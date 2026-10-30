@@ -625,6 +625,11 @@ impl Rig {
         Self::build_mode(None, false, false, |_| {}).await
     }
 
+    /// As `with_unstarted_engine`, with the API clock held for deterministic observations.
+    pub async fn with_unstarted_engine_and_time_held() -> Self {
+        Self::build_mode(None, true, false, |_| {}).await
+    }
+
     /// The already connected scripted machine's controller, for a target-local stored-command bridge.
     pub fn machine_controller(&self) -> ControllerLink {
         self.commands.link.clone()

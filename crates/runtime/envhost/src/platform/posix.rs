@@ -30,6 +30,14 @@ fn io_error(errno: rustix::io::Errno) -> io::Error {
     io::Error::from_raw_os_error(errno.raw_os_error())
 }
 
+#[cfg(target_os = "linux")]
+fn openat2_unavailable(error: rustix::io::Errno) -> bool {
+    matches!(
+        error,
+        rustix::io::Errno::NOSYS | rustix::io::Errno::PERM | rustix::io::Errno::ACCESS
+    )
+}
+
 /// Refuses a name that is not one plain name of one directory.
 fn plain(name: &OsStr) -> io::Result<()> {
     let bytes = name.as_bytes();
@@ -72,6 +80,119 @@ fn meta_of(stat: &rustix::fs::Stat) -> Meta {
 }
 
 impl Dir {
+    /// Opens an existing directory beneath an already resolved root without following new links.
+    #[cfg(target_os = "linux")]
+    pub(crate) fn open_beneath(root: &Path, relative: &Path, path: &Path) -> io::Result<Self> {
+        use rustix::fs::{ResolveFlags, openat2};
+        let base = match openat2(
+            CWD,
+            root,
+            OFlags::PATH | OFlags::DIRECTORY | OFlags::CLOEXEC,
+            Mode::empty(),
+            ResolveFlags::NO_SYMLINKS | ResolveFlags::NO_MAGICLINKS,
+        ) {
+            Ok(base) => base,
+            Err(error) if openat2_unavailable(error) => {
+                return Self::open_beneath_walk(root, relative, path);
+            }
+            Err(error) => return Err(io_error(error)),
+        };
+        let relative = if relative.as_os_str().is_empty() {
+            Path::new(".")
+        } else {
+            relative
+        };
+        let fd = match openat2(
+            &base,
+            relative,
+            OFlags::PATH | OFlags::DIRECTORY | OFlags::CLOEXEC,
+            Mode::empty(),
+            ResolveFlags::BENEATH | ResolveFlags::NO_SYMLINKS | ResolveFlags::NO_MAGICLINKS,
+        ) {
+            Ok(fd) => fd,
+            Err(error) if openat2_unavailable(error) => {
+                return Self::open_beneath_walk(root, relative, path);
+            }
+            Err(error) => return Err(io_error(error)),
+        };
+        Ok(Self {
+            fd,
+            path: path.to_path_buf(),
+        })
+    }
+
+    /// Equivalent no-follow component walk for kernels or sandboxes without `openat2`.
+    #[cfg(target_os = "linux")]
+    fn open_beneath_walk(root: &Path, relative: &Path, path: &Path) -> io::Result<Self> {
+        use std::path::Component;
+        if !root.is_absolute() || relative.is_absolute() {
+            return Err(io::Error::new(
+                io::ErrorKind::InvalidInput,
+                "the root must be absolute and the child relative",
+            ));
+        }
+        let flags = OFlags::PATH | OFlags::DIRECTORY | OFlags::NOFOLLOW | OFlags::CLOEXEC;
+        let mut fd = rustix::fs::openat(CWD, "/", flags, Mode::empty()).map_err(io_error)?;
+        for component in root.components().chain(relative.components()) {
+            match component {
+                Component::RootDir | Component::CurDir => {}
+                Component::Normal(name) => {
+                    fd = rustix::fs::openat(&fd, name, flags, Mode::empty()).map_err(io_error)?;
+                }
+                _ => {
+                    return Err(io::Error::new(
+                        io::ErrorKind::InvalidInput,
+                        "the directory path climbs or has a prefix",
+                    ));
+                }
+            }
+        }
+        Ok(Self {
+            fd,
+            path: path.to_path_buf(),
+        })
+    }
+
+    /// Opens a readable handle to this same held directory.
+    #[cfg(target_os = "linux")]
+    pub(crate) fn readable(self) -> io::Result<Self> {
+        let fd = rustix::fs::openat(
+            &self.fd,
+            ".",
+            OFlags::RDONLY | OFlags::DIRECTORY | OFlags::CLOEXEC,
+            Mode::empty(),
+        )
+        .map_err(io_error)?;
+        Ok(Self {
+            fd,
+            path: self.path,
+        })
+    }
+
+    /// Checks access on the held directory rather than reopening its pathname.
+    #[cfg(target_os = "linux")]
+    pub(crate) fn require_writable(&self) -> io::Result<()> {
+        rustix::fs::accessat(
+            &self.fd,
+            ".",
+            rustix::fs::Access::WRITE_OK | rustix::fs::Access::EXEC_OK,
+            AtFlags::EACCESS,
+        )
+        .map_err(io_error)
+    }
+
+    /// An external process can enter this directory while this handle remains open.
+    #[cfg(target_os = "linux")]
+    #[must_use]
+    pub fn process_path(&self) -> PathBuf {
+        use std::os::fd::AsRawFd;
+        PathBuf::from(format!(
+            "/proc/{}/fd/{}",
+            std::process::id(),
+            self.fd.as_raw_fd()
+        ))
+    }
+
     /// Opens the directory at `path`, following links in the path: the root of a workspace, which
     /// is given by whoever set the environment up and is not a request's to name.
     pub fn open_path(path: &Path) -> io::Result<Self> {
@@ -448,13 +569,30 @@ pub fn send_signal(pid: u32, expect_start_ms: Option<i64>, sig: Sig) -> io::Resu
     if let Some(done) = super::os::signal_via_handle(pid, expect_start_ms, sig) {
         return done;
     }
-    if let Some(expected) = expect_start_ms
-        && super::os::exact_start_ms(pid).is_some_and(|found| found != expected)
-    {
-        return Err(io::Error::new(
-            io::ErrorKind::NotFound,
-            "that number now names another process",
-        ));
+    if let Some(expected) = expect_start_ms {
+        let found = super::os::exact_start_ms(pid);
+        #[cfg(target_os = "macos")]
+        let found = found.or_else(|| {
+            use sysinfo::{Pid, ProcessRefreshKind, ProcessesToUpdate, System};
+            let mut system = System::new();
+            let id = Pid::from_u32(pid);
+            system.refresh_processes_specifics(
+                ProcessesToUpdate::Some(&[id]),
+                true,
+                ProcessRefreshKind::nothing(),
+            );
+            system.process(id).map(|process| {
+                i64::try_from(process.start_time())
+                    .unwrap_or(0)
+                    .saturating_mul(1000)
+            })
+        });
+        if found != Some(expected) {
+            return Err(io::Error::new(
+                io::ErrorKind::NotFound,
+                "that number now names another process",
+            ));
+        }
     }
     rustix::process::kill_process(target, rustix_signal_of(sig)).map_err(io_error)
 }
@@ -471,4 +609,44 @@ pub fn send_group(group: u32, sig: Sig) -> io::Result<()> {
     }
     let target = as_pid(group).ok_or_else(|| refuse("that is not a process group number"))?;
     rustix::process::kill_process_group(target, rustix_signal_of(sig)).map_err(io_error)
+}
+
+#[cfg(all(test, target_os = "linux"))]
+#[allow(clippy::unwrap_used, reason = "a test fails by panicking")]
+mod held_root_fallback_tests {
+    use super::*;
+    use std::io::Read;
+
+    #[test]
+    fn a_component_walk_keeps_the_open_directory_and_refuses_links_and_parent_paths() {
+        let root = tempfile::tempdir().unwrap();
+        let outside = tempfile::tempdir().unwrap();
+        let work = root.path().join("work");
+        std::fs::create_dir(&work).unwrap();
+        std::fs::write(work.join("marker"), "offered").unwrap();
+        std::fs::write(outside.path().join("marker"), "outside").unwrap();
+        let held = Dir::open_beneath_walk(root.path(), Path::new("work"), &work).unwrap();
+        std::fs::rename(&work, root.path().join("moved")).unwrap();
+        std::os::unix::fs::symlink(outside.path(), &work).unwrap();
+        let readable = held.readable().unwrap();
+        let mut text = String::new();
+        readable
+            .open_read(OsStr::new("marker"))
+            .unwrap()
+            .read_to_string(&mut text)
+            .unwrap();
+        assert_eq!(text, "offered");
+        assert!(Dir::open_beneath_walk(root.path(), Path::new("work"), &work).is_err());
+        assert!(Dir::open_beneath_walk(&work, Path::new("."), &work).is_err());
+        assert!(Dir::open_beneath_walk(root.path(), Path::new("../outside"), &work).is_err());
+        assert!(Dir::open_beneath_walk(root.path(), Path::new("."), root.path()).is_ok());
+    }
+
+    #[test]
+    fn the_fallback_is_used_only_when_openat2_is_unavailable_or_blocked() {
+        assert!(openat2_unavailable(rustix::io::Errno::NOSYS));
+        assert!(openat2_unavailable(rustix::io::Errno::PERM));
+        assert!(openat2_unavailable(rustix::io::Errno::ACCESS));
+        assert!(!openat2_unavailable(rustix::io::Errno::LOOP));
+    }
 }

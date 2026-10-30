@@ -362,6 +362,127 @@ fn utc(time: Time) -> DateTime<Utc> {
     time.get()
 }
 
+/// Records the exact credential behind a human-issued enrollment token before revealing it.
+pub(crate) async fn bind_issuer(
+    conn: &mut orch_db::Conn,
+    receipt: &str,
+    user: &crate::middleware::authentication::Authed,
+) -> Result<bool, DbError> {
+    use crate::middleware::authentication::Via;
+    let (kind, id) = match &user.via {
+        Via::Session { session_id } => ("session", *session_id),
+        Via::Token { token_id, .. } => ("token", *token_id),
+    };
+    Ok(sqlx::query(
+        "UPDATE enrollment_tokens SET issuer_kind=$2,issuer_credential_id=$3,issuer_as_admin=$5
+          WHERE token_hash=$1 AND created_by=$4 AND used_at IS NULL",
+    )
+    .bind(raw_hash(receipt))
+    .bind(kind)
+    .bind(id)
+    .bind(user.id())
+    .bind(user.is_session() && user.as_admin)
+    .execute(conn)
+    .await?
+    .rows_affected()
+        == 1)
+}
+
+/// Rechecks the issuer and the original creation or re-enrollment authority under the spending transaction.
+async fn issuer_still_authorized(
+    conn: &mut orch_db::Conn,
+    token: &TokenRow,
+    clock: &dyn Clock,
+) -> Result<bool, LinkFault> {
+    use crate::middleware::authorization::{self, RetainedIdentity};
+    use orch_access_contract::permissions::Permission;
+    use orch_authz::{Policy, ownership::Making};
+
+    let (kind, credential, issued_as_admin): (String, Option<Id>, bool) = sqlx::query_as(
+        "SELECT issuer_kind,issuer_credential_id,issuer_as_admin FROM enrollment_tokens WHERE token_hash=$1",
+    )
+    .bind(&token.token_hash)
+    .fetch_one(&mut *conn)
+    .await
+    .map_err(DbError::from)?;
+    if kind == "system" {
+        return Ok(true);
+    }
+    let Some(credential) = credential else {
+        return Ok(false);
+    };
+    orch_db::queries::transaction_guard::lock_action(conn).await?;
+    if orch_db::queries::transaction_guard::lock_person(conn, token.created_by)
+        .await?
+        .is_none_or(|user| user.suspended())
+    {
+        return Ok(false);
+    }
+    let Some(identity) =
+        RetainedIdentity::from_stored(token.created_by, &kind, credential, issued_as_admin)
+    else {
+        return Ok(false);
+    };
+    let Some(principal) = identity
+        .principal(conn, clock.time())
+        .await
+        .map_err(|_| EnrollRefusal::Gone)?
+    else {
+        return Ok(false);
+    };
+    if let Some(machine) = token.again_machine_id {
+        if let Some(host) = resources::reenrollment::host_of(conn, machine).await? {
+            return Ok(authorization::require_resource(
+                conn,
+                &principal,
+                ResourceKind::Host,
+                host,
+                Permission::HostManage,
+                Policy::default(),
+            )
+            .await
+            .is_ok());
+        }
+        return Ok(crate::routes::resources::machines::require_machine(
+            conn,
+            &principal,
+            machine,
+            Permission::AccessOwn,
+        )
+        .await
+        .is_ok());
+    }
+    let resource = match token.purpose.as_str() {
+        "machine" | "connected" if principal.caller().reaches(None) => ResourceKind::Machine,
+        "host" => ResourceKind::Host,
+        _ => return Ok(false),
+    };
+    let home = if token.org_id.is_none() && resource == ResourceKind::Machine {
+        Some(CertificateService::personal_machine_home(conn, token.created_by).await?)
+    } else {
+        token.org_id
+    };
+    let members = match home {
+        Some(home) => {
+            crate::routes::resources::providers::home_policies(conn, home)
+                .await
+                .map_err(|_| EnrollRefusal::Gone)?
+                .members_make
+        }
+        None => Vec::new(),
+    };
+    let policy = match home {
+        Some(home) => crate::routes::nodes::policy_at(conn, home)
+            .await
+            .map_err(|_| EnrollRefusal::Gone)?,
+        None => Policy::default(),
+    };
+    Ok(matches!(
+        ownership::may_make(conn, &principal, resource, home, &members, policy).await,
+        Ok(Making::Allowed(_))
+    ))
+}
+
 impl CertificateService {
     /// The service for `authority`, keeping its rows in `db`.
     #[must_use]
@@ -667,6 +788,9 @@ impl CertificateService {
         let row = resources::lock_enrollment_token(&mut tx, &hash)
             .await?
             .ok_or_else(|| LinkFault::from(EnrollRefusal::Gone))?;
+        if !issuer_still_authorized(&mut tx, &row, inner.clock.as_ref()).await? {
+            return Err(EnrollRefusal::Gone.into());
+        }
         if request.machine_id.is_some() && request.machine_id != row.again_machine_id {
             return Err(LinkFault::new(
                 403,

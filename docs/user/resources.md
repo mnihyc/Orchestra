@@ -1,6 +1,6 @@
 ---
 title: Resources and movement
-screens: /resources, /resources/agents/$id, /resources/machines/$id, /thread/$threadId
+screens: /resources, /resources/agents/$id, /resources/machines/$id, /resources/providers/$id, /resources/environments/$id, /thread/$threadId
 keywords: environment, provider, home, browser, display, port, files, terminal, folders, fork, move, connect a machine, install, service, foreground, data directory, remove, multiple connectors
 ---
 
@@ -59,6 +59,8 @@ then chooses from those offers; a model entry's allowed maximum is separate
 from the thread's current setting. The routing name reaches the provider and
 the display name reaches people. A changed name or disabled model is checked
 again when the next turn starts.
+The provider's model editor names the known access programs **Daybreak Blue**,
+**Daybreak Red** and **Standard**. Other program names appear as supplied.
 
 ## How agents run
 
@@ -91,6 +93,9 @@ The profile's technical details name executors and tool sets from their declarat
 Opening those details reads any executor names the profile does not already supply.
 An unsuccessful read has **Try again**; an unreported name stays unavailable.
 Long arrangement and tool-set lists show one page at a time.
+When a confirmed program can run in the selected environment, its local arrangements are tried before
+separated tools. The provider's allowed arrangements and any place preference still apply.
+A failed start distinguishes an unreachable tool environment from an agent-program error.
 
 A host makes managed runtimes from templates; the chooser shows what is free
 and what the template needs. A connected computer supplies the roles and roots
@@ -214,6 +219,7 @@ An environment manager controls placing a thread, changing its directory or
 confinement and removing it. Managing a thread does not confer that authority.
 An environment can have several thread views at once; a thread's permissions
 are still checked for each route to the shared environment.
+The environment page names the driver and runtime together when both are known.
 
 Ports publishes a listening program through HTTP, raw TCP or UDP according to
 the offered plan. The environment owns the endpoint and its audience. Read the

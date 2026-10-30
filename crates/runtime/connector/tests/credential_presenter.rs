@@ -265,6 +265,45 @@ async fn a_system_completion_uses_the_same_cached_presentation_as_a_forwarded_ca
 }
 
 #[tokio::test]
+async fn an_upstream_error_does_not_put_presented_credentials_in_the_model_request_record() {
+    let exchange = Arc::new(Exchange::new(None));
+    let p = rig(exchange).await;
+    start(&p, "exchange").await;
+    p.mock.set_credential(Some("exchanged-1"));
+    p.mock
+        .queue("error rate_limit Capacity reached; token exchanged-1, auxiliary auxiliary-1")
+        .unwrap();
+    let result = p
+        .rig
+        .send(
+            &p.provider_key(),
+            &ProviderComplete {
+                params: None,
+                provider_id: p.rig.provider,
+                purpose: CompletionPurpose::Summary,
+                protocol: RESPONSES.to_owned(),
+                model_name: MODEL.to_owned(),
+                system: "Summarize".to_owned(),
+                input: "The work is ready.".to_owned(),
+                max_output_tokens: 64,
+            },
+        )
+        .await;
+    let Progress::Failed(error) = &result else {
+        panic!("the scripted endpoint refused this request: {result:?}");
+    };
+    let details = error.details.as_ref().unwrap();
+    assert_eq!(details["failure"]["code"], "provider_busy");
+    let said = details["model_request"]["outcome"]["said"]
+        .as_str()
+        .unwrap();
+    assert!(said.contains("Capacity reached"));
+    assert!(said.contains(orch_provider_contract::limits::REDACTED));
+    assert!(!format!("{result:?}").contains("exchanged-1"));
+    assert!(!format!("{result:?}").contains("auxiliary-1"));
+}
+
+#[tokio::test]
 async fn each_endpoint_gets_its_own_presentation_and_reuses_only_that_endpoints_headers() {
     let exchange = Arc::new(Exchange::new(None));
     let p = rig(Arc::clone(&exchange)).await;

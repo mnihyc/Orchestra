@@ -2,14 +2,16 @@
 import type { Item, Turn, TurnError } from '@/generated/api-types';
 import type { ThreadView } from '@/realtime/stores/thread';
 
+const distinguishesMessage = (code:string) => code === 'harness_error' || code === 'environment_unreachable';
+
 export function failureKey(error: Pick<TurnError, 'code' | 'message'> & { reason?: string | null }): string {
-  return JSON.stringify([error.code, error.reason ?? null, error.code === 'harness_error' ? error.message : null]);
+  return JSON.stringify([error.code, error.reason ?? null, distinguishesMessage(error.code) ? error.message : null]);
 }
 
 /** Native error rows may omit the terminal turn's more specific refusal reason. */
 export function sameFailure(a: Pick<TurnError, 'code' | 'message'> & { reason?: string | null }, b: Pick<TurnError, 'code' | 'message'> & { reason?: string | null }): boolean {
   return a.code === b.code && (a.reason === null || a.reason === undefined || b.reason === null || b.reason === undefined || a.reason === b.reason)
-    && (a.code !== 'harness_error' || a.message === b.message);
+    && (!distinguishesMessage(a.code) || a.message === b.message);
 }
 
 function automatic(view: ThreadView, turn: Turn): boolean {

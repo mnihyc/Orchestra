@@ -596,8 +596,23 @@ pub async fn accept_totp_step(conn: &mut Conn, user: Id, step: i64) -> Result<bo
     Ok(done.rows_affected() == 1)
 }
 
+/// Forgets session approvals when a configured second factor is removed.
+async fn forget_session_second_steps(conn: &mut Conn, user: Id) -> Result<(), DbError> {
+    sqlx::query("UPDATE sessions SET second_step_at = NULL WHERE user_id = $1 AND second_step_at IS NOT NULL")
+        .bind(user)
+        .execute(conn)
+        .await?;
+    Ok(())
+}
+
 /// Forgets the authenticator, its secret and the steps it accepted.
 pub async fn disable_totp(conn: &mut Conn, user: Id, at: DateTime<Utc>) -> Result<(), DbError> {
+    let removed: Option<bool> = sqlx::query_scalar(
+        "SELECT totp_enabled_at IS NOT NULL FROM users WHERE id = $1 FOR UPDATE",
+    )
+    .bind(user)
+    .fetch_optional(&mut *conn)
+    .await?;
     sqlx::query(
         "UPDATE users SET totp_secret = NULL, totp_enabled_at = NULL, totp_last_step = NULL, updated_at = $2
           WHERE id = $1",
@@ -606,6 +621,9 @@ pub async fn disable_totp(conn: &mut Conn, user: Id, at: DateTime<Utc>) -> Resul
     .bind(at)
     .execute(&mut *conn)
     .await?;
+    if removed == Some(true) {
+        forget_session_second_steps(conn, user).await?;
+    }
     super::recovery_codes::clear(conn, user).await?;
     crate::sequences::notify_identity(conn, user).await?;
     Ok(())
@@ -619,12 +637,23 @@ pub async fn set_email_code_second_step(
     since: Option<DateTime<Utc>>,
     at: DateTime<Utc>,
 ) -> Result<(), DbError> {
+    let removed: Option<bool> = if since.is_none() {
+        sqlx::query_scalar("SELECT email_code_at IS NOT NULL FROM users WHERE id = $1 FOR UPDATE")
+            .bind(user)
+            .fetch_optional(&mut *conn)
+            .await?
+    } else {
+        None
+    };
     sqlx::query("UPDATE users SET email_code_at = $2, updated_at = $3 WHERE id = $1")
         .bind(user)
         .bind(since)
         .bind(at)
         .execute(&mut *conn)
         .await?;
+    if removed == Some(true) {
+        forget_session_second_steps(conn, user).await?;
+    }
     crate::sequences::notify_identity(conn, user).await?;
     Ok(())
 }
@@ -2988,8 +3017,8 @@ pub async fn identity_provider_by_key(
 }
 
 /// A sign-in at an identity provider that was begun and has not ended: a row of `oidc_states`. It is
-/// a sign-in, a link to the signed-in user `link_user_id`, or a fresh proof for one act of the session
-/// `session_id` (`sensitive_purpose`).
+/// a sign-in, a link to the signed-in user `link_user_id`, or a fresh proof for one act
+/// (`sensitive_purpose`). A link or fresh proof is bound to `session_id`.
 #[derive(Debug, Clone, PartialEq, Eq, sqlx::FromRow)]
 pub struct SignInState {
     /// Names the sign-in; the browser brings it back.
@@ -3008,7 +3037,7 @@ pub struct SignInState {
     pub invitation: Option<String>,
     /// Whether the person explicitly composed acceptance with this sign-in.
     pub accept_invitation: bool,
-    /// The browser session a fresh proof is for; none otherwise.
+    /// The browser session that began a link or fresh proof; none for a sign-in.
     pub session_id: Option<Id>,
     /// The act a fresh proof is for; none otherwise.
     pub sensitive_purpose: Option<String>,

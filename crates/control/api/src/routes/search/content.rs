@@ -173,7 +173,22 @@ pub(super) async fn search(ctx: Ctx, query: SearchListQuery, (): ()) -> ApiResul
         .as_ref()
         .filter(|scope| scope.kind == "thread")
         .map(|scope| scope.id);
-    if (query.continuation_id.is_some() || query.projection_revision.is_some())
+    let history_selected = query.continuation_id.is_some() || query.projection_revision.is_some();
+    if history_selected
+        && query.chat_id.is_none()
+        && query.document_id.is_none()
+        && let Some(scope) = query.scope
+    {
+        let visible = scoped.is_some()
+            && view::refs(&mut tx, &principal, &[scope], Policy::default())
+                .await?
+                .get(&scope)
+                .is_some_and(|node| !node.redacted);
+        if !visible {
+            return Err(ApiError::not_found());
+        }
+    }
+    if history_selected
         && (exact_thread.is_none() || query.chat_id.is_some() || query.document_id.is_some())
     {
         return Err(invalid(
@@ -191,7 +206,7 @@ pub(super) async fn search(ctx: Ctx, query: SearchListQuery, (): ()) -> ApiResul
                 .is_some_and(|node| !node.redacted)
         };
         if !readable {
-            if query.continuation_id.is_some() {
+            if history_selected {
                 return Err(ApiError::not_found());
             }
             if length < SEARCH_INDEXED_MIN_CHARS {

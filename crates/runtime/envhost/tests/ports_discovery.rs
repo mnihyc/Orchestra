@@ -4,23 +4,34 @@
     clippy::expect_used,
     reason = "a test fails by panicking"
 )]
-#![cfg(target_os = "linux")]
 
+#[cfg(target_os = "linux")]
 use std::io::{BufRead, BufReader, Read, Write};
+#[cfg(target_os = "linux")]
 use std::net::{SocketAddr, TcpStream, UdpSocket};
+#[cfg(target_os = "linux")]
 use std::process::{Child, Command, Stdio};
+#[cfg(target_os = "linux")]
 use std::sync::Arc;
+#[cfg(target_os = "linux")]
 use std::time::Duration;
 
+#[cfg(target_os = "linux")]
 use orch_api_contract::ports::{PortBinding, PortDiscovery, PortTransport};
+#[cfg(target_os = "linux")]
 use orch_envhost::ports::{PortReadError, PortScope, Ports};
+#[cfg(target_os = "linux")]
 use orch_envhost::ports_sockets;
+#[cfg(target_os = "linux")]
 use orch_envhost::processes::{Processes, RootKind, ScopeKind};
+#[cfg(target_os = "linux")]
 use orch_executor_contract::descriptor::Attribution;
+#[cfg(target_os = "linux")]
 use orch_types::{SystemClock, new_id};
 
 // These trusted fixtures listen only in the run's allowed port interval. Binding itself chooses
 // a free number atomically, avoiding a separate check which another worker could race.
+#[cfg(target_os = "linux")]
 const PROGRAM: &str = r#"
 import json, random, socket, sys, threading
 addresses = json.loads(sys.argv[1])
@@ -67,11 +78,13 @@ print(json.dumps({'port':number}),flush=True)
 sys.stdin.readline()
 "#;
 
+#[cfg(target_os = "linux")]
 struct Service {
     child: Child,
     port: u16,
 }
 
+#[cfg(target_os = "linux")]
 impl Service {
     fn start(
         processes: Option<&Processes>,
@@ -134,6 +147,7 @@ impl Service {
     }
 }
 
+#[cfg(target_os = "linux")]
 impl Drop for Service {
     fn drop(&mut self) {
         let _ = self.child.kill();
@@ -141,6 +155,7 @@ impl Drop for Service {
     }
 }
 
+#[cfg(target_os = "linux")]
 fn reader() -> (Processes, Ports) {
     let clock = Arc::new(SystemClock);
     let processes = Processes::new(ScopeKind::Started, clock.clone());
@@ -152,6 +167,7 @@ fn reader() -> (Processes, Ports) {
     (processes, ports)
 }
 
+#[cfg(target_os = "linux")]
 #[test]
 fn current_tcp_listeners_and_bound_udp_are_native_scoped_ipv4_and_ipv6_observations() {
     let (processes, ports) = reader();
@@ -216,6 +232,7 @@ fn current_tcp_listeners_and_bound_udp_are_native_scoped_ipv4_and_ipv6_observati
     }
 }
 
+#[cfg(target_os = "linux")]
 #[test]
 fn owned_replacements_on_the_same_port_work_and_a_foreign_replacement_is_refused() {
     let (processes, ports) = reader();
@@ -259,6 +276,7 @@ fn owned_replacements_on_the_same_port_work_and_a_foreign_replacement_is_refused
     );
 }
 
+#[cfg(target_os = "linux")]
 fn exchange(address: SocketAddr, bytes: &[u8]) -> Vec<u8> {
     let mut stream = TcpStream::connect(address).unwrap();
     stream
@@ -271,6 +289,7 @@ fn exchange(address: SocketAddr, bytes: &[u8]) -> Vec<u8> {
     reply
 }
 
+#[cfg(target_os = "linux")]
 #[test]
 fn every_caller_prefers_owned_ipv4_loopback_before_ipv6_and_reaches_an_owned_wildcard_by_loopback()
 {
@@ -304,6 +323,7 @@ fn every_caller_prefers_owned_ipv4_loopback_before_ipv6_and_reaches_an_owned_wil
     assert_eq!(exchange(current.address, b"ok"), b"wild:ok");
 }
 
+#[cfg(target_os = "linux")]
 #[test]
 fn internal_control_and_carrier_sockets_cannot_be_opened_and_their_registration_ends_with_the_socket()
  {
@@ -336,6 +356,7 @@ fn internal_control_and_carrier_sockets_cannot_be_opened_and_their_registration_
     ));
 }
 
+#[cfg(target_os = "linux")]
 #[test]
 fn two_real_udp_senders_keep_distinct_inside_peers_and_zero_length_datagrams_remain_valid() {
     let (processes, ports) = reader();
@@ -367,6 +388,7 @@ fn two_real_udp_senders_keep_distinct_inside_peers_and_zero_length_datagrams_rem
     assert_eq!(first.recv(&mut buffer).unwrap(), 0);
 }
 
+#[cfg(target_os = "linux")]
 #[tokio::test]
 async fn a_fresh_look_and_two_live_readers_share_current_native_bindings_and_first_seen_times() {
     let (processes, ports) = reader();
@@ -404,6 +426,7 @@ async fn a_fresh_look_and_two_live_readers_share_current_native_bindings_and_fir
     drop((first, second));
 }
 
+#[cfg(target_os = "linux")]
 #[tokio::test]
 async fn the_inside_socket_factories_use_current_owned_programs_and_preserve_half_close_and_datagrams()
  {
@@ -502,4 +525,26 @@ async fn the_inside_socket_factories_use_current_owned_programs_and_preserve_hal
             .await
             .is_err()
     );
+}
+
+#[cfg(not(target_os = "linux"))]
+#[test]
+fn an_unavailable_native_socket_reader_reports_why_and_refuses_port_access() {
+    use orch_api_contract::ports::{PortDiscovery, PortTransport};
+    use orch_envhost::ports::{PortReadError, PortScope, Ports};
+    use orch_envhost::processes::{Processes, ScopeKind};
+    use orch_types::{SystemClock, new_id};
+    use std::sync::Arc;
+
+    let clock = Arc::new(SystemClock);
+    let processes = Processes::new(ScopeKind::Started, clock.clone());
+    let ports = Ports::new(new_id(), 3, PortScope::Processes, processes, clock);
+    let snapshot = ports.look();
+    assert_eq!(snapshot.discovery, PortDiscovery::Unsupported);
+    assert!(snapshot.reason.is_some());
+    assert!(snapshot.listeners.is_empty());
+    assert!(matches!(
+        ports.owned(41000, PortTransport::Tcp),
+        Err(PortReadError::Unsupported(_))
+    ));
 }

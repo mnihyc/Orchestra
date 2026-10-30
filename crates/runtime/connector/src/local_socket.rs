@@ -23,7 +23,10 @@ use orch_link::machine::{LinkStatus, MachineLink};
 use orch_link_contract::commands::{Command, CommandError, CommandResult};
 use orch_types::{Clock, Id, Time};
 use serde::{Deserialize, Serialize};
-use tokio::io::{AsyncBufReadExt, AsyncRead, AsyncWrite, AsyncWriteExt, BufReader};
+use subtle::ConstantTimeEq;
+use tokio::io::{
+    AsyncBufRead, AsyncBufReadExt, AsyncRead, AsyncReadExt, AsyncWrite, AsyncWriteExt, BufReader,
+};
 use tokio_util::sync::CancellationToken;
 
 /// The socket file on Unix.
@@ -587,23 +590,49 @@ pub enum LocalError {
     Exchange(String),
 }
 
+/// Reads a line without allowing an unterminated line to grow past the limit.
+async fn bounded_line<R: AsyncBufRead + Unpin>(
+    reader: &mut R,
+    limit: usize,
+) -> std::io::Result<Option<String>> {
+    let mut bytes = Vec::new();
+    // Permit a CRLF after the longest valid line without buffering more than that.
+    let bound = u64::try_from(limit).unwrap_or(u64::MAX).saturating_add(2);
+    let count = reader.take(bound).read_until(b'\n', &mut bytes).await?;
+    if count == 0 {
+        return Ok(None);
+    }
+    if bytes.last() == Some(&b'\n') {
+        bytes.pop();
+        if bytes.last() == Some(&b'\r') {
+            bytes.pop();
+        }
+    }
+    if bytes.len() > limit {
+        return Err(std::io::Error::new(
+            std::io::ErrorKind::InvalidData,
+            "the line is too long",
+        ));
+    }
+    String::from_utf8(bytes)
+        .map(Some)
+        .map_err(|error| std::io::Error::new(std::io::ErrorKind::InvalidData, error))
+}
+
 /// Answers one connection: lines of requests, each with a line of answer.
 async fn converse<S>(state: Arc<LocalState>, stream: S, token: Option<String>)
 where
     S: AsyncRead + AsyncWrite + Unpin,
 {
     let (reader, mut writer) = tokio::io::split(stream);
-    let mut lines = BufReader::new(reader).lines();
+    let mut reader = BufReader::new(reader);
     if let Some(token) = token {
-        match lines.next_line().await {
-            Ok(Some(given)) if given.trim() == token => {}
+        match bounded_line(&mut reader, token.len()).await {
+            Ok(Some(given)) if bool::from(given.as_bytes().ct_eq(token.as_bytes())) => {}
             _ => return,
         }
     }
-    while let Ok(Some(line)) = lines.next_line().await {
-        if line.len() > LINE_BYTES {
-            return;
-        }
+    while let Ok(Some(line)) = bounded_line(&mut reader, LINE_BYTES).await {
         let reply = match serde_json::from_str::<Request>(&line) {
             Ok(request) => state.answer(request).await,
             Err(error) => Reply::Error {
@@ -669,7 +698,9 @@ async fn listen(state: Arc<LocalState>, stop: CancellationToken) {
     };
     let token = hex::encode(rand::random::<[u8; 32]>());
     let file = state.data_dir.join(TOKEN_FILE);
-    if let Err(error) = std::fs::write(&file, format!("{}\n{token}\n", address.port())) {
+    if let Err(error) =
+        orch_pki::certificates::write_private_file(&file, &format!("{}\n{token}\n", address.port()))
+    {
         tracing::warn!(%error, "the console's token could not be kept");
         return;
     }
@@ -706,10 +737,13 @@ where
     );
     text.push('\n');
     writer.write_all(text.as_bytes()).await.map_err(failed)?;
-    let mut lines = BufReader::new(reader).lines();
-    let line = lines.next_line().await.map_err(failed)?.ok_or_else(|| {
-        LocalError::Exchange("the connection closed without an answer".to_owned())
-    })?;
+    let mut reader = BufReader::new(reader);
+    let line = bounded_line(&mut reader, LINE_BYTES)
+        .await
+        .map_err(failed)?
+        .ok_or_else(|| {
+            LocalError::Exchange("the connection closed without an answer".to_owned())
+        })?;
     serde_json::from_str(&line).map_err(|error| LocalError::Exchange(error.to_string()))
 }
 
@@ -756,6 +790,34 @@ mod recording_tests;
 #[allow(clippy::unwrap_used, reason = "a test fails by panicking")]
 mod tests {
     use super::*;
+
+    #[tokio::test]
+    async fn a_local_console_refuses_an_oversized_unfinished_line_without_waiting_for_a_newline() {
+        let (mut sender, receiver) = tokio::io::duplex(32);
+        sender.write_all(b"123456").await.unwrap();
+        let mut reader = BufReader::new(receiver);
+        let error = tokio::time::timeout(ANSWER_LIMIT, bounded_line(&mut reader, 4))
+            .await
+            .unwrap()
+            .unwrap_err();
+        assert_eq!(error.kind(), std::io::ErrorKind::InvalidData);
+        drop(sender);
+    }
+
+    #[tokio::test]
+    async fn a_local_console_reads_complete_lines_at_the_limit() {
+        let (mut sender, receiver) = tokio::io::duplex(32);
+        sender.write_all(b"1234\r\nnext\n").await.unwrap();
+        let mut reader = BufReader::new(receiver);
+        assert_eq!(
+            bounded_line(&mut reader, 4).await.unwrap().as_deref(),
+            Some("1234")
+        );
+        assert_eq!(
+            bounded_line(&mut reader, 4).await.unwrap().as_deref(),
+            Some("next")
+        );
+    }
 
     fn found(source: &str, directory: Option<&str>) -> orch_agent_contract::discovery::McpFound {
         serde_json::from_value(serde_json::json!({"name":"files","source":source,

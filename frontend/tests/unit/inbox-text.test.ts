@@ -16,6 +16,25 @@ function notice(kind: Notification['kind'], parameters: Record<string, unknown> 
 }
 
 describe('notification action text', () => {
+  it.each(['en', 'zh-CN'] as const)('names a redacted thread notice without restoring its private text (%s)', async (locale) => {
+    await setLocale(locale);
+    try {
+      const row = notice('milestone');
+      row.thread_id = 'private-thread';
+      row.title = '';
+      row.body = '';
+      row.data = {};
+      row.details = { v: 1, action: row.kind, parameters: {} };
+      expect(notificationText(row, i18n.t, locale, null)).toEqual({ title: i18n.t('inbox.kinds.milestone'), body: '' });
+    } finally { await setLocale('en'); }
+  });
+  it('keeps authored text for an untitled readable thread when its milestone has no title', () => {
+    const row = notice('milestone');
+    row.thread_id = 'thread';
+    row.title = '';
+    row.body = 'The work is ready';
+    expect(notificationText(row, i18n.t, 'en', null)).toEqual({ title: '', body: 'The work is ready' });
+  });
   it.each(['en', 'zh-CN'] as const)('localizes an explicit person notice and preserves its authored note (%s)', async (locale) => {
     await setLocale(locale);
     try {

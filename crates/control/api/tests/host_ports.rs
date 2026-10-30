@@ -186,6 +186,14 @@ async fn a_stopped_environments_host_opening_gives_its_number_back_and_keeps_it_
         .execute(&mut *conn)
         .await
         .unwrap();
+    let session_id: orch_types::Id =
+        sqlx::query_scalar("SELECT session_id FROM access_tokens WHERE token_hash=$1")
+            .bind(orch_api_core::middleware::authentication::token_hash(
+                &ada.token,
+            ))
+            .fetch_one(&mut *conn)
+            .await
+            .unwrap();
     let opening = orch_db::queries::ports::Opening {
         id: orch_types::new_id(),
         environment_id: env,
@@ -198,6 +206,9 @@ async fn a_stopped_environments_host_opening_gives_its_number_back_and_keeps_it_
         requested_by: Some(ada.id()),
         requested_by_thread: None,
         allowed_by: Some(ada.id()),
+        decider_credential_kind: Some("session".into()),
+        decider_credential_id: Some(session_id),
+        decider_as_admin: false,
         admission: None,
         opened_at: world.now(),
         until_at: None,

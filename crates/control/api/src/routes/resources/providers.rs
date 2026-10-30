@@ -13,7 +13,7 @@ use crate::routes::access::page::same;
 use crate::routes::nodes::{Placed, actor_name, invalid, placed, policy_at, view as node_view};
 use crate::routes::resources::agents::machine_reports;
 use crate::routes::resources::sealing::{
-    API_KEY, SECRET_MAX_BYTES, header_secret, put_provider_secret,
+    API_KEY, HEADER_PREFIX, SECRET_MAX_BYTES, header_secret, put_provider_secret,
 };
 use crate::routes::resources::upstreams::{self, Checked};
 use crate::routes::resources::view::{
@@ -1527,7 +1527,10 @@ pub(crate) async fn create(
     // an absent value is never treated as a credential or as a keyless endpoint declaration.
     let secrets = secrets.unwrap_or_default();
     for (secret, value) in &secrets {
-        if !secret_headers.contains(secret) {
+        if !secret_headers
+            .iter()
+            .any(|name| name.eq_ignore_ascii_case(secret))
+        {
             return Err(invalid(
                 &format!("secrets.{secret}"),
                 "this is no secret header of an endpoint",
@@ -1863,20 +1866,26 @@ async fn update(ctx: Ctx, (): (), body: api::ProviderUpdateBody) -> ApiResult<Pr
         return Err(stale(&ctx, &mut tx, &principal, id).await);
     }
     if let Some(checked) = &checked {
-        // A secret header that no endpoint lists any more has no use for its value.
-        let mut keep: Vec<String> = vec![API_KEY.to_owned()];
+        // Only obsolete endpoint headers go; the provider's other secrets have their own lifecycles.
+        let mut keep: Vec<String> =
+            orch_db::queries::settings::secret_names_of(&mut tx, &[("provider", id)])
+                .await?
+                .into_iter()
+                .map(|secret| secret.name)
+                .filter(|name| {
+                    name.strip_prefix(HEADER_PREFIX).is_none_or(|header| {
+                        checked
+                            .secret_headers
+                            .iter()
+                            .any(|kept| kept.eq_ignore_ascii_case(header))
+                    })
+                })
+                .collect();
         keep.extend(
             checked
                 .secret_headers
                 .iter()
                 .map(|name| header_secret(name)),
-        );
-        keep.extend(
-            orch_db::queries::settings::secret_names_of(&mut tx, &[("provider", id)])
-                .await?
-                .into_iter()
-                .map(|secret| secret.name)
-                .filter(|name| name.starts_with("runtime:")),
         );
         queries::delete_provider_secrets_except(&mut tx, id, &keep).await?;
     }
@@ -2245,14 +2254,34 @@ async fn secret_set(ctx: Ctx, (): (), body: api::ProviderSecretSetBody) -> ApiRe
             .unwrap_or_default();
     let runtime_secret =
         runtime_name.is_some_and(|name| runtime_names.iter().any(|listed| listed == name));
-    if !listed.contains(&name) && !runtime_secret {
+    let listed_header = listed
+        .iter()
+        .find(|header| header.eq_ignore_ascii_case(&name));
+    if listed_header.is_none() && !runtime_secret {
         return Err(ApiError::not_found());
     }
     let by = ctx.user()?.id();
     let stored_name = if runtime_secret {
         name.clone()
     } else {
-        header_secret(&name)
+        let mut existing: Vec<String> =
+            orch_db::queries::settings::secret_names_of(&mut tx, &[("provider", id)])
+                .await?
+                .into_iter()
+                .map(|secret| secret.name)
+                .filter(|stored| {
+                    stored
+                        .strip_prefix(HEADER_PREFIX)
+                        .is_some_and(|header| header.eq_ignore_ascii_case(&name))
+                })
+                .collect();
+        existing.sort();
+        let exact = header_secret(&name);
+        if existing.contains(&exact) || existing.len() != 1 {
+            exact
+        } else {
+            existing[0].clone()
+        }
     };
     let replaced = put_provider_secret(&mut tx, id, &stored_name, &body.value, by, ctx.now).await?;
     let who = actor_name(&ctx)?;
@@ -2903,14 +2932,22 @@ async fn harness_sessions(ctx: Ctx, (): (), (): ()) -> ApiResult<Vec<api::Native
         .iter()
         .map(|each| each.native_session_ref.clone())
         .collect();
-    let mut conn = ctx.app.db.acquire().await?;
-    let adopted: HashMap<String, Id> = thread_rows::adopting_threads(&mut conn, &references)
-        .await?
-        .into_iter()
-        .collect();
+    let (mut conn, guard) = crate::middleware::transaction_guard::begin(&ctx).await?;
+    let adopted: HashMap<String, Id> =
+        thread_rows::adopting_threads(&mut conn, id, agent, &references)
+            .await?
+            .into_iter()
+            .collect();
+    let threads: Vec<_> = adopted.values().copied().collect();
+    let visible =
+        node_view::refs(&mut conn, guard.principal(), &threads, Policy::default()).await?;
     for each in &mut sessions {
-        each.adopted_thread_id = adopted.get(&each.native_session_ref).copied();
+        each.adopted_thread_id = adopted
+            .get(&each.native_session_ref)
+            .copied()
+            .filter(|thread| visible.get(thread).is_some_and(|row| !row.redacted));
     }
+    conn.commit().await.map_err(DbError::from)?;
     Ok(sessions)
 }
 

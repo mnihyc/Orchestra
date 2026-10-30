@@ -1,6 +1,6 @@
 ---
 title: Who can see and do what
-screens: /thread/$threadId, /topic/$topicId, /project/$projectId, /org/$slug, /resources/environments/$id, /shared, /approvals
+screens: /thread/$threadId, /topic/$topicId, /project/$projectId, /org/$slug, /resources/environments/$id, /doc/$documentId, /chat/$chatId, /place-chat/$nodeId, /shared, /inbox, /approvals
 keywords: how do I share, access, permission, permissions, holders, group, role, members, everyone, locator, override, create, make, new, start, project, topic, thread, sharing.allow_external, sharing.allow_holders, access.manage, access.external, capability.policy
 heading_keywords.who-may-make-projects-topics-and-threads: create project, make project, new project, create topic, open topic, new topic, create thread, start thread, new thread, permission, 创建项目, 创建话题, 开始线程, 权限
 ---
@@ -13,7 +13,9 @@ A [locked reference](references.md#locked-references) keeps the name that was
 shared and offers the least access it needs. Add an optional reason and send.
 Only one request by you may wait on a thing; take it back from the card if it is
 no longer needed. A refusal inside work you already see still names who can
-give each missing permission.
+give each missing permission. Once all parts have an answer, the card shows
+their outcomes. If access is still missing, you can ask again. When a batch has
+several parts, taking it back withdraws those still waiting.
 
 Deciders can grant the requested access to that person on that one thing with
 one duration button. The shipped choices are one day, seven days, thirty days
@@ -21,6 +23,13 @@ and Always. The place can change them with `access.quick_grant_durations`.
 Other… opens the full decision; Deny accepts an optional note. Decisions are
 recorded and the requester is told. A timed entry stops giving access when it
 ends.
+
+When asking, choose how long you need access: until removed, one day, one week,
+30 days, or a date. The requested end is counted from when you send it and
+appears on the request and its notifications. The decision starts with that
+end; the approver can change or remove it. If the requested end has passed,
+choose a future end or until removed before approving. The end of access is
+separate from the request's own deadline for a decision.
 
 Only eligible people directly named in the thing's Owners row receive an Inbox
 item and appear in Waiting for you. Groups, roles, inherited managers and admin
@@ -59,6 +68,7 @@ Contribute is the middle level of an org, project or topic: it also announces to
 status and tags, and adds environments for work there. Create topics and Start threads can be given alone, to let
 somebody make things there and nothing more; whoever makes a topic or thread owns it. Contribute reaches no topic or
 thread inside: those follow their own pages and roles.
+The creation controls use those individual permissions, including when they are granted without Contribute.
 
 Open the containing place's menu and choose **Share**. An org also has
 **Roles and access** in its settings. Under **can take part**, the short
@@ -146,6 +156,11 @@ Holders share up to what they hold where the place permits it. Managing the
 page, its inheritance or locks takes its management right. Naming an outsider
 also needs the outside-sharing authority. Naming another place's group or
 role needs seeing its source, not managing that source.
+
+To extend an agent entry on a permission page, you must still be able to drive
+the receiving thread or place. You can shorten your own entry while you can
+still share that permission. The same receiver check applies when adding areas
+or extending a live agent share.
 
 Sharing a place asks whether you mean the place alone or its contents too;
 the preview states what follows and what remains private. Opening a thread

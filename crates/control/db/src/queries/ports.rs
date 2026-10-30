@@ -30,6 +30,12 @@ pub struct Opening {
     pub requested_by_thread: Option<Id>,
     /// Its current deciding person.
     pub allowed_by: Option<Id>,
+    /// The deciding person's browser session or API token, when one made the decision.
+    pub decider_credential_kind: Option<String>,
+    /// The deciding credential's durable identifier, never its secret.
+    pub decider_credential_id: Option<Id>,
+    /// Whether the deciding session was allowed administrator reach at issuance.
+    pub decider_as_admin: bool,
     /// The immutable capability grant or policy that admitted it.
     pub admission: Option<Json>,
     /// When admission began.
@@ -168,19 +174,21 @@ pub async fn used(conn: &mut Conn, environment: Id) -> Result<i64, DbError> {
 
 /// Inserts the admission chosen by a current guarded producer.
 pub async fn insert(conn: &mut Conn, row: &Opening) -> Result<(), DbError> {
-    sqlx::query("INSERT INTO port_openings(id,environment_id,port,kind,transports,entry_methods,place_id,label,requested_by,requested_by_thread,allowed_by,admission,opened_at,until_at,state,reason,secret_hash,secret_sealed,link_recipient,link_recipient_user,approval_id,host_id,host_port,fixed_host_port,host_allocated,revision,closed_at,publish_machine_id) VALUES($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16,$17,$18,$19,$20,$21,$22,$23,$24,$25,$26,$27,$28)")
+    sqlx::query("INSERT INTO port_openings(id,environment_id,port,kind,transports,entry_methods,place_id,label,requested_by,requested_by_thread,allowed_by,admission,opened_at,until_at,state,reason,secret_hash,secret_sealed,link_recipient,link_recipient_user,approval_id,host_id,host_port,fixed_host_port,host_allocated,revision,closed_at,publish_machine_id,decider_credential_kind,decider_credential_id,decider_as_admin) VALUES($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16,$17,$18,$19,$20,$21,$22,$23,$24,$25,$26,$27,$28,$29,$30,$31)")
         .bind(row.id).bind(row.environment_id).bind(row.port).bind(&row.kind).bind(&row.transports).bind(&row.entry_methods).bind(row.place_id).bind(&row.label)
         .bind(row.requested_by).bind(row.requested_by_thread).bind(row.allowed_by).bind(&row.admission).bind(row.opened_at).bind(row.until_at).bind(&row.state).bind(&row.reason)
         .bind(&row.secret_hash).bind(&row.secret_sealed).bind(&row.link_recipient).bind(row.link_recipient_user).bind(row.approval_id).bind(row.host_id).bind(row.host_port)
-        .bind(row.fixed_host_port).bind(row.host_allocated).bind(row.revision).bind(row.closed_at).bind(row.publish_machine_id).execute(conn).await?;
+        .bind(row.fixed_host_port).bind(row.host_allocated).bind(row.revision).bind(row.closed_at).bind(row.publish_machine_id)
+        .bind(&row.decider_credential_kind).bind(row.decider_credential_id).bind(row.decider_as_admin).execute(conn).await?;
     Ok(())
 }
 
 /// Admits an existing waiting row once; the approval and delivery owner shares this transaction.
 pub async fn grant(conn: &mut Conn, row: &Opening, expected: i64) -> Result<bool, DbError> {
-    Ok(sqlx::query("UPDATE port_openings SET allowed_by=$2,admission=$3,state=$4,reason=NULL,secret_hash=$5,secret_sealed=$6,link_recipient=$7,link_recipient_user=$8,host_id=$9,host_port=$10,host_allocated=$11,publish_machine_id=$13,revision=revision+1 WHERE id=$1 AND revision=$12 AND state='waiting'")
+    Ok(sqlx::query("UPDATE port_openings SET allowed_by=$2,admission=$3,state=$4,reason=NULL,secret_hash=$5,secret_sealed=$6,link_recipient=$7,link_recipient_user=$8,host_id=$9,host_port=$10,host_allocated=$11,publish_machine_id=$13,decider_credential_kind=$14,decider_credential_id=$15,decider_as_admin=$16,revision=revision+1 WHERE id=$1 AND revision=$12 AND state='waiting'")
         .bind(row.id).bind(row.allowed_by).bind(&row.admission).bind(&row.state).bind(&row.secret_hash).bind(&row.secret_sealed).bind(&row.link_recipient).bind(row.link_recipient_user)
-        .bind(row.host_id).bind(row.host_port).bind(row.host_allocated).bind(expected).bind(row.publish_machine_id).execute(conn).await?.rows_affected()==1)
+        .bind(row.host_id).bind(row.host_port).bind(row.host_allocated).bind(expected).bind(row.publish_machine_id)
+        .bind(&row.decider_credential_kind).bind(row.decider_credential_id).bind(row.decider_as_admin).execute(conn).await?.rows_affected()==1)
 }
 
 /// Ends admission irreversibly, keeping a host allocation until shutdown acknowledgement.

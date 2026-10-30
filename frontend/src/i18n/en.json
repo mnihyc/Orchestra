@@ -4046,7 +4046,7 @@
     "outbound": {
       "allowed_private_hosts": {
         "title": "Private hosts",
-        "description": "The hosts on private addresses that a channel or a destination of an org or a person may reach."
+        "description": "The private hosts that org or personal channels and destinations, and skill archive addresses, may reach."
       }
     },
     "storage": {
@@ -6740,6 +6740,15 @@
     "node": "Node runs through orch-node. Add a connector for other roles."
   },
   "machinePrograms": {
+    "found": "Found",
+    "confirmed": "Confirmed",
+    "use": "Use",
+    "removeConfirmation": "Remove confirmation",
+    "unknownVersion": "Version unknown",
+    "noProgramsFound": "No agent programs found",
+    "noProgramFound": "No program found",
+    "searchAgain": "Search again",
+    "harnessHelp": "A found program can run after a machine manager confirms it. The machine's local policy remains in control.",
     "signIns": "Sign-ins: {{methods}}",
     "noSignIn": "None",
     "noModels": "No models listed",
@@ -7007,7 +7016,10 @@
     "runtime": "Run the connection on",
     "sources": "Models, limits and usage",
     "later": "Add keys and sign-ins afterwards in Sign-in and keys.",
-    "create": "Add provider"
+    "create": "Add provider",
+    "partialTitle": "Provider added",
+    "partial": "{{name}} was added. Open its models to finish setup.",
+    "openCreated": "Open provider"
   },
   "providerDetails": {
     "notReadOnce": "Not read yet",
@@ -7831,7 +7843,8 @@
     },
     "environment": {
       "none_usable": "There is no environment you can use for this thread, and you may not create one. Ask somebody who manages one to let you in.",
-      "unavailable": "The environment is not ready at the moment. Try again shortly."
+      "unavailable": "The environment is not ready at the moment. Try again shortly.",
+      "selected_unavailable": "The selected environment is unavailable. Choose another environment."
     },
     "network": {
       "restricted_unavailable": "The requested network restriction is not verified. Retry the change or choose open in a new plan.",
@@ -8093,10 +8106,12 @@
     },
     "code": {
       "title": "Sign in with a code",
-      "sent": "If that name may sign in this way, a code is on its way to its address. It is good for ten minutes.",
+      "sent": "If that name may sign in this way and a code can be sent, it is on its way to its address.",
       "label": "Code",
       "missing": "Enter the code.",
       "wrong": "That did not work. Check the code, or ask for another.",
+      "sending": "Sending code…",
+      "send": "Send code",
       "resend": "Send another",
       "resendIn_one": "Send another in {{count}} second",
       "resendIn_other": "Send another in {{count}} seconds",
@@ -8110,7 +8125,7 @@
       },
       "totpLabel": "Code from your authenticator app",
       "recoveryLabel": "Recovery code",
-      "codeSent": "We sent a code to your address. It is good for ten minutes.",
+      "codeSent": "If a code can be sent, it is on its way to your address.",
       "missing": {
         "totp": "Enter the code.",
         "recovery_code": "Enter a saved recovery code.",
@@ -8142,6 +8157,7 @@
       "domain_not_allowed": "Your address is not allowed to sign in here.",
       "registration_closed": "Registration is closed here, so a first sign-in cannot make an account.",
       "invite_required": "This system takes new people by invitation. Open your invitation link and sign in from there.",
+      "invitation_issuer_authority_lost": "The person who sent this invitation can no longer grant access. Ask them for a new invitation.",
       "link_required": "An account with this address exists already. Sign in the way you did before, then link this sign-in from your profile.",
       "disabled": "This way of signing in is switched off.",
       "idp_error": "The identity provider answered with an error. Try again; if it goes on, tell an administrator."
@@ -8188,6 +8204,7 @@
       "partOf": "It belongs to {{org}}.",
       "goodUntil": "Good until {{time}}.",
       "bound": "This invitation is for the address it was sent to.",
+      "issuerAuthorityLost": "The person who sent this invitation can no longer grant access. Ask them for a new invitation.",
       "spent": "This invitation is no longer good. Ask whoever sent it for a new one.",
       "accept": "Accept invitation",
       "register": "Create an account",
@@ -9199,6 +9216,8 @@
       "manage": "You can’t manage {{place}}.",
       "view": "You can’t view {{place}}.",
       "interact": "You can’t take part in {{place}}.",
+      "createTopics": "You can’t create topics in {{place}}.",
+      "startThreads": "You can’t start threads in {{place}}.",
       "archive": "You can’t archive {{place}}.",
       "edit": "You can’t edit {{place}}.",
       "createDocument": "You can’t create documents in {{place}}.",
@@ -9842,12 +9861,23 @@
         "full_manage": "Manage"
       },
       "choose": "What to ask for",
+      "duration": "How long do you need access?",
+      "untilRemoved": "Until removed",
+      "chooseDate": "Choose a date",
+      "endsOn": "End date",
+      "futureDate": "Choose a future date",
+      "requestedUntil": "Requested until",
+      "requestedUntilRemoved": "Requested until removed",
+      "asRequested": "As requested",
       "reason": "Why do you need it?",
       "reasonHint": "Up to {{max}} characters. Whoever decides reads it.",
       "send": "Send",
       "goesTo": "Goes to {{names}}.",
+      "goesToPeople": "Goes to <people/>",
       "waiting": "Your request was sent and waits to be decided.",
       "waitingFor": "Your request was sent to {{names}} and waits to be decided.",
+      "waitingPeople": "Sent to <people/> · waiting for a decision",
+      "answered": "Your request was answered.",
       "complete": "Everything you asked for is yours now. Check again.",
       "cancel": "Take the request back",
       "tooMany": "You have {{waiting}} requests waiting. Wait for an answer, or take one back, before you ask again.",
@@ -11906,7 +11936,10 @@
       "effortDefault": "Default effort",
       "changed_one": "{{count}} file changed (+{{added}} −{{removed}})",
       "changed_other": "{{count}} files changed (+{{added}} −{{removed}})",
-      "retry": "Retry this turn"
+      "retry": "Retry this turn",
+      "inputWaiting": "Original message waiting in the queue below",
+      "inputDelivering": "Original message already being delivered",
+      "inputWaitingOrDelivering": "Original message is waiting in the queue below or is being delivered"
     },
     "catchup": {
       "title": "Since you were last here",
@@ -12031,6 +12064,7 @@
   "approvals": {
     "detailTitle": "Request",
     "incomplete": "This request could not be displayed. Read it again to continue.",
+    "outcomeUnavailable": "Could not load the outcome.",
     "accept": "Accept",
     "allowed": "Allowed",
     "alreadyAnswered": "Already answered by {{name}}",
@@ -12311,6 +12345,11 @@
       "access": {
         "title": "Access",
         "none": "None",
+        "names": {
+          "daybreakBlue": "Daybreak Blue",
+          "daybreakRed": "Daybreak Red",
+          "standard": "Standard"
+        },
         "startsWith": "Threads on this model start with {{label}}, as its managers chose; a thread cannot go back to none.",
         "line": "{{label}}: this thread's turns ask for that access program.",
         "lineNone": "None: no access program is asked for."
@@ -12691,7 +12730,7 @@
       "directoryHint": "Where in the environment this thread works, relative to its root. Left empty, the server chooses.",
       "directoryExists": "Exists",
       "directoryNew": "Will be created",
-      "directoryIsFile": "A file has this name",
+      "directoryIsFile": "This is not a directory",
       "closed": "It cannot be used now.",
       "newAbout": "Made for this thread from the defaults of {{place}}.",
       "hosts": "Where it would be made",
@@ -12705,6 +12744,7 @@
       "alsoUsedByMore_one": "also used by {{names}} and {{count}} other",
       "alsoUsedByMore_other": "also used by {{names}} and {{count}} others",
       "directoryIs": "Where in the environment this thread works. Left empty, it is {{directory}}.",
+      "canUse": "Can use",
       "askAccess": "Ask for access"
     },
     "arrangement": {
@@ -12745,6 +12785,7 @@
     "titleTopic": "New topic in {{parent}}",
     "reason": {
       "no_use": "you may not use it",
+      "environment_manage_required": "managing this environment is needed",
       "disabled": "it is switched off",
       "subscription_not_shared": "its owner keeps this subscription to themself",
       "harness_unreported": "its agent program has not reported yet",
@@ -14286,7 +14327,7 @@
       "roleChoices": {
         "environment": {
           "name": "Environment",
-          "description": "Let people work in folders of this machine"
+          "description": "Work in folders on Linux"
         },
         "agent": {
           "name": "Agent",
@@ -15167,6 +15208,7 @@
       "reachValue_other": "{{count}} people now",
       "lastActivity": "Last activity",
       "imageFailed": "Make the template's image available on this host, then retry. Pulling or loading it failed ({{reason}}). Check the image name and registry access, or build and publish it.",
+      "hostCapacityFailed": "The host lacks capacity ({{reason}}). Free the affected resources and retry.",
       "idleStop": "Stops when idle at",
       "may": "You may",
       "removalScheduled": "It is scheduled to be removed on {{time}}",

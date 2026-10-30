@@ -17,6 +17,16 @@ it.each(['en', 'zh-CN'] as const)('gives an action and the image cause once in %
   expect(environmentStatusDetail({ status: 'running', status_detail: null }, i18n.t)).toBeNull();
 });
 
+it.each(['en', 'zh-CN'] as const)('describes host capacity instead of a registry problem in %s', async (locale) => {
+  await setLocale(locale);
+  for (const detail of ['image: no capacity: no space left on device', 'image: image: no capacity: no space left on device']) {
+    const words = environmentStatusDetail({ status: 'failed', status_detail: detail }, i18n.t);
+    expect(words).toBe(locale === 'en'
+      ? 'The host lacks capacity (no space left on device). Free the affected resources and retry.'
+      : '主机资源不足（no space left on device）。请释放对应资源后重试。');
+  }
+});
+
 it('translates shipped live-application guidance and keeps an authored consequence', async () => {
   const shipped = i18n.getFixedT('en')('approvals.capability.liveEffect');
   await setLocale('zh-CN');

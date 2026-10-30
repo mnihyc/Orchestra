@@ -404,6 +404,7 @@ pub struct Process {
     request: Mutex<AgentStart>,
     adapter: tokio::sync::Mutex<Box<dyn AgentAdapter>>,
     adapter_start: AdapterStart,
+    authorized_program: Option<String>,
     resource_group: Option<orch_envhost::process_limits::UserGroup>,
     owned_home: bool,
     grant: Grant,
@@ -425,6 +426,19 @@ impl std::fmt::Debug for Process {
 }
 
 impl Process {
+    /// A running local harness may start new work only while its original program is still allowed.
+    pub(crate) fn check_program_policy(&self) -> Result<(), CommandError> {
+        if let Some(program) = &self.authorized_program {
+            let current = self.ctx.services.policy.harness(&self.kind);
+            if current.as_ref().map(|harness| harness.path.as_str()) != Some(program.as_str()) {
+                return Err(unavailable(format!(
+                    "agent.harnesses: the program for {} is no longer confirmed on this machine",
+                    self.kind
+                )));
+            }
+        }
+        Ok(())
+    }
     /// Commands after attach use the very same aggregate as this provider's harnesses.
     pub(crate) fn resource_launcher(&self) -> Vec<String> {
         self.resource_group
@@ -985,6 +999,7 @@ impl Process {
     }
 
     async fn relaunch(self: &Arc<Self>) -> Result<(), CommandError> {
+        self.check_program_policy()?;
         let mut adapter = self.adapter.lock().await;
         let _ = adapter.stop().await;
         let (sink, stream) = EventSink::channel();
@@ -1317,6 +1332,13 @@ impl Hosting {
         command: Option<Id>,
         request: &AgentStart,
     ) -> Result<(String, AgentDescriptor, bool), CommandError> {
+        let registration = self.registry.get(&request.harness_kind).ok_or_else(|| {
+            unavailable(format!(
+                "this machine has no adapter for the harness kind {:?}",
+                request.harness_kind
+            ))
+        })?;
+        let selected_program = self.binary_of(request, &request.profile, &registration)?;
         let key = (request.provider_id, request.agent_id);
         let existing = lock(&self.processes).get(&key).cloned();
         let previous_group = lock(&self.processes)
@@ -1350,6 +1372,10 @@ impl Hosting {
                 && before.home == request.home
                 && before.provider_config == request.provider_config
                 && same_runtime
+                && process
+                    .authorized_program
+                    .as_ref()
+                    .is_none_or(|program| selected_program.as_ref() == Some(program))
                 && process.state().status == HarnessState::Online;
             if same {
                 let described = process
@@ -1367,12 +1393,6 @@ impl Hosting {
             process.stop().await;
             lock(&self.processes).remove(&key);
         }
-        let registration = self.registry.get(&request.harness_kind).ok_or_else(|| {
-            unavailable(format!(
-                "this machine has no adapter for the harness kind {:?}",
-                request.harness_kind
-            ))
-        })?;
         let mut profile: AgentProfile = request.profile.clone();
         let source = Self::home_source(request, &profile);
         let owned_home = source.as_ref().map_or(
@@ -1390,10 +1410,33 @@ impl Hosting {
                 })
                 .home = Some(source);
         }
-        let mut binary = self.binary_of(request, &profile, &registration)?;
+        let mut binary = selected_program;
+        let authorized_program =
+            if registration.needs_binary && self.ctx.services.policy.policy().is_some() {
+                binary.clone()
+            } else {
+                None
+            };
         profile
             .env
-            .extend(self.runtime_environment(command, request, true)?);
+            .extend(self.runtime_environment(command, request, false)?);
+        if authorized_program.as_deref().is_some_and(|program| {
+            let path = Path::new(program);
+            !path.is_absolute() && path.components().count() == 1
+        }) {
+            let machine_path = std::env::var_os("PATH");
+            if profile.env.iter().any(|(name, value)| {
+                name.eq_ignore_ascii_case("PATH")
+                    && Some(std::ffi::OsStr::new(value)) != machine_path.as_deref()
+            }) {
+                return Err(unavailable(
+                    "agent.harnesses: a bare program name cannot use a different PATH from the machine's policy",
+                ));
+            }
+        }
+        if command.is_some() && request.runtime.is_some() {
+            self.runtime_environment(command, request, true)?;
+        }
         let services = &self.ctx.services;
         let resources = request
             .runtime
@@ -1466,6 +1509,7 @@ impl Hosting {
             request: Mutex::new(request.clone()),
             adapter: tokio::sync::Mutex::new(adapter),
             adapter_start,
+            authorized_program,
             resource_group,
             owned_home,
             grant,

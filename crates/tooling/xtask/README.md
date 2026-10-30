@@ -23,7 +23,7 @@ manifest of the files a directory holds, for a release put together from
 several machines. `cargo xtask image [--version V] [--fresh]` builds the default
 environment image alone, as `orch-env-base:V`, and refuses an image whose labels do
 not say the versions its recipe pins (`package` builds it the same way, and
-`--fresh-image` there, like `--fresh` here, builds without Docker's layer cache). `package` also builds the developer image `orch-env-dev:V` on it from `images/orch-env-dev` and holds it to the versions that recipe pins, so that the release names both.
+`--fresh-image` there, like `--fresh` here, builds without Docker's layer cache). `package` also builds the developer image `orch-env-dev:V` from the combined Default and Developer tools recipes and holds it to the versions those recipes pin, so that the release names both.
 `cargo xtask identity frontend` answers the browser
 application's build with the identity a Rust build gets from its build script.
 The server programs are compiled in a container of the distribution the Compose

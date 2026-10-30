@@ -15,6 +15,9 @@ the previous read state. Older rows load through the page controls.
 An Inbox row does not grant access to the original work. A changed permission
 can remove its private detail. Notification settings decide outward delivery;
 marking work read and pausing delivery have different effects.
+When you can no longer view a thread, its notice keeps a generic event but hides
+the thread's title and text. Queued outward notices stop if you lose access.
+Machine outage notices do not name affected threads when their access cannot be checked.
 
 ## Choose when to be told
 

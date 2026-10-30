@@ -329,6 +329,7 @@ pub fn descriptor(version: &str, as_root: bool) -> AgentDescriptor {
         arrangements: vec![
             entry(ArrangementType::KeySeparated),
             entry(ArrangementType::CredentialShared),
+            entry(ArrangementType::HandedOver),
             ArrangementEntry {
                 kind: ArrangementType::Separated,
                 executor: Some(EXECUTOR.to_owned()),
@@ -339,7 +340,6 @@ pub fn descriptor(version: &str, as_root: bool) -> AgentDescriptor {
                     tool_set::CUSTOM.to_owned(),
                 ]),
             },
-            entry(ArrangementType::HandedOver),
             entry(ArrangementType::Together),
         ],
         native_provider: Some(NativeProvider {
@@ -430,8 +430,8 @@ mod tests {
             [
                 ArrangementType::KeySeparated,
                 ArrangementType::CredentialShared,
-                ArrangementType::Separated,
                 ArrangementType::HandedOver,
+                ArrangementType::Separated,
                 ArrangementType::Together
             ]
         );

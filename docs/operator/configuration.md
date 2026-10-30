@@ -32,6 +32,12 @@ ownership before changing pool sizes. Never hold a connection while awaiting ano
 `[api] metrics_bind`, `[gateway] metrics_bind` and `[worker] metrics_bind` select the private metrics
 listeners. The [monitoring guide](monitoring.md) explains their addresses, scrape setup and alerts.
 
+## Deleted places
+
+`[retention] soft_delete_days` sets the recovery window for new deletions. Shortening it does not
+shorten a previously recorded recovery date for a place or the documents deleted with it. Older
+deletions without a recorded date use the current setting.
+
 ## Recorded files and restore
 
 Setup already provides a local content store: `[storage] root` defaults to `/var/lib/orch`, mounted

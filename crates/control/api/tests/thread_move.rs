@@ -20,7 +20,7 @@ use orch_api_contract::threads::{
     Delivery, ItemPayload, MarkerPayload, Thread, ThreadInterrupt, ThreadInterruptBody, ThreadSync,
     ThreadSyncGet, ThreadSyncGetQuery,
 };
-use orch_link_contract::events::TurnOutcome;
+use orch_link_contract::events::{ApprovalRequested, Event, TurnOutcome};
 use orch_settings::Target;
 use orch_types::{Id, new_id};
 use rig::{Scene, turn_began, turn_ended};
@@ -217,6 +217,57 @@ async fn a_move_keeps_the_same_history_workspace_and_stop_held_inputs_and_moves_
             "one move is one act in each topic's Activity"
         );
     }
+}
+
+#[tokio::test]
+async fn a_thread_with_an_unanswered_native_question_cannot_move() {
+    let s = Scene::new().await;
+    let thread = s.thread().await.base.id;
+    s.say(
+        &s.ada,
+        thread,
+        "Ask a question",
+        Delivery::Queue,
+        "move-question",
+    )
+    .await
+    .ok();
+    let start = s.rig.turn_start(thread, 0).await;
+    s.rig.say(thread, turn_began(start.turn_id)).await;
+    s.rig.say(thread, Event::ApprovalRequested(ApprovalRequested {
+        turn_id:start.turn_id, request_ref:"move-question".into(), title:"Choose a scope".into(),
+        request:serde_json::from_value(json!({"request_kind":"user_input","options":[],"detail":{
+            "questions":[{"id":"scope","header":"Scope","question":"Which scope?","multiple":false,"allow_other":true,"options":null}]
+        }})).unwrap(),
+    })).await;
+    s.rig.wait_state(thread, "waiting_approval").await;
+    let to = destination(&s).await;
+    let plan = preview(&s, thread, to).await;
+    assert!(
+        plan.movement
+            .blockers
+            .iter()
+            .any(|blocker| blocker.code == "thread.not_idle")
+    );
+    let attempted = s
+        .rig
+        .world
+        .app
+        .call(ThreadMove, &[&thread])
+        .token(&s.ada.token)
+        .body(&confirmation(&plan))
+        .send()
+        .await;
+    assert!(!attempted.status.is_success());
+    assert_eq!(sync(&s, thread).await.thread.topic_id, s.tree.topic.base.id);
+    let state: String = sqlx::query_scalar(
+        "SELECT state FROM approvals WHERE thread_id=$1 AND native_ref='move-question'",
+    )
+    .bind(thread)
+    .fetch_one(s.rig.db.pool())
+    .await
+    .unwrap();
+    assert_eq!(state, "pending");
 }
 
 #[tokio::test]

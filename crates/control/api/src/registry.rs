@@ -21,7 +21,7 @@ use axum::routing::{MethodFilter, on};
 use chrono::{DateTime, Utc};
 use http::{HeaderMap, HeaderValue, StatusCode, header};
 use orch_api_contract::common::{
-    CSRF_HEADER, ErrorCode, FieldFault, MAX_BODY_BYTES, MAX_JSON_BYTES, Problem, REQUEST_ID_HEADER,
+    ErrorCode, FieldFault, MAX_BODY_BYTES, MAX_JSON_BYTES, Problem, REQUEST_ID_HEADER,
 };
 use orch_api_contract::routes::{Access, Endpoint, Method, Route, Shape};
 use orch_types::Id;
@@ -542,10 +542,10 @@ async fn open(
     let caller = match route.access {
         Access::Public => Caller::Anonymous,
         Access::Cookie => {
-            if !parts.headers.contains_key(CSRF_HEADER) {
+            if !crate::sign_in::has_csrf(&parts.headers) {
                 return Err(ApiError::new(
                     ErrorCode::AuthCsrf,
-                    "the request lacks its header",
+                    "the request lacks its required CSRF header value",
                 ));
             }
             Caller::Anonymous

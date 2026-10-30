@@ -7506,7 +7506,7 @@ export const SETTINGS_REGISTRY: readonly SettingDef[] = [
   {
     "key": "outbound.allowed_private_hosts",
     "title": "Private hosts",
-    "description": "The hosts on private addresses that a channel or a destination of an org or a person may reach.",
+    "description": "The private hosts that org or personal channels and destinations, and skill archive addresses, may reach.",
     "group": "system",
     "schema": {
       "type": "array",

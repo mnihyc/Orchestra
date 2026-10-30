@@ -2,8 +2,7 @@
 //!
 //! An issuer describes itself at `<issuer>/.well-known/openid-configuration`: where a browser signs a
 //! person in, where a code is exchanged, where its keys are and what it signs with. The description is
-//! taken only where it names the issuer it was asked for (read without a closing slash, which is how
-//! an administrator may have written it), offers the code flow, and gives addresses that are safe to
+//! taken only where it names exactly the issuer it was asked for, offers the code flow, and gives addresses that are safe to
 //! send a secret to: `https`, or `http` to this very machine, for a provider in development.
 //!
 //! What was read is kept by issuer for [`METADATA_TTL`], and the keys for [`KEYS_TTL`]; a token that
@@ -61,7 +60,7 @@ impl Metadata {
             .and_then(Json::as_str)
             .ok_or_else(|| ProviderError::new("the description names no issuer"))?
             .to_owned();
-        if named.trim_end_matches('/') != issuer.trim_end_matches('/') {
+        if named != issuer {
             return Err(ProviderError::new(format!(
                 "the description names the issuer {named}, not {issuer}"
             )));
@@ -313,8 +312,10 @@ mod tests {
 
     #[test]
     fn a_description_of_the_issuer_asked_for_is_read_with_its_endpoints_and_algorithms() {
-        let read = Metadata::read("https://login.acme.example/realms/main/", described()).unwrap();
-        assert_eq!(read.issuer, "https://login.acme.example/realms/main");
+        let mut with_slash = described();
+        with_slash["issuer"] = json!("https://login.acme.example/realms/main/");
+        let read = Metadata::read("https://login.acme.example/realms/main/", with_slash).unwrap();
+        assert_eq!(read.issuer, "https://login.acme.example/realms/main/");
         assert_eq!(read.jwks_uri.as_str(), "https://keys.acme.example/certs");
         assert_eq!(
             read.signing_algorithms,
@@ -339,6 +340,10 @@ mod tests {
     #[test]
     fn a_description_of_another_issuer_or_without_the_code_flow_is_refused() {
         assert!(Metadata::read("https://login.acme.example/realms/other", described()).is_err());
+        assert!(Metadata::read("https://login.acme.example/realms/main/", described()).is_err());
+        let mut with_slash = described();
+        with_slash["issuer"] = json!("https://login.acme.example/realms/main/");
+        assert!(Metadata::read("https://login.acme.example/realms/main", with_slash).is_err());
         let mut implicit = described();
         implicit["response_types_supported"] = json!(["id_token"]);
         assert!(Metadata::read("https://login.acme.example/realms/main", implicit).is_err());

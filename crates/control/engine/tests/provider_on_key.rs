@@ -25,6 +25,60 @@ fn only<T>(mut found: Vec<T>) -> T {
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn an_expired_provider_key_purge_is_retried_on_its_original_machine_after_reconnection() {
+    let world = World::on_a_key(KEY).await;
+    let previous = orch_types::new_id();
+    let old = world.clock.now() - chrono::Duration::minutes(2);
+    let body = serde_json::json!({"provider_id":world.provider,"purge":true});
+    sqlx::query("UPDATE machines SET online=false WHERE id=$1")
+        .bind(world.machine_id)
+        .execute(world.pool.pool())
+        .await
+        .unwrap();
+    sqlx::query("INSERT INTO commands(id,machine_id,kind,body,serial_key,state,deadline_at,created_at,updated_at)
+                 VALUES($1,$2,'provider.stop',$3,$4,'expired',$5,$5,$5)")
+        .bind(previous)
+        .bind(world.machine_id)
+        .bind(&body)
+        .bind(world.provider.to_string())
+        .bind(old)
+        .execute(world.pool.pool())
+        .await
+        .unwrap();
+    let due = {
+        let mut conn = world.pool.acquire().await.unwrap();
+        orch_db::queries::lifecycle::provider_purges_due(&mut conn, world.clock.now(), 10)
+            .await
+            .unwrap()
+    };
+    assert!(due.is_empty(), "the keeper is offline");
+    sqlx::query("UPDATE machines SET online=true WHERE id=$1")
+        .bind(world.machine_id)
+        .execute(world.pool.pool())
+        .await
+        .unwrap();
+    world.wait_ran(CommandKind::ProviderStop, 1).await;
+    let Command::ProviderStop(stop) = only(world.seen.of_kind(CommandKind::ProviderStop)) else {
+        panic!("the keeper must receive its purge");
+    };
+    assert_eq!(stop.provider_id, world.provider);
+    assert_eq!(stop.purge, Some(true));
+    let sent = world.ordered();
+    assert!(sent.iter().any(|(machine, command)| *machine == world.machine_id
+        && matches!(command, Command::ProviderStop(stop) if stop.provider_id == world.provider && stop.purge == Some(true))));
+    let retried: Option<String> =
+        sqlx::query_scalar("SELECT error#>>'{details,purge_retry}' FROM commands WHERE id=$1")
+            .bind(previous)
+            .fetch_one(world.pool.pool())
+            .await
+            .unwrap();
+    assert!(
+        retried.is_some(),
+        "the successor is recorded before it is sent"
+    );
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn a_ready_key_fixture_defers_observation_without_disabling_its_normal_cadence() {
     use orch_db::queries::provider_facts::{ReadSchedule, due_reads};
     let world = World::on_a_key(KEY).await;
@@ -141,6 +195,10 @@ async fn a_turn_on_a_provider_on_a_key_starts_the_provider_opens_a_lease_and_clo
         world.machine_id.to_string().as_str()
     );
     assert_eq!(asked.ticket.more["thread_id"], thread.to_string().as_str());
+    assert_eq!(
+        asked.ticket.more["provider_id"],
+        world.provider.to_string().as_str()
+    );
 
     // The lease is the one pre-flight opened, for the model of the turn alone, with no allowance since no
     // cap is evaluated yet.

@@ -1,5 +1,6 @@
 //! Live port measurements and single-use channel admissions over the existing backplane.
 
+use crate::middleware::authorization::RetainedIdentity;
 use crate::middleware::requests::{ApiError, ApiResult};
 use crate::registry::Ctx;
 use orch_api_contract::common::ErrorCode;
@@ -36,7 +37,7 @@ enum Who {
     /// A link's holder: the link is asked again.
     Link,
     /// A person who entered by the browser route, asked again by who they are.
-    Person(Id),
+    Person(RetainedIdentity),
 }
 
 #[derive(Clone)]
@@ -56,8 +57,12 @@ struct Active {
 pub struct BrowserEntry {
     /// The person who entered, or none for a link's holder.
     pub person: Option<Id>,
+    /// The authenticated session that admitted this person, absent for link holders.
+    pub(crate) identity: Option<RetainedIdentity>,
     /// The environment of the port.
     pub environment: Id,
+    /// The environment incarnation that admitted the entry.
+    pub(crate) generation: i32,
     /// The port.
     pub port: u16,
     /// The named-place or link opening it entered by, or none for own use.
@@ -520,7 +525,7 @@ impl PortRuntime {
     }
 
     async fn current(active: &Active) -> ApiResult<()> {
-        if let Who::Person(person) = &active.who {
+        if let Who::Person(identity) = &active.who {
             let mut tx = active.app.db.begin().await?;
             let env = crate::routes::ports::environment(&mut tx, active.environment).await?;
             if i64::from(env.generation) != active.generation {
@@ -529,18 +534,15 @@ impl PortRuntime {
                     "the runtime generation changed",
                 ));
             }
-            let principal = orch_authz::Principal::load(
-                &mut tx,
-                orch_authz::tokens::Caller::session(*person),
-                Time::new(active.app.clock.now()),
-            )
-            .await
-            .map_err(|_| {
-                ApiError::new(
-                    ErrorCode::PortsNotAllowed,
-                    "the person can no longer use this port",
-                )
-            })?;
+            let principal = identity
+                .principal(&mut tx, Time::new(active.app.clock.now()))
+                .await?
+                .ok_or_else(|| {
+                    ApiError::new(
+                        ErrorCode::PortsNotAllowed,
+                        "the person can no longer use this port",
+                    )
+                })?;
             crate::routes::ports::may_use(
                 &mut tx,
                 &principal,
@@ -691,7 +693,7 @@ impl PortRuntime {
         port: u16,
         opening: Option<Id>,
         caller: PortCaller,
-        person: Option<Id>,
+        identity: Option<RetainedIdentity>,
         revision: i64,
         outside: SocketAddr,
         id: Id,
@@ -744,7 +746,7 @@ impl PortRuntime {
             })?;
         let active = Active {
             app: app.clone(),
-            who: person.map_or(Who::Link, Who::Person),
+            who: identity.map_or(Who::Link, Who::Person),
             environment: env.id,
             generation: i64::from(env.generation),
             port,
@@ -752,6 +754,13 @@ impl PortRuntime {
             opening,
             closer: tunnel.closer(),
         };
+        if Self::current(&active).await.is_err() {
+            active.closer.close();
+            return Err(ApiError::new(
+                ErrorCode::PortsNotAllowed,
+                "admission ended while the inside socket opened",
+            ));
+        }
         lock(&self.active).insert(id, active);
         Ok(tunnel)
     }

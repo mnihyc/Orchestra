@@ -6,13 +6,15 @@ mod rig;
 mod support;
 
 use orch_api_contract::{
+    approvals::ApprovalGet,
     auth::{ApiTokenCreateBody, MeTokenCreate, SensitiveProof},
     common::ErrorCode,
     threads::{
-        ContentPart, Delivery, PromptEditReason, ThreadContinuationStatus, ThreadInputCreate,
-        ThreadInputCreateBody, ThreadOpeningGet, ThreadOpeningGetQuery, ThreadPromptVersionCreate,
-        ThreadPromptVersionCreateBody, ThreadPromptVersionList, ThreadPromptVersionListQuery,
-        ThreadSync, ThreadSyncGet, ThreadSyncGetQuery,
+        ContentPart, Delivery, InputState, PromptEditReason, ThreadContinuationStatus,
+        ThreadInputCreate, ThreadInputCreateBody, ThreadInputRun, ThreadOpeningGet,
+        ThreadOpeningGetQuery, ThreadPromptVersionCreate, ThreadPromptVersionCreateBody,
+        ThreadPromptVersionList, ThreadPromptVersionListQuery, ThreadSync, ThreadSyncGet,
+        ThreadSyncGetQuery,
     },
 };
 use orch_types::Id;
@@ -93,6 +95,106 @@ async fn token(scene: &rig::Scene, thread: Id, scopes: &[&str]) -> Proof<String>
         .ok()
         .token
         .ok_or_else(|| "new synthetic token has no returned secret".into())
+}
+
+#[tokio::test]
+async fn a_token_without_environment_scope_cannot_approve_held_work() -> Proof {
+    let scene = rig::Scene::new().await;
+    let thread = scene.thread().await.base.id;
+    let narrow = token(
+        &scene,
+        thread,
+        &["thread.view", "thread.interact", "provider.use"],
+    )
+    .await?;
+    let entitled = token(
+        &scene,
+        thread,
+        &[
+            "thread.view",
+            "thread.interact",
+            "provider.use",
+            "environment.use",
+        ],
+    )
+    .await?;
+    let request = ThreadInputCreateBody {
+        plan: false,
+        content: vec![ContentPart::Text {
+            text: "Run only with environment access".into(),
+        }],
+        delivery: Delivery::Queue,
+        client_id: "environment-scope-approval".into(),
+        bypass: None,
+        native_action: None,
+    };
+    let submitted = scene
+        .rig
+        .world
+        .app
+        .call(ThreadInputCreate, &[&thread])
+        .token(&narrow)
+        .body(&request)
+        .send()
+        .await
+        .ok()
+        .input;
+    assert_eq!(submitted.state, InputState::Pending);
+    assert_eq!(
+        submitted.state_detail.as_deref(),
+        Some("model_use_required")
+    );
+    let approval = submitted
+        .approval_id
+        .ok_or("the held input has no approval")?;
+    let shown = scene
+        .rig
+        .world
+        .app
+        .call(ApprovalGet, &[&approval])
+        .token(&narrow)
+        .send()
+        .await
+        .ok();
+    assert!(!shown.can_decide);
+    let refused = scene
+        .rig
+        .world
+        .app
+        .call(ThreadInputRun, &[&thread, &submitted.id])
+        .token(&narrow)
+        .send()
+        .await
+        .problem();
+    assert_eq!(refused.code, ErrorCode::AuthzDenied);
+    assert_eq!(
+        refused.extra.get("required"),
+        Some(&json!("environment.use"))
+    );
+    let state: String = sqlx::query_scalar("SELECT state FROM approvals WHERE id=$1")
+        .bind(approval)
+        .fetch_one(scene.rig.db.pool())
+        .await?;
+    assert_eq!(state, "pending");
+    let accepted = scene
+        .rig
+        .world
+        .app
+        .call(ThreadInputRun, &[&thread, &submitted.id])
+        .token(&entitled)
+        .send()
+        .await
+        .ok();
+    assert_eq!(accepted.author.as_ref().unwrap().id, scene.ada.id());
+    assert_eq!(accepted.run_as.as_ref().unwrap().id, scene.ada.id());
+    let start = scene.rig.turn_start(thread, 0).await;
+    let responsible: Option<Id> =
+        sqlx::query_scalar("SELECT audit_for_user_id FROM turns WHERE id=$1")
+            .bind(start.turn_id)
+            .fetch_one(scene.rig.db.pool())
+            .await?;
+    assert_eq!(responsible, Some(scene.ada.id()));
+    Ok(())
 }
 
 async fn current(scene: &rig::Scene, thread: Id) -> ThreadSync {
@@ -198,7 +300,12 @@ async fn ordinary_input_and_prompt_edit_require_provider_scope_without_narrowing
     let allowed = token(
         &scene,
         thread,
-        &["thread.view", "thread.interact", "provider.use"],
+        &[
+            "thread.view",
+            "thread.interact",
+            "provider.use",
+            "environment.use",
+        ],
     )
     .await?;
     let before = counts(&scene, thread).await?;
@@ -1053,7 +1160,12 @@ async fn narrowing_only_provider_use_before_effects_or_activation_keeps_original
         let secret = token(
             &scene,
             thread,
-            &["thread.view", "thread.interact", "provider.use"],
+            &[
+                "thread.view",
+                "thread.interact",
+                "provider.use",
+                "environment.use",
+            ],
         )
         .await?;
         let token:Id=sqlx::query_scalar("SELECT id FROM api_tokens WHERE user_id=$1 AND scopes @> ARRAY['provider.use']::text[]")

@@ -31,18 +31,6 @@ async fn owned_machine(world: &World, owner: &Who) -> Id {
     let machine = fixtures::insert_persons_machine(&mut conn, owner.id(), "personal laptop")
         .await
         .unwrap();
-    orch_authz::ownership::start_resource(
-        &mut conn,
-        orch_access_contract::decisions::ObjectRef {
-            kind: orch_access_contract::permissions::ResourceKind::Machine.into(),
-            id: machine,
-        },
-        owner.id(),
-        orch_authz::ownership::NewAccess::Defaults,
-        orch_types::Time::new(world.now()),
-    )
-    .await
-    .unwrap();
     machine
 }
 
@@ -132,18 +120,6 @@ async fn a_bound_replacement_command_keeps_the_owned_connectors_named_directory_
     let machine = fixtures::insert_persons_machine(&mut conn, owner.id(), "named laptop")
         .await
         .unwrap();
-    orch_authz::ownership::start_resource(
-        &mut conn,
-        orch_access_contract::decisions::ObjectRef {
-            kind: orch_access_contract::permissions::ResourceKind::Machine.into(),
-            id: machine,
-        },
-        owner.id(),
-        orch_authz::ownership::NewAccess::Defaults,
-        orch_types::Time::new(world.now()),
-    )
-    .await
-    .unwrap();
     sqlx::query("UPDATE machines SET roles=ARRAY['agent'],facts=jsonb_build_object('installation',jsonb_build_object('data_dir',$2::text,'service',null,'executable','/tmp/connector bin/orch-connector')) WHERE id=$1")
         .bind(machine).bind("/tmp/owner's named machine").execute(&mut *conn).await.unwrap();
     drop(conn);

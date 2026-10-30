@@ -78,6 +78,9 @@ async fn anonymous_known_and_chunked_oversized_json_reaches_the_client_as_413_an
     let router = orch_api_core::server::router(world.app, registry);
     let directory = tempfile::tempdir().unwrap();
     std::fs::set_permissions(directory.path(), std::fs::Permissions::from_mode(0o755)).unwrap();
+    // The deployment entrypoint creates empty includes when HTTPS is not configured.
+    std::fs::write(directory.path().join("frontend-https.conf"), "").unwrap();
+    std::fs::write(directory.path().join("ports-https.conf"), "").unwrap();
     let authority = CertificateAuthority::create("Edge body test", 30, &SystemClock).unwrap();
     std::fs::write(directory.path().join("ca.pem"), authority.certificate_pem()).unwrap();
     let (key, certificate) = authority
@@ -122,6 +125,8 @@ async fn anonymous_known_and_chunked_oversized_json_reaches_the_client_as_413_an
             &format!("        listen 127.0.0.1:{PORT_NAMES_PORT};\n"),
         )
         .replace("https://api:8443", &format!("https://127.0.0.1:{API_PORT}"))
+        .replace("/tmp/frontend-https.conf", "/fixture/frontend-https.conf")
+        .replace("/tmp/ports-https.conf", "/fixture/ports-https.conf")
         .replace("/etc/orch/secrets/orch_ca_cert.pem", "/fixture/ca.pem");
     std::fs::write(directory.path().join("nginx.conf"), config).unwrap();
     let compose = std::fs::read_to_string(root.join("deploy/compose.yml")).unwrap();
@@ -171,7 +176,16 @@ async fn anonymous_known_and_chunked_oversized_json_reaches_the_client_as_413_an
         }
     })
     .await
-    .unwrap();
+    .unwrap_or_else(|error| {
+        let logs = Command::new("docker")
+            .args(["logs", &nginx.0])
+            .output()
+            .unwrap();
+        panic!(
+            "edge did not start: {error}; {}",
+            String::from_utf8_lossy(&logs.stderr)
+        );
+    });
     let marker = "credential-that-must-not-be-echoed";
     let payload = format!(
         "{{\"login\":\"{marker}{}\",\"password\":\"also-private\"}}",

@@ -16,6 +16,7 @@ use orch_api_contract::threads::{
     Delivery, ItemPayload, OutlineKind, ThreadItemGet, ThreadOutlineGet, ThreadSync, ThreadSyncGet,
     ThreadSyncGetQuery,
 };
+use orch_link_contract::commands::CommandKind;
 use orch_link_contract::events::{ApprovalRequested, Event};
 use orch_types::Id;
 use places::Who;
@@ -180,4 +181,92 @@ async fn a_question_is_in_its_item_for_the_manager_and_viewer_with_only_the_mana
         .await
         .problem();
     assert_eq!(denied.code, ErrorCode::AuthzDenied);
+}
+
+#[tokio::test]
+async fn interrupt_delivery_withdraws_the_question_in_every_personalized_card() {
+    let s = Scene::new().await;
+    let thread = s.thread().await.base.id;
+    assert!(
+        s.say(
+            &s.ada,
+            thread,
+            "Ask",
+            Delivery::Queue,
+            "interrupt-question-start"
+        )
+        .await
+        .status
+        .is_success()
+    );
+    let start = s.rig.turn_start(thread, 0).await;
+    s.rig.say(thread, rig::turn_began(start.turn_id)).await;
+    s.rig.say(thread, Event::ApprovalRequested(ApprovalRequested {
+        turn_id: start.turn_id, request_ref: "interrupt-question".into(), title: "Choose the scope".into(),
+        request: serde_json::from_value(json!({"request_kind":"user_input","options":[],"detail":{
+            "questions":[{"id":"scope","header":"Scope","question":"Which scope?","multiple":false,"options":null,"allow_other":true}]
+        }})).unwrap(),
+    })).await;
+    s.rig.wait_state(thread, "waiting_approval").await;
+    let initial = sync(&s, &s.ada, thread).await;
+    let item = initial
+        .items
+        .iter()
+        .find(|item| matches!(&item.payload, ItemPayload::Approval(_)))
+        .unwrap();
+    let item_id = item.id;
+    let ItemPayload::Approval(payload) = &item.payload else {
+        unreachable!()
+    };
+    let approval = payload.approval.as_ref().unwrap();
+    assert!(approval.can_decide);
+    let approval_id = approval.id;
+
+    s.rig.machine.handler.hold(CommandKind::TurnInterrupt);
+    assert!(
+        s.say(
+            &s.ada,
+            thread,
+            "Stop and change direction",
+            Delivery::Interrupt,
+            "interrupt-question-next"
+        )
+        .await
+        .status
+        .is_success()
+    );
+    let state: String = sqlx::query_scalar("SELECT state FROM turns WHERE id=$1")
+        .bind(start.turn_id)
+        .fetch_one(s.rig.db.pool())
+        .await
+        .unwrap();
+    assert_eq!(state, "running", "the native turn is still stopping");
+    for reader in [&s.ada, &s.cai] {
+        let read = sync(&s, reader, thread).await;
+        let item = read.items.iter().find(|item| item.id == item_id).unwrap();
+        let ItemPayload::Approval(payload) = &item.payload else {
+            unreachable!()
+        };
+        let approval = payload.approval.as_ref().unwrap();
+        assert_eq!(approval.state, ApprovalState::Cancelled);
+        assert!(!approval.can_decide);
+    }
+    let answer = ApprovalDecision::Answers(HarnessAnswersDecision {
+        answers: BTreeMap::from([("scope".into(), vec!["Login".into()])]),
+        note: None,
+    });
+    let late = s
+        .rig
+        .world
+        .app
+        .call(ApprovalDecide, &[&approval_id])
+        .token(&s.ada.token)
+        .body(&answer)
+        .send()
+        .await
+        .problem();
+    assert_eq!(late.code, ErrorCode::ApprovalAlreadyDecided);
+    assert_eq!(late.extra["current"]["state"], "cancelled");
+    assert_eq!(s.rig.commands.issued_of("approval.resolve"), 0);
+    s.rig.machine.handler.release();
 }

@@ -101,10 +101,9 @@ pub async fn create_failed(conn: &mut Conn, error: CreateThreadError) -> ApiErro
             "the provider is not there or is switched off",
         ),
         CreateThreadError::ProviderNotAllowed(why) => provider_policy_failed(conn, why).await,
-        CreateThreadError::EnvironmentUnavailable => ApiError::invalid(
-            "environment.use",
-            "the environment is not there or is being removed",
-        ),
+        CreateThreadError::EnvironmentUnavailable => {
+            ApiError::invalid("environment.use", "the selected environment is unavailable")
+        }
         CreateThreadError::AgentNotReported => ApiError::new(
             ErrorCode::BindingIncompatible,
             "the agent profile has not reported what its harness is",

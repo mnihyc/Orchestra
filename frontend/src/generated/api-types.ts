@@ -10539,6 +10539,11 @@ export interface components {
         AccessPreset: "defaults" | "private";
         /** @description A request for access to something. */
         AccessRequest: {
+            /**
+             * Format: date-time
+             * @description The proposed end of the access, or no end when absent.
+             */
+            expires_at?: string | null;
             /** @description The thread that the person was attempting to act on. */
             for_thread: components["schemas"]["NodeRef"] | null;
             /** @description Who the entries would name: a selected person (normally the requester), or all the work in a place. */
@@ -10562,6 +10567,11 @@ export interface components {
          *     normally the `missing` list of a refusal sent back as it came.
          */
         AccessRequestCreateBody: {
+            /**
+             * Format: date-time
+             * @description The proposed end of the access, or no end when omitted.
+             */
+            expires_at?: string | null;
             /**
              * Format: uuid
              * @description Shown to each approver to explain why they were asked: the thread that the person was
@@ -14137,6 +14147,11 @@ export interface components {
         };
         /** @description A request to join a known group chat. */
         ChatJoinRequestBody: {
+            /**
+             * Format: date-time
+             * @description The proposed end of membership, or no end when omitted.
+             */
+            expires_at?: string | null;
             /** @description The name as shared with the requester. */
             label?: string | null;
             /** @description Optional words for the people who may add a member. */
@@ -25721,6 +25736,20 @@ export interface components {
             kind: components["schemas"]["MachineProgramKind"];
             /** @description Its registration name. */
             name: string;
+        } | {
+            /** @constant */
+            action: "confirm_harness";
+            /** @description The harness kind. */
+            kind: string;
+            /** @description The path found or currently selected on the machine. */
+            path: string;
+        } | {
+            /** @constant */
+            action: "remove_harness";
+            /** @description The harness kind. */
+            kind: string;
+            /** @description The path found or currently selected on the machine. */
+            path: string;
         } | {
             /** @constant */
             action: "reload";

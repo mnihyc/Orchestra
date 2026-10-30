@@ -104,6 +104,98 @@ async fn setup_with_domain(domain: &str) -> (World, Who, Who, Id, Id, Id) {
         .id;
     (world, manager, colleague, env, project, machine)
 }
+
+#[tokio::test]
+async fn a_port_browser_entry_stops_with_its_session_and_environment_generation() {
+    use tower::ServiceExt;
+
+    for loss in ["session", "generation"] {
+        let (world, manager, _, env, _, _) = setup().await;
+        sqlx::query("UPDATE environments SET status='running', facts=jsonb_set(COALESCE(facts,'{}'::jsonb),'{ports}', $2::jsonb) WHERE id=$1")
+            .bind(env)
+            .bind(json!({"transports":["tcp"]}))
+            .execute(&world.db.pool)
+            .await
+            .unwrap();
+        let entry = world
+            .app
+            .call(EnvironmentPortEnter, &[&env, &"41042"])
+            .token(&manager.token)
+            .body(&EnvironmentPortEnterBody::default())
+            .send()
+            .await
+            .ok();
+        let url = url::Url::parse(&entry.url).unwrap();
+        if loss == "session" {
+            sqlx::query("UPDATE sessions SET revoked_at=$2 WHERE user_id=$1")
+                .bind(manager.id())
+                .bind(world.now())
+                .execute(&world.db.pool)
+                .await
+                .unwrap();
+        } else {
+            sqlx::query("UPDATE environments SET generation=generation+1 WHERE id=$1")
+                .bind(env)
+                .execute(&world.db.pool)
+                .await
+                .unwrap();
+        }
+        let mut registry = orch_api_core::registry::Registry::new();
+        orch_api_core::routes::mount(&mut registry);
+        let router = orch_api_core::server::router(world.app.app.clone(), registry);
+        let response = router
+            .oneshot(
+                http::Request::builder()
+                    .uri(format!("{}?{}", url.path(), url.query().unwrap()))
+                    .header("host", url.host_str().unwrap())
+                    .body(axum::body::Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(
+            response.status(),
+            403,
+            "a {loss} change invalidates the code"
+        );
+        assert!(response.headers().get(http::header::SET_COOKIE).is_none());
+    }
+}
+
+#[tokio::test]
+async fn a_closed_port_link_cannot_be_exchanged_for_a_browser_cookie() {
+    use tower::ServiceExt;
+    let (world, manager, _, env, _, _) = setup().await;
+    links_asked(&world).await;
+    let mut asked = request(41043, new_id(), "preview link");
+    asked.kind = PortOpeningKind::Link;
+    asked.place_id = None;
+    asked.until = Some(Time::new(world.now() + chrono::Duration::hours(1)));
+    asked.entry_methods = Some(vec![PortLinkMethod::Browser]);
+    let plan = review(&world, &manager, env, &asked).await;
+    let opened = confirm(&world, &manager, env, &plan, new_id()).await;
+    let url = url::Url::parse(&opened.link.unwrap().browser_url_once.unwrap()).unwrap();
+    sqlx::query("UPDATE port_openings SET state='closed' WHERE id=$1")
+        .bind(opened.opening.id)
+        .execute(&world.db.pool)
+        .await
+        .unwrap();
+    let mut registry = orch_api_core::registry::Registry::new();
+    orch_api_core::routes::mount(&mut registry);
+    let router = orch_api_core::server::router(world.app.app.clone(), registry);
+    let response = router
+        .oneshot(
+            http::Request::builder()
+                .uri(format!("{}?{}", url.path(), url.query().unwrap()))
+                .header("host", url.host_str().unwrap())
+                .body(axum::body::Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(response.status(), 403);
+    assert!(response.headers().get(http::header::SET_COOKIE).is_none());
+}
 /// Sets `capability.policy` at the system for one port capability, with its approvers the holders of
 /// Ports Manage on the environment, as shipped.
 async fn port_policy(world: &World, key: &str, decision: &str) {
@@ -186,6 +278,147 @@ async fn reconcile(world: &World, env: Id) -> Vec<Id> {
         .unwrap();
     tx.commit().await.unwrap();
     result
+}
+
+#[tokio::test]
+async fn a_persons_port_opening_ends_with_its_deciding_credential() {
+    use orch_api_core::middleware::authentication::{
+        ACCESS_TOKEN_PREFIX, API_TOKEN_PREFIX, new_token, token_hash,
+    };
+
+    for loss in ["session", "token", "token_scopes"] {
+        let (world, manager, _, env, _, _) = setup().await;
+        links_asked(&world).await;
+
+        // The same person also has a distinct session: its opening must survive the loss.
+        let other_secret = new_token(ACCESS_TOKEN_PREFIX);
+        let other_session = new_id();
+        orch_db::queries::identity::testing::insert_session(
+            &mut *world.conn().await,
+            other_session,
+            manager.id(),
+            &token_hash(&other_secret),
+            world.now() + chrono::Duration::days(400),
+        )
+        .await
+        .unwrap();
+        let mut other = manager.clone();
+        other.token = other_secret;
+
+        let mut decider = manager.clone();
+        let token_id = if loss != "session" {
+            let secret = new_token(API_TOKEN_PREFIX);
+            let id = orch_db::queries::identity::testing::insert_api_token(
+                &mut *world.conn().await,
+                manager.id(),
+                &token_hash(&secret),
+            )
+            .await
+            .unwrap();
+            sqlx::query("UPDATE api_tokens SET scopes=ARRAY['ports.manage'] WHERE id=$1")
+                .bind(id)
+                .execute(&world.db.pool)
+                .await
+                .unwrap();
+            decider.token = secret;
+            Some(id)
+        } else {
+            None
+        };
+
+        let mut asked = request(41051, new_id(), "token-bound opening");
+        asked.kind = PortOpeningKind::Link;
+        asked.place_id = None;
+        asked.until = Some(Time::new(world.now() + chrono::Duration::hours(1)));
+        let plan = review(&world, &decider, env, &asked).await;
+        let first = confirm(&world, &decider, env, &plan, new_id()).await;
+        asked.port = 41052;
+        let plan = review(&world, &other, env, &asked).await;
+        let second = confirm(&world, &other, env, &plan, new_id()).await;
+
+        match loss {
+            "session" => {
+                sqlx::query("UPDATE sessions SET revoked_at=$2 WHERE id=(SELECT session_id FROM access_tokens WHERE token_hash=$1)")
+                    .bind(token_hash(&manager.token)).bind(world.now()).execute(&world.db.pool).await.unwrap();
+            }
+            "token" => {
+                sqlx::query("UPDATE api_tokens SET revoked_at=$2 WHERE id=$1")
+                    .bind(token_id.unwrap())
+                    .bind(world.now())
+                    .execute(&world.db.pool)
+                    .await
+                    .unwrap();
+            }
+            "token_scopes" => {
+                sqlx::query("UPDATE api_tokens SET scopes=ARRAY[]::text[] WHERE id=$1")
+                    .bind(token_id.unwrap())
+                    .execute(&world.db.pool)
+                    .await
+                    .unwrap();
+            }
+            _ => unreachable!(),
+        }
+        assert_eq!(
+            reconcile(&world, env).await,
+            vec![first.opening.id],
+            "{loss}"
+        );
+        let state: String = sqlx::query_scalar("SELECT state FROM port_openings WHERE id=$1")
+            .bind(second.opening.id)
+            .fetch_one(&world.db.pool)
+            .await
+            .unwrap();
+        assert_ne!(
+            state, "closed",
+            "the independent session still holds its opening"
+        );
+    }
+}
+
+#[tokio::test]
+async fn a_port_decider_cannot_keep_using_a_place_that_now_requires_their_second_step() {
+    let (world, manager, _, env, project, _) = setup().await;
+    let plan = review(
+        &world,
+        &manager,
+        env,
+        &request(41055, project, "team preview"),
+    )
+    .await;
+    let opened = confirm(&world, &manager, env, &plan, new_id()).await;
+    let org: Id = sqlx::query_scalar("SELECT org_id FROM nodes WHERE id=$1")
+        .bind(project)
+        .fetch_one(&world.db.pool)
+        .await
+        .unwrap();
+    world
+        .set_at(
+            orch_settings::Target::Node(org),
+            "auth.second_step",
+            json!("required"),
+        )
+        .await;
+    assert_eq!(reconcile(&world, env).await, vec![opened.opening.id]);
+}
+
+#[tokio::test]
+async fn a_port_opening_loses_administrator_reach_when_its_session_turns_the_mode_off() {
+    let (world, _, colleague, env, _, _) = setup().await;
+    links_asked(&world).await;
+    world.make_admin(&colleague.person).await;
+    sqlx::query("UPDATE sessions SET as_admin=true WHERE id=(SELECT session_id FROM access_tokens WHERE token_hash=$1)")
+        .bind(orch_api_core::middleware::authentication::token_hash(&colleague.token))
+        .execute(&world.db.pool).await.unwrap();
+    let mut asked = request(41056, new_id(), "temporary admin review");
+    asked.kind = PortOpeningKind::Link;
+    asked.place_id = None;
+    asked.until = Some(Time::new(world.now() + chrono::Duration::hours(1)));
+    let plan = review(&world, &colleague, env, &asked).await;
+    let opened = confirm(&world, &colleague, env, &plan, new_id()).await;
+    sqlx::query("UPDATE sessions SET as_admin=false WHERE id=(SELECT session_id FROM access_tokens WHERE token_hash=$1)")
+        .bind(orch_api_core::middleware::authentication::token_hash(&colleague.token))
+        .execute(&world.db.pool).await.unwrap();
+    assert_eq!(reconcile(&world, env).await, vec![opened.opening.id]);
 }
 
 #[tokio::test]
@@ -860,9 +1093,22 @@ async fn rules_3_6_an_agents_approved_request_is_one_act_and_only_that_requester
         .await
         .unwrap();
     let body = serde_json::to_value(&asked).unwrap();
+    let session_id: Id =
+        sqlx::query_scalar("SELECT session_id FROM access_tokens WHERE token_hash=$1")
+            .bind(orch_api_core::middleware::authentication::token_hash(
+                &manager.token,
+            ))
+            .fetch_one(&mut *tx)
+            .await
+            .unwrap();
+    let credential = core::DecisionCredential::Session {
+        id: session_id,
+        as_admin: false,
+    };
     let first = core::produce(
         &mut tx,
         &principal,
+        credential,
         &environment,
         Requester::Thread(thread),
         client,
@@ -877,6 +1123,7 @@ async fn rules_3_6_an_agents_approved_request_is_one_act_and_only_that_requester
     let twice = core::produce(
         &mut tx,
         &principal,
+        credential,
         &environment,
         Requester::Thread(thread),
         client,
@@ -894,6 +1141,7 @@ async fn rules_3_6_an_agents_approved_request_is_one_act_and_only_that_requester
     let canonical = core::produce(
         &mut tx,
         &principal,
+        credential,
         &environment,
         Requester::Thread(thread),
         new_id(),
@@ -1026,6 +1274,64 @@ fn port_decision(
         link_recipient: recipient,
         expected_revision: revision,
     })
+}
+
+#[tokio::test]
+async fn a_once_decision_keeps_its_session_but_a_capability_grant_keeps_its_own_authority() {
+    use orch_api_contract::approvals::ApprovalDecide;
+    let (world, manager, _, env, project, _) = setup().await;
+    links_asked(&world).await;
+    let thread = asking_thread(&world, &manager, project, env).await;
+    let mut asked = PortOpeningRequest {
+        kind: PortOpeningKind::Link,
+        place_id: None,
+        until: Some(Time::new(world.now() + chrono::Duration::hours(1))),
+        entry_methods: Some(vec![PortLinkMethod::Helper]),
+        ..request(41053, project, "a service callback")
+    };
+    let once = world
+        .app
+        .call(ThreadPortRequestCreate, &[&thread])
+        .token(&manager.token)
+        .body(&asked)
+        .send()
+        .await
+        .ok();
+    asked.port = 41054;
+    let grant = world
+        .app
+        .call(ThreadPortRequestCreate, &[&thread])
+        .token(&manager.token)
+        .body(&asked)
+        .send()
+        .await
+        .ok();
+    for (made, choice) in [
+        (&once, PortDecisionChoice::Once),
+        (&grant, PortDecisionChoice::Grant),
+    ] {
+        world
+            .app
+            .call(ApprovalDecide, &[&made.request.as_ref().unwrap().id])
+            .token(&manager.token)
+            .body(&port_decision(choice, None, made.opening.revision))
+            .send()
+            .await
+            .ok();
+    }
+    sqlx::query("UPDATE sessions SET revoked_at=$2 WHERE id=(SELECT session_id FROM access_tokens WHERE token_hash=$1)")
+        .bind(orch_api_core::middleware::authentication::token_hash(&manager.token))
+        .bind(world.now()).execute(&world.db.pool).await.unwrap();
+    assert_eq!(reconcile(&world, env).await, vec![once.opening.id]);
+    let state: String = sqlx::query_scalar("SELECT state FROM port_openings WHERE id=$1")
+        .bind(grant.opening.id)
+        .fetch_one(&world.db.pool)
+        .await
+        .unwrap();
+    assert_ne!(
+        state, "closed",
+        "the separate capability grant remains admitted"
+    );
 }
 
 #[tokio::test]

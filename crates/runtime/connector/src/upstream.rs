@@ -32,6 +32,181 @@ use url::Url;
 
 use crate::https::CONNECT_TIMEOUT;
 
+/// A streaming filter for credential values echoed by an upstream.
+#[derive(Clone)]
+pub(crate) struct CredentialMask {
+    expression: regex::bytes::Regex,
+    longest: usize,
+    replacement: &'static [u8],
+}
+
+impl CredentialMask {
+    /// Protects the values sent as credentials and their JSON-escaped forms.
+    pub(crate) fn new(values: &[String]) -> Result<Option<Self>, regex::Error> {
+        let mut patterns = Vec::new();
+        for value in values.iter().filter(|value| !value.is_empty()) {
+            patterns.push(value.clone());
+            if let Ok(quoted) = serde_json::to_string(value) {
+                patterns.push(quoted[1..quoted.len() - 1].to_owned());
+            }
+        }
+        patterns.sort_unstable_by_key(|value| std::cmp::Reverse(value.len()));
+        patterns.dedup();
+        let Some(longest) = patterns.first().map(String::len) else {
+            return Ok(None);
+        };
+        let expression = patterns
+            .iter()
+            .map(|value| regex::escape(value))
+            .collect::<Vec<_>>()
+            .join("|");
+        let expression = regex::bytes::Regex::new(&expression)?;
+        let marker = orch_plugin_contract::secret::REDACTED.as_bytes();
+        let replacement: &'static [u8] = if expression.is_match(marker) {
+            b""
+        } else {
+            marker
+        };
+        Ok(Some(Self {
+            expression,
+            longest,
+            replacement,
+        }))
+    }
+
+    /// A response header with any echoed credential replaced.
+    pub(crate) fn header(&self, value: &HeaderValue) -> Option<HeaderValue> {
+        HeaderValue::from_bytes(
+            &self
+                .expression
+                .replace_all(value.as_bytes(), self.replacement),
+        )
+        .ok()
+    }
+
+    /// Masks an entire UTF-8 message.
+    pub(crate) fn text(&self, text: &str) -> String {
+        let safe = self
+            .expression
+            .replace_all(text.as_bytes(), self.replacement);
+        String::from_utf8(safe.into_owned()).unwrap_or_default()
+    }
+
+    /// Masks a whole reply read for model discovery.
+    pub(crate) fn bytes(&self, bytes: &[u8]) -> Bytes {
+        Bytes::from(
+            self.expression
+                .replace_all(bytes, self.replacement)
+                .into_owned(),
+        )
+    }
+}
+
+/// The uncommitted end of a stream, which may contain the start of a credential.
+struct MaskBuffer {
+    mask: CredentialMask,
+    pending: Vec<u8>,
+}
+
+impl MaskBuffer {
+    fn new(mask: CredentialMask) -> Self {
+        Self {
+            mask,
+            pending: Vec::new(),
+        }
+    }
+
+    fn take(&mut self, last: bool) -> Bytes {
+        let limit = if last {
+            self.pending.len()
+        } else {
+            self.pending
+                .len()
+                .saturating_sub(self.mask.longest.saturating_sub(1))
+        };
+        let mut output = Vec::new();
+        let mut consumed = 0;
+        for found in self.mask.expression.find_iter(&self.pending) {
+            if found.start() >= limit {
+                break;
+            }
+            output.extend_from_slice(&self.pending[consumed..found.start()]);
+            output.extend_from_slice(self.mask.replacement);
+            consumed = found.end();
+        }
+        let boundary = limit.max(consumed);
+        output.extend_from_slice(&self.pending[consumed..boundary]);
+        self.pending.drain(..boundary);
+        Bytes::from(output)
+    }
+}
+
+/// Masks an upstream body without exposing a credential split across two frames.
+pub(crate) struct MaskedBody<B> {
+    inner: B,
+    buffer: MaskBuffer,
+    ended: bool,
+}
+
+impl<B> MaskedBody<B> {
+    pub(crate) fn new(inner: B, mask: CredentialMask) -> Self {
+        Self {
+            inner,
+            buffer: MaskBuffer::new(mask),
+            ended: false,
+        }
+    }
+}
+
+impl<B> Body for MaskedBody<B>
+where
+    B: Body<Data = Bytes, Error = std::io::Error> + Unpin,
+{
+    type Data = Bytes;
+    type Error = std::io::Error;
+
+    fn poll_frame(
+        mut self: Pin<&mut Self>,
+        cx: &mut Context<'_>,
+    ) -> Poll<Option<Result<Frame<Bytes>, Self::Error>>> {
+        if self.ended {
+            return Poll::Ready(None);
+        }
+        loop {
+            match Pin::new(&mut self.inner).poll_frame(cx) {
+                Poll::Ready(Some(Ok(frame))) => {
+                    if let Ok(piece) = frame.into_data() {
+                        self.buffer.pending.extend_from_slice(&piece);
+                        let safe = self.buffer.take(false);
+                        if !safe.is_empty() {
+                            return Poll::Ready(Some(Ok(Frame::data(safe))));
+                        }
+                    }
+                }
+                Poll::Ready(Some(Err(error))) => {
+                    self.buffer.pending.clear();
+                    self.ended = true;
+                    return Poll::Ready(Some(Err(error)));
+                }
+                Poll::Ready(None) => {
+                    self.ended = true;
+                    let safe = self.buffer.take(true);
+                    return if safe.is_empty() {
+                        Poll::Ready(None)
+                    } else {
+                        Poll::Ready(Some(Ok(Frame::data(safe))))
+                    };
+                }
+                Poll::Pending => return Poll::Pending,
+            }
+        }
+    }
+
+    fn is_end_stream(&self) -> bool {
+        self.ended
+    }
+}
+
 /// How long the head of an answer may take. A model that is asked for a long answer in one document, and
 /// not as a stream, says nothing until it has finished, and the longest such request a vendor documents is
 /// ten minutes; a request that takes longer is meant to be streamed.
@@ -358,6 +533,37 @@ mod tests {
     use tokio::io::AsyncWriteExt;
     use tokio::net::TcpListener;
 
+    #[test]
+    fn credentials_are_masked_across_frames_including_overlapping_and_json_escaped_values() {
+        let mask = CredentialMask::new(&["token".into(), "token-long".into(), "quote\"key".into()])
+            .unwrap()
+            .unwrap();
+        let mut buffer = MaskBuffer::new(mask.clone());
+        let mut seen = Vec::new();
+        for piece in [
+            b"prefix tok".as_slice(),
+            br#"en-long then quote\""#.as_slice(),
+            b"key suffix".as_slice(),
+        ] {
+            buffer.pending.extend_from_slice(piece);
+            seen.extend_from_slice(&buffer.take(false));
+        }
+        seen.extend_from_slice(&buffer.take(true));
+        assert_eq!(
+            String::from_utf8(seen).unwrap(),
+            "prefix [secret] then [secret] suffix"
+        );
+        let header = HeaderValue::from_static("token-long rejected");
+        assert_eq!(mask.header(&header).unwrap(), "[secret] rejected");
+        let marker_is_secret = CredentialMask::new(&["secret".into()]).unwrap().unwrap();
+        assert_eq!(
+            marker_is_secret
+                .header(&HeaderValue::from_static("secret rejected"))
+                .unwrap(),
+            " rejected"
+        );
+    }
+
     #[derive(Default)]
     struct Seen {
         pieces: Mutex<Vec<u8>>,
@@ -480,7 +686,7 @@ mod tests {
         ));
     }
 
-    #[tokio::test(start_paused = true)]
+    #[tokio::test]
     async fn a_stream_that_goes_silent_is_given_up_after_the_idle_time() {
         let (url, _) = serve_once(vec![
             (
@@ -495,6 +701,9 @@ mod tests {
             .send(request(url))
             .await
             .unwrap();
+        // The clock stops only once the connection stands: a stopped clock moves on whenever nothing is ready, so
+        // it can run out the connect deadline while a real connection is still being made (seen on macOS).
+        tokio::time::pause();
         let seen = Arc::new(Seen::default());
         let mut relay = Relay::new(
             answer.body,

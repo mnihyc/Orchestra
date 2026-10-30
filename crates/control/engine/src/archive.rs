@@ -586,6 +586,7 @@ impl Engine {
     /// Delivers lifecycle controls from their committed journal, including after process restart.
     pub(crate) async fn deliver_lifecycle_controls(&self) -> Result<(), EngineError> {
         self.retry_withdrawn_registration_detaches().await?;
+        self.retry_provider_purges().await?;
         self.reconcile_disabled_units().await?;
         let rows = {
             let mut conn = self.inner.db.acquire().await?;
@@ -683,6 +684,63 @@ impl Engine {
                 self.finish_disabled_unit_stop(&mut conn, &row, &outcome)
                     .await?;
             }
+        }
+        Ok(())
+    }
+
+    /// Retries deleted-provider key cleanup once its original keeper is online again.
+    async fn retry_provider_purges(&self) -> Result<(), EngineError> {
+        let now = self.inner.clock.now();
+        // One normal execution window between retries keeps a persistent failure from flooding the journal.
+        let window = chrono::Duration::seconds(i64::from(
+            orch_link_contract::commands::CommandKind::ProviderStop.deadline_secs(),
+        ));
+        let pending = {
+            let mut conn = self.inner.db.acquire().await?;
+            lifecycle::provider_purges_due(&mut conn, now - window, self.inner.config.sweep_batch)
+                .await?
+        };
+        for previous in pending {
+            let provider: Id = previous
+                .body
+                .get("provider_id")
+                .and_then(Json::as_str)
+                .and_then(|value| value.parse().ok())
+                .ok_or_else(|| {
+                    EngineError::unreadable("the provider cleanup has no valid provider")
+                })?;
+            let serial_key = provider.to_string();
+            if previous
+                .serial_key()
+                .is_some_and(|key| key != serial_key.as_str())
+            {
+                return Err(EngineError::unreadable(
+                    "the provider cleanup has another serial identity",
+                ));
+            }
+            let id = ids::derived("provider.purge.retry", &[previous.id.as_bytes()]);
+            let mut tx = self.inner.db.begin().await?;
+            if lifecycle::claim_provider_purge_retry(&mut tx, previous.id, id).await? {
+                let inserted = link::insert_command(
+                    &mut tx,
+                    &link::NewCommand {
+                        id,
+                        machine_id: previous.machine_id,
+                        kind: &previous.kind,
+                        body: &previous.body,
+                        serial_key: Some(&serial_key),
+                        deadline_at: now + window,
+                    },
+                    now,
+                )
+                .await?;
+                if !inserted {
+                    return Err(EngineError::unreadable(
+                        "the provider cleanup retry identity is already in use",
+                    ));
+                }
+            }
+            tx.commit().await.map_err(orch_db::DbError::from)?;
         }
         Ok(())
     }

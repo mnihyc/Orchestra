@@ -77,3 +77,5 @@ The result lists objects left on the machine and their sizes. A lost host is rem
 ## When a default is lost
 
 A lost or removed default environment receives no new threads. Orch uses the ordinary environment-selection fallback. When Notify is selected, the affected topic's managers receive a notice to choose another default.
+
+A new thread cannot use an environment that is lost, removed, or still recovering from loss. Choose another environment or wait for recovery to finish.

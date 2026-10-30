@@ -8,7 +8,7 @@ import { OctagonAlert, RefreshCw, WifiOff } from 'lucide-react';
 import { type ReactNode, useState } from 'react';
 import { Trans, useTranslation } from 'react-i18next';
 
-import { ApiError } from '@/api/client';
+import { ApiError, invitationIssuerAuthorityLost } from '@/api/client';
 import { SecondStepGate, waitsForSecondStep } from '@/features/auth/SecondStepGate';
 import type { MissingAccess } from '@/generated/api-types';
 import { permissionDenial } from '@/lib/permissions';
@@ -65,7 +65,7 @@ function FailureLine({ error, title, titleAs, message, onRetry, retrying = false
   const [reviewing, setReviewing] = useState(false);
   const text = useErrorText()(error);
   const Icon = error instanceof NetworkError ? WifiOff : OctagonAlert;
-  const missing = error instanceof ApiError ? (error.extra('authz.denied')?.missing ?? []) : [];
+  const missing = error instanceof ApiError && !invitationIssuerAuthorityLost(error) ? (error.extra('authz.denied')?.missing ?? []) : [];
   const faults = error instanceof ApiError ? error.faults() : [];
   const explanations = [...new Set(faults.map((fault) => fault.message))]
     .filter((message) => message !== text.message && message !== t('errors.request.invalid') && message !== t('errors.request.value_refused'));

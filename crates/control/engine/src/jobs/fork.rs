@@ -1086,6 +1086,8 @@ impl Engine {
                     threads::set_interrupt_cause(&mut *unit.conn, turn.id, "environment_change")
                         .await?;
                     threads::mark_interrupted_by(&mut *unit.conn, turn.id, by, seq).await?;
+                    self.withdraw_interrupted_harness(&mut unit, thread, turn.id)
+                        .await?;
                     unit.wake(thread);
                 }
                 unit.finish().await?
@@ -2471,7 +2473,7 @@ impl Engine {
         };
         crate::approval_review::reviewer_allowed(
             approval,
-            crate::harnesses::descriptor_of(&agent)?.as_ref(),
+            crate::harnesses::descriptor_of(agent)?.as_ref(),
             &available_models,
         )
         .map_err(EngineError::unreadable)?;

@@ -42,7 +42,7 @@ for (const locale of ['en', 'zh-CN'] as const) for (const theme of ['light', 'da
     const blocked = { ...environment('blocked', { usable: false }), reason: null };
     const choose = vi.fn<(id: string) => void>();
     show(<Where compact place={{ id: 'topic', name: 'Release', kind: 'topic', parentId: 'project', archived: false, status: 'open', folder: false }}
-      homeId="acme" machines={[]} options={options({ environments: [available, blocked], can_create: { allowed: false, missing: [] } })} value={blocked.environment.id} onChange={choose} />);
+      homeId="acme" machines={[]} options={options({ environments: [available, blocked], can_create: { allowed: false, missing: [] } })} value={blocked.environment.id} onChange={choose} requesting={null} onRequestingChange={() => undefined} />);
     const trigger = screen.getByRole('combobox', { name: i18n.t('start.where.title') });
     expect(trigger).toHaveTextContent(blocked.environment.name);
     await userEvent.click(trigger);

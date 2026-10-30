@@ -391,5 +391,8 @@ pub async fn send_sample(
         body: message.body,
         notifications: message.notifications,
     };
-    Ok(TestOutcome::of(guarded(notifier.deliver(delivery)).await))
+    let secrets = delivery.config.secrets.clone();
+    Ok(TestOutcome::of(
+        guarded(notifier.deliver(delivery), &secrets).await,
+    ))
 }

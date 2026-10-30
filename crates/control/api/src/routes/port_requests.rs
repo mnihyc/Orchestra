@@ -572,6 +572,7 @@ pub(crate) async fn decide(
             if let Err(error) = core::grant_waiting(
                 &mut tx,
                 &principal,
+                crate::routes::ports::decision_credential(ctx, &principal)?,
                 waiting.id,
                 &card.request,
                 card.plan.program_revision,

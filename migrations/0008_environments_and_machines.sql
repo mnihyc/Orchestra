@@ -116,6 +116,8 @@ CREATE INDEX commands_open_thread_idx ON commands USING btree (((body ->> 'threa
 
 CREATE INDEX commands_provider_active_idx ON commands USING btree (((body ->> 'provider_id'::text)), ((body ->> 'model_name'::text))) WHERE ((kind = ANY (ARRAY['provider.complete'::text, 'provider.embed'::text])) AND (state = ANY (ARRAY['queued'::text, 'sent'::text, 'accepted'::text])));
 
+CREATE INDEX commands_provider_purge_retry_idx ON commands USING btree (updated_at, id) WHERE ((kind = 'provider.stop'::text) AND ((body ->> 'purge'::text) = 'true'::text) AND (state = ANY (ARRAY['failed'::text, 'expired'::text, 'cancelled'::text])));
+
 CREATE INDEX commands_runtime_create_idx ON commands USING btree (((body ->> 'runtime_id'::text)), created_at DESC, id DESC) WHERE (kind = 'node.runtime.create'::text);
 
 CREATE INDEX commands_tool_retirement_receipt ON commands USING btree (machine_id, ((body ->> 'runtime_id'::text))) WHERE ((kind = 'node.runtime.remove'::text) AND (state = 'succeeded'::text));
@@ -571,6 +573,9 @@ CREATE TABLE port_openings (
     requested_by uuid,
     requested_by_thread uuid,
     allowed_by uuid,
+    decider_credential_kind text,
+    decider_credential_id uuid,
+    decider_as_admin boolean DEFAULT false NOT NULL,
     admission jsonb,
     opened_at timestamp with time zone NOT NULL,
     until_at timestamp with time zone,
@@ -589,6 +594,7 @@ CREATE TABLE port_openings (
     revision bigint DEFAULT 1 NOT NULL,
     closed_at timestamp with time zone,
     CONSTRAINT port_openings_host_port_check CHECK (((host_port >= 1) AND (host_port <= 65535))),
+    CONSTRAINT port_openings_decider_credential_check CHECK (((decider_credential_kind IS NULL AND decider_credential_id IS NULL AND NOT decider_as_admin) OR (decider_credential_kind IS NOT NULL AND decider_credential_kind IN ('session', 'token') AND decider_credential_id IS NOT NULL AND (NOT decider_as_admin OR decider_credential_kind = 'session')))),
     CONSTRAINT port_openings_kind_check CHECK ((kind = ANY (ARRAY['place'::text, 'link'::text, 'host'::text]))),
     CONSTRAINT port_openings_link_recipient_check CHECK ((link_recipient = ANY (ARRAY['thread'::text, 'person'::text]))),
     CONSTRAINT port_openings_port_check CHECK (((port >= 1) AND (port <= 65535))),

@@ -78,6 +78,8 @@ One decision settles every recipient copy and marks its Inbox item read.
 It leaves all pending lists and counts, with who decided, the outcome and time
 kept in history. This also applies to **Proceed**, **Keep planning** and **Run it**.
 A second decision returns the first result and makes no second change.
+If the list cannot load a decision made elsewhere, it keeps a retry for that
+outcome without showing the old request details.
 
 A proposed plan offers **Proceed** or **Keep planning**. Proceed lets the agent
 continue under the composer's approval mode. Keep planning sends your words

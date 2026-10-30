@@ -527,6 +527,116 @@ async fn a_login_is_handed_over_given_back_and_taken_home() {
     assert_eq!(p.rig.fail(&p.provider_key(), &mismatched).await, "internal");
 }
 
+#[cfg(unix)]
+#[tokio::test]
+async fn a_claude_subscription_login_passes_through_the_connector_and_returns_its_renewal() {
+    use common::model::Options;
+    use orch_connector_core::harnesses::{AdapterRegistration, AdapterRegistry, HomeRule};
+    use std::os::unix::fs::PermissionsExt;
+    use std::sync::Arc;
+
+    // This stand-in only answers the adapter's version question; it never runs a vendor program.
+    let directory = tempfile::tempdir().unwrap();
+    let program = directory.path().join("claude");
+    std::fs::write(&program, "#!/bin/sh\nprintf '2.1.312 (Claude Code)\\n'\n").unwrap();
+    std::fs::set_permissions(&program, std::fs::Permissions::from_mode(0o755)).unwrap();
+    let configured = program.display().to_string();
+    let options = Options {
+        adapters: Some(Box::new(|_, _| {
+            let mut registry = AdapterRegistry::new();
+            registry
+                .register(AdapterRegistration {
+                    kind: "claude-code",
+                    adapter_version: orch_adapter_claude_code::config::ADAPTER_VERSION,
+                    builtin: true,
+                    needs_binary: true,
+                    home_rule: HomeRule::Connector,
+                    factory: Arc::new(|clock| {
+                        Box::new(orch_adapter_claude_code::ClaudeCodeAdapter::new(clock))
+                    }),
+                })
+                .unwrap();
+            registry.program_names("claude-code", &["claude"]);
+            registry
+        })),
+        ..Options::default()
+    };
+    let p = ProviderRig::build(options, move |rig, _| {
+        rig.config.agent.harnesses = vec![orch_config::connector::AgentHarness {
+            kind: "claude-code".into(),
+            path: configured,
+        }];
+        rig.config.provider.arrangements = vec![
+            "separated".into(),
+            "credential_shared".into(),
+            "handed_over".into(),
+        ];
+    })
+    .await;
+    let start = |agent: Id, home: &str| {
+        serde_json::from_value::<orch_link_contract::commands::AgentStart>(json!({
+            "provider_id":p.rig.provider,"agent_id":agent,"harness_kind":"claude-code",
+            "profile":{"harness_version":null,"config":{},"env":{}},"home":home
+        }))
+        .unwrap()
+    };
+    p.rig
+        .succeed(&harness_key(&p, p.rig.agent), &start(p.rig.agent, "owner"))
+        .await;
+    let owner = p.rig.data.path().join("owner").join(".credentials.json");
+    let login = json!({"claudeAiOauth":{"accessToken":"synthetic-access","refreshToken":"synthetic-refresh","expiresAt":1}});
+    std::fs::write(&owner, login.to_string()).unwrap();
+    let lease = open_lease(&p, "handover", "login").await;
+    let issued = p
+        .rig
+        .succeed(
+            &p.provider_key(),
+            &issue_body(&p, lease, "login", &machine(&p)),
+        )
+        .await;
+    assert!(!owner.exists());
+    assert!(
+        opened(&p, &issued["credential"], Direction::Issued, "login").contains("synthetic-refresh")
+    );
+
+    let away_id = new_id();
+    p.rig
+        .succeed(&harness_key(&p, away_id), &start(away_id, "away"))
+        .await;
+    p.rig
+        .succeed(
+            &harness_key(&p, away_id),
+            &set_body(&p, away_id, &issued, "login"),
+        )
+        .await;
+    let away = p.rig.data.path().join("away").join(".credentials.json");
+    let renewed = json!({"claudeAiOauth":{"accessToken":"renewed-access","refreshToken":"renewed-refresh","expiresAt":2}});
+    assert_eq!(
+        serde_json::from_slice::<Json>(&std::fs::read(&away).unwrap()).unwrap(),
+        login
+    );
+    std::fs::write(&away, renewed.to_string()).unwrap();
+    let returned = p
+        .rig
+        .succeed(
+            &harness_key(&p, away_id),
+            &serde_json::from_value::<orch_link_contract::commands::AgentCredentialReturn>(json!({
+                "provider_id":p.rig.provider,"agent_id":away_id,"custodian":machine(&p)
+            }))
+            .unwrap(),
+        )
+        .await;
+    assert!(!away.exists());
+    let accept = serde_json::from_value::<orch_link_contract::commands::ProviderCredentialAccept>(json!({
+        "provider_id":p.rig.provider,"form":"login","credential":returned["credential"],"expires_at":returned["expires_at"]
+    })).unwrap();
+    p.rig.succeed(&p.provider_key(), &accept).await;
+    assert_eq!(
+        serde_json::from_slice::<Json>(&std::fs::read(owner).unwrap()).unwrap(),
+        renewed
+    );
+}
+
 #[tokio::test]
 async fn the_machine_of_an_owner_who_allows_neither_refuses_to_open_the_lease() {
     let p = ProviderRig::new().await;

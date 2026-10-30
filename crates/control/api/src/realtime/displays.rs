@@ -1,8 +1,8 @@
 //! Display sockets terminate viewer security and filter every input under current authority.
 
 use super::rfb_filter::{Filter, MAX_INPUT, ProtocolError};
-use crate::middleware::authentication::{Via, new_token, token_hash};
-use crate::middleware::authorization;
+use crate::middleware::authentication::{new_token, token_hash};
+use crate::middleware::authorization::RetainedIdentity;
 use crate::middleware::requests::{ApiError, ApiResult};
 use crate::registry::Ctx;
 use crate::routes::displays as views;
@@ -16,7 +16,6 @@ use futures::StreamExt;
 use orch_access_contract::permissions::Permission;
 use orch_api_contract::common::ErrorCode;
 use orch_api_contract::displays::*;
-use orch_authz::{Caller, Principal};
 use orch_db::queries::displays as rows;
 use orch_engine::displays::{DisplayActions, Displays, SITTING_GAP};
 use orch_realtime_contract::feeds::Feed;
@@ -47,9 +46,8 @@ struct Ticket {
     display: Id,
     machine: Id,
     generation: i32,
-    caller: Caller,
+    identity: RetainedIdentity,
     user: Id,
-    via: Via,
     control: bool,
     expires: DateTime<Utc>,
 }
@@ -122,9 +120,8 @@ impl Sockets {
                 display,
                 machine,
                 generation,
-                caller: authorization::caller_of(authed)?,
+                identity: RetainedIdentity::of(authed),
                 user: authed.id(),
-                via: authed.via.clone(),
                 control,
                 expires,
             },
@@ -143,18 +140,9 @@ impl Sockets {
     async fn gates(app: &App, ticket: &Ticket) -> ApiResult<(bool, bool, &'static str)> {
         let mut conn = app.db.acquire().await?;
         let now = app.clock.now();
-        let valid = match ticket.via {
-            Via::Session { session_id } => rows::session_live(&mut conn, session_id, now).await?,
-            Via::Token { token_id, .. } => rows::token_live(&mut conn, token_id, now).await?,
-        };
-        if !valid {
+        let Some(principal) = ticket.identity.principal(&mut conn, Time::new(now)).await? else {
             return Ok((false, false, "revoked"));
-        }
-        let principal =
-            match Principal::load(&mut conn, ticket.caller.clone(), Time::new(now)).await {
-                Ok(p) => p,
-                Err(_) => return Ok((false, false, "revoked")),
-            };
+        };
         let Some(row) = rows::get(&mut conn, ticket.display).await? else {
             return Ok((false, false, "exited"));
         };

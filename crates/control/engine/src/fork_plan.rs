@@ -1931,7 +1931,27 @@ impl Engine {
         }
         // What the history holds is counted in SQL: the plan never loads it, whatever its length.
         let (low, high) = range.map_or((1, 0), |(from, to)| (i64::from(from), i64::from(to)));
-        let counts = if history.mode == HistoryMode::Nothing {
+        let prefix = if history.mode != HistoryMode::Nothing && low == 1 {
+            if let Some(parent) = source.thread.side_of {
+                let cut = orch_db::queries::thread_history_cuts::cut(conn, thread_id)
+                    .await?
+                    .filter(|cut| {
+                        cut.thread_id == parent && cut.owner_thread_id == Some(thread_id)
+                    });
+                if cut.is_none() {
+                    blockers.add(
+                        "history_source_unconfirmed",
+                        "The side's captured parent history is unavailable.",
+                    );
+                }
+                cut
+            } else {
+                None
+            }
+        } else {
+            None
+        };
+        let mut counts = if history.mode == HistoryMode::Nothing {
             crate::fork_history::Counts::default()
         } else {
             let counted = orch_db::queries::thread_history::range_counts(
@@ -1949,6 +1969,20 @@ impl Engine {
                 bytes: counted.bytes,
             }
         };
+        if let Some(prefix) = &prefix {
+            let inherited = orch_db::queries::thread_history_cuts::counts(conn, prefix.id).await?;
+            counts.turns = counts.turns.saturating_add(inherited.turns);
+            for (kind, count) in inherited.items {
+                if kind != "reasoning" {
+                    let held = counts.items.entry(kind).or_default();
+                    *held = held.saturating_add(count);
+                }
+            }
+            // The proof limit includes the whole retained prefix, including reasoning, just as the proof does.
+            counts.bytes = counts.bytes.saturating_add(
+                orch_db::queries::thread_history_cuts::payload_bytes(conn, prefix.id).await?,
+            );
+        }
         let turns = counts.turns;
         let source_machine = harnesses::machine_of(
             source.thread.arrangement.as_deref(),
@@ -2071,7 +2105,8 @@ impl Engine {
             let view = source.thread.active_continuation_id;
             let last =
                 orch_db::queries::thread_history::last_turn(&mut *conn, thread_id, view).await?;
-            let read = crate::fork_history::newest(
+            let limit = budget.unwrap_or(crate::fork_history::UNKNOWN_WINDOW_NEUTRAL_BYTES);
+            let mut read = crate::fork_history::newest(
                 &mut *conn,
                 crate::history_pages::Source::Live {
                     thread: thread_id,
@@ -2079,9 +2114,47 @@ impl Engine {
                 },
                 (low.max(1), high),
                 last,
-                budget.unwrap_or(crate::fork_history::UNKNOWN_WINDOW_NEUTRAL_BYTES),
+                limit,
             )
             .await?;
+            if read.complete
+                && let Some(prefix) = &prefix
+            {
+                // Side turn numbers follow the prefix in the captured archive. Account for any
+                // extra digits before deciding how much of the window remains for the prefix.
+                let mut extra_digits = std::collections::HashMap::new();
+                for (id, ordinal) in &read.selected.turns {
+                    let shifted = ordinal.checked_add(prefix.last_turn).ok_or_else(|| {
+                        EngineError::unreadable("The captured turn order is too large.")
+                    })?;
+                    extra_digits.insert(
+                        *id,
+                        shifted
+                            .to_string()
+                            .len()
+                            .saturating_sub(ordinal.to_string().len()),
+                    );
+                }
+                for item in &read.selected.items {
+                    if let Some(extra) = item.turn_id.and_then(|id| extra_digits.get(&id)) {
+                        read.bytes = read.bytes.saturating_add(*extra);
+                    }
+                }
+                if read.bytes > limit {
+                    read.complete = false;
+                } else {
+                    let inherited = crate::fork_history::newest(
+                        conn,
+                        crate::history_pages::Source::Cut(prefix),
+                        (1, i64::from(prefix.last_turn)),
+                        i64::from(prefix.last_turn),
+                        limit - read.bytes,
+                    )
+                    .await?;
+                    read.complete = inherited.complete;
+                    read.bytes = read.bytes.saturating_add(inherited.bytes);
+                }
+            }
             if read.complete {
                 neutral = Some(read);
             } else {

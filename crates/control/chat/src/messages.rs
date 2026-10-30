@@ -397,6 +397,7 @@ pub async fn edit(
     if found.author_id != Some(act.user()) {
         return Err(Error::NotTheAuthor);
     }
+    let observed = found.seq_updated;
     let before = views::parts_of(&found.content);
     check_parts(&parts, Some(&before))?;
     let mut parts = parts;
@@ -431,6 +432,11 @@ pub async fn edit(
     };
     loaded.lock(conn).await?;
     let found = live(rows::message(conn, chat, id).await?)?;
+    if found.seq_updated != observed {
+        return Err(Error::StaleMessage {
+            revision: found.seq_updated,
+        });
+    }
     let seq = chats::take(conn, chat).await?;
     let content = content_of(&parts)?;
     let search = search_text_of(&parts);
@@ -493,6 +499,7 @@ pub async fn delete(
     if found.is_deleted() {
         return Ok(found);
     }
+    let observed = found.seq_updated;
     let own = found.author_id == Some(act.user());
     if own {
         loaded.ensure_send()?;
@@ -517,6 +524,11 @@ pub async fn delete(
         .ok_or(Error::NotFound)?;
     if found.is_deleted() {
         return Ok(found);
+    }
+    if found.seq_updated != observed {
+        return Err(Error::StaleMessage {
+            revision: found.seq_updated,
+        });
     }
     let seq = chats::take(conn, chat).await?;
     let gone = rows::delete_message(conn, id, act.user(), seq, act.now).await?;

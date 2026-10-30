@@ -27,7 +27,7 @@ use orch_driver_contract::sources::{
 use orch_types::Hash;
 
 use crate::archive::spool;
-use crate::client::map_error;
+use crate::client::{daemon_capacity_failure, map_error};
 use crate::config::DockerConfig;
 use crate::driver::DockerDriver;
 use crate::images::{digest_of, is_step, parse_reference};
@@ -226,16 +226,19 @@ pub fn assemble(
     Ok(out)
 }
 
-/// Runs the Git client with nothing that could ask a person a question or reach for a credential.
-async fn git(
-    arguments: &[&str],
-    dir: Option<&Path>,
-    timeout: Duration,
-    allowed: &str,
-) -> Result<String, DriverError> {
+fn git_command(arguments: &[&str], dir: &Path, allowed: &str) -> tokio::process::Command {
     let mut command = tokio::process::Command::new("git");
     command
+        .args([
+            "-c",
+            "credential.helper=",
+            "-c",
+            "core.hooksPath=/dev/null",
+            "-c",
+            "init.templateDir=",
+        ])
         .args(arguments)
+        .current_dir(dir)
         .stdin(Stdio::null())
         .stdout(Stdio::piped())
         .stderr(Stdio::piped())
@@ -245,9 +248,30 @@ async fn git(
         .env("GIT_ALLOW_PROTOCOL", allowed)
         .env("GIT_CONFIG_NOSYSTEM", "1")
         .env("GIT_CONFIG_GLOBAL", "/dev/null");
-    if let Some(dir) = dir {
-        command.current_dir(dir);
+    // Keep the operator's network and certificate settings, but never let an
+    // inherited repository selection replace this scratch repo.
+    for name in [
+        "GIT_DIR",
+        "GIT_WORK_TREE",
+        "GIT_COMMON_DIR",
+        "GIT_INDEX_FILE",
+        "GIT_OBJECT_DIRECTORY",
+        "GIT_ALTERNATE_OBJECT_DIRECTORIES",
+        "GIT_TEMPLATE_DIR",
+    ] {
+        command.env_remove(name);
     }
+    command
+}
+
+/// Runs the Git client with nothing that could ask a person a question or reach for a credential.
+async fn git(
+    arguments: &[&str],
+    dir: &Path,
+    timeout: Duration,
+    allowed: &str,
+) -> Result<String, DriverError> {
+    let mut command = git_command(arguments, dir, allowed);
     let child = command
         .spawn()
         .map_err(|error| DriverError::Image(format!("git could not be run: {error}")))?;
@@ -262,6 +286,12 @@ async fn git(
         })?
         .map_err(|error| DriverError::Image(format!("git failed: {error}")))?;
     if !output.status.success() {
+        if matches!(arguments.first().copied(), Some("ls-remote" | "fetch")) {
+            return Err(DriverError::Image(format!(
+                "git {} could not read the repository",
+                arguments.first().copied().unwrap_or_default()
+            )));
+        }
         return Err(DriverError::Image(format!(
             "git {} failed: {}",
             arguments.first().unwrap_or(&""),
@@ -298,10 +328,19 @@ async fn resolve_commit(
         return Ok(reference.to_ascii_lowercase());
     }
     let allowed = schemes.join(":");
+    // A lookup must not discover the repository the node was started in.
+    let work = tempfile::tempdir().map_err(|error| DriverError::Internal(error.to_string()))?;
+    git(
+        &["init", "--quiet"],
+        work.path(),
+        GIT_LOOKUP_TIMEOUT,
+        &allowed,
+    )
+    .await?;
     let peeled = format!("{reference}^{{}}");
     let listing = git(
         &["ls-remote", "--exit-code", "--", url, reference, &peeled],
-        None,
+        work.path(),
         GIT_LOOKUP_TIMEOUT,
         &allowed,
     )
@@ -333,10 +372,10 @@ async fn export_commit(
 ) -> Result<tempfile::NamedTempFile, DriverError> {
     let allowed = schemes.join(":");
     let work = tempfile::tempdir().map_err(|error| DriverError::Internal(error.to_string()))?;
-    git(&["init", "--quiet"], Some(work.path()), timeout, &allowed).await?;
+    git(&["init", "--quiet"], work.path(), timeout, &allowed).await?;
     git(
         &["fetch", "--quiet", "--depth", "1", "--", url, commit],
-        Some(work.path()),
+        work.path(),
         timeout,
         &allowed,
     )
@@ -351,7 +390,7 @@ async fn export_commit(
     let output_path = out.path().to_string_lossy().into_owned();
     git(
         &["archive", "--format=tar", "-o", &output_path, &tree],
-        Some(work.path()),
+        work.path(),
         timeout,
         &allowed,
     )
@@ -811,10 +850,12 @@ impl DockerDriver {
                     }
                 }
                 Err(bollard::errors::Error::DockerStreamError { error }) => {
-                    return Err(DriverError::Image(format!(
-                        "the build failed: {error}\n{}",
-                        log.as_str()
-                    )));
+                    let message = format!("the build failed: {error}\n{}", log.as_str());
+                    return Err(if daemon_capacity_failure(&error) {
+                        DriverError::NoCapacity(message)
+                    } else {
+                        DriverError::Image(message)
+                    });
                 }
                 Err(other) => {
                     return Err(match map_error(other) {
@@ -978,6 +1019,74 @@ pub fn labels_of_record(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[tokio::test]
+    async fn a_build_lookup_uses_its_own_repository_inside_another_repository() {
+        let parent = tempfile::tempdir().unwrap();
+        let outer = parent.path().join(".git");
+        std::fs::create_dir_all(outer.join("objects")).unwrap();
+        std::fs::create_dir_all(outer.join("refs/heads")).unwrap();
+        std::fs::write(outer.join("HEAD"), "ref: refs/heads/main\n").unwrap();
+        std::fs::write(
+            outer.join("config"),
+            "[core]\nrepositoryformatversion = 0\nbare = false\n",
+        )
+        .unwrap();
+        let work = parent.path().join("private");
+        std::fs::create_dir(&work).unwrap();
+        git(&["init", "--quiet"], &work, GIT_LOOKUP_TIMEOUT, "https")
+            .await
+            .unwrap();
+        let top = git(
+            &["rev-parse", "--show-toplevel"],
+            &work,
+            GIT_LOOKUP_TIMEOUT,
+            "https",
+        )
+        .await
+        .unwrap();
+        assert_eq!(
+            std::fs::canonicalize(top.trim()).unwrap(),
+            std::fs::canonicalize(work).unwrap()
+        );
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn a_local_repository_cannot_run_a_credential_helper_during_a_build_fetch() {
+        use tokio::io::AsyncWriteExt;
+
+        let directory = tempfile::tempdir().unwrap();
+        let git_dir = directory.path().join(".git");
+        std::fs::create_dir_all(git_dir.join("objects")).unwrap();
+        std::fs::create_dir_all(git_dir.join("refs/heads")).unwrap();
+        std::fs::write(git_dir.join("HEAD"), "ref: refs/heads/main\n").unwrap();
+        std::fs::write(
+            git_dir.join("config"),
+            "[core]\nrepositoryformatversion = 0\nbare = false\n[credential]\nhelper = !printf hit > helper-ran\n",
+        )
+        .unwrap();
+        let mut command = git_command(&["credential", "fill"], directory.path(), "https");
+        command
+            .env("GIT_CONFIG_COUNT", "1")
+            .env("GIT_CONFIG_KEY_0", "credential.helper")
+            .env("GIT_CONFIG_VALUE_0", "!printf hit > injected-helper-ran");
+        command.stdin(Stdio::piped());
+        let mut child = command.spawn().unwrap();
+        let mut input = child.stdin.take().unwrap();
+        input
+            .write_all(b"protocol=https\nhost=example.invalid\n\n")
+            .await
+            .unwrap();
+        drop(input);
+        let output = tokio::time::timeout(Duration::from_secs(20), child.wait_with_output())
+            .await
+            .unwrap()
+            .unwrap();
+        assert!(!output.status.success());
+        assert!(!directory.path().join("helper-ran").exists());
+        assert!(!directory.path().join("injected-helper-ran").exists());
+    }
 
     fn build() -> BuildSource {
         BuildSource {
@@ -1178,6 +1287,49 @@ mod tests {
         assert!(!allowed_scheme("ssh://git@example.com/r.git", &schemes));
         assert!(!allowed_scheme("/srv/repo", &schemes));
         assert!(is_commit(&"ab".repeat(20)) && !is_commit("main") && !is_commit(&"ab".repeat(19)));
+    }
+
+    #[tokio::test]
+    async fn a_git_build_context_error_does_not_disclose_a_remote_service_response() {
+        use tokio::io::{AsyncReadExt, AsyncWriteExt};
+
+        let mut listener = None;
+        for port in 41000..=41999 {
+            if let Ok(bound) = tokio::net::TcpListener::bind(("127.0.0.1", port)).await {
+                listener = Some(bound);
+                break;
+            }
+        }
+        let listener = listener.expect("a test port is available");
+        let port = listener.local_addr().unwrap().port();
+        let server = tokio::spawn(async move {
+            let (mut stream, _) = listener.accept().await.unwrap();
+            let mut request = [0; 2048];
+            let received = stream.read(&mut request).await.unwrap();
+            assert!(received > 0);
+            let body = b"secret-response-from-private-service";
+            let head = format!(
+                "HTTP/1.1 200 OK\r\nContent-Type: application/x-git-upload-pack-advertisement\r\nContent-Length: {}\r\nConnection: close\r\n\r\n",
+                body.len()
+            );
+            stream.write_all(head.as_bytes()).await.unwrap();
+            stream.write_all(body).await.unwrap();
+        });
+        let url = format!("http://127.0.0.1:{port}/repo");
+        let error = git(
+            &["ls-remote", "--exit-code", "--", &url, "main"],
+            None,
+            Duration::from_secs(10),
+            "http",
+        )
+        .await
+        .unwrap_err();
+        tokio::time::timeout(Duration::from_secs(10), server)
+            .await
+            .unwrap()
+            .unwrap();
+        assert!(error.to_string().contains("could not read the repository"));
+        assert!(!error.to_string().contains("secr"));
     }
 
     #[test]

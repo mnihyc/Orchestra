@@ -1040,7 +1040,7 @@ impl Permission {
             with(Permission::AgentUse, Offer::ToTheWork),
             with(Permission::HostUse, Offer::ToTheWork),
             with(Permission::TemplateUse, Offer::ToTheWork),
-            with(Permission::EnvironmentManage, Offer::Nothing),
+            with(Permission::EnvironmentUse, Offer::ToTheWork),
         ];
         const A_SUBSCRIPTION: &[GoesWith] = &[with(Permission::AgentUse, Offer::ToTheSameHolders)];
         // Reading a thread shows its people none of the files it works on until
@@ -1069,7 +1069,11 @@ impl Permission {
         match self {
             Self::ThreadView => LOOKING_IN,
             Self::ThreadInteract => TALKING,
-            Self::TopicInteract | Self::ProjectInteract | Self::OrgInteract => STARTING_WORK,
+            Self::TopicInteract
+            | Self::TopicStartThreads
+            | Self::ProjectInteract
+            | Self::ProjectCreateTopics
+            | Self::OrgInteract => STARTING_WORK,
             Self::ProviderUse => A_SUBSCRIPTION,
             Self::ThreadManage => ANOTHER_PROVIDER_AND_WORKING_IN,
             Self::ThreadFork => A_FORK,
@@ -2629,8 +2633,16 @@ mod tests {
                 P::AgentUse,
                 P::HostUse,
                 P::TemplateUse,
-                P::EnvironmentManage
+                P::EnvironmentUse
             ]
+        );
+        assert_eq!(
+            P::TopicStartThreads.goes_with(),
+            P::TopicInteract.goes_with()
+        );
+        assert_eq!(
+            P::ProjectCreateTopics.goes_with(),
+            P::ProjectInteract.goes_with()
         );
         assert!(
             P::ThreadFork

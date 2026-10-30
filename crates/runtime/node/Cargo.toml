@@ -15,6 +15,7 @@ orch-connector-core.workspace = true
 orch-driver-contract.workspace = true
 orch-link.workspace = true
 orch-link-contract.workspace = true
+orch-notifier-contract.workspace = true
 orch-pki.workspace = true
 orch-types.workspace = true
 async-trait.workspace = true

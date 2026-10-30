@@ -14,6 +14,7 @@ const OUTCOMES = [
   'domain_not_allowed',
   'registration_closed',
   'invite_required',
+  'invitation_issuer_authority_lost',
   'link_required',
   'disabled',
   'idp_error',
@@ -22,6 +23,12 @@ const OUTCOMES = [
 type Outcome = (typeof OUTCOMES)[number];
 
 const isOutcome = (code: string): code is Outcome => (OUTCOMES as readonly string[]).includes(code);
+
+/** Keeps the callback's ordinary error code while honoring the invitation's specific reason. */
+export function callbackCode(code: string | undefined, reason: string | undefined): string | null {
+  return code === 'invite_required' && reason === 'invitation_issuer_authority_lost'
+    ? 'invitation_issuer_authority_lost' : code ?? null;
+}
 
 export function IdentityCallback({ code }: { code: string }) {
   const { t } = useTranslation();

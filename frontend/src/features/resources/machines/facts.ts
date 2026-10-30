@@ -53,6 +53,10 @@ export interface MachineFactsView {
   cpus: number | null;
   memoryBytes: number | null;
   harnesses: FoundHarness[];
+  /** Null until the connector has completed a local program search. */
+  discoveredHarnesses: FoundHarness[] | null;
+  /** The kinds included in that search, including those for which nothing was found. */
+  searchedHarnessKinds: string[] | null;
   adapters: MachineAdapter[];
   plugins: MachinePlugin[];
   link: MachineLink | null;
@@ -93,6 +97,11 @@ export function readMachineFacts(facts: unknown): MachineFactsView {
       const kind = text(entry.kind);
       return kind === null ? null : { kind, path: text(entry.path) ?? '', version: text(entry.version) ?? '', daemon: entry.daemon === true };
     }),
+    discoveredHarnesses: !Array.isArray(source.discovered_harnesses) ? null : list(source.discovered_harnesses, (entry) => {
+      const kind = text(entry.kind);
+      return kind === null ? null : { kind, path: text(entry.path) ?? '', version: text(entry.version) ?? '', daemon: entry.daemon === true };
+    }),
+    searchedHarnessKinds: !Array.isArray(source.searched_harness_kinds) ? null : source.searched_harness_kinds.filter((kind): kind is string => typeof kind === 'string'),
     adapters: list(source.adapters, (entry) => {
       const kind = text(entry.kind);
       return kind === null ? null : { kind, builtin: entry.builtin === true,needsBinary:entry.needs_binary!==false,title:reportedAdapterName(source,kind) ?? undefined };

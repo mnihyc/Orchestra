@@ -190,7 +190,13 @@ fn body_of(
         kind,
         at: notification.at,
         title: notification.title.clone(),
-        body: notification.body.clone(),
+        body: body_with_requested_end(
+            notification,
+            rendering.language,
+            rendering.recipient.map_or(Tz::UTC, |person| {
+                crate::quiet_hours::zone_of(&person.timezone)
+            }),
+        ),
         url: absolute(
             rendering.public_url,
             &open_path(notification, rendering.places),
@@ -203,6 +209,44 @@ fn body_of(
         data: notification.data.clone(),
         recipient: rendering.recipient.map(user_ref),
     })
+}
+
+/// A proposed access end is part of the message, in the recipient's time zone and language.
+fn body_with_requested_end(notification: &Snapshot, language: &str, zone: Tz) -> String {
+    if !matches!(
+        notification.kind.as_str(),
+        "access.requested" | "access.decided"
+    ) {
+        return notification.body.clone();
+    }
+    let Some(end) = notification.data.get("requested_expires_at") else {
+        return notification.body.clone();
+    };
+    let chinese = language.to_ascii_lowercase().starts_with("zh");
+    let line = if end.is_null() {
+        if chinese {
+            "申请至移除".to_owned()
+        } else {
+            "Requested until removed".to_owned()
+        }
+    } else if let Some(instant) = end
+        .as_str()
+        .and_then(|value| chrono::DateTime::parse_from_rfc3339(value).ok())
+    {
+        let date = instant.with_timezone(&zone).format("%Y-%m-%d %H:%M %Z");
+        if chinese {
+            format!("申请至 {date}")
+        } else {
+            format!("Requested until {date}")
+        }
+    } else {
+        return notification.body.clone();
+    };
+    if notification.body.is_empty() {
+        line
+    } else {
+        format!("{}\n{line}", notification.body)
+    }
 }
 
 /// An identifier for the `index`-th notification of a row that has none of its
@@ -224,7 +268,7 @@ fn item_of(notification: &Snapshot, rendering: &Rendering<'_>, zone: Tz) -> Item
         .unwrap_or_default();
     Item {
         title: notification.title.clone(),
-        body: notification.body.clone(),
+        body: body_with_requested_end(notification, rendering.language, zone),
         url: absolute(
             rendering.public_url,
             &open_path(notification, rendering.places),
@@ -452,6 +496,58 @@ mod tests {
             digest.body
         );
         assert_eq!(digest.notifications.len(), 3);
+    }
+
+    #[test]
+    fn an_access_notice_says_the_proposed_end_in_the_readers_language_and_time_zone() {
+        let descriptor = descriptor(BodyKind::Text, None);
+        let timed = snapshot(
+            "Access",
+            "Read the guide",
+            json!({"kind":"access.requested","data":{"requested_expires_at":"2026-10-12T10:00:00Z"}}),
+        );
+        let rendered = render_with(
+            &descriptor,
+            &json!({}),
+            "en",
+            std::slice::from_ref(&timed),
+            &[],
+        )
+        .unwrap();
+        assert!(
+            rendered
+                .body
+                .contains("Requested until 2026-10-12 12:00 CEST")
+        );
+        assert!(
+            rendered.notifications[0]
+                .body
+                .contains("Requested until 2026-10-12 12:00 CEST")
+        );
+        let chinese = render_with(&descriptor, &json!({}), "zh-CN", &[timed], &[]).unwrap();
+        assert!(chinese.body.contains("申请至 2026-10-12 12:00 CEST"));
+        let indefinite = snapshot(
+            "Access",
+            "",
+            json!({"kind":"access.decided","data":{"requested_expires_at":null}}),
+        );
+        assert!(
+            render_with(&descriptor, &json!({}), "en", &[indefinite], &[])
+                .unwrap()
+                .body
+                .contains("Requested until removed")
+        );
+        let older = snapshot(
+            "Access",
+            "Original",
+            json!({"kind":"access.requested","data":{}}),
+        );
+        assert!(
+            render_with(&descriptor, &json!({}), "en", &[older], &[])
+                .unwrap()
+                .body
+                .contains("Original")
+        );
     }
 
     #[test]

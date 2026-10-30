@@ -412,6 +412,9 @@ pub async fn purge_finished(
             WHERE c.state IN ('succeeded', 'failed', 'expired', 'cancelled')
               AND c.updated_at < $1
               AND c.kind <> ALL($2)
+              AND NOT (c.kind='provider.stop' AND COALESCE(c.body->>'purge'='true', false)
+                       AND c.state IN ('failed','expired','cancelled')
+                       AND c.error#>>'{details,purge_retry}' IS NULL)
               AND NOT EXISTS (SELECT 1 FROM thread_tool_commands e JOIN thread_tool_calls t ON t.answer_id=e.answer_id
                                 WHERE (NOT e.settled OR (NOT t.completed AND NOT t.retired)) AND (e.command_id=c.id OR e.fence_id=c.id OR
                                      (c.kind='node.runtime.remove' AND c.machine_id=e.retirement_machine_id

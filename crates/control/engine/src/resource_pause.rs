@@ -158,6 +158,12 @@ impl Engine {
             );
             let mut unit = Unit::new(conn, now);
             let (input_id, reason) = match origin {
+                // An input whose turn never began was returned to the queue.
+                // Enabling with Run waiting admits that original input rather
+                // than inventing a continuation for work that did not start.
+                Some(origin) if turn.started_at.is_none() && origin.state == "pending" => {
+                    (Some(origin.id), None)
+                }
                 Some(origin) => match self
                     .continue_original_input_in(&mut unit, &thread, &origin, reference, None)
                     .await
@@ -267,6 +273,8 @@ impl Engine {
             };
             let seq = unit.stamp(row.thread).await?;
             let caused = threads::mark_interrupted_by(unit.conn, turn.id, by, seq).await?;
+            self.withdraw_interrupted_harness(&mut unit, row.thread, turn.id)
+                .await?;
             if caused {
                 threads::set_interrupt_cause(unit.conn, turn.id, "resource_disabled").await?;
             }

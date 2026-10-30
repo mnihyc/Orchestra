@@ -87,7 +87,7 @@ describe('what the menu of a place offers', () => {
       for (const locale of ['en', 'zh-CN'] as const) {
         await setLocale(locale);
         for (const kind of ['org', 'project', 'topic'] as const) {
-          const rights = [`${kind}.view`, `${kind}.interact`, `${kind}.manage`, 'doc.create'];
+          const rights = [`${kind}.view`, `${kind}.interact`, `${kind}.manage`, 'doc.create', ...(kind === 'project' ? ['project.create_topics'] : kind === 'topic' ? ['topic.start_threads'] : [])];
           const create = { ...acts, newDocument: nothing };
           const onPage = ids(nodeMenuEntries(context(kind, rights, { where: 'screen' }), create, t));
           const screen = onPage.filter((id) => id.startsWith('new-'));
@@ -107,6 +107,18 @@ describe('what the menu of a place offers', () => {
     } finally { await setLocale('en'); }
   });
 
+  it('offers just the creation granted on its own without granting contribution', () => {
+    const project = ids(nodeMenuEntries(context('project', ['project.view', 'project.create_topics']), acts, t));
+    expect(project).toContain('new-topic');
+    expect(project).not.toContain('new-folder');
+    const topic = ids(nodeMenuEntries(context('topic', ['topic.view', 'topic.start_threads']), acts, t));
+    expect(topic).toContain('new-thread');
+    expect(topic).not.toContain('done');
+    // Scoped credentials may expose contribution without authorizing the creation permission.
+    expect(ids(nodeMenuEntries(context('project', ['project.view', 'project.interact']), acts, t))).not.toContain('new-topic');
+    expect(ids(nodeMenuEntries(context('topic', ['topic.view', 'topic.interact']), acts, t))).not.toContain('new-thread');
+  });
+
   it('a viewer can list their eligible kept things without gaining any node mutation', () => {
     const viewer = nodeMenuEntries(context('project', ['project.view']), acts, t);
 
@@ -114,7 +126,7 @@ describe('what the menu of a place offers', () => {
   });
 
   it('offers a project its own acts to whoever manages it, with Delete last and in the colour of danger', () => {
-    const entries = nodeMenuEntries(context('project', ['project.view', 'project.interact', 'project.manage']), acts, t);
+    const entries = nodeMenuEntries(context('project', ['project.view', 'project.interact', 'project.create_topics', 'project.manage']), acts, t);
 
     expect(ids(entries)).toEqual(
       expect.arrayContaining(['new-topic', 'rename', 'move', 'deleted', 'archive', 'delete']),
@@ -208,7 +220,7 @@ describe('what the caller holds', () => {
   });
 
   it('names a permission in words and reports an unavailable name without showing a protocol key', () => {
-    expect(permissionLabel('org.interact')).toBe('Interact Org');
+    expect(permissionLabel('org.interact')).toBe('Contribute to Org');
     expect(permissionLabel('widget.frobnicate')).toBe(i18n.t('resourceAccessWords.unavailable'));
     expect(permissionLabel('widget.frobnicate')).not.toContain('widget.frobnicate');
     expect(denial(t, 'topic.manage', 'Fix login', null)).toBe('You can’t manage Fix login.');

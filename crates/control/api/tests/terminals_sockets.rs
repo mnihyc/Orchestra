@@ -721,6 +721,94 @@ async fn agent_ticket(floor: &Floor, who: &places::Who, control: bool) -> String
 }
 
 #[tokio::test(flavor = "multi_thread")]
+async fn an_agent_terminal_ticket_cannot_outlive_the_permission_that_granted_it() {
+    let floor = Floor::new().await;
+    agent_declares(&floor, "interactive").await;
+    let ticket = agent_ticket(&floor, &floor.scene.dan, true).await;
+    let org = floor.scene.tree.org.base.id;
+    let mut conn = floor.pool().acquire().await.unwrap();
+    let role: orch_types::Id = sqlx::query_scalar(
+        "SELECT id FROM node_roles WHERE node_id = $1 AND subject_id = $2 AND removed_at IS NULL",
+    )
+    .bind(org)
+    .bind(floor.scene.dan.id())
+    .fetch_one(&mut *conn)
+    .await
+    .unwrap();
+    orch_db::queries::access::testing::take_role_away(
+        &mut conn,
+        role,
+        floor.scene.ada.id(),
+        floor.scene.rig.world.now(),
+    )
+    .await
+    .unwrap();
+    orch_db::queries::access::bump_epoch(&mut conn)
+        .await
+        .unwrap();
+    drop(conn);
+    let mut screen = floor.agent_screen(&ticket).await;
+    assert_eq!(screen.frame().await["reason"], "revoked");
+    assert!(floor.fake.agent_opened.lock().unwrap().is_empty());
+    floor.stop().await;
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn an_attached_agent_terminal_ends_when_the_issuing_session_is_revoked() {
+    let floor = Floor::new().await;
+    agent_declares(&floor, "interactive").await;
+    let ticket = agent_ticket(&floor, &floor.scene.dan, true).await;
+    let mut screen = floor.agent_screen(&ticket).await;
+    screen.ready().await;
+    sqlx::query("UPDATE sessions SET revoked_at = $2 WHERE user_id = $1")
+        .bind(floor.scene.dan.id())
+        .bind(floor.scene.rig.world.now())
+        .execute(floor.pool())
+        .await
+        .unwrap();
+    let closed = tokio::time::timeout(std::time::Duration::from_secs(4), screen.until_the_end())
+        .await
+        .expect("the socket closes after the session is revoked");
+    assert_eq!(closed, Some(1000));
+    assert_eq!(screen.closed_reason().as_deref(), Some("revoked"));
+    floor.stop().await;
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn a_scope_empty_token_cannot_attach_to_its_owners_shell() {
+    use orch_api_core::middleware::authentication::{API_TOKEN_PREFIX, new_token, token_hash};
+    let floor = Floor::new().await;
+    let made = floor.shell_of(&floor.scene.dan).await;
+    let token = new_token(API_TOKEN_PREFIX);
+    let mut conn = floor.pool().acquire().await.unwrap();
+    orch_db::queries::identity::testing::insert_api_token(
+        &mut conn,
+        floor.scene.dan.id(),
+        &token_hash(&token),
+    )
+    .await
+    .unwrap();
+    drop(conn);
+    let reply = floor
+        .scene
+        .rig
+        .world
+        .app
+        .call(
+            orch_api_contract::terminals::TerminalTicketCreate,
+            &[&made.session.id],
+        )
+        .token(&token)
+        .send()
+        .await;
+    assert_eq!(
+        reply.problem().code,
+        orch_api_contract::common::ErrorCode::AuthzDenied
+    );
+    floor.stop().await;
+}
+
+#[tokio::test(flavor = "multi_thread")]
 async fn a_view_only_agent_terminal_ignores_typing_and_resize_and_closes_for_a_malformed_control_frame()
  {
     let floor = Floor::new().await;
@@ -881,5 +969,163 @@ async fn a_screen_on_a_shell_that_its_person_gives_up_for_a_new_one_is_told_that
         "{:?}",
         screen.ops()
     );
+    floor.stop().await;
+}
+#[tokio::test(flavor = "multi_thread")]
+async fn a_shell_attachment_ends_when_its_issuing_api_token_is_revoked() {
+    use orch_api_core::middleware::authentication::{API_TOKEN_PREFIX, new_token, token_hash};
+    let floor = Floor::new().await;
+    let made = floor.shell_of(&floor.scene.dan).await;
+    let token = new_token(API_TOKEN_PREFIX);
+    let mut conn = floor.pool().acquire().await.unwrap();
+    let token_id = orch_db::queries::identity::testing::insert_api_token(
+        &mut conn,
+        floor.scene.dan.id(),
+        &token_hash(&token),
+    )
+    .await
+    .unwrap();
+    sqlx::query("UPDATE api_tokens SET scopes=ARRAY['terminal.manage'] WHERE id=$1")
+        .bind(token_id)
+        .execute(&mut *conn)
+        .await
+        .unwrap();
+    drop(conn);
+    let request = || {
+        floor
+            .scene
+            .rig
+            .world
+            .app
+            .call(
+                orch_api_contract::terminals::TerminalTicketCreate,
+                &[&made.session.id],
+            )
+            .token(&token)
+    };
+    let ticket = request().send().await.ok().ticket;
+    let mut screen = floor.screen(made.session.id, &ticket).await;
+    screen.ready().await;
+    sqlx::query("UPDATE api_tokens SET revoked_at=$2 WHERE id=$1")
+        .bind(token_id)
+        .bind(floor.scene.rig.world.now())
+        .execute(floor.pool())
+        .await
+        .unwrap();
+    assert_eq!(
+        tokio::time::timeout(std::time::Duration::from_secs(4), screen.until_the_end())
+            .await
+            .expect("the attachment closes after token revocation"),
+        Some(1000),
+    );
+    assert_eq!(screen.closed_reason().as_deref(), Some("revoked"));
+    assert!(
+        floor.row(made.session.id).await.is_live(),
+        "revoking a token detaches only its screen"
+    );
+    floor.stop().await;
+}
+#[tokio::test(flavor = "multi_thread")]
+async fn an_agent_terminal_ticket_cannot_open_a_later_native_session() {
+    let floor = Floor::new().await;
+    agent_declares(&floor, "interactive").await;
+    let ticket = agent_ticket(&floor, &floor.scene.dan, true).await;
+    let segment = orch_types::new_id();
+    let inserted = sqlx::query("INSERT INTO segments(id,thread_id,ordinal,agent_id,provider_id,environment_id,env_generation,arrangement,credential_path,seq_updated,continuation_id)
+        SELECT $1,thread_id,ordinal+1,agent_id,provider_id,environment_id,env_generation,arrangement,credential_path,seq_updated,continuation_id
+          FROM segments WHERE id=(SELECT current_segment_id FROM threads WHERE node_id=$2)")
+        .bind(segment).bind(floor.thread).execute(floor.pool()).await.unwrap();
+    assert_eq!(inserted.rows_affected(), 1, "the prior segment exists");
+    sqlx::query("UPDATE threads SET current_segment_id=$2 WHERE node_id=$1")
+        .bind(floor.thread)
+        .bind(segment)
+        .execute(floor.pool())
+        .await
+        .unwrap();
+    let mut screen = floor.agent_screen(&ticket).await;
+    assert_eq!(screen.frame().await["reason"], "revoked");
+    assert!(floor.fake.agent_opened.lock().unwrap().is_empty());
+    floor.stop().await;
+}
+#[tokio::test(flavor = "multi_thread")]
+async fn a_later_admin_mode_cannot_increase_an_agent_terminal_ticket() {
+    let floor = Floor::new().await;
+    agent_declares(&floor, "interactive").await;
+    let ticket = agent_ticket(&floor, &floor.scene.dan, true).await;
+    let mut conn = floor.pool().acquire().await.unwrap();
+    let role: orch_types::Id = sqlx::query_scalar(
+        "SELECT id FROM node_roles WHERE node_id=$1 AND subject_id=$2 AND removed_at IS NULL",
+    )
+    .bind(floor.scene.tree.org.base.id)
+    .bind(floor.scene.dan.id())
+    .fetch_one(&mut *conn)
+    .await
+    .unwrap();
+    orch_db::queries::access::testing::take_role_away(
+        &mut conn,
+        role,
+        floor.scene.ada.id(),
+        floor.scene.rig.world.now(),
+    )
+    .await
+    .unwrap();
+    orch_db::queries::access::bump_epoch(&mut conn)
+        .await
+        .unwrap();
+    sqlx::query("UPDATE users SET is_system_admin=true WHERE id=$1")
+        .bind(floor.scene.dan.id())
+        .execute(&mut *conn)
+        .await
+        .unwrap();
+    drop(conn);
+    places::admin_mode(&floor.scene.rig.world, &floor.scene.dan, true).await;
+    let mut screen = floor.agent_screen(&ticket).await;
+    assert_eq!(screen.frame().await["reason"], "revoked");
+    assert!(floor.fake.agent_opened.lock().unwrap().is_empty());
+    floor.stop().await;
+}
+#[tokio::test(flavor = "multi_thread")]
+async fn a_shell_ticket_cannot_be_redeemed_after_its_token_is_revoked() {
+    use orch_api_core::middleware::authentication::{API_TOKEN_PREFIX, new_token, token_hash};
+    let floor = Floor::new().await;
+    let made = floor.shell_of(&floor.scene.dan).await;
+    let token = new_token(API_TOKEN_PREFIX);
+    let mut conn = floor.pool().acquire().await.unwrap();
+    let token_id = orch_db::queries::identity::testing::insert_api_token(
+        &mut conn,
+        floor.scene.dan.id(),
+        &token_hash(&token),
+    )
+    .await
+    .unwrap();
+    sqlx::query("UPDATE api_tokens SET scopes=ARRAY['terminal.manage'] WHERE id=$1")
+        .bind(token_id)
+        .execute(&mut *conn)
+        .await
+        .unwrap();
+    drop(conn);
+    let ticket = floor
+        .scene
+        .rig
+        .world
+        .app
+        .call(
+            orch_api_contract::terminals::TerminalTicketCreate,
+            &[&made.session.id],
+        )
+        .token(&token)
+        .send()
+        .await
+        .ok()
+        .ticket;
+    sqlx::query("UPDATE api_tokens SET revoked_at=$2 WHERE id=$1")
+        .bind(token_id)
+        .bind(floor.scene.rig.world.now())
+        .execute(floor.pool())
+        .await
+        .unwrap();
+    let mut screen = floor.screen(made.session.id, &ticket).await;
+    assert_eq!(screen.frame().await["reason"], "revoked");
+    assert!(floor.row(made.session.id).await.is_live());
     floor.stop().await;
 }

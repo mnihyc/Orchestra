@@ -117,6 +117,41 @@ async fn link_for(world: &World, person: &Person, clear_second_step: bool, by: A
     made
 }
 
+#[tokio::test]
+async fn a_manual_reset_link_uses_the_recipient_address_current_when_it_is_issued() {
+    let world = World::new().await;
+    let person = world.person("recipient").await;
+    let mut tx = world.db.pool.begin().await.unwrap();
+    let stale = identity::user_by_id(&mut tx, person.id)
+        .await
+        .unwrap()
+        .unwrap();
+    sqlx::query("UPDATE users SET email='new@example.org', email_verified_at=$2 WHERE id=$1")
+        .bind(person.id)
+        .bind(world.now())
+        .execute(&world.db.pool)
+        .await
+        .unwrap();
+    let made = reset_links::make(
+        &mut tx,
+        &world.app.app.config,
+        &stale,
+        false,
+        Actor::System,
+        &Origin::default(),
+        world.now(),
+    )
+    .await
+    .unwrap();
+    tx.commit().await.unwrap();
+    let address: String = sqlx::query_scalar("SELECT email FROM email_tokens WHERE token_hash=$1")
+        .bind(token_hash(&secret_of(&made)))
+        .fetch_one(&world.db.pool)
+        .await
+        .unwrap();
+    assert_eq!(address, "new@example.org");
+}
+
 fn secret_of(made: &Made) -> String {
     made.url.rsplit('/').next().unwrap().to_owned()
 }
@@ -188,7 +223,10 @@ async fn a_link_is_good_for_half_an_hour_and_not_for_a_minute_more() {
 
 #[tokio::test]
 async fn the_address_is_on_the_origin_of_the_system_and_only_the_hash_of_its_secret_is_kept() {
-    let world = World::new().await;
+    let mut config = orch_config::ServerConfig::default();
+    config.system.public_url = "https://orch.example.com".into();
+    config.gateway.endpoints[0].url = "wss://gateway.test:9443".into();
+    let world = World::with(config).await;
     let ada = world.person("ada").await;
 
     let made = link_for(&world, &ada, false, Actor::System).await;

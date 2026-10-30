@@ -156,15 +156,7 @@ async fn environment_of(
     asked: Option<&EnvironmentChoice>,
 ) -> ApiResult<Id> {
     match asked {
-        Some(EnvironmentChoice::Use(id)) => {
-            if !orch_db::queries::loss::accepts_threads(conn, *id).await? {
-                return Err(ApiError::new(
-                    ErrorCode::EnvironmentUnavailable,
-                    "The environment was lost or removed; choose another environment",
-                ));
-            }
-            Ok(*id)
-        }
+        Some(EnvironmentChoice::Use(id)) => Ok(*id),
         Some(EnvironmentChoice::New(_)) => Err(invalid(
             "environment.new",
             "an environment is made by its own request, and named here with `use`",

@@ -331,7 +331,7 @@ export function requestAccess(body: AccessRequestCreateBody, key: string): Promi
 }
 
 /** Asks to join a known group; the grant is ordinary membership. */
-export function requestJoin(chatId:string,body:{reason:string;label?:string},key:string):Promise<AccessRequestCreateReply> {
+export function requestJoin(chatId:string,body:{reason:string;label?:string;expires_at?:string},key:string):Promise<AccessRequestCreateReply> {
   return ok(api.POST('/chats/{id}/join-requests',{params:{path:{id:chatId}},body,...repeatable(key)}));
 }
 

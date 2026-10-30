@@ -14,8 +14,9 @@ use orch_api_contract::admin::{
     IdentityProvider, IdentityProviderInput, IdentityProviderUpdateBody,
 };
 use orch_api_contract::auth::{
-    AdminModeSetBody, AuthOidcCallback, AuthOidcCallbackQuery, AuthOidcStart, AuthOidcStartQuery,
-    AuthRefresh, MeAdminModeSet, MeGet, MeIdentityDelete, MeIdentityLink, SensitivePurpose,
+    AdminModeSetBody, AuthLogout, AuthOidcCallback, AuthOidcCallbackQuery, AuthOidcStart,
+    AuthOidcStartQuery, AuthRefresh, MeAdminModeSet, MeGet, MeIdentityDelete, MeIdentityLink,
+    SensitivePurpose,
 };
 use orch_api_contract::common::ErrorCode;
 use orch_api_contract::users::TimezoneMode;
@@ -259,13 +260,16 @@ impl Sso {
     /// Starts linking the provider for a signed-in person, from their Security page: the address of
     /// the provider, with the browser given its mark.
     async fn begin_link(&self, signed: &Signed, browser: &mut Browser) -> String {
-        let reply = self
+        let mut call = self
             .world
             .app
             .call(MeIdentityLink, &[&KEY])
-            .token(signed.token())
-            .send()
-            .await;
+            .token(signed.token());
+        let held = browser.header();
+        if !held.is_empty() {
+            call = call.header("cookie", &held);
+        }
+        let reply = call.send().await;
         browser.keep(&reply.headers);
         reply.ok().redirect_url
     }
@@ -276,6 +280,18 @@ fn dana() -> Somebody {
         .with_email("dana@acme.example", true)
         .named("Dana Whit")
         .with_username("dana")
+}
+
+#[tokio::test]
+async fn an_identity_link_gets_a_fresh_browser_mark() {
+    let sso = sso().await;
+    let ada = sso.world.person("ada").await;
+    let signed = sso.world.sign_in(&ada).await;
+    let mut browser = Browser::default();
+    sso.begin(&mut browser, None, None).await;
+    let old = browser.cookies["__Host-orch_oidc"].clone();
+    sso.begin_link(&signed, &mut browser).await;
+    assert_ne!(browser.cookies["__Host-orch_oidc"], old);
 }
 
 #[tokio::test]
@@ -559,7 +575,7 @@ async fn a_first_sign_in_makes_one_person_with_one_session_and_the_next_signs_th
     let mut browser = Browser::default();
     let landed = sso.sign_in(&mut browser, Some("/projects")).await;
     assert_eq!(landed, "/projects");
-    assert!(browser.has("orch_session") && browser.has("orch_device"));
+    assert!(browser.has("__Host-orch_session") && browser.has("__Host-orch_device"));
     let dana = sso.user_named("dana").await.expect("a person was made");
     assert_eq!(sso.sessions(dana).await, 1, "exactly one session");
     assert_eq!(sso.identities_at("sub-dana").await, [dana]);
@@ -643,7 +659,7 @@ async fn an_answer_that_does_not_pass_opens_no_session_and_makes_nobody() {
         let mut browser = Browser::default();
         let landed = sso.sign_in(&mut browser, None).await;
         assert_eq!(landed, "/login?error=idp_error", "{fault:?}");
-        assert!(!browser.has("orch_session"), "{fault:?}");
+        assert!(!browser.has("__Host-orch_session"), "{fault:?}");
     }
     assert_eq!(sso.all_sessions().await, before);
     assert_eq!(sso.user_named("dana").await, None);
@@ -670,7 +686,7 @@ async fn a_code_exchanged_with_another_pkce_verifier_opens_nothing() {
         "/login?error=idp_error"
     );
     assert_eq!(sso.user_named("dana").await, None);
-    assert!(!browser.has("orch_session"));
+    assert!(!browser.has("__Host-orch_session"));
 }
 
 #[tokio::test]
@@ -686,7 +702,7 @@ async fn a_sign_in_ends_only_in_the_browser_that_began_it_and_only_once() {
         sso.come_back(&mut theirs, &back).await,
         "/login?error=state_expired"
     );
-    assert!(!theirs.has("orch_session"));
+    assert!(!theirs.has("__Host-orch_session"));
     assert_eq!(
         sso.come_back(&mut mine, &back).await,
         "/login?error=state_expired",
@@ -721,7 +737,7 @@ async fn an_address_that_a_person_has_joins_nobody_until_that_person_links_the_i
     let signed = sso.world.sign_in(&ada).await;
     let mut hers = Browser::default();
     let to_provider = sso.begin_link(&signed, &mut hers).await;
-    assert!(hers.has("orch_oidc"));
+    assert!(hers.has("__Host-orch_oidc"));
     let back = sso.provider.authorize(&to_provider).await.unwrap();
     assert_eq!(sso.come_back(&mut hers, &back).await, "/settings/security");
     assert_eq!(sso.identities_at("sub-ada").await, [ada.id]);
@@ -743,6 +759,52 @@ async fn an_address_that_a_person_has_joins_nobody_until_that_person_links_the_i
         2,
         "her password session and this one"
     );
+}
+
+#[tokio::test]
+async fn a_pending_identity_link_cannot_outlive_its_initiating_session() {
+    let sso = sso().await;
+    let ada = sso.world.person("ada").await;
+    let first = sso.world.sign_in(&ada).await;
+    sso.provider
+        .sign_in_as(Somebody::new("sub-ada").with_email(&ada.email, true));
+    let mut browser = Browser::default();
+    let to_provider = sso.begin_link(&first, &mut browser).await;
+    let back = sso.provider.authorize(&to_provider).await.unwrap();
+
+    let logout = sso
+        .world
+        .app
+        .call(AuthLogout, &[])
+        .header(csrf().0, csrf().1)
+        .header("cookie", &first.browser())
+        .send()
+        .await;
+    assert_eq!(logout.status, 204);
+    // A different live session of the same person must not revive the link.
+    let second = sso.world.sign_in(&ada).await;
+    assert_eq!(
+        sso.come_back(&mut browser, &back).await,
+        "/settings/security#identity_link_error=state_expired"
+    );
+    assert!(sso.identities_at("sub-ada").await.is_empty());
+
+    let to_provider = sso.begin_link(&second, &mut browser).await;
+    // Expire the session during the provider round trip while its OIDC state
+    // remains valid, as when a session reaches the end of its lifetime.
+    sqlx::query("UPDATE sessions SET expires_at = $1 WHERE user_id = $2 AND revoked_at IS NULL")
+        .bind(sso.world.now() + Duration::minutes(1))
+        .bind(ada.id)
+        .execute(&sso.world.db.pool)
+        .await
+        .unwrap();
+    sso.world.advance(Duration::minutes(2));
+    let back = sso.provider.authorize(&to_provider).await.unwrap();
+    assert_eq!(
+        sso.come_back(&mut browser, &back).await,
+        "/settings/security#identity_link_error=state_expired"
+    );
+    assert!(sso.identities_at("sub-ada").await.is_empty());
 }
 
 #[tokio::test]
@@ -862,7 +924,7 @@ async fn a_provider_or_a_system_that_registers_nobody_makes_nobody_and_a_refusal
     sso.provider.refuse_next();
     assert_eq!(sso.sign_in(&mut browser, None).await, "/login?error=denied");
     assert_eq!(sso.user_named("dana").await, None);
-    assert!(!browser.has("orch_session"));
+    assert!(!browser.has("__Host-orch_session"));
 }
 
 #[tokio::test]
@@ -1039,4 +1101,65 @@ async fn oidc_keeps_system_admission_and_explicit_team_acceptance_separate_from_
             "ordinary later sign-in neither joins nor creates another identity"
         );
     }
+}
+
+#[tokio::test]
+async fn an_oidc_registration_withdrawn_by_its_issuer_makes_no_account_or_home() {
+    use orch_api_contract::users::{InvitationCreate, InvitationCreateBody, InvitationKind};
+
+    let sso = sso().await;
+    sso.world.set("registration.mode", json!("invite")).await;
+    sso.world.set("orgs.personal_enabled", json!(true)).await;
+    let invitation = sso
+        .world
+        .app
+        .call(InvitationCreate, &[])
+        .token(sso.admin.token())
+        .body(&InvitationCreateBody {
+            kind: InvitationKind::System,
+            org_id: None,
+            node_id: None,
+            chat_id: None,
+            role: None,
+            permissions: None,
+            email: None,
+            max_uses: Some(2),
+            expires_in_hours: None,
+            note: None,
+        })
+        .send()
+        .await
+        .ok();
+    sso.provider.sign_in_as(dana());
+    let mut browser = Browser::default();
+    let address = sso
+        .begin(&mut browser, Some("/"), Some(&invitation.token))
+        .await;
+    let back = sso.provider.authorize(&address).await.unwrap();
+    let homes_before: i64 =
+        sqlx::query_scalar("SELECT count(*) FROM orgs WHERE org_kind = 'personal'")
+            .fetch_one(&sso.world.db.pool)
+            .await
+            .unwrap();
+    sqlx::query("UPDATE users SET is_system_admin = false WHERE id = $1")
+        .bind(sso.admin.result.user.user.id)
+        .execute(&sso.world.db.pool)
+        .await
+        .unwrap();
+    let destination = sso.come_back(&mut browser, &back).await;
+    assert_eq!(
+        destination,
+        "/login?error=invite_required&reason=invitation_issuer_authority_lost"
+    );
+    assert!(sso.user_named("dana").await.is_none());
+    assert!(!browser.has("__Host-orch_session"));
+    let homes_after: i64 =
+        sqlx::query_scalar("SELECT count(*) FROM orgs WHERE org_kind = 'personal'")
+            .fetch_one(&sso.world.db.pool)
+            .await
+            .unwrap();
+    let (uses, receipts): (i32, i64) = sqlx::query_as(
+        "SELECT uses, (SELECT count(*) FROM invitation_uses WHERE invitation_id = $1) FROM invitations WHERE id = $1",
+    ).bind(invitation.invitation.id).fetch_one(&sso.world.db.pool).await.unwrap();
+    assert_eq!((homes_after, uses, receipts), (homes_before, 0, 0));
 }

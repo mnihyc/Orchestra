@@ -15,7 +15,8 @@ use orch_api_contract::resources::{
     CreateProvider, Provider, ProviderCreate, ProviderDelete, ProviderDisable, ProviderEnable,
     ProviderGet, ProviderKeySet, ProviderKeySetBody, ProviderList, ProviderListQuery,
     ProviderListScope, ProviderModelCreate, ProviderModelCreateBody, ProviderSecretSet,
-    ProviderSecretSetBody, ProviderStatus, ProviderUpdate, ProviderUpdateBody, Upstream,
+    ProviderSecretSetBody, ProviderSourcesSet, ProviderStatus, ProviderUpdate, ProviderUpdateBody,
+    Upstream,
 };
 use orch_api_core::routes::resources::sealing::{binding, install_master_key};
 use orch_db::queries::hierarchy::testing::insert_node;
@@ -1672,6 +1673,288 @@ async fn the_secret_header_of_an_endpoint_that_goes_is_forgotten_with_it() {
     .await
     .unwrap();
     assert_eq!(left, ["api_key"]);
+}
+
+#[tokio::test]
+async fn changing_header_capitalization_keeps_its_secret_and_rotation_preserves_other_variants() {
+    const ROTATED: &str = "gateway-credential-after-rotation";
+    let world = world().await;
+    let c = company(&world).await;
+    let mut body = api_body("Team key", c.acme);
+    if let CreateProvider::Api {
+        upstreams, secrets, ..
+    } = &mut body
+    {
+        upstreams[0].options = json!({"secret_headers": ["x-gateway-key"]});
+        *secrets = Some([("x-gateway-key".to_owned(), GATEWAY_SECRET.to_owned())].into());
+    }
+    let provider = make(&world, &c.boss, &body).await;
+    let id = provider.base.id;
+    let before: Vec<u8> = sqlx::query_scalar("SELECT sealed FROM secrets WHERE owner_kind='provider' AND owner_id=$1 AND name='header:x-gateway-key'")
+        .bind(id).fetch_one(&world.db.pool).await.unwrap();
+    let changed = world
+        .app
+        .call(ProviderUpdate, &[&id])
+        .token(&c.boss.token)
+        .body(&ProviderUpdateBody {
+            name: None,
+            upstreams: Some(vec![endpoint(
+                "openai-responses",
+                "https://api.example.com/v1",
+                json!({"secret_headers":["X-GATEWAY-KEY"]}),
+            )]),
+            config: None,
+            arrangements: None,
+            runtime_config: None,
+            expected_revision: provider.revision,
+        })
+        .send()
+        .await
+        .ok();
+    assert!(
+        changed
+            .provider
+            .secrets_set
+            .iter()
+            .any(|name| name == "x-gateway-key")
+    );
+    let after: Vec<u8> = sqlx::query_scalar("SELECT sealed FROM secrets WHERE owner_kind='provider' AND owner_id=$1 AND name='header:x-gateway-key'")
+        .bind(id).fetch_one(&world.db.pool).await.unwrap();
+    assert_eq!(
+        after, before,
+        "changing only case retains the same sealed value"
+    );
+
+    let denied = world
+        .app
+        .call(ProviderSecretSet, &[&id, &"x-gateway-key"])
+        .token(&c.viewer.token)
+        .body(&ProviderSecretSetBody {
+            value: ROTATED.to_owned(),
+        })
+        .send()
+        .await
+        .problem();
+    assert_eq!(denied.code, ErrorCode::AuthzDenied);
+
+    // Another endpoint may have a distinct value under the other spelling.
+    {
+        let mut conn = world.db.pool.acquire().await.unwrap();
+        orch_api_core::routes::resources::sealing::put_provider_secret(
+            &mut conn,
+            id,
+            "header:X-GATEWAY-KEY",
+            "stale-value",
+            c.boss.id(),
+            world.now(),
+        )
+        .await
+        .unwrap();
+    }
+    let rotated = world
+        .app
+        .call(ProviderSecretSet, &[&id, &"x-gateway-key"])
+        .token(&c.boss.token)
+        .body(&ProviderSecretSetBody {
+            value: ROTATED.to_owned(),
+        })
+        .send()
+        .await;
+    assert_eq!(rotated.status, 204, "{:?}", rotated.body);
+    assert!(!String::from_utf8_lossy(&rotated.raw).contains(ROTATED));
+    let rows: Vec<(String, Vec<u8>)> = sqlx::query_as("SELECT name,sealed FROM secrets WHERE owner_kind='provider' AND owner_id=$1 AND name LIKE 'header:%' ORDER BY name")
+        .bind(id).fetch_all(&world.db.pool).await.unwrap();
+    assert_eq!(
+        rows.len(),
+        2,
+        "rotation retains the other explicitly named value"
+    );
+    let lower = rows
+        .iter()
+        .find(|(name, _)| name == "header:x-gateway-key")
+        .unwrap();
+    let plain = MasterKey::new(MASTER)
+        .open(&lower.1, &binding("provider", id, &lower.0))
+        .unwrap();
+    assert_eq!(plain, ROTATED.as_bytes());
+    let upper = rows
+        .iter()
+        .find(|(name, _)| name == "header:X-GATEWAY-KEY")
+        .unwrap();
+    let other = MasterKey::new(MASTER)
+        .open(&upper.1, &binding("provider", id, &upper.0))
+        .unwrap();
+    assert_eq!(other, b"stale-value");
+    let current = world
+        .app
+        .call(ProviderGet, &[&id])
+        .token(&c.boss.token)
+        .send()
+        .await
+        .ok();
+    world
+        .app
+        .call(ProviderUpdate, &[&id])
+        .token(&c.boss.token)
+        .body(&ProviderUpdateBody {
+            name: None,
+            upstreams: Some(vec![endpoint(
+                "openai-responses",
+                "https://api.example.com/v1",
+                json!({}),
+            )]),
+            config: None,
+            arrangements: None,
+            runtime_config: None,
+            expected_revision: current.revision,
+        })
+        .send()
+        .await
+        .ok();
+    let remaining: i64 = sqlx::query_scalar("SELECT count(*) FROM secrets WHERE owner_kind='provider' AND owner_id=$1 AND name LIKE 'header:%'")
+        .bind(id).fetch_one(&world.db.pool).await.unwrap();
+    assert_eq!(remaining, 0, "removing the header removes its value");
+}
+
+#[tokio::test]
+async fn provider_creation_keeps_distinct_values_named_for_distinct_endpoint_headers() {
+    let world = world().await;
+    let c = company(&world).await;
+    let mut body = api_body("Team key", c.acme);
+    if let CreateProvider::Api {
+        upstreams, secrets, ..
+    } = &mut body
+    {
+        upstreams[0].options = json!({"secret_headers": ["x-gateway-key"]});
+        *secrets = Some([("X-GATEWAY-KEY".to_owned(), GATEWAY_SECRET.to_owned())].into());
+    }
+    let made = make(&world, &c.boss, &body).await;
+    assert!(made.secrets_set.iter().any(|name| name == "X-GATEWAY-KEY"));
+    if let CreateProvider::Api {
+        name,
+        upstreams,
+        secrets,
+        ..
+    } = &mut body
+    {
+        *name = "Case variant endpoints".to_owned();
+        upstreams.push(endpoint(
+            "anthropic-messages",
+            "https://api.example.com",
+            json!({"secret_headers":["X-GATEWAY-KEY"]}),
+        ));
+        secrets
+            .as_mut()
+            .unwrap()
+            .insert("x-gateway-key".to_owned(), "another-value".to_owned());
+    }
+    let separate = make(&world, &c.boss, &body).await;
+    assert!(
+        separate
+            .secrets_set
+            .iter()
+            .any(|name| name == "X-GATEWAY-KEY")
+    );
+    assert!(
+        separate
+            .secrets_set
+            .iter()
+            .any(|name| name == "x-gateway-key")
+    );
+}
+
+#[tokio::test]
+async fn changing_an_endpoint_keeps_the_source_authorization_while_forgetting_removed_headers() {
+    const SOURCE_TOKEN: &str = "source-authorization-never-public";
+    let world = world().await;
+    let c = company(&world).await;
+    let mut body = api_body("Team key", c.acme);
+    if let CreateProvider::Api {
+        upstreams, secrets, ..
+    } = &mut body
+    {
+        upstreams[0].options = json!({ "secret_headers": ["x-gateway-key"] });
+        *secrets = Some([("x-gateway-key".to_owned(), GATEWAY_SECRET.to_owned())].into());
+    }
+    let provider = make(&world, &c.boss, &body).await;
+    let id = provider.base.id;
+    let source = world
+        .app
+        .call(ProviderSourcesSet, &[&id])
+        .token(&c.boss.token)
+        .raw_body(&json!({
+            "expected_revision": provider.revision,
+            "facts": {
+                "by": "address",
+                "address": {"url": "https://facts.example.com/orch", "auth": "bearer"},
+                "authorization": SOURCE_TOKEN
+            }
+        }))
+        .send()
+        .await;
+    assert!(!String::from_utf8_lossy(&source.raw).contains(SOURCE_TOKEN));
+    let source = source.ok();
+    let sealed_before: Vec<u8> = sqlx::query_scalar(
+        "SELECT sealed FROM secrets WHERE owner_kind='provider' AND owner_id=$1 AND name='source:facts:authorization'",
+    )
+    .bind(id)
+    .fetch_one(&world.db.pool)
+    .await
+    .unwrap();
+    assert!(
+        !sealed_before
+            .windows(SOURCE_TOKEN.len())
+            .any(|part| part == SOURCE_TOKEN.as_bytes())
+    );
+
+    let changed = world
+        .app
+        .call(ProviderUpdate, &[&id])
+        .token(&c.boss.token)
+        .body(&ProviderUpdateBody {
+            name: None,
+            upstreams: Some(vec![endpoint(
+                "openai-responses",
+                "https://api.example.com/v2",
+                json!({}),
+            )]),
+            config: None,
+            arrangements: None,
+            runtime_config: None,
+            expected_revision: source.revision,
+        })
+        .send()
+        .await
+        .ok();
+    assert!(changed.provider.key_set);
+    assert!(
+        !changed
+            .provider
+            .secrets_set
+            .iter()
+            .any(|name| name == "x-gateway-key")
+    );
+    assert!(
+        changed
+            .provider
+            .secrets_set
+            .iter()
+            .any(|name| name == "source:facts:authorization")
+    );
+    let rows: Vec<(String, Vec<u8>)> = sqlx::query_as(
+        "SELECT name, sealed FROM secrets WHERE owner_kind='provider' AND owner_id=$1 ORDER BY name",
+    )
+    .bind(id)
+    .fetch_all(&world.db.pool)
+    .await
+    .unwrap();
+    assert_eq!(
+        rows.iter()
+            .map(|(name, _)| name.as_str())
+            .collect::<Vec<_>>(),
+        ["api_key", "source:facts:authorization"]
+    );
+    assert_eq!(rows[1].1, sealed_before);
 }
 
 #[tokio::test]

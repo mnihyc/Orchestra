@@ -2066,18 +2066,36 @@ async fn change_with(
         return Err(ChangeError::Invalid(faults));
     }
 
-    // A new agents entry changes what the receiving agents may work with. The ordinary page
-    // request must ask that side too; a share already asked it before reaching this writer.
+    // A new or widened agents entry changes what the receiving agents may work with. An ordinary
+    // page change must ask whether its caller can drive the receiver too.
     if acting == Acting::Ordinary {
-        let recipients: std::collections::BTreeSet<Id> = checked
-            .rows
-            .iter()
-            .flat_map(|row| &row.add)
-            .filter_map(|entry| match entry.holder {
-                Holder::Agents { id } => Some(id),
-                _ => None,
+        let additions =
+            checked
+                .rows
+                .iter()
+                .flat_map(|row| &row.add)
+                .filter_map(|entry| match entry.holder {
+                    Holder::Agents { id } => Some(id),
+                    _ => None,
+                });
+        let widened = checked.rows.iter().flat_map(|row| {
+            let stored = &entries_now;
+            row.update.iter().filter_map(move |update| {
+                stored
+                    .iter()
+                    .find(|entry| {
+                        entry.entry.id == update.entry
+                            && entry.permission == row.permission
+                            && entry.profile == row.profile
+                            && crate::giving::entry_widens(&entry.entry, update)
+                    })
+                    .and_then(|entry| match entry.entry.holder {
+                        Holder::Agents { id } => Some(id),
+                        _ => None,
+                    })
             })
-            .collect();
+        });
+        let recipients: std::collections::BTreeSet<Id> = additions.chain(widened).collect();
         for recipient in recipients {
             match crate::nodes::check_named(
                 conn,

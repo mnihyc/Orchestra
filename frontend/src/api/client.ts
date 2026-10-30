@@ -132,8 +132,13 @@ export class ApiError extends Error {
   /** The faults of a request that was not valid, by the member each is about. */
   faults(): FieldFault[] {
     return (this.extra('request.invalid')?.errors ?? this.extra('request.value_refused')?.errors ?? this.extra('conflict.exists')?.errors ?? [])
-      .map((fault) => ({ ...fault, message: fieldErrorSentence(fault.message) }));
+      .map((fault) => ({ ...fault, message: fieldErrorSentence(fault.message, undefined, fault.path) }));
   }
+}
+
+/** Whether the invitation's maker can no longer authorize its grant. */
+export function invitationIssuerAuthorityLost(error: unknown): boolean {
+  return error instanceof ApiError && error.problem.reason === 'invitation_issuer_authority_lost';
 }
 
 function isProblem(value: unknown): value is Problem {

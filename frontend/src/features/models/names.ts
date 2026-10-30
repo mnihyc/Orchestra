@@ -16,3 +16,13 @@ export function modelDisplayName(display: string | null | undefined, t: TFunctio
 export function effortDisplayName(value: string, t: TFunction = i18n.t): string {
   return offeredChoice(t, 'effort', value)?.name ?? value;
 }
+
+/** Known access programs have readable names; other vendors' identifiers stay as reported. */
+export function accessProgramDisplayName(value: string, t: TFunction = i18n.t): string {
+  switch (value) {
+    case 'daybreakBlue': return t('composer.model.access.names.daybreakBlue');
+    case 'daybreakRed': return t('composer.model.access.names.daybreakRed');
+    case 'standard': return t('composer.model.access.names.standard');
+    default: return value;
+  }
+}

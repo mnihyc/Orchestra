@@ -274,7 +274,7 @@ async fn the_first_setup_makes_the_first_administrator_with_a_session_and_works_
     let world = World::new().await;
     let reply = setup(&world, "root").await;
     assert_eq!(reply.status, 200);
-    assert!(cookie(&reply.headers, "orch_session").is_some());
+    assert!(cookie(&reply.headers, "__Host-orch_session").is_some());
     let result = reply.ok();
     assert!(result.user.is_system_admin);
     assert_eq!(result.user.user.username, "root");
@@ -330,13 +330,13 @@ fn the_first_password_sign_in_after_setup_works_on_a_two_mib_stack() {
                 let world = World::new().await;
                 let setup = setup(&world, "root").await;
                 assert_eq!(setup.status, 200);
-                let setup_cookie = cookie(&setup.headers, "orch_session").unwrap();
+                let setup_cookie = cookie(&setup.headers, "__Host-orch_session").unwrap();
                 let administrator = setup.ok().user.user.id;
 
                 // This is the first request after setup and carries no session.
                 let signed_in = world.password_login("root", PASSWORD, STRANGER, "").await;
                 assert_eq!(signed_in.status, 200);
-                let session = cookie(&signed_in.headers, "orch_session").unwrap();
+                let session = cookie(&signed_in.headers, "__Host-orch_session").unwrap();
                 assert_ne!(session.value, setup_cookie.value, "signing in opens a fresh session");
                 let result = signed_in.ok();
                 assert_eq!(result.user.user.id, administrator);
@@ -409,7 +409,8 @@ async fn registering_makes_a_person_with_an_org_of_their_own_and_signs_them_in()
     let headers = reply.headers.clone();
     let result = registered(reply);
     assert!(
-        cookie(&headers, "orch_session").is_some() && cookie(&headers, "orch_device").is_some()
+        cookie(&headers, "__Host-orch_session").is_some()
+            && cookie(&headers, "__Host-orch_device").is_some()
     );
     let user = result.user.user.id;
     let org = result
@@ -655,7 +656,7 @@ async fn a_registration_that_must_be_confirmed_waits_for_the_link_which_then_sig
     assert_eq!(none.code, ErrorCode::RequestInvalid);
     let reply = register(&world, "ada", Some("ada@example.org"), None, STRANGER).await;
     assert_eq!(reply.status, 202);
-    assert!(cookie(&reply.headers, "orch_session").is_none());
+    assert!(cookie(&reply.headers, "__Host-orch_session").is_none());
     assert_eq!(
         reply.ok(),
         AuthRegisterReply::Pending(VerificationRequired {
@@ -685,9 +686,10 @@ async fn a_registration_that_must_be_confirmed_waits_for_the_link_which_then_sig
     assert_eq!((unknown.status, unknown.code), (410, ErrorCode::Gone));
     let done = verify(&world, &token).await;
     assert_eq!(done.status, 204);
-    let session = cookie(&done.headers, "orch_session").expect("the link signs the browser in");
-    let device = cookie(&done.headers, "orch_device").unwrap();
-    let signed = refresh(&world, &format!("orch_session={}", session.value))
+    let session =
+        cookie(&done.headers, "__Host-orch_session").expect("the link signs the browser in");
+    let device = cookie(&done.headers, "__Host-orch_device").unwrap();
+    let signed = refresh(&world, &format!("__Host-orch_session={}", session.value))
         .await
         .ok();
     assert!(signed.user.email_verified);
@@ -1063,8 +1065,8 @@ async fn a_reset_link_sets_a_new_password_ends_every_session_and_makes_the_brows
     // A refused password leaves the link to be used.
     let done = reset(&world, &token, "a brand new password").await;
     assert_eq!(done.status, 204);
-    let mark = cookie(&done.headers, "orch_device").expect("the browser becomes known");
-    assert!(cookie(&done.headers, "orch_session").is_none());
+    let mark = cookie(&done.headers, "__Host-orch_device").expect("the browser becomes known");
+    assert!(cookie(&done.headers, "__Host-orch_session").is_none());
 
     // Every session ended at once.
     for signed in [&first, &second] {
@@ -1080,7 +1082,7 @@ async fn a_reset_link_sets_a_new_password_ends_every_session_and_makes_the_brows
     }
     // The old password is no more, the new one is, on the browser that reset it, while the name
     // stays locked for strangers: nothing clears a count but time.
-    let known = format!("orch_device={}", mark.value);
+    let known = format!("__Host-orch_device={}", mark.value);
     assert_eq!(
         world
             .password_login("ada", PASSWORD, "198.51.100.91", &known)
@@ -1209,12 +1211,42 @@ async fn a_new_access_token_is_asked_for_with_the_session_cookie_and_the_header_
         (no_header.status, no_header.code),
         (403, ErrorCode::AuthCsrf)
     );
+    let wrong_header = world
+        .app
+        .call(AuthRefresh, &[])
+        .header("x-orch-csrf", "wrong")
+        .header("cookie", &signed.browser())
+        .send()
+        .await
+        .problem();
+    assert_eq!(wrong_header.code, ErrorCode::AuthCsrf);
+    let duplicate = world
+        .app
+        .call(AuthLogout, &[])
+        .header("x-orch-csrf", "1")
+        .header("x-orch-csrf", "wrong")
+        .header("cookie", &signed.browser())
+        .send()
+        .await
+        .problem();
+    assert_eq!(duplicate.code, ErrorCode::AuthCsrf);
+    assert_eq!(
+        refresh(&world, &signed.browser())
+            .await
+            .ok()
+            .user
+            .user
+            .username,
+        "ada"
+    );
     let no_cookie = refresh(&world, "").await.problem();
     assert_eq!(
         (no_cookie.status, no_cookie.code),
         (401, ErrorCode::AuthRequired)
     );
-    let unknown = refresh(&world, "orch_session=ors_nobody").await.problem();
+    let unknown = refresh(&world, "__Host-orch_session=ors_nobody")
+        .await
+        .problem();
     assert_eq!(
         (unknown.status, unknown.code),
         (401, ErrorCode::AuthInvalidToken)
@@ -1223,10 +1255,10 @@ async fn a_new_access_token_is_asked_for_with_the_session_cookie_and_the_header_
     let reply = refresh(&world, &signed.browser()).await;
     assert_eq!(reply.status, 200);
     let renewed =
-        cookie(&reply.headers, "orch_session").expect("its life slides with the session's");
+        cookie(&reply.headers, "__Host-orch_session").expect("its life slides with the session's");
     assert_eq!(renewed.value, signed.session);
     assert_eq!(renewed.max_age(), Some(30 * 86_400));
-    assert!(cookie(&reply.headers, "orch_device").is_none());
+    assert!(cookie(&reply.headers, "__Host-orch_device").is_none());
     let fresh = reply.ok();
     assert_eq!(
         fresh.access_expires_at.get(),
@@ -1241,6 +1273,31 @@ async fn a_new_access_token_is_asked_for_with_the_session_cookie_and_the_header_
         .await
         .ok();
     assert_eq!(me.user.username, "ada");
+}
+
+#[tokio::test]
+async fn a_parent_domain_cookie_cannot_replace_the_host_bound_session() {
+    let world = World::new().await;
+    let ada = world.person("ada").await;
+    let attacker = world.person("attacker").await;
+    let ada = world.sign_in(&ada).await;
+    let attacker = world.sign_in(&attacker).await;
+
+    // An untrusted sibling can set the old unprefixed name for a common
+    // parent domain; it must not be used even if it appears first.
+    let cookies = format!(
+        "orch_session={}; __Host-orch_session={}",
+        attacker.session, ada.session
+    );
+    let refreshed = refresh(&world, &cookies).await.ok();
+    assert_eq!(refreshed.user.user.username, "ada");
+    assert_eq!(
+        refresh(&world, &format!("orch_session={}", attacker.session))
+            .await
+            .problem()
+            .code,
+        ErrorCode::AuthRequired
+    );
 }
 
 #[tokio::test]
@@ -1291,11 +1348,11 @@ async fn signing_out_revokes_the_session_clears_its_cookie_and_leaves_the_mark_o
         .send()
         .await;
     assert_eq!(reply.status, 204);
-    let cleared = cookie(&reply.headers, "orch_session").unwrap();
+    let cleared = cookie(&reply.headers, "__Host-orch_session").unwrap();
     assert_eq!(cleared.value, "");
     assert_eq!(cleared.max_age(), Some(0));
     assert_eq!(cleared.path(), Some("/api/v1/auth"));
-    assert!(cookie(&reply.headers, "orch_device").is_none());
+    assert!(cookie(&reply.headers, "__Host-orch_device").is_none());
 
     let token = world
         .app

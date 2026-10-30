@@ -9,6 +9,7 @@ import { ExternalLink } from 'lucide-react';
 import { Fragment, type ReactNode } from 'react';
 
 import { IdChip, NamedChip, SharedPathChip, TypedChip } from '@/features/people/NamedChip';
+import { messageLinkTarget } from '@/features/people/links';
 import { idReferenceOf, referenceOfAddress } from '@/features/people/references';
 import type { UserRef } from '@/generated/api-types';
 import { cx } from '@/ui/cx';
@@ -76,13 +77,15 @@ function Runs({ runs, mentions, mentionsAll, me, originThread }: { runs: readonl
         const written = idReferenceOf(run.href);
         if (written?.path !== undefined) return <TypedChip key={index} reference={{ kind: 'environment_file', id: written.id, path: written.path, label, ...(written.number === undefined ? {} : { line: written.number }) }} />;
         if (written !== null) return <IdChip key={index} id={written.id} {...(written.number === undefined ? {} : { number: written.number })} label={label} fallback={<span><Runs runs={run.children} mentions={mentions} mentionsAll={mentionsAll} me={me} originThread={originThread} /></span>} />;
+        const target = messageLinkTarget(run.href, true);
+        if (target === null) return <Fragment key={index}><Runs runs={run.children} mentions={mentions} mentionsAll={mentionsAll} me={me} originThread={originThread} /></Fragment>;
         const typed = referenceOfAddress(run.href);
         if (typed !== null) return <TypedChip key={index} reference={{...typed,label}} />;
         const place = placeOfAddress(run.href, location.origin);
         if (place !== null) return <NamedChip key={index} {...place} original={label} />;
-        if (originThread !== undefined && !/^https?:\/\//i.test(run.href)) return <SharedPathChip key={index} threadId={originThread} path={run.href} />;
+        if (originThread !== undefined && !/^https?:\/\//i.test(target)) return <SharedPathChip key={index} threadId={originThread} path={run.href} />;
         return (
-          <a key={index} href={run.href} target="_blank" rel="noreferrer noopener" className="inline-flex items-baseline gap-1 text-accent-text underline underline-offset-2 hover:no-underline">
+          <a key={index} href={target} target="_blank" rel="noreferrer noopener" className="inline-flex items-baseline gap-1 text-accent-text underline underline-offset-2 hover:no-underline">
             <Runs runs={run.children} mentions={mentions} mentionsAll={mentionsAll} me={me} originThread={originThread} />
             <ExternalLink size={16} aria-hidden className="shrink-0 self-center" />
           </a>

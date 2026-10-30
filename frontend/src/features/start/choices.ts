@@ -2,7 +2,7 @@
  *
  * Nothing here asks anything of the server and nothing here knows how a screen draws. The server lists, for the place,
  * every provider with the reason one cannot be used, its profiles and models, every arrangement of a profile on a
- * provider in an environment with whether it can be had, and the environments the person manages. This turns that
+ * provider in an environment with whether it can be had, and the environments the person may use or request. This turns that
  * and the person's own picks into one answer: the provider, profile, model and effort in force, the environment, the
  * arrangement that is ticked and the one the server would take if none were named, and what is in the way. A pick
  * that cannot be had any more (the provider was changed under it) is not kept; an arrangement that cannot be had is

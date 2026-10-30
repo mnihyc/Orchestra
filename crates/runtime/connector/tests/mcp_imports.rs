@@ -119,6 +119,7 @@ async fn a_server_the_harness_configured_is_found_by_name_imported_run_from_its_
         .join("mcp")
         .join(format!("{server_id}.json"));
     assert!(copy.is_file());
+    #[cfg(unix)]
     {
         use std::os::unix::fs::PermissionsExt;
         assert_eq!(

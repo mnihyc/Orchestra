@@ -325,6 +325,253 @@ async fn an_approval_still_waiting_when_its_turn_ends_is_cancelled() {
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn stop_withdraws_pending_harness_approvals_and_questions_before_the_turn_ends() {
+    let world = World::new().await;
+    let thread = world.thread("Stop before a decision").await;
+    let (start, _) = world.running_turn(thread, "Do something").await;
+    world
+        .say(thread, command_asked(start.turn_id, "stop-command"))
+        .await;
+    world.wait_state(thread, "waiting_approval").await;
+    world
+        .say(
+            thread,
+            person_question(start.turn_id, "stop-question", None),
+        )
+        .await;
+    common::eventually("both native waits are pending", || async {
+        world
+            .count(
+                "SELECT count(*) FROM approvals WHERE thread_id=$1 AND state='pending'",
+                thread,
+            )
+            .await
+            == 2
+    })
+    .await;
+    let command: Id = world
+        .scalar(
+            "SELECT id FROM approvals WHERE thread_id=$1 AND native_ref='stop-command'",
+            thread,
+        )
+        .await;
+    let question: Id = world
+        .scalar(
+            "SELECT id FROM approvals WHERE thread_id=$1 AND native_ref='stop-question'",
+            thread,
+        )
+        .await;
+    world.machine.handler.hold(CommandKind::TurnInterrupt);
+    world
+        .engine()
+        .interrupt(&Caller::session(world.ada), thread, start.turn_id)
+        .await
+        .unwrap();
+    assert_eq!(
+        world.turn_state(start.turn_id).await,
+        "running",
+        "the native turn has not ended"
+    );
+    for (id, decision) in [(command, option("allow_once")), (question, person_answer())] {
+        assert_eq!(
+            world
+                .scalar::<String>("SELECT state FROM approvals WHERE id=$1", id)
+                .await,
+            "cancelled"
+        );
+        assert!(matches!(
+            world
+                .engine()
+                .decide_approval(&Caller::session(world.ada), id, &decision)
+                .await,
+            Err(ApprovalError::AlreadyDecided)
+        ));
+    }
+    let sync = world.sync(thread).await;
+    assert_eq!(sync.thread.pending_approvals, 0);
+    let cards: Vec<_> = sync
+        .items
+        .iter()
+        .filter(|item| item.kind() == ItemKind::Approval)
+        .collect();
+    assert_eq!(cards.len(), 2);
+    assert!(
+        cards
+            .iter()
+            .all(|item| item.status == ItemStatus::Cancelled)
+    );
+    assert_eq!(world.commands.issued_of("approval.resolve"), 0);
+    world.machine.handler.release();
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn interrupting_with_a_new_or_queued_input_withdraws_native_waits_atomically() {
+    use orch_api_contract::threads::{Delivery, ThreadInputUpdateBody};
+    for change_existing in [false, true] {
+        let world = World::with_clock(std::sync::Arc::new(orch_testkit::clock::manual())).await;
+        let thread = world.thread("Interrupt a waiting question").await;
+        let (start, _) = world.running_turn(thread, "Ask").await;
+        world
+            .say(thread, command_asked(start.turn_id, "interrupt-command"))
+            .await;
+        world
+            .say(
+                thread,
+                person_question(start.turn_id, "interrupt-question", None),
+            )
+            .await;
+        common::eventually("both native waits are pending", || async {
+            world
+                .count(
+                    "SELECT count(*) FROM approvals WHERE thread_id=$1 AND state='pending'",
+                    thread,
+                )
+                .await
+                == 2
+        })
+        .await;
+        let question: Id = world
+            .scalar(
+                "SELECT id FROM approvals WHERE thread_id=$1 AND native_ref='interrupt-question'",
+                thread,
+            )
+            .await;
+        let command: Id = world
+            .scalar(
+                "SELECT id FROM approvals WHERE thread_id=$1 AND native_ref='interrupt-command'",
+                thread,
+            )
+            .await;
+        world.machine.handler.hold(CommandKind::TurnInterrupt);
+        let input = if change_existing {
+            let waiting = world
+                .engine()
+                .submit_input(
+                    &Caller::session(world.ada),
+                    thread,
+                    queued("Stop and change course"),
+                )
+                .await
+                .unwrap();
+            let mut tx = world.pool.begin().await.unwrap();
+            let principal = orch_authz::Principal::load(
+                &mut tx,
+                Caller::session(world.ada),
+                orch_types::Time::new(world.clock.now()),
+            )
+            .await
+            .unwrap();
+            world
+                .engine()
+                .update_input_guarded(
+                    tx,
+                    principal,
+                    thread,
+                    waiting.input.id,
+                    ThreadInputUpdateBody {
+                        delivery: Some(Delivery::Interrupt),
+                        ..ThreadInputUpdateBody::default()
+                    },
+                )
+                .await
+                .unwrap()
+                .input
+        } else {
+            world
+                .engine()
+                .submit_input(
+                    &Caller::session(world.ada),
+                    thread,
+                    common::interrupting("Stop and change course"),
+                )
+                .await
+                .unwrap()
+                .input
+        };
+        assert_eq!(world.turn_state(start.turn_id).await, "running");
+        assert_eq!(world.input_state(input.id).await.0, "pending");
+        for (id, decision) in [(command, option("allow_once")), (question, person_answer())] {
+            assert_eq!(
+                world
+                    .scalar::<String>("SELECT state FROM approvals WHERE id=$1", id)
+                    .await,
+                "cancelled"
+            );
+            assert!(matches!(
+                world
+                    .engine()
+                    .decide_approval(&Caller::session(world.ada), id, &decision)
+                    .await,
+                Err(ApprovalError::AlreadyDecided)
+            ));
+        }
+        assert_eq!(world.sync(thread).await.thread.pending_approvals, 0);
+        assert_eq!(world.commands.issued_of("approval.resolve"), 0);
+        world.machine.handler.release();
+    }
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn disabling_a_provider_withdraws_a_waiting_question_in_the_interrupt_transaction() {
+    use orch_access_contract::{decisions::ObjectRef, permissions::ObjectKind};
+    use orch_api_contract::resource_facts::FactTarget;
+    use orch_engine::resource_pause::ResourceStop;
+    let world = World::with_clock(std::sync::Arc::new(orch_testkit::clock::manual())).await;
+    let thread = world.thread("Pause a waiting question").await;
+    let (start, _) = world.running_turn(thread, "Ask").await;
+    world
+        .say(
+            thread,
+            person_question(start.turn_id, "resource-question", None),
+        )
+        .await;
+    world.wait_state(thread, "waiting_approval").await;
+    let approval: Id = world
+        .scalar("SELECT id FROM approvals WHERE thread_id=$1", thread)
+        .await;
+    let target = FactTarget {
+        object: ObjectRef {
+            kind: ObjectKind::Provider,
+            id: world.provider,
+        },
+        model_id: None,
+    };
+    let mut tx = world.pool.begin().await.unwrap();
+    world
+        .engine()
+        .stop_resource_in(
+            &mut tx,
+            ResourceStop {
+                target,
+                name: "Provider",
+                by: world.ada,
+                note: None,
+                deleted: false,
+            },
+            world.clock.now(),
+        )
+        .await
+        .unwrap();
+    tx.commit().await.unwrap();
+    assert_eq!(world.turn_state(start.turn_id).await, "running");
+    assert_eq!(
+        world
+            .scalar::<String>("SELECT state FROM approvals WHERE id=$1", approval)
+            .await,
+        "cancelled"
+    );
+    assert!(matches!(
+        world
+            .engine()
+            .decide_approval(&Caller::session(world.ada), approval, &person_answer())
+            .await,
+        Err(ApprovalError::AlreadyDecided)
+    ));
+    assert_eq!(world.sync(thread).await.thread.pending_approvals, 0);
+    assert_eq!(world.commands.issued_of("approval.resolve"), 0);
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn a_request_raised_again_is_one_approval_and_one_under_the_reference_of_an_earlier_turn_is_dropped()
  {
     let world = World::new().await;
@@ -418,6 +665,63 @@ async fn a_person_who_does_not_manage_the_thread_cannot_decide() {
         .scalar("SELECT state FROM approvals WHERE id = $1", approval)
         .await;
     assert_eq!(state, "pending", "a refused decision decides nothing");
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn a_manager_who_loses_access_while_a_question_is_open_cannot_answer_it() {
+    let world = World::new().await;
+    let manager = world.person("departing-manager").await;
+    let role = world.give(manager, "developer").await;
+    let thread = world.thread("A question while access changes").await;
+    let (start, _) = world.running_turn(thread, "Ask").await;
+    world
+        .say(
+            thread,
+            person_question(start.turn_id, "revoked-manager", None),
+        )
+        .await;
+    world.wait_state(thread, "waiting_approval").await;
+    let approval: Id = world
+        .scalar("SELECT id FROM approvals WHERE thread_id=$1", thread)
+        .await;
+    {
+        let mut conn = world.pool.acquire().await.unwrap();
+        let principal = orch_authz::Principal::load(
+            &mut conn,
+            Caller::session(manager),
+            orch_types::Time::new(world.clock.now()),
+        )
+        .await
+        .unwrap();
+        assert!(
+            orch_authz::nodes::check(
+                &mut conn,
+                &principal,
+                thread,
+                orch_access_contract::permissions::Permission::ThreadManage,
+                orch_authz::Act::Use,
+                orch_authz::Policy::default()
+            )
+            .await
+            .unwrap()
+            .is_allowed()
+        );
+    }
+    world.take(role).await;
+    assert!(matches!(
+        world
+            .engine()
+            .decide_approval(&Caller::session(manager), approval, &person_answer())
+            .await,
+        Err(ApprovalError::Denied(_))
+    ));
+    assert_eq!(
+        world
+            .scalar::<String>("SELECT state FROM approvals WHERE id=$1", approval)
+            .await,
+        "pending"
+    );
+    assert_eq!(world.commands.issued_of("approval.resolve"), 0);
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
@@ -705,6 +1009,81 @@ async fn a_committed_question_answer_is_delivered_once_after_the_controller_rest
     world.restart_api().await;
     meanwhile(Duration::from_millis(300)).await;
     assert_eq!(world.ran(CommandKind::ApprovalResolve), 1);
+    assert_eq!(
+        world
+            .scalar::<String>("SELECT state FROM approvals WHERE id=$1", approval)
+            .await,
+        "answered"
+    );
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn an_answer_not_yet_issued_is_not_sent_after_its_turn_ends() {
+    let world = World::new().await;
+    let thread = world.thread("An answer to a finished turn").await;
+    let (start, _) = world.running_turn(thread, "Ask").await;
+    world
+        .say(thread, person_question(start.turn_id, "late-answer", None))
+        .await;
+    world.wait_state(thread, "waiting_approval").await;
+    let approval: Id = world
+        .scalar("SELECT id FROM approvals WHERE thread_id=$1", thread)
+        .await;
+    // The person commits the answer, but no supervisor can issue it yet.
+    let stopped = world.engine();
+    stopped.stop();
+    stopped
+        .decide_approval(&Caller::session(world.ada), approval, &person_answer())
+        .await
+        .unwrap();
+    assert_eq!(world.commands.issued_of("approval.resolve"), 0);
+    world
+        .say(thread, turn_ended(start.turn_id, TurnOutcome::Completed))
+        .await;
+    world.wait_turn(start.turn_id, "completed").await;
+    world.restart_api().await;
+    common::eventually("the undeliverable answer is cancelled", || async {
+        world
+            .scalar::<String>("SELECT state FROM approvals WHERE id=$1", approval)
+            .await
+            == "cancelled"
+    })
+    .await;
+    assert_eq!(world.commands.issued_of("approval.resolve"), 0);
+    let saved: serde_json::Value = world
+        .scalar("SELECT decision FROM approvals WHERE id=$1", approval)
+        .await;
+    assert_eq!(saved, json!({"answers":{"branch":["main"]}}));
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn a_delivered_answer_stays_answered_after_its_turn_ends_and_the_controller_restarts() {
+    let world = World::new().await;
+    let thread = world.thread("An answer already delivered").await;
+    let (start, _) = world.running_turn(thread, "Ask").await;
+    world
+        .say(
+            thread,
+            person_question(start.turn_id, "answered-before-end", None),
+        )
+        .await;
+    world.wait_state(thread, "waiting_approval").await;
+    let approval: Id = world
+        .scalar("SELECT id FROM approvals WHERE thread_id=$1", thread)
+        .await;
+    world
+        .engine()
+        .decide_approval(&Caller::session(world.ada), approval, &person_answer())
+        .await
+        .unwrap();
+    world.wait_ran(CommandKind::ApprovalResolve, 1).await;
+    world
+        .say(thread, turn_ended(start.turn_id, TurnOutcome::Completed))
+        .await;
+    world.wait_turn(start.turn_id, "completed").await;
+    world.restart_api().await;
+    meanwhile(Duration::from_millis(300)).await;
+    assert_eq!(world.commands.issued_of("approval.resolve"), 1);
     assert_eq!(
         world
             .scalar::<String>("SELECT state FROM approvals WHERE id=$1", approval)

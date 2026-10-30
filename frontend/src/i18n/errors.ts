@@ -32,6 +32,12 @@ export function apiErrorSentence(code: ErrorCode, status: number, t: TFunction =
 }
 
 /** Keep a useful field reason and its separate path; never turn a path or code into prose. */
-export function fieldErrorSentence(message: string, t: TFunction = i18n.t): string {
+export function fieldErrorSentence(message: string, t: TFunction = i18n.t, path?: string): string {
+  if (i18n.isInitialized && path === 'environment.use'
+    && (message === 'the selected environment is unavailable'
+      || message === 'the environment is not there or is being removed')
+    && hasErrorSentence('errors.environment.selected_unavailable', currentLocale())) {
+    return t('errors.environment.selected_unavailable');
+  }
   return message.trim() !== '' && !hasErrorCode(message) ? message : t('errors.request.invalid');
 }

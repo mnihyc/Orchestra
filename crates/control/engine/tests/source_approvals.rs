@@ -93,6 +93,26 @@ async fn plan_decision(
 async fn told(world: &World, approval: Id) -> Vec<Id> {
     sqlx::query_scalar("SELECT user_id FROM notifications WHERE approval_id=$1 AND kind IN ('approval.requested','access.requested') ORDER BY user_id").bind(approval).fetch_all(world.pool.pool()).await.unwrap()
 }
+
+async fn may_decide(world: &World, approval: Id, person: Id) -> bool {
+    let mut conn = world.pool.acquire().await.unwrap();
+    let row = orch_db::queries::approvals::approval(&mut conn, approval)
+        .await
+        .unwrap()
+        .unwrap();
+    let principal = Principal::load(
+        &mut conn,
+        Caller::session(person),
+        Time::new(world.clock.now()),
+    )
+    .await
+    .unwrap();
+    world
+        .engine()
+        .may_decide_source_request(&mut conn, &principal, &row)
+        .await
+        .unwrap()
+}
 async fn settled(world: &World, approval: Id, by: Id, state: &str) {
     let row =
         orch_db::queries::approvals::approval(&mut world.pool.acquire().await.unwrap(), approval)
@@ -184,6 +204,65 @@ async fn two_plan_deciders_share_one_outcome_and_only_one_follow_up_is_queued() 
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn a_plan_proceeds_as_the_person_who_approved_it() {
+    let world = World::new().await;
+    let writer = world.person("plan-writer").await;
+    world.give(writer, "interactor").await;
+    let thread = world.thread("Plan authority").await;
+    let item = proposal(&world, thread).await;
+    let chosen = plan_decision(&world, writer, thread, item, true)
+        .await
+        .unwrap();
+    assert_eq!(chosen.input.author.as_ref().unwrap().id, writer);
+    assert_eq!(chosen.input.run_as, None);
+    assert_eq!(chosen.decision.decided_by.as_ref().unwrap().id, writer);
+    let start = world.turn_start(thread, 1).await;
+    assert!(!start.plan);
+    let responsible: Option<Id> = world
+        .scalar(
+            "SELECT audit_for_user_id FROM turns WHERE id=$1",
+            start.turn_id,
+        )
+        .await;
+    assert_eq!(responsible, Some(writer));
+    world.say(thread, turn_began(start.turn_id)).await;
+    world
+        .say(
+            thread,
+            turn_ended(
+                start.turn_id,
+                orch_link_contract::events::TurnOutcome::Completed,
+            ),
+        )
+        .await;
+    world.wait_state(thread, "idle").await;
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn a_plan_proceed_without_the_writers_model_use_waits_for_an_authorized_person() {
+    let world = World::new().await;
+    let writer = world.person("plan-writer-without-model").await;
+    world.give(writer, "interactor").await;
+    let thread = world.thread("Plan without model use").await;
+    let item = proposal(&world, thread).await;
+    world.access.deny_model(writer, common::MODEL);
+    let chosen = plan_decision(&world, writer, thread, item, true)
+        .await
+        .unwrap();
+    assert_eq!(chosen.input.author.as_ref().unwrap().id, writer);
+    assert_eq!(chosen.input.run_as, None);
+    assert_eq!(
+        world.input_state(chosen.input.id).await,
+        ("pending".into(), Some("model_use_required".into()))
+    );
+    assert_eq!(
+        world.turn_starts(thread).len(),
+        1,
+        "only the earlier plan turn ran"
+    );
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn two_model_users_may_run_one_held_input_once_and_its_author_stays_named() {
     let world = World::new().await;
     let bo = world.person("bob").await;
@@ -234,6 +313,54 @@ async fn two_model_users_may_run_one_held_input_once_and_its_author_stays_named(
         )
         .await;
     assert_eq!(responsible, Some(winner));
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn a_held_input_decision_rechecks_the_model_after_the_card_was_opened() {
+    let world = World::new().await;
+    let author = world.person("message-author").await;
+    let approver = world.person("model-approver").await;
+    world.give(author, "interactor").await;
+    world.give(approver, "interactor").await;
+    let thread = world.thread("Model changed while waiting").await;
+    world.access.deny(author);
+    let submitted = world
+        .engine()
+        .submit_input(
+            &Caller::session(author),
+            thread,
+            queued("Please do the work"),
+        )
+        .await
+        .unwrap();
+    let approval = submitted.input.approval_id.unwrap();
+    world.access.deny_model(approver, "other-model");
+    assert!(may_decide(&world, approval, approver).await);
+    world.set(thread, "agent.model", json!("other-model")).await;
+    assert!(!may_decide(&world, approval, approver).await);
+    assert!(matches!(
+        world
+            .engine()
+            .run_input(&Caller::session(approver), thread, submitted.input.id)
+            .await,
+        Err(InputError::Denied(_))
+    ));
+    assert_eq!(world.input_run_as(submitted.input.id).await, None);
+    assert_eq!(
+        world
+            .scalar::<String>("SELECT state FROM approvals WHERE id=$1", approval)
+            .await,
+        "pending"
+    );
+    world.set(thread, "agent.model", json!(common::MODEL)).await;
+    assert!(may_decide(&world, approval, approver).await);
+    let accepted = world
+        .engine()
+        .run_input(&Caller::session(approver), thread, submitted.input.id)
+        .await
+        .unwrap();
+    assert_eq!(accepted.author.as_ref().unwrap().id, author);
+    assert_eq!(accepted.run_as.as_ref().unwrap().id, approver);
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]

@@ -405,6 +405,12 @@ pub struct MachineFacts {
     pub memory_bytes: i64,
     /// The harnesses found on it.
     pub harnesses: Vec<MachineFactsHarness>,
+    /// Programs found by search which the machine's policy has not confirmed; absent before a search.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub discovered_harnesses: Option<Vec<MachineFactsHarness>>,
+    /// Harness kinds included in that search, including those for which no program was found.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub searched_harness_kinds: Option<Vec<String>>,
     /// The harness kinds its connector can drive.
     pub adapters: Vec<MachineFactsAdapter>,
     /// The implementations from outside registered on it.

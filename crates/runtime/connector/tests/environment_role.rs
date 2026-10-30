@@ -18,6 +18,86 @@ use orch_types::new_id;
 use rig_environment::EnvRig;
 use serde_json::json;
 
+#[cfg(target_os = "linux")]
+#[tokio::test]
+async fn a_verified_workspace_stays_bound_when_its_name_is_swapped_before_attachment() {
+    use orch_envhost::blobs::MemoryBlobs;
+    use orch_envhost::environment::{EnvHost, Gates, HostSettings, Reports};
+    use orch_link_contract::policy::LocalPolicy;
+    use std::sync::Arc;
+
+    let owner = tempfile::tempdir().unwrap();
+    let outside = tempfile::tempdir().unwrap();
+    let offered = owner.path().join("offered");
+    let workspace = offered.join("workspace");
+    std::fs::create_dir_all(&workspace).unwrap();
+    std::fs::write(workspace.join("marker"), b"the offered directory").unwrap();
+    std::fs::write(outside.path().join("marker"), b"outside data").unwrap();
+    let policy = LocalPolicy {
+        environment_roots: vec![offered.to_string_lossy().into_owned()],
+        ..Default::default()
+    };
+    let (binding, held) =
+        orch_connector_core::policy::hold_environment_directory(&policy, &workspace).unwrap();
+    held.require_writable().unwrap();
+
+    // The policy returned; replace its old name before the host starts the attachment.
+    std::fs::rename(&workspace, offered.join("moved")).unwrap();
+    std::os::unix::fs::symlink(outside.path(), &workspace).unwrap();
+    let mut settings = HostSettings::connected(owner.path().join("connector"), vec![offered]);
+    settings.gates = Gates::OPEN;
+    let store = MemoryBlobs::new();
+    let (reports, _receiver) = Reports::channel(32);
+    let host = EnvHost::new(
+        settings,
+        Arc::new(orch_types::SystemClock),
+        reports,
+        Arc::new(store.clone()),
+        Vec::new(),
+    );
+    let environment_id = new_id();
+    host.env_attach_with_root(
+        &EnvAttach {
+            environment_id,
+            workspace_root: Some(binding.path),
+            data_sources: None,
+            resources: None,
+            data_generation: None,
+            storage: None,
+            ignore: Vec::new(),
+            index: IndexMode::Live,
+            mounts: None,
+            variables: BTreeMap::new(),
+            secrets: BTreeMap::new(),
+        },
+        &BTreeMap::new(),
+        Some(held),
+    )
+    .await
+    .unwrap();
+    let fetched = host
+        .fs_fetch(
+            &FsFetch {
+                environment_id,
+                mount: None,
+                path: "marker".into(),
+                expect: None,
+                max_bytes: None,
+            },
+            &store,
+        )
+        .await
+        .unwrap();
+    assert_eq!(
+        store.get_bytes(&fetched.hash).unwrap().as_ref(),
+        b"the offered directory"
+    );
+    assert_eq!(
+        std::fs::read(outside.path().join("marker")).unwrap(),
+        b"outside data"
+    );
+}
+
 #[tokio::test]
 async fn a_restart_reconstructs_attachment_and_executor_without_new_start_commands_and_detach_stays_detached()
  {
@@ -285,7 +365,10 @@ async fn a_path_outside_the_workspace_is_refused_whatever_the_command() {
     let workspace = rig.directory("work");
     let outside = rig.directory("outside");
     std::fs::write(outside.join("secret.txt"), "not yours").unwrap();
+    #[cfg(unix)]
     std::os::unix::fs::symlink(outside.join("secret.txt"), workspace.join("leak")).unwrap();
+    #[cfg(windows)]
+    std::os::windows::fs::symlink_file(outside.join("secret.txt"), workspace.join("leak")).unwrap();
     rig.start().await;
     rig.attach(&workspace).await;
     let environment_id = rig.environment;
@@ -522,7 +605,10 @@ async fn a_tree_is_snapshotted_and_materialized_in_another_environment_with_its_
     std::fs::create_dir_all(source.join("src/deep")).unwrap();
     std::fs::write(source.join("a.txt"), "first").unwrap();
     std::fs::write(source.join("src/deep/b.txt"), "second ".repeat(1000)).unwrap();
+    #[cfg(unix)]
     std::os::unix::fs::symlink("a.txt", source.join("link")).unwrap();
+    #[cfg(windows)]
+    std::os::windows::fs::symlink_file("a.txt", source.join("link")).unwrap();
     let target = rig.directory("target");
     rig.start().await;
     rig.attach(&source).await;

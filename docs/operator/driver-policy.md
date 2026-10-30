@@ -31,6 +31,11 @@ builds = false
 archives = false
 ```
 
+Docker template bind sources must resolve inside this machine's
+`environment.roots`. A symlink to a location outside those roots is refused.
+Template cache volumes cannot use names beginning with `orch-`, which are
+reserved for managed resources. Use a separate name for an external cache.
+
 Builds and archives also require unrestricted image and registry rules because
 their fetched or loaded image identities cannot all be checked in advance.
 Older `drivers.docker` and `drivers.host` policy keys remain readable, preserving

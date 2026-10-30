@@ -142,6 +142,42 @@ pub enum Judgement {
     Lacks(Vec<Permission>),
 }
 
+/// The common row-giving rule for a current standing, including standings such as people chats
+/// that are not represented by a permission page. `holds` must include the caller's scope.
+/// When `in_forms` is true, a defaults share retains the environment forms the giver holds.
+#[must_use]
+pub fn judge_rows(
+    may_share: bool,
+    in_forms: bool,
+    rows: &[(Permission, Profile)],
+    holds: impl Fn(Permission, Profile) -> bool,
+) -> Judgement {
+    if !may_share {
+        return Judgement::KeptToOwners;
+    }
+    let mut keep = Vec::new();
+    let mut lacks = Vec::new();
+    for (permission, profile) in rows {
+        if holds(*permission, *profile) {
+            keep.push((*permission, *profile));
+            continue;
+        }
+        let other_form_held = in_forms
+            && permission.profiles()
+            && rows.iter().any(|(other, form)| {
+                other == permission && form != profile && holds(*other, *form)
+            });
+        if !other_form_held && !lacks.contains(permission) {
+            lacks.push(*permission);
+        }
+    }
+    if lacks.is_empty() {
+        Judgement::Allowed { rows: keep }
+    } else {
+        Judgement::Lacks(lacks)
+    }
+}
+
 /// The giver on one page: who they are there, and what the place lets them give.
 #[derive(Debug)]
 pub struct Giving<'a, 'p> {
@@ -359,31 +395,12 @@ impl<'a, 'p> Giving<'a, 'p> {
     /// giver is one.
     #[must_use]
     pub fn judge(&self, rows: &[(Permission, Profile)]) -> Judgement {
-        if !self.may_share() {
-            return Judgement::KeptToOwners;
-        }
-        let in_forms = self.acting == Acting::Share && self.page == PageKind::Defaults;
-        let mut keep: Vec<(Permission, Profile)> = Vec::new();
-        let mut lacks: Vec<Permission> = Vec::new();
-        for (permission, profile) in rows {
-            if self.within_bound(*permission, *profile) {
-                keep.push((*permission, *profile));
-                continue;
-            }
-            let other_form_held = in_forms
-                && permission.profiles()
-                && rows.iter().any(|(other, form)| {
-                    other == permission && form != profile && self.within_bound(*other, *form)
-                });
-            if !other_form_held && !lacks.contains(permission) {
-                lacks.push(*permission);
-            }
-        }
-        if lacks.is_empty() {
-            Judgement::Allowed { rows: keep }
-        } else {
-            Judgement::Lacks(lacks)
-        }
+        judge_rows(
+            self.may_share(),
+            self.acting == Acting::Share && self.page == PageKind::Defaults,
+            rows,
+            |permission, profile| self.within_bound(permission, profile),
+        )
     }
 
     /// The role the giver holds in the place, where the thing is one.

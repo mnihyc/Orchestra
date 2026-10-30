@@ -141,7 +141,8 @@ function readHtml(source) {
   // ---------------------------------------------------------------- inside a line
   const allowedLink = (href) => /^(?:https?:\/\/|mailto:)/i.test(href) || href.startsWith('#') || (href.startsWith('/') && !href.startsWith('//'));
   /** A link that goes nowhere a script could: an address with no scheme at all is a path, kept for the caller to settle. */
-  const keptLink = (href) => allowedLink(href) || (!/^[a-z][a-z\d+.-]*:/i.test(href) && !href.startsWith('//') && !href.startsWith('\\') && href !== '' && !/[\u0000-\u001f]/.test(href));
+  const keptLink = (href) => !/[\u0000-\u001f\u007f-\u009f]/.test(href) && !href.startsWith('/\\')
+    && (allowedLink(href) || (!/^[a-z][a-z\d+.-]*:/i.test(href) && !href.startsWith('//') && !href.startsWith('\\') && href !== ''));
   const imageOf = (node) => {
     const src = (node.attrs.src ?? '').trim();
     if (src === '') return null;

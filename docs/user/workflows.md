@@ -58,6 +58,12 @@ live connection. If a colleague answers first, the card shows that result;
 your late answer does not overwrite it. An agent's port or capability request
 has its own plan and effects, which must be read before confirming.
 
+When you share a direct or group chat with agents, the live share keeps the access
+that your current account or token can give. A request for writing becomes a read-only
+share if you can only read; download is included only if you may export. A chat copy
+requires export because it contains the chat's contents. If you change a share, safe
+removals and shorter ends can still take effect even if you cannot extend other access.
+
 ## Share a thing or a place
 
 Share shows what the person or agent will receive. A thread or document is one
@@ -199,7 +205,11 @@ Files shows the environment you can access, with code/text and other viewers.
 [Files and attachments](files-and-attachments.md) explains previews, chip sizes and what reaches an agent.
 Edits are conflict-aware. HTML is displayed as code; previewing a file does not
 execute it. Shells belong to their opener; an environment manager can close
-them. Their final retained output follows that place's recording and masking
+them. If Orch cannot end a shell, it reports the failure and keeps the terminal
+in the list. On Windows, the process list omits children whose identity cannot
+be distinguished from a reused process number, and Orch refuses to stop an
+ambiguous tree. A process started during shutdown can escape the final process
+check. Their final retained output follows that place's recording and masking
 policy. Files, home, processes, browser profiles and displays are shared by
 threads in the same environment, so a directory does not isolate their work.
 
@@ -233,7 +243,8 @@ the plan blocks that request; it does not silently omit the selected content.
 The tree shows chats and documents with their places, allows unrelated branches
 to fold, and can focus on your work or one place. Stars and recents help return
 to it. Activity can summarize a place's immediate contents or expand through its
-descendants. Archive pauses old work; deleted content remains restorable until
-its retention expires. Authorized inspection of retained content does not
+descendants. Archive pauses old work; a deleted place and the work deleted with it remain
+restorable until the date shown, even if the system's retention setting is shortened.
+Authorized inspection of retained content does not
 require restoring it first. [Finding things](finding-things.md#search) explains
 the shared search and the finder.

@@ -2271,6 +2271,52 @@ pub async fn move_member(
     by: Id,
     at: DateTime<Utc>,
 ) -> Result<String, DbError> {
+    move_member_with_choice(conn, root, user, from, to, role, true, by, at).await
+}
+
+/// Moves a member, preserving all current domain grants when no new role was chosen.
+#[expect(
+    clippy::too_many_arguments,
+    reason = "one act of one person between two places, by one person, at one moment"
+)]
+pub async fn move_member_with_choice(
+    conn: &mut Conn,
+    root: Id,
+    user: Id,
+    from: Id,
+    to: Id,
+    role: &str,
+    replace_role: bool,
+    by: Id,
+    at: DateTime<Utc>,
+) -> Result<String, DbError> {
+    // A domain can have a lasting role and shorter grants beside it. Keep the ends of the
+    // grants that move, so moving the person does not silently make a temporary role lasting.
+    let source: Vec<(String, Option<DateTime<Utc>>, String)> = sqlx::query_as(
+        "SELECT role, expires_at, note FROM node_roles
+          WHERE node_id = $1 AND subject_kind = 'user' AND subject_id = $2 AND removed_at IS NULL
+            AND (expires_at IS NULL OR expires_at > $3)
+          ORDER BY CASE role WHEN 'admin' THEN 4 WHEN 'developer' THEN 3 WHEN 'interactor' THEN 2 ELSE 1 END DESC,
+                   expires_at DESC NULLS FIRST",
+    )
+    .bind(from)
+    .bind(user)
+    .bind(at)
+    .fetch_all(&mut *conn)
+    .await?;
+    let moving = if replace_role || source.is_empty() {
+        let chosen = source
+            .iter()
+            .find(|(held, _, _)| held == role)
+            .or_else(|| source.first());
+        vec![(
+            role.to_owned(),
+            chosen.and_then(|(_, end, _)| *end),
+            chosen.map_or_else(String::new, |(_, _, note)| note.clone()),
+        )]
+    } else {
+        source
+    };
     sqlx::query(
         "UPDATE node_roles SET removed_at = $4, removed_by = $3, revision = revision + 1
           WHERE node_id = $1 AND subject_kind = 'user' AND subject_id = $2 AND removed_at IS NULL",
@@ -2281,39 +2327,77 @@ pub async fn move_member(
     .bind(at)
     .execute(&mut *conn)
     .await?;
-    let held: Option<(Id, String)> = sqlx::query_as(
-        "SELECT id, role FROM node_roles
-          WHERE node_id = $1 AND subject_kind = 'user' AND subject_id = $2 AND removed_at IS NULL",
-    )
-    .bind(to)
-    .bind(user)
-    .fetch_optional(&mut *conn)
-    .await?;
-    let now_held = match held {
-        None => {
+    for (moving_role, end, note) in moving {
+        let held: Vec<(Id, String, Option<DateTime<Utc>>)> = sqlx::query_as(
+            "SELECT id, role, expires_at FROM node_roles
+              WHERE node_id = $1 AND subject_kind = 'user' AND subject_id = $2 AND removed_at IS NULL",
+        )
+        .bind(to)
+        .bind(user)
+        .fetch_all(&mut *conn)
+        .await?;
+        let lasting = held.iter().find(|(_, _, end)| end.is_none());
+        if lasting.is_some_and(|(_, existing, _)| role_rank(existing) >= role_rank(&moving_role)) {
+            continue;
+        }
+        let same = held
+            .iter()
+            .find(|(_, existing, _)| *existing == moving_role);
+        if end.is_none()
+            && let Some((lasting_id, _, _)) = lasting
+        {
+            if let Some((same_id, _, _)) = same {
+                sqlx::query("UPDATE node_roles SET removed_at = $2, removed_by = $3, revision = revision + 1 WHERE id = $1")
+                    .bind(same_id).bind(at).bind(by).execute(&mut *conn).await?;
+            }
+            sqlx::query("UPDATE node_roles SET role = $2, revision = revision + 1 WHERE id = $1")
+                .bind(lasting_id)
+                .bind(&moving_role)
+                .execute(&mut *conn)
+                .await?;
+        } else if let Some((same_id, _, existing_end)) = same {
+            let extend = match (existing_end, end) {
+                (None, _) => false,
+                (Some(_), None) => true,
+                (Some(before), Some(after)) => after > *before,
+            };
+            if extend {
+                sqlx::query(
+                    "UPDATE node_roles SET expires_at = $2, revision = revision + 1 WHERE id = $1",
+                )
+                .bind(same_id)
+                .bind(end)
+                .execute(&mut *conn)
+                .await?;
+            }
+        } else {
             sqlx::query(
-                "INSERT INTO node_roles (id, node_id, subject_kind, subject_id, role, created_by, created_at)
-                 VALUES (gen_random_uuid(), $1, 'user', $2, $3, $4, $5)",
+                "INSERT INTO node_roles (id, node_id, subject_kind, subject_id, role, expires_at, note, created_by, created_at)
+                 VALUES (gen_random_uuid(), $1, 'user', $2, $3, $4, $5, $6, $7)",
             )
             .bind(to)
             .bind(user)
-            .bind(role)
+            .bind(&moving_role)
+            .bind(end)
+            .bind(&note)
             .bind(by)
             .bind(at)
             .execute(&mut *conn)
             .await?;
-            role.to_owned()
         }
-        Some((id, existing)) if role_rank(&existing) < role_rank(role) => {
-            sqlx::query("UPDATE node_roles SET role = $2, revision = revision + 1 WHERE id = $1")
-                .bind(id)
-                .bind(role)
-                .execute(&mut *conn)
-                .await?;
-            role.to_owned()
-        }
-        Some((_, existing)) => existing,
-    };
+    }
+    let now_held: String = sqlx::query_scalar(
+        "SELECT role FROM node_roles
+          WHERE node_id = $1 AND subject_kind = 'user' AND subject_id = $2 AND removed_at IS NULL
+            AND (expires_at IS NULL OR expires_at > $3)
+          ORDER BY CASE role WHEN 'admin' THEN 4 WHEN 'developer' THEN 3 WHEN 'interactor' THEN 2 ELSE 1 END DESC
+          LIMIT 1",
+    )
+    .bind(to)
+    .bind(user)
+    .bind(at)
+    .fetch_one(&mut *conn)
+    .await?;
     sqlx::query(
         "UPDATE org_members SET domain_id = $3, moved_at = $4, moved_by = $5
           WHERE org_id = $1 AND user_id = $2",

@@ -39,6 +39,9 @@ const WINDOW_BYTES: u64 = 256 * 1024;
 /// The size of a tar header block, which also settles whether a stream is a tar.
 const TAR_BLOCK_BYTES: usize = 512;
 
+/// Limit one expanded read so a long skip rechecks its deadline without excessive store reads.
+const TAR_READ_CHUNK_BYTES: usize = 64 * 1024;
+
 /// Where the `ustar` signature lies in a header block.
 const TAR_MAGIC_OFFSET: usize = 257;
 
@@ -100,6 +103,37 @@ pub enum ArchiveError {
 
 fn unreadable(error: impl std::fmt::Display) -> ArchiveError {
     ArchiveError::Unreadable(error.to_string())
+}
+
+fn read_failure(error: std::io::Error) -> ArchiveError {
+    if error.kind() == std::io::ErrorKind::TimedOut {
+        ArchiveError::Timeout
+    } else {
+        ArchiveError::Failed(error.to_string())
+    }
+}
+
+/// Checks the same deadline while a TAR reader skips or expands an entry.
+struct DeadlineReader<R> {
+    inner: R,
+    deadline: Instant,
+}
+
+impl<R: Read> Read for DeadlineReader<R> {
+    fn read(&mut self, buffer: &mut [u8]) -> std::io::Result<usize> {
+        if buffer.is_empty() {
+            return Ok(0);
+        }
+        if Instant::now() >= self.deadline {
+            return Err(std::io::Error::from(std::io::ErrorKind::TimedOut));
+        }
+        let length = buffer.len().min(TAR_READ_CHUNK_BYTES);
+        let read = self.inner.read(&mut buffer[..length])?;
+        if Instant::now() >= self.deadline {
+            return Err(std::io::Error::from(std::io::ErrorKind::TimedOut));
+        }
+        Ok(read)
+    }
 }
 
 // ---------------------------------------------------------------- the blob as a file
@@ -524,7 +558,10 @@ fn list_tar(
     children: &mut Children,
     deadline: Instant,
 ) -> Result<bool, ArchiveError> {
-    let mut archive = tar::Archive::new(reader);
+    let mut archive = tar::Archive::new(DeadlineReader {
+        inner: reader,
+        deadline,
+    });
     let entries = archive.entries().map_err(unreadable)?;
     for entry in entries {
         if Instant::now() >= deadline {
@@ -746,8 +783,14 @@ pub async fn documents(
                 }
             }
             Shape::Tar(compression) => {
-                let mut archive = tar::Archive::new(decompress(open(), compression)?);
+                let mut archive = tar::Archive::new(DeadlineReader {
+                    inner: decompress(open(), compression)?,
+                    deadline,
+                });
                 for (index, entry) in archive.entries().map_err(unreadable)?.enumerate() {
+                    if Instant::now() >= deadline {
+                        return Err(ArchiveError::Timeout);
+                    }
                     if index >= most {
                         return Err(unreadable(format!(
                             "an import archive holds at most {most} entries"
@@ -790,7 +833,7 @@ fn read_bounded(reader: &mut dyn Read, entry: &str, limit: u64) -> Result<Vec<u8
     reader
         .take(limit + 1)
         .read_to_end(&mut bytes)
-        .map_err(|error| ArchiveError::Failed(error.to_string()))?;
+        .map_err(read_failure)?;
     if bytes.len() as u64 > limit {
         return Err(too_large(entry, limit));
     }
@@ -828,7 +871,10 @@ fn read_tar(
     limit: u64,
     deadline: Instant,
 ) -> Result<Vec<u8>, ArchiveError> {
-    let mut archive = tar::Archive::new(reader);
+    let mut archive = tar::Archive::new(DeadlineReader {
+        inner: reader,
+        deadline,
+    });
     for entry in archive.entries().map_err(unreadable)? {
         if Instant::now() >= deadline {
             return Err(ArchiveError::Timeout);
@@ -852,7 +898,11 @@ fn read_tar(
         if size > limit {
             return Err(too_large(wanted, limit));
         }
-        return read_bounded(&mut entry, wanted, limit);
+        let result = read_bounded(&mut entry, wanted, limit);
+        if Instant::now() >= deadline {
+            return Err(ArchiveError::Timeout);
+        }
+        return result;
     }
     Err(ArchiveError::NotFound(wanted.to_owned()))
 }
@@ -1131,6 +1181,60 @@ mod tests {
                 limit: 50
             }
         );
+    }
+
+    #[test]
+    fn a_tar_scan_stops_while_skipping_an_entry_when_its_time_runs_out() {
+        use std::sync::atomic::{AtomicUsize, Ordering};
+
+        struct Delayed {
+            source: std::io::Cursor<Vec<u8>>,
+            read: Arc<AtomicUsize>,
+            deadline: Instant,
+            delayed: bool,
+        }
+
+        impl Read for Delayed {
+            fn read(&mut self, buffer: &mut [u8]) -> std::io::Result<usize> {
+                if !self.delayed && self.source.position() >= TAR_BLOCK_BYTES as u64 {
+                    self.delayed = true;
+                    std::thread::sleep(
+                        self.deadline.saturating_duration_since(Instant::now())
+                            + Duration::from_millis(5),
+                    );
+                }
+                let length = buffer.len().min(TAR_BLOCK_BYTES);
+                let count = self.source.read(&mut buffer[..length])?;
+                self.read.fetch_add(count, Ordering::Relaxed);
+                Ok(count)
+            }
+        }
+
+        let skipped = vec![0_u8; 128 * 1024];
+        let bytes = tar_of(&[("skip.bin", skipped.as_slice()), ("wanted.txt", &b"ok"[..])]);
+        for listing in [false, true] {
+            let deadline = Instant::now() + Duration::from_millis(200);
+            let read = Arc::new(AtomicUsize::new(0));
+            let reader = Box::new(Delayed {
+                source: std::io::Cursor::new(bytes.clone()),
+                read: Arc::clone(&read),
+                deadline,
+                delayed: false,
+            });
+            if listing {
+                let mut children = Children::new(Some("wanted"), 10);
+                assert!(list_tar(reader, &mut children, deadline).unwrap());
+            } else {
+                assert_eq!(
+                    read_tar(reader, "wanted.txt", 10, deadline),
+                    Err(ArchiveError::Timeout)
+                );
+            }
+            assert!(
+                read.load(Ordering::Relaxed) < skipped.len() / 2,
+                "the expired scan must not consume the skipped entry"
+            );
+        }
     }
 
     #[tokio::test(flavor = "multi_thread")]

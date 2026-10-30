@@ -5,6 +5,7 @@
     reason = "a test fails by panicking"
 )]
 
+mod desk;
 mod places;
 mod support;
 
@@ -13,14 +14,148 @@ use orch_api_contract::common::ErrorCode;
 use orch_api_contract::common::PageQuery;
 use orch_api_contract::nodes::{Node, NodeGet, NodeKind};
 use orch_api_contract::ownership::{
-    NodeDelete, NodeDeleteBody, NodeDeleteMembers, NodeDeleted, NodeDeletedList, NodeRestore,
-    NodeTransfer, OrgDeletedList, TransferBody,
+    NodeDelete, NodeDeleteBody, NodeDeleteMembers, NodeDeletePreview, NodeDeleted, NodeDeletedList,
+    NodeRestore, NodeTransfer, OrgDeletedList, TransferBody,
 };
 use orch_types::Id;
 use places::{
     Who, children, join, make_department, make_org, make_project, make_topic, person, read,
 };
 use support::World;
+
+fn with_shorter_retention(world: &World) -> orch_api_core::testing::TestApp {
+    let mut config = orch_config::ServerConfig::default();
+    config.retention.soft_delete_days = 1;
+    let mut registry = orch_api_core::registry::Registry::new();
+    orch_api_core::routes::mount(&mut registry);
+    orch_api_core::testing::TestApp::with_config(
+        orch_db::Db::from_pool(world.db.pool.clone()),
+        world.app.clock.clone(),
+        registry,
+        config,
+    )
+}
+
+#[tokio::test]
+async fn restoring_an_unreadable_version_leaves_the_current_document_untouched() {
+    use orch_api_contract::documents::{DocumentVersionRestore, VersionCause};
+    use orch_db::queries::documents::{self, history};
+
+    let desk = desk::Desk::new().await;
+    let document = desk.make(&desk.ada, "Notes").await.base.id;
+    let block = desk
+        .paragraphs(&desk.ada, document, &["Earlier"])
+        .await
+        .remove(0);
+    let mut tx = desk.world.db.pool.begin().await.unwrap();
+    let row = documents::lock(&mut tx, document).await.unwrap().unwrap();
+    assert_eq!(
+        history::cut(&mut tx, &row, VersionCause::Window, desk.world.now())
+            .await
+            .unwrap(),
+        1
+    );
+    tx.commit().await.unwrap();
+    desk.world.advance(Duration::seconds(1));
+    desk.write(&desk.ada, document, vec![desk::rewrite(&block, "Newer")])
+        .await
+        .ok();
+    sqlx::query(
+        "UPDATE document_versions SET whole=jsonb_set(whole, '{0,position}', 'null'::jsonb)
+        WHERE document_id=$1 AND version=1",
+    )
+    .bind(document)
+    .execute(&desk.world.db.pool)
+    .await
+    .unwrap();
+
+    let refused = desk
+        .world
+        .app
+        .call(DocumentVersionRestore, &[&document, &1])
+        .token(&desk.ada.token)
+        .send()
+        .await;
+    assert_eq!(
+        refused.status, 500,
+        "an unreadable version is not a partial restore"
+    );
+    assert_eq!(desk.words(&desk.ada, document).await, ["Newer"]);
+    let versions: i64 =
+        sqlx::query_scalar("SELECT count(*) FROM document_versions WHERE document_id=$1")
+            .bind(document)
+            .fetch_one(&desk.world.db.pool)
+            .await
+            .unwrap();
+    assert_eq!(versions, 1, "a refused restore does not cut a new version");
+}
+
+#[tokio::test]
+async fn restoring_a_malformed_version_delta_leaves_newer_work_untouched() {
+    use orch_api_contract::documents::{DocumentVersionRestore, VersionCause};
+    use orch_db::queries::documents::{self, history};
+
+    let desk = desk::Desk::new().await;
+    let document = desk.make(&desk.ada, "Notes").await.base.id;
+    let first = desk
+        .paragraphs(&desk.ada, document, &["First"])
+        .await
+        .remove(0);
+    let mut tx = desk.world.db.pool.begin().await.unwrap();
+    let row = documents::lock(&mut tx, document).await.unwrap().unwrap();
+    history::cut(&mut tx, &row, VersionCause::Window, desk.world.now())
+        .await
+        .unwrap();
+    tx.commit().await.unwrap();
+    desk.world.advance(Duration::seconds(1));
+    let second = desk
+        .write(&desk.ada, document, vec![desk::rewrite(&first, "Second")])
+        .await
+        .ok()
+        .blocks
+        .into_iter()
+        .find(|block| block.id == first.id)
+        .unwrap();
+    let mut tx = desk.world.db.pool.begin().await.unwrap();
+    let row = documents::lock(&mut tx, document).await.unwrap().unwrap();
+    assert_eq!(
+        history::cut(&mut tx, &row, VersionCause::Window, desk.world.now())
+            .await
+            .unwrap(),
+        2
+    );
+    tx.commit().await.unwrap();
+    desk.world.advance(Duration::seconds(1));
+    desk.write(&desk.ada, document, vec![desk::rewrite(&second, "Newest")])
+        .await
+        .ok();
+    sqlx::query(
+        "UPDATE document_versions SET whole=NULL,base=1,change=$2
+        WHERE document_id=$1 AND version=2",
+    )
+    .bind(document)
+    .bind(serde_json::json!({"put": []}))
+    .execute(&desk.world.db.pool)
+    .await
+    .unwrap();
+
+    let refused = desk
+        .world
+        .app
+        .call(DocumentVersionRestore, &[&document, &2])
+        .token(&desk.ada.token)
+        .send()
+        .await;
+    assert_eq!(refused.status, 500);
+    assert_eq!(desk.words(&desk.ada, document).await, ["Newest"]);
+    let versions: i64 =
+        sqlx::query_scalar("SELECT count(*) FROM document_versions WHERE document_id=$1")
+            .bind(document)
+            .fetch_one(&desk.world.db.pool)
+            .await
+            .unwrap();
+    assert_eq!(versions, 2);
+}
 
 struct Setup {
     boss: Who,
@@ -206,6 +341,124 @@ async fn a_node_deleted_longer_ago_than_the_retention_is_gone_for_good() {
         .await
         .ok();
     assert!(listed.items.is_empty());
+}
+
+#[tokio::test]
+async fn a_shorter_retention_setting_keeps_a_deleted_place_and_its_documents_until_the_promised_day()
+ {
+    let desk = desk::Desk::new().await;
+    let old_topic = desk.another_topic("Earlier deletion").await;
+    delete(&desk.world, &desk.ada, old_topic).await.ok();
+    desk.world.advance(Duration::seconds(1));
+    let document = desk.make(&desk.ada, "Kept notes").await.base.id;
+    desk.paragraphs(&desk.ada, document, &["The original text"])
+        .await;
+    let deleted_at = desk.world.now();
+    delete(&desk.world, &desk.ada, desk.project).await.ok();
+    let promised = deleted_at + Duration::days(30);
+    desk.world.advance(Duration::days(2));
+
+    let shorter = with_shorter_retention(&desk.world);
+    let mut tx = desk.world.db.pool.begin().await.unwrap();
+    orch_db::queries::notifications::upkeep::purge_soft_deleted(
+        &mut tx,
+        desk.world.now() - Duration::days(1),
+        desk.world.now(),
+    )
+    .await
+    .unwrap();
+    tx.commit().await.unwrap();
+    let still_held: bool = sqlx::query_scalar(
+        "SELECT EXISTS(SELECT 1 FROM documents WHERE id=$1) AND EXISTS(SELECT 1 FROM nodes WHERE id=$2)",
+    ).bind(document).bind(desk.project).fetch_one(&desk.world.db.pool).await.unwrap();
+    assert!(still_held, "the purge cannot shorten the original promise");
+
+    let listed = shorter
+        .call(NodeDeletedList, &[&desk.org])
+        .token(&desk.ada.token)
+        .query(&PageQuery::default())
+        .send()
+        .await
+        .ok();
+    let project = listed
+        .items
+        .iter()
+        .find(|item| item.node.id == desk.project)
+        .unwrap();
+    assert_eq!(project.purge_at.get(), promised);
+    shorter
+        .call(NodeRestore, &[&desk.project])
+        .token(&desk.ada.token)
+        .send()
+        .await
+        .ok();
+    assert_eq!(desk.words(&desk.ada, document).await, ["The original text"]);
+    assert_eq!(
+        desk.world
+            .app
+            .call(NodeGet, &[&old_topic])
+            .token(&desk.ada.token)
+            .send()
+            .await
+            .problem()
+            .code,
+        ErrorCode::NotFound,
+        "restoring a later deletion does not restore an earlier one"
+    );
+}
+
+#[tokio::test]
+async fn a_deleted_root_organization_keeps_its_original_deadline_after_retention_changes() {
+    let world = World::new().await;
+    let s = setup(&world).await;
+    let deleted_at = world.now();
+    delete(&world, &s.boss, s.acme).await.ok();
+    world.advance(Duration::days(2));
+    let shorter = with_shorter_retention(&world);
+    let listed = shorter
+        .call(OrgDeletedList, &[])
+        .token(&s.boss.token)
+        .send()
+        .await
+        .ok();
+    let org = listed.iter().find(|org| org.org.id == s.acme).unwrap();
+    assert_eq!(org.purge_at.get(), deleted_at + Duration::days(30));
+    shorter
+        .call(NodeRestore, &[&s.acme])
+        .token(&s.boss.token)
+        .send()
+        .await
+        .ok();
+}
+
+#[tokio::test]
+async fn a_delete_plan_must_be_reviewed_again_when_its_recovery_deadline_shortens() {
+    let world = World::new().await;
+    let s = setup(&world).await;
+    let plan = world
+        .app
+        .call(NodeDeletePreview, &[&s.web])
+        .token(&s.boss.token)
+        .send()
+        .await
+        .ok();
+    let shorter = with_shorter_retention(&world);
+    let refused = shorter
+        .call(NodeDelete, &[&s.web])
+        .token(&s.boss.token)
+        .body(&NodeDeleteBody {
+            preflight_id: Some(plan.preflight_id),
+            expected_revision: Some(plan.revision),
+            ..NodeDeleteBody::default()
+        })
+        .send()
+        .await
+        .problem();
+    assert_eq!(refused.code, ErrorCode::ConflictStaleRevision);
+    assert!(matches!(
+        read(&world, &s.boss, s.web).await,
+        Node::Project(_)
+    ));
 }
 
 #[tokio::test]

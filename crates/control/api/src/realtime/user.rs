@@ -71,11 +71,12 @@ pub(crate) async fn head(
 /// The messages sent by mail and push name the same paths.
 #[must_use]
 pub fn open_path(row: &InboxRow, node: Option<&NodeRef>) -> String {
-    let supplied = row
-        .data
-        .get("path")
-        .and_then(Json::as_str)
-        .filter(|path| path.starts_with('/') && !path.starts_with("//"));
+    let supplied = row.data.get("path").and_then(Json::as_str).filter(|path| {
+        path.starts_with('/')
+            && !path.starts_with("//")
+            && !path.starts_with("/\\")
+            && !path.chars().any(char::is_control)
+    });
     if let Some(approval) = row.approval_id
         && supplied.is_none_or(|path| matches!(path, "/approvals" | "/approvals/"))
     {
@@ -119,18 +120,39 @@ pub fn notification_view(
         .thread_id
         .and_then(reference)
         .filter(|node| node.kind == NodeKind::Thread);
+    let hide_thread_content = row.thread_id.is_some()
+        && orch_authz::documents::notice_contains_thread_content(&row.kind)
+        && thread.as_ref().is_none_or(|node| node.redacted);
     let path = row
         .thread_id
         .and_then(|id| paths.get(&id))
         .or_else(|| row.node_id.and_then(|id| paths.get(&id)))
         .cloned()
         .unwrap_or_default();
-    let url = open_path(row, node.as_ref());
+    let url = if hide_thread_content {
+        "/inbox".to_owned()
+    } else {
+        open_path(row, node.as_ref())
+    };
+    let data = if hide_thread_content {
+        orch_db::queries::notifications::people::notification_data(&row.kind, &json!({}))
+    } else {
+        row.data.clone()
+    };
     Some(Notification {
         id: row.id,
         kind,
-        title: row.title.clone(),
-        body: if kind == NotificationKind::JobFinished
+        title: if hide_thread_content {
+            String::new()
+        } else {
+            row.title.clone()
+        },
+        body: if hide_thread_content
+            || orch_db::queries::notifications::people::machine_notice_has_unscoped_thread_text(
+                &row.kind, &row.data,
+            ) {
+            String::new()
+        } else if kind == NotificationKind::JobFinished
             && row.data.get("state").and_then(Json::as_str) == Some("failed")
         {
             orch_api_contract::messages::for_failure(
@@ -142,17 +164,24 @@ pub fn notification_view(
         } else {
             row.body.clone()
         },
-        actor: actors.get(&row.id).cloned(),
+        actor: if hide_thread_content {
+            None
+        } else {
+            actors.get(&row.id).cloned()
+        },
         node,
         thread_id: row.thread_id,
         thread,
         path,
-        approval_id: row.approval_id,
+        approval_id: if hide_thread_content {
+            None
+        } else {
+            row.approval_id
+        },
         chat_id: row.chat_id,
         url,
-        data: row.data.clone(),
-        details: row
-            .data
+        data: data.clone(),
+        details: data
             .get(orch_db::queries::notifications::people::NOTIFICATION_DETAILS_MEMBER)
             .and_then(|details| {
                 serde_json::from_value::<
@@ -446,9 +475,16 @@ pub(crate) async fn read(inner: &Inner, person: Id, after: Seq, upto: Seq) -> Re
     };
     for row in &rows {
         if let Some(principal) = &principal
-            && !orch_authz::documents::notice_readable(&mut conn, principal, &row.kind, &row.data)
-                .await
-                .map_err(Fail::other)?
+            && !orch_authz::documents::notice_readable(
+                &mut conn,
+                principal,
+                &row.kind,
+                &row.data,
+                row.chat_id,
+                row.thread_id,
+            )
+            .await
+            .map_err(Fail::other)?
         {
             continue;
         }
@@ -562,6 +598,9 @@ mod tests {
     fn a_path_that_leaves_the_application_is_not_followed() {
         for path in [
             "//elsewhere.example/phish",
+            "/\\elsewhere.example/phish",
+            "/\t/elsewhere.example/phish",
+            "/\u{0085}/elsewhere.example/phish",
             "https://elsewhere.example/",
             "relative",
         ] {

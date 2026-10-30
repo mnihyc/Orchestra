@@ -1,4 +1,5 @@
 //! Codex's exec server, started the way an exec node starts it; the vendor's program runs only in Docker.
+#![cfg(unix)]
 #![allow(
     clippy::unwrap_used,
     clippy::expect_used,

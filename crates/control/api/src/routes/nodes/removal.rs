@@ -244,7 +244,8 @@ async fn hold_to_plan(
     let same = revision == kept.revision
         && expected_revision.is_none_or(|expected| expected == revision)
         && fingerprint_of(&set) == kept.fingerprint
-        && purge.date_naive() <= kept.purge_at.date_naive();
+        && purge >= kept.purge_at
+        && purge.date_naive() == kept.purge_at.date_naive();
     orch_db::queries::jobs::forks::forget_preflight(conn, preflight).await?;
     if same {
         return Ok(None);
@@ -314,14 +315,11 @@ async fn node_delete(ctx: Ctx, (): (), body: NodeDeleteBody) -> ApiResult<NodeDe
     {
         let members = hierarchy::members_inside(&mut tx, id).await?;
         if members > 0 {
-            let role: String = body
+            let requested_role = body
                 .members
                 .as_ref()
                 .and_then(|members| members.role)
-                .map_or_else(
-                    || "viewer".to_owned(),
-                    |role| same(&role).unwrap_or_default(),
-                );
+                .unwrap_or(orch_api_contract::access::Role::Viewer);
             for org in [id, above] {
                 authorization::require(
                     &mut tx,
@@ -333,6 +331,17 @@ async fn node_delete(ctx: Ctx, (): (), body: NodeDeleteBody) -> ApiResult<NodeDe
                 )
                 .await?;
             }
+            let policy = super::policy_at(&mut tx, above).await?;
+            crate::routes::access::require_role_giving(
+                &mut tx,
+                &principal,
+                above,
+                requested_role,
+                policy,
+            )
+            .await?;
+            let role: String =
+                same(&requested_role).ok_or_else(|| ApiError::internal("a role does not read"))?;
             hierarchy::move_members_up(&mut tx, id, above, &role, principal.user(), ctx.now)
                 .await?;
         }
@@ -538,6 +547,7 @@ async fn deleted_list(ctx: Ctx, query: PageQuery, (): ()) -> ApiResult<Page<Dele
         &mut conn,
         parent,
         purged_before(ctx.now, days),
+        ctx.now,
         after,
         batch,
     )
@@ -576,7 +586,10 @@ async fn deleted_nodes(
                 kind,
                 deleted_at: Time::new(row.deleted_at),
                 deleted_by: row.deleted_by.and_then(|user| people.get(&user).cloned()),
-                purge_at: Time::new(purge_at(row.deleted_at, days)),
+                purge_at: Time::new(
+                    row.purge_at
+                        .unwrap_or_else(|| purge_at(row.deleted_at, days)),
+                ),
                 children: row.children,
             })
         })
@@ -629,7 +642,11 @@ async fn node_restore(
             .await?;
         }
     }
-    if purge_at(row.deleted_at, days) <= ctx.now {
+    if row
+        .purge_at
+        .unwrap_or_else(|| purge_at(row.deleted_at, days))
+        <= ctx.now
+    {
         return Err(ApiError::new(
             ErrorCode::Gone,
             "it was deleted so long ago that it is gone for good",
@@ -735,9 +752,13 @@ async fn node_restore(
 async fn org_deleted_list(ctx: Ctx, (): (), (): ()) -> ApiResult<Vec<DeletedOrg>> {
     let days = ctx.app.config.retention.soft_delete_days;
     let mut conn = ctx.app.db.acquire().await?;
-    let rows =
-        hierarchy::deleted_orgs_of(&mut conn, ctx.user()?.id(), purged_before(ctx.now, days))
-            .await?;
+    let rows = hierarchy::deleted_orgs_of(
+        &mut conn,
+        ctx.user()?.id(),
+        purged_before(ctx.now, days),
+        ctx.now,
+    )
+    .await?;
     let mut users: Vec<Id> = rows.iter().filter_map(|row| row.deleted_by).collect();
     users.sort_unstable();
     let people = refusals::user_refs(&mut conn, &users).await?;
@@ -754,7 +775,10 @@ async fn org_deleted_list(ctx: Ctx, (): (), (): ()) -> ApiResult<Vec<DeletedOrg>
             slug: row.slug.clone().unwrap_or_default(),
             deleted_at: Time::new(row.deleted_at),
             deleted_by: row.deleted_by.and_then(|user| people.get(&user).cloned()),
-            purge_at: Time::new(purge_at(row.deleted_at, days)),
+            purge_at: Time::new(
+                row.purge_at
+                    .unwrap_or_else(|| purge_at(row.deleted_at, days)),
+            ),
         })
         .collect())
 }

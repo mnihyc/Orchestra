@@ -961,7 +961,7 @@ mod tests {
         let entry = setup.link.entry(setup.machine).await.unwrap();
         let environment = new_id();
         let stored = command(json!({
-            "exec": { "ticket": { "$ticket": { "kind": "exec", "service": "exec/codex", "dst": environment } } }
+            "exec": { "ticket": { "$ticket": { "kind": "exec", "service": "exec/codex", "dst": environment, "environment_id": environment, "environment_generation": 3 } } }
         }));
         assert!(has_references(&stored.body));
         let sent = setup.link.prepare(&entry, None, stored).await.unwrap();
@@ -984,6 +984,8 @@ mod tests {
             (claims.dst, claims.service.as_str()),
             (environment, "exec/codex")
         );
+        assert_eq!(claims.tool_environment_id, Some(environment));
+        assert_eq!(claims.tool_environment_generation, Some(3));
     }
 
     #[tokio::test]

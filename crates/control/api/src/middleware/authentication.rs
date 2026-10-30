@@ -193,10 +193,12 @@ mod tests {
         let mut headers = HeaderMap::new();
         headers.insert(
             header::COOKIE,
-            "theme=dark; orch_session=ors_abc; x=1".parse().unwrap(),
+            "theme=dark; __Host-orch_session=ors_abc; x=1"
+                .parse()
+                .unwrap(),
         );
-        assert_eq!(cookie(&headers, "orch_session"), Some("ors_abc"));
-        assert_eq!(cookie(&headers, "orch_device"), None);
+        assert_eq!(cookie(&headers, "__Host-orch_session"), Some("ors_abc"));
+        assert_eq!(cookie(&headers, "__Host-orch_device"), None);
     }
 
     #[test]

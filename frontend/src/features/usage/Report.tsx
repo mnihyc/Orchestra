@@ -20,6 +20,7 @@ import { providerQuery } from '@/api/resources';
 import { eventsQuery, usageQuery } from '@/api/usage';
 import type { Provider, UsageAnalytics, UsageDimension, UsageEvent, UsageKey } from '@/generated/api-types';
 import { programNameIn } from '@/features/resources/programNames';
+import { accessProgramDisplayName } from '@/features/models/names';
 import { Breakdowns, type TableState } from '@/features/usage/Breakdowns';
 import { UsageChart } from '@/features/usage/Chart';
 import { Export } from '@/features/usage/Export';
@@ -128,6 +129,7 @@ function labelOfFilter(analytics: UsageAnalytics | undefined, records:readonly U
     if(filterValue(dimension,key)===value) return keyLabel(dimension,key,t);
   }
   if (name === 'environment') return value === 'managed' ? t('usage.key.managed') : t('usage.key.connected');
+  if (name === 'program') return value === 'none' ? t('usagePerf.noProgram') : accessProgramDisplayName(value, t);
   return t(`usage.chip.${name}`);
 }
 

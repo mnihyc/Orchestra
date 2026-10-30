@@ -137,8 +137,10 @@ struct Writing<'a, 'b> {
     chat: Id,
     /// The files the batch carried for this chat.
     staged: HashSet<Hash>,
-    /// The blobs the messages may carry: the files the batch carried and those the store was found to hold.
+    /// The blobs the messages may carry: files from this chat's package or live destination messages.
     known: HashSet<Hash>,
+    /// Claims that were not brought and are not already in the destination chat.
+    absent: HashSet<Hash>,
     /// What each message of the source is here, as far as it is remembered: what was there, and what was written so far.
     written: HashMap<Id, Id>,
     /// How many lines the system wrote in the chat there, which are not brought.
@@ -173,6 +175,7 @@ pub(super) async fn make_chat(
         batch,
         chat: chat.id,
         known: staged.clone(),
+        absent: HashSet::new(),
         staged,
         written: HashMap::new(),
         system: 0,
@@ -309,20 +312,30 @@ impl Writing<'_, '_> {
         if fresh.is_empty() {
             return Ok(());
         }
-        self.know_blobs(tx, &fresh).await?;
+        let authorized = self.know_blobs(tx, &fresh).await?;
+        self.known.extend(authorized.iter().copied());
         self.know_replies(tx, &fresh, &sources, &placed).await?;
         for group in fresh.chunks(GROUP) {
             self.group(tx, group, &placed).await?;
+        }
+        // A readable source may be revoked between pages: check it again for the next page.
+        for hash in authorized {
+            self.known.remove(&hash);
         }
         self.batch
             .say(|| format!("a chat: {} messages brought", self.totals.added));
         Ok(())
     }
 
-    /// Asks the store which of the files the messages may carry it holds, besides those the batch carried.
-    async fn know_blobs(&mut self, tx: &mut Tx, fresh: &[&ChatMessage]) -> Result<(), MakeError> {
-        if self.known.len() > REMEMBERED_MAX {
+    /// Finds destination files and files the importer may currently read elsewhere.
+    async fn know_blobs(
+        &mut self,
+        tx: &mut Tx,
+        fresh: &[&ChatMessage],
+    ) -> Result<HashSet<Hash>, MakeError> {
+        if self.known.len().saturating_add(self.absent.len()) > REMEMBERED_MAX {
             self.known.clone_from(&self.staged);
+            self.absent.clear();
         }
         let wanted: HashSet<Hash> = fresh
             .iter()
@@ -330,16 +343,22 @@ impl Writing<'_, '_> {
             .filter(|blob| !self.known.contains(blob))
             .collect();
         if wanted.is_empty() {
-            return Ok(());
+            return Ok(HashSet::new());
         }
-        let hashes: Vec<Vec<u8>> = wanted.iter().map(|blob| blob.as_bytes().to_vec()).collect();
-        self.known.extend(
-            rows::blobs_known(tx, &hashes)
-                .await?
-                .into_iter()
-                .filter_map(|(hash, _)| Hash::from_slice(&hash).ok()),
-        );
-        Ok(())
+        let unchecked: HashSet<Hash> = wanted.difference(&self.absent).copied().collect();
+        let held = extra::held_blobs(tx, self.chat, &unchecked).await?;
+        self.absent.extend(unchecked.difference(&held).copied());
+        self.known.extend(held);
+        let mut authorized = HashSet::new();
+        for hash in wanted.difference(&self.known) {
+            if orch_chat::following::may_use_blob(tx, self.batch.principal, hash)
+                .await
+                .map_err(EngineError::unreadable)?
+            {
+                authorized.insert(*hash);
+            }
+        }
+        Ok(authorized)
     }
 
     /// Finds what the messages replied to are here: what was there already, and what an earlier page of this run wrote, which a reply

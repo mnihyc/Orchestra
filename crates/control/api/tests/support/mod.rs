@@ -406,8 +406,8 @@ impl Signed {
         };
         Self {
             result,
-            session: value("orch_session"),
-            device: value("orch_device"),
+            session: value("__Host-orch_session"),
+            device: value("__Host-orch_device"),
             headers,
         }
     }
@@ -418,12 +418,15 @@ impl Signed {
 
     /// The `Cookie` header of the browser that was given these.
     pub fn browser(&self) -> String {
-        format!("orch_session={}; orch_device={}", self.session, self.device)
+        format!(
+            "__Host-orch_session={}; __Host-orch_device={}",
+            self.session, self.device
+        )
     }
 
     /// The `Cookie` header of a browser that has only the mark.
     pub fn mark_only(&self) -> String {
-        format!("orch_device={}", self.device)
+        format!("__Host-orch_device={}", self.device)
     }
 }
 

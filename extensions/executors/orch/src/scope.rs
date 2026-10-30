@@ -69,6 +69,9 @@ pub struct SessionScope {
     /// The mounts that are attached, further places to reach.
     #[serde(default)]
     pub mounts: Vec<Mount>,
+    /// The environment generation already checked by the connector.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub generation: Option<i64>,
 }
 
 /// Why a session's header cannot be used.
@@ -174,6 +177,7 @@ mod tests {
                 path: "/data/ünï cödé".to_owned(),
                 read_only: true,
             }],
+            generation: None,
         }
     }
 

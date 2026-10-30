@@ -395,6 +395,9 @@ impl Connector {
             data_dir: data.root().to_owned(),
             publisher: Arc::new(link.clone()),
             policy: Arc::clone(&policy),
+            local_harnesses: Arc::new(crate::local_harnesses::Discovery::new(Arc::new(
+                params.adapters.clone(),
+            ))),
             provider_sources,
             builtin_sources,
             source_runtime: Arc::new(crate::sources::dispatch::Runtime::default()),
@@ -515,6 +518,7 @@ impl Connector {
                 facts_link.rates(),
                 facts_link.clock_offset_ms(),
             );
+            facts_services.local_harnesses.apply(&mut facts);
             facts.programs = facts_programs
                 .as_ref()
                 .map(|handler| handler.snapshot(&facts_policy));
@@ -523,6 +527,7 @@ impl Connector {
             facts
         });
         let mut dispatcher = Dispatcher::new(Arc::clone(&policy), Arc::clone(&facts_now));
+        dispatcher.local_harnesses(Arc::clone(&services.local_harnesses));
         let update_requests = Arc::new(crate::automatic::Requests::new(
             !params.managed || node,
             if node {
@@ -594,12 +599,17 @@ impl Connector {
         tasks.push(tokio::spawn(crate::facts::on_connections(
             link.clone(),
             roles.clone(),
+            Arc::clone(&policy),
+            Arc::clone(&services.local_harnesses),
+            Arc::clone(&facts_now),
             stop.clone(),
         )));
         tasks.push(tokio::spawn(report_facts(
             link.clone(),
             facts_now,
             policy.changes(),
+            Arc::clone(&policy),
+            Arc::clone(&services.local_harnesses),
             stop.clone(),
         )));
         // What the owner changes in the file while the connector runs holds without a restart.
@@ -722,6 +732,7 @@ impl Connector {
             self.link.rates(),
             self.link.clock_offset_ms(),
         );
+        self.services.local_harnesses.apply(&mut facts);
         facts.role_management = Some(self.role_changes.capability(&self.services.policy));
         facts
     }
@@ -773,6 +784,8 @@ async fn report_facts(
     link: MachineLink,
     facts: Arc<crate::dispatch::FactsNow>,
     mut policy_changes: tokio::sync::watch::Receiver<u64>,
+    policy: Arc<PolicyStore>,
+    discovery: Arc<crate::local_harnesses::Discovery>,
     stop: CancellationToken,
 ) {
     let mut ticker = tokio::time::interval(FACTS_EVERY);
@@ -787,6 +800,7 @@ async fn report_facts(
                 if changed.is_err() {
                     return;
                 }
+                discovery.refresh(&policy).await;
             }
         }
         let now = facts();

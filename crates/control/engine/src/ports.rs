@@ -519,6 +519,35 @@ impl Requester {
     }
 }
 
+/// The credential whose authority admitted a person's port opening.
+#[derive(Debug, Clone, Copy)]
+pub enum DecisionCredential {
+    /// A browser session, bounded by its mode when it made the decision.
+    Session {
+        /// The durable session identifier.
+        id: Id,
+        /// Whether the session acted as an administrator at the decision.
+        as_admin: bool,
+    },
+    /// A stored API token.
+    Token {
+        /// The durable token identifier.
+        id: Id,
+    },
+}
+
+impl DecisionCredential {
+    fn bind(self, opening: &mut Opening) {
+        let (kind, id, as_admin) = match self {
+            Self::Session { id, as_admin } => ("session", id, as_admin),
+            Self::Token { id } => ("token", id, false),
+        };
+        opening.decider_credential_kind = Some(kind.into());
+        opening.decider_credential_id = Some(id);
+        opening.decider_as_admin = as_admin;
+    }
+}
+
 /// An admitted effect and whether this call created it.
 #[derive(Debug)]
 pub struct Produced {
@@ -622,6 +651,7 @@ fn digest(body: &impl serde::Serialize) -> Result<Vec<u8>, Error> {
 pub async fn produce(
     conn: &mut Conn,
     principal: &Principal,
+    credential: DecisionCredential,
     environment: &EnvironmentFull,
     requester: Requester,
     client: Id,
@@ -633,6 +663,7 @@ pub async fn produce(
     produce_prepared(
         conn,
         principal,
+        credential,
         environment,
         requester,
         client,
@@ -653,6 +684,7 @@ pub async fn produce(
 pub async fn produce_prepared(
     conn: &mut Conn,
     principal: &Principal,
+    credential: DecisionCredential,
     environment: &EnvironmentFull,
     requester: Requester,
     client: Id,
@@ -665,6 +697,7 @@ pub async fn produce_prepared(
     produce_admitted(
         conn,
         principal,
+        Some(credential),
         environment,
         requester,
         client,
@@ -706,6 +739,7 @@ pub async fn produce_automatic(
     produce_admitted(
         conn,
         principal,
+        None,
         environment,
         Requester::Thread(thread),
         client,
@@ -728,6 +762,7 @@ pub async fn produce_automatic(
 async fn produce_admitted(
     conn: &mut Conn,
     principal: &Principal,
+    credential: Option<DecisionCredential>,
     environment: &EnvironmentFull,
     requester: Requester,
     client: Id,
@@ -901,6 +936,9 @@ async fn produce_admitted(
         requested_by: user,
         requested_by_thread: thread,
         allowed_by: decided_by,
+        decider_credential_kind: None,
+        decider_credential_id: None,
+        decider_as_admin: false,
         admission,
         opened_at: now,
         until_at: None,
@@ -994,6 +1032,13 @@ async fn produce_admitted(
             opening.state = "opening".into();
         }
     }
+    if opening.admission.is_none() {
+        credential
+            .ok_or_else(|| {
+                Error::NotAllowed("a person's opening needs its deciding credential".into())
+            })?
+            .bind(&mut opening);
+    }
     rows::insert(conn, &opening).await?;
     rows::save_request(
         conn,
@@ -1068,6 +1113,7 @@ pub async fn record(
 pub async fn grant_waiting(
     conn: &mut Conn,
     principal: &Principal,
+    credential: DecisionCredential,
     id: Id,
     request: &PortOpeningRequest,
     expected_program: i64,
@@ -1137,6 +1183,9 @@ pub async fn grant_waiting(
     }
     opening.allowed_by = Some(principal.user());
     opening.admission = admission;
+    if opening.admission.is_none() {
+        credential.bind(&mut opening);
+    }
     opening.state = if environment.status == "running" {
         "not_listening"
     } else {
@@ -1325,6 +1374,107 @@ pub async fn link_used(conn: &mut Conn, id: Id, now: Time) -> Result<bool, Error
     Ok(true)
 }
 
+/// Restores a person's deciding credential, never a more powerful browser caller.
+async fn current_decider(
+    conn: &mut Conn,
+    opening: &Opening,
+    now: Time,
+) -> Result<Option<Principal>, Error> {
+    let (Some(user_id), Some(kind), Some(id)) = (
+        opening.allowed_by,
+        opening.decider_credential_kind.as_deref(),
+        opening.decider_credential_id,
+    ) else {
+        return Ok(None);
+    };
+    let Some(user) = orch_db::queries::identity::user_by_id(conn, user_id)
+        .await?
+        .filter(|user| !user.suspended())
+    else {
+        return Ok(None);
+    };
+    let (caller, proved_step) = match kind {
+        "session" => {
+            let Some(as_admin) =
+                orch_db::queries::identity::session_admin_mode(conn, user_id, id, now.get())
+                    .await?
+            else {
+                return Ok(None);
+            };
+            let proved = orch_db::queries::second_step::session_given_at(conn, id)
+                .await?
+                .is_some();
+            (
+                orch_authz::Caller::session(user_id)
+                    .with_admin_mode(as_admin && opening.decider_as_admin),
+                proved,
+            )
+        }
+        "token" => {
+            let row: Option<(Vec<String>, Option<Id>)> = sqlx::query_as(
+                "SELECT scopes, node_id FROM api_tokens WHERE id=$1 AND user_id=$2 AND revoked_at IS NULL AND (expires_at IS NULL OR expires_at>$3)",
+            )
+            .bind(id).bind(user_id).bind(now.get()).fetch_optional(&mut *conn).await.map_err(DbError::from)?;
+            let Some((scopes, subtree)) = row else {
+                return Ok(None);
+            };
+            let Ok(grant) = orch_authz::TokenGrant::from_stored(&scopes, subtree) else {
+                return Ok(None);
+            };
+            (
+                orch_authz::Caller::token(user_id, grant.for_token(id)),
+                true,
+            )
+        }
+        _ => return Ok(None),
+    };
+    let mut principal = match Principal::load(conn, caller, now).await {
+        Ok(principal) => principal,
+        Err(orch_authz::Error::NoSuchUser(_)) => return Ok(None),
+        Err(error) => return Err(error.into()),
+    };
+    let configured = user.totp_on() || user.email_code_on();
+    if user.kind != "service"
+        && (!configured || !proved_step)
+        && orch_db::queries::second_step::required_anywhere(conn).await?
+    {
+        let definition = registry::get(keys::AUTH_SECOND_STEP)
+            .ok_or_else(|| Error::Invalid("the second-step setting is absent".into()))?;
+        let mut held = Vec::new();
+        for (_, root) in orch_db::queries::second_step::root_orgs_of(conn, &[user_id]).await? {
+            let snapshot = match Box::pin(Snapshot::load(
+                conn,
+                Place::Node(root),
+                Wanted::Keys(&[definition]),
+            ))
+            .await
+            {
+                Ok(snapshot) => snapshot,
+                Err(orch_settings::Error::NotFound) => continue,
+                Err(error) => return Err(error.into()),
+            };
+            if snapshot
+                .resolve(definition)
+                .value
+                .as_ref()
+                .and_then(|value| value.as_str())
+                == Some("required")
+            {
+                held.push(root);
+            }
+        }
+        if !held.is_empty() {
+            principal = principal.held_for_second_step(orch_authz::suspension::SecondStepHold {
+                orgs: held,
+                setup: !configured,
+                sources: Vec::new(),
+                methods: Vec::new(),
+            });
+        }
+    }
+    Ok(Some(principal))
+}
+
 /// Rechecks what keeps an opening admitted, independently of the requesting thread's lifetime: its
 /// kind still allowed by the template and not denied by the policy, and then either its deciding
 /// person's current Ports Manage (with View of a named place), or, for an opening a grant, a template
@@ -1362,16 +1512,9 @@ async fn authority_under(
             _ => true,
         });
     }
-    let author = opening.allowed_by;
-    let Some(author) = author else {
+    let Some(principal) = current_decider(conn, opening, now).await? else {
         return Ok(false);
     };
-    let principal =
-        match Principal::load(conn, orch_authz::tokens::Caller::session(author), now).await {
-            Ok(principal) => principal,
-            Err(orch_authz::Error::NoSuchUser(_)) => return Ok(false),
-            Err(error) => return Err(error.into()),
-        };
     if !holds(
         conn,
         &principal,
@@ -1704,6 +1847,9 @@ pub async fn request_waiting(
         requested_by: None,
         requested_by_thread: Some(thread),
         allowed_by: None,
+        decider_credential_kind: None,
+        decider_credential_id: None,
+        decider_as_admin: false,
         admission: None,
         opened_at: now.get(),
         until_at: resolved.until.map(Time::get),

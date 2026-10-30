@@ -137,6 +137,45 @@ impl MachineDrivers {
         Ok(())
     }
 
+    fn image_capabilities(
+        &self,
+        capabilities: &orch_driver_contract::capabilities::CapabilityState,
+    ) -> Result<(), String> {
+        for key in capabilities.base.iter().chain(&capabilities.granted) {
+            if !orch_driver_contract::capabilities::gateway_given(key)
+                && !permits(&self.images.capabilities, key)
+            {
+                return Err(format!("capability {key} is not allowed"));
+            }
+            if capabilities
+                .patches
+                .get(key)
+                .is_some_and(|patch| patch.get("privileged").and_then(Json::as_bool) == Some(true))
+                && !self.images.privileged
+            {
+                return Err(
+                    "privileged execution is off; the node operator must explicitly allow it"
+                        .into(),
+                );
+            }
+        }
+        Ok(())
+    }
+
+    /// Checks native grants against the machine's current image-driver ceiling.
+    pub fn check_capabilities(
+        &self,
+        descriptor: &orch_driver_contract::descriptor::DriverDescriptor,
+        capabilities: &orch_driver_contract::capabilities::CapabilityState,
+    ) -> Result<(), String> {
+        if descriptor.sources.is_empty() {
+            return Ok(());
+        }
+        self.image_capabilities(capabilities).map_err(|reason| {
+            format!("drivers (node role): {reason}; the machine's operator or its managers decide this setting")
+        })
+    }
+
     /// Check a driver spec and its actual native capabilities on both the server and node.
     pub fn check(
         &self,
@@ -199,26 +238,9 @@ impl MachineDrivers {
                 {
                     return Err(format!("runtime class {runtime} is not allowed"));
                 }
-                for key in capabilities
-                    .base
-                    .iter()
-                    .chain(&capabilities.granted)
-                    .filter(|key| !orch_driver_contract::capabilities::gateway_given(key))
-                {
-                    if !permits(&self.images.capabilities, key) {
-                        return Err(format!("capability {key} is not allowed"));
-                    }
-                }
-                let patches = capabilities
-                    .base
-                    .iter()
-                    .chain(&capabilities.granted)
-                    .filter_map(|key| capabilities.patches.get(key));
+                self.image_capabilities(capabilities)?;
                 let privileged = spec.get("privileged").and_then(Json::as_bool) == Some(true)
-                    || spec.pointer("/security/privileged").and_then(Json::as_bool) == Some(true)
-                    || patches
-                        .clone()
-                        .any(|patch| patch.get("privileged").and_then(Json::as_bool) == Some(true));
+                    || spec.pointer("/security/privileged").and_then(Json::as_bool) == Some(true);
                 if privileged && !self.images.privileged {
                     return Err(
                         "privileged execution is off; the node operator must explicitly allow it"

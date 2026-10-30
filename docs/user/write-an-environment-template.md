@@ -68,6 +68,13 @@ host that offers builds, or an uploaded image archive. A tag can change; a diges
 keeps the same image. Dockerfiles use the classic Docker builder. A build context
 provides files from an uploaded archive or a public Git repository.
 
+The built-in **Default** and **Developer tools** templates have editable
+Dockerfiles under **Image**. Their recipes need no build context. A host that
+offers builds makes the chosen image on first use and keeps it for later
+environments; the job shows its progress. The first build needs network access
+to the recipe's package and download sources. Developer tools includes the
+Default recipe, so it does not need a Default image built beforehand.
+
 **Confinement** selects the container runtime and security options. Leaving the
 runtime unset uses the host's default. Read-only image files still allow writes
 to writable volumes. Tool confinement controls the agent's file access inside
@@ -103,8 +110,11 @@ inherited commands and the host operator's separate hooks.
 **Storage** sets the environment's workspace and home paths and any extra mounts.
 Use absolute paths that do not overlap one another or Orch's directories. A named
 volume keeps data; temporary memory storage is lost when the container is removed;
-a bind mount exposes an existing directory on that host. A provider runtime keeps
-its state volume and has no environment workspace or home-path fields. Its
+a bind mount exposes an existing directory on that host. The host's allowed
+directories also apply to bind sources. Named caches cannot use Orch's reserved
+`orch-` volume names; use a separate name or an anonymous volume instead. A
+provider runtime keeps its state volume and has no environment workspace or
+home-path fields. Its
 **Registered programs** section describes programs installed in the provider image.
 
 Each field is its own reference: a shared setting row shows its meaning, value

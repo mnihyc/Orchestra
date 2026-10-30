@@ -164,7 +164,15 @@ pub async fn mailed_code_right(
     let tried = throttle::begin(ctx, conn, limits, who, SignInProof::EmailCode, by_address).await?;
     let live = identity::live_sign_in_code(conn, user.map(|user| user.id), ctx.now).await?;
     let id = user.map_or_else(orch_types::Id::nil, |user| user.id);
-    let right = codes::matches(live.as_ref().map(|row| row.code_hash.as_slice()), id, given);
+    let matches = codes::matches(live.as_ref().map(|row| row.code_hash.as_slice()), id, given);
+    let address_is_current = live.as_ref().zip(user).is_some_and(|(row, user)| {
+        user.email_confirmed()
+            && user
+                .email
+                .as_deref()
+                .is_some_and(|email| email.trim().to_lowercase() == row.email.trim().to_lowercase())
+    });
+    let right = matches && address_is_current;
     throttle::end(ctx, conn, limits, who, tried, right).await?;
     Ok(live.filter(|_| right).map(|row| row.code_hash))
 }

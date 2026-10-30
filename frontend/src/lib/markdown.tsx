@@ -9,14 +9,13 @@
 import { Lexer, type Token, type Tokens } from 'marked';
 import { createContext, type ReactNode, useContext } from 'react';
 import { i18n } from '@/i18n';
+import { messageLinkAllowed, messageLinkTarget } from '@/features/people/links';
 
 import { CodeBlock } from '@/ui/CodeBlock';
 import { cx } from '@/ui/cx';
 import { ScrollRegion } from '@/ui/ScrollRegion';
 
-/** The kinds of address a link of a message may lead to; anything else is shown as its text. */
-const SAFE_SCHEME = /^(https?:|mailto:)/i;
-const OWN_ADDRESS = /^(\/(?!\/)|#|\.\.?\/)/;
+const OWN_ADDRESS = /^(\/(?![/\\])|#|\.\.?\/)/;
 /** A link that leaves the application opens in a tab of its own and tells that tab nothing of this page. */
 const NEW_TAB = { target: '_blank', rel: 'noopener noreferrer' } as const;
 
@@ -47,9 +46,10 @@ function LinkView({ href, title, children }: { href: string; title?: string; chi
   const draw = useContext(ReferenceDrawer);
   const drawn = draw?.(href, false, <span>{children}</span>) ?? null;
   if (drawn !== null) return drawn;
-  if (!isSafeHref(href)) return <span>{children}</span>;
+  const target = messageLinkTarget(href);
+  if (target === null) return <span>{children}</span>;
   return (
-    <MessageLink href={href} {...(title ? { title } : {})}>
+    <MessageLink href={target} {...(title ? { title } : {})}>
       {children}
     </MessageLink>
   );
@@ -74,8 +74,7 @@ function MessageLink({ href, title, children }: { href: string; title?: string; 
 
 /** Whether a link's address is one to follow. */
 export function isSafeHref(href: string): boolean {
-  const clean = href.trim();
-  return SAFE_SCHEME.test(clean) || OWN_ADDRESS.test(clean);
+  return messageLinkAllowed(href);
 }
 
 /** Reads text into blocks. Raw HTML is kept in the tokens, as text, and never turned into elements. `breaks`: a line break inside a paragraph is kept, as in what a person wrote. */
@@ -130,9 +129,10 @@ function inline(tokens: readonly Token[] | undefined, key: string, tail?: Tail):
         // Never fetched by the page: a link to it, under the words that describe it.
         const image = token as Tokens.Image;
         const label = image.text === '' ? image.href : image.text;
+        const target = messageLinkTarget(image.href);
         out.push(
-          isSafeHref(image.href) ? (
-            <a key={at} href={image.href} {...NEW_TAB} className="text-accent-text underline underline-offset-2">
+          target !== null ? (
+            <a key={at} href={target} {...NEW_TAB} className="text-accent-text underline underline-offset-2">
               {label}
             </a>
           ) : (

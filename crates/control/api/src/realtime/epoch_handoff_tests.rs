@@ -94,6 +94,39 @@ struct Reader {
     connection: Arc<Connection>,
 }
 
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn replacing_a_subscription_discards_only_its_queued_frames() -> Proof {
+    let rig = Rig::with_time_held().await;
+    let reader = Reader::new(&rig, &rig.token).await?;
+    let old = reader.subscribe_id(1, Feed::User).await?;
+    let other = reader.subscribe_id(2, Feed::User).await?;
+    reader.connection.outbox.push_event(
+        old.tag(),
+        old.feed(),
+        json!({"op":"event","id":1,"data":"old private projection"}).to_string(),
+    );
+    reader.connection.outbox.push_event(
+        other.tag(),
+        other.feed(),
+        json!({"op":"event","id":2,"data":"other reader state"}).to_string(),
+    );
+    let frame: SubFrame = serde_json::from_value(json!({"id":1,"feed":"user"}))?;
+    subscriptions::subscribe(&reader.realtime.inner, &reader.connection, frame).await?;
+    let retained = reader.next().await?;
+    assert_eq!(
+        retained["id"], 2,
+        "only the other subscription's event remains"
+    );
+    assert_eq!(retained["data"], "other reader state");
+    let answer = reader.next().await?;
+    assert_eq!(answer["op"], "subscribed");
+    assert_eq!(answer["id"], 1);
+    reader.empty();
+    reader.finish().await;
+    rig.server.stop().await;
+    Ok(())
+}
+
 impl Drop for Reader {
     fn drop(&mut self) {
         // These direct protocol readers have no socket serve-loop to remove its

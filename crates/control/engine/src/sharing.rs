@@ -44,6 +44,7 @@ use orch_api_contract::share::{
     ShareDocumentsLevel, ShareLevel, ShareParts, ShareTo, ShareWhat, ShareWithAgents,
 };
 use orch_api_contract::threads::{ContentPart, Delivery, ShareMode};
+use orch_authz::giving::{self, Judgement};
 use orch_authz::pages::{self, ChangeError, Target};
 use orch_authz::reach::AgentReach;
 use orch_authz::{Act, Caller, Policy, Principal, documents as document_access, epoch, nodes};
@@ -468,6 +469,68 @@ impl Row {
             Some(Placement::Connected) => "connected",
         }
     }
+}
+
+/// Direct and group chats have no ordinary permission page for their members. Ask the same
+/// giving rule of their loaded current standing and of the caller's scopes.
+fn people_chat_rows_the_sharer_may_give(
+    principal: &Principal,
+    found: &Found,
+    loaded: Option<&chat_access::Loaded>,
+    wanted: Vec<Row>,
+) -> Result<Vec<Row>, ShareError> {
+    let chat = loaded.ok_or(ShareError::NotFound)?;
+    let rows: Vec<_> = wanted
+        .iter()
+        .map(|row| (row.permission, Profile::Any))
+        .collect();
+    match giving::judge_rows(true, false, &rows, |permission, _| {
+        principal.caller().permits(permission)
+            && match permission {
+                Permission::ChatView => chat.standing.reads(),
+                Permission::ChatInteract => chat.standing.sending.is_ok(),
+                Permission::ChatExport => chat.standing.export,
+                _ => false,
+            }
+    }) {
+        Judgement::Allowed { .. } => Ok(wanted),
+        Judgement::Lacks(lacks) => Err(ShareError::Denied(Box::new(Refusal::of(
+            lacks[0],
+            ObjectRef {
+                kind: ObjectKind::Org,
+                id: found.org,
+            },
+            Vec::new(),
+        )))),
+        Judgement::KeptToOwners => Err(ShareError::NotFound),
+    }
+}
+
+/// Keep the individually safe rows of a people-chat share, without discarding the
+/// rest of a useful request when one wider row is outside the caller's standing.
+fn people_chat_rows_within_standing(
+    principal: &Principal,
+    found: &Found,
+    loaded: Option<&chat_access::Loaded>,
+    wanted: Vec<Row>,
+) -> Result<Vec<Row>, ShareError> {
+    let mut kept = Vec::new();
+    for row in wanted {
+        match people_chat_rows_the_sharer_may_give(principal, found, loaded, vec![row]) {
+            Ok(rows) => kept.extend(rows),
+            Err(ShareError::Denied(_)) => {}
+            Err(other) => return Err(other),
+        }
+    }
+    Ok(kept)
+}
+
+fn people_chat_export_row() -> Vec<Row> {
+    vec![Row {
+        defaults: false,
+        permission: Permission::ChatExport,
+        placement: None,
+    }]
 }
 
 /// The rows of the pages that carry `parts` of `found`; a place shared by itself (`inside` false) has the rows of
@@ -1113,6 +1176,7 @@ impl Engine {
                     origin,
                     now,
                     &found,
+                    loaded.as_ref(),
                     &parts,
                     inside,
                     &destinations,
@@ -1122,6 +1186,14 @@ impl Engine {
                 .await?
             }
             ShareMode::Snapshot => {
+                if found.people_chat {
+                    people_chat_rows_the_sharer_may_give(
+                        principal,
+                        &found,
+                        loaded.as_ref(),
+                        people_chat_export_row(),
+                    )?;
+                }
                 if request
                     .comment
                     .as_ref()
@@ -1313,6 +1385,7 @@ impl Engine {
                     origin,
                     now,
                     &found,
+                    loaded.as_ref(),
                     &parts,
                     inside,
                     &destinations,
@@ -1322,6 +1395,14 @@ impl Engine {
                 .await?
             }
             ShareMode::Snapshot => {
+                if found.people_chat {
+                    people_chat_rows_the_sharer_may_give(
+                        &principal,
+                        &found,
+                        loaded.as_ref(),
+                        people_chat_export_row(),
+                    )?;
+                }
                 self.create_copies(
                     &mut tx,
                     &principal,
@@ -1381,6 +1462,7 @@ impl Engine {
         origin: &Origin,
         now: DateTime<Utc>,
         found: &Found,
+        loaded: Option<&chat_access::Loaded>,
         parts: &ShareParts,
         inside: bool,
         destinations: &[Destination],
@@ -1396,20 +1478,24 @@ impl Engine {
         .then_some(inside);
         let holders: Vec<Id> = destinations.iter().map(|each| each.id).collect();
         let before = self.live_records(tx, found, now).await?;
-        if !found.people_chat {
-            // Nobody gives more than they hold: the whole share is asked what it lacks before anything is
-            // written, so that the refusal names everything and nothing is half made.
-            wanted = self
-                .rows_the_sharer_may_give(tx, principal, found, wanted)
-                .await?;
-        }
+        // Ask every requested row of the same common giving rule before writing anything.
+        wanted = if found.people_chat {
+            people_chat_rows_within_standing(principal, found, loaded, wanted)?
+        } else {
+            self.rows_the_sharer_may_give(tx, principal, found, wanted)
+                .await?
+        };
         // The export of a place: the agents may also copy what is shared where the sharer holds the Export row
         // of the area and leaves "They may download it" ticked. What they do not hold is left out, not refused:
         // the agents then read it and do not copy it.
         if download {
             let export = export_rows_of(found, parts, inside);
             let export = if found.people_chat {
-                export
+                match people_chat_rows_the_sharer_may_give(principal, found, loaded, export) {
+                    Ok(rows) => rows,
+                    Err(ShareError::Denied(_)) => Vec::new(),
+                    Err(other) => return Err(other),
+                }
             } else {
                 self.export_rows_the_sharer_may_give(tx, principal, found, export)
                     .await?
@@ -2393,7 +2479,7 @@ impl Engine {
         let (found, loaded) = self
             .find_subject(&mut tx, &principal, origin, now, record.subject)
             .await?;
-        if found.people_chat && !loaded.is_some_and(|chat| chat.standing.in_chat) {
+        if found.people_chat && !loaded.as_ref().is_some_and(|chat| chat.standing.in_chat) {
             return Err(ShareError::NotFound);
         }
         if let Some(end) = change.expires_at
@@ -2438,14 +2524,27 @@ impl Engine {
         let (soft_add, strict_add): (Vec<Row>, Vec<Row>) = to_add
             .into_iter()
             .partition(|row| row.permission.is_export());
-        let mut may_add: Vec<Row> = if found.people_chat || strict_add.is_empty() {
+        let mut may_add: Vec<Row> = if strict_add.is_empty() {
             strict_add
+        } else if found.people_chat {
+            people_chat_rows_within_standing(&principal, &found, loaded.as_ref(), strict_add)?
         } else {
             self.rows_the_sharer_may_give(&mut tx, &principal, &found, strict_add)
                 .await?
         };
-        may_add.extend(if found.people_chat || soft_add.is_empty() {
+        may_add.extend(if soft_add.is_empty() {
             soft_add
+        } else if found.people_chat {
+            match people_chat_rows_the_sharer_may_give(
+                &principal,
+                &found,
+                loaded.as_ref(),
+                soft_add,
+            ) {
+                Ok(rows) => rows,
+                Err(ShareError::Denied(_)) => Vec::new(),
+                Err(other) => return Err(other),
+            }
         } else {
             self.export_rows_the_sharer_may_give(&mut tx, &principal, &found, soft_add)
                 .await?
@@ -2463,19 +2562,111 @@ impl Engine {
                 delta.remove(*row, *entry);
             }
         }
-        if found.people_chat {
-            let missing: Vec<Row> = wanted
+        let extends = delta.update.values().flatten().any(|(entry, end)| {
+            record
+                .grants
                 .iter()
-                .filter(|row| !standing.contains_key(row))
-                .copied()
+                .find(|grant| grant.entry_id == *entry)
+                .is_some_and(|grant| match (grant.expires_at, end) {
+                    (Some(before), Some(after)) => after.get() > before,
+                    (Some(_), None) => true,
+                    _ => false,
+                })
+        });
+        if found.people_chat && extends {
+            // Each end that moves later is a new grant; leave a row's old end
+            // in place if the caller cannot give that row now.
+            let widening: Vec<Row> = delta
+                .update
+                .iter()
+                .filter_map(|(row, changes)| {
+                    changes
+                        .iter()
+                        .any(|(entry, end)| {
+                            record
+                                .grants
+                                .iter()
+                                .find(|grant| grant.entry_id == *entry)
+                                .is_some_and(|grant| match (grant.expires_at, end) {
+                                    (Some(before), Some(after)) => after.get() > before,
+                                    (Some(_), None) => true,
+                                    _ => false,
+                                })
+                        })
+                        .then_some(*row)
+                })
                 .collect();
+            let may_extend = people_chat_rows_within_standing(
+                &principal,
+                &found,
+                loaded.as_ref(),
+                widening.clone(),
+            )?;
+            for row in widening {
+                if !may_extend.contains(&row) {
+                    delta.update.remove(&row);
+                }
+            }
+        }
+        let extends = delta.update.values().flatten().any(|(entry, end)| {
+            record
+                .grants
+                .iter()
+                .find(|grant| grant.entry_id == *entry)
+                .is_some_and(|grant| match (grant.expires_at, end) {
+                    (Some(before), Some(after)) => after.get() > before,
+                    (Some(_), None) => true,
+                    _ => false,
+                })
+        });
+        if !delta.add.is_empty() || extends {
+            match nodes::check_named(
+                &mut tx,
+                &principal,
+                record.to,
+                PermissionName::OfNode(NodePermission::Interact),
+                Act::Use,
+                Policy::default(),
+            )
+            .await?
+            {
+                Decision::Allowed { .. } => {}
+                Decision::Refused(refusal) => {
+                    // Still carry out a safe removal or shortening from a mixed update.
+                    delta.add.clear();
+                    delta.update.retain(|_, changes| {
+                        changes.retain(|(entry, end)| {
+                            record
+                                .grants
+                                .iter()
+                                .find(|grant| grant.entry_id == *entry)
+                                .is_some_and(|grant| match (grant.expires_at, end) {
+                                    (None, Some(_)) => true,
+                                    (Some(before), Some(after)) => after.get() < before,
+                                    _ => false,
+                                })
+                        });
+                        !changes.is_empty()
+                    });
+                    if delta.remove.is_empty() && delta.update.is_empty() {
+                        return Err(ShareError::Denied(Box::new(refusal)));
+                    }
+                }
+            }
+        }
+        if found.people_chat {
+            let missing: Vec<Row> = delta.add.keys().copied().collect();
             self.name_agents_in_chat(&mut tx, &principal, &found, record.to, &missing, end, now)
                 .await?;
             for (row, entry) in &standing {
                 if !wanted.contains(row) {
                     self.take_entry_out(&mut tx, principal.user(), &found, *entry, now)
                         .await?;
-                } else if let Some(end) = end
+                } else if delta
+                    .update
+                    .get(row)
+                    .is_some_and(|updates| updates.iter().any(|(id, _)| id == entry))
+                    && let Some(end) = end
                     && let Some(existing) = access::find_entry(
                         &mut tx,
                         &PageKey::new("chat", found.object, "live"),

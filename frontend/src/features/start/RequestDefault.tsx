@@ -19,6 +19,7 @@ import { Dialog } from '@/ui/Dialog';
 import { ErrorAlert } from '@/ui/ErrorState';
 import { InlineAlert } from '@/ui/InlineAlert';
 import { Textarea } from '@/ui/Textarea';
+import { RequestedEnd, RequestEndField, useRequestEnd } from '@/features/access/RequestEnd';
 
 /** The longest reason a request takes. */
 const REASON_MAX = 500;
@@ -27,10 +28,15 @@ export function RequestDefault({ place, owner, open, onClose }: { place: PlaceRe
   const { t } = useTranslation();
   const actKey = useActKey();
   const [reason, setReason] = useState('');
+  const end = useRequestEnd();
   // What is written about how threads are bound is a parameter of the place, and its manager's.
   const body = { items: [{ object: { kind: place.kind, id: place.id }, permissions: [`${place.kind}.manage`] }], reason: reason.trim() };
   const asking = owner?.display_name;
-  const send = useMutation({ mutationFn: () => requestAccess(body, actKey(body)) });
+  const send = useMutation({ mutationFn: () => {
+    const expiresAt = end.end();
+    const request = { ...body, ...(expiresAt === null ? {} : { expires_at: expiresAt }) };
+    return requestAccess(request, actKey(request));
+  } });
 
   return (
     <Dialog
@@ -46,7 +52,7 @@ export function RequestDefault({ place, owner, open, onClose }: { place: PlaceRe
             {send.isSuccess ? t('common.close') : t('common.cancel')}
           </Button>
           {!send.isSuccess && (
-            <Button variant="primary" icon={<Send aria-hidden />} pending={send.isPending} onClick={() => send.mutate()}>
+            <Button variant="primary" icon={<Send aria-hidden />} pending={send.isPending} disabled={!end.valid} onClick={() => send.mutate()}>
               {t('start.request.send')}
             </Button>
           )}
@@ -54,15 +60,17 @@ export function RequestDefault({ place, owner, open, onClose }: { place: PlaceRe
       }
     >
       {send.isSuccess ? (
-        <InlineAlert tone="success">{asking === undefined ? t('start.request.sentNoOwner') : t('start.request.sent', { name: asking })}</InlineAlert>
+        <><InlineAlert tone="success">{asking === undefined ? t('start.request.sentNoOwner') : t('start.request.sent', { name: asking })}</InlineAlert>
+          {send.data.approvals[0]?.kind === 'access' && <RequestedEnd at={send.data.approvals[0].request.expires_at} />}</>
       ) : (
         <form
           className="flex flex-col gap-3"
           onSubmit={(event) => {
             event.preventDefault();
-            send.mutate();
+            if (end.valid) send.mutate();
           }}
         >
+          <RequestEndField value={end} />
           <Textarea label={t('start.request.reason')} hint={t('start.request.reasonHint', { max: REASON_MAX })} value={reason} maxLength={REASON_MAX} onChange={(event) => setReason(event.target.value)} />
           {send.error !== null && <ErrorAlert error={send.error} />}
         </form>

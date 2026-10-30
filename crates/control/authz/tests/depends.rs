@@ -249,16 +249,16 @@ async fn starting_work_in_a_place_shows_what_it_runs_on_and_where_and_whether_it
             (ObjectKind::Agent, P::AgentUse),
             (ObjectKind::Host, P::HostUse),
             (ObjectKind::Template, P::TemplateUse),
-            (ObjectKind::Environment, P::EnvironmentManage),
+            (ObjectKind::Environment, P::EnvironmentUse),
         ]
     );
     assert!(
         found
             .iter()
-            .all(|dependency| dependency.for_permission == P::TopicInteract)
+            .all(|dependency| dependency.for_permission == P::TopicStartThreads)
     );
     // The Developers of the topic start work there as shipped; none of the four is open to them yet,
-    // and the environment is managed by the Developers as shipped, so it is.
+    // and the environment is usable by the Developers as shipped, so it is.
     let by_kind = |kind: ObjectKind| {
         found
             .iter()
@@ -294,4 +294,69 @@ async fn starting_work_in_a_place_shows_what_it_runs_on_and_where_and_whether_it
         (provider_dependency.open, provider_dependency.through),
         (Open::All, Some(w.topic))
     );
+}
+
+#[tokio::test]
+async fn starting_threads_given_alone_shows_and_can_open_environment_use_to_the_work() {
+    let w = World::new().await;
+    let (owner, starter) = (w.member("owner").await, w.member("starter").await);
+    w.give(w.root, owner, Role::Viewer).await;
+    w.give(w.root, starter, Role::Viewer).await;
+    w.name(w.topic, P::TopicStartThreads, Holder::User { id: starter })
+        .await;
+    let environment = w.thing("environment", owner, w.topic, "Shared").await;
+    let starting = Starting {
+        provider: None,
+        profile: None,
+        host: None,
+        template: None,
+        environment: Some(environment),
+    };
+    let policies = Policies::default();
+    let principal = w.principal(Caller::session(owner)).await;
+    let mut conn = w.conn().await;
+    let dependency = depends::of_place(&mut conn, &principal, w.topic, &starting, &policies)
+        .await
+        .unwrap()
+        .remove(0);
+    assert_eq!(dependency.for_permission, P::TopicStartThreads);
+    assert_eq!(dependency.permission, P::EnvironmentUse);
+    assert_ne!(dependency.open, Open::All);
+    let Offer::Give { change, .. } =
+        depends::offer(&mut conn, &principal, &dependency, w.topic, &policies)
+            .await
+            .unwrap()
+    else {
+        panic!("the owner can open the environment");
+    };
+    drop(conn);
+    let change = serde_json::to_value(&change).unwrap();
+    assert_eq!(change["rows"][0]["permission"], "environment.use");
+    assert_eq!(
+        change["rows"][0]["add"][0]["holder"],
+        json!({ "kind": "node", "id": w.topic })
+    );
+    w.change_thing(owner, "environment", environment, change)
+        .await
+        .unwrap();
+    let mut conn = w.conn().await;
+    let after = depends::of_place(&mut conn, &principal, w.topic, &starting, &policies)
+        .await
+        .unwrap()
+        .remove(0);
+    assert_eq!((after.open, after.through), (Open::All, Some(w.topic)));
+    drop(conn);
+    w.name(
+        w.project,
+        P::ProjectCreateTopics,
+        Holder::User { id: starter },
+    )
+    .await;
+    let mut conn = w.conn().await;
+    let project = depends::of_place(&mut conn, &principal, w.project, &starting, &policies)
+        .await
+        .unwrap()
+        .remove(0);
+    assert_eq!(project.for_permission, P::ProjectCreateTopics);
+    assert_eq!(project.permission, P::EnvironmentUse);
 }

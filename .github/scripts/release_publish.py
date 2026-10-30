@@ -13,6 +13,27 @@ def run(*command):
     return subprocess.run(command, check=True, text=True, capture_output=True).stdout.strip()
 
 
+def check_existing_draft(draft, publish_images, tagged_commit, commit):
+    """Only complete a draft whose still-existing tag resolves to this release's commit."""
+    if not draft["draft"] or not publish_images or tagged_commit != commit:
+        raise ValueError("an existing release is never replaced; only the approved image facts of this exact draft may be completed")
+
+
+def check_draft_assets(draft, directory):
+    """Require the same asset set and unchanged bytes, apart from the manifest being completed."""
+    remote = {asset["name"]: asset for asset in draft["assets"]}
+    local = {asset.name: asset for asset in directory.iterdir()}
+    if set(remote) != set(local):
+        raise ValueError("the draft has a different asset set")
+    for name, asset in local.items():
+        if name == "version.json":
+            continue
+        with asset.open("rb") as file:
+            digest = "sha256:" + hashlib.file_digest(file, "sha256").hexdigest()
+        if remote[name].get("digest") != digest:
+            raise ValueError(f"draft asset differs: {name}")
+
+
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--release", type=Path, required=True)
@@ -23,6 +44,17 @@ def main():
     listing = json.loads(listing_path.read_text())
     tag, version, commit = (listing[key] for key in ("tag", "version", "commit"))
     publish_images = os.environ.get("PUBLISH_IMAGES") == "true"
+    subprocess.run(["cargo", "xtask", "package", "--out", str(args.release.resolve()), "--check", "--require-all-connectors"], check=True)
+    existing = subprocess.run(["gh", "api", f"repos/{args.repo}/releases/tags/{tag}"], capture_output=True, text=True)
+    if existing.returncode != 0 and "(HTTP 404)" not in existing.stderr:
+        raise ValueError("the existing release could not be checked")
+    draft = None
+    if existing.returncode == 0:
+        draft = json.loads(existing.stdout)
+        # target_commitish is for creating a missing tag; it is not the commit of an existing tag.
+        tagged_commit = json.loads(run("gh", "api", f"repos/{args.repo}/commits/{tag}"))["sha"]
+        check_existing_draft(draft, publish_images, tagged_commit, commit)
+        check_draft_assets(draft, args.release)
     if publish_images:
         reference = f"ghcr.io/{args.repo.lower().split('/')[0]}/orch-env-base:{version}"
         # The protected release-images environment is approved before this job receives its token.
@@ -47,19 +79,7 @@ def main():
         staged = args.release.parent / "draft-notes.md"
         staged.write_text(notes.read_text() + "\n\nDefault environment image publication is pending operator approval. This draft must not be published until its image digest is recorded.\n")
         notes = staged
-    existing = subprocess.run(["gh", "api", f"repos/{args.repo}/releases/tags/{tag}"], capture_output=True, text=True)
-    if existing.returncode == 0:
-        draft = json.loads(existing.stdout)
-        if not draft["draft"] or not publish_images or draft["target_commitish"] != commit:
-            raise ValueError("an existing release is never replaced; only the approved image facts of this exact draft may be completed")
-        remote = {asset["name"]: asset for asset in draft["assets"]}
-        for asset in args.release.iterdir():
-            if asset.name == "version.json":
-                continue
-            with asset.open("rb") as file:
-                digest = "sha256:" + hashlib.file_digest(file, "sha256").hexdigest()
-            if asset.name not in remote or remote[asset.name].get("digest") != digest:
-                raise ValueError(f"draft asset differs: {asset.name}")
+    if draft is not None:
         subprocess.run(["gh", "release", "upload", tag, str(listing_path), "--repo", args.repo, "--clobber"], check=True)
         subprocess.run(["gh", "release", "edit", tag, "--repo", args.repo, "--notes-file", str(notes)], check=True)
     else:

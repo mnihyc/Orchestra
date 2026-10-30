@@ -292,6 +292,14 @@ describe('the one queue above the conversation’s composer', () => {
     expect(queuedInputs(replayed).map((input) => input.id)).toEqual(['i2']);
     expect(replayed.items.get('spoken')).toEqual(message);
   });
+  it('shows an input returned to the queue after its earlier message', () => {
+    const spoken = { ...userMessage('spoken', 'Try again', { author: ADA, inputId: 'i1', status: 'in_progress' }), seq_created: 5, seq_updated: 5 };
+    const stale = { ...threadInput('i1', 'Try again', { author: ADA, position: '1' }), seq_updated: 4 };
+    const view = applyRows(viewOf([], [], [stale], { state: 'idle' }), { items: [spoken] });
+    expect(queuedInputs(view)).toEqual([]);
+    const returned = applyRows(view, { inputs: [{ ...stale, seq_updated: 6 }] });
+    expect(queuedInputs(returned).map((input) => input.id)).toEqual(['i1']);
+  });
   it('holds the first input too when idle, leaving no unsent grey row in the conversation', () => {
     const inputs = [
       threadInput('i1', 'First', { author: ADA, position: '1' }),

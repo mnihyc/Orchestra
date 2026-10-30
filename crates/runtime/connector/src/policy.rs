@@ -115,7 +115,50 @@ pub fn inspect_environment_directory(
     policy: &LocalPolicy,
     path: &Path,
 ) -> Result<orch_driver_contract::runtime::DirectoryBinding, CommandError> {
-    inspect_environment_path(policy, path, true)
+    hold_environment_directory(policy, path).map(|(binding, _)| binding)
+}
+
+/// Verifies and retains the same directory that attachment will use.
+pub fn hold_environment_directory(
+    policy: &LocalPolicy,
+    path: &Path,
+) -> Result<
+    (
+        orch_driver_contract::runtime::DirectoryBinding,
+        orch_envhost::paths::HeldRoot,
+    ),
+    CommandError,
+> {
+    #[cfg(target_os = "linux")]
+    {
+        let roots: Vec<PathBuf> = policy.environment_roots.iter().map(PathBuf::from).collect();
+        let held = orch_envhost::paths::HeldRoot::open(&roots, path).map_err(|error| {
+            CommandError::new(
+                ErrorCode::PolicyRootNotAllowed,
+                format!("environment.roots: {error}"),
+            )
+        })?;
+        let meta = held.metadata().map_err(|error| {
+            CommandError::new(
+                ErrorCode::PolicyRootNotAllowed,
+                format!("environment.roots: {error}"),
+            )
+        })?;
+        let binding = orch_driver_contract::runtime::DirectoryBinding {
+            path: held.path().to_string_lossy().into_owned(),
+            device: Some(meta.dev),
+            inode: Some(meta.ino),
+        };
+        Ok((binding, held))
+    }
+    #[cfg(not(target_os = "linux"))]
+    {
+        let _ = resolve_environment_path(policy, path, true)?;
+        Err(CommandError::new(
+            ErrorCode::Unsupported,
+            "this platform cannot verify an existing directory beneath environment.roots",
+        ))
+    }
 }
 
 /// The same roots policy also bounds file, socket and directory mount sources.
@@ -124,6 +167,9 @@ pub fn inspect_environment_path(
     path: &Path,
     directory: bool,
 ) -> Result<orch_driver_contract::runtime::DirectoryBinding, CommandError> {
+    if directory {
+        return inspect_environment_directory(policy, path);
+    }
     let real = resolve_environment_path(policy, path, directory)?;
     #[cfg(target_os = "linux")]
     {
@@ -1044,6 +1090,68 @@ impl PolicyStore {
         Ok(())
     }
 
+    /// Atomically changes one harness selection under the machine's delegated policy.
+    pub(crate) fn change_harness(
+        &self,
+        kind: &str,
+        expected: Option<&str>,
+        replacement: Option<&str>,
+    ) -> Result<(), CommandError> {
+        let key = PolicyKey::AgentHarnesses;
+        let mut state = self.state();
+        let Some(mut policy) = state.policy.clone() else {
+            return Err(refused(
+                ErrorCode::Unsupported,
+                key.as_str(),
+                "this runtime has no local harness policy",
+            ));
+        };
+        if !policy.delegates(key) {
+            return Err(refusal_authority(
+                &policy,
+                refused(
+                    ErrorCode::Unsupported,
+                    key.as_str(),
+                    "the harness selection is kept locally",
+                ),
+            ));
+        }
+        if kind.is_empty() || replacement.is_some_and(str::is_empty) {
+            return Err(CommandError::new(
+                ErrorCode::Unsupported,
+                "a harness kind and program path are required",
+            ));
+        }
+        if policy.harness(kind).map(|entry| entry.path.as_str()) != expected {
+            return Err(CommandError::new(
+                ErrorCode::Conflict,
+                "the harness selection changed; refresh the machine and try again",
+            ));
+        }
+        policy.agent_harnesses.retain(|entry| entry.kind != kind);
+        if let Some(path) = replacement {
+            policy.agent_harnesses.push(PolicyHarness {
+                kind: kind.to_owned(),
+                path: path.to_owned(),
+            });
+        }
+        let value = policy.get(key);
+        let before = state.config.policy.values.clone();
+        state
+            .config
+            .policy
+            .values
+            .insert(key.as_str().into(), value);
+        if let Err(error) = self.commit(&mut state, policy) {
+            state.config.policy.values = before;
+            return Err(CommandError::new(
+                ErrorCode::Internal,
+                format!("the harness selection could not be saved: {error}"),
+            ));
+        }
+        Ok(())
+    }
+
     /// Save operational roles under the same lock/file as policy and programs. Active-role facts
     /// remain unchanged until the supervisor has rebuilt the actual role handlers.
     pub fn change_roles(
@@ -1389,6 +1497,46 @@ mod tests {
         );
     }
     use super::*;
+
+    #[test]
+    fn individual_harness_confirmations_preserve_other_kinds_and_refuse_stale_changes() {
+        let store = PolicyStore::connected(ConnectorConfig::default(), None).unwrap();
+        store.offered_roles(&[orch_link_contract::session::Role::Environment]);
+        assert!(store.change_harness("codex", None, Some("/one")).is_err());
+        store.delegate(&["agent.harnesses".into()]).unwrap();
+        store.change_harness("codex", None, Some("/one")).unwrap();
+        store
+            .change_harness("claude-code", None, Some("/two"))
+            .unwrap();
+        assert!(store.change_harness("codex", None, Some("/stale")).is_err());
+        assert!(store.change_harness("codex", Some("/stale"), None).is_err());
+        store.change_harness("codex", Some("/one"), None).unwrap();
+        let current = store.policy().unwrap();
+        assert!(current.harness("codex").is_none());
+        assert_eq!(current.harness("claude-code").unwrap().path, "/two");
+    }
+
+    #[test]
+    fn two_managers_confirming_different_harnesses_do_not_overwrite_each_other() {
+        let store =
+            std::sync::Arc::new(PolicyStore::connected(ConnectorConfig::default(), None).unwrap());
+        store.offered_roles(&[orch_link_contract::session::Role::Environment]);
+        store.delegate(&["agent.harnesses".into()]).unwrap();
+        let ready = std::sync::Arc::new(std::sync::Barrier::new(2));
+        std::thread::scope(|scope| {
+            for (kind, path) in [("codex", "/one"), ("claude-code", "/two")] {
+                let store = std::sync::Arc::clone(&store);
+                let ready = std::sync::Arc::clone(&ready);
+                scope.spawn(move || {
+                    ready.wait();
+                    store.change_harness(kind, None, Some(path)).unwrap();
+                });
+            }
+        });
+        let policy = store.policy().unwrap();
+        assert_eq!(policy.harness("codex").unwrap().path, "/one");
+        assert_eq!(policy.harness("claude-code").unwrap().path, "/two");
+    }
     use orch_link_contract::commands::{
         EnvAttach, ExecStart, FsMaterialize, FsWrite, IndexMode, LeaseOpen, PtyOpen, SessionMode,
         SessionOpen, SessionOpenExec, SessionOpenMount, TurnStart,

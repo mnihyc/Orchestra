@@ -25,3 +25,17 @@ then eligible owners above it, then org admins. If nobody in that walk can decid
 every currently eligible person is told. Others who can decide find the card or
 Others you may decide. Losing deciding authority removes a pending item and its count;
 it never grants authority merely because a notice was sent earlier.
+
+Moving a member or reassigning members when a department is deleted checks the
+actor's current authority to give the destination role. Token scopes also bound
+the permissions that role can convey.
+An expiring domain role retains its deadline when the member moves.
+
+Extending an agent entry through a permission page rechecks the giver's current
+ability to drive its receiving thread or place. Shortening does not extend access.
+Adding an area or extending a live agent share uses the same receiver check.
+
+Live shares of people chats use current chat standing and token scopes: unavailable
+Write or Export is left out while Read remains. A chat copy requires Export. In a
+mixed live-share update, safe removals and shortenings remain available when the
+caller cannot drive the receiver for an addition or an extension.

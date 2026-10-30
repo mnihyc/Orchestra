@@ -1,12 +1,12 @@
 /** Contract-wide, bilingual error coverage: no protocol token is a person's message. */
 import { readFileSync } from 'node:fs';
 import { resolve } from 'node:path';
-import { afterAll, beforeAll, expect, it } from 'vitest';
+import { afterAll, beforeAll, expect, it, vi } from 'vitest';
 
 import { ApiError } from '@/api/client';
 import type { ErrorCode } from '@/generated/api-types';
 import { i18n, setLocale, startI18n } from '@/i18n';
-import { apiErrorSentence, hasErrorCode } from '@/i18n/errors';
+import { apiErrorSentence, fieldErrorSentence, hasErrorCode } from '@/i18n/errors';
 import english from '@/i18n/en.json';
 import chinese from '@/i18n/zh-CN.json';
 import { errorText } from '@/ui/errorText';
@@ -30,7 +30,38 @@ function sentence(catalogue: unknown, code: string): string {
 beforeAll(async () => { await startI18n('en'); });
 afterAll(async () => { await setLocale('en'); });
 
+it('keeps the environment explanation while translations are loading', () => {
+  const initialized = i18n.isInitialized;
+  try {
+    i18n.isInitialized = false;
+    expect(fieldErrorSentence('the selected environment is unavailable', undefined, 'environment.use'))
+      .toBe('the selected environment is unavailable');
+  } finally {
+    i18n.isInitialized = initialized;
+  }
+});
+
+it('keeps the environment explanation until its catalogue arrives', () => {
+  const resource = vi.spyOn(i18n, 'getResource').mockReturnValueOnce(undefined);
+  try {
+    expect(fieldErrorSentence('the selected environment is unavailable', undefined, 'environment.use'))
+      .toBe('the selected environment is unavailable');
+  } finally {
+    resource.mockRestore();
+  }
+});
+
 for (const locale of ['en', 'zh-CN'] as const) {
+  it(`explains an unavailable selected environment in ${locale}`, async () => {
+    await setLocale(locale);
+    const t = i18n.getFixedT(locale);
+    for (const message of ['the selected environment is unavailable', 'the environment is not there or is being removed']) {
+      const error = new ApiError({ type: 'orch:error:request.invalid', code: 'request.invalid', title: 'Refused',
+        detail: diagnostic, status: 400, request_id: '', errors: [{ path: 'environment.use', message }] }, null);
+      expect(error.faults()).toEqual([{ path: 'environment.use', message: t('errors.environment.selected_unavailable') }]);
+    }
+  });
+
   it(`gives workspace attachment refusals a catalogued cause and recovery in ${locale}`, async () => {
     await setLocale(locale);
     const t = i18n.getFixedT(locale);

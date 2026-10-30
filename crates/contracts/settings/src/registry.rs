@@ -2429,7 +2429,7 @@ registry! {
     SYSTEM_BANNER = "system.banner", System, Policy, SYSTEM, Replace, NULL, BANNER_OR_NONE,
         "Banner", "A message shown to everybody on the system, with its level and when it ends.";
     OUTBOUND_ALLOWED_PRIVATE_HOSTS = "outbound.allowed_private_hosts", System, Policy, SYSTEM, Replace, EMPTY_LIST, list(&TEXT),
-        "Private hosts", "The hosts on private addresses that a channel or a destination of an org or a person may reach.";
+        "Private hosts", "The private hosts that org or personal channels and destinations, and skill archive addresses, may reach.";
     STORAGE_MAX_BLOB_BYTES = "storage.max_blob_bytes", System, Policy, SYSTEM, Replace, value("8589934592"), BYTES,
         "Largest file", "The largest single file that Orch stores, in bytes.";
     STORAGE_ENV_CACHE_QUOTA_BYTES = "storage.env_cache_quota_bytes", Workspace, Policy, SYSTEM_TO_PROJECT, Replace, value("21474836480"), BYTES,

@@ -22,6 +22,7 @@ use orch_db::queries::access::testing::add_entry;
 use orch_types::{Id, new_id};
 use places::Who;
 use rig::Scene;
+use std::time::Duration;
 
 /// The items a thread has after one exchange: what the person said, what the agent said, and a marker.
 async fn items_of(s: &Scene, thread: Id) -> Vec<(Id, String)> {
@@ -202,6 +203,174 @@ async fn an_item_quoted_into_the_chat_of_its_thread_is_counted_on_the_item_until
         .ok();
     assert_eq!(refs_of(&s, item).await.0, 1);
     assert_eq!(by_item(item).await.len(), 1);
+}
+
+#[tokio::test]
+async fn deleting_while_an_edit_adds_a_quote_preserves_the_reference_until_a_fresh_delete() {
+    let s = Scene::new().await;
+    let thread = s.thread().await;
+    let (thread_id, chat) = (thread.base.id, thread.base.chat_id);
+    s.exchange(thread_id, 0, "Question", "Answer").await;
+    let item = agent_message(&s, thread_id).await;
+    let message = send(&s, &s.ada, chat, vec![text("Before")], "delete-race")
+        .await
+        .ok()
+        .message;
+
+    // The edit takes the thread and chat locks in their usual order, but remains uncommitted.
+    let mut first = s.rig.world.db.pool.begin().await.unwrap();
+    let pid: i32 = sqlx::query_scalar("SELECT pg_backend_pid()")
+        .fetch_one(&mut *first)
+        .await
+        .unwrap();
+    let thread_seq = orch_db::sequences::next(&mut first, thread_id)
+        .await
+        .unwrap()
+        .unwrap();
+    let revision: i64 = sqlx::query_scalar(
+        "UPDATE chats SET next_seq = next_seq + 1 WHERE id = $1 RETURNING next_seq - 1",
+    )
+    .bind(chat)
+    .fetch_one(&mut *first)
+    .await
+    .unwrap();
+    sqlx::query("UPDATE chat_messages SET content = $2, seq_updated = $3 WHERE id = $1")
+        .bind(message.id)
+        .bind(serde_json::to_value(vec![text("After"), quote(thread_id, item)]).unwrap())
+        .bind(revision)
+        .execute(&mut *first)
+        .await
+        .unwrap();
+    orch_db::queries::chats::add_item_refs(&mut first, message.id, &[item])
+        .await
+        .unwrap();
+    orch_db::queries::chats::count_item_quotes(
+        &mut first,
+        &[item],
+        1,
+        thread_seq,
+        s.rig.world.now(),
+    )
+    .await
+    .unwrap();
+
+    let app = s.rig.world.app.clone();
+    let token = s.ada.token.clone();
+    let message_id = message.id;
+    let pending = tokio::spawn(async move {
+        // The request is made before the await, so the path's parameters are not held across it.
+        let request = app
+            .call(ChatMessageDelete, &[&chat, &message_id])
+            .token(&token);
+        request.send().await
+    });
+    // A database lock wait proves the delete read the previous version before this edit commits.
+    tokio::time::timeout(Duration::from_secs(10), async {
+        loop {
+            let waiting: bool = sqlx::query_scalar(
+                "SELECT EXISTS (SELECT 1 FROM pg_stat_activity WHERE datname = current_database() AND $1 = ANY(pg_blocking_pids(pid)))",
+            )
+            .bind(pid)
+            .fetch_one(&s.rig.world.db.pool)
+            .await
+            .unwrap();
+            if waiting {
+                break;
+            }
+            tokio::time::sleep(Duration::from_millis(10)).await;
+        }
+    })
+    .await
+    .expect("the delete waits for the edit");
+    first.commit().await.unwrap();
+    let problem = pending.await.unwrap().problem();
+    assert_eq!(problem.code, ErrorCode::ConflictStaleRevision);
+    assert_eq!(problem.extra["seq_updated"], revision);
+    assert_eq!(refs_of(&s, item).await.0, 1);
+    let live: bool =
+        sqlx::query_scalar("SELECT deleted_at IS NULL FROM chat_messages WHERE id = $1")
+            .bind(message.id)
+            .fetch_one(&s.rig.world.db.pool)
+            .await
+            .unwrap();
+    assert!(live);
+
+    s.rig
+        .world
+        .app
+        .call(ChatMessageDelete, &[&chat, &message.id])
+        .token(&s.ada.token)
+        .send()
+        .await
+        .ok();
+    assert_eq!(refs_of(&s, item).await.0, 0);
+    let links: i64 =
+        sqlx::query_scalar("SELECT count(*) FROM chat_item_refs WHERE message_id = $1")
+            .bind(message.id)
+            .fetch_one(&s.rig.world.db.pool)
+            .await
+            .unwrap();
+    assert_eq!(links, 0);
+}
+
+#[tokio::test]
+async fn a_thread_mention_is_hidden_from_the_inbox_when_the_thread_becomes_private() {
+    use orch_api_contract::access::{PageChange, PageChangeWhole, PermissionPageUpdate};
+    use orch_api_contract::notifications::{NotificationList, NotificationListQuery};
+    use orch_api_contract::threads::Delivery;
+
+    let s = Scene::new().await;
+    let thread = s.thread().await.base.id;
+    s.say(
+        &s.ada,
+        thread,
+        "Please look @cai",
+        Delivery::Queue,
+        "mention",
+    )
+    .await
+    .ok();
+    let query = NotificationListQuery {
+        kind: Some("mention".to_owned()),
+        ..NotificationListQuery::default()
+    };
+    let inbox = || {
+        s.rig
+            .world
+            .app
+            .call(NotificationList, &[])
+            .token(&s.cai.token)
+            .query(&query)
+            .send()
+    };
+    assert!(
+        inbox()
+            .await
+            .ok()
+            .items
+            .iter()
+            .any(|row| row.thread_id == Some(thread))
+    );
+    s.rig
+        .world
+        .app
+        .call(PermissionPageUpdate, &[&"nodes", &thread])
+        .token(&s.ada.token)
+        .body(&PageChange {
+            whole: Some(PageChangeWhole::Private),
+            ..PageChange::default()
+        })
+        .send()
+        .await
+        .ok();
+    assert!(
+        inbox()
+            .await
+            .ok()
+            .items
+            .iter()
+            .all(|row| row.thread_id != Some(thread))
+    );
 }
 
 #[tokio::test]

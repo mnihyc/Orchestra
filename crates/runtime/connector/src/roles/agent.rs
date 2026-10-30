@@ -297,6 +297,7 @@ impl AgentRole {
             .map_err(|error| CommandError::new(ErrorCode::Internal, error.to_string()))?;
         let provider_id = provider_of(&body.provider);
         let process = self.hosting.process(provider_id, body.agent_id)?;
+        process.check_program_policy()?;
         match &mut intent {
             OpenIntent::Prefix(prefix) => process.check_idle_source(&prefix.source, None)?,
             OpenIntent::Resume {
@@ -502,6 +503,7 @@ impl AgentRole {
         expected: Option<Id>,
     ) -> Result<Empty, CommandError> {
         let process = self.process_of_thread(body.thread_id)?;
+        process.check_program_policy()?;
         process.check_segment(body.thread_id, expected)?;
         let selection = native_selection(
             self.hosting.segment_of(body.thread_id),
@@ -1073,6 +1075,7 @@ impl RoleHandler for AgentRole {
             }
             Command::TurnSteer(body) => {
                 let process = self.process_of_thread(body.thread_id)?;
+                process.check_program_policy()?;
                 let selection = native_selection(
                     self.hosting.segment_of(body.thread_id),
                     body.native_action.as_ref(),

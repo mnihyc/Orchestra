@@ -1,17 +1,23 @@
 //! Real HTTPS Git authentication keeps source and environment credentials in their own repositories.
-#![cfg(unix)]
 #![allow(
     clippy::unwrap_used,
     clippy::expect_used,
     reason = "a test fails by panicking"
 )]
 
+#[cfg(unix)]
 use base64::Engine as _;
+#[cfg(unix)]
 use bytes::Bytes;
+#[cfg(unix)]
 use http_body_util::{BodyExt, Full};
+#[cfg(unix)]
 use hyper::{Request, Response, body::Incoming, service::service_fn};
+#[cfg(unix)]
 use hyper_util::rt::TokioIo;
+#[cfg(unix)]
 use orch_api_contract::source::SourceDestination;
+#[cfg(unix)]
 use orch_envhost::{
     environment::{GateState, Gates, Limits},
     file_states::FileStates,
@@ -23,11 +29,14 @@ use orch_envhost::{
     paths::{PathStyle, Workspace},
     state_store::ObjectStore,
 };
+#[cfg(unix)]
 use orch_link_contract::{
     commands::Secret,
     source::{GitAuthor, GitCommit, GitPrepare, GitPush},
 };
+#[cfg(unix)]
 use orch_types::new_id;
+#[cfg(unix)]
 use std::{
     convert::Infallible,
     ffi::OsString,
@@ -36,17 +45,23 @@ use std::{
     sync::{Arc, Mutex},
     time::Duration,
 };
+#[cfg(unix)]
 use tokio::{io::AsyncWriteExt, net::TcpListener, task::JoinSet};
 
 // Isolated disposable test identities, never credentials of a person or a provider.
+#[cfg(unix)]
 const SOURCE_PASSWORD: &str = "source-fixture-secret";
+#[cfg(unix)]
 const ENVIRONMENT_PASSWORD: &str = "environment-fixture-secret";
+#[cfg(unix)]
 const TEST_TIMEOUT: Duration = Duration::from_secs(60);
 
+#[cfg(unix)]
 fn quote(value: &str) -> String {
     format!("'{}'", value.replace('\'', "'\"'\"'"))
 }
 
+#[cfg(unix)]
 fn native(program: &Path, cwd: &Path, arguments: &[&str]) -> Vec<u8> {
     let reply = std::process::Command::new(program)
         .current_dir(cwd)
@@ -63,7 +78,9 @@ fn native(program: &Path, cwd: &Path, arguments: &[&str]) -> Vec<u8> {
     reply.stdout
 }
 
+#[cfg(unix)]
 struct StopServer(tokio::task::JoinHandle<()>);
+#[cfg(unix)]
 impl Drop for StopServer {
     fn drop(&mut self) {
         self.0.abort();
@@ -71,12 +88,14 @@ impl Drop for StopServer {
 }
 
 #[derive(Clone)]
+#[cfg(unix)]
 struct Backend {
     program: PathBuf,
     root: PathBuf,
     seen: Arc<Mutex<Vec<(String, String)>>>,
 }
 
+#[cfg(unix)]
 impl Backend {
     async fn reply(self, request: Request<Incoming>) -> Result<Response<Full<Bytes>>, Infallible> {
         let path = request.uri().path().to_owned();
@@ -195,6 +214,7 @@ impl Backend {
     }
 }
 
+#[cfg(unix)]
 async fn listener() -> TcpListener {
     // Use only the VM's explicitly assigned test ports; every bind is owned by this fixture.
     for port in 41000..=41999 {
@@ -205,6 +225,7 @@ async fn listener() -> TcpListener {
     panic!("no owned Git HTTPS fixture port available");
 }
 
+#[cfg(unix)]
 async fn authentication() {
     use std::os::unix::fs::PermissionsExt;
     let fixture = tempfile::tempdir().unwrap();
@@ -478,6 +499,7 @@ async fn authentication() {
     );
 }
 
+#[cfg(unix)]
 #[tokio::test]
 async fn authenticated_clone_and_another_remote_push_never_share_the_source_credential() {
     tokio::time::timeout(TEST_TIMEOUT, authentication())

@@ -96,6 +96,53 @@ pub async fn controls(conn: &mut Conn, limit: i64) -> Result<Vec<CommandRow>, Db
     ).bind(limit).fetch_all(conn).await?)
 }
 
+/// Finished local-key purges whose original machine is online and which have not been retried.
+pub async fn provider_purges_due(
+    conn: &mut Conn,
+    ready_before: DateTime<Utc>,
+    limit: i64,
+) -> Result<Vec<CommandRow>, DbError> {
+    Ok(sqlx::query_as(
+        "SELECT c.id,c.machine_id,c.kind,c.body,c.serial_key,c.state,c.result,c.error,c.attempts,
+                c.deadline_at,c.created_at,c.updated_at
+           FROM commands c JOIN machines m ON m.id=c.machine_id
+          WHERE c.kind='provider.stop' AND c.body->>'purge'='true'
+            AND c.state IN ('failed','expired','cancelled') AND c.updated_at <= $1
+            AND c.error#>>'{details,purge_retry}' IS NULL
+            AND m.online AND m.status='active' AND m.deleted_at IS NULL
+          ORDER BY c.updated_at,c.id LIMIT $2",
+    )
+    .bind(ready_before)
+    .bind(limit)
+    .fetch_all(conn)
+    .await?)
+}
+
+/// Claims one purge retry; the caller journals its successor in the same transaction.
+pub async fn claim_provider_purge_retry(
+    conn: &mut Conn,
+    previous: Id,
+    next: Id,
+) -> Result<bool, DbError> {
+    Ok(sqlx::query(
+        "UPDATE commands c SET error=jsonb_set(
+            CASE WHEN jsonb_typeof(c.error)='object' THEN c.error ELSE '{}'::jsonb END,
+            '{details}',
+            (CASE WHEN jsonb_typeof(c.error->'details')='object' THEN c.error->'details' ELSE '{}'::jsonb END)
+              || jsonb_build_object('purge_retry',$2::uuid::text), true)
+          WHERE c.id=$1 AND c.kind='provider.stop' AND c.body->>'purge'='true'
+            AND c.state IN ('failed','expired','cancelled')
+            AND c.error#>>'{details,purge_retry}' IS NULL
+            AND EXISTS(SELECT 1 FROM machines m WHERE m.id=c.machine_id AND m.online
+                       AND m.status='active' AND m.deleted_at IS NULL)",
+    )
+    .bind(previous)
+    .bind(next)
+    .execute(conn)
+    .await?
+    .rows_affected() == 1)
+}
+
 /// Retryable detach refusals belonging to a registration that remains withdrawn.
 /// A job owns retries for active environments; this covers committed one-way cleanup controls.
 pub async fn busy_registration_detaches(

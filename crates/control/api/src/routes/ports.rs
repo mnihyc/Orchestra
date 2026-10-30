@@ -18,6 +18,27 @@ use orch_engine::ports::{self as core, Requester};
 use orch_types::{Id, Json, Time, new_id};
 use std::collections::BTreeSet;
 
+/// The guarded person's credential, kept for the lifetime of their decision.
+pub(crate) fn decision_credential(
+    ctx: &Ctx,
+    principal: &Principal,
+) -> ApiResult<core::DecisionCredential> {
+    use crate::middleware::authentication::Via;
+    let user = ctx.user()?;
+    if user.id() != principal.user() {
+        return Err(ApiError::internal(
+            "the port decider does not match its credential",
+        ));
+    }
+    Ok(match &user.via {
+        Via::Session { session_id } => core::DecisionCredential::Session {
+            id: *session_id,
+            as_admin: principal.caller().as_admin(),
+        },
+        Via::Token { token_id, .. } => core::DecisionCredential::Token { id: *token_id },
+    })
+}
+
 /// Binds the target, policy and admission core; entry and agent decisions join separately.
 pub fn mount(registry: &mut Registry) {
     registry
@@ -1273,6 +1294,7 @@ async fn create(
     let produced = match core::produce_prepared(
         &mut tx,
         guard.principal(),
+        decision_credential(&ctx, guard.principal())?,
         &env,
         Requester::Person(guard.principal().user()),
         body.client_id,

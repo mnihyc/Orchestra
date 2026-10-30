@@ -146,6 +146,8 @@ pub struct Services {
     pub publisher: Arc<dyn Publisher>,
     /// The machine's local policy.
     pub policy: Arc<PolicyStore>,
+    /// Cached local observations; policy, not discovery, decides what may run.
+    pub(crate) local_harnesses: Arc<crate::local_harnesses::Discovery>,
     /// Provider programs registered beside this machine's credentials.
     pub provider_sources: Arc<crate::sources::Programs>,
     /// The built-in sources of a key's facts the program registered: the vendors' readers, by name.

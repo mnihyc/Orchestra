@@ -23,6 +23,205 @@ use orch_types::new_id;
 use serde_json::json;
 
 #[tokio::test]
+async fn an_optional_live_grant_cannot_exceed_the_machines_capability_ceiling() {
+    use orch_driver_contract::sources::SourceKind;
+    use orch_link_contract::policy::{MachineDrivers, PolicyKey};
+    use std::sync::Arc;
+
+    let driver = MemoryDriver::new("memory").with_sources(vec![SourceKind::Image]);
+    let mut descriptor = driver.describe();
+    descriptor
+        .live_changes
+        .capabilities
+        .push("docker_socket".into());
+    let mut rig = Rig::with_driver(driver.with_descriptor(descriptor));
+    rig.have_connector();
+    rig.start().await;
+    let policy = Arc::new(
+        orch_connector_core::policy::PolicyStore::host(
+            orch_config::ConnectorConfig::default(),
+            None,
+        )
+        .unwrap(),
+    );
+    let mut drivers = MachineDrivers::managed();
+    drivers.images.capabilities = vec!["kvm".into()];
+    policy
+        .set_here(PolicyKey::Drivers, &json!(&drivers))
+        .unwrap();
+    rig.role().runtimes().set_policy(Arc::clone(&policy));
+
+    let mut spec = rig.spec(RuntimeKind::Environment, "live-ceiling");
+    spec.capabilities = serde_json::from_value(json!({
+        "allowed":["docker_socket"], "base":[], "granted":[],
+        "patches":{"docker_socket":{"binds":["/var/run/docker.sock:/var/run/docker.sock"]}}
+    }))
+    .unwrap();
+    rig.made(&spec).await;
+    assert!(matches!(
+        rig.start_runtime(spec.runtime_id).await,
+        Progress::Succeeded(_)
+    ));
+    rig.driver.clear_calls();
+    let mut granted = spec.capabilities.clone();
+    granted.granted.push("docker_socket".into());
+    let error = rig
+        .refused(
+            &SerialKey::Runtime(spec.runtime_id),
+            &NodeCapabilitiesApply {
+                runtime_id: spec.runtime_id,
+                capabilities: json!(granted),
+            },
+        )
+        .await;
+    assert_eq!(error.code, "unsupported");
+    assert!(error.detail.contains("docker_socket"));
+    assert!(rig.driver.targets_of(Operation::Stop).is_empty());
+    assert!(rig.driver.targets_of(Operation::Start).is_empty());
+    assert!(
+        rig.role()
+            .ledger()
+            .capabilities(spec.runtime_id)
+            .unwrap()
+            .desired
+            .granted
+            .is_empty()
+    );
+    rig.stop().await;
+}
+
+#[tokio::test]
+async fn a_saved_capability_is_not_replayed_after_the_machine_owner_disallows_it() {
+    use orch_driver_contract::sources::SourceKind;
+    use orch_link_contract::policy::{MachineDrivers, PolicyKey};
+    use std::sync::Arc;
+
+    let driver = MemoryDriver::new("memory").with_sources(vec![SourceKind::Image]);
+    let mut rig = Rig::with_driver(driver);
+    rig.have_connector();
+    rig.start().await;
+    let policy = Arc::new(
+        orch_connector_core::policy::PolicyStore::host(
+            orch_config::ConnectorConfig::default(),
+            None,
+        )
+        .unwrap(),
+    );
+    let mut drivers = MachineDrivers::managed();
+    drivers.images.capabilities = vec!["kvm".into()];
+    policy
+        .set_here(PolicyKey::Drivers, &json!(&drivers))
+        .unwrap();
+    rig.role().runtimes().set_policy(Arc::clone(&policy));
+    let mut spec = rig.spec(RuntimeKind::Environment, "replay-ceiling");
+    spec.capabilities = serde_json::from_value(json!({
+        "allowed":["kvm"], "base":["kvm"], "granted":[], "patches":{"kvm":{}}
+    }))
+    .unwrap();
+    rig.made(&spec).await;
+    assert!(matches!(
+        rig.start_runtime(spec.runtime_id).await,
+        Progress::Succeeded(_)
+    ));
+    assert!(matches!(
+        rig.stop_runtime(spec.runtime_id).await,
+        Progress::Succeeded(_)
+    ));
+    drivers.images.capabilities.clear();
+    policy
+        .set_here(PolicyKey::Drivers, &json!(&drivers))
+        .unwrap();
+    rig.driver.clear_calls();
+    let error = match rig.start_runtime(spec.runtime_id).await {
+        Progress::Failed(error) => error,
+        other => panic!("a capability outside the current policy was replayed: {other:?}"),
+    };
+    assert_eq!(error.code, "unsupported");
+    assert!(error.detail.contains("kvm"));
+    assert!(rig.driver.targets_of(Operation::Start).is_empty());
+    rig.stop().await;
+}
+
+#[cfg(unix)]
+#[tokio::test]
+async fn template_bind_mounts_obey_the_machines_directory_roots() {
+    let mut rig = Rig::with_driver(MemoryDriver::new("docker").replacing());
+    rig.settings.drivers = vec!["docker".into()];
+    rig.have_connector();
+    rig.start().await;
+
+    // The fixture offers the system temporary directory, while the package is outside it.
+    let outside = std::env::current_dir().unwrap();
+    let offered = tempfile::tempdir().unwrap();
+    let escaped = offered.path().join("escape");
+    std::os::unix::fs::symlink(&outside, &escaped).unwrap();
+    for (label, source) in [("outside", &outside), ("escape", &escaped)] {
+        let mut spec = rig.spec(RuntimeKind::Environment, label);
+        spec.driver = "docker".into();
+        spec.spec["mounts"] = json!([{
+            "type":"bind", "source":source, "target":"/extra"
+        }]);
+        let error = match rig.create(&spec).await {
+            Progress::Failed(error) => error,
+            other => panic!("a template mount outside the machine's roots was accepted: {other:?}"),
+        };
+        assert_eq!(error.code, "policy.root_not_allowed");
+        assert!(rig.driver.unit(&spec.name).is_none());
+    }
+
+    let mut spec = rig.spec(RuntimeKind::Environment, "allowed");
+    spec.driver = "docker".into();
+    let directory = offered.path().join("data");
+    std::fs::create_dir(&directory).unwrap();
+    let link = offered.path().join("within");
+    std::os::unix::fs::symlink(&directory, &link).unwrap();
+    spec.spec["mounts"] = json!([{
+        "type":"bind", "source":link, "target":"/extra"
+    }]);
+    rig.made(&spec).await;
+    let actual = rig.driver.unit(&spec.name).unwrap();
+    assert_eq!(
+        actual.spec.spec["mounts"][0]["source"],
+        json!(std::fs::canonicalize(&directory).unwrap())
+    );
+    std::fs::rename(&directory, offered.path().join("original")).unwrap();
+    std::fs::create_dir(&directory).unwrap();
+    let error = match rig.start_runtime(spec.runtime_id).await {
+        Progress::Failed(error) => error,
+        other => panic!("a replaced template directory was accepted: {other:?}"),
+    };
+    assert_eq!(error.code, "policy.root_not_allowed");
+    assert!(rig.driver.targets_of(Operation::Start).is_empty());
+    rig.stop().await;
+}
+
+#[cfg(unix)]
+#[tokio::test]
+async fn a_capability_patch_cannot_add_a_template_bind_outside_the_machines_roots() {
+    let mut rig = Rig::with_driver(MemoryDriver::new("docker").replacing());
+    rig.settings.drivers = vec!["docker".into()];
+    rig.have_connector();
+    rig.start().await;
+    let mut spec = rig.spec(RuntimeKind::Environment, "patch");
+    spec.driver = "docker".into();
+    spec.capabilities.base = vec!["probe".into()];
+    spec.capabilities.patches.insert(
+        "probe".into(),
+        json!({"mounts":[{
+            "type":"bind", "source":std::env::current_dir().unwrap(), "target":"/extra"
+        }]}),
+    );
+    let error = match rig.create(&spec).await {
+        Progress::Failed(error) => error,
+        other => panic!("a capability patch escaped the machine's roots: {other:?}"),
+    };
+    assert_eq!(error.code, "unsupported");
+    assert!(error.detail.contains("capability patch"));
+    assert!(rig.driver.unit(&spec.name).is_none());
+    rig.stop().await;
+}
+
+#[tokio::test]
 async fn an_unavailable_driver_reports_its_schema_without_a_schedulable_descriptor() {
     use orch_node_core::drivers::{DriverHost, Factory, Registrations};
     use std::sync::Arc;

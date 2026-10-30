@@ -5,9 +5,11 @@ import { useState } from 'react';
 import { useTranslation } from 'react-i18next';
 import { EmptyState } from '@/ui/EmptyState';
 import { changeMachinePrograms,machineProgramsKey,machineProgramsQuery } from '@/api/machinePrograms';
+import { machinePolicyQuery,machineQuery,probeMachine } from '@/api/resources';
 import { ApiError } from '@/api/client';
 import type { Machine,MachineProgram,MachineProgramKind,MachinePrograms,MachineProgramsCommand } from '@/generated/api-types';
 import { TaskGuideLink } from '@/features/help/TaskGuideLink';
+import { useHelpOpener } from '@/features/help/open';
 import { CommandBox } from '@/features/resources/Facts';
 import { readMachineFacts } from '@/features/resources/machines/facts';
 import { FACT_MEMBERS } from '@/features/resources/providers/details';
@@ -46,6 +48,58 @@ function ProgramError({error}:{error:unknown}) {
 
 function ProgramsHelp() {
   return <TaskGuideLink guide="register-your-program" />;
+}
+
+/** Local discoveries are facts; changing the delegated policy is the authorization to use one. */
+function LocalHarnessPrograms({machine,canManage}:{machine:Pick<Machine,'id'|'facts'>;canManage:boolean}) {
+  const {t}=useTranslation();
+  const client=useQueryClient();
+  const openHelp=useHelpOpener();
+  const [fresh,setFresh]=useState<{previous:unknown;facts:unknown}|null>(null);
+  const facts=readMachineFacts(fresh!==null && fresh.previous===machine.facts?fresh.facts:machine.facts);
+  const title=useHarnessTitle();
+  const confirmed=facts.harnesses;
+  const found=facts.discoveredHarnesses ?? [];
+  const reported=facts.discoveredHarnesses!==null || confirmed.length>0;
+  const policy=useQuery({...machinePolicyQuery(machine.id),enabled:reported && canManage});
+  const key=policy.data?.keys.find((entry)=>entry.key==='agent.harnesses');
+  const change=useMutation({mutationFn:async ({kind,path,allow}:{kind:string;path:string;allow:boolean})=>{
+    if(key?.writable!==true)throw new Error(t('machinePrograms.managerRequired'));
+    const saved=await changeMachinePrograms(machine.id,{action:allow?'confirm_harness':'remove_harness',kind,path});
+    client.setQueryData(machineProgramsKey(machine.id),saved);
+    void client.invalidateQueries({queryKey:machinePolicyQuery(machine.id).queryKey});
+    return saved.machine_view ?? probeMachine(machine.id);
+  },onSuccess:(updated)=>{
+    setFresh({previous:machine.facts,facts:updated.facts});
+    client.setQueryData(machineQuery(machine.id).queryKey,updated);
+  }});
+  const search=useMutation({mutationFn:()=>probeMachine(machine.id),onSuccess:(updated)=>{
+    setFresh({previous:machine.facts,facts:updated.facts});
+    client.setQueryData(machineQuery(machine.id).queryKey,updated);
+  }});
+  if(!reported)return null;
+  const entries=[...confirmed.map((entry)=>({entry,confirmed:true})),...found.map((entry)=>({entry,confirmed:false}))];
+  const missing=(facts.searchedHarnessKinds ?? []).filter((kind)=>!entries.some(({entry})=>entry.kind===kind));
+  return <section aria-labelledby="machine-local-programs"><div className="mb-2 flex flex-wrap items-center gap-2">
+    <h3 id="machine-local-programs" className="font-medium">{t('machinePrograms.installedHarnesses')}</h3>
+    <HelpHint term={t('machinePrograms.installedHarnesses')} what={t('machinePrograms.harnessHelp')} guide={{article:'connect-a-machine',heading:'confirm-an-agent-program'}}
+      more={{label:t('help.hint.more'),onOpen:()=>openHelp('connect-a-machine','confirm-an-agent-program')}}/>
+    {canManage && <Button size="sm" pending={search.isPending} onClick={()=>search.mutate()}>{t('machinePrograms.searchAgain')}</Button>}
+    {canManage && key!==undefined && !key.writable && <Button size="sm" asChild><Link to="/resources/machines/$id" params={{id:machine.id}} search={{tab:'policy'}}>{t('machinePrograms.openPolicy')}</Link></Button>}
+  </div>
+    {entries.length===0 && missing.length===0?<StateLine compact message={t('machinePrograms.noProgramsFound')}/>:<ul className="divide-y divide-border rounded-lg border border-border">
+      {entries.map(({entry,confirmed:allowed})=><li key={`${entry.kind}:${entry.path}`} className="flex flex-wrap items-center gap-x-3 gap-y-1 px-3 py-2">
+        <span>{title(entry.kind)}</span><span className="text-sm text-text-muted">{entry.version==='' || entry.version==='unknown'?t('machinePrograms.unknownVersion'):entry.version}</span>
+        <PathValue path={entry.path} full/><span className="text-sm text-text-muted">{t(allowed?'machinePrograms.confirmed':'machinePrograms.found')}</span>
+        {key?.writable===true && <Button size="sm" pending={change.isPending && change.variables.path===entry.path}
+          disabled={change.isPending || search.isPending} onClick={()=>change.mutate({kind:entry.kind,path:entry.path,allow:!allowed})}>{t(allowed?'machinePrograms.removeConfirmation':'machinePrograms.use')}</Button>}
+      </li>)}
+      {missing.map((kind)=><li key={kind} className="flex flex-wrap items-center gap-x-3 gap-y-1 px-3 py-2"><span>{title(kind)}</span><span className="text-sm text-text-muted">{t('machinePrograms.noProgramFound')}</span></li>)}
+    </ul>}
+    {canManage && policy.isError && <ErrorAlert error={policy.error}/>}
+    {change.isError && <ErrorAlert error={change.error}/>}
+    {search.isError && <ErrorAlert error={search.error}/>}
+  </section>;
 }
 
 /** Exact local operator entry; argv is serialized as TOML strings without a shell command or invented path. */
@@ -135,7 +189,9 @@ export function MachineProgramsTab({machine}:{machine:Pick<Machine,'id'|'facts'|
   const {t}=useTranslation();
   const client=useQueryClient();
   const query=useQuery(machineProgramsQuery(machine.id));
-  const harnesses=readMachineFacts(machine.facts).harnesses;
+  const machineFacts=readMachineFacts(machine.facts);
+  const showLocalHarnesses=machineFacts.discoveredHarnesses!==null || (machineFacts.policy!==null && machineFacts.harnesses.length>0);
+  const harnesses=showLocalHarnesses?[]:machineFacts.harnesses;
   const harnessTitle=useHarnessTitle(harnesses.length>0);
   const [enrolling,setEnrolling]=useState(false);
   const [kind,setKind]=useState<MachineProgramKind>('agent');
@@ -187,6 +243,7 @@ export function MachineProgramsTab({machine}:{machine:Pick<Machine,'id'|'facts'|
         })}
       </ul>}
     {programs.entries.some((entry)=>entry.origin==='local') && <p className="text-sm text-text-muted">{t('machinePrograms.localEntry',{file:programs.config_file ?? t('machinePrograms.localConfiguration')})}</p>}
+    {showLocalHarnesses && <LocalHarnessPrograms machine={machine} canManage={programs.can_manage}/>}
     {harnesses.length>0 && <section aria-labelledby="machine-installed-harnesses"><h3 id="machine-installed-harnesses" className="mb-2 font-medium">{t('machinePrograms.installedHarnesses')}</h3>
       <ul className="divide-y divide-border rounded-lg border border-border">{harnesses.map((harness)=><li key={`${harness.kind}:${harness.path}`} className="flex flex-wrap items-baseline gap-x-3 gap-y-1 px-3 py-2">
         <span>{harnessTitle(harness.kind)}</span>{harness.version!=='' && harness.version!=='unknown' && <span className="text-sm text-text-muted">{harness.version}</span>}<PathValue path={harness.path}/>

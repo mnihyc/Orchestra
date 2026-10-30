@@ -14,7 +14,7 @@ Orch can use images, agent programs and models carried into an internal network.
 | Discover newer agent programs | Vendor channels, when explicitly requested or enabled | Carry in vendor checksums; a mirror supplies executable bytes, not checksum authority |
 | Check for an Orch release | The configured release site, when explicitly requested or enabled | An internal release site; scheduled checks ship off |
 | Refresh model prices | The configured rate source, when explicitly requested or enabled | The release's local rate catalogue or an internal source |
-| Fetch a skill or template source | The URL or Git repository its manager imports | Upload an archive, or use an internal URL or repository |
+| Fetch a skill or template source | The URL or Git repository its manager imports | Upload an archive, or use an internal URL or repository. For a skill archive URL, allow its private host in `outbound.allowed_private_hosts` |
 | Run a model, summary, review or embedding request | The provider endpoint its manager configured | A provider served inside the network |
 | Read subscription or known-key usage | That provider's vendor, after that provider is configured | Use an internal API provider; vendor subscriptions require their vendor |
 | Sign in through an identity provider | Its configured discovery, authorization and token endpoints | An internal identity provider or local Orch sign-in |

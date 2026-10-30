@@ -38,6 +38,16 @@ pub struct MachineProgramKey {
     pub name: String,
 }
 
+/// A discovered harness and the exact local program whose selection is changed.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+#[serde(deny_unknown_fields)]
+pub struct MachineHarnessProgram {
+    /// The harness kind.
+    pub kind: String,
+    /// The path found or currently selected on the machine.
+    pub path: String,
+}
+
 /// Who supplied a registration.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
 #[serde(rename_all = "snake_case")]
@@ -115,6 +125,10 @@ pub enum MachineProgramsCommand {
     Test(MachineProgramKey),
     /// Remove an Orch-owned registration after active turns have finished.
     Remove(MachineProgramKey),
+    /// Confirm a discovered harness program under the machine's delegated local policy.
+    ConfirmHarness(MachineHarnessProgram),
+    /// Remove a matching harness program selection without changing any other kind.
+    RemoveHarness(MachineHarnessProgram),
     /// Reload operator configuration and the connector's persisted registrations.
     Reload,
 }
@@ -156,4 +170,26 @@ pub struct MachineInstallationCommands {
     /// Reviewed uninstall command; null when installation ownership cannot be established.
     #[serde(default)]
     pub uninstall: Option<String>,
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use serde_json::json;
+
+    #[test]
+    fn harness_confirmation_commands_name_the_kind_and_exact_path() {
+        for action in ["confirm_harness", "remove_harness"] {
+            let example =
+                json!({"action":action,"kind":"claude-code","path":"/usr/local/bin/claude"});
+            let command: MachineProgramsCommand = serde_json::from_value(example.clone()).unwrap();
+            assert_eq!(serde_json::to_value(command).unwrap(), example);
+            assert!(
+                serde_json::from_value::<MachineProgramsCommand>(json!({
+                    "action":action,"kind":"claude-code","path":"/usr/local/bin/claude","other":true
+                }))
+                .is_err()
+            );
+        }
+    }
 }

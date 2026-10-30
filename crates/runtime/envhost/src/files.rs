@@ -792,9 +792,21 @@ impl Files {
     }
 
     fn stale(&self, path: &RelPath) -> HostError {
-        HostError::Stale {
-            current: self.stat(path).ok().map(Box::new),
-        }
+        let current = self.stat(path).ok().map(|mut stat| {
+            if stat.hash.is_none() {
+                stat.hash = self
+                    .ws()
+                    .locate(path, Locate::THROUGH)
+                    .ok()
+                    .and_then(|located| {
+                        self.current_hash(&located.parent, located.name().ok()?, &located.real)
+                            .ok()
+                            .flatten()
+                    });
+            }
+            Box::new(stat)
+        });
+        HostError::Stale { current }
     }
 
     /// Writes the content `blob` holds to the file at `path`, creating the directories above it.
@@ -1076,7 +1088,7 @@ impl Files {
                 let source = from_dir
                     .open_read(from_name)
                     .map_err(|error| HostError::io(format!("opening {real}"), error))?;
-                budget.take(meta.size)?;
+                budget.check(meta.size)?;
                 let target = to_dir
                     .create_new(to_name, meta.mode & WRITABLE_MODE_BITS)
                     .map_err(|error| HostError::io("making the copy of a file", error))?;
@@ -1089,6 +1101,9 @@ impl Files {
                     if count == 0 {
                         break;
                     }
+                    // A file can grow after its metadata was read; only bytes actually read
+                    // count toward the shared budget, before any of this chunk is written.
+                    budget.take(count as u64)?;
                     let mut written = 0usize;
                     while written < count {
                         let step =
@@ -1195,16 +1210,21 @@ struct Budget {
 }
 
 impl Budget {
-    fn take(&mut self, bytes: u64) -> Result<()> {
+    fn check(&self, bytes: u64) -> Result<()> {
         let bytes = i64::try_from(bytes).unwrap_or(i64::MAX);
-        self.left = self.left.saturating_sub(bytes);
-        if self.left < 0 {
+        if bytes > self.left {
             return Err(HostError::TooLarge {
                 what: self.what.clone(),
-                size: self.limit - self.left,
+                size: self.limit.saturating_sub(self.left).saturating_add(bytes),
                 limit: self.limit,
             });
         }
+        Ok(())
+    }
+
+    fn take(&mut self, bytes: u64) -> Result<()> {
+        self.check(bytes)?;
+        self.left -= i64::try_from(bytes).unwrap_or(i64::MAX);
         Ok(())
     }
 }
@@ -1784,6 +1804,86 @@ mod tests {
         assert!(
             names.iter().all(|n| !n.starts_with(TEMP_PREFIX)),
             "no half-made copy is left: {names:?}"
+        );
+    }
+
+    #[test]
+    fn a_copy_refuses_a_file_that_grows_after_its_size_was_checked() {
+        let f = fixture();
+        std::fs::write(f.dir.join("source"), "a").unwrap();
+        let source = f.files.ws().locate(&path("source"), Locate::ENTRY).unwrap();
+        let meta = source.meta.unwrap();
+        std::fs::write(f.dir.join("source"), "larger").unwrap();
+
+        let temporary = OsStr::new(".copy-in-progress");
+        let destination = OsStr::new("copy");
+        let mut cleanup = Cleanup::new(&source.parent, temporary, false).unwrap();
+        let mut budget = Budget {
+            left: 4,
+            limit: 4,
+            what: "source".to_owned(),
+        };
+        let result = f.files.copy_entry(
+            &source.parent,
+            source.name().unwrap(),
+            &meta,
+            &source.real,
+            None,
+            &source.parent,
+            temporary,
+            0,
+            &mut budget,
+        );
+        if result.is_ok() {
+            source
+                .parent
+                .rename_to(temporary, &source.parent, destination, false)
+                .unwrap();
+            cleanup.disarm();
+        }
+        drop(cleanup);
+
+        assert!(matches!(result, Err(HostError::TooLarge { limit: 4, .. })));
+        assert!(!f.dir.join("copy").exists());
+        assert!(!f.dir.join(temporary).exists());
+        assert_eq!(read(&f.dir, "source"), "larger");
+    }
+
+    #[test]
+    fn a_copy_counts_actual_bytes_across_a_tree_and_accepts_the_limit() {
+        let mut f = fixture();
+        let ws = Workspace::open(&f.dir, &[], PathStyle::Posix, true).unwrap();
+        f.files = Files::workspace(
+            ws,
+            Arc::new(IgnoreRules::new(&[], true)),
+            Arc::new(HashCache::new()),
+            Limits {
+                max_blob_bytes: 4,
+                ..Limits::default()
+            },
+            Arc::new(GateState::new(Gates::OPEN)),
+        );
+        std::fs::create_dir(f.dir.join("source")).unwrap();
+        std::fs::write(f.dir.join("source/a"), "12").unwrap();
+        std::fs::write(f.dir.join("source/b"), "34").unwrap();
+        f.files.copy(&path("source"), &path("fits")).unwrap();
+        assert_eq!(read(&f.dir, "fits/a"), "12");
+        assert_eq!(read(&f.dir, "fits/b"), "34");
+
+        std::fs::write(f.dir.join("source/b"), "345").unwrap();
+        assert!(matches!(
+            f.files.copy(&path("source"), &path("too-large")),
+            Err(HostError::TooLarge { limit: 4, .. })
+        ));
+        assert!(!f.dir.join("too-large").exists());
+        let names: Vec<_> = std::fs::read_dir(&f.dir)
+            .unwrap()
+            .map(|entry| entry.unwrap().file_name())
+            .collect();
+        assert!(
+            names
+                .iter()
+                .all(|name| !name.to_string_lossy().starts_with(TEMP_PREFIX))
         );
     }
 

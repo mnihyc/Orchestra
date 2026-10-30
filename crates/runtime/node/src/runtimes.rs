@@ -384,6 +384,58 @@ impl Runtimes {
         }
     }
 
+    fn check_template_directories(
+        &self,
+        spec: &mut orch_driver_contract::runtime::RuntimeSpec,
+    ) -> Result<BTreeMap<String, orch_driver_contract::runtime::DirectoryBinding>, CommandError>
+    {
+        let mut checked = BTreeMap::new();
+        if spec.driver != "docker" {
+            return Ok(checked);
+        }
+        // Docker capability patches have their own native fields; allowing a template
+        // mount there would evade the machine's check of the template's sources.
+        if spec
+            .capabilities
+            .patches
+            .values()
+            .any(|patch| patch.get("mounts").is_some())
+        {
+            return Err(CommandError::new(
+                ErrorCode::Unsupported,
+                "a Docker capability patch cannot add template mounts",
+            ));
+        }
+        let Some(mounts) = spec.spec.get_mut("mounts").and_then(Json::as_array_mut) else {
+            return Ok(checked);
+        };
+        for (index, mount) in mounts.iter_mut().enumerate() {
+            if mount.get("type").and_then(Json::as_str) != Some("bind") {
+                continue;
+            }
+            let Some(source) = mount.get("source").and_then(Json::as_str) else {
+                continue; // The driver's own validation reports the missing source.
+            };
+            let policy = lock(&self.inner.policy)
+                .as_ref()
+                .and_then(|store| store.policy())
+                .ok_or_else(|| {
+                    CommandError::new(
+                        ErrorCode::PolicyRootNotAllowed,
+                        "this machine has not offered any environment.roots",
+                    )
+                })?;
+            let directory = orch_connector_core::policy::inspect_environment_directory(
+                &policy,
+                std::path::Path::new(source),
+            )?;
+            mount["source"] = Json::String(directory.path.clone());
+            // A colon cannot occur in an ordinary managed volume name.
+            checked.insert(format!("template:{index}"), directory);
+        }
+        Ok(checked)
+    }
+
     fn check_data_directories(
         &self,
         spec: &mut orch_driver_contract::runtime::RuntimeSpec,
@@ -739,9 +791,10 @@ impl Runtimes {
                 .bounded_resources(spec.resources)
                 .map_err(|reason| CommandError::new(ErrorCode::Unsupported, reason))?;
         }
+        let template_directories = self.check_template_directories(&mut spec)?;
         self.check_data_directories(&mut spec)?;
         self.check_mount_paths(&mut spec.mounts)?;
-        let checked_roots: BTreeMap<_, _> = spec
+        let mut checked_roots: BTreeMap<_, _> = spec
             .volumes
             .values()
             .filter_map(|volume| {
@@ -751,6 +804,7 @@ impl Runtimes {
                     .map(|directory| (volume.name.clone(), directory.clone()))
             })
             .collect();
+        checked_roots.extend(template_directories);
         if self.inner.ledger.get(spec.runtime_id).is_some()
             && self.inner.ledger.directories(spec.runtime_id) != checked_roots
         {
@@ -888,18 +942,7 @@ impl Runtimes {
         let before = self.inner.ledger.get(spec.runtime_id);
         self.inner
             .ledger
-            .set_directories(
-                spec.runtime_id,
-                spec.volumes
-                    .values()
-                    .filter_map(|volume| {
-                        volume
-                            .directory
-                            .as_ref()
-                            .map(|directory| (volume.name.clone(), directory.clone()))
-                    })
-                    .collect(),
-            )
+            .set_directories(spec.runtime_id, checked_roots)
             .map_err(|error| CommandError::new(ErrorCode::Internal, error.to_string()))?;
         let first_record = before.is_none();
         let record = Record {

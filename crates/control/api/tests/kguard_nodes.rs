@@ -502,7 +502,7 @@ async fn making_departments_projects_folders_and_topics_requires_permission_afte
                 _ => (
                     s.folder.base.id,
                     "topics",
-                    "project.interact",
+                    "project.create_topics",
                     json!({"name": "Made"}),
                 ),
             };
@@ -645,7 +645,7 @@ async fn moving_and_previewing_each_kind_requires_both_ends_after_the_body() {
                         s.folder.base.id,
                         s.topic.base.revision,
                         "topic.manage",
-                        "project.interact",
+                        "project.create_topics",
                         s.project.base.id,
                     ),
                 };

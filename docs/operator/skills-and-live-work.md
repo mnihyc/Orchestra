@@ -11,6 +11,10 @@ Use permits enablement, not editing. Review imported scripts and their origin,
 then test in an ordinary bounded environment without production secrets.
 Private source credentials are sealed; diagnose imports from the safe error,
 host readiness and allowed network route rather than printing credential values.
+For an archive imported from an address, the system setting
+`outbound.allowed_private_hosts` names private hosts the chosen host may reach.
+Direct connections check each redirect. If the node uses a proxy, configure the
+proxy's own address restrictions as well.
 
 An enabled update reaches a thread before its next turn. If Updating skills
 persists, inspect the thread's work detail and its machine connection. Check

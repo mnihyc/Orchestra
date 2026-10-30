@@ -5,27 +5,43 @@
     reason = "a test fails by panicking"
 )]
 
+#[cfg(target_os = "linux")]
 mod common;
 
+#[cfg(target_os = "linux")]
 use async_trait::async_trait;
+#[cfg(target_os = "linux")]
 use common::Rig;
+#[cfg(target_os = "linux")]
 use common::docker::{CodexDocker, Containers};
+#[cfg(target_os = "linux")]
 use orch_adapter_codex::CodexAdapter;
+#[cfg(target_os = "linux")]
 use orch_adapter_codex::process::{HarnessProcess, LaunchError, LaunchRequest, Launcher};
+#[cfg(target_os = "linux")]
 use orch_connector_core::harnesses::{AdapterRegistration, AdapterRegistry, HomeRule};
+#[cfg(target_os = "linux")]
 use orch_connector_core::roles::provider::{ProviderParts, plug_in};
+#[cfg(target_os = "linux")]
 use orch_link_contract::session::Role;
+#[cfg(target_os = "linux")]
 use orch_types::{Clock, SystemClock};
+#[cfg(target_os = "linux")]
 use serde_json::json;
+#[cfg(target_os = "linux")]
 use std::path::PathBuf;
+#[cfg(target_os = "linux")]
 use std::sync::Arc;
+#[cfg(target_os = "linux")]
 use std::time::Duration;
 
+#[cfg(target_os = "linux")]
 struct TestHome {
     docker: CodexDocker,
     home: PathBuf,
 }
 
+#[cfg(target_os = "linux")]
 #[async_trait]
 impl Launcher for TestHome {
     async fn launch(&self, mut request: LaunchRequest) -> Result<HarnessProcess, LaunchError> {
@@ -37,6 +53,7 @@ impl Launcher for TestHome {
     }
 }
 
+#[cfg(target_os = "linux")]
 #[tokio::test]
 async fn an_existing_sign_in_is_announced_again_after_reconnect_without_starting_a_thread() {
     let present = std::process::Command::new("docker")

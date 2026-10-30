@@ -78,6 +78,7 @@ pub struct Dispatcher {
     roles: HashMap<CommandKind, Vec<Arc<dyn RoleHandler>>>,
     policy: Arc<PolicyStore>,
     facts: Arc<FactsNow>,
+    local_harnesses: Option<Arc<crate::local_harnesses::Discovery>>,
     turn_admission: Arc<tokio::sync::RwLock<()>>,
     updates: Arc<crate::automatic::Requests>,
     programs: Option<(
@@ -187,6 +188,7 @@ impl Dispatcher {
             roles: HashMap::new(),
             policy,
             facts,
+            local_harnesses: None,
             turn_admission: Arc::new(tokio::sync::RwLock::new(())),
             updates: Arc::new(crate::automatic::Requests::new(
                 false,
@@ -196,6 +198,11 @@ impl Dispatcher {
             programs: None,
             role_changes: None,
         }
+    }
+
+    /// Connects machine probes to the shared local program observations.
+    pub(crate) fn local_harnesses(&mut self, discovery: Arc<crate::local_harnesses::Discovery>) {
+        self.local_harnesses = Some(discovery);
     }
 
     /// Gives the common machine command the physical program's supervisor queue.
@@ -343,9 +350,60 @@ impl CommandHandler for Dispatcher {
             None
         };
         match command {
-            Command::MachineProbe(_) => return Ok(CommandResult::MachineProbe((self.facts)())),
+            Command::MachineProbe(_) => {
+                if let Some(discovery) = &self.local_harnesses {
+                    discovery.refresh(&self.policy).await;
+                }
+                return Ok(CommandResult::MachineProbe((self.facts)()));
+            }
             Command::MachineRolesSet(body) => return self.machine_roles_set(&context, body),
             Command::MachinePrograms(request) => {
+                use orch_api_contract::machine_programs::MachineProgramsCommand;
+                let harness = match &request {
+                    MachineProgramsCommand::ConfirmHarness(body) => Some((body, true)),
+                    MachineProgramsCommand::RemoveHarness(body) => Some((body, false)),
+                    _ => None,
+                };
+                if let Some((body, confirm)) = harness {
+                    let Some(discovery) = &self.local_harnesses else {
+                        return Err(CommandError::new(
+                            ErrorCode::Unsupported,
+                            "this connector cannot inspect local harnesses",
+                        ));
+                    };
+                    let Some((_, services)) = &self.role_changes else {
+                        return Err(CommandError::new(
+                            ErrorCode::Unsupported,
+                            "this connector has no local program registry",
+                        ));
+                    };
+                    let admission = self.turn_admission.write().await;
+                    if confirm && !discovery.found(&body.kind, &body.path) {
+                        return Err(CommandError::new(
+                            ErrorCode::Conflict,
+                            "the program was not found in the latest search; search again",
+                        ));
+                    }
+                    self.policy.change_harness(
+                        &body.kind,
+                        (!confirm).then_some(body.path.as_str()),
+                        confirm.then_some(body.path.as_str()),
+                    )?;
+                    drop(admission);
+                    discovery.refresh(&self.policy).await;
+                    let facts = (self.facts)();
+                    if let Err(error) = services
+                        .publisher
+                        .publish(
+                            orch_link_contract::streams::Stream::Machine,
+                            orch_link_contract::events::Event::MachineFacts(facts.clone()),
+                        )
+                        .await
+                    {
+                        tracing::warn!(%error, "a harness selection changed but its report could not be queued");
+                    }
+                    return Ok(CommandResult::MachinePrograms(facts));
+                }
                 let Some((handler, services)) = &self.programs else {
                     return Err(CommandError::new(
                         ErrorCode::Unsupported,

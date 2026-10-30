@@ -614,9 +614,30 @@ fn write_atomically(path: &Path, text: &str, access: Access) -> Result<(), PkiEr
         .filter(|parent| !parent.as_os_str().is_empty())
         .unwrap_or_else(|| Path::new("."));
     std::fs::create_dir_all(directory).map_err(file_error)?;
-    // A temporary file is made readable by its owner alone, so that a secret
-    // is never visible to others even for the moment before it is renamed.
+    // Keep a newly created Windows file exclusively open until its inherited access is removed.
+    // A reader cannot acquire a handle in the interval before its private ACL is installed.
+    #[cfg(windows)]
+    let mut staged = if access == Access::OwnerOnly {
+        use std::os::windows::fs::OpenOptionsExt;
+        tempfile::Builder::new()
+            .make_in(directory, |temporary| {
+                std::fs::OpenOptions::new()
+                    .read(true)
+                    .write(true)
+                    .create_new(true)
+                    .share_mode(0)
+                    .open(temporary)
+            })
+            .map_err(file_error)?
+    } else {
+        tempfile::NamedTempFile::new_in(directory).map_err(file_error)?
+    };
+    #[cfg(not(windows))]
     let mut staged = tempfile::NamedTempFile::new_in(directory).map_err(file_error)?;
+    #[cfg(windows)]
+    if access == Access::OwnerOnly {
+        restrict_to_user(staged.path()).map_err(file_error)?;
+    }
     staged.write_all(text.as_bytes()).map_err(file_error)?;
     staged.as_file().sync_all().map_err(file_error)?;
     #[cfg(unix)]
@@ -629,27 +650,39 @@ fn write_atomically(path: &Path, text: &str, access: Access) -> Result<(), PkiEr
             .set_permissions(std::fs::Permissions::from_mode(WORLD_READABLE))
             .map_err(file_error)?;
     }
-    staged.persist(path).map_err(|e| file_error(e.error))?;
-    #[cfg(not(unix))]
+    #[cfg(windows)]
     if access == Access::OwnerOnly {
-        restrict_to_user(path).map_err(file_error)?;
+        // Rename after closing the exclusive handle; the staged file is already private.
+        let (file, temporary) = staged.into_parts();
+        drop(file);
+        temporary.persist(path).map_err(|e| file_error(e.error))?;
+        return Ok(());
     }
+    staged.persist(path).map_err(|e| file_error(e.error))?;
     Ok(())
 }
 
 /// Takes every access but the user's own from a file, on a system whose
 /// files have access lists and no modes.
-#[cfg(not(unix))]
+#[cfg(windows)]
 fn restrict_to_user(path: &Path) -> std::io::Result<()> {
-    let user = std::env::var("USERNAME").map_err(std::io::Error::other)?;
-    let status = std::process::Command::new("icacls")
-        .arg(path)
-        .args(["/inheritance:r", "/grant:r"])
-        .arg(format!("{user}:F"))
-        .status()?;
-    if status.success() {
-        Ok(())
-    } else {
-        Err(std::io::Error::other("icacls refused to restrict the file"))
+    let root = std::env::var_os("SystemRoot")
+        .ok_or_else(|| std::io::Error::other("the Windows system directory is not known"))?;
+    let program = Path::new(&root).join("System32").join("icacls.exe");
+    // Reset removes any explicit entries; removing inheritance then leaves only Owner Rights.
+    for arguments in [
+        &["/reset"][..],
+        &["/inheritance:r", "/grant:r", "*S-1-3-4:F"][..],
+    ] {
+        let status = std::process::Command::new(&program)
+            .arg(path)
+            .args(arguments)
+            .stdout(std::process::Stdio::null())
+            .stderr(std::process::Stdio::null())
+            .status()?;
+        if !status.success() {
+            return Err(std::io::Error::other("icacls refused to restrict the file"));
+        }
     }
+    Ok(())
 }

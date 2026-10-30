@@ -46,6 +46,12 @@ which the thread reports. Use its running-work/process/terminal views to check
 that process before retrying an effect. A retried remote command must retain
 its original identity to use the connector's deduplication.
 
+On Windows, process-tree shutdown checks the observed descendants before ending
+their parent. It omits ambiguous children from the process list and refuses the
+stop if the recorded times cannot distinguish a child from a reused process
+number. A child created during the final check can escape observation;
+inspect the machine's processes if shutdown was concurrent with new work.
+
 ## A provider needs attention
 
 The provider page distinguishes missing setup, offline, exhausted and a vendor

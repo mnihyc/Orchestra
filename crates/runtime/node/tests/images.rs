@@ -15,7 +15,7 @@ use orch_driver_contract::descriptor::DriverDescriptor;
 use orch_driver_contract::driver::DriverError;
 use orch_driver_contract::imports::{ImportNote, ImportProposal, NoteLevel};
 use orch_driver_contract::runtime::RuntimeKind;
-use orch_driver_contract::sources::SourceKind;
+use orch_driver_contract::sources::{Source, SourceKind};
 use orch_link_contract::commands::{
     NodeImageEnsure, NodeImageEnsureResult, NodeTemplateImport, NodeTemplateImportResult,
     RuntimeKind as LinkKind, SerialKey,
@@ -149,6 +149,67 @@ async fn an_image_is_made_available_and_the_digest_the_host_holds_is_answered() 
         ),
         ("debian:13", "sha256:13")
     );
+    rig.stop().await;
+}
+
+#[tokio::test]
+async fn context_free_release_recipes_reach_the_building_driver_on_a_new_host() {
+    use orch_driver_docker::build::{ContextFiles, DOCKERFILE_NAME, assemble};
+    use orch_driver_docker::imports::read_dockerfile;
+    use orch_testkit::doubles::driver::Operation;
+    use std::io::Read;
+
+    let base = include_str!("../../../../images/orch-env-base/Dockerfile");
+    let developer = include_str!("../../../../images/orch-env-dev/Dockerfile");
+    let recipes = [base.to_owned(), format!("{base}\n{developer}")];
+    let mut rig = Rig::with_driver(builder());
+    rig.start().await;
+    for (index, dockerfile) in recipes.into_iter().enumerate() {
+        let spec = json!({ "build": {
+            "dockerfile": dockerfile, "context": null, "args": { "VERSION": "0.1.1" }, "target": null
+        } });
+        let Source::Build(build) = Source::from_spec(&spec).unwrap() else {
+            panic!("build")
+        };
+        assert!(build.context.is_none());
+        let facts = read_dockerfile(&build.dockerfile);
+        assert_eq!(facts.bases.len(), 1);
+        assert!(facts.bases[0].starts_with('$'));
+        assert!(!build.dockerfile.lines().any(|line| {
+            let word = line.split_whitespace().next().unwrap_or_default();
+            word.eq_ignore_ascii_case("COPY") || word.eq_ignore_ascii_case("ADD")
+        }));
+        let context = assemble(&build.dockerfile, &ContextFiles::Nothing).unwrap();
+        let mut tar = tar::Archive::new(context.reopen().unwrap());
+        let mut entries = tar.entries().unwrap();
+        let mut entry = entries.next().unwrap().unwrap();
+        assert_eq!(
+            entry.path().unwrap().as_ref(),
+            std::path::Path::new(DOCKERFILE_NAME)
+        );
+        let mut sent = String::new();
+        entry.read_to_string(&mut sent).unwrap();
+        assert_eq!(sent, build.dockerfile);
+        drop(entry);
+        assert!(entries.next().is_none());
+
+        let result = result_of(
+            rig.succeed(
+                &key(&format!("release-{index}")),
+                &ensure(spec.clone(), None),
+            )
+            .await,
+        );
+        assert!(result.digest.is_some());
+        assert!(result.built.unwrap().commit.is_none());
+        let expected = format!("built:{}", Hash::of(spec.to_string().as_bytes()));
+        assert!(
+            rig.driver
+                .calls()
+                .iter()
+                .any(|call| call.operation == Operation::EnsureImage && call.target == expected)
+        );
+    }
     rig.stop().await;
 }
 

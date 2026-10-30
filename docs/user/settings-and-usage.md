@@ -38,6 +38,9 @@ be used with. A provider manager first enables the offers the provider actually
 has. A thread's setting then chooses among them, independently of the model's
 maximum. Use the inherited choice to follow the place's default or select a
 local override; the page shows the one in force.
+The access choice and usage reports use the same readable program names as the
+provider's model editor. **None** means no access program; **Standard** is a
+program when the provider offers and enables it.
 
 Model, reasoning effort and parameters apply from the next turn. Steering a
 running turn adds a message and does not change that turn's parameters. Stop,
@@ -268,6 +271,10 @@ defaults within their authority. A department has the same controls as another
 organization. Moving a member changes their domain and role and previews the
 access changes; it does not move the things they own. Creating a team organization
 requires the invitation shown by the installation's policy.
+
+Moving a member, or moving members when a department is deleted, also requires
+the authority to give their destination role. A token can give only what its
+scopes allow. An expiring role keeps its end when the member moves.
 
 Use a person's What they did here to investigate their recorded work and the
 agents acting for them. Inspect retained deleted content without restoring it

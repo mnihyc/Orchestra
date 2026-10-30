@@ -18,6 +18,23 @@ fn invalid(detail: &str) -> CommandError {
 }
 
 impl Runtimes {
+    fn check_live_capability_policy(
+        &self,
+        host: &HostDriver,
+        state: &CapabilityState,
+    ) -> Result<(), CommandError> {
+        if let Some(policy) = lock(&self.inner.policy)
+            .as_ref()
+            .and_then(|store| store.policy())
+        {
+            policy
+                .drivers
+                .check_capabilities(&host.describe(), state)
+                .map_err(|reason| CommandError::new(ErrorCode::Unsupported, reason))?;
+        }
+        Ok(())
+    }
+
     pub async fn inspect_resources(
         &self,
         request: &orch_link_contract::commands::NodeResourcesInspect,
@@ -106,6 +123,10 @@ impl Runtimes {
         };
         let old = native(&before.applied);
         let new = native(&after);
+        // A withdrawal must remain possible after the owner narrows the ceiling.
+        if !new.is_subset(&old) {
+            self.check_live_capability_policy(&host, &after)?;
+        }
         let declared = host.describe().live_changes.capabilities;
         if old
             .symmetric_difference(&new)
@@ -208,6 +229,7 @@ impl Runtimes {
             .capabilities(record.runtime_id)
             .map(|state| state.desired)
             .unwrap_or_default();
+        self.check_live_capability_policy(host, &state)?;
         if let Err(error) = host
             .contract()
             .start_with_capabilities(&record.unit, &state)
@@ -256,6 +278,7 @@ impl Runtimes {
             .hook(HookEvent::PostDown, reason, false, host, record)
             .await;
         self.note_phase(record.runtime_id, HookPhase::Down);
+        self.check_live_capability_policy(host, state)?;
         self.keep_off_shared_volumes(record).await?;
         if let Some(run) = self
             .hook(HookEvent::PreUp, UnitReason::Start, false, host, record)

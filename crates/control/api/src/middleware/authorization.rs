@@ -65,6 +65,100 @@ pub fn caller_of(authed: &Authed) -> ApiResult<Caller> {
     }
 }
 
+/// The session or API token that gave a short-lived handle to a long-lived stream.
+/// No bearer secret is retained, and each use reloads the credential and its current authority.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct RetainedIdentity {
+    user: Id,
+    via: Via,
+    issued_as_admin: bool,
+}
+
+impl RetainedIdentity {
+    pub(crate) fn of(authed: &Authed) -> Self {
+        Self {
+            user: authed.id(),
+            via: authed.via.clone(),
+            issued_as_admin: authed.is_session() && authed.as_admin,
+        }
+    }
+
+    pub(crate) fn from_stored(user: Id, kind: &str, id: Id, issued_as_admin: bool) -> Option<Self> {
+        let via = match kind {
+            "session" => Via::Session { session_id: id },
+            "token" => Via::Token {
+                token_id: id,
+                scopes: Vec::new(),
+                node_id: None,
+            },
+            _ => return None,
+        };
+        Some(Self {
+            user,
+            via,
+            issued_as_admin,
+        })
+    }
+
+    pub(crate) async fn principal(
+        &self,
+        conn: &mut Conn,
+        now: Time,
+    ) -> ApiResult<Option<Principal>> {
+        use orch_db::queries::identity;
+
+        let Some(user) = identity::user_by_id(conn, self.user)
+            .await?
+            .filter(|user| !user.suspended())
+        else {
+            return Ok(None);
+        };
+        let (as_admin, via) = match &self.via {
+            Via::Session { session_id } => {
+                let Some(as_admin) =
+                    identity::session_admin_mode(conn, self.user, *session_id, now.get()).await?
+                else {
+                    return Ok(None);
+                };
+                (
+                    as_admin && self.issued_as_admin,
+                    Via::Session {
+                        session_id: *session_id,
+                    },
+                )
+            }
+            Via::Token { token_id, .. } => {
+                let row: Option<(Vec<String>, Option<Id>)> = sqlx::query_as(
+                    "SELECT scopes, node_id FROM api_tokens WHERE id=$1 AND user_id=$2 AND revoked_at IS NULL AND (expires_at IS NULL OR expires_at>$3)",
+                )
+                .bind(token_id)
+                .bind(self.user)
+                .bind(now.get())
+                .fetch_optional(&mut *conn)
+                .await
+                .map_err(orch_db::DbError::from)?;
+                let Some((scopes, node_id)) = row else {
+                    return Ok(None);
+                };
+                (
+                    false,
+                    Via::Token {
+                        token_id: *token_id,
+                        scopes,
+                        node_id,
+                    },
+                )
+            }
+        };
+        let authed = Authed {
+            as_admin,
+            user,
+            via,
+        };
+        principal_of(conn, &authed, now).await.map(Some)
+    }
+}
+
 /// The current caller; inside an action transaction, also rechecks the
 /// credential and the endpoint's declared permission through the action guard.
 pub async fn principal(ctx: &Ctx, conn: &mut Conn) -> ApiResult<Principal> {

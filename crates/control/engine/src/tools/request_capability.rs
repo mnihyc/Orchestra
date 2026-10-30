@@ -46,6 +46,9 @@ struct Arguments {
 const DENIAL_HOLD_HOURS: i64 = 1;
 /// The shared requests registry defaults to one day when a snapshot has no explicit value.
 const REQUEST_EXPIRY_DEFAULT_HOURS: i64 = 24;
+/// Three preparations tolerate ordinary concurrent edits without waiting forever on changing policy.
+const REQUEST_ATTEMPTS: usize = 3;
+const RETRY_PREPARATION: &str = "retry capability preparation";
 
 /// What is said when the key is none of the environment's.
 fn none_offered() -> &'static str {
@@ -63,6 +66,24 @@ fn done(status: &str, notice: &str, request: Option<Id>) -> Answer {
 impl Engine {
     /// `request_capability`: the call of an agent.
     pub(crate) async fn request_capability_call(
+        &self,
+        call: &CallContext,
+        thread: &ThreadRow,
+        settings: &ToolSettings,
+    ) -> Result<Answer, EngineError> {
+        for _ in 0..REQUEST_ATTEMPTS {
+            let answer = self
+                .request_capability_attempt(call, thread, settings)
+                .await?;
+            if matches!(&answer, Answer::Refused(refusal) if refusal.message == RETRY_PREPARATION) {
+                continue;
+            }
+            return Ok(answer);
+        }
+        Ok(capability_changed())
+    }
+
+    async fn request_capability_attempt(
         &self,
         call: &CallContext,
         thread: &ThreadRow,
@@ -208,6 +229,13 @@ impl Engine {
                 drop(conn);
                 let mut tx = self.inner.db.begin().await?;
                 super::source::check(&mut tx).await?;
+                match self
+                    .current_capability_request(&mut tx, &view, &definition, &policy)
+                    .await?
+                {
+                    CapabilityCheck::Current(_) => {}
+                    CapabilityCheck::Retry => return Ok(capability_retry()),
+                }
                 requests::insert(
                     &mut tx,
                     &requests::NewCapabilityApproval {
@@ -249,6 +277,13 @@ impl Engine {
                 let finished = {
                     let mut unit = Unit::new(&mut tx, now);
                     unit.check_tool_source().await?;
+                    let (current, current_definition) = match self
+                        .current_capability_request(&mut *unit.conn, &view, &definition, &policy)
+                        .await?
+                    {
+                        CapabilityCheck::Current(current) => *current,
+                        CapabilityCheck::Retry => return Ok(capability_retry()),
+                    };
                     append(&mut *unit.conn, &audit, &Origin::default(), now).await?;
                     requests::insert(
                         &mut *unit.conn,
@@ -277,8 +312,8 @@ impl Engine {
                     .await?;
                     self.grant_capability(
                         &mut unit,
-                        &view.facts,
-                        &definition,
+                        &current.facts,
+                        &current_definition,
                         Some(thread.node_id),
                         None,
                     )
@@ -356,6 +391,13 @@ impl Engine {
                 let finished = {
                     let mut unit = Unit::new(&mut tx, now);
                     unit.check_tool_source().await?;
+                    match self
+                        .current_capability_request(&mut *unit.conn, &view, &definition, &policy)
+                        .await?
+                    {
+                        CapabilityCheck::Current(_) => {}
+                        CapabilityCheck::Retry => return Ok(capability_retry()),
+                    }
                     let title = format!("{} asks for \"{label}\"", thread.name);
                     let raised = requests::insert(
                         &mut *unit.conn,
@@ -401,6 +443,46 @@ impl Engine {
                 Ok(done("pending", &pending_notice, Some(request_id)))
             }
         }
+    }
+
+    /// Confirms the prepared request still describes the offered capability and its policy.
+    async fn current_capability_request(
+        &self,
+        conn: &mut orch_db::Conn,
+        before: &crate::capabilities::EnvironmentView,
+        definition: &env_rows::DefinitionRow,
+        policy: &crate::capabilities::Policy,
+    ) -> Result<CapabilityCheck, EngineError> {
+        let Some(current) = self.environment_capabilities(conn, before.facts.id).await? else {
+            return Ok(CapabilityCheck::Retry);
+        };
+        let Some(current_definition) = env_rows::definition(conn, &definition.key).await? else {
+            return Ok(CapabilityCheck::Retry);
+        };
+        let current_policy = self
+            .capability_policy(conn, current.facts.home_node_id, &current_definition)
+            .await?;
+        if current.held.iter().any(|held| held.key == definition.key) {
+            return Ok(CapabilityCheck::Retry);
+        }
+        if !current.applies
+            || !current
+                .offered
+                .iter()
+                .any(|offered| offered.key == definition.key)
+        {
+            return Ok(CapabilityCheck::Retry);
+        }
+        if current.facts != before.facts
+            || current_definition != *definition
+            || current_policy != *policy
+        {
+            return Ok(CapabilityCheck::Retry);
+        }
+        Ok(CapabilityCheck::Current(Box::new((
+            current,
+            current_definition,
+        ))))
     }
 
     /// The request as an approval holds it: what is asked, who asks for what, and what granting it would do.
@@ -455,6 +537,28 @@ impl Engine {
             "consequences": consequences,
         }))
     }
+}
+
+enum CapabilityCheck {
+    Current(
+        Box<(
+            crate::capabilities::EnvironmentView,
+            env_rows::DefinitionRow,
+        )>,
+    ),
+    Retry,
+}
+
+fn capability_retry() -> Answer {
+    Refusal::new(crate::tools::definitions::Code::Changed, RETRY_PREPARATION).into()
+}
+
+fn capability_changed() -> Answer {
+    Refusal::new(
+        crate::tools::definitions::Code::Changed,
+        "The capability or its policy changed while the request was prepared. No request was recorded or capability granted; ask again.",
+    )
+    .into()
 }
 
 /// The name of a host.

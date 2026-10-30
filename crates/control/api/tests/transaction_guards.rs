@@ -1779,7 +1779,7 @@ async fn concurrent_refreshes_and_drafts_pass_another_persons_held_refresh_and_a
                 Request::builder()
                     .method("POST")
                     .uri("/auth/refresh")
-                    .header("cookie", format!("orch_session={pending_cookie}"))
+                    .header("cookie", format!("__Host-orch_session={pending_cookie}"))
                     .header(orch_api_contract::common::CSRF_HEADER, "1")
                     .body(Body::empty())
                     .unwrap(),
@@ -1806,7 +1806,7 @@ async fn concurrent_refreshes_and_drafts_pass_another_persons_held_refresh_and_a
             Request::builder()
                 .method("POST")
                 .uri("/auth/refresh")
-                .header("cookie", format!("orch_session={}", cookies[index]))
+                .header("cookie", format!("__Host-orch_session={}", cookies[index]))
                 .header(orch_api_contract::common::CSRF_HEADER, "1")
                 .body(Body::empty())
                 .unwrap()

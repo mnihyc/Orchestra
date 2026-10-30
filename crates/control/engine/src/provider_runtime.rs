@@ -1016,6 +1016,8 @@ impl Engine {
                 if let Some(turn) = threads::active_turn(&mut *unit.conn, thread).await? {
                     let seq = unit.stamp(thread).await?;
                     threads::mark_interrupted_by(&mut *unit.conn, turn.id, by, seq).await?;
+                    self.withdraw_interrupted_harness(&mut unit, thread, turn.id)
+                        .await?;
                     unit.wake(thread);
                 }
                 unit.finish().await?

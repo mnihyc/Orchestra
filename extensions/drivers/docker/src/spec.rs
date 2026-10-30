@@ -377,6 +377,11 @@ impl DockerSpec {
             }
             taken.push(&mount.target);
             match (mount.kind, &mount.source) {
+                (TemplateMountKind::Volume, Some(source)) if source.starts_with("orch-") => {
+                    problems.push(format!(
+                        "{at}.source: volume names beginning with orch- belong to managed resources"
+                    ));
+                }
                 (TemplateMountKind::Tmpfs, Some(_)) => {
                     problems.push(format!("{at}: a tmpfs has no source"));
                 }
@@ -496,6 +501,30 @@ mod tests {
         assert_eq!(spec.home_mount, "/home/agent");
         assert_eq!(spec.network, NetworkSpec::default());
         assert_eq!(spec.user.container_user(), None);
+    }
+
+    #[test]
+    fn a_template_cache_cannot_attach_another_resources_managed_volume() {
+        for name in [
+            "orch-ws-0199abcd-1234-7000-8000-0000000000e1",
+            "orch-home-0199abcd-1234-7000-8000-0000000000e1",
+            "orch-state-0199abcd-1234-7000-8000-0000000000e1",
+            "orch-mount-0199abcd-1234-7000-8000-0000000000e1",
+            "orch-environment-0199abcd1234-run",
+        ] {
+            let spec = json!({"image":"busybox", "mounts":[
+                {"type":"volume", "source":name, "target":"/cache"}
+            ]});
+            let error = DockerSpec::parse(RuntimeKind::Environment, &spec).unwrap_err();
+            assert!(error.to_string().contains("volume"), "{name}: {error}");
+        }
+        for mount in [
+            json!({"type":"volume", "source":"team-cache", "target":"/cache"}),
+            json!({"type":"volume", "target":"/cache"}),
+        ] {
+            let spec = json!({"image":"busybox", "mounts":[mount]});
+            assert!(DockerSpec::parse(RuntimeKind::Environment, &spec).is_ok());
+        }
     }
 
     #[test]

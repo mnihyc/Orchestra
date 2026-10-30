@@ -3,11 +3,11 @@
 # Run only by the integrator. This fixture writes no files and makes no network requests.
 set -eu
 
-installer_test_dir=$(CDPATH= cd -- "$(dirname -- "$0")" && pwd)
-installer_test_root=$(CDPATH= cd -- "$installer_test_dir/../../.." && pwd)
+installer_test_dir=$(CDPATH='' cd -- "$(dirname -- "$0")" && pwd)
+installer_test_root=$(CDPATH='' cd -- "$installer_test_dir/../../.." && pwd)
 
 help_for() {
-  LANG="$1" LC_ALL= LC_MESSAGES= sh -c '
+  LANG="$1" LC_ALL='' LC_MESSAGES='' sh -c '
     installer=$1
     option=$2
     blocked() { printf "help attempted %s\n" "$1" >&2; exit 97; }
@@ -34,15 +34,24 @@ expect_text() {
   esac
 }
 
+expect_once() {
+  occurrences=$(printf '%s\n' "$1" | grep -Fo -- "$2" | wc -l | tr -d ' ')
+  if [ "$occurrences" != 1 ]; then
+    printf 'installer help must mention %s exactly once (found %s)\n' "$2" "$occurrences" >&2
+    exit 1
+  fi
+}
+
 for installer_test_lang in en zh_CN; do
   for installer_test_flag in --help -h; do
     connector_help=$(help_for "$installer_test_lang" "$installer_test_root/deploy/install/install.sh" "$installer_test_flag")
     node_help=$(help_for "$installer_test_lang" "$installer_test_root/deploy/install/install-node.sh" "$installer_test_flag")
-    expect_text "$connector_help" '~/.local/bin/orch-connector'
-    expect_text "$connector_help" '~/Library/Application Support/Orch/connector'
+    expect_text "$connector_help" \~/.local/bin/orch-connector
+    expect_text "$connector_help" \~/'Library/Application Support/Orch/connector'
     expect_text "$connector_help" 'XDG_DATA_HOME'
     expect_text "$connector_help" 'service stop'
     expect_text "$connector_help" 'service uninstall'
+    expect_once "$connector_help" 'service uninstall'
     expect_text "$connector_help" '--data-dir'
     expect_text "$connector_help" '--no-service'
     expect_text "$connector_help" 'Ctrl+C'
@@ -52,6 +61,8 @@ for installer_test_lang in en zh_CN; do
     expect_text "$node_help" '--no-service'
     expect_text "$node_help" 'systemctl disable --now orch-node.service'
     expect_text "$node_help" 'systemctl daemon-reload'
+    expect_once "$node_help" 'systemctl disable --now orch-node.service'
+    expect_once "$node_help" 'systemctl daemon-reload'
     expect_text "$node_help" 'Ctrl+C'
     case "$installer_test_lang" in
       en)

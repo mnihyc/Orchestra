@@ -396,6 +396,89 @@ impl Locate {
     };
 }
 
+/// A workspace directory held beneath an allowed root, before it is attached.
+#[derive(Debug)]
+pub struct HeldRoot {
+    path: PathBuf,
+    dir: Dir,
+}
+
+impl HeldRoot {
+    /// Resolves the requested directory and opens it beneath an offered root without following
+    /// links introduced after resolution. The returned directory is the one that was checked.
+    #[cfg(target_os = "linux")]
+    pub fn open(roots: &[PathBuf], requested: &Path) -> Result<Self> {
+        if !requested.is_absolute() {
+            return Err(HostError::RootNotAllowed(
+                "an existing directory must be an absolute path".into(),
+            ));
+        }
+        let real = std::fs::canonicalize(requested)
+            .map_err(|error| HostError::io(format!("opening {}", requested.display()), error))?;
+        for root in roots {
+            let Ok(root) = std::fs::canonicalize(root) else {
+                continue;
+            };
+            let Ok(relative) = real.strip_prefix(&root) else {
+                continue;
+            };
+            let dir = Dir::open_beneath(&root, relative, &real).map_err(|error| {
+                HostError::RootNotAllowed(format!(
+                    "the directory changed or cannot be opened: {error}"
+                ))
+            })?;
+            return Ok(Self { path: real, dir });
+        }
+        Err(HostError::RootNotAllowed(format!(
+            "this machine's owner does not offer {}",
+            requested.display()
+        )))
+    }
+
+    /// The canonical spelling used when the held directory was verified.
+    #[must_use]
+    pub fn path(&self) -> &Path {
+        &self.path
+    }
+
+    /// The identity of the held directory.
+    pub fn metadata(&self) -> Result<Meta> {
+        self.dir
+            .stat_self()
+            .map_err(|error| HostError::io("reading the held directory", error))
+    }
+
+    /// Makes the verified directory readable for workspace operations without reopening its path.
+    #[cfg(target_os = "linux")]
+    pub(crate) fn readable(self) -> Result<Self> {
+        let dir = self
+            .dir
+            .readable()
+            .map_err(|error| HostError::io(format!("opening {}", self.path.display()), error))?;
+        Ok(Self {
+            path: self.path,
+            dir,
+        })
+    }
+
+    /// Finds whether names differ by case in this directory without reopening it.
+    #[must_use]
+    pub(crate) fn case_sensitivity(&self) -> Option<bool> {
+        Workspace::probe_case_sensitivity(&self.dir)
+    }
+
+    /// Checks the actual account's access to the held directory.
+    #[cfg(target_os = "linux")]
+    pub fn require_writable(&self) -> Result<()> {
+        self.dir.require_writable().map_err(|error| {
+            HostError::RootNotAllowed(format!(
+                "{} must be writable and searchable for this account: {error}",
+                self.path.display()
+            ))
+        })
+    }
+}
+
 /// A workspace root, held open, and the rules for walking from it.
 #[derive(Debug)]
 pub struct Workspace {
@@ -433,16 +516,53 @@ impl Workspace {
                 error,
             )
         })?;
-        let mut all = vec![root.to_path_buf()];
+        Ok(Self::from_directory(
+            handle,
+            root_path,
+            root,
+            aliases,
+            style,
+            case_sensitive,
+        ))
+    }
+
+    /// Uses the exact directory checked against the machine's offered roots.
+    #[must_use]
+    pub(crate) fn from_held(
+        held: HeldRoot,
+        original: &Path,
+        aliases: &[PathBuf],
+        style: PathStyle,
+        case_sensitive: bool,
+    ) -> Self {
+        Self::from_directory(
+            held.dir,
+            held.path,
+            original,
+            aliases,
+            style,
+            case_sensitive,
+        )
+    }
+
+    pub(crate) fn from_directory(
+        root: Dir,
+        root_path: PathBuf,
+        original: &Path,
+        aliases: &[PathBuf],
+        style: PathStyle,
+        case_sensitive: bool,
+    ) -> Self {
+        let mut all = vec![original.to_path_buf()];
         all.extend(aliases.iter().cloned());
         all.retain(|path| *path != root_path);
-        Ok(Self {
-            root: handle,
+        Self {
+            root,
             root_path,
             aliases: all,
             style,
             case_sensitive,
-        })
+        }
     }
 
     /// The real path of the root.
