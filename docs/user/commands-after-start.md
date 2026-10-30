@@ -73,7 +73,7 @@ command or image, then start again under a new reviewed run.
 Nothing runs inside the unit when it stops, idles out or is recycled; the
 next start runs these commands again. Work that belongs to a stop, such as
 removing a route, is the host operator's `pre_down` or `post_down` node
-hook ([Node hooks](../operator/node-hooks.md)).
+hook, described in the operator guide under Node hooks.
 
 A template writes the same commands as a list, each with its name:
 
