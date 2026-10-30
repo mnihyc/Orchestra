@@ -1,0 +1,47 @@
+[package]
+name = "orch-driver-kubernetes"
+description = "Kubernetes implementation of the runtime driver contract."
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+rust-version.workspace = true
+repository.workspace = true
+publish.workspace = true
+
+[features]
+# Opt in only with the disposable k3d namespace and its expected UID.
+k3d-test = []
+
+[dependencies]
+async-trait.workspace = true
+orch-driver-contract.workspace = true
+orch-plugin-contract.workspace = true
+orch-settings-contract.workspace = true
+orch-types.workspace = true
+chacha20poly1305.workspace = true
+futures.workspace = true
+hex.workspace = true
+k8s-openapi.workspace = true
+kube.workspace = true
+nix = { workspace = true, features = ["poll", "socket"] }
+rand.workspace = true
+rustix.workspace = true
+rustls.workspace = true
+schemars.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+sha2.workspace = true
+tar.workspace = true
+thiserror.workspace = true
+tempfile.workspace = true
+tokio.workspace = true
+
+[dev-dependencies]
+axum.workspace = true
+jsonschema.workspace = true
+orch-link-contract.workspace = true
+orch-node-core.workspace = true
+tokio-util.workspace = true
+
+[lints]
+workspace = true

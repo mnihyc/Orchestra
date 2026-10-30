@@ -1,0 +1,24 @@
+{
+  "package": "mammoth",
+  "version": "1.13.0",
+  "tarball": "https://registry.npmjs.org/mammoth/-/mammoth-1.13.0.tgz",
+  "integrity": "sha512-2cawcYFcP7ISfXbBcL9lmVgTNWo88v/52ND1gnywHtVT/pX0//puPnf0iMPV9ZgmuvNOE+zkIhDgZ9M2c2dDDg==",
+  "sha256": "fe778792e43b06dbbff93d20e22951fe1bc55a05eb04ec823961e8639c62260b",
+  "file": "mammoth.browser.min.js",
+  "license": "BSD-2-Clause",
+  "unmodified": false,
+  "integrity_verified": true,
+  "bundled": {
+    "@xmldom/xmldom": "MIT",
+    "base64-js": "MIT",
+    "dingbat-to-unicode": "BSD-2-Clause",
+    "jszip": "MIT OR GPL-3.0-or-later (used under MIT)",
+    "lop": "BSD-2-Clause",
+    "underscore": "MIT",
+    "xmlbuilder": "MIT"
+  },
+  "modification": "the section sign in its entity table is written as the escape sequence u00a7 (the same string), so that the file is plain ASCII there",
+  "file_sha256_as_published": "92914a3708cfdf1e62cb553d1856a7fedab21da83d8ee82845de2f897b368cab",
+  "file_sha256": "da27ba22a9e566c9398cf49f2adf32ae2af292c31c9ad6b099de204a60db1d61",
+  "file_sha256_note": "file_sha256 is that of the file as kept here; file_sha256_as_published is that of the file in the package"
+}

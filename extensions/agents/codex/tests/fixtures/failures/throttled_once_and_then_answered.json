@@ -1,0 +1,24 @@
+{
+ "harness": "codex",
+ "version": "0.162.1",
+ "recorded": "2026-10-12",
+ "fault": "(the model server was left to its queue)",
+ "setup": "provider of the forwarded path (model_providers entry, token in ORCH_LLM_TOKEN)",
+ "requests": 2,
+ "exit": 0,
+ "stderr": [],
+ "frames": [
+  {"method":"turn/started","params":{"threadId":"01a12f99-bfe3-7f13-b650-aef57adfbec7","turn":{"id":"01a12f99-c071-7070-830c-71ac5e828fc9","rootTurnId":"01a12f99-c071-7070-830c-71ac5e828fc9","items":[],"itemsView":"notLoaded","status":"inProgress","error":null,"startedAt":1791799967,"completedAt":null,"durationMs":null}},"emittedAtMs":1791799968059},
+  {"method":"item/started","params":{"item":{"type":"userMessage","id":"01a12f99-c15f-7ed1-9c60-767da4e919fa","clientId":null,"content":[{"type":"text","text":"hello","text_elements":[]}]},"threadId":"01a12f99-bfe3-7f13-b650-aef57adfbec7","turnId":"01a12f99-c071-7070-830c-71ac5e828fc9","startedAtMs":1791799968096},"emittedAtMs":1791799968096},
+  {"method":"item/completed","params":{"item":{"type":"userMessage","id":"01a12f99-c15f-7ed1-9c60-767da4e919fa","clientId":null,"content":[{"type":"text","text":"hello","text_elements":[]}]},"threadId":"01a12f99-bfe3-7f13-b650-aef57adfbec7","turnId":"01a12f99-c071-7070-830c-71ac5e828fc9","completedAtMs":1791799968096},"emittedAtMs":1791799968120},
+  {"method":"error","params":{"error":{"message":"Reconnecting... 1/5","codexErrorInfo":{"responseStreamDisconnected":{"httpStatusCode":429}},"additionalDetails":"exceeded retry limit, last status: 429 Too Many Requests","misalignment":null},"willRetry":true,"threadId":"01a12f99-bfe3-7f13-b650-aef57adfbec7","turnId":"01a12f99-c071-7070-830c-71ac5e828fc9"},"emittedAtMs":1791799968159},
+  {"method":"item/started","params":{"item":{"type":"agentMessage","id":"msg_mock_000002_0","text":"","phase":null,"memoryCitation":null,"delivery":null,"questions":null},"threadId":"01a12f99-bfe3-7f13-b650-aef57adfbec7","turnId":"01a12f99-c071-7070-830c-71ac5e828fc9","startedAtMs":1791799969227},"emittedAtMs":1791799969227},
+  {"method":"item/agentMessage/delta","params":{"threadId":"01a12f99-bfe3-7f13-b650-aef57adfbec7","turnId":"01a12f99-c071-7070-830c-71ac5e828fc9","itemId":"msg_mock_000002_0","delta":"You said"},"emittedAtMs":1791799969228},
+  {"method":"item/agentMessage/delta","params":{"threadId":"01a12f99-bfe3-7f13-b650-aef57adfbec7","turnId":"01a12f99-c071-7070-830c-71ac5e828fc9","itemId":"msg_mock_000002_0","delta":": hello"},"emittedAtMs":1791799969228},
+  {"method":"item/completed","params":{"item":{"type":"agentMessage","id":"msg_mock_000002_0","text":"You said: hello","phase":null,"memoryCitation":null,"delivery":null,"questions":null},"threadId":"01a12f99-bfe3-7f13-b650-aef57adfbec7","turnId":"01a12f99-c071-7070-830c-71ac5e828fc9","completedAtMs":1791799969231},"emittedAtMs":1791799969249},
+  {"method":"thread/tokenUsage/updated","params":{"threadId":"01a12f99-bfe3-7f13-b650-aef57adfbec7","turnId":"01a12f99-c071-7070-830c-71ac5e828fc9","tokenUsage":{"total":{"totalTokens":8576,"inputTokens":8572,"cachedInputTokens":0,"cacheWriteInputTokens":0,"outputTokens":4,"reasoningOutputTokens":0},"last":{"totalTokens":8576,"inputTokens":8572,"cachedInputTokens":0,"cacheWriteInputTokens":0,"outputTokens":4,"reasoningOutputTokens":0},"modelContextWindow":258400}},"emittedAtMs":1791799969277},
+  {"method":"account/rateLimits/updated","params":{"rateLimits":{"limitId":"codex","limitName":null,"normalModelSlug":null,"primary":null,"secondary":null,"credits":null,"individualLimit":null,"spendControlReached":null,"planType":null,"rateLimitReachedType":null}},"emittedAtMs":1791799969277},
+  {"method":"turn/completed","params":{"threadId":"01a12f99-bfe3-7f13-b650-aef57adfbec7","turn":{"id":"01a12f99-c071-7070-830c-71ac5e828fc9","rootTurnId":"01a12f99-c071-7070-830c-71ac5e828fc9","items":[{"type":"agentMessage","id":"msg_mock_000002_0","text":"You said: hello","phase":null,"memoryCitation":null,"delivery":null,"questions":null}],"itemsView":"summary","status":"completed","error":null,"startedAt":1791799967,"completedAt":1791799969,"durationMs":1454}},"emittedAtMs":1791799969346}
+ ],
+ "expect": {"outcome": "completed"}
+}

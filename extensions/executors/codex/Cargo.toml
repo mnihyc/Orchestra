@@ -1,0 +1,36 @@
+[package]
+name = "orch-executor-codex"
+description = "Codex exec-server hosted inside a thread's environment."
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+rust-version.workspace = true
+repository.workspace = true
+publish.workspace = true
+
+[dependencies]
+orch-agent-contract.workspace = true
+orch-agent-programs.workspace = true
+orch-executor-contract.workspace = true
+orch-plugin-contract.workspace = true
+async-trait.workspace = true
+base64.workspace = true
+futures.workspace = true
+hex.workspace = true
+rand.workspace = true
+semver.workspace = true
+serde_json.workspace = true
+sha2.workspace = true
+thiserror.workspace = true
+tokio.workspace = true
+tokio-tungstenite.workspace = true
+tracing.workspace = true
+
+[target.'cfg(unix)'.dependencies]
+rustix.workspace = true
+
+[dev-dependencies]
+tempfile.workspace = true
+
+[lints]
+workspace = true

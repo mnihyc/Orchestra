@@ -1,0 +1,91 @@
+{
+  "type": "object",
+  "properties": {
+    "provider": {
+      "$ref": "#/$defs/SourceAskProvider",
+      "description": "The provider."
+    },
+    "endpoint": {
+      "$ref": "#/$defs/SourceAskEndpoint",
+      "description": "The endpoint the model request goes to."
+    },
+    "config": {
+      "type": "object",
+      "additionalProperties": true,
+      "description": "What the provider's managers gave for the source's fields that are no secrets.",
+      "default": {}
+    },
+    "secrets": {
+      "type": "object",
+      "additionalProperties": {
+        "type": "string"
+      },
+      "description": "The values of the source's secret fields.",
+      "default": {}
+    },
+    "credential": {
+      "$ref": "#/$defs/SourceAskCredential",
+      "description": "The key to present."
+    }
+  },
+  "required": [
+    "provider",
+    "endpoint",
+    "credential"
+  ],
+  "description": "What `credential.present` is given: the key to present, the endpoint it is presented to, and what every\ncall is given of the provider and the source's fields.",
+  "title": "PresentAsk",
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$defs": {
+    "SourceAskProvider": {
+      "type": "object",
+      "properties": {
+        "id": {
+          "type": "string",
+          "format": "uuid",
+          "description": "Its identifier."
+        },
+        "name": {
+          "type": "string",
+          "description": "Its name."
+        }
+      },
+      "required": [
+        "id",
+        "name"
+      ],
+      "description": "The provider a call is about."
+    },
+    "SourceAskEndpoint": {
+      "type": "object",
+      "properties": {
+        "protocol": {
+          "type": "string",
+          "description": "The protocol it speaks, such as `openai-responses` or `anthropic-messages`."
+        },
+        "base_url": {
+          "type": "string",
+          "description": "Its address."
+        }
+      },
+      "required": [
+        "protocol",
+        "base_url"
+      ],
+      "description": "One endpoint of the provider."
+    },
+    "SourceAskCredential": {
+      "type": "object",
+      "properties": {
+        "key": {
+          "type": "string",
+          "description": "The provider's key."
+        }
+      },
+      "required": [
+        "key"
+      ],
+      "description": "The provider's credential, as a source that wants it is given it."
+    }
+  }
+}

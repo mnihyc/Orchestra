@@ -1,0 +1,29 @@
+[package]
+name = "orch-stress"
+description = "Seeds a running Orch through its HTTP API and drives it at a team's scale: threads, browsers, searches, live feeds"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+rust-version.workspace = true
+repository.workspace = true
+publish.workspace = true
+
+[lints]
+workspace = true
+
+# Speaks JSON to a running system and depends on no product crate, so that it builds while the product is mid-edit
+# and keeps working against an older or a newer build of the API.
+[dependencies]
+anyhow.workspace = true
+chrono.workspace = true
+clap.workspace = true
+form_urlencoded.workspace = true
+futures.workspace = true
+reqwest.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+sqlx.workspace = true
+tokio.workspace = true
+tokio-tungstenite.workspace = true
+tokio-util.workspace = true
+uuid.workspace = true

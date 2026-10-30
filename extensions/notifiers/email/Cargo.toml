@@ -1,0 +1,27 @@
+[package]
+name = "orch-notifier-email"
+description = "SMTP notification delivery across configured security and authentication modes."
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+rust-version.workspace = true
+repository.workspace = true
+publish.workspace = true
+
+[dependencies]
+async-trait.workspace = true
+lettre.workspace = true
+orch-notifier-contract.workspace = true
+orch-plugin-contract.workspace = true
+orch-types.workspace = true
+serde_json.workspace = true
+thiserror.workspace = true
+tokio.workspace = true
+
+[dev-dependencies]
+rcgen.workspace = true
+reqwest.workspace = true
+tempfile.workspace = true
+
+[lints]
+workspace = true

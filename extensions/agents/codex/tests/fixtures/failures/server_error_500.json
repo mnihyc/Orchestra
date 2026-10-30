@@ -1,0 +1,23 @@
+{
+ "harness": "codex",
+ "version": "0.162.1",
+ "recorded": "2026-10-12",
+ "fault": "error server",
+ "setup": "provider of the forwarded path (model_providers entry, token in ORCH_LLM_TOKEN)",
+ "requests": 30,
+ "exit": 0,
+ "stderr": [],
+ "frames": [
+  {"method":"turn/started","params":{"threadId":"01a12f90-7c41-7ef3-b9c0-88c6376be8bc","turn":{"id":"01a12f90-7cb3-7fe3-9fc2-24536ded51d5","rootTurnId":"01a12f90-7cb3-7fe3-9fc2-24536ded51d5","items":[],"itemsView":"notLoaded","status":"inProgress","error":null,"startedAt":1791799360,"completedAt":null,"durationMs":null}},"emittedAtMs":1791799360798},
+  {"method":"item/started","params":{"item":{"type":"userMessage","id":"01a12f90-7d33-70a0-ac39-90292464e271","clientId":null,"content":[{"type":"text","text":"hello\n#!mock\nerror server\n","text_elements":[]}]},"threadId":"01a12f90-7c41-7ef3-b9c0-88c6376be8bc","turnId":"01a12f90-7cb3-7fe3-9fc2-24536ded51d5","startedAtMs":1791799360825},"emittedAtMs":1791799360825},
+  {"method":"item/completed","params":{"item":{"type":"userMessage","id":"01a12f90-7d33-70a0-ac39-90292464e271","clientId":null,"content":[{"type":"text","text":"hello\n#!mock\nerror server\n","text_elements":[]}]},"threadId":"01a12f90-7c41-7ef3-b9c0-88c6376be8bc","turnId":"01a12f90-7cb3-7fe3-9fc2-24536ded51d5","completedAtMs":1791799360825},"emittedAtMs":1791799360830},
+  {"method":"error","params":{"error":{"message":"Reconnecting... 1/5","codexErrorInfo":{"responseStreamDisconnected":{"httpStatusCode":null}},"additionalDetails":"We’re currently experiencing high demand, which may cause temporary errors.","misalignment":null},"willRetry":true,"threadId":"01a12f90-7c41-7ef3-b9c0-88c6376be8bc","turnId":"01a12f90-7cb3-7fe3-9fc2-24536ded51d5"},"emittedAtMs":1791799363835},
+  {"method":"error","params":{"error":{"message":"Reconnecting... 2/5","codexErrorInfo":{"responseStreamDisconnected":{"httpStatusCode":null}},"additionalDetails":"We’re currently experiencing high demand, which may cause temporary errors.","misalignment":null},"willRetry":true,"threadId":"01a12f90-7c41-7ef3-b9c0-88c6376be8bc","turnId":"01a12f90-7cb3-7fe3-9fc2-24536ded51d5"},"emittedAtMs":1791799367575},
+  {"method":"error","params":{"error":{"message":"Reconnecting... 3/5","codexErrorInfo":{"responseStreamDisconnected":{"httpStatusCode":null}},"additionalDetails":"We’re currently experiencing high demand, which may cause temporary errors.","misalignment":null},"willRetry":true,"threadId":"01a12f90-7c41-7ef3-b9c0-88c6376be8bc","turnId":"01a12f90-7cb3-7fe3-9fc2-24536ded51d5"},"emittedAtMs":1791799371045},
+  {"method":"error","params":{"error":{"message":"Reconnecting... 4/5","codexErrorInfo":{"responseStreamDisconnected":{"httpStatusCode":null}},"additionalDetails":"We’re currently experiencing high demand, which may cause temporary errors.","misalignment":null},"willRetry":true,"threadId":"01a12f90-7c41-7ef3-b9c0-88c6376be8bc","turnId":"01a12f90-7cb3-7fe3-9fc2-24536ded51d5"},"emittedAtMs":1791799374675},
+  {"method":"error","params":{"error":{"message":"Reconnecting... 5/5","codexErrorInfo":{"responseStreamDisconnected":{"httpStatusCode":null}},"additionalDetails":"We’re currently experiencing high demand, which may cause temporary errors.","misalignment":null},"willRetry":true,"threadId":"01a12f90-7c41-7ef3-b9c0-88c6376be8bc","turnId":"01a12f90-7cb3-7fe3-9fc2-24536ded51d5"},"emittedAtMs":1791799379308},
+  {"method":"error","params":{"error":{"message":"We’re currently experiencing high demand, which may cause temporary errors.","codexErrorInfo":"internalServerError","additionalDetails":null,"misalignment":null},"willRetry":false,"threadId":"01a12f90-7c41-7ef3-b9c0-88c6376be8bc","turnId":"01a12f90-7cb3-7fe3-9fc2-24536ded51d5"},"emittedAtMs":1791799385199},
+  {"method":"turn/completed","params":{"threadId":"01a12f90-7c41-7ef3-b9c0-88c6376be8bc","turn":{"id":"01a12f90-7cb3-7fe3-9fc2-24536ded51d5","rootTurnId":"01a12f90-7cb3-7fe3-9fc2-24536ded51d5","items":[],"itemsView":"notLoaded","status":"failed","error":{"message":"We’re currently experiencing high demand, which may cause temporary errors.","codexErrorInfo":"internalServerError","additionalDetails":null,"misalignment":null},"startedAt":1791799360,"completedAt":1791799385,"durationMs":24503}},"emittedAtMs":1791799385207}
+ ],
+ "expect": {"outcome": "failed", "code": "provider_busy", "retryable": true, "incomplete": false, "resets_at": null, "row": "busy", "said_contains": "high demand"}
+}

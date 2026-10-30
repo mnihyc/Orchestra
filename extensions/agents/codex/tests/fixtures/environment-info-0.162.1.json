@@ -1,0 +1,4 @@
+{
+  "shell": { "name": "bash", "path": "/bin/bash" },
+  "cwd": "file:///workspace"
+}

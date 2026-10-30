@@ -1,0 +1,18 @@
+{
+ "harness": "claude-code",
+ "version": "2.1.296",
+ "recorded": "2026-10-12",
+ "fault": "error invalid_request something is wrong with the request",
+ "setup": "signed in with a token as the forwarded path does (ANTHROPIC_AUTH_TOKEN)",
+ "requests": 2,
+ "exit": 1,
+ "stderr": ["[claude-code:unrecognized_model] {\"model\":\"mock-large\",\"query_source\":\"sdk\"}"],
+ "frames": [
+  {"type":"system","subtype":"init","cwd":"/workspace","session_id":"7be7a443-baba-4e8c-9b5b-a5f69c02e3e3","model":"mock-large","permissionMode":"default","claude_code_version":"2.1.296","apiKeySource":"none","uuid":"8945f305-74a3-4f51-81d0-23df640ccb20"},
+  {"type":"system","subtype":"status","status":"requesting","session_id":"7be7a443-baba-4e8c-9b5b-a5f69c02e3e3","uuid":"6159aa21-e5d7-4133-a745-52f7c5f046fd"},
+  {"type":"user","message":{"role":"user","content":[{"type":"text","text":"hello\n#!mock\nerror invalid_request something is wrong with the request\n"}]},"session_id":"7be7a443-baba-4e8c-9b5b-a5f69c02e3e3","parent_tool_use_id":null,"uuid":"9d695a07-4742-40ae-8e04-00542fc959c4","timestamp":"2026-10-12T10:02:23.253Z","isReplay":true},
+  {"type":"assistant","message":{"diagnostics":null,"id":"c84137bc-5748-474b-8939-84711cef3bb1","container":null,"model":"<synthetic>","role":"assistant","stop_details":null,"stop_reason":"stop_sequence","stop_sequence":"","type":"message","usage":{"output_tokens_details":null,"input_tokens":0,"output_tokens":0,"cache_creation_input_tokens":0,"cache_read_input_tokens":0,"server_tool_use":{"web_search_requests":0,"web_fetch_requests":0},"service_tier":null,"cache_creation":{"ephemeral_1h_input_tokens":0,"ephemeral_5m_input_tokens":0},"inference_geo":null,"iterations":null,"speed":null,"fallback_credit":null},"content":[{"type":"text","text":"API Error: 400 something is wrong with the request"}],"context_management":null},"parent_tool_use_id":null,"session_id":"7be7a443-baba-4e8c-9b5b-a5f69c02e3e3","uuid":"4755e0bd-23a3-4be9-b2f7-02d2ea87b311","timestamp":"2026-10-12T10:02:23.504Z","error":"unknown","request_id":"req_mock_000002","is_api_error_message":true},
+  {"duration_api_ms":0,"stop_reason":"stop_sequence","session_id":"7be7a443-baba-4e8c-9b5b-a5f69c02e3e3","total_cost_usd":0,"usage":{"output_tokens_details":{"thinking_tokens":0},"input_tokens":0,"cache_creation_input_tokens":0,"cache_read_input_tokens":0,"output_tokens":0,"server_tool_use":{"web_search_requests":0,"web_fetch_requests":0},"service_tier":"standard","cache_creation":{"ephemeral_1h_input_tokens":0,"ephemeral_5m_input_tokens":0},"inference_geo":"","iterations":[],"speed":"standard","fallback_credit":null},"modelUsage":{},"permission_denials":[],"terminal_reason":"api_error","fast_mode_state":"off","fast_mode_disabled_reason":"sdk_opt_in_required","subagent_stats":{"spawned":0,"requested":{"background":0,"foreground":0,"unset":0},"started_in_background":0,"max_depth":0,"spawned_by_subagents":0,"completed":0,"failed":0,"killed":{"parent":0,"user":0,"system":0},"refused":{"depth_limit":0,"concurrency_limit":0,"budget":0},"by_type":{}},"safety_stops":0,"is_error":true,"num_turns":1,"subtype":"success","api_error_status":400,"result":"API Error: 400 something is wrong with the request","type":"result","duration_ms":342,"uuid":"10fb3ba0-653b-45a0-8058-62d456bd3c1f","queued_turn_count":0,"result_index":0}
+ ],
+ "expect": {"outcome": "failed", "code": "harness_error", "retryable": false, "incomplete": false, "resets_at": null, "row": "unknown", "said_exactly": "API Error: 400 something is wrong with the request"}
+}

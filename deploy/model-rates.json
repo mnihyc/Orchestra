@@ -1,0 +1,2044 @@
+{
+  "format": 1,
+  "as_of": "2026-10-10",
+  "unit": "USD",
+  "families": [
+    {
+      "match": "claude-fable-5-1*",
+      "vendor": "Anthropic",
+      "source": "https://platform.claude.com/docs/en/about-claude/pricing",
+      "as_of": "2026-10-10",
+      "rate": {
+        "input_per_mtok": "10",
+        "cached_input_per_mtok": "0.25",
+        "output_per_mtok": "50",
+        "cache_write_per_mtok": "12.5",
+        "tiers": {
+          "batch": "0.5"
+        }
+      }
+    },
+    {
+      "match": "claude-mythos-5-1*",
+      "vendor": "Anthropic",
+      "source": "https://platform.claude.com/docs/en/about-claude/pricing",
+      "as_of": "2026-10-10",
+      "rate": {
+        "input_per_mtok": "10",
+        "cached_input_per_mtok": "0.25",
+        "output_per_mtok": "50",
+        "cache_write_per_mtok": "12.5",
+        "tiers": {
+          "batch": "0.5"
+        }
+      }
+    },
+    {
+      "match": "claude-fable-5*",
+      "vendor": "Anthropic",
+      "source": "https://platform.claude.com/docs/en/about-claude/pricing",
+      "as_of": "2026-10-10",
+      "rate": {
+        "input_per_mtok": "10",
+        "cached_input_per_mtok": "1",
+        "output_per_mtok": "50",
+        "cache_write_per_mtok": "12.5",
+        "tiers": {
+          "batch": "0.5"
+        }
+      }
+    },
+    {
+      "match": "claude-mythos-5*",
+      "vendor": "Anthropic",
+      "source": "https://platform.claude.com/docs/en/about-claude/pricing",
+      "as_of": "2026-10-10",
+      "rate": {
+        "input_per_mtok": "10",
+        "cached_input_per_mtok": "1",
+        "output_per_mtok": "50",
+        "cache_write_per_mtok": "12.5",
+        "tiers": {
+          "batch": "0.5"
+        }
+      }
+    },
+    {
+      "match": "claude-opus-5-5*",
+      "vendor": "Anthropic",
+      "source": "https://platform.claude.com/docs/en/about-claude/pricing",
+      "as_of": "2026-10-10",
+      "note": "Fast mode is twice the price.",
+      "rate": {
+        "input_per_mtok": "4",
+        "cached_input_per_mtok": "0.2",
+        "output_per_mtok": "20",
+        "cache_write_per_mtok": "5",
+        "tiers": {
+          "batch": "0.5",
+          "fast": "2"
+        }
+      }
+    },
+    {
+      "match": "claude-opus-5*",
+      "vendor": "Anthropic",
+      "source": "https://platform.claude.com/docs/en/about-claude/pricing",
+      "as_of": "2026-10-10",
+      "note": "Fast mode is twice the price.",
+      "rate": {
+        "input_per_mtok": "5",
+        "cached_input_per_mtok": "0.5",
+        "output_per_mtok": "25",
+        "cache_write_per_mtok": "6.25",
+        "tiers": {
+          "batch": "0.5",
+          "fast": "2"
+        }
+      }
+    },
+    {
+      "match": "claude-opus-4-8*",
+      "vendor": "Anthropic",
+      "source": "https://platform.claude.com/docs/en/about-claude/pricing",
+      "as_of": "2026-10-10",
+      "note": "Fast mode is twice the price.",
+      "rate": {
+        "input_per_mtok": "5",
+        "cached_input_per_mtok": "0.5",
+        "output_per_mtok": "25",
+        "cache_write_per_mtok": "6.25",
+        "tiers": {
+          "batch": "0.5",
+          "fast": "2"
+        }
+      }
+    },
+    {
+      "match": "claude-opus-4-7*",
+      "vendor": "Anthropic",
+      "source": "https://platform.claude.com/docs/en/about-claude/pricing",
+      "as_of": "2026-10-10",
+      "rate": {
+        "input_per_mtok": "5",
+        "cached_input_per_mtok": "0.5",
+        "output_per_mtok": "25",
+        "cache_write_per_mtok": "6.25",
+        "tiers": {
+          "batch": "0.5"
+        }
+      }
+    },
+    {
+      "match": "claude-opus-4-6*",
+      "vendor": "Anthropic",
+      "source": "https://platform.claude.com/docs/en/about-claude/pricing",
+      "as_of": "2026-10-10",
+      "rate": {
+        "input_per_mtok": "5",
+        "cached_input_per_mtok": "0.5",
+        "output_per_mtok": "25",
+        "cache_write_per_mtok": "6.25",
+        "tiers": {
+          "batch": "0.5"
+        }
+      }
+    },
+    {
+      "match": "claude-opus-4-5*",
+      "vendor": "Anthropic",
+      "source": "https://platform.claude.com/docs/en/about-claude/pricing",
+      "as_of": "2026-10-10",
+      "rate": {
+        "input_per_mtok": "5",
+        "cached_input_per_mtok": "0.5",
+        "output_per_mtok": "25",
+        "cache_write_per_mtok": "6.25",
+        "tiers": {
+          "batch": "0.5"
+        }
+      }
+    },
+    {
+      "match": "claude-opus-4-1*",
+      "vendor": "Anthropic",
+      "source": "https://platform.claude.com/docs/en/about-claude/pricing",
+      "as_of": "2026-10-10",
+      "rate": {
+        "input_per_mtok": "15",
+        "cached_input_per_mtok": "1.5",
+        "output_per_mtok": "75",
+        "cache_write_per_mtok": "18.75",
+        "tiers": {
+          "batch": "0.5"
+        }
+      }
+    },
+    {
+      "match": "claude-opus-4-0*",
+      "vendor": "Anthropic",
+      "source": "https://platform.claude.com/docs/en/about-claude/pricing",
+      "as_of": "2026-10-10",
+      "rate": {
+        "input_per_mtok": "15",
+        "cached_input_per_mtok": "1.5",
+        "output_per_mtok": "75",
+        "cache_write_per_mtok": "18.75",
+        "tiers": {
+          "batch": "0.5"
+        }
+      }
+    },
+    {
+      "match": "claude-opus-4-20*",
+      "vendor": "Anthropic",
+      "source": "https://platform.claude.com/docs/en/about-claude/pricing",
+      "as_of": "2026-10-10",
+      "rate": {
+        "input_per_mtok": "15",
+        "cached_input_per_mtok": "1.5",
+        "output_per_mtok": "75",
+        "cache_write_per_mtok": "18.75",
+        "tiers": {
+          "batch": "0.5"
+        }
+      }
+    },
+    {
+      "match": "claude-sonnet-5-5*",
+      "vendor": "Anthropic",
+      "source": "https://platform.claude.com/docs/en/about-claude/pricing",
+      "as_of": "2026-10-10",
+      "rate": {
+        "input_per_mtok": "2",
+        "cached_input_per_mtok": "0.1",
+        "output_per_mtok": "10",
+        "cache_write_per_mtok": "2.5",
+        "tiers": {
+          "batch": "0.5"
+        }
+      }
+    },
+    {
+      "match": "claude-sonnet-5*",
+      "vendor": "Anthropic",
+      "source": "https://platform.claude.com/docs/en/about-claude/pricing",
+      "as_of": "2026-10-10",
+      "rate": {
+        "input_per_mtok": "2",
+        "cached_input_per_mtok": "0.2",
+        "output_per_mtok": "10",
+        "cache_write_per_mtok": "2.5",
+        "tiers": {
+          "batch": "0.5"
+        }
+      }
+    },
+    {
+      "match": "claude-sonnet-4-6*",
+      "vendor": "Anthropic",
+      "source": "https://platform.claude.com/docs/en/about-claude/pricing",
+      "as_of": "2026-10-10",
+      "rate": {
+        "input_per_mtok": "3",
+        "cached_input_per_mtok": "0.3",
+        "output_per_mtok": "15",
+        "cache_write_per_mtok": "3.75",
+        "tiers": {
+          "batch": "0.5"
+        }
+      }
+    },
+    {
+      "match": "claude-sonnet-4-5*",
+      "vendor": "Anthropic",
+      "source": "https://platform.claude.com/docs/en/about-claude/pricing",
+      "as_of": "2026-10-10",
+      "rate": {
+        "input_per_mtok": "3",
+        "cached_input_per_mtok": "0.3",
+        "output_per_mtok": "15",
+        "cache_write_per_mtok": "3.75",
+        "tiers": {
+          "batch": "0.5"
+        }
+      }
+    },
+    {
+      "match": "claude-sonnet-4-0*",
+      "vendor": "Anthropic",
+      "source": "https://platform.claude.com/docs/en/about-claude/pricing",
+      "as_of": "2026-10-10",
+      "rate": {
+        "input_per_mtok": "3",
+        "cached_input_per_mtok": "0.3",
+        "output_per_mtok": "15",
+        "cache_write_per_mtok": "3.75",
+        "tiers": {
+          "batch": "0.5"
+        }
+      }
+    },
+    {
+      "match": "claude-sonnet-4-20*",
+      "vendor": "Anthropic",
+      "source": "https://platform.claude.com/docs/en/about-claude/pricing",
+      "as_of": "2026-10-10",
+      "rate": {
+        "input_per_mtok": "3",
+        "cached_input_per_mtok": "0.3",
+        "output_per_mtok": "15",
+        "cache_write_per_mtok": "3.75",
+        "tiers": {
+          "batch": "0.5"
+        }
+      }
+    },
+    {
+      "match": "claude-haiku-5-5*",
+      "vendor": "Anthropic",
+      "source": "https://platform.claude.com/docs/en/about-claude/pricing",
+      "as_of": "2026-10-10",
+      "note": "Priced by the length of the prompt: over 100 000 tokens, the higher prices.",
+      "rate": {
+        "input_per_mtok": "0.1",
+        "cached_input_per_mtok": "0.01",
+        "output_per_mtok": "0.5",
+        "cache_write_per_mtok": "0.125",
+        "tiers": {
+          "batch": "0.5"
+        },
+        "above": [
+          {
+            "context_tokens": 100000,
+            "input_per_mtok": "0.5",
+            "cached_input_per_mtok": "0.05",
+            "output_per_mtok": "2.5",
+            "cache_write_per_mtok": "0.625"
+          }
+        ]
+      }
+    },
+    {
+      "match": "claude-haiku-4-5*",
+      "vendor": "Anthropic",
+      "source": "https://platform.claude.com/docs/en/about-claude/pricing",
+      "as_of": "2026-10-10",
+      "rate": {
+        "input_per_mtok": "1",
+        "cached_input_per_mtok": "0.1",
+        "output_per_mtok": "5",
+        "cache_write_per_mtok": "1.25",
+        "tiers": {
+          "batch": "0.5"
+        }
+      }
+    },
+    {
+      "match": "claude-3-5-haiku*",
+      "vendor": "Anthropic",
+      "source": "https://platform.claude.com/docs/en/about-claude/pricing",
+      "as_of": "2026-10-10",
+      "rate": {
+        "input_per_mtok": "0.8",
+        "cached_input_per_mtok": "0.08",
+        "output_per_mtok": "4",
+        "cache_write_per_mtok": "1",
+        "tiers": {
+          "batch": "0.5"
+        }
+      }
+    },
+    {
+      "match": "claude-opus-*",
+      "vendor": "Anthropic",
+      "source": "https://platform.claude.com/docs/en/about-claude/pricing",
+      "as_of": "2026-10-10",
+      "note": "A guess for a model of this family that is not listed by itself: the price of the newest one that is.",
+      "rate": {
+        "input_per_mtok": "4",
+        "cached_input_per_mtok": "0.2",
+        "output_per_mtok": "20",
+        "cache_write_per_mtok": "5",
+        "tiers": {
+          "batch": "0.5"
+        }
+      }
+    },
+    {
+      "match": "claude-sonnet-*",
+      "vendor": "Anthropic",
+      "source": "https://platform.claude.com/docs/en/about-claude/pricing",
+      "as_of": "2026-10-10",
+      "note": "A guess for a model of this family that is not listed by itself: the price of the newest one that is.",
+      "rate": {
+        "input_per_mtok": "2",
+        "cached_input_per_mtok": "0.1",
+        "output_per_mtok": "10",
+        "cache_write_per_mtok": "2.5",
+        "tiers": {
+          "batch": "0.5"
+        }
+      }
+    },
+    {
+      "match": "claude-haiku-*",
+      "vendor": "Anthropic",
+      "source": "https://platform.claude.com/docs/en/about-claude/pricing",
+      "as_of": "2026-10-10",
+      "note": "A guess for a model of this family that is not listed by itself: the price of the newest one that is.",
+      "rate": {
+        "input_per_mtok": "0.1",
+        "cached_input_per_mtok": "0.01",
+        "output_per_mtok": "0.5",
+        "cache_write_per_mtok": "0.125",
+        "tiers": {
+          "batch": "0.5"
+        }
+      }
+    },
+    {
+      "match": "gpt-6-astra*",
+      "vendor": "OpenAI",
+      "source": "https://developers.openai.com/api/docs/pricing",
+      "as_of": "2026-10-10",
+      "note": "A prompt over 272 000 tokens pays twice for input and one and a half times for output.",
+      "rate": {
+        "input_per_mtok": "10",
+        "cached_input_per_mtok": "1",
+        "output_per_mtok": "50",
+        "tiers": {
+          "batch": "0.5",
+          "flex": "0.5",
+          "fast": "2",
+          "ultrafast": "6"
+        },
+        "above": [
+          {
+            "context_tokens": 272000,
+            "input_per_mtok": "20",
+            "cached_input_per_mtok": "2",
+            "output_per_mtok": "75"
+          }
+        ]
+      }
+    },
+    {
+      "match": "gpt-6.1-sol*",
+      "vendor": "OpenAI",
+      "source": "https://developers.openai.com/api/docs/pricing",
+      "as_of": "2026-10-10",
+      "note": "A prompt over 272 000 tokens pays twice for input and one and a half times for output.",
+      "rate": {
+        "input_per_mtok": "2",
+        "cached_input_per_mtok": "0.1",
+        "output_per_mtok": "10",
+        "tiers": {
+          "batch": "0.5",
+          "flex": "0.5",
+          "fast": "2",
+          "ultrafast": "6"
+        },
+        "above": [
+          {
+            "context_tokens": 272000,
+            "input_per_mtok": "4",
+            "cached_input_per_mtok": "0.2",
+            "output_per_mtok": "15"
+          }
+        ]
+      }
+    },
+    {
+      "match": "gpt-6-luna*",
+      "vendor": "OpenAI",
+      "source": "https://developers.openai.com/api/docs/pricing",
+      "as_of": "2026-10-10",
+      "note": "A prompt over 272 000 tokens pays twice for input and one and a half times for output.",
+      "rate": {
+        "input_per_mtok": "0.1",
+        "cached_input_per_mtok": "0.01",
+        "output_per_mtok": "0.5",
+        "tiers": {
+          "batch": "0.5",
+          "flex": "0.5",
+          "fast": "2"
+        },
+        "above": [
+          {
+            "context_tokens": 272000,
+            "input_per_mtok": "0.2",
+            "cached_input_per_mtok": "0.02",
+            "output_per_mtok": "0.75"
+          }
+        ]
+      }
+    },
+    {
+      "match": "gpt-6-sol*",
+      "vendor": "OpenAI",
+      "source": "https://developers.openai.com/api/docs/pricing",
+      "as_of": "2026-10-10",
+      "note": "A prompt over 272 000 tokens pays twice for input and one and a half times for output.",
+      "rate": {
+        "input_per_mtok": "2",
+        "cached_input_per_mtok": "0.2",
+        "output_per_mtok": "10",
+        "tiers": {
+          "batch": "0.5",
+          "flex": "0.5",
+          "fast": "2"
+        },
+        "above": [
+          {
+            "context_tokens": 272000,
+            "input_per_mtok": "4",
+            "cached_input_per_mtok": "0.4",
+            "output_per_mtok": "15"
+          }
+        ]
+      }
+    },
+    {
+      "match": "gpt-5.6-sol*",
+      "vendor": "OpenAI",
+      "source": "https://developers.openai.com/api/docs/pricing",
+      "as_of": "2026-10-10",
+      "note": "A prompt over 272 000 tokens pays twice for input and one and a half times for output.",
+      "rate": {
+        "input_per_mtok": "4",
+        "cached_input_per_mtok": "0.4",
+        "output_per_mtok": "20",
+        "tiers": {
+          "batch": "0.5",
+          "flex": "0.5",
+          "fast": "2"
+        },
+        "above": [
+          {
+            "context_tokens": 272000,
+            "input_per_mtok": "8",
+            "cached_input_per_mtok": "0.8",
+            "output_per_mtok": "30"
+          }
+        ]
+      }
+    },
+    {
+      "match": "gpt-5.6-terra*",
+      "vendor": "OpenAI",
+      "source": "https://developers.openai.com/api/docs/pricing",
+      "as_of": "2026-10-10",
+      "note": "A prompt over 272 000 tokens pays twice for input and one and a half times for output.",
+      "rate": {
+        "input_per_mtok": "2",
+        "cached_input_per_mtok": "0.2",
+        "output_per_mtok": "12",
+        "tiers": {
+          "batch": "0.5",
+          "flex": "0.5",
+          "fast": "2"
+        },
+        "above": [
+          {
+            "context_tokens": 272000,
+            "input_per_mtok": "4",
+            "cached_input_per_mtok": "0.4",
+            "output_per_mtok": "18"
+          }
+        ]
+      }
+    },
+    {
+      "match": "gpt-5.6-luna*",
+      "vendor": "OpenAI",
+      "source": "https://developers.openai.com/api/docs/pricing",
+      "as_of": "2026-10-10",
+      "note": "A prompt over 272 000 tokens pays twice for input and one and a half times for output.",
+      "rate": {
+        "input_per_mtok": "0.2",
+        "cached_input_per_mtok": "0.02",
+        "output_per_mtok": "1.2",
+        "tiers": {
+          "batch": "0.5",
+          "flex": "0.5",
+          "fast": "2"
+        },
+        "above": [
+          {
+            "context_tokens": 272000,
+            "input_per_mtok": "0.4",
+            "cached_input_per_mtok": "0.04",
+            "output_per_mtok": "1.8"
+          }
+        ]
+      }
+    },
+    {
+      "match": "gpt-5.5-pro*",
+      "vendor": "OpenAI",
+      "source": "https://developers.openai.com/api/docs/pricing",
+      "as_of": "2026-10-10",
+      "note": "No cached price is listed: cached input is counted as input.",
+      "rate": {
+        "input_per_mtok": "30",
+        "cached_input_per_mtok": "30",
+        "output_per_mtok": "180",
+        "tiers": {
+          "batch": "0.5"
+        }
+      }
+    },
+    {
+      "match": "gpt-5.5*",
+      "vendor": "OpenAI",
+      "source": "https://developers.openai.com/api/docs/pricing",
+      "as_of": "2026-10-10",
+      "note": "A prompt over 272 000 tokens pays twice for input and one and a half times for output.",
+      "rate": {
+        "input_per_mtok": "5",
+        "cached_input_per_mtok": "0.5",
+        "output_per_mtok": "30",
+        "tiers": {
+          "batch": "0.5",
+          "flex": "0.5",
+          "fast": "2.5"
+        },
+        "above": [
+          {
+            "context_tokens": 272000,
+            "input_per_mtok": "10",
+            "cached_input_per_mtok": "1",
+            "output_per_mtok": "45"
+          }
+        ]
+      }
+    },
+    {
+      "match": "gpt-5.4-pro*",
+      "vendor": "OpenAI",
+      "source": "https://developers.openai.com/api/docs/pricing",
+      "as_of": "2026-10-10",
+      "note": "No cached price is listed: cached input is counted as input. A prompt over 272 000 tokens pays twice for input and one and a half times for output.",
+      "rate": {
+        "input_per_mtok": "30",
+        "cached_input_per_mtok": "30",
+        "output_per_mtok": "180",
+        "tiers": {
+          "batch": "0.5"
+        },
+        "above": [
+          {
+            "context_tokens": 272000,
+            "input_per_mtok": "60",
+            "cached_input_per_mtok": "60",
+            "output_per_mtok": "270"
+          }
+        ]
+      }
+    },
+    {
+      "match": "gpt-5.4-mini*",
+      "vendor": "OpenAI",
+      "source": "https://developers.openai.com/api/docs/pricing",
+      "as_of": "2026-10-10",
+      "rate": {
+        "input_per_mtok": "0.75",
+        "cached_input_per_mtok": "0.075",
+        "output_per_mtok": "4.5",
+        "tiers": {
+          "batch": "0.5",
+          "flex": "0.5",
+          "fast": "2"
+        }
+      }
+    },
+    {
+      "match": "gpt-5.4-nano*",
+      "vendor": "OpenAI",
+      "source": "https://developers.openai.com/api/docs/pricing",
+      "as_of": "2026-10-10",
+      "rate": {
+        "input_per_mtok": "0.2",
+        "cached_input_per_mtok": "0.02",
+        "output_per_mtok": "1.25",
+        "tiers": {
+          "batch": "0.5",
+          "flex": "0.5",
+          "fast": "2"
+        }
+      }
+    },
+    {
+      "match": "gpt-5.4*",
+      "vendor": "OpenAI",
+      "source": "https://developers.openai.com/api/docs/pricing",
+      "as_of": "2026-10-10",
+      "note": "A prompt over 272 000 tokens pays twice for input and one and a half times for output.",
+      "rate": {
+        "input_per_mtok": "2.5",
+        "cached_input_per_mtok": "0.25",
+        "output_per_mtok": "15",
+        "tiers": {
+          "batch": "0.5",
+          "flex": "0.5",
+          "fast": "2"
+        },
+        "above": [
+          {
+            "context_tokens": 272000,
+            "input_per_mtok": "5",
+            "cached_input_per_mtok": "0.5",
+            "output_per_mtok": "22.5"
+          }
+        ]
+      }
+    },
+    {
+      "match": "gpt-5.3-codex*",
+      "vendor": "OpenAI",
+      "source": "https://developers.openai.com/api/docs/pricing",
+      "as_of": "2026-10-10",
+      "rate": {
+        "input_per_mtok": "1.75",
+        "cached_input_per_mtok": "0.175",
+        "output_per_mtok": "14",
+        "tiers": {
+          "batch": "0.5",
+          "flex": "0.5",
+          "fast": "2"
+        }
+      }
+    },
+    {
+      "match": "gpt-5.2-pro*",
+      "vendor": "OpenAI",
+      "source": "https://developers.openai.com/api/docs/pricing",
+      "as_of": "2026-10-10",
+      "note": "No cached price is listed: cached input is counted as input.",
+      "rate": {
+        "input_per_mtok": "21",
+        "cached_input_per_mtok": "21",
+        "output_per_mtok": "168",
+        "tiers": {
+          "batch": "0.5"
+        }
+      }
+    },
+    {
+      "match": "gpt-5.2*",
+      "vendor": "OpenAI",
+      "source": "https://developers.openai.com/api/docs/pricing",
+      "as_of": "2026-10-10",
+      "rate": {
+        "input_per_mtok": "1.75",
+        "cached_input_per_mtok": "0.175",
+        "output_per_mtok": "14",
+        "tiers": {
+          "batch": "0.5",
+          "flex": "0.5",
+          "fast": "2"
+        }
+      }
+    },
+    {
+      "match": "gpt-5.1*",
+      "vendor": "OpenAI",
+      "source": "https://developers.openai.com/api/docs/pricing",
+      "as_of": "2026-10-10",
+      "rate": {
+        "input_per_mtok": "1.25",
+        "cached_input_per_mtok": "0.125",
+        "output_per_mtok": "10",
+        "tiers": {
+          "batch": "0.5",
+          "flex": "0.5",
+          "fast": "2"
+        }
+      }
+    },
+    {
+      "match": "gpt-5",
+      "vendor": "OpenAI",
+      "source": "https://developers.openai.com/api/docs/pricing",
+      "as_of": "2026-10-10",
+      "rate": {
+        "input_per_mtok": "1.25",
+        "cached_input_per_mtok": "0.125",
+        "output_per_mtok": "10",
+        "tiers": {
+          "batch": "0.5",
+          "flex": "0.5",
+          "fast": "2"
+        }
+      }
+    },
+    {
+      "match": "gpt-5-20*",
+      "vendor": "OpenAI",
+      "source": "https://developers.openai.com/api/docs/pricing",
+      "as_of": "2026-10-10",
+      "rate": {
+        "input_per_mtok": "1.25",
+        "cached_input_per_mtok": "0.125",
+        "output_per_mtok": "10",
+        "tiers": {
+          "batch": "0.5",
+          "flex": "0.5",
+          "fast": "2"
+        }
+      }
+    },
+    {
+      "match": "gpt-5-mini*",
+      "vendor": "OpenAI",
+      "source": "https://developers.openai.com/api/docs/pricing",
+      "as_of": "2026-10-10",
+      "rate": {
+        "input_per_mtok": "0.25",
+        "cached_input_per_mtok": "0.025",
+        "output_per_mtok": "2",
+        "tiers": {
+          "batch": "0.5",
+          "flex": "0.5",
+          "fast": "2"
+        }
+      }
+    },
+    {
+      "match": "gpt-5-nano*",
+      "vendor": "OpenAI",
+      "source": "https://developers.openai.com/api/docs/pricing",
+      "as_of": "2026-10-10",
+      "rate": {
+        "input_per_mtok": "0.05",
+        "cached_input_per_mtok": "0.005",
+        "output_per_mtok": "0.4",
+        "tiers": {
+          "batch": "0.5",
+          "flex": "0.5",
+          "fast": "2"
+        }
+      }
+    },
+    {
+      "match": "gpt-5-pro*",
+      "vendor": "OpenAI",
+      "source": "https://developers.openai.com/api/docs/pricing",
+      "as_of": "2026-10-10",
+      "note": "No cached price is listed: cached input is counted as input.",
+      "rate": {
+        "input_per_mtok": "15",
+        "cached_input_per_mtok": "15",
+        "output_per_mtok": "120",
+        "tiers": {
+          "batch": "0.5"
+        }
+      }
+    },
+    {
+      "match": "o3-pro*",
+      "vendor": "OpenAI",
+      "source": "https://developers.openai.com/api/docs/pricing",
+      "as_of": "2026-10-10",
+      "note": "No cached price is listed: cached input is counted as input.",
+      "rate": {
+        "input_per_mtok": "20",
+        "cached_input_per_mtok": "20",
+        "output_per_mtok": "80",
+        "tiers": {
+          "batch": "0.5"
+        }
+      }
+    },
+    {
+      "match": "o3-mini*",
+      "vendor": "OpenAI",
+      "source": "https://developers.openai.com/api/docs/pricing",
+      "as_of": "2026-10-10",
+      "rate": {
+        "input_per_mtok": "1.1",
+        "cached_input_per_mtok": "0.55",
+        "output_per_mtok": "4.4",
+        "tiers": {
+          "batch": "0.5"
+        }
+      }
+    },
+    {
+      "match": "o3",
+      "vendor": "OpenAI",
+      "source": "https://developers.openai.com/api/docs/pricing",
+      "as_of": "2026-10-10",
+      "rate": {
+        "input_per_mtok": "2",
+        "cached_input_per_mtok": "0.5",
+        "output_per_mtok": "8",
+        "tiers": {
+          "batch": "0.5",
+          "flex": "0.5"
+        }
+      }
+    },
+    {
+      "match": "o3-20*",
+      "vendor": "OpenAI",
+      "source": "https://developers.openai.com/api/docs/pricing",
+      "as_of": "2026-10-10",
+      "rate": {
+        "input_per_mtok": "2",
+        "cached_input_per_mtok": "0.5",
+        "output_per_mtok": "8",
+        "tiers": {
+          "batch": "0.5",
+          "flex": "0.5"
+        }
+      }
+    },
+    {
+      "match": "o4-mini*",
+      "vendor": "OpenAI",
+      "source": "https://developers.openai.com/api/docs/pricing",
+      "as_of": "2026-10-10",
+      "rate": {
+        "input_per_mtok": "1.1",
+        "cached_input_per_mtok": "0.275",
+        "output_per_mtok": "4.4",
+        "tiers": {
+          "batch": "0.5",
+          "flex": "0.5"
+        }
+      }
+    },
+    {
+      "match": "o1-pro*",
+      "vendor": "OpenAI",
+      "source": "https://developers.openai.com/api/docs/pricing",
+      "as_of": "2026-10-10",
+      "note": "No cached price is listed: cached input is counted as input.",
+      "rate": {
+        "input_per_mtok": "150",
+        "cached_input_per_mtok": "150",
+        "output_per_mtok": "600",
+        "tiers": {
+          "batch": "0.5"
+        }
+      }
+    },
+    {
+      "match": "o1",
+      "vendor": "OpenAI",
+      "source": "https://developers.openai.com/api/docs/pricing",
+      "as_of": "2026-10-10",
+      "rate": {
+        "input_per_mtok": "15",
+        "cached_input_per_mtok": "7.5",
+        "output_per_mtok": "60",
+        "tiers": {
+          "batch": "0.5"
+        }
+      }
+    },
+    {
+      "match": "o1-20*",
+      "vendor": "OpenAI",
+      "source": "https://developers.openai.com/api/docs/pricing",
+      "as_of": "2026-10-10",
+      "rate": {
+        "input_per_mtok": "15",
+        "cached_input_per_mtok": "7.5",
+        "output_per_mtok": "60",
+        "tiers": {
+          "batch": "0.5"
+        }
+      }
+    },
+    {
+      "match": "gpt-4.1-mini*",
+      "vendor": "OpenAI",
+      "source": "https://developers.openai.com/api/docs/pricing",
+      "as_of": "2026-10-10",
+      "rate": {
+        "input_per_mtok": "0.4",
+        "cached_input_per_mtok": "0.1",
+        "output_per_mtok": "1.6",
+        "tiers": {
+          "batch": "0.5"
+        }
+      }
+    },
+    {
+      "match": "gpt-4.1-nano*",
+      "vendor": "OpenAI",
+      "source": "https://developers.openai.com/api/docs/pricing",
+      "as_of": "2026-10-10",
+      "rate": {
+        "input_per_mtok": "0.1",
+        "cached_input_per_mtok": "0.025",
+        "output_per_mtok": "0.4",
+        "tiers": {
+          "batch": "0.5"
+        }
+      }
+    },
+    {
+      "match": "gpt-4.1",
+      "vendor": "OpenAI",
+      "source": "https://developers.openai.com/api/docs/pricing",
+      "as_of": "2026-10-10",
+      "rate": {
+        "input_per_mtok": "2",
+        "cached_input_per_mtok": "0.5",
+        "output_per_mtok": "8",
+        "tiers": {
+          "batch": "0.5"
+        }
+      }
+    },
+    {
+      "match": "gpt-4.1-20*",
+      "vendor": "OpenAI",
+      "source": "https://developers.openai.com/api/docs/pricing",
+      "as_of": "2026-10-10",
+      "rate": {
+        "input_per_mtok": "2",
+        "cached_input_per_mtok": "0.5",
+        "output_per_mtok": "8",
+        "tiers": {
+          "batch": "0.5"
+        }
+      }
+    },
+    {
+      "match": "gpt-4o-mini",
+      "vendor": "OpenAI",
+      "source": "https://developers.openai.com/api/docs/pricing",
+      "as_of": "2026-10-10",
+      "rate": {
+        "input_per_mtok": "0.15",
+        "cached_input_per_mtok": "0.075",
+        "output_per_mtok": "0.6",
+        "tiers": {
+          "batch": "0.5"
+        }
+      }
+    },
+    {
+      "match": "gpt-4o-mini-20*",
+      "vendor": "OpenAI",
+      "source": "https://developers.openai.com/api/docs/pricing",
+      "as_of": "2026-10-10",
+      "rate": {
+        "input_per_mtok": "0.15",
+        "cached_input_per_mtok": "0.075",
+        "output_per_mtok": "0.6",
+        "tiers": {
+          "batch": "0.5"
+        }
+      }
+    },
+    {
+      "match": "gpt-4o",
+      "vendor": "OpenAI",
+      "source": "https://developers.openai.com/api/docs/pricing",
+      "as_of": "2026-10-10",
+      "rate": {
+        "input_per_mtok": "2.5",
+        "cached_input_per_mtok": "1.25",
+        "output_per_mtok": "10",
+        "tiers": {
+          "batch": "0.5"
+        }
+      }
+    },
+    {
+      "match": "gpt-4o-20*",
+      "vendor": "OpenAI",
+      "source": "https://developers.openai.com/api/docs/pricing",
+      "as_of": "2026-10-10",
+      "rate": {
+        "input_per_mtok": "2.5",
+        "cached_input_per_mtok": "1.25",
+        "output_per_mtok": "10",
+        "tiers": {
+          "batch": "0.5"
+        }
+      }
+    },
+    {
+      "match": "gemini-3.8-flash*",
+      "vendor": "Google",
+      "source": "https://ai.google.dev/gemini-api/docs/pricing",
+      "as_of": "2026-10-10",
+      "note": "The page announces twice these prices from 1 January 2027.",
+      "rate": {
+        "input_per_mtok": "0.75",
+        "cached_input_per_mtok": "0.075",
+        "output_per_mtok": "3.75",
+        "tiers": {
+          "batch": "0.5",
+          "flex": "0.5",
+          "priority": "1.8"
+        }
+      }
+    },
+    {
+      "match": "gemini-3.6-flash*",
+      "vendor": "Google",
+      "source": "https://ai.google.dev/gemini-api/docs/pricing",
+      "as_of": "2026-10-10",
+      "note": "The page announces twice these prices from 1 January 2027.",
+      "rate": {
+        "input_per_mtok": "0.75",
+        "cached_input_per_mtok": "0.075",
+        "output_per_mtok": "3.75",
+        "tiers": {
+          "batch": "0.5",
+          "flex": "0.5",
+          "priority": "1.8"
+        }
+      }
+    },
+    {
+      "match": "gemini-3.5-flash-lite*",
+      "vendor": "Google",
+      "source": "https://ai.google.dev/gemini-api/docs/pricing",
+      "as_of": "2026-10-10",
+      "rate": {
+        "input_per_mtok": "0.3",
+        "cached_input_per_mtok": "0.03",
+        "output_per_mtok": "2.5",
+        "tiers": {
+          "batch": "0.5",
+          "flex": "0.5",
+          "priority": "1.8"
+        }
+      }
+    },
+    {
+      "match": "gemini-3.1-flash-lite*",
+      "vendor": "Google",
+      "source": "https://ai.google.dev/gemini-api/docs/pricing",
+      "as_of": "2026-10-10",
+      "rate": {
+        "input_per_mtok": "0.25",
+        "cached_input_per_mtok": "0.025",
+        "output_per_mtok": "1.5",
+        "tiers": {
+          "batch": "0.5",
+          "flex": "0.5",
+          "priority": "1.8"
+        }
+      }
+    },
+    {
+      "match": "gemini-3.1-pro*",
+      "vendor": "Google",
+      "source": "https://ai.google.dev/gemini-api/docs/pricing",
+      "as_of": "2026-10-10",
+      "note": "A prompt over 200 000 tokens pays the higher prices.",
+      "rate": {
+        "input_per_mtok": "2",
+        "cached_input_per_mtok": "0.2",
+        "output_per_mtok": "12",
+        "tiers": {
+          "batch": "0.5",
+          "flex": "0.5",
+          "priority": "1.8"
+        },
+        "above": [
+          {
+            "context_tokens": 200000,
+            "input_per_mtok": "4",
+            "cached_input_per_mtok": "0.4",
+            "output_per_mtok": "18"
+          }
+        ]
+      }
+    },
+    {
+      "match": "gemini-2.5-pro*",
+      "vendor": "Google",
+      "source": "https://ai.google.dev/gemini-api/docs/pricing",
+      "as_of": "2026-10-10",
+      "note": "A prompt over 200 000 tokens pays the higher prices.",
+      "rate": {
+        "input_per_mtok": "1.25",
+        "cached_input_per_mtok": "0.125",
+        "output_per_mtok": "10",
+        "tiers": {
+          "batch": "0.5",
+          "flex": "0.5",
+          "priority": "1.8"
+        },
+        "above": [
+          {
+            "context_tokens": 200000,
+            "input_per_mtok": "2.5",
+            "cached_input_per_mtok": "0.25",
+            "output_per_mtok": "15"
+          }
+        ]
+      }
+    },
+    {
+      "match": "gemini-2.5-flash-lite*",
+      "vendor": "Google",
+      "source": "https://ai.google.dev/gemini-api/docs/pricing",
+      "as_of": "2026-10-10",
+      "rate": {
+        "input_per_mtok": "0.1",
+        "cached_input_per_mtok": "0.01",
+        "output_per_mtok": "0.4",
+        "tiers": {
+          "batch": "0.5",
+          "flex": "0.5",
+          "priority": "1.8"
+        }
+      }
+    },
+    {
+      "match": "gemini-2.5-flash*",
+      "vendor": "Google",
+      "source": "https://ai.google.dev/gemini-api/docs/pricing",
+      "as_of": "2026-10-10",
+      "rate": {
+        "input_per_mtok": "0.3",
+        "cached_input_per_mtok": "0.03",
+        "output_per_mtok": "2.5",
+        "tiers": {
+          "batch": "0.5",
+          "flex": "0.5",
+          "priority": "1.8"
+        }
+      }
+    },
+    {
+      "match": "grok-4.7*",
+      "vendor": "xAI",
+      "source": "https://docs.x.ai/docs/models",
+      "as_of": "2026-10-10",
+      "note": "A prompt of 200 000 tokens or more pays twice, for every token of the request.",
+      "rate": {
+        "input_per_mtok": "2",
+        "cached_input_per_mtok": "0.5",
+        "output_per_mtok": "6",
+        "above": [
+          {
+            "context_tokens": 199999,
+            "input_per_mtok": "4",
+            "cached_input_per_mtok": "1",
+            "output_per_mtok": "12"
+          }
+        ]
+      }
+    },
+    {
+      "match": "grok-4.6*",
+      "vendor": "xAI",
+      "source": "https://docs.x.ai/docs/models",
+      "as_of": "2026-10-10",
+      "note": "A prompt of 200 000 tokens or more pays twice, for every token of the request.",
+      "rate": {
+        "input_per_mtok": "2",
+        "cached_input_per_mtok": "0.5",
+        "output_per_mtok": "6",
+        "above": [
+          {
+            "context_tokens": 199999,
+            "input_per_mtok": "4",
+            "cached_input_per_mtok": "1",
+            "output_per_mtok": "12"
+          }
+        ]
+      }
+    },
+    {
+      "match": "grok-4.5*",
+      "vendor": "xAI",
+      "source": "https://docs.x.ai/docs/models",
+      "as_of": "2026-10-10",
+      "rate": {
+        "input_per_mtok": "2",
+        "cached_input_per_mtok": "0.3",
+        "output_per_mtok": "6"
+      }
+    },
+    {
+      "match": "grok-4.3*",
+      "vendor": "xAI",
+      "source": "https://docs.x.ai/docs/models",
+      "as_of": "2026-10-10",
+      "rate": {
+        "input_per_mtok": "1.25",
+        "cached_input_per_mtok": "0.2",
+        "output_per_mtok": "2.5"
+      }
+    },
+    {
+      "match": "grok-4.20*",
+      "vendor": "xAI",
+      "source": "https://docs.x.ai/docs/models",
+      "as_of": "2026-10-10",
+      "rate": {
+        "input_per_mtok": "1.25",
+        "cached_input_per_mtok": "0.2",
+        "output_per_mtok": "2.5"
+      }
+    },
+    {
+      "match": "grok-build-0.1*",
+      "vendor": "xAI",
+      "source": "https://docs.x.ai/docs/models",
+      "as_of": "2026-10-10",
+      "rate": {
+        "input_per_mtok": "1",
+        "cached_input_per_mtok": "0.2",
+        "output_per_mtok": "2"
+      }
+    },
+    {
+      "match": "deepseek-flash*",
+      "vendor": "DeepSeek",
+      "source": "https://api-docs.deepseek.com/quick_start/pricing",
+      "as_of": "2026-10-10",
+      "note": "The peak price. Off-peak hours cost half, which a rate has no member for.",
+      "rate": {
+        "input_per_mtok": "0.3",
+        "cached_input_per_mtok": "0.006",
+        "output_per_mtok": "1.2"
+      }
+    },
+    {
+      "match": "deepseek-v4-pro*",
+      "vendor": "DeepSeek",
+      "source": "https://api-docs.deepseek.com/quick_start/pricing",
+      "as_of": "2026-10-10",
+      "note": "The peak price. Off-peak hours cost half, which a rate has no member for.",
+      "rate": {
+        "input_per_mtok": "1.32",
+        "cached_input_per_mtok": "0.044",
+        "output_per_mtok": "3.96"
+      }
+    },
+    {
+      "match": "glm-5.3-flashx*",
+      "vendor": "Z.ai",
+      "source": "https://docs.z.ai/guides/overview/pricing",
+      "as_of": "2026-10-10",
+      "rate": {
+        "input_per_mtok": "0.37",
+        "cached_input_per_mtok": "0.075",
+        "output_per_mtok": "1.25"
+      }
+    },
+    {
+      "match": "glm-5.3-flash*",
+      "vendor": "Z.ai",
+      "source": "https://docs.z.ai/guides/overview/pricing",
+      "as_of": "2026-10-10",
+      "rate": {
+        "input_per_mtok": "0.15",
+        "cached_input_per_mtok": "0.03",
+        "output_per_mtok": "0.5"
+      }
+    },
+    {
+      "match": "glm-5.3*",
+      "vendor": "Z.ai",
+      "source": "https://docs.z.ai/guides/overview/pricing",
+      "as_of": "2026-10-10",
+      "rate": {
+        "input_per_mtok": "1.4",
+        "cached_input_per_mtok": "0.26",
+        "output_per_mtok": "4.4"
+      }
+    },
+    {
+      "match": "glm-5.2*",
+      "vendor": "Z.ai",
+      "source": "https://docs.z.ai/guides/overview/pricing",
+      "as_of": "2026-10-10",
+      "rate": {
+        "input_per_mtok": "1.4",
+        "cached_input_per_mtok": "0.26",
+        "output_per_mtok": "4.4"
+      }
+    },
+    {
+      "match": "glm-5.1*",
+      "vendor": "Z.ai",
+      "source": "https://docs.z.ai/guides/overview/pricing",
+      "as_of": "2026-10-10",
+      "rate": {
+        "input_per_mtok": "1.4",
+        "cached_input_per_mtok": "0.26",
+        "output_per_mtok": "4.4"
+      }
+    },
+    {
+      "match": "glm-5",
+      "vendor": "Z.ai",
+      "source": "https://docs.z.ai/guides/overview/pricing",
+      "as_of": "2026-10-10",
+      "rate": {
+        "input_per_mtok": "1",
+        "cached_input_per_mtok": "0.2",
+        "output_per_mtok": "3.2"
+      }
+    },
+    {
+      "match": "glm-4.7-flashx*",
+      "vendor": "Z.ai",
+      "source": "https://docs.z.ai/guides/overview/pricing",
+      "as_of": "2026-10-10",
+      "rate": {
+        "input_per_mtok": "0.07",
+        "cached_input_per_mtok": "0.01",
+        "output_per_mtok": "0.4"
+      }
+    },
+    {
+      "match": "glm-4.7*",
+      "vendor": "Z.ai",
+      "source": "https://docs.z.ai/guides/overview/pricing",
+      "as_of": "2026-10-10",
+      "rate": {
+        "input_per_mtok": "0.6",
+        "cached_input_per_mtok": "0.11",
+        "output_per_mtok": "2.2"
+      }
+    },
+    {
+      "match": "glm-4.6*",
+      "vendor": "Z.ai",
+      "source": "https://docs.z.ai/guides/overview/pricing",
+      "as_of": "2026-10-10",
+      "rate": {
+        "input_per_mtok": "0.6",
+        "cached_input_per_mtok": "0.11",
+        "output_per_mtok": "2.2"
+      }
+    },
+    {
+      "match": "glm-4.5*",
+      "vendor": "Z.ai",
+      "source": "https://docs.z.ai/guides/overview/pricing",
+      "as_of": "2026-10-10",
+      "rate": {
+        "input_per_mtok": "0.6",
+        "cached_input_per_mtok": "0.11",
+        "output_per_mtok": "2.2"
+      }
+    },
+    {
+      "match": "glm-4.5-airx*",
+      "vendor": "Z.ai",
+      "source": "https://docs.z.ai/guides/overview/pricing",
+      "as_of": "2026-10-10",
+      "rate": {
+        "input_per_mtok": "1.1",
+        "cached_input_per_mtok": "0.22",
+        "output_per_mtok": "4.5"
+      }
+    },
+    {
+      "match": "glm-4.5-air*",
+      "vendor": "Z.ai",
+      "source": "https://docs.z.ai/guides/overview/pricing",
+      "as_of": "2026-10-10",
+      "rate": {
+        "input_per_mtok": "0.2",
+        "cached_input_per_mtok": "0.03",
+        "output_per_mtok": "1.1"
+      }
+    },
+    {
+      "match": "glm-4.5-x*",
+      "vendor": "Z.ai",
+      "source": "https://docs.z.ai/guides/overview/pricing",
+      "as_of": "2026-10-10",
+      "rate": {
+        "input_per_mtok": "2.2",
+        "cached_input_per_mtok": "0.45",
+        "output_per_mtok": "8.9"
+      }
+    },
+    {
+      "match": "kimi-k3*",
+      "vendor": "Moonshot AI",
+      "source": "https://platform.kimi.ai/docs/pricing/chat",
+      "as_of": "2026-10-10",
+      "rate": {
+        "input_per_mtok": "3",
+        "cached_input_per_mtok": "0.3",
+        "output_per_mtok": "15"
+      }
+    },
+    {
+      "match": "kimi-k2.7-code-highspeed*",
+      "vendor": "Moonshot AI",
+      "source": "https://platform.kimi.ai/docs/pricing/chat",
+      "as_of": "2026-10-10",
+      "rate": {
+        "input_per_mtok": "1.9",
+        "cached_input_per_mtok": "0.38",
+        "output_per_mtok": "8"
+      }
+    },
+    {
+      "match": "kimi-k2.7-code*",
+      "vendor": "Moonshot AI",
+      "source": "https://platform.kimi.ai/docs/pricing/chat",
+      "as_of": "2026-10-10",
+      "rate": {
+        "input_per_mtok": "0.95",
+        "cached_input_per_mtok": "0.19",
+        "output_per_mtok": "4"
+      }
+    },
+    {
+      "match": "kimi-k2.6*",
+      "vendor": "Moonshot AI",
+      "source": "https://platform.kimi.ai/docs/pricing/chat",
+      "as_of": "2026-10-10",
+      "rate": {
+        "input_per_mtok": "0.95",
+        "cached_input_per_mtok": "0.16",
+        "output_per_mtok": "4"
+      }
+    },
+    {
+      "match": "qwen3.8-max*",
+      "vendor": "Alibaba Cloud",
+      "source": "https://www.alibabacloud.com/help/en/model-studio/model-pricing",
+      "as_of": "2026-10-10",
+      "note": "Singapore prices. A cache hit is a tenth of input and writing a cache one and a quarter, as the page gives them.",
+      "rate": {
+        "input_per_mtok": "2",
+        "cached_input_per_mtok": "0.2",
+        "output_per_mtok": "6",
+        "cache_write_per_mtok": "2.5",
+        "tiers": {
+          "batch": "0.5"
+        }
+      }
+    },
+    {
+      "match": "qwen3.7-max*",
+      "vendor": "Alibaba Cloud",
+      "source": "https://www.alibabacloud.com/help/en/model-studio/model-pricing",
+      "as_of": "2026-10-10",
+      "note": "Singapore prices. A cache hit is a tenth of input and writing a cache one and a quarter, as the page gives them.",
+      "rate": {
+        "input_per_mtok": "2.5",
+        "cached_input_per_mtok": "0.25",
+        "output_per_mtok": "7.5",
+        "cache_write_per_mtok": "3.125",
+        "tiers": {
+          "batch": "0.5"
+        }
+      }
+    },
+    {
+      "match": "qwen-max*",
+      "vendor": "Alibaba Cloud",
+      "source": "https://www.alibabacloud.com/help/en/model-studio/model-pricing",
+      "as_of": "2026-10-10",
+      "note": "Singapore prices. A cache hit is a tenth of input and writing a cache one and a quarter, as the page gives them.",
+      "rate": {
+        "input_per_mtok": "1.6",
+        "cached_input_per_mtok": "0.16",
+        "output_per_mtok": "6.4",
+        "cache_write_per_mtok": "2",
+        "tiers": {
+          "batch": "0.5"
+        }
+      }
+    },
+    {
+      "match": "qwen3.7-plus*",
+      "vendor": "Alibaba Cloud",
+      "source": "https://www.alibabacloud.com/help/en/model-studio/model-pricing",
+      "as_of": "2026-10-10",
+      "note": "Singapore prices. A cache hit is a tenth of input and writing a cache one and a quarter, as the page gives them.",
+      "rate": {
+        "input_per_mtok": "0.4",
+        "cached_input_per_mtok": "0.04",
+        "output_per_mtok": "1.6",
+        "cache_write_per_mtok": "0.5",
+        "tiers": {
+          "batch": "0.5"
+        },
+        "above": [
+          {
+            "context_tokens": 256000,
+            "input_per_mtok": "1.2",
+            "cached_input_per_mtok": "0.12",
+            "output_per_mtok": "4.8",
+            "cache_write_per_mtok": "1.5"
+          }
+        ]
+      }
+    },
+    {
+      "match": "qwen3.6-plus*",
+      "vendor": "Alibaba Cloud",
+      "source": "https://www.alibabacloud.com/help/en/model-studio/model-pricing",
+      "as_of": "2026-10-10",
+      "note": "Singapore prices. A cache hit is a tenth of input and writing a cache one and a quarter, as the page gives them.",
+      "rate": {
+        "input_per_mtok": "0.5",
+        "cached_input_per_mtok": "0.05",
+        "output_per_mtok": "3",
+        "cache_write_per_mtok": "0.625",
+        "tiers": {
+          "batch": "0.5"
+        },
+        "above": [
+          {
+            "context_tokens": 256000,
+            "input_per_mtok": "2",
+            "cached_input_per_mtok": "0.2",
+            "output_per_mtok": "6",
+            "cache_write_per_mtok": "2.5"
+          }
+        ]
+      }
+    },
+    {
+      "match": "qwen3.5-plus*",
+      "vendor": "Alibaba Cloud",
+      "source": "https://www.alibabacloud.com/help/en/model-studio/model-pricing",
+      "as_of": "2026-10-10",
+      "note": "Singapore prices. A cache hit is a tenth of input and writing a cache one and a quarter, as the page gives them.",
+      "rate": {
+        "input_per_mtok": "0.4",
+        "cached_input_per_mtok": "0.04",
+        "output_per_mtok": "2.4",
+        "cache_write_per_mtok": "0.5",
+        "tiers": {
+          "batch": "0.5"
+        },
+        "above": [
+          {
+            "context_tokens": 256000,
+            "input_per_mtok": "0.5",
+            "cached_input_per_mtok": "0.05",
+            "output_per_mtok": "3",
+            "cache_write_per_mtok": "0.625"
+          }
+        ]
+      }
+    },
+    {
+      "match": "qwen-plus*",
+      "vendor": "Alibaba Cloud",
+      "source": "https://www.alibabacloud.com/help/en/model-studio/model-pricing",
+      "as_of": "2026-10-10",
+      "note": "Singapore prices. A cache hit is a tenth of input and writing a cache one and a quarter, as the page gives them.",
+      "rate": {
+        "input_per_mtok": "0.4",
+        "cached_input_per_mtok": "0.04",
+        "output_per_mtok": "1.2",
+        "cache_write_per_mtok": "0.5",
+        "tiers": {
+          "batch": "0.5"
+        },
+        "above": [
+          {
+            "context_tokens": 256000,
+            "input_per_mtok": "1.2",
+            "cached_input_per_mtok": "0.12",
+            "output_per_mtok": "3.6",
+            "cache_write_per_mtok": "1.5"
+          }
+        ]
+      }
+    },
+    {
+      "match": "qwen3.8-flash*",
+      "vendor": "Alibaba Cloud",
+      "source": "https://www.alibabacloud.com/help/en/model-studio/model-pricing",
+      "as_of": "2026-10-10",
+      "note": "Singapore prices. A cache hit is a tenth of input and writing a cache one and a quarter, as the page gives them.",
+      "rate": {
+        "input_per_mtok": "0.15",
+        "cached_input_per_mtok": "0.015",
+        "output_per_mtok": "0.47",
+        "cache_write_per_mtok": "0.1875",
+        "tiers": {
+          "batch": "0.5"
+        }
+      }
+    },
+    {
+      "match": "qwen3.7-flash*",
+      "vendor": "Alibaba Cloud",
+      "source": "https://www.alibabacloud.com/help/en/model-studio/model-pricing",
+      "as_of": "2026-10-10",
+      "note": "Singapore prices. A cache hit is a tenth of input and writing a cache one and a quarter, as the page gives them.",
+      "rate": {
+        "input_per_mtok": "0.03",
+        "cached_input_per_mtok": "0.003",
+        "output_per_mtok": "0.13",
+        "cache_write_per_mtok": "0.0375",
+        "tiers": {
+          "batch": "0.5"
+        },
+        "above": [
+          {
+            "context_tokens": 32000,
+            "input_per_mtok": "0.1",
+            "cached_input_per_mtok": "0.01",
+            "output_per_mtok": "0.4",
+            "cache_write_per_mtok": "0.125"
+          },
+          {
+            "context_tokens": 256000,
+            "input_per_mtok": "0.2",
+            "cached_input_per_mtok": "0.02",
+            "output_per_mtok": "0.8",
+            "cache_write_per_mtok": "0.25"
+          }
+        ]
+      }
+    },
+    {
+      "match": "qwen3.6-flash*",
+      "vendor": "Alibaba Cloud",
+      "source": "https://www.alibabacloud.com/help/en/model-studio/model-pricing",
+      "as_of": "2026-10-10",
+      "note": "Singapore prices. A cache hit is a tenth of input and writing a cache one and a quarter, as the page gives them.",
+      "rate": {
+        "input_per_mtok": "0.25",
+        "cached_input_per_mtok": "0.025",
+        "output_per_mtok": "1.5",
+        "cache_write_per_mtok": "0.3125",
+        "tiers": {
+          "batch": "0.5"
+        },
+        "above": [
+          {
+            "context_tokens": 256000,
+            "input_per_mtok": "1",
+            "cached_input_per_mtok": "0.1",
+            "output_per_mtok": "4",
+            "cache_write_per_mtok": "1.25"
+          }
+        ]
+      }
+    },
+    {
+      "match": "qwen3.5-flash*",
+      "vendor": "Alibaba Cloud",
+      "source": "https://www.alibabacloud.com/help/en/model-studio/model-pricing",
+      "as_of": "2026-10-10",
+      "note": "Singapore prices. A cache hit is a tenth of input and writing a cache one and a quarter, as the page gives them.",
+      "rate": {
+        "input_per_mtok": "0.1",
+        "cached_input_per_mtok": "0.01",
+        "output_per_mtok": "0.4",
+        "cache_write_per_mtok": "0.125",
+        "tiers": {
+          "batch": "0.5"
+        }
+      }
+    },
+    {
+      "match": "qwen-flash*",
+      "vendor": "Alibaba Cloud",
+      "source": "https://www.alibabacloud.com/help/en/model-studio/model-pricing",
+      "as_of": "2026-10-10",
+      "note": "Singapore prices. A cache hit is a tenth of input and writing a cache one and a quarter, as the page gives them.",
+      "rate": {
+        "input_per_mtok": "0.05",
+        "cached_input_per_mtok": "0.005",
+        "output_per_mtok": "0.4",
+        "cache_write_per_mtok": "0.0625",
+        "tiers": {
+          "batch": "0.5"
+        },
+        "above": [
+          {
+            "context_tokens": 256000,
+            "input_per_mtok": "0.25",
+            "cached_input_per_mtok": "0.025",
+            "output_per_mtok": "2",
+            "cache_write_per_mtok": "0.3125"
+          }
+        ]
+      }
+    },
+    {
+      "match": "qwen3-coder-flash*",
+      "vendor": "Alibaba Cloud",
+      "source": "https://www.alibabacloud.com/help/en/model-studio/model-pricing",
+      "as_of": "2026-10-10",
+      "note": "Singapore prices. A cache hit is a tenth of input and writing a cache one and a quarter, as the page gives them.",
+      "rate": {
+        "input_per_mtok": "0.3",
+        "cached_input_per_mtok": "0.03",
+        "output_per_mtok": "1.5",
+        "cache_write_per_mtok": "0.375",
+        "tiers": {
+          "batch": "0.5"
+        },
+        "above": [
+          {
+            "context_tokens": 32000,
+            "input_per_mtok": "0.5",
+            "cached_input_per_mtok": "0.05",
+            "output_per_mtok": "2.5",
+            "cache_write_per_mtok": "0.625"
+          },
+          {
+            "context_tokens": 128000,
+            "input_per_mtok": "0.8",
+            "cached_input_per_mtok": "0.08",
+            "output_per_mtok": "4",
+            "cache_write_per_mtok": "1"
+          },
+          {
+            "context_tokens": 256000,
+            "input_per_mtok": "1.6",
+            "cached_input_per_mtok": "0.16",
+            "output_per_mtok": "9.6",
+            "cache_write_per_mtok": "2"
+          }
+        ]
+      }
+    },
+    {
+      "match": "mistral-large*",
+      "vendor": "Mistral AI",
+      "source": "https://docs.mistral.ai/inference/pricing",
+      "as_of": "2026-10-10",
+      "note": "The list price of Large 4, the newest. Large 3 is 0.5, 0.05 and 1.5, and a name that does not say which is counted as the newer.",
+      "rate": {
+        "input_per_mtok": "1.36",
+        "cached_input_per_mtok": "0.14",
+        "output_per_mtok": "4.18"
+      }
+    },
+    {
+      "match": "mistral-medium*",
+      "vendor": "Mistral AI",
+      "source": "https://docs.mistral.ai/inference/pricing",
+      "as_of": "2026-10-10",
+      "rate": {
+        "input_per_mtok": "1.5",
+        "cached_input_per_mtok": "0.15",
+        "output_per_mtok": "7.5"
+      }
+    },
+    {
+      "match": "mistral-small*",
+      "vendor": "Mistral AI",
+      "source": "https://docs.mistral.ai/inference/pricing",
+      "as_of": "2026-10-10",
+      "rate": {
+        "input_per_mtok": "0.15",
+        "cached_input_per_mtok": "0.015",
+        "output_per_mtok": "0.6"
+      }
+    },
+    {
+      "match": "ministral-14b*",
+      "vendor": "Mistral AI",
+      "source": "https://docs.mistral.ai/inference/pricing",
+      "as_of": "2026-10-10",
+      "rate": {
+        "input_per_mtok": "0.2",
+        "cached_input_per_mtok": "0.02",
+        "output_per_mtok": "0.2"
+      }
+    },
+    {
+      "match": "ministral-8b*",
+      "vendor": "Mistral AI",
+      "source": "https://docs.mistral.ai/inference/pricing",
+      "as_of": "2026-10-10",
+      "rate": {
+        "input_per_mtok": "0.15",
+        "cached_input_per_mtok": "0.015",
+        "output_per_mtok": "0.15"
+      }
+    },
+    {
+      "match": "ministral-3b*",
+      "vendor": "Mistral AI",
+      "source": "https://docs.mistral.ai/inference/pricing",
+      "as_of": "2026-10-10",
+      "rate": {
+        "input_per_mtok": "0.1",
+        "cached_input_per_mtok": "0.01",
+        "output_per_mtok": "0.1"
+      }
+    },
+    {
+      "match": "codestral*",
+      "vendor": "Mistral AI",
+      "source": "https://docs.mistral.ai/inference/pricing",
+      "as_of": "2026-10-10",
+      "rate": {
+        "input_per_mtok": "0.3",
+        "cached_input_per_mtok": "0.03",
+        "output_per_mtok": "0.9"
+      }
+    },
+    {
+      "match": "minimax-m3*",
+      "vendor": "MiniMax",
+      "source": "https://platform.minimax.io/docs/guides/pricing-paygo.md",
+      "as_of": "2026-10-10",
+      "note": "A prompt over 512 000 tokens pays twice.",
+      "rate": {
+        "input_per_mtok": "0.3",
+        "cached_input_per_mtok": "0.06",
+        "output_per_mtok": "1.2",
+        "tiers": {
+          "priority": "1.5"
+        },
+        "above": [
+          {
+            "context_tokens": 512000,
+            "input_per_mtok": "0.6",
+            "cached_input_per_mtok": "0.12",
+            "output_per_mtok": "2.4"
+          }
+        ]
+      }
+    },
+    {
+      "match": "minimax-m2.7-highspeed*",
+      "vendor": "MiniMax",
+      "source": "https://platform.minimax.io/docs/guides/pricing-paygo.md",
+      "as_of": "2026-10-10",
+      "note": "Input and output as listed. The cached and the cache-write price are twice those of the ordinary model, since the page lists none for this one.",
+      "rate": {
+        "input_per_mtok": "0.6",
+        "cached_input_per_mtok": "0.12",
+        "output_per_mtok": "2.4",
+        "cache_write_per_mtok": "0.75"
+      }
+    },
+    {
+      "match": "minimax-m2.7*",
+      "vendor": "MiniMax",
+      "source": "https://platform.minimax.io/docs/guides/pricing-paygo.md",
+      "as_of": "2026-10-10",
+      "rate": {
+        "input_per_mtok": "0.3",
+        "cached_input_per_mtok": "0.06",
+        "output_per_mtok": "1.2",
+        "cache_write_per_mtok": "0.375"
+      }
+    },
+    {
+      "match": "minimax-m2.5*",
+      "vendor": "MiniMax",
+      "source": "https://platform.minimax.io/docs/guides/pricing-paygo.md",
+      "as_of": "2026-10-10",
+      "rate": {
+        "input_per_mtok": "0.3",
+        "cached_input_per_mtok": "0.03",
+        "output_per_mtok": "1.2"
+      }
+    },
+    {
+      "match": "minimax-m2.1*",
+      "vendor": "MiniMax",
+      "source": "https://platform.minimax.io/docs/guides/pricing-paygo.md",
+      "as_of": "2026-10-10",
+      "rate": {
+        "input_per_mtok": "0.3",
+        "cached_input_per_mtok": "0.03",
+        "output_per_mtok": "1.2"
+      }
+    },
+    {
+      "match": "minimax-m2*",
+      "vendor": "MiniMax",
+      "source": "https://platform.minimax.io/docs/guides/pricing-paygo.md",
+      "as_of": "2026-10-10",
+      "rate": {
+        "input_per_mtok": "0.3",
+        "cached_input_per_mtok": "0.03",
+        "output_per_mtok": "1.2"
+      }
+    },
+    {
+      "match": "sonar-deep-research*",
+      "vendor": "Perplexity",
+      "source": "https://docs.perplexity.ai/getting-started/pricing",
+      "as_of": "2026-10-10",
+      "note": "Token prices only: the fee for each request and for each search is no part of a rate. No cached price is listed.",
+      "rate": {
+        "input_per_mtok": "2",
+        "cached_input_per_mtok": "2",
+        "output_per_mtok": "8"
+      }
+    },
+    {
+      "match": "sonar-reasoning-pro*",
+      "vendor": "Perplexity",
+      "source": "https://docs.perplexity.ai/getting-started/pricing",
+      "as_of": "2026-10-10",
+      "note": "Token prices only: the fee for each request and for each search is no part of a rate. No cached price is listed.",
+      "rate": {
+        "input_per_mtok": "2",
+        "cached_input_per_mtok": "2",
+        "output_per_mtok": "8"
+      }
+    },
+    {
+      "match": "sonar-pro*",
+      "vendor": "Perplexity",
+      "source": "https://docs.perplexity.ai/getting-started/pricing",
+      "as_of": "2026-10-10",
+      "note": "Token prices only: the fee for each request and for each search is no part of a rate. No cached price is listed.",
+      "rate": {
+        "input_per_mtok": "3",
+        "cached_input_per_mtok": "3",
+        "output_per_mtok": "15"
+      }
+    },
+    {
+      "match": "sonar*",
+      "vendor": "Perplexity",
+      "source": "https://docs.perplexity.ai/getting-started/pricing",
+      "as_of": "2026-10-10",
+      "note": "Token prices only: the fee for each request and for each search is no part of a rate. No cached price is listed.",
+      "rate": {
+        "input_per_mtok": "1",
+        "cached_input_per_mtok": "1",
+        "output_per_mtok": "1"
+      }
+    },
+    {
+      "match": "command-r-plus*",
+      "vendor": "Cohere",
+      "source": "https://cohere.com/pricing",
+      "as_of": "2026-10-10",
+      "note": "A legacy model. No cached price is listed.",
+      "rate": {
+        "input_per_mtok": "2.5",
+        "cached_input_per_mtok": "2.5",
+        "output_per_mtok": "10"
+      }
+    },
+    {
+      "match": "command-r*",
+      "vendor": "Cohere",
+      "source": "https://cohere.com/pricing",
+      "as_of": "2026-10-10",
+      "note": "A legacy model. No cached price is listed.",
+      "rate": {
+        "input_per_mtok": "0.5",
+        "cached_input_per_mtok": "0.5",
+        "output_per_mtok": "1.5"
+      }
+    }
+  ]
+}

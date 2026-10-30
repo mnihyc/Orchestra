@@ -1,0 +1,28 @@
+[package]
+name = "orch-authz"
+description = "The single access-decision implementation."
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+rust-version.workspace = true
+repository.workspace = true
+publish.workspace = true
+
+[dependencies]
+chrono.workspace = true
+orch-access-contract.workspace = true
+orch-agent-contract.workspace = true
+orch-db.workspace = true
+orch-types.workspace = true
+serde_json.workspace = true
+thiserror.workspace = true
+tracing.workspace = true
+
+[dev-dependencies]
+orch-testkit.workspace = true
+rand.workspace = true
+sqlx.workspace = true
+tokio.workspace = true
+
+[lints]
+workspace = true

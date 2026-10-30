@@ -1,0 +1,8 @@
+{"at_ms":0,"sent":"turn/start"}
+{"at_ms":100,"event":{"method":"turn/started","params":{"threadId":"ref-0001","turn":{"id":"ref-0002"}}}}
+{"at_ms":500,"event":{"method":"item/agentMessage/delta","params":{"threadId":"ref-0001","delta":"Looking up sources."}}}
+{"at_ms":1500,"event":{"method":"item/started","params":{"threadId":"ref-0001","item":{"id":"ref-0003","type":"webSearch"}}}}
+{"at_ms":2500,"event":{"method":"item/completed","params":{"threadId":"ref-0001","item":{"id":"ref-0003","type":"webSearch"}}}}
+{"at_ms":3500,"event":{"method":"item/agentMessage/delta","params":{"threadId":"ref-0001","delta":"The answer with sources."}}}
+{"at_ms":3600,"event":{"method":"thread/tokenUsage/updated","params":{"threadId":"ref-0001","tokenUsage":{"last":{"inputTokens":20,"outputTokens":64,"reasoningOutputTokens":0,"totalTokens":84}}}}}
+{"at_ms":3700,"event":{"method":"turn/completed","params":{"threadId":"ref-0001","turn":{"id":"ref-0002","status":"completed"}}}}

@@ -1,0 +1,27 @@
+{
+  "oneOf": [
+    {
+      "type": "string",
+      "const": "unsupported",
+      "description": "The source does not declare it, and it was never told."
+    },
+    {
+      "type": "string",
+      "const": "not_read_yet",
+      "description": "The source declares it, and it was never told."
+    },
+    {
+      "type": "string",
+      "const": "empty",
+      "description": "It was told as `null` or `[]`: none offered."
+    },
+    {
+      "type": "string",
+      "const": "told",
+      "description": "It was told with a value."
+    }
+  ],
+  "description": "Where a member of a provider's facts stands: one of four, each with its own behaviour of the screens and\nthe engine.",
+  "title": "MemberState",
+  "$schema": "https://json-schema.org/draft/2020-12/schema"
+}

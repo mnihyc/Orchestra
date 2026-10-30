@@ -1,0 +1,952 @@
+[
+  {
+    "name": "cyber advice",
+    "codes": [],
+    "status": null,
+    "message": "Cyber we handle it carefully, please try again.",
+    "expected": "model_refused",
+    "reason": "cyber",
+    "why": "Named cause wins over retry advice"
+  },
+  {
+    "name": "observed filter",
+    "codes": [],
+    "status": null,
+    "message": "flagged for possible cybersecurity risk",
+    "expected": "model_refused",
+    "reason": "cyber",
+    "why": "Named cause wins over retry advice"
+  },
+  {
+    "name": "observed programme",
+    "codes": [],
+    "status": 403,
+    "message": "Daybreak isn't available for this model",
+    "expected": "model_unavailable",
+    "reason": "access",
+    "why": "Model programme access is structural, not credential refusal"
+  },
+  {
+    "name": "account programme",
+    "codes": [],
+    "status": 403,
+    "message": "Cyber programme not enabled for this account; try again later",
+    "expected": "model_unavailable",
+    "reason": "access",
+    "why": "Named cause wins over retry advice"
+  },
+  {
+    "name": "policy vs context",
+    "codes": [],
+    "status": null,
+    "message": "Safety policy rejected a context length request; retry",
+    "expected": "model_refused",
+    "reason": "safety",
+    "why": "Named cause wins over retry advice"
+  },
+  {
+    "name": "access vs policy",
+    "codes": [],
+    "status": null,
+    "message": "Safety programme is not granted to this account",
+    "expected": "model_unavailable",
+    "reason": "access",
+    "why": "Named cause wins over retry advice"
+  },
+  {
+    "name": "context vs quota",
+    "codes": [],
+    "status": null,
+    "message": "Context length exceeded; quota retry later",
+    "expected": "context_overflow",
+    "reason": null,
+    "why": "Named cause wins over retry advice"
+  },
+  {
+    "name": "model vs quota",
+    "codes": [],
+    "status": null,
+    "message": "Unknown model; billing contact support",
+    "expected": "model_unavailable",
+    "reason": null,
+    "why": "Named cause wins over retry advice"
+  },
+  {
+    "name": "quota vs key",
+    "codes": [],
+    "status": null,
+    "message": "Usage limit reached; API key valid",
+    "expected": "provider_exhausted",
+    "reason": null,
+    "why": "Named cause wins over retry advice"
+  },
+  {
+    "name": "bare rate",
+    "codes": [],
+    "status": 429,
+    "message": "",
+    "expected": "provider_busy",
+    "reason": null,
+    "why": "429 alone proves no quota or credit problem"
+  },
+  {
+    "name": "bare forbidden",
+    "codes": [],
+    "status": 403,
+    "message": "",
+    "expected": "model_refused",
+    "reason": "other",
+    "why": "403 alone never rejects a credential"
+  },
+  {
+    "name": "bare missing",
+    "codes": [],
+    "status": 404,
+    "message": "",
+    "expected": "harness_error",
+    "reason": null,
+    "why": "A missing resource is not necessarily a model"
+  },
+  {
+    "name": "missing model",
+    "codes": [],
+    "status": 404,
+    "message": "model was not found",
+    "expected": "model_unavailable",
+    "reason": null,
+    "why": "Named cause wins over retry advice"
+  },
+  {
+    "name": "bare unauthorized",
+    "codes": [],
+    "status": 401,
+    "message": "",
+    "expected": "provider_unauthorized",
+    "reason": null,
+    "why": "401 is explicit authentication evidence"
+  },
+  {
+    "name": "bare payment",
+    "codes": [],
+    "status": 402,
+    "message": "",
+    "expected": "provider_exhausted",
+    "reason": null,
+    "why": "402 says billing, not invalid credentials"
+  },
+  {
+    "name": "timeout",
+    "codes": [],
+    "status": 408,
+    "message": "",
+    "expected": "provider_unreachable",
+    "reason": null,
+    "why": "Named cause wins over retry advice"
+  },
+  {
+    "name": "gateway timeout",
+    "codes": [],
+    "status": 504,
+    "message": "",
+    "expected": "provider_unreachable",
+    "reason": null,
+    "why": "Named cause wins over retry advice"
+  },
+  {
+    "name": "too large",
+    "codes": [],
+    "status": 413,
+    "message": "",
+    "expected": "context_overflow",
+    "reason": null,
+    "why": "Named cause wins over retry advice"
+  },
+  {
+    "name": "busy 500",
+    "codes": [],
+    "status": 500,
+    "message": "",
+    "expected": "provider_busy",
+    "reason": null,
+    "why": "Named cause wins over retry advice"
+  },
+  {
+    "name": "busy 502",
+    "codes": [],
+    "status": 502,
+    "message": "",
+    "expected": "provider_busy",
+    "reason": null,
+    "why": "Named cause wins over retry advice"
+  },
+  {
+    "name": "busy 503",
+    "codes": [],
+    "status": 503,
+    "message": "",
+    "expected": "provider_busy",
+    "reason": null,
+    "why": "Named cause wins over retry advice"
+  },
+  {
+    "name": "busy 529",
+    "codes": [],
+    "status": 529,
+    "message": "",
+    "expected": "provider_busy",
+    "reason": null,
+    "why": "Named cause wins over retry advice"
+  },
+  {
+    "name": "busy 599",
+    "codes": [],
+    "status": 599,
+    "message": "",
+    "expected": "provider_busy",
+    "reason": null,
+    "why": "Named cause wins over retry advice"
+  },
+  {
+    "name": "authentication_error",
+    "codes": [
+      "authentication_error"
+    ],
+    "status": null,
+    "message": "try again",
+    "expected": "provider_unauthorized",
+    "reason": null,
+    "why": "Explicit authentication type outranks advice"
+  },
+  {
+    "name": "invalid_api_key",
+    "codes": [
+      "invalid_api_key"
+    ],
+    "status": null,
+    "message": "try again",
+    "expected": "provider_unauthorized",
+    "reason": null,
+    "why": "Explicit authentication type outranks advice"
+  },
+  {
+    "name": "unauthorized",
+    "codes": [
+      "unauthorized"
+    ],
+    "status": null,
+    "message": "try again",
+    "expected": "provider_unauthorized",
+    "reason": null,
+    "why": "Explicit authentication type outranks advice"
+  },
+  {
+    "name": "provider_credentials",
+    "codes": [
+      "provider_credentials"
+    ],
+    "status": null,
+    "message": "try again",
+    "expected": "provider_unauthorized",
+    "reason": null,
+    "why": "Explicit authentication type outranks advice"
+  },
+  {
+    "name": "billing_error",
+    "codes": [
+      "billing_error"
+    ],
+    "status": null,
+    "message": "try again",
+    "expected": "provider_exhausted",
+    "reason": null,
+    "why": "Named cause wins over retry advice"
+  },
+  {
+    "name": "insufficient_quota",
+    "codes": [
+      "insufficient_quota"
+    ],
+    "status": null,
+    "message": "try again",
+    "expected": "provider_exhausted",
+    "reason": null,
+    "why": "Named cause wins over retry advice"
+  },
+  {
+    "name": "usageLimitExceeded",
+    "codes": [
+      "usageLimitExceeded"
+    ],
+    "status": null,
+    "message": "try again",
+    "expected": "provider_exhausted",
+    "reason": null,
+    "why": "Named cause wins over retry advice"
+  },
+  {
+    "name": "usage_limit_reached",
+    "codes": [
+      "usage_limit_reached"
+    ],
+    "status": null,
+    "message": "try again",
+    "expected": "provider_exhausted",
+    "reason": null,
+    "why": "Named cause wins over retry advice"
+  },
+  {
+    "name": "credit_balance_exhausted",
+    "codes": [
+      "credit_balance_exhausted"
+    ],
+    "status": null,
+    "message": "try again",
+    "expected": "provider_exhausted",
+    "reason": null,
+    "why": "Named cause wins over retry advice"
+  },
+  {
+    "name": "organization_spend_limit_exceeded",
+    "codes": [
+      "organization_spend_limit_exceeded"
+    ],
+    "status": null,
+    "message": "try again",
+    "expected": "provider_exhausted",
+    "reason": null,
+    "why": "Named cause wins over retry advice"
+  },
+  {
+    "name": "project_spend_limit_exceeded",
+    "codes": [
+      "project_spend_limit_exceeded"
+    ],
+    "status": null,
+    "message": "try again",
+    "expected": "provider_exhausted",
+    "reason": null,
+    "why": "Named cause wins over retry advice"
+  },
+  {
+    "name": "organization_usage_limit_exceeded",
+    "codes": [
+      "organization_usage_limit_exceeded"
+    ],
+    "status": null,
+    "message": "try again",
+    "expected": "provider_exhausted",
+    "reason": null,
+    "why": "Named cause wins over retry advice"
+  },
+  {
+    "name": "overloaded_error",
+    "codes": [
+      "overloaded_error"
+    ],
+    "status": null,
+    "message": "retry later",
+    "expected": "provider_busy",
+    "reason": null,
+    "why": "Named cause wins over retry advice"
+  },
+  {
+    "name": "serverOverloaded",
+    "codes": [
+      "serverOverloaded"
+    ],
+    "status": null,
+    "message": "retry later",
+    "expected": "provider_busy",
+    "reason": null,
+    "why": "Named cause wins over retry advice"
+  },
+  {
+    "name": "internalServerError",
+    "codes": [
+      "internalServerError"
+    ],
+    "status": null,
+    "message": "retry later",
+    "expected": "provider_busy",
+    "reason": null,
+    "why": "Named cause wins over retry advice"
+  },
+  {
+    "name": "flexUnavailable",
+    "codes": [
+      "flexUnavailable"
+    ],
+    "status": null,
+    "message": "retry later",
+    "expected": "provider_busy",
+    "reason": null,
+    "why": "Named cause wins over retry advice"
+  },
+  {
+    "name": "server_is_overloaded",
+    "codes": [
+      "server_is_overloaded"
+    ],
+    "status": null,
+    "message": "retry later",
+    "expected": "provider_busy",
+    "reason": null,
+    "why": "Named cause wins over retry advice"
+  },
+  {
+    "name": "service_unavailable_error",
+    "codes": [
+      "service_unavailable_error"
+    ],
+    "status": null,
+    "message": "retry later",
+    "expected": "provider_busy",
+    "reason": null,
+    "why": "Named cause wins over retry advice"
+  },
+  {
+    "name": "rate_limit_error",
+    "codes": [
+      "rate_limit_error"
+    ],
+    "status": null,
+    "message": "retry later",
+    "expected": "provider_busy",
+    "reason": null,
+    "why": "Named cause wins over retry advice"
+  },
+  {
+    "name": "rateLimitExceeded",
+    "codes": [
+      "rateLimitExceeded"
+    ],
+    "status": null,
+    "message": "retry later",
+    "expected": "provider_busy",
+    "reason": null,
+    "why": "Named cause wins over retry advice"
+  },
+  {
+    "name": "slow_down",
+    "codes": [
+      "slow_down"
+    ],
+    "status": null,
+    "message": "retry later",
+    "expected": "provider_busy",
+    "reason": null,
+    "why": "Named cause wins over retry advice"
+  },
+  {
+    "name": "contextWindowExceeded",
+    "codes": [
+      "contextWindowExceeded"
+    ],
+    "status": null,
+    "message": "try again",
+    "expected": "context_overflow",
+    "reason": null,
+    "why": "Named cause wins over retry advice"
+  },
+  {
+    "name": "context_length_exceeded",
+    "codes": [
+      "context_length_exceeded"
+    ],
+    "status": null,
+    "message": "try again",
+    "expected": "context_overflow",
+    "reason": null,
+    "why": "Named cause wins over retry advice"
+  },
+  {
+    "name": "prompt_too_long",
+    "codes": [
+      "prompt_too_long"
+    ],
+    "status": null,
+    "message": "try again",
+    "expected": "context_overflow",
+    "reason": null,
+    "why": "Named cause wins over retry advice"
+  },
+  {
+    "name": "request_too_large",
+    "codes": [
+      "request_too_large"
+    ],
+    "status": null,
+    "message": "try again",
+    "expected": "context_overflow",
+    "reason": null,
+    "why": "Named cause wins over retry advice"
+  },
+  {
+    "name": "model_not_found",
+    "codes": [
+      "model_not_found"
+    ],
+    "status": null,
+    "message": "",
+    "expected": "model_unavailable",
+    "reason": null,
+    "why": "Named cause wins over retry advice"
+  },
+  {
+    "name": "model_unavailable",
+    "codes": [
+      "model_unavailable"
+    ],
+    "status": null,
+    "message": "",
+    "expected": "model_unavailable",
+    "reason": null,
+    "why": "Named cause wins over retry advice"
+  },
+  {
+    "name": "permission type",
+    "codes": [
+      "permission_error"
+    ],
+    "status": null,
+    "message": "",
+    "expected": "model_refused",
+    "reason": "other",
+    "why": "Named cause wins over retry advice"
+  },
+  {
+    "name": "permission for model",
+    "codes": [
+      "permission_error"
+    ],
+    "status": 403,
+    "message": "Your account does not have permission to use this model",
+    "expected": "model_unavailable",
+    "reason": "access",
+    "why": "Named cause wins over retry advice"
+  },
+  {
+    "name": "quota in rate wrapper",
+    "codes": [
+      "rate_limit_error"
+    ],
+    "status": 429,
+    "message": "Monthly spend limit reached",
+    "expected": "provider_exhausted",
+    "reason": null,
+    "why": "Named cause wins over retry advice"
+  },
+  {
+    "name": "type beats status",
+    "codes": [
+      "context_length_exceeded"
+    ],
+    "status": 503,
+    "message": "try again",
+    "expected": "context_overflow",
+    "reason": null,
+    "why": "Named cause wins over retry advice"
+  },
+  {
+    "name": "status beats incidental quota",
+    "codes": [],
+    "status": 500,
+    "message": "You've hit your session limit",
+    "expected": "provider_busy",
+    "reason": null,
+    "why": "An explicit server status beats words without a typed quota"
+  },
+  {
+    "name": "negated quota",
+    "codes": [],
+    "status": 429,
+    "message": "Temporarily limiting requests (not your usage limit)",
+    "expected": "provider_busy",
+    "reason": null,
+    "why": "Named cause wins over retry advice"
+  },
+  {
+    "name": "Model at capacity",
+    "codes": [],
+    "status": null,
+    "message": "Model at capacity",
+    "expected": "provider_busy",
+    "reason": null,
+    "why": "Named cause wins over retry advice"
+  },
+  {
+    "name": "Too many requests",
+    "codes": [],
+    "status": null,
+    "message": "Too many requests",
+    "expected": "provider_busy",
+    "reason": null,
+    "why": "Named cause wins over retry advice"
+  },
+  {
+    "name": "Requests throttled",
+    "codes": [],
+    "status": null,
+    "message": "Requests throttled",
+    "expected": "provider_busy",
+    "reason": null,
+    "why": "Named cause wins over retry advice"
+  },
+  {
+    "name": "service overloaded",
+    "codes": [],
+    "status": null,
+    "message": "service overloaded",
+    "expected": "provider_busy",
+    "reason": null,
+    "why": "Named cause wins over retry advice"
+  },
+  {
+    "name": "DNS resolution failed",
+    "codes": [],
+    "status": null,
+    "message": "DNS resolution failed",
+    "expected": "provider_unreachable",
+    "reason": null,
+    "why": "Named cause wins over retry advice"
+  },
+  {
+    "name": "TLS handshake failed",
+    "codes": [],
+    "status": null,
+    "message": "TLS handshake failed",
+    "expected": "provider_unreachable",
+    "reason": null,
+    "why": "Named cause wins over retry advice"
+  },
+  {
+    "name": "ECONNRESET",
+    "codes": [],
+    "status": null,
+    "message": "ECONNRESET",
+    "expected": "provider_unreachable",
+    "reason": null,
+    "why": "Named cause wins over retry advice"
+  },
+  {
+    "name": "Connection refused",
+    "codes": [],
+    "status": null,
+    "message": "Connection refused",
+    "expected": "provider_unreachable",
+    "reason": null,
+    "why": "Named cause wins over retry advice"
+  },
+  {
+    "name": "request timed out",
+    "codes": [],
+    "status": null,
+    "message": "request timed out",
+    "expected": "provider_unreachable",
+    "reason": null,
+    "why": "Named cause wins over retry advice"
+  },
+  {
+    "name": "unknown future",
+    "codes": [
+      "unknown_future_type"
+    ],
+    "status": 418,
+    "message": "a novel issue; contact support",
+    "expected": "harness_error",
+    "reason": null,
+    "why": "Unknown evidence keeps original words without changing a provider"
+  },
+  {
+    "name": "advice without cause",
+    "codes": [],
+    "status": null,
+    "message": "Please retry later; contact support",
+    "expected": "harness_error",
+    "reason": null,
+    "why": "Advice alone is not evidence of busy or unavailable service"
+  },
+  {
+    "name": "documented stream API error",
+    "codes": [
+      "api_error"
+    ],
+    "status": null,
+    "message": "unexpected error",
+    "expected": "provider_busy",
+    "reason": null,
+    "why": "Anthropic api_error is a structured server failure even in a stream"
+  },
+  {
+    "name": "coarse harness auth on model policy",
+    "codes": [
+      "authentication_failed"
+    ],
+    "status": 403,
+    "message": "Daybreak isn't available for this model",
+    "expected": "model_unavailable",
+    "reason": "access",
+    "why": "The harness wraps every 403; the vendor names missing model access"
+  },
+  {
+    "name": "coarse harness auth on filter",
+    "codes": [
+      "authentication_failed"
+    ],
+    "status": 403,
+    "message": "Cyber risk flagged; try again",
+    "expected": "model_refused",
+    "reason": "cyber",
+    "why": "A generic 403 wrapper cannot reject the provider credential for a request filter"
+  },
+  {
+    "name": "actual recorded authentication refusal",
+    "codes": [
+      "authentication_failed"
+    ],
+    "status": 403,
+    "message": "Failed to authenticate. API Error: 403 Your API key does not have permission to use the specified resource.",
+    "expected": "provider_unauthorized",
+    "reason": null,
+    "why": "Explicit authentication words and type, with no model-policy or programme cause"
+  },
+  {
+    "name": "account verification is structural",
+    "codes": [
+      "verification_required"
+    ],
+    "status": 403,
+    "message": "The organization must verify access to this model",
+    "expected": "model_unavailable",
+    "reason": "access",
+    "why": "Account verification does not prove a dead credential and repeated filtering retries cannot grant it"
+  },
+  {
+    "name": "account hold is structural",
+    "codes": [
+      "account_on_hold"
+    ],
+    "status": 403,
+    "message": "Account is on hold",
+    "expected": "model_unavailable",
+    "reason": "access",
+    "why": "A held account needs attention without globally rejecting a credential as invalid"
+  },
+  {
+    "name": "coarse server wrapper with a gateway deadline",
+    "codes": [
+      "server_error"
+    ],
+    "status": 504,
+    "message": "Gateway timeout",
+    "expected": "provider_unreachable",
+    "reason": null,
+    "why": "A generic server wrapper does not override the specific HTTP gateway deadline"
+  },
+  {
+    "name": "coarse server wrapper alone",
+    "codes": [
+      "server_error"
+    ],
+    "status": null,
+    "message": "Upstream failed",
+    "expected": "provider_busy",
+    "reason": null,
+    "why": "Without more precise evidence a server-error wrapper retains the busy default"
+  },
+  {
+    "name": "working authentication is not credential refusal",
+    "codes": [
+      "rate_limit_error"
+    ],
+    "status": 429,
+    "message": "Authentication is working; model at capacity",
+    "expected": "provider_busy",
+    "reason": null,
+    "why": "Authentication mention without a denial cannot reject a shared credential"
+  },
+  {
+    "name": "sign-in advice after capacity",
+    "codes": [],
+    "status": null,
+    "message": "Model at capacity; sign in again if this continues",
+    "expected": "provider_busy",
+    "reason": null,
+    "why": "Sign-in advice cannot outweigh a named capacity cause"
+  },
+  {
+    "name": "credential refusal with busy advice",
+    "codes": [],
+    "status": null,
+    "message": "The credential was rejected; the service is at capacity; try again",
+    "expected": "provider_unauthorized",
+    "reason": null,
+    "why": "An explicit credential denial outranks incidental busy advice"
+  },
+  {
+    "name": "sign-in advice after network failure",
+    "codes": [],
+    "status": null,
+    "message": "DNS resolution failed; please sign in again",
+    "expected": "provider_unreachable",
+    "reason": null,
+    "why": "A named network failure outranks generic sign-in advice"
+  },
+  {
+    "name": "logical error in a successful HTTP envelope",
+    "codes": [
+      "rate_limit_error"
+    ],
+    "status": 200,
+    "message": "Usage credits are exhausted; please retry later",
+    "expected": "provider_exhausted",
+    "reason": null,
+    "why": "A success envelope supplies no failure-status evidence to hide a generic wrapper's explicit quota cause"
+  },
+  {
+    "name": "native wrapper timeout",
+    "codes": [
+      "api_error"
+    ],
+    "status": null,
+    "message": "Request timed out",
+    "expected": "provider_unreachable",
+    "reason": null,
+    "why": "A generic API wrapper cannot outweigh an explicit transport timeout"
+  },
+  {
+    "name": "native wrapper refused connection",
+    "codes": [
+      "api_error"
+    ],
+    "status": null,
+    "message": "API Error: Connection refused — a firewall or proxy may be blocking it (ECONNREFUSED)",
+    "expected": "provider_unreachable",
+    "reason": null,
+    "why": "The retained connection failure is more specific than the API wrapper"
+  },
+  {
+    "name": "native wrapper interrupted stream",
+    "codes": [
+      "api_error"
+    ],
+    "status": null,
+    "message": "API Error: Connection to the API was lost (ECONNRESET). This is usually temporary — try again.",
+    "expected": "provider_unreachable",
+    "reason": null,
+    "why": "Retry advice does not turn a lost stream into provider capacity"
+  },
+  {
+    "name": "server wrapper interrupted stream",
+    "codes": [
+      "server_error"
+    ],
+    "status": null,
+    "message": "The connection was reset before a response arrived",
+    "expected": "provider_unreachable",
+    "reason": null,
+    "why": "A generic server wrapper defers to an explicit network cause"
+  },
+  {
+    "name": "request tokens rate rejection",
+    "codes": [
+      "rate_limit_error"
+    ],
+    "status": 429,
+    "message": "API Error: Request rejected (429) · Number of request tokens has exceeded your per-minute rate limit.",
+    "expected": "provider_busy",
+    "reason": null,
+    "why": "Request-token throughput rejects the request without rejecting the credential"
+  },
+  {
+    "name": "input tokens request rejection",
+    "codes": [],
+    "status": 429,
+    "message": "The request was rejected because input tokens exceed the rate limit",
+    "expected": "provider_busy",
+    "reason": null,
+    "why": "A token count is usage evidence rather than an invalid sign-in token"
+  },
+  {
+    "name": "singular token rate",
+    "codes": [],
+    "status": null,
+    "message": "The token rate limit requires a pause before the next request",
+    "expected": "provider_busy",
+    "reason": null,
+    "why": "A throughput requirement does not establish credential rejection"
+  },
+  {
+    "name": "ambiguous missing model access",
+    "codes": [
+      "httpConnectionFailed"
+    ],
+    "status": 404,
+    "message": "The model does not exist or you do not have access to it.",
+    "expected": "model_unavailable",
+    "reason": null,
+    "why": "Alternative explanations do not establish that account access is missing"
+  },
+  {
+    "name": "local output limit",
+    "codes": [
+      "max_output_tokens"
+    ],
+    "status": null,
+    "message": "The answer was cut",
+    "expected": "harness_error",
+    "reason": null,
+    "why": "A local output cap is not a transport failure or provider overload"
+  },
+  {
+    "name": "generic api server status",
+    "codes": [
+      "api_error"
+    ],
+    "status": 500,
+    "message": "Unexpected upstream failure",
+    "expected": "provider_busy",
+    "reason": null,
+    "why": "An otherwise unrefined server error keeps the HTTP busy default"
+  },
+  {
+    "name": "explicit sign in token rejection",
+    "codes": [],
+    "status": 429,
+    "message": "The sign-in token was rejected as invalid",
+    "expected": "provider_unauthorized",
+    "reason": null,
+    "why": "An explicit credential denial remains stronger than a generic rate status"
+  },
+  {
+    "name": "native incomplete API envelope",
+    "codes": [
+      "unknown"
+    ],
+    "status": null,
+    "message": "API Error: JSON Parse error: Unterminated string",
+    "expected": "provider_unreachable",
+    "reason": null,
+    "why": "A recorded unreadable API envelope is a broken response, independent of the generic terminal wrapper"
+  },
+  {
+    "name": "native malformed successful response",
+    "codes": [
+      "unknown"
+    ],
+    "status": null,
+    "message": "API Error: API returned an empty or malformed response (HTTP 200); StreamNoEventsError; 0 stream events received",
+    "expected": "provider_unreachable",
+    "reason": null,
+    "why": "A success status printed inside an error message does not make an unusable upstream response a valid model answer"
+  },
+  {
+    "name": "model output JSON parsing alone",
+    "codes": [],
+    "status": null,
+    "message": "JSON Parse error: Unterminated string in the generated answer",
+    "expected": "harness_error",
+    "reason": null,
+    "why": "Invalid model output does not by itself establish a broken API transport"
+  }
+]

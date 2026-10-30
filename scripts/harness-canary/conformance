@@ -1,0 +1,43 @@
+#!/usr/bin/env bash
+# Native contract canary, run by the integration/test runner, never by a writer.
+# Usage: bash scripts/harness-canary/conformance --record DIRECTORY [--image IMAGE]
+# Exits 1 for a broken native case, 2 for absent prerequisites or fixture-only proof.
+set -euo pipefail
+
+project_root=$(realpath "$(dirname "$0")/../..")
+harness_image=${ORCH_HARNESS_IMAGE:-orch-dev-harness}
+evidence_dir=
+while [ $# -gt 0 ]; do
+  case "$1" in
+    --record) evidence_dir=${2:?--record requires a directory}; shift 2 ;;
+    --image) harness_image=${2:?--image requires a name}; shift 2 ;;
+    *) echo "Usage: bash scripts/harness-canary/conformance --record DIRECTORY [--image IMAGE]" >&2; exit 2 ;;
+  esac
+done
+if [ -z "$evidence_dir" ]; then echo "--record is required so the checked versions and cases are retained" >&2; exit 2; fi
+if ! docker image inspect "$harness_image" >/dev/null 2>&1; then
+  echo "NOT RUN: the requested native harness image is absent" >&2
+  exit 2
+fi
+mkdir -p "$evidence_dir"
+export ORCH_CONFORMANCE_RECORD
+ORCH_CONFORMANCE_RECORD=$(realpath "$evidence_dir")
+export ORCH_HARNESS_IMAGE=$harness_image
+# Exact defaults are the current pinned evidence candidates, not a claim about
+# every version between them. A runner can explicitly select another candidate.
+export ORCH_EXPECTED_CODEX_VERSION=${ORCH_EXPECTED_CODEX_VERSION:-0.162.1}
+export ORCH_EXPECTED_CLAUDE_VERSION=${ORCH_EXPECTED_CLAUDE_VERSION:-2.1.296}
+result=0
+for adapter in codex claude-code; do
+  run_log="$ORCH_CONFORMANCE_RECORD/$adapter.log"
+  if ! cargo test --manifest-path "$project_root/Cargo.toml" -p "orch-adapter-$adapter" --test conformance \
+      -- --nocapture --test-threads=1 >"$run_log" 2>&1; then result=1; fi
+  grep 'CONFORMANCE ' "$run_log" || true
+  if ! grep -qE "CONFORMANCE passed $adapter startup " "$run_log"; then
+    echo "NOT RUN: $adapter did not produce native startup evidence" >&2
+    result=1
+  fi
+  if grep -q 'CONFORMANCE failed ' "$run_log"; then result=1; fi
+  if grep -q 'CONFORMANCE fixture_only ' "$run_log" && [ "$result" -eq 0 ]; then result=2; fi
+done
+exit "$result"

@@ -1,0 +1,10 @@
+{
+  "kind": "codex-exec-server",
+  "title": { "en": "Codex tools", "zh-CN": "Codex 工具" },
+  "wire": "program",
+  "program": "codex",
+  "build": "same",
+  "endpoint": { "transport": "websocket", "path": "/" },
+  "sandbox_modes": ["read_only", "workspace", "open"],
+  "attribution": { "thread_id": "CODEX_THREAD_ID", "tool_call_id": "CODEX_TOOL_CALL_ID" }
+}

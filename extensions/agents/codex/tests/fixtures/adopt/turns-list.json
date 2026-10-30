@@ -1,0 +1,136 @@
+{
+ "data": [
+  {
+   "id": "01a12ab3-f4ca-76c3-bcd1-cc08f384ae21",
+   "rootTurnId": "01a12ab3-f4ca-76c3-bcd1-cc08f384ae21",
+   "items": [
+    {
+     "type": "userMessage",
+     "id": "01a12ab3-f58f-7da2-ab39-2d575a0c6c88",
+     "clientId": null,
+     "content": [
+      {
+       "type": "text",
+       "text": "remember the word banana",
+       "text_elements": []
+      }
+     ]
+    },
+    {
+     "type": "agentMessage",
+     "id": "msg_mock_000021_0",
+     "text": "You said: remember the word banana",
+     "phase": null,
+     "memoryCitation": null,
+     "delivery": null,
+     "questions": null
+    }
+   ],
+   "itemsView": "full",
+   "status": "completed",
+   "error": null,
+   "startedAt": 1791717799,
+   "completedAt": 1791717799,
+   "durationMs": 315
+  },
+  {
+   "id": "01a12ab3-fcf2-72c1-a89f-dcb14777e7b4",
+   "rootTurnId": "01a12ab3-fcf2-72c1-a89f-dcb14777e7b4",
+   "items": [
+    {
+     "type": "userMessage",
+     "id": "01a12ab3-fd02-7851-b065-e3b6d0660807",
+     "clientId": null,
+     "content": [
+      {
+       "type": "text",
+       "text": "what word did I ask you to remember?",
+       "text_elements": []
+      }
+     ]
+    },
+    {
+     "type": "agentMessage",
+     "id": "msg_mock_000022_0",
+     "text": "You said: what word did I ask you to remember?",
+     "phase": null,
+     "memoryCitation": null,
+     "delivery": null,
+     "questions": null
+    }
+   ],
+   "itemsView": "full",
+   "status": "completed",
+   "error": null,
+   "startedAt": 1791717801,
+   "completedAt": 1791717801,
+   "durationMs": 47
+  },
+  {
+   "id": "01a12ab3-44a4-75e3-b2c8-3f2111081cb6",
+   "rootTurnId": "01a12ab3-44a4-75e3-b2c8-3f2111081cb6",
+   "items": [
+    {
+     "type": "userMessage",
+     "id": "01a12ab3-44f9-70b3-9a82-277092853f8a",
+     "clientId": null,
+     "content": [
+      {
+       "type": "text",
+       "text": "go\n#!mock\ntool exec_command {\"cmd\":\"for i in 1 2 3 4 5 6 7 8 9 10 11 12 13 14 15 16 17 18 19 20; do echo tick$i; sleep 1; done\",\"yield_time_ms\":30000}\nthen\nsay finished",
+       "text_elements": []
+      }
+     ]
+    },
+    {
+     "type": "commandExecution",
+     "id": "call_mock_000020_0",
+     "pluginId": null,
+     "scriptPath": null,
+     "command": "/bin/bash -lc 'for i in 1 2 3 4 5 6 7 8 9 10 11 12 13 14 15 16 17 18 19 20; do echo tick$i; sleep 1; done'",
+     "cwd": "/work/web",
+     "processId": "81291",
+     "source": "unifiedExecStartup",
+     "status": "completed",
+     "commandActions": [
+      {
+       "type": "unknown",
+       "command": "for i in 1 2 3 4 5 6 7 8 9 10 11 12 13 14 15 16 17 18 19 20; do echo tick$i; sleep 1; done"
+      }
+     ],
+     "aggregatedOutput": "tick1\ntick2\ntick3\ntick4\ntick5\ntick6\ntick7\ntick8\ntick9\ntick10\ntick11\ntick12\ntick13\ntick14\ntick15\ntick16\ntick17\ntick18\ntick19\ntick20\n",
+     "exitCode": 0,
+     "durationMs": 19938
+    },
+    {
+     "type": "agentMessage",
+     "id": "msg_mock_000017_0",
+     "text": "finished",
+     "phase": null,
+     "memoryCitation": null,
+     "delivery": null,
+     "questions": null
+    }
+   ],
+   "itemsView": "full",
+   "status": "completed",
+   "error": null,
+   "startedAt": 1791717754,
+   "completedAt": 1791717775,
+   "durationMs": 20938
+  },
+  {
+   "id": "01a12ab4-0000-7000-8000-000000000000",
+   "rootTurnId": null,
+   "items": [],
+   "itemsView": "full",
+   "status": "inProgress",
+   "error": null,
+   "startedAt": 1791717800,
+   "completedAt": null,
+   "durationMs": null
+  }
+ ],
+ "nextCursor": null,
+ "backwardsCursor": null
+}

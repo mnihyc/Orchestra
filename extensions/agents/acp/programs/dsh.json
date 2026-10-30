@@ -1,0 +1,216 @@
+{
+  "supported_range": ">=0.2.1-rc.2, <0.3.0",
+  "process": "per_session",
+  "home_scope": "segment",
+  "version_args": [
+    "--version"
+  ],
+  "home_variable": "DSH_HOME",
+  "args": [
+    "--profile",
+    "acp",
+    "--patch",
+    "{file:orch.patch.yml}"
+  ],
+  "env": {
+    "DSH_AGENTS_HOME": "{agents_home}",
+    "DSH_PERMISSION_MODE": "danger-full-access",
+    "DSH_TELEMETRY_DISABLED": "1",
+    "DSH_RESOURCE_CACHE": "{profile_home}/resources",
+    "HOME": "{profile_home}/user",
+    "XDG_CACHE_HOME": "{profile_home}/user/.cache",
+    "XDG_CONFIG_HOME": "{profile_home}/user/.config",
+    "TMPDIR": "{home}/tmp",
+    "ORCH_LLM_TOKEN": "{llm_token}"
+  },
+  "directories": [
+    "{profile_home}/user/.cache",
+    "{profile_home}/user/.config",
+    "{profile_home}/resources",
+    "{home}/tmp"
+  ],
+  "inherit": [
+    "PATH",
+    "LANG",
+    "LC_ALL",
+    "TZ",
+    "SSL_CERT_FILE",
+    "SSL_CERT_DIR"
+  ],
+  "files": [
+    {
+      "path": "orch.patch.yml",
+      "template": "# Written by Orch for one session, and again at every start.\n# The two rows that follow switch off what dsh sends to its vendor with every request to the official\n# DeepSeek API: the log of the session and the list of the plugins. Orch's model forwarder refuses both\n# again, in case a build of dsh does not honour this.\n- id: session-log-deepseek\n  disabled: true\n- id: plugin-package-inventory-deepseek\n  disabled: true\n# Orch owns goal continuations and checks every turn before it starts. Disable the native goal\n# service, driver, command and tools so none can start unchecked turns in this managed home.\n- id: goal\n  disabled: true\n- id: goal-round-driver\n  disabled: true\n- id: command-goal\n  disabled: true\n- id: tool-goal\n  disabled: true\n# The one model route: Orch's forwarder, which holds the key. The token below is the connector's, never a model key.\n- id: llm-pi-ai\n  config:\n    providers:\n      orch:\n        apiKeyEnv: ORCH_LLM_TOKEN\n        api: {api:json}\n        baseURL: {llm_url:json}\n{#if api=openai-completions}        compat:\n          supportsDeveloperRole: false\n          maxTokensField: max_tokens\n{/if}        models:\n{#each models}          - id: {item:json}\n            input: [text, image]\n            contextWindow: {context_window}\n            maxTokens: 32768\n            reasoningEfforts:\n              off:\n              minimal: minimal\n              low: low\n              medium: medium\n              high: high\n              xhigh: xhigh\n              max: max\n{/each}- id: agent-default-model\n  config:\n    provider: orch\n    model: {model:json}\n- id: acp\n  config:\n    provider: orch\n    model: {model:json}\n# Orch's environment confines the program, not its own sandbox, which cannot start inside a container.\n- id: sandbox-policy\n  config:\n    mode: danger-full-access\n    workspaceRoot: {cwd:json}\n- id: approval\n  config:\n    policy: {approval.policy:json}\n- id: permission\n  config:\n    presets:\n      orch-ask:\n        sandbox: danger-full-access\n        approval: ask\n      orch-bypass:\n        sandbox: danger-full-access\n        approval: never\n    defaultPreset: {approval.preset:json}\n"
+    },
+    {
+      "path": "bridge.patch.yml",
+      "requires": "plugin",
+      "template": "# Orch's plugin for dsh, loaded by its absolute path. It adds what the protocol does not carry (live text, steering,\n# questions, a plan to review, approvals, token counts of every model call, compaction phases) and says which of\n# these work in `_orch/hello`. The plugin takes over the program's standard streams when it is loaded, so the row of\n# `acp` stays as the base patch has it. The ask tool is the one the plugin turns into questions for a person.\n- insert:\n    - id: orch-bridge\n      name: {plugin:json}\n      config:\n        approvals:\n          mode: {approval.plugin:json}\n    - id: tool-ask-user\n      name: '@deepseek-ai/dsh-tool-ask-user'\n"
+    },
+    {
+      "path": "backends.patch.yml",
+      "requires": "separated",
+      "template": "# The model's tools for the environment (commands and files) run in the environment: the plugin takes over the rows\n# that hold their names and sends each call to Orch's executor. A row's config replaces the one before it, so the\n# plugin's row is given again with everything it had.\n- id: tool-bash\n  disabled: true\n- id: tool-fs\n  disabled: true\n- id: tool-fs-search\n  disabled: true\n- id: tool-jobs\n  disabled: true\n- id: tool-working-directory\n  disabled: true\n- id: orch-bridge\n  config:\n    approvals:\n      mode: {approval.plugin:json}\n    backends:\n      enabled: true\n"
+    }
+  ],
+  "approvals": {
+    "ask": {
+      "permission_mode": "danger-full-access",
+      "values": {
+        "preset": "orch-ask",
+        "policy": "ask",
+        "plugin": "ask"
+      }
+    },
+    "bypass": {
+      "permission_mode": "danger-full-access",
+      "values": {
+        "preset": "orch-bypass",
+        "policy": "never",
+        "plugin": "bypass"
+      }
+    }
+  },
+  "sandbox_modes": [
+    "open"
+  ],
+  "arrangements": [
+    "separated",
+    "key_separated"
+  ],
+  "protocols": {
+    "api": {
+      "openai-chat": "openai-completions",
+      "openai-responses": "openai-responses",
+      "anthropic-messages": "anthropic-messages"
+    },
+    "base_suffix": {
+      "openai-chat": "/v1",
+      "openai-responses": "/v1",
+      "anthropic-messages": ""
+    },
+    "provider_id": "orch",
+    "order": [
+      "openai-chat",
+      "openai-responses",
+      "anthropic-messages"
+    ]
+  },
+  "model_option": "model",
+  "effort_option": "reasoning_effort",
+  "capabilities": {
+    "telemetry_off": true,
+    "mcp": {
+      "strict": true
+    },
+    "discover_sessions": false
+  },
+  "tools": [
+    {
+      "names": [
+        "bash"
+      ],
+      "family": "command",
+      "argument": "command"
+    },
+    {
+      "names": [
+        "read"
+      ],
+      "family": "read",
+      "argument": "file_path"
+    },
+    {
+      "names": [
+        "write"
+      ],
+      "family": "write",
+      "argument": "file_path"
+    },
+    {
+      "names": [
+        "edit"
+      ],
+      "family": "edit",
+      "argument": "file_path"
+    },
+    {
+      "names": [
+        "glob"
+      ],
+      "family": "glob",
+      "argument": "pattern"
+    },
+    {
+      "names": [
+        "grep"
+      ],
+      "family": "grep",
+      "argument": "pattern"
+    },
+    {
+      "names": [
+        "web_search"
+      ],
+      "family": "web_search",
+      "argument": "query"
+    },
+    {
+      "names": [
+        "web_fetch"
+      ],
+      "family": "web_fetch",
+      "argument": "url"
+    },
+    {
+      "names": [
+        "subagent",
+        "subagent_fork"
+      ],
+      "family": "subagent"
+    },
+    {
+      "names": [
+        "todo_write"
+      ],
+      "family": "todo"
+    }
+  ],
+  "command_exit_marker": "[exit code:",
+  "cancel_grace_ms": 20000,
+  "privacy": {
+    "strip_headers": [
+      "x-deepseek-harness-*"
+    ],
+    "refuse_members": [
+      "dsh_session_log",
+      "dsh_plugin_packages"
+    ]
+  },
+  "companion": {
+    "args": [
+      "--patch",
+      "{file:bridge.patch.yml}"
+    ],
+    "hello_wait_ms": 8000,
+    "extras": [
+      "streaming",
+      "steering",
+      "questions",
+      "plan_mode",
+      "approvals",
+      "usage",
+      "compaction",
+      "skills",
+      "fork",
+      "native_carry",
+      "executor_backends"
+    ],
+    "separated_args": [
+      "--patch",
+      "{file:backends.patch.yml}"
+    ],
+    "file": "orch-dsh-bridge.mjs"
+  },
+  "reports_context": true
+}

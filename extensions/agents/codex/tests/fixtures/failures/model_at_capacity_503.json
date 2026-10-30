@@ -1,0 +1,23 @@
+{
+ "harness": "codex",
+ "version": "0.162.1",
+ "recorded": "2026-10-12",
+ "fault": "error overloaded",
+ "setup": "provider of the forwarded path (model_providers entry, token in ORCH_LLM_TOKEN)",
+ "requests": 30,
+ "exit": 0,
+ "stderr": [],
+ "frames": [
+  {"method":"turn/started","params":{"threadId":"01a12f90-7b67-7c30-98aa-1dd02c7610db","turn":{"id":"01a12f90-7bd0-74a1-a3de-dad2654d3216","rootTurnId":"01a12f90-7bd0-74a1-a3de-dad2654d3216","items":[],"itemsView":"notLoaded","status":"inProgress","error":null,"startedAt":1791799360,"completedAt":null,"durationMs":null}},"emittedAtMs":1791799360709},
+  {"method":"item/started","params":{"item":{"type":"userMessage","id":"01a12f90-7cef-7870-b773-63a7bea1d698","clientId":null,"content":[{"type":"text","text":"hello\n#!mock\nerror overloaded\n","text_elements":[]}]},"threadId":"01a12f90-7b67-7c30-98aa-1dd02c7610db","turnId":"01a12f90-7bd0-74a1-a3de-dad2654d3216","startedAtMs":1791799360752},"emittedAtMs":1791799360753},
+  {"method":"item/completed","params":{"item":{"type":"userMessage","id":"01a12f90-7cef-7870-b773-63a7bea1d698","clientId":null,"content":[{"type":"text","text":"hello\n#!mock\nerror overloaded\n","text_elements":[]}]},"threadId":"01a12f90-7b67-7c30-98aa-1dd02c7610db","turnId":"01a12f90-7bd0-74a1-a3de-dad2654d3216","completedAtMs":1791799360752},"emittedAtMs":1791799360756},
+  {"method":"error","params":{"error":{"message":"Reconnecting... 1/5","codexErrorInfo":{"responseStreamDisconnected":{"httpStatusCode":null}},"additionalDetails":"Selected model is at capacity. Please try a different model.","misalignment":null},"willRetry":true,"threadId":"01a12f90-7b67-7c30-98aa-1dd02c7610db","turnId":"01a12f90-7bd0-74a1-a3de-dad2654d3216"},"emittedAtMs":1791799368859},
+  {"method":"error","params":{"error":{"message":"Reconnecting... 2/5","codexErrorInfo":{"responseStreamDisconnected":{"httpStatusCode":null}},"additionalDetails":"Selected model is at capacity. Please try a different model.","misalignment":null},"willRetry":true,"threadId":"01a12f90-7b67-7c30-98aa-1dd02c7610db","turnId":"01a12f90-7bd0-74a1-a3de-dad2654d3216"},"emittedAtMs":1791799378909},
+  {"method":"error","params":{"error":{"message":"Reconnecting... 3/5","codexErrorInfo":{"responseStreamDisconnected":{"httpStatusCode":null}},"additionalDetails":"Selected model is at capacity. Please try a different model.","misalignment":null},"willRetry":true,"threadId":"01a12f90-7b67-7c30-98aa-1dd02c7610db","turnId":"01a12f90-7bd0-74a1-a3de-dad2654d3216"},"emittedAtMs":1791799389018},
+  {"method":"error","params":{"error":{"message":"Reconnecting... 4/5","codexErrorInfo":{"responseStreamDisconnected":{"httpStatusCode":null}},"additionalDetails":"Selected model is at capacity. Please try a different model.","misalignment":null},"willRetry":true,"threadId":"01a12f90-7b67-7c30-98aa-1dd02c7610db","turnId":"01a12f90-7bd0-74a1-a3de-dad2654d3216"},"emittedAtMs":1791799399172},
+  {"method":"error","params":{"error":{"message":"Reconnecting... 5/5","codexErrorInfo":{"responseStreamDisconnected":{"httpStatusCode":null}},"additionalDetails":"Selected model is at capacity. Please try a different model.","misalignment":null},"willRetry":true,"threadId":"01a12f90-7b67-7c30-98aa-1dd02c7610db","turnId":"01a12f90-7bd0-74a1-a3de-dad2654d3216"},"emittedAtMs":1791799409272},
+  {"method":"error","params":{"error":{"message":"Selected model is at capacity. Please try a different model.","codexErrorInfo":"serverOverloaded","additionalDetails":null,"misalignment":null},"willRetry":false,"threadId":"01a12f90-7b67-7c30-98aa-1dd02c7610db","turnId":"01a12f90-7bd0-74a1-a3de-dad2654d3216"},"emittedAtMs":1791799419478},
+  {"method":"turn/completed","params":{"threadId":"01a12f90-7b67-7c30-98aa-1dd02c7610db","turn":{"id":"01a12f90-7bd0-74a1-a3de-dad2654d3216","rootTurnId":"01a12f90-7bd0-74a1-a3de-dad2654d3216","items":[],"itemsView":"notLoaded","status":"failed","error":{"message":"Selected model is at capacity. Please try a different model.","codexErrorInfo":"serverOverloaded","additionalDetails":null,"misalignment":null},"startedAt":1791799360,"completedAt":1791799419,"durationMs":59032}},"emittedAtMs":1791799419538}
+ ],
+ "expect": {"outcome": "failed", "code": "provider_busy", "retryable": true, "incomplete": false, "resets_at": null, "row": "busy", "said_contains": "Selected model is at capacity", "said_also": "tried again 5 times"}
+}

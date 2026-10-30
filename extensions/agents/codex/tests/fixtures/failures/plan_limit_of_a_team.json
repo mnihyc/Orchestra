@@ -1,0 +1,19 @@
+{
+ "harness": "codex",
+ "version": "0.162.1",
+ "recorded": "2026-10-12",
+ "fault": "error plan_limit window=weekly resets=1791972152 plan=team",
+ "setup": "provider of the forwarded path (model_providers entry, token in ORCH_LLM_TOKEN); TZ=UTC",
+ "requests": 1,
+ "exit": 0,
+ "stderr": [],
+ "frames": [
+  {"method":"turn/started","params":{"threadId":"01a12f90-668f-7200-8af9-a0f113eed368","turn":{"id":"01a12f90-6777-7f11-9c7e-8b38c10598d8","rootTurnId":"01a12f90-6777-7f11-9c7e-8b38c10598d8","items":[],"itemsView":"notLoaded","status":"inProgress","error":null,"startedAt":1791799355,"completedAt":null,"durationMs":null}},"emittedAtMs":1791799355423},
+  {"method":"item/started","params":{"item":{"type":"userMessage","id":"01a12f90-6848-7cc2-b0ec-f13d09937e35","clientId":null,"content":[{"type":"text","text":"hello\n#!mock\nerror plan_limit window=weekly resets=1791972152 plan=team\n","text_elements":[]}]},"threadId":"01a12f90-668f-7200-8af9-a0f113eed368","turnId":"01a12f90-6777-7f11-9c7e-8b38c10598d8","startedAtMs":1791799355467},"emittedAtMs":1791799355467},
+  {"method":"item/completed","params":{"item":{"type":"userMessage","id":"01a12f90-6848-7cc2-b0ec-f13d09937e35","clientId":null,"content":[{"type":"text","text":"hello\n#!mock\nerror plan_limit window=weekly resets=1791972152 plan=team\n","text_elements":[]}]},"threadId":"01a12f90-668f-7200-8af9-a0f113eed368","turnId":"01a12f90-6777-7f11-9c7e-8b38c10598d8","completedAtMs":1791799355467},"emittedAtMs":1791799355475},
+  {"method":"account/rateLimits/updated","params":{"rateLimits":{"limitId":"codex","limitName":null,"normalModelSlug":null,"primary":{"usedPercent":40,"windowDurationMins":300,"resetsAt":null},"secondary":{"usedPercent":100,"windowDurationMins":10080,"resetsAt":1791972152},"credits":null,"individualLimit":null,"spendControlReached":null,"planType":null,"rateLimitReachedType":null}},"emittedAtMs":1791799355559},
+  {"method":"error","params":{"error":{"message":"You’ve hit your usage limit. To get more access now, send a request to your admin or try again at Oct 14th, 2026 10:02 AM.","codexErrorInfo":"usageLimitExceeded","additionalDetails":null,"misalignment":null},"willRetry":false,"threadId":"01a12f90-668f-7200-8af9-a0f113eed368","turnId":"01a12f90-6777-7f11-9c7e-8b38c10598d8"},"emittedAtMs":1791799355559},
+  {"method":"turn/completed","params":{"threadId":"01a12f90-668f-7200-8af9-a0f113eed368","turn":{"id":"01a12f90-6777-7f11-9c7e-8b38c10598d8","rootTurnId":"01a12f90-6777-7f11-9c7e-8b38c10598d8","items":[],"itemsView":"notLoaded","status":"failed","error":{"message":"You’ve hit your usage limit. To get more access now, send a request to your admin or try again at Oct 14th, 2026 10:02 AM.","codexErrorInfo":"usageLimitExceeded","additionalDetails":null,"misalignment":null},"startedAt":1791799355,"completedAt":1791799355,"durationMs":298}},"emittedAtMs":1791799355564}
+ ],
+ "expect": {"outcome": "failed", "code": "provider_exhausted", "retryable": false, "incomplete": false, "resets_at": "2026-10-14T10:02:32.000Z", "row": "plan_limit", "said_contains": "send a request to your admin"}
+}

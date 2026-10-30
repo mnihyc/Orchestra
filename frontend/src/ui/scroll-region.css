@@ -1,0 +1,10 @@
+/* Custom tracks stay visible on hosts with native overlay scrollbars. */
+@media (min-width: 40rem) {
+  /* Keep the last cell and last row clear of the persistent Radix tracks. */
+  .scroll-region-custom .scroll-region-viewport > div { box-sizing: border-box; padding-inline-end: 0.75rem; padding-bottom: 0.75rem; }
+}
+/* A phone's cards remain in the page flow; the same mounted table keeps its local state. */
+@media (width < 40rem) {
+  .scroll-region-custom, .scroll-region-custom .scroll-region-viewport { overflow: visible !important; height: auto !important; }
+  .scroll-region-custom [data-visible-scrollbar] { display: none; }
+}

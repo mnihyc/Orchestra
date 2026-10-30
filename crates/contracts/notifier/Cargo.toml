@@ -1,0 +1,24 @@
+[package]
+name = "orch-notifier-contract"
+description = "Notification channel contract hosted by the worker."
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+rust-version.workspace = true
+repository.workspace = true
+publish.workspace = true
+
+[dependencies]
+orch-plugin-contract.workspace = true
+orch-types.workspace = true
+async-trait.workspace = true
+schemars.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+thiserror.workspace = true
+
+[dev-dependencies]
+futures.workspace = true
+
+[lints]
+workspace = true

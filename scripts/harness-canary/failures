@@ -1,0 +1,85 @@
+#!/usr/bin/env bash
+# Holds a version of Codex and of Claude Code against the failures that were recorded from the versions the
+# adapters were built for, and prints the rows that changed.
+#
+#   scripts/harness-canary/failures [--image IMAGE] [--record DIRECTORY] [--adapter claude-code|codex]...
+#
+# Each adapter's test `tests/failures.rs` starts the real harness in the image (no real model and no key: the
+# model is the scripted server, which fails on purpose) for every row of its table, and compares what the
+# adapter makes of the answer with what the row's fixture in `tests/fixtures/failures` expects. Every row is
+# printed on a line of its own:
+#
+#   same    <adapter> <row> (<version>)          the row holds
+#   CHANGED <adapter> <row> (<version>): <why>   the code, the advice to try again, the mark of a cut answer or the
+#                                                time of a limit is not what it was recorded as
+#   WORDS   <adapter> <row> (<version>): <how>   the vendor's words are not the recorded ones; nothing maps from
+#                                                them, so it is only told
+#
+# With --record, each row is also written to DIRECTORY as `<adapter>-<row>.json` in the form of the fixtures (the
+# frames the harness wrote, the fault, what the adapter made of them), to be read and, where the new behaviour is
+# right, copied over the fixture. The image defaults to `orch-dev-harness`. A machine without Docker or the image
+# exits 2 for absent prerequisites. The exit status is 1 when a row changed or a test did not run to its end;
+# a skipped native test is incomplete evidence and exits 2.
+set -u
+
+root=$(realpath "$(dirname "$0")/../..")
+image=${ORCH_HARNESS_IMAGE:-orch-dev-harness}
+record=${ORCH_RECORD_FAILURES:-}
+adapters=()
+
+usage() {
+  sed -n '2,/^set -u$/p' "$0" | sed '$d' | sed 's/^# \{0,1\}//'
+}
+
+while [ $# -gt 0 ]; do
+  case "$1" in
+    --image) image=${2:?--image needs a name}; shift 2 ;;
+    --record) record=${2:?--record needs a directory}; shift 2 ;;
+    --adapter) adapters+=("${2:?--adapter needs a name}"); shift 2 ;;
+    -h|--help) usage; exit 0 ;;
+    *) echo "unknown argument: $1" >&2; usage >&2; exit 2 ;;
+  esac
+done
+[ ${#adapters[@]} -gt 0 ] || adapters=(claude-code codex)
+
+export ORCH_HARNESS_IMAGE=$image
+if ! docker image inspect "$image" >/dev/null 2>&1; then
+  echo "NOT RUN: the requested native harness image is absent" >&2
+  exit 2
+fi
+if [ -n "$record" ]; then
+  mkdir -p "$record"
+  export ORCH_RECORD_FAILURES=$(realpath "$record")
+fi
+
+status=0
+for adapter in "${adapters[@]}"; do
+  case "$adapter" in
+    claude-code) package=orch-adapter-claude-code ;;
+    codex) package=orch-adapter-codex ;;
+    *) echo "unknown adapter: $adapter (claude-code or codex)" >&2; exit 2 ;;
+  esac
+  if [ -n "$record" ]; then
+    log="$ORCH_RECORD_FAILURES/$adapter.log"
+  else
+    log=$(mktemp)
+  fi
+  if ! cargo test --manifest-path "$root/Cargo.toml" -p "$package" --test failures \
+      every_fault_the_model_server_can_give -- --nocapture --test-threads=1 >"$log" 2>&1; then
+    status=1
+  fi
+  # The first row's line follows the name of the test on the same line, hence no anchor at the start.
+  rows='(same|CHANGED|WORDS) +(claude-code|codex) .*|^SKIPPED.*|^skipped.*'
+  grep -oE "$rows" "$log"
+  if grep -qE "CHANGED +$adapter " "$log"; then status=1; fi
+  if grep -qE '^SKIPPED|^skipped' "$log"; then
+    echo "NOT RUN: $adapter skipped native failure checks" >&2
+    [ "$status" -ne 0 ] || status=2
+  elif ! grep -qE "(same|CHANGED) +$adapter " "$log"; then
+    echo "$adapter: the test did not run to a row; its output:" >&2
+    tail -n 30 "$log" >&2
+    status=1
+  fi
+  if [ -z "$record" ]; then rm -f "$log"; fi
+done
+exit $status

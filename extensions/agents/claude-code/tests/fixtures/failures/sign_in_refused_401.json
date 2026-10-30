@@ -1,0 +1,20 @@
+{
+ "harness": "claude-code",
+ "version": "2.1.296",
+ "recorded": "2026-10-12",
+ "fault": "error authentication",
+ "setup": "signed in as a subscription (CLAUDE_CODE_OAUTH_TOKEN)",
+ "requests": 2,
+ "exit": 1,
+ "stderr": ["[claude-code:unrecognized_model] {\"model\":\"mock-large\",\"query_source\":\"sdk\"}"],
+ "frames": [
+  {"type":"system","subtype":"init","cwd":"/workspace","session_id":"5ef0d77d-0b2f-4744-b17e-a0c47a025eba","model":"mock-large","permissionMode":"default","claude_code_version":"2.1.296","apiKeySource":"none","uuid":"bfa2eeb1-cf41-41d6-b3d7-08e29eb0d483"},
+  {"type":"system","subtype":"status","status":"requesting","session_id":"5ef0d77d-0b2f-4744-b17e-a0c47a025eba","uuid":"2c62a428-afee-469e-8bca-9b8712fbbde0"},
+  {"type":"system","subtype":"api_retry","attempt":1,"max_retries":10,"retry_delay_ms":535,"error_status":401,"error":"authentication_failed","session_id":"5ef0d77d-0b2f-4744-b17e-a0c47a025eba","uuid":"8e2ed593-a6d7-4fac-af37-8a37c5c1b3c9"},
+  {"type":"system","subtype":"api_retry","attempt":2,"max_retries":10,"retry_delay_ms":1102,"error_status":401,"error":"authentication_failed","session_id":"5ef0d77d-0b2f-4744-b17e-a0c47a025eba","uuid":"0f427b5f-2db1-45f3-bfdc-5e3ac33da0ff"},
+  {"type":"user","message":{"role":"user","content":[{"type":"text","text":"hello\n#!mock\nerror authentication\n"}]},"session_id":"5ef0d77d-0b2f-4744-b17e-a0c47a025eba","parent_tool_use_id":null,"uuid":"abdb2ca5-982f-47b6-b6c8-d5dc75c54fe2","timestamp":"2026-10-12T10:02:16.075Z","isReplay":true},
+  {"type":"assistant","message":{"diagnostics":null,"id":"4aaa946a-a8bf-47ff-83d1-13f50b9368eb","container":null,"model":"<synthetic>","role":"assistant","stop_details":null,"stop_reason":"stop_sequence","stop_sequence":"","type":"message","usage":{"output_tokens_details":null,"input_tokens":0,"output_tokens":0,"cache_creation_input_tokens":0,"cache_read_input_tokens":0,"server_tool_use":{"web_search_requests":0,"web_fetch_requests":0},"service_tier":null,"cache_creation":{"ephemeral_1h_input_tokens":0,"ephemeral_5m_input_tokens":0},"inference_geo":null,"iterations":null,"speed":null,"fallback_credit":null},"content":[{"type":"text","text":"Not logged in · Please run /login"}],"context_management":null},"parent_tool_use_id":null,"session_id":"5ef0d77d-0b2f-4744-b17e-a0c47a025eba","uuid":"1e3531db-9a21-49b6-8267-b9531607d900","timestamp":"2026-10-12T10:02:17.978Z","error":"authentication_failed","request_id":"req_mock_000002","is_api_error_message":true},
+  {"duration_api_ms":0,"stop_reason":"stop_sequence","session_id":"5ef0d77d-0b2f-4744-b17e-a0c47a025eba","total_cost_usd":0,"usage":{"output_tokens_details":{"thinking_tokens":0},"input_tokens":0,"cache_creation_input_tokens":0,"cache_read_input_tokens":0,"output_tokens":0,"server_tool_use":{"web_search_requests":0,"web_fetch_requests":0},"service_tier":"standard","cache_creation":{"ephemeral_1h_input_tokens":0,"ephemeral_5m_input_tokens":0},"inference_geo":"","iterations":[],"speed":"standard","fallback_credit":null},"modelUsage":{},"permission_denials":[],"terminal_reason":"api_error","fast_mode_state":"off","fast_mode_disabled_reason":"sdk_opt_in_required","subagent_stats":{"spawned":0,"requested":{"background":0,"foreground":0,"unset":0},"started_in_background":0,"max_depth":0,"spawned_by_subagents":0,"completed":0,"failed":0,"killed":{"parent":0,"user":0,"system":0},"refused":{"depth_limit":0,"concurrency_limit":0,"budget":0},"by_type":{}},"safety_stops":0,"is_error":true,"num_turns":1,"subtype":"success","api_error_status":401,"result":"Not logged in · Please run /login","type":"result","duration_ms":1955,"uuid":"e9222ff7-8b39-4a8e-98a5-688fd8beadbb","queued_turn_count":0,"result_index":0}
+ ],
+ "expect": {"outcome": "failed", "code": "provider_unauthorized", "retryable": false, "incomplete": false, "resets_at": null, "row": "credential_refused", "said_exactly": "Not logged in · Please run /login"}
+}

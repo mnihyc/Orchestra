@@ -1,0 +1,27 @@
+{
+ "harness": "codex",
+ "version": "0.162.1",
+ "recorded": "2026-10-12",
+ "fault": "say begin; sleep 60000; say end",
+ "setup": "provider of the forwarded path (model_providers entry, token in ORCH_LLM_TOKEN); stream_idle_timeout_ms=4000, stream_max_retries=1",
+ "requests": 2,
+ "exit": 0,
+ "stderr": [],
+ "frames": [
+  {"method":"turn/started","params":{"threadId":"01a12f91-90ee-7543-9326-555ba2a32e28","turn":{"id":"01a12f91-9177-7dc2-b493-bc6ca9fde122","rootTurnId":"01a12f91-9177-7dc2-b493-bc6ca9fde122","items":[],"itemsView":"notLoaded","status":"inProgress","error":null,"startedAt":1791799431,"completedAt":null,"durationMs":null}},"emittedAtMs":1791799431705},
+  {"method":"item/started","params":{"item":{"type":"userMessage","id":"01a12f91-922b-7911-876e-8b9db61b4dd1","clientId":null,"content":[{"type":"text","text":"hello\n#!mock\nsay begin\nsleep 60000\nsay end\n","text_elements":[]}]},"threadId":"01a12f91-90ee-7543-9326-555ba2a32e28","turnId":"01a12f91-9177-7dc2-b493-bc6ca9fde122","startedAtMs":1791799431726},"emittedAtMs":1791799431726},
+  {"method":"item/completed","params":{"item":{"type":"userMessage","id":"01a12f91-922b-7911-876e-8b9db61b4dd1","clientId":null,"content":[{"type":"text","text":"hello\n#!mock\nsay begin\nsleep 60000\nsay end\n","text_elements":[]}]},"threadId":"01a12f91-90ee-7543-9326-555ba2a32e28","turnId":"01a12f91-9177-7dc2-b493-bc6ca9fde122","completedAtMs":1791799431726},"emittedAtMs":1791799431743},
+  {"method":"item/started","params":{"item":{"type":"agentMessage","id":"msg_mock_000001_0","text":"","phase":null,"memoryCitation":null,"delivery":null,"questions":null},"threadId":"01a12f91-90ee-7543-9326-555ba2a32e28","turnId":"01a12f91-9177-7dc2-b493-bc6ca9fde122","startedAtMs":1791799431798},"emittedAtMs":1791799431798},
+  {"method":"item/agentMessage/delta","params":{"threadId":"01a12f91-90ee-7543-9326-555ba2a32e28","turnId":"01a12f91-9177-7dc2-b493-bc6ca9fde122","itemId":"msg_mock_000001_0","delta":"begin"},"emittedAtMs":1791799431803},
+  {"method":"item/completed","params":{"item":{"type":"agentMessage","id":"msg_mock_000001_0","text":"begin","phase":null,"memoryCitation":null,"delivery":null,"questions":null},"threadId":"01a12f91-90ee-7543-9326-555ba2a32e28","turnId":"01a12f91-9177-7dc2-b493-bc6ca9fde122","completedAtMs":1791799431803},"emittedAtMs":1791799431805},
+  {"method":"account/rateLimits/updated","params":{"rateLimits":{"limitId":"codex","limitName":null,"normalModelSlug":null,"primary":null,"secondary":null,"credits":null,"individualLimit":null,"spendControlReached":null,"planType":null,"rateLimitReachedType":null}},"emittedAtMs":1791799435807},
+  {"method":"error","params":{"error":{"message":"Reconnecting... 1/1","codexErrorInfo":{"responseStreamDisconnected":{"httpStatusCode":null}},"additionalDetails":"stream disconnected before completion: idle timeout waiting for SSE","misalignment":null},"willRetry":true,"threadId":"01a12f91-90ee-7543-9326-555ba2a32e28","turnId":"01a12f91-9177-7dc2-b493-bc6ca9fde122"},"emittedAtMs":1791799435807},
+  {"method":"item/started","params":{"item":{"type":"agentMessage","id":"msg_mock_000002_0","text":"","phase":null,"memoryCitation":null,"delivery":null,"questions":null},"threadId":"01a12f91-90ee-7543-9326-555ba2a32e28","turnId":"01a12f91-9177-7dc2-b493-bc6ca9fde122","startedAtMs":1791799436080},"emittedAtMs":1791799436080},
+  {"method":"item/agentMessage/delta","params":{"threadId":"01a12f91-90ee-7543-9326-555ba2a32e28","turnId":"01a12f91-9177-7dc2-b493-bc6ca9fde122","itemId":"msg_mock_000002_0","delta":"begin"},"emittedAtMs":1791799436081},
+  {"method":"item/completed","params":{"item":{"type":"agentMessage","id":"msg_mock_000002_0","text":"begin","phase":null,"memoryCitation":null,"delivery":null,"questions":null},"threadId":"01a12f91-90ee-7543-9326-555ba2a32e28","turnId":"01a12f91-9177-7dc2-b493-bc6ca9fde122","completedAtMs":1791799436081},"emittedAtMs":1791799436082},
+  {"method":"account/rateLimits/updated","params":{"rateLimits":{"limitId":"codex","limitName":null,"normalModelSlug":null,"primary":null,"secondary":null,"credits":null,"individualLimit":null,"spendControlReached":null,"planType":null,"rateLimitReachedType":null}},"emittedAtMs":1791799440084},
+  {"method":"error","params":{"error":{"message":"stream disconnected before completion: idle timeout waiting for SSE","codexErrorInfo":"other","additionalDetails":null,"misalignment":null},"willRetry":false,"threadId":"01a12f91-90ee-7543-9326-555ba2a32e28","turnId":"01a12f91-9177-7dc2-b493-bc6ca9fde122"},"emittedAtMs":1791799440084},
+  {"method":"turn/completed","params":{"threadId":"01a12f91-90ee-7543-9326-555ba2a32e28","turn":{"id":"01a12f91-9177-7dc2-b493-bc6ca9fde122","rootTurnId":"01a12f91-9177-7dc2-b493-bc6ca9fde122","items":[],"itemsView":"notLoaded","status":"failed","error":{"message":"stream disconnected before completion: idle timeout waiting for SSE","codexErrorInfo":"other","additionalDetails":null,"misalignment":null},"startedAt":1791799431,"completedAt":1791799440,"durationMs":8538}},"emittedAtMs":1791799440092}
+ ],
+ "expect": {"outcome": "failed", "code": "provider_unreachable", "retryable": true, "incomplete": true, "resets_at": null, "row": "out_of_reach", "said_contains": "idle timeout waiting for SSE"}
+}

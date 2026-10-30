@@ -1,0 +1,11 @@
+{
+  "warm_thread_ms": 1500,
+  "renderer_heap_bytes": 314572800,
+  "delta_paint_ms": 50,
+  "typing_paint_ms": 16,
+  "input_ack_p95_ms": 1000,
+  "base_stack_peak_bytes": 8589934592,
+  "quiet_memory_growth_bytes": 67108864,
+  "quiet_fd_growth": 16,
+  "turn_guard_seconds": 300
+}

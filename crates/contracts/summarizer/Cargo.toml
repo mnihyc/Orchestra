@@ -1,0 +1,25 @@
+[package]
+name = "orch-summarizer-contract"
+description = "Summarizer contract for title, description and tag generation."
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+rust-version.workspace = true
+repository.workspace = true
+publish.workspace = true
+
+[dependencies]
+orch-agent-contract.workspace = true
+orch-plugin-contract.workspace = true
+orch-types.workspace = true
+async-trait.workspace = true
+schemars.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+thiserror.workspace = true
+
+[dev-dependencies]
+futures.workspace = true
+
+[lints]
+workspace = true

@@ -1,0 +1,25 @@
+{
+  "requests": [
+    {
+      "first_token_ms": 889,
+      "generation_ms": 368,
+      "request_ms": 1257,
+      "output_tokens": 84,
+      "reasoning_tokens": 0,
+      "reasoning_hidden": false,
+      "streamed_tokens": 84,
+      "speed_milli": null
+    },
+    {
+      "first_token_ms": 757,
+      "generation_ms": 9,
+      "request_ms": 766,
+      "output_tokens": 11,
+      "reasoning_tokens": 0,
+      "reasoning_hidden": false,
+      "streamed_tokens": 11,
+      "speed_milli": null
+    }
+  ],
+  "duration_api_ms": 1994
+}

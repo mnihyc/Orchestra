@@ -1,0 +1,46 @@
+/* Flat rows keep their facts on three short phone lines, without a tree gutter. */
+.everything-flat-row { display: grid; grid-template-columns: minmax(0, 1fr) auto auto; column-gap: 0.5rem; row-gap: 0.25rem; padding: 0.75rem; border-bottom: 1px solid var(--border); }
+.everything-flat-row > td { min-width: 0; height: auto; padding: 0; }
+.everything-flat-row .flat-name { grid-column: 1; grid-row: 1; align-self: center; }
+.everything-flat-row .flat-state { grid-column: 2; grid-row: 1; align-self: center; }
+.everything-flat-row .flat-state svg { width: 1rem; height: 1rem; }
+.everything-flat-row .flat-actions { grid-column: 3; grid-row: 1; justify-self: end; }
+.everything-flat-row .flat-place { grid-column: 1; grid-row: 2; align-self: center; }
+.everything-flat-row .flat-time { grid-column: 2 / span 2; grid-row: 2; align-self: center; white-space: nowrap; }
+.everything-flat-row .flat-by { grid-column: 1 / -1; grid-row: 3; display: flex; min-width: 0; align-items: center; gap: 0.5rem; }
+.everything-flat-row .flat-extra { grid-column: 1 / -1; display: flex; min-width: 0; align-items: center; gap: 0.5rem; }
+.everything-flat-row .flat-secondary, .everything-flat-row .flat-state[data-empty], .everything-flat-row .flat-by[data-empty] { display: none; }
+.everything-flat-row .flat-field-label { display: none; }
+.everything-flat-row .flat-by .flat-field-label, .everything-flat-row .flat-extra .flat-field-label { display: inline; flex: none; }
+.everything-flat-row[data-selecting] { grid-template-columns: auto minmax(0, 1fr) auto auto; }
+.everything-flat-row .flat-choice { grid-column: 1; grid-row: 1; align-self: center; }
+.everything-flat-row[data-selecting] .flat-name { grid-column: 2; }
+.everything-flat-row[data-selecting] .flat-state { grid-column: 3; }
+.everything-flat-row[data-selecting] .flat-actions { grid-column: 4; }
+.everything-flat-row[data-selecting] .flat-place { grid-column: 2; }
+.everything-flat-row[data-selecting] .flat-time { grid-column: 3 / span 2; }
+.everything-flat-row [data-desktop-place] { display: none; }
+.everything-flat-row [data-mobile-place] { display: block; }
+@media (min-width: 40rem) {
+  /* Subgrids align every row while Name takes its content width before Where gets the remainder. */
+  .everything-recent-table { display: grid; grid-template-columns: var(--recent-columns); min-width: var(--recent-min-width); }
+  .everything-recent-table > thead, .everything-recent-table > tbody,
+  .everything-recent-table tr { display: grid; grid-column: 1 / -1; grid-template-columns: subgrid; }
+  .everything-recent-table [colspan] { grid-column: 1 / -1; }
+  .everything-recent-table .everything-flat-row,
+  .everything-recent-table .everything-flat-row[data-selecting] { grid-template-columns: subgrid; gap: 0; }
+  .everything-recent-table .everything-flat-row > td,
+  .everything-recent-table .everything-flat-row[data-selecting] > td { grid-column: auto; grid-row: auto; align-self: stretch; }
+  .everything-flat-row { display: table-row; padding: 0; border: 0; }
+  .everything-flat-row > td { display: grid; align-content: center; min-height: var(--table-row-height); height: auto; padding: 0.25rem 0.5rem; }
+  .everything-flat-row .flat-by, .everything-flat-row .flat-extra, .everything-flat-row .flat-secondary,
+  .everything-flat-row .flat-state[data-empty], .everything-flat-row .flat-by[data-empty] { display: grid; }
+  .everything-flat-row .flat-actions { padding-inline: 0.25rem; }
+  .everything-flat-row .flat-phone-by, .everything-flat-row .flat-field-label,
+  .everything-flat-row .flat-by .flat-field-label, .everything-flat-row .flat-extra .flat-field-label { display: none; }
+  .everything-flat-row [data-mobile-place] { display: none; }
+  .everything-flat-row [data-desktop-place] { display: block; }
+  .everything-flat-row .flat-by > span, .everything-flat-row .flat-extra > span { max-width: 100%; }
+  .everything-recent-table th { padding-inline: 0.5rem; }
+  .everything-recent-table th:last-child { padding-inline: 0.25rem; }
+}

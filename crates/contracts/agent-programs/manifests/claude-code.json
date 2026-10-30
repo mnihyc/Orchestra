@@ -1,0 +1,218 @@
+{
+  "manifest_version": 1,
+  "kind": "claude-code",
+  "names": {
+    "en": "Claude Code",
+    "zh-CN": "Claude Code"
+  },
+  "vendor": {
+    "name": "Anthropic",
+    "home_page": "https://www.anthropic.com/claude-code"
+  },
+  "protocol": "claude_stream_json",
+  "launch": {
+    "programs": [
+      "claude",
+      "claude-code"
+    ]
+  },
+  "placement": {
+    "colocated": true,
+    "home": "program",
+    "needs_binary": true
+  },
+  "builds": {
+    "channels": [
+      {
+        "type": "signed_manifest",
+        "id": "releases",
+        "base": "https://downloads.claude.ai/claude-code-releases",
+        "channels": [
+          "latest",
+          "stable"
+        ],
+        "platforms": [
+          {
+            "arch": "x86_64",
+            "word": "linux-x64"
+          },
+          {
+            "arch": "aarch64",
+            "word": "linux-arm64"
+          }
+        ],
+        "file_default": "claude"
+      }
+    ]
+  },
+  "checks": {
+    "interface": {
+      "programs": [
+        "claude-code",
+        "claude"
+      ],
+      "args": [
+        "--help"
+      ],
+      "printed": "text",
+      "needs": [
+        {
+          "name": "--add-dir"
+        },
+        {
+          "name": "--allow-dangerously-skip-permissions"
+        },
+        {
+          "name": "--allowedTools"
+        },
+        {
+          "name": "--disallowed-tools"
+        },
+        {
+          "name": "--fork-session",
+          "capability": "fork_native"
+        },
+        {
+          "name": "--forward-subagent-text"
+        },
+        {
+          "name": "--include-partial-messages"
+        },
+        {
+          "name": "--input-format"
+        },
+        {
+          "name": "--mcp-config"
+        },
+        {
+          "name": "--model"
+        },
+        {
+          "name": "--no-session-persistence"
+        },
+        {
+          "name": "--output-format"
+        },
+        {
+          "name": "--plugin-dir"
+        },
+        {
+          "name": "--permission-mode"
+        },
+        {
+          "name": "--permission-prompt-tool"
+        },
+        {
+          "name": "--replay-user-messages"
+        },
+        {
+          "name": "--resume"
+        },
+        {
+          "name": "--session-id"
+        },
+        {
+          "name": "--setting-sources"
+        },
+        {
+          "name": "--settings"
+        },
+        {
+          "name": "--strict-mcp-config"
+        },
+        {
+          "name": "--system-prompt-snapshot"
+        },
+        {
+          "name": "--tools"
+        },
+        {
+          "name": "--verbose"
+        },
+        {
+          "name": "--version"
+        }
+      ]
+    },
+    "conformance": [
+      {
+        "name": "startup"
+      },
+      {
+        "name": "parallel_calls"
+      },
+      {
+        "name": "image_result",
+        "feature": "input_images"
+      },
+      {
+        "name": "sandbox"
+      },
+      {
+        "name": "native_import",
+        "feature": "import_native"
+      },
+      {
+        "name": "tools.result_form",
+        "feature": "orch_tools"
+      }
+    ],
+    "tool_names": {
+      "read_file": {
+        "name": "Read",
+        "arguments": {
+          "path": "file_path"
+        }
+      }
+    }
+  },
+  "executors": [],
+  "files": {
+    "managed_home_cleanup": true,
+    "instruction_files": [
+      {
+        "path": "CLAUDE.md",
+        "scope": "home"
+      },
+      {
+        "path": "CLAUDE.md",
+        "scope": "workspace"
+      },
+      {
+        "path": ".claude/CLAUDE.md",
+        "scope": "workspace"
+      },
+      {
+        "path": "CLAUDE.local.md",
+        "scope": "workspace"
+      },
+      {
+        "path": "AGENTS.md",
+        "scope": "workspace"
+      },
+      {
+        "path": ".claude/AGENTS.md",
+        "scope": "workspace"
+      }
+    ],
+    "workspace_config": [
+      ".claude"
+    ]
+  },
+  "privacy": [
+    {
+      "name": "telemetry",
+      "how": {
+        "en": "Non-essential traffic, telemetry and error reports are switched off by the variables Orch starts it with.",
+        "zh-CN": "Orch 启动它时设置的环境变量已关闭非必要流量、遥测和错误报告。"
+      }
+    },
+    {
+      "name": "updates",
+      "how": {
+        "en": "Self-update is switched off by the variables Orch starts it with.",
+        "zh-CN": "Orch 启动它时设置的环境变量已关闭自动更新。"
+      }
+    }
+  ]
+}

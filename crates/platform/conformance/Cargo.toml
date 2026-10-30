@@ -1,0 +1,55 @@
+[package]
+name = "orch-conformance"
+description = "The suite every implementation of a contract passes, for tests and for orchctl plugin check."
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+rust-version.workspace = true
+repository.workspace = true
+publish.workspace = true
+
+[dependencies]
+base64.workspace = true
+axum.workspace = true
+reqwest.workspace = true
+orch-api-contract.workspace = true
+bytes.workspace = true
+futures.workspace = true
+http.workspace = true
+orch-agent-contract.workspace = true
+orch-agent-programs.workspace = true
+orch-blob-contract.workspace = true
+orch-driver-contract.workspace = true
+orch-executor-contract.workspace = true
+orch-identity-contract.workspace = true
+orch-model-contract.workspace = true
+orch-notifier-contract.workspace = true
+orch-plugin.workspace = true
+orch-plugin-contract.workspace = true
+orch-provider-contract.workspace = true
+orch-summarizer-contract.workspace = true
+orch-types.workspace = true
+serde_json.workspace = true
+serde.workspace = true
+tokio.workspace = true
+url.workspace = true
+
+[dev-dependencies]
+async-trait.workspace = true
+orch-connector-core.workspace = true
+orch-link-contract.workspace = true
+orch-adapter-fake.workspace = true
+orch-adapter-codex.workspace = true
+orch-adapter-claude-code.workspace = true
+orch-provider-openrouter.workspace = true
+orch-executor-orch.workspace = true
+orch-executor-codex.workspace = true
+orch-protocol-openai-responses.workspace = true
+orch-protocol-anthropic-messages.workspace = true
+orch-testkit.workspace = true
+orch-blob-local.workspace = true
+tempfile.workspace = true
+tokio = { workspace = true, features = ["test-util"] }
+
+[lints]
+workspace = true

@@ -1,0 +1,31 @@
+[data-row-name-place] {
+  display: grid;
+  grid-template-columns: auto minmax(0, max-content) minmax(0, 1fr);
+  column-gap: 0;
+}
+/* The name takes its intrinsic width first; a hidden place reserves no gap. */
+[data-row-name-place] > :first-child { margin-inline-end: 0.5rem; }
+[data-row-name-place] [data-row-place-words] { padding-inline-start: 0.5rem; }
+[data-row-place] {
+  display: block;
+  container: row-place / inline-size;
+  min-width: 0;
+  flex: 1 10 6rem;
+  overflow: hidden;
+}
+[data-row-place-words] { display: none; }
+/* Below six character widths a parent name would become an unhelpful fragment. */
+@container row-place (min-width: 6ch) {
+  [data-row-place-words] { display: flex; min-width: 0; align-items: center; gap: 0.5rem; white-space: nowrap; }
+}
+[data-row-path] { display: block; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; direction: rtl; text-align: left; }
+[data-row-end] { display: flex; flex: none; align-items: center; gap: 0.5rem; }
+[data-row-time] { white-space: nowrap; }
+[data-row-actions] { display: inline-flex; align-items: center; }
+@media (min-width: 40rem) and (hover: hover) {
+  [data-row-end] { display: grid; gap: 0; }
+  [data-row-time], [data-row-actions] { grid-area: 1 / 1; justify-self: end; }
+  [data-row-actions] { visibility: hidden; }
+  [role='treeitem']:is(:hover, :focus-within, [aria-current='page']) [data-row-time] { visibility: hidden; }
+  [role='treeitem']:is(:hover, :focus-within, [aria-current='page']) [data-row-actions] { visibility: visible; }
+}

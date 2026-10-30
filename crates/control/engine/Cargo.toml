@@ -1,0 +1,70 @@
+[package]
+name = "orch-engine"
+description = "Durable product orchestration hosted inside the API."
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+rust-version.workspace = true
+repository.workspace = true
+publish.workspace = true
+
+[dependencies]
+async-trait.workspace = true
+base64.workspace = true
+bytes.workspace = true
+bzip2.workspace = true  # a tar packed with bzip2 that an import reads
+chrono.workspace = true
+flate2.workspace = true  # the deflate that the zip of an archive is written with: its backend is chosen here, not by the zip crate
+futures.workspace = true
+metrics.workspace = true
+globset.workspace = true
+hex.workspace = true  # the SHA-256 of a skill's files, as its manifest writes them
+jsonschema.workspace = true
+liblzma.workspace = true  # a tar packed with xz that an import reads
+orch-chat.workspace = true
+orch-documents.workspace = true
+regex.workspace = true
+orch-access-contract.workspace = true
+orch-agent-contract.workspace = true
+orch-agent-programs.workspace = true
+orch-api-contract.workspace = true
+orch-authz.workspace = true
+orch-blob-contract.workspace = true
+orch-config.workspace = true
+orch-db.workspace = true
+orch-driver-contract.workspace = true
+orch-link.workspace = true
+orch-link-contract.workspace = true
+orch-model-contract.workspace = true  # the protocol whose endpoints make vectors
+orch-settings.workspace = true
+orch-settings-contract.workspace = true
+orch-summarizer-contract.workspace = true
+orch-summarizer-model.workspace = true
+orch-plugin-contract.workspace = true
+orch-provider-contract.workspace = true
+orch-types.workspace = true
+rand.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+sha2.workspace = true  # the SHA-256 of each file a skill's manifest lists
+sqlx.workspace = true  # atomic native outcome and thread scope updates use the existing database connection
+thiserror.workspace = true
+tokio.workspace = true
+tokio-util.workspace = true
+tar.workspace = true  # the archive each skill version is kept as
+tracing.workspace = true
+url.workspace = true
+unicode-segmentation.workspace = true
+zip.workspace = true
+zstd.workspace = true
+
+[dev-dependencies]
+orch-driver-docker.workspace = true
+orch-envhost.workspace = true # source-attempt proofs use the real Git receipts and filesystem cleanup
+orch-blob-local.workspace = true
+orch-testkit.workspace = true
+tempfile.workspace = true
+sqlx.workspace = true
+
+[lints]
+workspace = true

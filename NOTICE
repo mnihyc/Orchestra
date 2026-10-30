@@ -1,0 +1,29 @@
+Orch
+
+This distribution includes third-party components under their own terms.
+The release's generated THIRD_PARTY_NOTICES file
+identifies versions, declared licences and versioned source downloads.
+
+The lazily loaded VNC client includes @novnc/novnc 1.7.0, unmodified and
+used as a library. noVNC is Copyright (C) 2022 The noVNC authors.
+Its core library is licensed under Mozilla Public License 2.0 (MPL-2.0),
+which applies at the file level. The unmodified source is available in
+the exact npm package:
+https://registry.npmjs.org/@novnc/novnc/-/novnc-1.7.0.tgz
+
+The repository retains the package's original notices, authors and licence
+texts under licenses/novnc-1.7.0/, with its source identity in SOURCE.json.
+The frontend archive includes those terms in THIRD_PARTY_NOTICES.
+
+The document importer includes mammoth 1.13.0 as its browser bundle in
+shared/vendor/ (with one character of its entity table written as an escape
+sequence, which leaves its meaning as it was), run inside the importer's
+sandbox to turn a Word file into HTML. mammoth is Copyright (c) 2013, Michael Williamson, and is
+licensed under the BSD 2-Clause licence; the bundle also carries xmldom,
+base64-js, dingbat-to-unicode, jszip (used under the MIT licence), lop,
+underscore and xmlbuilder under their own terms. The unmodified source is
+available in the exact npm package:
+https://registry.npmjs.org/mammoth/-/mammoth-1.13.0.tgz
+
+The repository retains the package's licence under licenses/mammoth-1.13.0/,
+with its source identity in SOURCE.json.

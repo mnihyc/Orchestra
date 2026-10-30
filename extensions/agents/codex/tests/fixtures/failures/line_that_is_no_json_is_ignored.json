@@ -1,0 +1,25 @@
+{
+ "harness": "codex",
+ "version": "0.162.1",
+ "recorded": "2026-10-12",
+ "fault": "say before; garbage this is {not json; say after",
+ "setup": "provider of the forwarded path (model_providers entry, token in ORCH_LLM_TOKEN)",
+ "requests": 1,
+ "exit": 0,
+ "stderr": [],
+ "frames": [
+  {"method":"turn/started","params":{"threadId":"01a12f91-7cb2-7682-9be0-a48885f21710","turn":{"id":"01a12f91-7d19-7913-aea6-7f93a9feee4b","rootTurnId":"01a12f91-7d19-7913-aea6-7f93a9feee4b","items":[],"itemsView":"notLoaded","status":"inProgress","error":null,"startedAt":1791799426,"completedAt":null,"durationMs":null}},"emittedAtMs":1791799426484},
+  {"method":"item/started","params":{"item":{"type":"userMessage","id":"01a12f91-7dd7-7b20-b34b-f3801eefc4b3","clientId":null,"content":[{"type":"text","text":"hello\n#!mock\nsay before\ngarbage this is {not json\nsay after\n","text_elements":[]}]},"threadId":"01a12f91-7cb2-7682-9be0-a48885f21710","turnId":"01a12f91-7d19-7913-aea6-7f93a9feee4b","startedAtMs":1791799426520},"emittedAtMs":1791799426520},
+  {"method":"item/completed","params":{"item":{"type":"userMessage","id":"01a12f91-7dd7-7b20-b34b-f3801eefc4b3","clientId":null,"content":[{"type":"text","text":"hello\n#!mock\nsay before\ngarbage this is {not json\nsay after\n","text_elements":[]}]},"threadId":"01a12f91-7cb2-7682-9be0-a48885f21710","turnId":"01a12f91-7d19-7913-aea6-7f93a9feee4b","completedAtMs":1791799426520},"emittedAtMs":1791799426523},
+  {"method":"item/started","params":{"item":{"type":"agentMessage","id":"msg_mock_000001_0","text":"","phase":null,"memoryCitation":null,"delivery":null,"questions":null},"threadId":"01a12f91-7cb2-7682-9be0-a48885f21710","turnId":"01a12f91-7d19-7913-aea6-7f93a9feee4b","startedAtMs":1791799426573},"emittedAtMs":1791799426574},
+  {"method":"item/agentMessage/delta","params":{"threadId":"01a12f91-7cb2-7682-9be0-a48885f21710","turnId":"01a12f91-7d19-7913-aea6-7f93a9feee4b","itemId":"msg_mock_000001_0","delta":"before"},"emittedAtMs":1791799426574},
+  {"method":"item/completed","params":{"item":{"type":"agentMessage","id":"msg_mock_000001_0","text":"before","phase":null,"memoryCitation":null,"delivery":null,"questions":null},"threadId":"01a12f91-7cb2-7682-9be0-a48885f21710","turnId":"01a12f91-7d19-7913-aea6-7f93a9feee4b","completedAtMs":1791799426573},"emittedAtMs":1791799426576},
+  {"method":"item/started","params":{"item":{"type":"agentMessage","id":"msg_mock_000001_1","text":"","phase":null,"memoryCitation":null,"delivery":null,"questions":null},"threadId":"01a12f91-7cb2-7682-9be0-a48885f21710","turnId":"01a12f91-7d19-7913-aea6-7f93a9feee4b","startedAtMs":1791799426578},"emittedAtMs":1791799426578},
+  {"method":"item/agentMessage/delta","params":{"threadId":"01a12f91-7cb2-7682-9be0-a48885f21710","turnId":"01a12f91-7d19-7913-aea6-7f93a9feee4b","itemId":"msg_mock_000001_1","delta":"after"},"emittedAtMs":1791799426578},
+  {"method":"item/completed","params":{"item":{"type":"agentMessage","id":"msg_mock_000001_1","text":"after","phase":null,"memoryCitation":null,"delivery":null,"questions":null},"threadId":"01a12f91-7cb2-7682-9be0-a48885f21710","turnId":"01a12f91-7d19-7913-aea6-7f93a9feee4b","completedAtMs":1791799426578},"emittedAtMs":1791799426579},
+  {"method":"thread/tokenUsage/updated","params":{"threadId":"01a12f91-7cb2-7682-9be0-a48885f21710","turnId":"01a12f91-7d19-7913-aea6-7f93a9feee4b","tokenUsage":{"total":{"totalTokens":8580,"inputTokens":8577,"cachedInputTokens":0,"cacheWriteInputTokens":0,"outputTokens":3,"reasoningOutputTokens":0},"last":{"totalTokens":8580,"inputTokens":8577,"cachedInputTokens":0,"cacheWriteInputTokens":0,"outputTokens":3,"reasoningOutputTokens":0},"modelContextWindow":258400}},"emittedAtMs":1791799426584},
+  {"method":"account/rateLimits/updated","params":{"rateLimits":{"limitId":"codex","limitName":null,"normalModelSlug":null,"primary":null,"secondary":null,"credits":null,"individualLimit":null,"spendControlReached":null,"planType":null,"rateLimitReachedType":null}},"emittedAtMs":1791799426584},
+  {"method":"turn/completed","params":{"threadId":"01a12f91-7cb2-7682-9be0-a48885f21710","turn":{"id":"01a12f91-7d19-7913-aea6-7f93a9feee4b","rootTurnId":"01a12f91-7d19-7913-aea6-7f93a9feee4b","items":[{"type":"agentMessage","id":"msg_mock_000001_1","text":"after","phase":null,"memoryCitation":null,"delivery":null,"questions":null}],"itemsView":"summary","status":"completed","error":null,"startedAt":1791799426,"completedAt":1791799426,"durationMs":249}},"emittedAtMs":1791799426592}
+ ],
+ "expect": {"outcome": "completed"}
+}

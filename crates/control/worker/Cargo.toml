@@ -1,0 +1,59 @@
+[package]
+name = "orch-worker-core"
+description = "Database and outside-world delivery and upkeep; no machine orchestration."
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+rust-version.workspace = true
+repository.workspace = true
+publish.workspace = true
+
+[dependencies]
+base64.workspace = true
+blake3.workspace = true
+chrono.workspace = true
+chrono-tz.workspace = true
+futures.workspace = true
+metrics.workspace = true
+orch-access-contract.workspace = true
+orch-authz.workspace = true
+orch-api-contract.workspace = true
+orch-build-info.workspace = true
+orch-config.workspace = true
+orch-db.workspace = true
+orch-notifier-contract.workspace = true
+orch-plugin-contract.workspace = true
+orch-settings.workspace = true
+orch-settings-contract.workspace = true
+orch-types.workspace = true
+orch-telemetry.workspace = true
+rand.workspace = true
+reqwest.workspace = true
+rustix.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+sqlx.workspace = true
+semver.workspace = true
+sha2.workspace = true
+thiserror.workspace = true
+tokio.workspace = true
+tokio-util.workspace = true
+tracing.workspace = true
+
+[dev-dependencies]
+async-trait.workspace = true
+axum.workspace = true
+orch-api-core.workspace = true
+orch-documents.workspace = true
+orch-notifier-email.workspace = true
+orch-notifier-push.workspace = true
+orch-notifier-telegram.workspace = true
+orch-notifier-webhook.workspace = true
+orch-testkit.workspace = true
+rcgen.workspace = true
+reqwest.workspace = true
+tempfile.workspace = true
+tokio = { workspace = true, features = ["test-util"] }
+
+[lints]
+workspace = true

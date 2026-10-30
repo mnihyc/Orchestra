@@ -1,0 +1,43 @@
+[package]
+name = "orch-adapter-codex"
+description = "Codex app-server adapter; Codex-specific vocabulary stays here."
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+rust-version.workspace = true
+repository.workspace = true
+publish.workspace = true
+
+[dependencies]
+orch-agent-contract.workspace = true
+orch-agent-programs.workspace = true
+orch-plugin-contract.workspace = true
+orch-types.workspace = true
+orch-provider-contract.workspace = true
+async-trait.workspace = true
+base64.workspace = true
+blake3.workspace = true
+chrono.workspace = true
+chrono-tz.workspace = true
+futures.workspace = true
+semver.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+similar.workspace = true
+thiserror.workspace = true
+tempfile.workspace = true
+tokio.workspace = true
+toml.workspace = true
+tracing.workspace = true
+zstd.workspace = true
+
+[dev-dependencies]
+orch-api-contract.workspace = true
+orch-conformance.workspace = true
+orch-testkit.workspace = true
+axum.workspace = true       # the relay of the check against a real model, in tests/common/relay.rs
+reqwest.workspace = true    # that relay's side towards the real interface
+tokio = { workspace = true, features = ["test-util"] }  # paused time, for the lifetime of a code
+
+[lints]
+workspace = true

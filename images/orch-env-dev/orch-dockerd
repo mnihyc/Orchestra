@@ -1,0 +1,72 @@
+#!/bin/sh
+# Starts Docker inside this environment, once, and waits until it answers.
+#
+# Orch prepares Docker's data place (/var/lib/docker, a file system of its own in a file of the state volume) where the
+# environment holds Docker inside, every time it starts. Without that place a daemon would write to a shared file
+# system that overlays cannot be built on, so this program refuses to start one.
+set -eu
+
+# The CLI can wait indefinitely for an unresponsive API, even after the daemon has opened its socket. Bound the
+# complete startup, including every readiness probe. A stuck child gets five seconds to exit after the deadline.
+if timeout --kill-after=5s 60s sh -s <<'START_DOCKER'
+set -eu
+
+if timeout --kill-after=1s 5s docker info >/dev/null 2>&1; then
+  exit 0
+fi
+if ! mountpoint -q /var/lib/docker 2>/dev/null; then
+  echo "Docker's place is not prepared here: ask for Docker inside first (the capability), then run this again." >&2
+  exit 1
+fi
+root=""
+if [ "$(id -u)" != 0 ]; then root="sudo"; fi
+started_pid=""
+# A file system that outlives a stop (the container's own layer is kept under some runtimes) keeps the last daemon's
+# process number and socket. Keep them when that daemon is still running: an API timeout is not proof it is gone.
+daemon_alive() {
+  pid="$($root cat /var/run/docker.pid 2>/dev/null || true)"
+  case "$pid" in
+    ''|*[!0-9]*) ;;
+    *) if [ "$($root cat "/proc/$pid/comm" 2>/dev/null || true)" = dockerd ] && $root kill -0 "$pid" 2>/dev/null; then return 0; fi ;;
+  esac
+  # The process we just launched can still be loading before it writes docker.pid. Its absence is not an exit.
+  [ -n "$started_pid" ] && $root kill -0 "$started_pid" 2>/dev/null
+}
+start_daemon() {
+  $root rm -f /var/run/docker.pid /var/run/docker.sock
+  # A runtime with a kernel written in user space (gVisor) has no firewall for Docker to configure: the daemon is then
+  # started without it. Containers started inside should use --network=host to reach the network; -p still serves a port.
+  firewall=""
+  if ! $root iptables -t nat -L >/dev/null 2>&1; then firewall="--iptables=false"; fi
+  # ORCH_DOCKERD_ARGS: more arguments for the daemon, for a runtime that needs them.
+  started_pid="$($root sh -c "nohup dockerd -G agent $firewall \${ORCH_DOCKERD_ARGS:-} >>/var/log/dockerd.log 2>&1 </dev/null & echo \$!")"
+}
+starts=0
+if ! daemon_alive; then
+  start_daemon
+  starts=1
+fi
+while ! timeout --kill-after=1s 5s docker info >/dev/null 2>&1; do
+  if ! daemon_alive; then
+    # A managed containerd can exit during a cold start. Retry once after an actual process exit, within the same
+    # minute; keep its diagnostic log and never start a second daemon beside a live one.
+    if [ "$starts" -ge 2 ]; then
+      echo "Docker exited while starting: see /var/log/dockerd.log" >&2
+      exit 1
+    fi
+    echo "Docker exited while starting; retrying within the same minute. See /var/log/dockerd.log" >&2
+    start_daemon
+    starts=$((starts + 1))
+  fi
+  sleep 1
+done
+START_DOCKER
+then
+  exit 0
+else
+  status=$?
+fi
+case "$status" in
+  124|137) echo "Docker did not start in a minute: see /var/log/dockerd.log" >&2 ;;
+esac
+exit "$status"

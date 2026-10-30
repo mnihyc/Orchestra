@@ -1,0 +1,30 @@
+[package]
+name = "orch-driver-host"
+description = "Host-process implementation of the runtime driver contract."
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+rust-version.workspace = true
+repository.workspace = true
+publish.workspace = true
+
+[dependencies]
+async-trait.workspace = true
+orch-driver-contract.workspace = true
+orch-settings-contract.workspace = true
+orch-types.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+sysinfo.workspace = true
+tokio.workspace = true
+
+[target.'cfg(unix)'.dependencies]
+nix.workspace = true
+rustix.workspace = true
+
+[dev-dependencies]
+tempfile.workspace = true
+jsonschema.workspace = true
+
+[lints]
+workspace = true

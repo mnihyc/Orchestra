@@ -1,0 +1,4 @@
+services:
+  frontend:
+    ports:
+      - "${ORCH_FRONTEND_HTTPS_BIND:?set ORCH_FRONTEND_HTTPS_BIND}:443"

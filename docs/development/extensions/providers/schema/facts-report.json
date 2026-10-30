@@ -1,0 +1,630 @@
+{
+  "type": "object",
+  "description": "The members of a provider's facts this read tells. A member present, even null or [], is told by this read; a member absent is not told and keeps what was told before. Members of a later contract are ignored.",
+  "properties": {
+    "identity": {
+      "type": [
+        "string",
+        "null"
+      ],
+      "description": "Who the credential belongs to, at most 200 characters."
+    },
+    "credential": {
+      "anyOf": [
+        {
+          "$ref": "#/$defs/CredentialFacts"
+        },
+        {
+          "type": "null"
+        }
+      ],
+      "description": "How the credential was given, what it is, and when it lapses."
+    },
+    "credential_verified": {
+      "type": [
+        "boolean",
+        "null"
+      ],
+      "description": "True only where this read authenticated with the provider's credential; it is kept only from a read that was given the key."
+    },
+    "plan": {
+      "type": [
+        "string",
+        "null"
+      ],
+      "description": "The plan's id, at most 200 characters; the name shown for it is the one the source's `plans` give."
+    },
+    "windows": {
+      "type": [
+        "array",
+        "null"
+      ],
+      "items": {
+        "$ref": "#/$defs/UsageWindow"
+      },
+      "description": "The usage windows of the plan, at most 64, each by its `id`: how much is used in percent, and when it starts over."
+    },
+    "limit_reached": {
+      "anyOf": [
+        {
+          "$ref": "#/$defs/LimitReached"
+        },
+        {
+          "type": "null"
+        }
+      ],
+      "description": "A limit of the plan that has been reached, with when it lifts: new turns wait until then, or until a read admits ordinary use."
+    },
+    "ordinary_usage_allowed": {
+      "type": [
+        "boolean",
+        "null"
+      ],
+      "description": "Whether the vendor admits ordinary use now: false holds new turns, true lifts that."
+    },
+    "balances": {
+      "type": [
+        "array",
+        "null"
+      ],
+      "items": {
+        "$ref": "#/$defs/Balance"
+      },
+      "description": "What is left to be spent, at most 32, each by its `id` and in its own unit; amounts are decimal text."
+    },
+    "spend": {
+      "type": [
+        "array",
+        "null"
+      ],
+      "items": {
+        "$ref": "#/$defs/Spend"
+      },
+      "description": "What has been spent over periods, at most 64, each by its `id`, with the period's limit where it has one; amounts are decimal text."
+    },
+    "extra_usage": {
+      "anyOf": [
+        {
+          "$ref": "#/$defs/ExtraUsage"
+        },
+        {
+          "type": "null"
+        }
+      ],
+      "description": "Spending beyond the plan, in the vendor's unit."
+    },
+    "available_resets": {
+      "anyOf": [
+        {
+          "$ref": "#/$defs/AvailableResets"
+        },
+        {
+          "type": "null"
+        }
+      ],
+      "description": "The resets that can be spent, with their credits, at most 64; a source that spends them declares `spends_resets`."
+    }
+  },
+  "additionalProperties": true,
+  "title": "FactsReport",
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$defs": {
+    "CredentialFacts": {
+      "type": "object",
+      "properties": {
+        "method": {
+          "type": [
+            "string",
+            "null"
+          ],
+          "description": "A sign-in method's id; `null` for a key."
+        },
+        "yields": {
+          "$ref": "#/$defs/CredentialYield",
+          "description": "What the credential is."
+        },
+        "expires_at": {
+          "type": [
+            "string",
+            "null"
+          ],
+          "format": "date-time",
+          "description": "When a token lapses, where that is known."
+        },
+        "issued_at": {
+          "type": [
+            "string",
+            "null"
+          ],
+          "format": "date-time",
+          "description": "When the credential was issued, where its own claims say so.",
+          "default": null
+        }
+      },
+      "required": [
+        "yields"
+      ],
+      "description": "How a provider was given its credential, and when it lapses."
+    },
+    "CredentialYield": {
+      "oneOf": [
+        {
+          "type": "string",
+          "const": "login",
+          "description": "A sign-in the harness renews."
+        },
+        {
+          "type": "string",
+          "const": "token",
+          "description": "A token used as it is."
+        },
+        {
+          "type": "string",
+          "const": "key",
+          "description": "An API key."
+        },
+        {
+          "type": "string",
+          "const": "none",
+          "description": "None."
+        }
+      ],
+      "description": "What a credential yields, as a provider's facts say it."
+    },
+    "UsageWindow": {
+      "type": "object",
+      "properties": {
+        "id": {
+          "type": "string",
+          "description": "The vendor's id for the window."
+        },
+        "label": {
+          "type": "string",
+          "description": "What it is called: `5h`, `weekly`."
+        },
+        "duration_minutes": {
+          "type": [
+            "integer",
+            "null"
+          ],
+          "format": "int64",
+          "description": "How long it is, in minutes; `null` where it has no fixed length.",
+          "minimum": 1
+        },
+        "used_percent": {
+          "type": "number",
+          "format": "double",
+          "description": "How much of it is used, from 0 to 100. A vendor may report a fraction.",
+          "minimum": 0
+        },
+        "resets_at": {
+          "type": [
+            "string",
+            "null"
+          ],
+          "format": "date-time",
+          "description": "When it starts over."
+        },
+        "model_family": {
+          "type": [
+            "string",
+            "null"
+          ],
+          "description": "The family of models this window covers; null means the whole plan.",
+          "default": null
+        },
+        "is_active": {
+          "type": [
+            "boolean",
+            "null"
+          ],
+          "description": "Whether the vendor marks this as the binding window.",
+          "default": null
+        },
+        "reset_not_started": {
+          "type": [
+            "boolean",
+            "null"
+          ],
+          "description": "The source reports an unstarted or not yet fixed reset, distinct from an unknown reset.",
+          "default": null
+        },
+        "warning_percent": {
+          "type": [
+            "number",
+            "null"
+          ],
+          "format": "double",
+          "description": "The vendor's warning mark, in percent, where it names one.",
+          "minimum": 0,
+          "maximum": 100,
+          "default": null
+        },
+        "severity": {
+          "type": [
+            "string",
+            "null"
+          ],
+          "description": "The vendor's severity for display, without a notification.",
+          "default": null
+        }
+      },
+      "required": [
+        "id",
+        "label",
+        "used_percent"
+      ],
+      "description": "How much of a usage window of the vendor's plan is used."
+    },
+    "LimitReached": {
+      "type": "object",
+      "properties": {
+        "type": {
+          "type": "string",
+          "description": "Which limit, as the vendor names it."
+        },
+        "resets_at": {
+          "type": [
+            "string",
+            "null"
+          ],
+          "format": "date-time",
+          "description": "When it is lifted."
+        }
+      },
+      "required": [
+        "type"
+      ],
+      "description": "A limit of the plan that has been reached."
+    },
+    "Balance": {
+      "type": "object",
+      "properties": {
+        "id": {
+          "type": "string",
+          "description": "The source's name for it, one of a kind among the balances it tells: `plan`, `account`, a currency."
+        },
+        "label": {
+          "type": [
+            "string",
+            "null"
+          ],
+          "description": "What it is called for people, where the source names it.",
+          "default": null
+        },
+        "unit": {
+          "type": "string",
+          "description": "The vendor's unit: a currency such as `USD` or `CNY`, or `credits`."
+        },
+        "remaining": {
+          "type": [
+            "string",
+            "null"
+          ],
+          "description": "What is left.",
+          "default": null
+        },
+        "total": {
+          "type": [
+            "string",
+            "null"
+          ],
+          "description": "What there was in all.",
+          "default": null
+        },
+        "used": {
+          "type": [
+            "string",
+            "null"
+          ],
+          "description": "What has been spent of it.",
+          "default": null
+        },
+        "unlimited": {
+          "type": [
+            "boolean",
+            "null"
+          ],
+          "description": "Whether it has no limit.",
+          "default": null
+        },
+        "parts": {
+          "type": [
+            "array",
+            "null"
+          ],
+          "items": {
+            "$ref": "#/$defs/BalancePart"
+          },
+          "description": "What it is made of, where the vendor splits it.",
+          "default": null
+        },
+        "expires_at": {
+          "type": [
+            "string",
+            "null"
+          ],
+          "format": "date-time",
+          "description": "When it lapses, where it does.",
+          "default": null
+        }
+      },
+      "required": [
+        "id",
+        "unit"
+      ],
+      "patternProperties": {
+        "^x_": true
+      },
+      "description": "What an account, a plan or a key still holds to be spent, in the vendor's own unit: not Orch's credits.\n\nAmounts are decimal text (`\"12.50\"`), so that the vendor's precision is kept as it was told."
+    },
+    "BalancePart": {
+      "type": "object",
+      "properties": {
+        "label": {
+          "type": "string",
+          "description": "What the vendor calls the part."
+        },
+        "amount": {
+          "type": "string",
+          "description": "How much it is, as decimal text in the balance's unit."
+        }
+      },
+      "required": [
+        "label",
+        "amount"
+      ],
+      "description": "One part of a balance, where the vendor splits it, such as what was granted and what was topped up."
+    },
+    "Spend": {
+      "type": "object",
+      "properties": {
+        "id": {
+          "type": "string",
+          "description": "The source's name for the row, one of a kind among the rows it tells."
+        },
+        "label": {
+          "type": [
+            "string",
+            "null"
+          ],
+          "description": "What it is called for people, where the source names it.",
+          "default": null
+        },
+        "unit": {
+          "type": "string",
+          "description": "The vendor's unit."
+        },
+        "period": {
+          "$ref": "#/$defs/SpendPeriod",
+          "description": "The period it covers."
+        },
+        "period_minutes": {
+          "type": [
+            "integer",
+            "null"
+          ],
+          "format": "int64",
+          "description": "For a period of its own length, how long it is, in minutes.",
+          "default": null
+        },
+        "used": {
+          "type": [
+            "string",
+            "null"
+          ],
+          "description": "What has been spent in the period.",
+          "default": null
+        },
+        "limit": {
+          "type": [
+            "string",
+            "null"
+          ],
+          "description": "The most that may be spent in it.",
+          "default": null
+        },
+        "remaining": {
+          "type": [
+            "string",
+            "null"
+          ],
+          "description": "What is left of the limit.",
+          "default": null
+        },
+        "resets_at": {
+          "type": [
+            "string",
+            "null"
+          ],
+          "format": "date-time",
+          "description": "When the period starts over.",
+          "default": null
+        }
+      },
+      "required": [
+        "id",
+        "unit",
+        "period"
+      ],
+      "patternProperties": {
+        "^x_": true
+      },
+      "description": "What has been spent over one period, in the vendor's own unit, and the limit of that period where there\nis one. Amounts are decimal text."
+    },
+    "SpendPeriod": {
+      "oneOf": [
+        {
+          "type": "string",
+          "const": "day",
+          "description": "A day, by the vendor's clock."
+        },
+        {
+          "type": "string",
+          "const": "week",
+          "description": "A week, by the vendor's clock."
+        },
+        {
+          "type": "string",
+          "const": "month",
+          "description": "A month, by the vendor's clock."
+        },
+        {
+          "type": "string",
+          "const": "total",
+          "description": "Everything so far."
+        },
+        {
+          "type": "string",
+          "const": "window",
+          "description": "A window of its own length, given as `period_minutes`."
+        }
+      ],
+      "description": "The period a row of spending covers."
+    },
+    "ExtraUsage": {
+      "type": "object",
+      "properties": {
+        "enabled": {
+          "type": "boolean",
+          "description": "Whether extra spending is enabled."
+        },
+        "limit": {
+          "type": [
+            "number",
+            "null"
+          ],
+          "format": "double",
+          "description": "The spending limit, where known."
+        },
+        "used": {
+          "type": [
+            "number",
+            "null"
+          ],
+          "format": "double",
+          "description": "What has been used, where known."
+        },
+        "used_percent": {
+          "type": [
+            "number",
+            "null"
+          ],
+          "format": "double",
+          "description": "How much is used, in percent."
+        },
+        "unit": {
+          "type": [
+            "string",
+            "null"
+          ],
+          "description": "The vendor's currency or unit, where supplied."
+        },
+        "decimal_places": {
+          "type": [
+            "integer",
+            "null"
+          ],
+          "format": "uint32",
+          "minimum": 0,
+          "description": "The scale the vendor uses for its amounts."
+        },
+        "disabled_reason": {
+          "type": [
+            "string",
+            "null"
+          ],
+          "description": "Why it is disabled, when the vendor says."
+        },
+        "limit_reached": {
+          "type": [
+            "boolean",
+            "null"
+          ],
+          "description": "Whether its spending limit is reached."
+        }
+      },
+      "required": [
+        "enabled"
+      ],
+      "description": "Spending beyond a subscription's included plan, in the vendor's unit."
+    },
+    "AvailableResets": {
+      "type": "object",
+      "properties": {
+        "available_count": {
+          "type": "integer",
+          "format": "int64",
+          "description": "The count, which may be greater than the detail list's length."
+        },
+        "credits": {
+          "type": [
+            "array",
+            "null"
+          ],
+          "items": {
+            "$ref": "#/$defs/ResetCredit"
+          },
+          "description": "Null means only the count is known; an empty list means no details were returned."
+        }
+      },
+      "required": [
+        "available_count"
+      ],
+      "description": "How many resets are available and the detail rows the vendor supplied."
+    },
+    "ResetCredit": {
+      "type": "object",
+      "properties": {
+        "id": {
+          "type": "string",
+          "description": "The vendor's opaque identifier."
+        },
+        "title": {
+          "type": [
+            "string",
+            "null"
+          ],
+          "description": "The vendor's title, where supplied."
+        },
+        "description": {
+          "type": [
+            "string",
+            "null"
+          ],
+          "description": "What the vendor says the reset begins anew."
+        },
+        "reset_type": {
+          "type": "string",
+          "description": "The type of reset, in the vendor's vocabulary."
+        },
+        "status": {
+          "type": "string",
+          "description": "Whether the vendor says it is available, redeeming, redeemed or unknown."
+        },
+        "granted_at": {
+          "type": [
+            "string",
+            "null"
+          ],
+          "format": "date-time",
+          "description": "When it was granted."
+        },
+        "expires_at": {
+          "type": [
+            "string",
+            "null"
+          ],
+          "format": "date-time",
+          "description": "When it lapses, or null when it has no known end."
+        }
+      },
+      "required": [
+        "id",
+        "reset_type",
+        "status"
+      ],
+      "description": "One reset credit as the vendor lists it."
+    }
+  }
+}

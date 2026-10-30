@@ -1,0 +1,35 @@
+{
+  "baseURL": "http://127.0.0.1:41800",
+  "candidate": "review-candidate",
+  "output": ".tmp/captures",
+  "people": {
+    "ada": { "login": "ada", "passwordEnv": "ORCH_CAPTURE_ADA_PASSWORD" },
+    "vera": { "login": "vera", "passwordEnv": "ORCH_CAPTURE_VERA_PASSWORD" },
+    "ben": { "login": "ben", "passwordEnv": "ORCH_CAPTURE_BEN_PASSWORD" }
+  },
+  "locales": ["en"],
+  "targets": {
+    "org": "/org/acme",
+    "department": "/org/acme.research",
+    "personalOrg": "/org/ada",
+    "project": "/project/00000000-0000-4000-8003-000000000002",
+    "topic": "/topic/00000000-0000-4000-8003-000000000003",
+    "thread": "/thread/00000000-0000-4000-8003-000000000004",
+    "document": "/doc/00000000-0000-4000-8007-000000000001",
+    "inspectedThread": "/inspect/thread/00000000-0000-4000-801b-000000000003",
+    "trace": "/trace/00000000-0000-4000-8003-000000000004",
+    "profile": "/u/ada",
+    "provider": "/resources/providers/00000000-0000-4000-8022-000000000001",
+    "agent": "/resources/agents/00000000-0000-4000-8023-000000000001",
+    "environment": "/resources/environments/00000000-0000-4000-8024-000000000001",
+    "host": "/resources/hosts/00000000-0000-4000-8025-000000000002",
+    "template": "/resources/templates/00000000-0000-4000-8026-000000000001",
+    "machine": "/resources/machines/00000000-0000-4000-8021-000000000001",
+    "mcp": "/resources/mcp/0199d1a8-7f3c-7a1e-8b3a-1c2d3e4f5a60",
+    "mount": "/resources/mounts/0199d1a8-7f3c-7a1e-8b3a-1c2d3e4f5a61"
+  },
+  "replacements": {},
+  "routes": {},
+  "dialogs": [],
+  "states": []
+}

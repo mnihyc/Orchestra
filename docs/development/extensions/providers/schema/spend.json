@@ -1,0 +1,110 @@
+{
+  "type": "object",
+  "properties": {
+    "id": {
+      "type": "string",
+      "description": "The source's name for the row, one of a kind among the rows it tells."
+    },
+    "label": {
+      "type": [
+        "string",
+        "null"
+      ],
+      "description": "What it is called for people, where the source names it.",
+      "default": null
+    },
+    "unit": {
+      "type": "string",
+      "description": "The vendor's unit."
+    },
+    "period": {
+      "$ref": "#/$defs/SpendPeriod",
+      "description": "The period it covers."
+    },
+    "period_minutes": {
+      "type": [
+        "integer",
+        "null"
+      ],
+      "format": "int64",
+      "description": "For a period of its own length, how long it is, in minutes.",
+      "default": null
+    },
+    "used": {
+      "type": [
+        "string",
+        "null"
+      ],
+      "description": "What has been spent in the period.",
+      "default": null
+    },
+    "limit": {
+      "type": [
+        "string",
+        "null"
+      ],
+      "description": "The most that may be spent in it.",
+      "default": null
+    },
+    "remaining": {
+      "type": [
+        "string",
+        "null"
+      ],
+      "description": "What is left of the limit.",
+      "default": null
+    },
+    "resets_at": {
+      "type": [
+        "string",
+        "null"
+      ],
+      "format": "date-time",
+      "description": "When the period starts over.",
+      "default": null
+    }
+  },
+  "required": [
+    "id",
+    "unit",
+    "period"
+  ],
+  "patternProperties": {
+    "^x_": true
+  },
+  "description": "What has been spent over one period, in the vendor's own unit, and the limit of that period where there\nis one. Amounts are decimal text.",
+  "title": "Spend",
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$defs": {
+    "SpendPeriod": {
+      "oneOf": [
+        {
+          "type": "string",
+          "const": "day",
+          "description": "A day, by the vendor's clock."
+        },
+        {
+          "type": "string",
+          "const": "week",
+          "description": "A week, by the vendor's clock."
+        },
+        {
+          "type": "string",
+          "const": "month",
+          "description": "A month, by the vendor's clock."
+        },
+        {
+          "type": "string",
+          "const": "total",
+          "description": "Everything so far."
+        },
+        {
+          "type": "string",
+          "const": "window",
+          "description": "A window of its own length, given as `period_minutes`."
+        }
+      ],
+      "description": "The period a row of spending covers."
+    }
+  }
+}

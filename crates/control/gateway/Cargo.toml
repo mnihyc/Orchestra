@@ -1,0 +1,57 @@
+[package]
+name = "orch-gateway-core"
+description = "Stateless machine gateway and tunnel relay."
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+rust-version.workspace = true
+repository.workspace = true
+publish.workspace = true
+
+[dependencies]
+async-trait.workspace = true
+base64.workspace = true
+bytes.workspace = true
+futures.workspace = true
+http.workspace = true
+metrics.workspace = true
+http-body-util.workspace = true
+hyper.workspace = true
+hyper-util.workspace = true
+orch-config.workspace = true
+orch-link.workspace = true
+orch-link-contract.workspace = true
+orch-pki.workspace = true
+orch-types.workspace = true
+orch-telemetry.workspace = true
+rustls.workspace = true
+serde_json.workspace = true
+thiserror.workspace = true
+tokio.workspace = true
+tokio-rustls.workspace = true
+tokio-tungstenite.workspace = true
+tokio-util.workspace = true
+tracing.workspace = true
+url.workspace = true
+
+[dev-dependencies]
+orch-access-contract.workspace = true
+orch-api-contract.workspace = true
+orch-connector-core.workspace = true
+orch-envhost.workspace = true
+orch-plugin-contract.workspace = true
+axum.workspace = true
+base64.workspace = true
+chrono.workspace = true
+hex.workspace = true
+orch-api-core.workspace = true
+orch-build-info.workspace = true
+orch-db.workspace = true
+orch-testkit.workspace = true
+rand.workspace = true
+serde_json.workspace = true
+sqlx.workspace = true
+tempfile.workspace = true
+
+[lints]
+workspace = true

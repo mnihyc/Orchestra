@@ -1,0 +1,122 @@
+/* Shared choices retain their own roles: list rows, raised segments, form radios and switches. */
+.choice-option {
+  border: 1px solid transparent;
+  background: transparent;
+}
+
+.choice-option[data-highlighted],
+[role='listbox'] .choice-option[aria-selected='true'],
+.choice-option[aria-pressed='true'] {
+  background: var(--bg-muted);
+  color: var(--text);
+}
+
+/* A menu marks its chosen value with its check, and shades only the current pointer/key row. */
+[role='menu'] .choice-option {
+  border-color: transparent;
+  background: transparent;
+  color: inherit;
+}
+[role='menu'] .choice-option[data-highlighted] {
+  background: var(--bg-muted);
+}
+
+/* The selected segment is a raised neutral surface; primary actions keep the accent fill. */
+[data-segmented] .choice-option {
+  border: 0;
+  background: transparent;
+  color: var(--text-muted);
+}
+[data-segmented] .choice-option[data-state='checked'] {
+  background: var(--segment-selected);
+  color: var(--text);
+  box-shadow: var(--shadow-sm);
+}
+[data-segmented] .choice-option[data-state='checked'] [data-choice-name] {
+  font-weight: var(--font-weight-semibold);
+}
+
+.choice-radio {
+  border-color: var(--control-border);
+}
+.choice-radio[data-state='checked'] {
+  border-color: var(--accent);
+  background: var(--accent-subtle);
+}
+.choice-toggle {
+  border: 1px solid var(--control-border);
+  background: var(--surface);
+}
+.choice-toggle:is([data-state='checked'], [data-state='indeterminate']) {
+  border-color: var(--control-selected);
+  background: var(--control-selected);
+  color: var(--control-on-selected);
+}
+
+.choice-option:focus-visible,
+.choice-radio:focus-visible,
+.choice-toggle:focus-visible,
+.choice-switch:focus-visible {
+  outline: 2px solid var(--focus);
+  outline-offset: 2px;
+}
+.choice-option:disabled,
+.choice-radio:disabled,
+.choice-toggle:disabled,
+.choice-switch:is(:disabled, [aria-disabled='true']) {
+  cursor: not-allowed;
+  opacity: 0.65;
+}
+
+.choice-switch {
+  background: var(--control-border);
+}
+.choice-switch[data-state='checked'] {
+  background: var(--switch-on);
+}
+.choice-switch [data-choice-thumb] {
+  background: var(--text-on-accent);
+}
+
+/* Keep an avatar's sample intact; its selection ring lies outside the sample. */
+.swatch-option {
+  border: 2px solid transparent;
+  background: transparent;
+}
+.swatch-option[data-state='checked'] {
+  border-color: var(--control-selected);
+}
+.swatch-option:focus-visible {
+  outline: 2px solid var(--focus);
+  outline-offset: 2px;
+}
+
+@media (forced-colors: active) {
+  .choice-radio,
+  .choice-toggle,
+  .choice-switch,
+  .swatch-option[data-state='checked'] {
+    border-color: ButtonText;
+  }
+  [data-segmented] .choice-option[data-state='checked'],
+  .choice-radio[data-state='checked'],
+  .choice-toggle:is([data-state='checked'], [data-state='indeterminate']),
+  .choice-switch[data-state='checked'] {
+    forced-color-adjust: none;
+    background: Highlight;
+    color: HighlightText;
+  }
+  [data-segmented] .choice-option[data-state='checked'] {
+    text-decoration: underline;
+  }
+  .choice-switch:not([data-state='checked']) {
+    forced-color-adjust: none;
+    background: ButtonFace;
+  }
+  .choice-switch:not([data-state='checked']) [data-choice-thumb] {
+    background: ButtonText;
+  }
+  .choice-switch[data-state='checked'] [data-choice-thumb] {
+    background: HighlightText;
+  }
+}

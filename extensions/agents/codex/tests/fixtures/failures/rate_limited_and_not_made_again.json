@@ -1,0 +1,18 @@
+{
+ "harness": "codex",
+ "version": "0.162.1",
+ "recorded": "2026-10-12",
+ "fault": "error rate_limit retry-after=none",
+ "setup": "provider of the forwarded path (model_providers entry, token in ORCH_LLM_TOKEN)",
+ "requests": 1,
+ "exit": 0,
+ "stderr": [],
+ "frames": [
+  {"method":"turn/started","params":{"threadId":"01a12f90-7a93-7441-975e-760cb56e6325","turn":{"id":"01a12f90-7b14-7950-820f-ab38436cd975","rootTurnId":"01a12f90-7b14-7950-820f-ab38436cd975","items":[],"itemsView":"notLoaded","status":"inProgress","error":null,"startedAt":1791799360,"completedAt":null,"durationMs":null}},"emittedAtMs":1791799360459},
+  {"method":"item/started","params":{"item":{"type":"userMessage","id":"01a12f90-7bf7-7a32-a66b-3b376b67f434","clientId":null,"content":[{"type":"text","text":"hello\n#!mock\nerror rate_limit retry-after=none\n","text_elements":[]}]},"threadId":"01a12f90-7a93-7441-975e-760cb56e6325","turnId":"01a12f90-7b14-7950-820f-ab38436cd975","startedAtMs":1791799360509},"emittedAtMs":1791799360510},
+  {"method":"item/completed","params":{"item":{"type":"userMessage","id":"01a12f90-7bf7-7a32-a66b-3b376b67f434","clientId":null,"content":[{"type":"text","text":"hello\n#!mock\nerror rate_limit retry-after=none\n","text_elements":[]}]},"threadId":"01a12f90-7a93-7441-975e-760cb56e6325","turnId":"01a12f90-7b14-7950-820f-ab38436cd975","completedAtMs":1791799360510},"emittedAtMs":1791799360519},
+  {"method":"error","params":{"error":{"message":"exceeded retry limit, last status: 429 Too Many Requests","codexErrorInfo":{"responseTooManyFailedAttempts":{"httpStatusCode":429}},"additionalDetails":null,"misalignment":null},"willRetry":false,"threadId":"01a12f90-7a93-7441-975e-760cb56e6325","turnId":"01a12f90-7b14-7950-820f-ab38436cd975"},"emittedAtMs":1791799360652},
+  {"method":"turn/completed","params":{"threadId":"01a12f90-7a93-7441-975e-760cb56e6325","turn":{"id":"01a12f90-7b14-7950-820f-ab38436cd975","rootTurnId":"01a12f90-7b14-7950-820f-ab38436cd975","items":[],"itemsView":"notLoaded","status":"failed","error":{"message":"exceeded retry limit, last status: 429 Too Many Requests","codexErrorInfo":{"responseTooManyFailedAttempts":{"httpStatusCode":429}},"additionalDetails":null,"misalignment":null},"startedAt":1791799360,"completedAt":1791799360,"durationMs":377}},"emittedAtMs":1791799360662}
+ ],
+ "expect": {"outcome": "failed", "code": "provider_busy", "retryable": true, "incomplete": false, "resets_at": null, "row": "busy", "said_contains": "exceeded retry limit, last status: 429"}
+}

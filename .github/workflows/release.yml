@@ -1,0 +1,180 @@
+name: Release
+
+on:
+  push:
+    tags: ['v*']
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: Existing tag to package
+        required: true
+        type: string
+      publish_images:
+        description: Publish the default image after its terms and release-images environment are approved
+        required: true
+        default: false
+        type: boolean
+
+permissions:
+  contents: read
+
+concurrency:
+  group: release-${{ inputs.tag || github.ref_name }}
+  cancel-in-progress: false
+
+env:
+  RELEASE_TAG: ${{ inputs.tag || github.ref_name }}
+  CARGO_INCREMENTAL: '0'
+  CARGO_BUILD_JOBS: '4'
+
+jobs:
+  gate:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 10
+    outputs:
+      tag: ${{ steps.gate.outputs.tag }}
+      version: ${{ steps.gate.outputs.version }}
+      commit: ${{ steps.gate.outputs.commit }}
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+        with:
+          ref: ${{ inputs.tag || github.ref_name }}
+          fetch-depth: 0
+      - name: Gate the exact tag and commit
+        id: gate
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: python3 .github/scripts/release_gate.py
+      - name: Release helper behavior
+        run: python3 -I -B -m unittest discover -s .github/scripts -p 'test_release_*.py'
+      - name: Lint the workflows in the pinned tooling image
+        run: python3 .github/scripts/workflow_lint.py
+
+  native:
+    needs: gate
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - {os: ubuntu-24.04, target: x86_64-unknown-linux-musl}
+          - {os: ubuntu-24.04-arm, target: aarch64-unknown-linux-musl}
+          - {os: macos-15-intel, target: x86_64-apple-darwin}
+          - {os: macos-15, target: aarch64-apple-darwin}
+          - {os: windows-2022, target: x86_64-pc-windows-msvc}
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 120
+    env:
+      ORCH_RELEASE_VERSION: ${{ needs.gate.outputs.version }}
+      ORCH_RELEASE_TAG: ${{ needs.gate.outputs.tag }}
+      ORCH_BUILD_NUMBER_DIR: ${{ github.workspace }}/.tmp/release-counters
+      CARGO_TARGET_DIR: ${{ github.workspace }}/.tmp/release-target
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+        with:
+          ref: ${{ needs.gate.outputs.commit }}
+      - name: Native tests, connector build and actual version command
+        run: python .github/scripts/release_native.py --target ${{ matrix.target }} --out .tmp/native
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        with:
+          name: native-${{ matrix.target }}
+          path: .tmp/native/*
+          if-no-files-found: error
+          retention-days: 14
+
+  package:
+    needs: [gate, native]
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - {os: ubuntu-24.04, arch: x86_64}
+          - {os: ubuntu-24.04-arm, arch: aarch64}
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 180
+    env:
+      ORCH_RELEASE_VERSION: ${{ needs.gate.outputs.version }}
+      ORCH_RELEASE_TAG: ${{ needs.gate.outputs.tag }}
+      ORCH_BUILD_NUMBER_DIR: ${{ github.workspace }}/.tmp/release-counters
+      CARGO_TARGET_DIR: ${{ github.workspace }}/.tmp/release-target
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+        with:
+          ref: ${{ needs.gate.outputs.commit }}
+      - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4
+        with:
+          pattern: native-*
+          path: .tmp/native-inputs
+      - name: Package and validate all connector downloads
+        run: python3 .github/scripts/release_package.py --inputs .tmp/native-inputs --out .tmp/package
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        with:
+          name: package-${{ matrix.arch }}
+          path: .tmp/package/*
+          if-no-files-found: error
+          retention-days: 14
+
+  images:
+    if: github.event_name == 'workflow_dispatch' && inputs.publish_images
+    needs: [gate, package]
+    environment: release-images
+    permissions:
+      contents: read
+      packages: write
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - {os: ubuntu-24.04, arch: x86_64}
+          - {os: ubuntu-24.04-arm, arch: aarch64}
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 120
+    env:
+      GH_TOKEN: ${{ github.token }}
+      ORCH_RELEASE_VERSION: ${{ needs.gate.outputs.version }}
+      ORCH_RELEASE_TAG: ${{ needs.gate.outputs.tag }}
+      ORCH_BUILD_NUMBER_DIR: ${{ github.workspace }}/.tmp/release-counters
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+        with:
+          ref: ${{ needs.gate.outputs.commit }}
+      - name: Publish approved native image with verified recipe labels
+        run: python3 .github/scripts/release_image.py --arch ${{ matrix.arch }} --out .tmp/image
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        with:
+          name: image-${{ matrix.arch }}
+          path: .tmp/image/*.json
+          if-no-files-found: error
+          retention-days: 14
+
+  draft:
+    if: always() && needs.gate.result == 'success' && needs.package.result == 'success' && (needs.images.result == 'success' || needs.images.result == 'skipped')
+    needs: [gate, package, images]
+    runs-on: ubuntu-24.04
+    timeout-minutes: 30
+    permissions:
+      contents: write
+      packages: write
+    env:
+      GH_TOKEN: ${{ github.token }}
+      ORCH_BUILD_NUMBER_DIR: ${{ github.workspace }}/.tmp/release-counters
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+        with:
+          ref: ${{ needs.gate.outputs.commit }}
+      - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4
+        with:
+          pattern: package-*
+          path: .tmp/packages
+      - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4
+        if: needs.images.result == 'success'
+        with:
+          pattern: image-*
+          path: .tmp/images
+      - name: Assemble both architectures and verify the complete release
+        env:
+          RELEASE_BASE_URL: ${{ github.server_url }}/${{ github.repository }}/releases/download/${{ needs.gate.outputs.tag }}
+        run: python3 .github/scripts/release_assemble.py --inputs .tmp/packages --out .tmp/release --base-url "$RELEASE_BASE_URL"
+      - name: Create the reviewed draft without replacing assets
+        env:
+          PUBLISH_IMAGES: ${{ needs.images.result == 'success' }}
+        run: python3 .github/scripts/release_publish.py --release .tmp/release --repo "$GITHUB_REPOSITORY" --images .tmp/images

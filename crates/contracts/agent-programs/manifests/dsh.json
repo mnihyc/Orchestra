@@ -1,0 +1,88 @@
+{
+  "manifest_version": 1,
+  "kind": "dsh",
+  "names": {
+    "en": "DeepSeek Harness",
+    "zh-CN": "DeepSeek Harness"
+  },
+  "vendor": {
+    "name": "DeepSeek",
+    "licence": "MIT",
+    "home_page": "https://github.com/deepseek-ai/deepseek-harness"
+  },
+  "protocol": "acp",
+  "launch": {
+    "programs": [
+      "deepseek_harness_runtime/runtime/deepseek-harness-sdk-runtime-linux-x64",
+      "dsh"
+    ]
+  },
+  "placement": {
+    "colocated": true,
+    "home": "connector",
+    "needs_binary": true
+  },
+  "builds": {
+    "channels": [
+      {
+        "type": "pypi",
+        "id": "pypi",
+        "project": "deepseek-harness-runtime-bin",
+        "files": [
+          {
+            "arch": "x86_64",
+            "name": "*-manylinux_2_28_x86_64.whl"
+          },
+          {
+            "arch": "aarch64",
+            "name": "*-manylinux_2_28_aarch64.whl"
+          }
+        ],
+        "listed": 20,
+        "prereleases": true
+      }
+    ]
+  },
+  "checks": {
+    "conformance": [
+      {
+        "name": "startup"
+      }
+    ]
+  },
+  "files": {
+    "instruction_files": [
+      {
+        "path": "AGENTS.md",
+        "scope": "workspace"
+      },
+      {
+        "path": "CLAUDE.md",
+        "scope": "workspace"
+      }
+    ]
+  },
+  "privacy": [
+    {
+      "name": "telemetry",
+      "how": {
+        "en": "Telemetry is switched off in the environment Orch starts it in.",
+        "zh-CN": "Orch 启动它时的环境变量已关闭遥测。"
+      }
+    },
+    {
+      "name": "uploads",
+      "how": {
+        "en": "The log of the session and the list of plugins that it sends to its vendor with a request are switched off, and Orch's model proxy refuses a request that carries either.",
+        "zh-CN": "它随请求发往厂商的会话日志和插件清单已关闭，Orch 的模型代理也会拒绝带有这两项的请求。"
+      }
+    },
+    {
+      "name": "client_identity",
+      "how": {
+        "en": "The headers that name the client and the person's installation are removed from every model request.",
+        "zh-CN": "每个模型请求中标明客户端和安装的请求头都会被移除。"
+      }
+    }
+  ]
+}

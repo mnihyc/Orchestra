@@ -1,0 +1,34 @@
+{
+  "kind": "orch-exec",
+  "title": { "en": "Orch tools", "zh-CN": "Orch 工具" },
+  "wire": "mcp",
+  "build": "*",
+  "tool_sets": [
+    {
+      "name": "claude-code",
+      "title": { "en": "Claude Code tools", "zh-CN": "Claude Code 工具" },
+      "summary": {
+        "en": "Tools with the names and inputs of Claude Code's own shell and file tools.",
+        "zh-CN": "名称和输入与 Claude Code 自带的命令行和文件工具相同的工具。"
+      }
+    },
+    {
+      "name": "plain",
+      "title": { "en": "Basic tools", "zh-CN": "基本工具" },
+      "summary": {
+        "en": "Eight plain tools for any agent program and any model.",
+        "zh-CN": "适用于任何代理程序和任何模型的八个基本工具。"
+      }
+    },
+    {
+      "name": "custom",
+      "title": { "en": "Custom tools", "zh-CN": "自定义工具" },
+      "summary": {
+        "en": "No tools of its own: the agent acts through the environment's MCP servers.",
+        "zh-CN": "没有自带工具：代理通过环境的 MCP 服务器工作。"
+      }
+    }
+  ],
+  "sandbox_modes": ["open"],
+  "attribution": { "thread_id": "ORCH_THREAD_ID", "tool_call_id": "ORCH_ITEM_ID" }
+}

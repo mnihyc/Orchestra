@@ -1,0 +1,334 @@
+{
+  "type": "object",
+  "properties": {
+    "name": {
+      "type": "string",
+      "description": "Its name: one of a kind among the programs of a machine, and among the built-in sources."
+    },
+    "title": {
+      "type": "string",
+      "description": "What it is called."
+    },
+    "summary": {
+      "type": "string",
+      "description": "What it is, in one sentence."
+    },
+    "contract": {
+      "type": "integer",
+      "format": "uint32",
+      "minimum": 0,
+      "description": "The version of this contract it speaks."
+    },
+    "facts": {
+      "anyOf": [
+        {
+          "$ref": "#/$defs/SourceDescriptorFacts"
+        },
+        {
+          "type": "null"
+        }
+      ],
+      "description": "What it tells of the facts; `null` when it implements no facts.",
+      "default": null
+    },
+    "models": {
+      "anyOf": [
+        {
+          "$ref": "#/$defs/SourceDescriptorModels"
+        },
+        {
+          "type": "null"
+        }
+      ],
+      "description": "`null` when it lists no models.",
+      "default": null
+    },
+    "presents": {
+      "anyOf": [
+        {
+          "$ref": "#/$defs/SourceDescriptorPresents"
+        },
+        {
+          "type": "null"
+        }
+      ],
+      "description": "`null` when it presents no credential.",
+      "default": null
+    },
+    "fields": {
+      "type": "array",
+      "items": {
+        "$ref": "#/$defs/Field"
+      },
+      "description": "What it asks of a provider's managers. A secret field is kept as the provider secret\n`source:<element>:field:<name>`, written once and never shown again.",
+      "default": []
+    },
+    "docs_url": {
+      "type": [
+        "string",
+        "null"
+      ],
+      "description": "Where its own documentation is.",
+      "default": null
+    }
+  },
+  "required": [
+    "name",
+    "title",
+    "summary",
+    "contract"
+  ],
+  "patternProperties": {
+    "^x_": true
+  },
+  "description": "What a source declares: what it is, which of the interfaces it implements, and what it asks of a\nprovider's managers.",
+  "title": "SourceDescriptor",
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$defs": {
+    "SourceDescriptorFacts": {
+      "type": "object",
+      "properties": {
+        "reports": {
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/FactMember"
+          },
+          "description": "The members it can tell. A member it does not list is unsupported until it tells it; a name this\ncontract does not know is left out.",
+          "default": []
+        },
+        "spends_resets": {
+          "type": "boolean",
+          "description": "Whether it spends the resets it lists in `available_resets` (`resets.spend`).",
+          "default": false
+        },
+        "credential": {
+          "$ref": "#/$defs/SourceCredential",
+          "description": "Whether it wants the provider's key to read.",
+          "default": "none"
+        },
+        "min_interval_secs": {
+          "type": [
+            "integer",
+            "null"
+          ],
+          "format": "uint32",
+          "minimum": 0,
+          "description": "The least time between two of its reads, in seconds, at least 60; `null` leaves it to Orch.",
+          "default": null
+        },
+        "plans": {
+          "type": "object",
+          "additionalProperties": {
+            "type": "string"
+          },
+          "description": "The plans it may name in `plan`, by id, with the name to show for each.",
+          "default": {}
+        }
+      },
+      "description": "What a source tells of a provider's facts."
+    },
+    "FactMember": {
+      "oneOf": [
+        {
+          "type": "string",
+          "const": "plan",
+          "description": "The plan's id."
+        },
+        {
+          "type": "string",
+          "const": "windows",
+          "description": "The usage windows of the plan."
+        },
+        {
+          "type": "string",
+          "const": "limit_reached",
+          "description": "A limit that has been reached."
+        },
+        {
+          "type": "string",
+          "const": "ordinary_usage_allowed",
+          "description": "Whether the vendor admits ordinary use now."
+        },
+        {
+          "type": "string",
+          "const": "balances",
+          "description": "What is left to be spent."
+        },
+        {
+          "type": "string",
+          "const": "spend",
+          "description": "What has been spent, over periods."
+        },
+        {
+          "type": "string",
+          "const": "extra_usage",
+          "description": "Spending beyond the plan."
+        },
+        {
+          "type": "string",
+          "const": "available_resets",
+          "description": "Resets that can be spent."
+        },
+        {
+          "type": "string",
+          "const": "identity",
+          "description": "Who the credential belongs to."
+        },
+        {
+          "type": "string",
+          "const": "credential",
+          "description": "How the credential was given and when it lapses."
+        },
+        {
+          "type": "string",
+          "const": "credential_verified",
+          "description": "Whether this read authenticated with the provider's credential."
+        }
+      ],
+      "description": "A member of [`ProviderFacts`] that a source can tell, as its descriptor lists it and `facts_state`\nanswers it."
+    },
+    "SourceCredential": {
+      "oneOf": [
+        {
+          "type": "string",
+          "const": "none",
+          "description": "It reads without the key."
+        },
+        {
+          "type": "string",
+          "const": "key",
+          "description": "It wants the provider's key; it is given only where the provider's credential is a key (and, for an\naddress, only where the provider's managers turned that on for it)."
+        }
+      ],
+      "description": "Whether a source wants the provider's key to read its facts."
+    },
+    "SourceDescriptorModels": {
+      "type": "object",
+      "description": "What a source declares of the models it lists. It has no members yet: that it is there says that the\nsource implements `models.list`."
+    },
+    "SourceDescriptorPresents": {
+      "type": "object",
+      "description": "What a source declares of the key presentation it makes. It has no members yet: that it is there says\nthat the source implements `credential.present`."
+    },
+    "Field": {
+      "type": "object",
+      "properties": {
+        "name": {
+          "type": "string",
+          "description": "The member the answer is given under."
+        },
+        "label": {
+          "type": "string",
+          "description": "What the person reads beside it."
+        },
+        "type": {
+          "$ref": "#/$defs/FieldType",
+          "description": "The kind of value."
+        },
+        "required": {
+          "type": "boolean",
+          "description": "Whether an answer must be given."
+        },
+        "help": {
+          "type": [
+            "string",
+            "null"
+          ],
+          "description": "A sentence of help."
+        },
+        "choices": {
+          "type": [
+            "array",
+            "null"
+          ],
+          "items": {
+            "$ref": "#/$defs/Choice"
+          },
+          "description": "The choices, for a choice."
+        },
+        "default": {
+          "description": "What stands in the form before the person writes."
+        },
+        "max_bytes": {
+          "type": [
+            "integer",
+            "null"
+          ],
+          "format": "uint64",
+          "minimum": 0,
+          "description": "The most bytes an answer may have."
+        }
+      },
+      "required": [
+        "name",
+        "label",
+        "type",
+        "required"
+      ],
+      "description": "One thing a person is asked for."
+    },
+    "FieldType": {
+      "oneOf": [
+        {
+          "type": "string",
+          "const": "text",
+          "description": "One line of text."
+        },
+        {
+          "type": "string",
+          "const": "secret",
+          "description": "One line that is never shown again."
+        },
+        {
+          "type": "string",
+          "const": "secret_text",
+          "description": "Several lines that are never shown again, such as a key file."
+        },
+        {
+          "type": "string",
+          "const": "choice",
+          "description": "One of the field's choices."
+        },
+        {
+          "type": "string",
+          "const": "boolean",
+          "description": "Yes or no."
+        },
+        {
+          "type": "string",
+          "const": "date",
+          "description": "A calendar day, `YYYY-MM-DD`."
+        },
+        {
+          "type": "string",
+          "const": "map",
+          "description": "Names with values."
+        },
+        {
+          "type": "string",
+          "const": "secret_map",
+          "description": "Names with values that are never shown again."
+        }
+      ],
+      "description": "What kind of value a field takes."
+    },
+    "Choice": {
+      "type": "object",
+      "properties": {
+        "value": {
+          "type": "string",
+          "description": "What is stored."
+        },
+        "label": {
+          "type": "string",
+          "description": "What is shown."
+        }
+      },
+      "required": [
+        "value",
+        "label"
+      ],
+      "description": "One choice of a [`FieldType::Choice`] field."
+    }
+  }
+}

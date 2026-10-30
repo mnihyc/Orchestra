@@ -1,0 +1,62 @@
+{
+  "oneOf": [
+    {
+      "type": "string",
+      "const": "plan",
+      "description": "The plan's id."
+    },
+    {
+      "type": "string",
+      "const": "windows",
+      "description": "The usage windows of the plan."
+    },
+    {
+      "type": "string",
+      "const": "limit_reached",
+      "description": "A limit that has been reached."
+    },
+    {
+      "type": "string",
+      "const": "ordinary_usage_allowed",
+      "description": "Whether the vendor admits ordinary use now."
+    },
+    {
+      "type": "string",
+      "const": "balances",
+      "description": "What is left to be spent."
+    },
+    {
+      "type": "string",
+      "const": "spend",
+      "description": "What has been spent, over periods."
+    },
+    {
+      "type": "string",
+      "const": "extra_usage",
+      "description": "Spending beyond the plan."
+    },
+    {
+      "type": "string",
+      "const": "available_resets",
+      "description": "Resets that can be spent."
+    },
+    {
+      "type": "string",
+      "const": "identity",
+      "description": "Who the credential belongs to."
+    },
+    {
+      "type": "string",
+      "const": "credential",
+      "description": "How the credential was given and when it lapses."
+    },
+    {
+      "type": "string",
+      "const": "credential_verified",
+      "description": "Whether this read authenticated with the provider's credential."
+    }
+  ],
+  "description": "A member of [`ProviderFacts`] that a source can tell, as its descriptor lists it and `facts_state`\nanswers it.",
+  "title": "FactMember",
+  "$schema": "https://json-schema.org/draft/2020-12/schema"
+}

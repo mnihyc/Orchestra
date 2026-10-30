@@ -1,0 +1,175 @@
+# The deployment's settings, read by every service when it starts. What people
+# change while they use the product (who may register, limits, channels, rates)
+# is kept in the database, not here. Secrets are files of their own under
+# config/secrets/. A key that is left out takes the default that ships, a key
+# nobody defined stops the service that reads it, and any key can be replaced
+# by an environment variable ORCH_<SECTION>_<KEY> (ORCH_API_DB_POOL).
+#
+# The database's address is not here: the services are given it as
+# ORCH_DATABASE_URL, so that the password is in no file.
+
+version = 1
+
+[system]
+name = "Orch"
+# The address people open in a browser, as the HTTPS edge in front of the stack
+# serves it. It is used in links and in mail, and the node fetches the connector
+# it puts in a managed environment from it, so the containers of this host have to
+# reach it. Change it before the first start.
+public_url = "https://orch.example.com"
+
+[release]
+# The updater and read-only checks share this base address; ORCH_RELEASE_URL overrides it.
+# Scheduled notices ship off (release.check_days = 0). Management reads the hourly cache. No check installs anything.
+# url = "https://releases.example.com/orch/releases" # defaults to this repository's GitHub releases
+request_timeout_secs = 10
+manifest_max_bytes = 1048576
+
+[api]
+# TLS under the system's own authority; reached only through the web edge.
+bind = "0.0.0.0:8443"
+# Mutual TLS: the gateways' backplane and certificate renewal.
+internal_bind = "0.0.0.0:8444"
+# Plain HTTP, on the stack's own network only.
+metrics_bind = "0.0.0.0:9100"
+db_pool = 32
+# The API has no published port: everything that reaches it is the web edge,
+# which says who the browser was.
+trusted_proxy_cidrs = [] # Compose supplies its control network; add operator edge/CDN ranges there.
+
+[gateway]
+# Machines that present client certificates. This is the published port.
+pinned_bind = "[::]:9443"
+# Machines that come through the HTTPS edge, behind the web edge; TLS under the
+# system's own authority.
+edge_bind = "0.0.0.0:9444"
+metrics_bind = "0.0.0.0:9101"
+backplane_url = "wss://api:8444/internal/backplane"
+gateway_id = "compose-gateway"
+# What runtimes made by this system's node are told to connect to. The node adds
+# a host entry for gateway.orch.internal that reaches the Docker host, where the
+# pinned port is published.
+managed_endpoint = "wss://gateway.orch.internal:9443"
+
+# The addresses advertised to connected machines, in order of preference. A
+# deployment may list only pinned ones, only public ones, or both. `pinned`
+# endpoints are reached under the system's authority with a client certificate;
+# `public` ones go through the HTTPS edge and are checked by the roots every
+# device trusts. Add /link on the people's address here to advertise that door.
+[[gateway.endpoints]]
+url = "wss://gateway.example.com:9443"
+trust = "pinned"
+
+[link]
+heartbeat_secs = 20
+dead_after_secs = 60
+max_frame_bytes = 262144
+tunnel_window_bytes = 1048576
+tunnel_resume_grace_secs = 60
+tunnel_replay_buffer_bytes = 8388608
+port_connections_max = 64                    # parallel assets/colleagues, bounded per environment
+port_waiting_max = 16                        # a short burst waiting for the ordinary ten-second open result
+port_buffer_bytes = 262144                   # quarter MiB per TCP direction; at most 32 MiB replay
+port_udp_idle_secs = 60                      # ends a still sender while supporting ordinary bursts
+port_udp_senders_max = 128                   # bounds inside sockets per environment
+port_udp_datagram_bytes = 4000               # fits the 4 KiB adaptive frame floor with its header
+port_udp_buffer_bytes = 262144               # a short burst, dropped rather than holding TCP back
+port_recent_connections = 128                # bounded ended rows per opening or own-use target
+port_recent_total = 2048                     # sixteen groups of 128; bounds many audiences/targets
+port_recent_secs = 900                       # fifteen-minute debugging loop, memory only
+port_caller_totals = 128                     # bounded caller groups; overflow is Other
+
+[worker]
+metrics_bind = "0.0.0.0:9102"
+db_pool = 8
+
+[database]
+migrations_dir = "/opt/orch/migrations"
+# Warn with statement text/placeholders, never bound values; successful slow pool acquisitions too.
+slow_statement_ms = 1000
+slow_acquire_ms = 1000
+
+[storage]
+# blobs/, uploads/ and tmp/ below it: runtime/data on the host.
+# Turn-file recording and restore use this store automatically; no separate blob service is needed.
+# Keep this persistent, together with each connector's data and each environment's home.
+root = "/var/lib/orch"
+
+[auth]
+access_token_ttl_secs = 900
+session_ttl_days = 30
+password_min_length = 10
+# Wrong tries of one proof at one name, whatever address they come from, in any
+# three hours; then that proof is refused there until the oldest is that old.
+login_failure_limit = 8
+login_failure_window_secs = 10800
+# Wrong tries from one address, whatever the names, in fifteen minutes.
+address_failure_limit = 30
+address_failure_window_secs = 900
+# How long a mailed sign-in code lives, and how many may be mailed to one name
+# in the same three hours.
+email_code_ttl_secs = 600
+email_code_send_limit = 5
+# How long a browser stays known after its person last got in from it.
+known_device_days = 90
+
+[pki]
+leaf_validity_days = 365
+expired_renew_grace_days = 90
+# The names the services' certificates are good for: the services of the
+# stack, and the name managed runtimes reach the gateway by.
+service_dns_names = ["api", "gateway", "worker", "gateway.orch.internal"]
+
+# The bundled node.
+# Legacy driver/port/storage/hook declarations are imported once into its machine policy.
+# Inspect with `orch-node policy show`; change hooks with `orch-node policy set hooks '{...}'`.
+[node]
+# Registry lookups are opt-in; zero keeps a disconnected host quiet.
+image_check_hours = 0
+# In the stack this is replaced by ORCH_NODE_DATA_DIR in compose.yml: the node
+# keeps its state in a directory that the Docker host can also see.
+data_dir = "/var/lib/orch-node"
+gateway_url = "wss://gateway:9443"
+# Only the Docker driver runs in a container. The host driver is for a node
+# installed on a host directly.
+drivers = ["docker"]
+# How long a new runtime's connector has to enroll before its creation fails.
+enroll_timeout_secs = 120
+
+[node.docker]
+socket = "/var/run/docker.sock"
+# What gateway.orch.internal resolves to inside the runtimes the node makes.
+gateway_host = "host-gateway"
+# Whether this host builds images from Dockerfiles.
+builds = true
+# The size, in GB, of the file that holds the data of Docker running inside an environment (a sparse file: it takes the
+# room its contents take, and this is how far they may grow).
+# docker_inside_gb = 100
+# The name servers of an open environment under a runtime that has a kernel of its own, in place of the host's own.
+# resolvers = ["10.0.0.53"]
+
+# A runtime that holds an environment in more than the host's shared kernel is declared here, because Docker cannot
+# tell what a runtime is; one that is not declared counts as sharing the host's kernel. The optional scripts under
+# deploy/hosts/runtimes set a host up for these, and docs/operator/recommended-host-setups.md says which suits which use.
+#
+# [node.docker.runtimes.runsc]
+# boundary = "user_space_kernel"   # none, shared_kernel, user_space_kernel or own_kernel
+# keeps_software_on_stop = true    # true when runsc is registered with --overlay2=none, as gvisor.sh does
+#
+# [node.docker.runtimes.kata]
+# boundary = "own_kernel"
+
+# An external implementation of an extension point is registered like this; it
+# is started by the service that hosts its kind (drivers by the node, summarizers
+# by the API, notifiers by the worker).
+#
+# [[plugin]]
+# kind = "driver"
+# name = "firecracker"
+# command = ["/opt/orch-plugins/orch-driver-firecracker"]
+# env = { FC_KERNEL = "/var/lib/fc/vmlinux" }
+# restart = "on-failure"
+
+[log]
+# text, or json for a collector.
+format = "text"

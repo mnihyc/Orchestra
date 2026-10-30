@@ -1,0 +1,26 @@
+{
+  "type": "object",
+  "properties": {
+    "contract": {
+      "type": "integer",
+      "format": "uint32",
+      "minimum": 0,
+      "description": "The version of the contract the request is written in."
+    },
+    "method": {
+      "type": "string",
+      "description": "The method ([`wire`])."
+    },
+    "params": {
+      "description": "Its parameters: `{}` for `describe`, a `SourceAsk` (with `reset_id` and `idempotency_key` for\n`resets.spend`), or a `PresentAsk`.",
+      "default": null
+    }
+  },
+  "required": [
+    "contract",
+    "method"
+  ],
+  "description": "The body of a request to an address.",
+  "title": "AddressRequest",
+  "$schema": "https://json-schema.org/draft/2020-12/schema"
+}

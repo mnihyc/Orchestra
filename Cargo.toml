@@ -1,0 +1,296 @@
+# Executable composition, grouped libraries and contract implementations.
+# docs/development/architecture.md documents ownership and dependency direction.
+[workspace]
+resolver = "3"
+members = [
+    "apps/api",
+    "apps/connector",
+    "apps/ctl",
+    "apps/gateway",
+    "apps/node",
+    "apps/worker",
+    "crates/contracts/access",
+    "crates/contracts/agent",
+    "crates/contracts/agent-programs",
+    "crates/contracts/api",
+    "crates/contracts/blob",
+    "crates/contracts/driver",
+    "crates/contracts/executor",
+    "crates/contracts/identity",
+    "crates/contracts/link",
+    "crates/contracts/model",
+    "crates/contracts/notifier",
+    "crates/contracts/plugin",
+    "crates/contracts/provider",
+    "crates/contracts/realtime",
+    "crates/contracts/settings",
+    "crates/contracts/summarizer",
+    "crates/control/api",
+    "crates/control/authz",
+    "crates/control/chat",
+    "crates/control/db",
+    "crates/control/documents",
+    "crates/control/engine",
+    "crates/control/gateway",
+    "crates/control/settings",
+    "crates/control/worker",
+    "crates/foundation/build-info",
+    "crates/foundation/types",
+    "crates/platform/config",
+    "crates/platform/conformance",
+    "crates/platform/link",
+    "crates/platform/pki",
+    "crates/platform/plugin",
+    "crates/platform/telemetry",
+    "crates/runtime/connector",
+    "crates/runtime/envhost",
+    "crates/runtime/node",
+    "crates/tooling/build-support",
+    "crates/tooling/stress",
+    "crates/tooling/testkit",
+    "crates/tooling/xtask",
+    "extensions/agents/acp",
+    "extensions/agents/claude-code",
+    "extensions/agents/codex",
+    "extensions/agents/fake",
+    "extensions/blobs/local",
+    "extensions/drivers/docker",
+    "extensions/drivers/host",
+    "extensions/drivers/kubernetes",
+    "extensions/executors/codex",
+    "extensions/executors/orch",
+    "extensions/identity/oidc",
+    "extensions/notifiers/email",
+    "extensions/notifiers/push",
+    "extensions/notifiers/telegram",
+    "extensions/notifiers/webhook",
+    "extensions/protocols/anthropic-messages",
+    "extensions/protocols/openai-responses",
+    "extensions/providers/deepseek",
+    "extensions/providers/openrouter",
+    "extensions/summarizers/model",
+]
+
+[workspace.package]
+version = "0.1.0"
+edition = "2024"
+license = "Apache-2.0"
+rust-version = "1.97.0"
+repository = "https://github.com/mnihyc/Orchestra"
+publish = false
+
+[workspace.dependencies]
+# Workspace crates.
+orch-access-contract = { path = "crates/contracts/access" }
+orch-adapter-acp = { path = "extensions/agents/acp" }
+orch-adapter-claude-code = { path = "extensions/agents/claude-code" }
+orch-adapter-codex = { path = "extensions/agents/codex" }
+orch-adapter-fake = { path = "extensions/agents/fake" }
+orch-agent-contract = { path = "crates/contracts/agent" }
+orch-agent-programs = { path = "crates/contracts/agent-programs" }
+orch-api = { path = "apps/api" }
+orch-api-contract = { path = "crates/contracts/api" }
+orch-api-core = { path = "crates/control/api" }
+orch-authz = { path = "crates/control/authz" }
+orch-blob-contract = { path = "crates/contracts/blob" }
+orch-blob-local = { path = "extensions/blobs/local" }
+orch-build-info = { path = "crates/foundation/build-info" }
+orch-build-support = { path = "crates/tooling/build-support" }
+orch-chat = { path = "crates/control/chat" }
+orch-config = { path = "crates/platform/config" }
+orch-conformance = { path = "crates/platform/conformance" }
+orch-connector = { path = "apps/connector" }
+orch-connector-core = { path = "crates/runtime/connector" }
+orch-db = { path = "crates/control/db" }
+orch-documents = { path = "crates/control/documents" }
+orch-driver-contract = { path = "crates/contracts/driver" }
+orch-driver-docker = { path = "extensions/drivers/docker" }
+orch-driver-host = { path = "extensions/drivers/host" }
+orch-driver-kubernetes = { path = "extensions/drivers/kubernetes" }
+orch-engine = { path = "crates/control/engine" }
+orch-envhost = { path = "crates/runtime/envhost" }
+orch-executor-codex = { path = "extensions/executors/codex" }
+orch-executor-contract = { path = "crates/contracts/executor" }
+orch-executor-orch = { path = "extensions/executors/orch" }
+orch-gateway = { path = "apps/gateway" }
+orch-gateway-core = { path = "crates/control/gateway" }
+orch-identity-contract = { path = "crates/contracts/identity" }
+orch-identity-oidc = { path = "extensions/identity/oidc" }
+orch-link = { path = "crates/platform/link" }
+orch-link-contract = { path = "crates/contracts/link" }
+orch-model-contract = { path = "crates/contracts/model" }
+orch-node = { path = "apps/node" }
+orch-node-core = { path = "crates/runtime/node" }
+orch-notifier-contract = { path = "crates/contracts/notifier" }
+orch-notifier-email = { path = "extensions/notifiers/email" }
+orch-notifier-push = { path = "extensions/notifiers/push" }
+orch-notifier-telegram = { path = "extensions/notifiers/telegram" }
+orch-notifier-webhook = { path = "extensions/notifiers/webhook" }
+orch-pki = { path = "crates/platform/pki" }
+orch-plugin = { path = "crates/platform/plugin" }
+orch-plugin-contract = { path = "crates/contracts/plugin" }
+orch-provider-contract = { path = "crates/contracts/provider" }
+orch-protocol-anthropic-messages = { path = "extensions/protocols/anthropic-messages" }
+orch-protocol-openai-responses = { path = "extensions/protocols/openai-responses" }
+orch-provider-deepseek = { path = "extensions/providers/deepseek" }
+orch-provider-openrouter = { path = "extensions/providers/openrouter" }
+orch-realtime-contract = { path = "crates/contracts/realtime" }
+orch-settings = { path = "crates/control/settings" }
+orch-settings-contract = { path = "crates/contracts/settings" }
+orch-summarizer-contract = { path = "crates/contracts/summarizer" }
+orch-summarizer-model = { path = "extensions/summarizers/model" }
+orch-telemetry = { path = "crates/platform/telemetry" }
+orch-testkit = { path = "crates/tooling/testkit" }
+orch-types = { path = "crates/foundation/types" }
+orch-worker = { path = "apps/worker" }
+orch-worker-core = { path = "crates/control/worker" }
+orch-xtask = { path = "crates/tooling/xtask" }
+orchctl = { path = "apps/ctl" }
+
+# Third-party crates, each with what it is here for. `cargo deny check`
+# must keep passing.
+#
+# Runtime, HTTP and sockets.
+tokio = { version = "1.53.3", features = ["full"] }        # the async runtime of every executable
+tokio-util = { version = "0.7", features = ["codec", "io", "rt"] }  # cancellation tokens, framed streams
+tokio-stream = { version = "0.1", features = ["sync"] }    # streams over channels and broadcasts
+futures = "0.3"                                            # stream and sink combinators
+async-trait = "0.1"                                        # object-safe async traits at extension points
+bytes = "1"                                                # shared byte buffers on the link and in proxies
+axum = { version = "0.8", features = ["ws", "macros"] }    # the HTTP API and realtime sockets
+tower = { version = "0.5", features = ["util", "timeout", "limit"] }  # middleware
+tower-http = { version = "0.7", features = ["trace", "limit", "request-id", "set-header", "timeout", "fs"] }
+http = "1"                                                 # header and status types shared with clients
+http-body-util = "0.1"                                     # reading bodies in proxies and tests
+hyper = { version = "1", features = ["full"] }             # serving over our own TLS acceptors
+hyper-util = { version = "0.1", features = ["full"] }      # connection builders for those acceptors
+reqwest = { version = "0.13", default-features = false, features = ["rustls", "json", "stream", "http2", "socks"] }  # upstream model APIs, webhooks, bots; `socks` so that a SOCKS proxy the system names is spoken to
+tokio-tungstenite = { version = "0.30", features = ["rustls-tls-webpki-roots"] }  # the link's client side
+url = { version = "2", features = ["serde"] }              # endpoint and redirect addresses
+rquickjs = { version = "=0.14.0", default-features = false, features = ["std"] } # one inert HTML converter shared with browser paste
+webpki-roots = "1"                                         # the public roots a connector believes on a public endpoint
+
+# Data.
+serde = { version = "1.0.229", features = ["derive"] }
+serde_json = { version = "1.0.151", features = ["preserve_order", "raw_value"] }
+form_urlencoded = "1"                                      # the pairs of a query string
+ipnet = { version = "2", features = ["serde"] }            # address ranges of trusted proxies
+inventory = "0.3.24"                                       # linked registrations at production audit emission sites
+serde_path_to_error = "0.1"                                # where in a body a fault is, for the answer
+serde_html_form = "0.2"                                    # query strings into the declared query types, a repeated
+                                                           # parameter read as a list
+serde_urlencoded = "0.7"                                   # the test client writes query strings with it
+serde_with = "3"                                           # absent-or-null members of PATCH bodies
+schemars = { version = "1.2", features = ["uuid1", "chrono04", "preserve_order"] }  # JSON Schema of every contract type
+jsonschema = { version = "0.33", default-features = false }  # saved extension configs; references never fetch files or URLs
+uuid = { version = "1.28", features = ["v7", "v4", "serde"] }  # identifiers (v7: ordered by creation)
+chrono = { version = "0.4", default-features = false, features = ["std", "clock", "serde"] }  # UTC time
+chrono-tz = "0.10"                                         # a person's time zone, for quiet hours
+toml = "1"                                                 # orch.toml and a connector's local policy
+log = "0.4" # SQLx's warning level; already a transitive dependency.
+sqlx = { version = "0.9", default-features = false, features = ["runtime-tokio", "postgres", "uuid", "json", "chrono", "migrate", "ipnetwork", "derive"] }  # PostgreSQL
+regex = "1"                                                # name rules and an agent's search
+unicode-segmentation = "1"                                 # the first letter of a name, as a person reads it (an avatar)
+globset = "0.4"                                            # model patterns and ignore rules
+base64 = "0.23"                                            # cursors, keys and tokens on the wire
+image = { version = "0.25.10", default-features = false, features = ["png", "jpeg", "gif", "webp", "bmp", "ico"] } # bounded static attachment thumbnails
+resvg = { version = "0.49", default-features = false }       # inert SVG thumbnails without host resources or fonts
+hex = "0.4"                                                # hashes on the wire
+zstd = "0.14.3"                                            # stored raw events and content on the link
+similar = "3"                                              # differences of files and documents
+pulldown-cmark = { version = "0.13.5", default-features = false }  # Markdown in and out of documents
+semver = "1"                                               # harness versions and the ranges that name the builds that fit
+spdx = { version = "0.13.6", features = ["text"] }             # SPDX expressions and offline release notice texts
+walkdir = "2.5"                                            # package notice discovery
+
+# Cryptography.
+blake3 = "1.8"                                             # content hashes
+sha2 = "0.11"                                              # token hashes, as the schema stores them
+sha1 = "0.10"                                              # raw immutable Git objects in the separate file-state store
+hmac = "0.13"                                              # webhook signatures
+subtle = "2"                                               # constant-time comparison of secrets
+des = "0.8.1"                                            # classic VNC challenge authentication only
+rand = "0.10"                                               # tokens, codes and jitter
+argon2 = "0.6"                                             # password hashes
+totp-rs = { version = "6", features = ["otpauth"] }        # authenticator codes
+chacha20poly1305 = "0.11"                                  # sealing stored secrets
+rustls = { version = "0.23.46", default-features = false, features = ["ring", "std", "tls12", "logging"] }  # TLS under the Orch CA
+tokio-rustls = { version = "0.26", default-features = false, features = ["ring", "tls12"] }
+rustls-pemfile = "2"                                       # reading PEM keys and certificates
+rustls-native-certs = "0.8"                                # the roots of the operating system, for the upstreams a connector forwards model calls to
+rcgen = { version = "0.14", features = ["pem", "x509-parser"] }  # issuing certificates
+x509-parser = "0.18"                                       # reading a presented certificate
+hpke = "0.14"                                              # sealing a secret to a machine's key
+ed25519-dalek = { version = "3", features = ["rand_core", "pkcs8"] }  # release and plugin signatures
+p256 = { version = "0.14", features = ["ecdsa", "pem"] }   # machine keys
+ring = "0.17"                                              # identity providers' token signatures (RSA, ECDSA, Ed25519),
+                                                           # the same build rustls already carries
+
+# Machines.
+bollard = "0.21"                                           # the Docker driver
+k8s-openapi = { version = "0.28", features = ["v1_35"] } # Kubernetes object definitions for the driver
+kube = { version = "4.2", features = ["ws"] }             # the Kubernetes API and exec streams
+notify = "8"                                               # watching a workspace
+sysinfo = "0.39"                                           # what a host has and uses
+portable-pty = "0.9"                                       # interactive shells
+ignore = "0.4"                                             # walking a directory by its ignore rules
+tempfile = "3"                                             # atomic writes and test directories
+rustix = { version = "1.1", default-features = false, features = ["std", "fs", "process", "param"] }  # file operations relative to a directory, signals and pidfds, without unsafe code
+nix = { version = "0.31", default-features = false, features = ["sched", "mount", "fs", "user"] }  # the node helper's namespace, chroot and device operations
+tar = { version = "0.4", default-features = false }        # what a tar archive holds, read without unpacking it
+zip = { version = "9", default-features = false, features = ["deflate-flate2"] }  # what a zip archive holds, read without unpacking it
+flate2 = "1"                                               # looking into a tar.gz
+bzip2 = "0.6"                                              # looking into a tar.bz2
+liblzma = "0.4"                                            # looking into a tar.xz
+
+# Services.
+lettre = { version = "0.11", default-features = false, features = ["builder", "smtp-transport", "tokio1", "tokio1-rustls", "ring", "rustls-native-certs", "hostname"] }  # mail
+ece = "2.4"                                                # RFC 8291 browser push encryption, without a signing or HTTP stack
+openidconnect = { version = "4", default-features = false }  # sign-in through an identity provider
+rmcp = "3"                                                 # Orch's tools as an MCP server
+
+# Programs.
+anyhow = "1"                                               # binaries only
+tracing = "0.1"
+tracing-subscriber = { version = "0.3", features = ["json", "env-filter"] }
+metrics = "0.24"
+metrics-exporter-prometheus = { version = "0.18", default-features = false }
+clap = { version = "4.6.7", features = ["derive", "env"] }
+crossterm = "=0.29.0"                                      # the connector console's terminal: keys and the screen
+ratatui = "=0.30.2"                                        # the connector console's screens, on crossterm
+thiserror = "2.0"
+
+[workspace.lints.rust]
+# The floor for every crate. Every crate without platform modules also
+# carries `#![forbid(unsafe_code)]`.
+unsafe_code = "deny"
+# An unpolled delivery future loses its event, so ignored must-use values fail every target's build.
+unused_must_use = "deny"
+
+[workspace.lints.clippy]
+# Failures are returned as typed errors. A proven invariant states its proof
+# in the `reason` of an `#[expect(...)]` beside it.
+unwrap_used = "warn"
+expect_used = "warn"
+# Placeholder modules contain documentation; executable stubs fail explicitly.
+dbg_macro = "warn"
+todo = "warn"
+unimplemented = "warn"
+# A suppressed lint says why.
+allow_attributes_without_reason = "warn"
+# Errors here are rich on purpose (a code, the words a person reads, what blocks, a request id): they travel only on
+# failure paths, where moving 128 bytes instead of 8 costs nothing measurable, and boxing every error type would
+# change several hundred signatures for no behaviour. Enum variants that are large on the success path are still
+# reported (large_enum_variant stays on).
+result_large_err = "allow"
+
+[profile.dev]
+# Line numbers for our own code and nothing for dependencies: with full debug
+# information every test binary is hundreds of megabytes, and there are many.
+debug = "line-tables-only"
+
+[profile.dev.package."*"]
+debug = false
+
+[profile.release]
+strip = "symbols"

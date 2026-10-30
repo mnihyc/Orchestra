@@ -1,0 +1,18 @@
+{
+ "harness": "codex",
+ "version": "0.162.1",
+ "recorded": "2026-10-12",
+ "fault": "error invalid_request something is wrong with the request",
+ "setup": "provider of the forwarded path (model_providers entry, token in ORCH_LLM_TOKEN)",
+ "requests": 1,
+ "exit": 0,
+ "stderr": [],
+ "frames": [
+  {"method":"turn/started","params":{"threadId":"01a12f91-1695-7c90-a282-9a0f198f1afc","turn":{"id":"01a12f91-16e9-7822-99a5-5922de22175c","rootTurnId":"01a12f91-16e9-7822-99a5-5922de22175c","items":[],"itemsView":"notLoaded","status":"inProgress","error":null,"startedAt":1791799400,"completedAt":null,"durationMs":null}},"emittedAtMs":1791799400258},
+  {"method":"item/started","params":{"item":{"type":"userMessage","id":"01a12f91-175f-7681-a185-015bb93c7356","clientId":null,"content":[{"type":"text","text":"hello\n#!mock\nerror invalid_request something is wrong with the request\n","text_elements":[]}]},"threadId":"01a12f91-1695-7c90-a282-9a0f198f1afc","turnId":"01a12f91-16e9-7822-99a5-5922de22175c","startedAtMs":1791799400288},"emittedAtMs":1791799400288},
+  {"method":"item/completed","params":{"item":{"type":"userMessage","id":"01a12f91-175f-7681-a185-015bb93c7356","clientId":null,"content":[{"type":"text","text":"hello\n#!mock\nerror invalid_request something is wrong with the request\n","text_elements":[]}]},"threadId":"01a12f91-1695-7c90-a282-9a0f198f1afc","turnId":"01a12f91-16e9-7822-99a5-5922de22175c","completedAtMs":1791799400288},"emittedAtMs":1791799400299},
+  {"method":"error","params":{"error":{"message":"{\"error\":{\"message\":\"something is wrong with the request\",\"type\":\"invalid_request_error\",\"param\":null,\"code\":\"invalid_value\"}}","codexErrorInfo":"other","additionalDetails":null,"misalignment":null},"willRetry":false,"threadId":"01a12f91-1695-7c90-a282-9a0f198f1afc","turnId":"01a12f91-16e9-7822-99a5-5922de22175c"},"emittedAtMs":1791799400361},
+  {"method":"turn/completed","params":{"threadId":"01a12f91-1695-7c90-a282-9a0f198f1afc","turn":{"id":"01a12f91-16e9-7822-99a5-5922de22175c","rootTurnId":"01a12f91-16e9-7822-99a5-5922de22175c","items":[],"itemsView":"notLoaded","status":"failed","error":{"message":"{\"error\":{\"message\":\"something is wrong with the request\",\"type\":\"invalid_request_error\",\"param\":null,\"code\":\"invalid_value\"}}","codexErrorInfo":"other","additionalDetails":null,"misalignment":null},"startedAt":1791799400,"completedAt":1791799400,"durationMs":190}},"emittedAtMs":1791799400367}
+ ],
+ "expect": {"outcome": "failed", "code": "harness_error", "retryable": false, "incomplete": false, "resets_at": null, "row": "unknown", "said_contains": "something is wrong with the request"}
+}

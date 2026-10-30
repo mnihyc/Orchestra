@@ -1,0 +1,46 @@
+{
+ "thread": {
+  "id": "01a12ab3-f36a-7c03-92d9-3c1be502f976",
+  "environments": [
+   {
+    "environmentId": "local",
+    "cwd": "/work/web",
+    "runtimeWorkspaceRoots": [
+     "/work/web"
+    ]
+   }
+  ],
+  "extra": null,
+  "sessionId": "01a12ab3-f36a-7c03-92d9-3c1be502f976",
+  "forkedFromId": null,
+  "parentThreadId": null,
+  "preview": "remember the word banana",
+  "ephemeral": false,
+  "section": null,
+  "sectionEnteredAt": null,
+  "projectId": null,
+  "historyMode": "paginated",
+  "modelProvider": "orch_bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+  "model": "mock-large",
+  "reasoningEffort": null,
+  "createdAt": 1791717798,
+  "updatedAt": 1791717801,
+  "recencyAt": 1791717801,
+  "status": {
+   "type": "idle"
+  },
+  "path": "/home/ada/.codex/sessions/2026/10/11/rollout-2026-10-11T11-23-18-01a12ab3-f36a-7c03-92d9-3c1be502f976.jsonl",
+  "cwd": "/work/web",
+  "cliVersion": "0.162.1",
+  "originator": "orch",
+  "source": "vscode",
+  "canAcceptDirectInput": true,
+  "threadSource": null,
+  "agentNickname": null,
+  "agentRole": null,
+  "gitInfo": null,
+  "name": null,
+  "daybreakEnabled": null,
+  "turns": []
+ }
+}

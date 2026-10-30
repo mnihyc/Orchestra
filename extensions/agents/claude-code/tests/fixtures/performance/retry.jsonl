@@ -1,0 +1,7 @@
+{"at_ms":0,"event":{"type":"system","subtype":"init","model":"model-a"}}
+{"at_ms":500,"event":{"type":"system","subtype":"api_retry","attempt":1,"max_retries":3,"retry_delay_ms":0,"error_status":429,"error":"rate_limit"}}
+{"at_ms":1000,"event":{"type":"stream_event","event":{"type":"message_start","message":{"id":"ref-0001","model":"model-a","usage":{"input_tokens":20,"cache_read_input_tokens":0,"cache_creation_input_tokens":0,"output_tokens":16}}}}}
+{"at_ms":1200,"event":{"type":"stream_event","event":{"type":"content_block_delta","delta":{"type":"text_delta","text":"A fresh answer"}}}}
+{"at_ms":2000,"event":{"type":"stream_event","event":{"type":"message_delta","delta":{"stop_reason":"end_turn"},"usage":{"output_tokens":64,"output_tokens_details":{"thinking_tokens":0}}}}}
+{"at_ms":2100,"event":{"type":"stream_event","event":{"type":"message_stop"}}}
+{"at_ms":2200,"event":{"type":"result","subtype":"success","duration_api_ms":1600,"usage":{"input_tokens":20,"output_tokens":64}}}

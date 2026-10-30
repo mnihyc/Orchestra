@@ -1,0 +1,135 @@
+name: Harness canary
+
+# Each day the newest Codex and Claude Code are held against the adapters' native conformance and against the
+# failures recorded from the versions the adapters were built for, in a harness image made for the run
+# (images/harness-canary). A failure opens one issue, or adds a comment to the one already open, so that a
+# harness release that breaks an adapter is seen before people meet it. A run by hand may name the versions.
+on:
+  schedule:
+    - cron: "41 4 * * *"
+  workflow_dispatch:
+    inputs:
+      codex:
+        description: The Codex version to hold (npm), or latest
+        required: false
+        default: latest
+      claude:
+        description: The Claude Code version to hold (npm), or latest
+        required: false
+        default: latest
+
+permissions:
+  contents: read
+  issues: write
+
+concurrency:
+  group: harness-canary
+  cancel-in-progress: false
+
+jobs:
+  canary:
+    name: Newest harness builds
+    runs-on: ubuntu-24.04
+    timeout-minutes: 150
+    env:
+      CODEX_VERSION: ${{ inputs.codex || 'latest' }}
+      CLAUDE_VERSION: ${{ inputs.claude || 'latest' }}
+      ORCH_HARNESS_IMAGE: orch-harness-canary
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+      - name: Install the repository toolchain
+        run: rustup show
+      - uses: actions/cache@0057852bfaa89a56745cba8c7296529d2fc39830 # v4
+        with:
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+            target
+          key: canary-${{ runner.os }}-${{ hashFiles('rust-toolchain.toml', 'Cargo.lock') }}-${{ github.sha }}
+          restore-keys: canary-${{ runner.os }}-${{ hashFiles('rust-toolchain.toml', 'Cargo.lock') }}-
+      - name: Check that incomplete native evidence fails the runners
+        run: python3 -I -B -m unittest discover -s scripts/harness-canary/tests
+      - name: Build the harness image with the builds to hold
+        shell: bash
+        run: |
+          docker build --pull --tag "$ORCH_HARNESS_IMAGE" \
+            --build-arg CODEX_VERSION="$CODEX_VERSION" \
+            --build-arg CLAUDE_VERSION="$CLAUDE_VERSION" \
+            images/harness-canary
+          codex=$(docker run --rm "$ORCH_HARNESS_IMAGE" codex --version | grep -oE '[0-9]+\.[0-9]+\.[0-9]+' | head -n 1)
+          claude=$(docker run --rm "$ORCH_HARNESS_IMAGE" claude --version | grep -oE '[0-9]+\.[0-9]+\.[0-9]+' | head -n 1)
+          if [ -z "$codex" ] || [ -z "$claude" ]; then
+            echo "the image does not say its harness versions" >&2
+            exit 1
+          fi
+          mkdir -p evidence
+          docker image inspect --format '{{.Id}} {{.Os}}/{{.Architecture}}' "$ORCH_HARNESS_IMAGE" > evidence/image.txt
+          printf 'source=%s\ncodex=%s\nclaude=%s\n' "$GITHUB_SHA" "$codex" "$claude" > evidence/versions.txt
+          # The conformance holds the versions the image has, not the pinned ones.
+          echo "ORCH_EXPECTED_CODEX_VERSION=$codex" >> "$GITHUB_ENV"
+          echo "ORCH_EXPECTED_CLAUDE_VERSION=$claude" >> "$GITHUB_ENV"
+          printf '## Harness canary\n\nCodex %s, Claude Code %s\n\n' "$codex" "$claude" >> "$GITHUB_STEP_SUMMARY"
+      - name: Native conformance
+        id: conformance
+        continue-on-error: true
+        shell: bash
+        run: |
+          mkdir -p evidence
+          set +e
+          bash scripts/harness-canary/conformance --image "$ORCH_HARNESS_IMAGE" --record evidence/conformance \
+            2>&1 | tee evidence/conformance.txt
+          status=${PIPESTATUS[0]}
+          set -e
+          if [ "$status" -eq 2 ]; then
+            echo "::error::native conformance evidence is incomplete: a prerequisite is absent or a case is fixture-only"
+          fi
+          exit "$status"
+      - name: Recorded failures
+        id: failures
+        continue-on-error: true
+        shell: bash
+        run: |
+          mkdir -p evidence
+          bash scripts/harness-canary/failures --image "$ORCH_HARNESS_IMAGE" --record evidence/failures \
+            2>&1 | tee evidence/failures.txt
+      - name: Summarize
+        if: always()
+        shell: bash
+        run: |
+          {
+            printf 'Conformance: %s; recorded failures: %s\n\n' \
+              "${{ steps.conformance.outcome }}" "${{ steps.failures.outcome }}"
+            printf '```\n'
+            grep -hE '^(CONFORMANCE|NOT RUN|same|CHANGED|WORDS|SKIPPED|skipped)' evidence/*.txt 2>/dev/null | head -n 200 || true
+            printf '```\n'
+          } >> "$GITHUB_STEP_SUMMARY"
+      - name: Retain native results and the tested image identity
+        if: always()
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        with:
+          name: harness-canary-evidence
+          path: evidence/
+          if-no-files-found: error
+      - name: Open or update the canary's issue
+        if: steps.conformance.outcome == 'failure' || steps.failures.outcome == 'failure'
+        env:
+          GH_TOKEN: ${{ github.token }}
+        shell: bash
+        run: |
+          title="Harness canary: native compatibility needs review"
+          run_url="${GITHUB_SERVER_URL}/${GITHUB_REPOSITORY}/actions/runs/${GITHUB_RUN_ID}"
+          rows=$(grep -hE '^(CONFORMANCE failed|CONFORMANCE fixture_only|NOT RUN|CHANGED|WORDS|SKIPPED|skipped)' evidence/*.txt 2>/dev/null | head -n 60 || true)
+          fence=$(printf '\140\140\140')
+          body=$(printf 'Codex %s and Claude Code %s, in %s.\n\nConformance: %s; recorded failures: %s.\n\n%s\n%s\n%s\n' \
+            "$ORCH_EXPECTED_CODEX_VERSION" "$ORCH_EXPECTED_CLAUDE_VERSION" "$run_url" \
+            "${{ steps.conformance.outcome }}" "${{ steps.failures.outcome }}" "$fence" "$rows" "$fence")
+          number=$(gh issue list --state open --search "\"$title\" in:title" --json number,title \
+            --jq "map(select(.title == \"$title\")) | .[0].number // empty")
+          if [ -n "$number" ]; then
+            gh issue comment "$number" --body "$body"
+          else
+            gh issue create --title "$title" --body "$body"
+          fi
+      - name: Fail the run when the canary failed
+        if: steps.conformance.outcome == 'failure' || steps.failures.outcome == 'failure'
+        run: exit 1

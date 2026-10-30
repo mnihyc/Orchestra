@@ -1,0 +1,18 @@
+{
+ "harness": "claude-code",
+ "version": "2.1.296",
+ "recorded": "2026-10-12",
+ "fault": "error billing",
+ "setup": "signed in with a token as the forwarded path does (ANTHROPIC_AUTH_TOKEN)",
+ "requests": 1,
+ "exit": 1,
+ "stderr": ["[claude-code:unrecognized_model] {\"model\":\"mock-large\",\"query_source\":\"sdk\"}"],
+ "frames": [
+  {"type":"system","subtype":"init","cwd":"/workspace","session_id":"3a76c452-6244-4e4a-bbda-5e796822e2a6","model":"mock-large","permissionMode":"default","claude_code_version":"2.1.296","apiKeySource":"none","uuid":"9f2903f3-7cc4-4338-b312-450cb089bce2"},
+  {"type":"system","subtype":"status","status":"requesting","session_id":"3a76c452-6244-4e4a-bbda-5e796822e2a6","uuid":"cabe57ac-99de-470d-aa90-18ed6635d2b9"},
+  {"type":"user","message":{"role":"user","content":[{"type":"text","text":"hello\n#!mock\nerror billing\n"}]},"session_id":"3a76c452-6244-4e4a-bbda-5e796822e2a6","parent_tool_use_id":null,"uuid":"60dd8465-5c0a-4a8b-9ce1-e90d3328daca","timestamp":"2026-10-12T10:02:20.573Z","isReplay":true},
+  {"type":"assistant","message":{"diagnostics":null,"id":"c0d492d8-f894-4ee7-bd11-1cfa356c809e","container":null,"model":"<synthetic>","role":"assistant","stop_details":null,"stop_reason":"stop_sequence","stop_sequence":"","type":"message","usage":{"output_tokens_details":null,"input_tokens":0,"output_tokens":0,"cache_creation_input_tokens":0,"cache_read_input_tokens":0,"server_tool_use":{"web_search_requests":0,"web_fetch_requests":0},"service_tier":null,"cache_creation":{"ephemeral_1h_input_tokens":0,"ephemeral_5m_input_tokens":0},"inference_geo":null,"iterations":null,"speed":null,"fallback_credit":null},"content":[{"type":"text","text":"Credit balance is too low"}],"context_management":null},"parent_tool_use_id":null,"session_id":"3a76c452-6244-4e4a-bbda-5e796822e2a6","uuid":"044b55c8-46f7-4a45-84c4-049b52351317","timestamp":"2026-10-12T10:02:20.798Z","error":"billing_error","request_id":"req_mock_000001","is_api_error_message":true},
+  {"duration_api_ms":0,"stop_reason":"stop_sequence","session_id":"3a76c452-6244-4e4a-bbda-5e796822e2a6","total_cost_usd":0,"usage":{"output_tokens_details":{"thinking_tokens":0},"input_tokens":0,"cache_creation_input_tokens":0,"cache_read_input_tokens":0,"output_tokens":0,"server_tool_use":{"web_search_requests":0,"web_fetch_requests":0},"service_tier":"standard","cache_creation":{"ephemeral_1h_input_tokens":0,"ephemeral_5m_input_tokens":0},"inference_geo":"","iterations":[],"speed":"standard","fallback_credit":null},"modelUsage":{},"permission_denials":[],"terminal_reason":"api_error","fast_mode_state":"off","fast_mode_disabled_reason":"sdk_opt_in_required","subagent_stats":{"spawned":0,"requested":{"background":0,"foreground":0,"unset":0},"started_in_background":0,"max_depth":0,"spawned_by_subagents":0,"completed":0,"failed":0,"killed":{"parent":0,"user":0,"system":0},"refused":{"depth_limit":0,"concurrency_limit":0,"budget":0},"by_type":{}},"safety_stops":0,"is_error":true,"num_turns":1,"subtype":"success","api_error_status":402,"result":"Credit balance is too low","type":"result","duration_ms":342,"uuid":"e7b5901e-56e5-4cad-b132-c82c3bfdeda3","queued_turn_count":0,"result_index":0}
+ ],
+ "expect": {"outcome": "failed", "code": "provider_exhausted", "retryable": false, "incomplete": false, "resets_at": null, "row": "balance_ran_out", "said_exactly": "Credit balance is too low"}
+}

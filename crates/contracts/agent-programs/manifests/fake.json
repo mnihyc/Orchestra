@@ -1,0 +1,15 @@
+{
+  "manifest_version": 1,
+  "kind": "fake",
+  "names": {
+    "en": "Example agent",
+    "zh-CN": "示例代理"
+  },
+  "protocol": "fake",
+  "placement": {
+    "colocated": false,
+    "home": "connector",
+    "needs_binary": false
+  },
+  "checks": {}
+}

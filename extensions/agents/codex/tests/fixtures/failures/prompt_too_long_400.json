@@ -1,0 +1,18 @@
+{
+ "harness": "codex",
+ "version": "0.162.1",
+ "recorded": "2026-10-12",
+ "fault": "error context_length",
+ "setup": "provider of the forwarded path (model_providers entry, token in ORCH_LLM_TOKEN)",
+ "requests": 1,
+ "exit": 0,
+ "stderr": [],
+ "frames": [
+  {"method":"turn/started","params":{"threadId":"01a12f91-14df-7e30-b37b-a05643579d92","turn":{"id":"01a12f91-1527-7f41-95cb-cbac8a9b35ca","rootTurnId":"01a12f91-1527-7f41-95cb-cbac8a9b35ca","items":[],"itemsView":"notLoaded","status":"inProgress","error":null,"startedAt":1791799399,"completedAt":null,"durationMs":null}},"emittedAtMs":1791799399819},
+  {"method":"item/started","params":{"item":{"type":"userMessage","id":"01a12f91-15a7-7ab0-ac2e-d4e6d0de231a","clientId":null,"content":[{"type":"text","text":"hello\n#!mock\nerror context_length\n","text_elements":[]}]},"threadId":"01a12f91-14df-7e30-b37b-a05643579d92","turnId":"01a12f91-1527-7f41-95cb-cbac8a9b35ca","startedAtMs":1791799399849},"emittedAtMs":1791799399850},
+  {"method":"item/completed","params":{"item":{"type":"userMessage","id":"01a12f91-15a7-7ab0-ac2e-d4e6d0de231a","clientId":null,"content":[{"type":"text","text":"hello\n#!mock\nerror context_length\n","text_elements":[]}]},"threadId":"01a12f91-14df-7e30-b37b-a05643579d92","turnId":"01a12f91-1527-7f41-95cb-cbac8a9b35ca","completedAtMs":1791799399849},"emittedAtMs":1791799399863},
+  {"method":"error","params":{"error":{"message":"{\"error\":{\"message\":\"Your input exceeds the context window of this model. Please adjust your input and try again.\",\"type\":\"invalid_request_error\",\"param\":null,\"code\":\"context_length_exceeded\"}}","codexErrorInfo":"other","additionalDetails":null,"misalignment":null},"willRetry":false,"threadId":"01a12f91-14df-7e30-b37b-a05643579d92","turnId":"01a12f91-1527-7f41-95cb-cbac8a9b35ca"},"emittedAtMs":1791799399901},
+  {"method":"turn/completed","params":{"threadId":"01a12f91-14df-7e30-b37b-a05643579d92","turn":{"id":"01a12f91-1527-7f41-95cb-cbac8a9b35ca","rootTurnId":"01a12f91-1527-7f41-95cb-cbac8a9b35ca","items":[],"itemsView":"notLoaded","status":"failed","error":{"message":"{\"error\":{\"message\":\"Your input exceeds the context window of this model. Please adjust your input and try again.\",\"type\":\"invalid_request_error\",\"param\":null,\"code\":\"context_length_exceeded\"}}","codexErrorInfo":"other","additionalDetails":null,"misalignment":null},"startedAt":1791799399,"completedAt":1791799399,"durationMs":179}},"emittedAtMs":1791799399907}
+ ],
+ "expect": {"outcome": "failed", "code": "context_overflow", "retryable": false, "incomplete": false, "resets_at": null, "row": "context_window", "said_contains": "context_length_exceeded"}
+}

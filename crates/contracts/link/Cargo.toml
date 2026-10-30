@@ -1,0 +1,29 @@
+[package]
+name = "orch-link-contract"
+description = "Machine link and backplane schemas; commands and events shared by both ends."
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+rust-version.workspace = true
+repository.workspace = true
+publish.workspace = true
+
+[dependencies]
+base64.workspace = true
+bytes.workspace = true
+orch-api-contract.workspace = true
+orch-agent-contract.workspace = true
+orch-agent-programs.workspace = true
+orch-driver-contract.workspace = true
+orch-executor-contract.workspace = true
+orch-model-contract.workspace = true
+orch-provider-contract.workspace = true
+orch-settings-contract.workspace = true
+orch-types.workspace = true
+schemars.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+thiserror.workspace = true
+
+[lints]
+workspace = true

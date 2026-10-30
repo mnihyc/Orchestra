@@ -1,0 +1,27 @@
+[package]
+name = "orch-gateway"
+description = "Compose the stateless gateway listeners, backplane and tunnel relay."
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+rust-version.workspace = true
+repository.workspace = true
+publish.workspace = true
+
+[dependencies]
+anyhow.workspace = true
+clap.workspace = true
+orch-build-info.workspace = true
+orch-config.workspace = true
+orch-gateway-core.workspace = true
+orch-pki.workspace = true
+orch-telemetry.workspace = true
+orch-types.workspace = true
+tokio.workspace = true
+tracing.workspace = true
+
+[build-dependencies]
+orch-build-support.workspace = true
+
+[lints]
+workspace = true

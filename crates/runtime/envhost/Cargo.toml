@@ -1,0 +1,67 @@
+[package]
+name = "orch-envhost"
+description = "Environment-side files, tools, processes and interactive services."
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+rust-version.workspace = true
+repository.workspace = true
+publish.workspace = true
+
+[dependencies]
+des.workspace = true
+async-trait.workspace = true
+bytes.workspace = true
+base64.workspace = true
+bzip2.workspace = true
+chrono.workspace = true
+flate2.workspace = true
+futures.workspace = true
+globset.workspace = true
+hex.workspace = true
+http-body-util.workspace = true
+hyper.workspace = true
+hyper-util.workspace = true
+ignore.workspace = true
+liblzma.workspace = true
+notify.workspace = true
+orch-agent-contract.workspace = true
+orch-api-contract.workspace = true
+orch-driver-contract.workspace = true
+orch-executor-contract.workspace = true
+orch-link-contract.workspace = true
+orch-plugin-contract.workspace = true
+orch-realtime-contract.workspace = true
+orch-settings-contract.workspace = true
+orch-types.workspace = true
+portable-pty.workspace = true
+rand.workspace = true
+regex.workspace = true
+reqwest.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+sha1.workspace = true
+sha2.workspace = true
+subtle.workspace = true
+sysinfo.workspace = true
+tar.workspace = true
+tempfile.workspace = true
+thiserror.workspace = true
+tokio.workspace = true
+tokio-util.workspace = true
+tokio-tungstenite.workspace = true
+tracing.workspace = true
+zip.workspace = true
+zstd.workspace = true
+
+[target.'cfg(unix)'.dependencies]
+rustix.workspace = true
+
+[dev-dependencies]
+rcgen.workspace = true
+rustls.workspace = true
+tokio-rustls.workspace = true
+tokio = { workspace = true, features = ["test-util"] }
+
+[lints]
+workspace = true

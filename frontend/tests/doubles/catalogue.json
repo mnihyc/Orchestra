@@ -1,0 +1,1576 @@
+{
+  "permissions": [
+    {
+      "name": "chat.view",
+      "area": "chat",
+      "level": "view",
+      "with": null,
+      "on": [
+        "org",
+        "project",
+        "topic",
+        "thread"
+      ],
+      "label": "View Chat",
+      "allows": "Read the chat of the node and follow it.",
+      "profiles": false,
+      "holders": [
+        "role",
+        "group",
+        "user",
+        "agents"
+      ],
+      "options_schema": null
+    },
+    {
+      "name": "chat.interact",
+      "area": "chat",
+      "level": "interact",
+      "with": null,
+      "on": [
+        "org",
+        "project",
+        "topic",
+        "thread"
+      ],
+      "label": "Interact Chat",
+      "allows": "Write in the chat of the node: post, react, pin, forward into it, and change or delete what one wrote oneself.",
+      "profiles": false,
+      "holders": [
+        "role",
+        "group",
+        "user",
+        "agents"
+      ],
+      "options_schema": null
+    },
+    {
+      "name": "chat.manage",
+      "area": "chat",
+      "level": "manage",
+      "with": null,
+      "on": [
+        "org",
+        "project",
+        "topic",
+        "thread"
+      ],
+      "label": "Manage Chat",
+      "allows": "Delete what anybody wrote in the chat of the node.",
+      "profiles": false,
+      "holders": [
+        "role",
+        "group",
+        "user"
+      ],
+      "options_schema": null
+    },
+    {
+      "name": "doc.view",
+      "area": "doc",
+      "level": "view",
+      "with": null,
+      "on": [
+        "org",
+        "project",
+        "topic",
+        "thread",
+        "document"
+      ],
+      "label": "View Documents",
+      "allows": "Read the documents beside the node, or this document: its text, earlier versions, discussions and files.",
+      "profiles": false,
+      "holders": [
+        "role",
+        "group",
+        "user",
+        "agents"
+      ],
+      "options_schema": null
+    },
+    {
+      "name": "doc.edit",
+      "area": "doc",
+      "level": "edit",
+      "with": null,
+      "on": [
+        "org",
+        "project",
+        "topic",
+        "thread",
+        "document"
+      ],
+      "label": "Edit Documents",
+      "allows": "Write the documents beside the node, or this document: its title, its blocks and the files it holds.",
+      "profiles": false,
+      "holders": [
+        "role",
+        "group",
+        "user",
+        "agents"
+      ],
+      "options_schema": null
+    },
+    {
+      "name": "doc.create",
+      "area": "doc",
+      "level": "advanced",
+      "with": "doc.edit",
+      "on": [
+        "org",
+        "project",
+        "topic",
+        "thread"
+      ],
+      "label": "New documents",
+      "allows": "Make a document beside the node; whoever makes one owns it.",
+      "profiles": false,
+      "holders": [
+        "role",
+        "group",
+        "user"
+      ],
+      "options_schema": null
+    },
+    {
+      "name": "doc.comment",
+      "area": "doc",
+      "level": "advanced",
+      "with": "doc.edit",
+      "on": [
+        "org",
+        "project",
+        "topic",
+        "thread",
+        "document"
+      ],
+      "label": "Comment",
+      "allows": "Discuss a document: start a discussion, answer in one, react and resolve.",
+      "profiles": false,
+      "holders": [
+        "role",
+        "group",
+        "user"
+      ],
+      "options_schema": null
+    },
+    {
+      "name": "doc.manage",
+      "area": "doc",
+      "level": "manage",
+      "with": null,
+      "on": [
+        "org",
+        "project",
+        "topic",
+        "thread",
+        "document"
+      ],
+      "label": "Manage Documents",
+      "allows": "Manage the documents beside the node, or this document: put an earlier version back, move it, delete and restore it, and delete anybody's comment.",
+      "profiles": false,
+      "holders": [
+        "role",
+        "group",
+        "user",
+        "agents"
+      ],
+      "options_schema": null
+    },
+    {
+      "name": "thread.view",
+      "area": "thread",
+      "level": "view",
+      "with": null,
+      "on": [
+        "thread"
+      ],
+      "label": "View Thread",
+      "allows": "See the thread and read its conversation, its state and its usage; follow it.",
+      "profiles": true,
+      "holders": [
+        "role",
+        "group",
+        "user",
+        "agents"
+      ],
+      "options_schema": null
+    },
+    {
+      "name": "thread.interact",
+      "area": "thread",
+      "level": "interact",
+      "with": null,
+      "on": [
+        "thread"
+      ],
+      "label": "Interact Thread",
+      "allows": "Drive the agent: give it input, steer or interrupt a running turn, stop or retry one, and put in order what waits.",
+      "profiles": true,
+      "holders": [
+        "role",
+        "group",
+        "user",
+        "agents"
+      ],
+      "options_schema": null
+    },
+    {
+      "name": "thread.manage",
+      "area": "thread",
+      "level": "manage",
+      "with": null,
+      "on": [
+        "thread"
+      ],
+      "label": "Manage Thread",
+      "allows": "Set the session up: its name, model and effort, the agent's parameters and instructions, its approval mode, its provider and profile; answer what the agent asks; delete the thread.",
+      "profiles": true,
+      "holders": [
+        "role",
+        "group",
+        "user"
+      ],
+      "options_schema": null
+    },
+    {
+      "name": "thread.fork",
+      "area": "thread",
+      "level": "advanced",
+      "with": "thread.manage",
+      "on": [
+        "thread"
+      ],
+      "label": "Fork",
+      "allows": "Take a fork of the thread: a new thread of one's own, with as much of its history as one chooses.",
+      "profiles": true,
+      "holders": [
+        "role",
+        "group",
+        "user"
+      ],
+      "options_schema": null
+    },
+    {
+      "name": "thread.archive",
+      "area": "thread",
+      "level": "advanced",
+      "with": "thread.manage",
+      "on": [
+        "thread"
+      ],
+      "label": "Archive",
+      "allows": "Archive the thread, and bring it back.",
+      "profiles": true,
+      "holders": [
+        "role",
+        "group",
+        "user"
+      ],
+      "options_schema": null
+    },
+    {
+      "name": "topic.view",
+      "area": "topic",
+      "level": "view",
+      "with": null,
+      "on": [
+        "topic"
+      ],
+      "label": "View Topic",
+      "allows": "See the topic: its name, description, status, tags and the settings that are no secret, and who has access.",
+      "profiles": false,
+      "holders": [
+        "role",
+        "group",
+        "user"
+      ],
+      "options_schema": null
+    },
+    {
+      "name": "topic.interact",
+      "area": "topic",
+      "level": "interact",
+      "with": null,
+      "on": [
+        "topic"
+      ],
+      "label": "Interact Topic",
+      "allows": "Start threads in the topic, announce to its threads, set its status and tags, and create an environment for work there.",
+      "profiles": false,
+      "holders": [
+        "role",
+        "group",
+        "user"
+      ],
+      "options_schema": null
+    },
+    {
+      "name": "topic.manage",
+      "area": "topic",
+      "level": "manage",
+      "with": null,
+      "on": [
+        "topic"
+      ],
+      "label": "Manage Topic",
+      "allows": "Rename the topic, change its description, its parameters and its default environment, delete it, and restore what was deleted in it.",
+      "profiles": false,
+      "holders": [
+        "role",
+        "group",
+        "user"
+      ],
+      "options_schema": null
+    },
+    {
+      "name": "topic.archive",
+      "area": "topic",
+      "level": "advanced",
+      "with": "topic.manage",
+      "on": [
+        "topic"
+      ],
+      "label": "Archive",
+      "allows": "Archive the topic, and bring it back.",
+      "profiles": false,
+      "holders": [
+        "role",
+        "group",
+        "user"
+      ],
+      "options_schema": null
+    },
+    {
+      "name": "project.view",
+      "area": "project",
+      "level": "view",
+      "with": null,
+      "on": [
+        "project"
+      ],
+      "label": "View Project",
+      "allows": "See the project: its name, description and the settings that are no secret, and who has access.",
+      "profiles": false,
+      "holders": [
+        "role",
+        "group",
+        "user"
+      ],
+      "options_schema": null
+    },
+    {
+      "name": "project.interact",
+      "area": "project",
+      "level": "interact",
+      "with": null,
+      "on": [
+        "project"
+      ],
+      "label": "Interact Project",
+      "allows": "Create topics in the project, and an environment for work there.",
+      "profiles": false,
+      "holders": [
+        "role",
+        "group",
+        "user"
+      ],
+      "options_schema": null
+    },
+    {
+      "name": "project.manage",
+      "area": "project",
+      "level": "manage",
+      "with": null,
+      "on": [
+        "project"
+      ],
+      "label": "Manage Project",
+      "allows": "Rename the project, change its description and parameters, announce to all its open topics, move it to another org of its tree, delete it, and restore what was deleted in it.",
+      "profiles": false,
+      "holders": [
+        "role",
+        "group",
+        "user"
+      ],
+      "options_schema": null
+    },
+    {
+      "name": "project.archive",
+      "area": "project",
+      "level": "advanced",
+      "with": "project.manage",
+      "on": [
+        "project"
+      ],
+      "label": "Archive",
+      "allows": "Archive the project, and bring it back.",
+      "profiles": false,
+      "holders": [
+        "role",
+        "group",
+        "user"
+      ],
+      "options_schema": null
+    },
+    {
+      "name": "org.view",
+      "area": "org",
+      "level": "view",
+      "with": null,
+      "on": [
+        "org"
+      ],
+      "label": "View Org",
+      "allows": "See the org: its name, its members and groups, the orgs inside it and the settings that are no secret.",
+      "profiles": false,
+      "holders": [
+        "role",
+        "group",
+        "user"
+      ],
+      "options_schema": null
+    },
+    {
+      "name": "org.interact",
+      "area": "org",
+      "level": "interact",
+      "with": null,
+      "on": [
+        "org"
+      ],
+      "label": "Interact Org",
+      "allows": "Create projects in the org, and an environment for work there.",
+      "profiles": false,
+      "holders": [
+        "role",
+        "group",
+        "user"
+      ],
+      "options_schema": null
+    },
+    {
+      "name": "org.manage",
+      "area": "org",
+      "level": "manage",
+      "with": null,
+      "on": [
+        "org"
+      ],
+      "label": "Manage Org",
+      "allows": "Rename the org, change its parameters and tags, create orgs inside it, move it within its tree, delete it, and restore what was deleted in it.",
+      "profiles": false,
+      "holders": [
+        "role",
+        "group",
+        "user"
+      ],
+      "options_schema": null
+    },
+    {
+      "name": "org.archive",
+      "area": "org",
+      "level": "advanced",
+      "with": "org.manage",
+      "on": ["org"],
+      "label": "Archive",
+      "allows": "Archive the org with everything inside it, and bring it back.",
+      "profiles": false,
+      "holders": ["role", "group", "user"],
+      "options_schema": null
+    },
+    {
+      "name": "settings.manage",
+      "area": "settings",
+      "level": "manage",
+      "with": null,
+      "on": [
+        "org",
+        "project",
+        "topic",
+        "thread"
+      ],
+      "label": "Manage Settings",
+      "allows": "Write the policies and locks of the node, its secrets, and where what happens there is sent.",
+      "profiles": false,
+      "holders": [
+        "role",
+        "group",
+        "user"
+      ],
+      "options_schema": null
+    },
+    {
+      "name": "usage.view",
+      "area": "usage",
+      "level": "view",
+      "with": null,
+      "on": [
+        "org",
+        "project",
+        "topic",
+        "thread"
+      ],
+      "label": "View Usage",
+      "allows": "Read every record of use in the node and below it, and the caps defined there.",
+      "profiles": false,
+      "holders": [
+        "role",
+        "group",
+        "user"
+      ],
+      "options_schema": null
+    },
+    {
+      "name": "usage.summary",
+      "area": "usage",
+      "level": "advanced",
+      "with": "usage.view",
+      "on": [
+        "org",
+        "project",
+        "topic",
+        "thread"
+      ],
+      "label": "Usage summary",
+      "allows": "See how much was used in the node as figures by person, model, provider, agent and kind of environment, without anybody else's records.",
+      "profiles": false,
+      "holders": [
+        "role",
+        "group",
+        "user"
+      ],
+      "options_schema": null
+    },
+    {
+      "name": "usage.manage",
+      "area": "usage",
+      "level": "manage",
+      "with": null,
+      "on": [
+        "org",
+        "project",
+        "topic",
+        "thread"
+      ],
+      "label": "Manage Usage",
+      "allows": "Add, change and remove the usage caps of the node.",
+      "profiles": false,
+      "holders": [
+        "role",
+        "group",
+        "user"
+      ],
+      "options_schema": null
+    },
+    {
+      "name": "usage.bypass",
+      "area": "usage",
+      "level": "advanced",
+      "with": "usage.manage",
+      "on": [
+        "org",
+        "project",
+        "topic",
+        "thread"
+      ],
+      "label": "Go past limits",
+      "allows": "Let one turn run past a cap that is defined on the node and has no room left.",
+      "profiles": false,
+      "holders": [
+        "role",
+        "group",
+        "user"
+      ],
+      "options_schema": null
+    },
+    {
+      "name": "audit.view",
+      "area": "audit",
+      "level": "view",
+      "with": null,
+      "on": [
+        "org",
+        "project",
+        "topic",
+        "thread"
+      ],
+      "label": "View Audit",
+      "allows": "Read the audit trail of the node and of what is inside it.",
+      "profiles": false,
+      "holders": [
+        "role",
+        "group",
+        "user"
+      ],
+      "options_schema": null
+    },
+    {
+      "name": "members.manage",
+      "area": "members",
+      "level": "manage",
+      "with": null,
+      "on": [
+        "org"
+      ],
+      "label": "Manage Members",
+      "allows": "Invite people into the org, remove, suspend and move them, and manage its groups and service accounts.",
+      "profiles": false,
+      "holders": [
+        "role",
+        "group",
+        "user"
+      ],
+      "options_schema": null
+    },
+    {
+      "name": "directs.view",
+      "area": "directs",
+      "level": "view",
+      "with": null,
+      "on": [
+        "org"
+      ],
+      "label": "View Direct chats",
+      "allows": "Read the direct and group chats among the org's members without being in them.",
+      "profiles": false,
+      "holders": [
+        "role",
+        "group",
+        "user"
+      ],
+      "options_schema": null
+    },
+    {
+      "name": "access.manage",
+      "area": "access",
+      "level": "manage",
+      "with": null,
+      "on": [
+        "org",
+        "project",
+        "topic",
+        "thread",
+        "document",
+        "provider",
+        "agent",
+        "environment",
+        "host",
+        "template",
+        "mcp_server",
+        "mount"
+      ],
+      "label": "Manage Access",
+      "allows": "Change who holds what on the thing, and on a place also its defaults and its roles; decide requests for access; share it with agents.",
+      "profiles": false,
+      "holders": [
+        "role",
+        "group",
+        "user",
+        "everyone"
+      ],
+      "options_schema": null
+    },
+    {
+      "name": "access.own",
+      "area": "access",
+      "level": "own",
+      "with": null,
+      "on": [
+        "org",
+        "project",
+        "topic",
+        "thread",
+        "document",
+        "provider",
+        "agent",
+        "environment",
+        "host",
+        "template",
+        "mcp_server",
+        "mount"
+      ],
+      "label": "Own",
+      "allows": "Be one of its owners: hold everything on its page, and say who else owns it and who else may change the page.",
+      "profiles": false,
+      "holders": [
+        "group",
+        "user"
+      ],
+      "options_schema": null
+    },
+    {
+      "name": "access.external",
+      "area": "access",
+      "level": "advanced",
+      "with": null,
+      "on": [
+        "org",
+        "project",
+        "topic",
+        "thread",
+        "document",
+        "provider",
+        "agent",
+        "environment",
+        "host",
+        "template",
+        "mcp_server",
+        "mount"
+      ],
+      "label": "Share outside",
+      "allows": "Name on its page somebody who is no member of its root org.",
+      "profiles": false,
+      "holders": [
+        "role",
+        "group",
+        "user",
+        "everyone"
+      ],
+      "options_schema": null
+    },
+    {
+      "name": "thread.export",
+      "area": "thread",
+      "level": "advanced",
+      "with": "thread.manage",
+      "on": [
+        "thread"
+      ],
+      "label": "Export",
+      "allows": "Take the conversation of the thread away as a file: its own export, its place in an archive, a copy given to an agent, and an agent's download of it.",
+      "profiles": true,
+      "holders": [
+        "role",
+        "group",
+        "user",
+        "agents"
+      ],
+      "options_schema": null
+    },
+    {
+      "name": "chat.export",
+      "area": "chat",
+      "level": "advanced",
+      "with": "chat.manage",
+      "on": [
+        "org",
+        "project",
+        "topic",
+        "thread"
+      ],
+      "label": "Export",
+      "allows": "Take the chat of the node away as a file: its own export, its place in an archive, a copy given to an agent, and an agent's download of it.",
+      "profiles": false,
+      "holders": [
+        "role",
+        "group",
+        "user",
+        "agents"
+      ],
+      "options_schema": null
+    },
+    {
+      "name": "doc.export",
+      "area": "doc",
+      "level": "advanced",
+      "with": "doc.manage",
+      "on": [
+        "org",
+        "project",
+        "topic",
+        "thread",
+        "document"
+      ],
+      "label": "Export",
+      "allows": "Take the documents beside the node, or this document, away as files: its own export, its place in an archive, a copy given to an agent, and an agent's download of it.",
+      "profiles": false,
+      "holders": [
+        "role",
+        "group",
+        "user",
+        "agents"
+      ],
+      "options_schema": null
+    },
+    {
+      "name": "provider.view",
+      "area": "provider",
+      "level": "view",
+      "with": null,
+      "on": [
+        "provider"
+      ],
+      "label": "View Provider",
+      "allows": "See the provider in lists, with its status, plan and limits, and what each thread used of it.",
+      "profiles": false,
+      "holders": [
+        "role",
+        "group",
+        "user"
+      ],
+      "options_schema": null
+    },
+    {
+      "name": "provider.use",
+      "area": "provider",
+      "level": "use",
+      "with": null,
+      "on": [
+        "provider"
+      ],
+      "label": "Use Provider",
+      "allows": "Run turns on the provider: put a thread on it, and give input to threads that run on it, with the models and efforts the entry allows.",
+      "profiles": false,
+      "holders": [
+        "role",
+        "group",
+        "user",
+        "node"
+      ],
+      "options_schema": {
+        "type": "object",
+        "additionalProperties": false,
+        "properties": {
+          "models": {
+            "type": [
+              "array",
+              "null"
+            ],
+            "items": {
+              "type": "string"
+            },
+            "description": "The models the holder may run, by name; left out, every enabled model\nof the provider."
+          },
+          "efforts": {
+            "type": [
+              "array",
+              "null"
+            ],
+            "items": {
+              "type": "string"
+            },
+            "description": "The reasoning efforts the holder may run, by name, on any model that\nlists them; left out, every effort a model lists."
+          },
+          "arrangements": {
+            "type": [
+              "array",
+              "null"
+            ],
+            "items": {
+              "$ref": "#/$defs/Arrangement"
+            },
+            "description": "The arrangement types in which work done through this entry may use\nthe provider; left out, all that the provider's owners allow. It can\nonly narrow what they allow."
+          }
+        },
+        "description": "What an entry in the Use row of a provider lets its holder run. A member\nthat is left out does not narrow.",
+        "title": "ProviderUse",
+        "$schema": "https://json-schema.org/draft/2020-12/schema",
+        "$defs": {
+          "Arrangement": {
+            "oneOf": [
+              {
+                "type": "string",
+                "const": "separated",
+                "description": "The harness stays with its provider, and its tools run elsewhere."
+              },
+              {
+                "type": "string",
+                "const": "key_separated",
+                "description": "The key stays with the provider and is forwarded."
+              },
+              {
+                "type": "string",
+                "const": "credential_shared",
+                "description": "A copy of the credential is shared."
+              },
+              {
+                "type": "string",
+                "const": "handed_over",
+                "description": "The credential itself is handed over."
+              }
+            ],
+            "description": "A way to place a harness, its tools and a credential that an entry\nmay allow for work done through it. The fifth arrangement, everything\non one machine, is never chosen and so is no option."
+          }
+        }
+      }
+    },
+    {
+      "name": "provider.manage",
+      "area": "provider",
+      "level": "manage",
+      "with": null,
+      "on": [
+        "provider"
+      ],
+      "label": "Manage Provider",
+      "allows": "Sign the provider in and out, rotate its key, say which models and arrangements it allows, run and update its runtime, and enable, disable and delete it.",
+      "profiles": false,
+      "holders": [
+        "role",
+        "group",
+        "user"
+      ],
+      "options_schema": null
+    },
+    {
+      "name": "provider.bypass",
+      "area": "provider",
+      "level": "advanced",
+      "with": "provider.manage",
+      "on": [
+        "provider"
+      ],
+      "label": "Go past limits",
+      "allows": "Let one turn run past a cap on the provider that has no room left, or past the limit of its plan.",
+      "profiles": false,
+      "holders": [
+        "role",
+        "group",
+        "user"
+      ],
+      "options_schema": null
+    },
+    {
+      "name": "agent.view",
+      "area": "agent",
+      "level": "view",
+      "with": null,
+      "on": [
+        "agent"
+      ],
+      "label": "View Agent profile",
+      "allows": "See the agent profile in lists, with what its adapter declares.",
+      "profiles": false,
+      "holders": [
+        "role",
+        "group",
+        "user",
+        "everyone"
+      ],
+      "options_schema": null
+    },
+    {
+      "name": "agent.use",
+      "area": "agent",
+      "level": "use",
+      "with": null,
+      "on": [
+        "agent"
+      ],
+      "label": "Use Agent profile",
+      "allows": "Put a thread on the profile, and sign a subscription in through it.",
+      "profiles": false,
+      "holders": [
+        "role",
+        "group",
+        "user",
+        "node",
+        "everyone"
+      ],
+      "options_schema": null
+    },
+    {
+      "name": "agent.manage",
+      "area": "agent",
+      "level": "manage",
+      "with": null,
+      "on": [
+        "agent"
+      ],
+      "label": "Manage Agent profile",
+      "allows": "Change the profile and its overrides, and enable, disable and delete it.",
+      "profiles": false,
+      "holders": [
+        "role",
+        "group",
+        "user",
+        "everyone"
+      ],
+      "options_schema": null
+    },
+    {
+      "name": "environment.view",
+      "area": "environment",
+      "level": "view",
+      "with": null,
+      "on": [
+        "environment"
+      ],
+      "label": "View Environment",
+      "allows": "See the environment: its name, owner, place and state, and what updates wait for it.",
+      "profiles": true,
+      "holders": [
+        "role",
+        "group",
+        "user"
+      ],
+      "options_schema": null
+    },
+    {
+      "name": "environment.manage",
+      "area": "environment",
+      "level": "manage",
+      "with": null,
+      "on": [
+        "environment"
+      ],
+      "label": "Manage Environment",
+      "allows": "Have all of the environment: say which threads run in it and where, how far agents are confined and what it offers; start, stop, recreate, update, configure, move and remove it.",
+      "profiles": true,
+      "holders": [
+        "role",
+        "group",
+        "user"
+      ],
+      "options_schema": null
+    },
+    {
+      "name": "files.view",
+      "area": "files",
+      "level": "view",
+      "with": null,
+      "on": [
+        "environment"
+      ],
+      "label": "View Files",
+      "allows": "List, read and download the files of the environment's whole workspace, with their differences and snapshots.",
+      "profiles": true,
+      "holders": [
+        "role",
+        "group",
+        "user"
+      ],
+      "options_schema": null
+    },
+    {
+      "name": "files.manage",
+      "area": "files",
+      "level": "manage",
+      "with": null,
+      "on": [
+        "environment"
+      ],
+      "label": "Manage Files",
+      "allows": "Change the files of that workspace through Orch, and make, label and restore snapshots.",
+      "profiles": true,
+      "holders": [
+        "role",
+        "group",
+        "user"
+      ],
+      "options_schema": null
+    },
+    {
+      "name": "terminal.view",
+      "area": "terminal",
+      "level": "view",
+      "with": null,
+      "on": [
+        "environment"
+      ],
+      "label": "View Terminal",
+      "allows": "See the processes of the environment and what they use, and watch an agent's own terminal there.",
+      "profiles": true,
+      "holders": [
+        "role",
+        "group",
+        "user"
+      ],
+      "options_schema": null
+    },
+    {
+      "name": "terminal.manage",
+      "area": "terminal",
+      "level": "manage",
+      "with": null,
+      "on": [
+        "environment"
+      ],
+      "label": "Manage Terminal",
+      "allows": "Open a shell of one's own in the environment and come back to it, signal processes there, and type into an agent's own terminal.",
+      "profiles": true,
+      "holders": [
+        "role",
+        "group",
+        "user"
+      ],
+      "options_schema": null
+    },
+    {
+      "name": "browser.view",
+      "area": "browser",
+      "level": "view",
+      "with": null,
+      "on": [
+        "environment"
+      ],
+      "label": "View Browsers",
+      "allows": "See the browsers open in the environment and the profiles it keeps, and watch a tab of one, and who else watches or drives it.",
+      "profiles": true,
+      "holders": [
+        "role",
+        "group",
+        "user"
+      ],
+      "options_schema": null
+    },
+    {
+      "name": "browser.manage",
+      "area": "browser",
+      "level": "manage",
+      "with": null,
+      "on": [
+        "environment"
+      ],
+      "label": "Manage Browsers",
+      "allows": "Drive a browser of the environment with pointer and keys, open and close its tabs, open or quit one, make, rename and delete profiles, and read the address a browser is driven at.",
+      "profiles": true,
+      "holders": [
+        "role",
+        "group",
+        "user"
+      ],
+      "options_schema": null
+    },
+    {
+      "name": "vnc.view",
+      "area": "vnc",
+      "level": "view",
+      "with": null,
+      "on": [
+        "environment"
+      ],
+      "label": "View VNC",
+      "allows": "See the displays served in the environment, and watch one.",
+      "profiles": true,
+      "holders": [
+        "role",
+        "group",
+        "user"
+      ],
+      "options_schema": null
+    },
+    {
+      "name": "vnc.manage",
+      "area": "vnc",
+      "level": "manage",
+      "with": null,
+      "on": [
+        "environment"
+      ],
+      "label": "Manage VNC",
+      "allows": "Work in a display with pointer, keys and the clipboard, open one from a preset, and close one.",
+      "profiles": true,
+      "holders": [
+        "role",
+        "group",
+        "user"
+      ],
+      "options_schema": null
+    },
+    {
+      "name": "host.view",
+      "area": "host",
+      "level": "view",
+      "with": null,
+      "on": [
+        "host"
+      ],
+      "label": "View Host",
+      "allows": "See the host in lists, with its capacity and what runs on it for the reader.",
+      "profiles": false,
+      "holders": [
+        "role",
+        "group",
+        "user",
+        "everyone"
+      ],
+      "options_schema": null
+    },
+    {
+      "name": "host.use",
+      "area": "host",
+      "level": "use",
+      "with": null,
+      "on": [
+        "host"
+      ],
+      "label": "Use Host",
+      "allows": "Have environments and a provider's runtime made on the host, or moved to it, within what the entry allows.",
+      "profiles": false,
+      "holders": [
+        "role",
+        "group",
+        "user",
+        "node",
+        "everyone"
+      ],
+      "options_schema": null
+    },
+    {
+      "name": "host.manage",
+      "area": "host",
+      "level": "manage",
+      "with": null,
+      "on": [
+        "host"
+      ],
+      "label": "Manage Host",
+      "allows": "Rename and label the host, take it out of scheduling, say what it does when it is full, stop or remove what runs on it, decide the capability requests of its scope, and remove it.",
+      "profiles": false,
+      "holders": [
+        "role",
+        "group",
+        "user",
+        "everyone"
+      ],
+      "options_schema": null
+    },
+    {
+      "name": "template.view",
+      "area": "template",
+      "level": "view",
+      "with": null,
+      "on": [
+        "template"
+      ],
+      "label": "View Template",
+      "allows": "See the template in lists, with what it specifies.",
+      "profiles": false,
+      "holders": [
+        "role",
+        "group",
+        "user",
+        "everyone"
+      ],
+      "options_schema": null
+    },
+    {
+      "name": "template.use",
+      "area": "template",
+      "level": "use",
+      "with": null,
+      "on": [
+        "template"
+      ],
+      "label": "Use Template",
+      "allows": "Have an environment, or a provider's runtime, made from the template within what the entry allows.",
+      "profiles": false,
+      "holders": [
+        "role",
+        "group",
+        "user",
+        "node",
+        "everyone"
+      ],
+      "options_schema": null
+    },
+    {
+      "name": "template.manage",
+      "area": "template",
+      "level": "manage",
+      "with": null,
+      "on": [
+        "template"
+      ],
+      "label": "Manage Template",
+      "allows": "Change, enable, disable and delete the template.",
+      "profiles": false,
+      "holders": [
+        "role",
+        "group",
+        "user",
+        "everyone"
+      ],
+      "options_schema": null
+    },
+    {
+      "name": "mcp.view",
+      "area": "mcp",
+      "level": "view",
+      "with": null,
+      "on": [
+        "mcp_server"
+      ],
+      "label": "View MCP server",
+      "allows": "See the server in lists, without its secrets.",
+      "profiles": false,
+      "holders": [
+        "role",
+        "group",
+        "user",
+        "everyone"
+      ],
+      "options_schema": null
+    },
+    {
+      "name": "mcp.use",
+      "area": "mcp",
+      "level": "use",
+      "with": null,
+      "on": [
+        "mcp_server"
+      ],
+      "label": "Use MCP server",
+      "allows": "Switch the server on for a scope.",
+      "profiles": false,
+      "holders": [
+        "role",
+        "group",
+        "user",
+        "node",
+        "everyone"
+      ],
+      "options_schema": null
+    },
+    {
+      "name": "mcp.manage",
+      "area": "mcp",
+      "level": "manage",
+      "with": null,
+      "on": [
+        "mcp_server"
+      ],
+      "label": "Manage MCP server",
+      "allows": "Change, enable, disable and delete the server.",
+      "profiles": false,
+      "holders": [
+        "role",
+        "group",
+        "user",
+        "everyone"
+      ],
+      "options_schema": null
+    },
+    {
+      "name": "mount.view",
+      "area": "mount",
+      "level": "view",
+      "with": null,
+      "on": [
+        "mount"
+      ],
+      "label": "View Mount",
+      "allows": "See the mount in lists, with the machines that have it.",
+      "profiles": false,
+      "holders": [
+        "role",
+        "group",
+        "user",
+        "everyone"
+      ],
+      "options_schema": null
+    },
+    {
+      "name": "mount.use",
+      "area": "mount",
+      "level": "use",
+      "with": null,
+      "on": [
+        "mount"
+      ],
+      "label": "Use Mount",
+      "allows": "Attach the mount to an environment, or to the environments made for a scope.",
+      "profiles": false,
+      "holders": [
+        "role",
+        "group",
+        "user",
+        "node",
+        "everyone"
+      ],
+      "options_schema": null
+    },
+    {
+      "name": "mount.manage",
+      "area": "mount",
+      "level": "manage",
+      "with": null,
+      "on": [
+        "mount"
+      ],
+      "label": "Manage Mount",
+      "allows": "Change, enable, disable and delete the mount, and say where its data may be.",
+      "profiles": false,
+      "holders": [
+        "role",
+        "group",
+        "user",
+        "everyone"
+      ],
+      "options_schema": null
+    }
+  ],
+  "choices": [
+    {
+      "key": "full_view",
+      "label": "Can view",
+      "permissions": {
+        "agent": [
+          "agent.view"
+        ],
+        "document": [
+          "doc.view"
+        ],
+        "environment": [
+          "environment.view",
+          "files.view",
+          "terminal.view",
+          "browser.view",
+          "vnc.view"
+        ],
+        "host": [
+          "host.view"
+        ],
+        "mcp_server": [
+          "mcp.view"
+        ],
+        "mount": [
+          "mount.view"
+        ],
+        "org": [
+          "chat.view",
+          "doc.view",
+          "org.view"
+        ],
+        "project": [
+          "chat.view",
+          "doc.view",
+          "project.view"
+        ],
+        "provider": [
+          "provider.view"
+        ],
+        "template": [
+          "template.view"
+        ],
+        "thread": [
+          "chat.view",
+          "doc.view",
+          "thread.view"
+        ],
+        "topic": [
+          "chat.view",
+          "doc.view",
+          "topic.view"
+        ]
+      }
+    },
+    {
+      "key": "full_interact",
+      "label": "Can interact",
+      "permissions": {
+        "agent": [
+          "agent.use"
+        ],
+        "document": [
+          "doc.edit"
+        ],
+        "host": [
+          "host.use"
+        ],
+        "mcp_server": [
+          "mcp.use"
+        ],
+        "mount": [
+          "mount.use"
+        ],
+        "org": [
+          "chat.interact",
+          "doc.edit",
+          "org.interact"
+        ],
+        "project": [
+          "chat.interact",
+          "doc.edit",
+          "project.interact"
+        ],
+        "provider": [
+          "provider.use"
+        ],
+        "template": [
+          "template.use"
+        ],
+        "thread": [
+          "chat.interact",
+          "doc.edit",
+          "thread.interact"
+        ],
+        "topic": [
+          "chat.interact",
+          "doc.edit",
+          "topic.interact"
+        ]
+      }
+    },
+    {
+      "key": "full_manage",
+      "label": "Can manage",
+      "permissions": {
+        "agent": [
+          "agent.manage"
+        ],
+        "document": [
+          "doc.manage"
+        ],
+        "environment": [
+          "environment.manage"
+        ],
+        "host": [
+          "host.manage"
+        ],
+        "mcp_server": [
+          "mcp.manage"
+        ],
+        "mount": [
+          "mount.manage"
+        ],
+        "org": [
+          "chat.manage",
+          "doc.manage",
+          "org.manage"
+        ],
+        "project": [
+          "chat.manage",
+          "doc.manage",
+          "project.manage"
+        ],
+        "provider": [
+          "provider.manage"
+        ],
+        "template": [
+          "template.manage"
+        ],
+        "thread": [
+          "chat.manage",
+          "doc.manage",
+          "thread.manage"
+        ],
+        "topic": [
+          "chat.manage",
+          "doc.manage",
+          "topic.manage"
+        ]
+      }
+    }
+  ],
+  "roles": [
+    {
+      "key": "viewer",
+      "name": "Viewer"
+    },
+    {
+      "key": "interactor",
+      "name": "Interactor"
+    },
+    {
+      "key": "developer",
+      "name": "Developer"
+    },
+    {
+      "key": "admin",
+      "name": "Admin"
+    }
+  ]
+}

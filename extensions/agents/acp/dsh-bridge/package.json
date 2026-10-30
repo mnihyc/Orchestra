@@ -1,0 +1,17 @@
+{
+  "name": "orch-dsh-bridge",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "license": "Apache-2.0",
+  "description": "Orch's plugin for DeepSeek Harness: the features its Agent Client Protocol server does not carry",
+  "engines": {
+    "node": ">=24.16.0"
+  },
+  "scripts": {
+    "typecheck": "node ../../../../frontend/node_modules/typescript/bin/tsc -p tsconfig.json",
+    "build": "node build.mjs",
+    "check": "node build.mjs --check && npm run typecheck",
+    "test": "node --test --test-concurrency=2 tests/*.test.ts"
+  }
+}

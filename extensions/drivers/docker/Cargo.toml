@@ -1,0 +1,42 @@
+[package]
+name = "orch-driver-docker"
+description = "Docker Engine implementation of the runtime driver contract."
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+rust-version.workspace = true
+repository.workspace = true
+publish.workspace = true
+
+[dependencies]
+orch-blob-contract.workspace = true
+orch-driver-contract.workspace = true
+orch-settings-contract.workspace = true
+orch-types.workspace = true
+async-trait.workspace = true
+blake3.workspace = true
+bollard.workspace = true
+bytes.workspace = true
+chrono.workspace = true
+flate2.workspace = true
+futures.workspace = true
+hex.workspace = true
+ipnet.workspace = true
+rustix.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+sha2.workspace = true
+tar.workspace = true
+tempfile.workspace = true
+thiserror.workspace = true
+tokio.workspace = true
+tokio-util.workspace = true
+tracing.workspace = true
+url.workspace = true
+zip.workspace = true
+
+[lints]
+workspace = true
+
+[dev-dependencies]
+jsonschema.workspace = true

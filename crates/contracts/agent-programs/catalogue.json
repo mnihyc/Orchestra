@@ -1,0 +1,480 @@
+{
+  "cases": {
+    "startup": {
+      "en": "Starts with isolated settings",
+      "zh-CN": "使用隔离设置启动"
+    },
+    "command_approval": {
+      "en": "Asks before running a command",
+      "zh-CN": "运行命令前请求批准"
+    },
+    "user_input": {
+      "en": "Asks a question and receives its answer",
+      "zh-CN": "提出问题并收到回答"
+    },
+    "elicitation": {
+      "en": "Returns answers to tool questions",
+      "zh-CN": "将回答传回提问的工具"
+    },
+    "nested_subagent": {
+      "en": "Starts a linked sub-agent",
+      "zh-CN": "启动有关联的子智能体"
+    },
+    "native_import": {
+      "en": "Takes over a conversation natively",
+      "zh-CN": "以原生方式接续对话"
+    },
+    "history.native_import": {
+      "en": "Takes over a conversation natively",
+      "zh-CN": "以原生方式接续对话"
+    },
+    "tools.result_form": {
+      "en": "Delivers text and structured tool results once",
+      "zh-CN": "仅传递一次文本和结构化工具结果"
+    },
+    "parallel_calls": {
+      "en": "Keeps parallel tool results separate",
+      "zh-CN": "区分并行工具调用的结果"
+    },
+    "image_result": {
+      "en": "Passes tool images to the model",
+      "zh-CN": "将工具返回的图片传给模型"
+    },
+    "sandbox": {
+      "en": "Refuses an unproved read-only sandbox",
+      "zh-CN": "拒绝未经验证的只读沙箱"
+    },
+    "dynamic_tools": {
+      "en": "Exposes Orch's tools as dynamic tools",
+      "zh-CN": "将 Orch 工具作为动态工具提供"
+    }
+  },
+  "features": {
+    "approvals.command": {
+      "en": "asking before running commands",
+      "zh-CN": "运行命令前请求批准"
+    },
+    "approvals.user_input": {
+      "en": "asking questions",
+      "zh-CN": "提问"
+    },
+    "approvals.mcp_elicitation": {
+      "en": "answering tool questions",
+      "zh-CN": "回答工具提问"
+    },
+    "subagents": {
+      "en": "starting sub-agents",
+      "zh-CN": "启动子智能体"
+    },
+    "plan_mode": {
+      "en": "planning before acting",
+      "zh-CN": "先规划再执行"
+    },
+    "orch_tools": {
+      "en": "using shared tools",
+      "zh-CN": "使用共享工具"
+    },
+    "input_images": {
+      "en": "reading images",
+      "zh-CN": "读取图片"
+    },
+    "steer": {
+      "en": "steering a running turn",
+      "zh-CN": "引导正在运行的回合"
+    },
+    "fork_native": {
+      "en": "branching a conversation natively",
+      "zh-CN": "以原生方式分支对话"
+    },
+    "import_native": {
+      "en": "taking over a conversation natively",
+      "zh-CN": "以原生方式接续对话"
+    },
+    "import_neutral": {
+      "en": "carrying history as items",
+      "zh-CN": "按条目携带历史"
+    },
+    "discover_sessions": {
+      "en": "finding existing sessions",
+      "zh-CN": "查找已有会话"
+    },
+    "model_discovery": {
+      "en": "listing available models",
+      "zh-CN": "列出可用模型"
+    },
+    "background_commands": {
+      "en": "running background commands",
+      "zh-CN": "运行后台命令"
+    },
+    "reasoning_summary": {
+      "en": "showing reasoning summaries",
+      "zh-CN": "显示推理摘要"
+    },
+    "plan": {
+      "en": "showing plan updates",
+      "zh-CN": "显示计划进展"
+    },
+    "history_delete": {
+      "en": "removing native session history",
+      "zh-CN": "移除原生会话历史"
+    }
+  },
+  "runner": {
+    "en": "Returns a complete check report",
+    "zh-CN": "返回完整的检查报告"
+  },
+  "other_feature": {
+    "en": "other program functions",
+    "zh-CN": "其他程序功能"
+  },
+  "capability_groups": [
+    {
+      "id": "conversation",
+      "title": {
+        "en": "Conversation",
+        "zh-CN": "对话"
+      },
+      "items": [
+        {
+          "id": "steer",
+          "title": {
+            "en": "Steering",
+            "zh-CN": "引导"
+          },
+          "path": "/capabilities/steer"
+        },
+        {
+          "id": "interrupt",
+          "title": {
+            "en": "Interrupt",
+            "zh-CN": "中断"
+          },
+          "path": "/capabilities/interrupt"
+        },
+        {
+          "id": "questions",
+          "title": {
+            "en": "Questions",
+            "zh-CN": "提问"
+          },
+          "path": "/capabilities/approvals:user_input|/capabilities/approvals:mcp_elicitation"
+        },
+        {
+          "id": "plan_mode",
+          "title": {
+            "en": "Plan mode",
+            "zh-CN": "计划模式"
+          },
+          "path": "/capabilities/plan_mode"
+        },
+        {
+          "id": "plan",
+          "title": {
+            "en": "Plan updates",
+            "zh-CN": "计划更新"
+          },
+          "path": "/capabilities/plan"
+        },
+        {
+          "id": "reasoning_summary",
+          "title": {
+            "en": "Reasoning summary",
+            "zh-CN": "推理摘要"
+          },
+          "path": "/capabilities/reasoning_summary"
+        },
+        {
+          "id": "input_images",
+          "title": {
+            "en": "Images",
+            "zh-CN": "图片"
+          },
+          "path": "/capabilities/input_images"
+        },
+        {
+          "id": "effort",
+          "title": {
+            "en": "Reasoning effort",
+            "zh-CN": "推理力度"
+          },
+          "path": "/capabilities/effort"
+        },
+        {
+          "id": "title",
+          "title": {
+            "en": "Session title",
+            "zh-CN": "会话标题"
+          },
+          "path": "/capabilities/title"
+        },
+        {
+          "id": "plan_mechanics",
+          "title": {
+            "en": "Plan handoff",
+            "zh-CN": "计划交接"
+          },
+          "path": "/capabilities/plan_mode"
+        }
+      ]
+    },
+    {
+      "id": "tools",
+      "title": {
+        "en": "Tools",
+        "zh-CN": "工具"
+      },
+      "items": [
+        {
+          "id": "approvals",
+          "title": {
+            "en": "Approvals",
+            "zh-CN": "审批"
+          },
+          "path": "/capabilities/approvals"
+        },
+        {
+          "id": "sandbox",
+          "title": {
+            "en": "Sandbox",
+            "zh-CN": "沙箱"
+          },
+          "path": "/sandbox_modes:read_only|/sandbox_modes:workspace"
+        },
+        {
+          "id": "mcp",
+          "title": {
+            "en": "MCP",
+            "zh-CN": "MCP"
+          },
+          "path": "/capabilities/mcp/stdio|/capabilities/mcp/http"
+        },
+        {
+          "id": "skills",
+          "title": {
+            "en": "Skills",
+            "zh-CN": "技能"
+          },
+          "path": "/capabilities/skills"
+        },
+        {
+          "id": "subagents",
+          "title": {
+            "en": "Sub-agents",
+            "zh-CN": "子智能体"
+          },
+          "path": "/capabilities/subagents"
+        },
+        {
+          "id": "background_commands",
+          "title": {
+            "en": "Background commands",
+            "zh-CN": "后台命令"
+          },
+          "path": "/capabilities/background_commands"
+        },
+        {
+          "id": "orch_tools",
+          "title": {
+            "en": "Orch tools",
+            "zh-CN": "Orch 工具"
+          },
+          "path": "/capabilities/orch_tools"
+        },
+        {
+          "id": "mcp_discovery",
+          "title": {
+            "en": "MCP discovery",
+            "zh-CN": "发现 MCP"
+          },
+          "path": "/capabilities/mcp_discovery"
+        },
+        {
+          "id": "approval_reviewer",
+          "title": {
+            "en": "Approval reviewer",
+            "zh-CN": "审批审查器"
+          },
+          "path": "/capabilities/approval_reviewer"
+        },
+        {
+          "id": "subagent_limits",
+          "title": {
+            "en": "Sub-agent limits",
+            "zh-CN": "子智能体限制"
+          },
+          "path": "/capabilities/subagent_limits"
+        },
+        {
+          "id": "auxiliary_models",
+          "title": {
+            "en": "Helper model allowlist",
+            "zh-CN": "辅助模型允许列表"
+          },
+          "path": "/capabilities/auxiliary_models"
+        }
+      ]
+    },
+    {
+      "id": "sessions",
+      "title": {
+        "en": "Sessions",
+        "zh-CN": "会话"
+      },
+      "items": [
+        {
+          "id": "resume",
+          "title": {
+            "en": "Resume",
+            "zh-CN": "恢复"
+          },
+          "path": "/capabilities/resume"
+        },
+        {
+          "id": "fork_native",
+          "title": {
+            "en": "Native fork",
+            "zh-CN": "原生分支"
+          },
+          "path": "/capabilities/fork_native"
+        },
+        {
+          "id": "carry",
+          "title": {
+            "en": "Carry conversation",
+            "zh-CN": "接续对话"
+          },
+          "path": "/capabilities/import_neutral"
+        },
+        {
+          "id": "import_native",
+          "title": {
+            "en": "Native import",
+            "zh-CN": "原生导入"
+          },
+          "path": "/capabilities/import_native"
+        },
+        {
+          "id": "export_native",
+          "title": {
+            "en": "Native export",
+            "zh-CN": "原生导出"
+          },
+          "path": "/capabilities/export_native"
+        },
+        {
+          "id": "discover_sessions",
+          "title": {
+            "en": "Session discovery",
+            "zh-CN": "发现会话"
+          },
+          "path": "/capabilities/discover_sessions"
+        },
+        {
+          "id": "native_input_prefix",
+          "title": {
+            "en": "Fork at an input",
+            "zh-CN": "从输入处分支"
+          },
+          "path": "/capabilities/native_input_prefix"
+        },
+        {
+          "id": "memory",
+          "title": {
+            "en": "Memory",
+            "zh-CN": "记忆"
+          },
+          "path": "/capabilities/memory"
+        },
+        {
+          "id": "telemetry_off",
+          "title": {
+            "en": "Telemetry disabled",
+            "zh-CN": "关闭遥测"
+          },
+          "path": "/capabilities/telemetry_off"
+        },
+        {
+          "id": "instruction_root_marker",
+          "title": {
+            "en": "Instruction root",
+            "zh-CN": "指令根目录"
+          },
+          "path": "/capabilities/instruction_root_marker"
+        },
+        {
+          "id": "session_reload",
+          "title": {
+            "en": "Session reload",
+            "zh-CN": "会话重新加载"
+          },
+          "path": "/capabilities/session_reload"
+        },
+        {
+          "id": "agent_terminal",
+          "title": {
+            "en": "Agent terminal",
+            "zh-CN": "代理终端"
+          },
+          "path": "/capabilities/agent_terminal"
+        }
+      ]
+    },
+    {
+      "id": "usage",
+      "title": {
+        "en": "Usage",
+        "zh-CN": "用量"
+      },
+      "items": [
+        {
+          "id": "usage_tokens",
+          "title": {
+            "en": "Tokens",
+            "zh-CN": "令牌"
+          },
+          "path": "/capabilities/usage_tokens"
+        },
+        {
+          "id": "usage_context",
+          "title": {
+            "en": "Context",
+            "zh-CN": "上下文"
+          },
+          "path": "/capabilities/usage_context"
+        },
+        {
+          "id": "phases",
+          "title": {
+            "en": "Phases",
+            "zh-CN": "阶段"
+          },
+          "path": "/capabilities/phases"
+        },
+        {
+          "id": "model_discovery",
+          "title": {
+            "en": "Model discovery",
+            "zh-CN": "发现模型"
+          },
+          "path": "/capabilities/model_discovery"
+        },
+        {
+          "id": "provider_facts",
+          "title": {
+            "en": "Provider facts",
+            "zh-CN": "提供方信息"
+          },
+          "path": "/capabilities/provider_facts"
+        }
+      ]
+    }
+  ],
+  "not_supported": {
+    "en": "The reported build does not declare this capability.",
+    "zh-CN": "报告的构建未声明此能力。"
+  },
+  "off_by_check": {
+    "en": "The build check disabled this capability.",
+    "zh-CN": "构建检查已关闭此能力。"
+  }
+}

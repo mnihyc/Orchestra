@@ -1,0 +1,40 @@
+[package]
+name = "orch-plugin"
+description = "External plugin transport, supervision and trait bridges."
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+rust-version.workspace = true
+repository.workspace = true
+publish.workspace = true
+
+[dependencies]
+jsonschema.workspace = true
+orch-agent-contract.workspace = true
+orch-agent-programs.workspace = true
+orch-driver-contract.workspace = true
+orch-executor-contract.workspace = true
+orch-model-contract.workspace = true
+orch-notifier-contract.workspace = true
+orch-plugin-contract.workspace = true
+orch-provider-contract.workspace = true
+orch-summarizer-contract.workspace = true
+orch-types.workspace = true
+async-trait.workspace = true
+bytes.workspace = true
+chrono.workspace = true
+futures.workspace = true
+metrics.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+thiserror.workspace = true
+tokio.workspace = true
+tracing.workspace = true
+
+[dev-dependencies]
+orch-config.workspace = true
+orch-telemetry.workspace = true
+tempfile.workspace = true
+
+[lints]
+workspace = true

@@ -1,0 +1,47 @@
+[package]
+name = "orch-api"
+description = "Compose the API, engine, database, PKI, blob store, summarizers and identity providers."
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+rust-version.workspace = true
+repository.workspace = true
+publish.workspace = true
+
+[dependencies]
+anyhow.workspace = true
+clap.workspace = true
+orch-agent-programs.workspace = true
+orch-api-core.workspace = true
+orch-blob-local.workspace = true
+orch-build-info.workspace = true
+orch-config.workspace = true
+orch-db.workspace = true
+orch-identity-oidc.workspace = true
+orch-notifier-email.workspace = true
+orch-notifier-push.workspace = true
+orch-notifier-telegram.workspace = true
+orch-notifier-webhook.workspace = true
+orch-pki.workspace = true
+orch-provider-contract.workspace = true
+orch-provider-deepseek.workspace = true
+orch-provider-openrouter.workspace = true
+orch-telemetry.workspace = true
+orch-types.workspace = true
+orch-worker-core.workspace = true
+serde_json.workspace = true
+tokio.workspace = true
+tokio-util.workspace = true
+tracing.workspace = true
+
+[dev-dependencies]
+orch-testkit.workspace = true
+reqwest.workspace = true
+tempfile.workspace = true
+url.workspace = true
+
+[build-dependencies]
+orch-build-support.workspace = true
+
+[lints]
+workspace = true

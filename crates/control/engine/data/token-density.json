@@ -1,0 +1,27 @@
+{
+  "note": "Bytes of ASCII text per token, and characters beyond ASCII per token, measured on 2026-10-14 through a gateway's usage on 6 000 characters of each kind with the cheapest model of each family: prose, code, JSON and Chinese. Every measure is times a hundred. A structured text (code, JSON, what a command printed) is counted at the middle of code and JSON. A family that was not measured is counted between the two that were.",
+  "families": [
+    {
+      "name": "claude",
+      "matches": ["*claude*", "anthropic/*"],
+      "ascii_prose_x100": 331,
+      "ascii_structured_x100": 292,
+      "other_x100": 86,
+      "image_tokens": 1049
+    },
+    {
+      "name": "gpt",
+      "matches": ["gpt*", "*/gpt*", "*codex*", "o[0-9]*", "*/o[0-9]*", "openai/*"],
+      "ascii_prose_x100": 482,
+      "ascii_structured_x100": 437,
+      "other_x100": 132,
+      "image_tokens": 765
+    }
+  ],
+  "unmeasured": {
+    "ascii_prose_x100": 400,
+    "ascii_structured_x100": 350,
+    "other_x100": 100,
+    "image_tokens": 1000
+  }
+}

@@ -1,0 +1,18 @@
+{
+ "harness": "codex",
+ "version": "0.162.1",
+ "recorded": "2026-10-12",
+ "fault": "error billing",
+ "setup": "provider of the forwarded path (model_providers entry, token in ORCH_LLM_TOKEN)",
+ "requests": 1,
+ "exit": 0,
+ "stderr": [],
+ "frames": [
+  {"method":"turn/started","params":{"threadId":"01a12f91-031e-7cb0-bd2a-cb20bdc67570","turn":{"id":"01a12f91-038c-73c1-bfee-adc81b59df57","rootTurnId":"01a12f91-038c-73c1-bfee-adc81b59df57","items":[],"itemsView":"notLoaded","status":"inProgress","error":null,"startedAt":1791799395,"completedAt":null,"durationMs":null}},"emittedAtMs":1791799395427},
+  {"method":"item/started","params":{"item":{"type":"userMessage","id":"01a12f91-04a8-7ee0-bf9e-835ff025cd77","clientId":null,"content":[{"type":"text","text":"hello\n#!mock\nerror billing\n","text_elements":[]}]},"threadId":"01a12f91-031e-7cb0-bd2a-cb20bdc67570","turnId":"01a12f91-038c-73c1-bfee-adc81b59df57","startedAtMs":1791799395511},"emittedAtMs":1791799395511},
+  {"method":"item/completed","params":{"item":{"type":"userMessage","id":"01a12f91-04a8-7ee0-bf9e-835ff025cd77","clientId":null,"content":[{"type":"text","text":"hello\n#!mock\nerror billing\n","text_elements":[]}]},"threadId":"01a12f91-031e-7cb0-bd2a-cb20bdc67570","turnId":"01a12f91-038c-73c1-bfee-adc81b59df57","completedAtMs":1791799395511},"emittedAtMs":1791799395543},
+  {"method":"error","params":{"error":{"message":"Quota exceeded. Check your plan and billing details.","codexErrorInfo":"usageLimitExceeded","additionalDetails":null,"misalignment":null},"willRetry":false,"threadId":"01a12f91-031e-7cb0-bd2a-cb20bdc67570","turnId":"01a12f91-038c-73c1-bfee-adc81b59df57"},"emittedAtMs":1791799395638},
+  {"method":"turn/completed","params":{"threadId":"01a12f91-031e-7cb0-bd2a-cb20bdc67570","turn":{"id":"01a12f91-038c-73c1-bfee-adc81b59df57","rootTurnId":"01a12f91-038c-73c1-bfee-adc81b59df57","items":[],"itemsView":"notLoaded","status":"failed","error":{"message":"Quota exceeded. Check your plan and billing details.","codexErrorInfo":"usageLimitExceeded","additionalDetails":null,"misalignment":null},"startedAt":1791799395,"completedAt":1791799395,"durationMs":428}},"emittedAtMs":1791799395660}
+ ],
+ "expect": {"outcome": "failed", "code": "provider_exhausted", "retryable": false, "incomplete": false, "resets_at": null, "row": "plan_limit", "said_exactly": "Quota exceeded. Check your plan and billing details."}
+}

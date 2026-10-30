@@ -1,0 +1,19 @@
+{
+ "harness": "codex",
+ "version": "0.162.1",
+ "recorded": "2026-10-12",
+ "fault": "error plan_limit window=weekly resets=1791972152 plan=pro",
+ "setup": "provider of the forwarded path (model_providers entry, token in ORCH_LLM_TOKEN); TZ=Asia/Singapore",
+ "requests": 1,
+ "exit": 0,
+ "stderr": [],
+ "frames": [
+  {"method":"turn/started","params":{"threadId":"01a12f90-6691-7dc1-a6d4-ad2206d44248","turn":{"id":"01a12f90-6775-72e1-941f-94e5b966e6fb","rootTurnId":"01a12f90-6775-72e1-941f-94e5b966e6fb","items":[],"itemsView":"notLoaded","status":"inProgress","error":null,"startedAt":1791799355,"completedAt":null,"durationMs":null}},"emittedAtMs":1791799355429},
+  {"method":"item/started","params":{"item":{"type":"userMessage","id":"01a12f90-684b-7f52-b9b2-92d1c18ad895","clientId":null,"content":[{"type":"text","text":"hello\n#!mock\nerror plan_limit window=weekly resets=1791972152 plan=pro\n","text_elements":[]}]},"threadId":"01a12f90-6691-7dc1-a6d4-ad2206d44248","turnId":"01a12f90-6775-72e1-941f-94e5b966e6fb","startedAtMs":1791799355471},"emittedAtMs":1791799355471},
+  {"method":"item/completed","params":{"item":{"type":"userMessage","id":"01a12f90-684b-7f52-b9b2-92d1c18ad895","clientId":null,"content":[{"type":"text","text":"hello\n#!mock\nerror plan_limit window=weekly resets=1791972152 plan=pro\n","text_elements":[]}]},"threadId":"01a12f90-6691-7dc1-a6d4-ad2206d44248","turnId":"01a12f90-6775-72e1-941f-94e5b966e6fb","completedAtMs":1791799355471},"emittedAtMs":1791799355475},
+  {"method":"account/rateLimits/updated","params":{"rateLimits":{"limitId":"codex","limitName":null,"normalModelSlug":null,"primary":{"usedPercent":40,"windowDurationMins":300,"resetsAt":null},"secondary":{"usedPercent":100,"windowDurationMins":10080,"resetsAt":1791972152},"credits":null,"individualLimit":null,"spendControlReached":null,"planType":null,"rateLimitReachedType":null}},"emittedAtMs":1791799355563},
+  {"method":"error","params":{"error":{"message":"You’ve hit your usage limit. Visit https://chatgpt.com/settings/usage to purchase more credits or try again at Oct 14th, 2026 6:02 PM.","codexErrorInfo":"usageLimitExceeded","additionalDetails":null,"misalignment":null},"willRetry":false,"threadId":"01a12f90-6691-7dc1-a6d4-ad2206d44248","turnId":"01a12f90-6775-72e1-941f-94e5b966e6fb"},"emittedAtMs":1791799355563},
+  {"method":"turn/completed","params":{"threadId":"01a12f90-6691-7dc1-a6d4-ad2206d44248","turn":{"id":"01a12f90-6775-72e1-941f-94e5b966e6fb","rootTurnId":"01a12f90-6775-72e1-941f-94e5b966e6fb","items":[],"itemsView":"notLoaded","status":"failed","error":{"message":"You’ve hit your usage limit. Visit https://chatgpt.com/settings/usage to purchase more credits or try again at Oct 14th, 2026 6:02 PM.","codexErrorInfo":"usageLimitExceeded","additionalDetails":null,"misalignment":null},"startedAt":1791799355,"completedAt":1791799355,"durationMs":299}},"emittedAtMs":1791799355566}
+ ],
+ "expect": {"outcome": "failed", "code": "provider_exhausted", "retryable": false, "incomplete": false, "resets_at": "2026-10-14T10:02:32.000Z", "row": "plan_limit", "said_contains": "try again at Oct 14th, 2026"}
+}

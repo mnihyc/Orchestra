@@ -1,0 +1,204 @@
+{
+  "type": "object",
+  "properties": {
+    "allow_http": {
+      "type": "boolean",
+      "description": "The server's current providers.allow_http_upstreams permission for this address call; absent, false."
+    },
+    "provider": {
+      "anyOf": [
+        {
+          "$ref": "#/$defs/SourceAskProvider"
+        },
+        {
+          "type": "null"
+        }
+      ],
+      "description": "The provider's current name for the source's call context; absent on older commands."
+    },
+    "by": {
+      "$ref": "#/$defs/SourceBy",
+      "description": "What implements the element."
+    },
+    "name": {
+      "type": [
+        "string",
+        "null"
+      ],
+      "description": "The built-in source or the program, by name."
+    },
+    "address": {
+      "anyOf": [
+        {
+          "$ref": "#/$defs/SourceAddress"
+        },
+        {
+          "type": "null"
+        }
+      ],
+      "description": "The address, with how it is authorized and whether the provider's key may be sent to it."
+    },
+    "config": {
+      "type": "object",
+      "additionalProperties": true,
+      "description": "What the provider's managers gave for the source's fields that are no secrets."
+    },
+    "secrets": {
+      "type": "object",
+      "additionalProperties": {
+        "$ref": "#/$defs/SourceSecret"
+      },
+      "description": "The values of the source's secret fields, by field."
+    },
+    "authorization": {
+      "anyOf": [
+        {
+          "$ref": "#/$defs/SourceSecret"
+        },
+        {
+          "type": "null"
+        }
+      ],
+      "description": "The address's authorization: the bearer token, or the value of the named header."
+    }
+  },
+  "required": [
+    "by"
+  ],
+  "description": "What the server tells the machine that keeps the credential of the source of one element, for one call.\nWhere a command carries none, the default source is used, as before sources could be chosen.",
+  "title": "SourceSpec",
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$defs": {
+    "SourceAskProvider": {
+      "type": "object",
+      "properties": {
+        "id": {
+          "type": "string",
+          "format": "uuid",
+          "description": "Its identifier."
+        },
+        "name": {
+          "type": "string",
+          "description": "Its name."
+        }
+      },
+      "required": [
+        "id",
+        "name"
+      ],
+      "description": "The provider a call is about."
+    },
+    "SourceBy": {
+      "oneOf": [
+        {
+          "type": "string",
+          "const": "default",
+          "description": "What follows from the provider's credential and endpoints ([`default_source`]): its harness for a\nsign-in, a vendor's reads of a key at its hosts, each endpoint's list of models, else nothing."
+        },
+        {
+          "type": "string",
+          "const": "builtin",
+          "description": "A built-in source, by `name` ([`builtin`])."
+        },
+        {
+          "type": "string",
+          "const": "program",
+          "description": "A program registered on the machine that keeps the credential, by `name`."
+        },
+        {
+          "type": "string",
+          "const": "address",
+          "description": "An address, reached from the machine that keeps the credential."
+        },
+        {
+          "type": "string",
+          "const": "none",
+          "description": "Nothing: no facts are read beside what the keeper reports, no models are listed (they are added by\nname), no key is presented but by its own rule."
+        }
+      ],
+      "description": "What implements an element."
+    },
+    "SourceAddress": {
+      "type": "object",
+      "properties": {
+        "url": {
+          "type": "string",
+          "description": "The address requests are posted to."
+        },
+        "auth": {
+          "$ref": "#/$defs/AddressAuth",
+          "description": "How requests to it are authorized.",
+          "default": "none"
+        },
+        "header": {
+          "type": [
+            "string",
+            "null"
+          ],
+          "description": "For `auth` `header`, the header's name."
+        },
+        "send_credential": {
+          "type": "boolean",
+          "description": "Whether the provider's key is sent to it, as `params.credential.key`: only where its managers turned\nthat on for this address, and only for a key.",
+          "default": false
+        }
+      },
+      "required": [
+        "url"
+      ],
+      "description": "An address a source is reached at, with how it is authorized and whether the provider's key may be sent\nto it. The authorization itself is a provider secret, never part of it."
+    },
+    "AddressAuth": {
+      "oneOf": [
+        {
+          "type": "string",
+          "const": "none",
+          "description": "It is not."
+        },
+        {
+          "type": "string",
+          "const": "bearer",
+          "description": "`Authorization: Bearer <token>`."
+        },
+        {
+          "type": "string",
+          "const": "header",
+          "description": "The token as the value of the header named in `header`."
+        }
+      ],
+      "description": "How a request to an address is authorized: as an endpoint's key is presented."
+    },
+    "SourceSecret": {
+      "oneOf": [
+        {
+          "type": "object",
+          "properties": {
+            "$secret": {
+              "type": "string",
+              "format": "uuid"
+            }
+          },
+          "required": [
+            "$secret"
+          ],
+          "additionalProperties": false,
+          "description": "As the command is kept: the identifier of the secret."
+        },
+        {
+          "type": "object",
+          "properties": {
+            "$sealed": {
+              "type": "string"
+            }
+          },
+          "required": [
+            "$sealed"
+          ],
+          "additionalProperties": false,
+          "description": "As the command is sent: the value, sealed to the machine it goes to."
+        }
+      ],
+      "description": "A secret of a source on its way to the machine that keeps the credential: as the server keeps the\ncommand, the identifier of the provider secret; as the command is sent, its value sealed to that machine.\nIt is written as the link writes every secret of a command (`{\"$secret\": id}`, `{\"$sealed\": \"…\"}`)."
+    }
+  }
+}

@@ -1,0 +1,26 @@
+[package]
+name = "orch-notifier-telegram"
+description = "Telegram bot notification delivery to the people who linked a chat with the bot."
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+rust-version.workspace = true
+repository.workspace = true
+publish.workspace = true
+
+[dependencies]
+async-trait.workspace = true
+orch-notifier-contract.workspace = true
+orch-plugin-contract.workspace = true
+orch-types.workspace = true
+reqwest.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+url.workspace = true
+tokio.workspace = true
+
+[dev-dependencies]
+axum.workspace = true
+
+[lints]
+workspace = true

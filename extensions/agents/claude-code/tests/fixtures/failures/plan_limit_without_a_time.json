@@ -1,0 +1,19 @@
+{
+ "harness": "claude-code",
+ "version": "2.1.296",
+ "recorded": "2026-10-12",
+ "fault": "error plan_limit window=session",
+ "setup": "signed in as a subscription (CLAUDE_CODE_OAUTH_TOKEN); TZ=Asia/Singapore",
+ "requests": 1,
+ "exit": 1,
+ "stderr": ["[claude-code:unrecognized_model] {\"model\":\"mock-large\",\"query_source\":\"sdk\"}"],
+ "frames": [
+  {"type":"system","subtype":"init","cwd":"/workspace","session_id":"06b6eae4-5e38-4873-bfc4-ad4530f38671","model":"mock-large","permissionMode":"default","claude_code_version":"2.1.296","apiKeySource":"none","uuid":"3001bf31-1067-49bd-a6c8-fa918194755a"},
+  {"type":"system","subtype":"status","status":"requesting","session_id":"06b6eae4-5e38-4873-bfc4-ad4530f38671","uuid":"955bd1a1-d7ca-4477-aed1-54327f1f5840"},
+  {"type":"rate_limit_event","rate_limit_info":{"status":"rejected","rateLimitType":"five_hour","isUsingOverage":false},"uuid":"53a3f1f8-8e0a-4c7c-a8dd-b5f6803746e4","session_id":"06b6eae4-5e38-4873-bfc4-ad4530f38671"},
+  {"type":"user","message":{"role":"user","content":[{"type":"text","text":"hello\n#!mock\nerror plan_limit window=session\n"}]},"session_id":"06b6eae4-5e38-4873-bfc4-ad4530f38671","parent_tool_use_id":null,"uuid":"75f1b43a-5b15-4d13-b8f4-4a4a34f4cde9","timestamp":"2026-10-12T09:59:07.173Z","isReplay":true},
+  {"type":"assistant","message":{"diagnostics":null,"id":"63d38c3c-d825-4f66-87d6-1389544b6ae6","container":null,"model":"<synthetic>","role":"assistant","stop_details":null,"stop_reason":"stop_sequence","stop_sequence":"","type":"message","usage":{"output_tokens_details":null,"input_tokens":0,"output_tokens":0,"cache_creation_input_tokens":0,"cache_read_input_tokens":0,"server_tool_use":{"web_search_requests":0,"web_fetch_requests":0},"service_tier":null,"cache_creation":{"ephemeral_1h_input_tokens":0,"ephemeral_5m_input_tokens":0},"inference_geo":null,"iterations":null,"speed":null,"fallback_credit":null},"content":[{"type":"text","text":"You've hit your session limit"}],"context_management":null},"parent_tool_use_id":null,"session_id":"06b6eae4-5e38-4873-bfc4-ad4530f38671","uuid":"ce9d1915-bdea-4fc8-aab7-c1253459b4db","timestamp":"2026-10-12T09:59:07.417Z","error":"rate_limit","request_id":"req_mock_000001","is_api_error_message":true,"api_error":"usage_limit_reached","api_error_params":{"rate_limit_info":{"status":"rejected","rateLimitType":"five_hour","isUsingOverage":false}}},
+  {"duration_api_ms":0,"stop_reason":"stop_sequence","session_id":"06b6eae4-5e38-4873-bfc4-ad4530f38671","total_cost_usd":0,"usage":{"output_tokens_details":{"thinking_tokens":0},"input_tokens":0,"cache_creation_input_tokens":0,"cache_read_input_tokens":0,"output_tokens":0,"server_tool_use":{"web_search_requests":0,"web_fetch_requests":0},"service_tier":"standard","cache_creation":{"ephemeral_1h_input_tokens":0,"ephemeral_5m_input_tokens":0},"inference_geo":"","iterations":[],"speed":"standard","fallback_credit":null},"modelUsage":{},"permission_denials":[],"terminal_reason":"api_error","fast_mode_state":"off","fast_mode_disabled_reason":"sdk_opt_in_required","subagent_stats":{"spawned":0,"requested":{"background":0,"foreground":0,"unset":0},"started_in_background":0,"max_depth":0,"spawned_by_subagents":0,"completed":0,"failed":0,"killed":{"parent":0,"user":0,"system":0},"refused":{"depth_limit":0,"concurrency_limit":0,"budget":0},"by_type":{}},"safety_stops":0,"is_error":true,"num_turns":1,"subtype":"success","api_error_status":429,"api_error":"usage_limit_reached","result":"You've hit your session limit","type":"result","duration_ms":326,"uuid":"2b136299-e12b-40b5-9e56-611803587408","queued_turn_count":0,"result_index":0}
+ ],
+ "expect": {"outcome": "failed", "code": "provider_exhausted", "retryable": false, "incomplete": false, "resets_at": null, "row": "plan_limit", "said_exactly": "You've hit your session limit"}
+}

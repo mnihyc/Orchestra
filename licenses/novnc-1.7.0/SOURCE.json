@@ -1,0 +1,9 @@
+{
+  "package": "@novnc/novnc",
+  "version": "1.7.0",
+  "tarball": "https://registry.npmjs.org/@novnc/novnc/-/novnc-1.7.0.tgz",
+  "integrity": "sha512-ucEJOx4T2avIRCleodk7YobZj5O2Ga2AeLfQ69A/yjG9HHba2+PDgwSkN3FttrmG+70ZGx21sElNFouK13RzyA==",
+  "sha256": "32689f18d6abe96bc6530828a6bd0b9ae33bda07c083a6575ed255b5a8f2e903",
+  "unmodified": true,
+  "integrity_verified": true
+}

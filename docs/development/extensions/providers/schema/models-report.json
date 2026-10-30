@@ -1,0 +1,299 @@
+{
+  "type": "object",
+  "properties": {
+    "models": {
+      "type": [
+        "array",
+        "null"
+      ],
+      "items": {
+        "$ref": "#/$defs/ModelSuggestion"
+      },
+      "description": "The models it lists (at most [`limits::MODELS_MAX`]): `null` when it does not list models, `[]` when it\nlists none. Each needs `model_name`; `display_name`, `parameters` and `listed` may be left out. Each is\nread on its own, so that one in another shape is left out and the others kept.",
+      "default": null
+    }
+  },
+  "description": "What a source answers to `models.list`.",
+  "title": "ModelsReport",
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$defs": {
+    "ModelSuggestion": {
+      "type": "object",
+      "properties": {
+        "model_name": {
+          "type": "string",
+          "description": "The routing name: the exact name sent upstream, in whatever form that upstream takes."
+        },
+        "display_name": {
+          "type": "string",
+          "description": "The proposed display name; the routing name where the list has none."
+        },
+        "parameters": {
+          "$ref": "#/$defs/ModelParameters",
+          "description": "What the list says of the model: its efforts and default, what it offers, its context window, whether\nit takes images, and a rate where the list carries prices."
+        },
+        "listed": {
+          "type": "boolean",
+          "description": "Whether the list the suggestion comes from names it."
+        }
+      },
+      "required": [
+        "model_name",
+        "display_name",
+        "parameters",
+        "listed"
+      ],
+      "description": "A model as a list of models gives it: a proposal and no more."
+    },
+    "ModelParameters": {
+      "type": "object",
+      "properties": {
+        "efforts": {
+          "type": [
+            "array",
+            "null"
+          ],
+          "items": {
+            "type": "string"
+          },
+          "description": "The efforts it takes."
+        },
+        "default_effort": {
+          "type": [
+            "string",
+            "null"
+          ],
+          "description": "The effort used when none is chosen."
+        },
+        "service_tiers": {
+          "type": [
+            "array",
+            "null"
+          ],
+          "items": {
+            "$ref": "#/$defs/ServiceTier"
+          },
+          "description": "The speeds a manager of the provider enabled; empty until then,\nwhatever the harness offers."
+        },
+        "default_service_tier": {
+          "type": [
+            "string",
+            "null"
+          ],
+          "description": "The speed a thread on this model starts with: one of `service_tiers`. Left out, the ordinary\none. A manager's choice, never discovery's."
+        },
+        "access_programs": {
+          "type": [
+            "array",
+            "null"
+          ],
+          "items": {
+            "type": "string"
+          },
+          "description": "The access programs a manager enabled, one by one, never by discovery."
+        },
+        "default_access_program": {
+          "type": [
+            "string",
+            "null"
+          ],
+          "description": "The access program a thread on this model starts with: one of `access_programs`. Left out,\nnone."
+        },
+        "context_window": {
+          "type": [
+            "integer",
+            "null"
+          ],
+          "format": "int64",
+          "description": "The model's own window, in tokens: what its harness works with when it is told nothing, as\nthe harness's list gives it or a manager wrote it."
+        },
+        "context_max": {
+          "type": [
+            "integer",
+            "null"
+          ],
+          "format": "int64",
+          "description": "The largest context a thread on this model may be given, where that is more than\n`context_window`: enabled by a manager of the provider, as a faster speed is, since a longer\nprompt may be counted at other prices or take more of a plan. Left out, there is no choice."
+        },
+        "default_context": {
+          "type": [
+            "integer",
+            "null"
+          ],
+          "format": "int64",
+          "description": "The context a thread on this model starts with, at most `context_max`. Left out, all that is\nopen (`context_max`), and where nothing larger is open, the model's own window. Where the\nconversation is shortened below a context is worked out and is a member of nothing."
+        },
+        "offered": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/ModelOffered"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "description": "What the harness or the endpoint most recently reported as on offer. Being listed here does\nnot make anything usable."
+        },
+        "input_images": {
+          "type": [
+            "boolean",
+            "null"
+          ],
+          "description": "Whether it takes images."
+        },
+        "rate": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/Rate"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "description": "What it costs, when a manager entered a price or discovery found one."
+        }
+      },
+      "description": "What one model can be run with at a provider. Models differ in all of it, so each member is the\nmodel's own and has three parts: what the model offers there (`offered`), what its managers\nopened (`efforts`, `service_tiers`, `access_programs`, up to `context_max`), and what a thread on\nit starts with (`default_*`). What a model *may* be run with is written here; what a thread\n*does* run with is the thread's own setting, chosen within what is open."
+    },
+    "ServiceTier": {
+      "type": "object",
+      "properties": {
+        "id": {
+          "type": "string",
+          "description": "What a request names."
+        },
+        "label": {
+          "type": "string",
+          "description": "What it is called."
+        }
+      },
+      "required": [
+        "id",
+        "label"
+      ],
+      "description": "A paid-for speed a turn on a model may ask for beside the ordinary one."
+    },
+    "ModelOffered": {
+      "type": "object",
+      "properties": {
+        "service_tiers": {
+          "type": [
+            "array",
+            "null"
+          ],
+          "items": {
+            "$ref": "#/$defs/ServiceTier"
+          },
+          "description": "Speeds on offer."
+        },
+        "access_programs": {
+          "type": [
+            "array",
+            "null"
+          ],
+          "items": {
+            "type": "string"
+          },
+          "description": "Access programs on offer."
+        },
+        "context_max": {
+          "type": [
+            "integer",
+            "null"
+          ],
+          "format": "int64",
+          "description": "The largest context, in tokens, that the harness or the endpoint says the model takes, where\nthat is more than the window the model starts with. A manager opens it by writing it as the\nmodel's `context_max`; until then no thread can be given it."
+        }
+      },
+      "description": "What a harness or an endpoint last said a model offers."
+    },
+    "Rate": {
+      "type": "object",
+      "properties": {
+        "input_per_mtok": {
+          "type": "string",
+          "description": "Credits for a million input tokens."
+        },
+        "cached_input_per_mtok": {
+          "type": "string",
+          "description": "Credits for a million cached input tokens."
+        },
+        "output_per_mtok": {
+          "type": "string",
+          "description": "Credits for a million output tokens."
+        },
+        "cache_write_per_mtok": {
+          "type": [
+            "string",
+            "null"
+          ],
+          "description": "Credits for a million tokens written to a prompt cache; as input when left out."
+        },
+        "tiers": {
+          "type": [
+            "object",
+            "null"
+          ],
+          "additionalProperties": {
+            "type": "string"
+          },
+          "description": "Service tiers priced as a multiple of the rate, written as a decimal string: `\"2\"` for\ndouble, `\"0.5\"` for half."
+        },
+        "above": {
+          "type": [
+            "array",
+            "null"
+          ],
+          "items": {
+            "$ref": "#/$defs/RateAbove"
+          },
+          "description": "Prices that replace the ordinary ones for large prompts."
+        }
+      },
+      "required": [
+        "input_per_mtok",
+        "cached_input_per_mtok",
+        "output_per_mtok"
+      ],
+      "description": "What a model costs, in credits, written as decimal strings."
+    },
+    "RateAbove": {
+      "type": "object",
+      "properties": {
+        "context_tokens": {
+          "type": "integer",
+          "format": "int64",
+          "description": "The prompt size from which these prices apply."
+        },
+        "input_per_mtok": {
+          "type": "string",
+          "description": "Credits for a million input tokens."
+        },
+        "cached_input_per_mtok": {
+          "type": [
+            "string",
+            "null"
+          ],
+          "description": "Credits for a million cached input tokens; as the ordinary rate when left out."
+        },
+        "output_per_mtok": {
+          "type": "string",
+          "description": "Credits for a million output tokens."
+        },
+        "cache_write_per_mtok": {
+          "type": [
+            "string",
+            "null"
+          ],
+          "description": "Credits for a million tokens written to a prompt cache."
+        }
+      },
+      "required": [
+        "context_tokens",
+        "input_per_mtok",
+        "output_per_mtok"
+      ],
+      "description": "A price that applies to requests whose prompt is larger than a size."
+    }
+  }
+}

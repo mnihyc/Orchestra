@@ -1,0 +1,3 @@
+SELECT __OUTER_COLUMNS__ FROM (__INNER__) s
+__TEXT_LOOKUP__
+WHERE s.media_matches AND __TEXT_MATCH__

@@ -1,0 +1,40 @@
+[package]
+name = "orch-adapter-claude-code"
+description = "Claude Code adapter; Claude Code-specific vocabulary stays here."
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+rust-version.workspace = true
+repository.workspace = true
+publish.workspace = true
+
+[dependencies]
+orch-agent-contract.workspace = true
+orch-agent-programs.workspace = true
+orch-plugin-contract.workspace = true
+orch-types.workspace = true
+orch-provider-contract.workspace = true
+async-trait.workspace = true
+base64.workspace = true
+chrono.workspace = true
+chrono-tz.workspace = true
+futures.workspace = true
+semver.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+similar.workspace = true
+thiserror.workspace = true
+tempfile.workspace = true
+tokio.workspace = true
+tokio-util.workspace = true
+tracing.workspace = true
+
+[dev-dependencies]
+orch-conformance.workspace = true
+axum.workspace = true
+orch-testkit.workspace = true
+reqwest.workspace = true
+tokio = { workspace = true, features = ["test-util"] }
+
+[lints]
+workspace = true

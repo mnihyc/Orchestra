@@ -1,0 +1,622 @@
+/* Placeholder: light/dark colors, type, spacing, density, motion and layers. */
+
+/*
+ * The design tokens. Every colour, size, duration and layer of the application is one of these, and
+ * nothing outside this file carries a literal value.
+ *
+ * Light is the default and dark is a full peer: `data-theme="dark"` on the root element switches the
+ * whole page, and on any other element that part of it. "System" is resolved by the application,
+ * which writes the attribute from what the browser prefers and follows it when it changes.
+ *
+ * Sizes are written in rem so that they follow the size of text a person set in their browser; the
+ * pixel values in the comments are what they come to at the usual 16 px.
+ */
+
+/* ------------------------------------------------------------------ colour, light */
+:root {
+  color-scheme: light;
+
+  --bg: #ffffff;
+  --bg-subtle: #f7f7f8;
+  --bg-muted: #efeff1;
+  --bg-inset: #f3f4f6;
+  --surface: #ffffff;
+  --surface-raised: #ffffff;
+  /* The chosen segment of a segmented control: raised above its muted track. */
+  --segment-selected: var(--surface-raised);
+  --overlay: rgba(15, 17, 21, 0.45);
+  --border: #e4e4e7;
+  --border-strong: #d0d0d6;
+  --control-border: #71717a;
+  --control-selected: #4f46e5;
+  --control-on-selected: #ffffff;
+  --switch-on: #059669;
+  --text: #18181b;
+  --text-muted: #52525b;
+  --text-subtle: #71717a;
+  --text-disabled: #a1a1aa;
+  --text-on-accent: #ffffff;
+  --accent: #4f46e5;
+  --accent-hover: #4338ca;
+  --accent-subtle: #eef2ff;
+  --accent-text: #4338ca;
+  --success: #16a34a;
+  --success-subtle: #f0fdf4;
+  --warning: #d97706;
+  --warning-text: #92400e;
+  --warning-subtle: #fffbeb;
+  --danger: #dc2626;
+  --danger-subtle: #fef2f2;
+  --info: #2563eb;
+  --info-subtle: #eff6ff;
+  --focus: #6366f1;
+
+  /*
+   * Danger as the colour of words. `--danger` draws icons, lines and dots, which need less contrast
+   * than text does; as text it falls below 4.5:1 on the muted and the tinted grounds. Words take the
+   * deeper red of the identity palette instead.
+   */
+  --danger-text: #b91c1c;
+  /* The same for green: `--success` is for icons and dots; words, as the counts of a change are, take this deeper one. */
+  --success-text: #166534;
+}
+
+/* ------------------------------------------------------------------ colour, dark */
+[data-theme='dark'] {
+  color-scheme: dark;
+
+  --bg: #111113;
+  --bg-subtle: #18181b;
+  --bg-muted: #222226;
+  --bg-inset: #0c0c0e;
+  --surface: #18181b;
+  --surface-raised: #1f1f23;
+  /* A shadow does not show on a dark track, so the chosen segment is lighter than it instead (about 1.5:1). */
+  --segment-selected: #3f3f46;
+  --overlay: rgba(0, 0, 0, 0.6);
+  --border: #2a2a2f;
+  --border-strong: #3a3a41;
+  --control-border: #8b8b93;
+  --control-selected: #a5b4fc;
+  --control-on-selected: #111113;
+  --switch-on: #10b981;
+  --text: #ededef;
+  --text-muted: #b4b4bb;
+  --text-subtle: #8b8b93;
+  --text-disabled: #5e5e66;
+  --text-on-accent: #ffffff;
+  --accent: #6366f1;
+  --accent-hover: #818cf8;
+  --accent-subtle: #1e1b4b;
+  --accent-text: #a5b4fc;
+  --success: #22c55e;
+  --success-subtle: #052e16;
+  --warning: #f59e0b;
+  --warning-text: #fcd34d;
+  --warning-subtle: #2b1d05;
+  --danger: #ef4444;
+  --danger-subtle: #2c0b0e;
+  --info: #3b82f6;
+  --info-subtle: #0b1e3a;
+  --focus: #818cf8;
+
+  /*
+   * The one colour here that the palette above does not hold. On the raised and the muted grounds of
+   * this theme `--danger` reads at 4.4:1 and 4.2:1 as text; the next lighter step of the same red
+   * reads at 5.5:1 or more on every ground there is.
+   */
+  --danger-text: #f87171;
+  --success-text: #4ade80;
+}
+
+/* ------------------------------------------------------------------ colour, fills that carry text */
+/*
+ * A filled control (a primary or a destructive button, a count on a badge) carries
+ * `--text-on-accent`, which is white in both themes. White needs a ground it reads on at 4.5:1 or
+ * more, and the dark theme's accent and danger are lighter than that (4.47:1 and 3.76:1). So a
+ * fill keeps the deeper pair in both themes; `--accent` and `--danger` stay what marks, lines and
+ * icons are drawn in. The darker red is the first colour of the identity palette, which is held to
+ * the same ratio.
+ */
+:root {
+  --accent-solid: #4f46e5;
+  --accent-solid-hover: #4338ca;
+  --danger-solid: #dc2626;
+  --danger-solid-hover: #b91c1c;
+}
+
+/*
+ * Until the application has started and written the attribute, the page is empty: only its ground
+ * and its text follow what the system prefers, so that a dark screen is not lit up white meanwhile.
+ */
+@media (prefers-color-scheme: dark) {
+  :root:not([data-theme]) {
+    color-scheme: dark;
+    --bg: #111113;
+    --text: #ededef;
+  }
+}
+
+/* ------------------------------------------------------------------ identity palette */
+/* Twelve colours for avatars and tags, the same in both themes; each carries white text at 4.5:1 or more. */
+:root {
+  --identity-0: #b91c1c;
+  --identity-1: #c2410c;
+  --identity-2: #a16207;
+  --identity-3: #4d7c0f;
+  --identity-4: #15803d;
+  --identity-5: #0f766e;
+  --identity-6: #0e7490;
+  --identity-7: #1d4ed8;
+  --identity-8: #4338ca;
+  --identity-9: #7e22ce;
+  --identity-10: #be185d;
+  --identity-11: #525252;
+  --identity-text: #ffffff;
+}
+
+/* ------------------------------------------------------------------ the twelve as the colour of a glyph */
+/*
+ * A place's icon is drawn in one of the twelve, on the page's own grounds and under no white text. On
+ * the light grounds each of them reads at 4.2:1 or more as it is. On the dark ones none reaches 3.3:1,
+ * so there a glyph takes the same colour mixed with white: six parts of the colour to four of white is
+ * the least white that brings every one of the twelve over 4.5:1 on every ground of that theme.
+ */
+:root {
+  --node-ink-1: var(--identity-0);
+  --node-ink-2: var(--identity-1);
+  --node-ink-3: var(--identity-2);
+  --node-ink-4: var(--identity-3);
+  --node-ink-5: var(--identity-4);
+  --node-ink-6: var(--identity-5);
+  --node-ink-7: var(--identity-6);
+  --node-ink-8: var(--identity-7);
+  --node-ink-9: var(--identity-8);
+  --node-ink-10: var(--identity-9);
+  --node-ink-11: var(--identity-10);
+  --node-ink-12: var(--identity-11);
+}
+
+[data-theme='dark'] {
+  --node-ink-1: color-mix(in srgb, var(--identity-0) 60%, white);
+  --node-ink-2: color-mix(in srgb, var(--identity-1) 60%, white);
+  --node-ink-3: color-mix(in srgb, var(--identity-2) 60%, white);
+  --node-ink-4: color-mix(in srgb, var(--identity-3) 60%, white);
+  --node-ink-5: color-mix(in srgb, var(--identity-4) 60%, white);
+  --node-ink-6: color-mix(in srgb, var(--identity-5) 60%, white);
+  --node-ink-7: color-mix(in srgb, var(--identity-6) 60%, white);
+  --node-ink-8: color-mix(in srgb, var(--identity-7) 60%, white);
+  --node-ink-9: color-mix(in srgb, var(--identity-8) 60%, white);
+  --node-ink-10: color-mix(in srgb, var(--identity-9) 60%, white);
+  --node-ink-11: color-mix(in srgb, var(--identity-10) 60%, white);
+  --node-ink-12: color-mix(in srgb, var(--identity-11) 60%, white);
+}
+
+/*
+ * A colour of a place's own is drawn as it was picked where it reads, and brought into reach where it would
+ * not: on the light grounds no lighter than lightness 0.55 (about 4.5:1 on white), on the dark ones no darker
+ * than 0.75 (over 7:1 on the darkest ground). Its hue and its strength stay what was picked.
+ */
+.node-own {
+  color: oklch(from var(--node-own) min(l, 0.55) c h);
+}
+
+[data-theme='dark'] .node-own {
+  color: oklch(from var(--node-own) max(l, 0.75) c h);
+}
+
+/* ------------------------------------------------------------------ density */
+/* Both densities keep lists comfortable. Compact tightens messages and avatars, never font sizes. */
+:root {
+  --row-height: 2rem; /* 32 px: one line with room above and below it in every list */
+  --table-row-height: 2.5rem; /* 40 px: room for facts and the row's controls */
+  --section-heading-height: 2.5rem; /* 40 px: a clear pause between the lists of a bar */
+  --bar-heading-height: 2.5rem; /* 40 px: the same rhythm for a bar's controls */
+  --page-padding: 1.25rem; /* 20 px: keeps content clear of a phone's edges */
+  --bar-surface: var(--bg-subtle);
+  --bar-reveal-width: 0.75rem; /* 12 px: an edge remains easy to point at without taking a row's hit area */
+  --message-gap: 1rem; /* 16 px */
+  --avatar-size: 1.75rem; /* 28 px */
+}
+
+[data-theme] { --bar-surface: var(--bg-subtle); }
+
+[data-density='compact'] {
+  --row-height: 2rem; /* Lists keep their comfortable minimum; density still changes messages and avatars. */
+  --message-gap: 0.5rem; /* 8 px */
+  --avatar-size: 1.5rem; /* 24 px */
+}
+
+@media (min-width: 40rem) {
+  :root { --page-padding: 2rem; /* 32 px: breathing room around desktop pages */ }
+}
+
+/* ------------------------------------------------------------------ motion, layers, sizes of the frame */
+:root {
+  --motion-fast: 120ms;
+  --motion-base: 200ms;
+  --motion-slow: 320ms;
+  --motion-ease: cubic-bezier(0.2, 0, 0, 1);
+
+  --layer-base: 0;
+  --layer-sticky: 10;
+  --layer-overlay: 40;
+  --layer-modal: 50;
+  /* A list that opens from a control inside a dialog has to stand above the dialog; from the page nothing stands above it anyway. */
+  --layer-dropdown: 55;
+  --layer-toast: 60;
+  --layer-tooltip: 70;
+
+  /* The focus ring: two pixels of the focus colour, on every element that takes the keyboard. */
+  --focus-ring-width: 2px;
+
+  /* Controls keep their height in both densities: a button is aimed at, a row is scanned. */
+  --control-sm: 1.75rem; /* 28 px */
+  --control-md: 2.25rem; /* 36 px */
+
+  /* The workbench. The bars are dragged between their bounds; these are where they start. */
+  --rail-width: 3.5rem; /* 56 px */
+  --left-bar-width: 17.5rem; /* 280 px */
+  --left-bar-min: 13.75rem; /* 220 px */
+  --left-bar-max: 30rem; /* 480 px */
+  --right-bar-width: 25rem; /* 400 px */
+  --right-bar-min: 20rem; /* 320 px */
+  --bottom-bar-height: 15rem; /* 240 px: a dozen lines of a shell */
+  --bottom-bar-min: 7.5rem; /* 120 px */
+  --tab-strip-height: 2.25rem; /* 36 px: the height of a control, so a tab is as easy to hit as a button */
+  --status-bar-height: 1.5rem; /* 24 px: one line of the smallest text and its breathing room */
+  --bottom-tabs-height: 3.5rem; /* 56 px: a thumb's target, as the rail is a pointer's */
+  --drawer-width: 20rem; /* 320 px: the left bar as a sheet on a small screen */
+
+  /* Overlays that hold a list: wide enough for a name and its shortcut, narrow enough to stay a list. */
+  --menu-min-width: 11rem; /* 176 px */
+  --menu-max-width: 20rem; /* 320 px */
+  --hint-width: 22rem; /* 352 px: the card of a hint, wide enough for its four parts to read as sentences */
+
+  /*
+   * The widths at which the workbench changes shape, for the script that asks which shape fits: the
+   * same lengths as the `md` and `lg` breakpoints of the utilities further down.
+   */
+  --screen-md: 56.25rem; /* 900 px: below it there are no areas, one view at a time */
+  --screen-lg: 75rem; /* 1200 px: below it the right bar lies over the main area */
+
+  /* The conversation: the column it is read in, and how tall the things that scroll inside it may grow. */
+  --reading-width: 51.25rem; /* 820 px */
+  --diff-max-height: 28rem; /* 448 px: a difference scrolls inside itself beyond this */
+  --output-height: 30rem; /* 480 px: 24 lines of a command's output */
+  --composer-max-height: 18rem; /* 288 px: 12 lines of the message being written */
+  --dialog-max-height: calc(100dvh - 2rem);
+  --chip-width: 18rem; /* 288 px: the most a chip of the header or the box grows to */
+  --chip-width-narrow: 14rem; /* 224 px */
+  --list-max-height: 18rem; /* 288 px: the models of a list before it scrolls */
+  --tray-max-height: 12rem; /* 192 px: the queue before it scrolls */
+  --field-wide: 14rem; /* 224 px: the least a field of the dialog that makes a thread is wide */
+  --field-narrow: 10rem; /* 160 px */
+  --description-least: 8rem; /* 128 px: room the header keeps for the description beside the title */
+  --avatar-message: 1.75rem; /* 28 px: the mark of a message */
+  --skeleton-line: 6rem; /* 96 px */
+  --caption-height: 1.75rem; /* 28 px: the line above a code block, an output or a difference */
+  --meter-bar: 0.375rem; /* 6 px: the height of a bar that shows how much is used */
+  --field-minutes: 5rem; /* 80 px: room for a number of minutes, which is at most four digits */
+
+  /* The finder and the card of a hint: a field with its list under it, over the page. */
+  --palette-top: 12dvh; /* where the finder begins: high enough to leave the page in view, low enough to be a window */
+  --palette-list-height: 24rem; /* 384 px: ten rows of two lines before the list scrolls */
+  --hint-width: 22rem; /* 352 px: the card of a hint, wide enough for its four parts to read as sentences */
+  --help-label-width: 6rem; /* 96 px: the column of keys in the list of shortcuts */
+
+  /* The diameters an avatar is drawn at; a list uses `--avatar-size`, which follows the density. */
+  --avatar-24: 1.5rem;
+  --avatar-28: 1.75rem;
+  --avatar-32: 2rem;
+  --avatar-40: 2.5rem;
+
+  /* The model control of a thread: its list of models gives room to the choices beneath it, and its chip grows wider for the speed and the context written in it. */
+  --list-max-height-short: 9rem; /* 144 px */
+  --chip-width-wide: 22rem; /* 352 px */
+}
+
+/* All motion is removed for whoever asked the system for less of it. */
+@media (prefers-reduced-motion: reduce) {
+  :root {
+    --motion-fast: 0ms;
+    --motion-base: 0ms;
+    --motion-slow: 0ms;
+  }
+}
+
+/* ------------------------------------------------------------------ the scales, as utilities */
+/*
+ * The scales below are the only ones the utility classes know: a class for a colour, a size or a
+ * step that is no token produces nothing. Spacing keeps the usual unit of a quarter rem (4 px), with
+ * only the steps of the scale: 0, 0.5, 1, 2, 3, 4, 5, 6, 8, 10, 12, 16.
+ */
+@theme {
+  --font-sans:
+    'Inter Variable', Inter, system-ui, -apple-system, 'Segoe UI', 'PingFang SC', 'Hiragino Sans GB',
+    'Microsoft YaHei', 'Noto Sans CJK SC', sans-serif;
+  --font-mono:
+    'JetBrains Mono Variable', 'JetBrains Mono', ui-monospace, 'SF Mono', 'Cascadia Mono', Consolas,
+    monospace;
+  --default-font-family: var(--font-sans);
+  --default-mono-font-family: var(--font-mono);
+
+  /* Type: size / line height. Interface text is `base`, message bodies `md`, code mono `sm`. */
+  --text-xs: 0.75rem; /* 12 / 16 */
+  --text-xs--line-height: 1rem;
+  --text-sm: 0.8125rem; /* 13 / 20 */
+  --text-sm--line-height: 1.25rem;
+  --text-base: 0.875rem; /* 14 / 20 */
+  --text-base--line-height: 1.25rem;
+  --text-md: 0.9375rem; /* 15 / 24 */
+  --text-md--line-height: 1.5rem;
+  --text-lg: 1rem; /* 16 / 24 */
+  --text-lg--line-height: 1.5rem;
+  --text-xl: 1.125rem; /* 18 / 28 */
+  --text-xl--line-height: 1.75rem;
+  --text-2xl: 1.375rem; /* 22 / 28 */
+  --text-2xl--line-height: 1.75rem;
+  --text-3xl: 1.75rem; /* 28 / 36 */
+  --text-3xl--line-height: 2.25rem;
+
+  --font-weight-normal: 400;
+  --font-weight-medium: 500;
+  --font-weight-semibold: 600;
+  --tracking-wide: 0.025em;
+
+  --spacing-0: 0;
+  --spacing-0\.5: 0.125rem; /* 2 px */
+  --spacing-1: 0.25rem; /* 4 px */
+  --spacing-1\.5: 0.375rem; /* 6 px */
+  --spacing-2: 0.5rem; /* 8 px */
+  --spacing-2\.5: 0.625rem; /* 10 px */
+  --spacing-3: 0.75rem; /* 12 px */
+  --spacing-3\.5: 0.875rem; /* 14 px */
+  --spacing-4: 1rem; /* 16 px */
+  --spacing-5: 1.25rem; /* 20 px */
+  --spacing-6: 1.5rem; /* 24 px */
+  --spacing-7: 1.75rem;
+  --spacing-8: 2rem; /* 32 px */
+  --spacing-9: 2.25rem;
+  --spacing-10: 2.5rem; /* 40 px */
+  --spacing-11: 2.75rem;
+  --spacing-12: 3rem; /* 48 px */
+  --spacing-14: 3.5rem;
+  --spacing-16: 4rem; /* 64 px */
+  --spacing-20: 5rem;
+  --spacing-24: 6rem;
+  --spacing-28: 7rem;
+  --spacing-32: 8rem;
+  --spacing-36: 9rem;
+  --spacing-40: 10rem;
+  --spacing-44: 11rem;
+  --spacing-48: 12rem;
+  --spacing-52: 13rem;
+  --spacing-56: 14rem;
+  --spacing-60: 15rem;
+  --spacing-64: 16rem;
+  --spacing-72: 18rem;
+  --spacing-80: 20rem;
+  --spacing-96: 24rem;
+
+  /* One radius at each level: inline marks, controls/rows, contained surfaces, overlays.
+     Full circles remain circles; activity cells use xs because they are data, not controls. */
+  --radius-xs: 0.125rem; /* 2 px: small activity cells */
+  --radius-sm: 0.25rem; /* 4 px: inline marks */
+  --radius-md: 0.375rem; /* 6 px: controls and interactive rows */
+  --radius-lg: 0.5rem; /* 8 px: contained surfaces */
+  --radius-xl: 0.75rem; /* 12 px: overlays */
+
+  --shadow-sm: 0 1px 2px rgba(0, 0, 0, 0.06);
+  --shadow-md: 0 4px 12px rgba(0, 0, 0, 0.1);
+  --shadow-lg: 0 12px 32px rgba(0, 0, 0, 0.16);
+
+  --breakpoint-sm: 40rem; /* 640 px */
+  --breakpoint-md: 56.25rem; /* 900 px */
+  --breakpoint-lg: 75rem; /* 1200 px */
+  --breakpoint-xl: 96rem; /* 1536 px */
+
+  /* How wide a column of content grows: a form, a dialog in three sizes, a text that is read. */
+  /* The named query steps and compact widths already used by the file and browser views. */
+  --container-sm: 24rem; /* 384 px */
+  --container-md: 28rem; /* 448 px */
+  --container-xl: 36rem; /* 576 px */
+  --container-3xl: 48rem; /* 768 px */
+  --container-form: 25rem; /* 400 px */
+  --container-dialog-sm: 25rem; /* 400 px */
+  --container-dialog-md: 35rem; /* 560 px */
+  --container-dialog-lg: 45rem; /* 720 px */
+  --container-dialog-xl: 60rem; /* 960 px: shortcut names, bindings, context and hover controls fit in one table. */
+  --container-prose: 45rem; /* 720 px */
+  --container-page: 60rem; /* 960 px */
+
+  --animate-spin: spin 1s linear infinite;
+  --animate-pulse: skeleton 2s var(--motion-ease) infinite;
+
+  @keyframes spin {
+    to {
+      transform: rotate(360deg);
+    }
+  }
+}
+
+/*
+ * What follows names tokens that change with the theme, the density and the motion preference, so
+ * the utilities read them where they are used and a part of the page can carry another theme.
+ */
+@theme inline {
+  --color-bg: var(--bg);
+  --color-bg-subtle: var(--bg-subtle);
+  --color-bg-muted: var(--bg-muted);
+  --color-bg-inset: var(--bg-inset);
+  --color-surface: var(--surface);
+  --color-surface-raised: var(--surface-raised);
+  --color-bar-surface: var(--bar-surface);
+  --color-overlay: var(--overlay);
+  --color-border: var(--border);
+  --color-border-strong: var(--border-strong);
+  --color-control-border: var(--control-border);
+  --color-control-selected: var(--control-selected);
+  --color-control-on-selected: var(--control-on-selected);
+  --color-text: var(--text);
+  --color-text-muted: var(--text-muted);
+  --color-text-subtle: var(--text-subtle);
+  --color-text-disabled: var(--text-disabled);
+  --color-text-on-accent: var(--text-on-accent);
+  --color-accent: var(--accent);
+  --color-accent-hover: var(--accent-hover);
+  --color-accent-subtle: var(--accent-subtle);
+  --color-accent-text: var(--accent-text);
+  --color-link: var(--accent-text);
+  --color-accent-solid: var(--accent-solid);
+  --color-accent-solid-hover: var(--accent-solid-hover);
+  --color-danger-solid: var(--danger-solid);
+  --color-danger-solid-hover: var(--danger-solid-hover);
+  --color-danger-text: var(--danger-text);
+  --color-success-text: var(--success-text);
+  --color-success: var(--success);
+  --color-success-subtle: var(--success-subtle);
+  --color-warning: var(--warning);
+  --color-warning-text: var(--warning-text);
+  --color-warning-subtle: var(--warning-subtle);
+  --color-danger: var(--danger);
+  --color-danger-subtle: var(--danger-subtle);
+  --color-info: var(--info);
+  --color-info-subtle: var(--info-subtle);
+  --color-focus: var(--focus);
+  --color-identity-text: var(--identity-text);
+  /* PDF paper/search marks and a translucent tag hover keep these fixed colours in either theme. */
+  --color-white: #ffffff;
+  --color-black: #000000;
+  --color-yellow-200: #fef08a;
+
+  --ease-standard: var(--motion-ease);
+  --default-transition-duration: var(--motion-fast);
+  --default-transition-timing-function: var(--motion-ease);
+}
+
+/* ------------------------------------------------------------------ code and shells (the code view, the terminal) */
+/*
+ * Colours of syntax and of a shell's sixteen. Each reads at 4.5:1 or more on the grounds it lies on
+ * (the surface, the inset ground and the muted ground) in its own theme. In the light theme a shell
+ * has a light ground, as the page has, and its "white" is a dark grey so that it can be read there.
+ */
+:root {
+  --syntax-keyword: #6d28d9;
+  --syntax-string: #166534;
+  --syntax-number: #9a3412;
+  --syntax-comment: #52525b;
+  --syntax-function: #1d4ed8;
+  --syntax-type: #0f766e;
+  --syntax-tag: #be123c;
+  --syntax-operator: #475569;
+  --syntax-meta: #7c2d12;
+  --syntax-link: #1d4ed8;
+  --syntax-invalid: #b91c1c;
+
+  --terminal-bg: #f3f4f6;
+  --terminal-fg: #18181b;
+  --terminal-cursor: #18181b;
+  --terminal-selection: #c7d2fe;
+  --terminal-black: #18181b;
+  --terminal-red: #b91c1c;
+  --terminal-green: #166534;
+  --terminal-yellow: #854d0e;
+  --terminal-blue: #1d4ed8;
+  --terminal-magenta: #86198f;
+  --terminal-cyan: #0e7490;
+  --terminal-white: #52525b;
+  --terminal-bright-black: #3f3f46;
+  --terminal-bright-red: #991b1b;
+  --terminal-bright-green: #14532d;
+  --terminal-bright-yellow: #713f12;
+  --terminal-bright-blue: #1e40af;
+  --terminal-bright-magenta: #701a75;
+  --terminal-bright-cyan: #155e75;
+  --terminal-bright-white: #27272a;
+
+  /* The least height of the code view and of a shell, so that a narrow bar still shows some lines; and the size of the tree's glyphs. */
+  --code-min-height: 12rem; /* 192 px */
+  --gutter-width: 3rem; /* 48 px: four digits of line number in the code view */
+  --tree-row-glyph: 1rem; /* 16 px */
+  --chart-height: 3.5rem; /* 56 px: a small chart of the resources */
+  --shell-min-height: 10rem; /* 160 px */
+  --process-table-min: 24rem; /* 384 px: the table of processes scrolls sideways in a narrower bar */
+}
+
+[data-theme='dark'] {
+  --syntax-keyword: #c4b5fd;
+  --syntax-string: #86efac;
+  --syntax-number: #fdba74;
+  --syntax-comment: #a1a1aa;
+  --syntax-function: #93c5fd;
+  --syntax-type: #5eead4;
+  --syntax-tag: #fda4af;
+  --syntax-operator: #cbd5e1;
+  --syntax-meta: #fdba74;
+  --syntax-link: #93c5fd;
+  --syntax-invalid: #f87171;
+
+  --terminal-bg: #0c0c0e;
+  --terminal-fg: #ededef;
+  --terminal-cursor: #ededef;
+  --terminal-selection: #3730a3;
+  --terminal-black: #8b8b93;
+  --terminal-red: #f87171;
+  --terminal-green: #4ade80;
+  --terminal-yellow: #facc15;
+  --terminal-blue: #60a5fa;
+  --terminal-magenta: #e879f9;
+  --terminal-cyan: #22d3ee;
+  --terminal-white: #d4d4d8;
+  --terminal-bright-black: #a1a1aa;
+  --terminal-bright-red: #fca5a5;
+  --terminal-bright-green: #86efac;
+  --terminal-bright-yellow: #fde047;
+  --terminal-bright-blue: #93c5fd;
+  --terminal-bright-magenta: #f0abfc;
+  --terminal-bright-cyan: #67e8f9;
+  --terminal-bright-white: #fafafa;
+}
+
+/* ------------------------------------------------------------------ colour, the series of a chart */
+/*
+ * The colours a chart draws its lines in, given out in this order (the first line takes the first,
+ * and no colour is made up past the eighth). Each theme has its own steps of the same eight hues,
+ * and the first six were checked as a set against the ground they lie on: neighbours stay apart
+ * for people who see colour differently, and in the dark theme every one reads at 3:1. They colour
+ * marks only. The words beside a mark are in the text colours, and a legend and a table always
+ * say the same, so that no line is told apart by its colour alone.
+ */
+:root {
+  --chart-1: #2a78d6;
+  --chart-2: #eb6834;
+  --chart-3: #1baf7a;
+  --chart-4: #eda100;
+  --chart-5: #e87ba4;
+  --chart-6: #008300;
+  --chart-7: #6250d6;
+  --chart-8: #e34948;
+}
+
+[data-theme='dark'] {
+  --chart-1: #3987e5;
+  --chart-2: #d95926;
+  --chart-3: #199e70;
+  --chart-4: #c98500;
+  --chart-5: #d55181;
+  --chart-6: #008300;
+  --chart-7: #9085e9;
+  --chart-8: #e66767;
+}
+
+@theme inline {
+  --color-chart-1: var(--chart-1);
+  --color-chart-2: var(--chart-2);
+  --color-chart-3: var(--chart-3);
+  --color-chart-4: var(--chart-4);
+  --color-chart-5: var(--chart-5);
+  --color-chart-6: var(--chart-6);
+  --color-chart-7: var(--chart-7);
+  --color-chart-8: var(--chart-8);
+}

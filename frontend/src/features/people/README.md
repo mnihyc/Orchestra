@@ -1,0 +1,62 @@
+# People around the work
+
+Current readers and discussion subscriptions use the same authenticated API as the existing document
+and chat screens. Notifications are server records; no screen fabricates a notice.
+
+- `pending.ts`: People-screen types the generated contract does not name; every served type is imported from the generated contract where it is used. */
+- `DiscussionBell.tsx`: A document's two-choice bell, with pending and refused changes kept beside the control.
+- `CommentField.tsx`: A focused, keyboard-accessible comment field with a paged mention picker.
+- `MentionPrompt.tsx`: An explicit choice to notify or share after a document mention is inserted.
+- `MentionView.tsx`: A document mention is the same person chip used elsewhere.
+- `PersonQuickCard.tsx`: A compact identity and the acts available beside a person.
+- `personContext.tsx`: The thing and part beside a person, for the actions its person card can offer.
+- `ReaderComment.tsx`: Native text selection for readers, without an editing caret or block mutation.
+- `MentionPicker.tsx`: Current chat readers, permitted role/group counts and count-only broad audiences.
+- `mentionParts.ts`: Stable per-occurrence targets through drafts and edits, including equal-name threads.
+- `MentionAgentAccess.tsx`: The ordinary exact missing-access request for a visible unusable thread.
+- `AgentAsks.tsx`: Guarded input previews, current model and sender use, real refusal requests and accepted thread receipts.
+- `ChatPeople.tsx`: Standing inspection access and local agent posting controls.
+- `inverse.ts`: Guarded ordinary inverses for updated, added and removed subtrees.
+- `PutBack.tsx`: Repeatable single-block restoration, with stale and failed states.
+- `Writer.tsx`: Actual human/agent writer attribution for each difference.
+- `NamedChip.tsx`: Current-readable names and kind glyphs for internal links and agent shared paths; a readable chip opens its card.
+- `references.ts`: A chip's typed reference read from its address, where it opens, and the words that hand it to an agent.
+- `AgentReferences.tsx`: References in what an agent wrote, drawn as chips resolved as its thread resolves them.
+- `ReferenceView.tsx`: Current readable inline document references with their own glyph and link.
+- `chipSizes.ts`: Reference sizes follow the place they appear and stay with the reader's workbench unless the document owns the choice.
+- `wording.ts`: Expanded mention names in replies and forwarding previews.
+- `sharedMarker.ts`: Received current-readable sharing names and actual area levels in historical markers.
+- `ThreadIdentity.tsx`: Current agent, state and start time for equal-name thread choices.
+- `DocumentOutline.tsx`: Live headings, real jumps and the existing phone sheet, without inserted blocks.
+- `DocumentPolicy.tsx`: Current document policy, creation reach and controlling setting.
+- `Knowledge.tsx`: Current shares, first-reading paths and the reachable metadata tree.
+- `InspectionAccess.tsx`: The standing creation-time inspection description from the actual permission row.
+- `CopyDocument.tsx`: Current readable source and destination checks, shared Tree, pending and failed copies.
+- `ImportDialog.tsx`, `ImportHost.tsx`: One five-step import wizard, shared entry points and report reopening.
+- `ImportSourceStep.tsx`: File, folder and archive selection with the shared drop behavior.
+- `ImportDestination.tsx`: Place, folder and package root choices with current creation checks.
+- `ImportFolderBrowser.tsx`: Paged document-folder browsing with current creation checks.
+- `ImportReview.tsx`: Planned items, actions, previews, conflicts, options and losses.
+- `ImportPagination.tsx`: One bounded page with a way back to the beginning.
+- `ImportPeople.tsx`: Source people matched to visible accounts or imported-person labels.
+- `ImportReasons.tsx`: One page of losses, warnings or blockers with their localized words and measured counts.
+- `ImportReference.tsx`: Report and conflict references checked on opening their shared card.
+- `ImportReport.tsx`, `ImportUndo.tsx`: Paged results, downloads and a reviewed undo.
+- `YourImports.tsx`: The signed-in person's import history and report actions.
+- `ImportProgress.tsx`, `ImportStatus.tsx`, `importJobs.ts`: Live import jobs, opt-in notices and status.
+- `importHostState.ts`: The shared import dialog entry points.
+- `ImportSteps.tsx`: Compact import progress and return to earlier choices before a job starts.
+- `Templates.tsx`: Ordinary currently readable template documents, with hidden entries omitted.
+- `imports.ts`: Import selection validation: which files Orch reads (Markdown, HTML, Word, text, one archive).
+- `importSource.ts`: Import source paths, byte totals and selection validation.
+- `importUploads.ts`: Resumable source uploads with batch progress and cancellation.
+- `importReason.ts`: Localized import reasons with a server-sentence fallback.
+- `importReportFile.ts`: A chosen file receives report bytes directly, one chunk at a time.
+- `importResults.ts`: Compact measured action summaries for reports and history.
+- `html.ts`: Adapter for the one shared/document-html.js converter that the server's importer runs, as the browser tests and the fake server have it.
+- `links.ts`: The common safe-link rule for conversion and the editor.
+- `reactions.ts`: Eight recent distinct platform choices using personal state and its feed.
+- `view.ts`: Device-local document view choices isolated by person and place.
+- `README.md`: This module inventory and the boundary between server records and visible controls.
+
+- `DocumentNoticeJobs.tsx`: A discussion's background notices stay visible, with bounded pages and the common job activity line.

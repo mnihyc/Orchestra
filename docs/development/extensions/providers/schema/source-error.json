@@ -1,0 +1,87 @@
+{
+  "type": "object",
+  "properties": {
+    "code": {
+      "$ref": "#/$defs/SourceErrorCode",
+      "description": "What went wrong."
+    },
+    "message": {
+      "type": "string",
+      "description": "A sentence on it, in the source's words; every secret replaced by `[secret]` before it is kept."
+    },
+    "retryable": {
+      "type": "boolean",
+      "description": "Whether asking again may succeed.",
+      "default": false
+    }
+  },
+  "required": [
+    "code",
+    "message"
+  ],
+  "description": "A source's failure, as a program or an address writes it (`{\"code\", \"message\", \"retryable\"}`) and as the\nmachine that keeps the credential reports it.",
+  "title": "SourceError",
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$defs": {
+    "SourceErrorCode": {
+      "oneOf": [
+        {
+          "type": "string",
+          "const": "unsupported",
+          "description": "The method is not implemented."
+        },
+        {
+          "type": "string",
+          "const": "not_told",
+          "description": "The source could not tell now: its vendor was silent."
+        },
+        {
+          "type": "string",
+          "const": "refused",
+          "description": "The vendor refused this read."
+        },
+        {
+          "type": "string",
+          "const": "timeout",
+          "description": "No answer within the method's deadline."
+        },
+        {
+          "type": "string",
+          "const": "unavailable",
+          "description": "The program is down or restarting, the address cannot be reached, or it answered HTTP 5xx or 429."
+        },
+        {
+          "type": "string",
+          "const": "malformed",
+          "description": "The answer is not in its shape: the message names the first wrong member."
+        },
+        {
+          "type": "string",
+          "const": "too_large",
+          "description": "The answer is over its size, or a list over its cap."
+        },
+        {
+          "type": "string",
+          "const": "redirected",
+          "description": "An address answered with a redirection, which is never followed."
+        },
+        {
+          "type": "string",
+          "const": "unauthorized",
+          "description": "An address refused the authorization Orch holds for it (HTTP 401 or 403)."
+        },
+        {
+          "type": "string",
+          "const": "policy.upstream_not_allowed",
+          "description": "The address is not among the upstreams a person's machine allows."
+        },
+        {
+          "type": "string",
+          "const": "credential_unavailable",
+          "description": "A key could not be presented for a model request."
+        }
+      ],
+      "description": "Why a source did not answer as asked. The codes are the same for every binding."
+    }
+  }
+}

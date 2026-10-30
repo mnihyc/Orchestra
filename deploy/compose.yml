@@ -1,0 +1,259 @@
+# The Orch stack: PostgreSQL, the API, the gateway, the worker, the node and the
+# web edge, on stock images with the release mounted read-only. Start and stop
+# it with ./update.sh (it brings the release payloads, the secrets and this
+# file's variables together); `docker compose logs`, `ps` and `exec` work here
+# as they are, because the variables are in .env.
+#
+# Two networks. `backend` is the database and the services that use it
+# (postgres, api, worker). `control` is everything that talks to the API or the
+# gateway (api, gateway, worker, node, frontend). Only two ports are published:
+# the web edge, for the HTTPS front you run, and the gateway's pinned listener,
+# which machines and managed runtimes connect to. Only the node mounts the
+# Docker socket.
+#
+# Every service runs as the user and group that run the stack (ORCH_UID and
+# ORCH_GID, written to .env by `update.sh first-start`), so that what they write
+# under runtime/ is yours to back up, move and remove without privilege. When
+# that person is root, update.sh picks an unprivileged id instead and gives
+# runtime/ to it.
+
+name: orch
+
+x-logging: &logging
+  driver: json-file
+  options:
+    max-size: 10m
+    max-file: "5"
+
+# The control bridge has a known range before its first creation. An explicit
+# override adds the operator's front/CDN ranges and keeps this bridge range.
+x-trusted-proxy-cidrs: &trusted-proxy-cidrs '${ORCH_API_TRUSTED_PROXY_CIDRS:-["${ORCH_CONTROL_CIDR:-172.30.0.0/24}"]}'
+
+# What api, gateway, worker and node have in common: the stock Debian image,
+# a read-only root file system, no capabilities, and the payload read-only at
+# /opt/orch. The public roots come with the payload because this image has none.
+x-service: &service
+  image: debian:bookworm-slim@sha256:7c7b2c966bc9ee8cedfeef67e0e279108992c77681fa595db4a9d65c06ccc587
+  restart: unless-stopped
+  user: "${ORCH_UID:?run ./update.sh first-start}:${ORCH_GID:?run ./update.sh first-start}"
+  read_only: true
+  cap_drop: [ALL]
+  security_opt: ["no-new-privileges:true"]
+  tmpfs: ["/tmp:size=64m"]
+  stop_grace_period: 30s
+  logging: *logging
+  environment: &service-environment
+    ORCH_CONFIG: /etc/orch/orch.toml
+    ORCH_SECRETS_DIR: /run/secrets
+    SSL_CERT_FILE: /opt/orch/share/ca-certificates.crt
+    SSL_CERT_DIR: /etc/orch/ca-certificates
+
+services:
+  postgres:
+    # Orch's database image: the pinned PostgreSQL image with pgvector added for search by meaning
+    # (postgres/Dockerfile). Compose makes it the first time the stack starts.
+    build: ./postgres
+    restart: unless-stopped
+    # The server runs as the same user as everything else; the image's own user
+    # would own the data directory, and nobody could remove it without root.
+    # initdb needs the user to have a name, so /etc/passwd is the one
+    # update.sh makes.
+    user: "${ORCH_UID:?run ./update.sh first-start}:${ORCH_GID:?run ./update.sh first-start}"
+    environment:
+      POSTGRES_USER: orch
+      POSTGRES_DB: orch
+      POSTGRES_PASSWORD: "${POSTGRES_PASSWORD:?set POSTGRES_PASSWORD in .env}"
+    volumes:
+      - ./runtime/postgres/data:/var/lib/postgresql/data
+      - ./runtime/postgres/passwd:/etc/passwd:ro
+    networks: [backend]
+    stop_grace_period: 60s
+    logging: *logging
+    healthcheck:
+      # Over TCP, so that the temporary server of a first initialisation, which
+      # listens on a socket only, is not taken for the database.
+      test: ["CMD-SHELL", "pg_isready -h 127.0.0.1 -U orch -d orch"]
+      interval: 5s
+      timeout: 5s
+      retries: 20
+      start_period: 10s
+
+  api:
+    <<: *service
+    command: ["/opt/orch/bin/orch-api"]
+    depends_on:
+      postgres:
+        condition: service_healthy
+    environment:
+      <<: *service-environment
+      ORCH_DATABASE_URL: "postgres://orch:${POSTGRES_PASSWORD}@postgres:5432/orch"
+      ORCH_RELEASE_URL: "${ORCH_RELEASE_URL:-}"
+      ORCH_FRONTEND_HTTPS_BIND: "${ORCH_FRONTEND_HTTPS_BIND:-}"
+      ORCH_API_TRUSTED_PROXY_CIDRS: *trusted-proxy-cidrs
+      ORCH_MIGRATION_STATUS_FILE: /var/lib/orch/update-status/migrations.json
+      ORCH_MIGRATION_STATUS_INTERVAL_SECS: "${ORCH_MIGRATION_STATUS_INTERVAL_SECS:-1}"
+    volumes:
+      - ./config/ca-certificates:/etc/orch/ca-certificates:ro
+      - ./runtime/server/current:/opt/orch:ro
+      - ./runtime/cli/current:/opt/orchctl:ro
+      - ./runtime/data:/var/lib/orch
+      # Protected operator metadata only; imported after installation-id and manifest-hash checks.
+      - ./runtime/update:/var/lib/orch/installation:ro
+      - ./config/orch.toml:/etc/orch/orch.toml:ro
+      - ./config/secrets/orch_ca_cert.pem:/run/secrets/orch_ca_cert.pem:ro
+      - ./config/secrets/orch_ca_key.pem:/run/secrets/orch_ca_key.pem:ro
+      - ./config/secrets/orch_master_key:/run/secrets/orch_master_key:ro
+      - ./config/secrets/service_api_cert.pem:/run/secrets/service_api_cert.pem:ro
+      - ./config/secrets/service_api_key.pem:/run/secrets/service_api_key.pem:ro
+      # The API registers this token, so that the node can enroll with it.
+      - ./config/secrets/node_enrollment_token:/run/secrets/node_enrollment_token:ro
+    networks: [backend, control]
+    healthcheck:
+      test: ["CMD", "/opt/orchctl/orchctl", "doctor", "--only", "config,database,api"]
+      interval: 10s
+      timeout: 10s
+      retries: 6
+      # The first start applies the schema before it listens.
+      start_period: 120s
+
+  gateway:
+    <<: *service
+    command: ["/opt/orch/bin/orch-gateway"]
+    environment:
+      <<: *service-environment
+      ORCH_API_TRUSTED_PROXY_CIDRS: *trusted-proxy-cidrs
+    depends_on:
+      api:
+        condition: service_healthy
+    ports:
+      - "${ORCH_GATEWAY_PUBLISH:-9443:9443}"
+    volumes:
+      - ./config/ca-certificates:/etc/orch/ca-certificates:ro
+      - ./runtime/server/current:/opt/orch:ro
+      - ./config/orch.toml:/etc/orch/orch.toml:ro
+      - ./config/secrets/orch_ca_cert.pem:/run/secrets/orch_ca_cert.pem:ro
+      - ./config/secrets/service_gateway_cert.pem:/run/secrets/service_gateway_cert.pem:ro
+      - ./config/secrets/service_gateway_key.pem:/run/secrets/service_gateway_key.pem:ro
+    networks:
+      control:
+        # The name the system advertises for the pinned listener, and the one its
+        # certificate is good for. Managed runtimes reach it through the host;
+        # the services of this stack, the node among them, find it here.
+        aliases: [gateway.orch.internal]
+    healthcheck:
+      # The listener behind the web edge answers a connection.
+      test: ["CMD", "bash", "-c", "exec 3<>/dev/tcp/127.0.0.1/9444"]
+      interval: 10s
+      timeout: 5s
+      retries: 6
+      start_period: 20s
+
+  worker:
+    <<: *service
+    command: ["/opt/orch/bin/orch-worker"]
+    depends_on:
+      postgres:
+        condition: service_healthy
+      api:
+        # API readiness needs our heartbeat. We wait for its schema ourselves.
+        condition: service_started
+    environment:
+      <<: *service-environment
+      ORCH_RELEASE_URL: "${ORCH_RELEASE_URL:-}"
+      ORCH_DATABASE_URL: "postgres://orch:${POSTGRES_PASSWORD}@postgres:5432/orch"
+    volumes:
+      - ./config/ca-certificates:/etc/orch/ca-certificates:ro
+      - ./runtime/server/current:/opt/orch:ro
+      - ./config/orch.toml:/etc/orch/orch.toml:ro
+      - ./config/secrets/orch_ca_cert.pem:/run/secrets/orch_ca_cert.pem:ro
+      - ./config/secrets/orch_master_key:/run/secrets/orch_master_key:ro
+      - ./config/secrets/orch_vapid_private_key:/run/secrets/orch_vapid_private_key:ro
+      - ./config/secrets/service_worker_cert.pem:/run/secrets/service_worker_cert.pem:ro
+      - ./config/secrets/service_worker_key.pem:/run/secrets/service_worker_key.pem:ro
+    networks: [backend, control]
+    healthcheck:
+      # The metrics listener answers.
+      test:
+        - CMD
+        - bash
+        - -c
+        - 'exec 3<>/dev/tcp/127.0.0.1/9102 && printf "GET /metrics HTTP/1.0\r\n\r\n" >&3 && head -n1 <&3 | grep -q " 200 "'
+      interval: 10s
+      timeout: 5s
+      retries: 6
+      start_period: 20s
+
+  node:
+    <<: *service
+    # What the system calls this host, which is the name it enrolls under.
+    hostname: orch-node
+    # Runs, and enrolls itself with the bundled node's token the first time.
+    command: ["/opt/orch/bin/orch-node", "run", "--token-file", "/run/secrets/node_enrollment_token"]
+    depends_on:
+      gateway:
+        condition: service_healthy
+    # The docker group of the host, to reach the Docker socket as that group.
+    group_add: ["${ORCH_DOCKER_GID:?run ./update.sh first-start}"]
+    environment:
+      <<: *service-environment
+      # The node hands paths to the Docker daemon, which resolves them on the
+      # host. So its directory is mounted at the path it has there, and the
+      # node is told that path.
+      ORCH_INSTALLATION_ROOT: "${ORCH_HOME:?run ./update.sh first-start}"
+      ORCH_NODE_DATA_DIR: "${ORCH_HOME:?run ./update.sh first-start}/runtime/node"
+    volumes:
+      - ./config/ca-certificates:/etc/orch/ca-certificates:ro
+      - ./runtime/server/current:/opt/orch:ro
+      - ./config/orch.toml:/etc/orch/orch.toml:ro
+      - ./config/secrets/node_enrollment_token:/run/secrets/node_enrollment_token:ro
+      - "${ORCH_HOME}/runtime/node:${ORCH_HOME}/runtime/node"
+      - "${ORCH_HOME}/runtime/node.orch-instance-lock:${ORCH_HOME}/runtime/node.orch-instance-lock"
+      - /var/run/docker.sock:/var/run/docker.sock
+    networks: [control]
+
+  frontend:
+    image: nginx:1.30-alpine@sha256:0985e772fb9f729e6fa0980da05fca5d9c468e870eed43071545afa9d2e27d94
+    restart: unless-stopped
+    command: ["/bin/sh", "/etc/orch/frontend.sh"]
+    group_add: ["${ORCH_GID:?run ./update.sh first-start}"]
+    environment:
+      ORCH_FRONTEND_HTTPS_BIND: "${ORCH_FRONTEND_HTTPS_BIND:-}"
+    read_only: true
+    # The master process starts as root to bind port 80 and hand the work to
+    # its unprivileged workers; nothing else is kept.
+    cap_drop: [ALL]
+    cap_add: [CHOWN, SETGID, SETUID, NET_BIND_SERVICE]
+    security_opt: ["no-new-privileges:true"]
+    tmpfs:
+      - /var/cache/nginx:size=64m
+      - /tmp
+    depends_on:
+      api:
+        condition: service_healthy
+    ports:
+      - "${ORCH_FRONTEND_BIND:-127.0.0.1:5180}:80"
+    volumes:
+      - ./frontend.sh:/etc/orch/frontend.sh:ro
+      - ./runtime/data/frontend-tls:/etc/orch/frontend-tls:ro
+      - ./runtime/frontend/current/dist:/usr/share/nginx/html:ro
+      - ./runtime/data/update-status:/var/lib/orch-update-status:ro
+      - ./nginx.conf:/etc/nginx/nginx.conf:ro
+      # The authority the upstreams' certificates are checked against.
+      - ./config/secrets/orch_ca_cert.pem:/etc/orch/secrets/orch_ca_cert.pem:ro
+    networks: [control]
+    logging: *logging
+    healthcheck:
+      # Through the proxy to the API, so that the chain of certificates between
+      # them is tried as well.
+      test: ["CMD", "wget", "-q", "-O", "/dev/null", "http://127.0.0.1/health"]
+      interval: 10s
+      timeout: 5s
+      retries: 6
+      start_period: 20s
+
+networks:
+  backend: {}
+  control:
+    ipam:
+      config:
+        - subnet: "${ORCH_CONTROL_CIDR:-172.30.0.0/24}"

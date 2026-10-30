@@ -1,0 +1,335 @@
+{
+  "manifest_version": 1,
+  "kind": "codex",
+  "names": {
+    "en": "Codex",
+    "zh-CN": "Codex"
+  },
+  "vendor": {
+    "name": "OpenAI",
+    "licence": "Apache-2.0",
+    "home_page": "https://github.com/openai/codex"
+  },
+  "protocol": "codex_app_server",
+  "launch": {
+    "programs": [
+      "codex"
+    ]
+  },
+  "placement": {
+    "colocated": true,
+    "home": "program",
+    "needs_binary": true
+  },
+  "builds": {
+    "channels": [
+      {
+        "type": "github_release",
+        "id": "releases",
+        "repository": "openai/codex",
+        "tag_prefix": "rust-v",
+        "listed": 20,
+        "assets": [
+          {
+            "arch": "x86_64",
+            "name": "codex-package-x86_64-unknown-linux-musl.tar.gz"
+          },
+          {
+            "arch": "aarch64",
+            "name": "codex-package-aarch64-unknown-linux-musl.tar.gz"
+          }
+        ],
+        "checksum": {
+          "from": "digest"
+        }
+      }
+    ]
+  },
+  "checks": {
+    "interface": {
+      "args": [
+        "app-server",
+        "generate-json-schema",
+        "--experimental",
+        "--out",
+        "{out}"
+      ],
+      "printed": "schema",
+      "needs": [
+        {
+          "name": "account/login/cancel"
+        },
+        {
+          "name": "account/login/completed"
+        },
+        {
+          "name": "account/login/start"
+        },
+        {
+          "name": "account/logout"
+        },
+        {
+          "name": "account/rateLimitResetCredit/consume"
+        },
+        {
+          "name": "account/rateLimits/read"
+        },
+        {
+          "name": "account/rateLimits/updated"
+        },
+        {
+          "name": "account/read"
+        },
+        {
+          "name": "account/updated"
+        },
+        {
+          "name": "config/read"
+        },
+        {
+          "name": "environment/add"
+        },
+        {
+          "name": "environment/info"
+        },
+        {
+          "name": "item/agentMessage/delta"
+        },
+        {
+          "name": "item/autoApprovalReview/completed"
+        },
+        {
+          "name": "item/commandExecution/outputDelta"
+        },
+        {
+          "name": "item/commandExecution/requestApproval"
+        },
+        {
+          "name": "item/completed"
+        },
+        {
+          "name": "item/fileChange/patchUpdated"
+        },
+        {
+          "name": "item/fileChange/requestApproval"
+        },
+        {
+          "name": "item/permissions/requestApproval"
+        },
+        {
+          "name": "item/reasoning/summaryPartAdded",
+          "capability": "reasoning_summary"
+        },
+        {
+          "name": "item/reasoning/summaryTextDelta",
+          "capability": "reasoning_summary"
+        },
+        {
+          "name": "item/reasoning/textDelta"
+        },
+        {
+          "name": "item/started"
+        },
+        {
+          "name": "item/tool/requestUserInput"
+        },
+        {
+          "name": "mcpServer/elicitation/request"
+        },
+        {
+          "name": "model/list",
+          "capability": "model_discovery"
+        },
+        {
+          "name": "openai/userVerification"
+        },
+        {
+          "name": "serverRequest/resolved"
+        },
+        {
+          "name": "thread/backgroundTerminals/list",
+          "capability": "background_commands"
+        },
+        {
+          "name": "thread/backgroundTerminals/terminate",
+          "capability": "background_commands"
+        },
+        {
+          "name": "thread/closed"
+        },
+        {
+          "name": "thread/compacted"
+        },
+        {
+          "name": "thread/delete",
+          "capability": "history_delete"
+        },
+        {
+          "name": "thread/loaded/list",
+          "capability": "history_delete_fallback"
+        },
+        {
+          "name": "thread/fork",
+          "capability": "fork_native"
+        },
+        {
+          "name": "thread/inject_items",
+          "capability": "import_neutral"
+        },
+        {
+          "name": "thread/list",
+          "capability": "discover_sessions"
+        },
+        {
+          "name": "thread/name/updated"
+        },
+        {
+          "name": "thread/read"
+        },
+        {
+          "name": "thread/resume"
+        },
+        {
+          "name": "thread/start"
+        },
+        {
+          "name": "thread/started"
+        },
+        {
+          "name": "thread/tokenUsage/updated"
+        },
+        {
+          "name": "thread/turns/list"
+        },
+        {
+          "name": "thread/unsubscribe"
+        },
+        {
+          "name": "turn/completed"
+        },
+        {
+          "name": "turn/interrupt"
+        },
+        {
+          "name": "turn/plan/updated",
+          "capability": "plan"
+        },
+        {
+          "name": "turn/start"
+        },
+        {
+          "name": "turn/started"
+        },
+        {
+          "name": "turn/steer",
+          "capability": "steer"
+        },
+        {
+          "name": "TurnStartParams.collaborationMode",
+          "capability": "plan_mode"
+        },
+        {
+          "name": "ThreadStartParams.selectedCapabilityRoots"
+        }
+      ]
+    },
+    "conformance": [
+      {
+        "name": "startup"
+      },
+      {
+        "name": "command_approval",
+        "feature": "approvals.command"
+      },
+      {
+        "name": "user_input",
+        "feature": "approvals.user_input"
+      },
+      {
+        "name": "elicitation",
+        "feature": "approvals.mcp_elicitation"
+      },
+      {
+        "name": "nested_subagent",
+        "feature": "subagents"
+      },
+      {
+        "name": "native_import",
+        "feature": "import_native"
+      },
+      {
+        "name": "tools.result_form",
+        "feature": "orch_tools"
+      },
+      {
+        "name": "history.native_import",
+        "feature": "import_native"
+      }
+    ],
+    "probes": [
+      "dynamic_tools"
+    ],
+    "tool_names": {
+      "command": {
+        "name": "exec_command",
+        "arguments": {
+          "command": "cmd"
+        }
+      },
+      "ask_user": {
+        "name": "request_user_input"
+      },
+      "spawn_agent": {
+        "name": "multi_agent_v1.spawn_agent"
+      }
+    },
+    "features": {
+      "history_delete_fallback": {
+        "en": "removing native session history from files",
+        "zh-CN": "从文件移除原生会话历史"
+      }
+    }
+  },
+  "executors": [
+    "codex-exec-server"
+  ],
+  "files": {
+    "instruction_files": [
+      {
+        "path": "AGENTS.override.md",
+        "scope": "home"
+      },
+      {
+        "path": "AGENTS.md",
+        "scope": "home"
+      },
+      {
+        "path": "AGENTS.override.md",
+        "scope": "workspace"
+      },
+      {
+        "path": "AGENTS.md",
+        "scope": "workspace"
+      }
+    ],
+    "workspace_config": [
+      ".codex"
+    ]
+  },
+  "privacy": [
+    {
+      "name": "telemetry",
+      "how": {
+        "en": "Analytics, feedback and trace exporters are switched off in the home Orch writes.",
+        "zh-CN": "Orch 写入的主目录中已关闭分析、反馈和追踪导出。"
+      }
+    },
+    {
+      "name": "updates",
+      "how": {
+        "en": "The check for a newer version on startup is switched off.",
+        "zh-CN": "已关闭启动时的新版本检查。"
+      }
+    }
+  ]
+}

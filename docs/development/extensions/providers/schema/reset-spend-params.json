@@ -1,0 +1,110 @@
+{
+  "type": "object",
+  "properties": {
+    "provider": {
+      "$ref": "#/$defs/SourceAskProvider",
+      "description": "The provider."
+    },
+    "endpoints": {
+      "type": "array",
+      "items": {
+        "$ref": "#/$defs/SourceAskEndpoint"
+      },
+      "description": "Its endpoints; none for a provider signed in through a harness.",
+      "default": []
+    },
+    "config": {
+      "type": "object",
+      "additionalProperties": true,
+      "description": "What the provider's managers gave for the source's fields that are no secrets, by field.",
+      "default": {}
+    },
+    "secrets": {
+      "type": "object",
+      "additionalProperties": {
+        "type": "string"
+      },
+      "description": "The values of the source's secret fields, by field: those it declared, and no other.",
+      "default": {}
+    },
+    "credential": {
+      "anyOf": [
+        {
+          "$ref": "#/$defs/SourceAskCredential"
+        },
+        {
+          "type": "null"
+        }
+      ],
+      "description": "The provider's key: only where the source wants it, the credential is a key, and, for an address,\nthe provider's managers turned on sending it there. Never a sign-in."
+    },
+    "reset_id": {
+      "type": "string",
+      "description": "The reset to spend, by the id the source listed it with in `available_resets`."
+    },
+    "idempotency_key": {
+      "type": "string",
+      "description": "The same key given twice spends once."
+    }
+  },
+  "required": [
+    "provider",
+    "reset_id",
+    "idempotency_key"
+  ],
+  "description": "The parameters of `resets.spend`: what every call is given, with the reset to spend and the key that makes\na repeated request spend once.",
+  "title": "ResetSpendParams",
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$defs": {
+    "SourceAskProvider": {
+      "type": "object",
+      "properties": {
+        "id": {
+          "type": "string",
+          "format": "uuid",
+          "description": "Its identifier."
+        },
+        "name": {
+          "type": "string",
+          "description": "Its name."
+        }
+      },
+      "required": [
+        "id",
+        "name"
+      ],
+      "description": "The provider a call is about."
+    },
+    "SourceAskEndpoint": {
+      "type": "object",
+      "properties": {
+        "protocol": {
+          "type": "string",
+          "description": "The protocol it speaks, such as `openai-responses` or `anthropic-messages`."
+        },
+        "base_url": {
+          "type": "string",
+          "description": "Its address."
+        }
+      },
+      "required": [
+        "protocol",
+        "base_url"
+      ],
+      "description": "One endpoint of the provider."
+    },
+    "SourceAskCredential": {
+      "type": "object",
+      "properties": {
+        "key": {
+          "type": "string",
+          "description": "The provider's key."
+        }
+      },
+      "required": [
+        "key"
+      ],
+      "description": "The provider's credential, as a source that wants it is given it."
+    }
+  }
+}

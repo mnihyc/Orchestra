@@ -1,0 +1,21 @@
+{
+ "harness": "codex",
+ "version": "0.162.1",
+ "recorded": "2026-10-12",
+ "fault": "fail context_length",
+ "setup": "provider of the forwarded path (model_providers entry, token in ORCH_LLM_TOKEN)",
+ "requests": 1,
+ "exit": 0,
+ "stderr": [],
+ "frames": [
+  {"method":"turn/started","params":{"threadId":"01a12f91-6c07-7a90-8bb9-468a7efbb2e1","turn":{"id":"01a12f91-6c3a-7882-ab2e-8512c56daa4c","rootTurnId":"01a12f91-6c3a-7882-ab2e-8512c56daa4c","items":[],"itemsView":"notLoaded","status":"inProgress","error":null,"startedAt":1791799422,"completedAt":null,"durationMs":null}},"emittedAtMs":1791799422108},
+  {"method":"item/started","params":{"item":{"type":"userMessage","id":"01a12f91-6cbf-7d20-ad78-febd68e7ca42","clientId":null,"content":[{"type":"text","text":"hello\n#!mock\nfail context_length\n","text_elements":[]}]},"threadId":"01a12f91-6c07-7a90-8bb9-468a7efbb2e1","turnId":"01a12f91-6c3a-7882-ab2e-8512c56daa4c","startedAtMs":1791799422153},"emittedAtMs":1791799422153},
+  {"method":"item/completed","params":{"item":{"type":"userMessage","id":"01a12f91-6cbf-7d20-ad78-febd68e7ca42","clientId":null,"content":[{"type":"text","text":"hello\n#!mock\nfail context_length\n","text_elements":[]}]},"threadId":"01a12f91-6c07-7a90-8bb9-468a7efbb2e1","turnId":"01a12f91-6c3a-7882-ab2e-8512c56daa4c","completedAtMs":1791799422153},"emittedAtMs":1791799422189},
+  {"method":"account/rateLimits/updated","params":{"rateLimits":{"limitId":"codex","limitName":null,"normalModelSlug":null,"primary":null,"secondary":null,"credits":null,"individualLimit":null,"spendControlReached":null,"planType":null,"rateLimitReachedType":null}},"emittedAtMs":1791799422292},
+  {"method":"thread/tokenUsage/updated","params":{"threadId":"01a12f91-6c07-7a90-8bb9-468a7efbb2e1","turnId":"01a12f91-6c3a-7882-ab2e-8512c56daa4c","tokenUsage":{"total":{"totalTokens":258400,"inputTokens":0,"cachedInputTokens":0,"cacheWriteInputTokens":0,"outputTokens":0,"reasoningOutputTokens":0},"last":{"totalTokens":258400,"inputTokens":0,"cachedInputTokens":0,"cacheWriteInputTokens":0,"outputTokens":0,"reasoningOutputTokens":0},"modelContextWindow":258400}},"emittedAtMs":1791799422299},
+  {"method":"account/rateLimits/updated","params":{"rateLimits":{"limitId":"codex","limitName":null,"normalModelSlug":null,"primary":null,"secondary":null,"credits":null,"individualLimit":null,"spendControlReached":null,"planType":null,"rateLimitReachedType":null}},"emittedAtMs":1791799422299},
+  {"method":"error","params":{"error":{"message":"Codex ran out of room in the model's context window. Start a new thread or clear earlier history before retrying.","codexErrorInfo":"contextWindowExceeded","additionalDetails":null,"misalignment":null},"willRetry":false,"threadId":"01a12f91-6c07-7a90-8bb9-468a7efbb2e1","turnId":"01a12f91-6c3a-7882-ab2e-8512c56daa4c"},"emittedAtMs":1791799422299},
+  {"method":"turn/completed","params":{"threadId":"01a12f91-6c07-7a90-8bb9-468a7efbb2e1","turn":{"id":"01a12f91-6c3a-7882-ab2e-8512c56daa4c","rootTurnId":"01a12f91-6c3a-7882-ab2e-8512c56daa4c","items":[],"itemsView":"notLoaded","status":"failed","error":{"message":"Codex ran out of room in the model's context window. Start a new thread or clear earlier history before retrying.","codexErrorInfo":"contextWindowExceeded","additionalDetails":null,"misalignment":null},"startedAt":1791799422,"completedAt":1791799422,"durationMs":285}},"emittedAtMs":1791799422308}
+ ],
+ "expect": {"outcome": "failed", "code": "context_overflow", "retryable": false, "incomplete": false, "resets_at": null, "row": "context_window", "said_contains": "ran out of room in the model's context window"}
+}

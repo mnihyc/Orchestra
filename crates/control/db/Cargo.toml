@@ -1,0 +1,43 @@
+[package]
+name = "orch-db"
+description = "PostgreSQL persistence, transactions and projections."
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+rust-version.workspace = true
+repository.workspace = true
+publish.workspace = true
+
+[dependencies]
+chacha20poly1305.workspace = true
+chrono.workspace = true
+hmac.workspace = true
+inventory.workspace = true
+log.workspace = true
+metrics.workspace = true
+orch-access-contract.workspace = true
+orch-agent-programs.workspace = true
+orch-api-contract.workspace = true
+orch-documents.workspace = true
+orch-driver-contract.workspace = true
+orch-link-contract.workspace = true
+orch-provider-contract.workspace = true
+orch-settings-contract.workspace = true
+orch-types.workspace = true
+rand.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+sha2.workspace = true
+sqlx.workspace = true
+thiserror.workspace = true
+tokio.workspace = true
+tracing.workspace = true
+
+[dev-dependencies]
+tempfile.workspace = true
+orch-testkit.workspace = true
+orch-telemetry.workspace = true
+tracing-subscriber.workspace = true
+
+[lints]
+workspace = true

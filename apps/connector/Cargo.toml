@@ -1,0 +1,68 @@
+[package]
+name = "orch-connector"
+description = "Compose connector roles, adapters, executors, model protocols and environment host."
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+rust-version.workspace = true
+repository.workspace = true
+publish.workspace = true
+
+[dependencies]
+anyhow.workspace = true
+async-trait.workspace = true
+clap.workspace = true
+orch-adapter-acp.workspace = true
+orch-adapter-claude-code.workspace = true
+orch-adapter-codex.workspace = true
+orch-adapter-fake.workspace = true
+orch-build-info.workspace = true
+orch-agent-contract.workspace = true
+orch-agent-programs.workspace = true
+orch-api-contract.workspace = true
+orch-config.workspace = true
+orch-connector-core.workspace = true
+orch-envhost.workspace = true
+orch-executor-codex.workspace = true
+orch-executor-orch.workspace = true
+orch-executor-contract.workspace = true
+orch-link-contract.workspace = true
+orch-pki.workspace = true
+orch-plugin.workspace = true
+orch-plugin-contract.workspace = true
+orch-protocol-anthropic-messages.workspace = true
+orch-protocol-openai-responses.workspace = true
+orch-provider-contract.workspace = true
+orch-provider-deepseek.workspace = true
+orch-provider-openrouter.workspace = true
+orch-telemetry.workspace = true
+orch-types.workspace = true
+chrono.workspace = true
+serde_json.workspace = true
+tokio.workspace = true
+tracing.workspace = true
+url.workspace = true
+
+# The proxy of a restricted unit runs in a Linux container beside it, never on Windows.
+[target.'cfg(unix)'.dependencies]
+orch-driver-docker.workspace = true
+
+[dev-dependencies]
+orch-model-contract.workspace = true
+orch-db.workspace = true
+sqlx.workspace = true
+zstd.workspace = true
+bytes.workspace = true
+http-body-util.workspace = true
+hyper.workspace = true
+hyper-util.workspace = true
+orch-link.workspace = true
+orch-testkit.workspace = true
+tempfile.workspace = true
+tokio-rustls.workspace = true
+
+[build-dependencies]
+orch-build-support.workspace = true
+
+[lints]
+workspace = true

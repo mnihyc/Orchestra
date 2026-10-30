@@ -1,0 +1,62 @@
+[
+  {
+    "kind": "codex",
+    "version": "0.165.0",
+    "os": "linux",
+    "arch": "x86_64",
+    "url": "https://github.com/openai/codex/releases/download/rust-v0.165.0/codex-package-x86_64-unknown-linux-musl.tar.gz",
+    "sha256": "e97c4463d7f146692a955d7b0e1c8cf48f97cd4d616cd45c5dcab2e8d9743316",
+    "is_default": true,
+    "source": "release"
+  },
+  {
+    "kind": "codex",
+    "version": "0.165.0",
+    "os": "linux",
+    "arch": "aarch64",
+    "url": "https://github.com/openai/codex/releases/download/rust-v0.165.0/codex-package-aarch64-unknown-linux-musl.tar.gz",
+    "sha256": "c8b2844fdef57498572db960344aee8c836ce9f75c203379da0a9c3a334fc3b7",
+    "is_default": true,
+    "source": "release"
+  },
+  {
+    "kind": "claude-code",
+    "version": "2.1.312",
+    "os": "linux",
+    "arch": "x86_64",
+    "url": "https://downloads.claude.ai/claude-code-releases/2.1.312/linux-x64/claude",
+    "sha256": "4f4178ce41d83e23341ebfbaecdbcf8ea6bf7baea0690025abe49eeec3a5d01d",
+    "is_default": true,
+    "source": "release"
+  },
+  {
+    "kind": "claude-code",
+    "version": "2.1.312",
+    "os": "linux",
+    "arch": "aarch64",
+    "url": "https://downloads.claude.ai/claude-code-releases/2.1.312/linux-arm64/claude",
+    "sha256": "dc4af28917455e009d26704b82a438353a06149e825b6cdf782908b2d28661f5",
+    "is_default": true,
+    "source": "release"
+  },
+  {
+    "kind": "dsh",
+    "version": "0.2.1-rc.2",
+    "os": "linux",
+    "arch": "x86_64",
+    "url": "https://files.pythonhosted.org/packages/01/f3/1f7b9ea37ece210a5e432089bd63d048b2c45acc910561ec5e730c46a532/deepseek_harness_runtime_bin-0.2.1rc2-py3-none-manylinux_2_28_x86_64.whl",
+    "sha256": "0a0a4eb85a22cd9339972e6a5ced77a27ec791353a5b220e3e10b8cdbbdeca39",
+    "is_default": true,
+    "source": "release"
+  },
+  {
+    "kind": "dsh",
+    "version": "0.2.1-rc.2",
+    "os": "linux",
+    "arch": "aarch64",
+    "url": "https://files.pythonhosted.org/packages/2e/36/dd6d86ab8e4dd4ec2b3ed09ccb3bb28864d86c4e1c31189f7753bd0c07c6/deepseek_harness_runtime_bin-0.2.1rc2-py3-none-manylinux_2_28_aarch64.whl",
+    "sha256": "71ed869e3e9a0e3ea398521730889d2d7e154767834165f1553755818e3f2a78",
+    "is_default": true,
+    "source": "release"
+  }
+]

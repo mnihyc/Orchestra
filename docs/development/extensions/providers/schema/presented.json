@@ -1,0 +1,27 @@
+{
+  "type": "object",
+  "properties": {
+    "headers": {
+      "type": "object",
+      "additionalProperties": {
+        "type": "string"
+      },
+      "description": "The headers a model request carries in place of the key's own presentation, by name."
+    },
+    "expires_at": {
+      "type": [
+        "string",
+        "null"
+      ],
+      "format": "date-time",
+      "description": "When they stop being good; `null` where the source does not say.",
+      "default": null
+    }
+  },
+  "required": [
+    "headers"
+  ],
+  "description": "What a source answers to `credential.present`.",
+  "title": "Presented",
+  "$schema": "https://json-schema.org/draft/2020-12/schema"
+}

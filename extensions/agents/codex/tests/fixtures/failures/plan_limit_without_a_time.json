@@ -1,0 +1,19 @@
+{
+ "harness": "codex",
+ "version": "0.162.1",
+ "recorded": "2026-10-12",
+ "fault": "error plan_limit window=session plan=plus",
+ "setup": "provider of the forwarded path (model_providers entry, token in ORCH_LLM_TOKEN); TZ=Asia/Singapore",
+ "requests": 1,
+ "exit": 0,
+ "stderr": [],
+ "frames": [
+  {"method":"turn/started","params":{"threadId":"01a12f90-66a0-7ea2-b285-04af55317f14","turn":{"id":"01a12f90-6775-7412-990e-0b396d056ce9","rootTurnId":"01a12f90-6775-7412-990e-0b396d056ce9","items":[],"itemsView":"notLoaded","status":"inProgress","error":null,"startedAt":1791799355,"completedAt":null,"durationMs":null}},"emittedAtMs":1791799355427},
+  {"method":"item/started","params":{"item":{"type":"userMessage","id":"01a12f90-683d-76b1-84a5-ae64fe89f75e","clientId":null,"content":[{"type":"text","text":"hello\n#!mock\nerror plan_limit window=session plan=plus\n","text_elements":[]}]},"threadId":"01a12f90-66a0-7ea2-b285-04af55317f14","turnId":"01a12f90-6775-7412-990e-0b396d056ce9","startedAtMs":1791799355458},"emittedAtMs":1791799355460},
+  {"method":"item/completed","params":{"item":{"type":"userMessage","id":"01a12f90-683d-76b1-84a5-ae64fe89f75e","clientId":null,"content":[{"type":"text","text":"hello\n#!mock\nerror plan_limit window=session plan=plus\n","text_elements":[]}]},"threadId":"01a12f90-66a0-7ea2-b285-04af55317f14","turnId":"01a12f90-6775-7412-990e-0b396d056ce9","completedAtMs":1791799355459},"emittedAtMs":1791799355468},
+  {"method":"account/rateLimits/updated","params":{"rateLimits":{"limitId":"codex","limitName":null,"normalModelSlug":null,"primary":{"usedPercent":100,"windowDurationMins":300,"resetsAt":null},"secondary":{"usedPercent":40,"windowDurationMins":10080,"resetsAt":null},"credits":null,"individualLimit":null,"spendControlReached":null,"planType":null,"rateLimitReachedType":null}},"emittedAtMs":1791799355530},
+  {"method":"error","params":{"error":{"message":"You’ve hit your usage limit. Upgrade to Pro (https://chatgpt.com/explore/pro), visit https://chatgpt.com/settings/usage to purchase more credits or try again later.","codexErrorInfo":"usageLimitExceeded","additionalDetails":null,"misalignment":null},"willRetry":false,"threadId":"01a12f90-66a0-7ea2-b285-04af55317f14","turnId":"01a12f90-6775-7412-990e-0b396d056ce9"},"emittedAtMs":1791799355532},
+  {"method":"turn/completed","params":{"threadId":"01a12f90-66a0-7ea2-b285-04af55317f14","turn":{"id":"01a12f90-6775-7412-990e-0b396d056ce9","rootTurnId":"01a12f90-6775-7412-990e-0b396d056ce9","items":[],"itemsView":"notLoaded","status":"failed","error":{"message":"You’ve hit your usage limit. Upgrade to Pro (https://chatgpt.com/explore/pro), visit https://chatgpt.com/settings/usage to purchase more credits or try again later.","codexErrorInfo":"usageLimitExceeded","additionalDetails":null,"misalignment":null},"startedAt":1791799355,"completedAt":1791799355,"durationMs":270}},"emittedAtMs":1791799355538}
+ ],
+ "expect": {"outcome": "failed", "code": "provider_exhausted", "retryable": false, "incomplete": false, "resets_at": null, "row": "plan_limit", "said_contains": "try again later"}
+}

@@ -1,0 +1,103 @@
+{
+  "type": "object",
+  "properties": {
+    "id": {
+      "type": "string",
+      "description": "The source's name for it, one of a kind among the balances it tells: `plan`, `account`, a currency."
+    },
+    "label": {
+      "type": [
+        "string",
+        "null"
+      ],
+      "description": "What it is called for people, where the source names it.",
+      "default": null
+    },
+    "unit": {
+      "type": "string",
+      "description": "The vendor's unit: a currency such as `USD` or `CNY`, or `credits`."
+    },
+    "remaining": {
+      "type": [
+        "string",
+        "null"
+      ],
+      "description": "What is left.",
+      "default": null
+    },
+    "total": {
+      "type": [
+        "string",
+        "null"
+      ],
+      "description": "What there was in all.",
+      "default": null
+    },
+    "used": {
+      "type": [
+        "string",
+        "null"
+      ],
+      "description": "What has been spent of it.",
+      "default": null
+    },
+    "unlimited": {
+      "type": [
+        "boolean",
+        "null"
+      ],
+      "description": "Whether it has no limit.",
+      "default": null
+    },
+    "parts": {
+      "type": [
+        "array",
+        "null"
+      ],
+      "items": {
+        "$ref": "#/$defs/BalancePart"
+      },
+      "description": "What it is made of, where the vendor splits it.",
+      "default": null
+    },
+    "expires_at": {
+      "type": [
+        "string",
+        "null"
+      ],
+      "format": "date-time",
+      "description": "When it lapses, where it does.",
+      "default": null
+    }
+  },
+  "required": [
+    "id",
+    "unit"
+  ],
+  "patternProperties": {
+    "^x_": true
+  },
+  "description": "What an account, a plan or a key still holds to be spent, in the vendor's own unit: not Orch's credits.\n\nAmounts are decimal text (`\"12.50\"`), so that the vendor's precision is kept as it was told.",
+  "title": "Balance",
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$defs": {
+    "BalancePart": {
+      "type": "object",
+      "properties": {
+        "label": {
+          "type": "string",
+          "description": "What the vendor calls the part."
+        },
+        "amount": {
+          "type": "string",
+          "description": "How much it is, as decimal text in the balance's unit."
+        }
+      },
+      "required": [
+        "label",
+        "amount"
+      ],
+      "description": "One part of a balance, where the vendor splits it, such as what was granted and what was topped up."
+    }
+  }
+}

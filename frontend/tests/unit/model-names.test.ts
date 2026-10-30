@@ -1,0 +1,61 @@
+/** A work screen uses a model's reported display name and keeps routing identities out of labels. */
+import { MODEL_ESTIMATE } from '../doubles/fixtures';
+import { afterEach, expect, it } from 'vitest';
+import { effortDisplayName, modelDisplayName } from '@/features/models/names';
+import { programName } from '@/features/resources/programNames';
+import { keyDetail, keyLabel } from '@/features/usage/keys';
+import { modelName as threadModelName } from '@/features/composer/ModelEffort';
+import { modelName as startModelName } from '@/features/start/choices';
+import { modelLabel } from '@/features/change/modelLabel';
+import { planProviderName } from '@/features/change/plan';
+import type { ModelOption } from '@/generated/api-types';
+import { i18n, setLocale } from '@/i18n';
+
+afterEach(async () => { await setLocale('en'); });
+it.each(['en', 'zh-CN'] as const)('uses reported names and an honest missing-name label in %s', async (locale) => {
+  await setLocale(locale);
+  expect(modelDisplayName('Reasoner')).toBe('Reasoner');
+  expect(modelDisplayName('mock-large')).toBe(i18n.t('composer.model.exampleLarge'));
+  expect(modelDisplayName('Mock Large')).toBe(i18n.t('composer.model.exampleLarge'));
+  expect(modelDisplayName('mock-small')).toBe(i18n.t('composer.model.exampleSmall'));
+  expect(modelDisplayName('fake')).toBe(i18n.t('composer.model.example'));
+  expect(modelDisplayName('Mock Large reasoning model for release work')).toBe('Mock Large reasoning model for release work');
+  expect(threadModelName({ model: 'private_vendor_route', model_display: 'Reasoner' })).toBe('Reasoner');
+  expect(threadModelName({ model: null, model_display: null })).toBe('');
+  for (const display of ['', ' ', null, undefined]) expect(modelDisplayName(display)).toBe(i18n.t('composer.model.displayUnknown'));
+  expect(threadModelName({ model: 'private_vendor_route', model_display: null })).toBe(i18n.t('composer.model.displayUnknown'));
+  const option: ModelOption = { ...MODEL_ESTIMATE, model_name: 'private_vendor_route', display_name: 'Reasoner', parameters: {}, allowed: true, reason: null };
+  expect(startModelName(option)).toBe('Reasoner');
+  expect(modelLabel('mock-large', [{ model_name: 'mock-large', display_name: 'Mock Large' }], null, i18n.t)).toBe(i18n.t('composer.model.exampleLarge'));
+  expect(modelLabel('mock-large', [], 'Mock Large', i18n.t)).toBe(i18n.t('composer.model.exampleLarge'));
+  expect(modelLabel('private_route', [], null, i18n.t)).toBe(i18n.t('changeCompact.unnamedModel'));
+  expect(startModelName({ ...option, display_name: '' })).toBe(i18n.t('composer.model.displayUnknown'));
+  expect(effortDisplayName('high')).toBe(i18n.t('choiceCatalog.effort.high.name'));
+  expect(effortDisplayName('My custom effort')).toBe('My custom effort');
+  expect(programName({ kind: 'codex', name: 'Codex', names: {} }, locale)).toBe('Codex');
+  expect(programName({ kind: 'claude_code', name: 'Claude Code', names: {} }, locale)).toBe('Claude Code');
+  const example = { kind: 'fake', name: 'Example agent', names: { 'zh-CN': '示例代理' } };
+  expect(programName(example, locale)).toBe(locale === 'zh-CN' ? '示例代理' : 'Example agent');
+  expect(programName({ kind: 'private_harness_key', name: '', names: {} }, locale)).toBeNull();
+  expect(keyLabel('model', { model: 'private_vendor_route', model_display: 'Reasoner' }, i18n.t)).toBe('Reasoner');
+  expect(keyDetail('model', { model: 'private_vendor_route', model_display: 'Reasoner' }, i18n.t)).toBeNull();
+  const named = { harness: { kind: 'claude_code', name: 'Claude Code', names: {} } };
+  expect(keyDetail('agent', { agent: { name: 'Codex', kind: 'codex' } }, i18n.t)).toBeNull();
+  const reviewer = { agent: { name: 'Reviewer', kind: 'claude_code', ...named } };
+  expect(keyDetail('agent', reviewer, i18n.t)).toBe('Claude Code');
+  expect(keyDetail('agent', { agent: { name: 'Reviewer', kind: 'private_harness_key' } }, i18n.t)).toBeNull();
+});
+
+it.each(['en', 'zh-CN'] as const)('distinguishes namesake providers through the same review and result labels in %s', async (locale) => {
+  await setLocale(locale);
+  const plan = { from: { provider: { id: 'current', name: 'Scripted model' } }, to: { provider: { id: 'selected', name: 'Scripted model' } } };
+  const context = { providerNames: new Map([['current', 'Scripted model (Acme)'], ['selected', 'Scripted model (Beta)']]) };
+  expect(planProviderName(plan, 'from', context, i18n.t)).toBe('Scripted model (Acme)');
+  expect(planProviderName(plan, 'to', context, i18n.t)).toBe('Scripted model (Beta)');
+  expect(planProviderName(plan, 'from', {}, i18n.t)).toBe(i18n.t('change.runs.providerCurrent', { name: 'Scripted model' }));
+  expect(planProviderName(plan, 'to', {}, i18n.t)).toBe(i18n.t('change.runs.providerSelected', { name: 'Scripted model' }));
+  expect(planProviderName(plan, 'from', {}, i18n.t)).not.toBe(planProviderName(plan, 'to', {}, i18n.t));
+  expect(planProviderName({ from: plan.from, to: plan.from }, 'to', {}, i18n.t)).toBe('Scripted model');
+  const distinct = { ...plan, to: { provider: { id: 'selected', name: 'Team plan' } } };
+  expect(planProviderName(distinct, 'to', {}, i18n.t)).toBe('Team plan');
+});

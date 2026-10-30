@@ -1,0 +1,91 @@
+[graph]
+all-features = true
+
+[advisories]
+unmaintained = "all"
+yanked = "deny"
+
+[licenses]
+# These permissive terms can accompany Apache-2.0 code. Release packaging
+# retains the dependency licenses, copyright notices and exact source URLs.
+allow = [
+    "0BSD",
+    "Apache-2.0",
+    "BSD-3-Clause",
+    "CC0-1.0",
+    "CDLA-Permissive-2.0", # redistributable certificate-root data, with its terms
+    "ISC",
+    "MIT",
+    "MIT-0", # MIT without the attribution clause (borrow-or-share, under jsonschema); more permissive than MIT
+    "OFL-1.1", # fonts emitted by the web application retain their original font terms
+    "Unlicense", # public-domain web libraries and their fallback permission text
+    "Unicode-3.0",
+    "Zlib",
+    "bzip2-1.0.6", # attribution and unchanged-origin notices remain in the bundle
+]
+# MPL applies to ece's own files, which are unmodified and separately licensed;
+# it permits linking into an Apache-2.0 larger work. The release's license list
+# gives recipients the exact version's source download and includes its license.
+exceptions = [{ crate = "ece@2.4.2", allow = ["MPL-2.0"] }]
+
+[bans]
+multiple-versions = "deny"
+wildcards = "deny"
+# Private path dependencies use the workspace version and cannot resolve to
+# a registry release. Registry and Git sources remain restricted below.
+allow-wildcard-paths = true
+deny = [
+    { crate = "web-push", reason = "Push uses ece and p256 directly; this wrapper adds an unused RSA signing stack." },
+]
+
+# These exact old versions are required by the two disjoint parent ranges
+# beside each entry. No dependency subtree or advisory class is excluded.
+skip = [
+    { crate = "cipher@0.4.4", reason = "des 0.8.1 (^0.4), for the RFB (VNC) password challenge, and the 0.5 line used elsewhere require different version ranges; no stable des on cipher 0.5 yet." },
+    { crate = "inout@0.1.4", reason = "cipher 0.4.4 (for des 0.8.1, the VNC password challenge) and cipher 0.5.2 require different inout ranges." },
+    { crate = "base64@0.22.1", reason = "axum 0.8.9 (^0.22.1) and email-encoding 0.4.2 (^0.23) require different version ranges." },
+    { crate = "bitflags@1.3.2", reason = "portable-pty 0.9.0 (^1.3) and dispatch2 0.3.1 (^2.5.0) require different version ranges." },
+    { crate = "block-buffer@0.10.4", reason = "digest 0.10.7 (^0.10) and cipher 0.5.2 (^0.12) require different version ranges." },
+    { crate = "cfg_aliases@0.1.1", reason = "nix 0.28.0 (^0.1.1) and nix 0.31.3 (^0.2.1) require different version ranges." },
+    { crate = "core-foundation@0.9.4", reason = "system-configuration 0.7.0 (^0.9) and rustls-platform-verifier 0.7.1 (^0.10) require different version ranges." },
+    { crate = "cpufeatures@0.2.17", reason = "sha1 0.10.7 (^0.2) and argon2 0.6.0 (^0.3) require different version ranges." },
+    { crate = "crypto-common@0.1.6", reason = "digest 0.10.7 (^0.1.3) and aead 0.6.1 (^0.2) require different version ranges." },
+    { crate = "digest@0.10.7", reason = "hmac 0.12.1 (^0.10 or ^0.10.3) and blake2 0.11.0 (^0.11) require different version ranges." },
+    { crate = "getrandom@0.2.17", reason = "ring 0.17.14 (^0.2.10) and crypto-bigint 0.7.5 (^0.4) require different version ranges." },
+    { crate = "getrandom@0.3.4", reason = "rand_core 0.9.5 (^0.3.0) and crypto-bigint 0.7.5 (^0.4) require different version ranges." },
+    { crate = "hashbrown@0.16.1", reason = "hashlink 0.11.1 (^0.16) and indexmap 2.14.2 (^0.17) require different version ranges." },
+    { crate = "hkdf@0.12.4", reason = "ece 2.4.2 (^0.12) and elliptic-curve 0.14.1 (^0.13) require different version ranges." },
+    { crate = "hmac@0.12.1", reason = "hkdf 0.12.4 (^0.12.1) and hkdf 0.13.0 (^0.13) require different version ranges." },
+    { crate = "nix@0.28.0", reason = "portable-pty 0.9.0 (^0.28) and zip 9.0.1 (^0.31.3) require different version ranges." },
+    { crate = "nom@7.1.3", reason = "asn1-rs 0.7.2 (^7.0) and lettre 0.11.23 (^8) require different version ranges." },
+    { crate = "pem@3.0.6", reason = "kube-client 4.2.0 (^3.0.1) and rcgen 0.14.10 (^4) require different version ranges." },
+    { crate = "r-efi@5.3.0", reason = "getrandom 0.3.4 (^5.1) and getrandom 0.4.3 (^6) require different version ranges." },
+    { crate = "rand@0.9.5", reason = "metrics-util 0.20.4 (^0.9) and quinn-proto 0.11.19 (^0.10.1) require different version ranges." },
+    { crate = "rand_core@0.9.5", reason = "rand 0.9.5 (^0.9.0) and chacha20 0.10.2 (^0.10) require different version ranges." },
+    { crate = "sha1@0.10.7", reason = "axum 0.8.9 (^0.10) and sqlx-mysql 0.9.0 (^0.11.0) require different version ranges." },
+    { crate = "sha2@0.10.9", reason = "ece 2.4.2 (^0.10) and ed25519-dalek 3.0.0 (^0.11) require different version ranges." },
+    { crate = "sha3@0.11.0", reason = "ml-kem 0.3.2 (^0.11) and hpke 0.14.1 (^0.12) require different version ranges." },
+    { crate = "syn@2.0.119", reason = "asn1-rs-derive 0.6.0 (^2.0) and async-trait 0.1.92 (^3) require different version ranges." },
+    { crate = "synstructure@0.13.2", reason = "asn1-rs-derive 0.6.0 (^0.13) and yoke-derive 0.8.4 (^0.14.0) require different version ranges." },
+    { crate = "thiserror@1.0.69", reason = "filedescriptor 0.8.3 (^1.0) and asn1-rs 0.7.2 (^2.0.0) require different version ranges." },
+    { crate = "thiserror-impl@1.0.69", reason = "thiserror 1.0.69 (=1.0.69) and thiserror 2.0.21 (=2.0.21) require different version ranges." },
+    { crate = "tokio-tungstenite@0.29.0", reason = "axum 0.8.9 (^0.29.0) and orch-api-core 0.1.0 (^0.30) require different version ranges." },
+    { crate = "tower-http@0.6.11", reason = "reqwest 0.13.5 (^0.6.8) and orch-api-core 0.1.0 (^0.7) require different version ranges." },
+    { crate = "tungstenite@0.29.0", reason = "tokio-tungstenite 0.29.0 (^0.29.0) and tokio-tungstenite 0.30.0 (^0.30.0) require different version ranges." },
+    { crate = "webpki-roots@0.26.11", reason = "tokio-tungstenite 0.30.0 (^0.26.0) and webpki-roots 0.26.11 (^1) require different version ranges." },
+    { crate = "windows-sys@0.52.0", reason = "ring 0.17.14 (^0.52) and etcetera 0.11.0 (^0.61) require different version ranges." },
+    { crate = "windows-sys@0.60.2", reason = "notify 8.2.0 (^0.60.1) and etcetera 0.11.0 (^0.61) require different version ranges." },
+    { crate = "windows-targets@0.52.6", reason = "windows-sys 0.52.0 (^0.52.0) and windows-sys 0.60.2 (^0.53.2) require different version ranges." },
+    { crate = "windows_aarch64_gnullvm@0.52.6", reason = "windows-targets 0.52.6 (^0.52.6) and windows-targets 0.53.5 (^0.53.0) require different version ranges." },
+    { crate = "windows_aarch64_msvc@0.52.6", reason = "windows-targets 0.52.6 (^0.52.6) and windows-targets 0.53.5 (^0.53.0) require different version ranges." },
+    { crate = "windows_i686_gnu@0.52.6", reason = "windows-targets 0.52.6 (^0.52.6) and windows-targets 0.53.5 (^0.53.0) require different version ranges." },
+    { crate = "windows_i686_gnullvm@0.52.6", reason = "windows-targets 0.52.6 (^0.52.6) and windows-targets 0.53.5 (^0.53.0) require different version ranges." },
+    { crate = "windows_i686_msvc@0.52.6", reason = "windows-targets 0.52.6 (^0.52.6) and windows-targets 0.53.5 (^0.53.0) require different version ranges." },
+    { crate = "windows_x86_64_gnu@0.52.6", reason = "windows-targets 0.52.6 (^0.52.6) and windows-targets 0.53.5 (^0.53.0) require different version ranges." },
+    { crate = "windows_x86_64_gnullvm@0.52.6", reason = "windows-targets 0.52.6 (^0.52.6) and windows-targets 0.53.5 (^0.53.0) require different version ranges." },
+    { crate = "windows_x86_64_msvc@0.52.6", reason = "windows-targets 0.52.6 (^0.52.6) and windows-targets 0.53.5 (^0.53.0) require different version ranges." },
+]
+
+[sources]
+unknown-registry = "deny"
+unknown-git = "deny"
