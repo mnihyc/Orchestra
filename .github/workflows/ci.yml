@@ -1,7 +1,9 @@
 name: CI
 
 on:
+  # Branches only: a release tag names a commit its branch's push has already tested.
   push:
+    branches: ['**']
   pull_request:
   workflow_dispatch:
   # The deployment scenarios package two releases and run stacks on Docker: an hour and more,
@@ -37,7 +39,9 @@ jobs:
           key: rust-${{ runner.os }}-${{ runner.arch }}-${{ hashFiles('rust-toolchain.toml', 'Cargo.lock') }}-${{ github.sha }}
           restore-keys: rust-${{ runner.os }}-${{ runner.arch }}-${{ hashFiles('rust-toolchain.toml', 'Cargo.lock') }}-
       - name: Check formatting
-        # `--check` given to cargo fmt itself: PowerShell drops a bare `--` before it reaches cargo.
+        # Formatting does not depend on the platform, and on Windows cargo fmt passes a package's files to rustfmt in
+        # one command line that is longer than Windows allows (os error 206).
+        if: runner.os == 'Linux'
         run: cargo fmt --all --check
       - name: Compile scaffold
         run: cargo check --workspace --all-targets --locked

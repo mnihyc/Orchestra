@@ -51,9 +51,14 @@ Making something is a permission on the place that will contain it:
 
 | What you want to make | Permission on the containing place | Who holds it by default |
 |---|---|---|
-| A project in an org | **Interact Org** (`org.interact`) | That org's admins |
-| A topic in a project or folder | **Interact Project** (`project.interact`) | That project's developers and higher roles |
-| A thread in a topic | **Interact Topic** (`topic.interact`) | That topic's developers and higher roles |
+| A project in an org | **Contribute to Org** (`org.interact`) | That org's admins |
+| A topic in a project or folder | **Create topics** (`project.create_topics`), part of **Contribute to Project** (`project.interact`) | That project's developers and higher roles |
+| A thread in a topic | **Start threads** (`topic.start_threads`), part of **Contribute to Topic** (`topic.interact`) | That topic's developers and higher roles |
+
+Contribute is the middle level of an org, project or topic: it also announces to the place's threads, sets its
+status and tags, and adds environments for work there. Create topics and Start threads can be given alone, to let
+somebody make things there and nothing more; whoever makes a topic or thread owns it. Contribute reaches no topic or
+thread inside: those follow their own pages and roles.
 
 Open the containing place's menu and choose **Share**. An org also has
 **Roles and access** in its settings. Under **can take part**, the short
@@ -67,7 +72,7 @@ force applies, and when one ends the others stay.
 
 For one person or group, use a **Custom** row in By area: choose the
 permission, add the actual person or group from the holder picker, and
-allow it or refuse it. For example, on your org allow Interact Org for
+allow it or refuse it. For example, on your org allow Contribute to Org for
 your project-maintainers group to let its members make projects without
 making them admins. To refuse one person who would otherwise receive
 that right through a role, give that person a Refuse entry on this row.
@@ -77,7 +82,7 @@ authority shown there; a read-only row names who can change it.
 
 The place's **Defaults** decide the starting permissions of things made
 inside it. They do not grant permission to make those things in the
-containing place. A new project's page and the org's Interact Org row
+containing place. A new project's page and the org's Contribute to Org row
 therefore answer different questions. The same distinction applies to
 new topics and threads. Starting a thread also needs the separate
 provider/model and environment access shown by its creation dialog.

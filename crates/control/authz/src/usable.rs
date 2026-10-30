@@ -477,7 +477,7 @@ pub async fn usable_list(
             }
             let policy = policies.at(resource.home);
             let granted = if kind == ResourceKind::Environment {
-                let ways = batch.frame.ways(site, Permission::EnvironmentManage);
+                let ways = batch.frame.ways(site, Permission::EnvironmentUse);
                 (!ways.is_empty()).then(|| Use {
                     options: Options::None,
                     through: ways,
@@ -1117,7 +1117,7 @@ pub async fn check_binding(
         ask.permission,
         Permission::ProviderUse,
         Permission::AgentUse,
-        Permission::EnvironmentManage,
+        Permission::EnvironmentUse,
     ];
     let frame = Frame::load(conn, principal, node_policy, graph, &sites, &wanted).await?;
 
@@ -1131,11 +1131,11 @@ pub async fn check_binding(
         });
     }
     if let Some(site) = &environment_site
-        && frame.ways(site, Permission::EnvironmentManage).is_empty()
+        && frame.ways(site, Permission::EnvironmentUse).is_empty()
     {
         lacking.push(Lacking {
             site: site.clone(),
-            permissions: vec![Permission::EnvironmentManage],
+            permissions: vec![Permission::EnvironmentUse],
             options: None,
             closed: None,
         });

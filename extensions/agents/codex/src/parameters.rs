@@ -270,16 +270,20 @@ impl TurnSettings {
                 .filter(|value| allowed.is_none_or(|allowed| allowed.contains(value)))
                 .map(str::to_owned)
         };
+        // A program is offered by the account's own model list and switched on by a manager of the provider, so a
+        // newer one of the vendor's family is sent as it is named; the vendor refuses one the account does not have.
+        let program = params
+            .get(CYBER_ACCESS_PROGRAM)
+            .and_then(Json::as_str)
+            .filter(|value| *value == "standard" || is_daybreak(value))
+            .map(str::to_owned);
         Self {
             service_tier: text(SERVICE_TIER, None),
             summary: text(
                 REASONING_SUMMARY,
                 Some(&["auto", "concise", "detailed", "none"]),
             ),
-            cyber_access_program: text(
-                CYBER_ACCESS_PROGRAM,
-                Some(&["standard", "daybreakBlue", "daybreakRed"]),
-            ),
+            cyber_access_program: program,
         }
     }
 
@@ -596,6 +600,16 @@ mod tests {
             "reasoning_summary": "verbose", "approvals_reviewer": 3, "cyber_access_program": "root", "service_tier": ""
         }));
         assert_eq!(settings, TurnSettings::default());
+    }
+
+    #[test]
+    fn a_newer_program_of_the_vendors_family_is_sent_as_it_is_named() {
+        let settings =
+            TurnSettings::from_params(&json!({ "cyber_access_program": "daybreakGreen" }));
+        assert_eq!(
+            settings.cyber_access_program.as_deref(),
+            Some("daybreakGreen")
+        );
     }
 
     #[test]

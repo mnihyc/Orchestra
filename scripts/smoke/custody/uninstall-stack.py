@@ -20,9 +20,9 @@ import uuid
 REPO = Path(__file__).resolve().parents[3]
 NODE, CTL, ARTIFACTS = (Path(value).resolve() for value in sys.argv[1:])
 ARTIFACTS.mkdir(parents=True, exist_ok=True)
-POSTGRES = 'postgres:17-trixie'
+POSTGRES = 'postgres:17-trixie@sha256:b8faeff7712663c2773a190181e1246e37e364b887611c04658c28b44e2408fe'
 DEBIAN = 'debian:trixie-slim'
-BUSYBOX = 'busybox:latest'
+BUSYBOX = 'busybox:1.36.1@sha256:73aaf090f3d85aa34ee199857f03fa3a95c8ede2ffd4cc2cdb5b94e566b11662'
 NGINX = 'nginx:1.30-alpine'
 # Sixty seconds is the updater's ordinary service-stop budget, ample for fixture initialization.
 READY_SECONDS = 60

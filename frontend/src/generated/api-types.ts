@@ -1976,9 +1976,10 @@ export interface paths {
             path?: never;
             cookie?: never;
         };
-        /** Answers in a discussion. */
+        /** Lists a discussion's comments in the order they were written, a window at a time from the newest. */
         get: operations["DocumentCommentList"];
         put?: never;
+        /** Answers in a discussion. */
         post: operations["DocumentCommentCreate"];
         delete?: never;
         options?: never;
@@ -31360,7 +31361,7 @@ export interface components {
          *     Permissions compare as their keys do, so that a sorted list of them
          *     reads in the order of their names.
          */
-        Permission: "chat.view" | "chat.interact" | "chat.manage" | "doc.view" | "doc.edit" | "doc.create" | "doc.comment" | "doc.manage" | "thread.view" | "thread.interact" | "thread.manage" | "thread.fork" | "thread.archive" | "topic.view" | "topic.interact" | "topic.manage" | "topic.archive" | "project.view" | "project.interact" | "project.manage" | "project.archive" | "org.view" | "org.interact" | "org.manage" | "org.archive" | "settings.manage" | "usage.view" | "usage.summary" | "usage.manage" | "usage.bypass" | "audit.view" | "members.manage" | "directs.view" | "access.manage" | "access.own" | "access.external" | "thread.export" | "chat.export" | "doc.export" | "provider.view" | "provider.use" | "provider.manage" | "provider.bypass" | "agent.view" | "agent.use" | "agent.manage" | "environment.view" | "environment.use" | "environment.manage" | "files.view" | "files.manage" | "terminal.view" | "terminal.manage" | "browser.view" | "browser.manage" | "vnc.view" | "vnc.manage" | "ports.view" | "ports.manage" | "host.view" | "host.use" | "host.manage" | "machine.view" | "machine.use" | "machine.manage" | "template.view" | "template.use" | "template.manage" | "mcp.view" | "mcp.use" | "mcp.manage" | "mount.view" | "mount.use" | "mount.manage" | "skill.view" | "skill.use" | "skill.manage";
+        Permission: "chat.view" | "chat.interact" | "chat.manage" | "doc.view" | "doc.edit" | "doc.create" | "doc.comment" | "doc.manage" | "thread.view" | "thread.interact" | "thread.manage" | "thread.fork" | "thread.archive" | "topic.view" | "topic.interact" | "topic.manage" | "topic.archive" | "topic.start_threads" | "project.view" | "project.interact" | "project.manage" | "project.archive" | "project.create_topics" | "org.view" | "org.interact" | "org.manage" | "org.archive" | "settings.manage" | "usage.view" | "usage.summary" | "usage.manage" | "usage.bypass" | "audit.view" | "members.manage" | "directs.view" | "access.manage" | "access.own" | "access.external" | "thread.export" | "chat.export" | "doc.export" | "provider.view" | "provider.use" | "provider.manage" | "provider.bypass" | "agent.view" | "agent.use" | "agent.manage" | "environment.view" | "environment.use" | "environment.manage" | "files.view" | "files.manage" | "terminal.view" | "terminal.manage" | "browser.view" | "browser.manage" | "vnc.view" | "vnc.manage" | "ports.view" | "ports.manage" | "host.view" | "host.use" | "host.manage" | "machine.view" | "machine.use" | "machine.manage" | "template.view" | "template.use" | "template.manage" | "mcp.view" | "mcp.use" | "mcp.manage" | "mount.view" | "mount.use" | "mount.manage" | "skill.view" | "skill.use" | "skill.manage";
         /**
          * @description The catalogue of permissions as data: every page is drawn from it and names
          *     no permission of its own.

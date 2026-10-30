@@ -134,13 +134,21 @@
   {
     "name": "search_shared",
     "title": "Search what was shared",
-    "description": "Search readable names and content. Words match in any order; double quotes keep a phrase together. regex uses a regular expression without look-around or back-references. Each row represents one entry, best matches first (a name or title, then a description, a heading, the rest; then more matching rows; then newer), with a match count and first native positions for read_shared; path#position names one in what you write. Where your org searches by meaning, the first page also holds entries near the query in meaning, each with found_by. Text snippets are omitted unless snippets is true. Continue with the returned cursor and the same query, path and filters; partial counts describe the bounded scan window. Narrow with path, kinds or names when needed.",
+    "description": "Search readable names and content. Words match in any order; double quotes keep a phrase together. regex uses a regular expression without look-around or back-references. Each row represents one entry, best matches first (a name or title, then a description, a heading, the rest; then more matching rows; then newer), with a match count and first native positions for read_shared; path#position names one in what you write. Where your org searches by meaning, the first page also holds entries near the query in meaning, each with found_by. Text snippets are omitted unless snippets is true. Continue with the returned cursor and the same query, path and filters; partial counts describe the bounded scan window. Narrow with path, kinds or names when needed. To find documents, chats and conversations related to a document, use related_to instead of query, regex or cursor: {\"related_to\":\"docs/Rollout plan.md\"}. A path or id:<id> works. That list combines meaning, place and references under the document's settings; each entry says related_by, and meaning says when vectors are unavailable. To find what refers to a document, use referenced_by instead of query, regex or related_to: {\"referenced_by\":\"docs/Rollout plan.md\"}. Each entry is a document, chat or conversation you may read, with its mentions and the lines around the first of them (the reference is in square brackets); a document's comments count as part of it. Continue with next_cursor and the same referenced_by, path and filters, even when a page is empty; each call checks your current shares again. It makes no model request.",
     "inputSchema": {
       "type": "object",
       "properties": {
+        "related_to": {
+          "type": "string",
+          "description": "Find items related to a readable document, by shared path or id:<id>. Use instead of query; for example related_to: \"docs/Rollout plan.md\"."
+        },
+        "referenced_by": {
+          "type": "string",
+          "description": "List what refers to a readable document, by shared path or id:<id>, with the lines around the mentions. Use instead of query; for example referenced_by: \"docs/Rollout plan.md\"."
+        },
         "query": {
           "type": "string",
-          "description": "Words in any order; double quotes keep a phrase together. With regex, a regular expression instead.",
+          "description": "Words in any order; double quotes keep a phrase together. With regex, a regular expression instead. Needed unless related_to or referenced_by is given.",
           "minLength": 1,
           "maxLength": 1000
         },
@@ -171,7 +179,7 @@
         },
         "max_results": {
           "type": "integer",
-          "description": "The most matching entries, newest first. 50 when left out.",
+          "description": "At most this many entries. Ordinary search defaults to 50; related lists also respect related.count.",
           "minimum": 1,
           "maximum": 200
         },
@@ -200,9 +208,7 @@
           "description": "Include optional opaque object ids; false when left out. Required references and positions remain."
         }
       },
-      "required": [
-        "query"
-      ],
+      "required": [],
       "additionalProperties": false
     },
     "annotations": {
@@ -270,13 +276,13 @@
   {
     "name": "edit_document",
     "title": "Edit a document",
-    "description": "Create or change a shared document, as Markdown. One command per call. create: a new document in an existing writable document directory from list_shared, ending in the title you want and .md (for example \"docs/Week 41.md\"). Its parents must exist; use manage_shared create_folder to make a folder, and manage_shared copy to duplicate a document or folder. rewrite: replace a whole document with markdown. replace: put new in place of old, which must be the text exactly as you read it and occur once (or pass all). insert: add markdown after the block that contains after, or at the end when after is left out. rename: give it another title. describe: set its description, the line shown beside its title where documents are listed (create takes one too). attach: read one whole file relative to your thread's directory and store it in the document; paths outside the environment are refused. name defaults to its last path component; overwrite: true replaces an existing name while keeping its links. The environment must be online, and the file must fit the same per-file and total document limits as a person's upload. detach: remove a file by its stored name and any blocks showing it. File changes are named in the document's history under your thread. Read the document first and pass the seq you read it at as seq, so that you do not undo what somebody wrote meanwhile; rewrite requires it. People see every change at once, under your name, and can put an earlier version back. Name a shared thing as a Markdown link or in backquotes: its path or id:<id>, with #n for a part as read_shared counts it, for example [Rollout plan](<docs/Rollout plan.md#3>) (angle brackets around a path with spaces or parentheses). People see a chip, and the answer lists each reference resolved and each kept as text. Keep shared names followed by (no access) as they are: you may not read those references. Files also use a shared path or your workspace path, with :n or #n for a text line. Use your file tools for workspace paths.",
+    "description": "Create or change a shared document, written as Orch Markdown (the markdown argument says what it holds). One command per call; each argument says which commands take it. create: a new document at a path ending in its title and .md, in an existing writable document directory from list_shared; use manage_shared create_folder for a folder and manage_shared copy to duplicate a document or folder. rewrite: replace the whole document; a block you write as it was keeps its comments and links. replace: put new in place of old, exactly as you read it. insert: add text after the block that holds after, or at the end. block_replace, block_insert_after, block_delete and block_move_after change one block by its address, the number read_shared counts it by (#3, #3.2, #0 for the start); batch applies several of those and replace and insert as one change. rename gives it another title, describe sets the line shown beside its title, attach and detach store or remove a file of your workspace in it, and import makes documents of a directory or .zip of Markdown, HTML, Word and text files, going on after the answer (the same call again says how far it is). Read the document first and pass the seq you read it at, so that you do not undo what somebody wrote meanwhile; rewrite and batch require it. People see every change at once, under your name, and can put an earlier version back. download_shared writes a document as a file to edit with your own tools; commit it with rewrite and file. Name a shared thing as a Markdown link or in backquotes: its path or id:<id>, with #n for a part as read_shared counts it, for example [Rollout plan](<docs/Rollout plan.md#3>) (angle brackets around a path with spaces or parentheses). People see a chip, and the answer lists each reference resolved and each kept as text. Keep shared names followed by (no access) as they are. Name a file of your workspace by its path, with :n or #n for a line.",
     "inputSchema": {
       "type": "object",
       "properties": {
         "command": {
           "type": "string",
-          "description": "What to do: create, rewrite, replace, insert, rename, describe, attach or detach.",
+          "description": "What to do: create, rewrite, replace, insert, rename, describe, attach, detach, block_replace, block_insert_after, block_delete, block_move_after, batch or import.",
           "enum": [
             "create",
             "rewrite",
@@ -285,16 +291,22 @@
             "rename",
             "describe",
             "attach",
-            "detach"
+            "detach",
+            "block_replace",
+            "block_insert_after",
+            "block_delete",
+            "block_move_after",
+            "batch",
+            "import"
           ]
         },
         "path": {
           "type": "string",
-          "description": "One text document path or id. For create: a new path in an existing writable docs root or document folder, ending in the title and .md. Use manage_shared for folders and copies."
+          "description": "One text document path or id. For create: a new path in an existing writable docs root or document folder, ending in the title and .md. For import: a writable docs directory or document folder the documents go into. Use manage_shared for folders and copies."
         },
         "markdown": {
           "type": "string",
-          "description": "The text, as Markdown: for create, rewrite and insert."
+          "description": "The text, as Orch Markdown: for create, rewrite, insert, block_replace and block_insert_after; for create, rewrite and insert, file may be given in its place. Orch Markdown is GitHub Markdown with $x$ formulas, $$ blocks, ```mermaid diagrams, callouts as alerts (a line \"> [!WARNING]\" and then the words as a quote; NOTE, TIP, WARNING or CAUTION), and a closed set of tags, each on a line of its own between blank lines: a toggle is \"<details>\", \"<summary>Title</summary>\", its blocks, \"</details>\"; columns are \"<columns>\" holding \"<column ratio=\"2\">\" and \"<column>\" with their blocks, each closed; inside a line <span color=\"red\" background=\"amber\">words</span> and <u>words</u> (colours: red, orange, amber, lime, green, teal, cyan, blue, indigo, purple, pink, grey); \"<video src=\"https://example.org/a.mp4\">caption</video>\", the same for <audio>; and \"<page-break/>\". Any other tag stays text. Keep exported <!-- orch:block ... --> and <!-- orch:children --> comments as they are: they keep layout, cell spans, blank blocks and nesting. A picture is ![caption](images/a.png), its path relative to your file, or ![caption](<Title.files/a.png>) for one the document holds; a path that is not found is listed as missing and kept as words."
         },
         "ids": {
           "type": "boolean",
@@ -314,7 +326,7 @@
         },
         "after": {
           "type": "string",
-          "description": "For insert: text in the block the new text follows. At the end when left out."
+          "description": "For insert and attach: text in the block the new block or text follows. At the end when left out. For block_move_after: the address of the block it goes after, or #0."
         },
         "title": {
           "type": "string",
@@ -328,7 +340,7 @@
         },
         "file": {
           "type": "string",
-          "description": "For attach: one whole file relative to your thread's directory, without .. or an absolute path; it must remain inside the environment's roots and fit the document's upload limits."
+          "description": "A file relative to your thread's directory, without .. or an absolute path; it must remain inside the environment's roots. For attach: the one whole file to store, which must fit the document's upload limits. For create, rewrite and insert: the text, in place of markdown (with format). For import: a directory or a .zip."
         },
         "name": {
           "type": "string",
@@ -340,7 +352,81 @@
         },
         "seq": {
           "type": "integer",
-          "description": "The seq of the read the change was written on, so that what somebody wrote meanwhile is not undone. rewrite requires it."
+          "description": "The seq of the read the change was written on, so that what somebody wrote meanwhile is not undone. rewrite (unless its file carries one) and batch require it."
+        },
+        "format": {
+          "type": "string",
+          "description": "What file is written in: markdown, html, docx or text. Left out, its ending says.",
+          "enum": [
+            "markdown",
+            "html",
+            "docx",
+            "text"
+          ]
+        },
+        "block": {
+          "type": "string",
+          "description": "For block_replace, block_insert_after, block_delete and block_move_after: the address of a block, `#n` for the nth block as read_shared counts them and `#n.m` for the mth block directly under it; `#0` (the start) for block_insert_after."
+        },
+        "place": {
+          "type": "boolean",
+          "description": "For attach: show the file in a block (the default); false stores it without one."
+        },
+        "caption": {
+          "type": "string",
+          "description": "For attach: the words under the block that shows the file."
+        },
+        "cancel": {
+          "type": "boolean",
+          "description": "For import: stop the job for this same path and file after the current file, keeping committed documents. Does not start a job."
+        },
+        "resume": {
+          "type": "boolean",
+          "description": "For import: restart a cancelled job through current permissions, keeping already imported documents. Use separately from cancel."
+        },
+        "edits": {
+          "type": "array",
+          "description": "For batch: the edits in order, each a replace, insert, block_replace, block_insert_after, block_delete or block_move_after with the arguments that command takes. Every address and passage is read as the document stood at seq.",
+          "items": {
+            "type": "object",
+            "additionalProperties": false,
+            "properties": {
+              "command": {
+                "type": "string",
+                "enum": [
+                  "replace",
+                  "insert",
+                  "block_replace",
+                  "block_insert_after",
+                  "block_delete",
+                  "block_move_after"
+                ]
+              },
+              "block": {
+                "type": "string"
+              },
+              "markdown": {
+                "type": "string"
+              },
+              "old": {
+                "type": "string"
+              },
+              "new": {
+                "type": "string"
+              },
+              "all": {
+                "type": "boolean"
+              },
+              "after": {
+                "type": "string"
+              }
+            },
+            "required": [
+              "command"
+            ]
+          },
+          "maxItems": 100,
+          "minItems": 1
         },
         "max_bytes": {
           "type": "integer",

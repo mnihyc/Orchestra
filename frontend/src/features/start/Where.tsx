@@ -1,7 +1,7 @@
-/** Where a thread runs: an existing environment that its creator manages (the topic's first, every other under More), or a new one with template, place, storage, mounts, starting files and who else manages it.
+/** Where a thread runs: an existing environment its creator may use (the topic's first, every other under More), or a new one with template, place, storage, mounts, starting files and who else manages it.
  *
- * Where a thread works: an environment the person manages (the topic's own first, with its default
- * marked, as the server lists them), a new one that is made for the thread from the defaults of the place, or one
+ * Where a thread works: an environment the person may use (the topic's own first, with its default
+ * marked, as the server lists them; those they only see follow, set apart, and picking one asks for its Use), a new one that is made for the thread from the defaults of the place, or one
  * made here by the form that the resources screens use, or a directory of one of their connected machines, which
  * becomes an environment when it is registered. Starting a thread in an environment puts an agent there that
  * reaches all of it, so each row says whose it is, where, how it stands and who already works in it; one the person
@@ -137,14 +137,23 @@ function usedBy(row: BindingEnvironment, t: TFunction): string | null {
   return [threads, where].filter((part): part is string => part !== null).join(t('startFlow.separator')) || null;
 }
 
+/** An environment the person sees and may not start a thread in: picking it asks for its Use. */
+const USE_REQUIRED = 'environment_use_required';
+
 export function Where({ compact = false, place, options, value, onChange, machines, machinesLoading = false, homeId }: WhereProps) {
   const { t } = useTranslation();
   const mayMake = options.can_create.allowed;
+  const [asking, setAsking] = useState<BindingEnvironment | null>(null);
+  // What may be used comes first; what may be asked for follows, set apart; what cannot be had now, last.
+  const order = (row: BindingEnvironment) => (canUseEnvironment(row) ? 0 : row.reason === USE_REQUIRED ? 1 : 2);
+  const listed = [...options.environments].sort((a, b) => order(a) - order(b));
+  const firstAsk = listed.find((row) => order(row) === 1)?.environment.id;
   const rows = [
-    ...options.environments.map((row) => {
+    ...listed.map((row) => {
       const used = usedBy(row, t);
       const usable = canUseEnvironment(row);
-      const refusal = usable ? null : row.environment.status === 'failed' || row.environment.status === 'removed' ? t('startRecovery.failedChoice') : row.reason === null ? t('start.where.closed') : reasonWords(row.reason);
+      const askable = row.reason === USE_REQUIRED;
+      const refusal = usable || askable ? null : row.environment.status === 'failed' || row.environment.status === 'removed' ? t('startRecovery.failedChoice') : row.reason === null ? t('start.where.closed') : reasonWords(row.reason);
       return {
         value: row.environment.id,
         preview: resourcePreview({ kind: 'environment', environment: row.environment, host: row.host }),
@@ -155,10 +164,12 @@ export function Where({ compact = false, place, options, value, onChange, machin
             {row.is_default && usable && <span>{t('start.where.topicDefault')}</span>}
             <ResourceHint subject={{ kind: 'environment', environment: row.environment, host: row.host }} />
             {used !== null && !usable && <span>{used}</span>}
+            {askable && <span className="text-accent-text">{t('start.where.askAccess')}</span>}
             {refusal !== null && <span className="text-warning-text">{refusal}</span>}
           </span>
         ),
-        disabled: !usable,
+        disabled: !usable && !askable,
+        separatorBefore: row.environment.id === firstAsk,
       };
     }),
     ...(mayMake
@@ -182,7 +193,37 @@ export function Where({ compact = false, place, options, value, onChange, machin
       {rows.length === 0 ? (
         <EmptyState compact title={t('start.where.none')} />
       ) : (
-        <Select label={t('start.where.title')} hideLabel value={value ?? ''} onValueChange={onChange} options={rows} />
+        <Select
+          label={t('start.where.title')}
+          hideLabel
+          value={asking?.environment.id ?? value ?? ''}
+          onValueChange={(id) => {
+            const row = options.environments.find((each) => each.environment.id === id);
+            if (row !== undefined && row.reason === USE_REQUIRED) {
+              setAsking(row);
+              return;
+            }
+            setAsking(null);
+            onChange(id);
+          }}
+          options={rows}
+        />
+      )}
+      {asking !== null && (
+        <AccessRequest
+          key={asking.environment.id}
+          fixed
+          objectId={asking.environment.id}
+          missing={[{
+            object: { kind: 'environment', id: asking.environment.id, name: asking.environment.name, owner: asking.environment.owner ?? null },
+            permissions: ['environment.use'],
+            ask: [],
+            ask_more: 0,
+            closed: null,
+            options: null,
+            override: false,
+          }]}
+        />
       )}
       {!compact && <WhereOptions place={place} options={options} value={value} onChange={onChange} machines={machines} machinesLoading={machinesLoading} homeId={homeId} />}
     </div>

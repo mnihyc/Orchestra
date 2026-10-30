@@ -430,84 +430,80 @@ fn input_schema_of(tool: OrchTool) -> Json {
             ],
             &["path"],
         ),
-        OrchTool::SearchShared => {
-            let mut schema = object(
-                vec![
-                    (
-                        "related_to",
-                        string(
-                            "Find items related to a readable document, by shared path or id:<id>. Use instead of query; for example related_to: \"docs/Rollout plan.md\".",
-                        ),
+        // One of query, related_to and referenced_by is given, and the call says so when it is not: no union at the root
+        // of a schema, which not every program that offers a tool to its model reads.
+        OrchTool::SearchShared => object(
+            vec![
+                (
+                    "related_to",
+                    string(
+                        "Find items related to a readable document, by shared path or id:<id>. Use instead of query; for example related_to: \"docs/Rollout plan.md\".",
                     ),
-                    (
-                        "referenced_by",
-                        string(
-                            "List what refers to a readable document, by shared path or id:<id>, with the lines around the mentions. Use instead of query; for example referenced_by: \"docs/Rollout plan.md\".",
-                        ),
+                ),
+                (
+                    "referenced_by",
+                    string(
+                        "List what refers to a readable document, by shared path or id:<id>, with the lines around the mentions. Use instead of query; for example referenced_by: \"docs/Rollout plan.md\".",
                     ),
-                    (
-                        "query",
-                        bounded_string(
-                            "Words in any order; double quotes keep a phrase together. With regex, a regular expression instead.",
-                            1,
-                            QUERY_MAX_CHARS,
-                        ),
+                ),
+                (
+                    "query",
+                    bounded_string(
+                        "Words in any order; double quotes keep a phrase together. With regex, a regular expression instead. Needed unless related_to or referenced_by is given.",
+                        1,
+                        QUERY_MAX_CHARS,
                     ),
-                    (
-                        "regex",
-                        boolean(
-                            "Whether query is a regular expression, without look-around and without back-references.",
-                        ),
+                ),
+                (
+                    "regex",
+                    boolean(
+                        "Whether query is a regular expression, without look-around and without back-references.",
                     ),
-                    (
-                        "path",
-                        string(
-                            "A directory to look under. Everything you can reach when left out.",
-                        ),
+                ),
+                (
+                    "path",
+                    string("A directory to look under. Everything you can reach when left out."),
+                ),
+                (
+                    "kinds",
+                    list_of(
+                        "Which kinds to look in. All four when left out.",
+                        json!({ "type": "string", "enum": ["documents", "chats", "conversations", "files"] }),
+                        None,
                     ),
-                    (
-                        "kinds",
-                        list_of(
-                            "Which kinds to look in. All four when left out.",
-                            json!({ "type": "string", "enum": ["documents", "chats", "conversations", "files"] }),
-                            None,
-                        ),
+                ),
+                (
+                    "names",
+                    string(
+                        "A pattern over entry names: only entries whose name matches are looked at.",
                     ),
-                    (
-                        "names",
-                        string(
-                            "A pattern over entry names: only entries whose name matches are looked at.",
-                        ),
+                ),
+                (
+                    "max_results",
+                    bounded_integer(
+                        "At most this many entries. Ordinary search defaults to 50; related lists also respect related.count.",
+                        1,
+                        RESULTS_MAX,
                     ),
-                    (
-                        "max_results",
-                        bounded_integer(
-                            "At most this many entries. Ordinary search defaults to 50; related lists also respect related.count.",
-                            1,
-                            RESULTS_MAX,
-                        ),
+                ),
+                ("cursor", page_cursor()),
+                (
+                    "snippets",
+                    boolean(
+                        "Include text snippets with native positions. False when left out; summaries always include match counts and first positions.",
                     ),
-                    ("cursor", page_cursor()),
-                    (
-                        "snippets",
-                        boolean(
-                            "Include text snippets with native positions. False when left out; summaries always include match counts and first positions.",
-                        ),
+                ),
+                (
+                    "context",
+                    bounded_integer(
+                        "How many lines around a match a snippet carries. 1 when left out.",
+                        0,
+                        CONTEXT_MAX,
                     ),
-                    (
-                        "context",
-                        bounded_integer(
-                            "How many lines around a match a snippet carries. 1 when left out.",
-                            0,
-                            CONTEXT_MAX,
-                        ),
-                    ),
-                ],
-                &[],
-            );
-            schema["oneOf"] = json!([{"required":["query"]},{"required":["related_to"]},{"required":["referenced_by"]}]);
-            schema
-        }
+                ),
+            ],
+            &[],
+        ),
         OrchTool::DownloadShared => object(
             vec![
                 (
@@ -572,7 +568,7 @@ fn input_schema_of(tool: OrchTool) -> Json {
                 (
                     "markdown",
                     string(
-                        "The text, as Orch Markdown: for create, rewrite, insert, block_replace and block_insert_after. For create, rewrite and insert, file may be given in its place.",
+                        "The text, as Orch Markdown: for create, rewrite, insert, block_replace and block_insert_after; for create, rewrite and insert, file may be given in its place. Orch Markdown is GitHub Markdown with $x$ formulas, $$ blocks, ```mermaid diagrams, callouts as alerts (a line \"> [!WARNING]\" and then the words as a quote; NOTE, TIP, WARNING or CAUTION), and a closed set of tags, each on a line of its own between blank lines: a toggle is \"<details>\", \"<summary>Title</summary>\", its blocks, \"</details>\"; columns are \"<columns>\" holding \"<column ratio=\"2\">\" and \"<column>\" with their blocks, each closed; inside a line <span color=\"red\" background=\"amber\">words</span> and <u>words</u> (colours: red, orange, amber, lime, green, teal, cyan, blue, indigo, purple, pink, grey); \"<video src=\"https://example.org/a.mp4\">caption</video>\", the same for <audio>; and \"<page-break/>\". Any other tag stays text. Keep exported <!-- orch:block ... --> and <!-- orch:children --> comments as they are: they keep layout, cell spans, blank blocks and nesting. A picture is ![caption](images/a.png), its path relative to your file, or ![caption](<Title.files/a.png>) for one the document holds; a path that is not found is listed as missing and kept as words.",
                     ),
                 ),
                 (

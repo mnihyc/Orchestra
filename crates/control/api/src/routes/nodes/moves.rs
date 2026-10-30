@@ -85,8 +85,9 @@ fn permission_to_receive(kind: NodeKind, target: Option<&str>) -> Option<Permiss
     match (kind, target?) {
         (NodeKind::Org, "org") => Some(Permission::OrgManage),
         (NodeKind::Project, "org") => Some(Permission::OrgInteract),
-        (NodeKind::Project | NodeKind::Topic, "project") => Some(Permission::ProjectInteract),
-        (NodeKind::Thread, "topic") => Some(Permission::TopicInteract),
+        (NodeKind::Project, "project") => Some(Permission::ProjectInteract),
+        (NodeKind::Topic, "project") => Some(Permission::ProjectCreateTopics),
+        (NodeKind::Thread, "topic") => Some(Permission::TopicStartThreads),
         _ => None,
     }
 }

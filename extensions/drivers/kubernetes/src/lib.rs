@@ -46,7 +46,6 @@ mod run_files;
 mod schema;
 #[cfg(target_os = "linux")]
 mod stage_exchange;
-#[cfg(target_os = "linux")]
 mod stage_protocol;
 #[cfg(target_os = "linux")]
 mod stage_worker;

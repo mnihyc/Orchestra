@@ -29,6 +29,7 @@ import { ArrangementSection } from './Arrangement';
 import { type Mode, modelName, NEW_ENVIRONMENT, NO_PICKS, type Picks } from './choices';
 import { useStartOptions } from './options';
 import { useStart } from './start';
+import { DirectorySign } from './DirectorySign';
 import { Where, WhereOptions } from './Where';
 import { TemporaryChoice } from '@/features/resources/environments/Temporary';
 import { agentWhy, bindingReason, providerWhy, reasonWords } from './words';
@@ -255,6 +256,7 @@ function ThreadSetup({ parent, open, onClose, draft }: NewThreadDialogProps) {
                 label={t('start.where.directory')}
                 optional
                 hint={resolved.environment !== null && resolved.environment.directory !== '' ? t('start.where.directoryIs', { directory: resolved.environment.directory }) : t('start.where.directoryHint')}
+                aside={<DirectorySign environmentId={resolved.fresh ? null : (resolved.environment?.environment.id ?? null)} directory={directory.trim()} />}
                 value={directory}
                 onChange={(event) => setDirectory(event.target.value)}
                 autoComplete="off"

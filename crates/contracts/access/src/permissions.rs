@@ -617,23 +617,27 @@ permissions! {
     TopicView = "topic.view", Topic, View, TOPIC, VIEWERS,
         "View Topic", "See the topic: its name, description, status, tags and the settings that are no secret, and who has access.";
     TopicInteract = "topic.interact", Topic, Interact, TOPIC, DEVELOPERS,
-        "Interact Topic", "Start threads in the topic, announce to its threads, set its status and tags, and create an environment for work there.";
+        "Contribute to Topic", "Start threads in the topic, announce to its threads, set its status and tags, and create an environment for work there.";
     TopicManage = "topic.manage", Topic, Manage, TOPIC, DEVELOPERS,
         "Manage Topic", "Rename the topic, change its description, its parameters and its default environment, delete it, and restore what was deleted in it.";
     TopicArchive = "topic.archive", Topic, Advanced, TOPIC, NOBODY,
         "Archive", "Archive the topic, and bring it back.";
+    TopicStartThreads = "topic.start_threads", Topic, Advanced, TOPIC, NOBODY,
+        "Start threads", "Start threads in the topic; whoever starts one owns it.";
     ProjectView = "project.view", Project, View, PROJECT, VIEWERS,
         "View Project", "See the project: its name, description and the settings that are no secret, and who has access.";
     ProjectInteract = "project.interact", Project, Interact, PROJECT, DEVELOPERS,
-        "Interact Project", "Create topics, announce to the open topics of the project, set its tags, and create an environment for work there.";
+        "Contribute to Project", "Create topics, announce to the open topics of the project, set its tags, and create an environment for work there.";
     ProjectManage = "project.manage", Project, Manage, PROJECT, ADMINS,
         "Manage Project", "Rename the project, change its description and parameters, move it to another org of its tree, delete it, and restore what was deleted in it.";
     ProjectArchive = "project.archive", Project, Advanced, PROJECT, NOBODY,
         "Archive", "Archive the project, and bring it back.";
+    ProjectCreateTopics = "project.create_topics", Project, Advanced, PROJECT, NOBODY,
+        "Create topics", "Create topics in the project; whoever creates one owns it.";
     OrgView = "org.view", Org, View, ORG, VIEWERS,
         "View Org", "See the org: its name, its members and groups, the orgs inside it and the settings that are no secret.";
     OrgInteract = "org.interact", Org, Interact, ORG, ADMINS,
-        "Interact Org", "Create projects, announce to the open topics of the org, set its tags, and create an environment for work there.";
+        "Contribute to Org", "Create projects, announce to the open topics of the org, set its tags, and create an environment for work there.";
     OrgManage = "org.manage", Org, Manage, ORG, ADMINS,
         "Manage Org", "Rename the org, change its parameters and tags, create orgs inside it, move it within its tree, delete it, and restore what was deleted in it.";
     OrgArchive = "org.archive", Org, Advanced, ORG, NOBODY,
@@ -685,9 +689,9 @@ permissions! {
     EnvironmentView = "environment.view", Environment, View, ENVIRONMENT, VIEWERS,
         "View Environment", "See the environment: its name, owner, place and state, and what updates wait for it.";
     EnvironmentUse = "environment.use", Environment, Use, ENVIRONMENT, INTERACTORS_WHERE_MANAGED,
-        "Use Environment", "Have the agents of the threads that run in the environment act for oneself there: give them input, steer or interrupt their turns, stop or retry one.";
+        "Use Environment", "Start threads in the environment, and have the agents of its threads act for oneself there: give them input, steer or interrupt their turns, stop or retry one.";
     EnvironmentManage = "environment.manage", Environment, Manage, ENVIRONMENT, DEVELOPERS_WHERE_MANAGED,
-        "Manage Environment", "Have all of the environment: say which threads run in it and where, how far agents are confined and what it offers; start, stop, recreate, update, configure, move and remove it.";
+        "Manage Environment", "Have all of the environment: where its threads run, how far agents are confined and what it offers; start, stop, recreate, update, configure, move and remove it.";
     FilesView = "files.view", Files, View, ENVIRONMENT, VIEWERS,
         "View Files", "List, read and download the files of the environment's whole workspace, with their differences and snapshots.";
     FilesManage = "files.manage", Files, Manage, ENVIRONMENT, DEVELOPERS_WHERE_MANAGED,
@@ -835,6 +839,9 @@ impl Permission {
         match self {
             Self::ThreadFork | Self::ThreadArchive => Some(Self::ThreadManage),
             Self::TopicArchive => Some(Self::TopicManage),
+            // Making things inside is a part of contributing to the place, and can be given alone.
+            Self::TopicStartThreads => Some(Self::TopicInteract),
+            Self::ProjectCreateTopics => Some(Self::ProjectInteract),
             Self::ProjectArchive => Some(Self::ProjectManage),
             Self::OrgArchive => Some(Self::OrgManage),
             Self::DocCreate | Self::DocComment => Some(Self::DocEdit),
@@ -1218,6 +1225,10 @@ impl Choice {
                 "Can edit"
             }
             (Self::FullInteract, kind) if kind.resource().is_some() => "Can use",
+            // A place's middle level makes things inside it; talking to an agent or people is a thread's or a chat's.
+            (Self::FullInteract, ObjectKind::Org | ObjectKind::Project | ObjectKind::Topic) => {
+                "Can contribute"
+            }
             _ => self.label(),
         }
     }
@@ -2391,7 +2402,18 @@ mod tests {
         );
         assert_eq!(
             Choice::FullInteract.label_on(ObjectKind::Topic),
+            "Can contribute"
+        );
+        assert_eq!(
+            Choice::FullInteract.label_on(ObjectKind::Thread),
             "Can interact"
+        );
+        assert_eq!(P::TopicStartThreads.with(), Some(P::TopicInteract));
+        assert_eq!(P::ProjectCreateTopics.with(), Some(P::ProjectInteract));
+        assert!(
+            P::TopicStartThreads
+                .held_through()
+                .any(|held| held == P::TopicInteract)
         );
     }
 

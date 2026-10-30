@@ -177,6 +177,8 @@ pub fn inspect_environment_path(
             });
         }
     }
+    #[cfg(not(target_os = "linux"))]
+    let _ = real;
     Err(CommandError::new(
         ErrorCode::Unsupported,
         "this platform cannot verify an existing directory beneath environment.roots",

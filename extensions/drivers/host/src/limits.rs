@@ -3,9 +3,11 @@
 //! Limits are promised only after this node successfully creates a systemd scope with the needed controls.
 
 use orch_driver_contract::runtime::Resources;
+#[cfg(target_os = "linux")]
 use std::time::Duration;
 
 /// A local scope probe is bounded to five seconds, including an unavailable manager or authorization service.
+#[cfg(target_os = "linux")]
 const PROBE_WITHIN: Duration = Duration::from_secs(5);
 
 /// Whether a native scope with CPU, memory and task controls works for this node now.

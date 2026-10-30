@@ -184,9 +184,17 @@ def inputs(root):
     return sorted(set(selected))
 
 
+def built_here(root):
+    """The images this repository builds from its own recipes (images/<name>/Dockerfile): made, never pulled."""
+    images = root / "images"
+    return {recipe.parent.name for recipe in images.glob("*/Dockerfile")} if images.is_dir() else set()
+
+
 def check(root, selected):
+    own = built_here(root)
     faults = [f"{path}: {reference} needs a tag and a sha256 index digest"
-              for path, _, _, reference in selected if not PIN.fullmatch(reference)]
+              for path, _, _, reference in selected
+              if not PIN.fullmatch(reference) and reference.split(":", 1)[0] not in own]
     for relative in paths(root):
         if relative.suffix not in {".yml", ".yaml"} or not (str(relative).startswith(".github/") or relative.name in {"action.yml", "action.yaml"}): continue
         for action in re.findall(r"^\s*(?:-\s*)?uses:\s*(\S+)", (root / relative).read_text(), re.MULTILINE):

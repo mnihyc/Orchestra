@@ -39371,7 +39371,7 @@
     "/documents/{id}/discussions/{discussion_id}/comments": {
       "get": {
         "operationId": "DocumentCommentList",
-        "summary": "Answers in a discussion.",
+        "summary": "Lists a discussion's comments in the order they were written, a window at a time from the newest.",
         "x-orch-access": "permission",
         "x-orch-tokens": true,
         "responses": {
@@ -39461,7 +39461,7 @@
       },
       "post": {
         "operationId": "DocumentCommentCreate",
-        "summary": "",
+        "summary": "Answers in a discussion.",
         "x-orch-access": "permission",
         "x-orch-tokens": true,
         "responses": {
@@ -96558,6 +96558,11 @@
           },
           {
             "type": "string",
+            "const": "topic.start_threads",
+            "description": "Start threads in the topic; whoever starts one owns it."
+          },
+          {
+            "type": "string",
             "const": "project.view",
             "description": "See the project: its name, description and the settings that are no secret, and who has access."
           },
@@ -96575,6 +96580,11 @@
             "type": "string",
             "const": "project.archive",
             "description": "Archive the project, and bring it back."
+          },
+          {
+            "type": "string",
+            "const": "project.create_topics",
+            "description": "Create topics in the project; whoever creates one owns it."
           },
           {
             "type": "string",
@@ -96709,12 +96719,12 @@
           {
             "type": "string",
             "const": "environment.use",
-            "description": "Have the agents of the threads that run in the environment act for oneself there: give them input, steer or interrupt their turns, stop or retry one."
+            "description": "Start threads in the environment, and have the agents of its threads act for oneself there: give them input, steer or interrupt their turns, stop or retry one."
           },
           {
             "type": "string",
             "const": "environment.manage",
-            "description": "Have all of the environment: say which threads run in it and where, how far agents are confined and what it offers; start, stop, recreate, update, configure, move and remove it."
+            "description": "Have all of the environment: where its threads run, how far agents are confined and what it offers; start, stop, recreate, update, configure, move and remove it."
           },
           {
             "type": "string",
