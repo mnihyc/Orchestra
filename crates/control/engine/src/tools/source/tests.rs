@@ -2932,6 +2932,12 @@ fn source_generation_retention_runs_with_default_worker_stacks_even_if_the_suite
 #[tokio::test]
 async fn a_changed_directory_generation_retains_its_old_hold_until_real_detach_and_the_original_native_key_drain()
 -> Proof {
+    // The case holds a whole scene, a host and a peer across its waits: on the heap, as a worker holds a task, so
+    // that the thread's stack carries only what polling it takes.
+    Box::pin(changed_directory_generation_keeps_its_old_hold()).await
+}
+
+async fn changed_directory_generation_keeps_its_old_hold() -> Proof {
     use orch_envhost::{
         blobs::MemoryBlobs,
         environment::{EnvHost, Gates, HostSettings, Reports},

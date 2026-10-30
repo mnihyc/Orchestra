@@ -1,4 +1,8 @@
 //! Retained projection fixtures over genuinely admitted history, without claiming native activation proof.
+#![allow(
+    dead_code,
+    reason = "each test program that includes these fixtures uses only some of them"
+)]
 
 use orch_db::{
     Db,

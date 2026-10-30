@@ -803,8 +803,12 @@ async fn providers_of(
     Ok(listed)
 }
 
-/// The environments the caller manages, this topic's first, each with what a thread would get
-/// there.
+/// The reason an environment the caller sees, and may not start a thread in, is listed with: asked for
+/// through an access request, as a missing Use is.
+const ENVIRONMENT_USE_REQUIRED: &str = "environment_use_required";
+
+/// The environments the caller may start a thread in, this topic's first, each with what a thread would
+/// get there; then those they only see, with the reason that asks for their Use.
 async fn environments_of(
     conn: &mut Conn,
     principal: &Principal,
@@ -830,7 +834,23 @@ async fn environments_of(
     )
     .await
     .map_err(ApiError::internal)?;
-    let ids: Vec<Id> = managed.items.iter().map(|each| each.resource.id).collect();
+    let mut ids: Vec<Id> = managed.items.iter().map(|each| each.resource.id).collect();
+    let placeable: std::collections::HashSet<Id> = ids.iter().copied().collect();
+    let seen = orch_authz::resources::visible(
+        conn,
+        principal,
+        ResourceKind::Environment,
+        page,
+        Policy::default(),
+    )
+    .await
+    .map_err(ApiError::internal)?;
+    ids.extend(
+        seen.items
+            .iter()
+            .map(|each| each.resource.id)
+            .filter(|id| !placeable.contains(id)),
+    );
     let rows = environment_queries::environments(conn, &ids).await?;
     let ids: Vec<Id> = rows.iter().map(|row| row.id).collect();
     let uses = history::environment_uses(conn, &ids, topic).await?;
@@ -875,6 +895,8 @@ async fn environments_of(
             Some(DISABLED)
         } else if row.status == "failed" || row.status == "removed" {
             Some("environment_failed")
+        } else if !placeable.contains(&row.id) {
+            Some(ENVIRONMENT_USE_REQUIRED)
         } else {
             None
         };
@@ -1146,9 +1168,9 @@ async fn can_create_in(
 ) -> ApiResult<BindingCanCreate> {
     let permission =
         if thread_rows::tools::node_kind(conn, topic).await?.as_deref() == Some("project") {
-            Permission::ProjectInteract
+            Permission::ProjectCreateTopics
         } else {
-            Permission::TopicInteract
+            Permission::TopicStartThreads
         };
     let interact = nodes::check(
         conn,

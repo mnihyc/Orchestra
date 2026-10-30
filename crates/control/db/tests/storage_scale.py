@@ -63,7 +63,7 @@ def main():
              '--user',f'{os.getuid()}:{os.getgid()}',
              '-e','POSTGRES_USER=orch','-e','POSTGRES_PASSWORD=storage-proof',
              '-e','PGDATA=/var/lib/postgresql/data','-v',str(args.data_root.resolve())+':/var/lib/postgresql/data',
-             'postgres:17','postgres','-p',str(PORT),'-c','shared_buffers=32MB','-c','max_connections=10'])
+             'postgres:17@sha256:31ba9c94a03ada9988f2bb493a22a75eef3a185884533e5cdbcd498ea835b08f','postgres','-p',str(PORT),'-c','shared_buffers=32MB','-c','max_connections=10'])
         started=True
         deadline=time.monotonic()+60
         while time.monotonic()<deadline:

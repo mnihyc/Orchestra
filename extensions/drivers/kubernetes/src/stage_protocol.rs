@@ -1,7 +1,13 @@
 //! A bounded, Pod-bound header for the trusted tool-staging transfer.
 //! The header is not authentication: the caller must protect the exec channel and Pod identity.
 
-#![cfg(target_os = "linux")]
+#![cfg_attr(
+    not(target_os = "linux"),
+    allow(
+        dead_code,
+        reason = "the stage runs on Linux; receipts keep its header everywhere"
+    )
+)]
 
 use std::io::{self, Write};
 

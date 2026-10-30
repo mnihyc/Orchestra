@@ -24,15 +24,26 @@ unit's outbound traffic closed while its host VPN is down.
   made by Compose on the first start, with Alpine's build tools and the extension's checked source), and the
   manifest records the same digests. The [release image script](../../scripts/release/README.md) prints current
   indexes for review and refreshes the pins only with `--write`.
-  On a host without access to a registry, bring them with `docker load` first. A release also names the image
-  its environments are made from (`orch-env-base`); `update.sh` pulls it if the host lacks it. That image is a
-  working machine for an agent that also holds a browser, a VNC display and `sudo` without a password for the
-  agent's account (the unit is the boundary, and a template that sets `no_new_privileges` takes `sudo` away): about
-  650 MB to pull and 1.6 GiB on disk. [Its page](../../images/orch-env-base/README.md) lists what it holds, with
-  the versions.
-  A release also names `orch-env-dev`, the same image with Docker Engine, QEMU and build tools added (about 0.6 GiB more,
-  2.2 GB on disk), which the Developer tools template is made from; `update.sh` pulls it too, and a pull that fails is
-  said and holds back only the environments made from that template.
+  On a host without access to a registry, bring them with `docker load` first.
+- The images environments are made from, on every Docker host that runs them. The Default template names
+  `orch-env-base:<version>` and Developer tools `orch-env-dev:<version>`, for the version the system was first started
+  with (each template's page shows the image it names). A release built by the project's workflow does not carry
+  them, so build them once on each such host when you install its node, from a checkout of the repository at that
+  version's tag (here 0.1.0):
+
+  ```sh
+  docker build -t orch-env-base:0.1.0 --build-arg VERSION=0.1.0 images/orch-env-base
+  docker build -t orch-env-dev:0.1.0 --build-arg VERSION=0.1.0 --build-arg BASE_IMAGE=orch-env-base:0.1.0 images/orch-env-dev
+  ```
+
+  `VERSION` only labels the image; everything it installs is pinned in the recipe, and the build needs the network.
+  Until a host has the image, environments of that template wait there; the others are not affected. A template can
+  instead build its own image from a Dockerfile (its Source), which each host then builds the first time it is used.
+  The default image is a working machine for an agent that also holds a browser, a VNC display and `sudo` without a
+  password for the agent's account (the unit is the boundary, and a template that sets `no_new_privileges` takes
+  `sudo` away): about 650 MB and 1.6 GiB on disk. [Its page](../../images/orch-env-base/README.md) lists what it
+  holds, with the versions. `orch-env-dev` is the same image with Docker Engine, QEMU and build tools added (about
+  0.6 GiB more, 2.2 GB on disk).
 - An HTTPS front for the web edge, which is yours: Orch's own edge speaks plain HTTP on this host and expects
   something in front of it to speak HTTPS to people. The [edge guide](edge.md) says what the front must do and
   how to check it. For a trial, the web edge's own address on loopback is enough.

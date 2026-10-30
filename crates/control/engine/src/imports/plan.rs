@@ -181,8 +181,9 @@ pub(super) fn creation_right(parent: NodeKind, kind: PackageKind) -> Option<Perm
     use PackageKind::{Chat, Document, Folder, Org, Project, Thread, Topic};
     match (kind, parent) {
         (Org | Project, NodeKind::Org) => Some(Permission::OrgInteract),
-        (Project | Topic, NodeKind::Project) => Some(Permission::ProjectInteract),
-        (Thread, NodeKind::Topic) => Some(Permission::TopicInteract),
+        (Project, NodeKind::Project) => Some(Permission::ProjectInteract),
+        (Topic, NodeKind::Project) => Some(Permission::ProjectCreateTopics),
+        (Thread, NodeKind::Topic) => Some(Permission::TopicStartThreads),
         (Folder | Document, _) => Some(Permission::DocCreate),
         (Chat, _) => Some(Permission::ChatInteract),
         _ => None,
@@ -951,11 +952,11 @@ mod tests {
         );
         assert_eq!(
             creation_right(NodeKind::Project, PackageKind::Topic),
-            Some(Permission::ProjectInteract)
+            Some(Permission::ProjectCreateTopics)
         );
         assert_eq!(
             creation_right(NodeKind::Topic, PackageKind::Thread),
-            Some(Permission::TopicInteract)
+            Some(Permission::TopicStartThreads)
         );
         assert_eq!(
             creation_right(NodeKind::Topic, PackageKind::Document),

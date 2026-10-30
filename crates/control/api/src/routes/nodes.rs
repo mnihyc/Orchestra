@@ -864,8 +864,8 @@ pub fn permission_to_make(kind: NodeKind) -> PermissionName {
     match kind {
         NodeKind::Org => exact(Permission::OrgManage),
         NodeKind::Project => exact(Permission::OrgInteract),
-        NodeKind::Topic => exact(Permission::ProjectInteract),
-        NodeKind::Thread => exact(Permission::TopicInteract),
+        NodeKind::Topic => exact(Permission::ProjectCreateTopics),
+        NodeKind::Thread => exact(Permission::TopicStartThreads),
     }
 }
 

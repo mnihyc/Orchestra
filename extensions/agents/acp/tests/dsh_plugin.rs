@@ -361,7 +361,7 @@ async fn a_question_a_command_and_a_plan_reach_the_person_and_their_answers_reac
     rig.adapter.open_session(rig.spec.clone()).await.unwrap();
 
     // A question of the model is a card with its options; the choice goes back to the model.
-    rig.mock.queue(&("tool ask_user_question {\"questions\":[{\"id\":\"choice\",\"header\":\"Choice\",\"question\":\"Which value?\",\"options\":[{\"label\":\"First\",\"description\":\"First value\"},{\"label\":\"Second\",\"description\":\"Second value\"}]}]}\nthen\nsay question finished\n".to_owned())).unwrap();
+    rig.mock.queue("tool ask_user_question {\"questions\":[{\"id\":\"choice\",\"header\":\"Choice\",\"question\":\"Which value?\",\"options\":[{\"label\":\"First\",\"description\":\"First value\"},{\"label\":\"Second\",\"description\":\"Second value\"}]}]}\nthen\nsay question finished\n").unwrap();
     let turn = turn_for(&rig.spec, "Run the scripted conformance case.");
     rig.adapter.start_turn(turn).await.unwrap();
     let seen = until(&mut rig.events, is_request_for_person).await;
@@ -433,7 +433,7 @@ async fn a_question_a_command_and_a_plan_reach_the_person_and_their_answers_reac
     assert!(allowed.exists(), "an allowed command did not run");
 
     // A command that only reads does not ask.
-    rig.mock.queue(&("tool bash {\"command\":\"ls\",\"description\":\"lists the directory\"}\nthen\nsay listed\n".to_owned())).unwrap();
+    rig.mock.queue("tool bash {\"command\":\"ls\",\"description\":\"lists the directory\"}\nthen\nsay listed\n").unwrap();
     let turn = turn_for(&rig.spec, "Run the scripted conformance case.");
     rig.adapter.start_turn(turn).await.unwrap();
     let seen = until(&mut rig.events, is_request_for_person).await;
@@ -545,7 +545,7 @@ async fn a_message_added_to_a_running_turn_reaches_the_model_and_a_stop_ends_the
     rig.adapter.open_session(rig.spec.clone()).await.unwrap();
 
     // The first round writes slowly and ends in a call that only reads; what is added arrives before the next round.
-    rig.mock.queue(&("chunk 4\ndelay 150\nsay Working on it, one moment please.\ntool bash {\"command\":\"ls\",\"description\":\"lists\"}\nthen\nsay finished\n".to_owned())).unwrap();
+    rig.mock.queue("chunk 4\ndelay 150\nsay Working on it, one moment please.\ntool bash {\"command\":\"ls\",\"description\":\"lists\"}\nthen\nsay finished\n").unwrap();
     let turn = turn_for(&rig.spec, "Run the scripted conformance case.");
     let turn_id = turn.turn_id;
     rig.adapter.start_turn(turn).await.unwrap();
@@ -573,7 +573,7 @@ async fn a_message_added_to_a_running_turn_reaches_the_model_and_a_stop_ends_the
     );
 
     // A turn that is stopped while the model writes ends as stopped, and its call is reported as cut short.
-    rig.mock.queue(&("chunk 3\ndelay 400\nsay Once upon a time there was a very long sentence that goes on and on and on.\n".to_owned())).unwrap();
+    rig.mock.queue("chunk 3\ndelay 400\nsay Once upon a time there was a very long sentence that goes on and on and on.\n").unwrap();
     let turn = turn_for(&rig.spec, "Run the scripted conformance case.");
     let turn_id = turn.turn_id;
     let before = rig.mock.requests().len();
@@ -681,7 +681,7 @@ async fn the_first_question_of_a_program_started_again_is_a_new_card_and_its_ans
             let again = rig.adapter.open_session(rig.spec.clone()).await.unwrap();
             assert!(again.resumed, "the session was opened again, not made anew");
         }
-        rig.mock.queue(&("tool ask_user_question {\"questions\":[{\"id\":\"choice\",\"header\":\"Choice\",\"question\":\"Which value?\",\"options\":[{\"label\":\"First\",\"description\":\"First value\"},{\"label\":\"Second\",\"description\":\"Second value\"}]}]}\nthen\nsay question finished\n".to_owned())).unwrap();
+        rig.mock.queue("tool ask_user_question {\"questions\":[{\"id\":\"choice\",\"header\":\"Choice\",\"question\":\"Which value?\",\"options\":[{\"label\":\"First\",\"description\":\"First value\"},{\"label\":\"Second\",\"description\":\"Second value\"}]}]}\nthen\nsay question finished\n").unwrap();
         let turn = turn_for(&rig.spec, "Run the scripted conformance case.");
         rig.adapter.start_turn(turn).await.unwrap();
         let seen = until(&mut rig.events, is_request_for_person).await;

@@ -60,6 +60,8 @@ async fn codex_on_request_to_dsh_carry_uses_ask_and_keeps_the_model_words() {
         .find_map(|command| match command {
             Command::SessionOpen(open) => Some(open),
             Command::SessionOpenFenced(open) => Some(open.session.as_ref()),
+            Command::SessionPrefixOpen(open) => Some(open.session.as_ref()),
+            Command::SessionContinuationResume(open) => Some(open.session.as_ref()),
             _ => None,
         })
         .expect("the carried session was opened");
@@ -79,8 +81,9 @@ async fn a_reduced_mode_switch_does_not_widen_the_places_allowed_modes() {
     rig.world
         .set(thread, keys::APPROVAL_MODE, json!("on_request"))
         .await;
+    // The allowed modes are a policy of a topic and the places above it, never of one thread.
     rig.world
-        .set(thread, keys::APPROVAL_ALLOWED_MODES, json!(["on_request"]))
+        .set(rig.world.topic, keys::APPROVAL_ALLOWED_MODES, json!(["on_request"]))
         .await;
     let plan = rig.plan(thread, &rig.to_other()).await;
     assert_eq!(plan.to.approval_mode.as_deref(), Some("ask"));
@@ -256,6 +259,8 @@ async fn codex_on_request_to_dsh_without_history_uses_ask_on_the_next_turn() {
         .find_map(|command| match command {
             Command::SessionOpen(open) => Some(open),
             Command::SessionOpenFenced(open) => Some(open.session.as_ref()),
+            Command::SessionPrefixOpen(open) => Some(open.session.as_ref()),
+            Command::SessionContinuationResume(open) => Some(open.session.as_ref()),
             _ => None,
         })
         .expect("the no-history session was opened for the next turn");

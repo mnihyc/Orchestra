@@ -1085,7 +1085,7 @@ impl Engine {
             &mut *conn,
             principal,
             new.topic,
-            Permission::TopicInteract,
+            Permission::TopicStartThreads,
             Act::Use,
             orch_authz::Policy::default(),
         )
@@ -1163,12 +1163,12 @@ impl Engine {
         let environment_answer = self
             .inner
             .access
-            .environment_manage(&mut *conn, person, environment.id)
+            .environment_place(&mut *conn, person, environment.id)
             .await
             .map_err(EngineError::from)?;
         if let Answer::Refused(missing) = environment_answer {
             lacking.push((
-                Permission::EnvironmentManage,
+                Permission::EnvironmentUse,
                 ObjectKind::Environment,
                 environment.id,
                 missing,

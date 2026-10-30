@@ -7274,7 +7274,7 @@
     "confirm": "移动到 {{topic}}",
     "here": "当前位置",
     "checking": "正在核对权限…",
-    "needsInteract": "需要主题的交互权限",
+    "needsInteract": "需要在该话题中开始线程的权限",
     "jobMustEnd": "请等待变更任务完成",
     "loading": "正在加载目录树…",
     "reviewing": "正在预览此次移动…",
@@ -10144,21 +10144,23 @@
     },
     "org": {
       "view": "查看组织",
-      "interact": "与组织互动",
+      "interact": "在组织中协作",
       "manage": "管理组织",
       "archive": "归档组织"
     },
     "project": {
       "view": "查看项目",
-      "interact": "与项目互动",
+      "interact": "在项目中协作",
       "manage": "管理项目",
-      "archive": "归档项目"
+      "archive": "归档项目",
+      "create_topics": "创建话题"
     },
     "topic": {
       "view": "查看话题",
-      "interact": "与话题互动",
+      "interact": "在话题中协作",
       "manage": "管理话题",
-      "archive": "归档话题"
+      "archive": "归档话题",
+      "start_threads": "开始线程"
     },
     "thread": {
       "view": "查看会话",
@@ -10596,7 +10598,7 @@
       "empty": {
         "title": "这个组织还没有项目",
         "about": "项目承载同一方面工作的话题。创建第一个项目即可开始。",
-        "noRight": "这里的项目由拥有“与组织互动”权限的人创建。可以请它的所有者 {{name}} 授权。"
+        "noRight": "这里的项目由拥有“在组织中协作”权限的人创建。可以请它的所有者 {{name}} 授权。"
       },
       "personalTitle": "个人空间 · {{name}}",
       "ownEmpty": {
@@ -10654,7 +10656,7 @@
       "empty": {
         "title": "还没有话题",
         "about": "话题是一项具体的工作。创建第一个话题即可开始。",
-        "noRight": "这里的话题由拥有“与项目互动”权限的人创建。"
+        "noRight": "这里的话题由拥有“创建话题”权限的人创建。"
       }
     },
     "topics": {
@@ -11938,6 +11940,7 @@
       "segmentStarted": "启动了使用 {{provider}} 的 {{agent}}",
       "segmentResumed": "恢复了使用 {{provider}} 的 {{agent}}",
       "switched": "{{by}} 切换到使用 {{provider}} 的 {{agent}}",
+      "switchedCarried_one": "{{by}} 切换到使用 {{provider}} 的 {{agent}}，带入对话中的 {{count}} 项",
       "switchedCarried_other": "{{by}} 切换到使用 {{provider}} 的 {{agent}}，带入对话中的 {{count}} 项",
       "switchedSummary": "{{by}} 切换到使用 {{provider}} 的 {{agent}}，附带对话摘要",
       "switchedFresh": "{{by}} 切换到使用 {{provider}} 的 {{agent}}，不带之前的对话",
@@ -12686,6 +12689,9 @@
       "use": "使用此目录",
       "directory": "环境中的目录",
       "directoryHint": "此会话在环境中的工作位置，相对于环境根目录。留空则由服务器决定。",
+      "directoryExists": "已存在",
+      "directoryNew": "将会创建",
+      "directoryIsFile": "已有同名文件",
       "closed": "目前无法使用。",
       "newAbout": "按 {{place}} 的默认设置为此会话新建。",
       "hosts": "将在哪里创建",
@@ -12698,7 +12704,8 @@
       "alsoUsedBy": "另被 {{names}} 使用",
       "alsoUsedByMore_one": "另被 {{names}} 等 {{count}} 个主题使用",
       "alsoUsedByMore_other": "另被 {{names}} 等 {{count}} 个主题使用",
-      "directoryIs": "此会话在环境中的工作位置。留空则为 {{directory}}。"
+      "directoryIs": "此会话在环境中的工作位置。留空则为 {{directory}}。",
+      "askAccess": "申请使用"
     },
     "arrangement": {
       "noneAllowed": "{{provider}} 不允许任何可用的智能体放置方式。",
@@ -16653,7 +16660,7 @@
         "what": "查看话题、它的会话和聊天。"
       },
       "line-topic-interact": {
-        "title": "可以参与",
+        "title": "可以协作",
         "what": "还可以在其中开始会话，设置状态和标签。"
       },
       "line-topic-manage": {
@@ -16665,7 +16672,7 @@
         "what": "查看项目、它的话题和聊天。"
       },
       "line-project-interact": {
-        "title": "可以参与",
+        "title": "可以协作",
         "what": "还可以在其中创建话题。"
       },
       "line-project-manage": {
@@ -16677,7 +16684,7 @@
         "what": "查看组织、它的成员、其中的组织和项目。"
       },
       "line-org-interact": {
-        "title": "可以参与",
+        "title": "可以协作",
         "what": "还可以在其中创建项目。"
       },
       "line-org-manage": {
@@ -24073,8 +24080,7 @@
       "failed": "无法更改目标"
     },
     "menu": {
-      "set": "设定目标…",
-      "exists": "目标进行中：请在输入框上方编辑"
+      "set": "设定目标…"
     },
     "slash": {
       "about": "设定目标：持续工作直到完成",
