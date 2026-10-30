@@ -473,10 +473,6 @@ pub async fn run(launch: &Launch<'_>, build: BuildInfo) -> anyhow::Result<()> {
     Ok(())
 }
 
-/// The image the Default template's environments are made from when the
-/// release's manifest names none: the local tag a checkout builds it under.
-const ENVIRONMENT_IMAGE: &str = concat!("orch-env-base:", env!("ORCH_RELEASE_VERSION"));
-
 /// The adapters this build has built in: every program of the registry. Each gets a profile that people then
 /// change or disable like any other.
 fn adapters() -> Vec<orch_db::seeds::BuiltInAdapter<'static>> {
@@ -504,8 +500,7 @@ async fn first_start(db: &Db, clock: &dyn Clock) -> anyhow::Result<()> {
     let now = clock.now();
     let adapters = adapters();
     let release = orch_db::seeds::Release {
-        environment_image: ENVIRONMENT_IMAGE,
-        environment_image_digest: None,
+        version: env!("ORCH_RELEASE_VERSION"),
         adapters: &adapters,
     };
     let mut tx = db.begin().await?;

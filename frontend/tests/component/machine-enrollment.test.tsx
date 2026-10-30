@@ -50,6 +50,7 @@ for(const locale of ['en','zh-CN'] as const) it(`names roles once and mints only
       expect(screen.getAllByRole('checkbox',{name:i18n.t(`machines.add.roleChoices.${role}.name`)})).toHaveLength(1);
       expect(screen.getByText(i18n.t(`machines.add.roleChoices.${role}.description`))).toBeVisible();
     }
+    expect(screen.getByText(locale==='en'?'Work in folders on Linux':'在 Linux 的文件夹中工作')).toBeVisible();
     await waitFor(()=>expect(screen.getByRole('button',{name:i18n.t('machineInstallation.showCommand')})).toBeEnabled());
     expect(createMachineToken).not.toHaveBeenCalled();expect(createHostToken).not.toHaveBeenCalled();
     await user.click(screen.getByRole('checkbox',{name:i18n.t('machines.add.roleChoices.provider.name')}));

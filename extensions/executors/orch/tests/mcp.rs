@@ -175,6 +175,7 @@ async fn eventually(what: &str, mut check: impl FnMut() -> bool) {
     }
 }
 
+#[cfg(unix)]
 fn process_exists(pid_file: &Path) -> bool {
     let Ok(text) = std::fs::read_to_string(pid_file) else {
         return false;
@@ -557,7 +558,10 @@ async fn a_path_outside_the_directory_is_refused_by_every_file_tool_in_workspace
     let secret = rig.elsewhere.join("secret.txt");
     std::fs::write(&secret, "hidden\n").unwrap();
     std::fs::write(rig.work.join("inside.txt"), "visible\n").unwrap();
+    #[cfg(unix)]
     std::os::unix::fs::symlink(&rig.elsewhere, rig.work.join("door")).unwrap();
+    #[cfg(windows)]
+    std::os::windows::fs::symlink_dir(&rig.elsewhere, rig.work.join("door")).unwrap();
     let outside = secret.display().to_string();
     for mode in [SandboxMode::Workspace, SandboxMode::ReadOnly] {
         let plain = connect(&rig, &scope(&rig, ToolSet::Plain, mode)).await;
@@ -1117,6 +1121,7 @@ async fn a_request_is_served_only_with_the_executors_token_and_a_session_it_can_
     rig.exec.stop().await.unwrap();
 }
 
+#[cfg(unix)]
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn when_a_client_goes_away_the_command_of_its_call_is_ended() {
     let mut rig = rig().await;
@@ -1144,6 +1149,7 @@ async fn when_a_client_goes_away_the_command_of_its_call_is_ended() {
     rig.exec.stop().await.unwrap();
 }
 
+#[cfg(unix)]
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn stopping_the_executor_ends_what_it_started_and_closes_its_server() {
     let mut rig = rig().await;
@@ -1263,6 +1269,7 @@ async fn an_environment_without_the_shell_says_why_the_executor_cannot_start() {
     exec.stop().await.unwrap();
 }
 
+#[cfg(unix)]
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn an_executor_that_is_dropped_without_being_stopped_ends_its_commands() {
     let rig = rig().await;

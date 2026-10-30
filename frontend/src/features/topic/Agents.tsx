@@ -7,7 +7,7 @@ import { startOptionsQuery, type StartOptions } from '@/api/start';
 import { modelName } from '@/features/start/choices';
 import type { AgentRef, BindingAgent, Topic } from '@/generated/api-types';
 import { offeredChoice } from '@/i18n/choices';
-import { holds } from '@/lib/permissions';
+import { canCreateIn } from '@/lib/permissions';
 import { Button } from '@/ui/Button';
 import { EmptyState } from '@/ui/EmptyState';
 import { ErrorState } from '@/ui/ErrorState';
@@ -29,7 +29,7 @@ function available(options: StartOptions) {
 
 export function TopicAgents({ topic }: { topic: Topic }) {
   const { t } = useTranslation();
-  const mayStart = holds(topic.access, 'topic.interact') && !topic.archived;
+  const mayStart = canCreateIn('topic', topic.access) && !topic.archived;
   const query = useQuery({ ...startOptionsQuery(topic.id, null), enabled: mayStart });
   if (!mayStart) return <EmptyState compact title={topic.archived ? t('topicAgents.archived') : t('topicAgents.notAllowed', { owner: topic.owner.display_name })} />;
   if (query.isPending) return <SkeletonRows rows={3} />;

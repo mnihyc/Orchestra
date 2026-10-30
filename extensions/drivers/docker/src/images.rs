@@ -26,7 +26,7 @@ use std::collections::{BTreeMap, HashMap};
 use std::time::Duration;
 use tokio_util::io::ReaderStream;
 
-use crate::client::{map_error, status_of};
+use crate::client::{daemon_capacity_failure, map_error, status_of};
 use crate::config::DockerConfig;
 use crate::driver::DockerDriver;
 use crate::progress::{LogTail, Phase, ProgressSink};
@@ -193,14 +193,17 @@ fn credentials_for(config: &DockerConfig, name: &str) -> Option<DockerCredential
         })
 }
 
-/// A failure of the request to pull or load, in the terms of the contract: the registry or the archive let the
-/// image down (an image error), or the daemon was not there to ask.
+/// A failed pull or load distinguishes host capacity from an image or registry failure.
 fn image_error(error: bollard::errors::Error) -> DriverError {
     match error {
-        bollard::errors::Error::DockerResponseServerError { message, .. } => {
-            DriverError::Image(message)
+        bollard::errors::Error::DockerResponseServerError { message, .. }
+        | bollard::errors::Error::DockerStreamError { error: message } => {
+            if daemon_capacity_failure(&message) {
+                DriverError::NoCapacity(message)
+            } else {
+                DriverError::Image(message)
+            }
         }
-        bollard::errors::Error::DockerStreamError { error } => DriverError::Image(error),
         other => map_error(other),
     }
 }
@@ -393,6 +396,10 @@ impl DockerDriver {
                     let failure = image_error(error);
                     return Err(match failure {
                         DriverError::Image(message) => DriverError::Image(
+                            self.config
+                                .redact_registry_text(&format!("{reference}: {message}")),
+                        ),
+                        DriverError::NoCapacity(message) => DriverError::NoCapacity(
                             self.config
                                 .redact_registry_text(&format!("{reference}: {message}")),
                         ),

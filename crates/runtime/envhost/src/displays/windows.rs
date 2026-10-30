@@ -266,7 +266,7 @@ impl Store {
             file.write_all(&bytes)?;
             file.sync_all()?;
             std::fs::rename(&temporary, self.directory.join("windows.json"))?;
-            std::fs::File::open(&self.directory)?.sync_all()?;
+            crate::platform::Dir::open_path(&self.directory)?.sync()?;
             Ok(())
         })();
         if result.is_err() {
@@ -285,6 +285,30 @@ mod tests {
         let store = Store::new(directory.path().join("screens")).unwrap();
         std::fs::write(store.directory.join("windows.json"), b"broken").unwrap();
         assert!(store.load().is_err());
+    }
+    #[test]
+    fn a_display_journal_can_be_saved_reopened_and_replaced() {
+        let directory = tempfile::tempdir().unwrap();
+        let store = Store::new(directory.path().join("screens")).unwrap();
+        let id = orch_types::new_id();
+        store
+            .save(vec![Record {
+                id,
+                endpoint: "127.0.0.1:41000".into(),
+                x_display: ":1".into(),
+                program: directory.path().join("display-program"),
+                server: None,
+                manager: None,
+                closing: false,
+            }])
+            .unwrap();
+        let reopened = Store::new(store.directory.clone()).unwrap();
+        let records = reopened.load().unwrap();
+        assert_eq!(records.len(), 1);
+        assert_eq!(records[0].id, id);
+        assert_eq!(records[0].endpoint, "127.0.0.1:41000");
+        reopened.save(Vec::new()).unwrap();
+        assert!(reopened.load().unwrap().is_empty());
     }
     #[cfg(target_os = "linux")]
     #[test]

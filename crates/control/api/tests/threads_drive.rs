@@ -1541,28 +1541,30 @@ async fn an_input_needs_the_senders_own_right_to_drive_the_thread_and_to_use_its
 async fn an_input_needs_the_senders_own_use_of_the_environment_its_agent_acts_in() {
     let s = Scene::new().await;
     let id = s.thread().await.base.id;
-    // The environment's Use row stops following its place: only those its page names may have its agents
-    // act for them. Eve manages it, which holds its Use.
+    // Both Use and Manage stop following the place: the developer otherwise inherits Manage,
+    // which also grants Use. Eve is named in Manage on the page and still holds Use through it.
     {
         let mut conn = s.rig.db.acquire().await.unwrap();
-        orch_db::queries::access::write_row(
-            &mut conn,
-            &orch_db::queries::access::RowWrite {
-                page: &orch_db::queries::access::PageKey::new(
-                    "environment",
-                    s.on.environment,
-                    "live",
-                ),
-                profile: "any",
-                permission: "environment.use",
-                inherit: false,
-                locked: false,
-            },
-            Some(s.ada.id()),
-            s.rig.world.now(),
-        )
-        .await
-        .unwrap();
+        for permission in ["environment.use", "environment.manage"] {
+            orch_db::queries::access::write_row(
+                &mut conn,
+                &orch_db::queries::access::RowWrite {
+                    page: &orch_db::queries::access::PageKey::new(
+                        "environment",
+                        s.on.environment,
+                        "live",
+                    ),
+                    profile: "any",
+                    permission,
+                    inherit: false,
+                    locked: false,
+                },
+                Some(s.ada.id()),
+                s.rig.world.now(),
+            )
+            .await
+            .unwrap();
+        }
     }
     sqlx::query("INSERT INTO settings (node_id,key,value) VALUES ($1,'thread.inputs_without_use','\"refused\"'::jsonb)")
         .bind(s.tree.topic.base.id)
@@ -1881,6 +1883,59 @@ async fn a_turn_that_failed_is_tried_again_as_the_callers_own_input_and_one_that
     // Whoever retries needs what an input needs.
     let cai = retry(&s.cai, start.turn_id, "c").await.problem();
     assert!(missing_permissions(&cai).contains(&"thread.interact".to_owned()));
+}
+
+#[tokio::test]
+async fn retry_does_not_copy_an_input_that_already_returned_to_the_queue() {
+    let s = Scene::new().await;
+    let thread = s.thread().await.base.id;
+    s.rig.seen.refuse(
+        CommandKind::TurnStart,
+        orch_link_contract::commands::CommandError::new(
+            orch_link_contract::commands::ErrorCode::Timeout,
+            "the start was not taken",
+        )
+        .retryable(),
+    );
+    let original = s
+        .say(&s.ada, thread, "Keep this", Delivery::Queue, "first")
+        .await
+        .ok()
+        .input;
+    let turn = s.rig.turn_start(thread, 0).await;
+    s.rig.wait_turn(turn.turn_id, "failed").await;
+    let state: String = sqlx::query_scalar("SELECT state FROM thread_inputs WHERE id=$1")
+        .bind(original.id)
+        .fetch_one(s.rig.db.pool())
+        .await
+        .unwrap();
+    assert_eq!(state, "pending");
+    let retry = |who: &Who| {
+        let call = s
+            .rig
+            .world
+            .app
+            .call(ThreadTurnRetry, &[&thread, &turn.turn_id])
+            .token(&who.token)
+            .body(&ThreadTurnRetryBody {
+                client_id: "retry-pending".to_owned(),
+                bypass: None,
+            });
+        async move { call.send().await }
+    };
+    let refused = retry(&s.ada).await.problem();
+    assert_eq!(refused.code, ErrorCode::RequestInvalid);
+    assert_eq!(
+        refused.detail,
+        "The original input is waiting in the message queue or is being delivered"
+    );
+    assert_eq!(retry(&s.cai).await.problem().code, ErrorCode::AuthzDenied);
+    let count: i64 = sqlx::query_scalar("SELECT count(*) FROM thread_inputs WHERE thread_id=$1")
+        .bind(thread)
+        .fetch_one(s.rig.db.pool())
+        .await
+        .unwrap();
+    assert_eq!(count, 1);
 }
 
 #[tokio::test]

@@ -86,7 +86,7 @@ mod tests {
 
     #[test]
     fn the_figures_that_stand_for_a_turn_are_named_and_small() {
-        assert!(BRIEF_TURN_BYTES > INDEX_LINE_BYTES);
+        const { assert!(BRIEF_TURN_BYTES > INDEX_LINE_BYTES) };
         assert_eq!(BRIEF_TURN_BYTES + INDEX_LINE_BYTES, 700);
     }
 }

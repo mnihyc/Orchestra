@@ -1,6 +1,6 @@
 /** Add the provider interface: model access, credential, machine, and visible model/fact sources; examples fill those same fields. */
 import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query';
-import { useNavigate } from '@tanstack/react-router';
+import { Link, useNavigate } from '@tanstack/react-router';
 import { lazy, Suspense, useEffect, useMemo, useRef, useState } from 'react';
 import { useTranslation } from 'react-i18next';
 
@@ -39,6 +39,7 @@ export function AddProviderDialog({ onClose, initialRuntimeMachine, initialHome,
   const cache = useQueryClient();
   const submitting = useRef(false);
   const [created, setCreated] = useState(false);
+  const [partial, setPartial] = useState<Awaited<ReturnType<typeof createProvider>> | null>(null);
   const [serverFaults, setServerFaults] = useState<Record<string, string>>({});
   const [unplaced, setUnplaced] = useState(false);
   const [unplacedMessages,setUnplacedMessages]=useState<string[]>([]);
@@ -162,6 +163,10 @@ export function AddProviderDialog({ onClose, initialRuntimeMachine, initialHome,
     },
     onError: (error) => {
       submitting.current=false;
+      if (createdReply.current !== null) {
+        setPartial(createdReply.current);
+        return;
+      }
       const placed:Record<string,string>={};const rowFaults:Record<string,string>={};const rest:string[]=[];let first=false;
       for(const fault of error instanceof ApiError ? error.faults() : []) {
         const endpoint=/^upstreams\[(\d+)\](?:\.(.*))?$/.exec(fault.path);
@@ -267,6 +272,16 @@ export function AddProviderDialog({ onClose, initialRuntimeMachine, initialHome,
     if (native && subscription !== undefined) create.mutate({ kind: 'subscription', ...common, agent_id: subscription.agent.id });
     else create.mutate({ kind: 'api', ...common, upstreams: built.map((row) => row.upstream) });
   };
+
+  if (partial !== null) return <Dialog open title={t('providerCreation.partialTitle')} onOpenChange={(open) => { if (!open) onClose(); }} footer={<>
+    <Button onClick={onClose}>{t('common.close')}</Button>
+    <Button variant="primary" asChild><Link to="/resources/providers/$id" params={{ id: partial.id }} search={{ tab: 'models' }} onClick={onClose}>{t('providerCreation.openCreated')}</Link></Button>
+  </>}>
+    <div className="flex flex-col gap-3">
+      <InlineAlert tone="info">{t('providerCreation.partial', { name: partial.name })}</InlineAlert>
+      <ErrorAlert error={create.error} />
+    </div>
+  </Dialog>;
 
   return <Dialog open dismissible={!pending} title={t('providers.add.title')} onOpenChange={(open) => { if (!open && !pending) onClose(); }} footer={<>
     <TaskGuideLink guide="add-a-provider" heading={example === 'preset:Local embeddings' ? 'local-embeddings' : null} />

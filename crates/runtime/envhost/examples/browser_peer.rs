@@ -6,25 +6,41 @@
     reason = "a test peer fails by panicking"
 )]
 
+#[cfg(unix)]
 use bytes::BytesMut;
+#[cfg(unix)]
 use orch_envhost::blobs::MemoryBlobs;
+#[cfg(unix)]
 use orch_envhost::browser_screen::{BrowserInput, BrowserStream};
+#[cfg(unix)]
 use orch_envhost::environment::{EnvHost, HostSettings, ManagedPlaces, Reports};
+#[cfg(unix)]
 use orch_envhost::processes::ScopeKind;
+#[cfg(unix)]
 use orch_link_contract::commands::{Command, CommandResult, Empty, EnvAttach, IndexMode};
+#[cfg(unix)]
 use orch_link_contract::tunnels::{ExecMessage, ExecOpcode};
+#[cfg(unix)]
 use orch_types::{Id, Json, SystemClock};
+#[cfg(unix)]
 use serde_json::json;
+#[cfg(unix)]
 use std::collections::BTreeMap;
+#[cfg(unix)]
 use std::path::PathBuf;
+#[cfg(unix)]
 use std::sync::Arc;
+#[cfg(unix)]
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 
 /// The peer's fixture page is served only in the unit's loopback namespace.
+#[cfg(unix)]
 const PAGE_PORT: u16 = 41820;
 /// One maximum viewport JPEG is much smaller than sixteen mebibytes.
+#[cfg(unix)]
 const MESSAGE_MAX: usize = 16 * 1024 * 1024;
 
+#[cfg(unix)]
 #[tokio::main]
 async fn main() {
     let mut args = std::env::args().skip(1);
@@ -422,6 +438,12 @@ async fn main() {
     }
 }
 
+#[cfg(not(unix))]
+fn main() {
+    eprintln!("the browser test peer requires a Unix socket");
+}
+
+#[cfg(unix)]
 async fn page_server() {
     let listener = tokio::net::TcpListener::bind(("127.0.0.1", PAGE_PORT))
         .await
@@ -442,6 +464,7 @@ async fn page_server() {
     });
 }
 
+#[cfg(unix)]
 async fn bridge(stream: tokio::net::UnixStream, mut screen: BrowserStream) {
     let (mut reader, mut writer) = tokio::io::split(stream);
     let input = screen.input.clone();

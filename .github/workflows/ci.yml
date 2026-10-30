@@ -47,6 +47,19 @@ jobs:
       - name: Lint
         if: ${{ !cancelled() }}
         run: cargo clippy --workspace --all-targets --locked --keep-going -- -D warnings
+      - name: Start PostgreSQL for connector restart tests
+        if: ${{ !cancelled() && runner.os == 'macOS' }}
+        uses: ankane/setup-postgres@b1a598d92f86cb2ed364411898d150d4eac6d5ca # v1
+        with:
+          postgres-version: 17
+          user: orch
+      - name: Test environment host and connector
+        if: ${{ !cancelled() && runner.os != 'Linux' }}
+        timeout-minutes: 45
+        env:
+          RUST_MIN_STACK: "16777216"
+          ORCH_TEST_DATABASE_URL: postgres://orch@127.0.0.1:5432/postgres
+        run: cargo test --locked --no-fail-fast -p orch-envhost -p orch-connector-core -p orch-connector
       - name: Check documentation
         if: ${{ !cancelled() }}
         env:

@@ -5,8 +5,7 @@
 //! pages to make one thing work: the page that gives the first shows the second beside it, says
 //! whether the people concerned have it, and offers to give it in the same step where the person
 //! at the page may. [`of_thread`] does that for `thread.interact` and the provider its model is
-//! run on, [`of_place`] for the Interact of a topic, a project or an org and what work there starts
-//! from.
+//! run on, [`of_place`] for the right to start work in a topic, a project or an org and what work there starts from.
 //!
 //! The device behind it is the holder that names the work in a place: a resource opened to it
 //! once, instead of to its people one by one. Each offer is a change of the other object's page,
@@ -385,10 +384,9 @@ pub async fn of_place_with_model(
     of_place_resolved(conn, principal, place, starting, model, effort, policies).await
 }
 
-/// What Interact on a topic, a project or an org, which starts work there, is no use without:
+/// What starting work in a topic, a project or an org is no use without:
 /// something to run on and somewhere to run. For each thing the settings of the place name, whether
-/// it is open to everyone who holds Interact there, and whether it is open to the work in the place;
-/// for the default environment, who manages it.
+/// it is open to everyone who holds the creation right there, and whether it is open to the work in the place.
 pub async fn of_place(
     conn: &mut Conn,
     principal: &Principal,
@@ -411,15 +409,19 @@ async fn of_place_resolved(
     let mut graph = Graph::load(conn, &[place]).await?;
     let facts = graph.get(place).cloned().ok_or(Error::NotFound(place))?;
     let place_site = graph.site_of(place).ok_or(Error::NotFound(place))?;
-    let interact = NodePermission::Interact
-        .on(facts.kind)
-        .ok_or(Error::NotFound(place))?;
+    let creation = match facts.kind {
+        NodeKind::Topic => Permission::TopicStartThreads,
+        NodeKind::Project => Permission::ProjectCreateTopics,
+        _ => NodePermission::Interact
+            .on(facts.kind)
+            .ok_or(Error::NotFound(place))?,
+    };
     let named: Vec<(Id, Permission)> = [
         (starting.provider, Permission::ProviderUse),
         (starting.profile, Permission::AgentUse),
         (starting.host, Permission::HostUse),
         (starting.template, Permission::TemplateUse),
-        (starting.environment, Permission::EnvironmentManage),
+        (starting.environment, Permission::EnvironmentUse),
     ]
     .into_iter()
     .filter_map(|(id, permission)| id.map(|id| (id, permission)))
@@ -442,7 +444,7 @@ async fn of_place_resolved(
     }
     let mut all: Vec<Site> = vec![place_site.clone()];
     all.extend(sites.iter().map(|(_, site, _)| site.clone()));
-    let mut wanted = vec![interact, Permission::AccessManage];
+    let mut wanted = vec![creation, Permission::AccessManage];
     wanted.extend(sites.iter().map(|(_, _, permission)| *permission));
     // A single frame serves every dependency with the same resolved policy, even when its homes differ.
     let mut frames = std::collections::HashMap::new();
@@ -457,7 +459,7 @@ async fn of_place_resolved(
                 frame,
                 &Pairing {
                     holder_site: &place_site,
-                    holder_permission: interact,
+                    holder_permission: creation,
                     resource_site: site,
                     permission: *permission,
                     work: &facts.path,
@@ -471,7 +473,7 @@ async fn of_place_resolved(
                 },
             );
             dependencies.push(Dependency {
-                for_permission: interact,
+                for_permission: creation,
                 object: resource.object(),
                 name: resource.name.clone(),
                 owner: resource.first_owner,

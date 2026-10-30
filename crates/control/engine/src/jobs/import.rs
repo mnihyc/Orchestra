@@ -567,16 +567,7 @@ impl Importing {
                     lost.insert(object.object.id);
                 }
                 progress.counts_note(object, &made);
-                let row = row_of(
-                    position,
-                    object,
-                    made.outcome,
-                    made.made.clone(),
-                    made.message.clone(),
-                    made.code.clone(),
-                    made.warnings.clone(),
-                    made.author.clone(),
-                );
+                let row = row_of(position, object, &made);
                 written.push(stored_row(&row));
             }
             rows::add_report_rows(&mut tx, self.import, &written).await?;

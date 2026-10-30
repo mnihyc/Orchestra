@@ -136,6 +136,11 @@ export class ApiError extends Error {
   }
 }
 
+/** Whether the invitation's maker can no longer authorize its grant. */
+export function invitationIssuerAuthorityLost(error: unknown): boolean {
+  return error instanceof ApiError && error.problem.reason === 'invitation_issuer_authority_lost';
+}
+
 function isProblem(value: unknown): value is Problem {
   return isRecord(value) && typeof value.code === 'string' && typeof value.status === 'number';
 }

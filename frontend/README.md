@@ -304,6 +304,11 @@ Node as `.nvmrc` says, npm only. `npm ci`, then:
 | `npm run test:e2e` | Playwright against the built application (built once when the run begins, served by `vite preview`) with the fake API of `tests/doubles` behind it; the five tests tagged `@development` (the gallery of the shared controls exists in a development build only; two reach a module by its source path) run in a project of their own against a development server the run starts beside it; `ORCH_E2E_DEV=1` runs every test against the development server instead, for work by hand; `npx playwright install chromium` once before |
 | `node tests/doubles/server.ts` | The fake API by itself (`127.0.0.1:41871`), to look at the application without a system behind it: `ORCH_DEV_API=http://127.0.0.1:41871 npm run dev`, then sign in as `ada` with `correct horse battery` (the team's org, with orgs inside it, projects, topics, threads, members and invitations, and what the threads run on: machines, providers with their models, agent profiles, environments, hosts and templates, all one world for every screen, see `tests/doubles/README.md`; `vera` may only read, `dora` is a developer); a thread is given a conversation by `POST /__double/thread/scene` with `{"thread": <its id>, "name": "history" \| "running" \| "waiting" \| "failures" \| "long"}` |
 
+The no-argument lint discovers the files accepted by the ESLint configuration and checks
+them in bounded, separate processes. This keeps typed lint state within the memory available
+on CI runners; every batch uses the same rules and any failing batch fails the command.
+Explicit arguments retain ESLint's direct command-line behavior.
+
 `/dev/ui` shows every shared control in both themes, both densities and both languages; it exists
 in a development build only. The fake API also holds people's chats: `ORCH_DEV_API=http://127.0.0.1:41871 npm run dev`,
 sign in as `ada`, and open a topic or `/org/acme/messages`; a second person (`dora`) in another browser sees

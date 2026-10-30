@@ -838,7 +838,7 @@ export class ThreadWorld implements Part {
   }
 
   private makeThread(person: Person, topicId: string, body: Record<string, unknown>): Thread {
-    this.places.need(person, topicId, 'topic.interact');
+    this.places.need(person, topicId, 'topic.start_threads');
     const { resources, binding, fresh, model, arrangement, providerId, ...target } = this.startAdmission(person, topicId, body);
     let { environmentId } = target;
     if (fresh !== null) {

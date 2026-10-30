@@ -252,7 +252,15 @@ async fn failed_turn(world: &World, thread: Id) {
         .say(thread, turn_ended(start.turn_id, TurnOutcome::Failed))
         .await;
     world.wait_turn(start.turn_id, "failed").await;
-    world.wait_state(thread, "idle").await;
+    // The shipped catch-all recovery rule waits for a person after an unclassified failure.
+    world.wait_blocked(thread, "error").await;
+    let detail: Option<String> = world
+        .scalar(
+            "SELECT blocked_detail FROM threads WHERE node_id=$1",
+            thread,
+        )
+        .await;
+    assert_eq!(detail.as_deref(), Some("call_recovery"));
     world.wait_followed_up(thread).await;
 }
 
@@ -621,13 +629,13 @@ async fn a_thread_that_is_blocked_is_told_once_to_those_who_follow_it() {
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
-async fn an_approval_reaches_whoever_can_decide_it_and_nobody_else() {
+async fn an_approval_notifies_the_eligible_turn_starter_while_other_managers_can_decide() {
     let world = World::new().await;
     let thread = world.thread("Careful").await;
-    let always = developer(&world, "bob").await; // can decide, follows nothing, asked for every approval (the default)
+    let always = developer(&world, "bob").await; // can decide, follows nothing
     let muted = developer(&world, "cyd").await; // can decide, follows nothing, asked for none
     let follows = developer(&world, "dee").await; // can decide, asked for none, follows at important
-    let silenced = developer(&world, "eve").await; // can decide, asked for every approval, switched the thread off
+    let silenced = developer(&world, "eve").await; // can decide, but switched the thread off
     let reader = viewer(&world, "fay").await; // follows at all and cannot decide
     for person in [muted, follows] {
         let mut conn = world.pool.acquire().await.unwrap();
@@ -655,12 +663,17 @@ async fn an_approval_reaches_whoever_can_decide_it_and_nobody_else() {
     let approval: Id = world
         .scalar("SELECT id FROM approvals WHERE thread_id = $1", thread)
         .await;
+    let eligible = world.engine().eligible_deciders(thread).await.unwrap();
+    for person in [world.ada, always, muted, follows, silenced] {
+        assert!(eligible.contains(&person), "{person} can decide");
+    }
+    assert!(!eligible.contains(&reader), "a reader cannot decide");
     for (person, told) in [
         (world.ada, true),
-        (always, true),
+        (always, false),
         (muted, false),
-        (follows, true),
-        (silenced, true),
+        (follows, false),
+        (silenced, false),
         (reader, false),
     ] {
         let rows = inbox_of(&world, person, "approval.requested").await;
@@ -677,7 +690,7 @@ async fn an_approval_reaches_whoever_can_decide_it_and_nobody_else() {
     .fetch_one(world.pool.pool())
     .await
     .unwrap();
-    assert_eq!(linked, 4, "every row names the approval it asks about");
+    assert_eq!(linked, 1, "the starter's row names the approval");
 
     // Once somebody has decided it nobody has anything left to do about it.
     world
@@ -685,10 +698,8 @@ async fn an_approval_reaches_whoever_can_decide_it_and_nobody_else() {
         .decide_approval(&Caller::session(always), approval, &option("allow_once"))
         .await
         .unwrap();
-    for person in [world.ada, always, follows, silenced] {
-        let rows = inbox_of(&world, person, "approval.requested").await;
-        assert!(rows[0].2, "{person} need not look at what was decided");
-    }
+    let rows = inbox_of(&world, world.ada, "approval.requested").await;
+    assert!(rows[0].2, "the starter need not look at what was decided");
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]

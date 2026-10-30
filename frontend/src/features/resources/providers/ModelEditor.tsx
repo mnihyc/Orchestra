@@ -15,6 +15,7 @@ import { choiceOption, offeredChoice } from '@/i18n/choices';
 import { createModel, updateModel } from '@/api/resources';
 import { Hint } from '@/features/help/Hint';
 import { firstStep, formatContext, readTokens } from '@/features/models/context';
+import { accessProgramDisplayName } from '@/features/models/names';
 import { type EntryForm, effortsOf, type Faults, faultsOf, formOf, hasLargest, parametersOf, refusedAt, type StepForm } from '@/features/resources/providers/entry';
 import { ModelLimits } from '@/features/resources/providers/Caps';
 import { GroupsField, groupsOf } from '@/features/resources/providers/Groups';
@@ -190,7 +191,7 @@ export function EntryFields({ base, form, onChange, faults, disabled, otherGroup
   }));
   const programItems: Item[] = [...new Set([...offeredPrograms, ...form.programs])].map((name) => ({
     id: name,
-    label: name,
+    label: accessProgramDisplayName(name, t),
     hint: offeredPrograms.includes(name) ? t('models.editor.programs.offered', { source: provider.harness_kind === null ? t('models.editor.theEndpoint') : t('models.editor.thePlan') }) : t('models.editor.typedIn', { source }),
     on: form.programs.includes(name),
   }));
@@ -255,7 +256,7 @@ export function EntryFields({ base, form, onChange, faults, disabled, otherGroup
           none: t('models.editor.noProgram'),
           hint: t('models.editor.programs.startHint'),
           value: form.defaultProgram,
-          options: form.programs.map((program) => ({ value: program, label: program })),
+          options: form.programs.map((program) => ({ value: program, label: accessProgramDisplayName(program, t) })),
           error: faults.program,
           onChange: (value) => onChange({ ...form, defaultProgram: value }),
         }}

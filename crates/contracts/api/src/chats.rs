@@ -31,6 +31,9 @@ pub struct ChatJoinRequestBody {
     /// The name as shared with the requester.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub label: Option<String>,
+    /// The proposed end of membership, or no end when omitted.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub expires_at: Option<Time>,
 }
 
 /// The most parts a chat message holds.

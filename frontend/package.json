@@ -12,7 +12,7 @@
     "build": "vite build",
     "preview": "vite preview",
     "typecheck": "node --max-old-space-size=8192 node_modules/typescript/bin/tsc -b",
-    "lint": "node --max-old-space-size=8192 node_modules/eslint/bin/eslint.js .",
+    "lint": "node build/lint.ts",
     "test": "vitest run",
     "test:e2e": "playwright test"
   },

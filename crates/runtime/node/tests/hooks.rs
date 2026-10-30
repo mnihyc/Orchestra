@@ -1,4 +1,5 @@
 //! The operator's lifecycle hooks as the node runs them for its units, on the in-memory hub with the scripted controller and the in-memory driver: what each is told, an up hook that keeps a unit from running, down hooks that never hold a stop, the run again at a node's start, and what the system is told of each run.
+#![cfg(unix)]
 #![allow(
     clippy::unwrap_used,
     clippy::expect_used,

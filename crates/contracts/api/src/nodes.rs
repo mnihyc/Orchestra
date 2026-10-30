@@ -1559,15 +1559,15 @@ crate::endpoints! {
     /// Moves a project to another org, or into another project, of its root org.
     ProjectMove: POST "/projects/{id}/move", Rule("project.manage on the project, and org.interact on the org or project.interact on the project it moves under"), none, json NodeMoveBody, json Project, 200;
     /// Makes a topic in a project, and with it a first thread if one is asked for.
-    TopicCreate: POST "/projects/{id}/topics", Permission("project.interact"), none, json TopicCreateBody, json TopicCreateReply, 200;
+    TopicCreate: POST "/projects/{id}/topics", Permission("project.create_topics"), none, json TopicCreateBody, json TopicCreateReply, 200;
     /// Shows what moving a topic to another project or folder would change, before anything does.
     TopicMovePreview: POST "/topics/{id}/move/preview", Rule("the same as the move itself"), none, json MovePreviewBody, json NodeMovePlan, 200;
     /// Moves a topic with its threads to another project or folder of its root org.
-    TopicMove: POST "/topics/{id}/move", Rule("topic.manage on the topic, and project.interact on the project or folder it moves to"), none, json NodeMoveBody, json Topic, 200;
+    TopicMove: POST "/topics/{id}/move", Rule("topic.manage on the topic, and project.create_topics on the project or folder it moves to"), none, json NodeMoveBody, json Topic, 200;
     /// Makes a thread in a topic.
-    ThreadCreate: POST "/topics/{id}/threads", Permission("topic.interact"), none, json CreateThread, json Thread, 200;
+    ThreadCreate: POST "/topics/{id}/threads", Permission("topic.start_threads"), none, json CreateThread, json Thread, 200;
     /// Attaches a new thread to a session that already exists in a provider's harness.
-    ThreadAdopt: POST "/topics/{id}/threads/adopt", Rule("topic.interact, the use of the provider and agent, and environment.manage on the environment"), none, json ThreadAdoptBody, json Thread, 200;
+    ThreadAdopt: POST "/topics/{id}/threads/adopt", Rule("topic.start_threads, the use of the provider and agent, and environment.use on the environment"), none, json ThreadAdoptBody, json Thread, 200;
     /// Shows what adopting a session would do (where it would run, the model, the history it brings), before anything does.
     ThreadAdoptPreview: POST "/topics/{id}/threads/adopt/preview", Rule("the same as adopting it"), none, json ThreadAdoptBody, json AdoptPlan, 200;
     /// Lists the topics of a project that the caller may view.

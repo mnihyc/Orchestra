@@ -39,7 +39,7 @@ export function threadsOfTopic(rows: ReadonlyMap<string, TreeNode>, topicId: str
 export function NewThreadButton({ topic, allowed, owner }: { topic: PlaceRef; allowed: boolean; owner: Parameters<typeof denial>[3] }) {
   const { t } = useTranslation();
   return (
-    <PermissionGate allowed={allowed && !topic.archived} mode="block" reason={topic.archived ? t('state.archived') : denial(t, 'topic.interact', topic.name, owner)}>
+    <PermissionGate allowed={allowed && !topic.archived} mode="block" reason={topic.archived ? t('state.archived') : denial(t, 'topic.start_threads', topic.name, owner)}>
       <Button data-tutorial-target="new-thread" variant="primary" icon={<MessageSquarePlus aria-hidden />} onClick={() => openNodeDialog({ type: 'new-thread', parent: topic })}>
         {t('places.topic.newThread')}
       </Button>

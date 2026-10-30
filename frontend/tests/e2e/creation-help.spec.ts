@@ -20,8 +20,8 @@ test('the finder opens the creation section for create project and start thread'
 });
 
 for (const kind of ['org', 'project'] as const) {
-  test(`an empty ${kind}'s creation question opens its own interaction row without a permission write`, async ({ page }) => {
-    await deny(PEOPLE.vera.login, ['org.interact', 'project.interact']);
+  test(`an empty ${kind}'s creation question opens its own permission row without a permission write`, async ({ page }) => {
+    await deny(PEOPLE.vera.login, ['org.interact', 'project.create_topics']);
     const id = kind === 'org' ? ACME.org : ACME.web;
     await changeTree(acmeTree().filter((row) => row.parent_id === id).map((row) => ({ id: row.id, deleted: true })));
     await signIn(page, PEOPLE.vera);
@@ -31,7 +31,7 @@ for (const kind of ['org', 'project'] as const) {
       if (['POST', 'PUT', 'PATCH', 'DELETE'].includes(request.method()) && /\/(?:page|defaults)(?:\/|$)/.test(new URL(request.url()).pathname)) writes.push(request.url());
     });
     await page.getByRole('button', { name: kind === 'org' ? 'Who may make projects here?' : 'Who may open topics here?' }).click();
-    const row = page.locator(`[data-access-permission="${kind}.interact"]`);
+    const row = page.locator(`[data-access-permission="${kind === 'org' ? 'org.interact' : 'project.create_topics'}"]`);
     await expect(row).toBeVisible();
     await expect(row).toBeFocused();
     expect(writes).toEqual([]);

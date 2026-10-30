@@ -66,6 +66,26 @@ async fn a_side_recovers_its_own_conversation_without_substituting_its_parent_or
         .unwrap()
         .unwrap();
     let original = original_cut.artifacts["side_native_result"].clone();
+    let other_segment = rig.world.segment_of(parent).await;
+    let refused = sqlx::query(
+        "INSERT INTO thread_history_cuts
+           (id,thread_id,continuation_id,job_id,owner_thread_id,source_segment_id,source_native_ref,
+            execution_revision,first_turn,last_turn,captured_seq,captured_at,head,artifacts)
+         SELECT $2,thread_id,continuation_id,job_id,owner_thread_id,source_segment_id,source_native_ref,
+            execution_revision,first_turn,last_turn,captured_seq,captured_at,head,artifacts
+         FROM thread_history_cuts WHERE id=$1",
+    )
+    .bind(side)
+    .bind(other_segment)
+    .execute(rig.world.pool.pool())
+    .await
+    .expect_err("another thread's segment cannot own this side's recovery cut");
+    assert_eq!(
+        refused
+            .as_database_error()
+            .and_then(|error| error.constraint()),
+        Some("thread_history_cut_owner_segment")
+    );
     let old_segment = remove_side_cache_observation(&rig, side).await;
     rig.world.restart_api().await;
     rig.world.engine().attach_blobs(rig.store.clone());
@@ -257,13 +277,27 @@ async fn an_observed_side_without_its_confirmed_creation_receipt_cannot_create_a
     rig.world.wait_state(side, "idle").await;
     rig.world.wait_followed_up(side).await;
     remove_side_cache_observation(&rig, side).await;
-    sqlx::query(
-        "UPDATE thread_history_cuts SET artifacts=artifacts-'side_native_result' WHERE id=$1",
+    // Inject a damaged retained record. Normal writes cannot remove a published artifact; the table lock
+    // keeps the trigger disabled only within this transaction, and recovery runs with it enabled again.
+    let mut tx = rig.world.pool.pool().begin().await.unwrap();
+    sqlx::query("ALTER TABLE thread_history_cuts DISABLE TRIGGER history_cut_identity")
+        .execute(&mut *tx)
+        .await
+        .unwrap();
+    let changed = sqlx::query(
+        "UPDATE thread_history_cuts SET artifacts=artifacts-'side_native_result'
+         WHERE id=$1 AND artifacts ? 'side_native_result'",
     )
     .bind(side)
-    .execute(rig.world.pool.pool())
+    .execute(&mut *tx)
     .await
     .unwrap();
+    assert_eq!(changed.rows_affected(), 1);
+    sqlx::query("ALTER TABLE thread_history_cuts ENABLE TRIGGER history_cut_identity")
+        .execute(&mut *tx)
+        .await
+        .unwrap();
+    tx.commit().await.unwrap();
     rig.world.restart_api().await;
     rig.world.engine().attach_blobs(rig.store.clone());
     rig.say(

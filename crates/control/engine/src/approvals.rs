@@ -1584,18 +1584,31 @@ pub mod access {
             asks: &[Ask],
             reason: &str,
             for_thread: Option<Id>,
+            requested_expires_at: Option<Time>,
             origin: &Origin,
         ) -> Result<Raised, RaiseError> {
             let now = self.inner.clock.now();
             let mut tx = self.inner.db.begin().await?;
             let principal = Principal::load(&mut tx, caller.clone(), Time::new(now)).await?;
-            self.raise_access_requests_guarded(tx, principal, asks, reason, for_thread, origin)
-                .await
+            self.raise_access_requests_guarded(
+                tx,
+                principal,
+                asks,
+                reason,
+                for_thread,
+                requested_expires_at,
+                origin,
+            )
+            .await
         }
 
         /// Asks as [`Self::raise_access_requests`] does, in a transaction whose caller was asked again
         /// once the request had come (the API's action guard): `principal` was loaded in `tx` by that
         /// check, and its caller and its time are the ones the request is made with.
+        #[expect(
+            clippy::too_many_arguments,
+            reason = "the guarded transaction and every part of the request commit together"
+        )]
         pub async fn raise_access_requests_guarded(
             &self,
             mut tx: orch_db::Tx,
@@ -1603,6 +1616,7 @@ pub mod access {
             asks: &[Ask],
             reason: &str,
             for_thread: Option<Id>,
+            requested_expires_at: Option<Time>,
             origin: &Origin,
         ) -> Result<Raised, RaiseError> {
             let caller = principal.caller().clone();
@@ -1716,6 +1730,7 @@ pub mod access {
                         request: &stored,
                         required_permission: rows::REQUIRED_PERMISSION,
                         expires_at: expiry(now, days),
+                        requested_expires_at: requested_expires_at.map(Time::get),
                         at: now,
                     },
                 )
@@ -1734,6 +1749,7 @@ pub mod access {
             entry.details = json!({
                 "batch_id": batch,
                 "reason": reason,
+                "requested_expires_at": requested_expires_at,
                 "items": made.iter().map(|(row, sent, permissions)| json!({
                     "approval": row.id,
                     "object": { "kind": sent.kind.as_str(), "id": sent.id },
@@ -1757,6 +1773,7 @@ pub mod access {
                         "batch_id": batch,
                         "permissions": permissions.iter().map(|permission| permission.as_str()).collect::<Vec<_>>(),
                         "reason": reason,
+                        "requested_expires_at": requested_expires_at,
                         "path": "/approvals",
                     }),
                     source: row.id.to_string(),
@@ -2025,6 +2042,8 @@ pub mod access {
                 "object": { "kind": object.kind.as_str(), "id": object.id },
                 "asked": asked.permissions.iter().map(|one| one.as_str()).collect::<Vec<_>>(),
                 "given": given.iter().map(|one| one.as_str()).collect::<Vec<_>>(),
+                "requested_expires_at": row.requested_expires_at.map(Time::new),
+                "expires_at": decided.expires_at,
                 "note": decided.note,
             });
             audit::append(&mut tx, &entry, origin, now)
@@ -2076,6 +2095,7 @@ pub mod access {
                     "approved": decided.approve,
                     "permissions": given.iter().map(|permission| permission.as_str()).collect::<Vec<_>>(),
                     "note": note,
+                    "requested_expires_at": row.requested_expires_at.map(Time::new),
                     "path": "/approvals",
                 }),
                 source: format!("{}:{verdict}", row.id),

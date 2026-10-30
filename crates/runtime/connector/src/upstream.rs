@@ -480,7 +480,7 @@ mod tests {
         ));
     }
 
-    #[tokio::test(start_paused = true)]
+    #[tokio::test]
     async fn a_stream_that_goes_silent_is_given_up_after_the_idle_time() {
         let (url, _) = serve_once(vec![
             (
@@ -495,6 +495,9 @@ mod tests {
             .send(request(url))
             .await
             .unwrap();
+        // The clock stops only once the connection stands: a stopped clock moves on whenever nothing is ready, so
+        // it can run out the connect deadline while a real connection is still being made (seen on macOS).
+        tokio::time::pause();
         let seen = Arc::new(Seen::default());
         let mut relay = Relay::new(
             answer.body,

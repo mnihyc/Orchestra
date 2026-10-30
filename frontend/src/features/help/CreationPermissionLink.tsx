@@ -7,6 +7,6 @@ import { Button } from '@/ui/Button';
 
 export function CreationPermissionLink({ place }: { place: AccessTarget & { kind: 'org' | 'project' } }) {
   const { t } = useTranslation();
-  const open = () => openAccess(place, { share: false, permission: `${place.kind}.interact` });
+  const open = () => openAccess(place, { share: false, permission: place.kind === 'project' ? 'project.create_topics' : 'org.interact' });
   return <Button action="help" size="sm" variant="ghost" onClick={open}>{t(place.kind === 'org' ? 'creationPermissions.projects' : 'creationPermissions.topics')}</Button>;
 }

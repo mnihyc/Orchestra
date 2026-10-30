@@ -390,6 +390,9 @@ pub struct AccessRequest {
     pub holder: Holder,
     /// Why.
     pub reason: String,
+    /// The proposed end of the access, or no end when absent.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub expires_at: Option<Time>,
     /// The thread that the person was attempting to act on.
     pub for_thread: Option<NodeRef>,
 }

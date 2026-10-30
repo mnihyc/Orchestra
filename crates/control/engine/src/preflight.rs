@@ -277,6 +277,15 @@ impl Engine {
             }
             return Ok(Outcome::Busy);
         }
+        // A steer sent to the previous turn may have been taken even when its
+        // acknowledgement has not arrived. Its result decides whether it is
+        // delivered or goes back to the queue before another turn starts.
+        if thread.current_turn_id.is_none()
+            && threads::unsettled_steer(&mut *unit.conn, thread_id).await?
+        {
+            unit.wake(thread_id);
+            return Ok(Outcome::Busy);
+        }
         if crate::calls::maybe_return_in(unit, &thread).await? {
             return Ok(Outcome::Busy);
         }

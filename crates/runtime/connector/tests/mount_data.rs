@@ -24,13 +24,22 @@ async fn a_machine_with_directory_data_facts_can_make_a_volume_attach_it_and_rem
     let mount = new_id();
     let name = format!("orch-mount-{mount}");
     let labels = BTreeMap::from([("orch.mount_id".into(), mount.to_string())]);
-    rig.succeed(&NodeVolumeEnsure {
+    let ensure = NodeVolumeEnsure {
         driver: "directory".into(),
         name: name.clone(),
         storage: None,
         labels: labels.clone(),
-    })
-    .await;
+    };
+    if !cfg!(target_os = "linux") {
+        assert_eq!(rig.fail(&ensure).await, "unsupported");
+        assert_eq!(
+            std::fs::read_to_string(sibling.join("kept")).unwrap(),
+            "private files"
+        );
+        rig.stop().await;
+        return;
+    }
+    rig.succeed(&ensure).await;
     let attach:EnvAttach=serde_json::from_value(json!({"environment_id":rig.environment,"workspace_root":workspace,"ignore":[],"index":"live",
         "mounts":[{"mount_id":mount,"name":"data","source":name,"volume":{"name":name,"storage":null},"mode":"read_only"}],"variables":{},"secrets":{}})).unwrap();
     let facts = rig.succeed(&attach).await;

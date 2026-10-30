@@ -17,6 +17,7 @@ import { NewThreadButton, threadsOfTopic } from '@/features/topic/Threads';
 import { ThreadCard } from '@/features/topic/ThreadCard';
 import { UsageSection } from '@/features/usage/Board';
 import type { Topic } from '@/generated/api-types';
+import { canCreateIn } from '@/lib/permissions';
 import { useOrgTree } from '@/realtime/stores/tree';
 import { boxClasses, Section } from '@/shell/Page';
 import { EmptyState } from '@/ui/EmptyState';
@@ -29,7 +30,7 @@ export function TopicOverview({ topic, place }: { topic: Topic; place: PlaceRef 
   const { t } = useTranslation();
   const tree = useOrgTree(topic.org_id);
   const threads = useMemo(() => threadsOfTopic(tree.nodes, topic.id), [tree.nodes, topic.id]);
-  const allowed = topic.access.permissions.includes('topic.interact');
+  const allowed = canCreateIn('topic', topic.access);
   // The project a topic lies in is the one it lies in directly, a folder or not, and the folders on the way are its place too.
   const places = placesAbove(topic.path);
 

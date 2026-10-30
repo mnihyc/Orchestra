@@ -57,7 +57,7 @@ export class FirstStepsWorld implements Part {
       ];
       return holders.some((holder) => holder.kind === 'everyone' || (holder.kind === 'role' && ROLES.indexOf(role) >= ROLES.indexOf(holder.role)));
     };
-    return ROLES.map((role) => ({ role, start_topics: permits(role, 'project.interact'), start_threads: permits(role, 'topic.interact'), send_inputs: permits(role, 'thread.interact'), answer_requests: permits(role, 'thread.manage'), model_access_required: true }));
+    return ROLES.map((role) => ({ role, start_topics: permits(role, 'project.create_topics') || permits(role, 'project.interact'), start_threads: permits(role, 'topic.start_threads') || permits(role, 'topic.interact'), send_inputs: permits(role, 'thread.interact'), answer_requests: permits(role, 'thread.manage'), model_access_required: true }));
   }
 
   private guide(person: Person, org: Org): DocumentRef | null {

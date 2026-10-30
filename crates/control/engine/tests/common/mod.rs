@@ -77,8 +77,10 @@ pub fn on_default_stack(case: &str) {
         .contains("test result: ok. 1 passed; 0 failed; 0 ignored;");
     assert!(
         result.status.success() && one_case_ran,
-        "{case} must pass on default stacks: status {:?}, one case ran: {one_case_ran}",
-        result.status
+        "{case} must pass on default stacks: status {:?}, one case ran: {one_case_ran}\nstdout:\n{}\nstderr:\n{}",
+        result.status,
+        String::from_utf8_lossy(&result.stdout),
+        String::from_utf8_lossy(&result.stderr)
     );
 }
 
@@ -109,6 +111,7 @@ pub async fn meanwhile(how_long: Duration) {
 #[derive(Default)]
 pub struct TestAccess {
     denied: Mutex<HashSet<Id>>,
+    denied_models: Mutex<HashSet<(Id, String)>>,
     no_bypass: Mutex<HashSet<Id>>,
     unreachable: AtomicBool,
 }
@@ -122,6 +125,16 @@ impl TestAccess {
     /// From now on `person` may again.
     pub fn allow(&self, person: Id) {
         lock(&self.denied).remove(&person);
+    }
+
+    /// Refuses one person's use of one model while leaving their other use unchanged.
+    pub fn deny_model(&self, person: Id, model: &str) {
+        lock(&self.denied_models).insert((person, model.to_owned()));
+    }
+
+    /// Restores one person's use of one model.
+    pub fn allow_model(&self, person: Id, model: &str) {
+        lock(&self.denied_models).remove(&(person, model.to_owned()));
     }
 
     /// From now on `person` may not let a turn past a limit.
@@ -158,7 +171,14 @@ impl ResourceAccess for TestAccess {
         _: &mut Conn,
         ask: &ProviderUse<'_>,
     ) -> Result<Answer, AccessFault> {
-        self.answer(ask.person)
+        let answer = self.answer(ask.person)?;
+        if ask.model.is_some_and(|model| {
+            lock(&self.denied_models).contains(&(ask.person, model.to_owned()))
+        }) {
+            Ok(Answer::Refused(Vec::new()))
+        } else {
+            Ok(answer)
+        }
     }
 
     async fn agent_use(
@@ -1830,6 +1850,7 @@ impl World {
     /// in a few statements and with no row made one at a time. The history that results is one a person would not tell
     /// from a long one.
     pub async fn grow_history(&self, thread: Id, turns: i64) {
+        self.wait_followed_up(thread).await;
         let template: Id = self
             .scalar(
                 "SELECT id FROM turns WHERE thread_id=$1 AND ordinal=1",
@@ -1879,6 +1900,29 @@ impl World {
             .execute(&mut *tx)
             .await
             .unwrap();
+        // This private fixture holds an exclusive table lock. Restore and validate every original foreign key
+        // before committing, so PostgreSQL can validate the bulk copies as sets instead of probing once per row.
+        let foreign_keys: Vec<(String, String, bool)> = sqlx::query_as(
+            "SELECT quote_ident(conname::text), pg_get_constraintdef(oid), convalidated
+             FROM pg_constraint WHERE conrelid='items'::regclass AND contype='f' ORDER BY conname",
+        )
+        .fetch_all(&mut *tx)
+        .await
+        .unwrap();
+        assert!(foreign_keys.iter().all(|(_, _, valid)| *valid));
+        assert!(
+            foreign_keys
+                .iter()
+                .any(|(name, _, _)| name == "items_segment_id_fkey")
+        );
+        for (name, _, _) in &foreign_keys {
+            sqlx::query(sqlx::AssertSqlSafe(format!(
+                "ALTER TABLE items DROP CONSTRAINT {name}"
+            )))
+            .execute(&mut *tx)
+            .await
+            .unwrap();
+        }
         sqlx::query(
             "WITH seed AS MATERIALIZED (
                 SELECT x.seq_created, row_number() OVER (ORDER BY x.seq_created) AS rank, to_jsonb(x) AS body
@@ -1900,6 +1944,20 @@ impl World {
         .execute(&mut *tx)
         .await
         .unwrap();
+        for (name, definition, _) in &foreign_keys {
+            sqlx::query(sqlx::AssertSqlSafe(format!(
+                "ALTER TABLE items ADD CONSTRAINT {name} {definition} NOT VALID"
+            )))
+            .execute(&mut *tx)
+            .await
+            .unwrap();
+            sqlx::query(sqlx::AssertSqlSafe(format!(
+                "ALTER TABLE items VALIDATE CONSTRAINT {name}"
+            )))
+            .execute(&mut *tx)
+            .await
+            .unwrap();
+        }
         sqlx::query("ALTER TABLE items ENABLE TRIGGER related_thread_references")
             .execute(&mut *tx)
             .await
@@ -1932,10 +1990,18 @@ impl World {
 
     /// Waits for a thread to be in a state.
     pub async fn wait_state(&self, thread: Id, state: &str) {
-        eventually(&format!("thread in state {state}"), || async move {
-            self.state(thread).await.0 == state
-        })
-        .await;
+        let started = Instant::now();
+        loop {
+            let found = self.state(thread).await;
+            if found.0 == state {
+                return;
+            }
+            assert!(
+                started.elapsed() < PATIENCE,
+                "gave up waiting for: thread in state {state}; it stands {found:?}"
+            );
+            tokio::time::sleep(Duration::from_millis(20)).await;
+        }
     }
 
     /// Waits until what the end of each ended turn of a thread writes after it is written: the turn's use
@@ -2109,14 +2175,20 @@ impl World {
 
     /// Waits for the machine to have run a thread's `nth` turn start (from 0), and returns it.
     pub async fn turn_start(&self, thread: Id, nth: usize) -> TurnStart {
-        let mut found = None;
-        eventually(&format!("turn.start number {nth}"), || {
-            found = self.turn_starts(thread).get(nth).cloned();
-            let done = found.is_some();
-            async move { done }
-        })
-        .await;
-        found.expect("a turn start was seen")
+        let started = Instant::now();
+        loop {
+            if let Some(found) = self.turn_starts(thread).get(nth).cloned() {
+                return found;
+            }
+            if started.elapsed() >= PATIENCE {
+                panic!(
+                    "gave up waiting for: turn.start number {nth}; thread {:?}; commands {:?}",
+                    self.state(thread).await,
+                    self.commands.kinds()
+                );
+            }
+            tokio::time::sleep(Duration::from_millis(20)).await;
+        }
     }
 
     /// The next commands of this kind fail with these errors, one each; the ones after them are answered as before.

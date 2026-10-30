@@ -417,6 +417,38 @@ async fn stored_text(world: &common::World, artifact: &cut::TranscriptFile) -> P
 }
 
 #[tokio::test]
+async fn a_cut_counts_an_adopted_item_after_its_live_row_is_removed() -> Proof {
+    let world = common::World::new().await;
+    let thread = conversation(&world, 1).await?;
+    let adopted = new_id();
+    let mut conn = world.pool.acquire().await?;
+    let added = sqlx::query(
+        "INSERT INTO items SELECT copied.* FROM (
+            SELECT i.* FROM items i WHERE i.thread_id=$1 AND i.kind='agent_message' LIMIT 1
+         ) seed CROSS JOIN LATERAL jsonb_populate_record(NULL::items,to_jsonb(seed)||jsonb_build_object(
+            'id',$2::uuid,'turn_id',NULL,'before_orch',true,'seq_created',1,'seq_updated',1,
+            'native_ref',NULL,'payload',jsonb_build_object('text','Adopted before Orch'))) copied",
+    )
+    .bind(thread)
+    .bind(adopted)
+    .execute(&mut *conn)
+    .await?;
+    assert_eq!(added.rows_affected(), 1);
+    drop(conn);
+    let cut = captured(&world, thread).await?;
+    let mut conn = world.pool.acquire().await?;
+    let before = cuts::counts(&mut conn, cut.id).await?;
+    assert_eq!(before.items.get("agent_message"), Some(&2));
+    sqlx::query("DELETE FROM items WHERE id=$1")
+        .bind(adopted)
+        .execute(&mut *conn)
+        .await?;
+    let after = cuts::counts(&mut conn, cut.id).await?;
+    assert_eq!(after, before, "the captured adopted line is still counted");
+    Ok(())
+}
+
+#[tokio::test]
 async fn a_cut_holds_its_items_by_spans_and_keeps_a_copy_only_of_an_item_changed_or_removed_after_it()
 -> Proof {
     let world = common::World::new().await;
@@ -1050,6 +1082,10 @@ async fn a_cut_of_two_hundred_thousand_turns_gives_its_carry_from_the_end_its_tr
     let target = world.thread("A copy of a long history").await;
     let target_segment = world.segment_of(target).await;
     let mut tx = world.pool.begin().await?;
+    // A fork publishes through the API pool, whose statement budget is 15 seconds.
+    sqlx::query("SET LOCAL statement_timeout='15s'")
+        .execute(&mut *tx)
+        .await?;
     let (copied, statements) = Statements::of(async {
         let mut unit = crate::unit::Unit::new(&mut tx, world.clock.now());
         fork_history::copy_conversation(

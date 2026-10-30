@@ -63,7 +63,7 @@ export class AdoptionWorld implements Part {
 
   /** What adopting the session into the topic would do. */
   private plan(person: Person, topicId: string, body: Record<string, unknown>): AdoptPlan {
-    this.world.places.need(person, topicId, 'topic.interact');
+    this.world.places.need(person, topicId, 'topic.start_threads');
     const { entry } = this.find(body);
     const cwd = entry.session.cwd;
     const environment = this.world.resources.environments

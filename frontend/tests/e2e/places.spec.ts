@@ -175,14 +175,14 @@ test('a refusal says what is missing and whom to ask, beside the act that was re
   await expect(page.getByRole('button', { name: 'New topic', exact: true }).first()).toBeVisible();
 
   // Somebody takes the right away after the page was loaded: the page still believes it, the server does not.
-  await deny('dora', ['project.interact']);
+  await deny('dora', ['project.create_topics']);
   await page.getByRole('button', { name: 'New topic', exact: true }).first().click();
   await dialogField(page, /^Name/).fill('Not allowed');
   await page.getByRole('dialog').getByRole('button', { name: 'Create topic' }).click();
 
   const refusal = page.getByRole('dialog').getByRole('alert');
   await expect(refusal).toContainText('You do not have access to this.');
-  await expect(refusal.getByText('Interact Project')).toBeVisible();
+  await expect(refusal.getByText('Create topics')).toBeVisible();
   await expect(refusal).toContainText('on Web');
   await expect(refusal).toContainText('Ask Ada Lovelace.');
   // Nothing was made.

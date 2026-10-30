@@ -256,11 +256,19 @@ export function buildRows(view: ThreadView, options: RowOptions): Row[] {
 
 /** Every waiting input, including the first, delivering and held rows, belongs to the one queue. */
 export function queuedInputs(view: ThreadView): ThreadInput[] {
-  // A delivered message can precede its input-state frame. Its native input id is proof that
-  // this same row is already in the conversation, including steering and file handoffs.
-  const spoken = new Set<string>();
-  for (const item of view.items.values()) if (item.stream === 'main' && item.kind === 'user_message' && typeof item.payload.input_id === 'string') spoken.add(item.payload.input_id);
-  return waitingInputs(view).filter((input) => !spoken.has(input.id));
+  // A delivered message can precede its input-state frame. Its input identity keeps
+  // that stale row out of the queue, including steering and file handoffs.
+  const spoken = new Map<string, { seq: number; status: Item['status'] }>();
+  for (const item of view.items.values()) if (item.stream === 'main' && item.kind === 'user_message' && typeof item.payload.input_id === 'string') {
+    const previous = spoken.get(item.payload.input_id);
+    if (previous === undefined || previous.seq < item.seq_updated) spoken.set(item.payload.input_id, { seq: item.seq_updated, status: item.status });
+  }
+  return waitingInputs(view).filter((input) => {
+    const message = spoken.get(input.id);
+    // An unconfirmed reserved message can return to the queue. A completed
+    // message still wins over a stale pending frame, even if that frame is newer.
+    return message === undefined || (input.state === 'pending' && message.status !== 'completed' && input.seq_updated > message.seq);
+  });
 }
 
 /**

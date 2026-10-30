@@ -128,6 +128,10 @@ pub async fn is_member(
 
 impl Engine {
     /// Raises a membership request in the caller's guarded transaction, with the ordinary access-request limits.
+    #[expect(
+        clippy::too_many_arguments,
+        reason = "the guarded transaction and the complete membership request commit together"
+    )]
     pub async fn ask_to_join_guarded(
         &self,
         mut tx: Tx,
@@ -135,6 +139,7 @@ impl Engine {
         chat: Id,
         reason: &str,
         label: Option<&str>,
+        requested_expires_at: Option<Time>,
         origin: &Origin,
     ) -> Result<Raised, RaiseError> {
         let now = principal.now();
@@ -220,6 +225,7 @@ impl Engine {
                 required_permission: orch_access_contract::permissions::Permission::ChatInteract
                     .as_str(),
                 expires_at: end,
+                requested_expires_at: requested_expires_at.map(Time::get),
                 at: now.get(),
             },
         )
@@ -232,8 +238,7 @@ impl Engine {
             "asked to join a group chat",
         );
         audit.org_id = Some(row.org_id);
-        audit.details =
-            json!({"chat_id":chat,"approval_id":approval.id,"batch_id":batch,"reason":reason});
+        audit.details = json!({"chat_id":chat,"approval_id":approval.id,"batch_id":batch,"reason":reason,"requested_expires_at":requested_expires_at});
         audit::append(&mut tx, &audit, origin, now.get()).await?;
         let event = Event {
             kind: Kind::AccessRequested,
@@ -242,7 +247,7 @@ impl Engine {
             approval: Some(approval.id),
             title: title.to_owned(),
             body: reason.to_owned(),
-            data: json!({"approval_id":approval.id,"batch_id":batch,"path":"/approvals"}),
+            data: json!({"approval_id":approval.id,"batch_id":batch,"requested_expires_at":requested_expires_at,"path":"/approvals"}),
             source: approval.id.to_string(),
             actor: Some(principal.user()),
             at: now.get(),
@@ -354,7 +359,7 @@ impl Engine {
             },
         );
         entry.org_id = Some(loaded.row.org_id);
-        entry.details = json!({"approval_id":row.id,"chat_id":chat,"requester":requester,"expires_at":decided.expires_at,"note":decided.note});
+        entry.details = json!({"approval_id":row.id,"chat_id":chat,"requester":requester,"requested_expires_at":row.requested_expires_at.map(Time::new),"expires_at":decided.expires_at,"note":decided.note});
         audit::append(&mut tx, &entry, origin, now.get()).await?;
         let event = Event {
             kind: Kind::AccessDecided,
@@ -368,7 +373,7 @@ impl Engine {
             }
             .to_owned(),
             body: decided.note.clone().unwrap_or_default(),
-            data: json!({"approval_id":row.id,"batch_id":row.batch_id,"approved":decided.approve,"membership":true,"path":"/approvals"}),
+            data: json!({"approval_id":row.id,"batch_id":row.batch_id,"approved":decided.approve,"membership":true,"requested_expires_at":row.requested_expires_at.map(Time::new),"path":"/approvals"}),
             source: format!("{}:{state}", row.id),
             actor: Some(principal.user()),
             at: now.get(),

@@ -237,6 +237,7 @@ CREATE TABLE approvals (
     decided_at timestamp with time zone,
     decision jsonb,
     expires_at timestamp with time zone,
+    requested_expires_at timestamp with time zone,
     created_at timestamp with time zone DEFAULT now() NOT NULL,
     updated_at timestamp with time zone DEFAULT now() NOT NULL,
     CONSTRAINT approvals_approver_scope_check CHECK ((approver_scope = ANY (ARRAY['environment'::text, 'host'::text, 'org'::text, 'system'::text]))),
@@ -883,13 +884,12 @@ CREATE TABLE thread_history_cuts (
     artifacts jsonb DEFAULT '{}'::jsonb NOT NULL,
     CONSTRAINT thread_history_cuts_captured_seq_check CHECK ((captured_seq >= 0)),
     CONSTRAINT thread_history_cuts_check CHECK ((num_nonnulls(job_id, owner_thread_id) = 1)),
-    CONSTRAINT thread_history_cuts_check1 CHECK ((((job_id IS NULL) OR (id = job_id)) AND ((owner_thread_id IS NULL) OR (id = owner_thread_id)))),
+    CONSTRAINT thread_history_cuts_check1 CHECK (((job_id IS NULL) OR (id = job_id))),
     CONSTRAINT thread_history_cuts_check2 CHECK (((last_turn = 0) OR (last_turn >= first_turn))),
     CONSTRAINT thread_history_cuts_execution_revision_check CHECK ((execution_revision > 0)),
     CONSTRAINT thread_history_cuts_first_turn_check CHECK ((first_turn > 0)),
     CONSTRAINT thread_history_cuts_last_turn_check CHECK ((last_turn >= 0)),
     CONSTRAINT thread_history_cuts_job_id_key UNIQUE (job_id),
-    CONSTRAINT thread_history_cuts_owner_thread_id_key UNIQUE (owner_thread_id),
     CONSTRAINT thread_history_cuts_pkey PRIMARY KEY (id),
     CONSTRAINT thread_history_cuts_continuation_id_fkey FOREIGN KEY (continuation_id) REFERENCES thread_continuations(id) DEFERRABLE INITIALLY DEFERRED,
     CONSTRAINT thread_history_cuts_job_id_fkey FOREIGN KEY (job_id) REFERENCES jobs(id) ON DELETE CASCADE,
@@ -901,7 +901,24 @@ CREATE INDEX history_cuts_agent_history_source_idx ON thread_history_cuts USING 
 
 CREATE INDEX history_cuts_source_idx ON thread_history_cuts USING btree (thread_id, continuation_id);
 
+CREATE INDEX history_cuts_owner_idx ON thread_history_cuts USING btree (owner_thread_id) WHERE (owner_thread_id IS NOT NULL);
+
 CREATE INDEX thread_history_cuts_native_history_idx ON thread_history_cuts USING btree (source_segment_id) WHERE (source_native_ref IS NOT NULL);
+
+CREATE FUNCTION public.thread_history_cut_owner_segment() RETURNS trigger
+    LANGUAGE plpgsql
+    AS $$
+BEGIN
+  IF NEW.owner_thread_id IS NOT NULL AND NEW.id <> NEW.owner_thread_id AND NOT EXISTS(
+      SELECT 1 FROM segments WHERE id=NEW.id AND thread_id=NEW.owner_thread_id) THEN
+    RAISE EXCEPTION 'a recovery cut must belong to its thread and segment'
+      USING ERRCODE='23514', CONSTRAINT='thread_history_cut_owner_segment';
+  END IF;
+  RETURN NEW;
+END
+$$;
+
+CREATE TRIGGER history_cut_owner_segment BEFORE INSERT OR UPDATE OF id, owner_thread_id ON thread_history_cuts FOR EACH ROW EXECUTE FUNCTION thread_history_cut_owner_segment();
 
 CREATE TRIGGER history_cut_identity BEFORE UPDATE ON thread_history_cuts FOR EACH ROW EXECUTE FUNCTION thread_history_cut_identity();
 

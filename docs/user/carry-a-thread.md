@@ -17,6 +17,9 @@ import brings the recorded turns in the shared format. A file handoff gives
 the new agent recent context and the full conversation as a file. The plan
 names the method it will use.
 
+When a side thread's fork includes its first turn, the plan also counts the
+parent conversation captured when the side was created.
+
 A Codex thread keeps its history in the program's own store, and Orch never
 copies it. In the home where it was made, and when an environment moves with
 its volumes, the thread resumes natively. A native fork also needs the turn

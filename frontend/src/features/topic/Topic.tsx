@@ -34,7 +34,7 @@ import { TopicThreads, threadsOfTopic } from '@/features/topic/Threads';
 import { TopicDocuments } from '@/features/topic/Documents';
 import { TopicAgents } from '@/features/topic/Agents';
 import { SubscriptionBell } from '@/features/thread/SubscriptionBell';
-import { holds } from '@/lib/permissions';
+import { canCreateIn, holds } from '@/lib/permissions';
 import { useOrgTreeFeed } from '@/realtime/live';
 import { useOrgTree } from '@/realtime/stores/tree';
 import { selectOrg } from '@/shell/org';
@@ -170,7 +170,7 @@ export function Topic({ topicId, tab, onTab, section, onSection }: TopicProps) {
             value: 'threads',
             label: t('places.topic.tabs.threads'),
             count: tree.loaded ? threadCount : undefined,
-            panel: <TopicThreads orgId={data.org_id} topicId={data.id} topic={place} allowed={mayInteract} owner={data.owner} />,
+            panel: <TopicThreads orgId={data.org_id} topicId={data.id} topic={place} allowed={canCreateIn('topic', data.access)} owner={data.owner} />,
           },
           { value: 'environments', label: t('places.topic.tabs.environments'), count: data.environments.length, panel: <TopicEnvironments topic={data} /> },
           { value: 'documents', label: t('places.topic.tabs.documents'), panel: <TopicDocuments topic={data} /> },

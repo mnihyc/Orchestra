@@ -8,6 +8,9 @@
 mod places;
 mod support;
 
+use orch_api_contract::access::{
+    HolderInput, NodeDefaultsUpdate, PageChange, PageChangeAdd, PageChangeRow, Role,
+};
 use orch_api_contract::common::ErrorCode;
 use orch_api_contract::first_steps::{
     FirstStepsChoice, FirstStepsFact, FirstStepsGetQuery, FirstStepsId, FirstStepsMode,
@@ -55,6 +58,61 @@ async fn an_org_home_reads_real_first_steps_without_a_provider_or_model_probe() 
             .iter()
             .all(|role| role.model_access_required)
     );
+}
+
+#[tokio::test]
+async fn invitation_summaries_include_creation_rights_given_without_contribution() {
+    let world = World::new().await;
+    let owner = person(&world, "first-owner").await;
+    let org = make_org(&world, &owner, "First team", "first-team").await;
+    let rows = ["project.create_topics", "topic.start_threads"]
+        .into_iter()
+        .map(|permission| PageChangeRow {
+            permission: permission.to_owned(),
+            profile: None,
+            inherit: Some(false),
+            locked: None,
+            add: Some(vec![PageChangeAdd {
+                holder: HolderInput::Role {
+                    role: Role::Viewer,
+                    at: None,
+                },
+                options: None,
+                expires_at: None,
+                note: None,
+            }]),
+            update: None,
+            remove: None,
+        })
+        .collect();
+    world
+        .app
+        .call(NodeDefaultsUpdate, &[&org.base.id])
+        .token(&owner.token)
+        .body(&PageChange {
+            rows: Some(rows),
+            ..PageChange::default()
+        })
+        .send()
+        .await
+        .ok();
+    let facts = world
+        .app
+        .call(MeFirstStepsGet, &[])
+        .token(&owner.token)
+        .query(&FirstStepsGetQuery {
+            org_id: Some(org.base.id),
+        })
+        .send()
+        .await
+        .ok();
+    let viewer = facts
+        .invitation_roles
+        .iter()
+        .find(|summary| summary.role == Role::Viewer)
+        .unwrap();
+    assert!(viewer.start_topics);
+    assert!(viewer.start_threads);
 }
 
 #[tokio::test]

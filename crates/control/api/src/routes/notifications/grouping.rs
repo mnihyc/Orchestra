@@ -246,9 +246,16 @@ pub async fn list_by_place(
     };
     let mut rows = Vec::new();
     for row in source_rows(&mut conn, me, &filter, cut).await? {
-        if orch_authz::documents::notice_readable(&mut conn, &principal, &row.kind, &row.data)
-            .await
-            .map_err(ApiError::internal)?
+        if orch_authz::documents::notice_readable(
+            &mut conn,
+            &principal,
+            &row.kind,
+            &row.data,
+            row.chat_id,
+            row.thread_id,
+        )
+        .await
+        .map_err(ApiError::internal)?
         {
             rows.push(row);
         }
@@ -385,9 +392,16 @@ pub async fn read_group(ctx: Ctx, body: NotificationReadBody) -> ApiResult<Notif
     };
     let mut rows = Vec::new();
     for row in source_rows(&mut tx, me, &filter, through).await? {
-        if orch_authz::documents::notice_readable(&mut tx, &principal, &row.kind, &row.data)
-            .await
-            .map_err(ApiError::internal)?
+        if orch_authz::documents::notice_readable(
+            &mut tx,
+            &principal,
+            &row.kind,
+            &row.data,
+            row.chat_id,
+            row.thread_id,
+        )
+        .await
+        .map_err(ApiError::internal)?
         {
             rows.push(row);
         }
@@ -459,9 +473,16 @@ pub async fn undo_group(ctx: Ctx, body: NotificationReadBody) -> ApiResult<Notif
     let mut readable = Vec::new();
     for row in &carried {
         if groups.contains_key(&row.id)
-            && orch_authz::documents::notice_readable(&mut tx, &principal, &row.kind, &row.data)
-                .await
-                .map_err(ApiError::internal)?
+            && orch_authz::documents::notice_readable(
+                &mut tx,
+                &principal,
+                &row.kind,
+                &row.data,
+                row.chat_id,
+                row.thread_id,
+            )
+            .await
+            .map_err(ApiError::internal)?
         {
             readable.push(row.id);
         }

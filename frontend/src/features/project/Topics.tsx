@@ -12,7 +12,7 @@ import { TopicBoard } from '@/features/project/TopicBoard';
 import { TopicList } from '@/features/project/TopicList';
 import { TopicSelection } from '@/features/project/TopicSelection';
 import type { Project } from '@/generated/api-types';
-import { holds } from '@/lib/permissions';
+import { canCreateIn } from '@/lib/permissions';
 import { EmptyState } from '@/ui/EmptyState';
 import { ErrorState } from '@/ui/ErrorState';
 import { Pagination } from '@/ui/Pagination';
@@ -29,7 +29,7 @@ export function Topics({ project, search }: { project: Project; search: ProjectS
   const topics = useMemo(() => list.data?.pages.flatMap((page) => page.items) ?? [], [list.data]);
   const [selected, setSelected] = useState<ReadonlySet<string>>(new Set());
   const [anchor, setAnchor] = useState<string | null>(null);
-  const mayOpen = holds(project.access, 'project.interact');
+  const mayOpen = canCreateIn('project', project.access);
   const content = () => {
     if (list.isPending) return <SkeletonRows rows={5} />;
     if (list.isError) return <ErrorState compact error={list.error} retrying={list.isRefetching} onRetry={() => void list.refetch()} />;

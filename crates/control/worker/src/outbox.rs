@@ -614,7 +614,7 @@ impl Outbox {
     }
 
     /// The notifications of a unit that are still to be told: what the person read since is left
-    /// out, and so is a document's notice they may no longer read. Says too whether anything was
+    /// out, and so is a notice about work they may no longer read. Says too whether anything was
     /// left out for having been read.
     async fn still_to_tell(
         &self,
@@ -648,7 +648,7 @@ impl Outbox {
             }
             if matches!(
                 snapshot.kind.as_str(),
-                "doc.comment" | "doc.mention" | "person.notify"
+                "doc.comment" | "doc.mention" | "person.notify" | "mention" | "chat.message"
             ) {
                 let principal = match orch_authz::Principal::load(
                     conn,
@@ -668,6 +668,8 @@ impl Outbox {
                     &principal,
                     &snapshot.kind,
                     &snapshot.data,
+                    snapshot.chat_id,
+                    snapshot.thread_id,
                 )
                 .await?
                 {

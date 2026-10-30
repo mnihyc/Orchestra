@@ -27,8 +27,9 @@
 # runtime/<payload>/releases/<tag>-<hash>/, and runtime/<payload>/current and
 # runtime/<payload>/previous are links to the releases that run and that ran.
 # A link is replaced by one rename, so it is never half made. compose.yml,
-# nginx.conf, .env, config/orch.toml and the secrets are never changed by an
-# update. The password file's permissions are checked on every run.
+# nginx.conf, .env, config/orch.toml and existing secrets are kept by an update.
+# A missing port assertion key is added to an older complete secret set. The
+# password file's permissions are checked on every run.
 #
 # An update, a rollback and a first start are transactions. runtime/update/journal
 # records each step before it is taken, so that `recover` can finish or undo
@@ -60,7 +61,7 @@ RELEASE_URL="${ORCH_RELEASE_URL:-}"
 # The secrets a complete set has (orchctl compose-secrets makes them).
 SECRET_FILES="orch_ca_cert.pem orch_ca_key.pem orch_master_key orch_vapid_private_key
 node_enrollment_token service_api_cert.pem service_api_key.pem service_gateway_cert.pem
-service_gateway_key.pem service_worker_cert.pem service_worker_key.pem"
+service_gateway_key.pem service_worker_cert.pem service_worker_key.pem orch_ports_assertion_key"
 
 DEPLOY_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd -P)"
 cd "$DEPLOY_DIR"
@@ -158,13 +159,14 @@ machine_facts() {
     owner="$(stat -c '%u:%g' "$DEPLOY_DIR")"
     if [ "${owner%%:*}" -ne 0 ]; then uid="${owner%%:*}"; gid="${owner##*:}"; else uid="$ROOT_SERVICE_ID"; gid="$ROOT_SERVICE_ID"; fi
   fi
-  socket="${DOCKER_SOCKET:-/var/run/docker.sock}"
+  socket="${DOCKER_SOCKET:-$(env_get DOCKER_SOCKET)}"; socket="${socket:-/var/run/docker.sock}"
   [ -S "$socket" ] || die "no Docker socket at $socket; the node needs it (set DOCKER_SOCKET if it is elsewhere)"
   docker_gid="$(stat -c '%g' "$socket")"
   [ -n "$(env_get ORCH_HOME)" ] || block+="ORCH_HOME=$DEPLOY_DIR"$'\n'
   [ -n "$(env_get ORCH_UID)" ] || block+="ORCH_UID=$uid"$'\n'
   [ -n "$(env_get ORCH_GID)" ] || block+="ORCH_GID=$gid"$'\n'
   [ -n "$(env_get ORCH_DOCKER_GID)" ] || block+="ORCH_DOCKER_GID=$docker_gid"$'\n'
+  # shellcheck disable=SC2016 # Compose expands the optional file when it reads .env.
   [ -n "$(env_get COMPOSE_FILE)" ] || block+='COMPOSE_FILE=compose.yml${ORCH_FRONTEND_HTTPS_BIND:+:compose.frontend-https.yml}'$'\n'
   if [ -n "$block" ]; then
     { printf '\n# Written by update.sh first-start: the facts of this machine.\n'; printf '%s' "$block"; } >> .env
@@ -180,6 +182,9 @@ load_facts() {
   fi
   [ "$ORCH_HOME" = "$DEPLOY_DIR" ] ||
     die "ORCH_HOME in .env is $ORCH_HOME and this directory is $DEPLOY_DIR; it was moved. Set ORCH_HOME to the new place, and check that the Docker host sees the same path"
+  if [ "$(id -u)" -ne 0 ] && [ "$SERVICE_UID" != "$(id -u)" ]; then
+    die "ORCH_UID is $SERVICE_UID, but this user is $(id -u); run the updater as that user or as root so the services can write their directories"
+  fi
 }
 
 # --- Directories -----------------------------------------------------------------
@@ -194,7 +199,8 @@ make_dir() {
 # A stable bind-mounted inode keeps purge and a new node run mutually exclusive.
 ensure_node_lock() {
   local path="$DEPLOY_DIR/runtime/node.orch-instance-lock"
-  [ ! -L "$path" ] && { [ ! -e "$path" ] || [ -f "$path" ]; } || die "the node instance lock is not a real file"
+  if [ -L "$path" ]; then die "the node instance lock is not a real file"; fi
+  if [ -e "$path" ] && [ ! -f "$path" ]; then die "the node instance lock is not a real file"; fi
   (umask 077; : >> "$path")
   [ "$(id -u)" -ne 0 ] || chown "$SERVICE_UID:$SERVICE_GID" "$path"
   chmod 600 "$path"
@@ -294,6 +300,8 @@ load_manifest() {
   TAG="$(mget tag)"; VERSION="$(mget version)"; CONNECTOR_MINIMUM="$(mget connector_minimum)"
   [[ "$TAG" =~ ^v[0-9]+\.[0-9]+\.[0-9]+(-[0-9A-Za-z.-]+)?$ ]] || die "the release tag $TAG is not vMAJOR.MINOR.PATCH"
   [ "$TAG" = "v$VERSION" ] || die "version.json says tag $TAG and version $VERSION"
+  [[ "$CONNECTOR_MINIMUM" =~ ^[0-9]+\.[0-9]+\.[0-9]+(-[0-9A-Za-z.-]+)?$ ]] ||
+    die "connector_minimum in version.json is not a release version"
   arch="$(release_arch)"
   # shellcheck disable=SC2034 # read as ASSET_<kind> through an indirect expansion
   ASSET_server="orch-server-linux-$arch.zip"
@@ -386,7 +394,7 @@ fetch_release() {
 # services' user, with the release and the staging directory mounted.
 toolbox() {
   docker run --rm --user "$SERVICE_UID:$SERVICE_GID" --network none --entrypoint "$1" \
-    -v "$RELEASE_DIR:/in:ro" -v "$STAGE_PARENT:/out" "$TOOLBOX_IMAGE" "${@:2}"
+    -v "$TOOLBOX_INPUT:/in:ro" -v "$STAGE_PARENT:/out" "$TOOLBOX_IMAGE" "${@:2}"
 }
 
 # unpack KIND: puts the release's payload of KIND in releases/<tag>-<hash>/ and
@@ -405,8 +413,21 @@ unpack() {
   case "$kind" in
     server)
       # ORCH_UPDATE_NO_UNZIP=1 takes the container path on a host that has unzip (to try it).
-      if [ -z "${ORCH_UPDATE_NO_UNZIP:-}" ] && command -v unzip > /dev/null 2>&1; then unzip -q -o "$RELEASE_DIR/$asset" -d "$STAGE_PARENT/$stage"
-      else toolbox unzip -q "/in/$asset" -d "/out/$stage"; fi
+      if [ -z "${ORCH_UPDATE_NO_UNZIP:-}" ] && command -v unzip > /dev/null 2>&1; then
+        unzip -q -o "$RELEASE_DIR/$asset" -d "$STAGE_PARENT/$stage"
+      else
+        # A root-run updater creates the stage as root; the container unpacks as the service user.
+        [ "$(id -u)" -ne 0 ] || chown "$SERVICE_UID:$SERVICE_GID" "$STAGE_PARENT/$stage"
+        # The original release directory may be private to the operator. Mount a private copy
+        # the service user can read instead of requiring access to that directory.
+        TOOLBOX_INPUT="$WORK/server-archive"
+        mkdir -p "$TOOLBOX_INPUT"
+        cp "$RELEASE_DIR/$asset" "$TOOLBOX_INPUT/$asset"
+        [ "$(id -u)" -ne 0 ] || chown -R "$SERVICE_UID:$SERVICE_GID" "$TOOLBOX_INPUT"
+        chmod 700 "$TOOLBOX_INPUT"
+        chmod 600 "$TOOLBOX_INPUT/$asset"
+        toolbox unzip -q "/in/$asset" -d "/out/$stage"
+      fi
       chmod 755 "$STAGE_PARENT/$stage/bin/"*
       chmod 755 "$STAGE_PARENT/$stage/connectors/"orch-connector-* "$STAGE_PARENT/$stage/connectors/"*.sh 2> /dev/null || true
       ;;
@@ -428,7 +449,7 @@ unpack() {
 # published one names a registry. A failure to pull is said and is no reason to
 # stop: the services do not need them, only the environments made from them.
 ensure_images() {
-  local index=0 reference digest present selected
+  local index=0 reference digest present digest_image selected
   while reference="$(mget "images.$index.reference")" && [ -n "$reference" ]; do
     digest="$(mget "images.$index.digest")"
     index=$((index + 1))
@@ -445,6 +466,14 @@ ensure_images() {
     fi
     present="$(docker image inspect --format '{{.Id}}' "$reference" 2> /dev/null || true)"
     if [ -n "$present" ] && [ -n "$digest" ] && [ "$present" != "$digest" ]; then
+      # A registry digest identifies a manifest or index, while .Id is the image configuration's digest.
+      # An already digest-qualified reference was looked up by that digest above. For a tag, resolve
+      # the recorded digest separately and compare the image IDs that Docker would actually run.
+      if [[ "$reference" == *"@$digest" ]]; then continue; fi
+      if [[ "$reference" != *@* ]]; then
+        digest_image="$(docker image inspect --format '{{.Id}}' "$reference@$digest" 2> /dev/null || true)"
+        [ "$digest_image" = "$present" ] && continue
+      fi
       note "$reference on this host is $present, and the release names $digest"
     fi
   done
@@ -575,7 +604,12 @@ wait_ready() {
 take_dump() {
   if [ "${J[kind]:-}" != first-start ]; then
     backup_command dump --out "/backups/$(basename "$1")" --records-dir /installation \
-      --release "$(state_get current_tag)" --cause "${2:-pre-update}" || die "database backup failed; a completed pair, if any, can repair its Overview record without another dump"
+      --release "$(state_get current_tag)" --cause "${2:-pre-update}" || {
+        if [ "${J[kind]:-}" = update ] || [ "${J[kind]:-}" = rollback ]; then
+          die "database backup failed after services were stopped; resolve the cause and run ./update.sh recover to restart them"
+        fi
+        die "database backup failed; a completed pair, if any, can repair its Overview record without another dump"
+      }
     return
   fi
   take_bootstrap_dump "$1"
@@ -616,26 +650,47 @@ restore_database() {
     die "the dump $1 could not be restored"
 }
 
-# sql QUERY: one value or a few rows from the database, or nothing if it cannot be asked.
-sql() { compose exec -T postgres psql -U orch -d orch -At -F'|' -c "$1" 2> /dev/null || true; }
+# sql QUERY: one value or a few rows from the database; a failed query is not an empty inventory.
+sql() { compose exec -T postgres psql -X -v ON_ERROR_STOP=1 -U orch -d orch -At -F'|' -c "$1"; }
 
 # --- What an update does to running work -------------------------------------------------
 
 # warn_about_work: tells what the new release does to what is running, and sets
 # NEEDS_ANSWER when it said anything, for the caller to ask whether to go on.
 warn_about_work() {
-  local running units kind count lines="" environments=0 providers=0
-  running="$(sql "SELECT count(*) FROM threads WHERE state IN ('starting','running','waiting_approval')")"
+  local running units prereleases kind count lines="" environments=0 providers=0
+  running="$(sql "SELECT count(*) FROM threads WHERE state IN ('starting','running','waiting_approval')")" ||
+    die "could not inspect running threads; no services were stopped"
+  [[ "$running" =~ ^[0-9]+$ ]] || die "the running thread count could not be read; no services were stopped"
   units="$(sql "SELECT r.kind, count(*) FROM runtimes r JOIN machines m ON m.id = r.machine_id
                  WHERE r.state IN ('creating','running','stopped','stopping')
-                   AND string_to_array(split_part(m.connector_version, '-', 1), '.')::int[]
-                       < string_to_array(split_part('$CONNECTOR_MINIMUM', '-', 1), '.')::int[]
-                 GROUP BY r.kind")"
+                   AND string_to_array(split_part(split_part(m.connector_version, '+', 1), '-', 1), '.')::numeric[]
+                       < string_to_array(split_part('$CONNECTOR_MINIMUM', '-', 1), '.')::numeric[]
+                 GROUP BY r.kind")" || die "could not inspect runtime connector versions; no services were stopped"
   while IFS='|' read -r kind count; do
-    case "$kind" in environment) environments="$count" ;; provider) providers="$count" ;; esac
+    [ -n "$kind" ] || continue
+    [[ "$count" =~ ^[0-9]+$ ]] || die "the runtime count could not be read; no services were stopped"
+    case "$kind" in
+      environment) environments="$count" ;;
+      provider) providers="$count" ;;
+      *) die "the runtime kind $kind could not be read; no services were stopped" ;;
+    esac
   done <<< "$units"
+  # The gateway compares prerelease identifiers too. Do not treat one with the
+  # minimum's numeric version as current without checking those identifiers.
+  prereleases="$(sql "SELECT count(*) FROM runtimes r JOIN machines m ON m.id = r.machine_id
+                      WHERE r.state IN ('creating','running','stopped','stopping')
+                        AND string_to_array(split_part(split_part(m.connector_version, '+', 1), '-', 1), '.')::numeric[]
+                            = string_to_array(split_part('$CONNECTOR_MINIMUM', '-', 1), '.')::numeric[]
+                        AND position('-' IN split_part(m.connector_version, '+', 1)) > 0")" ||
+    die "could not inspect prerelease connector versions; no services were stopped"
+  [[ "$prereleases" =~ ^[0-9]+$ ]] || die "the prerelease runtime count could not be read; no services were stopped"
   if [ "$environments" -gt 0 ] || [ "$providers" -gt 0 ]; then
     lines+="$environments environments and $providers provider runtimes will need an update before they work again (release $TAG no longer accepts their connector).
+"
+  fi
+  if [ "$prereleases" -gt 0 ]; then
+    lines+="$prereleases runtimes use prerelease connectors on the minimum's numeric version; check whether they meet $CONNECTOR_MINIMUM before continuing.
 "
   fi
   if [ "${running:-0}" -gt 0 ]; then
@@ -724,25 +779,25 @@ release_keep_count() {
 
 # The automatic pass applies; the operator command supplies zero for its dry run.
 prune_releases() {
-  local apply="${1:-1}" keep kind current previous name age retained directory identity bytes marker
+  local apply="${1:-1}" keep kind current previous name retained directory identity bytes marker
   STORAGE_KEEP_COUNT=""
   if ! keep="$(release_keep_count)"; then return 0; fi
   STORAGE_KEEP_COUNT="$keep"
   [ "$keep" != 0 ] || return 0
   for kind in $PAYLOADS; do
     directory="$DEPLOY_DIR/runtime/$kind/releases"
-    [ -d "$DEPLOY_DIR/runtime" ] && [ ! -L "$DEPLOY_DIR/runtime" ] || continue
-    [ -d "$DEPLOY_DIR/runtime/$kind" ] && [ ! -L "$DEPLOY_DIR/runtime/$kind" ] || continue
-    [ -d "$directory" ] && [ ! -L "$directory" ] || continue
+    if [ ! -d "$DEPLOY_DIR/runtime" ] || [ -L "$DEPLOY_DIR/runtime" ]; then continue; fi
+    if [ ! -d "$DEPLOY_DIR/runtime/$kind" ] || [ -L "$DEPLOY_DIR/runtime/$kind" ]; then continue; fi
+    if [ ! -d "$directory" ] || [ -L "$directory" ]; then continue; fi
     identity="$(stat -c '%d:%i' -- "$directory")"
     current="$(link_get "$kind" current)"; previous="$(link_get "$kind" previous)"
     retained=0
-    while IFS=$'\t' read -r -d '' age name; do
+    while IFS=$'\t' read -r -d '' _ name; do
       case "$name" in "$current" | "$previous") continue ;; esac
       case "$name" in .*) continue ;; esac
       # Only whole payloads that the updater published are eligible; links and staging paths stay.
       [[ "$name" =~ ^[0-9A-Za-z][0-9A-Za-z._-]*$ ]] || continue
-      [ -f "$directory/$name/.complete" ] && [ ! -L "$directory/$name/.complete" ] && [ ! -L "$directory/$name" ] || continue
+      if [ ! -f "$directory/$name/.complete" ] || [ -L "$directory/$name/.complete" ] || [ -L "$directory/$name" ]; then continue; fi
       # A complete marker is one 64-character digest, optionally ending in a newline.
       [ "$(stat -c %s -- "$directory/$name/.complete")" -le 65 ] || continue
       marker="$(cat "$directory/$name/.complete")"
@@ -754,12 +809,12 @@ prune_releases() {
           say "$(uninstall_words 'Would remove' '将移除') $kind/$name ($bytes $(uninstall_words bytes 字节))"
         else
           # Manual changes outside this lock cannot redirect a confirmed cleanup.
-          [ ! -L "$DEPLOY_DIR/runtime" ] && [ ! -L "$DEPLOY_DIR/runtime/$kind" ] && [ ! -L "$directory" ] || die "the release directory changed; review prune again"
+          if [ -L "$DEPLOY_DIR/runtime" ] || [ -L "$DEPLOY_DIR/runtime/$kind" ] || [ -L "$directory" ]; then die "the release directory changed; review prune again"; fi
           [ "$(stat -c '%d:%i' -- "$directory")" = "$identity" ] || die "the release directory changed; review prune again"
-          [ "$name" != "$(link_get "$kind" current)" ] && [ "$name" != "$(link_get "$kind" previous)" ] || continue
-          [ ! -L "$directory/$name" ] && [ ! -L "$directory/$name/.complete" ] && [ "$(cat "$directory/$name/.complete")" = "$marker" ] || die "the release changed; review prune again"
+          if [ "$name" = "$(link_get "$kind" current)" ] || [ "$name" = "$(link_get "$kind" previous)" ]; then continue; fi
+          if [ -L "$directory/$name" ] || [ -L "$directory/$name/.complete" ] || [ "$(cat "$directory/$name/.complete")" != "$marker" ]; then die "the release changed; review prune again"; fi
           say "$(uninstall_words Removing 正在移除) $kind/$name ($bytes $(uninstall_words bytes 字节))"
-          rm -rf -- "$directory/$name"
+          rm -rf -- "${directory:?}/${name:?}"
         fi
       fi
     done < <(find "$directory" -mindepth 1 -maxdepth 1 -type d -printf '%T@\t%f\0' | sort -zrn)
@@ -803,7 +858,7 @@ cmd_dumps_remove() {
 transact() {
   local from="${J[from_tag]}" to="${J[to_tag]}"
   jset step stopping
-  app_stop
+  app_stop || die "services could not all be stopped; run ./update.sh recover to restart the previous release"
   jset step dumping
   take_dump "${J[leaving_dump]}"
   jset step activating
@@ -837,6 +892,7 @@ cmd_update() {
   ensure_images
   warn_about_work
   [ "$NEEDS_ANSWER" -eq 0 ] || confirm "Go on?"
+  ensure_secrets "$DEPLOY_DIR/runtime/cli/releases/${NEW_RELEASE[cli]}"
   begin_transaction update "$(state_get current_tag)" "$TAG"
   for kind in $PAYLOADS; do
     J[${kind}_current_after]="${NEW_RELEASE[$kind]}"
@@ -866,6 +922,7 @@ EOF
   load_manifest_of_installed "$back"
   warn_about_work
   confirm "Roll back to $back?"
+  ensure_secrets "$DEPLOY_DIR/runtime/cli/current"
   begin_transaction rollback "$(state_get current_tag)" "$back"
   for kind in $PAYLOADS; do
     J[${kind}_current_after]="${J[${kind}_previous_before]}"
@@ -878,10 +935,14 @@ EOF
   say "release $back is running again."
 }
 
-# load_manifest_of_installed TAG: for a rollback the version to ask for is the one
-# that is going to be entered; there is no manifest to read, and no connector
-# minimum to warn about.
-load_manifest_of_installed() { TAG="$1"; CONNECTOR_MINIMUM="0.0.0"; }
+# The previous server payload carries the manifest used for its own downloads.
+load_manifest_of_installed() {
+  local wanted=$1 release
+  release="$(link_get server previous)"
+  [ -n "$release" ] || die "the previous server release is not there"
+  load_manifest "runtime/server/releases/$release/connectors"
+  [ "$TAG" = "$wanted" ] || die "the previous server manifest says $TAG, but the installed record says $wanted"
+}
 
 cmd_backup() {
   local out
@@ -919,18 +980,20 @@ cmd_recover() {
   step="${J[step]}"; kind="${J[kind]}"; from="${J[from_tag]}"; to="${J[to_tag]}"
   say "an interrupted $kind to $to is recorded; it stopped at step $step"
   if [ "$kind" = first-start ]; then
-    say "a first start can be taken up again: run ./update.sh first-start; the journal is cleared"
+    say "a first start can be taken up again: repeat the original ./update.sh first-start command with its options; the journal is cleared"
     journal_clear
     return 0
   fi
   require_installed allow-journal
+  ensure_secrets "$DEPLOY_DIR/runtime/cli/current"
   case "$step" in
     begin | staged | stopping | dumping | activating)
       # No service has run the new release, and the database is as it was: the
       # links go back, and the old release runs.
       note "the new release never ran; starting release $from as it was"
       deactivate_payloads
-      rm -f -- "${J[leaving_dump]}.partial"
+      # A cut at begin can precede assignment of the dump name.
+      if [ -n "${J[leaving_dump]:-}" ]; then rm -f -- "${J[leaving_dump]}.partial"; fi
       app_start
       wait_ready "$from" || die "release $from does not become ready; docker compose logs"
       journal_clear
@@ -982,7 +1045,7 @@ begin_transaction() {
 }
 
 cmd_first_start() {
-  local selector=${1:-} kind fingerprint url bind file secrets_out
+  local selector=${1:-} kind fingerprint url bind file
   load_facts_for_first_start
   check_password
   if [ -L runtime/server/current ] && [ -f "$STATE" ]; then die "a release is installed already ($(state_get current_tag)); ./update.sh latest or vX.Y.Z updates it"; fi
@@ -998,14 +1061,7 @@ cmd_first_start() {
   done
   ensure_images
   jset step secrets
-  if complete_secrets; then say "the secrets in config/secrets are all there"; else
-    say "making the secrets"
-    secrets_out="$(docker run --rm --user "$SERVICE_UID:$SERVICE_GID" --network none \
-      -v "$DEPLOY_DIR/config:/config" -v "$DEPLOY_DIR/runtime/cli/current:/cli:ro" "$RUNTIME_IMAGE" \
-      /cli/orchctl compose-secrets --secrets-dir /config/secrets --config /config/orch.toml)" || die "orchctl compose-secrets failed"
-    printf '%s\n' "$secrets_out"
-  fi
-  chmod 700 config/secrets
+  ensure_secrets "$DEPLOY_DIR/runtime/cli/current"
   check_installation
   jset step database
   database_start
@@ -1019,7 +1075,7 @@ cmd_first_start() {
   jset step starting
   app_start
   jset step verifying
-  wait_ready "$TAG" || die "the stack did not become ready; docker compose logs shows why, and ./update.sh first-start takes it up again"
+  wait_ready "$TAG" || die "the stack did not become ready; docker compose logs shows why, and repeating the original ./update.sh first-start command takes it up again"
   state_save "$TAG" "" ""
   journal_clear
   publish_storage_metadata
@@ -1051,6 +1107,23 @@ complete_secrets() {
   for file in $SECRET_FILES; do [ -f "config/secrets/$file" ] || return 1; done
 }
 
+# A complete older set can lack the port assertion key. compose-secrets adds it
+# without replacing the existing keys, and refuses any partial original set.
+ensure_secrets() {
+  local cli_dir=$1 secrets_out
+  if complete_secrets; then
+    say "the secrets in config/secrets are all there"
+  else
+    say "making or completing the secrets"
+    secrets_out="$(docker run --rm --user "$SERVICE_UID:$SERVICE_GID" --network none \
+      -v "$DEPLOY_DIR/config:/config" -v "$cli_dir:/cli:ro" "$RUNTIME_IMAGE" \
+      /cli/orchctl compose-secrets --secrets-dir /config/secrets --config /config/orch.toml)" || die "orchctl compose-secrets failed"
+    printf '%s\n' "$secrets_out"
+  fi
+  chmod 700 config/secrets
+  complete_secrets || die "config/secrets is incomplete after orchctl compose-secrets"
+}
+
 # authority_fingerprint: the SHA-256 of the authority's certificate, in hexadecimal.
 authority_fingerprint() {
   sed -n '/BEGIN CERTIFICATE/,/END CERTIFICATE/p' config/secrets/orch_ca_cert.pem | grep -v -- '-----' | base64 -d | sha256sum | cut -d' ' -f1
@@ -1074,7 +1147,8 @@ uninstall_node() {
 }
 
 uninstall_backup() {
-  local pair="$DEPLOY_DIR/backups/uninstall-$(stamp)-$$" dump="orch-final.dump"
+  local pair dump="orch-final.dump"
+  pair="$DEPLOY_DIR/backups/uninstall-$(stamp)-$$"
   [ ! -e "$pair" ] || die "the final backup destination already exists"
   make_dir 700 "$DEPLOY_DIR/backups"
   make_dir 700 "$pair"
@@ -1097,7 +1171,7 @@ cmd_uninstall() {
   load_facts
   [ -f "$STATE" ] || die "nothing is installed here"
   [ ! -f "$JOURNAL" ] || die "recover the interrupted update before uninstalling"
-  [ ! -L runtime ] && [ ! -L config ] && [ ! -L config/secrets ] || die "runtime and secrets must be real installation directories"
+  if [ -L runtime ] || [ -L config ] || [ -L config/secrets ]; then die "runtime and secrets must be real installation directories"; fi
   [ -x runtime/cli/current/orchctl ] || die "the installed command line program is unavailable"
   name="$(runtime/cli/current/orchctl system-name --config config/orch.toml)" || die "the system's name cannot be read"
   [ -n "$name" ] || die "the system has no name"
@@ -1132,6 +1206,7 @@ cmd_uninstall() {
     IFS= read -r answer || die "confirmation was not given; nothing was removed"
     [ "$answer" = "$name" ] || die "the name did not match; nothing was removed"
   fi
+  # shellcheck disable=SC2086 # The service names are separate arguments.
   compose stop --timeout "$STOP_TIMEOUT" $APP_SERVICES
   if [ "$PURGE" = 1 ]; then
     if [ "$NO_BACKUP" = 0 ]; then uninstall_backup; fi
@@ -1139,8 +1214,8 @@ cmd_uninstall() {
   fi
   compose down --timeout "$STOP_TIMEOUT" --remove-orphans || die "the stack could not be removed"
   if [ "$PURGE" = 1 ]; then
-    [ ! -L runtime ] && [ ! -L config ] && [ ! -L config/secrets ] || die "an installation directory was replaced; files are kept"
-    [ "$(stat -c '%d:%i' runtime)" = "$runtime_identity" ] && [ "$(stat -c '%d:%i' config)" = "$config_identity" ] && [ "$(stat -c '%d:%i' config/secrets)" = "$secrets_identity" ] || die "an installation directory changed identity; files are kept"
+    if [ -L runtime ] || [ -L config ] || [ -L config/secrets ]; then die "an installation directory was replaced; files are kept"; fi
+    if [ "$(stat -c '%d:%i' runtime)" != "$runtime_identity" ] || [ "$(stat -c '%d:%i' config)" != "$config_identity" ] || [ "$(stat -c '%d:%i' config/secrets)" != "$secrets_identity" ]; then die "an installation directory changed identity; files are kept"; fi
     rm -rf -- "$DEPLOY_DIR/runtime" "$DEPLOY_DIR/config/secrets"
   fi
   uninstall_words "The stack is removed." "系统服务已移除。"

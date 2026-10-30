@@ -11,7 +11,7 @@ import { useEffect, useState } from 'react';
 import { useTranslation } from 'react-i18next';
 
 import { metaQuery, nameAvailabilityQuery, PASSWORD_MIN_CHARS, register, resendConfirmation, USERNAME_PATTERN } from '@/api/auth';
-import { ApiError } from '@/api/client';
+import { ApiError, invitationIssuerAuthorityLost } from '@/api/client';
 import { invitationQuery } from '@/api/users';
 import { AuthCard } from '@/features/auth/Frame';
 import { IdentityProviders } from '@/features/auth/IdentityProviders';
@@ -152,13 +152,13 @@ function RegisterForm({ invitation, preview, onEnded }: RegisterFormProps) {
     onError: (error) => {
       if (form.refuse(error)) return;
       // The one refusal a personal link has of its own: another address than the one it was sent to.
-      if (bound && error instanceof ApiError && error.is('registration.invite_required')) form.focus('email');
+      if (bound && error instanceof ApiError && error.is('registration.invite_required') && !invitationIssuerAuthorityLost(error)) form.focus('email');
     },
   });
 
   const error = create.error;
   const placed = error instanceof ApiError && error.faults().some((fault) => fault.path in form.values);
-  const otherAddress = bound && error instanceof ApiError && error.is('registration.invite_required');
+  const otherAddress = bound && error instanceof ApiError && error.is('registration.invite_required') && !invitationIssuerAuthorityLost(error);
   const taken = error instanceof ApiError && error.is('conflict.exists');
   const nameConflict = taken && error.faults().some((fault) => fault.path === 'username') && username.error !== undefined;
   const email = form.field('email');
