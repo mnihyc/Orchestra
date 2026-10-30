@@ -32,6 +32,7 @@ import { useStart } from './start';
 import { DirectorySign } from './DirectorySign';
 import { Where, WhereOptions } from './Where';
 import { TemporaryChoice } from '@/features/resources/environments/Temporary';
+import type { BindingEnvironment } from '@/generated/api-types';
 import { agentWhy, bindingReason, providerWhy, reasonWords } from './words';
 
 /** What the person typed and chose in the inline starter, which the dialog opens with. */
@@ -68,6 +69,7 @@ function ThreadSetup({ parent, open, onClose, draft }: NewThreadDialogProps) {
   const optionsId = useId();
   const harnessTitle = useHarnessTitle(open);
   const [picks, setPicks] = useState<Picks>(draft?.picks ?? NO_PICKS);
+  const [requesting, setRequesting] = useState<BindingEnvironment | null>(null);
   const [access, setAccess] = useState<NewPagePreset>('defaults');
   const [letIntoEnvironment, setLetIntoEnvironment] = useState(true);
   const [name, setName] = useState('');
@@ -103,6 +105,8 @@ function ThreadSetup({ parent, open, onClose, draft }: NewThreadDialogProps) {
       ? loading
         ? t('start.why.loading')
         : t('start.why.failed')
+      : requesting !== null
+        ? t('start.why.environment')
       : refreshing || resolved.settling
         ? t('start.why.checking')
         : resolved.missing[0] === undefined
@@ -110,7 +114,7 @@ function ThreadSetup({ parent, open, onClose, draft }: NewThreadDialogProps) {
           : t(`start.why.${resolved.missing[0].kind === 'agent' && resolved.missing[0].unreported ? 'agentUnreported' : resolved.missing[0].kind}`);
 
   const create = () => {
-    if (options === null || resolved === null) return;
+    if (options === null || resolved === null || requesting !== null) return;
     make.start({
       place: parent,
       options,
@@ -241,8 +245,8 @@ function ThreadSetup({ parent, open, onClose, draft }: NewThreadDialogProps) {
             </Step>
 
             <Step title={t('start.where.title')}>
-              <Where compact place={parent} options={options} value={whereValue} onChange={(next) => pick({ environment: next, arrangement: null })} machines={machines.data ?? []} homeId={place.data?.org_id ?? ''} />
-              {resolved.fresh && <TemporaryChoice checked={temporary} onChange={setTemporary} disabled={make.pending} />}
+              <Where compact place={parent} options={options} value={whereValue} onChange={(next) => pick({ environment: next, arrangement: null })} machines={machines.data ?? []} homeId={place.data?.org_id ?? ''} requesting={requesting} onRequestingChange={setRequesting} onRefresh={retry} />
+              {requesting === null && resolved.fresh && <TemporaryChoice checked={temporary} onChange={setTemporary} disabled={make.pending} />}
             </Step>
           </>
         )}
@@ -251,21 +255,21 @@ function ThreadSetup({ parent, open, onClose, draft }: NewThreadDialogProps) {
         {extraOpen && <div id={optionsId} role="region" aria-label={t('start.options.title')} className="flex flex-col gap-3">
           {resolved !== null && options !== null && <>
               {resolved.efforts.length > 0 && <Select label={t('start.model.effort')} value={resolved.effort ?? ''} onValueChange={(next) => pick({ effort: next })} options={resolved.efforts.map((value) => ({ value, ...(offeredChoice(t, 'effort', value) ?? choiceOption(t, 'dynamic.value', { name: value, context: t('start.model.effort') })) }))} />}
-              <WhereOptions place={parent} options={options} value={whereValue} onChange={(next) => pick({ environment: next, arrangement: null })} machines={machines.data ?? []} machinesLoading={machines.isPending} homeId={place.data?.org_id ?? ''} />
+              <WhereOptions place={parent} options={options} value={whereValue} onChange={(next) => { setRequesting(null); pick({ environment: next, arrangement: null }); }} machines={machines.data ?? []} machinesLoading={machines.isPending} homeId={place.data?.org_id ?? ''} />
               <Input
                 label={t('start.where.directory')}
                 optional
-                hint={resolved.environment !== null && resolved.environment.directory !== '' ? t('start.where.directoryIs', { directory: resolved.environment.directory }) : t('start.where.directoryHint')}
-                aside={<DirectorySign environmentId={resolved.fresh ? null : (resolved.environment?.environment.id ?? null)} directory={directory.trim()} />}
+                hint={requesting === null && resolved.environment !== null && resolved.environment.directory !== '' ? t('start.where.directoryIs', { directory: resolved.environment.directory }) : t('start.where.directoryHint')}
+                aside={<DirectorySign environmentId={requesting !== null || resolved.fresh ? null : (resolved.environment?.environment.id ?? null)} directory={directory.trim()} />}
                 value={directory}
                 onChange={(event) => setDirectory(event.target.value)}
                 autoComplete="off"
               />
               <RepositoryChoice source={options.source} checked={prepareSource} onChange={setPrepareSource} />
-              <ArrangementSection resolved={resolved} refreshing={refreshing} onChange={(type) => pick({ arrangement: type })} />
-          <NewPage place={parent} placement={resolved.environment?.environment.placement ?? 'managed'} preset={access} onPresetChange={setAccess}
+              {requesting === null && <ArrangementSection resolved={resolved} refreshing={refreshing} onChange={(type) => pick({ arrangement: type })} />}
+          <NewPage place={parent} placement={requesting?.environment.placement ?? resolved.environment?.environment.placement ?? 'managed'} preset={access} onPresetChange={setAccess}
             letIntoEnvironment={letIntoEnvironment} onLetIntoEnvironmentChange={setLetIntoEnvironment}
-            summary={resolved.environment?.environment.placement === 'connected' ? options.access.connected : options.access.managed}
+            summary={(requesting?.environment.placement ?? resolved.environment?.environment.placement) === 'connected' ? options.access.connected : options.access.managed}
             {...(making ? { audienceName: t('places.project.newTopic') } : {})} />
           </>}
           <Input label={t('start.options.name')} optional hint={t('start.options.nameHint')} value={name} onChange={(event) => setName(event.target.value)} autoComplete="off" />

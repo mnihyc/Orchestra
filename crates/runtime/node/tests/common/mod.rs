@@ -414,7 +414,10 @@ impl Rig {
         std::fs::write(version.join(".complete"), "x\n").unwrap();
         let link = versions.join("current");
         let _ = std::fs::remove_file(&link);
+        #[cfg(unix)]
         std::os::unix::fs::symlink("0.1.0", link).unwrap();
+        #[cfg(windows)]
+        std::os::windows::fs::symlink_dir("0.1.0", link).unwrap();
     }
 
     /// The body of `node.runtime.create` for `spec`, its token sealed to the node for the command `command`.

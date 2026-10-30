@@ -103,6 +103,7 @@ services:
       - ./config/secrets/orch_ca_cert.pem:/run/secrets/orch_ca_cert.pem:ro
       - ./config/secrets/orch_ca_key.pem:/run/secrets/orch_ca_key.pem:ro
       - ./config/secrets/orch_master_key:/run/secrets/orch_master_key:ro
+      - ./config/secrets/orch_ports_assertion_key:/run/secrets/orch_ports_assertion_key:ro
       - ./config/secrets/service_api_cert.pem:/run/secrets/service_api_cert.pem:ro
       - ./config/secrets/service_api_key.pem:/run/secrets/service_api_key.pem:ro
       # The API registers this token, so that the node can enroll with it.
@@ -208,7 +209,7 @@ services:
       - ./config/secrets/node_enrollment_token:/run/secrets/node_enrollment_token:ro
       - "${ORCH_HOME}/runtime/node:${ORCH_HOME}/runtime/node"
       - "${ORCH_HOME}/runtime/node.orch-instance-lock:${ORCH_HOME}/runtime/node.orch-instance-lock"
-      - /var/run/docker.sock:/var/run/docker.sock
+      - "${DOCKER_SOCKET:-/var/run/docker.sock}:/var/run/docker.sock"
     networks: [control]
 
   frontend:

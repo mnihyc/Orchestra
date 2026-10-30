@@ -344,8 +344,7 @@ async fn port_capability_policy_is_shown_for_later_use_and_does_not_become_a_sec
         orch_db::seeds::seed(
             &mut tx,
             &orch_db::seeds::Release {
-                environment_image: "registry.example/orch-test-env:1",
-                environment_image_digest: None,
+                version: "0.1.0",
                 adapters: &[],
             },
             s.rig.world.now(),

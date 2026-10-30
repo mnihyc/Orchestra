@@ -4,16 +4,19 @@
     clippy::expect_used,
     reason = "a test fails by panicking"
 )]
-#![cfg(target_os = "linux")]
 
 use std::collections::BTreeMap;
 use std::path::Path;
 use std::sync::Arc;
 use std::time::Duration;
 
+#[cfg(unix)]
 use orch_envhost::blobs::MemoryBlobs;
+#[cfg(unix)]
 use orch_envhost::environment::{Report, Reports};
+#[cfg(target_os = "linux")]
 use orch_envhost::platform::{self, Sig};
+#[cfg(target_os = "linux")]
 use orch_envhost::processes::{Processes, ScopeKind};
 use orch_envhost::terminal::{Attachment, Event, OpenSpec, Purpose, TerminalLinks, Terminals};
 use orch_types::{Id, SystemClock};
@@ -25,7 +28,12 @@ fn spec(id: Id, cwd: &Path, record: bool) -> OpenSpec {
         id,
         environment_id: orch_types::new_id(),
         purpose: Purpose::Shell,
-        program: "/bin/sh".into(),
+        program: (if cfg!(windows) {
+            std::env::var("COMSPEC").unwrap_or_else(|_| "cmd.exe".to_owned())
+        } else {
+            "/bin/sh".to_owned()
+        })
+        .into(),
         args: vec![],
         login: false,
         cwd: cwd.to_path_buf(),
@@ -58,8 +66,9 @@ async fn read_until(attachment: &mut Attachment, seen: &mut String, needle: &str
 }
 
 fn type_line(attachment: &Attachment, line: &str) {
+    let newline = if cfg!(windows) { "\r\n" } else { "\n" };
     attachment
-        .send_input(format!("{line}\n").into_bytes())
+        .send_input(format!("{line}{newline}").into_bytes())
         .unwrap();
 }
 
@@ -79,6 +88,34 @@ async fn replay_until(terminals: &Terminals, id: Id, needle: &str) -> Attachment
     }
 }
 
+#[cfg(windows)]
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_windows_shell_runs_in_its_directory_and_replays_output_after_detach() {
+    let dir = tempfile::tempdir().unwrap();
+    let terminals = terminals(TerminalLinks::default());
+    let id = orch_types::new_id();
+    let mut open = spec(id, dir.path(), false);
+    open.env.insert("ORCH_TEST_NUMBER".into(), "42".into());
+    terminals.open(open).unwrap();
+    let mut screen = terminals.attach(id, true).unwrap();
+    screen.resize(100, 30).unwrap();
+    type_line(&screen, "cd & echo native-%ORCH_TEST_NUMBER%");
+    let mut seen = String::new();
+    read_until(&mut screen, &mut seen, "native-42").await;
+    assert!(
+        seen.to_lowercase()
+            .contains(&dir.path().to_string_lossy().to_lowercase()),
+        "the shell starts in its requested directory: {seen}"
+    );
+    drop(screen);
+    assert!(!terminals.list()[0].attached);
+    let screen = replay_until(&terminals, id, "native-42").await;
+    assert!(String::from_utf8_lossy(screen.replay()).contains("native-42"));
+    drop(screen);
+    terminals.close(id).await.unwrap();
+}
+
+#[cfg(unix)]
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn a_shell_runs_commands_in_the_directory_it_was_opened_in_and_follows_a_resize() {
     let dir = tempfile::tempdir().unwrap();
@@ -100,6 +137,7 @@ async fn a_shell_runs_commands_in_the_directory_it_was_opened_in_and_follows_a_r
     terminals.close(id).await.unwrap();
 }
 
+#[cfg(unix)]
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn a_shell_keeps_running_with_nobody_attached_and_the_next_attachment_gets_what_it_printed() {
     let dir = tempfile::tempdir().unwrap();
@@ -127,6 +165,7 @@ async fn a_shell_keeps_running_with_nobody_attached_and_the_next_attachment_gets
     terminals.close(id).await.unwrap();
 }
 
+#[cfg(unix)]
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn a_second_attachment_takes_the_shell_from_the_first_which_is_told_and_can_no_longer_type() {
     let dir = tempfile::tempdir().unwrap();
@@ -172,6 +211,7 @@ async fn a_second_attachment_takes_the_shell_from_the_first_which_is_told_and_ca
     terminals.close(id).await.unwrap();
 }
 
+#[cfg(unix)]
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn an_attachment_that_only_watches_sees_the_screen_and_types_nothing() {
     let dir = tempfile::tempdir().unwrap();
@@ -189,6 +229,7 @@ async fn an_attachment_that_only_watches_sees_the_screen_and_types_nothing() {
     terminals.close(id).await.unwrap();
 }
 
+#[cfg(unix)]
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn a_shell_that_printed_more_keeps_its_last_256_kib_and_no_more() {
     let dir = tempfile::tempdir().unwrap();
@@ -229,6 +270,7 @@ async fn a_shell_that_printed_more_keeps_its_last_256_kib_and_no_more() {
     terminals.close(id).await.unwrap();
 }
 
+#[cfg(unix)]
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn a_shell_that_exits_while_attached_tells_its_attachment_how() {
     let dir = tempfile::tempdir().unwrap();
@@ -258,6 +300,7 @@ async fn a_shell_that_exits_while_attached_tells_its_attachment_how() {
     );
 }
 
+#[cfg(unix)]
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn a_shell_that_exits_with_nobody_attached_is_reported_with_what_it_printed_last_and_closed_with_the_same()
  {
@@ -303,6 +346,7 @@ async fn a_shell_that_exits_with_nobody_attached_is_reported_with_what_it_printe
     assert_eq!(closed.bytes_out, exited.bytes_out);
 }
 
+#[cfg(target_os = "linux")]
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn closing_a_shell_ends_it_and_everything_it_started_and_keeps_its_output_only_if_asked() {
     let dir = tempfile::tempdir().unwrap();
@@ -371,6 +415,7 @@ async fn closing_a_shell_ends_it_and_everything_it_started_and_keeps_its_output_
     assert!(terminals.attach(id, true).is_err());
 }
 
+#[cfg(unix)]
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn only_a_shell_with_a_command_running_counts_as_busy() {
     // Returning the foreground to the shell may be delayed by other builds;

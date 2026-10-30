@@ -121,17 +121,24 @@ impl Files {
 }
 
 #[cfg(test)]
-#[cfg(unix)]
 mod tests {
     use super::*;
     use crate::environment::{GateState, Gates, Limits};
     use crate::ignore::IgnoreRules;
     use crate::index::HashCache;
     use crate::paths::{PathStyle, Workspace};
+
+    fn native_style() -> PathStyle {
+        if cfg!(windows) {
+            PathStyle::Windows
+        } else {
+            PathStyle::Posix
+        }
+    }
     use std::sync::Arc;
 
     fn files_in(root: &std::path::Path, patterns: &[&str]) -> Files {
-        let ws = Workspace::open(root, &[], PathStyle::Posix, true).unwrap();
+        let ws = Workspace::open(root, &[], native_style(), true).unwrap();
         let rules = Arc::new(IgnoreRules::new(
             &patterns.iter().map(|p| (*p).to_owned()).collect::<Vec<_>>(),
             true,
@@ -146,7 +153,7 @@ mod tests {
     }
 
     fn path(text: &str) -> RelPath {
-        RelPath::parse(text, PathStyle::Posix).unwrap()
+        RelPath::parse(text, native_style()).unwrap()
     }
 
     #[test]

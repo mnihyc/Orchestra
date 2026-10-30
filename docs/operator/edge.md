@@ -21,7 +21,9 @@ leave certificate verification enabled.
 `[system] public_url` is the address people open; `[edge] ports_domain` is the separate suffix for
 published environment ports. The default machine list, `[[gateway.endpoints]]`, advertises only
 `wss://gateway.example.com:9443` with `trust = "pinned"`. Replace the example with a reachable name or IP.
-`ORCH_GATEWAY_PUBLISH` publishes that direct door. Add `wss://<people's-name>/link` with
+`ORCH_GATEWAY_PUBLISH` publishes that direct door. If its host port differs from 9443, set the same port in
+the bundled `[gateway] managed_endpoint` so its Docker runtimes can reach it; keep `[node] gateway_url` on
+the internal Compose port 9443. Add `wss://<people's-name>/link` with
 `trust = "public"` to advertise the front too. The gateway accepts both doors at all times; the list
 controls advertising and preference, not listener availability.
 
@@ -208,7 +210,7 @@ of the official `httpd:2.4` image, and `orchctl doctor --url` was run against it
 
 `orchctl doctor --url https://orch.example.com` tries the front the way a browser and a machine would, from
 wherever it is run. The program is one static file: `orchctl-linux-x86_64-musl` of the release runs on any
-Linux host, and `docker compose exec api orchctl doctor --url …` runs it inside the stack. Each check prints a
+Linux host, and `docker compose exec api /opt/orchctl/orchctl doctor --url …` runs it inside the stack. Each check prints a
 line saying what was sent and what came back, and the exit status is 1 if any failed:
 
 | Check | What is sent | What it shows |

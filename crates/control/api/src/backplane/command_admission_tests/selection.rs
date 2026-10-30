@@ -274,6 +274,7 @@ async fn a_real_guarded_selection_and_gc_can_finish_before_the_old_cancelled_dis
         reads: AtomicUsize::new(0),
         writes: AtomicUsize::new(0),
         probes: AtomicUsize::new(0),
+        starts: AtomicUsize::new(0),
         wire: Mutex::new(Vec::new()),
     });
     let server = CommandServer::new(

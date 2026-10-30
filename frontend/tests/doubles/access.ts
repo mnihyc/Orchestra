@@ -45,7 +45,7 @@ const ROLES: readonly Role[] = ['viewer', 'interactor', 'developer', 'admin'];
 const rank = (role: Role): number => ROLES.indexOf(role);
 
 /** What a thread's screens ask of the environment it runs in: its own two levels and the rows of its four doors. */
-const ENVIRONMENT_PERMISSIONS = ['browser.manage', 'browser.view', 'environment.manage', 'environment.view', 'files.manage', 'files.view', 'terminal.manage', 'terminal.view', 'vnc.manage', 'vnc.view', 'ports.view', 'ports.manage'] as const;
+const ENVIRONMENT_PERMISSIONS = ['browser.manage', 'browser.view', 'environment.manage', 'environment.use', 'environment.view', 'files.manage', 'files.view', 'terminal.manage', 'terminal.view', 'vnc.manage', 'vnc.view', 'ports.view', 'ports.manage'] as const;
 
 /** The three everyday choices, from the least to the most. */
 const CHOICES: readonly AccessChoice[] = ['full_view', 'full_interact', 'full_manage'];
@@ -90,14 +90,14 @@ const SHIPPED: Record<string, { managed: Role | null; connected: Role | null }> 
     'doc.view': same('viewer'), 'doc.edit': same('interactor'), 'doc.create': same('viewer'), 'doc.comment': same('viewer'), 'doc.manage': same('developer'),
     'thread.view': same('viewer'), 'thread.interact': split('interactor'), 'thread.manage': split('developer'), 'thread.fork': same('viewer'), 'thread.archive': same(null),
     'files.view': same('viewer'), 'files.manage': split('developer'), 'terminal.view': same('viewer'), 'terminal.manage': split('developer'),
-    'topic.view': same('viewer'), 'topic.interact': same('developer'), 'topic.manage': same('developer'), 'topic.archive': same(null),
-    'project.view': same('viewer'), 'project.interact': same('developer'), 'project.manage': same('admin'), 'project.archive': same(null),
+    'topic.view': same('viewer'), 'topic.interact': same('developer'), 'topic.manage': same('developer'), 'topic.archive': same(null), 'topic.start_threads': same(null),
+    'project.view': same('viewer'), 'project.interact': same('developer'), 'project.manage': same('admin'), 'project.archive': same(null), 'project.create_topics': same(null),
     'org.view': same('viewer'), 'org.interact': same('admin'), 'org.manage': same('admin'), 'org.archive': same(null),
     'settings.manage': same('admin'), 'usage.view': same('admin'), 'usage.summary': same('viewer'), 'usage.manage': same('admin'), 'usage.bypass': same('admin'),
     'audit.view': same('admin'), 'members.manage': same('admin'), 'directs.view': same('admin'),
     'access.manage': same(null), 'access.external': same('developer'),
     'thread.export': same('viewer'), 'chat.export': same('viewer'), 'doc.export': same('viewer'),
-    'environment.view': same('viewer'), 'environment.manage': split('developer'),
+    'environment.view': same('viewer'), 'environment.use': split('interactor'), 'environment.manage': split('developer'),
     'browser.view': same('viewer'), 'browser.manage': same(null), 'vnc.view': same('viewer'), 'vnc.manage': same(null),
     'ports.view': same('viewer'), 'ports.manage': same(null),
   };
@@ -902,7 +902,7 @@ export class Access implements Part {
       const owner = this.person(this.world.resources.describe('provider', binding.provider)?.owner ?? 'ada') ?? this.person('ada')!;
       const mayGive = person.me.username === owner.me.username || person.me.is_system_admin;
       found.push({
-        for: page.kind === 'thread' ? 'thread.interact' : 'topic.interact',
+        for: page.kind === 'thread' ? 'thread.interact' : 'topic.start_threads',
         permission: 'provider.use',
         choice: null,
         object: { id: provider.id, kind: 'provider', name: provider.name, owner: this.ref(owner) },

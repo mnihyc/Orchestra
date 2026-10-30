@@ -312,7 +312,49 @@ async fn a_project_and_a_topic_are_made_by_whoever_the_engine_lets() {
         .send()
         .await
         .problem();
-    assert_eq!(refused.extra["required"], "project.interact");
+    assert_eq!(refused.extra["required"], "project.create_topics");
+    let mut conn = world.conn().await;
+    orch_db::queries::access::testing::add_entry(
+        &mut conn,
+        &orch_db::queries::access::PageKey::new("node", web.base.id, "live"),
+        "any",
+        "project.create_topics",
+        ("user", Some(dan.id()), None),
+        None,
+        world.now(),
+    )
+    .await
+    .unwrap();
+    drop(conn);
+    let Node::Project(visible) = read(&world, &dan, web.base.id).await else {
+        panic!("the project remains visible");
+    };
+    assert!(
+        visible
+            .base
+            .access
+            .permissions
+            .contains(&"project.create_topics".to_owned())
+    );
+    assert!(
+        !visible
+            .base
+            .access
+            .permissions
+            .contains(&"project.interact".to_owned())
+    );
+    let reply = world
+        .app
+        .call(TopicCreate, &[&web.base.id])
+        .token(&dan.token)
+        .body(&TopicCreateBody::default())
+        .send()
+        .await
+        .ok();
+    let TopicCreateReply::Topic(created) = reply else {
+        panic!("a topic alone was asked for")
+    };
+    assert_eq!(created.base.owner.id, dan.id());
 }
 
 #[tokio::test]

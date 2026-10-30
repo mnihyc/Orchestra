@@ -448,13 +448,30 @@ pub fn send_signal(pid: u32, expect_start_ms: Option<i64>, sig: Sig) -> io::Resu
     if let Some(done) = super::os::signal_via_handle(pid, expect_start_ms, sig) {
         return done;
     }
-    if let Some(expected) = expect_start_ms
-        && super::os::exact_start_ms(pid).is_some_and(|found| found != expected)
-    {
-        return Err(io::Error::new(
-            io::ErrorKind::NotFound,
-            "that number now names another process",
-        ));
+    if let Some(expected) = expect_start_ms {
+        let found = super::os::exact_start_ms(pid);
+        #[cfg(target_os = "macos")]
+        let found = found.or_else(|| {
+            use sysinfo::{Pid, ProcessRefreshKind, ProcessesToUpdate, System};
+            let mut system = System::new();
+            let id = Pid::from_u32(pid);
+            system.refresh_processes_specifics(
+                ProcessesToUpdate::Some(&[id]),
+                true,
+                ProcessRefreshKind::nothing(),
+            );
+            system.process(id).map(|process| {
+                i64::try_from(process.start_time())
+                    .unwrap_or(0)
+                    .saturating_mul(1000)
+            })
+        });
+        if found != Some(expected) {
+            return Err(io::Error::new(
+                io::ErrorKind::NotFound,
+                "that number now names another process",
+            ));
+        }
     }
     rustix::process::kill_process(target, rustix_signal_of(sig)).map_err(io_error)
 }

@@ -7,8 +7,9 @@ import { createProvider, createTemplate, createModel } from '@/api/resources';
 import type * as ResourcesApi from '@/api/resources';
 import { AddProviderDialog } from '@/features/resources/providers/AddProvider';
 import type { HomePickerProps } from '@/features/resources/HomePicker';
-import type { ArrangementType,ProviderSetup,Template,ProviderModel } from '@/generated/api-types';
+import type { ArrangementType,ProviderSetup,Template,ProviderModel,Provider } from '@/generated/api-types';
 import { i18n,setLocale } from '@/i18n';
+import { NetworkError } from '@/lib/requests';
 import { planProvider,SOURCE_DESCRIPTOR } from '../unit/provider-plan-fixtures';
 import { show } from './support';
 import { harnessName } from '../doubles/harness-names';
@@ -16,12 +17,13 @@ import { harnessName } from '../doubles/harness-names';
 vi.mock('@/features/help/open',()=>({useHelpOpener:()=>vi.fn()}));
 vi.mock('@/features/help/Hint',()=>({Hint:()=>null}));
 const navigate=vi.hoisted(()=>vi.fn());
-vi.mock('@tanstack/react-router',()=>({useNavigate:()=>navigate,Link:({children}:{children:ReactNode})=><a href="#provider">{children}</a>}));
+const readProvider=vi.hoisted(()=>vi.fn<(id:string)=>Promise<Provider>>());
+vi.mock('@tanstack/react-router',()=>({useNavigate:()=>navigate,Link:({children,to,params,search,onClick}:{children:ReactNode;to?:string;params?:{id?:string};search?:{tab?:string};onClick?:()=>void})=><a href={`${(to??'#provider').replace('$id',params?.id??'$id')}${search?.tab===undefined?'':`?tab=${search.tab}`}`} onClick={(event)=>{event.preventDefault();onClick?.();}}>{children}</a>}));
 vi.mock('@/features/resources/HomePicker',()=>({
   HomePicker:({value,onChange}:Pick<HomePickerProps,'value'|'onChange'>)=><select aria-label="Home" value={value} onChange={(event)=>onChange(event.target.value)}><option value="">Choose home</option><option value="org">Acme</option></select>,
   useHomeChoices:()=>({choices:[{id:'org',label:'Acme',personal:false,department:false}],pending:false,error:null}),
 }));
-vi.mock('@/api/resources',async(load)=>({...await load<typeof ResourcesApi>(),createProvider:vi.fn(),createTemplate:vi.fn(),createModel:vi.fn(),providerQuery:(id:string)=>({queryKey:['created-provider',id],queryFn:()=>Promise.resolve(planProvider({id}))}),templatesQuery:()=>({queryKey:['local-templates'],queryFn:()=>Promise.resolve(localTemplates)}),providerSetupQuery:()=>({queryKey:['location-setup'],queryFn:()=>Promise.resolve(setup)})}));
+vi.mock('@/api/resources',async(load)=>({...await load<typeof ResourcesApi>(),createProvider:vi.fn(),createTemplate:vi.fn(),createModel:vi.fn(),providerQuery:(id:string)=>({queryKey:['created-provider',id],queryFn:()=>readProvider(id)}),templatesQuery:()=>({queryKey:['local-templates'],queryFn:()=>Promise.resolve(localTemplates)}),providerSetupQuery:()=>({queryKey:['location-setup'],queryFn:()=>Promise.resolve(setup)})}));
 let localTemplates: Template[] = [];
 const keeper={id:'keeper',name:'Keeper',online:true,placement:'connected' as const,platform_os:'linux' as const};
 const runner={...keeper,id:'runner',name:'Runner'};
@@ -39,6 +41,7 @@ beforeEach(()=>{
   vi.clearAllMocks();const profile=setup.subscriptions[0];
   if(profile!==undefined){profile.agent.machine=null;profile.arrangements=[{type:'separated',allowed:true,available:true,puts:'',form:null}];}
   for(const choice of setup.machines ?? [])choice.arrangements=['separated','key_separated'];
+  readProvider.mockReset().mockImplementation((id)=>Promise.resolve(planProvider({id})));
   vi.mocked(createProvider).mockResolvedValue({...planProvider(),warning:null});
 });
 afterEach(async()=>{cleanup();await setLocale('en');});
@@ -193,3 +196,37 @@ it.each([true, false])('Local embeddings uses a live ordinary template or create
     else expect(createTemplate).toHaveBeenCalledWith(recipe, expect.any(String));
   } finally { setup.presets = before; setup.protocols = protocols; setup.http_allowed = http; }
 });
+
+for (const locale of ['en', 'zh-CN'] as const) for (const failed of ['model', 'read'] as const) {
+  it(`opens a created provider for inspection after its ${failed} step fails in ${locale}`, async () => {
+    await setLocale(locale);
+    const before = setup.presets; const protocols = setup.protocols;
+    const recipe = { name: 'Local embeddings', home_id: 'org', kind: 'provider' as const, driver: 'docker', spec: { build: { dockerfile: 'FROM llama', context: null, args: {}, target: null } } };
+    const template = { id: 'existing-template', name: 'Local embeddings', home: { id: 'org' }, spec: recipe.spec } as Template;
+    try {
+      setup.protocols = [...protocols, { name: 'openai-embeddings', title: 'Embeddings', agents: [], endpoint_options: [] }];
+      setup.presets = [...before, { name: 'Local embeddings', note: null, docs_url: null, upstreams: [{ protocol: 'openai-embeddings', base_url: 'http://127.0.0.1:8090/v1', options: { auth: 'none' } }], template: recipe, model: { model_name: 'embeddinggemma-2', display_name: 'EmbeddingGemma 2' }, dimensions: 256 }];
+      localTemplates = [template];
+      vi.mocked(createModel).mockReset();
+      if (failed === 'model') vi.mocked(createModel).mockRejectedValueOnce(new NetworkError('offline'));
+      else { vi.mocked(createModel).mockResolvedValueOnce({} as ProviderModel); readProvider.mockRejectedValueOnce(new NetworkError('offline')); }
+      const close = vi.fn(); const done = vi.fn(); const user = userEvent.setup();
+      show(<AddProviderDialog initialHome="org" initialPreset="Local embeddings" onClose={close} onCreated={done} />);
+      await screen.findByRole('textbox', { name: i18n.t('admin.semantic.fields.model') });
+      await user.click(screen.getByRole('button', { name: i18n.t('common.next') }));
+      await user.click(screen.getByRole('button', { name: i18n.t('providerCreation.create') }));
+      expect(await screen.findByText(i18n.t('providerCreation.partial', { name: planProvider().name }))).toBeVisible();
+      expect(screen.getByRole('alert')).toHaveTextContent(i18n.t('network.offline'));
+      expect(screen.queryByLabelText(i18n.t('providers.add.name'))).not.toBeInTheDocument();
+      expect(screen.queryByRole('button', { name: i18n.t('providerCreation.create') })).not.toBeInTheDocument();
+      const open = screen.getByRole('link', { name: i18n.t('providerCreation.openCreated') });
+      expect(open).toHaveAttribute('href', `/resources/providers/${planProvider().id}?tab=models`);
+      await user.click(open);
+      expect(close).toHaveBeenCalledOnce();
+      expect(done).not.toHaveBeenCalled();
+      expect(navigate).not.toHaveBeenCalled();
+      expect(createProvider).toHaveBeenCalledTimes(1);
+      expect(createModel).toHaveBeenCalledTimes(1);
+    } finally { setup.presets = before; setup.protocols = protocols; localTemplates = []; }
+  });
+}

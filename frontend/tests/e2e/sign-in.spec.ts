@@ -90,7 +90,7 @@ test('somebody whose second step is a mailed code is sent one at once, and gets 
   await page.getByLabel('Password', { exact: true }).fill(PEOPLE.linus.password);
   await page.getByRole('button', { name: 'Sign in' }).click();
 
-  await expect(page.getByText('We sent a code to your address.')).toBeVisible();
+  await expect(page.getByText('If a code can be sent, it is on its way to your address.')).toBeVisible();
   // Another code is offered only after a minute.
   await expect(page.getByRole('button', { name: /Send another in \d+ seconds?/ })).toBeDisabled();
 
@@ -110,7 +110,7 @@ test('a code by mail gets somebody in without their password, and the page says 
   // A name nobody has reads exactly like one that somebody has.
   await page.getByLabel('Username or email address').fill('nobody-at-all');
   await page.getByRole('button', { name: 'Mail me a code instead' }).click();
-  const sentence = 'If that name may sign in this way, a code is on its way to its address. It is good for ten minutes.';
+  const sentence = 'If that name may sign in this way and a code can be sent, it is on its way to its address.';
   await expect(page.getByText(sentence)).toBeVisible();
   await expectAccessibleInBothThemes(page);
 

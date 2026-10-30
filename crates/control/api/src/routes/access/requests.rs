@@ -157,6 +157,9 @@ pub async fn create(
     let (tx, guard) = transaction_guard::begin(&ctx).await?;
     ctx.now = guard.now().get();
     let principal = guard.into_principal();
+    if body.expires_at.is_some_and(|end| end <= principal.now()) {
+        return Err(invalid("expires_at", "must be in the future"));
+    }
     let raised = ctx
         .app
         .engine
@@ -166,6 +169,7 @@ pub async fn create(
             &asks,
             body.reason.trim(),
             body.for_thread,
+            body.expires_at,
             &origin(&ctx),
         )
         .await
@@ -326,6 +330,7 @@ pub async fn views_of(
                     .and_then(serde_json::Value::as_str)
                     .unwrap_or("")
                     .to_owned(),
+                expires_at: row.requested_expires_at.map(Time::new),
                 for_thread: None,
             };
             shown.insert(
@@ -405,6 +410,7 @@ pub async fn views_of(
                     }),
                     holder,
                     reason: asked.reason.clone(),
+                    expires_at: row.requested_expires_at.map(Time::new),
                     for_thread: row.thread_id.and_then(|thread| refs.get(&thread).cloned()),
                 },
                 object: api::ObjectRef {

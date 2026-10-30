@@ -40,7 +40,7 @@ use tokio::sync::mpsc;
 use crate::blobs::{BlobSink, MemoryReader};
 use crate::environment::{Report, Reports};
 use crate::error::{HostError, Result};
-use crate::processes::{Processes, RootKind};
+use crate::processes::{Processes, RootKind, ScopeKind};
 
 /// How many bytes one read of a terminal asks for. Sixteen kibibytes is a screenful many times
 /// over, so that a program that prints a lot costs few wake-ups, and small enough that the first
@@ -443,11 +443,14 @@ impl Terminals {
     pub fn new(clock: Arc<dyn Clock>, keep_bytes: usize, links: TerminalLinks) -> Result<Self> {
         let runtime = tokio::runtime::Handle::try_current()
             .map_err(|_| HostError::Internal("shells are made inside a runtime".to_owned()))?;
+        let processes = links.processes.or_else(|| {
+            cfg!(windows).then(|| Processes::new(ScopeKind::Started, Arc::clone(&clock)))
+        });
         Ok(Self {
             sessions: Mutex::new(HashMap::new()),
             clock,
             keep_bytes,
-            processes: links.processes,
+            processes,
             reports: links.reports,
             blobs: links.blobs,
             registry: links.data_dir.map(|dir| dir.join(REGISTRY_FILE)),
@@ -732,8 +735,9 @@ impl Terminals {
         session.closing.store(true, Ordering::SeqCst);
         let ended = session.shared().exit.is_some();
         if !ended {
+            let mut stop_error = None;
             if let (Some(processes), Some(pid)) = (&self.processes, session.pid) {
-                let _ = processes.stop_tree(pid, CLOSE_GRACE).await;
+                stop_error = processes.stop_tree(pid, CLOSE_GRACE).await.err();
             } else if let Some(pid) = session.pid {
                 // Without the environment's table the shell's own group is what can be reached.
                 let _ = crate::platform::send_group(pid, crate::platform::Sig::Term);
@@ -741,6 +745,17 @@ impl Terminals {
                 let _ = crate::platform::send_group(pid, crate::platform::Sig::Kill);
             }
             self.wait_ended(&session).await;
+            let ended = session.shared().exit.is_some();
+            if let Some(error) = stop_error
+                && !(ended && matches!(&error, HostError::NotFound(_)))
+            {
+                session.closing.store(false, Ordering::SeqCst);
+                return Err(error);
+            }
+            if !ended {
+                session.closing.store(false, Ordering::SeqCst);
+                return Err(HostError::Timeout(format!("terminal {id} did not end")));
+            }
         }
         let (exit_code, bytes_out, mut kept, kept_done, ring) = {
             let shared = session.shared();
@@ -991,9 +1006,7 @@ pub fn find_shell(preferred: Option<&str>) -> Option<(String, PathBuf)> {
     };
     candidates
         .into_iter()
-        .find(|path| {
-            path.is_absolute() && path.is_file() || cfg!(windows) && path.extension().is_some()
-        })
+        .find(|path| shell_exists(path))
         .map(|path| {
             let name = path
                 .file_stem()
@@ -1003,24 +1016,46 @@ pub fn find_shell(preferred: Option<&str>) -> Option<(String, PathBuf)> {
         })
 }
 
+fn shell_exists(path: &Path) -> bool {
+    if path.is_absolute() {
+        return path.is_file();
+    }
+    #[cfg(windows)]
+    {
+        path.components().count() == 1
+            && std::env::var_os("PATH").is_some_and(|paths| {
+                std::env::split_paths(&paths).any(|directory| directory.join(path).is_file())
+            })
+    }
+    #[cfg(not(windows))]
+    {
+        false
+    }
+}
+
 #[cfg(test)]
-#[cfg(unix)]
 mod tests {
     use super::*;
 
     #[test]
     fn a_shell_is_found_on_a_machine_that_has_one() {
         let (name, path) = find_shell(None).unwrap();
-        assert!(path.is_absolute() && path.is_file(), "{path:?}");
+        assert!(shell_exists(&path), "{path:?}");
         assert!(!name.is_empty());
+        #[cfg(unix)]
         assert_eq!(
             find_shell(Some("/bin/sh")).unwrap().1,
             PathBuf::from("/bin/sh")
         );
-        let fallback = find_shell(Some("/no/such/shell")).unwrap();
+        let absent = tempfile::tempdir()
+            .unwrap()
+            .path()
+            .join("missing-shell.exe");
+        let fallback = find_shell(Some(absent.to_str().unwrap())).unwrap();
         assert!(
-            fallback.1.is_file(),
+            shell_exists(&fallback.1),
             "a shell that is not there gives way to one that is"
         );
+        assert_ne!(fallback.1, absent);
     }
 }

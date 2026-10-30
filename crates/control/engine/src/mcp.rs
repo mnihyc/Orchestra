@@ -625,6 +625,9 @@ impl Engine {
                 ask.ticket
                     .more
                     .insert("environment_id".to_owned(), json!(environment));
+                ask.ticket
+                    .more
+                    .insert("environment_generation".to_owned(), json!(env.generation));
             }
             result.push(SessionOpenMcp {
                 server_id: Some(server.row.id),

@@ -242,13 +242,13 @@ pub const fn node_word(kind: PackageKind) -> Option<&'static str> {
 #[must_use]
 pub const fn may_hold(parent: PackageKind, child: PackageKind) -> bool {
     use PackageKind::{Chat, Document, Folder, Org, Project, Thread, Topic};
-    match (parent, child) {
-        (Org | Project, Project | Topic | Folder | Document | Chat) => true,
-        (Topic, Thread | Folder | Document | Chat) => true,
-        (Thread, Folder | Document | Chat) => true,
-        (Folder, Folder | Document) => true,
-        _ => false,
-    }
+    matches!(
+        (parent, child),
+        (Org | Project, Project | Topic | Folder | Document | Chat)
+            | (Topic, Thread | Folder | Document | Chat)
+            | (Thread, Folder | Document | Chat)
+            | (Folder, Folder | Document)
+    )
 }
 
 /// How many levels deep an object lies, counted by its parents in the source.

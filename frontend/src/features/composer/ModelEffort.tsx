@@ -29,7 +29,7 @@ import { SettingConflict } from '@/features/composer/SettingConflict';
 import { SettingHelpGroup } from '@/features/help/SettingHelpGroup';
 import { AccessChoice, SpeedChoice } from '@/features/composer/SpeedAndAccess';
 import { formatContext } from '@/features/models/context';
-import { effortDisplayName, modelDisplayName } from '@/features/models/names';
+import { accessProgramDisplayName, effortDisplayName, modelDisplayName } from '@/features/models/names';
 import type { ModelOption, Thread } from '@/generated/api-types';
 import { useAppearance } from '@/lib/appearance';
 import { holds } from '@/lib/permissions';
@@ -122,7 +122,8 @@ export function leftBehind(dropped: Dropped, next: ModelOption, locale: string, 
     return t('composer.model.dropped.speed', { model, was: dropped.was, becomes });
   }
   if (dropped.kind === 'access') {
-    return dropped.becomes === null ? t('composer.model.dropped.accessNone', { model, was: dropped.was }) : t('composer.model.dropped.access', { model, was: dropped.was, becomes: dropped.becomes });
+    const was = accessProgramDisplayName(String(dropped.was), t);
+    return dropped.becomes === null ? t('composer.model.dropped.accessNone', { model, was }) : t('composer.model.dropped.access', { model, was, becomes: accessProgramDisplayName(String(dropped.becomes), t) });
   }
   const was = typeof dropped.was === 'number' ? formatContext(dropped.was, locale) : dropped.was;
   return typeof dropped.becomes === 'number'

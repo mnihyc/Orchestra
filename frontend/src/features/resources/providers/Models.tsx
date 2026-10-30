@@ -44,7 +44,7 @@ import { RelativeTime } from '@/ui/RelativeTime';
 import { Switch } from '@/ui/Switch';
 import { type Column, Table } from '@/ui/Table';
 import { toast } from '@/ui/Toast';
-import { modelDisplayName } from '@/features/models/names';
+import { accessProgramDisplayName, modelDisplayName } from '@/features/models/names';
 
 const shownName = (model: Pick<ProviderModel, 'display_name' | 'model_name'>,t:TFunction): string => modelDisplayName(model.display_name,t);
 
@@ -83,7 +83,7 @@ export function offeredOnly(parameters: ModelParameters, locale: string, t: TFun
   const programs = [...new Set([...(parameters.offered?.access_programs ?? []), ...(suggestion ? (parameters.access_programs ?? []) : [])])].filter((program) => !switched.includes(program));
   const largest = suggestion ? (parameters.offered?.context_max ?? parameters.context_max) : (parameters.context_max === undefined || parameters.context_max === null ? parameters.offered?.context_max : null);
   const bigger = largest !== undefined && largest !== null ? [t('models.list.contextUpTo', { largest: formatContext(largest, locale) })] : [];
-  return [...speeds, ...programs, ...bigger];
+  return [...speeds, ...programs.map((program) => accessProgramDisplayName(program, t)), ...bigger];
 }
 
 /** What a model can be run with here, a line for each thing: efforts, context, images, the speeds and programs that are on and what is offered and not yet on, and the rate. */
@@ -99,7 +99,7 @@ export function Summary({ parameters }: { parameters: ModelParameters }) {
   else if (window !== null && window !== undefined) lines.push(t('providers.models.context', { size: formatContext(window, locale) }));
   if (parameters.input_images === true) lines.push(t('providers.models.images'));
   if ((parameters.service_tiers ?? []).length > 0) lines.push(t('providers.models.speeds', { list: (parameters.service_tiers ?? []).map((tier) => tier.label).join(', ') }));
-  if ((parameters.access_programs ?? []).length > 0) lines.push(t('providers.models.programs', { list: (parameters.access_programs ?? []).join(', ') }));
+  if ((parameters.access_programs ?? []).length > 0) lines.push(t('providers.models.programs', { list: (parameters.access_programs ?? []).map((program) => accessProgramDisplayName(program, t)).join(', ') }));
   if (parameters.rate !== null && parameters.rate !== undefined) {
     lines.push(t('providers.models.rate', { input: parameters.rate.input_per_mtok, cached: parameters.rate.cached_input_per_mtok, output: parameters.rate.output_per_mtok }));
   }

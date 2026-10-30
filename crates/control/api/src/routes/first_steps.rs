@@ -122,8 +122,8 @@ async fn role_summaries(
         let held = giving.role_permissions(native);
         InvitationRoleSummary {
             role,
-            start_topics: held.contains(&Permission::ProjectInteract),
-            start_threads: held.contains(&Permission::TopicInteract),
+            start_topics: held.contains(&Permission::ProjectCreateTopics),
+            start_threads: held.contains(&Permission::TopicStartThreads),
             send_inputs: held.contains(&Permission::ThreadInteract),
             answer_requests: held.contains(&Permission::ThreadManage),
             model_access_required: true,

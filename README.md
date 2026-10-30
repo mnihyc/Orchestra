@@ -24,17 +24,22 @@ conversation, documents and decisions in one place.
 
 ## Install
 
-Orch runs on one Docker host with PostgreSQL. Download the deployment bundle and the server package for your
-architecture from the [latest release](../../releases/latest), then:
+Orch runs on a Linux Docker host with the Compose plugin. From the [latest release](../../releases/latest), put
+`version.json`, `orch-deploy-<tag>.tar.gz`, `orch-frontend-dist.tar.gz`,
+`orch-server-linux-<arch>.zip` and `orchctl-linux-<arch>-musl` in one directory. The tag includes `v`;
+`<arch>` is `x86_64` or `aarch64` for the Docker host. For example, with the files in
+`$HOME/orch-release`:
 
 ```sh
-tar -xzf orch-deploy-<version>.tar.gz
-cd deploy
-cp .env.example .env              # set the database password and the published addresses
-./update.sh first-start --from <directory with the release files>
+mkdir -p "$HOME/orch"
+tar -xzf "$HOME/orch-release/orch-deploy-<tag>.tar.gz" -C "$HOME/orch"
+cd "$HOME/orch/deploy"
+install -m 600 .env.example .env  # set the database password
+# Set the public URL and machine gateway in config/orch.toml, and configure the HTTPS front.
+./update.sh first-start --from "$HOME/orch-release"
 ```
 
-Put an HTTPS front in front of the web edge, open the address and create the first administrator. Machines join by
+Open the HTTPS address and create the first administrator. Machines join by
 installing the connector from the server's own downloads. The [deployment guide](deploy/README.md) and the
 [operator guides](docs/operator/README.md) cover configuration, updates, backups and recovery.
 

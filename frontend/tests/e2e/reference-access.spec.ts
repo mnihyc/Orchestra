@@ -30,6 +30,11 @@ for(const width of [400,1440])for(const theme of ['light','dark'] as const)for(c
  await expect(card).toContainText(locale==='en'?'Asks for View document':'申请查看文档');
  await expect(card).not.toContainText(privateTarget.title);await expect(card).not.toContainText('Ada Lovelace');
  await expect(card.getByRole('button',{name:words.access.request.send,exact:true})).toBeEnabled();
+ const duration=card.getByRole('combobox',{name:words.access.request.duration,exact:true});
+ await expect(duration).toContainText(words.access.request.untilRemoved);
+ await duration.click();await page.getByRole('option',{name:words.access.request.chooseDate,exact:true}).click();
+ await expect(card.getByLabel(words.access.request.endsOn,{exact:true})).toBeVisible();
+ await expect(card.getByRole('button',{name:words.access.request.send,exact:true})).toBeDisabled();
  const bounds=await card.boundingBox();expect(bounds).not.toBeNull();if(bounds===null)throw new Error('No card bounds');
  expect(bounds.x).toBeGreaterThanOrEqual(0);expect(bounds.x+bounds.width).toBeLessThanOrEqual(width);expect(bounds.y+bounds.height).toBeLessThanOrEqual(1000);
  expect(reads).toBe(1);

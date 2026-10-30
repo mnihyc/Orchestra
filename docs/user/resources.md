@@ -1,6 +1,6 @@
 ---
 title: Resources and movement
-screens: /resources, /resources/agents/$id, /resources/machines/$id, /thread/$threadId
+screens: /resources, /resources/agents/$id, /resources/machines/$id, /resources/providers/$id, /resources/environments/$id, /thread/$threadId
 keywords: environment, provider, home, browser, display, port, files, terminal, folders, fork, move, connect a machine, install, service, foreground, data directory, remove, multiple connectors
 ---
 
@@ -59,6 +59,8 @@ then chooses from those offers; a model entry's allowed maximum is separate
 from the thread's current setting. The routing name reaches the provider and
 the display name reaches people. A changed name or disabled model is checked
 again when the next turn starts.
+The provider's model editor names the known access programs **Daybreak Blue**,
+**Daybreak Red** and **Standard**. Other program names appear as supplied.
 
 ## How agents run
 
@@ -214,6 +216,7 @@ An environment manager controls placing a thread, changing its directory or
 confinement and removing it. Managing a thread does not confer that authority.
 An environment can have several thread views at once; a thread's permissions
 are still checked for each route to the shared environment.
+The environment page names the driver and runtime together when both are known.
 
 Ports publishes a listening program through HTTP, raw TCP or UDP according to
 the offered plan. The environment owns the endpoint and its audience. Read the

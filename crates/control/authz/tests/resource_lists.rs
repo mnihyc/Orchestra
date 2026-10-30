@@ -284,7 +284,7 @@ async fn what_a_person_may_use_where_they_stand_is_listed_with_the_options_that_
             .all(|item| item.granted.provider() == Default::default())
     );
     assert_eq!(mine.len(), 3, "not the disabled one");
-    // An environment is not used but managed: those the caller manages are what may be put work in.
+    // A new thread can be started in an environment by someone who holds Use.
     let environment = w.thing("environment", ada, w.topic, "main").await;
     let hold = w.member("hold").await;
     w.give(w.project, hold, Role::Developer).await;
@@ -294,11 +294,59 @@ async fn what_a_person_may_use_where_they_stand_is_listed_with_the_options_that_
         [environment],
         "the Developers manage it as shipped"
     );
-    assert!(
-        w.usable_list(bea, "environment", Some(w.topic))
-            .await
-            .is_empty()
+    assert_eq!(
+        ids(
+            &w.usable_list(bea, "environment", Some(w.topic)).await,
+            |item| item.resource.id
+        ),
+        [environment],
+        "an Interactor has Use without Manage"
     );
+}
+
+#[tokio::test]
+async fn manageable_environments_are_paged_after_management_is_checked() {
+    let w = World::new().await;
+    let (owner, user) = (w.member("owner").await, w.member("user").await);
+    w.give(w.project, user, Role::Interactor).await;
+    let one = w.thing("environment", owner, w.topic, "One").await;
+    let two = w.thing("environment", owner, w.topic, "Two").await;
+    let (first, later) = if one < two { (one, two) } else { (two, one) };
+    w.grant(
+        "environment",
+        later,
+        P::EnvironmentManage,
+        Holder::User { id: user },
+    )
+    .await;
+    let principal = w.principal(Caller::session(user)).await;
+    let mut conn = w.conn().await;
+    let page = Page {
+        after: None,
+        limit: 1,
+    };
+    let usable = usable::usable_list(
+        &mut conn,
+        &principal,
+        ResourceKind::Environment,
+        Some(w.topic),
+        &Policies::default(),
+        page,
+    )
+    .await
+    .unwrap();
+    assert_eq!(usable.items[0].resource.id, first);
+    let managed = usable::manageable_environments(
+        &mut conn,
+        &principal,
+        Some(w.topic),
+        &Policies::default(),
+        page,
+    )
+    .await
+    .unwrap();
+    assert_eq!(managed.items.len(), 1);
+    assert_eq!(managed.items[0].resource.id, later);
 }
 
 #[tokio::test]

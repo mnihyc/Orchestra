@@ -323,6 +323,7 @@ mod tests {
             cwd: None,
             sandbox_mode: mode,
             mounts,
+            generation: None,
         }
     }
 

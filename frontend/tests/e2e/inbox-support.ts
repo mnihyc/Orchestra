@@ -61,7 +61,7 @@ export function askCapability(more: Asked & { risk?: 'low' | 'medium' | 'high' |
   return control<Approval>('/approval/capability', more);
 }
 
-export function askAccess(more: Asked & { batch_id?: string; permissions?: string[]; reason?: string; object?: unknown; for_thread?: unknown; options?: unknown } = {}): Promise<Approval> {
+export function askAccess(more: Asked & { batch_id?: string; permissions?: string[]; reason?: string; object?: unknown; for_thread?: unknown; options?: unknown; expires_at?: string } = {}): Promise<Approval> {
   return control<Approval>('/approval/access', more);
 }
 

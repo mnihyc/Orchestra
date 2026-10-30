@@ -35,6 +35,7 @@ use crate::engine::{Engine, lock};
 use crate::error::EngineError;
 use crate::harnesses::HarnessKey;
 use crate::live::LiveDelta;
+use crate::preflight::Blocked;
 use crate::providers;
 use crate::turns::{InputAfter, TurnEnd, error_json, turn_error_json};
 use crate::unit::Unit;
@@ -955,8 +956,18 @@ impl Engine {
                     turn_state::FAILED
                 },
                 error: Some(error_json("session_lost", &message, true)),
-                input: InputAfter::Keep,
-                then_block: None,
+                // With no confirmation that the turn began, its input still needs
+                // a decision. Keep it in the queue and wait for a person before
+                // trying again: the lost session may have taken it already.
+                input: if turn.state == turn_state::STARTING {
+                    InputAfter::Retry { retryable: true }
+                } else {
+                    InputAfter::Keep
+                },
+                then_block: (turn.state == turn_state::STARTING).then(|| Blocked {
+                    reason: "error",
+                    detail: Some(message),
+                }),
             },
         )
         .await?;

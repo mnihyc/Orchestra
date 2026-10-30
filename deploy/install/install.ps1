@@ -10,7 +10,8 @@
 # connector running as the Scheduled Task "Orch Connector" (at logon, started again when it fails).
 # It never needs administrator rights. Run again, it changes only what is not right yet: the same
 # connector is left in place, a bound Enroll again token replaces its retained identity, and the task is registered again and started. When it fails, it takes away what it placed
-# itself. It never closes the window it runs in: a failure is said, and the script returns.
+# itself where possible; an updated existing program or task is not restored. It never closes
+# the window it runs in: a failure is reported to the caller.
 param(
     [string]$Url = '',
     [string]$Token = '',
@@ -37,6 +38,7 @@ if ($Help) {
 程序：%LOCALAPPDATA%\Orch\orch-connector.exe；数据：%LOCALAPPDATA%\Orch\connector。
 默认作为登录任务“Orch Connector”以你的账号运行；退出登录后停止。
 停止（启动时改为 start）：& "$env:LOCALAPPDATA\Orch\orch-connector.exe" service stop
+仅移除服务：& "$env:LOCALAPPDATA\Orch\orch-connector.exe" service uninstall；数据和身份保留。
 前台运行：安装时加 -NoService，然后运行
   & "$env:LOCALAPPDATA\Orch\orch-connector.exe" run
 按 Ctrl+C 停止；已有登录任务需先停止。
@@ -69,6 +71,7 @@ Installs an Orch connector for your Windows account; no administrator rights are
 Program: %LOCALAPPDATA%\Orch\orch-connector.exe; data: %LOCALAPPDATA%\Orch\connector.
 Default: the logon task 'Orch Connector', running as your account until you log out.
 Stop (or use start): & "$env:LOCALAPPDATA\Orch\orch-connector.exe" service stop
+Remove only the task: & "$env:LOCALAPPDATA\Orch\orch-connector.exe" service uninstall; data and identity stay.
 Foreground: install with -NoService, then run
   & "$env:LOCALAPPDATA\Orch\orch-connector.exe" run
 Ctrl+C stops it; stop any existing logon task first.
@@ -149,7 +152,7 @@ try {
     if (-not $machine) { $machine = $env:PROCESSOR_ARCHITECTURE }
     switch ($machine) {
         'AMD64' { $Arch = 'x86_64' }
-        'ARM64' { $Arch = 'aarch64' }
+        'ARM64' { $Arch = 'x86_64' }
         default { throw "no connector is made for a $machine processor" }
     }
     if (-not $env:LOCALAPPDATA) { throw 'LOCALAPPDATA is not set: the connector is installed for a person, in their profile' }
@@ -182,6 +185,12 @@ try {
         throw "release $($manifest.version) lists no SHA-256 for the connector, which this installer checks; it is older than this installer"
     }
 
+    # An x64 PowerShell can itself be emulated, so it may not identify the native ARM64 machine.
+    if ($PSUICulture -like 'zh*') {
+        Say '正在安装 x86-64 连接器；Windows 11 在 ARM64 上通过模拟运行它。'
+    } else {
+        Say 'Installing the x86-64 connector; Windows 11 on ARM64 runs it through emulation.'
+    }
     Say "Downloading the connector $($manifest.version) for Windows on $Arch"
     $download = Join-Path $Work 'orch-connector.exe'
     Invoke-WebRequest -Uri "$Url$wanted" -OutFile $download -MaximumRedirection 0 -UseBasicParsing
@@ -283,6 +292,7 @@ try {
     if ($Placed.Task) { Unregister-ScheduledTask -TaskName $Placed.Task -Confirm:$false -ErrorAction SilentlyContinue }
     if ($Placed.Binary) { Remove-Item -LiteralPath $Bin -Force -ErrorAction SilentlyContinue }
     if ($Placed.Task -or $Placed.Binary) { Say 'what this run placed was taken away again' }
+    throw
 } finally {
     if ($null -ne $Work) { Remove-Item -LiteralPath $Work -Recurse -Force -ErrorAction SilentlyContinue }
 }

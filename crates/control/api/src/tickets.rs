@@ -19,6 +19,8 @@
 //! | `src` | Who opens it: a machine, or `api`. The machine the command goes to when absent. |
 //! | `thread_id` | The thread it serves. |
 //! | `tool_set` | The tool set an executor lists on every channel of the ticket. |
+//! | `environment_id` | The environment whose executor or tool server the ticket reaches. |
+//! | `environment_generation` | The generation of that environment. |
 //! | `ttl_secs` | How long channels may be opened with it. [`DEFAULT_TICKET_SECS`] when absent. |
 
 use orch_link_contract::commands::{Object, TicketWanted};
@@ -109,6 +111,8 @@ impl Tickets {
                 service: Service::Port { use_id: id }.to_string(),
                 thread_id: None,
                 tool_set: None,
+                tool_environment_id: None,
+                tool_environment_generation: None,
                 port: Some(port),
                 exp: expires.unix_millis().div_euclid(1_000),
             })?)
@@ -140,6 +144,8 @@ impl Tickets {
                 service: Service::Port { use_id: jti }.to_string(),
                 thread_id: None,
                 tool_set: None,
+                tool_environment_id: None,
+                tool_environment_generation: None,
                 port: Some(port),
                 exp: expires.unix_millis().div_euclid(1_000),
             })?)
@@ -238,14 +244,30 @@ impl Tickets {
                 TicketFault::Request("has a `ttl_secs` that is not a number of seconds".to_owned())
             })?,
         };
-        self.issue(&TicketRequest {
+        let request = TicketRequest {
             src,
             dst,
             service,
             thread_id: id("thread_id")?,
             tool_set: text("tool_set")?.map(str::to_owned),
             expires_at: self.expires_in(seconds),
-        })
+        };
+        if matches!(wanted.kind, TunnelKind::Exec | TunnelKind::Mcp) {
+            let environment = id("environment_id")?
+                .ok_or_else(|| TicketFault::Request("lacks its `environment_id`".to_owned()))?;
+            let generation = more
+                .get("environment_generation")
+                .and_then(Json::as_i64)
+                .filter(|value| *value >= 0)
+                .ok_or_else(|| {
+                    TicketFault::Request("lacks a nonnegative `environment_generation`".to_owned())
+                })?;
+            Ok(self
+                .signer
+                .issue_for_tool(&request, environment, generation)?)
+        } else {
+            self.issue(&request)
+        }
     }
 }
 
@@ -368,7 +390,7 @@ mod tests {
     fn a_ticket_is_good_for_nobody_but_the_machine_it_was_signed_for() {
         let (tickets, clock) = tickets();
         let (agent, other, environment) = (new_id(), new_id(), new_id());
-        let wanted = request(
+        let mut wanted = request(
             TunnelKind::Exec,
             &Service::Exec {
                 executor: "codex".into(),
@@ -376,6 +398,12 @@ mod tests {
             environment,
             None,
         );
+        wanted
+            .more
+            .insert("environment_id".into(), Json::String(new_id().to_string()));
+        wanted
+            .more
+            .insert("environment_generation".into(), Json::from(0));
         let ticket = tickets.for_request(&wanted, agent).unwrap();
         let verifier = tickets.verifier();
         assert_eq!(
@@ -386,6 +414,62 @@ mod tests {
             ),
             Err(OpenErrorCode::BadTicket)
         );
+    }
+
+    #[test]
+    fn a_tool_ticket_signs_one_environment_and_refuses_an_unscoped_request() {
+        use orch_link_contract::tunnels::Ticket;
+
+        let (tickets, clock) = tickets();
+        let (agent, machine, environment, other) = (new_id(), new_id(), new_id(), new_id());
+        for service in [
+            Service::Exec {
+                executor: "codex".into(),
+            },
+            Service::Mcp {
+                server: "files".into(),
+            },
+        ] {
+            let mut wanted = request(service.kind(), &service, machine, Some(new_id()));
+            assert!(tickets.for_request(&wanted, agent).is_err());
+            wanted.more.insert(
+                "environment_id".into(),
+                Json::String(environment.to_string()),
+            );
+            assert!(tickets.for_request(&wanted, agent).is_err());
+            wanted
+                .more
+                .insert("environment_generation".into(), Json::from(3));
+            let signed = tickets.for_request(&wanted, agent).unwrap();
+            let verifier = tickets.verifier();
+            let presenter = TicketSource::Machine(agent);
+            let claims = verifier
+                .verify(&signed, presenter, Time::new(clock.now()))
+                .unwrap();
+            assert_eq!(claims.tool_environment_id, Some(environment));
+            assert_eq!(claims.tool_environment_generation, Some(3));
+            let original = Ticket::parse(&signed).unwrap();
+            let mut changed = claims;
+            changed.tool_environment_id = Some(other);
+            let altered = Ticket::assemble(
+                &Ticket::signing_input(&changed).unwrap(),
+                original.signature(),
+            );
+            assert_eq!(
+                verifier.verify(&altered, presenter, Time::new(clock.now())),
+                Err(OpenErrorCode::BadTicket)
+            );
+            changed.tool_environment_id = Some(environment);
+            changed.tool_environment_generation = Some(4);
+            let altered = Ticket::assemble(
+                &Ticket::signing_input(&changed).unwrap(),
+                original.signature(),
+            );
+            assert_eq!(
+                verifier.verify(&altered, presenter, Time::new(clock.now())),
+                Err(OpenErrorCode::BadTicket)
+            );
+        }
     }
 
     #[test]

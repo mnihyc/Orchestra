@@ -9,6 +9,7 @@ import { useState } from 'react';
 import { useTranslation } from 'react-i18next';
 
 import { requestAccess } from '@/api/access';
+import { RequestedEnd, RequestEndField, useRequestEnd } from '@/features/access/RequestEnd';
 import { useActKey } from '@/lib/forms';
 import { Button } from '@/ui/Button';
 import { Dialog } from '@/ui/Dialog';
@@ -28,12 +29,17 @@ export function RequestExport({ target, open, onClose }: { target: ExportTarget;
   const { t } = useTranslation();
   const actKey = useActKey();
   const [reason, setReason] = useState('');
+  const end = useRequestEnd();
   const row = target.kind === 'thread' || target.kind === 'chat' || target.kind === 'document' ? EXPORT_ROW[target.kind] : null;
   const page = target.page ?? { kind: target.kind, id: target.id };
   const body = { items: row === null ? [] : [{ object: page, permissions: [row] }], reason: reason.trim() };
   const asking = target.owner?.display_name;
 
-  const send = useMutation({ mutationFn: () => requestAccess(body, actKey(body)) });
+  const send = useMutation({ mutationFn: () => {
+    const expiresAt = end.end();
+    const request = { ...body, ...(expiresAt === null ? {} : { expires_at: expiresAt }) };
+    return requestAccess(request, actKey(request));
+  } });
 
   return (
     <Dialog
@@ -49,7 +55,7 @@ export function RequestExport({ target, open, onClose }: { target: ExportTarget;
             {send.isSuccess ? t('common.close') : t('common.cancel')}
           </Button>
           {!send.isSuccess && (
-            <Button variant="primary" icon={<Send aria-hidden />} pending={send.isPending} blocked={row === null} onClick={() => row !== null && send.mutate()}>
+            <Button variant="primary" icon={<Send aria-hidden />} pending={send.isPending} blocked={row === null} disabled={!end.valid} onClick={() => row !== null && end.valid && send.mutate()}>
               {t('export.request.send')}
             </Button>
           )}
@@ -57,15 +63,17 @@ export function RequestExport({ target, open, onClose }: { target: ExportTarget;
       }
     >
       {send.isSuccess ? (
-        <InlineAlert tone="success">{asking === undefined ? t('export.request.sentNoOwner') : t('export.request.sent', { name: asking })}</InlineAlert>
+        <><InlineAlert tone="success">{asking === undefined ? t('export.request.sentNoOwner') : t('export.request.sent', { name: asking })}</InlineAlert>
+          {send.data.approvals[0]?.kind === 'access' && <RequestedEnd at={send.data.approvals[0].request.expires_at} />}</>
       ) : (
         <form
           className="flex flex-col gap-3"
           onSubmit={(event) => {
             event.preventDefault();
-            if (row !== null) send.mutate();
+            if (row !== null && end.valid) send.mutate();
           }}
         >
+          <RequestEndField value={end} />
           <Textarea
             label={t('export.request.reason')}
             hint={t('export.request.reasonHint', { max: REASON_MAX })}

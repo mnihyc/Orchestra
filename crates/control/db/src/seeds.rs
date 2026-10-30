@@ -3,8 +3,8 @@
 //! What a fresh system starts with, as data that its admins edit afterwards.
 //! [`seed`] runs at every start of the API, in one transaction: each thing it
 //! makes has a fixed identity (a key, a well-known identifier, one profile for
-//! each kind of adapter), and a thing that exists is never touched, so a
-//! second start changes nothing and an admin's edit is never undone. A thing
+//! each kind of adapter). Untouched older image-based environment templates
+//! become build templates; an admin's edits are never undone. A thing
 //! that is gone altogether is made again; a template or a profile that was
 //! removed is only marked removed, so it stays gone. A template or a profile
 //! is made together with its Use row, which names everybody, and only then:
@@ -72,6 +72,8 @@ const AGENT_NAME_MAX_CHARS: usize = 80;
 /// of one unit and what an environment declares it needs; the template holds
 /// them and an admin changes them there.
 mod default_template {
+    /// The recipe is also used to package the release image.
+    pub const DOCKERFILE: &str = include_str!("../../../../images/orch-env-base/Dockerfile");
     /// Four CPUs: a language server, a build and a test run at once.
     pub const CPU_MILLIS: i64 = 4_000;
     /// 8 GiB of memory, in MiB.
@@ -103,6 +105,12 @@ mod default_template {
 /// What Developer tools gives beyond the Default template: images with Docker, QEMU and a compiler are larger,
 /// and a build or a container of its own needs more of everything.
 mod developer_tools_template {
+    /// The base and this stage form one Dockerfile, even on a host with no local base image.
+    pub const DOCKERFILE: &str = concat!(
+        include_str!("../../../../images/orch-env-base/Dockerfile"),
+        "\n",
+        include_str!("../../../../images/orch-env-dev/Dockerfile")
+    );
     /// Four CPUs, as the Default template.
     pub const CPU_MILLIS: i64 = 4_000;
     /// 8 GiB, in MiB, as the Default template: a build and a container of its own run beside the agent.
@@ -175,31 +183,11 @@ pub mod local_embeddings_template {
 /// What a release brings that the seeds need.
 #[derive(Debug, Clone, Copy)]
 pub struct Release<'a> {
-    /// Where the units of the Default template come from, as the release names
-    /// it: an image reference.
-    pub environment_image: &'a str,
-    /// The digest that pins that image, where the release has one.
-    pub environment_image_digest: Option<&'a str>,
+    /// The version written into images built from this release's recipes.
+    pub version: &'a str,
     /// The adapters this build has built in; each gets one profile.
     pub adapters: &'a [BuiltInAdapter<'a>],
 }
-
-impl Release<'_> {
-    /// The image of the Developer tools template: the environment image's repository `orch-env-base` swapped for
-    /// `orch-env-dev` under the same tag, because the two are built and released together. None where the
-    /// environment image is no such image (a release that brings its own), in which case no such template is made.
-    #[must_use]
-    pub fn developer_image(&self) -> Option<String> {
-        let (repository, tag) = self.environment_image.rsplit_once(':')?;
-        let base = repository.strip_suffix(ENVIRONMENT_REPOSITORY)?;
-        Some(format!("{base}{DEVELOPER_REPOSITORY}:{tag}"))
-    }
-}
-
-/// The repository of the Default template's image.
-const ENVIRONMENT_REPOSITORY: &str = "orch-env-base";
-/// The repository of the Developer tools template's image.
-const DEVELOPER_REPOSITORY: &str = "orch-env-dev";
 
 /// An adapter that is built in, which the system has a profile for.
 #[derive(Debug, Clone, Copy)]
@@ -460,12 +448,10 @@ fn default_template_spec(release: &Release<'_>) -> Json {
         .collect();
     colocated.sort_unstable();
     json!({
-        "image": release.environment_image,
-        "image_digest": release.environment_image_digest,
-        "build": null,
+        "image_digest": null,
+        "build": { "dockerfile": v::DOCKERFILE, "context": null, "args": { "VERSION": release.version }, "target": null },
         "archive": null,
         "runtime": "runc",
-        "image_facts": { "image": release.environment_image, "docker": false, "qemu": false },
         "user": { "name": "agent", "uid": v::AGENT_ID, "gid": v::AGENT_ID },
         "workspace_mount": "/workspace",
         "home_mount": "/home/agent",
@@ -490,15 +476,26 @@ fn default_template_spec(release: &Release<'_>) -> Json {
 
 /// The spec of **Developer tools**: the Default template's recipe on the developer image, with room for builds and
 /// for Docker of its own, which an environment is given where its runtime has a kernel of its own.
-fn developer_tools_template_spec(release: &Release<'_>, image: &str) -> Json {
+fn developer_tools_template_spec(release: &Release<'_>) -> Json {
     use developer_tools_template as v;
     let mut spec = default_template_spec(release);
-    spec["image"] = json!(image);
-    spec["image_digest"] = Json::Null;
-    spec["image_facts"] = json!({ "image": image, "docker": true, "qemu": true });
+    spec["build"]["dockerfile"] = json!(v::DOCKERFILE);
     spec["resources"] = json!({ "cpu_millis": v::CPU_MILLIS, "memory_mb": v::MEMORY_MB, "pids": v::PIDS, "disk_gb": v::DISK_GB });
     spec["resources_max"] = json!({ "cpu_millis": default_template::CPU_MILLIS_MAX, "memory_mb": default_template::MEMORY_MB_MAX, "pids": v::PIDS_MAX, "disk_gb": v::DISK_GB_MAX });
     spec["needs"] = json!({ "memory_mb": v::NEEDS_MEMORY_MB, "cpu_millis": default_template::NEEDS_CPU_MILLIS, "disk_gb": v::NEEDS_DISK_GB });
+    spec
+}
+
+/// Reconstructs the image-based seed, so only an exact old definition can be converted.
+fn old_environment_template_spec(release: &Release<'_>, image: &str, developer: bool) -> Json {
+    let mut spec = if developer {
+        developer_tools_template_spec(release)
+    } else {
+        default_template_spec(release)
+    };
+    spec["image"] = json!(image);
+    spec["build"] = Json::Null;
+    spec["image_facts"] = json!({ "image": image, "docker": developer, "qemu": developer });
     spec
 }
 
@@ -508,11 +505,7 @@ fn developer_tools_template_spec(release: &Release<'_>, image: &str) -> Json {
 fn provider_runtime_template_spec() -> Json {
     use provider_runtime_template as v;
     json!({
-        "allowed_capabilities": ["port_place", "port_host", "port_link"],
-        "image": null,
-        "image_digest": null,
         "build": { "dockerfile": v::DOCKERFILE, "context": null, "args": {}, "target": null },
-        "archive": null,
         "runtime": "runc",
         "user": { "name": "nonroot", "uid": v::NONROOT_ID, "gid": v::NONROOT_ID },
         "resources": { "cpu_millis": v::CPU_MILLIS, "memory_mb": v::MEMORY_MB, "pids": v::PIDS },
@@ -533,11 +526,7 @@ fn provider_runtime_template_spec() -> Json {
 pub fn local_embeddings_template_spec() -> Json {
     use local_embeddings_template as v;
     json!({
-        "allowed_capabilities": ["port_place", "port_host", "port_link"],
-        "image": null,
-        "image_digest": null,
         "build": { "dockerfile": v::DOCKERFILE, "context": null, "args": {}, "target": null },
-        "archive": null,
         "runtime": "runc",
         "user": { "name": "nonroot", "uid": v::NONROOT_ID, "gid": v::NONROOT_ID },
         "resources": { "cpu_millis": v::CPU_MILLIS, "memory_mb": v::MEMORY_MB, "pids": v::PIDS },
@@ -617,6 +606,7 @@ pub async fn seed(
     for capability in &capabilities() {
         made.capabilities += seed_capability(conn, capability, at).await?;
     }
+    convert_old_environment_templates(conn, release, at).await?;
     let templates = [
         (
             DEFAULT_TEMPLATE_ID,
@@ -632,20 +622,14 @@ pub async fn seed(
             "provider",
             provider_runtime_template_spec(),
         ),
+        (
+            DEVELOPER_TEMPLATE_ID,
+            "Developer tools",
+            "The Default environment with Docker Engine, QEMU and the usual build tools in its image. Docker inside is given under a runtime that has a kernel of its own.",
+            "environment",
+            developer_tools_template_spec(release),
+        ),
     ];
-    let mut templates = templates.to_vec();
-    if let Some(image) = release.developer_image() {
-        templates.insert(
-            1,
-            (
-                DEVELOPER_TEMPLATE_ID,
-                "Developer tools",
-                "The Default environment with Docker Engine, QEMU and the usual build tools in its image. Docker inside is given under a runtime that has a kernel of its own.",
-                "environment",
-                developer_tools_template_spec(release, &image),
-            ),
-        );
-    }
     for (id, name, description, kind, spec) in &templates {
         if seed_template(conn, *id, name, description, kind, spec, at).await? {
             made.templates += 1;
@@ -661,6 +645,67 @@ pub async fn seed(
         }
     }
     Ok(made)
+}
+
+/// Changes only a still-original image seed. The conditional update also protects a concurrent edit.
+async fn convert_old_environment_templates(
+    conn: &mut Conn,
+    release: &Release<'_>,
+    at: DateTime<Utc>,
+) -> Result<(), SeedError> {
+    for (id, name, description, repository, developer) in [
+        (
+            DEFAULT_TEMPLATE_ID,
+            "Default",
+            "Where environments are made unless a place says otherwise. The container is the confinement; the agent asks when it needs to.",
+            "orch-env-base:",
+            false,
+        ),
+        (
+            DEVELOPER_TEMPLATE_ID,
+            "Developer tools",
+            "The Default environment with Docker Engine, QEMU and the usual build tools in its image. Docker inside is given under a runtime that has a kernel of its own.",
+            "orch-env-dev:",
+            true,
+        ),
+    ] {
+        let old: Option<Json> = sqlx::query_scalar("SELECT spec FROM env_templates WHERE id = $1")
+            .bind(id)
+            .fetch_optional(&mut *conn)
+            .await?;
+        let Some(old) = old else { continue };
+        let Some(image) = old.get("image").and_then(Json::as_str) else {
+            continue;
+        };
+        if !image
+            .strip_prefix(repository)
+            .is_some_and(|tag| !tag.is_empty())
+            || old != old_environment_template_spec(release, image, developer)
+        {
+            continue;
+        }
+        let replacement = if developer {
+            developer_tools_template_spec(release)
+        } else {
+            default_template_spec(release)
+        };
+        sqlx::query(
+            "UPDATE env_templates SET spec = $2, revision = revision + 1, updated_at = $3
+             WHERE id = $1 AND spec = $4 AND name = $5 AND description = $6
+               AND kind = 'environment' AND driver = 'docker'
+               AND home_id IS NULL AND org_id IS NULL AND owner_id IS NULL
+               AND enabled AND deleted_at IS NULL AND revision = 1 AND updated_at = created_at",
+        )
+        .bind(id)
+        .bind(replacement)
+        .bind(at)
+        .bind(old)
+        .bind(name)
+        .bind(description)
+        .execute(&mut *conn)
+        .await?;
+    }
+    Ok(())
 }
 
 async fn seed_capability(
@@ -1210,11 +1255,28 @@ mod tests {
 
     fn release() -> Release<'static> {
         Release {
-            environment_image: "registry.example/orch-env-base:0.1.0",
-            environment_image_digest: None,
-
+            version: "0.1.0",
             adapters: ADAPTERS,
         }
+    }
+
+    /// The image-based template stored by the previous release, independent of today's seed code.
+    fn legacy_environment_template(developer: bool) -> Json {
+        let mut spec: Json = serde_json::from_str(include_str!(
+            "../tests/fixtures/legacy-environment-template.json"
+        ))
+        .unwrap();
+        if developer {
+            spec["image"] = json!("orch-env-dev:0.1.0");
+            spec["image_facts"] =
+                json!({"image": "orch-env-dev:0.1.0", "docker": true, "qemu": true});
+            spec["resources"] =
+                json!({"cpu_millis": 4000, "memory_mb": 8192, "pids": 8192, "disk_gb": 100});
+            spec["resources_max"] =
+                json!({"cpu_millis": 16000, "memory_mb": 65536, "pids": 65536, "disk_gb": 1000});
+            spec["needs"] = json!({"memory_mb": 4096, "cpu_millis": 1000, "disk_gb": 20});
+        }
+        spec
     }
 
     async fn count(conn: &mut Conn, table: &str) -> i64 {
@@ -1266,8 +1328,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn developer_tools_is_the_default_recipe_on_the_developer_image_and_only_where_that_image_is_known()
-     {
+    async fn both_environment_templates_build_their_release_recipes_on_the_host() {
         let test = TestDb::fresh().await;
         let mut conn = test.pool.acquire().await.unwrap();
         seed(&mut conn, &release(), clock::start()).await.unwrap();
@@ -1276,41 +1337,38 @@ mod tests {
             .fetch_one(&mut *conn)
             .await
             .unwrap();
-        assert_eq!(spec["image"], "registry.example/orch-env-dev:0.1.0");
+        assert!(spec["image"].is_null());
+        assert_eq!(
+            spec["build"]["dockerfile"],
+            developer_tools_template::DOCKERFILE
+        );
+        assert!(spec["build"]["context"].is_null());
+        assert_eq!(spec["build"]["args"]["VERSION"], "0.1.0");
         assert_eq!(
             spec["runtime"], "runc",
             "the runtime is chosen when an environment is made"
         );
         let allowed = spec["allowed_capabilities"].as_array().unwrap();
         assert!(allowed.contains(&json!("docker_inside")) && allowed.contains(&json!("kvm")));
-        assert_eq!(
-            spec["image_facts"],
-            json!({ "image": "registry.example/orch-env-dev:0.1.0", "docker": true, "qemu": true }),
-            "the image has Docker and QEMU, as its recipe says"
-        );
         let default_spec: Json = sqlx::query_scalar("SELECT spec FROM env_templates WHERE id = $1")
             .bind(DEFAULT_TEMPLATE_ID)
             .fetch_one(&mut *conn)
             .await
             .unwrap();
-        assert_eq!(default_spec["image_facts"]["docker"], false);
+        assert!(default_spec["image"].is_null());
         assert_eq!(
-            default_spec["image_facts"]["image"], default_spec["image"],
-            "the default image's facts name the image they were read from"
+            default_spec["build"]["dockerfile"],
+            default_template::DOCKERFILE
         );
-        assert_eq!(
-            release().developer_image().as_deref(),
-            Some("registry.example/orch-env-dev:0.1.0")
-        );
-        let own = Release {
-            environment_image: "registry.example/orch-test-env:1",
-            ..release()
-        };
-        assert_eq!(
-            own.developer_image(),
-            None,
-            "a release that brings its own environment image makes no such template"
-        );
+        assert!(default_spec["build"]["context"].is_null());
+        assert_eq!(default_spec["build"]["args"]["VERSION"], "0.1.0");
+        for template in [&spec, &default_spec] {
+            let source = orch_driver_contract::sources::Source::from_spec(template).unwrap();
+            assert_eq!(
+                source.kind(),
+                orch_driver_contract::sources::SourceKind::Build
+            );
+        }
     }
 
     #[tokio::test]
@@ -1373,7 +1431,92 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn gateway_port_capabilities_ship_without_driver_patches_and_all_templates_allow_them() {
+    async fn untouched_image_templates_are_converted_once_and_keep_their_use_rows() {
+        let test = TestDb::fresh().await;
+        let mut conn = test.pool.acquire().await.unwrap();
+        let at = clock::start();
+        seed(&mut conn, &release(), at).await.unwrap();
+        for (id, developer) in [(DEFAULT_TEMPLATE_ID, false), (DEVELOPER_TEMPLATE_ID, true)] {
+            let old = legacy_environment_template(developer);
+            sqlx::query("UPDATE env_templates SET spec = $2 WHERE id = $1")
+                .bind(id)
+                .bind(old)
+                .execute(&mut *conn)
+                .await
+                .unwrap();
+        }
+        let later = at + chrono::Duration::days(1);
+        let next = Release {
+            version: "0.1.1",
+            ..release()
+        };
+        seed(&mut conn, &next, later).await.unwrap();
+        for (id, expected) in [
+            (DEFAULT_TEMPLATE_ID, default_template_spec(&next)),
+            (DEVELOPER_TEMPLATE_ID, developer_tools_template_spec(&next)),
+        ] {
+            let (spec, revision, updated): (Json, i64, DateTime<Utc>) = sqlx::query_as(
+                "SELECT spec, revision, updated_at FROM env_templates WHERE id = $1",
+            )
+            .bind(id)
+            .fetch_one(&mut *conn)
+            .await
+            .unwrap();
+            assert_eq!(spec, expected);
+            assert_eq!(revision, 2);
+            assert_eq!(updated, later);
+        }
+        assert_eq!(count(&mut conn, "permission_entries").await, 6);
+        seed(&mut conn, &next, later + chrono::Duration::days(1))
+            .await
+            .unwrap();
+        let revisions: Vec<i64> = sqlx::query_scalar(
+            "SELECT revision FROM env_templates WHERE id = ANY($1) ORDER BY revision",
+        )
+        .bind(&[DEFAULT_TEMPLATE_ID, DEVELOPER_TEMPLATE_ID][..])
+        .fetch_all(&mut *conn)
+        .await
+        .unwrap();
+        assert_eq!(revisions, [2, 2]);
+    }
+
+    #[tokio::test]
+    async fn edited_disabled_and_removed_image_templates_are_not_converted() {
+        let test = TestDb::fresh().await;
+        let mut conn = test.pool.acquire().await.unwrap();
+        let at = clock::start();
+        seed(&mut conn, &release(), at).await.unwrap();
+        let original = legacy_environment_template(false);
+        let mut changed = original.clone();
+        changed["resources"]["memory_mb"] = json!(4096);
+        for (spec, name, revision, enabled, deleted) in [
+            (changed, "Default", 1_i64, true, None),
+            (original.clone(), "Renamed", 1, true, None),
+            (original.clone(), "Default", 2, true, None),
+            (original.clone(), "Default", 1, false, None),
+            (original.clone(), "Default", 1, true, Some(at)),
+        ] {
+            sqlx::query("UPDATE env_templates SET spec = $2, name = $3, revision = $4, enabled = $5, deleted_at = $6 WHERE id = $1")
+                .bind(DEFAULT_TEMPLATE_ID).bind(&spec).bind(name).bind(revision).bind(enabled).bind(deleted)
+                .execute(&mut *conn).await.unwrap();
+            seed(&mut conn, &release(), at + chrono::Duration::days(1))
+                .await
+                .unwrap();
+            let saved: Json = sqlx::query_scalar("SELECT spec FROM env_templates WHERE id = $1")
+                .bind(DEFAULT_TEMPLATE_ID)
+                .fetch_one(&mut *conn)
+                .await
+                .unwrap();
+            assert_eq!(
+                saved, spec,
+                "edited, disabled and removed templates are left alone"
+            );
+        }
+    }
+
+    #[tokio::test]
+    async fn gateway_port_capabilities_ship_without_driver_patches_and_environment_templates_allow_them()
+     {
         let test = TestDb::fresh().await;
         let mut conn = test.pool.acquire().await.unwrap();
         seed(&mut conn, &release(), clock::start()).await.unwrap();
@@ -1394,11 +1537,11 @@ mod tests {
         }
         let templates: Vec<Json> =
             sqlx::query_scalar("SELECT spec FROM env_templates WHERE id = ANY($1)")
-                .bind(&[DEFAULT_TEMPLATE_ID, PROVIDER_RUNTIME_TEMPLATE_ID][..])
+                .bind(&[DEFAULT_TEMPLATE_ID, DEVELOPER_TEMPLATE_ID][..])
                 .fetch_all(&mut *conn)
                 .await
                 .unwrap();
-        assert_eq!(templates.len(), 2, "both shipped templates are present");
+        assert_eq!(templates.len(), 2, "both environment templates are present");
         for template in templates {
             for key in ["port_place", "port_host", "port_link"] {
                 assert!(
@@ -1511,7 +1654,8 @@ mod tests {
                 "{member}: a unit may not start above its maximum"
             );
         }
-        assert_eq!(spec["image"], "registry.example/orch-env-base:0.1.0");
+        assert!(spec["image"].is_null());
+        assert_eq!(spec["build"]["args"]["VERSION"], "0.1.0");
         assert_eq!(spec["agent_defaults"]["approval.mode"], "on_request");
         let provider = provider_runtime_template_spec();
         assert_eq!(
@@ -1519,6 +1663,11 @@ mod tests {
             "what holds a credential is read-only"
         );
         assert_eq!(provider["user"]["name"], "nonroot");
+        for template in [provider, local_embeddings_template_spec()] {
+            assert!(template.get("allowed_capabilities").is_none());
+            assert_eq!(template["security"]["cap_drop"], json!(["ALL"]));
+            assert_eq!(template["security"]["no_new_privileges"], true);
+        }
     }
 
     #[test]
@@ -1535,8 +1684,7 @@ mod tests {
             })
             .collect();
         let spec = default_template_spec(&Release {
-            environment_image: "registry.example/orch-env-base:0.1.0",
-            environment_image_digest: None,
+            version: "0.1.0",
             adapters: &adapters,
         });
         let mut expected: Vec<&str> = programs.colocated_by_default();

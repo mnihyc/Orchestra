@@ -223,7 +223,7 @@ export function AddHolders({ page, target, catalogue, changes, initial = 'full_v
       const ask = askToLetIn(offer, holders, t('access.doors.reason', { names: people.map((entry) => entry.name).join(', '), thread: target.name, name: offer.environment.name }), target.id);
       if (ask !== null) {
         for (let offset = 0; offset < ask.items.length; offset += REQUEST_ITEMS) {
-          const batch = { ...ask, items: ask.items.slice(offset, offset + REQUEST_ITEMS) };
+          const batch = { ...ask, items: ask.items.slice(offset, offset + REQUEST_ITEMS), ...(expires === null ? {} : { expires_at: expires }) };
           await requestAccess(batch, actKey(batch));
         }
         setWaiting(t('access.doors.waiting', { names: people.map((entry) => entry.name).join(', '), owner: offer.environment.owner?.display_name ?? '', name: offer.environment.name }));

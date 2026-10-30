@@ -265,12 +265,69 @@ async fn somebody_who_may_not_start_work_in_the_topic_is_refused_before_anything
             .await
             .problem();
         assert_eq!(refused.code, ErrorCode::AuthzDenied, "{who:?}");
-        assert_eq!(refused.extra["required"], "topic.interact");
+        assert_eq!(refused.extra["required"], "topic.start_threads");
         assert_eq!(
             first_missing(&refused)["permissions"],
-            json!(["topic.interact"])
+            json!(["topic.start_threads"])
         );
     }
+}
+
+#[tokio::test]
+async fn a_person_given_start_threads_alone_can_create_and_own_a_thread() {
+    let s = Scene::new().await;
+    for (kind, id, permission) in [
+        ("node", s.tree.topic.base.id, "topic.start_threads"),
+        ("provider", s.on.provider, "provider.use"),
+        ("agent", s.on.agent, "agent.use"),
+        ("environment", s.on.environment, "environment.use"),
+    ] {
+        s.rig
+            .lets_use(kind, id, permission, &s.cai, json!({}))
+            .await;
+    }
+    let shown = s
+        .rig
+        .world
+        .app
+        .call(NodeGet, &[&s.tree.topic.base.id])
+        .token(&s.cai.token)
+        .send()
+        .await
+        .ok();
+    let Node::Topic(topic) = shown else {
+        panic!("the topic is visible")
+    };
+    assert!(
+        topic
+            .base
+            .access
+            .permissions
+            .contains(&"topic.start_threads".to_owned())
+    );
+    assert!(
+        !topic
+            .base
+            .access
+            .permissions
+            .contains(&"topic.interact".to_owned())
+    );
+    let thread = s
+        .rig
+        .world
+        .app
+        .call(ThreadCreate, &[&s.tree.topic.base.id])
+        .token(&s.cai.token)
+        .body(&CreateThread {
+            binding: Some(binding(&s)),
+            model: Some(MODEL.to_owned()),
+            environment: Some(EnvironmentChoice::Use(s.on.environment)),
+            ..CreateThread::default()
+        })
+        .send()
+        .await
+        .ok();
+    assert_eq!(thread.base.owner.id, s.cai.id());
 }
 
 #[tokio::test]

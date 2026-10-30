@@ -106,6 +106,7 @@ async fn ask(
         .body(&AccessRequestCreateBody {
             items,
             reason: "I need it".to_owned(),
+            expires_at: None,
             for_thread: None,
         })
         .send()
@@ -305,6 +306,150 @@ async fn somebody_who_is_refused_asks_for_what_is_missing_and_it_is_sent_to_the_
                 .await
                 .contains(&NotificationKind::AccessRequested)
         );
+    }
+}
+
+#[tokio::test]
+async fn a_requested_end_is_visible_and_each_approver_can_keep_change_or_clear_it() {
+    let f = firm().await;
+    let end = Time::new(f.desk.world.now() + Duration::days(7));
+    let changed = Time::new(f.desk.world.now() + Duration::days(2));
+    let mut topics = Vec::new();
+    for name in ["Keep", "Change", "Clear"] {
+        topics.push(
+            make_topic(&f.desk.world, &f.pam, f.project, name)
+                .await
+                .base
+                .id,
+        );
+    }
+    let body = AccessRequestCreateBody {
+        items: topics
+            .iter()
+            .map(|id| item("topic", *id, &["topic.interact"]))
+            .collect(),
+        reason: "For a week".to_owned(),
+        for_thread: None,
+        expires_at: Some(end),
+    };
+    let past = f
+        .desk
+        .world
+        .app
+        .call(AccessRequestCreate, &[])
+        .token(&f.rae.token)
+        .body(&AccessRequestCreateBody {
+            expires_at: Some(Time::new(f.desk.world.now())),
+            ..body.clone()
+        })
+        .send()
+        .await
+        .problem();
+    assert_eq!(past.code, ErrorCode::RequestInvalid);
+    let made = f
+        .desk
+        .world
+        .app
+        .call(AccessRequestCreate, &[])
+        .token(&f.rae.token)
+        .body(&body)
+        .send()
+        .await
+        .ok();
+    assert_eq!(made.approvals.len(), 3);
+    let reread = f
+        .desk
+        .world
+        .app
+        .call(AccessRequestGet, &[&made.batch_id])
+        .token(&f.rae.token)
+        .send()
+        .await
+        .ok();
+    assert_eq!(reread.approvals.len(), 3);
+    for approval in &reread.approvals {
+        let ApprovalRequest::Access(request) = &approval.request else {
+            panic!("access approval")
+        };
+        assert_eq!(request.expires_at, Some(end));
+        assert_ne!(
+            approval.expires_at,
+            Some(end),
+            "the decision deadline is separate"
+        );
+    }
+    let notices = f
+        .desk
+        .world
+        .app
+        .call(NotificationList, &[])
+        .token(&f.pam.token)
+        .query(&NotificationListQuery::default())
+        .send()
+        .await
+        .ok();
+    for approval in &made.approvals {
+        let notice = notices
+            .items
+            .iter()
+            .find(|row| row.approval_id == Some(approval.id))
+            .unwrap();
+        assert_eq!(notice.data["requested_expires_at"], json!(end));
+    }
+    for (topic, actual) in topics.into_iter().zip([Some(end), Some(changed), None]) {
+        let approval = made
+            .approvals
+            .iter()
+            .find(|approval| {
+                approval
+                    .object
+                    .as_ref()
+                    .is_some_and(|object| object.id == topic)
+            })
+            .unwrap();
+        decide(
+            &f,
+            &f.pam,
+            approval.id,
+            AccessDecision {
+                expires_at: actual,
+                ..approve()
+            },
+        )
+        .await
+        .ok();
+        let page = f
+            .desk
+            .world
+            .app
+            .call(PermissionPageGet, &[&"nodes", &topic])
+            .token(&f.pam.token)
+            .send()
+            .await
+            .ok();
+        let entry = page.rows.iter().find(|row| row.permission == "topic.interact").unwrap().entries.iter()
+            .find(|entry| matches!(&entry.holder, orch_api_contract::access::Holder::User { user } if user.id == f.rae.id())).unwrap();
+        assert_eq!(entry.expires_at, actual);
+    }
+    let answers = f
+        .desk
+        .world
+        .app
+        .call(NotificationList, &[])
+        .token(&f.rae.token)
+        .query(&NotificationListQuery::default())
+        .send()
+        .await
+        .ok();
+    for approval in &made.approvals {
+        let notice = answers
+            .items
+            .iter()
+            .find(|row| {
+                row.kind == NotificationKind::AccessDecided && row.approval_id == Some(approval.id)
+            })
+            .unwrap();
+        assert_eq!(notice.data["requested_expires_at"], json!(end));
     }
 }
 
@@ -1338,6 +1483,7 @@ async fn nobody_who_is_not_signed_in_asks_reads_or_decides() {
         .body(&AccessRequestCreateBody {
             items: vec![item("project", firm.project, &["project.interact"])],
             reason: String::new(),
+            expires_at: None,
             for_thread: None,
         })
         .send()

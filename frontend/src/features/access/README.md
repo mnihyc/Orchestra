@@ -111,7 +111,8 @@ What is not there yet, and why:
 - `AdminMode.tsx`: One server-held session switch and title-bar state; ordinary pages remain ordinary while it is off. Management visibility uses that mode plus the server's system-admin fact.
 - `AdminReachNotice.tsx`: A private answer marked by the server names the administered place without granting access or changing a page.
 - `ParticipationFilter.tsx`: The name-first ordinary focus filter, independent of authority and notification subscriptions.
-- `AccessRequest.tsx`: Ask for everything that is missing in one step, with a reason; each part goes to its owner.
+- `AccessRequest.tsx`: Ask for everything that is missing in one step, with a proposed end and a reason; each part goes to its owner.
+- `RequestEnd.tsx`: Choose and display the proposed end of a request, preserving it across a retry.
 - `GoesWith.tsx`: What a permission is no use without: Include the model for a thread, Open to the work here for a place, or a request to whoever decides.
 - `Reaches.tsx`: What reaches into an environment: a thread's files, terminal, browsers and displays are its environment's, how many people look into it, what making the thread private leaves open; and, on an environment's page, who can reach it.
 - `WhoMayUse.tsx`: The control that ends every dialog that makes a resource: only me, everyone in the org, chosen people, or as the org decides.

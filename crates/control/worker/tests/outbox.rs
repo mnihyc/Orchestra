@@ -147,6 +147,85 @@ async fn a_delivery_that_succeeds_after_a_failure_clears_the_error_of_the_channe
 }
 
 #[tokio::test(flavor = "multi_thread")]
+async fn a_delayed_chat_notice_is_not_delivered_after_the_recipient_loses_access() {
+    use orch_db::queries::chats::{self, NewChat, NewMember};
+
+    let notifier = Scripted::new("chat", Reaches::Channel);
+    let world = World::new(only(&notifier)).await;
+    let channel = world.channel(Of::System, "chat", json!({}), &[]).await;
+    let reader = world.person("reader").await;
+    let org = world.org("Office").await;
+    let chat = new_id();
+    {
+        let mut conn = world.test.pool.acquire().await.unwrap();
+        chats::insert_chat(
+            &mut conn,
+            &NewChat {
+                id: chat,
+                kind: "group",
+                org_id: org,
+                direct_key: None,
+                name: Some("Release"),
+                created_by: world.admin,
+                at: world.now(),
+            },
+        )
+        .await
+        .unwrap()
+        .unwrap();
+        chats::add_member(
+            &mut conn,
+            &NewMember {
+                expires_at: None,
+                chat_id: chat,
+                user_id: reader,
+                added_by: Some(world.admin),
+                guest: true,
+                seq: 1,
+                at: world.now(),
+            },
+        )
+        .await
+        .unwrap();
+    }
+    let route = world.route_on(reader, &channel).await;
+    let mut notice = world.snapshot("chat.message", "Private chat");
+    notice.id = None;
+    notice.chat_id = Some(chat);
+    notice.body = "Private words".to_owned();
+    world
+        .queue_for_route(&route, "chat", &[notice.clone()])
+        .await;
+    assert_eq!(world.outbox().run().await.unwrap().sent, 1);
+    assert_eq!(notifier.deliveries(), 1);
+
+    let waiting = world.queue_for_route(&route, "chat", &[notice]).await;
+    {
+        let mut conn = world.test.pool.acquire().await.unwrap();
+        assert!(
+            chats::remove_member(&mut conn, chat, reader, 2, world.now())
+                .await
+                .unwrap()
+        );
+    }
+    world.outbox().run().await.unwrap();
+    assert_eq!(
+        notifier.deliveries(),
+        1,
+        "no stale excerpt reaches the former member"
+    );
+    let row = world.row(waiting).await;
+    assert_eq!(row.state, "cancelled");
+    let reason: Option<String> =
+        sqlx::query_scalar("SELECT cancel_reason FROM outbox WHERE id = $1")
+            .bind(waiting)
+            .fetch_one(&world.test.pool)
+            .await
+            .unwrap();
+    assert_eq!(reason.as_deref(), Some("lost_access"));
+}
+
+#[tokio::test(flavor = "multi_thread")]
 async fn the_time_the_far_side_names_replaces_the_pause_of_the_schedule_and_what_cannot_succeed_fails_at_once()
  {
     let notifier = Scripted::new("email", Reaches::Email);

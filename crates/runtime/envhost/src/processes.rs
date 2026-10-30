@@ -141,6 +141,8 @@ struct State {
     system: System,
     users: Users,
     roots: BTreeMap<u32, Root>,
+    #[cfg(windows)]
+    root_pins: BTreeMap<u32, Arc<System>>,
     seen: BTreeMap<u32, i64>,
     protected: BTreeMap<u32, i64>,
     environments: HashMap<(u32, i64), BTreeMap<String, String>>,
@@ -207,6 +209,8 @@ impl Processes {
             system: System::new(),
             users: Users::new_with_refreshed_list(),
             roots: BTreeMap::new(),
+            #[cfg(windows)]
+            root_pins: BTreeMap::new(),
             seen: BTreeMap::new(),
             protected: BTreeMap::new(),
             environments: HashMap::new(),
@@ -377,16 +381,45 @@ impl Processes {
     /// Notes that the process `pid`, which the host or an executor just started, belongs to the
     /// environment, with everything that descends from it.
     pub fn register_root(&self, pid: u32, kind: RootKind) -> Result<()> {
+        #[cfg(windows)]
+        let (start_ms, pin) = {
+            let mut system = System::new();
+            let id = Pid::from_u32(pid);
+            system.refresh_processes_specifics(
+                ProcessesToUpdate::Some(&[id]),
+                true,
+                ProcessRefreshKind::nothing(),
+            );
+            let start = system
+                .process(id)
+                .map(|process| {
+                    i64::try_from(process.start_time())
+                        .unwrap_or(0)
+                        .saturating_mul(1000)
+                })
+                .filter(|start| *start > 0)
+                .ok_or_else(|| HostError::NotFound(format!("process {pid} is not there")))?;
+            (start, Arc::new(system))
+        };
+        #[cfg(not(windows))]
         let start_ms = start_of(pid)
             .ok_or_else(|| HostError::NotFound(format!("process {pid} is not there")))?;
-        self.state().roots.insert(pid, Root { start_ms, kind });
+        {
+            let mut state = self.state();
+            state.roots.insert(pid, Root { start_ms, kind });
+            #[cfg(windows)]
+            state.root_pins.insert(pid, pin);
+        }
         self.persist()
     }
 
     /// Forgets that `pid` was started for the environment (what descends from it is not forgotten
     /// until it ends).
     pub fn forget_root(&self, pid: u32) {
-        self.state().roots.remove(&pid);
+        let mut state = self.state();
+        state.roots.remove(&pid);
+        #[cfg(windows)]
+        state.root_pins.remove(&pid);
     }
 
     /// Notes that `pid` is the connector or one of the processes it runs on its own account: it is
@@ -468,10 +501,13 @@ impl Processes {
                     pid: number,
                     ppid: process.parent().map(Pid::as_u32),
                     group: platform::process_group_of(number),
+                    #[cfg(not(windows))]
                     session: process
                         .session_id()
                         .map(Pid::as_u32)
                         .or_else(|| platform::session_of(number)),
+                    #[cfg(windows)]
+                    session: None,
                     start_ms: i64::try_from(process.start_time())
                         .unwrap_or(0)
                         .saturating_mul(1000),
@@ -826,58 +862,217 @@ impl Processes {
         }
     }
 
-    /// Holds every member of the tree of `root` still while the members are found, sends `sig` to
-    /// each, and lets them go on when the signal is not one that ends them. Says who was reached.
+    /// Signals the verified members of `root` and says who was reached.
+    /// On Unix it holds the tree still while finding it; on Windows it ends descendants before
+    /// their parent because the platform cannot suspend processes.
     pub fn signal_tree(&self, root: u32, sig: Sig) -> Result<Vec<(u32, i64)>> {
-        let mut frozen: Vec<(u32, i64)> = Vec::new();
-        let mut known: BTreeSet<u32> = BTreeSet::new();
-        for _ in 0..FREEZE_ROUNDS {
-            let rows = self.rows();
-            let visible = self.visible(&rows);
-            let mut seeds: BTreeSet<u32> = known.iter().copied().collect();
-            if visible.contains(&root) {
-                seeds.insert(root);
-            }
-            let members = tree_from(&rows, &seeds, &visible);
-            let starts: BTreeMap<u32, i64> =
-                rows.iter().map(|row| (row.pid, row.start_ms)).collect();
-            let fresh: Vec<u32> = members
-                .into_iter()
-                .filter(|pid| !known.contains(pid))
-                .collect();
-            if fresh.is_empty() {
-                break;
-            }
-            for pid in fresh {
-                let start = starts.get(&pid).copied();
-                match platform::send_signal(pid, start, Sig::Stop) {
-                    Ok(()) => {
-                        known.insert(pid);
-                        frozen.push((pid, start.unwrap_or(0)));
-                    }
-                    // Gone since the table was read, or a number another process has now.
-                    Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
-                    Err(error) if pid == root => return Err(signalling(pid, &error)),
-                    Err(error) => {
-                        tracing::debug!(pid, %error, "a member of a process tree could not be held still")
+        #[cfg(windows)]
+        {
+            self.end_windows_tree(root, sig)
+        }
+
+        #[cfg(unix)]
+        {
+            let mut frozen: Vec<(u32, i64)> = Vec::new();
+            let mut known: BTreeSet<u32> = BTreeSet::new();
+            for _ in 0..FREEZE_ROUNDS {
+                let rows = self.rows();
+                let visible = self.visible(&rows);
+                let mut seeds: BTreeSet<u32> = known.iter().copied().collect();
+                if visible.contains(&root) {
+                    seeds.insert(root);
+                }
+                let members = tree_from(&rows, &seeds, &visible);
+                let starts: BTreeMap<u32, i64> =
+                    rows.iter().map(|row| (row.pid, row.start_ms)).collect();
+                let fresh: Vec<u32> = members
+                    .into_iter()
+                    .filter(|pid| !known.contains(pid))
+                    .collect();
+                if fresh.is_empty() {
+                    break;
+                }
+                for pid in fresh {
+                    let start = starts.get(&pid).copied();
+                    match platform::send_signal(pid, start, Sig::Stop) {
+                        Ok(()) => {
+                            known.insert(pid);
+                            frozen.push((pid, start.unwrap_or(0)));
+                        }
+                        // Gone since the table was read, or a number another process has now.
+                        Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
+                        Err(error) if pid == root => return Err(signalling(pid, &error)),
+                        Err(error) => {
+                            tracing::debug!(pid, %error, "a member of a process tree could not be held still")
+                        }
                     }
                 }
             }
-        }
-        if frozen.is_empty() {
-            return Err(HostError::NotFound(format!(
-                "process {root} is not one of this environment's"
-            )));
-        }
-        for (pid, start) in &frozen {
-            let _ = platform::send_signal(*pid, Some(*start), sig);
-        }
-        if sig != Sig::Kill {
-            for (pid, start) in &frozen {
-                let _ = platform::send_signal(*pid, Some(*start), Sig::Continue);
+            if frozen.is_empty() {
+                return Err(HostError::NotFound(format!(
+                    "process {root} is not one of this environment's"
+                )));
             }
+            for (pid, start) in &frozen {
+                let _ = platform::send_signal(*pid, Some(*start), sig);
+            }
+            if sig != Sig::Kill {
+                for (pid, start) in &frozen {
+                    let _ = platform::send_signal(*pid, Some(*start), Sig::Continue);
+                }
+            }
+            Ok(frozen)
         }
-        Ok(frozen)
+    }
+
+    /// Windows cannot freeze a tree. Keep the parent alive while ending observed descendants,
+    /// rechecking identities and looking again until only the root remains or the wait expires.
+    /// A child created between the last look and the root ending can escape observation.
+    #[cfg(windows)]
+    fn end_windows_tree(&self, root: u32, sig: Sig) -> Result<Vec<(u32, i64)>> {
+        if !matches!(sig, Sig::Term | Sig::Kill) {
+            return Err(HostError::Unsupported(
+                "this platform can end a process tree but cannot hold it still".to_owned(),
+            ));
+        }
+        // Holding the process object prevents Windows from reusing its PID during the stop.
+        let root_pin = self.state().root_pins.get(&root).cloned().ok_or_else(|| {
+            HostError::Unsupported(
+                "this process has no retained identity; its tree cannot be ended safely".to_owned(),
+            )
+        })?;
+        let first = self.rows();
+        let visible = self.visible(&first);
+        let root_start = first
+            .iter()
+            .find(|row| row.pid == root && visible.contains(&root) && !row.zombie)
+            .map(|row| row.start_ms)
+            .filter(|start| *start > 0)
+            .ok_or_else(|| {
+                HostError::NotFound(format!("process {root} is not one of this environment's"))
+            })?;
+        if root_pin.process(Pid::from_u32(root)).map(|process| {
+            i64::try_from(process.start_time())
+                .unwrap_or(0)
+                .saturating_mul(1000)
+        }) != Some(root_start)
+        {
+            return Err(HostError::Changed(
+                "the process identity changed".to_owned(),
+            ));
+        }
+        let deadline = std::time::Instant::now() + KILL_WAIT;
+        let mut observed = BTreeMap::from([(root, root_start)]);
+        let mut sent = BTreeMap::new();
+        let mut pins = System::new();
+
+        loop {
+            // Keep each observed process object open until the operation ends; a PID cannot be
+            // recycled while its original object still has a handle.
+            pins.refresh_processes_specifics(
+                ProcessesToUpdate::All,
+                false,
+                ProcessRefreshKind::nothing(),
+            );
+            let rows = self.rows();
+            let visible = self.visible(&rows);
+            let seeds: BTreeSet<u32> = rows
+                .iter()
+                .filter(|row| {
+                    !row.zombie
+                        && visible.contains(&row.pid)
+                        && observed.get(&row.pid) == Some(&row.start_ms)
+                })
+                .map(|row| row.pid)
+                .collect();
+            let members = tree_from(&rows, &seeds, &visible);
+            // Windows keeps a creator PID even after its parent exits. A child with the same
+            // reported start second could belong to an earlier process with a recycled PID.
+            for parent in rows.iter().filter(|row| members.contains(&row.pid)) {
+                if rows.iter().any(|child| {
+                    child.pid != parent.pid
+                        && child.ppid == Some(parent.pid)
+                        && !child.zombie
+                        && (child.start_ms <= 0 || child.start_ms == parent.start_ms)
+                }) {
+                    return Err(HostError::Unsupported(format!(
+                        "the children of process {} cannot be identified safely at this platform's time resolution",
+                        parent.pid
+                    )));
+                }
+            }
+            for row in &rows {
+                if members.contains(&row.pid) && !row.zombie {
+                    if row.start_ms <= 0
+                        || observed
+                            .get(&row.pid)
+                            .is_some_and(|start| *start != row.start_ms)
+                    {
+                        return Err(HostError::Changed(format!(
+                            "the identity of process {} could not be verified",
+                            row.pid
+                        )));
+                    }
+                    observed.entry(row.pid).or_insert(row.start_ms);
+                }
+            }
+            let live: Vec<&Row> = rows
+                .iter()
+                .filter(|row| {
+                    !row.zombie
+                        && members.contains(&row.pid)
+                        && observed.get(&row.pid) == Some(&row.start_ms)
+                })
+                .collect();
+            let descendants = live.iter().any(|row| row.pid != root);
+            let leaves: Vec<&Row> = live
+                .iter()
+                .copied()
+                .filter(|row| {
+                    (!descendants || row.pid != root)
+                        && !live.iter().any(|other| other.ppid == Some(row.pid))
+                        && sent.get(&row.pid) != Some(&row.start_ms)
+                })
+                .collect();
+            for row in leaves {
+                let pinned_start = pins.process(Pid::from_u32(row.pid)).map(|process| {
+                    i64::try_from(process.start_time())
+                        .unwrap_or(0)
+                        .saturating_mul(1000)
+                });
+                if pinned_start != Some(row.start_ms) || row.start_ms <= 0 {
+                    return Err(HostError::Changed(format!(
+                        "the identity of process {} could not be retained",
+                        row.pid
+                    )));
+                }
+                match platform::send_signal(row.pid, Some(row.start_ms), sig) {
+                    Ok(()) => {
+                        sent.insert(row.pid, row.start_ms);
+                    }
+                    Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
+                    Err(error) => return Err(signalling(row.pid, &error)),
+                }
+            }
+            if !descendants && sent.get(&root) == Some(&root_start) {
+                return Ok(sent.into_iter().collect());
+            }
+            if live.is_empty() {
+                return if sent.is_empty() {
+                    Err(HostError::NotFound(format!(
+                        "process {root} is not one of this environment's"
+                    )))
+                } else {
+                    Ok(sent.into_iter().collect())
+                };
+            }
+            if std::time::Instant::now() >= deadline {
+                return Err(HostError::Timeout(format!(
+                    "process {root} and what it started did not settle while ending"
+                )));
+            }
+            std::thread::sleep(POLL);
+        }
     }
 
     /// Ends the tree of `root`: asks with `TERM`, waits up to `grace` for every member to end, and
@@ -1126,9 +1321,9 @@ fn grow(rows: &[Row], seeds: BTreeSet<u32>, roots: &BTreeMap<u32, Root>) -> BTre
             if found.contains(&raw.pid) {
                 continue;
             }
-            let by_parent = raw
-                .ppid
-                .is_some_and(|parent| found.contains(&parent) && parent > 1);
+            let by_parent = raw.ppid.is_some_and(|parent| {
+                found.contains(&parent) && parent > 1 && verified_parent(rows, raw, parent)
+            });
             let by_group = raw.group.is_some_and(|group| {
                 leaders.contains(&group) && group > 1 && Some(group) != own_group
             });
@@ -1164,7 +1359,9 @@ fn tree_from(rows: &[Row], seeds: &BTreeSet<u32>, visible: &BTreeSet<u32>) -> BT
             if members.contains(&raw.pid) || !visible.contains(&raw.pid) {
                 continue;
             }
-            let by_parent = raw.ppid.is_some_and(|parent| members.contains(&parent));
+            let by_parent = raw.ppid.is_some_and(|parent| {
+                members.contains(&parent) && verified_parent(rows, raw, parent)
+            });
             let by_group = raw.group.is_some_and(|group| {
                 members.contains(&group) && Some(group) != platform::own_process_group()
             });
@@ -1178,6 +1375,19 @@ fn tree_from(rows: &[Row], seeds: &BTreeSet<u32>, visible: &BTreeSet<u32>) -> BT
     }
 }
 
+fn verified_parent(rows: &[Row], child: &Row, parent: u32) -> bool {
+    #[cfg(windows)]
+    {
+        rows.iter()
+            .any(|row| row.pid == parent && row.start_ms > 0 && child.start_ms > row.start_ms)
+    }
+    #[cfg(not(windows))]
+    {
+        let _ = (rows, child, parent);
+        true
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1188,10 +1398,36 @@ mod tests {
             ppid: Some(ppid),
             group: Some(group),
             session: Some(group),
-            start_ms: 1,
+            // Increasing fixture PIDs represent processes started in that order.
+            start_ms: i64::from(pid) * 1000,
             zombie: false,
             state: 'S',
         }
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn an_older_or_ambiguous_orphan_is_not_owned_by_a_reused_parent_number() {
+        let root = raw(100, 50, 100);
+        let mut older = raw(101, 100, 101);
+        older.start_ms = root.start_ms - 1000;
+        let mut ambiguous = raw(102, 100, 102);
+        ambiguous.start_ms = root.start_ms;
+        let later = raw(103, 100, 103);
+        let rows = [root, older, ambiguous, later];
+        let roots = BTreeMap::from([(
+            100,
+            Root {
+                start_ms: root.start_ms,
+                kind: RootKind::Executor,
+            },
+        )]);
+        assert_eq!(
+            grow(&rows, [100].into_iter().collect(), &roots)
+                .into_iter()
+                .collect::<Vec<_>>(),
+            [100, 103]
+        );
     }
 
     #[test]

@@ -14,6 +14,9 @@ the offline address fixtures also cover the installer's loopback-only HTTP excep
 | Help needs no token, root, platform probe, download or installation | `help.sh` sources both shell help branches in English and Chinese with platform/network/file/service commands forbidden; `help.ps1` exercises both Windows help aliases with installation operations forbidden |
 | HTTP system addresses are accepted only for literal loopback hosts | `addresses.tsv` is shared by `addresses.sh` (both shell installers, curl/wget, English/Chinese) and `addresses.ps1` (Windows). It covers 127/8 boundaries, localhost, compressed/expanded IPv6 loopback, ports, remote hosts, lookalikes, userinfo, encoded hosts, malformed addresses and CR/LF. Accepted cases reach stubbed manifest/download calls; refusals happen before them and name HTTPS plus the permitted loopback hosts |
 | Redirects cannot widen that HTTP exception | Curl only follows HTTPS redirects; wget and PowerShell disable redirects. The fixtures assert these transport arguments. The node's separate pinned gateway address still requires wss/https; HTTP applies to its system download address `--from` |
+| Services keep the proxy used to install them | `test_service.py` inspects Linux and macOS connector service files with default and named directories, including private permissions and escaped values. `test_node_service.py` exercises the node installer in a networkless minimal container, with spaces and systemd metacharacters in its paths |
+| A failed Windows installation does not start a foreground connector | `foreground.ps1` executes the same script block and checks that failure prevents the following command |
+| Windows ARM64 installs the x86-64 connector and explains emulation | `architecture.ps1` checks the selected manifest/download path and both languages for native ARM64 and emulated or native x64 PowerShell, with downloads and installation stubbed |
 
 Native installation is not exercised for macOS or Windows; Windows help and parsing run when PowerShell
 is available. Per-user services have no user manager in the scenario (`--no-service`). The node's
@@ -28,6 +31,10 @@ sh scripts/smoke/installers/help.sh
 pwsh -NoProfile -File scripts/smoke/installers/help.ps1
 sh scripts/smoke/installers/addresses.sh
 pwsh -NoProfile -File scripts/smoke/installers/addresses.ps1
+pwsh -NoProfile -File scripts/smoke/installers/architecture.ps1
+pwsh -NoProfile -File scripts/smoke/installers/foreground.ps1
+python3 -I scripts/smoke/installers/test_service.py
+python3 -I scripts/smoke/installers/test_node_service.py
 ```
 
 The address fixtures never run a real download, enroll, install, service or removal. The shell

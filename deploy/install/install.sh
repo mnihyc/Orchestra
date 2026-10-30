@@ -13,7 +13,8 @@
 # per-user service: a systemd user unit on Linux, a launchd agent on macOS. It never needs
 # administrator rights. Run again, it changes only what is not right yet: the same connector is
 # left in place, a bound Enroll again token replaces its retained identity, and the
-# service is written again and restarted. When it fails, it takes away what it placed itself.
+# service is written again and restarted. On failure a newly installed program or service is
+# removed where possible; an updated existing program or service is not restored to its old version.
 set -eu
 
 URL=""
@@ -46,6 +47,7 @@ usage() {
 （遵循 XDG_DATA_HOME），macOS 为 ~/Library/Application Support/Orch/connector。
 默认使用用户服务：Linux 的 systemd 用户单元，或 macOS 的 launchd 登录代理。
 停止/启动：orch-connector service stop / start；Linux 未启用 lingering 时退出登录即停止。
+仅移除服务：orch-connector service uninstall；数据和身份保留。
 前台运行：安装时加 --no-service，然后运行 orch-connector run，按 Ctrl+C 停止。
 同一台机器可运行多个连接器；另加 --data-dir <绝对路径>，各有独立的身份和服务。
 命名实例的后续命令都需使用相同的 --data-dir；已有服务需先停止，再前台运行。
@@ -78,6 +80,7 @@ Program: ~/.local/bin/orch-connector. Data: ~/.local/share/orch-connector on Lin
 (respects XDG_DATA_HOME), or ~/Library/Application Support/Orch/connector on macOS.
 Default: a user service, through systemd on Linux or a launchd agent on macOS.
 Stop/start: orch-connector service stop / start. Linux stops at logout without lingering.
+Remove only the service: orch-connector service uninstall; data and identity stay.
 Foreground: install with --no-service, then orch-connector run; Ctrl+C stops it.
 Several connectors can run side by side: add --data-dir <absolute path> for another
 identity and service; use that same option on its later commands. Stop any existing service first.
@@ -210,10 +213,13 @@ esac
 if command -v curl > /dev/null 2>&1; then
   # Even a loopback HTTP origin cannot redirect a download to cleartext on another host.
   fetch() { curl -fsSL --proto "$DOWNLOAD_PROTOCOLS" --proto-redir '=https' --tlsv1.2 -o "$2" "$1"; }
-elif command -v wget > /dev/null 2>&1; then
+elif command -v wget > /dev/null 2>&1 && wget --help 2>&1 | grep -q -- '--max-redirect'; then
   fetch() { wget -q --max-redirect=0 -O "$2" "$1"; }
 else
-  die "curl or wget is needed to download the connector"
+  case "${LC_ALL:-${LC_MESSAGES:-${LANG:-en}}}" in
+    zh*) die "下载连接器需要 curl 或支持 --max-redirect 的 wget；BusyBox wget 不支持此选项。" ;;
+    *) die "downloading the connector needs curl or a wget with --max-redirect; BusyBox wget does not support it" ;;
+  esac
 fi
 if command -v sha256sum > /dev/null 2>&1; then
   sha256() { sha256sum "$1" | cut -d' ' -f1; }
@@ -381,9 +387,29 @@ fi
 systemd_word() {
   printf '"%s"' "$(printf '%s' "$1" | sed -e 's/\\/\\\\/g' -e 's/"/\\"/g' -e 's/%/%%/g' -e 's/\$/$$/g')"
 }
+# Environment= does not expand dollars, but it does expand percent specifiers.
+systemd_environment() {
+  printf 'Environment="%s"\n' "$(printf '%s=%s' "$1" "$2" | sed -e 's/\\/\\\\/g' -e 's/"/\\"/g' -e 's/%/%%/g')"
+}
 # xml_text TEXT: TEXT inside an XML element.
 xml_text() {
   printf '%s' "$1" | sed -e 's/&/\&amp;/g' -e 's/</\&lt;/g' -e 's/>/\&gt;/g'
+}
+xml_environment() {
+  printf '    <key>%s</key><string>%s</string>\n' "$1" "$(xml_text "$2")"
+}
+# These fixed variable names are expanded without interpreting their values as shell code.
+proxy_environment() {
+  for proxy_name in HTTPS_PROXY https_proxy HTTP_PROXY http_proxy ALL_PROXY all_proxy NO_PROXY no_proxy; do
+    proxy_value=
+    eval "proxy_value=\${$proxy_name-}"
+    case "$proxy_value" in *[![:space:]]*) "$1" "$proxy_name" "$proxy_value" ;; esac
+  done
+}
+# Proxy addresses may contain credentials, including when an older service file is replaced.
+private_service_file() {
+  (umask 077; : >> "$1")
+  chmod 600 "$1"
 }
 
 install_systemd_unit() {
@@ -396,9 +422,12 @@ install_systemd_unit() {
   fi
   mkdir -p "$unit_dir"
   [ -e "$unit_dir/$unit" ] || PLACED_SERVICE="$unit_dir/$unit"
+  private_service_file "$unit_dir/$unit"
   {
     printf '[Unit]\nDescription=Orch connector (%s)\nAfter=network-online.target\nWants=network-online.target\n\n' "$(printf '%s' "$DATA_DIR" | sed 's/%/%%/g')"
-    printf '[Service]\nExecStart=%s --data-dir %s run\nRestart=on-failure\nRestartSec=10\n\n' "$(systemd_word "$BIN")" "$(systemd_word "$DATA_DIR")"
+    printf '[Service]\nExecStart=%s --data-dir %s run\n' "$(systemd_word "$BIN")" "$(systemd_word "$DATA_DIR")"
+    proxy_environment systemd_environment
+    printf 'Restart=on-failure\nRestartSec=10\n\n'
     printf '[Install]\nWantedBy=default.target\n'
   } > "$unit_dir/$unit"
   record_installation --service
@@ -418,6 +447,7 @@ install_launchd_agent() {
   plist="$agents/$label.plist"
   mkdir -p "$agents" "$DATA_DIR/logs"
   [ -e "$plist" ] || PLACED_SERVICE="$plist"
+  private_service_file "$plist"
   cat > "$plist" <<EOF
 <?xml version="1.0" encoding="UTF-8"?>
 <!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
@@ -436,6 +466,7 @@ install_launchd_agent() {
   <key>ThrottleInterval</key><integer>10</integer>
   <key>EnvironmentVariables</key><dict>
     <key>ORCH_CONNECTOR_LOG_FILES_ONLY</key><string>1</string>
+$(proxy_environment xml_environment)
   </dict>
   <key>StandardErrorPath</key><string>$(xml_text "$DATA_DIR/logs/launchd.log")</string>
 </dict>

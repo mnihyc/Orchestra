@@ -8,8 +8,9 @@ the gate warns, and every other check holds);
 platform; `release_frontend.py` builds the browser application once and records
 the release identity and each file's SHA-256; `release_package.py` checks that
 input, installs the locked npm packages for their notices, and puts all verified
-connectors into each server's downloads;
-`release_assemble.py` rejects mixed commits and differing common files.
+connectors into each server's downloads; `release_assemble.py` verifies each downloaded
+package against its original manifest, requires one server of each Linux architecture,
+and rejects mixed commits and differing common files.
 `release_image.py` builds and checks each native image's pinned labels before its
 approved push. `release_publish.py` records the shared image index and creates a
 draft. Existing published releases and image tags are never replaced.
@@ -38,8 +39,9 @@ run and cannot be requested while repackaging.
 Set the `release-images` environment to require an operator reviewer before
 enabling `publish_images` on a manual run. A tag run makes a reviewable draft
 without publishing the default environment image; its notes explicitly say that
-publication is pending. A later approved run may complete only the image facts
-of that exact draft after verifying every existing asset's SHA-256. Final release
+publication is pending. Before publishing the image index, a later approved run checks that an existing draft's tag
+still names the same commit and that every existing asset has the expected SHA-256. It may complete only that draft's
+image facts. Final release
 publication remains the operator's act. There is no push or publication in local
 helper tests.
 

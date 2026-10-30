@@ -44,6 +44,8 @@ async fn setting() -> Setting {
     let environment = w.thing("environment", ada, w.topic, "private").await;
     w.thing_row("environment", environment, P::EnvironmentManage, false)
         .await;
+    w.thing_row("environment", environment, P::EnvironmentUse, false)
+        .await;
     Setting {
         w,
         ada,
@@ -61,7 +63,7 @@ fn creating<'a>(
 ) -> BindingAsk<'a> {
     BindingAsk {
         node: s.w.topic,
-        permission: P::TopicInteract,
+        permission: P::TopicStartThreads,
         provider: Some(ProviderChoice {
             id: s.provider,
             model,
@@ -100,18 +102,17 @@ fn lacks(refusal: &Refusal) -> Vec<(ObjectKind, Vec<P>)> {
 }
 
 #[tokio::test]
-async fn creating_a_thread_takes_the_use_of_a_provider_and_a_profile_and_the_management_of_an_environment()
- {
+async fn creating_a_thread_takes_the_use_of_a_provider_a_profile_and_an_environment() {
     let s = setting().await;
     let existing = Some(EnvironmentChoice::Existing(s.environment));
     let refused = refusal(bind(&s.w, s.dev, &creating(&s, "big", existing.clone())).await);
-    assert_eq!(refused.required, P::TopicInteract);
+    assert_eq!(refused.required, P::TopicStartThreads);
     assert_eq!(
         lacks(&refused),
         [
             (ObjectKind::Provider, vec![P::ProviderUse]),
             (ObjectKind::Agent, vec![P::AgentUse]),
-            (ObjectKind::Environment, vec![P::EnvironmentManage]),
+            (ObjectKind::Environment, vec![P::EnvironmentUse]),
         ],
         "all three, not only the first; the topic is held"
     );
@@ -149,10 +150,14 @@ async fn creating_a_thread_takes_the_use_of_a_provider_and_a_profile_and_the_man
     s.w.grant(
         "environment",
         s.environment,
-        P::EnvironmentManage,
+        P::EnvironmentUse,
         Holder::User { id: s.dev },
     )
     .await;
+    assert!(
+        !s.w.can_on(s.dev, "environment", s.environment, P::EnvironmentManage)
+            .await
+    );
     let BindingDecision::Allowed(grant) =
         bind(&s.w, s.dev, &creating(&s, "big", existing.clone())).await
     else {
@@ -237,7 +242,7 @@ async fn what_cannot_run_for_anybody_blocks_the_choice_instead_of_refusing_the_c
                   effort: Option<&'static str>,
                   arrangement: Option<Arrangement>| BindingAsk {
         node: s.w.topic,
-        permission: P::TopicInteract,
+        permission: P::TopicStartThreads,
         provider: Some(ProviderChoice {
             id: s.provider,
             model,

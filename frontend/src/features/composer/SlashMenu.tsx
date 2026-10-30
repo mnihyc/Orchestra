@@ -99,7 +99,7 @@ export function useModelCommands(thread: Thread, openControl: (section: Kind | n
         if (argument === '') return (openControl(name), null);
         const wanted = argument.toLowerCase();
         const none = name === 'speed' ? t('composer.model.speed.standard') : t('composer.model.access.none');
-        const noneWords = [none.toLowerCase(), 'none', 'standard', 'off'];
+        const noneWords = [none.toLowerCase(), 'none', 'off', ...(name === 'speed' ? ['standard'] : [])];
         const found = noneWords.includes(wanted) ? ({ id: null, label: none } as const) : (state.open.find((one) => one.id.toLowerCase() === wanted || one.label.toLowerCase() === wanted) ?? null);
         if (found === null) return t('composer.model.slash.notOpen', { what: t(`composer.model.${name}.title`), given: argument, list: [none, ...state.open.map((one) => one.label)].join(', ') });
         runs.choose(state, found.id);

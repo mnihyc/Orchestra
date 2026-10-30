@@ -323,6 +323,7 @@ export class NotificationWorld implements Part {
       .filter((approval) => {
         if (scope === 'requested') return 'user' in approval.requester && approval.requester.user.username === username;
         if (scope.startsWith('node:')) return approval.node?.id === scope.slice('node:'.length) || approval.thread_id === scope.slice('node:'.length);
+        if (scope === 'others') return this.couldDecide(person, approval) && !this.sentTo(person, approval);
         return all ? this.couldDecide(person, approval) : this.sentTo(person, approval);
       })
       .map((approval) => this.view(person, approval))
@@ -430,6 +431,7 @@ export class NotificationWorld implements Part {
               options: more.options ?? null,
               permissions: (more.permissions as string[] | undefined) ?? ['thread.view', 'thread.interact'],
               reason: typeof more.reason === 'string' ? more.reason : 'I would like to talk to the agent.',
+              ...(typeof more.expires_at === 'string' ? { expires_at: more.expires_at } : {}),
             },
           };
     const deciders = (more.deciders as string[] | undefined) ?? ['ada'];

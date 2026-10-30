@@ -4,34 +4,52 @@
     clippy::expect_used,
     reason = "a test fails by panicking"
 )]
-#![cfg(target_os = "linux")]
 
+#[cfg(target_os = "linux")]
 use orch_envhost::blobs::MemoryBlobs;
+#[cfg(target_os = "linux")]
 use orch_envhost::browser_screen::{BrowserInput, BrowserStream};
+#[cfg(target_os = "linux")]
 use orch_envhost::environment::{EnvHost, HostSettings, ManagedPlaces, Report, Reports};
+#[cfg(target_os = "linux")]
 use orch_envhost::processes::ScopeKind;
+#[cfg(target_os = "linux")]
 use orch_link_contract::browser::*;
+#[cfg(target_os = "linux")]
 use orch_link_contract::commands::{EnvAttach, EnvDetach, FsList, IndexMode};
+#[cfg(target_os = "linux")]
 use orch_link_contract::tunnels::ExecOpcode;
+#[cfg(target_os = "linux")]
 use orch_realtime_contract::browser::{
     BrowserClientFrame, BrowserServerFrame, KeyKind, PictureHeader, PointerButton, PointerKind,
 };
+#[cfg(target_os = "linux")]
 use orch_types::{Id, Json, SystemClock};
+#[cfg(target_os = "linux")]
 use serde_json::json;
+#[cfg(target_os = "linux")]
 use std::collections::BTreeMap;
+#[cfg(target_os = "linux")]
 use std::sync::Arc;
+#[cfg(target_os = "linux")]
 use std::time::Duration;
+#[cfg(target_os = "linux")]
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 
+#[cfg(target_os = "linux")]
 mod browser_netem;
 
 /// A real browser has twenty seconds to start; the shared machine gets ample test time around it.
+#[cfg(target_os = "linux")]
 const WAIT: Duration = Duration::from_secs(60);
 /// Local fixture servers live in the reserved test range, inside an isolated unit.
+#[cfg(target_os = "linux")]
 const PAGE_PORT: u16 = 41820;
 /// The fixture has no external resources or credentials.
+#[cfg(target_os = "linux")]
 const PAGE: &str = r#"<!doctype html><meta charset=utf-8><title>browser-test</title><input id=i><button id=b onclick="document.title='clicked';document.getElementById('count').textContent='clicked'">Go</button><div id=count></div><input id=f type=file><script>document.body.style.background='white'</script>"#;
 
+#[cfg(target_os = "linux")]
 async fn inside(name: &str) -> bool {
     if std::env::var_os("ORCH_BROWSER_IN_UNIT").is_some() {
         return true;
@@ -114,6 +132,7 @@ async fn inside(name: &str) -> bool {
     false
 }
 
+#[cfg(target_os = "linux")]
 struct World {
     dir: tempfile::TempDir,
     host: EnvHost,
@@ -121,6 +140,7 @@ struct World {
     browser_states: Arc<tokio::sync::Mutex<Vec<BrowserState>>>,
 }
 
+#[cfg(target_os = "linux")]
 impl World {
     async fn new() -> Self {
         Self::with_browser(true).await
@@ -221,6 +241,7 @@ impl World {
     }
 }
 
+#[cfg(target_os = "linux")]
 async fn server() {
     let listener = tokio::net::TcpListener::bind(("127.0.0.1", PAGE_PORT))
         .await
@@ -256,6 +277,7 @@ async fn server() {
     });
 }
 
+#[cfg(target_os = "linux")]
 async fn page(browser: &Arc<orch_envhost::browsers::RunningBrowser>) -> (String, String) {
     let targets = browser
         .cdp
@@ -286,6 +308,7 @@ async fn page(browser: &Arc<orch_envhost::browsers::RunningBrowser>) -> (String,
     (tab, session)
 }
 
+#[cfg(target_os = "linux")]
 async fn value(
     browser: &Arc<orch_envhost::browsers::RunningBrowser>,
     session: &str,
@@ -303,6 +326,7 @@ async fn value(
         .clone()
 }
 
+#[cfg(target_os = "linux")]
 async fn wait_value(
     browser: &Arc<orch_envhost::browsers::RunningBrowser>,
     session: &str,
@@ -322,6 +346,7 @@ async fn wait_value(
     .unwrap();
 }
 
+#[cfg(target_os = "linux")]
 #[tokio::test]
 async fn complete_thread_profile_names_keep_real_browser_cookies_apart() {
     if !inside("complete_thread_profile_names_keep_real_browser_cookies_apart").await {
@@ -382,6 +407,7 @@ async fn complete_thread_profile_names_keep_real_browser_cookies_apart() {
     world.stop().await;
 }
 
+#[cfg(target_os = "linux")]
 #[tokio::test]
 async fn two_callers_join_one_kept_profile_and_a_cookie_survives_quit_and_environment_reattach() {
     if !inside(
@@ -594,6 +620,7 @@ async fn two_callers_join_one_kept_profile_and_a_cookie_survives_quit_and_enviro
     assert!(world.dir.path().join("home/.orch/browsers").is_dir());
 }
 
+#[cfg(target_os = "linux")]
 #[tokio::test]
 async fn a_person_and_playwright_drive_the_same_tab_while_its_picture_is_watched() {
     if !inside("a_person_and_playwright_drive_the_same_tab_while_its_picture_is_watched").await {
@@ -795,6 +822,7 @@ async fn a_person_and_playwright_drive_the_same_tab_while_its_picture_is_watched
     world.stop().await;
 }
 
+#[cfg(target_os = "linux")]
 #[tokio::test]
 async fn moving_pictures_follow_a_shaped_link_and_a_still_page_is_sent_once_more_sharp() {
     if !inside("moving_pictures_follow_a_shaped_link_and_a_still_page_is_sent_once_more_sharp")
@@ -926,6 +954,7 @@ async fn moving_pictures_follow_a_shaped_link_and_a_still_page_is_sent_once_more
     world.stop().await;
 }
 
+#[cfg(target_os = "linux")]
 #[tokio::test]
 async fn an_agent_browser_is_adopted_while_its_profile_lock_and_endpoint_are_respected() {
     if !inside("an_agent_browser_is_adopted_while_its_profile_lock_and_endpoint_are_respected")
@@ -1046,6 +1075,7 @@ async fn an_agent_browser_is_adopted_while_its_profile_lock_and_endpoint_are_res
     world.stop().await;
 }
 
+#[cfg(target_os = "linux")]
 #[tokio::test]
 async fn a_browser_with_a_window_uses_an_opened_display_and_both_end_with_the_environment() {
     if !inside("a_browser_with_a_window_uses_an_opened_display_and_both_end_with_the_environment")
@@ -1095,6 +1125,7 @@ async fn a_browser_with_a_window_uses_an_opened_display_and_both_end_with_the_en
     assert!(world.dir.path().join("home/.orch/browsers/window").is_dir());
 }
 
+#[cfg(target_os = "linux")]
 #[tokio::test]
 async fn an_environment_without_browser_programs_still_lists_its_files_and_reports_unsupported() {
     if !inside(
@@ -1139,6 +1170,7 @@ async fn an_environment_without_browser_programs_still_lists_its_files_and_repor
     world.stop().await;
 }
 
+#[cfg(target_os = "linux")]
 fn quantization(jpeg: &[u8]) -> u64 {
     let mut at = 2;
     while at + 4 < jpeg.len() {
@@ -1156,6 +1188,7 @@ fn quantization(jpeg: &[u8]) -> u64 {
     panic!("the JPEG has no quantization table");
 }
 
+#[cfg(target_os = "linux")]
 #[tokio::test]
 async fn a_quiet_tab_is_redrawn_once_with_finer_jpeg_quantization_and_then_costs_nothing() {
     if !inside("a_quiet_tab_is_redrawn_once_with_finer_jpeg_quantization_and_then_costs_nothing")
@@ -1260,6 +1293,7 @@ async fn a_quiet_tab_is_redrawn_once_with_finer_jpeg_quantization_and_then_costs
     world.stop().await;
 }
 
+#[cfg(target_os = "linux")]
 async fn drive(sender: &tokio::sync::mpsc::Sender<BrowserInput>, frame: Json) {
     let frame = serde_json::from_value(frame).unwrap();
     sender
@@ -1271,6 +1305,7 @@ async fn drive(sender: &tokio::sync::mpsc::Sender<BrowserInput>, frame: Json) {
         .unwrap();
 }
 
+#[cfg(target_os = "linux")]
 #[tokio::test]
 async fn a_loading_tab_keeps_its_loading_flag_until_its_page_has_finished() {
     if !inside("a_loading_tab_keeps_its_loading_flag_until_its_page_has_finished").await {
@@ -1337,6 +1372,7 @@ async fn a_loading_tab_keeps_its_loading_flag_until_its_page_has_finished() {
     world.stop().await;
 }
 
+#[cfg(target_os = "linux")]
 #[tokio::test]
 async fn a_page_changing_its_title_does_not_keep_an_unwatched_browser_from_being_idle() {
     if !inside("a_page_changing_its_title_does_not_keep_an_unwatched_browser_from_being_idle").await
@@ -1405,6 +1441,7 @@ async fn a_page_changing_its_title_does_not_keep_an_unwatched_browser_from_being
     world.stop().await;
 }
 
+#[cfg(target_os = "linux")]
 #[tokio::test]
 async fn watching_does_not_resize_the_page_and_a_new_view_keeps_the_drivers_size() {
     if !inside("watching_does_not_resize_the_page_and_a_new_view_keeps_the_drivers_size").await {
@@ -1510,6 +1547,7 @@ async fn watching_does_not_resize_the_page_and_a_new_view_keeps_the_drivers_size
     world.stop().await;
 }
 
+#[cfg(target_os = "linux")]
 async fn metadata(
     receiver: &mut tokio::sync::broadcast::Receiver<BrowserServerFrame>,
     predicate: impl Fn(&BrowserServerFrame) -> bool,
@@ -1531,6 +1569,7 @@ async fn metadata(
     .unwrap()
 }
 
+#[cfg(target_os = "linux")]
 #[tokio::test]
 async fn typing_scrolling_tabs_history_dialogs_workspace_files_copy_and_resize_reach_the_page() {
     if !inside(
@@ -1734,6 +1773,7 @@ async fn typing_scrolling_tabs_history_dialogs_workspace_files_copy_and_resize_r
     world.stop().await;
 }
 
+#[cfg(target_os = "linux")]
 #[tokio::test]
 async fn a_connected_host_uses_its_private_profiles_only_while_the_machine_owner_allows_browsers() {
     if !inside(
@@ -1864,6 +1904,7 @@ async fn a_connected_host_uses_its_private_profiles_only_while_the_machine_owner
         .unwrap();
 }
 
+#[cfg(target_os = "linux")]
 #[tokio::test]
 async fn the_picture_recovers_through_real_packet_loss_delay_and_the_floor_rate() {
     if !browser_netem::inside(

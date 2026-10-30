@@ -37,7 +37,7 @@ use orch_api_contract::threads::{
 use orch_authz::{Act, Caller, Principal, TokenGrant, nodes};
 use orch_db::audit::{self, Actor, Origin};
 use orch_db::queries::threads::{
-    self, InputChange, InputRow, NewInput, Place, ThreadRow, input_state, thread_state,
+    self, InputChange, InputRow, NewInput, Place, ThreadRow, TurnRow, input_state, thread_state,
 };
 use orch_types::{Id, Json, Seq, Time, new_id};
 use serde::{Deserialize, Serialize};
@@ -538,7 +538,20 @@ impl Engine {
         caller: &Caller,
         thread: &ThreadRow,
     ) -> Result<Serving, InputError> {
-        let refusal = match self.check_sender(unit, caller, thread, true).await {
+        self.check_author_for_turn(unit, caller, thread, None).await
+    }
+
+    async fn check_author_for_turn(
+        &self,
+        unit: &mut Unit<'_>,
+        caller: &Caller,
+        thread: &ThreadRow,
+        turn: Option<&TurnRow>,
+    ) -> Result<Serving, InputError> {
+        let refusal = match self
+            .check_sender_for_turn(unit, caller, thread, true, turn)
+            .await
+        {
             Ok(()) => return Ok(Serving::Own),
             Err(InputError::Denied(refusal)) => refusal,
             Err(other) => return Err(other),
@@ -609,6 +622,18 @@ impl Engine {
         thread: &ThreadRow,
         need_provider: bool,
     ) -> Result<(), InputError> {
+        self.check_sender_for_turn(unit, caller, thread, need_provider, None)
+            .await
+    }
+
+    pub(crate) async fn check_sender_for_turn(
+        &self,
+        unit: &mut Unit<'_>,
+        caller: &Caller,
+        thread: &ThreadRow,
+        need_provider: bool,
+        turn: Option<&TurnRow>,
+    ) -> Result<(), InputError> {
         let now = Time::new(unit.now());
         let principal = Principal::load(&mut *unit.conn, caller.clone(), now).await?;
         let decision = nodes::check(
@@ -638,7 +663,18 @@ impl Engine {
             refused = true;
             missing = refusal.missing;
         }
-        if need_provider && let Some(provider) = thread.provider_id {
+        let provider = if let Some(turn) = turn {
+            let segment = threads::segment(&mut *unit.conn, turn.segment_id)
+                .await?
+                .filter(|segment| segment.thread_id == thread.node_id)
+                .ok_or_else(|| {
+                    EngineError::unreadable("the running turn's provider is unavailable")
+                })?;
+            Some(segment.provider_id)
+        } else {
+            thread.provider_id
+        };
+        if need_provider && let Some(provider) = provider {
             // The resource supplier asks about the person, model and effort. Preserve
             // this caller's token narrowing before crossing that person-only boundary.
             if !caller.permits(Permission::ProviderUse) {
@@ -651,7 +687,11 @@ impl Engine {
                     Vec::new(),
                 ))));
             }
-            let settings = crate::resolved::load(&mut *unit.conn, thread.node_id).await?;
+            let settings = if turn.is_none() {
+                Some(crate::resolved::load(&mut *unit.conn, thread.node_id).await?)
+            } else {
+                None
+            };
             let answer = self
                 .inner
                 .access
@@ -661,8 +701,19 @@ impl Engine {
                         person: caller.user(),
                         node: thread.node_id,
                         provider,
-                        model: settings.model.as_deref(),
-                        effort: settings.effort.as_deref(),
+                        model: turn.map(|turn| turn.model.as_str()).or_else(|| {
+                            settings
+                                .as_ref()
+                                .and_then(|settings| settings.model.as_deref())
+                        }),
+                        effort: turn.map_or_else(
+                            || {
+                                settings
+                                    .as_ref()
+                                    .and_then(|settings| settings.effort.as_deref())
+                            },
+                            |turn| turn.effort.as_deref(),
+                        ),
                     },
                 )
                 .await
@@ -910,8 +961,19 @@ impl Engine {
                 interrupt: None,
             });
         }
-        // Boxed: a message is taken deep in a request's stack.
-        let serving = Box::pin(self.check_author(unit, caller, &thread)).await?;
+        let active = threads::active_turn(&mut *unit.conn, thread_id).await?;
+        let queue_locked =
+            thread.queue_held || crate::locks::held_by(unit.conn, thread_id).await?.is_some();
+        let steered_turn = active.as_ref().filter(|turn| {
+            !queue_locked
+                && request.delivery == Delivery::Steer
+                && turn.state == threads::turn_state::RUNNING
+                && turn.plan == request.plan
+        });
+        // Boxed: a message is taken deep in a request's stack. A steer uses
+        // the running turn's recorded provider, model and effort.
+        let serving =
+            Box::pin(self.check_author_for_turn(unit, caller, &thread, steered_turn)).await?;
         // A message that waits for somebody else's access joins the queue: it neither steers nor stops the turn
         // that runs on another person's access.
         let without_model = matches!(serving, Serving::WithoutModel { .. });
@@ -952,7 +1014,6 @@ impl Engine {
                 request.bypass.as_ref(),
             )
             .await?;
-        let active = threads::active_turn(&mut *unit.conn, thread_id).await?;
         let mut prepared = self
             .prepare_pastes(unit.conn, &thread, &request.content)
             .await?;
@@ -960,9 +1021,7 @@ impl Engine {
             .await?;
         let content = serde_json::to_value(&prepared).map_err(EngineError::from)?;
         // Where it goes, and in what state.
-        let (state, place, turn) = if thread.queue_held
-            || crate::locks::held_by(unit.conn, thread_id).await?.is_some()
-        {
+        let (state, place, turn) = if queue_locked {
             // Stop owns the queue until Resume. Neither a new send nor its delivery preference
             // may overtake the held work or steer into the turn that is still stopping.
             (input_state::PENDING, Place::End, None)
@@ -1552,6 +1611,14 @@ impl Engine {
                 }
                 None => false,
             };
+            let active = threads::active_turn(&mut *unit.conn, thread_id).await?;
+            let steered_turn = active.as_ref().filter(|turn| {
+                delivery == Some(Delivery::Steer)
+                    && turn.state == threads::turn_state::RUNNING
+                    && turn.plan == input.plan
+                    && !input.is_held()
+                    && thread.state != thread_state::BLOCKED
+            });
             let mut without_model = false;
             if changed_words || changed_selection {
                 let authority =
@@ -1568,7 +1635,10 @@ impl Engine {
                 input.run_as = None;
                 input.run_as_authority = None;
                 let serving = match input_author_caller(&mut unit, thread_id, &input).await? {
-                    Some(author) => self.check_author(&mut unit, &author, &thread).await?,
+                    Some(author) => {
+                        self.check_author_for_turn(&mut unit, &author, &thread, steered_turn)
+                            .await?
+                    }
                     None => Serving::WithoutModel { held: true },
                 };
                 without_model = matches!(serving, Serving::WithoutModel { .. });
@@ -1583,12 +1653,11 @@ impl Engine {
                 "interrupt" => Delivery::Interrupt,
                 _ => Delivery::Queue,
             });
-            let active = threads::active_turn(&mut *unit.conn, thread_id).await?;
             if delivery == Some(Delivery::Steer)
                 && !without_model
-                && active
-                    .as_ref()
-                    .is_some_and(|turn| turn.state == threads::turn_state::RUNNING)
+                && active.as_ref().is_some_and(|turn| {
+                    turn.state == threads::turn_state::RUNNING && turn.plan == input.plan
+                })
                 && !self.agent_steers(&mut unit, &thread).await?
             {
                 return Err(InputError::SteerUnsupported);
@@ -1683,9 +1752,9 @@ impl Engine {
                 .await?;
                 if delivery == Delivery::Steer
                     && !without_model
-                    && let Some(turn) = active
-                        .as_ref()
-                        .filter(|turn| turn.state == threads::turn_state::RUNNING)
+                    && let Some(turn) = active.as_ref().filter(|turn| {
+                        turn.state == threads::turn_state::RUNNING && turn.plan == candidate.plan
+                    })
                 {
                     // Changing delivery records intent; it never lifts a Stop, a cap, a file
                     // hold or a blocked binding. Only a ready input joins the current turn.
@@ -1706,7 +1775,8 @@ impl Engine {
                                     Vec::new(),
                                 )))
                             })?;
-                        self.check_sender(&mut unit, &sender, &thread, true).await?;
+                        self.check_sender_for_turn(&mut unit, &sender, &thread, true, Some(turn))
+                            .await?;
                         let needs_step = if let Some(author) = candidate.author_id {
                             crate::preflight::second_step_missing(
                                 &mut *unit.conn,

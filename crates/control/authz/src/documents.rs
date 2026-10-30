@@ -300,13 +300,76 @@ pub async fn check(
     .await
 }
 
-/// Whether a document notice still reaches a current reader; other notice kinds keep their own rules.
+async fn notice_chat_readable(
+    conn: &mut Conn,
+    principal: &Principal,
+    id: Id,
+) -> Result<bool, Error> {
+    let Some(chat) = orch_db::queries::chats::chat(conn, id).await? else {
+        return Ok(false);
+    };
+    let listed = crate::chats::listed_access(conn, principal, std::slice::from_ref(&chat)).await?;
+    if !listed.contains_key(&id) {
+        return Ok(false);
+    }
+    let members = if chat.node_id.is_none() {
+        orch_db::queries::chats::members(conn, id).await?
+    } else {
+        Vec::new()
+    };
+    // A notice is not an audited inspection of a direct or group chat.
+    let readers =
+        crate::chats::readers_among(conn, &chat, &members, &[principal.user()], principal.now())
+            .await?;
+    Ok(readers.contains(&principal.user()))
+}
+
+/// Whether a notice still reaches a current reader of the work it names.
 pub async fn notice_readable(
     conn: &mut Conn,
     principal: &Principal,
     kind: &str,
     data: &orch_types::Json,
+    chat: Option<Id>,
+    thread: Option<Id>,
 ) -> Result<bool, Error> {
+    if matches!(kind, "mention" | "chat.message") {
+        if let Some(chat) = chat {
+            return notice_chat_readable(conn, principal, chat).await;
+        }
+        if kind == "mention"
+            && let Some(thread) = thread
+        {
+            // A notice is an ordinary delivery, even if this session can perform an override.
+            let ordinary = Principal::load(
+                conn,
+                crate::Caller::session(principal.user()),
+                principal.now(),
+            )
+            .await?;
+            for reader in [principal, &ordinary] {
+                match crate::nodes::check(
+                    conn,
+                    reader,
+                    thread,
+                    Permission::ThreadView,
+                    Act::Use,
+                    Policy::default(),
+                )
+                .await
+                {
+                    Ok(Decision::Allowed { .. }) => {}
+                    Ok(Decision::Refused(_))
+                    | Err(Error::NotFound(_) | Error::NoSuchUser(_) | Error::Suspended { .. }) => {
+                        return Ok(false);
+                    }
+                    Err(error) => return Err(error),
+                }
+            }
+            return Ok(true);
+        }
+        return Ok(false);
+    }
     if kind == "person.notify" {
         if let (Some(resource), Some(kind)) = (
             data.get("resource_id")
@@ -343,10 +406,7 @@ pub async fn notice_readable(
             .and_then(orch_types::Json::as_str)
             .and_then(|id| id.parse().ok())
         {
-            let rows = orch_db::queries::chats::chats(conn, &[chat]).await?;
-            return Ok(crate::chats::listed_access(conn, principal, &rows)
-                .await?
-                .contains_key(&chat));
+            return notice_chat_readable(conn, principal, chat).await;
         }
         if let Some(node) = data
             .get("target_node_id")

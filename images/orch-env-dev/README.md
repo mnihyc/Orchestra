@@ -24,9 +24,10 @@ where the default is 1.6 GiB). It holds nothing of Orch's, as the default image 
 - **Build tools**: cmake, pkg-config, autoconf, automake and libtool, and the development files of OpenSSL, zlib and
   libffi. The compiler, make and git are already in the default image.
 
-`cargo xtask package` builds it as `orch-env-dev:<version>` on the default image of that version, which is the tag
-the Developer tools template is seeded with, and refuses an image whose labels do not say the versions the recipe
-pins.
+The Developer tools template joins the Default Dockerfile and this directory's Dockerfile into one build, with the
+Default recipe as its first stage. A host can build it on first use without a prebuilt Default image or other
+context files. `cargo xtask package` builds the same combined recipe as `orch-env-dev:<version>` and refuses an
+image whose labels do not say the versions the recipe pins.
 
 ## What it holds
 
