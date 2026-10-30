@@ -4,27 +4,37 @@
     clippy::expect_used,
     reason = "a test fails by panicking"
 )]
-#![cfg(target_os = "linux")]
 
+#[cfg(target_os = "linux")]
 use std::path::{Path, PathBuf};
+#[cfg(target_os = "linux")]
 use std::process::{Child, Command, Stdio};
+#[cfg(target_os = "linux")]
 use std::sync::Arc;
+#[cfg(target_os = "linux")]
 use std::time::{Duration, Instant};
 
+#[cfg(target_os = "linux")]
 use orch_envhost::platform::{self, Sig};
+#[cfg(target_os = "linux")]
 use orch_envhost::processes::{Processes, RootKind, ScopeKind};
+#[cfg(target_os = "linux")]
 use orch_executor_contract::descriptor::Attribution;
+#[cfg(target_os = "linux")]
 use orch_link_contract::commands::Signal;
+#[cfg(target_os = "linux")]
 use orch_types::{SystemClock, Time};
 
 /// Every process a test starts, ended when the test ends whatever happened: each was started in a
 /// group of its own by the test, and only those groups and numbers are ever signalled.
+#[cfg(target_os = "linux")]
 struct Started {
     groups: Vec<u32>,
     pids: Vec<u32>,
     children: Vec<Child>,
 }
 
+#[cfg(target_os = "linux")]
 impl Started {
     fn new() -> Self {
         Self {
@@ -64,6 +74,7 @@ impl Started {
     }
 }
 
+#[cfg(target_os = "linux")]
 impl Drop for Started {
     fn drop(&mut self) {
         for group in &self.groups {
@@ -81,11 +92,13 @@ impl Drop for Started {
     }
 }
 
+#[cfg(target_os = "linux")]
 fn is_sleep_of_the_test(pid: u32) -> bool {
     std::fs::read_to_string(format!("/proc/{pid}/cmdline"))
         .is_ok_and(|text| text.starts_with("sleep\x00300"))
 }
 
+#[cfg(target_os = "linux")]
 fn read_pids(file: &Path) -> Vec<u32> {
     std::fs::read_to_string(file)
         .unwrap_or_default()
@@ -94,10 +107,12 @@ fn read_pids(file: &Path) -> Vec<u32> {
         .collect()
 }
 
+#[cfg(target_os = "linux")]
 fn alive(pid: u32) -> bool {
     matches!(platform::os::state_of(pid), Some(state) if state != 'Z' && state != 'X')
 }
 
+#[cfg(target_os = "linux")]
 fn wait_until(what: &str, mut condition: impl FnMut() -> bool) {
     let started = Instant::now();
     while !condition() {
@@ -109,16 +124,19 @@ fn wait_until(what: &str, mut condition: impl FnMut() -> bool) {
     }
 }
 
+#[cfg(target_os = "linux")]
 fn processes(scope: ScopeKind) -> Processes {
     Processes::new(scope, Arc::new(SystemClock))
 }
 
+#[cfg(target_os = "linux")]
 fn script(dir: &Path, body: &str) -> PathBuf {
     let path = dir.join("script.sh");
     std::fs::write(&path, body).unwrap();
     path
 }
 
+#[cfg(target_os = "linux")]
 fn start_script(procs: &Processes, started: &mut Started, dir: &Path, body: &str) -> u32 {
     let path = script(dir, body);
     let mut command = Command::new("sh");
@@ -136,6 +154,7 @@ fn start_script(procs: &Processes, started: &mut Started, dir: &Path, body: &str
 
 /// A shell that starts sleepers in its group, in a subshell, and in a session of their own, and
 /// writes their numbers down.
+#[cfg(target_os = "linux")]
 const TREE: &str = r#"
 sleep 300 &
 echo $! >> "$D/pids"
@@ -145,6 +164,7 @@ echo $! >> "$D/pids"
 wait
 "#;
 
+#[cfg(target_os = "linux")]
 #[tokio::test]
 async fn a_process_tree_is_stopped_whole_including_what_left_its_group_and_what_was_orphaned() {
     let dir = tempfile::tempdir().unwrap();
@@ -186,6 +206,7 @@ async fn a_process_tree_is_stopped_whole_including_what_left_its_group_and_what_
     assert!(alive(bystander), "a process outside the tree is left alone");
 }
 
+#[cfg(target_os = "linux")]
 #[tokio::test]
 async fn a_tree_that_ignores_the_request_to_end_is_killed_after_the_grace() {
     let dir = tempfile::tempdir().unwrap();
@@ -215,6 +236,7 @@ while :; do sleep 1; done
     wait_until("the shell to end", || !alive(root));
 }
 
+#[cfg(target_os = "linux")]
 #[tokio::test]
 async fn a_signal_names_the_process_by_number_and_start_and_only_the_right_pair_is_signalled() {
     let dir = tempfile::tempdir().unwrap();
@@ -262,6 +284,7 @@ async fn a_signal_names_the_process_by_number_and_start_and_only_the_right_pair_
     assert!(alive(root), "its parent was not asked to end");
 }
 
+#[cfg(target_os = "linux")]
 #[tokio::test]
 async fn nothing_outside_the_environment_is_signalled_and_the_numbers_that_mean_everybody_are_refused()
  {
@@ -300,6 +323,7 @@ async fn nothing_outside_the_environment_is_signalled_and_the_numbers_that_mean_
     assert!(alive(bystander) && alive(std::process::id()));
 }
 
+#[cfg(target_os = "linux")]
 #[tokio::test]
 async fn a_process_group_is_signalled_only_if_the_environment_started_it() {
     let own = platform::own_process_group().unwrap();
@@ -314,6 +338,7 @@ async fn a_process_group_is_signalled_only_if_the_environment_started_it() {
     assert!(platform::send_signal(std::process::id(), None, Sig::Kill).is_err());
 }
 
+#[cfg(target_os = "linux")]
 #[tokio::test]
 async fn a_restarted_host_resumes_only_saved_owned_identities_and_a_second_resume_does_nothing() {
     let dir = tempfile::tempdir().unwrap();
@@ -383,6 +408,7 @@ while :; do i=$((i+1)); echo $i > "$D/count"; sleep 0.02; done
     platform::send_signal(root, Some(original_start), Sig::Continue).unwrap();
 }
 
+#[cfg(target_os = "linux")]
 #[tokio::test]
 async fn the_processes_an_environment_started_are_held_still_and_let_go_and_others_are_not() {
     let dir = tempfile::tempdir().unwrap();
@@ -423,6 +449,7 @@ while :; do i=$((i+1)); echo $i > "$D/count"; sleep 0.02; done
     wait_until("the counter to run again", || read_count() > frozen_at + 3);
 }
 
+#[cfg(target_os = "linux")]
 #[tokio::test]
 async fn a_process_carries_the_thread_and_the_tool_call_its_executor_started_it_for_and_so_do_its_children()
  {

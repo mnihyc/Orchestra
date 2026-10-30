@@ -1,4 +1,5 @@
 //! Bypass answers residual tool permissions while questions and plans remain with the person.
+#![cfg(unix)]
 #![allow(
     clippy::unwrap_used,
     clippy::expect_used,

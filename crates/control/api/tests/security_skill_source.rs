@@ -77,6 +77,12 @@ async fn upload(world: &World, by: &Who, bytes: &[u8]) -> Hash {
 async fn a_skill_reader_is_not_given_the_secret_query_used_to_import_its_archive() {
     install_master_key(MasterKey::new([7; 32]));
     let world = World::new().await;
+    world
+        .set(
+            "outbound.allowed_private_hosts",
+            serde_json::json!(["skill.internal"]),
+        )
+        .await;
     let Company {
         viewer,
         admin,
@@ -189,6 +195,7 @@ async fn a_skill_reader_is_not_given_the_secret_query_used_to_import_its_archive
     assert!(commands.iter().all(|body| {
         !body.to_string().contains(secret)
             && body["source"]["url"]["$secret"] == pointer.to_string()
+            && body["allowed_private_hosts"] == serde_json::json!(["skill.internal"])
     }));
     let audit: Vec<Json> = sqlx::query_scalar(
         "SELECT details FROM audit_log WHERE object_kind='skill' AND object_id=$1",

@@ -147,6 +147,11 @@ pub async fn failed(
             "the chat's read position was changed on another device",
         )
         .with("read_revision", revision),
+        ChatError::StaleMessage { revision } => ApiError::new(
+            ErrorCode::ConflictStaleRevision,
+            "the message changed while this action was waiting",
+        )
+        .with("seq_updated", revision),
         ChatError::Suspended { org } => {
             refusals::problem(conn, orch_authz::Error::Suspended { org }).await
         }
@@ -636,6 +641,9 @@ async fn join_request(
     let (tx, guard) = crate::middleware::transaction_guard::begin(&ctx).await?;
     ctx.now = guard.now().get();
     let principal = guard.into_principal();
+    if body.expires_at.is_some_and(|end| end <= principal.now()) {
+        return Err(ApiError::invalid("expires_at", "must be in the future"));
+    }
     let raised = ctx
         .app
         .engine
@@ -645,6 +653,7 @@ async fn join_request(
             chat,
             body.reason.trim(),
             body.label.as_deref(),
+            body.expires_at,
             &origin(&ctx),
         )
         .await

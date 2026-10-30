@@ -343,20 +343,76 @@ pub async fn check_before_save(
     let config =
         Config::from_answer(&declared.fields, given.fields, allowed).map_err(SaveFault::Fields)?;
     check_texts(given.templates, declared.body).map_err(SaveFault::Texts)?;
-    let saved = on_check(guarded(notifier.check(&config)).await);
+    let checked = guarded(notifier.check(&config), &config.secrets)
+        .await
+        .and_then(|value| {
+            if contains_secret(&value, &config.secrets) {
+                Err(DeliverError::refused(
+                    "invalid_result",
+                    "the notifier returned a credential in its result",
+                ))
+            } else {
+                Ok(value)
+            }
+        });
+    let saved = on_check(checked);
     Ok(Checked { config, saved })
 }
 
 /// Waits for a notifier no longer than [`DELIVERY_DEADLINE`].
 pub(crate) async fn guarded<T>(
     call: impl std::future::Future<Output = Result<T, DeliverError>>,
+    secrets: &BTreeMap<String, Secret>,
 ) -> Result<T, DeliverError> {
-    match tokio::time::timeout(DELIVERY_DEADLINE, call).await {
+    let result = match tokio::time::timeout(DELIVERY_DEADLINE, call).await {
         Ok(result) => result,
         Err(_) => Err(DeliverError::temporary(
             "timeout",
             "the notifier did not answer in time",
         )),
+    };
+    result.map_err(|error| scrub_error(error, secrets))
+}
+
+/// Removes configured credentials from a notifier's error before it can be returned or stored.
+pub(crate) fn scrub_error(
+    mut error: DeliverError,
+    secrets: &BTreeMap<String, Secret>,
+) -> DeliverError {
+    let mut values: Vec<&str> = secrets
+        .values()
+        .map(Secret::expose)
+        .filter(|value| !value.is_empty())
+        .collect();
+    values.sort_unstable_by_key(|value| std::cmp::Reverse(value.len()));
+    values.dedup();
+    let marker = orch_plugin_contract::secret::REDACTED;
+    let replacement = if values.iter().any(|value| marker.contains(*value)) {
+        ""
+    } else {
+        marker
+    };
+    for value in values {
+        error.message = error.message.replace(value, replacement);
+        error.code = error.code.replace(value, replacement);
+    }
+    error
+}
+
+/// Whether a notifier result includes one of the credentials it received.
+pub(crate) fn contains_secret(value: &Json, secrets: &BTreeMap<String, Secret>) -> bool {
+    let contains = |text: &str| {
+        secrets
+            .values()
+            .any(|secret| !secret.is_empty() && text.contains(secret.expose()))
+    };
+    match value {
+        Json::String(text) => contains(text),
+        Json::Array(values) => values.iter().any(|value| contains_secret(value, secrets)),
+        Json::Object(values) => values
+            .iter()
+            .any(|(key, value)| contains(key) || contains_secret(value, secrets)),
+        Json::Null | Json::Bool(_) | Json::Number(_) => false,
     }
 }
 
@@ -533,7 +589,8 @@ pub async fn send_test(
 pub async fn run_test(ready: PreparedTest) -> TestOutcome {
     let mut first_error = None;
     for delivery in ready.deliveries {
-        if let Err(error) = guarded(ready.notifier.deliver(delivery)).await {
+        let secrets = delivery.config.secrets.clone();
+        if let Err(error) = guarded(ready.notifier.deliver(delivery), &secrets).await {
             first_error.get_or_insert(error.message);
         }
     }
@@ -849,6 +906,85 @@ mod tests {
         .unwrap();
         assert_eq!(result.saved, Saved::KeptWithError(down));
         assert_eq!(result.config.allowed_private_hosts, Some(vec![]));
+    }
+
+    #[tokio::test]
+    async fn echoed_channel_credentials_are_removed_from_check_and_test_errors() {
+        const TOKEN: &str = "test-channel-credential";
+        let templates = BTreeMap::new();
+        let fields = json!({"url":"https://x.example", "token":TOKEN});
+        let failure = DeliverError::after("unreachable", &format!("Server rejected {TOKEN}"), 7);
+        let result = check_before_save(&registry(Err(failure)), &given(&fields, &templates), None)
+            .await
+            .unwrap();
+        let Saved::KeptWithError(error) = result.saved else {
+            panic!("a temporary error keeps the channel");
+        };
+        assert_eq!(error.code, "unreachable");
+        assert_eq!(error.retry_after_secs, Some(7));
+        assert!(error.retryable);
+        assert!(error.message.contains("Server rejected"));
+        assert!(!error.message.contains(TOKEN));
+        assert!(
+            error
+                .message
+                .contains(orch_plugin_contract::secret::REDACTED)
+        );
+
+        let bad = check_before_save(
+            &registry(Ok(json!({"label": format!("Account {TOKEN}")}))),
+            &given(&fields, &templates),
+            None,
+        )
+        .await
+        .unwrap();
+        let Saved::Refused(error) = bad.saved else {
+            panic!("a successful-looking result that contains a credential is refused");
+        };
+        assert_eq!(error.code, "invalid_result");
+        assert!(!error.message.contains(TOKEN));
+
+        struct Reject;
+        #[async_trait]
+        impl Notifier for Reject {
+            fn describe(&self) -> NotifierDescriptor {
+                Fake {
+                    name: "fake",
+                    check: Ok(Json::Null),
+                }
+                .describe()
+            }
+            async fn check(&self, _: &Config) -> Result<Json, DeliverError> {
+                Ok(Json::Null)
+            }
+            async fn deliver(&self, delivery: Delivery) -> Result<(), DeliverError> {
+                let value = delivery.config.secret("token").unwrap().expose();
+                Err(DeliverError::refused(
+                    "refused",
+                    &format!("Server rejected {value}"),
+                ))
+            }
+        }
+        let delivery = Delivery {
+            id: orch_types::new_id(),
+            attempt: 1,
+            config: result.config,
+            to: json!({}),
+            recipient: None,
+            language: "en".into(),
+            subject: None,
+            body: "test".into(),
+            notifications: vec![],
+        };
+        let outcome = run_test(PreparedTest {
+            notifier: Arc::new(Reject),
+            deliveries: vec![delivery],
+        })
+        .await;
+        let message = outcome.error.unwrap();
+        assert!(message.contains("Server rejected"));
+        assert!(!message.contains(TOKEN));
+        assert!(message.contains(orch_plugin_contract::secret::REDACTED));
     }
 
     #[tokio::test]

@@ -47,7 +47,7 @@ use chrono::Duration;
 use http::header::{CACHE_CONTROL, SET_COOKIE};
 use orch_access_contract::audit::AuditAction;
 use orch_api_contract::auth::{AuthResult, OrgCreation, RegistrationMode};
-use orch_api_contract::common::{BASE_PATH, DEVICE_COOKIE, ErrorCode, SESSION_COOKIE};
+use orch_api_contract::common::{DEVICE_COOKIE, ErrorCode, SESSION_COOKIE};
 use orch_config::server::Auth;
 use orch_db::Conn;
 use orch_db::audit::{self, Actor, Entry, Origin};
@@ -60,6 +60,21 @@ use serde::de::DeserializeOwned;
 /// What a cache is told of an answer that holds a secret, which is shown once
 /// and must not be kept.
 pub const NOT_KEPT: &str = "no-store";
+
+/// Refuses simple browser forms at public requests that can create a session.
+pub(crate) fn require_json(ctx: &Ctx) -> ApiResult<()> {
+    let headers = ctx.headers.get_all(http::header::CONTENT_TYPE);
+    let mut values = headers.iter();
+    let json = values
+        .next()
+        .and_then(|value| value.to_str().ok())
+        .and_then(|value| value.split(';').next())
+        .is_some_and(|media_type| media_type.trim().eq_ignore_ascii_case("application/json"));
+    if !json || values.next().is_some() {
+        return Err(ApiError::invalid("Content-Type", "send application/json"));
+    }
+    Ok(())
+}
 
 /// How soon after one code was mailed to a name another may be: a minute, so
 /// that nobody is sent mail without end by somebody else.
@@ -239,13 +254,11 @@ pub async fn record(
     Ok(())
 }
 
-/// A cookie, with the attributes every cookie of the sign-in carries: out of
-/// reach of scripts, only over TLS, never sent along from another site, and
-/// only to the requests that sign in and out.
+/// A host-bound sign-in cookie, out of reach of scripts and sent only over TLS.
 #[must_use]
 pub fn cookie(name: &str, value: &str, life: Duration) -> String {
     format!(
-        "{name}={value}; Max-Age={}; Path={BASE_PATH}/auth; HttpOnly; Secure; SameSite=Strict",
+        "{name}={value}; Max-Age={}; Path=/; HttpOnly; Secure; SameSite=Strict",
         life.num_seconds().max(0)
     )
 }
@@ -442,15 +455,15 @@ mod tests {
     fn a_cookie_carries_the_attributes_every_cookie_of_the_sign_in_has() {
         assert_eq!(
             session_cookie("ors_abc", Duration::days(30)),
-            "orch_session=ors_abc; Max-Age=2592000; Path=/api/v1/auth; HttpOnly; Secure; SameSite=Strict"
+            "__Host-orch_session=ors_abc; Max-Age=2592000; Path=/; HttpOnly; Secure; SameSite=Strict"
         );
         assert_eq!(
             device_cookie("odv_abc", &Auth::default()),
-            "orch_device=odv_abc; Max-Age=7776000; Path=/api/v1/auth; HttpOnly; Secure; SameSite=Strict"
+            "__Host-orch_device=odv_abc; Max-Age=7776000; Path=/; HttpOnly; Secure; SameSite=Strict"
         );
         assert_eq!(
             cleared_session_cookie(),
-            "orch_session=; Max-Age=0; Path=/api/v1/auth; HttpOnly; Secure; SameSite=Strict"
+            "__Host-orch_session=; Max-Age=0; Path=/; HttpOnly; Secure; SameSite=Strict"
         );
     }
 }

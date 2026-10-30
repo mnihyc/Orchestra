@@ -266,6 +266,21 @@ fn roots_of(policy: &LocalPolicy, data_dir: &std::path::Path) -> Vec<PathBuf> {
         .collect()
 }
 
+fn local_programs_of(policy: &LocalPolicy) -> BTreeMap<String, String> {
+    let path = std::env::var_os("PATH");
+    let mut programs = BTreeMap::new();
+    let mut seen = std::collections::BTreeSet::new();
+    for harness in &policy.agent_harnesses {
+        if seen.insert(&harness.kind)
+            && let Some(program) =
+                crate::local_harnesses::resolve_named(&harness.path, path.as_deref())
+        {
+            programs.insert(harness.kind.clone(), program.to_string_lossy().into_owned());
+        }
+    }
+    programs
+}
+
 /// What the host starts with: the policy of the machine if a person connected it, the places a driver
 /// gave if the system made it, and the tunables of the connector's configuration.
 fn settings_of(services: &Services, parts: &EnvironmentParts) -> HostSettings {
@@ -298,6 +313,9 @@ fn settings_of(services: &Services, parts: &EnvironmentParts) -> HostSettings {
         }
     };
     settings.process_controls = services.process_controls;
+    if let Some(policy) = services.policy.policy() {
+        settings.local_programs = local_programs_of(&policy);
+    }
     // The builds the system put in a runtime it made are the tools the environment was made with.
     settings.tools = services
         .installed
@@ -495,6 +513,7 @@ impl EnvironmentRole {
                 stop.clone(),
             )),
             tokio::spawn(follow_policy(Arc::downgrade(&role), stop.clone())),
+            tokio::spawn(follow_local_programs(Arc::downgrade(&role), stop.clone())),
             tokio::spawn(look_for_tool_servers(Arc::downgrade(&role), stop.clone())),
         ];
         let server: Arc<dyn TunnelServer> = Arc::new(EnvironmentTunnels(Arc::downgrade(&role)));
@@ -631,6 +650,10 @@ impl EnvironmentRole {
         // to the environment's actual started processes and cannot be overridden by user secrets.
         let mut private = body.clone();
         private.variables.extend(local.clone());
+        #[cfg(target_os = "linux")]
+        let mut held_workspace = None;
+        #[cfg(not(target_os = "linux"))]
+        let held_workspace = None;
         if let (Some(policy), Some(sources)) =
             (self.services.policy.policy(), body.data_sources.as_ref())
         {
@@ -649,7 +672,11 @@ impl EnvironmentRole {
                 ("workspace", &mut resolved.workspace),
                 ("home", &mut resolved.home),
             ] {
+                #[cfg(target_os = "linux")]
+                let mut owned = None;
                 let path = match source.directory() {
+                    #[cfg(target_os = "linux")]
+                    Some(path) if role == "workspace" => path.to_owned(),
                     Some(path) => {
                         crate::policy::inspect_environment_directory(
                             &policy,
@@ -662,7 +689,23 @@ impl EnvironmentRole {
                             "workspace" => storage.workspace.as_deref(),
                             _ => storage.home.as_deref(),
                         });
-                        let path = crate::storages::directory_generation(
+                        #[cfg(target_os = "linux")]
+                        {
+                            let (binding, held) = crate::storages::directory_generation_binding(
+                                &self.services.data_dir,
+                                &self.services.config,
+                                &policy,
+                                body.environment_id,
+                                role,
+                                requested,
+                                body.data_generation.unwrap_or(0),
+                            )?;
+                            let path = binding.path.clone();
+                            owned = Some((binding, held));
+                            path
+                        }
+                        #[cfg(not(target_os = "linux"))]
+                        crate::storages::directory_generation(
                             &self.services.data_dir,
                             &self.services.config,
                             &policy,
@@ -670,17 +713,53 @@ impl EnvironmentRole {
                             role,
                             requested,
                             body.data_generation.unwrap_or(0),
-                        )?;
-                        path.to_string_lossy().into_owned()
+                        )?
+                        .to_string_lossy()
+                        .into_owned()
                     }
                 };
-                crate::policy::writable_environment_directory(std::path::Path::new(&path))?;
+                #[cfg(target_os = "linux")]
+                let path = if role == "workspace" {
+                    let (binding, held) = match owned {
+                        Some(held) => held,
+                        None => crate::policy::hold_environment_directory(
+                            &policy,
+                            std::path::Path::new(&path),
+                        )?,
+                    };
+                    held.require_writable().map_err(|error| {
+                        CommandError::new(ErrorCode::PolicyRootNotAllowed, error.to_string())
+                    })?;
+                    held_workspace = Some(held);
+                    binding.path
+                } else {
+                    crate::policy::writable_environment_directory(std::path::Path::new(&path))?;
+                    path
+                };
+                #[cfg(not(target_os = "linux"))]
+                let path = {
+                    crate::policy::writable_environment_directory(std::path::Path::new(&path))?;
+                    path
+                };
                 *source = orch_driver_contract::runtime::EnvironmentDataSource::ExistingDirectory {
                     path,
                 };
             }
             private.workspace_root = resolved.workspace.directory().map(str::to_owned);
             private.data_sources = Some(resolved);
+        }
+        // Older attachments name the workspace directly rather than in data_sources.
+        #[cfg(target_os = "linux")]
+        if held_workspace.is_none()
+            && let (Some(policy), Some(path)) = (
+                self.services.policy.policy(),
+                private.workspace_root.as_deref(),
+            )
+        {
+            let (binding, held) =
+                crate::policy::hold_environment_directory(&policy, std::path::Path::new(path))?;
+            private.workspace_root = Some(binding.path);
+            held_workspace = Some(held);
         }
         if let Some(policy) = self.services.policy.policy() {
             for mount in private.mounts.iter_mut().flatten() {
@@ -711,7 +790,11 @@ impl EnvironmentRole {
         for name in local.keys() {
             secrets.remove(name);
         }
-        let attached = match self.host.env_attach(&private, &secrets).await {
+        let attached = match self
+            .host
+            .env_attach_with_root(&private, &secrets, held_workspace)
+            .await
+        {
             Ok(facts) => facts,
             Err(error) => return Err(error.into()),
         };
@@ -904,6 +987,35 @@ impl EnvironmentRole {
             JobProgressSink::new(Some(queue), Arc::clone(&self.services.clock)),
             task,
         )
+    }
+}
+
+/// A fresh local search can change a program's version even when its policy path stays the same.
+async fn follow_local_programs(role: Weak<EnvironmentRole>, stop: CancellationToken) {
+    let Some(mut changes) = role
+        .upgrade()
+        .map(|role| role.services.local_harnesses.changes())
+    else {
+        return;
+    };
+    loop {
+        let Some(current) = role.upgrade() else {
+            return;
+        };
+        if let Some(policy) = current.services.policy.policy() {
+            current
+                .host
+                .set_local_programs(local_programs_of(&policy))
+                .await;
+            for environment in current.host.environments() {
+                let _ = current.host.facts_changed(environment.id()).await;
+            }
+        }
+        drop(current);
+        tokio::select! {
+            () = stop.cancelled() => return,
+            changed = changes.changed() => if changed.is_err() { return; },
+        }
     }
 }
 
@@ -1667,30 +1779,29 @@ async fn follow_policy(role: Weak<EnvironmentRole>, stop: CancellationToken) {
         return;
     };
     loop {
-        tokio::select! {
-            () = stop.cancelled() => return,
-            changed = changes.changed() => {
-                if changed.is_err() {
-                    return;
-                }
-            }
-        }
         let Some(role) = role.upgrade() else {
             return;
         };
-        let Some(policy) = role.services.policy.policy() else {
-            continue;
-        };
-        role.host.set_policy(
-            gates_of(&policy),
-            Some(roots_of(&policy, &role.services.data_dir)),
-            Some(policy.exec_offers.clone()),
-            mcp_gates_of(&policy),
-        );
-        if !policy.environment_terminal {
-            for environment in role.host.environments() {
-                let _ = environment.terminals().close_all().await;
+        if let Some(policy) = role.services.policy.policy() {
+            role.host.set_policy(
+                gates_of(&policy),
+                Some(roots_of(&policy, &role.services.data_dir)),
+                Some(policy.exec_offers.clone()),
+                mcp_gates_of(&policy),
+            );
+            role.host
+                .set_local_programs(local_programs_of(&policy))
+                .await;
+            if !policy.environment_terminal {
+                for environment in role.host.environments() {
+                    let _ = environment.terminals().close_all().await;
+                }
             }
+        }
+        drop(role);
+        tokio::select! {
+            () = stop.cancelled() => return,
+            changed = changes.changed() => if changed.is_err() { return; },
         }
     }
 }
@@ -1785,6 +1896,32 @@ fn display_error(error: orch_envhost::displays::DisplayError) -> CommandError {
 #[cfg(test)]
 mod progress_tests {
     use super::*;
+
+    #[test]
+    fn the_environment_receives_only_the_first_policy_selected_program_of_each_kind() {
+        let dir = tempfile::tempdir().unwrap();
+        let first = dir.path().join("first");
+        let second = dir.path().join("second");
+        std::fs::write(&first, "program").unwrap();
+        std::fs::write(&second, "program").unwrap();
+        let mut policy = LocalPolicy::default();
+        policy.agent_harnesses = vec![
+            orch_link_contract::policy::PolicyHarness {
+                kind: "codex".into(),
+                path: first.display().to_string(),
+            },
+            orch_link_contract::policy::PolicyHarness {
+                kind: "codex".into(),
+                path: second.display().to_string(),
+            },
+        ];
+        assert_eq!(
+            local_programs_of(&policy).get("codex"),
+            Some(&first.display().to_string())
+        );
+        policy.agent_harnesses[0].path = dir.path().join("missing").display().to_string();
+        assert!(!local_programs_of(&policy).contains_key("codex"));
+    }
 
     #[tokio::test]
     async fn a_million_updates_keep_one_pending_sample_and_flush_the_last_on_close() {

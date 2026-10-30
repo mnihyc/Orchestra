@@ -179,19 +179,21 @@ impl Engine {
                 call.call_ref.as_bytes(),
             ],
         );
-        // How much an agent may send is its own topic's setting; how it reaches the thread is the thread's topic's.
-        let (own, broadcast) = {
+        // Avoid preparing files when the sender has already spent its allowance.
+        {
             let mut conn = self.inner.db.acquire().await?;
-            let own = Broadcast::load(&mut conn, thread.topic_id).await?;
-            let theirs = if target_topic == thread.topic_id {
-                own.clone()
-            } else {
-                Broadcast::load(&mut conn, target_topic).await?
-            };
-            (own, theirs)
-        };
-        if let Some(refusal) = self.within_hourly_rate(thread, &own, id).await? {
-            return Ok(refusal.into());
+            let broadcast = Broadcast::load(&mut conn, thread.topic_id).await?;
+            if let Some(refusal) = Self::within_hourly_rate_in(
+                &mut conn,
+                thread.node_id,
+                &broadcast,
+                id,
+                self.inner.clock.now(),
+            )
+            .await?
+            {
+                return Ok(refusal.into());
+            }
         }
         if let Some(saved) = self.saved_thread_message(id, &target_path).await? {
             return Ok(saved);
@@ -210,6 +212,27 @@ impl Engine {
             let stored = resolution.store(&text);
             (resolution, stored)
         };
+        let mut tx = self.inner.db.begin().await?;
+        Self::lock_hourly_sender(&mut tx, thread.node_id).await?;
+        let current = orch_db::queries::threads::thread(&mut tx, thread.node_id)
+            .await?
+            .ok_or(EngineError::StaleToolSource)?;
+        if current.topic_id != thread.topic_id {
+            return Err(EngineError::StaleToolSource);
+        }
+        // The source sets the allowance; the destination sets how the message arrives.
+        let own = Broadcast::load(&mut tx, current.topic_id).await?;
+        let now = self.inner.clock.now();
+        if let Some(refusal) =
+            Self::within_hourly_rate_in(&mut tx, thread.node_id, &own, id, now).await?
+        {
+            return Ok(refusal.into());
+        }
+        let broadcast = if target_topic == current.topic_id {
+            own
+        } else {
+            Broadcast::load(&mut tx, target_topic).await?
+        };
         let plan = Plan {
             category: AnnouncementCategory::Notice,
             title: String::new(),
@@ -221,8 +244,6 @@ impl Engine {
             reach: Reach::All,
         };
         let sender = Sender::Agent(Box::new(thread.clone()));
-        let now = self.inner.clock.now();
-        let mut tx = self.inner.db.begin().await?;
         let (finished, delivered_as) = {
             let mut unit = Unit::new(&mut tx, now);
             let delivered_as = self
@@ -450,6 +471,9 @@ impl Engine {
                 "The sending thread is gone.",
             )));
         };
+        if current.topic_id != from.topic_id {
+            return Err(EngineError::StaleToolSource);
+        }
         if !message.carried.is_empty()
             && !crate::tools::workspace_files::same_workspace(from, &current)
         {

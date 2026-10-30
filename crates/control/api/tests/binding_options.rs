@@ -660,7 +660,7 @@ async fn an_environment_whose_removal_is_scheduled_is_listed_as_not_to_be_chosen
 }
 
 #[tokio::test]
-async fn only_the_environments_the_caller_manages_are_listed() {
+async fn visible_environments_without_manage_are_listed_but_not_offered_for_a_move() {
     let s = Scene::new().await;
     let thread = s.thread().await.base.id;
     let theirs = a_directory_on_a_machine(&s, "Ada's laptop").await;
@@ -671,10 +671,61 @@ async fn only_the_environments_the_caller_manages_are_listed() {
         .iter()
         .map(|each| each.environment.id)
         .collect();
+    assert_eq!(ids.len(), 2);
+    assert!(ids.contains(&s.on.environment));
+    assert!(ids.contains(&theirs));
+    let other = options
+        .environments
+        .iter()
+        .find(|row| row.environment.id == theirs)
+        .unwrap();
+    assert!(!other.usable);
+    assert_eq!(other.reason.as_deref(), Some("environment_manage_required"));
+}
+
+#[tokio::test]
+async fn an_environment_with_use_alone_can_start_work_but_cannot_receive_a_moved_thread() {
+    let s = Scene::new().await;
+    let thread = s.thread().await.base.id;
+    let directory = a_directory_on_a_machine(&s, "Shared directory").await;
+    names(&s, "node", thread, "thread.manage", &s.eve, json!({})).await;
+    names(
+        &s,
+        "environment",
+        directory,
+        "environment.use",
+        &s.eve,
+        json!({}),
+    )
+    .await;
+
+    let start = s
+        .rig
+        .world
+        .app
+        .call(NodeBindingOptionsGet, &[&s.tree.topic.base.id])
+        .token(&s.eve.token)
+        .query(&NodeBindingOptionsGetQuery::default())
+        .send()
+        .await
+        .ok();
+    let offered = start
+        .environments
+        .iter()
+        .find(|row| row.environment.id == directory)
+        .unwrap();
+    assert!(offered.usable, "Use permits starting a new thread there");
+
+    let moved = options_for(&s, &s.eve, thread).await;
+    let offered = moved
+        .environments
+        .iter()
+        .find(|row| row.environment.id == directory)
+        .unwrap();
+    assert!(!offered.usable, "moving an existing thread requires Manage");
     assert_eq!(
-        ids,
-        [s.on.environment],
-        "Eve manages the one and is not told of {theirs}"
+        offered.reason.as_deref(),
+        Some("environment_manage_required")
     );
 }
 
@@ -704,13 +755,10 @@ async fn what_a_new_thread_starts_with_is_told_from_the_defaults_of_the_topic() 
     let connected = &options.access.connected;
     assert_eq!(roles(&connected.view), [Role::Viewer]);
     assert!(connected.interact.is_empty() && connected.manage.is_empty());
-    // And an environment made now is managed by the Developers of the topic as it ships.
+    // An environment made now gives View to Viewers, Use to Interactors and Manage to Developers.
     assert_eq!(roles(&options.new_environment.view), [Role::Viewer]);
+    assert_eq!(roles(&options.new_environment.interact), [Role::Interactor]);
     assert_eq!(roles(&options.new_environment.manage), [Role::Developer]);
-    assert!(
-        options.new_environment.interact.is_empty(),
-        "there is no middle"
-    );
 }
 
 #[tokio::test]

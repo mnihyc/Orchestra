@@ -15,7 +15,6 @@ use crate::middleware::authorization::{self, exact, refusals};
 use crate::middleware::requests::{ApiError, ApiResult};
 use crate::middleware::transaction_guard;
 use crate::registry::{Ctx, Registry};
-use crate::routes::access::admin_matters;
 use crate::routes::nodes::{Placed, invalid, placed, shown, view};
 use crate::sign_in::Limits;
 use crate::sign_in::mail::{self, CHANNEL_KIND};
@@ -306,6 +305,15 @@ fn clean_email(email: &str) -> ApiResult<String> {
     }
 }
 
+/// The rows a node role offer actually grants, including for older stored invitations.
+fn offered_permissions(row: &InvitationRow) -> Vec<String> {
+    if row.kind == "node" && row.role.is_some() {
+        Vec::new()
+    } else {
+        row.permissions.clone()
+    }
+}
+
 /// An invitation as the people who manage it read it.
 async fn invitations_shown(
     conn: &mut Conn,
@@ -336,7 +344,7 @@ async fn invitations_shown(
                     .role
                     .as_deref()
                     .and_then(|role| serde_json::from_value(json!(role)).ok()),
-                permissions: row.permissions.clone(),
+                permissions: offered_permissions(row),
                 form: if row.email.is_some() {
                     InvitationForm::Email
                 } else {
@@ -526,10 +534,8 @@ async fn invitation_create(
     let (role, rows): (Option<String>, Vec<String>) = match body.kind {
         InvitationKind::Org => {
             let role = body.role.unwrap_or(Role::Viewer);
-            if role == Role::Admin
-                && let Some(org) = org
-            {
-                admin_matters(&mut tx, principal, org, Policy::default()).await?;
+            if let Some(org) = org {
+                invitation_role(&mut tx, principal, org, role).await?;
             }
             (
                 serde_json::to_value(role)
@@ -541,10 +547,16 @@ async fn invitation_create(
         InvitationKind::Node => {
             let node = node.unwrap_or_else(Id::nil);
             let (_, kind) = placed(&mut tx, node).await?;
-            let rows: Vec<String> = body
-                .permissions
-                .clone()
-                .unwrap_or_else(|| DEFAULT_ROWS.iter().map(|row| (*row).to_owned()).collect());
+            let rows: Vec<String> = if body.role.is_some() {
+                Vec::new()
+            } else {
+                body.permissions
+                    .clone()
+                    .unwrap_or_else(|| DEFAULT_ROWS.iter().map(|row| (*row).to_owned()).collect())
+            };
+            if body.role.is_none() && rows.is_empty() {
+                return Err(invalid("permissions", "must name at least one permission"));
+            }
             for (index, row) in rows.iter().enumerate() {
                 let known = row.parse::<Permission>().ok().is_some_and(|permission| {
                     permission.exists_on(match kind {
@@ -568,14 +580,9 @@ async fn invitation_create(
                 ));
             }
             if let Some(role) = body.role {
-                let policy = crate::routes::nodes::policy_at(&mut tx, node).await?;
-                let standing = orch_authz::giving::role_standing(&mut tx, principal, node, policy)
-                    .await
-                    .map_err(ApiError::internal)?;
-                crate::routes::access::role_matters(
-                    &mut tx, principal, node, role, &standing, policy,
-                )
-                .await?;
+                invitation_role(&mut tx, principal, node, role).await?;
+            } else {
+                invitation_rows(&mut tx, principal, node, &rows).await?;
             }
             (
                 body.role
@@ -679,6 +686,52 @@ async fn invitation_create(
         url,
         sent,
     })
+}
+
+/// Checks that an invitation's maker may give this role at the place now.
+async fn invitation_role(
+    conn: &mut Conn,
+    principal: &Principal,
+    place: Id,
+    role: Role,
+) -> ApiResult<()> {
+    let policy = crate::routes::nodes::policy_at(conn, place).await?;
+    let standing = orch_authz::giving::role_standing(conn, principal, place, policy)
+        .await
+        .map_err(ApiError::internal)?;
+    crate::routes::access::role_matters(conn, principal, place, role, &standing, policy).await
+}
+
+/// Checks every permission an invitation would name, using the page's own giving judgment.
+async fn invitation_rows(
+    conn: &mut Conn,
+    principal: &Principal,
+    node: Id,
+    permissions: &[String],
+) -> ApiResult<()> {
+    let policy = crate::routes::nodes::policy_at(conn, node).await?;
+    let page = pages::read(conn, principal, Target::Live(node), policy)
+        .await
+        .map_err(ApiError::internal)?;
+    let missing: Vec<_> = permissions
+        .iter()
+        .filter(|name| {
+            !page
+                .rows
+                .iter()
+                .any(|row| row.permission.as_str() == name.as_str() && row.can_give)
+        })
+        .cloned()
+        .collect();
+    if let Some(first) = missing.first() {
+        return Err(ApiError::new(
+            ErrorCode::AuthzDenied,
+            "the invitation maker cannot give every requested permission",
+        )
+        .with("required", first)
+        .with("missing_permissions", &missing));
+    }
+    Ok(())
 }
 
 /// The audit row of an invitation: its object is the invitation, and it
@@ -828,6 +881,141 @@ fn gone() -> ApiError {
     )
 }
 
+/// The maker no longer has the authority the invitation depends on.
+pub(crate) const ISSUER_AUTHORITY_LOST: &str = "invitation_issuer_authority_lost";
+
+fn issuer_gone() -> ApiError {
+    gone().with("reason", ISSUER_AUTHORITY_LOST)
+}
+
+/// A delegated check used the maker's view; do not expose its names to the recipient.
+fn issuer_refusal(mut error: ApiError) -> ApiError {
+    let issuer_lost = matches!(
+        error.code(),
+        ErrorCode::AuthzDenied
+            | ErrorCode::SharingExternalForbidden
+            | ErrorCode::OrgSuspended
+            | ErrorCode::AuthSuspended
+            | ErrorCode::NodeArchived
+            | ErrorCode::AccessLocked
+            | ErrorCode::NotFound
+            | ErrorCode::ChatNotAllowed
+    );
+    if !issuer_lost && error.code() != ErrorCode::SharingExternalLifetimeExceeded {
+        return error;
+    }
+    let extra = &mut error.problem.extra;
+    if issuer_lost {
+        extra.insert("reason".into(), json!(ISSUER_AUTHORITY_LOST));
+    }
+    for name in ["ask", "ask_more", "by", "org", "scope", "archived_node"] {
+        extra.remove(name);
+    }
+    extra.insert("requestable".into(), json!(false));
+    extra.insert("override".into(), json!(false));
+    if let Some(missing) = extra
+        .get_mut("missing")
+        .and_then(serde_json::Value::as_array_mut)
+    {
+        for item in missing {
+            if let Some(object) = item
+                .get_mut("object")
+                .and_then(serde_json::Value::as_object_mut)
+            {
+                object.insert("name".into(), serde_json::Value::Null);
+                object.insert("owner".into(), serde_json::Value::Null);
+            }
+            if let Some(item) = item.as_object_mut() {
+                item.insert("ask".into(), json!([]));
+                item.insert("ask_more".into(), json!(0));
+                item.insert("override".into(), json!(false));
+                item.remove("locked_by");
+            }
+        }
+    }
+    error
+}
+
+async fn invitation_maker(
+    conn: &mut Conn,
+    row: &InvitationRow,
+    now: DateTime<Utc>,
+) -> ApiResult<Principal> {
+    let maker = match Principal::load(conn, issuer_caller(row), Time::new(now)).await {
+        Ok(maker) => maker,
+        Err(orch_authz::Error::NoSuchUser(_) | orch_authz::Error::Suspended { .. }) => {
+            return Err(issuer_gone());
+        }
+        Err(error) => return Err(ApiError::internal(error)),
+    };
+    if maker.suspension().applies(&[]) {
+        return Err(issuer_gone());
+    }
+    Ok(maker)
+}
+
+/// A link cannot disclose its target after its maker can no longer offer that access.
+async fn preview_issuer(conn: &mut Conn, row: &InvitationRow, now: DateTime<Utc>) -> ApiResult<()> {
+    let maker = invitation_maker(conn, row, now).await?;
+    match (row.kind.as_str(), row.org_id, row.node_id, row.chat_id) {
+        ("system", None, None, None) => {
+            if row.role.is_some() || !row.permissions.is_empty() {
+                return Err(gone());
+            }
+            if !maker.is_system_admin() {
+                return Err(issuer_gone());
+            }
+        }
+        ("org", Some(org), None, None) => {
+            authorization::require(
+                conn,
+                &maker,
+                org,
+                exact(Permission::MembersManage),
+                Act::Use,
+                Policy::default(),
+            )
+            .await
+            .map_err(issuer_refusal)?;
+            let role: Role = serde_json::from_value(json!(row.role.as_deref().unwrap_or("viewer")))
+                .map_err(ApiError::internal)?;
+            invitation_role(conn, &maker, org, role)
+                .await
+                .map_err(issuer_refusal)?;
+        }
+        ("node", None, Some(node), None) => {
+            let policy = crate::routes::nodes::policy_at(conn, node).await?;
+            for permission in [Permission::AccessManage, Permission::AccessExternal] {
+                authorization::require(conn, &maker, node, exact(permission), Act::Use, policy)
+                    .await
+                    .map_err(issuer_refusal)?;
+            }
+            if let Some(role) = row.role.as_deref() {
+                let role: Role = serde_json::from_value(json!(role)).map_err(ApiError::internal)?;
+                invitation_role(conn, &maker, node, role)
+                    .await
+                    .map_err(issuer_refusal)?;
+            } else if row.permissions.is_empty() {
+                return Err(issuer_refusal(ApiError::new(
+                    ErrorCode::AuthzDenied,
+                    "the invitation grants no permissions",
+                )));
+            } else {
+                invitation_rows(conn, &maker, node, &row.permissions)
+                    .await
+                    .map_err(issuer_refusal)?;
+            }
+        }
+        ("chat", None, None, Some(chat)) => {
+            invitable_chat(conn, &maker, chat)
+                .await
+                .map_err(issuer_refusal)?;
+        }
+        _ => return Err(gone()),
+    }
+    Ok(())
+}
+
 /// The invitation whose secret is `token`, if it is still good.
 async fn good(conn: &mut Conn, token: &str, now: DateTime<Utc>) -> ApiResult<InvitationRow> {
     let row = identity::invitation_by_hash(conn, &token_hash(token))
@@ -846,6 +1034,7 @@ async fn invitation_lookup(ctx: Ctx, (): (), (): ()) -> ApiResult<InvitationPrev
     let limits = Limits::of(&ctx.app.config.auth);
     throttle::by_address(&ctx, &mut conn, &limits, "invitation").await?;
     let row = good(&mut conn, &token, ctx.now).await?;
+    preview_issuer(&mut conn, &row, ctx.now).await?;
     let found = hierarchy::with_ancestors(
         &mut conn,
         &[row.org_id.or(row.node_id).unwrap_or_else(Id::nil)],
@@ -881,12 +1070,10 @@ async fn invitation_lookup(ctx: Ctx, (): (), (): ()) -> ApiResult<InvitationPrev
         if row.role.is_some() || !row.permissions.is_empty() {
             return Err(gone());
         }
-        let maker = Principal::load(&mut conn, issuer_caller(&row), Time::new(ctx.now))
-            .await
-            .map_err(|_| gone())?;
+        let maker = invitation_maker(&mut conn, &row, ctx.now).await?;
         let (loaded, _) = invitable_chat(&mut conn, &maker, chat)
             .await
-            .map_err(|_| gone())?;
+            .map_err(issuer_refusal)?;
         Some(InvitationPreviewWhat {
             kind: orch_api_contract::users::InvitedKind::Chat,
             name: loaded.row.name.unwrap_or_else(|| "Group chat".to_owned()),
@@ -906,7 +1093,7 @@ async fn invitation_lookup(ctx: Ctx, (): (), (): ()) -> ApiResult<InvitationPrev
             .role
             .as_deref()
             .and_then(|role| serde_json::from_value(json!(role)).ok()),
-        permissions: row.permissions.clone(),
+        permissions: offered_permissions(&row),
         inviter,
         email_bound: row.email.is_some(),
         expires_at: Time::new(row.expires_at),
@@ -975,6 +1162,29 @@ pub(crate) async fn redeem(
     recipient: &identity::UserRow,
     token: &str,
 ) -> ApiResult<InvitationRow> {
+    let initial = good(conn, token, ctx.now).await?;
+    // Capacity and its target are ordered before the definitive clock and authority checks.
+    let locked: Option<Id> =
+        sqlx::query_scalar("SELECT id FROM invitations WHERE id = $1 FOR UPDATE")
+            .bind(initial.id)
+            .fetch_optional(&mut *conn)
+            .await
+            .map_err(DbError::from)?;
+    if locked.is_none() {
+        return Err(gone());
+    }
+    if let Some(node) = initial.org_id.or(initial.node_id) {
+        if !hierarchy::lock(conn, node).await? {
+            return Err(gone());
+        }
+    } else if let Some(chat) = initial.chat_id {
+        if orch_db::queries::chats::lock(conn, chat).await?.is_none() {
+            return Err(issuer_refusal(ApiError::not_found()));
+        }
+    }
+    let mut current = ctx.clone();
+    current.now = current.app.clock.now();
+    let ctx = &current;
     let row = good(conn, token, ctx.now).await?;
     // A personal link is accepted by the address it was sent to.
     if let Some(address) = &row.email {
@@ -992,12 +1202,7 @@ pub(crate) async fn redeem(
     }
     let user = recipient.id;
     orch_db::queries::transaction_guard::watch_standing(conn).await?;
-    let maker = Principal::load(conn, issuer_caller(&row), Time::new(ctx.now))
-        .await
-        .map_err(|_| gone())?;
-    if maker.suspension().applies(&[]) {
-        return Err(gone());
-    }
+    let maker = invitation_maker(conn, &row, ctx.now).await?;
     let delegation =
         json!({"issuer":row.created_by,"administrator_mode":maker.caller().as_admin()});
     match (row.kind.as_str(), row.org_id, row.node_id) {
@@ -1011,10 +1216,13 @@ pub(crate) async fn redeem(
                 Act::Use,
                 Policy::default(),
             )
-            .await?;
-            if row.role.as_deref() == Some("admin") {
-                admin_matters(&mut *conn, &maker, org, Policy::default()).await?;
-            }
+            .await
+            .map_err(issuer_refusal)?;
+            let role = row.role.as_deref().unwrap_or("viewer");
+            let wanted: Role = serde_json::from_value(json!(role)).map_err(ApiError::internal)?;
+            invitation_role(&mut *conn, &maker, org, wanted)
+                .await
+                .map_err(issuer_refusal)?;
             let root = place.org;
             if orch_authz::orgs::limits(&mut *conn, root)
                 .await
@@ -1024,8 +1232,7 @@ pub(crate) async fn redeem(
                 return Err(ApiError::new(
                     ErrorCode::OrgClosed,
                     "that tree takes no further member",
-                )
-                .with("org", refusals::named_node(&mut *conn, root).await?));
+                ));
             }
             let memberships = access::memberships(&mut *conn, user).await?;
             if let Some(membership) = memberships.iter().find(|each| each.org_id == root) {
@@ -1042,7 +1249,6 @@ pub(crate) async fn redeem(
                 return Err(gone());
             }
             access::add_member(&mut *conn, root, user, org, Some(row.created_by), ctx.now).await?;
-            let role = row.role.clone().unwrap_or_else(|| "viewer".to_owned());
             access::put_role(
                 &mut *conn,
                 &access::NewRole {
@@ -1051,7 +1257,7 @@ pub(crate) async fn redeem(
                     subject_kind: "user",
                     subject: user,
                     subject_role: None,
-                    role: &role,
+                    role,
                     expires_at: None,
                     note: "",
                     by: row.created_by,
@@ -1073,7 +1279,9 @@ pub(crate) async fn redeem(
         }
         ("node", _, Some(node)) => {
             let (place, kind) = placed(&mut *conn, node).await.map_err(|_| gone())?;
-            accept_on_node(ctx, conn, &maker, user, &row, node, kind).await?;
+            accept_on_node(ctx, conn, &maker, user, &row, node, kind)
+                .await
+                .map_err(issuer_refusal)?;
             if !identity::use_invitation(&mut *conn, row.id, user, ctx.now).await? {
                 return Err(gone());
             }
@@ -1089,8 +1297,11 @@ pub(crate) async fn redeem(
             .await?;
         }
         ("system", ..) => {
-            if !maker.is_system_admin() {
+            if row.role.is_some() || !row.permissions.is_empty() {
                 return Err(gone());
+            }
+            if !maker.is_system_admin() {
+                return Err(issuer_gone());
             }
             if !identity::use_invitation(&mut *conn, row.id, user, ctx.now).await? {
                 return Err(gone());
@@ -1121,7 +1332,10 @@ pub(crate) async fn redeem(
             if already_used {
                 return Err(gone());
             }
-            let (mut loaded, outsiders) = invitable_chat(&mut *conn, &maker, chat).await?;
+            // The target lock was taken before the clock and maker were refreshed.
+            let (mut loaded, outsiders) = invitable_chat(&mut *conn, &maker, chat)
+                .await
+                .map_err(issuer_refusal)?;
             let root = loaded.row.org_id;
             let origin = crate::sign_in::origin(ctx);
             let acting = orch_chat::Acting {
@@ -1133,9 +1347,14 @@ pub(crate) async fn redeem(
                 orch_chat::chats::add_member(&mut *conn, &acting, &mut loaded, user, outsiders)
                     .await
             {
-                return Err(
-                    crate::routes::chats::failed(&mut *conn, &maker, Some(chat), error).await,
-                );
+                let issuer = matches!(&error, orch_chat::Error::Outsider { .. });
+                let problem =
+                    crate::routes::chats::failed(&mut *conn, &maker, Some(chat), error).await;
+                return Err(if issuer {
+                    issuer_refusal(problem)
+                } else {
+                    problem
+                });
             }
             if !identity::use_invitation(&mut *conn, row.id, user, ctx.now).await? {
                 return Err(gone());

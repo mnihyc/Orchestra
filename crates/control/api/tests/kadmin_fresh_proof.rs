@@ -153,13 +153,15 @@ async fn start(world: &World, ada: &Passwordless) -> (String, String) {
             sensitive_purpose: Some(SensitivePurpose::TokenCreate),
             ..AuthOidcStartQuery::default()
         })
-        .header("cookie", &format!("orch_session={}", ada.cookie))
+        .header("cookie", &format!("__Host-orch_session={}", ada.cookie))
         .send_bytes()
         .await;
     assert_eq!(reply.status, 302);
     let to = reply.headers["location"].to_str().unwrap().to_owned();
     assert!(to.starts_with("https://idp.example/authorize?"), "{to}");
-    let mark = support::cookie(&reply.headers, "orch_oidc").unwrap().value;
+    let mark = support::cookie(&reply.headers, "__Host-orch_oidc")
+        .unwrap()
+        .value;
     let state = url::Url::parse(&to)
         .unwrap()
         .query_pairs()
@@ -179,7 +181,7 @@ async fn come_back(world: &World, state: &str, mark: &str, code: &str) -> String
             state: Some(state.to_owned()),
             ..AuthOidcCallbackQuery::default()
         })
-        .header("cookie", &format!("orch_oidc={mark}"))
+        .header("cookie", &format!("__Host-orch_oidc={mark}"))
         .send_bytes()
         .await;
     assert_eq!(reply.status, 302);

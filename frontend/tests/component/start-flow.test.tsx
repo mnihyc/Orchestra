@@ -1,26 +1,41 @@
 /** Enter starts with a valid setup; only four choices are asked before Options opens. */
-import { act, screen, waitFor, within } from '@testing-library/react';
+import { act, fireEvent, screen, waitFor, within } from '@testing-library/react';
 import userEvent from '@testing-library/user-event';
 import { afterEach, beforeEach, expect, it, vi } from 'vitest';
 
-import { client } from '@/api/client';
+import { ApiError, client } from '@/api/client';
+import type * as AccessApi from '@/api/access';
 import type { StartOptions } from '@/api/start';
 import { NewThreadDialog } from '@/features/start/BindingDialog';
 import { QuickStart } from '@/features/start/QuickStart';
 import { rememberSetup } from '@/features/start/lastSetup';
 import { NO_PICKS } from '@/features/start/choices';
 import type { StartPlan } from '@/features/start/start';
-import type { PlaceHost, Topic } from '@/generated/api-types';
+import type { Approval, PlaceHost, Project, Topic } from '@/generated/api-types';
 import { i18n, setLocale } from '@/i18n';
 
 import { agent, arrangement, environment, options, provider } from '../unit/start-fixtures';
+import { BEA, TOPIC } from '../unit/general-access-fixtures';
 import { show } from './support';
 
-const state = vi.hoisted(() => ({ answer: null as StartOptions | null, freshAnswer: null as StartOptions | null, refusal: null as Error | null, refusedEnvironment: null as string | null, start: vi.fn<(plan: StartPlan) => void>(), reads: vi.fn<(environment: string | null) => void>() }));
+const state = vi.hoisted(() => ({ answer: null as StartOptions | null, freshAnswer: null as StartOptions | null, refusal: null as Error | null, refusedEnvironment: null as string | null, askFor: null as string | null, askClosed: false, approvals: [] as Approval[], request: vi.fn<typeof AccessApi.requestAccess>(), start: vi.fn<(plan: StartPlan) => void>(), reads: vi.fn<(environment: string | null) => void>() }));
 vi.mock('@/api/start', async (original) => ({ ...await original<object>(), startOptionsQuery: (_id: string, environment: string | null) => ({
-  queryKey: ['start-flow', environment], initialData: environment === 'new' ? state.freshAnswer ?? state.answer : state.answer,
-  queryFn: () => { state.reads(environment); return state.refusedEnvironment !== null && environment === state.refusedEnvironment ? Promise.reject(new Error('The selected environment is unavailable')) : state.refusal === null ? Promise.resolve(environment === 'new' ? state.freshAnswer ?? state.answer : state.answer) : Promise.reject(state.refusal); },
+  queryKey: ['start-flow', environment], initialData: environment === state.askFor && environment !== null ? undefined : environment === 'new' ? state.freshAnswer ?? state.answer : state.answer,
+  queryFn: () => {
+    state.reads(environment);
+    if (environment !== null && environment === state.askFor) {
+      const row = state.answer?.environments.find((entry) => entry.environment.id === environment);
+      const owner = row?.environment.owner ?? null;
+      return Promise.reject(new ApiError({ type: 'orch:error:authz.denied', code: 'authz.denied', status: 403, title: 'Access denied', detail: 'Use is needed', request_id: 'use-required', requestable: true,
+        missing: [{ object: { kind: 'environment', id: environment, name: row?.environment.name ?? null, owner }, permissions: ['environment.use'], ask: owner === null || state.askClosed ? [] : [owner], ask_more: 0, closed: state.askClosed ? 'locked' : null, options: null, override: false }] }, null));
+    }
+    return state.refusedEnvironment !== null && environment === state.refusedEnvironment ? Promise.reject(new Error('The selected environment is unavailable')) : state.refusal === null ? Promise.resolve(environment === 'new' ? state.freshAnswer ?? state.answer : state.answer) : Promise.reject(state.refusal);
+  },
 }) }));
+vi.mock('@/api/access', async (original) => ({ ...await original<typeof AccessApi>(),
+  requestAccess: (...args: Parameters<typeof AccessApi.requestAccess>) => state.request(...args),
+  accessRequestQuery: (batch: string) => ({ queryKey: ['start-access', batch], queryFn: () => Promise.resolve({ batch_id: batch, approvals: state.approvals, complete: false }) }),
+}));
 vi.mock('@/features/start/start', async (original) => ({ ...await original<object>(), useStart: () => ({ start: state.start, pending: false, error: null, step: null, standing: { topic: null, environment: null } }) }));
 vi.mock('@/api/resources', async (original) => ({ ...await original<object>(), providersQuery: () => ({ queryKey: ['start-flow-providers'], queryFn: () => Promise.resolve([]) }), machinesQuery: { queryKey: ['start-flow-machines'], queryFn: () => Promise.resolve([]) } }));
 vi.mock('@/api/nodes', async (original) => ({ ...await original<object>(), nodeQuery: (id: string) => ({ queryKey: ['start-flow-node', id], queryFn: () => Promise.resolve({ org_id: 'org', access: { permissions: [] } }) }) }));
@@ -29,9 +44,9 @@ vi.mock('@/features/resources/providers/ProviderUsageCard', () => ({ ProviderUsa
 vi.mock('@/features/access/NewPage', () => ({ NewPage: () => <div data-access-options /> }));
 vi.mock('@/features/help/open', () => ({ useHelpOpener: () => vi.fn() }));
 
-const topic = { id: 'topic', name: 'login', kind: 'topic', path: [], parent_id: null, archived: false, folder: false, status: 'open', access: { permissions: ['topic.interact'] } } as unknown as Topic;
+const topic = { id: 'topic', name: 'login', kind: 'topic', path: [], parent_id: null, archived: false, folder: false, status: 'open', access: { permissions: ['topic.interact', 'topic.start_threads'] } } as unknown as Topic;
 const parent = { id: topic.id, name: topic.name, kind: 'topic' as const, parentId: null, archived: false, folder: false, status: 'open' as const };
-beforeEach(() => { vi.clearAllMocks(); localStorage.clear(); state.refusal = null; state.refusedEnvironment = null; state.freshAnswer = null; state.answer = options(); client.session.setState({ status: 'signed_in', userId: 'starter' }); });
+beforeEach(() => { vi.clearAllMocks(); localStorage.clear(); sessionStorage.clear(); state.refusal = null; state.refusedEnvironment = null; state.askFor = null; state.askClosed = false; state.approvals = []; state.freshAnswer = null; state.answer = options(); state.request.mockResolvedValue({ batch_id: 'start-request', approvals: [] }); client.session.setState({ status: 'signed_in', userId: 'starter' }); });
 afterEach(async () => { act(() => client.session.setState({ status: 'signed_out', userId: null })); await setLocale('en'); });
 
 function submittedPlan(): StartPlan {
@@ -141,6 +156,15 @@ it('does not reuse another account’s setup', async () => {
   expect(submittedPlan()).toMatchObject({ resolved: { provider: { id: 'p1' } } });
 });
 
+it.each(['topic', 'project'] as const)('offers the starter for the creation permission alone on a %s', async (kind) => {
+  const right = kind === 'topic' ? 'topic.start_threads' : 'project.create_topics';
+  const node = { ...topic, kind, access: { permissions: [`${kind}.view`, right] } } as unknown as Topic | Project;
+  show(<QuickStart node={node} />);
+  const box = screen.getByRole('textbox', { name: i18n.t(`start.quick.label.${kind}`) });
+  await userEvent.type(box, 'Start work{Enter}');
+  expect(submittedPlan()).toMatchObject({ message: 'Start work', place: { kind } });
+});
+
 for (const locale of ['en', 'zh-CN'] as const) it(`never offers a failed Main as the topic default (${locale})`, async () => {
   await setLocale(locale);
   const failed = environment('failed', { isDefault: true });
@@ -161,6 +185,39 @@ for (const locale of ['en', 'zh-CN'] as const) it(`never offers a failed Main as
   expect(where).not.toHaveTextContent('Main');
 });
 
+for (const locale of ['en', 'zh-CN'] as const) it(`groups usable environments apart from those that need a request (${locale})`, async () => {
+  await setLocale(locale);
+  const askable = { ...environment('view', { usable: false }), reason: 'environment_use_required' };
+  const blocked = environment('blocked', { usable: false });
+  state.answer = options({ environments: [askable, blocked, environment('use', { isDefault: true })] });
+  state.askFor = 'view';
+  const user = userEvent.setup();
+  show(<NewThreadDialog parent={parent} open onClose={() => undefined} />);
+  await user.click(await screen.findByRole('combobox', { name: i18n.t('start.where.title') }));
+  const canUse = screen.getByRole('group', { name: i18n.t('start.where.canUse') });
+  const ask = screen.getByRole('group', { name: i18n.t('start.where.askAccess') });
+  expect(within(canUse).getByRole('option', { name: 'Env use' })).toBeEnabled();
+  expect(within(ask).getByRole('option', { name: 'Env view' })).toBeEnabled();
+  expect(screen.getByRole('option', { name: 'Env blocked' })).toHaveAttribute('aria-disabled', 'true');
+  expect(within(ask).queryByRole('option', { name: 'Env blocked' })).toBeNull();
+  expect(within(ask).queryByRole('option', { name: i18n.t('choiceCatalog.environmentDestination.new.name') })).toBeNull();
+  await user.click(within(ask).getByRole('option', { name: 'Env view' }));
+  expect(await screen.findByRole('textbox', { name: i18n.t('access.request.reason') })).toBeVisible();
+  expect(state.start).not.toHaveBeenCalled();
+});
+
+for (const locale of ['en', 'zh-CN'] as const) for (const access of ['usable', 'askable'] as const) it(`omits environment group labels when only ${access} choices exist (${locale})`, async () => {
+  await setLocale(locale);
+  const row = access === 'usable' ? environment('single') : { ...environment('single', { usable: false }), reason: 'environment_use_required' };
+  state.answer = options({ environments: [row] });
+  show(<NewThreadDialog parent={parent} open onClose={() => undefined} />);
+  await userEvent.click(await screen.findByRole('combobox', { name: i18n.t('start.where.title') }));
+  expect(screen.getByRole('option', { name: 'Env single' })).toBeEnabled();
+  expect(screen.queryByRole('group', { name: i18n.t('start.where.canUse') })).toBeNull();
+  expect(screen.queryByRole('group', { name: i18n.t('start.where.askAccess') })).toBeNull();
+  if (access === 'askable') expect(screen.getByText(i18n.t('start.where.askAccess'))).toBeVisible();
+});
+
 for (const locale of ['en', 'zh-CN'] as const) it(`can leave a location whose current options are refused without losing the first message (${locale})`, async () => {
   await setLocale(locale);
   state.refusedEnvironment = 'e2';
@@ -170,6 +227,129 @@ for (const locale of ['en', 'zh-CN'] as const) it(`can leave a location whose cu
   await userEvent.click(screen.getByRole('button', { name: i18n.t('start.create') }));
   await waitFor(() => expect(state.start).toHaveBeenCalledOnce());
   expect(submittedPlan()).toMatchObject({ message: 'Keep this request', resolved: { environment: { environment: { id: 'e1' } } } });
+});
+
+it.each(['en', 'zh-CN'] as const)('does not start in the previous environment while asking for another (%s)', async (locale) => {
+  await setLocale(locale);
+  const requested = { ...environment('e2', { usable: false }), reason: 'environment_use_required' };
+  state.answer = options({ environments: [environment('e1', { isDefault: true }), requested] });
+  state.askFor = 'e2';
+  const pending: Extract<Approval, { kind: 'access' }> = {
+    id: 'approval', batch_id: 'start-request', kind: 'access', state: 'pending', title: 'Use environment',
+    object: { kind: 'environment', id: 'e2', name: 'Env e2' }, node: TOPIC, requester: { user: BEA },
+    request: { permissions: ['environment.use'], reason: 'Please grant use.', holder: { kind: 'user', user: BEA }, options: null, for_thread: null },
+    required_permission: 'access.manage', can_decide: false, approver_scope: null, created_at: '2026-10-15T21:31:00Z',
+    decided_at: null, decided_automatically: false, decided_by: null, decision: null, expires_at: null, item_id: null, thread_id: null,
+  };
+  state.approvals = [pending];
+  state.request.mockResolvedValue({ batch_id: 'start-request', approvals: [pending] });
+  sessionStorage.setItem(`orch.access.request.v2.${JSON.stringify(['starter', 'e2', null, false])}`, 'another-permission');
+  const user = userEvent.setup();
+  show(<NewThreadDialog parent={parent} open onClose={() => undefined} draft={{ picks: NO_PICKS, message: 'Keep this request' }} />);
+  const where = await screen.findByRole('combobox', { name: i18n.t('start.where.title') });
+  await user.click(where);
+  await user.click(screen.getByRole('option', { name: 'Env e2' }));
+  expect(where).toHaveTextContent('Env e2');
+  const create = screen.getByRole('button', { name: i18n.t('start.create') });
+  expect(create).toBeDisabled();
+  const reason = await screen.findByRole('textbox', { name: i18n.t('access.request.reason') });
+  expect(reason).toBeVisible();
+  fireEvent.change(reason, { target: { value: 'Please grant use.' } });
+  fireEvent.click(screen.getByRole('button', { name: i18n.t('access.request.send') }));
+  await waitFor(() => expect(state.request).toHaveBeenCalledOnce());
+  expect(state.request.mock.calls[0]?.[0]).toEqual({ items: [{ object: { kind: 'environment', id: 'e2' }, permissions: ['environment.use'] }], reason: 'Please grant use.' });
+  await waitFor(() => expect(sessionStorage.getItem(`orch.access.request.v2.${JSON.stringify(['starter', 'e2.environment.use', null, false])}`)).toBe('start-request'));
+  expect(screen.getByRole('button', { name: 'Ada Lovelace' })).toBeVisible();
+  fireEvent.click(create);
+  expect(state.start).not.toHaveBeenCalled();
+});
+
+it('keeps the first message when leaving an access request for a usable environment', async () => {
+  const requested = { ...environment('e2', { usable: false }), reason: 'environment_use_required' };
+  state.answer = options({ environments: [environment('e1', { isDefault: true }), requested] });
+  state.askFor = 'e2';
+  const user = userEvent.setup();
+  show(<NewThreadDialog parent={parent} open onClose={() => undefined} draft={{ picks: NO_PICKS, message: 'Keep this request' }} />);
+  const where = await screen.findByRole('combobox', { name: i18n.t('start.where.title') });
+  await user.click(where);
+  await user.click(screen.getByRole('option', { name: 'Env e2' }));
+  await user.click(where);
+  await user.click(screen.getByRole('option', { name: 'Env e1' }));
+  const create = screen.getByRole('button', { name: i18n.t('start.create') });
+  await waitFor(() => expect(create).toBeEnabled());
+  fireEvent.click(create);
+  await waitFor(() => expect(state.start).toHaveBeenCalledOnce());
+  expect(submittedPlan()).toMatchObject({ message: 'Keep this request', resolved: { environment: { environment: { id: 'e1' } } } });
+});
+
+it('selects the requested environment only after a current read confirms Use', async () => {
+  const requested = { ...environment('e2', { usable: false }), reason: 'environment_use_required' };
+  state.answer = options({ environments: [environment('e1', { isDefault: true }), requested] });
+  state.askFor = 'e2';
+  state.request.mockImplementation(async () => {
+    state.askFor = null;
+    state.answer = options({ environments: [environment('e1', { isDefault: true }), environment('e2')] });
+    return { batch_id: 'start-request', approvals: [] };
+  });
+  const user = userEvent.setup();
+  show(<NewThreadDialog parent={parent} open onClose={() => undefined} />);
+  const where = await screen.findByRole('combobox', { name: i18n.t('start.where.title') });
+  await user.click(where);
+  await user.click(screen.getByRole('option', { name: 'Env e2' }));
+  const reason = await screen.findByRole('textbox', { name: i18n.t('access.request.reason') });
+  fireEvent.change(reason, { target: { value: 'Please grant use.' } });
+  fireEvent.click(screen.getByRole('button', { name: i18n.t('access.request.send') }));
+  const create = screen.getByRole('button', { name: i18n.t('start.create') });
+  await waitFor(() => expect(create).toBeEnabled());
+  expect(where).toHaveTextContent('Env e2');
+  fireEvent.click(create);
+  await waitFor(() => expect(state.start).toHaveBeenCalledOnce());
+  expect(submittedPlan()).toMatchObject({ resolved: { environment: { environment: { id: 'e2' } } } });
+});
+
+it('shows a locked environment refusal without offering an impossible access request', async () => {
+  const requested = { ...environment('e2', { usable: false }), reason: 'environment_use_required' };
+  state.answer = options({ environments: [environment('e1', { isDefault: true }), requested] });
+  state.askFor = 'e2';
+  state.askClosed = true;
+  const user = userEvent.setup();
+  show(<NewThreadDialog parent={parent} open onClose={() => undefined} />);
+  await user.click(await screen.findByRole('combobox', { name: i18n.t('start.where.title') }));
+  await user.click(screen.getByRole('option', { name: 'Env e2' }));
+  expect(await screen.findByText(i18n.t('access.missing.closed.locked'))).toBeVisible();
+  expect(screen.queryByRole('button', { name: i18n.t('access.request.send') })).toBeNull();
+  expect(screen.getByRole('button', { name: i18n.t('start.create') })).toBeDisabled();
+  expect(state.request).not.toHaveBeenCalled();
+});
+
+it('does not show new-environment choices or arrangements for an access request', async () => {
+  const requested = { ...environment('e2', { usable: false }), reason: 'environment_use_required' };
+  state.answer = options({ environment_default: 'fresh', environments: [requested] });
+  state.askFor = 'e2';
+  const user = userEvent.setup();
+  show(<NewThreadDialog parent={parent} open onClose={() => undefined} />);
+  expect(await screen.findByRole('switch', { name: i18n.t('temporary.name') })).toBeVisible();
+  await user.click(screen.getByRole('combobox', { name: i18n.t('start.where.title') }));
+  await user.click(screen.getByRole('option', { name: 'Env e2' }));
+  expect(screen.queryByRole('switch', { name: i18n.t('temporary.name') })).toBeNull();
+  await user.click(screen.getByRole('button', { name: i18n.t('start.options.title') }));
+  expect(screen.queryByRole('radiogroup', { name: i18n.t('start.arrangement.label') })).toBeNull();
+  expect(document.querySelector('[data-directory-sign]')).toBeNull();
+});
+
+it('does not show the previous environment’s default directory for an access request', async () => {
+  const previous = { ...environment('e1', { isDefault: true }), directory: 'old-directory' };
+  const requested = { ...environment('e2', { usable: false }), reason: 'environment_use_required' };
+  state.answer = options({ environments: [previous, requested] });
+  state.askFor = 'e2';
+  const user = userEvent.setup();
+  show(<NewThreadDialog parent={parent} open onClose={() => undefined} />);
+  fireEvent.click(await screen.findByRole('button', { name: i18n.t('start.options.title') }));
+  expect(screen.getByText(i18n.t('start.where.directoryIs', { directory: 'old-directory' }))).toBeVisible();
+  await user.click(screen.getByRole('combobox', { name: i18n.t('start.where.title') }));
+  await user.click(screen.getByRole('option', { name: 'Env e2' }));
+  expect(screen.queryByText(i18n.t('start.where.directoryIs', { directory: 'old-directory' }))).toBeNull();
+  expect(screen.getByText(i18n.t('start.where.directoryHint'))).toBeVisible();
 });
 
 it('does not submit cached options after the current read is refused', async () => {

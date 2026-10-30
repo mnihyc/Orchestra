@@ -1770,6 +1770,8 @@ pub struct DeletedRow {
     pub org_id: Id,
     /// When it was deleted.
     pub deleted_at: DateTime<Utc>,
+    /// The recovery deadline saved with this deletion, when available.
+    pub purge_at: Option<DateTime<Utc>>,
     /// Who deleted it.
     pub deleted_by: Option<Id>,
     /// How many nodes lay directly in it.
@@ -1782,9 +1784,11 @@ pub struct DeletedRow {
 /// above it, with the moment of the deletion that took it.
 pub async fn deleted_node(conn: &mut Conn, node: Id) -> Result<Option<DeletedRow>, DbError> {
     Ok(sqlx::query_as(
-        "SELECT n.id, n.kind, n.name, n.parent_id, n.org_id, n.deleted_at, n.deleted_by,
+        "SELECT n.id, n.kind, n.name, n.parent_id, n.org_id, n.deleted_at, n.deleted_by, s.purge_at,
                 (SELECT count(*) FROM nodes c WHERE c.parent_id = n.id) AS children, o.slug
            FROM nodes n LEFT JOIN orgs o ON o.node_id = n.id
+           LEFT JOIN audit_object_state s ON s.object_kind='node' AND s.object_id=n.id
+                AND s.deletion_id IS NOT DISTINCT FROM n.deletion_id
           WHERE n.id = $1 AND n.deleted_at IS NOT NULL",
     )
     .bind(node)
@@ -1799,14 +1803,18 @@ pub async fn deleted_under(
     conn: &mut Conn,
     parent: Id,
     purged_before: DateTime<Utc>,
+    now: DateTime<Utc>,
     after: Option<AuditCursor>,
     limit: i64,
 ) -> Result<Vec<DeletedRow>, DbError> {
     Ok(sqlx::query_as(
-        "SELECT n.id, n.kind, n.name, n.parent_id, n.org_id, n.deleted_at, n.deleted_by,
+        "SELECT n.id, n.kind, n.name, n.parent_id, n.org_id, n.deleted_at, n.deleted_by, s.purge_at,
                 (SELECT count(*) FROM nodes c WHERE c.parent_id = n.id) AS children, o.slug
            FROM nodes n LEFT JOIN orgs o ON o.node_id = n.id
-          WHERE n.parent_id = $1 AND n.deleted_at IS NOT NULL AND n.deleted_at > $2
+           LEFT JOIN audit_object_state s ON s.object_kind='node' AND s.object_id=n.id
+                AND s.deletion_id IS NOT DISTINCT FROM n.deletion_id
+          WHERE n.parent_id = $1 AND n.deleted_at IS NOT NULL
+            AND (s.purge_at > $6 OR (s.purge_at IS NULL AND n.deleted_at > $2))
             AND ($3::uuid IS NULL OR (n.deleted_at, n.id) < ($4, $3))
           ORDER BY n.deleted_at DESC, n.id DESC
           LIMIT $5",
@@ -1816,6 +1824,7 @@ pub async fn deleted_under(
     .bind(after.map(|cursor| cursor.id))
     .bind(after.map(|cursor| cursor.at))
     .bind(limit)
+    .bind(now)
     .fetch_all(conn)
     .await?)
 }
@@ -1826,13 +1835,17 @@ pub async fn deleted_orgs_of(
     conn: &mut Conn,
     user: Id,
     purged_before: DateTime<Utc>,
+    now: DateTime<Utc>,
 ) -> Result<Vec<DeletedRow>, DbError> {
     Ok(sqlx::query_as(
-        "SELECT n.id, n.kind, n.name, n.parent_id, n.org_id, n.deleted_at, n.deleted_by,
+        "SELECT n.id, n.kind, n.name, n.parent_id, n.org_id, n.deleted_at, n.deleted_by, s.purge_at,
                 (SELECT count(*) FROM nodes c WHERE c.parent_id = n.id) AS children, o.slug
            FROM nodes n JOIN orgs o ON o.node_id = n.id
+           LEFT JOIN audit_object_state s ON s.object_kind='node' AND s.object_id=n.id
+                AND s.deletion_id IS NOT DISTINCT FROM n.deletion_id
           WHERE n.parent_id IS NULL AND o.org_kind = 'team'
-            AND n.deleted_at IS NOT NULL AND n.deleted_at > $2
+            AND n.deleted_at IS NOT NULL
+            AND (s.purge_at > $3 OR (s.purge_at IS NULL AND n.deleted_at > $2))
             AND (n.owner_id = $1
                  OR EXISTS (SELECT 1 FROM permission_entries e
                              WHERE e.object_kind = 'node' AND e.object_id = n.id AND e.page = 'live'
@@ -1842,6 +1855,7 @@ pub async fn deleted_orgs_of(
     )
     .bind(user)
     .bind(purged_before)
+    .bind(now)
     .fetch_all(conn)
     .await?)
 }
@@ -2642,16 +2656,20 @@ pub async fn orgs_by_name(
 pub async fn deleted_root_orgs(
     conn: &mut Conn,
     purged_before: DateTime<Utc>,
+    now: DateTime<Utc>,
     q: Option<&str>,
     after: Option<(DateTime<Utc>, Id)>,
     limit: i64,
 ) -> Result<Vec<DeletedRow>, DbError> {
     Ok(sqlx::query_as(
-        "SELECT n.id, n.kind, n.name, n.parent_id, n.org_id, n.deleted_at, n.deleted_by,
+        "SELECT n.id, n.kind, n.name, n.parent_id, n.org_id, n.deleted_at, n.deleted_by, s.purge_at,
                 (SELECT count(*) FROM nodes c WHERE c.parent_id = n.id) AS children, o.slug
            FROM nodes n JOIN orgs o ON o.node_id = n.id
+           LEFT JOIN audit_object_state s ON s.object_kind='node' AND s.object_id=n.id
+                AND s.deletion_id IS NOT DISTINCT FROM n.deletion_id
           WHERE n.parent_id IS NULL AND o.org_kind = 'team'
-            AND n.deleted_at IS NOT NULL AND n.deleted_at > $1
+            AND n.deleted_at IS NOT NULL
+            AND (s.purge_at > $6 OR (s.purge_at IS NULL AND n.deleted_at > $1))
             AND ($2::text IS NULL OR strpos(lower(n.name), lower($2)) > 0)
             AND ($3::timestamptz IS NULL OR (n.deleted_at, n.id) < ($3, $4))
           ORDER BY n.deleted_at DESC, n.id DESC
@@ -2662,6 +2680,7 @@ pub async fn deleted_root_orgs(
     .bind(after.map(|(at, _)| at))
     .bind(after.map(|(_, id)| id))
     .bind(limit)
+    .bind(now)
     .fetch_all(conn)
     .await?)
 }

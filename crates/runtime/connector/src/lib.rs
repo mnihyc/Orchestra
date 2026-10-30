@@ -53,6 +53,7 @@ pub mod key_facts;
 pub mod leases;
 pub mod ledger;
 pub mod lifecycle;
+mod local_harnesses;
 pub mod local_ports;
 pub mod local_socket;
 pub mod loopback;

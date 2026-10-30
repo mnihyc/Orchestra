@@ -59,8 +59,9 @@ use orch_link::{
 };
 use orch_link_contract::{
     commands::{
-        Cmd, CmdAck, Command, CommandError, CommandKind, CommandResult, ErrorCode, ExpectedHash,
-        FsWrite, MachineProbe, SerialKey,
+        ApprovalMode, Cmd, CmdAck, Command, CommandError, CommandKind, CommandResult, Empty,
+        ErrorCode, ExpectedHash, FsWrite, MachineProbe, SandboxMode, SerialKey, SessionContext,
+        TurnStart,
     },
     session::{MachineFacts, Role},
 };
@@ -136,6 +137,7 @@ struct Native {
     reads: AtomicUsize,
     writes: AtomicUsize,
     probes: AtomicUsize,
+    starts: AtomicUsize,
     wire: Mutex<Vec<Cmd>>,
 }
 
@@ -148,7 +150,10 @@ impl CommandHandler for Native {
     ) -> Result<CommandResult, CommandError> {
         if !matches!(
             &command,
-            Command::SessionContext(_) | Command::FsStat(_) | Command::FsRecord(_)
+            Command::SessionContext(_)
+                | Command::FsStat(_)
+                | Command::FsRecord(_)
+                | Command::TurnStart(_)
         ) && context.key.as_deref() != Some(self.environment.to_string().as_str())
         {
             return Err(CommandError::new(
@@ -246,6 +251,16 @@ impl CommandHandler for Native {
                     "rates":{"up_bps":0,"down_bps":0,"round_trip_ms":0},"clock_offset_ms":0}))
                     .map_err(|_|CommandError::new(ErrorCode::Internal,"the owned facts have an invalid shape"))?;
                 Ok(CommandResult::MachineProbe(facts))
+            }
+            Command::TurnStart(body) => {
+                if context.key.as_deref() != Some(body.thread_id.to_string().as_str()) {
+                    return Err(CommandError::new(
+                        ErrorCode::Conflict,
+                        "another native thread queue",
+                    ));
+                }
+                self.starts.fetch_add(1, Ordering::SeqCst);
+                Ok(CommandResult::TurnStart(Empty {}))
             }
             Command::SessionContext(body) => {
                 if context.key.as_deref() != Some(body.thread_id.to_string().as_str()) {
@@ -534,6 +549,7 @@ impl Fixture {
             reads: AtomicUsize::new(0),
             writes: AtomicUsize::new(0),
             probes: AtomicUsize::new(0),
+            starts: AtomicUsize::new(0),
             wire: Mutex::new(Vec::new()),
         });
         let journal = Journal::open(
@@ -695,6 +711,138 @@ impl Fixture {
         within(self.test.pool.close()).await?;
         Ok(())
     }
+}
+
+#[tokio::test]
+async fn an_already_connected_dispatcher_adopts_a_retained_turn_start_only_when_issued() -> Proof {
+    let mut fixture = Fixture::new(false).await?;
+    within(fixture.connect(false)).await??;
+    let thread = new_id();
+    let id = new_id();
+    let key = SerialKey::Thread(thread).wire();
+    let deadline = Time::new(
+        fixture.clock.now()
+            + chrono::Duration::seconds(i64::from(CommandKind::TurnStart.deadline_secs())),
+    );
+    let body = serde_json::to_value(TurnStart {
+        thread_id: thread,
+        turn_id: new_id(),
+        text: "the admitted original".into(),
+        images: Vec::new(),
+        model: "owned-model".into(),
+        effort: None,
+        params: Default::default(),
+        approval_mode: ApprovalMode::Ask,
+        sandbox_mode: SandboxMode::ReadOnly,
+        native_action: None,
+        plan: false,
+    })?;
+    let original = StoredCommand {
+        id: Some(id),
+        machine: fixture.machine,
+        kind: CommandKind::TurnStart.as_str().into(),
+        key,
+        deadline: Some(deadline),
+        body,
+    };
+    let mut conn = fixture.test.pool.acquire().await?;
+    assert!(
+        rows::insert_command(
+            &mut conn,
+            &rows::NewCommand {
+                id,
+                machine_id: original.machine,
+                kind: &original.kind,
+                body: &original.body,
+                serial_key: original.key.as_deref(),
+                deadline_at: deadline.get(),
+            },
+            fixture.clock.now(),
+        )
+        .await?
+    );
+    drop(conn);
+
+    // The peer is live after the row was admitted, but looking at or waiting
+    // for that row does not put the command on an already-established link.
+    let queued = fixture
+        .dispatcher
+        .status(id)
+        .await?
+        .ok_or("the start was not admitted")?;
+    assert_eq!(queued.state, "queued");
+    let dispatcher = fixture.dispatcher.clone();
+    let waiting = tokio::spawn(async move { dispatcher.wait(id).await });
+    let context = SessionContext {
+        thread_id: thread,
+        segment_id: new_id(),
+    };
+    // This live observation uses the same serial key as the retained start.
+    assert_eq!(
+        within(fixture.link.session_context(fixture.machine, &context))
+            .await??
+            .fill,
+        None
+    );
+    fixture.completed_probe().await?;
+    assert!(!waiting.is_finished());
+    assert!(fixture.server.entry(id).is_none());
+    assert_eq!(fixture.native.starts.load(Ordering::SeqCst), 0);
+    assert!(
+        !fixture
+            .native
+            .wire
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner)
+            .iter()
+            .any(|command| command.id == id)
+    );
+
+    let issued = fixture.dispatcher.issue_stored(original.clone()).await?;
+    assert_eq!(issued.id, id);
+    assert_eq!(issued.deadline, deadline);
+    assert!(matches!(
+        within(waiting).await???,
+        CommandOutcome::Succeeded(_)
+    ));
+    // Re-adopting the retained row remains idempotent after its result.
+    fixture.dispatcher.issue_stored(original.clone()).await?;
+    assert_eq!(
+        within(fixture.link.session_context(fixture.machine, &context))
+            .await??
+            .fill,
+        None
+    );
+    fixture.completed_probe().await?;
+    assert_eq!(fixture.native.starts.load(Ordering::SeqCst), 1);
+    let journal = fixture
+        .server
+        .entry(id)
+        .ok_or("the native start was not journaled")?;
+    assert!(matches!(journal.step, Step::Done { ref result } if result.outcome.is_ok()));
+    let saved = fixture
+        .dispatcher
+        .status(id)
+        .await?
+        .ok_or("the original disappeared")?;
+    assert_eq!(saved.body, original.body);
+    assert_eq!(saved.serial_key, original.key);
+    assert_eq!(Time::new(saved.deadline_at), deadline);
+    {
+        let wire = fixture
+            .native
+            .wire
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner);
+        let sent = wire
+            .iter()
+            .find(|command| command.id == id)
+            .ok_or("the start was not sent")?;
+        assert_eq!(sent.body, original.body);
+        assert_eq!(sent.key, original.key);
+        assert_eq!(sent.deadline, deadline);
+    }
+    fixture.close().await
 }
 
 #[tokio::test]

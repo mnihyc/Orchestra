@@ -20,6 +20,9 @@ Type @ and choose a person. Readers appear first; people without access are mark
 
 Chat mentions remain part of the message you send. Changing access can remove a notice's private detail from the recipient's Inbox.
 
+If a chat message changes while your edit is saving, Orch asks you to try again. Your text stays in the editor so you can review it first.
+If a message changes while you delete it, review the current message before trying Delete again.
+
 ## Notification progress
 
 A discussion with many recipients saves immediately and sends its notices in the background. Comments shows Notifying people and the checked count. Stop notifications stops the remaining work; notices already delivered stay in the recipient's Inbox. Progress resumes after a server restart.

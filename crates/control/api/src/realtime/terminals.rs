@@ -23,7 +23,8 @@
 //! came back to, the shells of an environment that ended, and, on every move of the authorization epoch,
 //! the shells whose opener lost what they were opened by.
 
-use crate::middleware::authentication::{new_token, token_hash};
+use crate::middleware::authentication::{Authed, new_token, token_hash};
+use crate::middleware::authorization::{self, RetainedIdentity};
 use crate::realtime::Inner;
 use crate::registry::Ctx;
 use crate::state::App;
@@ -33,9 +34,11 @@ use bytes::{Buf, Bytes};
 use chrono::{DateTime, Utc};
 use futures::stream::{SplitSink, SplitStream};
 use futures::{SinkExt, StreamExt};
+use orch_access_contract::permissions::{Permission, ResourceKind};
 use orch_api_contract::terminals::{
     TERMINAL_SUBPROTOCOL, TERMINAL_TICKET_SECONDS, TerminalAttachQuery, TerminalTicket,
 };
+use orch_authz::Policy;
 use orch_db::queries::terminals as rows;
 use orch_engine::shells::{Ending, Holding};
 use orch_link::tunnels::channel::{OpenError, Tunnel, TunnelEvent};
@@ -109,18 +112,24 @@ pub enum Door {
     Agent {
         /// The thread.
         thread: Id,
+        /// The native session segment current when the ticket was issued.
+        segment: Option<Id>,
         /// Whether what is typed is passed on.
         control: bool,
     },
 }
 
 /// A ticket as it is kept.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone)]
 pub struct Ticket {
     /// The person it was given to.
     pub user: Id,
     /// What it opens.
     pub door: Door,
+    identity: RetainedIdentity,
+    environment: Id,
+    generation: i32,
+    machine: Option<Id>,
     expires: DateTime<Utc>,
 }
 
@@ -163,7 +172,15 @@ impl std::fmt::Debug for Sockets {
 
 impl Sockets {
     /// A ticket for `user` to open `door`, good for [`TERMINAL_TICKET_SECONDS`] from `now` and for one use.
-    pub fn issue(&self, now: DateTime<Utc>, user: Id, door: Door) -> TerminalTicket {
+    pub(crate) fn issue(
+        &self,
+        now: DateTime<Utc>,
+        user: &Authed,
+        door: Door,
+        environment: Id,
+        generation: i32,
+        machine: Option<Id>,
+    ) -> TerminalTicket {
         let token = new_token("tt_");
         let expires = now + chrono::Duration::seconds(i64::from(TERMINAL_TICKET_SECONDS));
         let mut tickets = lock(&self.tickets);
@@ -172,8 +189,12 @@ impl Sockets {
         tickets.insert(
             token_hash(&token),
             Ticket {
-                user,
+                user: user.id(),
                 door,
+                identity: RetainedIdentity::of(user),
+                environment,
+                generation,
+                machine,
                 expires,
             },
         );
@@ -315,11 +336,28 @@ async fn write(
     mut sink: SplitSink<WebSocket, Message>,
     mut out: mpsc::UnboundedReceiver<Out>,
     behind: Arc<Behind>,
+    attachment: Attachment,
 ) {
     while let Some(item) = out.recv().await {
         let sent = match item {
             Out::Data(bytes) => {
                 let count = bytes.len();
+                // Queued output must not outlive the authority under which it was read.
+                if let Err(reason) = attachment.admitted().await {
+                    let frame = TerminalServerFrame::Closed(TerminalClosedFrame { reason });
+                    let _ = sink
+                        .send(Message::Text(
+                            serde_json::to_string(&frame).unwrap_or_default().into(),
+                        ))
+                        .await;
+                    let _ = sink
+                        .send(Message::Close(Some(CloseFrame {
+                            code: NORMAL,
+                            reason: String::new().into(),
+                        })))
+                        .await;
+                    break;
+                }
                 let sent = sink.send(Message::Binary(bytes)).await;
                 behind.handed_over(count);
                 sent
@@ -437,7 +475,12 @@ impl Target {
     fn opened_by(self, door: Door) -> Option<bool> {
         match (self, door) {
             (Self::Shell(id), Door::Shell(held)) if id == held => Some(false),
-            (Self::Agent(id), Door::Agent { thread, control }) if id == thread => Some(control),
+            (
+                Self::Agent(id),
+                Door::Agent {
+                    thread, control, ..
+                },
+            ) if id == thread => Some(control),
             _ => None,
         }
     }
@@ -536,6 +579,7 @@ fn enter(
                 target,
                 who,
                 origin,
+                ticket,
             };
             attachment.serve(sink, stream).await;
         })
@@ -558,11 +602,13 @@ struct Who {
 }
 
 /// A socket that has been let in.
+#[derive(Clone)]
 struct Attachment {
     app: App,
     target: Target,
     who: Who,
     origin: orch_db::audit::Origin,
+    ticket: Ticket,
 }
 
 /// How an attachment ended.
@@ -599,10 +645,116 @@ impl Attachment {
         &self.app.realtime.inner
     }
 
+    /// Recheck the credential, the exact environment generation and the permissions of this screen.
+    async fn admitted(&self) -> Result<(), TerminalClosedReason> {
+        let mut conn = self
+            .app
+            .db
+            .acquire()
+            .await
+            .map_err(|_| TerminalClosedReason::LinkLost)?;
+        let principal = self
+            .ticket
+            .identity
+            .principal(&mut conn, Time::new(self.app.clock.now()))
+            .await
+            .map_err(|_| TerminalClosedReason::Revoked)?
+            .ok_or(TerminalClosedReason::Revoked)?;
+        let site = rows::site(&mut conn, self.ticket.environment)
+            .await
+            .map_err(|_| TerminalClosedReason::LinkLost)?
+            .ok_or(TerminalClosedReason::EnvironmentStopped)?;
+        if site.generation != self.ticket.generation
+            || !matches!(site.status.as_str(), "running" | "offline")
+        {
+            return Err(TerminalClosedReason::EnvironmentStopped);
+        }
+        let permission = match self.target {
+            Target::Shell(id) => {
+                let row = rows::get(&mut conn, id)
+                    .await
+                    .map_err(|_| TerminalClosedReason::LinkLost)?
+                    .ok_or(TerminalClosedReason::Exited)?;
+                if row.opened_by != self.who.user
+                    || row.environment_id != self.ticket.environment
+                    || row.env_generation != self.ticket.generation
+                    || site.machine_id != self.ticket.machine
+                {
+                    return Err(TerminalClosedReason::Revoked);
+                }
+                if !row.is_live() {
+                    return Err(closed_reason(&row));
+                }
+                Permission::TerminalManage
+            }
+            Target::Agent(thread) => {
+                let row = orch_db::queries::threads::thread(&mut conn, thread)
+                    .await
+                    .map_err(|_| TerminalClosedReason::LinkLost)?
+                    .filter(|row| {
+                        row.deleted_at.is_none()
+                            && row.environment_id == Some(self.ticket.environment)
+                    })
+                    .ok_or(TerminalClosedReason::Revoked)?;
+                let Door::Agent { segment, .. } = self.ticket.door else {
+                    return Err(TerminalClosedReason::Revoked);
+                };
+                if row.current_segment_id != segment {
+                    return Err(TerminalClosedReason::Revoked);
+                }
+                let screen = self
+                    .app
+                    .engine
+                    .shells()
+                    .agent_screen(&mut conn, thread)
+                    .await
+                    .map_err(|_| TerminalClosedReason::LinkLost)?
+                    .ok_or(TerminalClosedReason::Revoked)?;
+                if screen.machine != self.ticket.machine
+                    || matches!(
+                        screen.declared,
+                        orch_agent_contract::descriptor::AgentTerminal::None
+                    )
+                    || (self.who.control
+                        && matches!(
+                            screen.declared,
+                            orch_agent_contract::descriptor::AgentTerminal::View
+                        ))
+                {
+                    return Err(TerminalClosedReason::Revoked);
+                }
+                authorization::require_resource(
+                    &mut conn,
+                    &principal,
+                    ResourceKind::Environment,
+                    self.ticket.environment,
+                    Permission::TerminalView,
+                    Policy::default(),
+                )
+                .await
+                .map_err(|_| TerminalClosedReason::Revoked)?;
+                if !self.who.control {
+                    return Ok(());
+                }
+                Permission::TerminalManage
+            }
+        };
+        authorization::require_resource(
+            &mut conn,
+            &principal,
+            ResourceKind::Environment,
+            self.ticket.environment,
+            permission,
+            Policy::default(),
+        )
+        .await
+        .map_err(|_| TerminalClosedReason::Revoked)
+    }
+
     async fn serve(self, sink: SplitSink<WebSocket, Message>, stream: SplitStream<WebSocket>) {
         let behind = Arc::new(Behind::new());
         let (out, outgoing) = mpsc::unbounded_channel();
-        let writer = tokio::spawn(write(sink, outgoing, Arc::clone(&behind)));
+        let writer = tokio::spawn(write(sink, outgoing, Arc::clone(&behind), self.clone()));
         self.run(stream, &out, &behind).await;
         // Whatever the writer was handed is given a moment to reach the browser; a browser that takes
         // nothing is not waited for, and its socket is let go.
@@ -627,6 +779,10 @@ impl Attachment {
             let _ = out.send(closed(reason));
             let _ = out.send(Out::Close(NORMAL, String::new()));
         };
+        if let Err(reason) = self.admitted().await {
+            goodbye(reason);
+            return;
+        }
         let prepared = match self.target {
             Target::Shell(id) => self.prepare_shell(id).await,
             Target::Agent(thread) => self.prepare_agent(thread).await,
@@ -658,6 +814,11 @@ impl Attachment {
                 return;
             }
         };
+        if let Err(reason) = self.admitted().await {
+            self.inner().terminals.leave(key, number);
+            goodbye(reason);
+            return;
+        }
         let (cols, rows_) = ready.size;
         let announced = TerminalServerFrame::Ready(TerminalReadyFrame {
             cols,
@@ -731,7 +892,12 @@ impl Attachment {
                 last(TerminalClosedReason::Exited);
             }
             Ended::Taken => last(TerminalClosedReason::AttachedElsewhere),
-            Ended::Over(reason) => last(reason),
+            Ended::Over(reason) => {
+                if current && let Some(id) = shell {
+                    let _ = shells.detached(id).await;
+                }
+                last(reason);
+            }
             Ended::LinkLost => {
                 if current && let Some(id) = shell {
                     let _ = shells.detached(id).await;
@@ -1011,6 +1177,11 @@ impl Pump<'_> {
             let paused = self.behind.paused();
             let writing = self.typed.front().cloned();
             let draining = self.exit.is_some();
+            if writing.is_some()
+                && let Err(reason) = self.attachment.admitted().await
+            {
+                return Ended::Over(reason);
+            }
             tokio::select! {
                 biased;
                 () = inner.stop.cancelled() => return Ended::GoingAway,
@@ -1025,6 +1196,11 @@ impl Pump<'_> {
                     None => self.events = None,
                 },
                 input = self.inbox.recv(), if self.typed.len() < TYPED_QUEUE => {
+                    if matches!(input, Some(In::Typed(_) | In::Resize(..)))
+                        && let Err(reason) = self.attachment.admitted().await
+                    {
+                        return Ended::Over(reason);
+                    }
                     if let Some(ended) = self.browser_said(input) {
                         return ended;
                     }
@@ -1051,6 +1227,9 @@ impl Pump<'_> {
                     return self.exit.map_or(Ended::LinkLost, Ended::Exit);
                 }
                 _ = tick.tick() => {
+                    if let Err(reason) = self.attachment.admitted().await {
+                        return Ended::Over(reason);
+                    }
                     if self.heard.silent_for() >= inner.tuning.silence {
                         return Ended::BrowserGone;
                     }

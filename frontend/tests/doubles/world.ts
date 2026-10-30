@@ -469,7 +469,7 @@ export class World {
     const session = `ors_${randomUUID()}`;
     this.sessions.set(session, username);
     this.sessionModes.set(session, { id: randomUUID(), asAdmin: false });
-    return { status: 200, body: this.grant(person, session), cookies: { orch_session: session, orch_device: `odv_${randomUUID()}` } };
+    return { status: 200, body: this.grant(person, session), cookies: { '__Host-orch_session': session, '__Host-orch_device': `odv_${randomUUID()}` } };
   }
 
   private grant(person: Person, session: string): AuthResult {
@@ -755,20 +755,20 @@ export class World {
 
   refresh(cookies: Record<string, string>, csrf: string | undefined): Answer {
     if (csrf !== '1') return refuse(403, 'auth.csrf', 'the request lacks its header');
-    const username = this.sessions.get(cookies.orch_session ?? '');
+    const username = this.sessions.get(cookies['__Host-orch_session'] ?? '');
     const person = username === undefined ? undefined : this.people.get(username);
     if (person === undefined) return refuse(401, 'auth.required', 'no session');
     if (person.suspended) return refuse(401, 'auth.suspended', 'the user is suspended');
-    return { status: 200, body: this.grant(person, cookies.orch_session ?? '') };
+    return { status: 200, body: this.grant(person, cookies['__Host-orch_session'] ?? '') };
   }
 
   logout(cookies: Record<string, string>, csrf: string | undefined): Answer {
     if (csrf !== '1') return refuse(403, 'auth.csrf', 'the request lacks its header');
-    const session = cookies.orch_session ?? '';
+    const session = cookies['__Host-orch_session'] ?? '';
     const username = this.sessions.get(session);
     if (username === undefined) return refuse(401, 'auth.required', 'no session');
     this.forgetSession(session);
-    return { status: 204, cookies: { orch_session: null } };
+    return { status: 204, cookies: { '__Host-orch_session': null } };
   }
 
   /**
@@ -881,7 +881,7 @@ export class World {
     const session = `ors_${randomUUID()}`;
     this.sessions.set(session, person.me.username);
     this.sessionModes.set(session, { id: randomUUID(), asAdmin: false });
-    return { status: 204, cookies: { orch_session: session } };
+    return { status: 204, cookies: { '__Host-orch_session': session } };
   }
 
   verifyResend(body: Record<string, unknown>): Answer {

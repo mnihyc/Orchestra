@@ -266,7 +266,23 @@ pub async fn purge_soft_deleted(
                 AND s.object_id=t.id AND s.purge_at>$3)"
             ));
         }
+        if *table == "documents" {
+            // A place deletion owns this document's recovery promise. Independent document
+            // deletions keep their own deadline and are not extended by a later place deletion.
+            guard.push_str(
+                " AND NOT EXISTS(SELECT 1 FROM audit_object_state d
+                JOIN audit_object_state n ON n.object_kind='node' AND n.object_id=t.node_id
+                  AND n.deletion_id=d.deletion_id
+                WHERE d.object_kind='document' AND d.object_id=t.id
+                  AND d.deletion_id IS NOT NULL AND n.purge_at>$3)",
+            );
+        }
         if *table == "nodes" {
+            guard.push_str(
+                " AND NOT EXISTS(SELECT 1 FROM audit_object_state s
+                WHERE s.object_kind='node' AND s.object_id=t.id
+                  AND s.deletion_id IS NOT DISTINCT FROM t.deletion_id AND s.purge_at>$3)",
+            );
             guard.push_str(" AND NOT EXISTS(SELECT 1 FROM audit_object_state s WHERE s.purge_at>$3
                 AND ((s.object_kind='document' AND EXISTS(SELECT 1 FROM documents d WHERE d.id=s.object_id AND d.node_id=t.id))
                   OR (s.object_kind='document_container' AND EXISTS(SELECT 1 FROM document_containers c WHERE c.id=s.object_id AND c.node_id=t.id))))");

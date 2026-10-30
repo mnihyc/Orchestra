@@ -283,6 +283,18 @@ async fn follow_held(
         .await;
         let mut tx = gated(db).await?;
         match asked {
+            Ok(Ok(poll))
+                if serde_json::to_value(&poll).ok().is_none_or(|value| {
+                    crate::channels::contains_secret(&value, &config.secrets)
+                }) =>
+            {
+                rows::record_channel_error(
+                    &mut tx,
+                    channel.id,
+                    "the notifier returned an unsafe result",
+                )
+                .await?;
+            }
             Ok(Ok(poll)) => {
                 // The codes that wait are looked at when the answer is in, since the
                 // reading may have taken a while.
@@ -306,6 +318,7 @@ async fn follow_held(
                 rows::set_link_cursor(&mut tx, channel.id, poll.cursor.as_deref()).await?;
             }
             Ok(Err(error)) => {
+                let error = crate::channels::scrub_error(error, &config.secrets);
                 rows::record_channel_error(&mut tx, channel.id, &crate::outbox::error_line(&error))
                     .await?;
             }

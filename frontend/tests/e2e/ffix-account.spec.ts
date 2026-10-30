@@ -16,6 +16,14 @@ async function identity(page:Page,username:string) {
 }
 test.beforeEach(async () => { await scenario(); });
 
+test('sign-in keeps a host-bound session that can refresh the browser',async ({page}) => {
+  await signIn(page,PEOPLE.ada);
+  const session=(await page.context().cookies()).find((cookie) => cookie.name === '__Host-orch_session');
+  expect(session).toMatchObject({path:'/',httpOnly:true,secure:true,sameSite:'Strict'});
+  await page.reload();
+  await expect(page.locator('[data-main-area]')).toBeVisible();
+});
+
 test('a palette choice changes the shared avatar, and reset sends null to use the server’s colour',async ({page}) => {
   await signIn(page,PEOPLE.ada);
   await page.goto('/settings/profile');
@@ -115,7 +123,7 @@ test('202 registration shows confirmation without adopting a session or acceptin
   expect(response.status()).toBe(202);
   expect(await replySent(response)).toEqual({verification_required:true});
   await expect(page).toHaveTitle(/^Confirm your address/);
-  expect((await page.context().cookies()).some((cookie) => cookie.name === 'orch_session')).toBe(false);
+  expect((await page.context().cookies()).some((cookie) => cookie.name === '__Host-orch_session')).toBe(false);
   await expect(page.getByRole('button',{name:'Your account'})).toHaveCount(0);
 });
 

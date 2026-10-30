@@ -9,7 +9,7 @@ use crate::middleware::requests::{ApiError, ApiResult};
 use crate::registry::{Answer, Ctx, Registry};
 use crate::routes::nodes::make::may_make_org;
 use crate::sign_in::accounts::{self, Details, How};
-use crate::sign_in::{open_session, passwords, setting, system_policy};
+use crate::sign_in::{open_session, passwords, require_json, setting, system_policy};
 use crate::state::App;
 use axum::body::Body;
 use axum::extract::State;
@@ -152,6 +152,7 @@ pub(crate) async fn meta(ctx: Ctx, (): (), (): ()) -> ApiResult<Meta> {
 /// Makes the first system administrator, while there is no user, and signs
 /// them in.
 async fn setup(ctx: Ctx, (): (), body: SetupCreateBody) -> ApiResult<Answer<AuthResult>> {
+    require_json(&ctx)?;
     let settled = || ApiError::new(ErrorCode::ConflictExists, "the system is set up already");
     {
         // Not worth hashing a password for, when it is too late.

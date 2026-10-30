@@ -13,8 +13,8 @@
 //!   (`sensitive_purpose`), bound to the browser session whose cookie the start carried.
 //!
 //! **Only the browser that began a sign-in may end it.** The start gives the browser a mark, the
-//! cookie `orch_oidc` (`SameSite=Lax`, so that the provider's redirect back carries it; for ten
-//! minutes; for the requests of this module alone), and keeps its hash with the sign-in. A callback
+//! cookie `__Host-orch_oidc` (`SameSite=Lax`, so that the provider's redirect back carries it; for ten
+//! minutes; bound to this host), and keeps its hash with the sign-in. A callback
 //! that comes in another browser, as when somebody sends a person the address of a sign-in they began
 //! themself, ends nothing: the state alone ties an answer to no browser, and without the mark a
 //! stranger's identity could be signed in, or linked, in somebody else's browser.
@@ -37,7 +37,7 @@
 
 pub mod landing;
 
-use crate::middleware::authentication::{SESSION_PREFIX, new_token, token_hash};
+use crate::middleware::authentication::{SESSION_PREFIX, Via, new_token, token_hash};
 use crate::middleware::requests::{ApiError, ApiResult};
 use crate::middleware::transaction_guard;
 use crate::registry::{Answer, Ctx, Registry};
@@ -54,7 +54,7 @@ use orch_api_contract::auth::{
     AuthOidcCallback, AuthOidcCallbackQuery, AuthOidcStart, AuthOidcStartQuery, MeIdentityDelete,
     MeIdentityLink, MeIdentityLinkReply, SensitivePurpose,
 };
-use orch_api_contract::common::{BASE_PATH, ErrorCode, SESSION_COOKIE};
+use orch_api_contract::common::{ErrorCode, SESSION_COOKIE};
 use orch_db::audit::Actor;
 use orch_db::queries::identity::{
     self, IDENTITY_PROVIDER_SECRET_NAME, IDENTITY_PROVIDER_SECRET_OWNER, IdentityProviderRow,
@@ -91,7 +91,7 @@ pub const NO_SESSION: &str = "no_session";
 /// The member of the fragment of the Security page that says why an identity was not linked.
 pub const LINK_ERROR_FRAGMENT: &str = "identity_link_error";
 /// The cookie that marks the browser a sign-in was begun in.
-pub const BROWSER_COOKIE: &str = "orch_oidc";
+pub const BROWSER_COOKIE: &str = "__Host-orch_oidc";
 /// What the mark of a browser begins with.
 pub const BROWSER_MARK_PREFIX: &str = "oib_";
 
@@ -163,11 +163,11 @@ fn browser_mark(ctx: &Ctx) -> String {
 }
 
 /// The cookie that gives the browser its mark for as long as a sign-in lives: `Lax`, so that the
-/// provider's redirect back, a navigation from another site, carries it, and sent to this module's
-/// requests alone.
+/// provider's redirect back, a navigation from another site, carries it. The host-bound name and
+/// root path keep another origin from setting it for this application.
 fn browser_cookie(mark: &str) -> String {
     format!(
-        "{BROWSER_COOKIE}={mark}; Max-Age={SIGN_IN_LIFETIME_SECS}; Path={BASE_PATH}/auth/oidc; HttpOnly; Secure; SameSite=Lax"
+        "{BROWSER_COOKIE}={mark}; Max-Age={SIGN_IN_LIFETIME_SECS}; Path=/; HttpOnly; Secure; SameSite=Lax"
     )
 }
 
@@ -424,7 +424,7 @@ enum Purpose {
         accept_invitation: bool,
     },
     /// Linking the identity to the signed-in user.
-    Link { user: Id },
+    Link { user: Id, session: Option<Id> },
     /// Proving the person of the session again for the act `act`.
     Proof { session: Id, act: String },
 }
@@ -436,7 +436,7 @@ impl Purpose {
                 session,
                 act: act.clone(),
             },
-            (_, _, Some(user)) => Self::Link { user },
+            (session, _, Some(user)) => Self::Link { user, session },
             _ => Self::SignIn {
                 invitation: row.invitation.clone(),
                 accept_invitation: row.accept_invitation,
@@ -547,7 +547,9 @@ async fn callback(ctx: Ctx, query: AuthOidcCallbackQuery, _body: Body) -> ApiRes
             )
             .await
         }
-        Purpose::Link { user } => landing::link(&ctx, &provider, &identity, user).await,
+        Purpose::Link { user, session } => {
+            landing::link(&ctx, &provider, &identity, user, session).await
+        }
         Purpose::Proof { session, act } => {
             landing::proof(&ctx, &provider, &identity, &row, session, &act).await
         }
@@ -591,18 +593,20 @@ async fn link_start(ctx: Ctx, (): (), (): ()) -> ApiResult<Answer<MeIdentityLink
             "the identity provider could not be reached",
         )
     })?;
-    let mark = browser_mark(&ctx);
+    // Linking starts a fresh browser marker, even if another sign-in is in progress.
+    let mark = new_token(BROWSER_MARK_PREFIX);
     let (mut tx, guard) = transaction_guard::begin(&ctx).await?;
     let person = guard.user();
-    if !person.is_session() {
+    let Via::Session { session_id } = &person.via else {
         return Err(browser_only());
-    }
+    };
     identity::begin_sign_in(
         &mut tx,
         &SignInState {
             accept_invitation: false,
             redirect_path: SECURITY_PATH.to_owned(),
             link_user_id: Some(person.id()),
+            session_id: Some(*session_id),
             ..state_row(&ctx, provider.id, started.pending, &mark)
         },
     )
@@ -682,7 +686,10 @@ mod tests {
             at(proof.refused("/settings/security#x", NOT_FRESH)),
             "/settings/security#identity_proof_error=not_fresh"
         );
-        let link = Purpose::Link { user: Id::nil() };
+        let link = Purpose::Link {
+            user: Id::nil(),
+            session: Some(Id::nil()),
+        };
         assert_eq!(
             at(link.refused("/", "denied")),
             "/settings/security#identity_link_error=denied"
@@ -698,10 +705,10 @@ mod tests {
     }
 
     #[test]
-    fn the_mark_of_a_browser_is_sent_back_by_a_navigation_from_the_provider_and_only_here() {
+    fn the_mark_of_a_browser_is_host_bound_and_sent_back_by_a_navigation_from_the_provider() {
         let cookie = browser_cookie("oib_abc");
-        assert!(cookie.starts_with("orch_oidc=oib_abc; Max-Age=600;"));
-        assert!(cookie.contains("Path=/api/v1/auth/oidc;"));
+        assert!(cookie.starts_with("__Host-orch_oidc=oib_abc; Max-Age=600;"));
+        assert!(cookie.contains("Path=/;"));
         assert!(cookie.ends_with("HttpOnly; Secure; SameSite=Lax"));
     }
 

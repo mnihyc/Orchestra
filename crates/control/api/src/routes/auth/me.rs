@@ -32,7 +32,7 @@ use orch_api_contract::auth::{
 use orch_api_contract::common::{ErrorCode, FieldFault, Problem};
 use orch_api_contract::nodes::{NodeKind, NodeRef};
 use orch_api_contract::users::{EmailCodeUse, Me, TimezoneMode};
-use orch_authz::{Act, Caller, Policy, Principal, nodes};
+use orch_authz::{Act, Policy, Principal, nodes};
 use orch_db::Conn;
 use orch_db::audit::Actor;
 use orch_db::queries::access;
@@ -1302,15 +1302,14 @@ async fn tokens(ctx: Ctx, (): (), (): ()) -> ApiResult<Vec<ApiTokenInfo>> {
 
 /// Whether the person may see the node, which is what it takes to keep a
 /// token to it. A node they may not see is none to them.
-async fn may_see(ctx: &Ctx, conn: &mut Conn, user: Id, node: Id) -> ApiResult<bool> {
-    let principal = Principal::load(conn, Caller::session(user), Time::new(ctx.now))
-        .await
-        .map_err(ApiError::internal)?;
+async fn may_see(conn: &mut Conn, principal: &Principal, node: Id) -> ApiResult<bool> {
     let name = PermissionName::OfNode(NodePermission::View);
-    match nodes::check_named(conn, &principal, node, name, Act::Use, Policy::default()).await {
+    match nodes::check_named(conn, principal, node, name, Act::Use, Policy::default()).await {
         Ok(Decision::Allowed { .. }) | Err(orch_authz::Error::Archived { .. }) => Ok(true),
-        Ok(Decision::Refused(_))
-        | Err(orch_authz::Error::NotFound(_) | orch_authz::Error::Suspended { .. }) => Ok(false),
+        Ok(Decision::Refused(_)) | Err(orch_authz::Error::NotFound(_)) => Ok(false),
+        Err(error @ orch_authz::Error::Suspended { .. }) => {
+            Err(crate::middleware::authorization::engine_problem(conn, principal, &error).await)
+        }
         Err(error) => Err(ApiError::internal(error)),
     }
 }
@@ -1339,8 +1338,14 @@ async fn token_create(
     let proven = fresh::prove(&ctx, &authed, &body.proof, Purpose::TokenCreate).await?;
 
     let mut tx = credential_action(&mut ctx).await?;
+    let principal = crate::middleware::authorization::principal(&ctx, &mut tx).await?;
+    if body.node_id.is_none()
+        && let Some(hold) = principal.second_step_hold()
+    {
+        return Err(crate::sign_in::second_step::refusal(&mut tx, hold).await);
+    }
     if let Some(node) = body.node_id
-        && !may_see(&ctx, &mut tx, authed.id(), node).await?
+        && !may_see(&mut tx, &principal, node).await?
     {
         return Err(ApiError::not_found());
     }

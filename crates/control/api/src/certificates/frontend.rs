@@ -1,18 +1,25 @@
 //! The web edge's renewable certificate, issued by the existing authority and published as one complete pair.
 
 use orch_config::ServerConfig;
+use orch_pki::{PkiError, ca::CertificateAuthority};
+#[cfg(unix)]
 use orch_pki::{
-    PkiError,
-    ca::{CertificateAuthority, Holder},
+    ca::Holder,
     certificates::{Certificate, LeafKey, ServiceName},
 };
-use orch_types::{Clock, new_id};
+use orch_types::Clock;
+#[cfg(unix)]
+use orch_types::new_id;
+#[cfg(unix)]
 use std::path::Path;
 
 // The API owns the files; only the web edge's supplementary service group may read its server key.
+#[cfg(unix)]
 const DIRECTORY_MODE: u32 = 0o750;
+#[cfg(unix)]
 const KEY_MODE: u32 = 0o640;
 
+#[cfg(unix)]
 fn io(path: &Path, source: std::io::Error) -> PkiError {
     PkiError::File {
         path: path.display().to_string(),
@@ -20,6 +27,7 @@ fn io(path: &Path, source: std::io::Error) -> PkiError {
     }
 }
 
+#[cfg(unix)]
 pub(super) fn keep(
     authority: &CertificateAuthority,
     config: &ServerConfig,
@@ -85,6 +93,18 @@ pub(super) fn keep(
     )
 }
 
+#[cfg(not(unix))]
+pub(super) fn keep(
+    _authority: &CertificateAuthority,
+    _config: &ServerConfig,
+    _clock: &dyn Clock,
+) -> Result<(), PkiError> {
+    Err(PkiError::Certificate(
+        "frontend certificate publication requires Unix file permissions".to_owned(),
+    ))
+}
+
+#[cfg(unix)]
 fn publish(
     directory: &Path,
     key: LeafKey,
@@ -112,7 +132,7 @@ fn publish(
     std::fs::rename(&next, directory.join("current")).map_err(|error| io(&next, error))
 }
 
-#[cfg(test)]
+#[cfg(all(test, unix))]
 mod tests {
     use super::*;
     use chrono::TimeZone;

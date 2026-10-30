@@ -20,6 +20,7 @@ use orch_authz::{Act, Caller, Policy, Principal, nodes};
 use orch_db::audit::{Actor, Entry, Origin, append};
 use orch_db::queries::hierarchy;
 use orch_db::queries::imports as rows;
+use orch_db::queries::{documents::containers, transaction_guard};
 use orch_db::{Conn, DbError};
 use orch_types::{Id, Time, new_id};
 use serde_json::json;
@@ -80,7 +81,8 @@ async fn delete_place(
     principal: &Principal,
     id: Id,
     name: &str,
-    now: DateTime<Utc>,
+    since: DateTime<Utc>,
+    (now, purge_at): (DateTime<Utc>, DateTime<Utc>),
 ) -> Result<bool, Stop> {
     let allowed = matches!(
         nodes::check_named(
@@ -108,6 +110,10 @@ async fn delete_place(
         .await
         .map_err(|error| Failure::new(INTERNAL, error.to_string()))?;
     hierarchy::lock(conn, id).await?;
+    // Creation and messages contend with the node lock; decide only after any earlier writer commits.
+    if !rows::node_is_clear(conn, id, since).await? {
+        return Ok(false);
+    }
     let deleted: Vec<Id> = std::iter::once(id)
         .chain(
             hierarchy::descendants(conn, id)
@@ -143,17 +149,40 @@ async fn delete_place(
     entry.history = true;
     entry.node_id = Some(id);
     entry.org_id = Some(org);
-    entry.details =
-        json!({ "archived_first": marked, "deleted_nodes": deleted, "import_undo": true });
-    append(conn, &entry, &Origin::default(), now)
-        .await
-        .map_err(DbError::from)?;
+    entry.details = json!({ "archived_first": marked, "deleted_nodes": deleted,
+        "import_undo": true, "purge_at": purge_at });
+    append(conn, &entry, &Origin::default(), now).await?;
     Ok(true)
 }
 
 /// How many places or threads, and how many documents or folders, are taken back in one page.
 const NODES_PAGE: i64 = 50;
 const DOCUMENTS_PAGE: i64 = 500;
+
+/// Locks the current structural scopes and rows before deciding whether a page can be removed.
+async fn lock_document_entries(conn: &mut Conn, ids: &[Id], folders: bool) -> Result<(), DbError> {
+    let statement = if folders {
+        "SELECT id,node_id FROM document_containers WHERE id=ANY($1) ORDER BY id"
+    } else {
+        "SELECT id,node_id FROM documents WHERE id=ANY($1) ORDER BY id"
+    };
+    let before: Vec<(Id, Id)> = sqlx::query_as(statement)
+        .bind(ids)
+        .fetch_all(&mut *conn)
+        .await?;
+    let scopes: Vec<Id> = before.iter().map(|(_, node)| *node).collect();
+    containers::lock_scopes(conn, &scopes).await?;
+    let locked = if folders {
+        "SELECT id,node_id FROM document_containers WHERE id=ANY($1) ORDER BY id FOR UPDATE"
+    } else {
+        "SELECT id,node_id FROM documents WHERE id=ANY($1) ORDER BY id FOR UPDATE"
+    };
+    let current: Vec<(Id, Id)> = sqlx::query_as(locked).bind(ids).fetch_all(conn).await?;
+    if before != current {
+        return Err(DbError::Retry);
+    }
+    Ok(())
+}
 
 /// Takes back what the import of the job made, and only that, in pages: the documents it made (those nobody else has changed since, and
 /// that the person may still delete), the folders that hold nothing now, the places and threads it made that hold nothing that people
@@ -163,6 +192,18 @@ const DOCUMENTS_PAGE: i64 = 500;
 pub async fn remove(importing: &Importing, job: &Job) -> Result<Done, Stop> {
     let engine = importing.engine();
     let import = importing.import();
+    let retained_secs = job
+        .plan()
+        .await?
+        .get("undo_retention_secs")
+        .and_then(orch_types::Json::as_u64)
+        .unwrap_or_else(|| engine.inner.config.soft_delete.as_secs());
+    let retained = chrono::Duration::from_std(std::time::Duration::from_secs(retained_secs))
+        .map_err(|_| Failure::new(INTERNAL, "the retained deletion interval is out of range"))?;
+    let deadline = |at: DateTime<Utc>| {
+        at.checked_add_signed(retained)
+            .ok_or_else(|| Failure::new(INTERNAL, "the retained deletion date is out of range"))
+    };
     let (total, since) = {
         let mut conn = engine.inner.db.acquire().await?;
         let counts = rows::counts_made(&mut conn, import).await?;
@@ -193,6 +234,8 @@ pub async fn remove(importing: &Importing, job: &Job) -> Result<Done, Stop> {
         let now = engine.inner.clock.now();
         let cohort = new_id();
         let mut tx = engine.inner.db.begin().await?;
+        transaction_guard::lock_action(&mut tx).await?;
+        lock_document_entries(&mut tx, &page, false).await?;
         let principal = importing.principal_for(&mut tx).await?;
         let user = principal.user();
         let edited: HashSet<Id> = rows::edited_by_others(&mut tx, import, &page, user)
@@ -209,15 +252,23 @@ pub async fn remove(importing: &Importing, job: &Job) -> Result<Done, Stop> {
                 .collect();
         for document in &page {
             if allowed.contains(document) && !edited.contains(document) {
-                orch_db::queries::documents::containers::lock_document_scope(&mut tx, *document)
-                    .await?;
                 sqlx::query(
-                    "UPDATE documents SET deleted_at = $2, deleted_by = $3, deleted_in = $4 WHERE id = $1 AND deleted_at IS NULL",
+                    "WITH removed AS (
+                        UPDATE documents SET deleted_at=$2,deleted_by=$3,deleted_in=$4
+                        WHERE id=$1 AND deleted_at IS NULL RETURNING id,title,node_id
+                     ) INSERT INTO audit_object_state
+                        (object_kind,object_id,last_name,deletion_id,deleted_at,deleted_by,purge_at,home_node_id)
+                       SELECT 'document',id,title,$4,$2,$3,$5,node_id FROM removed
+                     ON CONFLICT(object_kind,object_id) DO UPDATE SET last_name=EXCLUDED.last_name,
+                       deletion_id=EXCLUDED.deletion_id,deleted_at=EXCLUDED.deleted_at,
+                       deleted_by=EXCLUDED.deleted_by,purge_at=EXCLUDED.purge_at,
+                       home_node_id=EXCLUDED.home_node_id,purged_at=NULL,purged_by=NULL",
                 )
                 .bind(document)
                 .bind(now)
                 .bind(user)
                 .bind(cohort)
+                .bind(deadline(now)?)
                 .execute(&mut *tx)
                 .await
                 .map_err(DbError::from)?;
@@ -250,6 +301,8 @@ pub async fn remove(importing: &Importing, job: &Job) -> Result<Done, Stop> {
             let now = engine.inner.clock.now();
             let cohort = new_id();
             let mut tx = engine.inner.db.begin().await?;
+            transaction_guard::lock_action(&mut tx).await?;
+            lock_document_entries(&mut tx, &page, true).await?;
             let principal = importing.principal_for(&mut tx).await?;
             let user = principal.user();
             let empty = rows::empty_folders(&mut tx, &page).await?;
@@ -269,13 +322,22 @@ pub async fn remove(importing: &Importing, job: &Job) -> Result<Done, Stop> {
                     continue;
                 }
                 sqlx::query(
-                    "UPDATE document_containers SET deleted_at = $2, deleted_by = $3, deleted_in = $4
-                      WHERE id = $1 AND deleted_at IS NULL",
+                    "WITH removed AS (
+                        UPDATE document_containers SET deleted_at=$2,deleted_by=$3,deleted_in=$4
+                        WHERE id=$1 AND deleted_at IS NULL RETURNING id,name,node_id
+                     ) INSERT INTO audit_object_state
+                        (object_kind,object_id,last_name,deletion_id,deleted_at,deleted_by,purge_at,home_node_id)
+                       SELECT 'document_container',id,name,$4,$2,$3,$5,node_id FROM removed
+                     ON CONFLICT(object_kind,object_id) DO UPDATE SET last_name=EXCLUDED.last_name,
+                       deletion_id=EXCLUDED.deletion_id,deleted_at=EXCLUDED.deleted_at,
+                       deleted_by=EXCLUDED.deleted_by,purge_at=EXCLUDED.purge_at,
+                       home_node_id=EXCLUDED.home_node_id,purged_at=NULL,purged_by=NULL",
                 )
                 .bind(folder)
                 .bind(now)
                 .bind(user)
                 .bind(cohort)
+                .bind(deadline(now)?)
                 .execute(&mut *tx)
                 .await
                 .map_err(DbError::from)?;
@@ -304,11 +366,7 @@ pub async fn remove(importing: &Importing, job: &Job) -> Result<Done, Stop> {
             job.check()?;
             let now = engine.inner.clock.now();
             let mut tx = engine.inner.db.begin().await?;
-            if !rows::node_is_clear(&mut tx, *id, since).await? {
-                tx.rollback().await.map_err(DbError::from)?;
-                stays += 1;
-                continue;
-            }
+            transaction_guard::lock_authority(&mut tx).await?;
             let principal = importing.principal_for(&mut tx).await?;
             if delete_place(
                 engine,
@@ -316,7 +374,8 @@ pub async fn remove(importing: &Importing, job: &Job) -> Result<Done, Stop> {
                 &principal,
                 *id,
                 name.as_deref().unwrap_or_default(),
-                now,
+                since,
+                (now, deadline(now)?),
             )
             .await?
             {

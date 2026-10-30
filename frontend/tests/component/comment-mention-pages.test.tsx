@@ -130,10 +130,17 @@ it('keeps one candidate page after repeated requests in a million-person directo
   const input = userEvent.setup(); show(<QueryClientProvider client={cache}><Field /></QueryClientProvider>);
   await input.type(screen.getByRole('textbox', { name: 'Comment' }), '@');
   await screen.findByRole('option', { name: /Person 000000/ });
+  const list = screen.getByRole('listbox', { name: 'People' });
   expect(pages.read).toHaveBeenCalledTimes(1);
   for (let page = 1; page <= 20; page += 1) {
     await input.click(screen.getByRole('option', { name: 'More people' }));
-    await screen.findByRole('option', { name: new RegExp(`Person ${String(page * size).padStart(6, '0')}`) });
+    const name = `Person ${String(page * size).padStart(6, '0')}`;
+    await waitFor(() => {
+      // Each page starts with this person; inspect that option rather than computing all 50 names.
+      const first = list.querySelector('[role="option"]');
+      expect(first).toBeVisible();
+      expect(first).toHaveAccessibleName(new RegExp(name));
+    });
     expect(screen.getAllByRole('option')).toHaveLength(size + 1);
     await waitFor(() => expect(cache.getQueryCache().findAll({ queryKey: ['document-readers', 'doc'] })).toHaveLength(1));
     expect(screen.queryByRole('option', { name: /Person 000000/ })).not.toBeInTheDocument();

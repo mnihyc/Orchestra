@@ -298,6 +298,20 @@ pub(crate) async fn role_matters(
     Err(refusals::denied(conn, refusal).await?)
 }
 
+/// Checks the current caller's ability to give a role at a place.
+pub(crate) async fn require_role_giving(
+    conn: &mut Conn,
+    principal: &Principal,
+    node: Id,
+    role: api::Role,
+    policy: Policy,
+) -> ApiResult<()> {
+    let standing = giving::role_standing(conn, principal, node, policy)
+        .await
+        .map_err(refusals_of)?;
+    role_matters(conn, principal, node, role, &standing, policy).await
+}
+
 /// Whether the role `row` may be changed or taken back by the caller: whoever manages the place's
 /// page may, and whoever gave it may for as long as they could give it again.
 async fn role_changeable(

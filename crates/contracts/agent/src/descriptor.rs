@@ -125,7 +125,13 @@ impl ExecutorBuild {
     pub fn fits(&self, executor: &str, harness: Option<&str>) -> bool {
         match self {
             Self::Any => true,
-            Self::Same => harness.is_some_and(|harness| harness == executor),
+            Self::Same => {
+                !executor.is_empty()
+                    && executor != "unknown"
+                    && harness.is_some_and(|harness| {
+                        !harness.is_empty() && harness != "unknown" && harness == executor
+                    })
+            }
             Self::Range(range) => version_in_range(executor, range),
         }
     }
@@ -1322,6 +1328,8 @@ mod tests {
         assert!(ExecutorBuild::Same.fits("0.160.1", Some("0.160.1")));
         assert!(!ExecutorBuild::Same.fits("0.160.2", Some("0.160.1")));
         assert!(!ExecutorBuild::Same.fits("0.160.1", None));
+        assert!(!ExecutorBuild::Same.fits("unknown", Some("unknown")));
+        assert!(!ExecutorBuild::Same.fits("", Some("")));
         let range = ExecutorBuild::Range(">=0.160.0, <0.162.0".into());
         assert!(range.fits("0.161.5", Some("0.162.0")));
         assert!(!range.fits("0.162.0", Some("0.162.0")));

@@ -144,7 +144,10 @@ async fn serve(app: &App, environment: Id, port: u16, host: String, request: Req
                 "Open the port again from its page in Orch.",
             );
         };
-        return remembered(app, entry, now, "/");
+        return match admitted(app, &entry).await {
+            Ok(_) => remembered(app, entry, now, "/"),
+            Err(error) => refused(&error),
+        };
     }
     let proofs: Vec<String> = form_urlencoded::parse(query.as_bytes())
         .filter(|(key, _)| key == LINK_TOKEN)
@@ -167,7 +170,10 @@ async fn serve(app: &App, environment: Id, port: u16, host: String, request: Req
         };
         if matches!(*request.method(), Method::GET | Method::HEAD) {
             // A browser takes the link's cookie for this name and goes on at the clean address.
-            return remembered(app, entry, now, &clean_path(request.uri()));
+            return match admitted(app, &entry).await {
+                Ok(_) => remembered(app, entry, now, &clean_path(request.uri())),
+                Err(error) => refused(&error),
+            };
         }
         entry
     } else if let Some(entry) = cookie_of(request.headers())
@@ -181,7 +187,7 @@ async fn serve(app: &App, environment: Id, port: u16, host: String, request: Req
             "A port's address lets nobody in by itself.",
         );
     };
-    match admitted(app, &entry, now).await {
+    match admitted(app, &entry).await {
         Ok(admission) => carry(app, &entry, admission, host, request, now).await,
         Err(error) => refused(&error),
     }
@@ -226,7 +232,12 @@ async fn link_entry(
         })?;
     Some(BrowserEntry {
         person: None,
+        identity: None,
         environment,
+        generation: crate::routes::ports::environment(&mut conn, environment)
+            .await
+            .ok()?
+            .generation,
         port,
         opening: Some(row.id),
         expires: Time::new(now.get() + chrono::Duration::hours(BROWSER_ENTRY_HOURS)),
@@ -242,23 +253,37 @@ struct Admission {
 }
 
 /// Asks an entry's admission again, as every request does, and reads what carrying it needs.
-async fn admitted(app: &App, entry: &BrowserEntry, now: Time) -> ApiResult<Admission> {
+async fn admitted(app: &App, entry: &BrowserEntry) -> ApiResult<Admission> {
     let mut tx = app.db.begin().await?;
+    let now = Time::new(app.clock.now());
+    if entry.expires <= now {
+        return Err(ApiError::new(
+            ErrorCode::PortsNotAllowed,
+            "the browser entry expired",
+        ));
+    }
     let env = environment(&mut tx, entry.environment).await?;
+    if env.generation != entry.generation {
+        return Err(ApiError::new(
+            ErrorCode::PortsNotAllowed,
+            "the environment generation changed",
+        ));
+    }
     let (caller, revision) = match entry.person {
         Some(person) => {
-            let principal = orch_authz::Principal::load(
-                &mut tx,
-                orch_authz::tokens::Caller::session(person),
-                now,
-            )
-            .await
-            .map_err(|_| {
-                ApiError::new(
-                    ErrorCode::PortsNotAllowed,
-                    "the person cannot use this port",
-                )
+            let identity = entry.identity.as_ref().ok_or_else(|| {
+                ApiError::new(ErrorCode::PortsNotAllowed, "the browser session is missing")
             })?;
+            let principal = identity
+                .principal(&mut tx, now)
+                .await?
+                .filter(|principal| principal.user() == person)
+                .ok_or_else(|| {
+                    ApiError::new(
+                        ErrorCode::PortsNotAllowed,
+                        "the person cannot use this port",
+                    )
+                })?;
             may_use(
                 &mut tx,
                 &principal,
@@ -399,7 +424,7 @@ async fn carry(
             entry.port,
             entry.opening,
             admission.caller.clone(),
-            entry.person,
+            entry.identity.clone(),
             admission.revision,
             outside,
             connection,

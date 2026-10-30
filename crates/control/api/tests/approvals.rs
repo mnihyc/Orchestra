@@ -210,6 +210,41 @@ async fn asking(s: &Scene, thread: Id, refs: &[&str]) -> orch_link_contract::com
     start
 }
 
+fn asked_plan(turn: Id, reference: &str) -> orch_link_contract::events::Event {
+    orch_link_contract::events::Event::ApprovalRequested(orch_link_contract::events::ApprovalRequested {
+        turn_id: turn,
+        request_ref: reference.into(),
+        title: "Proposed plan".into(),
+        request: serde_json::from_value(json!({
+            "request_kind": "plan", "detail": {"plan": "Read, then change"},
+            "options": [
+                {"id": "proceed", "label": "Proceed", "style": "allow", "scope": "once"},
+                {"id": "keep_planning", "label": "Keep planning", "style": "deny", "scope": null}
+            ]
+        })).unwrap(),
+    })
+}
+
+async fn native_approval(s: &Scene, thread: Id, reference: &str) -> Id {
+    rig::eventually("the native approval is stored", || async {
+        sqlx::query_scalar::<_, bool>(
+            "SELECT EXISTS(SELECT 1 FROM approvals WHERE thread_id=$1 AND native_ref=$2)",
+        )
+        .bind(thread)
+        .bind(reference)
+        .fetch_one(s.rig.db.pool())
+        .await
+        .unwrap()
+    })
+    .await;
+    sqlx::query_scalar("SELECT id FROM approvals WHERE thread_id=$1 AND native_ref=$2")
+        .bind(thread)
+        .bind(reference)
+        .fetch_one(s.rig.db.pool())
+        .await
+        .unwrap()
+}
+
 async fn list(s: &Scene, who: &Who, query: ApprovalListQuery) -> Page<Approval> {
     s.rig
         .world
@@ -451,6 +486,161 @@ async fn answering_what_the_agent_asks_is_managing_the_thread_and_driving_it_is_
         .ok();
     assert_eq!(synced.thread.state, ThreadState::WaitingApproval);
     assert_eq!(synced.thread.pending_approvals, 1, "nothing was decided");
+}
+
+#[tokio::test]
+async fn a_writer_answers_a_harness_plan_but_needs_manage_for_other_requests_and_manager_only_plans()
+ {
+    let s = Scene::new().await;
+    let writer = s.rig.person("plan-writer").await;
+    places::join(
+        &s.rig.world,
+        s.tree.org.base.id,
+        s.tree.org.base.id,
+        &writer,
+        "viewer",
+        &s.ada,
+    )
+    .await;
+    let thread = s.thread().await.base.id;
+    s.rig
+        .lets_use("node", thread, "thread.interact", &writer, json!({}))
+        .await;
+    let access = places::read(&s.rig.world, &writer, thread).await;
+    assert!(
+        matches!(access, orch_api_contract::nodes::Node::Thread(ref t)
+        if t.base.access.permissions.contains(&"thread.interact".to_owned())
+        && !t.base.access.permissions.contains(&"thread.manage".to_owned()))
+    );
+    assert!(
+        s.say(
+            &s.ada,
+            thread,
+            "Plan work",
+            orch_api_contract::threads::Delivery::Queue,
+            "plan-writer"
+        )
+        .await
+        .status
+        .is_success()
+    );
+    let start = s.rig.turn_start(thread, 0).await;
+    s.rig.say(thread, turn_began(start.turn_id)).await;
+    s.rig
+        .say(thread, asked_plan(start.turn_id, "writer-plan"))
+        .await;
+    let plan = native_approval(&s, thread, "writer-plan").await;
+    let visible = s
+        .rig
+        .world
+        .app
+        .call(ApprovalGet, &[&plan])
+        .token(&writer.token)
+        .send()
+        .await
+        .ok();
+    assert!(visible.can_decide);
+    let proceed = ApprovalDecision::Option(HarnessOptionDecision {
+        option_id: "proceed".into(),
+        note: None,
+    });
+    let accepted = s
+        .rig
+        .world
+        .app
+        .call(ApprovalDecide, &[&plan])
+        .token(&writer.token)
+        .body(&proceed)
+        .send()
+        .await
+        .ok();
+    assert_eq!(accepted.approval.state, ApprovalState::Approved);
+    assert_eq!(
+        accepted.approval.decided_by.as_ref().unwrap().id,
+        writer.id()
+    );
+
+    s.rig
+        .say(thread, asked_plan(start.turn_id, "manager-plan"))
+        .await;
+    let managed_plan = native_approval(&s, thread, "manager-plan").await;
+    let before_change = s
+        .rig
+        .world
+        .app
+        .call(ApprovalGet, &[&managed_plan])
+        .token(&writer.token)
+        .send()
+        .await
+        .ok();
+    assert!(before_change.can_decide);
+    s.rig
+        .world
+        .set_at(
+            orch_settings::Target::Node(thread),
+            "thread.plan_answered_by",
+            json!("managers"),
+        )
+        .await;
+    s.rig
+        .say(thread, command_asked(start.turn_id, "manager-command"))
+        .await;
+    s.rig.say(thread, orch_link_contract::events::Event::ApprovalRequested(orch_link_contract::events::ApprovalRequested {
+        turn_id: start.turn_id, request_ref: "manager-question".into(), title: "Choose a branch".into(),
+        request: serde_json::from_value(json!({"request_kind":"user_input","options":[],"detail":{
+            "questions":[{"id":"branch","header":"Branch","question":"Which branch?","multiple":false,"allow_other":true,"options":null}]
+        }})).unwrap(),
+    })).await;
+    let command = native_approval(&s, thread, "manager-command").await;
+    let question = native_approval(&s, thread, "manager-question").await;
+    let shown = s
+        .rig
+        .world
+        .app
+        .call(ApprovalGet, &[&managed_plan])
+        .token(&writer.token)
+        .send()
+        .await
+        .ok();
+    assert!(!shown.can_decide);
+    let answer = ApprovalDecision::Answers(HarnessAnswersDecision {
+        answers: std::collections::BTreeMap::from([("branch".into(), vec!["main".into()])]),
+        note: None,
+    });
+    for (id, decision) in [
+        (managed_plan, proceed.clone()),
+        (command, allow()),
+        (question, answer),
+    ] {
+        let refused = s
+            .rig
+            .world
+            .app
+            .call(ApprovalDecide, &[&id])
+            .token(&writer.token)
+            .body(&decision)
+            .send()
+            .await
+            .problem();
+        assert_eq!(refused.code, ErrorCode::AuthzDenied);
+        let state: String = sqlx::query_scalar("SELECT state FROM approvals WHERE id=$1")
+            .bind(id)
+            .fetch_one(s.rig.db.pool())
+            .await
+            .unwrap();
+        assert_eq!(state, "pending");
+    }
+    let approved = s
+        .rig
+        .world
+        .app
+        .call(ApprovalDecide, &[&managed_plan])
+        .token(&s.ada.token)
+        .body(&proceed)
+        .send()
+        .await
+        .ok();
+    assert_eq!(approved.approval.state, ApprovalState::Approved);
 }
 
 #[tokio::test]

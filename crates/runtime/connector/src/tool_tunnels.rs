@@ -268,6 +268,22 @@ impl ToolRelay {
             .is_some_and(|host| host.environment(environment_id).is_ok())
     }
 
+    /// Whether the attached environment is the generation admitted to the session.
+    #[must_use]
+    pub fn environment_matches(&self, environment: Id, generation: i64) -> bool {
+        self.host
+            .as_ref()
+            .and_then(|host| host.environment(environment).ok())
+            .is_some_and(|attached| attached.generation() == generation)
+    }
+
+    fn ticket_environment(&self, claims: &TicketClaims) -> Option<(Id, i64)> {
+        let environment = claims.tool_environment_id?;
+        let generation = claims.tool_environment_generation?;
+        (generation >= 0 && self.environment_matches(environment, generation))
+            .then_some((environment, generation))
+    }
+
     /// The running executors that speak a protocol of their harness's own and are called `kind`.
     pub async fn exec_targets(&self, kind: &str) -> Vec<Target> {
         let Some(host) = &self.host else {
@@ -299,14 +315,16 @@ impl ToolRelay {
     }
 
     /// Whether an executor called `kind` runs here and offers its tools as an MCP server.
-    pub async fn offers_mcp(&self, kind: &str) -> bool {
+    pub async fn offers_mcp(&self, kind: &str, environment: Id) -> bool {
         let Some(host) = &self.host else {
             return false;
         };
         host.running_executors()
             .await
             .into_iter()
-            .any(|(_, running, protocol, _)| running == kind && protocol == ExecutorProtocol::Mcp)
+            .any(|(id, running, protocol, _)| {
+                id == environment && running == kind && protocol == ExecutorProtocol::Mcp
+            })
     }
 
     /// The running servers an MCP tunnel to `server` can end at: Orch's own executor for `exec`, the tool
@@ -349,43 +367,18 @@ impl ToolRelay {
             .collect()
     }
 
-    /// Why the tool server `server` is not there, when it was given up on in one of the environments.
+    /// Why the tool server `server` is not there in this environment.
     #[must_use]
-    pub fn failure_of(&self, server: &str) -> Option<String> {
+    pub fn failure_of(&self, server: &str, environment: Id) -> Option<String> {
         let host = self.host.as_ref()?;
-        host.environments()
-            .iter()
-            .find_map(|environment| host.mcp_failure(environment.id(), server))
+        host.mcp_failure(environment, server)
     }
 
-    /// The target of an exchange: the environment the other end named, else the only one that has it, else
-    /// the one whose workspace the session's directory lies in.
-    pub fn pick(
-        &self,
-        mut targets: Vec<Target>,
-        hint: Option<Id>,
-        directory: Option<&str>,
-    ) -> Option<Target> {
-        if let Some(hint) = hint
-            && let Some(at) = targets.iter().position(|t| t.environment_id == hint)
-        {
-            return Some(targets.swap_remove(at));
-        }
-        if targets.len() <= 1 {
-            return targets.pop();
-        }
-        if let (Some(host), Some(directory)) = (&self.host, directory)
-            && let Some(at) = targets.iter().position(|target| {
-                host.environment(target.environment_id)
-                    .is_ok_and(|environment| {
-                        lies_inside(directory, &environment.facts().workspace_root)
-                    })
-            })
-        {
-            return Some(targets.swap_remove(at));
-        }
-        targets.sort_by_key(|target| target.environment_id);
-        targets.into_iter().next()
+    /// The target of an exchange must belong to its admitted environment.
+    pub fn pick(targets: Vec<Target>, environment: Id) -> Option<Target> {
+        targets
+            .into_iter()
+            .find(|target| target.environment_id == environment)
     }
 
     /// Checks what an exchange says of its session against the environment the tools act in, and states it
@@ -526,13 +519,11 @@ where
         .unwrap_or_else(|_| bad_gateway("the answer could not be passed on"))
 }
 
-/// The look of an exchange at this end: the environment the other end names, if it names one, and the
-/// session it is in.
-fn named_environment(headers: &HeaderMap) -> Option<Id> {
-    headers
-        .get(ENVIRONMENT_HEADER)
-        .and_then(|value| value.to_str().ok())
-        .and_then(|text| text.parse().ok())
+/// A sender may repeat the signed environment, but cannot change it.
+fn environment_header_matches(headers: &HeaderMap, environment: Id) -> bool {
+    headers.get(ENVIRONMENT_HEADER).is_none_or(|value| {
+        value.to_str().ok().and_then(|text| text.parse::<Id>().ok()) == Some(environment)
+    })
 }
 
 impl ToolRelay {
@@ -543,6 +534,7 @@ impl ToolRelay {
         request: Request<Incoming>,
         target: Target,
         session: Option<String>,
+        generation: i64,
     ) -> Response<Body> {
         let connected = match TcpStream::connect(target.address).await {
             Ok(stream) => Ok((stream, target.clone())),
@@ -557,6 +549,9 @@ impl ToolRelay {
         };
         match connected {
             Ok((stream, target)) => {
+                if !self.environment_matches(target.environment_id, generation) {
+                    return text(StatusCode::FORBIDDEN, "the environment was made anew");
+                }
                 let extra: Vec<(&str, String)> = session
                     .into_iter()
                     .map(|session| (SESSION_HEADER, session))
@@ -590,19 +585,26 @@ impl ToolRelay {
         claims: &TicketClaims,
         request: Request<Incoming>,
     ) -> Response<Body> {
-        let hint = named_environment(request.headers());
+        let Some((environment, generation)) = self.ticket_environment(claims) else {
+            return text(
+                StatusCode::FORBIDDEN,
+                "the ticket's environment or generation is unavailable",
+            );
+        };
+        if !environment_header_matches(request.headers(), environment) {
+            return text(
+                StatusCode::FORBIDDEN,
+                "the request names another environment",
+            );
+        }
         let header = request
             .headers()
             .get(SESSION_HEADER)
             .and_then(|value| value.to_str().ok())
             .map(str::to_owned);
-        let directory = header
-            .as_deref()
-            .and_then(|header| ExecScope::decode(header).ok())
-            .map(|scope| scope.directory);
         let targets = self.mcp_targets(server).await;
-        let Some(target) = self.pick(targets, hint, directory.as_deref()) else {
-            return match self.failure_of(server) {
+        let Some(target) = Self::pick(targets, environment) else {
+            return match self.failure_of(server, environment) {
                 Some(reason) => text(
                     StatusCode::SERVICE_UNAVAILABLE,
                     &format!("the tool server {server} failed: {reason}"),
@@ -621,7 +623,8 @@ impl ToolRelay {
         } else {
             None
         };
-        self.forward_local(request, target, session).await
+        self.forward_local(request, target, session, generation)
+            .await
     }
 }
 
@@ -788,8 +791,15 @@ pub async fn serve(relay: &Arc<ToolRelay>, incoming: IncomingTunnel) {
 }
 
 async fn serve_mcp(relay: &Arc<ToolRelay>, incoming: IncomingTunnel, server: String) {
-    if relay.mcp_targets(&server).await.is_empty() {
-        match relay.failure_of(&server) {
+    let Some((environment, _generation)) = relay.ticket_environment(&incoming.claims) else {
+        incoming.refuse(
+            OpenErrorCode::BadTicket,
+            "the ticket's environment or generation is unavailable",
+        );
+        return;
+    };
+    if ToolRelay::pick(relay.mcp_targets(&server).await, environment).is_none() {
+        match relay.failure_of(&server, environment) {
             Some(reason) => incoming.refuse(
                 OpenErrorCode::Refused,
                 &format!("the tool server {server} failed: {reason}"),
@@ -825,14 +835,21 @@ async fn serve_mcp(relay: &Arc<ToolRelay>, incoming: IncomingTunnel, server: Str
 }
 
 async fn serve_exec(relay: &Arc<ToolRelay>, incoming: IncomingTunnel, executor: String) {
+    let Some((environment, generation)) = relay.ticket_environment(&incoming.claims) else {
+        incoming.refuse(
+            OpenErrorCode::BadTicket,
+            "the ticket's environment or generation is unavailable",
+        );
+        return;
+    };
     // An executor that offers its tools as an MCP server is reached by HTTP exchanges, whichever of the
     // two services the system named in the ticket of the session.
-    if relay.offers_mcp(&executor).await {
+    if relay.offers_mcp(&executor, environment).await {
         serve_mcp(relay, incoming, MCP_SERVER_NAME.to_owned()).await;
         return;
     }
     let targets = relay.exec_targets(&executor).await;
-    let Some(target) = relay.pick(targets, None, None) else {
+    let Some(target) = ToolRelay::pick(targets, environment) else {
         incoming.refuse(
             OpenErrorCode::NoSuchService,
             &format!("{executor} is not running here"),
@@ -858,6 +875,10 @@ async fn serve_exec(relay: &Arc<ToolRelay>, incoming: IncomingTunnel, executor: 
             }
         }
     };
+    if !relay.environment_matches(environment, generation) {
+        incoming.refuse(OpenErrorCode::BadTicket, "the environment was made anew");
+        return;
+    }
     match incoming.accept() {
         Ok(tunnel) => pump(socket, tunnel).await,
         Err(error) => tracing::debug!(%error, "a tunnel to an executor could not be taken up"),

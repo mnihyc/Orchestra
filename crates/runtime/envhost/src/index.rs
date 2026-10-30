@@ -53,19 +53,36 @@ impl HashCache {
     /// The hash of `path` if it was computed for exactly this version of the file.
     #[must_use]
     pub fn get(&self, path: &RelPath, version: &Identity) -> Option<Hash> {
-        self.entries()
-            .get(path)
-            .filter(|(known, _)| known == version)
-            .map(|(_, hash)| *hash)
+        // Windows does not expose a reliable change time or file identity here. Size and
+        // modification time alone can be restored after an edit, so reuse would return stale bytes.
+        #[cfg(windows)]
+        {
+            let _ = (path, version);
+            None
+        }
+        #[cfg(not(windows))]
+        {
+            self.entries()
+                .get(path)
+                .filter(|(known, _)| known == version)
+                .map(|(_, hash)| *hash)
+        }
     }
 
     /// Remembers the hash of `path` for this version of the file.
     pub fn put(&self, path: &RelPath, version: Identity, hash: Hash) {
-        let mut entries = self.entries();
-        if entries.len() >= HASH_CACHE_MAX_ENTRIES && !entries.contains_key(path) {
-            entries.clear();
+        #[cfg(windows)]
+        {
+            let _ = (path, version, hash);
         }
-        entries.insert(path.clone(), (version, hash));
+        #[cfg(not(windows))]
+        {
+            let mut entries = self.entries();
+            if entries.len() >= HASH_CACHE_MAX_ENTRIES && !entries.contains_key(path) {
+                entries.clear();
+            }
+            entries.insert(path.clone(), (version, hash));
+        }
     }
 
     /// Forgets what is known of `path`.
@@ -552,18 +569,25 @@ impl Index {
 }
 
 #[cfg(test)]
-#[cfg(unix)]
 mod tests {
     use super::*;
     use crate::paths::PathStyle;
+
+    fn native_style() -> PathStyle {
+        if cfg!(windows) {
+            PathStyle::Windows
+        } else {
+            PathStyle::Posix
+        }
+    }
     use std::path::Path;
 
     fn workspace(root: &Path) -> Workspace {
-        Workspace::open(root, &[], PathStyle::Posix, true).unwrap()
+        Workspace::open(root, &[], native_style(), true).unwrap()
     }
 
     fn path(text: &str) -> RelPath {
-        RelPath::parse(text, PathStyle::Posix).unwrap()
+        RelPath::parse(text, native_style()).unwrap()
     }
 
     fn rules() -> Arc<IgnoreRules> {
@@ -733,7 +757,10 @@ mod tests {
         let cache = HashCache::new();
         let key = path("f.txt");
         cache.put(&key, before.identity(), Hash::of(b"aaaa"));
+        #[cfg(not(windows))]
         assert_eq!(cache.get(&key, &before.identity()), Some(Hash::of(b"aaaa")));
+        #[cfg(windows)]
+        assert_eq!(cache.get(&key, &before.identity()), None);
 
         // New content of the same size, and the modification time put back: not the same version.
         std::thread::sleep(std::time::Duration::from_millis(20));
@@ -755,7 +782,7 @@ mod tests {
         assert_eq!(
             cache.get(&key, &after.identity()),
             None,
-            "but the change time gave it away"
+            "an unverifiable version never returns the earlier hash"
         );
     }
 }

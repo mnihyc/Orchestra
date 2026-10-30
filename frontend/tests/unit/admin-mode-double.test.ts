@@ -10,7 +10,7 @@ function login(world: World, username = 'ada', password = 'correct horse battery
   const answer = world.login({ login: username, password });
   expect(answer.status).toBe(200);
   const auth = answer.body as AuthResult;
-  const cookie = answer.cookies?.orch_session;
+  const cookie = answer.cookies?.['__Host-orch_session'];
   if (typeof cookie !== 'string') throw new Error('The actual login supplier returned no session');
   return { bearer: `Bearer ${auth.access_token}`, cookie, auth };
 }
@@ -35,9 +35,9 @@ it('keeps two browser switches independent through refresh and logout while iden
   expect((await bootstrap(world, world.caller(b.bearer), b.bearer)).admin_mode).toEqual(world.adminMode(b.bearer));
   world.tokens.get(a.auth.access_token)!.endsAt = 0;
   refused(() => world.adminMode(a.bearer), 401, 'auth.invalid_token');
-  const refreshed = world.refresh({ orch_session: a.cookie }, '1').body as AuthResult;
+  const refreshed = world.refresh({ '__Host-orch_session': a.cookie }, '1').body as AuthResult;
   expect(world.adminMode(`Bearer ${refreshed.access_token}`)).toEqual({ as_admin: true, available: true });
-  expect(world.logout({ orch_session: b.cookie }, '1').status).toBe(204);
+  expect(world.logout({ '__Host-orch_session': b.cookie }, '1').status).toBe(204);
   refused(() => world.adminMode(b.bearer), 401, 'auth.invalid_token');
   expect(world.adminMode(`Bearer ${refreshed.access_token}`)).toEqual({ as_admin: true, available: true });
   expect(world.people.get('ada')!.me).toEqual(original);

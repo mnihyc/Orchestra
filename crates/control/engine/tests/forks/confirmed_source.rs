@@ -1689,6 +1689,11 @@ async fn a_full_fork_of_a_side_contains_its_captured_parent_and_keeps_newer_side
         plan.history.turns, 3,
         "the captured parent prefix and two actual side turns form the full history"
     );
+    assert_eq!(plan.history.report.by_kind["user_message"].kept, 3);
+    assert_eq!(
+        plan.history.report.by_kind["agent_message"].kept,
+        i64::try_from(answers.len()).unwrap() + 2
+    );
     let began = rig.world.began(CommandKind::SessionOpenFenced);
     rig.world
         .machine
@@ -1846,6 +1851,76 @@ async fn a_full_fork_of_a_side_contains_its_captured_parent_and_keeps_newer_side
             .len(),
         1
     );
+    rig.world.shutdown().await;
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn a_side_fork_counts_its_captured_parent_when_deciding_what_fits() {
+    let rig = Rig::new(
+        Can {
+            import_neutral: true,
+            ..Default::default()
+        },
+        "fake",
+        Can::default(),
+    )
+    .await;
+    let parent = rig.world.thread("Parent fills the window").await;
+    rig.say(parent, &"parent context ".repeat(400)).await;
+    rig.world.run_turn(parent, 0, "Parent answer").await;
+    rig.world.wait_state(parent, "idle").await;
+    // Nine inherited turns make the side's first turn cross a decimal boundary in the archive.
+    rig.world.grow_history(parent, 9).await;
+    rig.record_native(parent).await;
+    accounted(&rig, parent).await;
+    let side = rig
+        .world
+        .engine()
+        .start_side_thread(
+            &rig.caller(),
+            parent,
+            vec![orch_api_contract::threads::ContentPart::Text {
+                text: "Short side input".into(),
+            }],
+            "side-budget".into(),
+            None,
+        )
+        .await
+        .unwrap()
+        .thread;
+    rig.world.run_turn(side, 0, "Short side answer").await;
+    rig.world.wait_state(side, "idle").await;
+    accounted(&rig, side).await;
+    // At 80% and three bytes per token, 1,000 tokens fit the side but not the parent's long input.
+    sqlx::query("UPDATE provider_models SET parameters=jsonb_set(parameters,'{context_window}','1000') WHERE provider_id=$1 AND model_name=$2")
+        .bind(rig.world.provider).bind(MODEL).execute(rig.world.pool.pool()).await.unwrap();
+    let small = rig.plan(side, &rig.fork()).await;
+    assert!(small.blockers.is_empty(), "{:?}", small.blockers);
+    assert_eq!(small.history.turns, 10);
+    assert_eq!(small.history.method, HistoryMethod::FileHandoff);
+    sqlx::query("UPDATE provider_models SET parameters=jsonb_set(parameters,'{context_window}','100000') WHERE provider_id=$1 AND model_name=$2")
+        .bind(rig.world.provider).bind(MODEL).execute(rig.world.pool.pool()).await.unwrap();
+    let large = rig.plan(side, &rig.fork()).await;
+    assert!(large.blockers.is_empty(), "{:?}", large.blockers);
+    assert_eq!(large.history.turns, 10);
+    assert_eq!(large.history.method, HistoryMethod::NeutralImport);
+    let began = rig.world.began(CommandKind::SessionOpenFenced);
+    rig.world
+        .machine
+        .handler
+        .hold(CommandKind::SessionOpenFenced);
+    let job = rig.confirm(side, &large).await;
+    rig.world
+        .wait_began(CommandKind::SessionOpenFenced, began + 1)
+        .await;
+    let open = rig.held_open(job.id).await;
+    assert_eq!(
+        Some(open.history.expect("the neutral archive was opened").size),
+        large.history.archive_bytes,
+        "the plan counts the same bytes the agent receives"
+    );
+    rig.world.machine.handler.release();
+    rig.wait_job(job.id, "succeeded").await;
     rig.world.shutdown().await;
 }
 
@@ -2049,7 +2124,7 @@ async fn closing_a_side_keeps_its_uncertain_native_inputs_until_the_original_que
     rig.world.shutdown().await;
 }
 
-#[tokio::test]
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn carry_uses_the_proved_fallback_even_when_an_old_profile_claims_native_import() {
     let can = Can {
         export_native: true,
@@ -2081,11 +2156,11 @@ async fn carry_uses_the_proved_fallback_even_when_an_old_profile_claims_native_i
     let plan = rig.plan(thread, &rig.to_other()).await;
     assert!(plan.blockers.is_empty(), "{:?}", plan.blockers);
     assert_eq!(plan.history.method, HistoryMethod::NeutralImport);
-    let mut target = descriptor_with("codex", can);
-    target["capabilities"]["import_neutral"] = json!(false);
-    sqlx::query("UPDATE agents SET descriptor=$2 WHERE id=$1")
+    // A running harness's report takes precedence over the profile's last declaration. Disable
+    // neutral import through the override, which applies to either declaration.
+    sqlx::query("UPDATE agents SET descriptor_overrides=$2 WHERE id=$1")
         .bind(rig.other_agent)
-        .bind(target)
+        .bind(json!({"capabilities":{"import_native":true,"import_neutral":false}}))
         .execute(rig.world.pool.pool())
         .await
         .unwrap();

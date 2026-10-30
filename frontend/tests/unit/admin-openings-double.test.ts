@@ -10,7 +10,7 @@ function login(world: World) {
   const reply = world.login({ login: 'ada', password: 'correct horse battery' });
   expect(reply.status).toBe(200);
   const auth = reply.body as AuthResult;
-  return { bearer: `Bearer ${auth.access_token}`, cookie: reply.cookies!.orch_session! };
+  return { bearer: `Bearer ${auth.access_token}`, cookie: reply.cookies!['__Host-orch_session']! };
 }
 function document(world: World, user = 'dora') {
   const reply = world.documents.control('/make', { user, node: ACME.fixLogin, title: `Private opening ${randomUUID()}`, private: true, count: 1 });
@@ -113,7 +113,7 @@ it('rechecks mode, live credentials and current document authority before consid
   expect(s.world.openings.cached(s.signed.bearer, body)).toEqual({ status: 204 });
   refused(() => s.read(), 404, 'not_found');
   expect(s.rows()).toEqual(original);
-  s.world.logout({ orch_session: s.signed.cookie }, '1');
+  s.world.logout({ '__Host-orch_session': s.signed.cookie }, '1');
   refused(() => s.world.openings.cached(s.signed.bearer, body), 401, 'auth.invalid_token');
   expect(s.rows()).toEqual(original);
 });

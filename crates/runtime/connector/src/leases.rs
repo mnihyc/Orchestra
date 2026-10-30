@@ -478,29 +478,40 @@ impl Leases {
         table.by_id.get(id).cloned()
     }
 
-    /// The lease a call that came through a tunnel runs under: the one its ticket names when that is open,
-    /// otherwise the open one of the thread the ticket is for.
+    /// The lease a tunnel may use: the named lease or a later one for the same provider and thread.
+    /// A ticket with no known lease must name both its provider and its thread.
     #[must_use]
-    pub fn of_ticket(&self, lease_id: Id, thread_id: Option<Id>) -> Option<Arc<Lease>> {
+    pub fn of_ticket(
+        &self,
+        lease_id: Id,
+        thread_id: Option<Id>,
+        provider_id: Option<Id>,
+    ) -> Option<Arc<Lease>> {
         let table = self.table();
         let named = table.by_id.get(&lease_id).cloned();
-        if let Some(lease) = &named
-            && lease.is_open()
-            && thread_id.is_none_or(|thread| thread == lease.thread_id)
-        {
-            return named;
-        }
-        let thread = thread_id.or_else(|| named.as_ref().map(|lease| lease.thread_id));
-        let of_thread = thread.and_then(|thread| {
-            table
+        if let Some(lease) = &named {
+            if thread_id.is_some_and(|thread| thread != lease.thread_id)
+                || provider_id.is_some_and(|provider| provider != lease.provider_id)
+            {
+                return None;
+            }
+            if lease.is_open() {
+                return named;
+            }
+            let current = table
                 .current
-                .iter()
-                .filter(|((_, of), _)| *of == thread)
-                .filter_map(|(_, id)| table.by_id.get(id))
-                .find(|lease| lease.is_open())
-                .cloned()
-        });
-        of_thread.or(named)
+                .get(&(lease.provider_id, lease.thread_id))
+                .and_then(|id| table.by_id.get(id))
+                .filter(|lease| lease.is_open())
+                .cloned();
+            return current.or(named);
+        }
+        let key = (provider_id?, thread_id?);
+        table
+            .current
+            .get(&key)
+            .and_then(|id| table.by_id.get(id))
+            .cloned()
     }
 
     /// Closes a lease; what it used is returned. A lease that is not known here (it was never opened, or
@@ -651,14 +662,61 @@ mod tests {
         let old = leases.open(&forwarded(provider, thread), now()).unwrap();
         leases.close(old.id(), now());
         let new = leases.open(&forwarded(provider, thread), now()).unwrap();
-        assert_eq!(leases.of_ticket(old.id(), None).unwrap().id(), new.id());
         assert_eq!(
-            leases.of_ticket(new_id(), Some(thread)).unwrap().id(),
+            leases.of_ticket(old.id(), None, None).unwrap().id(),
             new.id()
         );
+        assert_eq!(
+            leases
+                .of_ticket(new_id(), Some(thread), Some(provider))
+                .unwrap()
+                .id(),
+            new.id()
+        );
+        assert!(leases.of_ticket(new_id(), Some(thread), None).is_none());
+        assert!(
+            leases
+                .of_ticket(old.id(), Some(new_id()), Some(provider))
+                .is_none()
+        );
+        assert!(
+            leases
+                .of_ticket(old.id(), Some(thread), Some(new_id()))
+                .is_none()
+        );
         leases.close(new.id(), now());
-        assert!(!leases.of_ticket(old.id(), Some(thread)).unwrap().is_open());
-        assert!(leases.of_ticket(new_id(), Some(new_id())).is_none());
+        assert!(
+            !leases
+                .of_ticket(old.id(), Some(thread), Some(provider))
+                .unwrap()
+                .is_open()
+        );
+        assert!(
+            leases
+                .of_ticket(new_id(), Some(new_id()), Some(provider))
+                .is_none()
+        );
+    }
+
+    #[test]
+    fn a_ticket_for_one_provider_cannot_use_another_providers_lease_on_the_same_thread() {
+        let leases = Leases::new();
+        let (provider, other, thread) = (new_id(), new_id(), new_id());
+        let old = leases.open(&forwarded(provider, thread), now()).unwrap();
+        leases.close(old.id(), now());
+        let other_lease = leases.open(&forwarded(other, thread), now()).unwrap();
+        assert!(
+            !leases
+                .of_ticket(old.id(), Some(thread), Some(provider))
+                .unwrap()
+                .is_open()
+        );
+        assert!(
+            leases
+                .of_ticket(new_id(), Some(thread), Some(provider))
+                .is_some_and(|lease| !lease.is_open())
+        );
+        assert!(other_lease.is_open());
     }
 
     #[test]

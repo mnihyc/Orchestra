@@ -10,12 +10,12 @@ mod support;
 use chrono::Duration;
 use orch_api_contract::auth::{
     ApiTokenCreateBody, AuthEmailCodeSend, AuthEmailCodeSendBody, AuthEmailVerify,
-    AuthEmailVerifyBody, AuthLoginBody, AuthRecoveryStart, AuthRecoveryStartBody,
-    MeEmailCodeDisable, MeEmailCodeDisableBody, MeEmailCodeEnable, MeEmailCodeEnableBody,
-    MeEmailCodeSend, MeEmailCodeSendBody, MeGet, MePasswordChange, MePasswordChangeBody,
-    MeSessionDelete, MeSessionList, MeTokenCreate, MeTokenDelete, MeTokenList, MeTotpDisable,
-    MeTotpDisableBody, MeTotpEnable, MeTotpEnableBody, MeTotpSetup, MeTotpSetupBody, MeUpdate,
-    MeUpdateBody,
+    AuthEmailVerifyBody, AuthLoginBody, AuthRecoveryCheck, AuthRecoveryConfirm,
+    AuthRecoveryConfirmBody, AuthRecoveryStart, AuthRecoveryStartBody, MeEmailCodeDisable,
+    MeEmailCodeDisableBody, MeEmailCodeEnable, MeEmailCodeEnableBody, MeEmailCodeSend,
+    MeEmailCodeSendBody, MeGet, MePasswordChange, MePasswordChangeBody, MeSessionDelete,
+    MeSessionList, MeTokenCreate, MeTokenDelete, MeTokenList, MeTotpDisable, MeTotpDisableBody,
+    MeTotpEnable, MeTotpEnableBody, MeTotpSetup, MeTotpSetupBody, MeUpdate, MeUpdateBody,
 };
 use orch_api_contract::common::ErrorCode;
 use orch_api_contract::nodes::{NodeGet, NodeKind};
@@ -342,6 +342,101 @@ async fn a_new_address_changes_nothing_until_it_is_confirmed_and_the_old_one_is_
             .audit()
             .await
             .contains(&"auth.email_changed".to_owned())
+    );
+}
+
+#[tokio::test]
+async fn a_reset_sent_to_a_former_address_stops_working_when_the_new_address_is_confirmed() {
+    let world = World::new().await;
+    world.mail_server().await;
+    let ada = world.person("ada").await;
+    let signed = world.sign_in(&ada).await;
+    update(
+        &world,
+        &signed,
+        &change_address("new@example.org", Some(PASSWORD)),
+    )
+    .await
+    .ok();
+    world
+        .app
+        .call(AuthRecoveryStart, &[])
+        .body(&AuthRecoveryStartBody {
+            email: "ada@example.org".to_owned(),
+        })
+        .send()
+        .await
+        .ok();
+    let old_mail = world.mails("reset_password", "ada@example.org").await;
+    let old_reset = old_mail[0]["data"]["token"].as_str().unwrap();
+    let verification = world.mails("verify_email", "new@example.org").await;
+    let verify_token = verification[0]["data"]["token"].as_str().unwrap();
+    world
+        .app
+        .call(AuthEmailVerify, &[])
+        .body(&AuthEmailVerifyBody {
+            token: verify_token.to_owned(),
+        })
+        .send()
+        .await
+        .ok();
+    let check = world
+        .app
+        .call(AuthRecoveryCheck, &[&old_reset])
+        .send()
+        .await
+        .problem();
+    assert_eq!((check.status, check.code), (410, ErrorCode::Gone));
+    // Model a recovery issuance that had read the old address before replacement and inserted
+    // its link after the cleanup committed: the destination is checked again on use.
+    sqlx::query("UPDATE email_tokens SET used_at=NULL WHERE token_hash=$1")
+        .bind(hash(old_reset))
+        .execute(&world.db.pool)
+        .await
+        .unwrap();
+    let reset = world
+        .app
+        .call(AuthRecoveryConfirm, &[])
+        .body(&AuthRecoveryConfirmBody {
+            token: old_reset.to_owned(),
+            password: "an attacker password".to_owned(),
+        })
+        .send()
+        .await
+        .problem();
+    assert_eq!((reset.status, reset.code), (410, ErrorCode::Gone));
+    assert_eq!(
+        world
+            .password_login("new@example.org", PASSWORD, STRANGER, "")
+            .await
+            .status,
+        200
+    );
+    // The existing send pace is per person, including after their address changes.
+    world.advance(Duration::minutes(1) + Duration::seconds(1));
+    world
+        .app
+        .call(AuthRecoveryStart, &[])
+        .body(&AuthRecoveryStartBody {
+            email: "new@example.org".to_owned(),
+        })
+        .send()
+        .await
+        .ok();
+    let new_mail = world.mails("reset_password", "new@example.org").await;
+    let new_reset = new_mail[0]["data"]["token"].as_str().unwrap();
+    assert_eq!(
+        world
+            .app
+            .call(AuthRecoveryConfirm, &[])
+            .body(&AuthRecoveryConfirmBody {
+                token: new_reset.to_owned(),
+                password: "a fresh new password".to_owned(),
+            })
+            .send()
+            .await
+            .status,
+        204
     );
 }
 

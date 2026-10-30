@@ -49,6 +49,12 @@ pub async fn make(
     origin: &Origin,
     now: DateTime<Utc>,
 ) -> Result<Made, DbError> {
+    // Order the recipient's current address against address changes before issuing the link.
+    let user = orch_db::queries::transaction_guard::lock_person(conn, user.id)
+        .await?
+        .ok_or_else(|| DbError::Reference {
+            constraint: "users".to_owned(),
+        })?;
     let secret = new_token(EMAIL_TOKEN_PREFIX);
     let expires_at = now + Purpose::Reset.life();
     identity::create_email_token(

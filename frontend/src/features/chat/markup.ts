@@ -192,5 +192,9 @@ export function placeOfAddress(href: string, origin: string): { path: string; id
   if (url.origin !== origin) return null;
   const found = /^\/(org|project|topic|thread|doc)\/([^/]+)\/?$/.exec(url.pathname);
   if (found === null) return null;
-  return { path: `${url.pathname}${url.search}`, id: decodeURIComponent(found[2] ?? ''), kind: found[1] as 'org' | 'project' | 'topic' | 'thread' | 'doc' };
+  try {
+    return { path: `${url.pathname}${url.search}`, id: decodeURIComponent(found[2] ?? ''), kind: found[1] as 'org' | 'project' | 'topic' | 'thread' | 'doc' };
+  } catch {
+    return null;
+  }
 }

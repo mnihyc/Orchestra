@@ -34,7 +34,7 @@ use orch_api_contract::approvals::{
 use orch_authz::engine::Graph;
 use orch_authz::{Act, Caller, Principal, nodes};
 use orch_db::queries::approvals::{self as queries, ApprovalRow, NewHarnessApproval};
-use orch_db::queries::threads::{self, ThreadRow, thread_state};
+use orch_db::queries::threads::{self, ThreadRow, TurnRow, thread_state};
 use orch_link_contract::commands::{ApprovalResolve, SerialKey};
 use orch_link_contract::events::{ApprovalClosed, ApprovalRequested};
 use orch_types::{Id, Json, Time, new_id};
@@ -44,6 +44,56 @@ use std::collections::BTreeSet;
 /// How many times the decision on one approval is handed to the harness
 /// before the engine gives the approval up as cancelled.
 const RESOLVE_ATTEMPTS: u32 = 2;
+
+enum ResolutionLane {
+    Active(Id),
+    Unavailable,
+    Gone,
+}
+
+/// The native request belongs to the current, uninterrupted execution lane.
+/// Callers hold the thread row lock while asking this question.
+async fn current_harness_turn(
+    conn: &mut orch_db::Conn,
+    thread: &ThreadRow,
+    turn: &TurnRow,
+) -> Result<bool, EngineError> {
+    if thread.deleted_at.is_some()
+        || thread.archived_at.is_some()
+        || thread.current_turn_id != Some(turn.id)
+        || thread.current_segment_id != Some(turn.segment_id)
+        || turn.thread_id != thread.node_id
+        || !turn.is_active()
+        || turn.interrupted_by.is_some()
+    {
+        return Ok(false);
+    }
+    Ok(threads::segment(conn, turn.segment_id)
+        .await?
+        .is_some_and(|segment| {
+            segment.thread_id == thread.node_id
+                && segment.continuation_id == thread.active_continuation_id
+        }))
+}
+
+/// Withdraws the still-pending native waits of this turn in the thread transaction.
+pub(crate) async fn cancel_pending_harness_for_turn(
+    unit: &mut Unit<'_>,
+    thread: Id,
+    turn: Id,
+) -> Result<bool, EngineError> {
+    let now = unit.now();
+    let cancelled = queries::cancel_pending_of_turn(&mut *unit.conn, turn, now).await?;
+    for approval in &cancelled {
+        crate::notifications::approval_settled(unit, approval.id).await?;
+        if let Some(item) = approval.item_id {
+            let seq = unit.stamp(thread).await?;
+            threads::set_item_status(&mut *unit.conn, item, &["pending"], "cancelled", now, seq)
+                .await?;
+        }
+    }
+    Ok(!cancelled.is_empty())
+}
 
 /// The canonical source outcome, derived from its approval record without storing a second state.
 pub(crate) async fn source_status(
@@ -723,7 +773,12 @@ impl Engine {
             tracing::warn!(%thread_id, "an approval for a turn the thread does not have");
             return Ok(());
         };
-        if !turn.is_active() {
+        let Some(thread) = threads::thread(&mut *unit.conn, thread_id).await? else {
+            return Ok(());
+        };
+        if turn.segment_id != segment_id
+            || !current_harness_turn(&mut *unit.conn, &thread, &turn).await?
+        {
             return Ok(());
         }
         if turn.state == threads::turn_state::STARTING {
@@ -748,10 +803,7 @@ impl Engine {
             return Ok(());
         };
         // A rule allowed for this thread answers, once, a request that offers the very matcher it holds.
-        let by_rule = match threads::thread(&mut *unit.conn, thread_id).await? {
-            Some(thread) => crate::approval_rules::answer_by_rule(unit, &thread, &request).await?,
-            None => None,
-        };
+        let by_rule = crate::approval_rules::answer_by_rule(unit, &thread, &request).await?;
         let status = if by_rule.is_some() {
             "approved"
         } else {
@@ -1138,6 +1190,15 @@ impl Engine {
             if approval.state != "pending" {
                 return Err(ApprovalError::AlreadyDecided);
             }
+            let Some(turn) = (match approval.turn_id {
+                Some(id) => threads::turn(&mut *unit.conn, id).await?,
+                None => None,
+            }) else {
+                return Err(ApprovalError::AlreadyDecided);
+            };
+            if !current_harness_turn(&mut *unit.conn, &thread, &turn).await? {
+                return Err(ApprovalError::AlreadyDecided);
+            }
             let request: HarnessRequest = serde_json::from_value(approval.request.clone())
                 .map_err(|error| {
                     EngineError::unreadable(format!("a stored request does not read: {error}"))
@@ -1164,8 +1225,15 @@ impl Engine {
                     .iter()
                     .find(|option| option.id == chosen.option_id)
             {
-                crate::approval_rules::keep(&mut unit, &thread, approval.id, option, caller.user())
-                    .await?;
+                crate::approval_rules::keep(
+                    &mut unit,
+                    &thread,
+                    approval.id,
+                    &request,
+                    option,
+                    caller.user(),
+                )
+                .await?;
             }
             let _ = settled.for_harness;
             crate::audit_facts::person(
@@ -1256,16 +1324,14 @@ impl Engine {
         else {
             return Ok(());
         };
-        let machine = {
-            let mut conn = self.inner.db.acquire().await?;
-            self.harness_machine_for(&mut conn, thread_id).await?
-        };
-        let Some(machine) = machine else {
-            return Ok(());
-        };
         for attempt in 0..RESOLVE_ATTEMPTS {
             let id = ids::approval_resolve(row.id, attempt);
             if self.inner.commands.status(id).await?.is_none() {
+                let machine = match self.resolution_lane(thread_id, row).await? {
+                    ResolutionLane::Active(machine) => machine,
+                    ResolutionLane::Unavailable => return Ok(()),
+                    ResolutionLane::Gone => return self.give_up_decision(thread_id, row).await,
+                };
                 let body = ApprovalResolve {
                     thread_id,
                     request_ref: request_ref.clone(),
@@ -1289,6 +1355,45 @@ impl Engine {
             }
         }
         self.give_up_decision(thread_id, row).await
+    }
+
+    /// An unissued answer is bound to the original live turn and its recorded machine.
+    async fn resolution_lane(
+        &self,
+        thread_id: Id,
+        row: &ApprovalRow,
+    ) -> Result<ResolutionLane, EngineError> {
+        let mut tx = self.inner.db.begin().await?;
+        let Some(thread) = threads::lock(&mut tx, thread_id).await? else {
+            return Ok(ResolutionLane::Gone);
+        };
+        let Some(current) = queries::approval(&mut tx, row.id).await? else {
+            return Ok(ResolutionLane::Gone);
+        };
+        if current.thread_id != Some(thread_id)
+            || current.turn_id != row.turn_id
+            || current.decision != row.decision
+            || !matches!(current.state.as_str(), "approved" | "answered" | "denied")
+        {
+            return Ok(ResolutionLane::Gone);
+        }
+        let Some(turn) = (match row.turn_id {
+            Some(id) => threads::turn(&mut tx, id).await?,
+            None => None,
+        }) else {
+            return Ok(ResolutionLane::Gone);
+        };
+        if !current_harness_turn(&mut tx, &thread, &turn).await? {
+            return Ok(ResolutionLane::Gone);
+        }
+        let machine: Option<Id> = sqlx::query_scalar("SELECT machine_id FROM segments WHERE id=$1")
+            .bind(turn.segment_id)
+            .fetch_optional(&mut *tx)
+            .await
+            .map_err(orch_db::DbError::from)?
+            .flatten();
+        tx.commit().await.map_err(orch_db::DbError::from)?;
+        Ok(machine.map_or(ResolutionLane::Unavailable, ResolutionLane::Active))
     }
 
     /// The harness could not be told what was decided: the approval is
@@ -1584,18 +1689,31 @@ pub mod access {
             asks: &[Ask],
             reason: &str,
             for_thread: Option<Id>,
+            requested_expires_at: Option<Time>,
             origin: &Origin,
         ) -> Result<Raised, RaiseError> {
             let now = self.inner.clock.now();
             let mut tx = self.inner.db.begin().await?;
             let principal = Principal::load(&mut tx, caller.clone(), Time::new(now)).await?;
-            self.raise_access_requests_guarded(tx, principal, asks, reason, for_thread, origin)
-                .await
+            self.raise_access_requests_guarded(
+                tx,
+                principal,
+                asks,
+                reason,
+                for_thread,
+                requested_expires_at,
+                origin,
+            )
+            .await
         }
 
         /// Asks as [`Self::raise_access_requests`] does, in a transaction whose caller was asked again
         /// once the request had come (the API's action guard): `principal` was loaded in `tx` by that
         /// check, and its caller and its time are the ones the request is made with.
+        #[expect(
+            clippy::too_many_arguments,
+            reason = "the guarded transaction and every part of the request commit together"
+        )]
         pub async fn raise_access_requests_guarded(
             &self,
             mut tx: orch_db::Tx,
@@ -1603,6 +1721,7 @@ pub mod access {
             asks: &[Ask],
             reason: &str,
             for_thread: Option<Id>,
+            requested_expires_at: Option<Time>,
             origin: &Origin,
         ) -> Result<Raised, RaiseError> {
             let caller = principal.caller().clone();
@@ -1716,6 +1835,7 @@ pub mod access {
                         request: &stored,
                         required_permission: rows::REQUIRED_PERMISSION,
                         expires_at: expiry(now, days),
+                        requested_expires_at: requested_expires_at.map(Time::get),
                         at: now,
                     },
                 )
@@ -1734,6 +1854,7 @@ pub mod access {
             entry.details = json!({
                 "batch_id": batch,
                 "reason": reason,
+                "requested_expires_at": requested_expires_at,
                 "items": made.iter().map(|(row, sent, permissions)| json!({
                     "approval": row.id,
                     "object": { "kind": sent.kind.as_str(), "id": sent.id },
@@ -1757,6 +1878,7 @@ pub mod access {
                         "batch_id": batch,
                         "permissions": permissions.iter().map(|permission| permission.as_str()).collect::<Vec<_>>(),
                         "reason": reason,
+                        "requested_expires_at": requested_expires_at,
                         "path": "/approvals",
                     }),
                     source: row.id.to_string(),
@@ -2025,6 +2147,8 @@ pub mod access {
                 "object": { "kind": object.kind.as_str(), "id": object.id },
                 "asked": asked.permissions.iter().map(|one| one.as_str()).collect::<Vec<_>>(),
                 "given": given.iter().map(|one| one.as_str()).collect::<Vec<_>>(),
+                "requested_expires_at": row.requested_expires_at.map(Time::new),
+                "expires_at": decided.expires_at,
                 "note": decided.note,
             });
             audit::append(&mut tx, &entry, origin, now)
@@ -2076,6 +2200,7 @@ pub mod access {
                     "approved": decided.approve,
                     "permissions": given.iter().map(|permission| permission.as_str()).collect::<Vec<_>>(),
                     "note": note,
+                    "requested_expires_at": row.requested_expires_at.map(Time::new),
                     "path": "/approvals",
                 }),
                 source: format!("{}:{verdict}", row.id),

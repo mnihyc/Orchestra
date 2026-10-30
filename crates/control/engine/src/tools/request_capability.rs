@@ -208,6 +208,13 @@ impl Engine {
                 drop(conn);
                 let mut tx = self.inner.db.begin().await?;
                 super::source::check(&mut tx).await?;
+                if self
+                    .current_capability_request(&mut tx, &view, &definition, &policy)
+                    .await?
+                    .is_none()
+                {
+                    return Ok(capability_changed());
+                }
                 requests::insert(
                     &mut tx,
                     &requests::NewCapabilityApproval {
@@ -249,6 +256,12 @@ impl Engine {
                 let finished = {
                     let mut unit = Unit::new(&mut tx, now);
                     unit.check_tool_source().await?;
+                    let Some((current, current_definition)) = self
+                        .current_capability_request(&mut *unit.conn, &view, &definition, &policy)
+                        .await?
+                    else {
+                        return Ok(capability_changed());
+                    };
                     append(&mut *unit.conn, &audit, &Origin::default(), now).await?;
                     requests::insert(
                         &mut *unit.conn,
@@ -277,8 +290,8 @@ impl Engine {
                     .await?;
                     self.grant_capability(
                         &mut unit,
-                        &view.facts,
-                        &definition,
+                        &current.facts,
+                        &current_definition,
                         Some(thread.node_id),
                         None,
                     )
@@ -356,6 +369,13 @@ impl Engine {
                 let finished = {
                     let mut unit = Unit::new(&mut tx, now);
                     unit.check_tool_source().await?;
+                    if self
+                        .current_capability_request(&mut *unit.conn, &view, &definition, &policy)
+                        .await?
+                        .is_none()
+                    {
+                        return Ok(capability_changed());
+                    }
                     let title = format!("{} asks for \"{label}\"", thread.name);
                     let raised = requests::insert(
                         &mut *unit.conn,
@@ -401,6 +421,43 @@ impl Engine {
                 Ok(done("pending", &pending_notice, Some(request_id)))
             }
         }
+    }
+
+    /// Confirms the prepared request still describes the offered capability and its policy.
+    async fn current_capability_request(
+        &self,
+        conn: &mut orch_db::Conn,
+        before: &crate::capabilities::EnvironmentView,
+        definition: &env_rows::DefinitionRow,
+        policy: &crate::capabilities::Policy,
+    ) -> Result<
+        Option<(
+            crate::capabilities::EnvironmentView,
+            env_rows::DefinitionRow,
+        )>,
+        EngineError,
+    > {
+        let Some(current) = self.environment_capabilities(conn, before.facts.id).await? else {
+            return Ok(None);
+        };
+        let Some(current_definition) = env_rows::definition(conn, &definition.key).await? else {
+            return Ok(None);
+        };
+        let current_policy = self
+            .capability_policy(conn, current.facts.home_node_id, &current_definition)
+            .await?;
+        if !current.applies
+            || !current
+                .offered
+                .iter()
+                .any(|offered| offered.key == definition.key)
+            || current.facts != before.facts
+            || current_definition != *definition
+            || current_policy != *policy
+        {
+            return Ok(None);
+        }
+        Ok(Some((current, current_definition)))
     }
 
     /// The request as an approval holds it: what is asked, who asks for what, and what granting it would do.
@@ -455,6 +512,14 @@ impl Engine {
             "consequences": consequences,
         }))
     }
+}
+
+fn capability_changed() -> Answer {
+    Refusal::new(
+        crate::tools::definitions::Code::Changed,
+        "The capability or its policy changed while the request was prepared. No request was recorded or capability granted; ask again.",
+    )
+    .into()
 }
 
 /// The name of a host.

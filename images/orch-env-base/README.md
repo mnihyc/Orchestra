@@ -13,12 +13,11 @@ curl and the usual small tools. Beside that it holds three things that a smaller
   browser can have a window on it.
 
 It holds nothing of Orch's: the connector and the harnesses come into a unit from the node's tool cache,
-read-only, so any image works and this is the one that is seeded. A team that needs less makes a template from
-a smaller image; one that needs more, from an image of its own that starts `FROM` this one (and gets the
-variables below with it).
+read-only, so any image works and this is the recipe in the Default template. A team that needs less can use a
+smaller image. To add tools, edit or copy the Default template's Dockerfile.
 
 It is large for that: about 1.6 GiB unpacked (Docker lists it as 2.3 GB; the 505 MiB it was without these
-three things is its first third), and 650 MB to pull. The browser and its video helper are about 420 MB of it,
+three things is its first third); building it downloads the packages and browser. The browser and its video helper are about 420 MB of it,
 Node.js with the command line 240 MB, the display 340 MB (170 MB of that is the software OpenGL with its LLVM that
 Debian's `libgl1` asks of any X server), the fonts and the browser's libraries 150 MB.
 
@@ -186,10 +185,11 @@ docker build --tag orch-env-base:0.1.0 --build-arg VERSION=0.1.0 images/orch-env
 cargo xtask image --version 0.1.0 --fresh      # the same, without Docker's cache, and the labels checked
 ```
 
-`cargo xtask package` builds it as `orch-env-base:<version>`, which is the tag the API seeds the Default template
-with, so a node on the same Docker daemon finds it without pulling, and records its content address in the
-release's manifest. A build from a clean cache took four minutes on a machine with a load of twenty-five (the
-downloads are Node.js, the npm packages, 190 MB of browser and the Debian packages), and needs the network.
+The Default template contains this Dockerfile and the release version as a build argument. The host builds it on
+first use and keeps the result; it needs no checkout or other build-context files. A build from a clean cache took
+four minutes on a machine with a load of twenty-five (the downloads are Node.js, npm packages, the browser and
+Debian packages). It needs the network. `cargo xtask package` builds the same recipe as `orch-env-base:<version>`
+and records its content address in the release manifest.
 
 The recipe builds for the processor Docker runs on. Only x86_64 has been built and run; the pins for aarch64 are
 the same (the Node.js archive of that processor has its hash in the recipe, and the browser, whose directory is then

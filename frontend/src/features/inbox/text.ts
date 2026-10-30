@@ -1,7 +1,7 @@
 /** Notification action text in the reader's language, retaining authored words and legacy fallbacks. */
 import type { TFunction } from 'i18next';
 
-import { isPersonNotice } from '@/features/inbox/kinds';
+import { isPersonNotice, lookOf } from '@/features/inbox/kinds';
 import type { Notification } from '@/generated/api-types';
 import type { TranslationKey } from '@/i18n';
 import { foldName } from '@/lib/placeLabel';
@@ -55,6 +55,10 @@ export function notificationParameters(row: Notification): Record<string, unknow
 
 /** The exact text shown by an Inbox row; an unknown action version keeps the server's safe fallback. */
 export function notificationText(row: Notification, t: TFunction, language: string, threadName?: string | null): { title: string; body: string; namesActor?: boolean } {
+  if (row.title === '' && row.body === '' && row.thread_id !== null && threadName === null) {
+    const label = lookOf(row.kind).label;
+    return { title: label === null ? t('inbox.row.other') : t(label), body: '' };
+  }
   const details = row.details;
   const structured = details?.v === ACTION_VERSION && details.action === row.kind;
   const data = fields(structured ? details.parameters : row.data);

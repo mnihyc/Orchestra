@@ -1100,6 +1100,20 @@ async fn check_facts(
             );
         }
     }
+    // A move gives the resulting role at the destination, just as a direct role grant does.
+    if let Some(role) = facts.after
+        && facts.on_arrival.is_none_or(|held| role > held)
+        && refused.joining.is_none()
+        && refused.admins_there.is_none()
+    {
+        let sharing = policies.sharing_at(Some(ask.to));
+        let standing = crate::giving::role_standing(conn, principal, ask.to, sharing).await?;
+        if !standing.may_give(role) {
+            refused.joining = Some(Box::new(
+                crate::giving::role_refusal(conn, principal, ask.to, role, sharing).await?,
+            ));
+        }
+    }
     Ok(
         if refused.leaving.is_none() && refused.joining.is_none() && refused.admins_there.is_none()
         {
@@ -1110,9 +1124,8 @@ async fn check_facts(
     )
 }
 
-/// Whether the caller may move the member: `members.manage` at the org they leave and at the org
-/// they join, which lie in one tree, and where the move gives Admin, being an owner or an admin of
-/// the org it is given on.
+/// Whether the caller may move the member: `members.manage` at both ends and authority to give
+/// any role newly granted at the destination.
 pub async fn may_move_member(
     conn: &mut Conn,
     principal: &Principal,

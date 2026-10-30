@@ -54,6 +54,60 @@ fn identity(hit: &SearchHit) -> (String, Id, Option<Id>) {
 }
 
 #[tokio::test]
+async fn retained_history_selection_does_not_reveal_whether_an_unreadable_thread_exists() {
+    let desk = Desk::new().await;
+    let stranger = desk.stranger("stranger").await;
+    let (thread, _) =
+        search_world::thread(&desk, &desk.ada, desk.topic, "Private conversation").await;
+    for (continuation, revision) in [(Some(new_id()), None), (None, Some(1))] {
+        let make_query = |scope| SearchListQuery {
+            scope: Some(scope),
+            continuation_id: continuation,
+            projection_revision: revision,
+            ..query("needle", SearchSort::Newest)
+        };
+        let hidden = desk
+            .world
+            .app
+            .call(SearchList, &[])
+            .token(&stranger.token)
+            .query(&make_query(thread))
+            .send()
+            .await
+            .problem();
+        let missing = desk
+            .world
+            .app
+            .call(SearchList, &[])
+            .token(&stranger.token)
+            .query(&make_query(new_id()))
+            .send()
+            .await
+            .problem();
+        assert_eq!(hidden.code, ErrorCode::NotFound);
+        assert_eq!(hidden.code, missing.code);
+        assert_eq!(hidden.status, missing.status);
+        assert_eq!(hidden.detail, missing.detail);
+        assert_eq!(hidden.extra, missing.extra);
+        let wrong_kind = desk
+            .world
+            .app
+            .call(SearchList, &[])
+            .token(&desk.ada.token)
+            .query(&make_query(desk.topic))
+            .send()
+            .await
+            .problem();
+        assert_eq!(wrong_kind.code, ErrorCode::RequestInvalid);
+    }
+    let visible = SearchListQuery {
+        scope: Some(thread),
+        ..query("needle", SearchSort::Newest)
+    };
+    let _ = page(&desk, &desk.ada, &visible).await;
+}
+
+#[tokio::test]
 async fn relevance_pages_put_names_and_titles_before_newer_bodies_newest_first_and_bind_the_order()
 {
     let desk = Desk::new().await;

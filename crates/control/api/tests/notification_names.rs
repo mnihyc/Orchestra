@@ -163,3 +163,145 @@ async fn threads_in_one_topic_have_distinct_current_titles_in_day_and_place_page
         );
     }
 }
+
+#[tokio::test]
+async fn private_thread_notices_keep_their_history_without_their_stored_text() {
+    let desk = Desk::new().await;
+    let reader = desk.member("reader", "viewer").await;
+    let (thread, _) =
+        search_world::thread(&desk, &desk.ada, desk.topic, "Private project title").await;
+    for kind in ["turn.completed", "milestone"] {
+        let mut conn = desk.world.conn().await;
+        announce(
+            &mut conn,
+            &NewNotification {
+                user_id: reader.id(),
+                kind,
+                node_id: Some(desk.topic),
+                thread_id: Some(thread),
+                approval_id: None,
+                chat_id: None,
+                title: "Private project title finished",
+                body: "Private agent result",
+                data: &json!({"subject":"Private project title", "excerpt":"Private agent result"}),
+                dedupe_key: &format!("private-test:{kind}"),
+                at: desk.world.now(),
+            },
+        )
+        .await
+        .unwrap()
+        .expect("a notification was written");
+    }
+    let visible = list(&desk, &reader, None).await;
+    assert_eq!(visible.len(), 2);
+    assert!(visible.iter().all(|row| row.body == "Private agent result"));
+    let page = desk
+        .world
+        .app
+        .call(PermissionPageGet, &[&"nodes", &thread])
+        .token(&desk.ada.token)
+        .send()
+        .await
+        .ok();
+    let change: PageChange =
+        serde_json::from_value(json!({"whole":"private","expected_revision":page.revision}))
+            .unwrap();
+    desk.world
+        .app
+        .call(PermissionPageUpdate, &[&"nodes", &thread])
+        .token(&desk.ada.token)
+        .body(&change)
+        .send()
+        .await
+        .ok();
+    for grouping in [None, Some(NotificationGrouping::Place)] {
+        let rows = list(&desk, &reader, grouping).await;
+        assert_eq!(rows.len(), 2, "historical notices stay available");
+        for row in &rows {
+            assert_eq!(row.thread_id, Some(thread));
+            let shown = serde_json::to_string(row).unwrap();
+            assert!(
+                !shown.contains("Private project title"),
+                "thread name was disclosed: {shown}"
+            );
+            assert!(
+                !shown.contains("Private agent result"),
+                "thread content was disclosed: {shown}"
+            );
+        }
+    }
+    let page = desk
+        .world
+        .app
+        .call(PermissionPageGet, &[&"nodes", &thread])
+        .token(&desk.ada.token)
+        .send()
+        .await
+        .ok();
+    let change: PageChange =
+        serde_json::from_value(json!({"whole":"reset","expected_revision":page.revision})).unwrap();
+    desk.world
+        .app
+        .call(PermissionPageUpdate, &[&"nodes", &thread])
+        .token(&desk.ada.token)
+        .body(&change)
+        .send()
+        .await
+        .ok();
+    let restored = list(&desk, &reader, None).await;
+    assert_eq!(restored.len(), 2);
+    assert!(
+        restored
+            .iter()
+            .all(|row| row.body == "Private agent result")
+    );
+}
+
+#[tokio::test]
+async fn machine_outage_notices_do_not_disclose_other_threads_and_certificate_notices_keep_their_text()
+ {
+    let desk = Desk::new().await;
+    let reader = desk.stranger("machine-owner").await;
+    for (key, body, data) in [
+        (
+            "outage",
+            "Secret thread and 3 more were running",
+            json!({"machine_id":new_id()}),
+        ),
+        (
+            "certificate",
+            "Certificate renewal information",
+            json!({"reason":"certificate_expiring"}),
+        ),
+    ] {
+        let mut conn = desk.world.conn().await;
+        announce(
+            &mut conn,
+            &NewNotification {
+                user_id: reader.id(),
+                kind: "machine.offline",
+                node_id: None,
+                thread_id: None,
+                approval_id: None,
+                chat_id: None,
+                title: "Machine needs attention",
+                body,
+                data: &data,
+                dedupe_key: key,
+                at: desk.world.now(),
+            },
+        )
+        .await
+        .unwrap()
+        .expect("a notification was written");
+    }
+    for grouping in [None, Some(NotificationGrouping::Place)] {
+        let rows = list(&desk, &reader, grouping).await;
+        assert_eq!(rows.len(), 2);
+        assert!(rows.iter().all(|row| !row.body.contains("Secret thread")));
+        assert!(
+            rows.iter()
+                .any(|row| row.body == "Certificate renewal information")
+        );
+    }
+}

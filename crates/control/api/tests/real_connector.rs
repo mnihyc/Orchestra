@@ -1384,6 +1384,8 @@ impl Cluster {
                     os_version: "scripted Linux".to_owned(),
                     cpus: 1,
                     memory_bytes: 0,
+                    discovered_harnesses: None,
+                    searched_harness_kinds: None,
                     harnesses: vec![MachineFactsHarness {
                         kind: "fake".to_owned(),
                         path: handler_program.clone(),

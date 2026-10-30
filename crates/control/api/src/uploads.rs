@@ -161,7 +161,7 @@ async fn own_session(
         .await?
         .filter(|session| session.user_id == user)
         .ok_or_else(ApiError::not_found)?;
-    if session.expires_at < now {
+    if session.expires_at <= now {
         return Err(ApiError::new(ErrorCode::Gone, "this upload ran out"));
     }
     Ok(session)

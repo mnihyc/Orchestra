@@ -369,6 +369,25 @@ pub async fn send_code(ctx: &Ctx, body: &AuthEmailCodeSendBody) -> ApiResult<()>
             .unwrap_or_default(),
         locale: found.map_or("en", |user| user.locale.as_str()),
     };
-    mail::send_code(ctx, &mut conn, policy.mail_channel, &to, go).await?;
+    // Order issuance with changes to the address or first proof. An old mailbox must not receive
+    // a newly valid code after the replacement transaction has already cleared its old codes.
+    drop(conn);
+    let mut tx = ctx.app.db.begin().await?;
+    let current = orch_db::queries::transaction_guard::lock_person(
+        &mut tx,
+        found.map_or_else(Id::nil, |user| user.id),
+    )
+    .await?;
+    let still_current = found
+        .zip(current.as_ref())
+        .is_some_and(|(before, current)| {
+            !current.suspended()
+                && current.email_confirmed()
+                && current.email == before.email
+                && current.password_hash == before.password_hash
+                && current.email_code_at == before.email_code_at
+        });
+    mail::send_code(ctx, &mut tx, policy.mail_channel, &to, go && still_current).await?;
+    tx.commit().await.map_err(orch_db::DbError::from)?;
     Ok(())
 }

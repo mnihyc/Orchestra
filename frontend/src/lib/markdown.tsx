@@ -9,14 +9,13 @@
 import { Lexer, type Token, type Tokens } from 'marked';
 import { createContext, type ReactNode, useContext } from 'react';
 import { i18n } from '@/i18n';
+import { messageLinkAllowed } from '@/features/people/links';
 
 import { CodeBlock } from '@/ui/CodeBlock';
 import { cx } from '@/ui/cx';
 import { ScrollRegion } from '@/ui/ScrollRegion';
 
-/** The kinds of address a link of a message may lead to; anything else is shown as its text. */
-const SAFE_SCHEME = /^(https?:|mailto:)/i;
-const OWN_ADDRESS = /^(\/(?!\/)|#|\.\.?\/)/;
+const OWN_ADDRESS = /^(\/(?![/\\])|#|\.\.?\/)/;
 /** A link that leaves the application opens in a tab of its own and tells that tab nothing of this page. */
 const NEW_TAB = { target: '_blank', rel: 'noopener noreferrer' } as const;
 
@@ -74,8 +73,7 @@ function MessageLink({ href, title, children }: { href: string; title?: string; 
 
 /** Whether a link's address is one to follow. */
 export function isSafeHref(href: string): boolean {
-  const clean = href.trim();
-  return SAFE_SCHEME.test(clean) || OWN_ADDRESS.test(clean);
+  return messageLinkAllowed(href);
 }
 
 /** Reads text into blocks. Raw HTML is kept in the tokens, as text, and never turned into elements. `breaks`: a line break inside a paragraph is kept, as in what a person wrote. */

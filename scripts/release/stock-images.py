@@ -113,11 +113,24 @@ def shell_images(text):
 
 def paths(root):
     # git's inventory also works for a worktree and includes newly added inputs.
-    result = subprocess.run(["git", "-C", str(root), "ls-files", "--cached", "--others", "--exclude-standard", "-z"], capture_output=True, check=False)
-    if result.returncode == 0:
-        return sorted({Path(path.decode()) for path in result.stdout.split(b"\0") if path})
+    top = subprocess.run(["git", "-C", str(root), "rev-parse", "--show-toplevel"], capture_output=True, text=True, check=False)
+    # A source export can sit inside an unrelated worktree. Its parent's inventory does not describe it.
+    if top.returncode == 0 and Path(top.stdout.strip()).resolve() == root.resolve():
+        result = subprocess.run(["git", "-C", str(root), "ls-files", "--cached", "--others", "--exclude-standard", "-z"], capture_output=True, check=False)
+        if result.returncode == 0:
+            return sorted({Path(path.decode()) for path in result.stdout.split(b"\0") if path})
     # A clean exported source archive has no git directory.
     return sorted(path.relative_to(root) for path in root.rglob("*") if path.is_file() and not any(part in {"node_modules", "target", ".git", ".tmp", "dist"} for part in path.relative_to(root).parts))
+
+
+def shared_stages(root):
+    """The stage names this repository's own image recipes define (images/<name>/Dockerfile): a recipe that is built
+    after another one, as one Dockerfile, starts from such a name, which is never pulled."""
+    images = root / "images"
+    names = set()
+    for recipe in images.glob("*/Dockerfile") if images.is_dir() else ():
+        names.update(match[1] for match in re.finditer(r"(?im)^\s*FROM\s+\S+(?:\s+\S+)*?\s+AS\s+([^\s#]+)", recipe.read_text()))
+    return names
 
 
 def inputs(root):
@@ -125,6 +138,7 @@ def inputs(root):
     database_recipe = root / "deploy/postgres/Dockerfile"
     if compose.exists() and 'build: ./postgres' in compose.read_text() and not database_recipe.exists():
         raise ValueError("deploy/postgres/Dockerfile: the database build recipe is missing")
+    own_stages = shared_stages(root)
     selected = []
     faults = []
     for relative in paths(root):
@@ -135,11 +149,14 @@ def inputs(root):
             if not path.read_bytes().startswith(b'#!'): continue
         if path.name.startswith("test_") or relative.parts[:3] == ('frontend','src','i18n'):
             continue
+        # A test's recorded data (a template as an earlier release stored it) names images that nothing pulls.
+        if any(relative.parts[i:i + 2] == ('tests', 'fixtures') for i in range(len(relative.parts) - 1)):
+            continue
         text = path.read_text()
         matches = []
         if recipe:
             arguments = {match[1]: match[2].strip("\"'") for match in re.finditer(r"(?im)^\s*ARG\s+([A-Z_][A-Z0-9_]*)=([^\s#]+)", text)}
-            stages = set()
+            stages = set(own_stages) if relative.parts[:1] == ("images",) else set()
             for match in re.finditer(r"(?im)^\s*FROM\s+(?:--platform=\S+\s+)?([^\s#]+)", text):
                 reference = match[1]
                 known_stage = reference in stages
@@ -184,17 +201,16 @@ def inputs(root):
     return sorted(set(selected))
 
 
-def built_here(root):
-    """The images this repository builds from its own recipes (images/<name>/Dockerfile): made, never pulled."""
-    images = root / "images"
-    return {recipe.parent.name for recipe in images.glob("*/Dockerfile")} if images.is_dir() else set()
+def local_base(root, path, reference):
+    """The developer recipe's default is the separately built local development image."""
+    return (path == Path("images/orch-env-dev/Dockerfile") and reference == "orch-env-base:dev"
+            and (root / "images/orch-env-base/Dockerfile").is_file())
 
 
 def check(root, selected):
-    own = built_here(root)
     faults = [f"{path}: {reference} needs a tag and a sha256 index digest"
               for path, _, _, reference in selected
-              if not PIN.fullmatch(reference) and reference.split(":", 1)[0] not in own]
+              if not PIN.fullmatch(reference) and not local_base(root, path, reference)]
     for relative in paths(root):
         if relative.suffix not in {".yml", ".yaml"} or not (str(relative).startswith(".github/") or relative.name in {"action.yml", "action.yaml"}): continue
         for action in re.findall(r"^\s*(?:-\s*)?uses:\s*(\S+)", (root / relative).read_text(), re.MULTILINE):
@@ -230,6 +246,7 @@ def main():
     try:
         selected = inputs(args.root)
         if args.check: return check(args.root, selected)
+        selected = [item for item in selected if not local_base(args.root, item[0], item[3])]
         tags = sorted({reference.split("@", 1)[0] for _, _, _, reference in selected})
         if any(not re.fullmatch(r"[^@\s]+:[^:@/\s]+", tag) for tag in tags): raise ValueError("cannot refresh an unresolved or untagged image input")
         digests = {tag: inspect(tag) for tag in tags}

@@ -4,8 +4,6 @@
     clippy::expect_used,
     reason = "a test fails by panicking"
 )]
-// The program is stopped the way a service manager stops it, with a termination signal.
-#![cfg(unix)]
 
 use std::convert::Infallible;
 use std::path::Path;
@@ -21,10 +19,12 @@ use hyper::{Method, Request, Response, StatusCode};
 use hyper_util::rt::TokioIo;
 use orch_link::framing::{Connection, MessageSink, MessageSource};
 use orch_link::websocket::accept_tls;
+#[cfg(unix)]
 use orch_link_contract::commands::{AgentStart, SerialKey, SessionClose, SessionOpen, TurnStart};
 use orch_link_contract::enrollment::{
     ENROLL_PATH, Endpoint, EnrollReply, EnrollReplySystem, EnrollRequest, Trust,
 };
+#[cfg(unix)]
 use orch_link_contract::streams::Stream;
 use orch_pki::ca::Holder;
 use orch_pki::certificates::ServiceName;
@@ -32,10 +32,15 @@ use orch_pki::enrollment::{MemoryLedger, TokenGrant, TokenPurpose, issue_token};
 use orch_pki::verification::{TlsIdentity, pinned_server_config, plain_server_config};
 use orch_testkit::doubles::controller::ScriptedController;
 use orch_testkit::doubles::link::{Hub, TestPki};
-use orch_types::{Clock, Id, SystemClock, Time, new_id};
+#[cfg(unix)]
+use orch_types::Time;
+use orch_types::{Clock, Id, SystemClock, new_id};
+#[cfg(unix)]
 use serde_json::json;
 use tokio::net::TcpListener;
-use tokio::process::{Child, Command};
+#[cfg(unix)]
+use tokio::process::Child;
+use tokio::process::Command;
 use tokio_rustls::TlsAcceptor;
 
 /// How long the test waits for something that has to happen, in real time.
@@ -79,6 +84,7 @@ impl System {
         issued.token.to_string()
     }
 
+    #[cfg(unix)]
     fn machine(&self) -> (Id, Arc<ScriptedController>) {
         self.enrolled
             .lock()
@@ -288,10 +294,12 @@ async fn succeeds(mut command: Command) -> String {
     String::from_utf8(output.stdout).unwrap()
 }
 
+#[cfg(unix)]
 fn deadline() -> Time {
     Time::new(chrono::Utc::now() + chrono::Duration::minutes(5))
 }
 
+#[cfg(unix)]
 async fn command<B: orch_link_contract::commands::CommandBody>(
     controller: &ScriptedController,
     key: &SerialKey,
@@ -308,6 +316,7 @@ async fn command<B: orch_link_contract::commands::CommandBody>(
 }
 
 /// Looks every few milliseconds whether something holds, for as long as `PATIENCE`.
+#[cfg(unix)]
 async fn eventually(mut holds: impl FnMut() -> bool) -> bool {
     let began = std::time::Instant::now();
     while began.elapsed() < PATIENCE {
@@ -320,6 +329,7 @@ async fn eventually(mut holds: impl FnMut() -> bool) -> bool {
 }
 
 /// Asks the process to stop as a service manager does, and waits for it to end.
+#[cfg(unix)]
 async fn terminate(child: &mut Child) -> std::process::ExitStatus {
     let pid = child.id().expect("the program already ended");
     let sent = Command::new("kill")
@@ -336,11 +346,13 @@ async fn terminate(child: &mut Child) -> std::process::ExitStatus {
 }
 
 /// Says, when the test is run with `--nocapture`, how far it has come and how long that took.
+#[cfg(unix)]
 fn step(began: std::time::Instant, what: &str) {
     eprintln!("[{:>6.2} s] {what}", began.elapsed().as_secs_f64());
 }
 
 /// A real supervised program speaking the public contract, rather than a registry-only double.
+#[cfg(unix)]
 fn program_fixture(
     directory: &Path,
     kind: orch_plugin_contract::PluginKind,
@@ -378,6 +390,7 @@ fn program_fixture(
     ]
 }
 
+#[cfg(unix)]
 fn run_program(data: &Path) -> Child {
     let log = std::fs::File::create(data.join("programs-test.log")).unwrap();
     program(data)
@@ -390,6 +403,7 @@ fn run_program(data: &Path) -> Child {
         .unwrap()
 }
 
+#[cfg(unix)]
 #[tokio::test]
 async fn programs_register_describe_run_survive_restart_remove_and_reload_with_the_local_policy_enforced()
  {
@@ -737,6 +751,7 @@ async fn role_enrollment_and_local_commands_preserve_handover_and_keep_node_sepa
     );
 }
 
+#[cfg(unix)]
 #[tokio::test]
 async fn a_source_that_needs_provider_context_can_register_even_when_its_metadata_preview_refuses()
 {
@@ -789,6 +804,7 @@ async fn a_source_that_needs_provider_context_can_register_even_when_its_metadat
     assert!(terminate(&mut child).await.success());
 }
 
+#[cfg(unix)]
 #[tokio::test]
 async fn a_delegated_role_change_reconnects_the_real_connector_and_makes_its_new_agent_usable() {
     use orch_connector_core::enrollment::DataDir;
@@ -828,6 +844,7 @@ async fn a_delegated_role_change_reconnects_the_real_connector_and_makes_its_new
     }).await.expect("delegated role changes must acknowledge and reconnect within the native protocol budget");
 }
 
+#[cfg(unix)]
 #[tokio::test]
 async fn the_program_enrolls_takes_its_limits_holds_a_session_hosts_a_turn_and_stops_when_told() {
     let began = std::time::Instant::now();
@@ -924,7 +941,7 @@ async fn the_program_enrolls_takes_its_limits_holds_a_session_hosts_a_turn_and_s
     step(began, "policy set, delegate and status done");
     assert!(status.contains("by-hand"), "{status}");
     assert!(
-        status.contains("Adapters     claude-code, codex, fake"),
+        status.contains("Adapters     claude-code, codex, dsh, fake"),
         "{status}"
     );
     assert!(
@@ -1210,6 +1227,7 @@ async fn a_key_given_to_the_program_is_kept_sealed_on_the_machine_and_is_shown_a
     assert_eq!(std::fs::read_dir(empty_dir.path()).unwrap().count(), 0);
 }
 
+#[cfg(unix)]
 #[tokio::test]
 async fn local_http_enrollment_finishes_and_its_machine_uses_the_pinned_tls_gateway() {
     let (system, _tls_enrollment_port) = start_system().await;

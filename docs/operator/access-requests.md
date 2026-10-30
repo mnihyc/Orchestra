@@ -25,3 +25,8 @@ then eligible owners above it, then org admins. If nobody in that walk can decid
 every currently eligible person is told. Others who can decide find the card or
 Others you may decide. Losing deciding authority removes a pending item and its count;
 it never grants authority merely because a notice was sent earlier.
+
+Moving a member or reassigning members when a department is deleted checks the
+actor's current authority to give the destination role. Token scopes also bound
+the permissions that role can convey.
+An expiring domain role retains its deadline when the member moves.

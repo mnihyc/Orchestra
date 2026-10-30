@@ -35,6 +35,7 @@ import { Button } from '@/ui/Button';
 import { UserChip } from '@/ui/UserChip';
 import { CallHelp } from '@/features/calls/Help';
 import { NotificationFiles } from '@/features/files/MessageFiles';
+import { RequestedEnd } from '@/features/access/RequestEnd';
 
 const ACTOR_MARKS = ['\u0001', '\u0002'] as const;
 
@@ -175,6 +176,7 @@ export function NotificationRow({ row, byPlace = false, labels }: { row: Notific
             </span>}
             {!settled && row.actor !== null && row.actor !== undefined && text.namesActor !== true && <span data-inbox-person className="flex items-center gap-1 text-sm text-text-muted"><Trans i18nKey="inbox.row.byPersonChip" components={{ person: <UserChip user={row.actor} size={24} className="pointer-events-auto relative z-10" /> }} /></span>}
             {kept ? <span className="text-sm text-text-muted">{t('temporary.kept')}</span> : attention ? <span className="pointer-events-auto relative z-10"><RouteNotice row={row} /></span> : body !== null && <span className={cx('text-sm wrap-anywhere', unread ? 'text-text' : 'text-text-muted')}>{body}</span>}
+            {(row.kind === 'access.requested' || row.kind === 'access.decided') && Object.hasOwn(parameters, 'requested_expires_at') && <RequestedEnd at={typeof parameters.requested_expires_at === 'string' ? parameters.requested_expires_at : null} />}
             {row.waiting_for_me && <span className="text-xs font-medium text-warning-text">{t('away.inbox.waiting')}</span>}
           </span>
         </div>

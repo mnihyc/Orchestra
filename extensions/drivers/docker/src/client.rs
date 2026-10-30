@@ -373,9 +373,8 @@ pub fn map_error(error: DockerError) -> DriverError {
     }
 }
 
-// Docker communicates these native ENOSPC/ENOMEM failures in its daemon error body, not a separate enum.
-// This translation belongs to the Docker adapter; the node consumes only typed errors.
-fn daemon_capacity_failure(message: &str) -> bool {
+/// Docker communicates native storage and memory exhaustion in its error body, not a separate enum.
+pub(crate) fn daemon_capacity_failure(message: &str) -> bool {
     let message = message.to_ascii_lowercase();
     [
         "no space left on device",

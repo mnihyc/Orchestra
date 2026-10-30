@@ -141,6 +141,10 @@ async fn a_turn_on_a_provider_on_a_key_starts_the_provider_opens_a_lease_and_clo
         world.machine_id.to_string().as_str()
     );
     assert_eq!(asked.ticket.more["thread_id"], thread.to_string().as_str());
+    assert_eq!(
+        asked.ticket.more["provider_id"],
+        world.provider.to_string().as_str()
+    );
 
     // The lease is the one pre-flight opened, for the model of the turn alone, with no allowance since no
     // cap is evaluated yet.

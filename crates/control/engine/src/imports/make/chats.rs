@@ -137,8 +137,10 @@ struct Writing<'a, 'b> {
     chat: Id,
     /// The files the batch carried for this chat.
     staged: HashSet<Hash>,
-    /// The blobs the messages may carry: the files the batch carried and those the store was found to hold.
+    /// The blobs the messages may carry: files from this chat's package or live destination messages.
     known: HashSet<Hash>,
+    /// Claims that were not brought and are not already in the destination chat.
+    absent: HashSet<Hash>,
     /// What each message of the source is here, as far as it is remembered: what was there, and what was written so far.
     written: HashMap<Id, Id>,
     /// How many lines the system wrote in the chat there, which are not brought.
@@ -173,6 +175,7 @@ pub(super) async fn make_chat(
         batch,
         chat: chat.id,
         known: staged.clone(),
+        absent: HashSet::new(),
         staged,
         written: HashMap::new(),
         system: 0,
@@ -319,26 +322,23 @@ impl Writing<'_, '_> {
         Ok(())
     }
 
-    /// Asks the store which of the files the messages may carry it holds, besides those the batch carried.
+    /// Finds files the destination chat already carries, besides those this package brought.
     async fn know_blobs(&mut self, tx: &mut Tx, fresh: &[&ChatMessage]) -> Result<(), MakeError> {
-        if self.known.len() > REMEMBERED_MAX {
+        if self.known.len().saturating_add(self.absent.len()) > REMEMBERED_MAX {
             self.known.clone_from(&self.staged);
+            self.absent.clear();
         }
         let wanted: HashSet<Hash> = fresh
             .iter()
             .flat_map(|message| blobs_in(&message.parts))
-            .filter(|blob| !self.known.contains(blob))
+            .filter(|blob| !self.known.contains(blob) && !self.absent.contains(blob))
             .collect();
         if wanted.is_empty() {
             return Ok(());
         }
-        let hashes: Vec<Vec<u8>> = wanted.iter().map(|blob| blob.as_bytes().to_vec()).collect();
-        self.known.extend(
-            rows::blobs_known(tx, &hashes)
-                .await?
-                .into_iter()
-                .filter_map(|(hash, _)| Hash::from_slice(&hash).ok()),
-        );
+        let held = extra::held_blobs(tx, self.chat, &wanted).await?;
+        self.absent.extend(wanted.difference(&held).copied());
+        self.known.extend(held);
         Ok(())
     }
 

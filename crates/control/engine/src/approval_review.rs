@@ -244,7 +244,7 @@ pub(crate) fn reviewer_allowed(
     else {
         return Err("Auto is unavailable: this agent program declares no reviewer".to_owned());
     };
-    if !reviewer.settable && !allowed.iter().any(|model| *model == reviewer.model) {
+    if !reviewer.settable && !allowed.contains(&reviewer.model) {
         return Err(format!(
             "Auto is unavailable: this person may not use the native reviewer model {} on this provider",
             reviewer.model

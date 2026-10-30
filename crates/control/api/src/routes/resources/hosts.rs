@@ -771,6 +771,11 @@ async fn token_create(
         }
     }
     .map_err(|fault| ApiError::internal(format!("{}: {}", fault.code, fault.detail)))?;
+    if !crate::certificates::bind_issuer(&mut conn, &made.receipt, ctx.user()?).await? {
+        return Err(ApiError::internal(
+            "the enrollment issuer could not be recorded",
+        ));
+    }
     conn.commit().await.map_err(DbError::from)?;
     Ok(EnrollmentToken {
         receipt: Some(made.receipt),

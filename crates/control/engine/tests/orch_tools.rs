@@ -8,6 +8,7 @@
 mod common;
 mod hosting;
 mod native_tools;
+mod shared;
 
 use common::{World, eventually, queued, turn_ended};
 use orch_authz::Caller;
@@ -15,6 +16,7 @@ use orch_link_contract::commands::{Command, CommandKind, OrchTool, OrchToolResul
 use orch_link_contract::events::TurnOutcome;
 use orch_types::{Id, Json, new_id};
 use serde_json::json;
+use shared::Places;
 use std::time::Duration;
 
 /// The tools a session is opened with, once the descriptor of the tests' agent says it takes an MCP server.
@@ -1134,6 +1136,127 @@ async fn what_an_agent_sends_into_other_threads_has_a_rate_in_the_hour_and_the_r
     )
     .await;
     assert!(milestone.error.is_none());
+}
+
+#[tokio::test]
+async fn concurrent_announcement_and_message_share_one_hourly_allowance() {
+    let world = a_world_whose_agent_takes_tools().await;
+    world
+        .set(world.topic, "broadcast.rate_per_hour", json!(1))
+        .await;
+    let sender = world.thread("Sender").await;
+    world.thread("Recipient").await;
+    native_tools::prepare(&world, sender).await;
+
+    // Both calls must finish their initial checks before either can deliver.
+    let before = world.machine.handler.executions().len();
+    world.machine.handler.hold(CommandKind::FsStat);
+    say_call(
+        &world,
+        sender,
+        "concurrent-announcement",
+        OrchTool::Announce,
+        json!({"title":"A notice","body":"See [the file](src/notice.txt)."}),
+    )
+    .await;
+    say_call(
+        &world,
+        sender,
+        "concurrent-message",
+        OrchTool::SendMessage,
+        json!({"target":{"kind":"thread","path":"Recipient"},"text":"See [the file](src/message.txt)."}),
+    )
+    .await;
+    eventually(
+        "both calls reach their independent file observation",
+        || async {
+            world.machine.handler.executions()[before..]
+                .iter()
+                .filter(|execution| execution.kind == CommandKind::FsStat)
+                .count()
+                >= 2
+        },
+    )
+    .await;
+    world.machine.handler.release();
+
+    let notice = answer_to(&world, sender, "concurrent-announcement").await;
+    let message = answer_to(&world, sender, "concurrent-message").await;
+    let answers = [&notice, &message];
+    assert_eq!(
+        answers
+            .iter()
+            .filter(|answer| answer.error.is_none())
+            .count(),
+        1
+    );
+    assert_eq!(
+        answers
+            .iter()
+            .filter(|answer| answer
+                .error
+                .as_ref()
+                .is_some_and(|error| error.code == "rate_limited"))
+            .count(),
+        1
+    );
+    assert_eq!(
+        world
+            .count(
+                "SELECT count(*) FROM announcements WHERE from_thread_id=$1 AND targets <> 'none'",
+                sender
+            )
+            .await,
+        1
+    );
+}
+
+#[tokio::test]
+async fn an_announcement_uses_the_current_audience_policy_after_preparation() {
+    let world = a_world_whose_agent_takes_tools().await;
+    world
+        .set(world.project, "broadcast.agent_scope", json!("project"))
+        .await;
+    let sender = world.thread("Sender").await;
+    let other_topic = world.topic("Other work").await;
+    world.thread_in(other_topic, "Other agent").await;
+    native_tools::prepare(&world, sender).await;
+
+    let before = world.machine.handler.executions().len();
+    world.machine.handler.hold(CommandKind::FsStat);
+    say_call(
+        &world,
+        sender,
+        "audience-changed",
+        OrchTool::Announce,
+        json!({"title":"News","body":"See [the file](src/news.txt).","audience":"project"}),
+    )
+    .await;
+    eventually(
+        "the announcement waits while observing its reference",
+        || async {
+            world.machine.handler.executions()[before..]
+                .iter()
+                .any(|execution| execution.kind == CommandKind::FsStat)
+        },
+    )
+    .await;
+    world
+        .set(world.topic, "broadcast.agent_scope", json!("topic"))
+        .await;
+    world.machine.handler.release();
+
+    let answer = answer_to(&world, sender, "audience-changed").await;
+    assert_eq!(refused(&answer).0, "invalid");
+    assert_eq!(
+        world
+            .count(
+                "SELECT count(*) FROM announcements WHERE from_thread_id=$1",
+                sender
+            )
+            .await,
+        0
+    );
 }
 
 #[tokio::test]

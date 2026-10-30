@@ -2,7 +2,7 @@
 import type { TFunction } from 'i18next';
 import { useTranslation } from 'react-i18next';
 
-import { ApiError } from '@/api/client';
+import { ApiError, invitationIssuerAuthorityLost } from '@/api/client';
 import type { TranslationKey } from '@/i18n';
 import { apiErrorSentence, hasErrorSentence } from '@/i18n/errors';
 import { useAppearance } from '@/lib/appearance';
@@ -40,8 +40,8 @@ export function errorText(
 ): ErrorText {
   if (error instanceof ApiError) {
     const at = error.retryAt === null ? null : formatTimeOfDay(error.retryAt, context);
-    const message =
-      error.code === 'rate_limited' && at !== null ? t('errorsAt.rate_limited', { time: at }) : apiErrorSentence(error.code, error.status, t, context.locale);
+    const message = invitationIssuerAuthorityLost(error) ? t('auth.invite.issuerAuthorityLost')
+      : error.code === 'rate_limited' && at !== null ? t('errorsAt.rate_limited', { time: at }) : apiErrorSentence(error.code, error.status, t, context.locale);
     return {
       message,
       code: error.code,

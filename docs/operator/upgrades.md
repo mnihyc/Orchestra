@@ -1,8 +1,7 @@
 # Upgrades and recovery
 
 How a release is installed over another, what happens when it does not become ready, how to go back, and how to
-finish what a power cut left half done. All of it was run, in the four scenarios of
-[scripts/smoke](../../scripts/smoke/README.md).
+finish what a power cut left half done. A source checkout includes deployment scenarios under `scripts/smoke/`.
 
 ## Updating
 
@@ -41,9 +40,13 @@ are new numbered files; never rewrite an applied checksum to make an update star
 ./update.sh latest
 ```
 
-Before anything is stopped, every file of the release is checked against its `version.json`, and the payloads
-are unpacked beside the running ones. Then `update.sh` says what the update does to running work and asks
-whether to go on (`--yes` answers it, and is needed when nobody can be asked):
+For `--from`, the directory needs `version.json`, the frontend archive, the server archive and the `orchctl`
+binary for this host's architecture, as described in [Deployment](deployment.md#get-the-release). Before anything
+is stopped, the updater checks those payloads and any other manifest-listed files present against `version.json`;
+it unpacks the payloads beside the running ones. If running work or incompatible runtimes are found,
+`update.sh` says what the update does and asks whether to go on (`--yes` answers it when nobody can be asked).
+Prerelease connectors on the minimum's numeric version are reported for a compatibility check. With no affected
+work it proceeds without a question. If the work inventory cannot be read, it stops before stopping services:
 
 ```
 2 environments and 1 provider runtimes will need an update before they work again (release v0.2.0 no longer accepts their connector).
@@ -61,9 +64,9 @@ Then, as one transaction whose every step is written to `runtime/update/journal`
    the release, the gateway is connected to it, the worker beats, and the node has a session. Five minutes are
    allowed (`ORCH_READY_TIMEOUT` changes it).
 
-What the update touches is the three payloads. `compose.yml`, `nginx.conf`, `.env`, `config/orch.toml` and the
-secrets are never changed by it; when a release needs a change to one of them, its notes say so, and the new
-`orch-deploy` bundle holds the new file to compare with yours.
+The update replaces the three payloads. It keeps `compose.yml`, `nginx.conf`, `.env`, `config/orch.toml` and
+existing secrets; it adds the port assertion key if an older complete secret set lacks it. When a release needs a
+configuration change, its notes say so, and the new `orch-deploy` bundle holds the file to compare with yours.
 
 ### Keeping unused releases
 
@@ -158,12 +161,14 @@ update is lost from the running system**: `update.sh` says so before it asks. It
 present database (`orch-<time>-before-rollback-from-<tag>.dump`), so that `./update.sh rollback` again goes
 forward, to the release you left and with what was in it. Machines that were enrolled in between are unknown to
 the restored database and have to be enrolled again; the bundled node, if it enrolled after the dump, is one of
-them (a system that has been in use for a while has had it for long).
+them (a system that has been in use for a while has had it for long). Before stopping services, rollback reads the
+previous server payload's `connectors/version.json` to check its connector minimum. If that manifest is missing or
+does not match the installed record, restore the previous payload from its release files before retrying.
 
 ## After an interruption
 
-A power cut or a Ctrl-C leaves the journal open. Another update, rollback or first start refuses to run until it is
-dealt with:
+A power cut or a Ctrl-C leaves the journal open. An update or rollback, or a first start encountering an
+interrupted update, refuses to run until it is dealt with:
 
 ```
 update.sh: a update to v0.2.0 was interrupted (step activating); run ./update.sh recover first
@@ -178,4 +183,8 @@ update.sh: a update to v0.2.0 was interrupted (step activating); run ./update.sh
 | `starting`, `verifying` | The new release may be fine: it is started and kept if it becomes ready and reports its release, undone like a failed update if not |
 | `done` | The record is closed |
 
-A first start that was cut off is taken up again by running `first-start` again.
+If a step such as stopping services or taking the backup fails, the journal can also remain open and services may
+be stopped. Resolve the reported cause, then run `./update.sh recover` to bring the previous release back.
+
+A first start that was cut off is taken up again by repeating the original `first-start` command, including
+`--from` and any `--restore-database` option.

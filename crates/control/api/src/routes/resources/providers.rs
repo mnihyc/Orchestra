@@ -13,7 +13,7 @@ use crate::routes::access::page::same;
 use crate::routes::nodes::{Placed, actor_name, invalid, placed, policy_at, view as node_view};
 use crate::routes::resources::agents::machine_reports;
 use crate::routes::resources::sealing::{
-    API_KEY, SECRET_MAX_BYTES, header_secret, put_provider_secret,
+    API_KEY, HEADER_PREFIX, SECRET_MAX_BYTES, header_secret, put_provider_secret,
 };
 use crate::routes::resources::upstreams::{self, Checked};
 use crate::routes::resources::view::{
@@ -1863,20 +1863,19 @@ async fn update(ctx: Ctx, (): (), body: api::ProviderUpdateBody) -> ApiResult<Pr
         return Err(stale(&ctx, &mut tx, &principal, id).await);
     }
     if let Some(checked) = &checked {
-        // A secret header that no endpoint lists any more has no use for its value.
-        let mut keep: Vec<String> = vec![API_KEY.to_owned()];
+        // Only obsolete endpoint headers go; the provider's other secrets have their own lifecycles.
+        let mut keep: Vec<String> =
+            orch_db::queries::settings::secret_names_of(&mut tx, &[("provider", id)])
+                .await?
+                .into_iter()
+                .map(|secret| secret.name)
+                .filter(|name| !name.starts_with(HEADER_PREFIX))
+                .collect();
         keep.extend(
             checked
                 .secret_headers
                 .iter()
                 .map(|name| header_secret(name)),
-        );
-        keep.extend(
-            orch_db::queries::settings::secret_names_of(&mut tx, &[("provider", id)])
-                .await?
-                .into_iter()
-                .map(|secret| secret.name)
-                .filter(|name| name.starts_with("runtime:")),
         );
         queries::delete_provider_secrets_except(&mut tx, id, &keep).await?;
     }
@@ -2903,14 +2902,22 @@ async fn harness_sessions(ctx: Ctx, (): (), (): ()) -> ApiResult<Vec<api::Native
         .iter()
         .map(|each| each.native_session_ref.clone())
         .collect();
-    let mut conn = ctx.app.db.acquire().await?;
-    let adopted: HashMap<String, Id> = thread_rows::adopting_threads(&mut conn, &references)
-        .await?
-        .into_iter()
-        .collect();
+    let (mut conn, guard) = crate::middleware::transaction_guard::begin(&ctx).await?;
+    let adopted: HashMap<String, Id> =
+        thread_rows::adopting_threads(&mut conn, id, agent, &references)
+            .await?
+            .into_iter()
+            .collect();
+    let threads: Vec<_> = adopted.values().copied().collect();
+    let visible =
+        node_view::refs(&mut conn, guard.principal(), &threads, Policy::default()).await?;
     for each in &mut sessions {
-        each.adopted_thread_id = adopted.get(&each.native_session_ref).copied();
+        each.adopted_thread_id = adopted
+            .get(&each.native_session_ref)
+            .copied()
+            .filter(|thread| visible.get(thread).is_some_and(|row| !row.redacted));
     }
+    conn.commit().await.map_err(DbError::from)?;
     Ok(sessions)
 }
 

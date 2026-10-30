@@ -1312,7 +1312,11 @@ impl Tree {
         }
         let own_topic_threads: HashSet<Id> = dirs
             .iter()
-            .filter(|dir| dir.place.kind == "thread" && dir.place.path.contains(&agent.topic))
+            .filter(|dir| {
+                dir.place.kind == "thread"
+                    && dir.place.side_of.is_none()
+                    && dir.place.path.contains(&agent.topic)
+            })
             .map(|dir| dir.place.id)
             .collect();
         let way: HashSet<Id> = agent.path.iter().copied().collect();

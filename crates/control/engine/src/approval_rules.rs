@@ -17,7 +17,8 @@ use crate::views;
 use orch_access_contract::decisions::Decision;
 use orch_access_contract::permissions::Permission;
 use orch_api_contract::approvals::{
-    ApprovalOption, HarnessRequest, OptionScope, OptionStyle, ThreadApprovalRule,
+    ApprovalOption, HarnessRequest, HarnessRequestDetail, OptionScope, OptionStyle,
+    ThreadApprovalRule,
 };
 use orch_authz::{Act, Principal, nodes};
 use orch_db::queries::approval_rules::{self as rows, Binding};
@@ -82,15 +83,28 @@ fn thread_option(option: &ApprovalOption) -> Option<serde_json::Value> {
         .and_then(|rule| serde_json::to_value(rule).ok())
 }
 
+/// Rules cover a verified permission request, never a plan, question, form,
+/// file change or unknown request, regardless of the options it carries.
+fn permits_rule(request: &HarnessRequest) -> bool {
+    matches!(
+        &request.detail,
+        HarnessRequestDetail::Command(_) | HarnessRequestDetail::Permissions(_)
+    )
+}
+
 /// Keeps the rule a person allowed by choosing `option` of a request of `thread`, where it is an option for this
 /// thread with its matcher; nothing otherwise. Its line is in the thread and its act in the audit.
 pub(crate) async fn keep(
     unit: &mut Unit<'_>,
     thread: &ThreadRow,
     approval: Id,
+    request: &HarnessRequest,
     option: &ApprovalOption,
     by: Id,
 ) -> Result<Option<Id>, EngineError> {
+    if !permits_rule(request) {
+        return Ok(None);
+    }
     let Some(matcher) = thread_option(option) else {
         return Ok(None);
     };
@@ -132,6 +146,9 @@ pub(crate) async fn answer_by_rule(
     thread: &ThreadRow,
     request: &HarnessRequest,
 ) -> Result<Option<(Id, String)>, EngineError> {
+    if !permits_rule(request) {
+        return Ok(None);
+    }
     let Some(once) = request.options.iter().find(|option| {
         option.style == OptionStyle::Allow && option.scope == Some(OptionScope::Once)
     }) else {

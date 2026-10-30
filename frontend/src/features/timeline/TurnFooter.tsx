@@ -8,11 +8,12 @@
  */
 import { useMutation } from '@tanstack/react-query';
 import { ListChecks, RotateCcw, ScrollText } from 'lucide-react';
-import { memo, type ReactNode } from 'react';
+import { memo, useRef, type ReactNode } from 'react';
 import { useTranslation } from 'react-i18next';
 import { useShallow } from 'zustand/react/shallow';
 
 import { retryTurn, sendInput } from '@/api/threads';
+import { ApiError } from '@/api/client';
 import { hasParams, RanWith } from '@/features/composer/RanWith';
 import { effortDisplayName, modelDisplayName } from '@/features/models/names';
 import { RestoreFromTurn } from '@/features/source/Restore';
@@ -24,7 +25,7 @@ import { useFormatContext } from '@/lib/appearance';
 import { turnPasteSource } from '@/lib/turnPasteSource';
 import { newActKey } from '@/lib/requests';
 import { formatSpan } from '@/lib/time';
-import { threadWriter, useThreadPart } from '@/realtime/stores/thread';
+import { threadViewOf, threadWriter, useThreadPart } from '@/realtime/stores/thread';
 import { useThreadReadRef } from '@/realtime/threadReadContext';
 import type { Turn, TurnLimit } from '@/generated/api-types';
 import type { TFunction } from 'i18next';
@@ -35,6 +36,13 @@ import { RelativeTime } from '@/ui/RelativeTime';
 import { Tooltip } from '@/ui/Tooltip';
 import { failureGroup, manualFailureActions } from './failures';
 import { FailureAlert } from './FailureAlert';
+import { queuedInputs } from './rows';
+
+/** The existing Retry refusal when its original input is already in flight. */
+const INPUT_ALREADY_WAITING = new Set([
+  'The original input is waiting in the message queue or is being delivered',
+  'The original input is already waiting or being delivered',
+]);
 
 /** What a limit that stopped a turn counts, in a sentence made from its structure, never from the vendor's words. */
 function limitWords(limit: TurnLimit, t: TFunction): string {
@@ -110,6 +118,9 @@ function TurnFooterView({ turnId,inputItemId }: { turnId: string;inputItemId?:st
   const read = useThreadReadRef(threadId);
   const turn = useThreadPart(threadId, (view) => view.turns.get(turnId));
   const manual = useThreadPart(threadId, (view) => turn !== undefined && manualFailureActions(view, turn));
+  const originalInput = useThreadPart(threadId, (view) => turn === undefined ? undefined : view.inputs.get(turn.input_id));
+  const originalWaiting = useThreadPart(threadId, (view) => turn === undefined || !manual ? undefined
+    : queuedInputs(view).find((input) => input.id === turn.input_id)?.state);
   const group = useThreadPart(threadId, useShallow((view) => turn === undefined ? { owner: turnId, attempts: 1 } : failureGroup(view, turn)));
   const previous = useThreadPart(threadId, (view) => {
     if (turn === undefined) return undefined;
@@ -145,10 +156,22 @@ function TurnFooterView({ turnId,inputItemId }: { turnId: string;inputItemId?:st
       return [files, added, removed] as const;
     }),
   );
+  const refusalInputSeq = useRef<number | null>(null);
   const retry = useMutation({
     mutationFn: () => retryTurn(read, turnId, newActKey()),
     onSuccess: (reply) => threadWriter.apply(read, { inputs: [reply.input] }),
+    onError: () => {
+      const view = threadViewOf(read);
+      const inputId = view.turns.get(turnId)?.input_id;
+      refusalInputSeq.current = inputId === undefined ? null : view.inputs.get(inputId)?.seq_updated ?? null;
+    },
   });
+  const retryWaiting = retry.error instanceof ApiError && retry.error.is('request.invalid')
+    && INPUT_ALREADY_WAITING.has(retry.error.problem.detail);
+  // A delivered frame already held when the refusal arrived may be stale.
+  const waitingRefusalSuperseded = retryWaiting && (originalWaiting !== undefined
+    || (originalInput !== undefined && originalInput.state !== 'pending' && originalInput.state !== 'delivering'
+      && (refusalInputSeq.current === null || originalInput.seq_updated > refusalInputSeq.current)));
   if (turn === undefined) return null;
   const took = turn.completed_at === null ? null : turnActiveMs(turn, Date.parse(turn.completed_at));
   const usage = turn.usage;
@@ -190,15 +213,18 @@ function TurnFooterView({ turnId,inputItemId }: { turnId: string;inputItemId?:st
       {parts}
       {paramsChanged && <RanWith threadId={threadId} turn={turn} />}
       {(turn.state === 'failed' || turn.state === 'interrupted') && canInteract && manual && (
-        <Button action="retryTurn" size="sm" variant="ghost" icon={<RotateCcw aria-hidden />} pending={retry.isPending} disabled={!live} onClick={() => retry.mutate()}>
-          {t('timeline.footer.retry')}
-        </Button>
+        originalWaiting === 'pending' || originalWaiting === 'delivering'
+          ? <span>{t(originalWaiting === 'pending' ? 'timeline.footer.inputWaiting' : 'timeline.footer.inputDelivering')}</span>
+          : <Button action="retryTurn" size="sm" variant="ghost" icon={<RotateCcw aria-hidden />} pending={retry.isPending} disabled={!live} onClick={() => retry.mutate()}>
+            {t('timeline.footer.retry')}
+          </Button>
       )}
       {inspection === undefined && readOnly !== true && ofTurn.length > 0 && (
         <IconButton action="selectTurn" size="sm" label={t('timeline.selection.turn')} icon={<ListChecks aria-hidden />} onClick={() => selection.pick(ofTurn)} />
       )}
       {inspection === undefined && turn.completed_at !== null && <RestoreFromTurn threadId={threadId} turn={turn} compact />}
-      {retry.error !== null && <ErrorAlert error={retry.error} />}
+      {retry.error !== null && !waitingRefusalSuperseded
+        && <ErrorAlert error={retry.error} message={retryWaiting ? t('timeline.footer.inputWaitingOrDelivering') : undefined} />}
     </div>
     </>
   );

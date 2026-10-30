@@ -71,6 +71,214 @@ async fn enroll(world: &World, token: &str, name: &str) -> Id {
     reply.machine_id
 }
 
+fn enrollment_request(token: &str) -> EnrollRequest {
+    let pending = orch_pki::enrollment::PendingEnrollment::start().unwrap();
+    EnrollRequest {
+        machine_id: None,
+        token: token.to_owned(),
+        csr_pem: pending.csr_pem().to_owned(),
+        name: "test machine".to_owned(),
+        platform: Platform {
+            os: Os::Linux,
+            arch: Arch::X86_64,
+        },
+        connector_version: "0.1.0".to_owned(),
+        protocol_versions: vec![1],
+        roles: vec![Role::Agent, Role::Environment],
+    }
+}
+
+#[tokio::test]
+async fn an_enrollment_token_stops_when_the_issuing_session_or_team_authority_ends() {
+    use orch_api_contract::directory::{OrgMemberSuspend, OrgMemberSuspendBody};
+    let world = World::new().await;
+    let owner = person(&world, "owner").await;
+    let maker = person(&world, "maker").await;
+    let team = make_org(&world, &owner, "Team", "enroll-issuer")
+        .await
+        .base
+        .id;
+    join(&world, team, team, &maker, "developer", &owner).await;
+    // Machine creation at a team home needs settings management unless its policy lists machines.
+    let mut conn = world.conn().await;
+    orch_db::queries::access::testing::add_entry(
+        &mut conn,
+        &orch_db::queries::access::PageKey::new("node", team, "live"),
+        "any",
+        "settings.manage",
+        ("user", Some(maker.id()), None),
+        None,
+        world.now(),
+    )
+    .await
+    .unwrap();
+    orch_db::queries::access::bump_epoch(&mut conn)
+        .await
+        .unwrap();
+    drop(conn);
+    let issue = |home| MachineEnrollmentTokenCreateBody {
+        home_id: Some(home),
+        ..Default::default()
+    };
+    let team_token = world
+        .app
+        .call(MachineEnrollmentTokenCreate, &[])
+        .token(&maker.token)
+        .body(&issue(team))
+        .send()
+        .await
+        .ok()
+        .token;
+    let own_token = world
+        .app
+        .call(MachineEnrollmentTokenCreate, &[])
+        .token(&maker.token)
+        .body(&issue(maker.person.personal_org))
+        .send()
+        .await
+        .ok()
+        .token;
+    let bearer = orch_api_core::middleware::authentication::new_token(
+        orch_api_core::middleware::authentication::API_TOKEN_PREFIX,
+    );
+    let mut conn = world.conn().await;
+    let api_id = orch_db::queries::identity::testing::insert_api_token(
+        &mut conn,
+        maker.id(),
+        &orch_api_core::middleware::authentication::token_hash(&bearer),
+    )
+    .await
+    .unwrap();
+    sqlx::query("UPDATE api_tokens SET scopes=ARRAY['*'] WHERE id=$1")
+        .bind(api_id)
+        .execute(&mut *conn)
+        .await
+        .unwrap();
+    drop(conn);
+    let token_issued_by_api = world
+        .app
+        .call(MachineEnrollmentTokenCreate, &[])
+        .token(&bearer)
+        .body(&issue(maker.person.personal_org))
+        .send()
+        .await
+        .ok()
+        .token;
+    let control = world
+        .app
+        .call(MachineEnrollmentTokenCreate, &[])
+        .token(&owner.token)
+        .body(&issue(owner.person.personal_org))
+        .send()
+        .await
+        .ok()
+        .token;
+    let created = world
+        .app
+        .app
+        .link
+        .certificates()
+        .enroll(
+            &enrollment_request(&control),
+            &orch_db::audit::Origin::default(),
+        )
+        .await
+        .expect("an unchanged issuer can enroll");
+    let again = world
+        .app
+        .call(
+            orch_api_contract::resources::MachineEnrollmentAgainTokenCreate,
+            &[&created.machine_id],
+        )
+        .token(&owner.token)
+        .send()
+        .await
+        .ok()
+        .token;
+    world
+        .app
+        .call(OrgMemberSuspend, &[&team, &maker.id()])
+        .token(&owner.token)
+        .body(&OrgMemberSuspendBody::default())
+        .send()
+        .await
+        .ok();
+    let denied = world
+        .app
+        .app
+        .link
+        .certificates()
+        .enroll(
+            &enrollment_request(&team_token),
+            &orch_db::audit::Origin::default(),
+        )
+        .await
+        .unwrap_err();
+    assert_eq!(denied.status, 410);
+    sqlx::query("UPDATE api_tokens SET revoked_at=$2 WHERE id=$1")
+        .bind(api_id)
+        .bind(world.now())
+        .execute(&world.db.pool)
+        .await
+        .unwrap();
+    let denied = world
+        .app
+        .app
+        .link
+        .certificates()
+        .enroll(
+            &enrollment_request(&token_issued_by_api),
+            &orch_db::audit::Origin::default(),
+        )
+        .await
+        .unwrap_err();
+    assert_eq!(denied.status, 410, "the issuing API token was revoked");
+    sqlx::query("UPDATE sessions SET revoked_at=$2 WHERE user_id=$1")
+        .bind(maker.id())
+        .bind(world.now())
+        .execute(&world.db.pool)
+        .await
+        .unwrap();
+    let denied = world
+        .app
+        .app
+        .link
+        .certificates()
+        .enroll(
+            &enrollment_request(&own_token),
+            &orch_db::audit::Origin::default(),
+        )
+        .await
+        .unwrap_err();
+    assert_eq!(denied.status, 410);
+    sqlx::query("UPDATE sessions SET revoked_at=$2 WHERE user_id=$1")
+        .bind(owner.id())
+        .bind(world.now())
+        .execute(&world.db.pool)
+        .await
+        .unwrap();
+    let denied = world
+        .app
+        .app
+        .link
+        .certificates()
+        .enroll(
+            &enrollment_request(&again),
+            &orch_db::audit::Origin::default(),
+        )
+        .await
+        .unwrap_err();
+    assert_eq!(
+        denied.status, 410,
+        "a replacement identity requires its issuing session"
+    );
+    let count: i64 = sqlx::query_scalar("SELECT count(*) FROM machines WHERE name='test machine'")
+        .fetch_one(&world.db.pool)
+        .await
+        .unwrap();
+    assert_eq!(count, 1, "only the unchanged issuer's machine was created");
+}
+
 async fn visible_and_private(
     world: &World,
     owner: &Who,
@@ -338,5 +546,73 @@ async fn an_older_unspent_token_without_a_home_still_enrolls_at_the_persons_home
             .unwrap()
             .id,
         alice.id()
+    );
+}
+#[tokio::test]
+async fn a_later_admin_mode_cannot_increase_an_enrollment_tokens_issuer_authority() {
+    let world = World::new().await;
+    let owner = person(&world, "owner").await;
+    let maker = person(&world, "maker").await;
+    let team = make_org(&world, &owner, "Team", "enrollment-ceiling")
+        .await
+        .base
+        .id;
+    join(&world, team, team, &maker, "viewer", &owner).await;
+    let mut conn = world.conn().await;
+    let entry = orch_db::queries::access::testing::add_entry(
+        &mut conn,
+        &orch_db::queries::access::PageKey::new("node", team, "live"),
+        "any",
+        "settings.manage",
+        ("user", Some(maker.id()), None),
+        None,
+        world.now(),
+    )
+    .await
+    .unwrap();
+    orch_db::queries::access::bump_epoch(&mut conn)
+        .await
+        .unwrap();
+    drop(conn);
+    let token = world
+        .app
+        .call(MachineEnrollmentTokenCreate, &[])
+        .token(&maker.token)
+        .body(&MachineEnrollmentTokenCreateBody {
+            home_id: Some(team),
+            ..Default::default()
+        })
+        .send()
+        .await
+        .ok()
+        .token;
+    let mut conn = world.conn().await;
+    orch_db::queries::access::remove_entry(&mut conn, entry, owner.id(), world.now())
+        .await
+        .unwrap();
+    orch_db::queries::access::bump_epoch(&mut conn)
+        .await
+        .unwrap();
+    sqlx::query("UPDATE users SET is_system_admin=true WHERE id=$1")
+        .bind(maker.id())
+        .execute(&mut *conn)
+        .await
+        .unwrap();
+    drop(conn);
+    places::admin_mode(&world, &maker, true).await;
+    let denied = world
+        .app
+        .app
+        .link
+        .certificates()
+        .enroll(
+            &enrollment_request(&token),
+            &orch_db::audit::Origin::default(),
+        )
+        .await
+        .unwrap_err();
+    assert_eq!(
+        denied.status, 410,
+        "authority enabled after issuance cannot rescue the token"
     );
 }

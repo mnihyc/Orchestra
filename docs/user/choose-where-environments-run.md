@@ -36,6 +36,9 @@ The environment's page shows its pair, the line on what it shares, and **Limits 
 its runtime, as what to do and why. The same lines are told to the agent at the start of each session, and after the
 environment moves or its runtime changes.
 
+If the host runs out of space while pulling or building an image, free space on that host and retry. A full disk does
+not make Orch substitute an older cached image.
+
 ## Which pairs exist
 
 | Runs on ＼ Runtime | none | runc | gVisor | Kata |

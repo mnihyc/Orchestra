@@ -1025,3 +1025,255 @@ async fn two_requests_that_take_in_one_session_at_once_make_one_thread_and_refus
             .unwrap();
     assert_eq!(holding, 1, "the session is held by one segment");
 }
+
+#[tokio::test]
+async fn adoption_does_not_reveal_an_environment_the_caller_cannot_use() {
+    let s = Scene::new().await;
+    the_harness_lists_its_sessions(&s).await;
+    let work = registered(&s, "/work").await;
+
+    let allowed = plan(&s, "native-a", Some(work)).await.ok();
+    assert_eq!(allowed.environment.as_ref().map(|env| env.id), Some(work));
+    assert_eq!(allowed.directory.as_deref(), Some("web"));
+
+    for native in ["native-a", "native-b"] {
+        let refused = s
+            .rig
+            .world
+            .app
+            .call(ThreadAdoptPreview, &[&s.tree.topic.base.id])
+            .token(&s.eve.token)
+            .body(&ThreadAdoptBody {
+                provider_id: s.on.provider,
+                agent_id: s.on.agent,
+                native_session_ref: native.to_owned(),
+                environment_id: Some(work),
+                name: None,
+            })
+            .send()
+            .await
+            .problem();
+        assert_eq!(refused.code, ErrorCode::AuthzDenied, "{native}");
+        assert!(
+            !serde_json::to_string(&refused).unwrap().contains("/work"),
+            "the other person's workspace root is not disclosed"
+        );
+    }
+    let refused = adopt(&s, &s.eve, "native-b", Some(work), None)
+        .await
+        .problem();
+    assert_eq!(refused.code, ErrorCode::AuthzDenied);
+    assert!(!serde_json::to_string(&refused).unwrap().contains("/work"));
+
+    s.rig
+        .lets_use("environment", work, "environment.use", &s.eve, json!({}))
+        .await;
+    let mut conn = s.rig.db.acquire().await.unwrap();
+    let principal = orch_authz::Principal::load(
+        &mut conn,
+        orch_authz::Caller::session(s.eve.id()),
+        orch_types::Time::new(s.rig.world.now()),
+    )
+    .await
+    .unwrap();
+    let manage = orch_authz::resources::check(
+        &mut conn,
+        &principal,
+        orch_access_contract::decisions::ObjectRef {
+            kind: orch_access_contract::permissions::ObjectKind::Environment,
+            id: work,
+        },
+        orch_access_contract::permissions::Permission::EnvironmentManage,
+        orch_authz::Policy::default(),
+    )
+    .await
+    .unwrap();
+    assert!(
+        !manage.is_allowed(),
+        "use alone must not require management"
+    );
+    drop(conn);
+    let allowed = s
+        .rig
+        .world
+        .app
+        .call(ThreadAdoptPreview, &[&s.tree.topic.base.id])
+        .token(&s.eve.token)
+        .body(&ThreadAdoptBody {
+            provider_id: s.on.provider,
+            agent_id: s.on.agent,
+            native_session_ref: "native-a".to_owned(),
+            environment_id: Some(work),
+            name: None,
+        })
+        .send()
+        .await
+        .ok();
+    assert_eq!(allowed.environment.as_ref().map(|env| env.id), Some(work));
+}
+
+#[tokio::test]
+async fn equal_native_names_in_other_harnesses_do_not_name_or_block_their_threads() {
+    use orch_api_contract::binding::EnvironmentChoice;
+    use orch_api_contract::nodes::{CreateThread, CreateThreadBinding, ThreadCreate};
+
+    let s = Scene::new().await;
+    the_harness_lists_its_sessions(&s).await;
+    let work = registered(&s, "/work").await;
+    let org = places::make_org(&s.rig.world, &s.bea, "Other", "other").await;
+    let project = places::make_project(&s.rig.world, &s.bea, org.base.id, "Other").await;
+    let topic = places::make_topic(&s.rig.world, &s.bea, project.base.id, "Other").await;
+    let tree = rig::Tree {
+        org,
+        project,
+        topic,
+    };
+    let other = s.rig.resources(&s.bea, &tree).await;
+    let thread = s
+        .rig
+        .world
+        .app
+        .call(ThreadCreate, &[&tree.topic.base.id])
+        .token(&s.bea.token)
+        .body(&CreateThread {
+            name: Some("Private work".into()),
+            binding: Some(CreateThreadBinding {
+                agent_id: other.agent,
+                provider_id: other.provider,
+                arrangement: None,
+            }),
+            model: Some(MODEL.into()),
+            environment: Some(EnvironmentChoice::Use(other.environment)),
+            directory: Some("work".into()),
+            ..CreateThread::default()
+        })
+        .send()
+        .await
+        .ok();
+    sqlx::query("UPDATE segments SET native_session_ref='native-a' WHERE thread_id=$1")
+        .bind(thread.base.id)
+        .execute(s.rig.db.pool())
+        .await
+        .unwrap();
+
+    let listed = s
+        .rig
+        .world
+        .app
+        .call(ProviderHarnessSessionList, &[&s.on.provider, &s.on.agent])
+        .token(&s.ada.token)
+        .send()
+        .await
+        .ok();
+    let session = listed
+        .iter()
+        .find(|session| session.native_session_ref == "native-a")
+        .unwrap();
+    assert_eq!(session.adopted_thread_id, None);
+    let preview = plan(&s, "native-a", Some(work)).await.ok();
+    assert_eq!(preview.adopted_thread_id, None);
+    assert_eq!(preview.session.adopted_thread_id, None);
+    let adopted = adopt(&s, &s.ada, "native-a", Some(work), None).await.ok();
+    assert_ne!(adopted.base.id, thread.base.id);
+    let after = plan(&s, "native-a", Some(work)).await.ok();
+    assert_eq!(after.adopted_thread_id, Some(adopted.base.id));
+}
+
+#[tokio::test]
+async fn a_shared_harness_does_not_disclose_a_private_adopted_thread() {
+    let s = Scene::new().await;
+    the_harness_lists_its_sessions(&s).await;
+    let work = registered(&s, "/work").await;
+    let thread = s.thread().await;
+    sqlx::query("UPDATE segments SET native_session_ref='native-a' WHERE thread_id=$1")
+        .bind(thread.base.id)
+        .execute(s.rig.db.pool())
+        .await
+        .unwrap();
+    let mut conn = s.rig.db.acquire().await.unwrap();
+    let page = orch_db::queries::access::PageKey::new("node", thread.base.id, "live");
+    for permission in ["thread.view", "thread.interact", "thread.manage"] {
+        orch_db::queries::access::testing::set_row(
+            &mut conn, &page, "any", permission, false, false,
+        )
+        .await
+        .unwrap();
+    }
+    orch_db::queries::access::bump_epoch(&mut conn)
+        .await
+        .unwrap();
+    let principal = orch_authz::Principal::load(
+        &mut conn,
+        orch_authz::Caller::session(s.eve.id()),
+        orch_types::Time::new(s.rig.world.now()),
+    )
+    .await
+    .unwrap();
+    let decision = orch_authz::nodes::check(
+        &mut conn,
+        &principal,
+        thread.base.id,
+        orch_access_contract::permissions::Permission::ThreadView,
+        orch_authz::Act::Use,
+        orch_authz::Policy::default(),
+    )
+    .await
+    .unwrap();
+    assert!(
+        !decision.is_allowed(),
+        "the thread is private to the other caller"
+    );
+    drop(conn);
+    s.rig
+        .lets_use("environment", work, "environment.use", &s.eve, json!({}))
+        .await;
+
+    let listed = s
+        .rig
+        .world
+        .app
+        .call(ProviderHarnessSessionList, &[&s.on.provider, &s.on.agent])
+        .token(&s.eve.token)
+        .send()
+        .await
+        .ok();
+    assert_eq!(
+        listed
+            .iter()
+            .find(|session| session.native_session_ref == "native-a")
+            .unwrap()
+            .adopted_thread_id,
+        None
+    );
+    let preview = s
+        .rig
+        .world
+        .app
+        .call(ThreadAdoptPreview, &[&s.tree.topic.base.id])
+        .token(&s.eve.token)
+        .body(&ThreadAdoptBody {
+            provider_id: s.on.provider,
+            agent_id: s.on.agent,
+            native_session_ref: "native-a".into(),
+            environment_id: Some(work),
+            name: None,
+        })
+        .send()
+        .await
+        .ok();
+    assert_eq!(preview.adopted_thread_id, None);
+    assert_eq!(preview.session.adopted_thread_id, None);
+    let duplicate = adopt(&s, &s.eve, "native-a", Some(work), None)
+        .await
+        .problem();
+    assert_eq!(duplicate.code, ErrorCode::ConflictExists);
+    assert!(!duplicate.extra.contains_key("existing_id"));
+    assert_eq!(
+        plan(&s, "native-a", Some(work))
+            .await
+            .ok()
+            .adopted_thread_id,
+        Some(thread.base.id),
+        "the thread's owner still sees the existing thread"
+    );
+}

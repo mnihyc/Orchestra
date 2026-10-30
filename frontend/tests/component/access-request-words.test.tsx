@@ -1,12 +1,13 @@
 /** Access requests use the same translated permission names on their inbox card, page card and waiting line. */
-import { cleanup, screen, waitFor, within } from '@testing-library/react';
+import { act, cleanup, fireEvent, screen, waitFor, within } from '@testing-library/react';
 import userEvent from '@testing-library/user-event';
 import { afterEach, beforeEach, expect, it, vi } from 'vitest';
 import type * as AccessApi from '@/api/access';
+import { client } from '@/api/client';
 import { AccessRequest } from '@/features/access/AccessRequest';
 import { RequestCard } from '@/features/access/RequestCard';
 import { AccessCard } from '@/features/approvals/Access';
-import type { AccessRequestGetReply, Approval, MissingAccess, UserRef } from '@/generated/api-types';
+import type { AccessRequestCreateReply, AccessRequestGetReply, Approval, MissingAccess, UserRef } from '@/generated/api-types';
 import { i18n, setLocale } from '@/i18n';
 import { useAppearance } from '@/lib/appearance';
 import { ADA, BEA, CATALOGUE, TOPIC } from '../unit/general-access-fixtures';
@@ -39,11 +40,32 @@ const modes = [['en', 'light'], ['en', 'dark'], ['zh-CN', 'light'], ['zh-CN', 'd
 const before = useAppearance.getState();
 const oldTheme = document.documentElement.dataset.theme;
 const oldDark = document.documentElement.classList.contains('dark');
+const originalSession = client.session.getState();
 beforeEach(() => { sessionStorage.clear(); vi.clearAllMocks(); calls.request.mockResolvedValue({ batch_id: 'batch', approvals: [approval] });calls.read.mockResolvedValue({batch_id:'batch',approvals:[approval],complete:false}); });
 afterEach(async () => {
-  cleanup(); useAppearance.setState(before); document.documentElement.classList.toggle('dark', oldDark);
+  cleanup(); client.session.setState(originalSession); useAppearance.setState(before); document.documentElement.classList.toggle('dark', oldDark);
   if (oldTheme === undefined) delete document.documentElement.dataset.theme; else document.documentElement.dataset.theme = oldTheme;
   await setLocale('en');
+});
+
+it('remembers a request accepted after its form was closed', async () => {
+  client.session.setState({ status: 'signed_in', userId: 'reader' });
+  let finish: (reply: AccessRequestCreateReply) => void = () => undefined;
+  calls.request.mockImplementation(() => new Promise((resolve) => { finish = resolve; }));
+  const view = show(<AccessRequest missing={[missing]} objectId="release" rememberAs="release.use" fixed />);
+  const reason = screen.getByRole('textbox', { name: i18n.t('access.request.reason') });
+  fireEvent.change(reason, { target: { value: 'Please grant use.' } });
+  const form = reason.closest('form');
+  if (form === null) throw new Error('The request has no form');
+  fireEvent.submit(form);
+  await waitFor(() => expect(calls.request).toHaveBeenCalledOnce());
+  view.unmount();
+  await act(async () => finish({ batch_id: 'batch', approvals: [approval] }));
+  const key = `orch.access.request.v2.${JSON.stringify(['reader', 'release.use', null, false])}`;
+  await waitFor(() => expect(sessionStorage.getItem(key)).toBe('batch'));
+  show(<AccessRequest missing={[missing]} objectId="release" rememberAs="release.use" fixed />);
+  expect(await screen.findByText(i18n.t('access.request.waitingFor', { names: ADA.display_name }))).toBeVisible();
+  expect(calls.request).toHaveBeenCalledOnce();
 });
 
 for (const [locale, theme] of modes) {

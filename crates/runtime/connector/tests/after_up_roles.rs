@@ -1,25 +1,34 @@
 //! Unit and directory roles use the same command journal, with each machine's policy and actual runtime context.
-#![cfg(unix)]
 #![allow(
     clippy::unwrap_used,
     clippy::expect_used,
     reason = "a test fails by panicking"
 )]
 
+#[cfg(unix)]
 mod common;
+#[cfg(unix)]
 mod rig_environment;
 
+#[cfg(unix)]
 use common::Rig;
+#[cfg(unix)]
 use orch_connector_core::roles::provider::{ProviderParts, plug_in};
+#[cfg(unix)]
 use orch_link_contract::{
     commands::{AgentStart, EnvAttach, IndexMode, Secret, SerialKey, UnitAfterUp},
     session::Role,
 };
+#[cfg(unix)]
 use orch_settings_contract::unit::AfterUpCommand;
+#[cfg(unix)]
 use orch_types::new_id;
+#[cfg(unix)]
 use rig_environment::EnvRig;
+#[cfg(unix)]
 use std::{collections::BTreeMap, sync::Arc};
 
+#[cfg(unix)]
 #[tokio::test]
 async fn a_managed_environment_uses_the_workspace_and_attached_variables_and_secrets_and_replays_after_connector_restart()
  {
@@ -92,6 +101,7 @@ async fn a_managed_environment_uses_the_workspace_and_attached_variables_and_sec
     rig.stop().await;
 }
 
+#[cfg(unix)]
 #[tokio::test]
 async fn a_provider_role_runs_in_its_home_before_provider_start_and_does_not_claim_an_environment_command()
  {
@@ -129,6 +139,7 @@ async fn a_provider_role_runs_in_its_home_before_provider_start_and_does_not_cla
     rig.kill().await;
 }
 
+#[cfg(unix)]
 #[tokio::test]
 async fn a_directory_keeps_commands_off_as_installed_and_can_enable_the_same_commands_locally() {
     let mut rig = EnvRig::new();
@@ -164,6 +175,7 @@ async fn a_directory_keeps_commands_off_as_installed_and_can_enable_the_same_com
     rig.stop().await;
 }
 
+#[cfg(unix)]
 #[tokio::test]
 async fn directory_provider_commands_use_the_selected_profile_home_and_runtime_variables() {
     let mut rig = Rig::with_roles(vec![Role::Agent, Role::Environment]);

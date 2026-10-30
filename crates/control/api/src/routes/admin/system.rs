@@ -277,6 +277,7 @@ async fn backup_restore_list(
 
 /// The bytes free on the disk that holds `dir`, or the nearest directory above it that exists:
 /// where the blob store will be, if it is not yet.
+#[cfg(unix)]
 fn free_bytes(dir: &Path) -> i64 {
     let mut at = dir;
     loop {
@@ -289,6 +290,11 @@ fn free_bytes(dir: &Path) -> i64 {
             None => return 0,
         }
     }
+}
+
+#[cfg(not(unix))]
+fn free_bytes(_dir: &Path) -> i64 {
+    0
 }
 
 /// What the blob store holds, from its index and from the disk.

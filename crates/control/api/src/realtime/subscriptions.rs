@@ -830,6 +830,8 @@ pub(crate) async fn subscribe(
         st.open = false;
         old.set_live(false);
         inner.unregister(&old);
+        // Frames belong to the old generation even when the client reuses its number.
+        connection.outbox.purge(old.tag().generation);
         // The same feed under the same number goes on being looked at.
         if old.feed() != &feed {
             inner.leave_presence(connection, old.feed());

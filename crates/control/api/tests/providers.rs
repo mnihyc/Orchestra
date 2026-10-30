@@ -15,7 +15,8 @@ use orch_api_contract::resources::{
     CreateProvider, Provider, ProviderCreate, ProviderDelete, ProviderDisable, ProviderEnable,
     ProviderGet, ProviderKeySet, ProviderKeySetBody, ProviderList, ProviderListQuery,
     ProviderListScope, ProviderModelCreate, ProviderModelCreateBody, ProviderSecretSet,
-    ProviderSecretSetBody, ProviderStatus, ProviderUpdate, ProviderUpdateBody, Upstream,
+    ProviderSecretSetBody, ProviderSourcesSet, ProviderStatus, ProviderUpdate, ProviderUpdateBody,
+    Upstream,
 };
 use orch_api_core::routes::resources::sealing::{binding, install_master_key};
 use orch_db::queries::hierarchy::testing::insert_node;
@@ -1672,6 +1673,100 @@ async fn the_secret_header_of_an_endpoint_that_goes_is_forgotten_with_it() {
     .await
     .unwrap();
     assert_eq!(left, ["api_key"]);
+}
+
+#[tokio::test]
+async fn changing_an_endpoint_keeps_the_source_authorization_while_forgetting_removed_headers() {
+    const SOURCE_TOKEN: &str = "source-authorization-never-public";
+    let world = world().await;
+    let c = company(&world).await;
+    let mut body = api_body("Team key", c.acme);
+    if let CreateProvider::Api {
+        upstreams, secrets, ..
+    } = &mut body
+    {
+        upstreams[0].options = json!({ "secret_headers": ["x-gateway-key"] });
+        *secrets = Some([("x-gateway-key".to_owned(), GATEWAY_SECRET.to_owned())].into());
+    }
+    let provider = make(&world, &c.boss, &body).await;
+    let id = provider.base.id;
+    let source = world
+        .app
+        .call(ProviderSourcesSet, &[&id])
+        .token(&c.boss.token)
+        .raw_body(&json!({
+            "expected_revision": provider.revision,
+            "facts": {
+                "by": "address",
+                "address": {"url": "https://facts.example.com/orch", "auth": "bearer"},
+                "authorization": SOURCE_TOKEN
+            }
+        }))
+        .send()
+        .await;
+    assert!(!String::from_utf8_lossy(&source.raw).contains(SOURCE_TOKEN));
+    let source = source.ok();
+    let sealed_before: Vec<u8> = sqlx::query_scalar(
+        "SELECT sealed FROM secrets WHERE owner_kind='provider' AND owner_id=$1 AND name='source:facts:authorization'",
+    )
+    .bind(id)
+    .fetch_one(&world.db.pool)
+    .await
+    .unwrap();
+    assert!(
+        !sealed_before
+            .windows(SOURCE_TOKEN.len())
+            .any(|part| part == SOURCE_TOKEN.as_bytes())
+    );
+
+    let changed = world
+        .app
+        .call(ProviderUpdate, &[&id])
+        .token(&c.boss.token)
+        .body(&ProviderUpdateBody {
+            name: None,
+            upstreams: Some(vec![endpoint(
+                "openai-responses",
+                "https://api.example.com/v2",
+                json!({}),
+            )]),
+            config: None,
+            arrangements: None,
+            runtime_config: None,
+            expected_revision: source.revision,
+        })
+        .send()
+        .await
+        .ok();
+    assert!(changed.provider.key_set);
+    assert!(
+        !changed
+            .provider
+            .secrets_set
+            .iter()
+            .any(|name| name == "x-gateway-key")
+    );
+    assert!(
+        changed
+            .provider
+            .secrets_set
+            .iter()
+            .any(|name| name == "source:facts:authorization")
+    );
+    let rows: Vec<(String, Vec<u8>)> = sqlx::query_as(
+        "SELECT name, sealed FROM secrets WHERE owner_kind='provider' AND owner_id=$1 ORDER BY name",
+    )
+    .bind(id)
+    .fetch_all(&world.db.pool)
+    .await
+    .unwrap();
+    assert_eq!(
+        rows.iter()
+            .map(|(name, _)| name.as_str())
+            .collect::<Vec<_>>(),
+        ["api_key", "source:facts:authorization"]
+    );
+    assert_eq!(rows[1].1, sealed_before);
 }
 
 #[tokio::test]

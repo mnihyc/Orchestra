@@ -315,6 +315,7 @@ impl PolicyKey {
             Self::ProviderSignIn | Self::ProviderPrograms | Self::ProviderArrangements
         ) && roles.contains(&Role::Agent)
             || self == Self::AgentMaxSandbox && roles.contains(&Role::Agent)
+            || self == Self::AgentHarnesses && roles.contains(&Role::Environment)
             || self == Self::ToolsFetch && roles.contains(&Role::Node)
             || matches!(self, Self::EnvironmentRoots | Self::EnvironmentAfterUp)
                 && roles
@@ -1189,6 +1190,14 @@ pub(crate) fn serialize_reported<S: serde::Serializer>(
 mod tests {
     use super::*;
     use serde_json::json;
+
+    #[test]
+    fn an_environment_role_can_report_harness_programs_without_delegating_them() {
+        use crate::session::Role;
+        assert!(PolicyKey::AgentHarnesses.applies_to_roles(&[Role::Environment]));
+        assert!(!PolicyKey::AgentHarnesses.handed_by(&["environment.*".into()]));
+        assert!(PolicyKey::AgentHarnesses.handed_by(&["agent.harnesses".into()]));
+    }
 
     #[test]
     fn environment_switches_follow_the_same_machine_ceiling_and_an_explicit_narrowing_stays_off() {

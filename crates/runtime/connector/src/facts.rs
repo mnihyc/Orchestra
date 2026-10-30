@@ -24,6 +24,9 @@ const DISCOVERY_TIMEOUT: Duration = Duration::from_secs(30);
 pub(crate) async fn on_connections(
     link: orch_link::machine::MachineLink,
     roles: Vec<std::sync::Arc<dyn crate::roles::RoleHandler>>,
+    policy: std::sync::Arc<crate::policy::PolicyStore>,
+    discovery: std::sync::Arc<crate::local_harnesses::Discovery>,
+    facts: std::sync::Arc<crate::dispatch::FactsNow>,
     stop: tokio_util::sync::CancellationToken,
 ) {
     let mut status = link.status();
@@ -36,6 +39,16 @@ pub(crate) async fn on_connections(
         if session != previous {
             previous = session;
             if let Some(session) = session {
+                discovery.refresh(&policy).await;
+                if let Err(error) = link
+                    .publish(
+                        &orch_link_contract::streams::Stream::Machine,
+                        &orch_link_contract::events::Event::MachineFacts(facts()),
+                    )
+                    .await
+                {
+                    tracing::warn!(%error, "local programs could not be reported");
+                }
                 for role in &roles {
                     role.connected(session).await;
                 }
@@ -204,6 +217,8 @@ pub fn machine_facts(
             .into_iter()
             .filter(|harness| std::path::Path::new(&harness.path).is_file())
             .collect(),
+        discovered_harnesses: None,
+        searched_harness_kinds: None,
         adapters: draft.adapters,
         plugins: draft.plugins,
         policy,

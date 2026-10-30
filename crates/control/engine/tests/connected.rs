@@ -690,6 +690,16 @@ async fn a_directory_without_a_template_runs_with_its_machines_full_access_ceili
             assert_eq!(opened[0].0, world.machine_id);
             assert_eq!(opened[0].1.exec.environment_id, environment);
             assert_eq!(opened[0].1.exec.executor.as_deref(), Some("orch-exec"));
+            let Some(orch_link_contract::commands::TicketSlot::Asked(ticket)) =
+                &opened[0].1.exec.ticket
+            else {
+                panic!("the executor must receive a ticket");
+            };
+            assert_eq!(ticket.ticket.more["environment_id"], json!(environment));
+            assert_eq!(
+                ticket.ticket.more["environment_generation"],
+                json!(opened[0].1.exec.generation)
+            );
             assert_eq!(
                 opened[0].1.sandbox_mode,
                 orch_link_contract::commands::SandboxMode::Open

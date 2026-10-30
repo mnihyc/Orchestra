@@ -47,6 +47,7 @@ use orch_api_contract::topics::{
 };
 use orch_api_contract::users::UserRef;
 use orch_authz::{Act, Caller, Principal, nodes};
+use orch_db::Conn;
 use orch_db::audit::{Actor, Entry, Origin, append};
 use orch_db::queries::hierarchy;
 use orch_db::queries::threads::{self, ThreadRow, thread_state, tools as rows, turn_state};
@@ -378,6 +379,13 @@ impl Engine {
         locked.dedup();
         rows::lock_threads(&mut *unit.conn, &locked).await?;
         unit.check_tool_source().await?;
+        if let Sender::Agent(source) = sender
+            && threads::thread(&mut *unit.conn, source.node_id)
+                .await?
+                .is_none_or(|current| current.topic_id != source.topic_id)
+        {
+            return Err(EngineError::StaleToolSource);
+        }
         let targets = match plan.reach {
             Reach::All => "all",
             Reach::Active => "active",
@@ -603,28 +611,34 @@ impl Engine {
         }
     }
 
-    /// Whether the agent of a thread may send one more announcement or message in this hour: the refusal that says
-    /// when, where it may not. What it sent is counted from the rows it made, so that a restart forgets nothing.
-    /// The announcement `id` is the one this call makes: where it exists already, the call is its repeat and is
-    /// let through.
-    pub(crate) async fn within_hourly_rate(
-        &self,
-        thread: &ThreadRow,
+    /// Serializes one agent's counted sends until the transaction commits, across all engine instances.
+    pub(crate) async fn lock_hourly_sender(conn: &mut Conn, thread: Id) -> Result<(), EngineError> {
+        sqlx::query("SELECT pg_advisory_xact_lock(hashtextextended('agent.send.hourly:' || $1::uuid::text, 0))")
+            .bind(thread)
+            .execute(conn)
+            .await
+            .map_err(orch_db::DbError::from)?;
+        Ok(())
+    }
+
+    /// Checks the count; the transaction-locked check is authoritative and replays spend no allowance.
+    pub(crate) async fn within_hourly_rate_in(
+        conn: &mut Conn,
+        thread: Id,
         broadcast: &Broadcast,
         id: Id,
+        now: DateTime<Utc>,
     ) -> Result<Option<Refusal>, EngineError> {
+        if rows::announcement(conn, id).await?.is_some() {
+            return Ok(None);
+        }
         if broadcast.rate_per_hour <= 0 {
             return Ok(Some(Refusal::new(
                 Code::Limit,
                 "Agents may not announce or send to other threads here: the setting broadcast.rate_per_hour is 0. A person who sets up the topic can change it.",
             )));
         }
-        let now = self.inner.clock.now();
-        let mut conn = self.inner.db.acquire().await?;
-        if rows::announcement(&mut conn, id).await?.is_some() {
-            return Ok(None);
-        }
-        let sent = rows::sent_since(&mut conn, thread.node_id, now - RATE_PERIOD).await?;
+        let sent = rows::sent_since(conn, thread, now - RATE_PERIOD).await?;
         if i64::try_from(sent.len()).unwrap_or(i64::MAX) < broadcast.rate_per_hour {
             return Ok(None);
         }
@@ -820,6 +834,41 @@ struct Arguments {
     wake_idle: Option<bool>,
 }
 
+fn check_agent_scope(audience: Audience, broadcast: &Broadcast) -> Result<(), Refusal> {
+    if (audience == Audience::Project
+        && !matches!(broadcast.agent_scope.as_str(), "project" | "org"))
+        || (audience == Audience::Org && broadcast.agent_scope != "org")
+    {
+        return Err(Refusal::invalid(
+            "That audience is outside the announcement reach set by broadcast.agent_scope here. Use the topic audience, or ask a person to change the announcement reach.",
+        ));
+    }
+    Ok(())
+}
+
+fn check_agent_options(arguments: &Arguments, broadcast: &Broadcast) -> Result<(), Refusal> {
+    let may = |option: &str| {
+        broadcast
+            .agent_options
+            .iter()
+            .any(|listed| listed == option)
+    };
+    if arguments
+        .delivery
+        .is_some_and(|chosen| !may(delivery_word(chosen)))
+    {
+        return Err(Refusal::invalid(
+            "The setting broadcast.agent_options does not allow that delivery here. Omit delivery to use the topic's setting.",
+        ));
+    }
+    if arguments.wake_idle.is_some() && !may("wake_idle") {
+        return Err(Refusal::invalid(
+            "The setting broadcast.agent_options does not allow wake_idle here. Omit it to use the topic's setting.",
+        ));
+    }
+    Ok(())
+}
+
 impl Engine {
     /// `announce`: the call of an agent.
     pub(crate) async fn announce_call(
@@ -845,44 +894,30 @@ impl Engine {
             AnnouncementCategory::Notice => Audience::Topic,
             AnnouncementCategory::Milestone => Audience::Followers,
         });
-        let broadcast = {
-            let mut conn = self.inner.db.acquire().await?;
-            Broadcast::load(&mut conn, thread.topic_id).await?
-        };
-        if (audience == Audience::Project
-            && !matches!(broadcast.agent_scope.as_str(), "project" | "org"))
-            || (audience == Audience::Org && broadcast.agent_scope != "org")
-        {
-            return Ok(Refusal::invalid(
-                "That audience is outside the announcement reach set by broadcast.agent_scope here. Use the topic audience, or ask a person to change the announcement reach.",
-            )
-            .into());
-        }
-        let now = self.inner.clock.now();
         let id = announcement_id(thread.node_id, &call.call_ref);
-        if audience != Audience::Followers
-            && let Some(refusal) = self.within_hourly_rate(thread, &broadcast, id).await?
+        // Refuse already-disallowed work before resolving references; repeat the decision in the write transaction.
         {
-            return Ok(refusal.into());
+            let mut conn = self.inner.db.acquire().await?;
+            let broadcast = Broadcast::load(&mut conn, thread.topic_id).await?;
+            if let Err(refusal) = check_agent_scope(audience, &broadcast) {
+                return Ok(refusal.into());
+            }
+            if audience != Audience::Followers
+                && let Some(refusal) = Self::within_hourly_rate_in(
+                    &mut conn,
+                    thread.node_id,
+                    &broadcast,
+                    id,
+                    self.inner.clock.now(),
+                )
+                .await?
+            {
+                return Ok(refusal.into());
+            }
+            if let Err(refusal) = check_agent_options(&arguments, &broadcast) {
+                return Ok(refusal.into());
+            }
         }
-        // What the agent may choose it chooses; the rest is the topic's.
-        let may = |option: &str| {
-            broadcast
-                .agent_options
-                .iter()
-                .any(|listed| listed == option)
-        };
-        if arguments
-            .delivery
-            .is_some_and(|chosen| !may(delivery_word(chosen)))
-        {
-            return Ok(Refusal::invalid("The setting broadcast.agent_options does not allow that delivery here. Omit delivery to use the topic's setting.").into());
-        }
-        if arguments.wake_idle.is_some() && !may("wake_idle") {
-            return Ok(Refusal::invalid("The setting broadcast.agent_options does not allow wake_idle here. Omit it to use the topic's setting.").into());
-        }
-        let delivery = arguments.delivery.unwrap_or(broadcast.delivery);
-        let wake_idle = arguments.wake_idle.unwrap_or(broadcast.wake_idle);
         let (resolution, body) = {
             let mut conn = self.inner.db.acquire().await?;
             let body = arguments.body.as_deref().unwrap_or_default();
@@ -892,6 +927,32 @@ impl Engine {
             let stored = resolution.store(body);
             (resolution, stored)
         };
+        let mut tx = self.inner.db.begin().await?;
+        if audience != Audience::Followers {
+            Self::lock_hourly_sender(&mut tx, thread.node_id).await?;
+        }
+        let current = threads::thread(&mut tx, thread.node_id)
+            .await?
+            .ok_or(EngineError::StaleToolSource)?;
+        if current.topic_id != thread.topic_id {
+            return Err(EngineError::StaleToolSource);
+        }
+        let broadcast = Broadcast::load(&mut tx, current.topic_id).await?;
+        if let Err(refusal) = check_agent_scope(audience, &broadcast) {
+            return Ok(refusal.into());
+        }
+        let now = self.inner.clock.now();
+        if audience != Audience::Followers
+            && let Some(refusal) =
+                Self::within_hourly_rate_in(&mut tx, thread.node_id, &broadcast, id, now).await?
+        {
+            return Ok(refusal.into());
+        }
+        if let Err(refusal) = check_agent_options(&arguments, &broadcast) {
+            return Ok(refusal.into());
+        }
+        let delivery = arguments.delivery.unwrap_or(broadcast.delivery);
+        let wake_idle = arguments.wake_idle.unwrap_or(broadcast.wake_idle);
         let plan = Plan {
             category,
             title: arguments.title.clone(),
@@ -906,7 +967,6 @@ impl Engine {
                 Reach::All
             },
         };
-        let mut tx = self.inner.db.begin().await?;
         let (finished, sent, totals) = {
             let mut unit = Unit::new(&mut tx, now);
             let (sent, totals) = if matches!(audience, Audience::Project | Audience::Org) {

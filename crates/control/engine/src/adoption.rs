@@ -662,6 +662,8 @@ impl Engine {
         let mut conn = self.inner.db.acquire().await?;
         let adopted_thread_id = thread_rows::adopting_threads(
             &mut conn,
+            adoption.provider,
+            adoption.agent,
             std::slice::from_ref(&adoption.native_session_ref),
         )
         .await?
@@ -765,6 +767,8 @@ impl Engine {
         adoption::lock_session(&mut guard, &adoption.native_session_ref).await?;
         if let Some((_, thread)) = thread_rows::adopting_threads(
             &mut guard,
+            adoption.provider,
+            adoption.agent,
             std::slice::from_ref(&adoption.native_session_ref),
         )
         .await?

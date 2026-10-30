@@ -7,6 +7,7 @@
 //! command as one blob, refused when it is larger than the command allows, and checked by the server, which
 //! reads the skill out of it; nothing of it is run here.
 
+use std::net::{IpAddr, SocketAddr};
 use std::path::Path;
 use std::process::Stdio;
 use std::sync::Arc;
@@ -19,6 +20,7 @@ use orch_link_contract::commands::{
     CommandError, ErrorCode, NodeSkillFetch, NodeSkillFetchResult, Secret, SecretOrText,
     SkillFetchSource,
 };
+use orch_notifier_contract::outbound;
 use orch_types::Id;
 use tokio::io::AsyncWriteExt;
 use tokio_util::sync::CancellationToken;
@@ -35,6 +37,9 @@ const GIT_STEP: Duration = Duration::from_secs(300);
 const CONNECT_TIMEOUT: Duration = Duration::from_secs(30);
 const STALL_TIMEOUT: Duration = Duration::from_secs(60);
 
+/// Match the downloader's previous redirect limit while checking each destination anew.
+const MAX_REDIRECTS: usize = 10;
+
 /// How many hexadecimal digits a full commit name has.
 const COMMIT_HEX: usize = 40;
 
@@ -47,7 +52,6 @@ const ARCHIVE: &str = "skill-archive";
 /// Fetches skills for the node's commands.
 #[derive(Debug, Clone)]
 pub struct SkillFetch {
-    http: reqwest::Client,
     policy: Option<Arc<orch_connector_core::policy::PolicyStore>>,
 }
 
@@ -85,12 +89,7 @@ impl SkillFetch {
     pub fn new(
         policy: Option<Arc<orch_connector_core::policy::PolicyStore>>,
     ) -> Result<Self, CommandError> {
-        let http = reqwest::Client::builder()
-            .connect_timeout(CONNECT_TIMEOUT)
-            .read_timeout(STALL_TIMEOUT)
-            .build()
-            .map_err(|error| internal("the downloader cannot be made", error))?;
-        Ok(Self { http, policy })
+        Ok(Self { policy })
     }
 
     /// A host whose operator switched fetching off fetches nothing.
@@ -136,7 +135,8 @@ impl SkillFetch {
                 ),
                 SkillFetchSource::Url { url } => {
                     let url = source_url(keys, command, url)?;
-                    self.download(&url, &archive, max, cancel).await?;
+                    self.download(&url, &archive, max, &body.allowed_private_hosts, cancel)
+                        .await?;
                     None
                 }
             };
@@ -266,9 +266,10 @@ impl SkillFetch {
         url: &str,
         into: &Path,
         max: u64,
+        allowed: &[String],
         cancel: &CancellationToken,
     ) -> Result<(), CommandError> {
-        let url = reqwest::Url::parse(url)
+        let mut url = reqwest::Url::parse(url)
             .ok()
             .filter(|url| matches!(url.scheme(), "http" | "https"))
             .ok_or_else(|| {
@@ -284,11 +285,43 @@ impl SkillFetch {
             url.host_str().unwrap_or_default(),
             url.path()
         );
-        let reply = tokio::select! {
-            reply = self.http.get(url.clone()).send() => reply
-                .map_err(|error| refused(ErrorCode::NotFound, format!("{shown}: {}", error.without_url())))?,
-            () = cancel.cancelled() => return Err(refused(ErrorCode::Timeout, "the fetch was stopped")),
-        };
+        let mut reply = None;
+        for hop in 0..=MAX_REDIRECTS {
+            let client = checked_client(&url, allowed, cancel).await?;
+            let response = tokio::select! {
+                response = client.get(url.clone()).send() => response
+                    .map_err(|error| refused(ErrorCode::NotFound, format!("{shown}: {}", error.without_url())))?,
+                () = cancel.cancelled() => return Err(refused(ErrorCode::Timeout, "the fetch was stopped")),
+            };
+            if matches!(response.status().as_u16(), 301 | 302 | 303 | 307 | 308) {
+                if hop == MAX_REDIRECTS {
+                    return Err(refused(
+                        ErrorCode::Unsupported,
+                        "the source redirected too many times",
+                    ));
+                }
+                url = response
+                    .headers()
+                    .get(reqwest::header::LOCATION)
+                    .and_then(|location| location.to_str().ok())
+                    .and_then(|location| url.join(location).ok())
+                    .ok_or_else(|| {
+                        refused(
+                            ErrorCode::Unsupported,
+                            "the source gave an invalid redirect",
+                        )
+                    })?;
+                continue;
+            }
+            reply = Some(response);
+            break;
+        }
+        let reply = reply.ok_or_else(|| {
+            refused(
+                ErrorCode::Unsupported,
+                "the source redirected too many times",
+            )
+        })?;
         if !reply.status().is_success() {
             return Err(refused(
                 ErrorCode::NotFound,
@@ -327,6 +360,57 @@ impl SkillFetch {
             .await
             .map_err(|error| internal("the download cannot be written", error))
     }
+}
+
+/// Resolve, check and pin the address actually used for one request. Proxies would resolve it again.
+async fn checked_client(
+    url: &reqwest::Url,
+    allowed: &[String],
+    cancel: &CancellationToken,
+) -> Result<reqwest::Client, CommandError> {
+    if !matches!(url.scheme(), "http" | "https") {
+        return Err(refused(
+            ErrorCode::Unsupported,
+            "an archive is downloaded from an http or https address",
+        ));
+    }
+    let host = url
+        .host_str()
+        .ok_or_else(|| refused(ErrorCode::Unsupported, "the source names no host"))?
+        .trim_start_matches('[')
+        .trim_end_matches(']');
+    let port = url
+        .port_or_known_default()
+        .ok_or_else(|| refused(ErrorCode::Unsupported, "the source names no port"))?;
+    let addresses: Vec<SocketAddr> = if let Ok(ip) = host.parse::<IpAddr>() {
+        vec![SocketAddr::new(ip, port)]
+    } else {
+        tokio::select! {
+            result = tokio::time::timeout(CONNECT_TIMEOUT, tokio::net::lookup_host((host, port))) => result
+                .map_err(|_| refused(ErrorCode::Timeout, "the source host lookup timed out"))?
+                .map_err(|_| refused(ErrorCode::NotFound, "the source host cannot be looked up"))?
+                .collect(),
+            () = cancel.cancelled() => return Err(refused(ErrorCode::Timeout, "the fetch was stopped")),
+        }
+    };
+    let vetted: Vec<_> = addresses
+        .into_iter()
+        .filter(|address| outbound::may_connect(host, address.ip(), Some(allowed)).is_ok())
+        .collect();
+    if vetted.is_empty() {
+        return Err(refused(
+            ErrorCode::Unsupported,
+            "the source address is not allowed or has no usable address",
+        ));
+    }
+    reqwest::Client::builder()
+        .redirect(reqwest::redirect::Policy::none())
+        .connect_timeout(CONNECT_TIMEOUT)
+        .read_timeout(STALL_TIMEOUT)
+        .no_proxy()
+        .resolve_to_addrs(host, &vetted)
+        .build()
+        .map_err(|error| internal("the downloader cannot be made", error.without_url()))
 }
 
 /// A command may store a public address or a reference to a skill-owned secret, never a URL
@@ -454,6 +538,85 @@ async fn git(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use axum::{Router, extract::State, http::StatusCode, routing::get};
+    use std::sync::atomic::{AtomicUsize, Ordering};
+
+    #[tokio::test]
+    async fn a_skill_archive_redirect_cannot_reach_an_unlisted_private_host() {
+        let mut listener = None;
+        for port in 41000..=41999 {
+            if let Ok(bound) = tokio::net::TcpListener::bind(("127.0.0.1", port)).await {
+                listener = Some(bound);
+                break;
+            }
+        }
+        let listener = listener.expect("a test port is available");
+        let port = listener.local_addr().unwrap().port();
+        let reached = Arc::new(AtomicUsize::new(0));
+        let target = format!("http://127.0.0.1:{port}/archive");
+        let app = Router::new()
+            .route(
+                "/redirect",
+                get(move || {
+                    let target = target.clone();
+                    async move { (StatusCode::FOUND, [("location", target)]) }
+                }),
+            )
+            .route(
+                "/archive",
+                get(|State(reached): State<Arc<AtomicUsize>>| async move {
+                    reached.fetch_add(1, Ordering::SeqCst);
+                    "archive bytes"
+                }),
+            )
+            .with_state(Arc::clone(&reached));
+        let server = tokio::spawn(async move { axum::serve(listener, app).await.unwrap() });
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("archive");
+        let fetcher = SkillFetch::new(None).unwrap();
+        let source = format!("http://localhost:{port}/redirect");
+        let cancel = CancellationToken::new();
+        let allowed = vec!["localhost".to_owned()];
+        assert!(
+            fetcher
+                .download(&source, &path, 1024, &allowed, &cancel)
+                .await
+                .is_err()
+        );
+        assert_eq!(
+            reached.load(Ordering::SeqCst),
+            0,
+            "the private redirect was never contacted"
+        );
+        let allowed = vec!["localhost".to_owned(), "127.0.0.1".to_owned()];
+        fetcher
+            .download(&source, &path, 1024, &allowed, &cancel)
+            .await
+            .unwrap();
+        assert_eq!(std::fs::read(path).unwrap(), b"archive bytes");
+        assert_eq!(reached.load(Ordering::SeqCst), 1);
+        server.abort();
+        let _ = server.await;
+    }
+
+    #[tokio::test]
+    async fn a_skill_archive_refuses_unlisted_internal_addresses_before_connecting() {
+        let cancel = CancellationToken::new();
+        for address in [
+            "http://127.0.0.1:41000/",
+            "http://169.254.169.254/latest/meta-data/",
+            "http://[::ffff:127.0.0.1]:41000/",
+            "file:///etc/passwd",
+        ] {
+            let url = reqwest::Url::parse(address).unwrap();
+            assert!(
+                checked_client(&url, &[], &cancel).await.is_err(),
+                "{address}"
+            );
+        }
+        let public = reqwest::Url::parse("https://8.8.8.8/archive").unwrap();
+        assert!(checked_client(&public, &[], &cancel).await.is_ok());
+    }
 
     #[test]
     fn a_reference_or_a_folder_that_could_be_read_as_an_option_is_refused() {

@@ -14,8 +14,8 @@ use archive_world::{Office, entry, everything, kept};
 use orch_api_contract::common::ErrorCode;
 use orch_api_contract::common::PageQuery;
 use orch_api_contract::documents::{
-    DocumentGet, DocumentUpdate, DocumentUpdateBody, DocumentVersionList, DocumentVersionListQuery,
-    NewDocumentAccess, NodeDocumentCreate, NodeDocumentCreateBody,
+    DocumentDelete, DocumentGet, DocumentUpdate, DocumentUpdateBody, DocumentVersionList,
+    DocumentVersionListQuery, NewDocumentAccess, NodeDocumentCreate, NodeDocumentCreateBody,
 };
 use orch_api_contract::imports::{
     Import, ImportAction, ImportGet, ImportOptions, ImportOutcome, ImportPersonChoice,
@@ -138,6 +138,187 @@ async fn report(o: &Office, by: &Who, import: Id) -> Vec<ImportReportRow> {
 
 fn of_kind(rows: &[ImportReportRow], kind: PackageKind) -> Vec<&ImportReportRow> {
     rows.iter().filter(|row| row.kind == kind).collect()
+}
+
+#[tokio::test]
+async fn a_chat_import_cannot_claim_an_unrelated_blob_by_its_hash() {
+    use orch_api_contract::chats::{
+        ChatAttachmentCreate, ChatBlobGet, ChatMessageCreate, ChatMessageCreateBody,
+        ChatMessageList, ChatPart,
+    };
+    use orch_api_contract::imports::ImportRoot;
+    use orch_api_contract::threads::{FILENAME_HEADER, UploadBlobGet, UploadBlobGetQuery};
+
+    let o = Office::new().await;
+    let app = &o.s.rig.world.app;
+    let ada = &o.s.ada;
+    let destination = places::make_topic(
+        &o.s.rig.world,
+        ada,
+        o.s.tree.project.base.id,
+        "Imported chat",
+    )
+    .await;
+    let target_chat = destination.base.chat_id;
+
+    let staged = app
+        .call(ChatAttachmentCreate, &[&o.topic_chat])
+        .token(&ada.token)
+        .header(FILENAME_HEADER, "included.txt")
+        .bytes(b"included in the package")
+        .send()
+        .await
+        .ok();
+    app.call(ChatMessageCreate, &[&o.topic_chat])
+        .token(&ada.token)
+        .body(&ChatMessageCreateBody {
+            parts: vec![ChatPart::Attachment {
+                blob: staged.blob,
+                name: staged.name.clone(),
+                size: staged.size,
+                media_type: staged.media_type.clone(),
+            }],
+            reply_to: None,
+            agent_review: None,
+            client_id: new_id().to_string(),
+        })
+        .send()
+        .await
+        .ok();
+    let existing = app
+        .call(ChatAttachmentCreate, &[&target_chat])
+        .token(&ada.token)
+        .header(FILENAME_HEADER, "already-here.txt")
+        .bytes(b"already in the destination")
+        .send()
+        .await
+        .ok();
+    app.call(ChatMessageCreate, &[&target_chat])
+        .token(&ada.token)
+        .body(&ChatMessageCreateBody {
+            parts: vec![ChatPart::Attachment {
+                blob: existing.blob,
+                name: existing.name.clone(),
+                size: existing.size,
+                media_type: existing.media_type.clone(),
+            }],
+            reply_to: None,
+            agent_review: None,
+            client_id: new_id().to_string(),
+        })
+        .send()
+        .await
+        .ok();
+
+    let (secret, secret_size) = kept(&o.s, b"another person's private file").await;
+    let mut conn = o.s.rig.db.acquire().await.unwrap();
+    orch_db::queries::uploads::remember(&mut conn, o.s.bea.id(), &secret, o.s.rig.world.now())
+        .await
+        .unwrap();
+    drop(conn);
+    let before = app
+        .call(UploadBlobGet, &[&secret])
+        .token(&ada.token)
+        .query(&UploadBlobGetQuery {
+            name: "private.txt".into(),
+            ..Default::default()
+        })
+        .send_bytes()
+        .await;
+    assert_eq!(before.status, 404);
+
+    let mut export_request = everything();
+    export_request.package = Some(true);
+    let export = o.made(ada, o.topic(), &export_request).await;
+    let mut entries = o.contents(ada, &export).await;
+    let mut manifest: PackageManifest = serde_json::from_slice(&entries[PACKAGE_MANIFEST]).unwrap();
+    let chat = manifest
+        .objects
+        .iter_mut()
+        .find(|object| object.kind == PackageKind::Chat && object.id == o.topic_chat)
+        .unwrap();
+    let path = chat.path.as_ref().unwrap().clone();
+    let mut messages: Vec<Value> = serde_json::from_slice(&entries[&path]).unwrap();
+    let message = messages
+        .iter_mut()
+        .find(|message| {
+            message["parts"]
+                .as_array()
+                .is_some_and(|parts| parts.iter().any(|part| part["blob"] == json!(staged.blob)))
+        })
+        .unwrap();
+    let parts = message["parts"].as_array_mut().unwrap();
+    parts.push(
+        json!({"type":"attachment", "blob":existing.blob, "name":existing.name,
+        "size":existing.size, "media_type":existing.media_type}),
+    );
+    parts.push(
+        json!({"type":"attachment", "blob":secret, "name":"private.txt",
+        "size":secret_size, "media_type":"text/plain"}),
+    );
+    let record = serde_json::to_vec(&messages).unwrap();
+    chat.bytes = i64::try_from(record.len()).unwrap();
+    chat.sha256 = Some(hex::encode(<sha2::Sha256 as sha2::Digest>::digest(&record)));
+    entries.insert(path, record);
+    entries.insert(
+        PACKAGE_MANIFEST.to_owned(),
+        serde_json::to_vec(&manifest).unwrap(),
+    );
+    let mut archive = zip::ZipWriter::new(std::io::Cursor::new(Vec::new()));
+    for (name, bytes) in entries {
+        archive
+            .start_file(name, zip::write::SimpleFileOptions::default())
+            .unwrap();
+        archive.write_all(&bytes).unwrap();
+    }
+    let bytes = archive.finish().unwrap().into_inner();
+    let file = upload(&o, ada, "forged.zip", &bytes).await;
+    let mut request = asked("chat-file-authority", &file);
+    request.destination.root = Some(ImportRoot::Here);
+    let done = imported(&o, ada, destination.base.id, &request).await;
+    assert_eq!(done.state, ImportState::Done, "{:?}", done.failure);
+
+    let messages = app
+        .call(ChatMessageList, &[&target_chat])
+        .token(&ada.token)
+        .send()
+        .await
+        .ok()
+        .messages;
+    let imported = messages
+        .iter()
+        .find(|message| {
+            message.parts.iter().any(
+                |part| matches!(part, ChatPart::Attachment { blob, .. } if *blob == staged.blob),
+            )
+        })
+        .unwrap();
+    let carried = orch_chat::attachments::blobs_in(&imported.parts);
+    assert!(
+        carried.contains(&staged.blob),
+        "the package's file is brought"
+    );
+    assert!(
+        carried.contains(&existing.blob),
+        "the destination's file remains usable"
+    );
+    assert!(
+        !carried.contains(&secret),
+        "a guessed hash grants no access"
+    );
+    let refused = app
+        .call(ChatBlobGet, &[&target_chat, &secret])
+        .token(&ada.token)
+        .send_bytes()
+        .await;
+    assert_eq!(refused.status, 404);
+    let included = app
+        .call(ChatBlobGet, &[&target_chat, &staged.blob])
+        .token(&ada.token)
+        .send_bytes()
+        .await;
+    assert_eq!(included.status, 200);
+    assert_eq!(included.raw.as_ref(), b"included in the package");
 }
 
 #[tokio::test]
@@ -1434,6 +1615,7 @@ async fn check_document_authorship(mode: &str) {
     }
     let mut export_request = everything();
     export_request.package = Some(true);
+    export_request.versions = Some(true);
     let export = o.made(ada, o.topic(), &export_request).await;
     let held = o.contents(ada, &export).await;
     let exported_versions: Vec<Value> = held
@@ -1770,6 +1952,252 @@ async fn a_document_somebody_else_changed_since_the_import_stays_when_it_is_take
     );
 }
 
+#[tokio::test]
+async fn undo_waits_for_an_in_flight_edit_before_deciding_whether_to_keep_the_document() {
+    let o = Office::new().await;
+    let (ada, dan) = (&o.s.ada, &o.s.dan);
+    let project = o.s.tree.project.base.id;
+    let file = upload(&o, ada, "topic.zip", &package_of(&o, o.topic()).await).await;
+    let done = imported(&o, ada, project, &asked("concurrent", &file)).await;
+    let rows = report(&o, ada, done.id).await;
+    let document = of_kind(&rows, PackageKind::Document)[0]
+        .made
+        .as_ref()
+        .unwrap()
+        .id;
+    o.s.rig.world.advance(chrono::Duration::minutes(5));
+
+    let mut writer = o.s.rig.world.db.pool.begin().await.unwrap();
+    let writer_pid: i32 = sqlx::query_scalar("SELECT pg_backend_pid()")
+        .fetch_one(&mut *writer)
+        .await
+        .unwrap();
+    sqlx::query("UPDATE documents SET updated_by=$2, updated_at=$3 WHERE id=$1")
+        .bind(document)
+        .bind(dan.id())
+        .bind(o.s.rig.world.now())
+        .execute(&mut *writer)
+        .await
+        .unwrap();
+    sqlx::query("UPDATE document_blocks SET text=$2, content=$3, updated_by=$4, updated_at=$5
+        WHERE id=(SELECT id FROM document_blocks WHERE document_id=$1 AND type='paragraph' LIMIT 1)")
+        .bind(document).bind("Dan's new words")
+        .bind(json!([{ "type": "text", "text": "Dan's new words" }]))
+        .bind(dan.id()).bind(o.s.rig.world.now())
+        .execute(&mut *writer).await.unwrap();
+    let job =
+        o.s.rig
+            .world
+            .app
+            .call(ImportUndo, &[&done.id])
+            .token(&ada.token)
+            .body(&ImportUndoBody::default())
+            .send()
+            .await
+            .ok();
+    rig::eventually("Undo waits for the document writer", || async {
+        sqlx::query_scalar::<_, bool>("SELECT EXISTS(SELECT 1 FROM pg_stat_activity WHERE datname=current_database() AND $1=ANY(pg_blocking_pids(pid)))")
+            .bind(writer_pid).fetch_one(&o.s.rig.world.db.pool).await.unwrap()
+    }).await;
+    writer.commit().await.unwrap();
+    let job = o.ended(ada, job.id).await;
+    assert_eq!(job.state, JobState::Succeeded, "{:?}", job.error);
+    o.s.rig
+        .world
+        .app
+        .call(DocumentGet, &[&document])
+        .token(&dan.token)
+        .send()
+        .await
+        .ok();
+    let words: String = sqlx::query_scalar(
+        "SELECT text FROM document_blocks WHERE document_id=$1 AND text=$2 AND removed_at IS NULL",
+    )
+    .bind(document)
+    .bind("Dan's new words")
+    .fetch_one(&o.s.rig.world.db.pool)
+    .await
+    .unwrap();
+    assert_eq!(words, "Dan's new words");
+}
+
+#[tokio::test]
+async fn undo_keeps_an_imported_folder_when_a_new_document_commits_inside_it() {
+    let o = Office::new().await;
+    let (ada, dan) = (&o.s.ada, &o.s.dan);
+    let requested = plain(&o, ada, "folder-race", &["notes/plan.md"]).await;
+    let done = imported(&o, ada, o.topic(), &requested).await;
+    let rows = report(&o, ada, done.id).await;
+    let folder = of_kind(&rows, PackageKind::Folder)[0]
+        .made
+        .as_ref()
+        .unwrap()
+        .id;
+    let imported_document = of_kind(&rows, PackageKind::Document)[0]
+        .made
+        .as_ref()
+        .unwrap()
+        .id;
+    assert_eq!(
+        o.s.rig
+            .world
+            .app
+            .call(DocumentDelete, &[&imported_document])
+            .token(&ada.token)
+            .send()
+            .await
+            .status,
+        204
+    );
+
+    let mut writer = o.s.rig.world.db.pool.begin().await.unwrap();
+    let writer_pid: i32 = sqlx::query_scalar("SELECT pg_backend_pid()")
+        .fetch_one(&mut *writer)
+        .await
+        .unwrap();
+    let new_document = new_id();
+    sqlx::query("INSERT INTO documents (id,node_id,org_id,owner_id,parent_container_id,title,created_by,updated_by,created_at,updated_at)
+        SELECT $1,node_id,org_id,$2,id,'New work',$2,$2,$3,$3 FROM document_containers WHERE id=$4")
+        .bind(new_document).bind(dan.id()).bind(o.s.rig.world.now()).bind(folder)
+        .execute(&mut *writer).await.unwrap();
+    let job =
+        o.s.rig
+            .world
+            .app
+            .call(ImportUndo, &[&done.id])
+            .token(&ada.token)
+            .body(&ImportUndoBody::default())
+            .send()
+            .await
+            .ok();
+    rig::eventually("Undo waits for the folder writer", || async {
+        sqlx::query_scalar::<_, bool>("SELECT EXISTS(SELECT 1 FROM pg_stat_activity WHERE datname=current_database() AND $1=ANY(pg_blocking_pids(pid)))")
+            .bind(writer_pid).fetch_one(&o.s.rig.world.db.pool).await.unwrap()
+    }).await;
+    writer.commit().await.unwrap();
+    let job = o.ended(ada, job.id).await;
+    assert_eq!(job.state, JobState::Succeeded, "{:?}", job.error);
+    let held: bool = sqlx::query_scalar(
+        "SELECT EXISTS(SELECT 1 FROM document_containers WHERE id=$1 AND deleted_at IS NULL)
+        AND EXISTS(SELECT 1 FROM documents WHERE id=$2 AND deleted_at IS NULL)",
+    )
+    .bind(folder)
+    .bind(new_document)
+    .fetch_one(&o.s.rig.world.db.pool)
+    .await
+    .unwrap();
+    assert!(held, "the new document and its folder remain visible");
+}
+
+#[tokio::test]
+async fn undo_records_recovery_deadlines_for_its_places_documents_and_folders() {
+    let o = Office::new().await;
+    let ada = &o.s.ada;
+    let file = upload(&o, ada, "topic.zip", &package_of(&o, o.topic()).await).await;
+    let imported_place =
+        imported(&o, ada, o.s.tree.project.base.id, &asked("retained", &file)).await;
+    let rows = report(&o, ada, imported_place.id).await;
+    let place = of_kind(&rows, PackageKind::Topic)[0]
+        .made
+        .as_ref()
+        .unwrap()
+        .id;
+    let document = of_kind(&rows, PackageKind::Document)[0]
+        .made
+        .as_ref()
+        .unwrap()
+        .id;
+    let preview =
+        o.s.rig
+            .world
+            .app
+            .call(ImportUndoPreflight, &[&imported_place.id])
+            .token(&ada.token)
+            .send()
+            .await
+            .ok();
+    let job =
+        o.s.rig
+            .world
+            .app
+            .call(ImportUndo, &[&imported_place.id])
+            .token(&ada.token)
+            .body(&ImportUndoBody::default())
+            .send()
+            .await
+            .ok();
+    assert_eq!(o.ended(ada, job.id).await.state, JobState::Succeeded);
+
+    let request = plain(&o, ada, "retained-folder", &["notes/plan.md"]).await;
+    let imported_folder = imported(&o, ada, o.topic(), &request).await;
+    let rows = report(&o, ada, imported_folder.id).await;
+    let folder = of_kind(&rows, PackageKind::Folder)[0]
+        .made
+        .as_ref()
+        .unwrap()
+        .id;
+    let nested = of_kind(&rows, PackageKind::Document)[0]
+        .made
+        .as_ref()
+        .unwrap()
+        .id;
+    let job =
+        o.s.rig
+            .world
+            .app
+            .call(ImportUndo, &[&imported_folder.id])
+            .token(&ada.token)
+            .body(&ImportUndoBody::default())
+            .send()
+            .await
+            .ok();
+    assert_eq!(o.ended(ada, job.id).await.state, JobState::Succeeded);
+
+    for (kind, id) in [
+        ("node", place),
+        ("document", document),
+        ("document_container", folder),
+        ("document", nested),
+    ] {
+        let deadline: Option<chrono::DateTime<chrono::Utc>> = sqlx::query_scalar(
+            "SELECT purge_at FROM audit_object_state WHERE object_kind=$1 AND object_id=$2",
+        )
+        .bind(kind)
+        .bind(id)
+        .fetch_one(&o.s.rig.world.db.pool)
+        .await
+        .unwrap();
+        assert_eq!(deadline, Some(preview.restore_until.get()), "{kind} {id}");
+    }
+    o.s.rig.world.advance(chrono::Duration::days(2));
+    let mut tx = o.s.rig.world.db.pool.begin().await.unwrap();
+    orch_db::queries::notifications::upkeep::purge_soft_deleted(
+        &mut tx,
+        o.s.rig.world.now() - chrono::Duration::days(1),
+        o.s.rig.world.now(),
+    )
+    .await
+    .unwrap();
+    tx.commit().await.unwrap();
+    let held: bool = sqlx::query_scalar(
+        "SELECT EXISTS(SELECT 1 FROM nodes WHERE id=$1)
+        AND EXISTS(SELECT 1 FROM documents WHERE id=$2)
+        AND EXISTS(SELECT 1 FROM document_containers WHERE id=$3)
+        AND EXISTS(SELECT 1 FROM documents WHERE id=$4)",
+    )
+    .bind(place)
+    .bind(document)
+    .bind(folder)
+    .bind(nested)
+    .fetch_one(&o.s.rig.world.db.pool)
+    .await
+    .unwrap();
+    assert!(
+        held,
+        "a shorter current interval cannot take the promised recovery time away"
+    );
+}
+
 /// Plain Markdown files named `names`, as a request for the topic of the scene.
 async fn plain(o: &Office, by: &Who, client: &str, names: &[&str]) -> ImportRequest {
     let mut files = Vec::new();
@@ -1788,6 +2216,10 @@ async fn plain(o: &Office, by: &Who, client: &str, names: &[&str]) -> ImportRequ
 #[tokio::test]
 async fn a_folder_the_person_may_not_add_to_is_no_folder_of_this_place_to_them_and_one_they_may_is()
 {
+    use orch_api_contract::access::{
+        AccessChoice, HolderInput, PageChange, PageChangeName, PageChangeWhole,
+        PermissionPageUpdate,
+    };
     let o = Office::new().await;
     let (ada, cai, dan) = (&o.s.ada, &o.s.cai, &o.s.dan);
     let topic = o.topic();
@@ -1805,6 +2237,49 @@ async fn a_folder_the_person_may_not_add_to_is_no_folder_of_this_place_to_them_a
         .as_ref()
         .unwrap()
         .id;
+
+    // The shipped viewer role can create documents; set up a read-only share explicitly.
+    o.s.rig
+        .world
+        .app
+        .call(PermissionPageUpdate, &[&"document-containers", &folder])
+        .token(&ada.token)
+        .body(&PageChange {
+            whole: Some(PageChangeWhole::Private),
+            ..Default::default()
+        })
+        .send()
+        .await
+        .ok();
+    o.s.rig
+        .world
+        .app
+        .call(PermissionPageUpdate, &[&"document-containers", &folder])
+        .token(&ada.token)
+        .body(&PageChange {
+            name: Some(vec![
+                PageChangeName {
+                    holders: vec![HolderInput::User { id: cai.id() }],
+                    choice: AccessChoice::FullView,
+                    options: None,
+                    expires_at: None,
+                    note: None,
+                    export: None,
+                },
+                PageChangeName {
+                    holders: vec![HolderInput::User { id: dan.id() }],
+                    choice: AccessChoice::FullInteract,
+                    options: None,
+                    expires_at: None,
+                    note: None,
+                    export: None,
+                },
+            ]),
+            ..Default::default()
+        })
+        .send()
+        .await
+        .ok();
 
     // Cai may read but not add: the folder is not one he may bring files into, with the answer that a folder that is not there gets.
     let mut asked_by_cai = plain(&o, cai, "cai", &["more.md"]).await;

@@ -709,6 +709,12 @@ impl orch_connector_core::programs::Handler for Programs {
                 self.activate(next)?;
                 Self::retire(services, &entry).await?;
             }
+            MachineProgramsCommand::ConfirmHarness(_)
+            | MachineProgramsCommand::RemoveHarness(_) => {
+                return Err(error(
+                    "Harness selections are handled by the connector's local policy.",
+                ));
+            }
             MachineProgramsCommand::Reload => {
                 services.policy.reload_from_file().map_err(error)?;
                 let desired = configured(&services.policy.config(), &self.template)?;

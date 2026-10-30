@@ -226,6 +226,37 @@ async fn a_refused_batch_fails_with_what_it_used_and_without_the_secret() {
 }
 
 #[tokio::test]
+async fn a_successful_embedding_does_not_record_a_secret_echoed_as_the_response_id() {
+    let (url, _) = stub_reply(
+        200,
+        Some(json!({
+            "id": format!("request-{SECRET}"),
+            "object": "list", "model": "local",
+            "data": [
+                {"object": "embedding", "index": 0, "embedding": [1.0, 0.5]},
+                {"object": "embedding", "index": 1, "embedding": [2.0, 0.5]}
+            ],
+            "usage": {"prompt_tokens": 11, "total_tokens": 11}
+        })),
+    )
+    .await;
+    let p = started(&url).await;
+    let reply = p
+        .rig
+        .succeed(
+            &p.provider_key(),
+            &ProviderEmbed {
+                provider_id: p.rig.provider,
+                ..asked()
+            },
+        )
+        .await;
+    assert!(!reply.to_string().contains(SECRET));
+    assert_eq!(reply["request_ref"], "request-[secret]");
+    assert_eq!(reply["usage"]["input_tokens"], 11);
+}
+
+#[tokio::test]
 async fn embedding_errors_keep_their_classified_cause_and_a_filter_does_not_refuse_the_key() {
     for (status, kind, reason, error_type, message) in [
         (

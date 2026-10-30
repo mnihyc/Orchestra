@@ -7,16 +7,45 @@
 
 mod support;
 
+use async_trait::async_trait;
 use chrono::{Duration, TimeZone, Utc};
+use orch_db::queries::notifications::outbox as db_outbox;
 use orch_db::queries::notifications::routes::{self, RouteChange};
-use orch_notifier_contract::descriptor::{Needs, Reaches};
+use orch_notifier_contract::delivery::{Config, DeliverError, Delivery};
+use orch_notifier_contract::descriptor::{Needs, NotifierDescriptor, Reaches};
 use orch_notifier_contract::notifier::Notifier;
+use orch_types::Json;
 use orch_worker_core::channels::Notifiers;
 use orch_worker_core::routes::{Change, RouteError, serve, set};
 use serde_json::json;
 use std::sync::Arc;
 use support::fakes::Scripted;
 use support::world::{Of, World};
+use tokio::sync::Notify;
+
+/// Holds a notifier's answer until the test has changed the in-flight attempt.
+struct GatedNotifier {
+    inner: Arc<Scripted>,
+    entered: Notify,
+    release: Notify,
+}
+
+#[async_trait]
+impl Notifier for GatedNotifier {
+    fn describe(&self) -> NotifierDescriptor {
+        self.inner.describe()
+    }
+
+    async fn check(&self, config: &Config) -> Result<Json, DeliverError> {
+        self.inner.check(config).await
+    }
+
+    async fn deliver(&self, delivery: Delivery) -> Result<(), DeliverError> {
+        self.entered.notify_one();
+        self.release.notified().await;
+        self.inner.deliver(delivery).await
+    }
+}
 
 fn only(notifier: &Arc<Scripted>) -> Notifiers {
     let mut notifiers = Notifiers::new();
@@ -38,6 +67,116 @@ fn limited(minutes: i32) -> RouteChange<'static> {
         min_interval_minutes: Some(Some(minutes)),
         ..RouteChange::default()
     }
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn database_races_retry_without_sending_a_notification_twice() {
+    let notifier = Scripted::new("chat", Reaches::Channel);
+    let world = World::new(only(&notifier)).await;
+    let channel = world.channel(Of::System, "chat", json!({}), &[]).await;
+    let ada = world.person("ada").await;
+    let route = world.route_on(ada, &channel).await;
+    let id = world
+        .queue_for_route(
+            &route,
+            "chat",
+            &[world.snapshot("turn.completed", "Finished")],
+        )
+        .await;
+
+    // Sequences survive rollback, so each injected failure occurs exactly once.
+    for statement in [
+        "CREATE SEQUENCE reserve_race",
+        "CREATE SEQUENCE conclusion_race",
+        "CREATE FUNCTION outbox_races() RETURNS trigger LANGUAGE plpgsql AS $$
+         BEGIN
+           IF NEW.state = 'sending' THEN
+             IF nextval('reserve_race') = 1 THEN
+               RAISE EXCEPTION 'reservation race' USING ERRCODE = '40001';
+             END IF;
+           ELSIF NEW.state = 'sent' THEN
+             IF nextval('conclusion_race') = 1 THEN
+               RAISE EXCEPTION 'conclusion race' USING ERRCODE = '40001';
+             END IF;
+           END IF;
+           RETURN NEW;
+         END $$",
+        "CREATE TRIGGER outbox_races BEFORE UPDATE ON outbox
+         FOR EACH ROW EXECUTE FUNCTION outbox_races()",
+    ] {
+        sqlx::query(statement)
+            .execute(&world.test.pool)
+            .await
+            .unwrap();
+    }
+
+    let done = world.outbox().deliver_next().await.unwrap().unwrap();
+    assert_eq!(done.sent, 1);
+    assert_eq!(notifier.deliveries(), 1, "the remote call is not retried");
+    let row = world.row(id).await;
+    assert_eq!((row.state.as_str(), row.attempts), ("sent", 1));
+    for sequence in ["reserve_race", "conclusion_race"] {
+        let attempts: i64 = sqlx::query_scalar(sqlx::AssertSqlSafe(format!(
+            "SELECT last_value FROM {sequence}"
+        )))
+        .fetch_one(&world.test.pool)
+        .await
+        .unwrap();
+        assert_eq!(attempts, 2, "both transactions were retried");
+    }
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn a_cancelled_attempts_late_answer_cannot_change_its_route_or_channel() {
+    let scripted = Scripted::new("chat", Reaches::Channel);
+    scripted.answer([Err(DeliverError::gone("gone", "the target is gone"))]);
+    let gated = Arc::new(GatedNotifier {
+        inner: scripted,
+        entered: Notify::new(),
+        release: Notify::new(),
+    });
+    let mut notifiers = Notifiers::new();
+    notifiers.register(gated.clone()).unwrap();
+    let world = World::new(notifiers).await;
+    let channel = world.channel(Of::System, "chat", json!({}), &[]).await;
+    let ada = world.person("ada").await;
+    let route = world.route_on(ada, &channel).await;
+    let id = world
+        .queue_for_route(
+            &route,
+            "chat",
+            &[world.snapshot("turn.completed", "Finished")],
+        )
+        .await;
+
+    let outbox = world.outbox();
+    let running = tokio::spawn(async move { outbox.deliver_next().await });
+    tokio::time::timeout(std::time::Duration::from_secs(10), gated.entered.notified())
+        .await
+        .expect("the notifier receives the reserved delivery");
+    let mut conn = world.test.pool.acquire().await.unwrap();
+    assert!(
+        db_outbox::cancel(&mut conn, id, "lost_access")
+            .await
+            .unwrap()
+    );
+    drop(conn);
+    let route_before = world.route_now(route.id).await;
+    let channel_before = world.channel_now(channel.id).await;
+    gated.release.notify_one();
+    let done = running.await.unwrap().unwrap().unwrap();
+    assert_eq!(done.total(), 0);
+    assert_eq!(world.row(id).await.state, "cancelled");
+    assert_eq!(world.route_now(route.id).await, route_before);
+    assert_eq!(world.channel_now(channel.id).await, channel_before);
+    let attention: i64 = sqlx::query_scalar(
+        "SELECT count(*) FROM notifications WHERE user_id = $1 AND kind = 'notification.route_attention'",
+    )
+    .bind(ada)
+    .fetch_one(&world.test.pool)
+    .await
+    .unwrap();
+    assert_eq!(attention, 0);
 }
 
 #[tokio::test(flavor = "multi_thread")]

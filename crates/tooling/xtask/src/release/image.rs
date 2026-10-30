@@ -8,11 +8,12 @@
 //! release can say which versions it ships.
 
 use crate::release::manifest::Image;
-use crate::release::{ReleaseError, capture, run};
+use crate::release::{ReleaseError, capture};
 use std::collections::BTreeMap;
 use std::fs;
+use std::io::Write;
 use std::path::Path;
-use std::process::Command;
+use std::process::{Command, Stdio};
 
 /// What the image is for, and the name of its tag.
 pub const NAME: &str = "orch-env-base";
@@ -183,31 +184,29 @@ fn labels_of(reference: &str) -> Result<BTreeMap<String, String>, ReleaseError> 
 /// Builds the image from its recipe as `orch-env-base:<version>`, checks that its labels say what the
 /// recipe pins, prints what it holds, and names it by its content.
 pub fn build(root: &Path, version: &str, fresh: bool) -> Result<Image, ReleaseError> {
-    build_recipe(root, NAME, RECIPE, &PINS, &[], version, fresh)
+    build_recipe(root, NAME, RECIPE, &PINS, false, version, fresh)
 }
 
-/// Builds the developer image from its recipe as `orch-env-dev:<version>`, on the default image of the same version
-/// (which must have been built before), and holds it to what its recipe pins as the default image is held.
+/// Builds the developer image with the default recipe as its first stage.
 pub fn build_developer(root: &Path, version: &str, fresh: bool) -> Result<Image, ReleaseError> {
     build_recipe(
         root,
         DEVELOPER_NAME,
         DEVELOPER_RECIPE,
         &DEVELOPER_PINS,
-        &[format!("BASE_IMAGE={NAME}:{version}")],
+        true,
         version,
         fresh,
     )
 }
 
-/// Builds the image `name:<version>` from the recipe below `recipe_dir` with the build arguments `arguments` besides the
-/// version, checks that its labels say what `pins` ask, prints what it holds, and names it by its content.
+/// Builds the image from the same context-free recipe text shipped in its template.
 fn build_recipe(
     root: &Path,
     name: &str,
     recipe_dir: &str,
     pins: &[Pin],
-    arguments: &[String],
+    include_base: bool,
     version: &str,
     fresh: bool,
 ) -> Result<Image, ReleaseError> {
@@ -216,25 +215,57 @@ fn build_recipe(
             "{version:?} cannot be a tag of the image (letters, digits, `_`, `.` and `-`)"
         )));
     }
-    let recipe = root.join(recipe_dir);
+    let build_file = root.join(recipe_dir).join(BUILD_FILE);
+    let text = fs::read_to_string(&build_file).map_err(|source| ReleaseError::Io {
+        path: build_file,
+        source,
+    })?;
+    let dockerfile = if include_base {
+        let base_file = root.join(RECIPE).join(BUILD_FILE);
+        let base = fs::read_to_string(&base_file).map_err(|source| ReleaseError::Io {
+            path: base_file,
+            source,
+        })?;
+        format!("{base}\n{text}")
+    } else {
+        text.clone()
+    };
     let reference = format!("{name}:{version}");
     let mut docker = Command::new("docker");
     docker
         .args(["build", "--tag", &reference])
         .args(["--build-arg", &format!("VERSION={version}")]);
-    for argument in arguments {
-        docker.args(["--build-arg", argument]);
-    }
     if fresh {
         docker.arg("--no-cache");
     }
-    run(docker.arg(&recipe))?;
-
-    let build_file = recipe.join(BUILD_FILE);
-    let text = fs::read_to_string(&build_file).map_err(|source| ReleaseError::Io {
-        path: build_file,
-        source,
+    eprintln!("+ docker build --tag {reference} --build-arg VERSION={version} -");
+    let mut child = docker
+        .arg("-")
+        .stdin(Stdio::piped())
+        .spawn()
+        .map_err(|error| ReleaseError::Command {
+            program: "docker".into(),
+            detail: format!("cannot be run: {error}"),
+        })?;
+    let written = child
+        .stdin
+        .take()
+        .ok_or_else(|| ReleaseError::Invalid("docker has no input".into()))?
+        .write_all(dockerfile.as_bytes());
+    let status = child.wait().map_err(|error| ReleaseError::Command {
+        program: "docker".into(),
+        detail: error.to_string(),
     })?;
+    written.map_err(|error| ReleaseError::Command {
+        program: "docker".into(),
+        detail: format!("cannot send the Dockerfile: {error}"),
+    })?;
+    if !status.success() {
+        return Err(ReleaseError::Command {
+            program: "docker".into(),
+            detail: status.to_string(),
+        });
+    }
     let pins = pinned_of(pins, &text)?;
     let faults = problems(&pins, &labels_of(&reference)?);
     if !faults.is_empty() {
@@ -275,6 +306,50 @@ mod tests {
         pins.iter()
             .map(|(pin, version)| (pin.label.to_owned(), version.clone()))
             .collect()
+    }
+
+    #[test]
+    fn recipes_write_the_complete_notices_and_docker_helper_without_context_files() {
+        let root = Path::new(env!("CARGO_MANIFEST_DIR"))
+            .ancestors()
+            .nth(3)
+            .unwrap();
+        for (recipe, source, destination) in [
+            (
+                "images/orch-env-base/Dockerfile",
+                "images/orch-env-base/NOTICE.md",
+                "/usr/share/doc/orch-env-base/NOTICE.md",
+            ),
+            (
+                "images/orch-env-dev/Dockerfile",
+                "images/orch-env-dev/NOTICE.md",
+                "/usr/share/doc/orch-env-dev/NOTICE.md",
+            ),
+            (
+                "images/orch-env-dev/Dockerfile",
+                "images/orch-env-dev/orch-dockerd",
+                "/usr/local/bin/orch-dockerd",
+            ),
+        ] {
+            let text = fs::read_to_string(root.join(recipe)).unwrap();
+            let end = text.find(&format!(" > {destination}")).unwrap();
+            let start = text[..end].rfind(" && printf '%s\\n' ").unwrap() + " && ".len();
+            let output = Command::new("sh")
+                .arg("-c")
+                .arg(&text[start..end])
+                .output()
+                .unwrap();
+            assert!(
+                output.status.success(),
+                "{recipe}: {}",
+                String::from_utf8_lossy(&output.stderr)
+            );
+            assert_eq!(
+                output.stdout,
+                fs::read(root.join(source)).unwrap(),
+                "{source}"
+            );
+        }
     }
 
     #[test]

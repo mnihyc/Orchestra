@@ -251,6 +251,18 @@ async fn sign_in_inner(
         match crate::routes::users::redeem(ctx, &mut tx, &user, token).await {
             Ok(row) => Some(row),
             Err(error)
+                if error
+                    .problem
+                    .extra
+                    .get("reason")
+                    .and_then(serde_json::Value::as_str)
+                    == Some(crate::routes::users::ISSUER_AUTHORITY_LOST) =>
+            {
+                return Ok(redirect(
+                    "/login?error=invite_required&reason=invitation_issuer_authority_lost",
+                ));
+            }
+            Err(error)
                 if matches!(
                     error.code(),
                     ErrorCode::Gone | ErrorCode::RegistrationInviteRequired
@@ -474,6 +486,7 @@ pub(super) async fn link(
     provider: &IdentityProviderRow,
     identity: &VerifiedIdentity,
     user: Id,
+    session: Option<Id>,
 ) -> ApiResult<Response> {
     let refused = |error: SignInError| {
         Ok(redirect(&format!(
@@ -490,6 +503,14 @@ pub(super) async fn link(
     };
     if person.suspended() {
         return refused(SignInError::Disabled);
+    }
+    // Revocation and this change take the same person lock, so a link cannot
+    // outlive the browser session that authorized it.
+    let Some(session) = session else {
+        return refused(SignInError::StateExpired);
+    };
+    if tokens::live_session_user(&mut tx, session, ctx.app.clock.now()).await? != Some(user) {
+        return refused(SignInError::StateExpired);
     }
     let Some(current_provider) = identity::identity_provider(&mut tx, provider.id).await? else {
         return refused(SignInError::Disabled);

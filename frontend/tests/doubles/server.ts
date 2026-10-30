@@ -57,8 +57,8 @@ function send(response: ServerResponse, answer: Answer, requestId: string): void
   const headers: Record<string, string | string[]> = { 'X-Request-Id': requestId, 'Cache-Control': 'no-store', ...answer.headers };
   const cookies = Object.entries(answer.cookies ?? {}).map(([name, value]) =>
     value === null
-      ? `${name}=; Max-Age=0; Path=${BASE}/auth; HttpOnly; Secure; SameSite=Strict`
-      : `${name}=${value}; Max-Age=2592000; Path=${BASE}/auth; HttpOnly; Secure; SameSite=Strict`,
+      ? `${name}=; Max-Age=0; Path=/; HttpOnly; Secure; SameSite=Strict`
+      : `${name}=${value}; Max-Age=2592000; Path=/; HttpOnly; Secure; SameSite=Strict`,
   );
   if (cookies.length > 0) headers['Set-Cookie'] = cookies;
   if (answer.text !== undefined) {

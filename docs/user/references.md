@@ -63,6 +63,9 @@ turn or message. Put it in a Markdown link or backquotes. For example,
 `[Design](</Web/Design notes#3>)` names part 3 of that document. Angle brackets
 keep a path containing spaces or parentheses together.
 
+In messages, script addresses and links beginning with `//` stay as text.
+For a web link, include `https://` or `http://`.
+
 Prefer **Copy reference** when handing work between people and agents. Its
 identifier survives a rename. Document block references keep the block's
 identity when surrounding blocks move. A copied part number describes the

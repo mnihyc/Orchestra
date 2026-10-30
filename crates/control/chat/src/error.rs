@@ -62,6 +62,12 @@ pub enum Error {
         /// The current read revision.
         revision: i64,
     },
+    /// A message changed while its edit was waiting for the chat.
+    #[error("the message was changed meanwhile")]
+    StaleMessage {
+        /// The current message revision.
+        revision: i64,
+    },
     /// The caller is suspended where the chat is: altogether, or in that org.
     #[error("the caller is suspended")]
     Suspended {

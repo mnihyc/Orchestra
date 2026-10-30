@@ -176,13 +176,13 @@ pub fn arrangements() -> Vec<ArrangementEntry> {
         tool_sets: None,
     };
     vec![
+        plain(ArrangementType::KeySeparated),
         ArrangementEntry {
             kind: ArrangementType::Separated,
             executor: Some(EXECUTOR.to_owned()),
             executor_version: Some(ExecutorBuild::Same),
             tool_sets: None,
         },
-        plain(ArrangementType::KeySeparated),
         plain(ArrangementType::Together),
     ]
 }
@@ -499,9 +499,21 @@ mod tests {
                 && !declared.supports(ArrangementType::HandedOver),
             "a harness that can be separated from its tools needs neither copy of a credential"
         );
-        let first = &declared.arrangements[0];
-        assert_eq!(first.executor.as_deref(), Some(EXECUTOR));
-        assert_eq!(first.executor_version, Some(ExecutorBuild::Same));
+        assert_eq!(
+            declared
+                .arrangements
+                .iter()
+                .map(|entry| entry.kind)
+                .collect::<Vec<_>>(),
+            [
+                ArrangementType::KeySeparated,
+                ArrangementType::Separated,
+                ArrangementType::Together
+            ]
+        );
+        let separated = declared.separated().next().unwrap();
+        assert_eq!(separated.executor.as_deref(), Some(EXECUTOR));
+        assert_eq!(separated.executor_version, Some(ExecutorBuild::Same));
     }
 
     #[test]
