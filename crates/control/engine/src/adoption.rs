@@ -255,7 +255,7 @@ impl Engine {
             &mut conn,
             &principal,
             adoption.topic,
-            Permission::TopicInteract,
+            Permission::TopicStartThreads,
             Act::Use,
             Policy::default(),
         )
@@ -379,7 +379,7 @@ impl Engine {
             let managed = self
                 .inner
                 .access
-                .environment_manage(conn, person, each.id)
+                .environment_place(conn, person, each.id)
                 .await
                 .map_err(EngineError::from)?;
             if matches!(managed, Answer::Refused(_)) {

@@ -139,7 +139,7 @@ async fn needs_new_default(
     }
     Ok(!matches!(
         AuthzAccess::new(Arc::clone(&app.clock))
-            .environment_manage(conn, person, id)
+            .environment_place(conn, person, id)
             .await
             .map_err(ApiError::internal)?,
         Answer::Allowed { .. }
@@ -193,7 +193,7 @@ async fn environment_of(
             };
             let access = AuthzAccess::new(Arc::clone(&app.clock));
             match access
-                .environment_manage(conn, person, environment)
+                .environment_place(conn, person, environment)
                 .await
                 .map_err(ApiError::internal)?
             {

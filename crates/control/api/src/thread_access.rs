@@ -184,7 +184,7 @@ impl ResourceAccess for AuthzAccess {
             (Some(model), Some(_)) => {
                 let binding = BindingAsk {
                     node: ask.node,
-                    permission: Permission::TopicInteract,
+                    permission: Permission::TopicStartThreads,
                     provider: Some(ProviderChoice {
                         id: ask.provider,
                         model,
@@ -327,6 +327,38 @@ impl ResourceAccess for AuthzAccess {
                 )
                 .await
             }
+        }
+    }
+
+    async fn environment_place(
+        &self,
+        conn: &mut Conn,
+        person: Id,
+        environment: Id,
+    ) -> Result<Answer, AccessFault> {
+        let principal = self.principal(conn, person).await?;
+        let policies = Self::policies(conn, environment).await?;
+        let home = rows::resource_facts(conn, &[environment])
+            .await
+            .map_err(fault)?
+            .first()
+            .and_then(|facts| facts.home_id);
+        let object = ObjectRef {
+            kind: ObjectKind::Environment,
+            id: environment,
+        };
+        match resources::check(
+            conn,
+            &principal,
+            object,
+            Permission::EnvironmentUse,
+            policies.at(home).node_policy(),
+        )
+        .await
+        .map_err(fault)?
+        {
+            Decision::Allowed { .. } => Ok(Answer::allowed()),
+            Decision::Refused(refusal) => Ok(refused(refusal)),
         }
     }
 

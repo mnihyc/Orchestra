@@ -1782,8 +1782,9 @@ crate::endpoints! {
     DocumentDiscussionList: GET "/documents/{id}/discussions", Permission("doc.view"), query DocumentDiscussionListQuery, none, json Page<DocumentDiscussion>, 200;
     /// Opens a discussion on a block of a document, with its first comment.
     DocumentDiscussionCreate: POST "/documents/{id}/discussions", Permission("doc.comment"), none, json DocumentDiscussionCreateBody, json DocumentDiscussion, 201;
-    /// Answers in a discussion.
+    /// Lists a discussion's comments in the order they were written, a window at a time from the newest.
     DocumentCommentList: GET "/documents/{id}/discussions/{discussion_id}/comments", Permission("doc.view"), query DocumentCommentListQuery, none, json DocumentCommentPage, 200;
+    /// Answers in a discussion.
     DocumentCommentCreate: POST "/documents/{id}/discussions/{discussion_id}/comments", Permission("doc.comment"), none, json DocumentCommentCreateBody, json DocumentComment, 201;
     /// Resolves a discussion, or opens it again.
     DocumentDiscussionResolve: POST "/documents/{id}/discussions/{discussion_id}/resolve", Rule("doc.edit, or having written in that discussion"), none, json DocumentDiscussionResolveBody, json DocumentDiscussion, 200;

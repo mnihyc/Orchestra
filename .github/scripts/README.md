@@ -5,11 +5,35 @@ tag/HEAD, semantic version ordering, release notes and the most recent CI result
 (a tag listed with its reason in `.github/release-ci-waivers.txt` may go without green CI;
 the gate warns, and every other check holds);
 `release_native.py` unit-tests, builds and runs each connector on its actual
-platform; `release_package.py` puts all verified connectors into each server's
-downloads; `release_assemble.py` rejects mixed commits and differing common files.
+platform; `release_frontend.py` builds the browser application once and records
+the release identity and each file's SHA-256; `release_package.py` checks that
+input, installs the locked npm packages for their notices, and puts all verified
+connectors into each server's downloads;
+`release_assemble.py` rejects mixed commits and differing common files.
 `release_image.py` builds and checks each native image's pinned labels before its
 approved push. `release_publish.py` records the shared image index and creates a
 draft. Existing published releases and image tags are never replaced.
+
+`ci_test_shard.py` uses Cargo's target list to split the API and engine
+integration programs, and assigns every other workspace package to one shard.
+Unit, example and documentation tests run as well. Shards keep going after a
+test program fails, use a separate PostgreSQL service, and report their results
+independently.
+
+To warm release caches before tagging, dispatch the release workflow from the
+default branch with `warm_caches` enabled and the intended future tag. It builds
+the same native, frontend and package jobs from that branch commit but never
+creates a draft or publishes images. A normal release still requires an existing
+tag, matching commit, release notes and green CI or a recorded waiver.
+
+To repackage, dispatch the release workflow with the same tag and the numeric
+`source_run_id` of an earlier, completed release run. It can have failed after
+producing its native artifacts. The gate still checks the tag and CI, and every
+native and frontend input must match the tag, commit, protocol and file hashes.
+The artifacts are retained for 14 days. A run from before the shared frontend
+was introduced can still supply native inputs: each package job builds and
+checks its own frontend in that case. Image publication is a separate approved
+run and cannot be requested while repackaging.
 
 Set the `release-images` environment to require an operator reviewer before
 enabling `publish_images` on a manual run. A tag run makes a reviewable draft

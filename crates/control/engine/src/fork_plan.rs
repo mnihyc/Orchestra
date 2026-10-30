@@ -1686,7 +1686,7 @@ impl Engine {
                     &mut *conn,
                     &principal,
                     target.topic,
-                    Permission::TopicInteract,
+                    Permission::TopicStartThreads,
                 )
                 .await?
                 {

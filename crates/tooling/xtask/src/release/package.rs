@@ -13,7 +13,8 @@
 //! | `version.json` | the manifest |
 //!
 //! The server programs are compiled in the builder image, on the distribution
-//! the services run, and the static ones for the musl target in the same image.
+//! the services run. Static programs use verified native inputs when supplied,
+//! and otherwise are compiled for the musl target in the same image.
 //! `--check` validates a directory without building anything, and
 //! `--manifest-only` writes the manifest of the files a directory holds, for a
 //! release assembled from the outputs of several machines.
@@ -80,8 +81,6 @@ pub struct PackageArgs {
 
 /// The programs compiled for the glibc the services run on.
 const SERVER_PROGRAMS: [&str; 3] = ["orch-api", "orch-gateway", "orch-worker"];
-/// The programs compiled static, for the musl target.
-const STATIC_PROGRAMS: [&str; 3] = ["orch-connector", "orch-node", "orchctl"];
 /// The bundle of public roots inside the builder image: a service image holds
 /// none, and the services reach public servers (mail, bots, webhooks, push).
 const CA_BUNDLE_IN_IMAGE: &str = "/etc/ssl/certs/ca-certificates.crt";
@@ -198,24 +197,32 @@ fn build(root: &Path, args: &PackageArgs) -> Result<(), ReleaseError> {
     }
     builder.cargo(&server_arguments, &server_variables)?;
     let mut static_arguments = vec!["build", "--release", "--locked", "--target", &triple];
-    for program in STATIC_PROGRAMS {
+    for program in static_programs_to_build(&arch, &extra_connectors) {
         static_arguments.extend(["-p", program]);
     }
     builder.cargo(&static_arguments, &identity_variables)?;
     let glibc_dir = builder.target_dir().join("release");
     let musl_dir = builder.target_dir().join(&triple).join("release");
+    let connector = static_source("orch-connector", &arch, &musl_dir, &extra_connectors);
+    let node = static_source("orch-node", &arch, &musl_dir, &extra_connectors);
+    if native_input("orch-connector", &arch, &extra_connectors).is_some() {
+        eprintln!("reusing verified native connector for {arch}");
+    }
+    if native_input("orch-node", &arch, &extra_connectors).is_some() {
+        eprintln!("reusing verified native node for {arch}");
+    }
 
     // The browser application.
     let dist = frontend_dist(root, args.reuse_frontend, &version, &tag)?;
 
     // The files that are one program each.
     for (program, name) in [
-        ("orchctl", &names.ctl),
-        ("orch-connector", &names.connector),
-        ("orch-node", &names.node),
+        (musl_dir.join("orchctl"), &names.ctl),
+        (connector.clone(), &names.connector),
+        (node.clone(), &names.node),
     ] {
         let target = out.join(name);
-        fs::copy(musl_dir.join(program), &target).map_err(io_error(&target))?;
+        fs::copy(program, &target).map_err(io_error(&target))?;
     }
     for (name, source) in &extra_connectors {
         let target = out.join(name);
@@ -240,12 +247,12 @@ fn build(root: &Path, args: &PackageArgs) -> Result<(), ReleaseError> {
     // The server archive.
     let mut server = Vec::new();
     for program in SERVER_PROGRAMS {
-        server.push(Entry::file(
+        server.push(executable_entry(
             format!("bin/{program}"),
             &glibc_dir.join(program),
         )?);
     }
-    server.push(Entry::file("bin/orch-node", &musl_dir.join("orch-node"))?);
+    server.push(executable_entry("bin/orch-node", &node)?);
     // Only the schema's files: the directory also holds a note for people.
     server.extend(archive::walk(
         &root.join("migrations"),
@@ -368,6 +375,48 @@ fn harness_builds(root: &Path) -> Result<Vec<serde_json::Value>, ReleaseError> {
     serde_json::from_str(&text).map_err(|source| ReleaseError::Json { path, source })
 }
 
+/// Uploaded build artifacts can arrive without their original executable bits.
+fn executable_entry(path: impl Into<String>, source: &Path) -> Result<Entry, ReleaseError> {
+    let mut entry = Entry::file(path, source)?;
+    entry.mode = EXECUTABLE_MODE;
+    Ok(entry)
+}
+
+/// Finds an input that `connectors::read` has already verified for this release.
+fn native_input<'a>(
+    program: &str,
+    arch: &str,
+    inputs: &'a [(String, PathBuf)],
+) -> Option<&'a Path> {
+    let name = format!("{program}-linux-{arch}-musl");
+    inputs
+        .iter()
+        .find(|(input, _)| *input == name)
+        .map(|(_, path)| path.as_path())
+}
+
+/// Keeps local packaging usable when no native build was supplied.
+fn static_source(
+    program: &str,
+    arch: &str,
+    musl_dir: &Path,
+    inputs: &[(String, PathBuf)],
+) -> PathBuf {
+    native_input(program, arch, inputs)
+        .map(Path::to_path_buf)
+        .unwrap_or_else(|| musl_dir.join(program))
+}
+
+fn static_programs_to_build(arch: &str, inputs: &[(String, PathBuf)]) -> Vec<&'static str> {
+    let mut programs = vec!["orchctl"];
+    for program in ["orch-connector", "orch-node"] {
+        if native_input(program, arch, inputs).is_none() {
+            programs.push(program);
+        }
+    }
+    programs
+}
+
 /// The files that go to `connectors/`: the connector builds, the installers, and
 /// the manifest of those files that `/downloads` answers from.
 fn connector_entries(
@@ -383,11 +432,11 @@ fn connector_entries(
     let mut entries = vec![
         Entry::file(
             format!("{TOOLS_DIR_IN_ZIP}/orch-connector-linux-{arch}-musl"),
-            &musl_dir.join("orch-connector"),
+            &static_source("orch-connector", arch, musl_dir, extra_connectors),
         )?,
         Entry::file(
             format!("{TOOLS_DIR_IN_ZIP}/orch-node-linux-{arch}-musl"),
-            &musl_dir.join("orch-node"),
+            &static_source("orch-node", arch, musl_dir, extra_connectors),
         )?,
     ];
     for (name, path) in extra_connectors {
@@ -705,6 +754,29 @@ fn check_server_archive(
             found.push(format!("{} holds no {wanted}", names.server));
         }
     }
+    let file = fs::File::open(&path).map_err(io_error(&path))?;
+    let mut zip = zip::ZipArchive::new(file).map_err(|error| {
+        ReleaseError::Invalid(format!("{} is not a zip archive: {error}", path.display()))
+    })?;
+    for program in [
+        "bin/orch-api",
+        "bin/orch-gateway",
+        "bin/orch-worker",
+        "bin/orch-node",
+    ] {
+        match zip.by_name(program) {
+            Ok(entry) if entry.unix_mode().is_none_or(|mode| mode & 0o111 == 0) => {
+                found.push(format!("{} has a non-executable {program}", names.server));
+            }
+            Ok(_) | Err(zip::result::ZipError::FileNotFound) => {}
+            Err(error) => {
+                return Err(ReleaseError::Invalid(format!(
+                    "{} cannot be read: {error}",
+                    path.display()
+                )));
+            }
+        }
+    }
     if !listed
         .iter()
         .any(|name| name.starts_with("migrations/") && name.ends_with(".sql"))
@@ -826,10 +898,10 @@ mod tests {
             .expect("the download bundle includes its manifest");
         let file = |path: &str, bytes: &[u8]| Entry::bytes(path, bytes.to_vec(), FILE_MODE);
         let mut server = vec![
-            file("bin/orch-api", b"x"),
-            file("bin/orch-gateway", b"x"),
-            file("bin/orch-worker", b"x"),
-            file("bin/orch-node", b"x"),
+            Entry::bytes("bin/orch-api", b"x".to_vec(), EXECUTABLE_MODE),
+            Entry::bytes("bin/orch-gateway", b"x".to_vec(), EXECUTABLE_MODE),
+            Entry::bytes("bin/orch-worker", b"x".to_vec(), EXECUTABLE_MODE),
+            Entry::bytes("bin/orch-node", b"x".to_vec(), EXECUTABLE_MODE),
             file("migrations/0001_initial.sql", b"SELECT 1;"),
             file("share/model-rates.json", b"{}"),
             file("share/ca-certificates.crt", b"x"),
@@ -897,6 +969,81 @@ mod tests {
             "{found}"
         );
         assert!(found.contains("is not a Linux program"), "{found}");
+    }
+
+    #[test]
+    fn a_server_archive_with_a_non_executable_node_is_refused() {
+        let dir = tempfile::tempdir().expect("a directory");
+        small_release(dir.path(), "v0.1.0");
+        let names = AssetNames::for_linux("x86_64", "v0.1.0");
+        archive::write_zip(
+            &dir.path().join(&names.server),
+            &[Entry::bytes("bin/orch-node", b"node".to_vec(), FILE_MODE)],
+        )
+        .expect("an archive with a non-executable node");
+        assert!(problems(dir.path()).contains("non-executable bin/orch-node"));
+    }
+
+    #[test]
+    fn verified_native_linux_programs_are_shipped_without_rebuilding_them() {
+        let dir = tempfile::tempdir().expect("a directory");
+        let root = Path::new(env!("CARGO_MANIFEST_DIR"))
+            .ancestors()
+            .nth(3)
+            .expect("the repository");
+        let connector = dir.path().join("orch-connector-linux-x86_64-musl");
+        let node = dir.path().join("orch-node-linux-x86_64-musl");
+        fs::write(&connector, b"\x7fELF verified connector").unwrap();
+        fs::write(&node, b"\x7fELF verified node").unwrap();
+        let inputs = vec![
+            ("orch-connector-linux-x86_64-musl".into(), connector.clone()),
+            ("orch-node-linux-x86_64-musl".into(), node.clone()),
+        ];
+        assert_eq!(static_programs_to_build("x86_64", &inputs), vec!["orchctl"]);
+        assert_eq!(
+            static_programs_to_build("aarch64", &inputs),
+            vec!["orchctl", "orch-connector", "orch-node"]
+        );
+        assert_eq!(
+            static_source("orch-node", "x86_64", dir.path(), &inputs),
+            node
+        );
+        let entries = connector_entries(
+            root,
+            dir.path(),
+            "x86_64",
+            "1.2.3",
+            "v1.2.3",
+            &"a".repeat(40),
+            &inputs,
+        )
+        .unwrap();
+        let archive = dir.path().join("server.zip");
+        let mut server = entries;
+        server.push(executable_entry("bin/orch-node", &node).unwrap());
+        archive::write_zip(&archive, &server).unwrap();
+        for (name, bytes) in [
+            (
+                "orch-connector-linux-x86_64-musl",
+                b"\x7fELF verified connector".as_slice(),
+            ),
+            (
+                "orch-node-linux-x86_64-musl",
+                b"\x7fELF verified node".as_slice(),
+            ),
+        ] {
+            assert_eq!(
+                archive::read_zip_entry(&archive, &format!("connectors/{name}"))
+                    .unwrap()
+                    .unwrap(),
+                bytes
+            );
+        }
+        let mut zip = zip::ZipArchive::new(fs::File::open(&archive).unwrap()).unwrap();
+        assert_eq!(
+            zip.by_name("bin/orch-node").unwrap().unix_mode().unwrap() & 0o777,
+            EXECUTABLE_MODE
+        );
     }
 
     #[test]

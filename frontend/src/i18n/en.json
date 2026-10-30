@@ -7274,7 +7274,7 @@
     "confirm": "Move to {{topic}}",
     "here": "Here now",
     "checking": "Checking access…",
-    "needsInteract": "Topic Interact needed",
+    "needsInteract": "Start threads in the topic needed",
     "jobMustEnd": "Wait for the change job to finish",
     "loading": "Loading this tree…",
     "reviewing": "Reviewing this move…",
@@ -10144,21 +10144,23 @@
     },
     "org": {
       "view": "View Org",
-      "interact": "Interact Org",
+      "interact": "Contribute to Org",
       "manage": "Manage Org",
       "archive": "Archive Org"
     },
     "project": {
       "view": "View Project",
-      "interact": "Interact Project",
+      "interact": "Contribute to Project",
       "manage": "Manage Project",
-      "archive": "Archive Project"
+      "archive": "Archive Project",
+      "create_topics": "Create topics"
     },
     "topic": {
       "view": "View Topic",
-      "interact": "Interact Topic",
+      "interact": "Contribute to Topic",
       "manage": "Manage Topic",
-      "archive": "Archive Topic"
+      "archive": "Archive Topic",
+      "start_threads": "Start threads"
     },
     "thread": {
       "view": "View Thread",
@@ -10596,7 +10598,7 @@
       "empty": {
         "title": "This org has no projects yet",
         "about": "A project holds the topics of one body of work. Make the first one to begin.",
-        "noRight": "Projects here are made by people who hold “Interact Org”. Ask {{name}}, who owns it."
+        "noRight": "Projects here are made by people who hold “Contribute to Org”. Ask {{name}}, who owns it."
       },
       "personalTitle": "Personal space · {{name}}",
       "ownEmpty": {
@@ -10654,7 +10656,7 @@
       "empty": {
         "title": "No topics yet",
         "about": "A topic is one piece of work. Open the first one to begin.",
-        "noRight": "Topics here are opened by people who hold “Interact Project”."
+        "noRight": "Topics here are opened by people who hold “Create topics”."
       }
     },
     "topics": {
@@ -12687,6 +12689,9 @@
       "use": "Use this directory",
       "directory": "Directory in that environment",
       "directoryHint": "Where in the environment this thread works, relative to its root. Left empty, the server chooses.",
+      "directoryExists": "Exists",
+      "directoryNew": "Will be created",
+      "directoryIsFile": "A file has this name",
       "closed": "It cannot be used now.",
       "newAbout": "Made for this thread from the defaults of {{place}}.",
       "hosts": "Where it would be made",
@@ -12699,7 +12704,8 @@
       "alsoUsedBy": "also used by {{names}}",
       "alsoUsedByMore_one": "also used by {{names}} and {{count}} other",
       "alsoUsedByMore_other": "also used by {{names}} and {{count}} others",
-      "directoryIs": "Where in the environment this thread works. Left empty, it is {{directory}}."
+      "directoryIs": "Where in the environment this thread works. Left empty, it is {{directory}}.",
+      "askAccess": "Ask for access"
     },
     "arrangement": {
       "noneAllowed": "{{provider}} allows no way of placing an agent that a harness there can take.",
@@ -16654,7 +16660,7 @@
         "what": "See the topic, its threads and its chat."
       },
       "line-topic-interact": {
-        "title": "Can interact",
+        "title": "Can contribute",
         "what": "Also start threads in it and set its status and tags."
       },
       "line-topic-manage": {
@@ -16666,7 +16672,7 @@
         "what": "See the project, its topics and its chat."
       },
       "line-project-interact": {
-        "title": "Can interact",
+        "title": "Can contribute",
         "what": "Also open topics in it."
       },
       "line-project-manage": {
@@ -16678,7 +16684,7 @@
         "what": "See the org, its members, the orgs inside it and its projects."
       },
       "line-org-interact": {
-        "title": "Can interact",
+        "title": "Can contribute",
         "what": "Also make projects in it."
       },
       "line-org-manage": {
@@ -24074,8 +24080,7 @@
       "failed": "The goal could not be changed"
     },
     "menu": {
-      "set": "Set a goal…",
-      "exists": "A goal is under way: edit it above the composer"
+      "set": "Set a goal…"
     },
     "slash": {
       "about": "Set a goal: keep working until it is done",

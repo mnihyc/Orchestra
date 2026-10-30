@@ -116,8 +116,17 @@ pub trait ResourceAccess: Send + Sync {
         agent: Id,
     ) -> Result<Answer, AccessFault>;
 
-    /// Whether the person manages the environment (`environment.manage`),
-    /// which putting a thread into it needs.
+    /// Whether the person may put a new thread into the environment: its Use
+    /// (`environment.use`), which also lets the thread's agent act for them there.
+    async fn environment_place(
+        &self,
+        conn: &mut Conn,
+        person: Id,
+        environment: Id,
+    ) -> Result<Answer, AccessFault>;
+
+    /// Whether the person manages the environment (`environment.manage`), which
+    /// moving, forking or copying work into it needs.
     async fn environment_manage(
         &self,
         conn: &mut Conn,
@@ -150,6 +159,10 @@ impl ResourceAccess for Unconnected {
     }
 
     async fn agent_use(&self, _: &mut Conn, _: Id, _: Id, _: Id) -> Result<Answer, AccessFault> {
+        Err(AccessFault::NotConnected)
+    }
+
+    async fn environment_place(&self, _: &mut Conn, _: Id, _: Id) -> Result<Answer, AccessFault> {
         Err(AccessFault::NotConnected)
     }
 

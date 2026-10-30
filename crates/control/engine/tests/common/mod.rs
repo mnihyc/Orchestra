@@ -171,6 +171,15 @@ impl ResourceAccess for TestAccess {
         self.answer(person)
     }
 
+    async fn environment_place(
+        &self,
+        _: &mut Conn,
+        person: Id,
+        _: Id,
+    ) -> Result<Answer, AccessFault> {
+        self.answer(person)
+    }
+
     async fn environment_manage(
         &self,
         _: &mut Conn,
@@ -1863,6 +1872,13 @@ impl World {
         .unwrap();
         // Expanding a composite function directly as (function()).* evaluates it once for each output column.
         // A lateral record evaluates the JSON conversion once per row; the small template is materialized once.
+        // The copies name what the template names: reading that out of each copy, a row at a time, is the reference
+        // trigger's work and no part of what a long history proves, so it is off for this one statement.
+        let mut tx = self.pool.pool().begin().await.unwrap();
+        sqlx::query("ALTER TABLE items DISABLE TRIGGER related_thread_references")
+            .execute(&mut *tx)
+            .await
+            .unwrap();
         sqlx::query(
             "WITH seed AS MATERIALIZED (
                 SELECT x.seq_created, row_number() OVER (ORDER BY x.seq_created) AS rank, to_jsonb(x) AS body
@@ -1881,9 +1897,14 @@ impl World {
         .bind(first_new)
         .bind(template)
         .bind(stride)
-        .execute(self.pool.pool())
+        .execute(&mut *tx)
         .await
         .unwrap();
+        sqlx::query("ALTER TABLE items ENABLE TRIGGER related_thread_references")
+            .execute(&mut *tx)
+            .await
+            .unwrap();
+        tx.commit().await.unwrap();
         sqlx::query(
             "UPDATE threads SET next_seq=GREATEST(
                 (SELECT COALESCE(max(seq_created),0) FROM items WHERE thread_id=$1),

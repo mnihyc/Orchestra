@@ -27,8 +27,9 @@ not say the versions its recipe pins (`package` builds it the same way, and
 `cargo xtask identity frontend` answers the browser
 application's build with the identity a Rust build gets from its build script.
 The server programs are compiled in a container of the distribution the Compose
-services run, and the connector, node and `orchctl` as static musl programs in
-the same container; nothing is installed on the machine that runs the command.
+services run. The connector and node use matching verified native inputs when
+supplied; otherwise they are built as static musl programs, as is `orchctl`, in
+the same container. Nothing is installed on the machine that runs the command.
 The release modules are tested on archives and manifests made in a temporary
 directory; packaging itself is run by the deployment smoke scenarios.
 `cargo xtask verify --offline -p PACKAGE` checks one package with cached inputs;

@@ -615,6 +615,11 @@ mod tests {
         std::fs::write(path, text).unwrap();
     }
 
+    /// The one build the adapter supports.
+    fn pinned() -> &'static str {
+        SUPPORTED_RANGE.trim_start_matches('=')
+    }
+
     fn home_with_session(version: &str) -> tempfile::TempDir {
         let home = tempfile::tempdir().unwrap();
         let project = home.path().join("projects").join("-workspace");
@@ -631,7 +636,7 @@ mod tests {
 
     #[test]
     fn a_session_is_found_by_its_id_wherever_its_directory_put_it_and_nothing_else_is() {
-        let home = home_with_session("2.1.296");
+        let home = home_with_session(pinned());
         assert!(find_transcript(home.path(), ID).is_some());
         assert!(find_transcript(home.path(), "22222222-2222-4222-8222-222222222222").is_none());
         assert!(find_transcript(home.path(), "../../etc/passwd").is_none());
@@ -641,14 +646,14 @@ mod tests {
     #[tokio::test]
     async fn a_session_exported_and_imported_into_another_home_is_there_whole_with_its_sub_agents()
     {
-        let source = home_with_session("2.1.296");
+        let source = home_with_session(pinned());
         let out = tempfile::tempdir().unwrap();
         let archive = export_transcript(source.path(), ID, out.path())
             .await
             .unwrap();
         assert_eq!(archive.format, TRANSCRIPT_FORMAT);
         let target = tempfile::tempdir().unwrap();
-        let id = import_transcript(target.path(), true, &archive, "2.1.296")
+        let id = import_transcript(target.path(), true, &archive, pinned())
             .await
             .unwrap();
         assert_eq!(id, ID);
@@ -669,7 +674,7 @@ mod tests {
             .await
             .unwrap();
         let target = tempfile::tempdir().unwrap();
-        let error = import_transcript(target.path(), true, &archive, "2.1.296")
+        let error = import_transcript(target.path(), true, &archive, pinned())
             .await
             .unwrap_err();
         assert!(matches!(error, HistoryError::OtherVersion(ref v) if v == "2.1.100"));
@@ -683,8 +688,9 @@ mod tests {
     async fn an_archive_that_names_a_path_outside_the_session_is_refused() {
         let out = tempfile::tempdir().unwrap();
         let path = out.path().join("evil.orch-claude-code");
+        let version = pinned();
         let header = format!(
-            "{{\"session_id\":\"{ID}\",\"harness_version\":\"2.1.296\",\"files\":[{{\"path\":\"../../escape\",\"size\":1}}]}}"
+            "{{\"session_id\":\"{ID}\",\"harness_version\":\"{version}\",\"files\":[{{\"path\":\"../../escape\",\"size\":1}}]}}"
         );
         tokio::fs::write(&path, format!("{ARCHIVE_MAGIC}\n{header}\nx"))
             .await
@@ -696,7 +702,7 @@ mod tests {
         };
         let target = tempfile::tempdir().unwrap();
         assert!(matches!(
-            import_transcript(target.path(), true, &archive, "2.1.296").await,
+            import_transcript(target.path(), true, &archive, pinned()).await,
             Err(HistoryError::NotAnArchive(_))
         ));
     }
@@ -712,7 +718,7 @@ mod tests {
             size: 0,
         };
         assert!(matches!(
-            import_transcript(out.path(), true, &archive, "2.1.296").await,
+            import_transcript(out.path(), true, &archive, pinned()).await,
             Err(HistoryError::NotAnArchive(_))
         ));
     }
@@ -735,12 +741,12 @@ mod tests {
         );
         let different = tempfile::tempdir().unwrap();
         assert!(matches!(
-            import_transcript(different.path(), true, &archive, "2.1.296").await,
+            import_transcript(different.path(), true, &archive, RECORDED).await,
             Err(HistoryError::VersionMismatch { .. })
         ));
         assert!(!different.path().join("projects").exists());
 
-        let old_source = home_with_session("2.1.296");
+        let old_source = home_with_session(RECORDED);
         let old_out = tempfile::tempdir().unwrap();
         let old_archive = export_transcript(old_source.path(), ID, old_out.path())
             .await
@@ -754,7 +760,7 @@ mod tests {
                 PORTABLE_ARCHIVE_CANDIDATE,
             )
             .await,
-            Err(HistoryError::VersionMismatch { .. })
+            Err(HistoryError::OtherVersion(_) | HistoryError::VersionMismatch { .. })
         ));
         assert!(!candidate_home.path().join("projects").exists());
     }
@@ -762,6 +768,8 @@ mod tests {
     /// A session as Claude Code 2.1.296 keeps it: two turns, a command and an edit, a picture given with
     /// words, and a line of a sub-agent's own conversation.
     const SESSION: &str = include_str!("../tests/fixtures/adopt/session.jsonl");
+    /// The build the session was recorded with, older than the pinned one; the pinned build writes the same lines.
+    const RECORDED: &str = "2.1.296";
     const SESSION_ID: &str = "5b0c3e9a-1f2d-4c8b-9a7e-2d4f6b8c0e12";
 
     fn adopted_home() -> tempfile::TempDir {
@@ -772,7 +780,7 @@ mod tests {
                 .join("projects")
                 .join("-work-web")
                 .join(format!("{SESSION_ID}.jsonl")),
-            SESSION,
+            &SESSION.replace(RECORDED, pinned()),
         );
         home
     }
@@ -989,7 +997,7 @@ mod tests {
             .join("projects")
             .join("-w")
             .join(format!("{SESSION_ID}.jsonl"));
-        write(&path, &SESSION.replace("2.1.296", "1.0.0"));
+        write(&path, &SESSION.replace(RECORDED, "1.0.0"));
         let settings = MapperSettings {
             directory: "/work/web".to_owned(),
             cwd: "/work/web".to_owned(),

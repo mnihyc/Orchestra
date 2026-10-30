@@ -35,12 +35,12 @@ async fn chosen_environment(
         conn,
         principal,
         &resources::Needs {
-            required: Permission::EnvironmentManage,
+            required: Permission::EnvironmentUse,
             anchor: object,
             through: Some(node),
             items: vec![resources::Need {
                 object,
-                permissions: vec![Permission::EnvironmentManage],
+                permissions: vec![Permission::EnvironmentUse],
                 options: None,
             }],
         },
@@ -137,8 +137,8 @@ async fn options(ctx: Ctx, query: NodeBindingOptionsGetQuery, (): ()) -> ApiResu
         .filter(|node| node.deleted_at.is_none())
         .ok_or_else(ApiError::not_found)?;
     let permission = match node.kind.as_str() {
-        "topic" => Permission::TopicInteract,
-        "project" => Permission::ProjectInteract,
+        "topic" => Permission::TopicStartThreads,
+        "project" => Permission::ProjectCreateTopics,
         _ => {
             return Err(invalid(
                 "id",

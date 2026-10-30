@@ -885,7 +885,8 @@ mod bounded_tests {
 
     #[test]
     fn a_share_that_leaves_less_than_the_newest_turn_still_cuts_to_it() {
-        let budget = budget_of(Some(1_000), 10);
+        // A thousand tokens of share: room beyond the frame, and far less than the newest turn.
+        let budget = budget_of(Some(10_000), 10);
         let transcript = long_thread(3);
         let recent = carried(3, 3, 50_000);
         let bounded = bounded_input(&transcript.text, Some(&recent), &budget);

@@ -472,13 +472,24 @@ impl ContractExtras {
             .tempdir_in(directory)
             .map_err(transfer_error)?;
         let path = staging.path().join("archive.pipe");
-        rustix::fs::mkfifoat(
-            rustix::fs::CWD,
-            &path,
-            rustix::fs::Mode::RUSR | rustix::fs::Mode::WUSR,
-        )
-        .map_err(transfer_error)?;
-        Ok((staging, path))
+        #[cfg(target_os = "linux")]
+        {
+            rustix::fs::mkfifoat(
+                rustix::fs::CWD,
+                &path,
+                rustix::fs::Mode::RUSR | rustix::fs::Mode::WUSR,
+            )
+            .map_err(transfer_error)?;
+            Ok((staging, path))
+        }
+        // Hosts run on Linux; elsewhere the node is only built for its checks.
+        #[cfg(not(target_os = "linux"))]
+        {
+            drop((staging, path));
+            Err(DriverError::Unavailable(
+                "volume transfers run on Linux hosts only".into(),
+            ))
+        }
     }
 }
 

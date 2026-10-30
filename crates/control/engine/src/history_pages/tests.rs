@@ -769,6 +769,11 @@ async fn an_oversized_neutral_turn_stops_after_one_item_page_without_holding_the
         .bind(end)
         .execute(&mut *tx)
         .await?;
+    // The copies name what the template names: the reference trigger's reading of each, a row at a time, is no part
+    // of what this turn proves, so it is off for this one statement.
+    sqlx::query("ALTER TABLE items DISABLE TRIGGER related_thread_references")
+        .execute(&mut *tx)
+        .await?;
     let inserted = sqlx::query(
         "WITH seed AS MATERIALIZED (
             SELECT to_jsonb(i) AS body FROM items i
@@ -787,6 +792,9 @@ async fn an_oversized_neutral_turn_stops_after_one_item_page_without_holding_the
     .bind(base)
     .execute(&mut *tx)
     .await?;
+    sqlx::query("ALTER TABLE items ENABLE TRIGGER related_thread_references")
+        .execute(&mut *tx)
+        .await?;
     assert_eq!(inserted.rows_affected(), u64::try_from(SCALE_TURNS)?);
     sqlx::query("UPDATE threads SET next_seq=$2 WHERE node_id=$1")
         .bind(thread)

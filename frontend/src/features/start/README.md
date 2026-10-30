@@ -23,8 +23,8 @@ Options itself, so a required choice cannot be hidden behind a disabled act. Col
 read only while their optional registration tools are visible; their pending state does not pretend there are no machines.
 Everything it lists is what the server says a thread there could be bound to, asked before the
 thread exists: the providers with the reason one cannot be used, the agents and models each offers, every arrangement in the server's
-order with the one the server would take marked and the closed ones shown off with its reason, the environments the person manages with
-their reasons, and whether they may make one. A new environment is made for the thread from the defaults of the place, or by the form of the
+order with the one the server would take marked and the closed ones shown off with its reason, the environments the person may use with
+their reasons, then those they only see, set apart, where picking one asks for its Use, and whether they may make one. A new environment is made for the thread from the defaults of the place, or by the form of the
 resources screens, opened from here; a directory of a connected machine can be registered as one. What is ticked is what is sent, the first
 arrangement as much as any other, and a refusal says why and is never answered by another way.
 

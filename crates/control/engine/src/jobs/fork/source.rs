@@ -299,7 +299,13 @@ pub(super) async fn authorize(
             ));
         }
         if recipe.result != ForkResult::Replace
-            && !allowed(conn, &principal, source.topic, Permission::TopicInteract).await?
+            && !allowed(
+                conn,
+                &principal,
+                source.topic,
+                Permission::TopicStartThreads,
+            )
+            .await?
         {
             return Err(failed(
                 "authz.denied",

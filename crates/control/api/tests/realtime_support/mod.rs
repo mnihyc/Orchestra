@@ -141,6 +141,10 @@ impl ResourceAccess for OpenAccess {
         Ok(Answer::Allowed { arrangements: None })
     }
 
+    async fn environment_place(&self, _: &mut Conn, _: Id, _: Id) -> Result<Answer, AccessFault> {
+        Ok(Answer::Allowed { arrangements: None })
+    }
+
     async fn environment_manage(&self, _: &mut Conn, _: Id, _: Id) -> Result<Answer, AccessFault> {
         Ok(Answer::Allowed { arrangements: None })
     }

@@ -6,8 +6,17 @@ on:
   workflow_dispatch:
     inputs:
       tag:
-        description: Existing tag to package
+        description: Release tag (a future tag is allowed only when warming caches)
         required: true
+        type: string
+      warm_caches:
+        description: Warm caches from the default branch without creating a draft or publishing images
+        required: true
+        default: false
+        type: boolean
+      source_run_id:
+        description: Completed release run whose native and frontend artifacts should be reused (optional)
+        required: false
         type: string
       publish_images:
         description: Publish the default image after its terms and release-images environment are approved
@@ -31,20 +40,45 @@ jobs:
   gate:
     runs-on: ubuntu-24.04
     timeout-minutes: 10
+    permissions:
+      contents: read
+      actions: read
     outputs:
-      tag: ${{ steps.gate.outputs.tag }}
-      version: ${{ steps.gate.outputs.version }}
-      commit: ${{ steps.gate.outputs.commit }}
+      tag: ${{ steps.gate.outputs.tag || steps.warm.outputs.tag }}
+      version: ${{ steps.gate.outputs.version || steps.warm.outputs.version }}
+      commit: ${{ steps.gate.outputs.commit || steps.warm.outputs.commit }}
+      source_frontend: ${{ steps.source.outputs.frontend }}
     steps:
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
         with:
-          ref: ${{ inputs.tag || github.ref_name }}
+          ref: ${{ inputs.warm_caches && github.sha || inputs.tag || github.ref_name }}
           fetch-depth: 0
+      - name: Prepare a cache-only build of the default branch
+        if: inputs.warm_caches
+        id: warm
+        env:
+          DEFAULT_BRANCH: ${{ github.event.repository.default_branch }}
+          SOURCE_RUN_ID: ${{ inputs.source_run_id }}
+          PUBLISH_IMAGES: ${{ inputs.publish_images }}
+        run: python3 .github/scripts/release_warmup.py
       - name: Gate the exact tag and commit
+        if: ${{ !inputs.warm_caches }}
         id: gate
         env:
           GH_TOKEN: ${{ github.token }}
         run: python3 .github/scripts/release_gate.py
+      - name: Check the source release run
+        if: inputs.source_run_id != ''
+        id: source
+        env:
+          GH_TOKEN: ${{ github.token }}
+          SOURCE_RUN_ID: ${{ inputs.source_run_id }}
+        run: python3 .github/scripts/release_source.py
+      - name: Refuse image publication during repackaging
+        if: inputs.source_run_id && inputs.publish_images
+        run: |
+          echo '::error::Repackaging only creates packages and a draft; publish images in a separate approved run.'
+          exit 1
       - name: Release helper behavior
         run: python3 -I -B -m unittest discover -s .github/scripts -p 'test_release_*.py'
       - name: Lint the workflows in the pinned tooling image
@@ -52,6 +86,7 @@ jobs:
 
   native:
     needs: gate
+    if: ${{ !inputs.source_run_id }}
     strategy:
       fail-fast: false
       matrix:
@@ -72,7 +107,37 @@ jobs:
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
         with:
           ref: ${{ needs.gate.outputs.commit }}
+      # The cache action identifies dependencies by their location outside the checkout.
+      - name: Prepare Linux native builder cache
+        if: runner.os == 'Linux'
+        shell: bash
+        run: |
+          mkdir -p "$RUNNER_TEMP/orch-builder-cargo-home" "$GITHUB_WORKSPACE/.tmp/release-target/container"
+          ln -s "$RUNNER_TEMP/orch-builder-cargo-home" "$GITHUB_WORKSPACE/.tmp/release-target/container/cargo-home"
+      # Linux builds run in the pinned builder with its own Cargo home and target.
+      - name: Restore Linux native dependencies
+        if: runner.os == 'Linux'
+        uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2.9.2
+        env:
+          CARGO_HOME: ${{ runner.temp }}/orch-builder-cargo-home
+        with:
+          key: native-${{ matrix.target }}
+          workspaces: . -> .tmp/release-target/container/target
+          cache-bin: 'false'
+      - name: Restore native dependencies
+        if: runner.os != 'Linux'
+        uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2.9.2
+        with:
+          key: native-${{ matrix.target }}
+          workspaces: . -> .tmp/release-target
+          cache-bin: 'false'
+      - name: Linux native tests, connector build and actual version command
+        if: runner.os == 'Linux'
+        env:
+          CARGO_HOME: ${{ runner.temp }}/orch-builder-cargo-home
+        run: python .github/scripts/release_native.py --target ${{ matrix.target }} --out .tmp/native
       - name: Native tests, connector build and actual version command
+        if: runner.os != 'Linux'
         run: python .github/scripts/release_native.py --target ${{ matrix.target }} --out .tmp/native
       - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
         with:
@@ -81,8 +146,51 @@ jobs:
           if-no-files-found: error
           retention-days: 14
 
+  frontend:
+    needs: gate
+    if: ${{ !inputs.source_run_id }}
+    runs-on: ubuntu-24.04
+    timeout-minutes: 90
+    env:
+      ORCH_RELEASE_VERSION: ${{ needs.gate.outputs.version }}
+      ORCH_RELEASE_TAG: ${{ needs.gate.outputs.tag }}
+      ORCH_BUILD_NUMBER_DIR: ${{ github.workspace }}/.tmp/release-counters
+      CARGO_TARGET_DIR: ${{ github.workspace }}/.tmp/release-target
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+        with:
+          ref: ${{ needs.gate.outputs.commit }}
+      - name: Restore frontend identity dependencies
+        uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2.9.2
+        with:
+          key: frontend
+          workspaces: . -> .tmp/release-target
+          cache-bin: 'false'
+      - name: Restore web application downloads
+        uses: actions/cache@0057852bfaa89a56745cba8c7296529d2fc39830 # v4
+        with:
+          path: .tmp/npm-cache
+          key: release-npm-${{ hashFiles('frontend/.nvmrc', 'frontend/package-lock.json') }}
+          restore-keys: release-npm-
+      - name: Build and record the frontend once
+        run: python3 .github/scripts/release_frontend.py --out .tmp/frontend-output
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        with:
+          name: frontend-dist
+          path: .tmp/frontend-output/*
+          if-no-files-found: error
+          include-hidden-files: true
+          retention-days: 14
+
   package:
-    needs: [gate, native]
+    needs: [gate, native, frontend]
+    if: >-
+      ${{ !cancelled() && needs.gate.result == 'success' &&
+          ((needs.native.result == 'success' && needs.frontend.result == 'success') ||
+           (inputs.source_run_id && needs.native.result == 'skipped' && needs.frontend.result == 'skipped')) }}
+    permissions:
+      contents: read
+      actions: read
     strategy:
       fail-fast: false
       matrix:
@@ -100,12 +208,46 @@ jobs:
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
         with:
           ref: ${{ needs.gate.outputs.commit }}
+      - name: Prepare server builder cache
+        run: |
+          mkdir -p "$RUNNER_TEMP/orch-builder-cargo-home" "$GITHUB_WORKSPACE/.tmp/release-target/container"
+          ln -s "$RUNNER_TEMP/orch-builder-cargo-home" "$GITHUB_WORKSPACE/.tmp/release-target/container/cargo-home"
+      - name: Restore server builder dependencies
+        uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2.9.2
+        env:
+          CARGO_HOME: ${{ runner.temp }}/orch-builder-cargo-home
+        with:
+          key: package-${{ matrix.arch }}
+          workspaces: . -> .tmp/release-target/container/target
+          cache-bin: 'false'
+      - name: Restore web application downloads for release notices
+        uses: actions/cache@0057852bfaa89a56745cba8c7296529d2fc39830 # v4
+        with:
+          path: .tmp/npm-cache
+          key: release-npm-${{ hashFiles('frontend/.nvmrc', 'frontend/package-lock.json') }}
+          restore-keys: release-npm-
       - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4
         with:
           pattern: native-*
           path: .tmp/native-inputs
+          github-token: ${{ github.token }}
+          run-id: ${{ inputs.source_run_id || github.run_id }}
+      - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4
+        if: ${{ !inputs.source_run_id || needs.gate.outputs.source_frontend == 'true' }}
+        with:
+          name: frontend-dist
+          path: .tmp/frontend-input
+          github-token: ${{ github.token }}
+          run-id: ${{ inputs.source_run_id || github.run_id }}
+      - name: Build the frontend when an older source run has none
+        if: inputs.source_run_id && needs.gate.outputs.source_frontend == 'false'
+        env:
+          CARGO_HOME: ${{ runner.temp }}/orch-builder-cargo-home
+        run: python3 .github/scripts/release_frontend.py --out .tmp/frontend-input
       - name: Package and validate all connector downloads
-        run: python3 .github/scripts/release_package.py --inputs .tmp/native-inputs --out .tmp/package
+        env:
+          CARGO_HOME: ${{ runner.temp }}/orch-builder-cargo-home
+        run: python3 .github/scripts/release_package.py --inputs .tmp/native-inputs --frontend .tmp/frontend-input --out .tmp/package
       - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
         with:
           name: package-${{ matrix.arch }}
@@ -114,7 +256,7 @@ jobs:
           retention-days: 14
 
   images:
-    if: github.event_name == 'workflow_dispatch' && inputs.publish_images
+    if: github.event_name == 'workflow_dispatch' && inputs.publish_images && !inputs.warm_caches
     needs: [gate, package]
     environment: release-images
     permissions:
@@ -147,7 +289,7 @@ jobs:
           retention-days: 14
 
   draft:
-    if: always() && needs.gate.result == 'success' && needs.package.result == 'success' && (needs.images.result == 'success' || needs.images.result == 'skipped')
+    if: always() && !inputs.warm_caches && needs.gate.result == 'success' && needs.package.result == 'success' && (needs.images.result == 'success' || needs.images.result == 'skipped')
     needs: [gate, package, images]
     runs-on: ubuntu-24.04
     timeout-minutes: 30

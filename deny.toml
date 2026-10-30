@@ -11,6 +11,7 @@ yanked = "deny"
 allow = [
     "0BSD",
     "Apache-2.0",
+    "BSD-2-Clause", # arrayref, under the SVG renderer of file previews
     "BSD-3-Clause",
     "CC0-1.0",
     "CDLA-Permissive-2.0", # redistributable certificate-root data, with its terms
@@ -41,6 +42,7 @@ deny = [
 # These exact old versions are required by the two disjoint parent ranges
 # beside each entry. No dependency subtree or advisory class is excluded.
 skip = [
+    { crate = "miniz_oxide@0.8.9", reason = "png 0.18.1 (^0.8, under image and tiny-skia) and flate2 1.1.10 (^0.9) require different version ranges." },
     { crate = "cipher@0.4.4", reason = "des 0.8.1 (^0.4), for the RFB (VNC) password challenge, and the 0.5 line used elsewhere require different version ranges; no stable des on cipher 0.5 yet." },
     { crate = "inout@0.1.4", reason = "cipher 0.4.4 (for des 0.8.1, the VNC password challenge) and cipher 0.5.2 require different inout ranges." },
     { crate = "base64@0.22.1", reason = "axum 0.8.9 (^0.22.1) and email-encoding 0.4.2 (^0.23) require different version ranges." },
