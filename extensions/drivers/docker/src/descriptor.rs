@@ -163,6 +163,11 @@ fn schema(title: &str, extra: Vec<(&'static str, Json)>) -> Json {
 /// The schema of the spec of a template for environments.
 #[must_use]
 pub fn environment_schema() -> Json {
+    // Gateway grants belong in template capability lists even though they need no Docker patch.
+    let capability_keys: Vec<&str> = capabilities::KEYS
+        .into_iter()
+        .chain(orch_driver_contract::capabilities::GATEWAY_GIVEN)
+        .collect();
     let mut schema = schema(
         "A Docker container for an environment",
         vec![
@@ -192,11 +197,11 @@ pub fn environment_schema() -> Json {
             ),
             (
                 "base_capabilities",
-                json!({ "type": "array", "items": { "enum": capabilities::KEYS } }),
+                json!({ "type": "array", "items": { "enum": capability_keys.clone() } }),
             ),
             (
                 "allowed_capabilities",
-                json!({ "type": "array", "items": { "enum": capabilities::KEYS } }),
+                json!({ "type": "array", "items": { "enum": capability_keys } }),
             ),
             (
                 "sandbox",
@@ -790,6 +795,16 @@ mod tests {
                 .unwrap()
                 .contains(&json!("kvm"))
         );
+        for field in ["base_capabilities", "allowed_capabilities"] {
+            let schema = environment_schema();
+            let keys = schema["properties"][field]["items"]["enum"]
+                .as_array()
+                .unwrap();
+            for key in orch_driver_contract::capabilities::GATEWAY_GIVEN {
+                assert!(keys.contains(&json!(key)), "{field}: {key}");
+            }
+            assert!(!keys.contains(&json!("unknown")));
+        }
     }
 
     #[test]

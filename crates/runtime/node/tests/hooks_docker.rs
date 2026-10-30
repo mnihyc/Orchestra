@@ -1,4 +1,5 @@
 //! Real Docker proof of the operator's hooks through the node: a `post_up` is told the unit's own network from the pool, its subnet and the unit's address there, and a failing `pre_up` keeps a unit from starting, with its message.
+#![cfg(unix)]
 #![allow(
     clippy::unwrap_used,
     clippy::expect_used,

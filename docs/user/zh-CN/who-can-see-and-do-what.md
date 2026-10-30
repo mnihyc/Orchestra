@@ -1,6 +1,6 @@
 ---
 title: 谁能看和做什么
-screens: /thread/$threadId, /topic/$topicId, /project/$projectId, /org/$slug, /resources/environments/$id, /shared, /approvals
+screens: /thread/$threadId, /topic/$topicId, /project/$projectId, /org/$slug, /resources/environments/$id, /doc/$documentId, /chat/$chatId, /place-chat/$nodeId, /shared, /inbox, /approvals
 keywords: 权限, 所有者, 查看, 编辑, 管理, 申请访问, 组织外, 授权期限, 审批, 群组, 角色, 共享, 访问, 持有者, 组, 成员, 所有人, 定位符, 越权, 创建项目, 创建话题, 开始线程, sharing.allow_external, sharing.allow_holders, access.manage, access.external, capability.policy
 heading_id.申请访问权限: requesting-access
 heading_id.谁能创建项目话题和对话: who-may-make-projects-topics-and-threads
@@ -26,10 +26,16 @@ heading_keywords.who-may-make-projects-topics-and-threads: create project, make 
 灰色带锁的[引用](references.md#locked-references)保留分享时的名称，卡片里可申请所需的最低权限。
 可填写原因再发送。同一人对同一项内容只能有一份待处理申请，可以撤回。
 在你已能看到的工作中，操作被拒绝的卡片仍会列出缺少的权限和可以授权的人。
+所有部分都有答复后，卡片显示各自的结果；如果仍缺少权限，可以再次申请。
+一份申请包含多个部分时，撤回会撤回其中仍在等待的部分。
 
 审批人可以点选时长，在这一项内容上直接授权给申请人。默认是一天、七天、三十天或永久，
 由 `access.quick_grant_durations` 配置。“其他…”可减少权限、缩小选项或另选到期日期；拒绝可附带说明。
 决定会记入记录，并告知申请人。授权到期后，这一条授权停止提供访问。
+
+申请时选择需要访问的时长：直到移除、一天、一周、30 天或指定日期。结束时间从发送时起计算，
+会显示在申请和通知中。审批时默认采用申请的结束时间，也可以更改或清除。若申请的时间已过，
+批准前请选择未来时间或直到移除。权限的结束时间与申请等待审批的期限是两回事。
 
 只有请求所针对内容的“所有者”行中直接命名、目前有权审批的人会收到收件箱通知，
 并在“等待你审批”中看到它。群组、角色、继承权限和管理员覆盖不会让所有成员都收到通知。

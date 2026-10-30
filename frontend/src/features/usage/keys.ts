@@ -5,7 +5,7 @@
  * counted all the same.
  */
 import type { TFunction } from 'i18next';
-import { effortDisplayName, modelDisplayName } from '@/features/models/names';
+import { accessProgramDisplayName, effortDisplayName, modelDisplayName } from '@/features/models/names';
 import { programNameIn } from '@/features/resources/programNames';
 import { i18n } from '@/i18n';
 import { offeredChoice } from '@/i18n/choices';
@@ -92,7 +92,7 @@ export function keyLabel(dimension: UsageDimension, key: UsageKey, t: TFunction)
     case 'tier':
       return key.tier === null || key.tier === undefined ? t('usage.key.standard') : offeredChoice(t, 'serviceTier', key.tier)?.name ?? key.tier;
     case 'program':
-      return key.program ?? t('usagePerf.noProgram');
+      return key.program === null || key.program === undefined ? t('usagePerf.noProgram') : accessProgramDisplayName(key.program, t);
     default: {
       const node = nodeOf(dimension, key);
       if (node === undefined) return t('usage.key.unknown');

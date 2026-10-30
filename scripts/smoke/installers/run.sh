@@ -28,6 +28,10 @@ check "both shell installers explain their lifecycle in English and Chinese" \
   sh "$SMOKE_REPO/scripts/smoke/installers/help.sh"
 check "system addresses allow HTTP only on literal loopback hosts, for both download backends" \
   sh "$SMOKE_REPO/scripts/smoke/installers/addresses.sh"
+check "Unix connector services retain the shell's proxy in private definitions" \
+  python3 -I "$SMOKE_REPO/scripts/smoke/installers/test_service.py"
+check "the node service retains its proxy and literal paths on a minimal host" \
+  python3 -I "$SMOKE_REPO/scripts/smoke/installers/test_node_service.py"
 
 step "a system, and an HTTPS front under the system's own authority"
 update_sh first-start --from "$A" > "$WORK/first-start.log" 2>&1 || abort "first-start failed (see $WORK/first-start.log)"
@@ -137,6 +141,8 @@ if command -v pwsh > /dev/null 2>&1; then
     pwsh -NoProfile -File "$SMOKE_REPO/scripts/smoke/installers/help.ps1"
   check "Windows allows the same loopback addresses and refuses unchecked redirects" \
     pwsh -NoProfile -File "$SMOKE_REPO/scripts/smoke/installers/addresses.ps1"
+  check "a failed Windows installation cannot start a foreground connector" \
+    pwsh -NoProfile -File "$SMOKE_REPO/scripts/smoke/installers/foreground.ps1"
 else
   say "NOT RUN  install.ps1: no PowerShell here; it is read on Windows only"
 fi

@@ -199,7 +199,11 @@ Files shows the environment you can access, with code/text and other viewers.
 [Files and attachments](files-and-attachments.md) explains previews, chip sizes and what reaches an agent.
 Edits are conflict-aware. HTML is displayed as code; previewing a file does not
 execute it. Shells belong to their opener; an environment manager can close
-them. Their final retained output follows that place's recording and masking
+them. If Orch cannot end a shell, it reports the failure and keeps the terminal
+in the list. On Windows, the process list omits children whose identity cannot
+be distinguished from a reused process number, and Orch refuses to stop an
+ambiguous tree. A process started during shutdown can escape the final process
+check. Their final retained output follows that place's recording and masking
 policy. Files, home, processes, browser profiles and displays are shared by
 threads in the same environment, so a directory does not isolate their work.
 

@@ -34,7 +34,7 @@ impl Engine {
             .await?
             .ok_or_else(|| EngineError::unreadable("The side is unavailable."))?;
         let current: bool = sqlx::query_scalar("SELECT EXISTS(SELECT 1 FROM turns t JOIN thread_inputs i ON i.id=t.input_id
-            WHERE t.id=$1 AND t.thread_id=$2 AND t.segment_id=$3 AND t.state='starting' AND t.input_id=$4
+            WHERE t.id=$1 AND t.thread_id=$2 AND t.segment_id=$3 AND t.state='starting' AND t.interrupted_by IS NULL AND t.input_id=$4
             AND t.continuation_id=$5 AND i.continuation_id=$5 AND i.state='delivering')")
             .bind(snapshot.turn.id).bind(side.node_id).bind(snapshot.segment.id)
             .bind(snapshot.input.id).bind(side.active_continuation_id)

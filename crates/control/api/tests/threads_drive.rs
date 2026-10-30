@@ -1884,6 +1884,57 @@ async fn a_turn_that_failed_is_tried_again_as_the_callers_own_input_and_one_that
 }
 
 #[tokio::test]
+async fn retry_does_not_copy_an_input_that_already_returned_to_the_queue() {
+    let s = Scene::new().await;
+    let thread = s.thread().await.base.id;
+    s.rig.seen.refuse(
+        CommandKind::TurnStart,
+        orch_link_contract::commands::CommandError::new(
+            orch_link_contract::commands::ErrorCode::Timeout,
+            "the start was not taken",
+        )
+        .retryable(),
+    );
+    let original = s
+        .say(&s.ada, thread, "Keep this", Delivery::Queue, "first")
+        .await
+        .ok()
+        .input;
+    let turn = s.rig.turn_start(thread, 0).await;
+    s.rig.wait_turn(turn.turn_id, "failed").await;
+    let state: String = sqlx::query_scalar("SELECT state FROM thread_inputs WHERE id=$1")
+        .bind(original.id)
+        .fetch_one(s.rig.db.pool())
+        .await
+        .unwrap();
+    assert_eq!(state, "pending");
+    let retry = |who: &Who| {
+        let call = s
+            .rig
+            .world
+            .app
+            .call(ThreadTurnRetry, &[&thread, &turn.turn_id])
+            .token(&who.token)
+            .body(&ThreadTurnRetryBody {
+                client_id: "retry-pending".to_owned(),
+                bypass: None,
+            });
+        async move { call.send().await }
+    };
+    assert_eq!(
+        retry(&s.ada).await.problem().code,
+        ErrorCode::RequestInvalid
+    );
+    assert_eq!(retry(&s.cai).await.problem().code, ErrorCode::AuthzDenied);
+    let count: i64 = sqlx::query_scalar("SELECT count(*) FROM thread_inputs WHERE thread_id=$1")
+        .bind(thread)
+        .fetch_one(s.rig.db.pool())
+        .await
+        .unwrap();
+    assert_eq!(count, 1);
+}
+
+#[tokio::test]
 async fn every_driving_request_is_refused_to_a_viewer_and_to_a_stranger() {
     let s = Scene::new().await;
     let id = s.thread().await.base.id;

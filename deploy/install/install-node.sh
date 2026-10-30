@@ -6,14 +6,15 @@
 #     [--drivers docker,host] [--name NAME] [--delegate-policy] [--no-service]
 #
 # It fetches the node for this processor from the system named by --from (the system's own
-# address; --url when left out), checks its size and SHA-256 against the system's release manifest
+# address), checks its size and SHA-256 against the system's release manifest
 # (and its BLAKE3 too where `b3sum` is installed), places it in /usr/local/bin, writes the node's
 # configuration (/etc/orch/orch.toml, its [node] table: the gateway's address, the data
 # directory, the drivers), enrolls the host with the host token at --url, and runs the node as the
 # systemd unit orch-node.service unless --no-service is selected. A node runs as root, which is what
 # reaching Docker amounts to, and needs no inbound port. Run again, it changes only what is not
 # right yet: the same node is left in place, a bound Enroll again token replaces the retained identity, an existing configuration is kept, and the unit is written again and restarted.
-# When it fails, it takes away what it placed itself.
+# On failure a newly installed program, configuration or service is removed where possible;
+# an updated existing program or service is not restored to its old version.
 set -eu
 
 FROM=""
@@ -49,6 +50,9 @@ usage() {
 
 程序：/usr/local/bin/orch-node；配置：/etc/orch/orch.toml；数据：/var/lib/orch-node。
 默认使用系统服务 orch-node.service；停止：systemctl stop orch-node.service；启动：systemctl start orch-node.service。
+仅移除服务：运行 systemctl disable --now orch-node.service，移除单元文件后运行 systemctl daemon-reload；数据和身份保留。
+直连网关的 9443 端口不提供下载；此时请用 --from 指定用户访问的系统地址。
+省略 --from 时从 --url 推导地址，仅在该地址也提供系统下载时可用。
 前台运行：安装时加 --no-service，然后以 root 运行
   /usr/local/bin/orch-node --config /etc/orch/orch.toml run
 按 Ctrl+C 停止；已有服务需先停止，此模式无需 systemd。
@@ -59,7 +63,7 @@ usage() {
 
   --url              注册并连接的网关地址（wss://…:9443 或 wss://…/link）
   --token            系统显示的一次性主机令牌（oenr_…）
-  --from             下载地址：HTTPS；HTTP 仅限 127.0.0.0/8、[::1] 或 localhost；省略时从 --url 推导
+  --from             系统下载地址：HTTPS；HTTP 仅限 127.0.0.0/8、[::1] 或 localhost
   --config           此节点已有的配置文件（默认 /etc/orch/orch.toml）
   --data-dir         此节点已有的数据目录（默认 /var/lib/orch-node）
   --drivers          节点加载的驱动，以逗号分隔；默认 docker
@@ -80,6 +84,10 @@ Installs orch-node as root on this Linux host and enrolls the host.
 
 Program: /usr/local/bin/orch-node; configuration: /etc/orch/orch.toml; data: /var/lib/orch-node.
 Default: the system service orch-node.service. Stop: systemctl stop orch-node.service; start: systemctl start orch-node.service.
+Remove only the service: systemctl disable --now orch-node.service, remove its unit file,
+then run systemctl daemon-reload. Data and identity stay.
+For a direct gateway on port 9443, set --from to the system's web address; the gateway does not serve downloads.
+Without --from, the origin is derived from --url and must also serve system downloads.
 Foreground: install with --no-service, then run as root:
   /usr/local/bin/orch-node --config /etc/orch/orch.toml run
 Ctrl+C stops it; stop any existing service first. This mode needs no systemd.
@@ -91,7 +99,7 @@ Use --plan to preview or --yes to skip typing. Other systems and supplied config
 
   --url      the gateway address for enrollment and connections (wss://…:9443 or wss://…/link)
   --token    the host token the system showed (oenr_…)
-  --from     HTTPS download address; HTTP only on 127.0.0.0/8, [::1] or localhost (--url when left out)
+  --from     HTTPS system download address; HTTP only on 127.0.0.0/8, [::1] or localhost
   --config   this node's existing configuration file (/etc/orch/orch.toml)
   --data-dir this node's existing identity directory (/var/lib/orch-node)
   --drivers  the drivers the node loads, separated by commas (docker)
@@ -229,8 +237,9 @@ case "$(uname -m)" in
 esac
 [ "$(id -u)" = 0 ] || die "the node is a service of the host: run this as root (pipe it to 'sudo sh -s --')"
 if [ "$SERVICE" = 1 ]; then
-  command -v systemctl > /dev/null 2>&1 && [ -d /run/systemd/system ] ||
+  if ! command -v systemctl > /dev/null 2>&1 || [ ! -d /run/systemd/system ]; then
     die "this host does not run systemd; install with --no-service and start $BIN --config $CONFIG run under your own supervisor"
+  fi
 fi
 case ",$DRIVERS," in
   *,docker,*) command -v docker > /dev/null 2>&1 || say "warning: the docker driver needs Docker, which is not installed here yet" ;;
@@ -238,10 +247,13 @@ esac
 
 if command -v curl > /dev/null 2>&1; then
   fetch() { curl -fsSL --proto "$DOWNLOAD_PROTOCOLS" --proto-redir '=https' --tlsv1.2 -o "$2" "$1"; }
-elif command -v wget > /dev/null 2>&1; then
+elif command -v wget > /dev/null 2>&1 && wget --help 2>&1 | grep -q -- '--max-redirect'; then
   fetch() { wget -q --max-redirect=0 -O "$2" "$1"; }
 else
-  die "curl or wget is needed to download the node"
+  case "${LC_ALL:-${LC_MESSAGES:-${LANG:-en}}}" in
+    zh*) die "下载节点需要 curl 或支持 --max-redirect 的 wget；BusyBox wget 不支持此选项。" ;;
+    *) die "downloading the node needs curl or a wget with --max-redirect; BusyBox wget does not support it" ;;
+  esac
 fi
 if command -v sha256sum > /dev/null 2>&1; then
   sha256() { sha256sum "$1" | cut -d' ' -f1; }
@@ -333,6 +345,7 @@ if command -v b3sum > /dev/null 2>&1; then
 fi
 say "  checked: $SIZE bytes, SHA-256 as listed"
 
+mkdir -p /usr/local/bin
 if [ -f "$BIN" ] && [ "$(sha256 "$BIN")" = "$SHA256" ]; then
   say "The node $VERSION is in $BIN already"
 else
@@ -393,10 +406,23 @@ if [ "$SERVICE" = 0 ]; then
 fi
 
 [ -e "$UNIT" ] || PLACED_UNIT=1
-# A systemd quoted word preserves spaces, percent signs and literal backslashes in retained paths.
-systemd_word() { printf '"%s"' "$(printf '%s' "$1" | sed -e 's/\\/\\\\/g' -e 's/"/\\"/g' -e 's/%/%%/g')"; }
+# A systemd quoted word preserves spaces, variables, percent signs and backslashes in retained paths.
+systemd_word() { printf '"%s"' "$(printf '%s' "$1" | sed -e 's/\\/\\\\/g' -e 's/"/\\"/g' -e 's/%/%%/g' -e 's/\$/$$/g')"; }
+# Environment= does not expand dollars, but it does expand percent specifiers.
+proxy_environment() {
+  for proxy_name in HTTPS_PROXY https_proxy HTTP_PROXY http_proxy ALL_PROXY all_proxy NO_PROXY no_proxy; do
+    proxy_value=
+    eval "proxy_value=\${$proxy_name-}"
+    case "$proxy_value" in
+      *[![:space:]]*) printf 'Environment="%s"\n' "$(printf '%s=%s' "$proxy_name" "$proxy_value" | sed -e 's/\\/\\\\/g' -e 's/"/\\"/g' -e 's/%/%%/g')" ;;
+    esac
+  done
+}
 data_arguments=""
 [ "$DATA_DIR_SET" = 0 ] || data_arguments=" --data-dir $(systemd_word "$DATA_DIR")"
+# A proxy may contain credentials; protect a new or existing unit before writing them.
+(umask 077; : >> "$UNIT")
+chmod 600 "$UNIT"
 cat > "$UNIT" <<EOF
 [Unit]
 Description=Orch node
@@ -406,6 +432,7 @@ Wants=network-online.target
 
 [Service]
 ExecStart=$BIN --config $(systemd_word "$CONFIG")${data_arguments} run
+$(proxy_environment)
 Restart=on-failure
 RestartSec=10
 

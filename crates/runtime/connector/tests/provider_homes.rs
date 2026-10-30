@@ -1,29 +1,41 @@
 //! Harness home selection preserves borrowed data, enforces roots and reports actual ownership.
-#![cfg(target_os = "linux")]
 #![allow(
     clippy::unwrap_used,
     clippy::expect_used,
     reason = "a test fails by panicking"
 )]
+#[cfg(target_os = "linux")]
 mod common;
 
+#[cfg(target_os = "linux")]
 use async_trait::async_trait;
+#[cfg(target_os = "linux")]
 use common::Rig;
+#[cfg(target_os = "linux")]
 use orch_adapter_fake::FakeAdapter;
+#[cfg(target_os = "linux")]
 use orch_agent_contract::adapter::{
     AdapterError, AgentAdapter, AgentStart as AdapterStart, AgentStarted, EventSink,
 };
+#[cfg(target_os = "linux")]
 use orch_agent_contract::descriptor::AgentDescriptor;
+#[cfg(target_os = "linux")]
 use orch_agent_contract::session::{SessionOpened, SessionSpec, ThreadId, TurnStart};
+#[cfg(target_os = "linux")]
 use orch_connector_core::harnesses::AdapterRegistry;
+#[cfg(target_os = "linux")]
 use orch_link_contract::commands::{AgentStart, AgentStop};
+#[cfg(target_os = "linux")]
 use serde_json::json;
+#[cfg(target_os = "linux")]
 use std::sync::{Arc, Mutex};
 
+#[cfg(target_os = "linux")]
 struct Capture {
     inner: FakeAdapter,
     starts: Arc<Mutex<Vec<AdapterStart>>>,
 }
+#[cfg(target_os = "linux")]
 #[async_trait]
 impl AgentAdapter for Capture {
     fn kind(&self) -> &'static str {
@@ -54,6 +66,7 @@ impl AgentAdapter for Capture {
     }
 }
 
+#[cfg(target_os = "linux")]
 #[tokio::test]
 async fn the_runtime_home_overrides_the_profile_and_only_made_data_is_owned() {
     use std::os::unix::fs::MetadataExt;
@@ -153,6 +166,7 @@ async fn the_runtime_home_overrides_the_profile_and_only_made_data_is_owned() {
     rig.kill().await;
 }
 
+#[cfg(target_os = "linux")]
 #[tokio::test]
 async fn a_relative_override_never_bypasses_roots_or_a_link_out_of_them() {
     let mut rig = Rig::new();
@@ -188,6 +202,7 @@ async fn a_relative_override_never_bypasses_roots_or_a_link_out_of_them() {
 
 /// Stand-in for a vendor harness that already has a login in its user's configuration directory.
 /// It restores that login itself; Orch sends no sign-in command and never copies the credential.
+#[cfg(target_os = "linux")]
 struct ExistingLogin {
     inner: FakeAdapter,
     user_home: std::path::PathBuf,
@@ -195,6 +210,7 @@ struct ExistingLogin {
     starts: Arc<Mutex<Vec<AdapterStart>>>,
 }
 
+#[cfg(target_os = "linux")]
 #[async_trait]
 impl AgentAdapter for ExistingLogin {
     fn kind(&self) -> &'static str {
@@ -274,6 +290,7 @@ impl AgentAdapter for ExistingLogin {
     }
 }
 
+#[cfg(target_os = "linux")]
 #[tokio::test]
 async fn an_existing_user_login_survives_home_reconciliation_and_connector_recovery_and_runs_a_turn()
  {

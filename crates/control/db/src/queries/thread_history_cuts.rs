@@ -519,7 +519,8 @@ pub async fn counts(conn: &mut Conn, id: Id) -> Result<CutCounts, DbError> {
     let rows: Vec<(String, i64)> = sqlx::query_as(
         "SELECT c.kind,count(*)::bigint FROM thread_history_cut_members($1) c
       WHERE c.stream='main' AND (c.turn_id IS NOT NULL
-        OR (SELECT i.before_orch FROM items i WHERE i.id=c.item_id))
+        OR COALESCE((c.body->>'before_orch')::boolean,
+          (SELECT i.before_orch FROM items i WHERE i.id=c.item_id),false))
       GROUP BY c.kind",
     )
     .bind(id)

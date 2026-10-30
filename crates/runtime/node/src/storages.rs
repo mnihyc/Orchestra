@@ -25,11 +25,13 @@ use crate::drivers::DriverHost;
 use crate::settings::NodeSettings;
 
 /// Bytes in a gigabyte, which is what capacities are written in.
+#[cfg(unix)]
 const BYTES_PER_GB: u64 = 1_000_000_000;
 
 /// The capacity and the free space of the file system that holds `path`, in gigabytes; nothing is known of a
 /// path that cannot be looked at.
 #[must_use]
+#[cfg(unix)]
 pub fn measure(path: &Path) -> (i64, i64) {
     match rustix::fs::statvfs(path) {
         Ok(stat) => {
@@ -43,10 +45,23 @@ pub fn measure(path: &Path) -> (i64, i64) {
     }
 }
 
+/// The host cannot measure capacity without a supported filesystem query.
+#[must_use]
+#[cfg(not(unix))]
+pub fn measure(_path: &Path) -> (i64, i64) {
+    (0, 0)
+}
+
 /// The identity of the file system that holds `path`, so that two storages on one disk are counted once.
+#[cfg(unix)]
 fn device_of(path: &Path) -> Option<u64> {
     use std::os::unix::fs::MetadataExt;
     std::fs::metadata(path).ok().map(|meta| meta.dev())
+}
+
+#[cfg(not(unix))]
+fn device_of(_path: &Path) -> Option<u64> {
+    None
 }
 
 /// The storages of the host.

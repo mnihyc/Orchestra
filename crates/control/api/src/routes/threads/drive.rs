@@ -651,6 +651,12 @@ async fn turn_retry(
     let thread = ctx.id("id")?;
     let turn = ctx.id("turn_id")?;
     let (mut tx, guard) = transaction_guard::begin(&ctx).await?;
+    // The queue and turn can change together. Keep the same lock through
+    // the decision and the later submission, so a waiting original cannot
+    // race a second copy into the queue.
+    rows::lock(&mut tx, thread)
+        .await?
+        .ok_or_else(ApiError::not_found)?;
     let content: Vec<ContentPart> = {
         let conn = &mut *tx;
         let row = rows::turn(conn, turn)
@@ -669,6 +675,14 @@ async fn turn_retry(
         let input = rows::input(conn, row.input_id)
             .await?
             .ok_or_else(ApiError::not_found)?;
+        if matches!(input.state.as_str(), "pending" | "delivering") {
+            authorization::require_on_path_in(&ctx, conn, guard.principal(), "thread.interact")
+                .await?;
+            return Err(ApiError::new(
+                ErrorCode::RequestInvalid,
+                "The original input is already waiting or being delivered",
+            ));
+        }
         serde_json::from_value(input.content).map_err(ApiError::internal)?
     };
     let submitted = ctx

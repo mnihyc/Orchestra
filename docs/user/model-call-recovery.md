@@ -60,8 +60,8 @@ Someone who can only view the thread can still read the reason and this help.
 
 A turn stopped because its provider, model, agent profile or environment was switched off is not a
 model failure. Recovery rules do not retry it or send an automatic Continue. When enabling the resource,
-**Run the waiting messages** also resumes that stopped work through a visible `Continue` by its original
-author. With that choice off, the queues stay held until someone uses Continue or Resume.
+**Run the waiting messages** also resumes started work through a visible `Continue` by its original
+author. If the turn had not begun, its original input runs instead. With that choice off, the queues stay held until someone uses Continue or Resume.
 
 ## Stop repeated failures
 

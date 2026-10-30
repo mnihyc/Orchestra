@@ -145,9 +145,7 @@ pub(super) async fn make_place(
     audit.org_id = Some(batch.plan.destination.org);
     audit.details =
         json!({ "kind": kind, "name": name, "parent": object.lies_in, "import": batch.import });
-    append(tx, &audit, &orch_db::audit::Origin::default(), batch.now)
-        .await
-        .map_err(DbError::from)?;
+    append(tx, &audit, &orch_db::audit::Origin::default(), batch.now).await?;
     note_origin(tx, batch, object, object.target, Some(object.lies_in), true).await?;
     let mut made = Made::done(object, object.target);
     super::access::restore(tx, batch, object, object.target, &mut made).await?;

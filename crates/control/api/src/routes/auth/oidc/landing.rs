@@ -251,6 +251,18 @@ async fn sign_in_inner(
         match crate::routes::users::redeem(ctx, &mut tx, &user, token).await {
             Ok(row) => Some(row),
             Err(error)
+                if error
+                    .problem
+                    .extra
+                    .get("reason")
+                    .and_then(serde_json::Value::as_str)
+                    == Some(crate::routes::users::ISSUER_AUTHORITY_LOST) =>
+            {
+                return Ok(redirect(
+                    "/login?error=invite_required&reason=invitation_issuer_authority_lost",
+                ));
+            }
+            Err(error)
                 if matches!(
                     error.code(),
                     ErrorCode::Gone | ErrorCode::RegistrationInviteRequired

@@ -4,7 +4,7 @@
 //! the package is written once. A [`Dir`] is a directory that was opened and is held by a handle:
 //! every operation on the workspace is a name relative to such a handle, which is what keeps a
 //! path from leaving the workspace root even when somebody swaps a directory for a link while a
-//! request is being served. Linux and macOS share the POSIX implementation in [`posix`]; Windows
+//! request is being served. Linux and macOS share the POSIX implementation; Windows
 //! has the same functions on top of the standard library, and says in its own documentation
 //! which of the guarantees it cannot give.
 //!

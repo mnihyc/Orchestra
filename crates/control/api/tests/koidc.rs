@@ -1040,3 +1040,64 @@ async fn oidc_keeps_system_admission_and_explicit_team_acceptance_separate_from_
         );
     }
 }
+
+#[tokio::test]
+async fn an_oidc_registration_withdrawn_by_its_issuer_makes_no_account_or_home() {
+    use orch_api_contract::users::{InvitationCreate, InvitationCreateBody, InvitationKind};
+
+    let sso = sso().await;
+    sso.world.set("registration.mode", json!("invite")).await;
+    sso.world.set("orgs.personal_enabled", json!(true)).await;
+    let invitation = sso
+        .world
+        .app
+        .call(InvitationCreate, &[])
+        .token(sso.admin.token())
+        .body(&InvitationCreateBody {
+            kind: InvitationKind::System,
+            org_id: None,
+            node_id: None,
+            chat_id: None,
+            role: None,
+            permissions: None,
+            email: None,
+            max_uses: Some(2),
+            expires_in_hours: None,
+            note: None,
+        })
+        .send()
+        .await
+        .ok();
+    sso.provider.sign_in_as(dana());
+    let mut browser = Browser::default();
+    let address = sso
+        .begin(&mut browser, Some("/"), Some(&invitation.token))
+        .await;
+    let back = sso.provider.authorize(&address).await.unwrap();
+    let homes_before: i64 =
+        sqlx::query_scalar("SELECT count(*) FROM orgs WHERE org_kind = 'personal'")
+            .fetch_one(&sso.world.db.pool)
+            .await
+            .unwrap();
+    sqlx::query("UPDATE users SET is_system_admin = false WHERE id = $1")
+        .bind(sso.admin.result.user.user.id)
+        .execute(&sso.world.db.pool)
+        .await
+        .unwrap();
+    let destination = sso.come_back(&mut browser, &back).await;
+    assert_eq!(
+        destination,
+        "/login?error=invite_required&reason=invitation_issuer_authority_lost"
+    );
+    assert!(sso.user_named("dana").await.is_none());
+    assert!(!browser.has("orch_session"));
+    let homes_after: i64 =
+        sqlx::query_scalar("SELECT count(*) FROM orgs WHERE org_kind = 'personal'")
+            .fetch_one(&sso.world.db.pool)
+            .await
+            .unwrap();
+    let (uses, receipts): (i32, i64) = sqlx::query_as(
+        "SELECT uses, (SELECT count(*) FROM invitation_uses WHERE invitation_id = $1) FROM invitations WHERE id = $1",
+    ).bind(invitation.invitation.id).fetch_one(&sso.world.db.pool).await.unwrap();
+    assert_eq!((homes_after, uses, receipts), (homes_before, 0, 0));
+}

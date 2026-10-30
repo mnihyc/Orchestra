@@ -57,8 +57,17 @@ fn files_below(dir: &Path) -> Vec<PathBuf> {
 
 /// Blobs are read-only; the tests that play a damaged disk make the file writable first.
 fn make_writable(path: &Path) {
-    use std::os::unix::fs::PermissionsExt;
-    std::fs::set_permissions(path, std::fs::Permissions::from_mode(0o644)).unwrap();
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        std::fs::set_permissions(path, std::fs::Permissions::from_mode(0o644)).unwrap();
+    }
+    #[cfg(not(unix))]
+    {
+        let mut permissions = std::fs::metadata(path).unwrap().permissions();
+        permissions.set_readonly(false);
+        std::fs::set_permissions(path, permissions).unwrap();
+    }
 }
 
 async fn put(store: &LocalBlobStore, bytes: &[u8]) -> Hash {

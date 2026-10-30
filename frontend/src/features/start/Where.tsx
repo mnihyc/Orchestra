@@ -147,7 +147,7 @@ export function Where({ compact = false, place, options, value, onChange, machin
   // What may be used comes first; what may be asked for follows, set apart; what cannot be had now, last.
   const order = (row: BindingEnvironment) => (canUseEnvironment(row) ? 0 : row.reason === USE_REQUIRED ? 1 : 2);
   const listed = [...options.environments].sort((a, b) => order(a) - order(b));
-  const firstAsk = listed.find((row) => order(row) === 1)?.environment.id;
+  const grouped = listed.some((row) => order(row) === 0) && listed.some((row) => order(row) === 1);
   const rows = [
     ...listed.map((row) => {
       const used = usedBy(row, t);
@@ -159,17 +159,17 @@ export function Where({ compact = false, place, options, value, onChange, machin
         preview: resourcePreview({ kind: 'environment', environment: row.environment, host: row.host }),
         accessory: <UserChip user={row.environment.owner} />,
         name: row.environment.name,
+        group: grouped ? usable ? t('start.where.canUse') : askable ? t('start.where.askAccess') : undefined : undefined,
         description: (
           <span className="flex flex-wrap items-center gap-x-3 gap-y-1">
             {row.is_default && usable && <span>{t('start.where.topicDefault')}</span>}
             <ResourceHint subject={{ kind: 'environment', environment: row.environment, host: row.host }} />
             {used !== null && !usable && <span>{used}</span>}
-            {askable && <span className="text-accent-text">{t('start.where.askAccess')}</span>}
+            {askable && !grouped && <span className="text-accent-text">{t('start.where.askAccess')}</span>}
             {refusal !== null && <span className="text-warning-text">{refusal}</span>}
           </span>
         ),
         disabled: !usable && !askable,
-        separatorBefore: row.environment.id === firstAsk,
       };
     }),
     ...(mayMake

@@ -161,6 +161,38 @@ for (const locale of ['en', 'zh-CN'] as const) it(`never offers a failed Main as
   expect(where).not.toHaveTextContent('Main');
 });
 
+for (const locale of ['en', 'zh-CN'] as const) it(`groups usable environments apart from those that need a request (${locale})`, async () => {
+  await setLocale(locale);
+  const askable = { ...environment('view', { usable: false }), reason: 'environment_use_required' };
+  const blocked = environment('blocked', { usable: false });
+  state.answer = options({ environments: [askable, blocked, environment('use', { isDefault: true })] });
+  const user = userEvent.setup();
+  show(<NewThreadDialog parent={parent} open onClose={() => undefined} />);
+  await user.click(await screen.findByRole('combobox', { name: i18n.t('start.where.title') }));
+  const canUse = screen.getByRole('group', { name: i18n.t('start.where.canUse') });
+  const ask = screen.getByRole('group', { name: i18n.t('start.where.askAccess') });
+  expect(within(canUse).getByRole('option', { name: 'Env use' })).toBeEnabled();
+  expect(within(ask).getByRole('option', { name: 'Env view' })).toBeEnabled();
+  expect(screen.getByRole('option', { name: 'Env blocked' })).toHaveAttribute('aria-disabled', 'true');
+  expect(within(ask).queryByRole('option', { name: 'Env blocked' })).toBeNull();
+  expect(within(ask).queryByRole('option', { name: i18n.t('choiceCatalog.environmentDestination.new.name') })).toBeNull();
+  await user.click(within(ask).getByRole('option', { name: 'Env view' }));
+  expect(await screen.findByRole('textbox', { name: i18n.t('access.request.reason') })).toBeVisible();
+  expect(state.start).not.toHaveBeenCalled();
+});
+
+for (const locale of ['en', 'zh-CN'] as const) for (const access of ['usable', 'askable'] as const) it(`omits environment group labels when only ${access} choices exist (${locale})`, async () => {
+  await setLocale(locale);
+  const row = access === 'usable' ? environment('single') : { ...environment('single', { usable: false }), reason: 'environment_use_required' };
+  state.answer = options({ environments: [row] });
+  show(<NewThreadDialog parent={parent} open onClose={() => undefined} />);
+  await userEvent.click(await screen.findByRole('combobox', { name: i18n.t('start.where.title') }));
+  expect(screen.getByRole('option', { name: 'Env single' })).toBeEnabled();
+  expect(screen.queryByRole('group', { name: i18n.t('start.where.canUse') })).toBeNull();
+  expect(screen.queryByRole('group', { name: i18n.t('start.where.askAccess') })).toBeNull();
+  if (access === 'askable') expect(screen.getByText(i18n.t('start.where.askAccess'))).toBeVisible();
+});
+
 for (const locale of ['en', 'zh-CN'] as const) it(`can leave a location whose current options are refused without losing the first message (${locale})`, async () => {
   await setLocale(locale);
   state.refusedEnvironment = 'e2';

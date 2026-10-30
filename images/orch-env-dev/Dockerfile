@@ -15,11 +15,10 @@
 # Every version is pinned below, checked after it is installed, and written into the image's labels;
 # images/orch-env-dev/README.md lists them.
 #
-# `cargo xtask package` builds it as orch-env-dev:<version>, the tag the API seeds the Developer tools template with,
-# from the base image of the same version.
+# This stage follows the Default recipe in the Developer tools template and in
+# the release build. No local Default image or build context is needed.
 
-ARG BASE_IMAGE=orch-env-base:dev
-FROM ${BASE_IMAGE}
+FROM orch-base
 
 # Docker's own packages for this release of Debian. The versions are the ones of Docker's repository
 # (https://download.docker.com/linux/debian/dists/bookworm/stable/), with the revision after them.
@@ -98,16 +97,108 @@ RUN apt-get update \
 # What starts Docker where Orch has prepared its place, and says so where it has not. dockerd runs as root, and its
 # socket belongs to the agent's group so that `docker` needs no sudo. Where the runtime shares a kernel the daemon
 # is not offered, and `mountpoint` fails.
-COPY orch-dockerd /usr/local/bin/orch-dockerd
-RUN chmod 0755 /usr/local/bin/orch-dockerd \
- && usermod --append --groups docker agent \
+# Its text is written here so the recipe needs no build context.
+RUN install -d /usr/local/bin \
+ && printf '%s\n' \
+    '#!/bin/sh' \
+    '# Starts Docker inside this environment, once, and waits until it answers.' \
+    '#' \
+    '# Orch prepares Docker'"'"'s data place (/var/lib/docker, a file system of its own in a file of the state volume) where the' \
+    '# environment holds Docker inside, every time it starts. Without that place a daemon would write to a shared file' \
+    '# system that overlays cannot be built on, so this program refuses to start one.' \
+    'set -eu' \
+    '' \
+    '# The CLI can wait indefinitely for an unresponsive API, even after the daemon has opened its socket. Bound the' \
+    '# complete startup, including every readiness probe. A stuck child gets five seconds to exit after the deadline.' \
+    'if timeout --kill-after=5s 60s sh -s <<'"'"'START_DOCKER'"'"'' \
+    'set -eu' \
+    '' \
+    'if timeout --kill-after=1s 5s docker info >/dev/null 2>&1; then' \
+    '  exit 0' \
+    fi \
+    'if ! mountpoint -q /var/lib/docker 2>/dev/null; then' \
+    '  echo "Docker'"'"'s place is not prepared here: ask for Docker inside first (the capability), then run this again." >&2' \
+    '  exit 1' \
+    fi \
+    'root=""' \
+    'if [ "$(id -u)" != 0 ]; then root="sudo"; fi' \
+    'started_pid=""' \
+    '# A file system that outlives a stop (the container'"'"'s own layer is kept under some runtimes) keeps the last daemon'"'"'s' \
+    '# process number and socket. Keep them when that daemon is still running: an API timeout is not proof it is gone.' \
+    'daemon_alive() {' \
+    '  pid="$($root cat /var/run/docker.pid 2>/dev/null || true)"' \
+    '  case "$pid" in' \
+    '    '"'"''"'"'|*[!0-9]*) ;;' \
+    '    *) if [ "$($root cat "/proc/$pid/comm" 2>/dev/null || true)" = dockerd ] && $root kill -0 "$pid" 2>/dev/null; then return 0; fi ;;' \
+    '  esac' \
+    '  # The process we just launched can still be loading before it writes docker.pid. Its absence is not an exit.' \
+    '  [ -n "$started_pid" ] && $root kill -0 "$started_pid" 2>/dev/null' \
+    '}' \
+    'start_daemon() {' \
+    '  $root rm -f /var/run/docker.pid /var/run/docker.sock' \
+    '  # A runtime with a kernel written in user space (gVisor) has no firewall for Docker to configure: the daemon is then' \
+    '  # started without it. Containers started inside should use --network=host to reach the network; -p still serves a port.' \
+    '  firewall=""' \
+    '  if ! $root iptables -t nat -L >/dev/null 2>&1; then firewall="--iptables=false"; fi' \
+    '  # ORCH_DOCKERD_ARGS: more arguments for the daemon, for a runtime that needs them.' \
+    '  started_pid="$($root sh -c "nohup dockerd -G agent $firewall \${ORCH_DOCKERD_ARGS:-} >>/var/log/dockerd.log 2>&1 </dev/null & echo \$!")"' \
+    '}' \
+    starts=0 \
+    'if ! daemon_alive; then' \
+    '  start_daemon' \
+    '  starts=1' \
+    fi \
+    'while ! timeout --kill-after=1s 5s docker info >/dev/null 2>&1; do' \
+    '  if ! daemon_alive; then' \
+    '    # A managed containerd can exit during a cold start. Retry once after an actual process exit, within the same' \
+    '    # minute; keep its diagnostic log and never start a second daemon beside a live one.' \
+    '    if [ "$starts" -ge 2 ]; then' \
+    '      echo "Docker exited while starting: see /var/log/dockerd.log" >&2' \
+    '      exit 1' \
+    '    fi' \
+    '    echo "Docker exited while starting; retrying within the same minute. See /var/log/dockerd.log" >&2' \
+    '    start_daemon' \
+    '    starts=$((starts + 1))' \
+    '  fi' \
+    '  sleep 1' \
+    done \
+    START_DOCKER \
+    then \
+    '  exit 0' \
+    else \
+    '  status=$?' \
+    fi \
+    'case "$status" in' \
+    '  124|137) echo "Docker did not start in a minute: see /var/log/dockerd.log" >&2 ;;' \
+    esac \
+    'exit "$status"' > /usr/local/bin/orch-dockerd \
+ && chmod 0755 /usr/local/bin/orch-dockerd
+RUN usermod --append --groups docker agent \
  && test -x /usr/local/bin/orch-dockerd
 
 # The release's version and the base image are named last: a build argument is part of what a step is made from.
 ARG BASE_IMAGE
 ARG VERSION=dev
 
-COPY NOTICE.md /usr/share/doc/orch-env-dev/NOTICE.md
+# This notice is written here so the recipe needs no build context.
+RUN install -d /usr/share/doc/orch-env-dev \
+ && printf '%s\n' \
+    '# Software in orch-env-dev' \
+    '' \
+    'The image is the Default environment image (see `/usr/share/doc/orch-env-base/NOTICE.md` for its software) with the' \
+    'software below added. `LicenseRef-Orch-Env-Dev` in its image label refers to this notice and to that one; it does not' \
+    'grant one licence for everything in the image. The Dockerfile, `orch-dockerd` and this notice are Apache-2.0.' \
+    '' \
+    '| Component | Terms and notices |' \
+    '|-----------|-------------------|' \
+    '| Docker Engine, the Docker command line, buildx and compose | Apache-2.0. Each package'"'"'s licence and notices are under `/usr/share/doc/<package>/`; [Docker Engine source and licence](https://github.com/moby/moby). |' \
+    '| containerd | Apache-2.0. [containerd source and licence](https://github.com/containerd/containerd). |' \
+    '| QEMU | GPL-2.0-or-later for QEMU'"'"'s own code, with separately licensed components; Debian'"'"'s complete record is `/usr/share/doc/qemu-system-x86/copyright`, with records for the other QEMU packages beside it. [QEMU source](https://www.qemu.org/). |' \
+    '| Build tools and development files (cmake, pkg-config, autoconf, automake, libtool, OpenSSL, zlib, libffi) | Each package keeps its copyright and licence record under `/usr/share/doc/<package>/copyright`. |' \
+    '' \
+    'The source of Debian packages is available from Debian'"'"'s source archives; the versions installed in this image can be' \
+    'listed with `dpkg-query -W`. Keep the bundled licence and copyright files when distributing the image, and apply each' \
+    'component'"'"'s own terms to its redistribution.' > /usr/share/doc/orch-env-dev/NOTICE.md
 
 LABEL org.opencontainers.image.title="orch-env-dev" \
       org.opencontainers.image.description="The Default environment with Docker Engine, QEMU and build tools, for Developer tools" \

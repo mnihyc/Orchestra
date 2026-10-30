@@ -15,6 +15,7 @@ import { choiceOption } from '@/i18n/choices';
 import { CardFrame, DecisionStatus } from '@/features/approvals/Card';
 import { useDecision } from '@/features/approvals/Decision';
 import { usePermissionName } from '@/features/access/names';
+import { RequestedEnd } from '@/features/access/RequestEnd';
 import type { Approval } from '@/generated/api-types';
 import { actionName } from '@/ui/actions';
 import { Button } from '@/ui/Button';
@@ -58,7 +59,7 @@ export function reachOf(permissions: Iterable<string>): ReachKey[] {
 
 /** When what is given ends, by how long from the moment of the decision. */
 const ENDS = { never: null, day: 1, week: 7, month: 30 } as const;
-type Ends = keyof typeof ENDS | 'custom';
+type Ends = keyof typeof ENDS | 'custom' | 'requested';
 const DAY_MS = 24 * 60 * 60 * 1000;
 
 /** The same one-click duration decisions in the Inbox, permission page and reference card. */
@@ -72,6 +73,7 @@ export function QuickGrant({ approval, live = true, onSettled, onOther }: { appr
   const shipped = SETTINGS_REGISTRY.find((entry) => entry.key === 'access.quick_grant_durations')?.default;
   const durations = approval.quick_grant_durations ?? (Array.isArray(shipped) ? shipped.filter((value):value is string=>typeof value==='string') : []);
   const user = approval.request.holder.kind === 'user' ? approval.request.holder.user : null;
+  const requestedEnd = approval.request.expires_at ?? null;
   const blocked = !approval.can_decide || !live || decision.pending;
   return <div className="flex flex-col gap-2">
     <div className="flex flex-wrap items-center gap-1 text-sm text-text-muted"><span>{approval.request.membership?t('approvals.quick.join'):t('approvals.quick.give', { access: approval.request.permissions.map(permissionName).join(', ') })}</span>{user !== null && <UserChip user={user} size={24} />}</div>
@@ -80,7 +82,7 @@ export function QuickGrant({ approval, live = true, onSettled, onOther }: { appr
         const days = duration.endsWith('d') ? Number(duration.slice(0,-1)) : null;
         const label = duration === 'always' ? t('approvals.quick.always') : days !== null && Number.isFinite(days) && days > 0 ? formatSpan(days * DAY_MS, format) : null;
         if (label === null) return null;
-        return <Button key={duration} size="sm" disabled={blocked} pending={decision.pressed === duration} onClick={() => decision.decide({approve:true,quick_duration:duration},duration)}>{label}</Button>;
+        return <Button key={duration} size="sm" variant={duration === 'always' && requestedEnd === null ? 'primary' : 'secondary'} disabled={blocked} pending={decision.pressed === duration} onClick={() => decision.decide({approve:true,quick_duration:duration},duration)}>{label}</Button>;
       })}
       <Button size="sm" variant="danger-ghost" disabled={blocked} onClick={() => setDenying((open)=>!open)}>{t('approvals.deny')}</Button>
       <Button size="sm" variant="ghost" disabled={blocked} onClick={onOther}>{t('approvals.quick.other')}</Button>
@@ -125,19 +127,21 @@ function AccessRow({ approval, live, onSettled }: { approval: AccessApproval; li
   const permissionName = usePermissionName(!approval.request.membership);
   const decision = useDecision(approval.id, { onDecided: onSettled, onLost: onSettled });
   const request = approval.request;
+  const requestedEnd = request.expires_at ?? null;
   const asked = request.permissions;
   const models = request.options?.models ?? [];
   const efforts = request.options?.efforts ?? [];
   const [given, setGiven] = useState<ReadonlySet<string>>(() => new Set(asked));
   const [pickedModels, setPickedModels] = useState<ReadonlySet<string>>(() => new Set(models));
   const [pickedEfforts, setPickedEfforts] = useState<ReadonlySet<string>>(() => new Set(efforts));
-  const [ends, setEnds] = useState<Ends>('never');
+  const [ends, setEnds] = useState<Ends>(() => requestedEnd === null ? 'never' : 'requested');
   const [customEnd,setCustomEnd]=useState('');
   const now=useNow();
   const customTime=Date.parse(customEnd);
-  const validEnd=ends!=='custom'||Number.isFinite(customTime)&&customTime>now;
+  const requestedTime = requestedEnd === null ? NaN : Date.parse(requestedEnd);
+  const validEnd=ends==='requested' ? Number.isFinite(requestedTime) && requestedTime > now : ends!=='custom'||Number.isFinite(customTime)&&customTime>now;
   const [note, setNote] = useState('');
-  const [other, setOther] = useState(false);
+  const [other, setOther] = useState(requestedEnd !== null);
   const may = approval.can_decide && live;
   const busy = decision.pending;
   const requesterName = 'user' in approval.requester ? approval.requester.user.display_name : approval.requester.thread.name;
@@ -145,13 +149,13 @@ function AccessRow({ approval, live, onSettled }: { approval: AccessApproval; li
   const narrowed = given.size !== asked.length;
   const optionsNarrowed = pickedModels.size !== models.length || pickedEfforts.size !== efforts.length;
   const approve = () => {
-    const days = ends==='custom'?null:ENDS[ends];
+    const days = ends==='custom'||ends==='requested'?null:ENDS[ends];
     decision.decide(
       {
         approve: true,
         ...(narrowed ? { permissions: asked.filter((permission) => given.has(permission)) } : {}),
         ...(optionsNarrowed ? { options: { models: models.filter((model) => pickedModels.has(model)), efforts: efforts.filter((effort) => pickedEfforts.has(effort)) } } : {}),
-        ...(ends==='custom'?{expires_at:new Date(customTime).toISOString()}:days === null ? {} : { expires_at: new Date(Date.now() + days * DAY_MS).toISOString() }),
+        ...(ends==='requested'&&requestedEnd !== null?{expires_at:requestedEnd}:ends==='custom'?{expires_at:new Date(customTime).toISOString()}:days === null ? {} : { expires_at: new Date(Date.now() + days * DAY_MS).toISOString() }),
         ...(note.trim() === '' ? {} : { note: note.trim() }),
       },
       t('approvals.approve'),
@@ -174,10 +178,11 @@ function AccessRow({ approval, live, onSettled }: { approval: AccessApproval; li
         {holder.kind === 'node' && holder.node.name !== null && <p className="text-sm text-text-muted">{t('approvals.access.holderNode', { place: holder.node.name })}</p>}
         {holder.kind === 'agents' && holder.node.name !== null && <p className="text-sm text-text-muted">{t('approvals.access.holderAgents', { place: holder.node.name })}</p>}
         {request.reason !== '' && <p className="text-sm wrap-anywhere text-text-muted">{request.reason}</p>}
+        <RequestedEnd at={request.expires_at} />
       </div>
 
       {!other && approval.can_decide && <QuickGrant approval={approval} live={live} onSettled={onSettled} onOther={()=>setOther(true)} />}
-      {other && <>{!request.membership&&<fieldset className="flex flex-col gap-1" disabled={!approval.can_decide || busy}>
+      {other && approval.can_decide && <>{!request.membership&&<fieldset className="flex flex-col gap-1" disabled={!approval.can_decide || busy}>
         <legend className="pb-1 text-sm font-medium text-text">{t('approvals.access.gives')}</legend>
         <p className="pb-1 text-sm text-text-muted">{t('approvals.access.givesHint')}</p>
         {asked.map((permission) => (
@@ -219,9 +224,11 @@ function AccessRow({ approval, live, onSettled }: { approval: AccessApproval; li
             value={ends}
             onValueChange={setEnds}
             disabled={busy}
+            error={!validEnd ? t('access.request.futureDate') : undefined}
             fieldClassName="max-w-(--field-wide)"
             options={[
-              { value: 'never', ...choiceOption(t, 'accessExpiry.never') },
+              ...(requestedEnd === null ? [] : [{ value: 'requested' as const, label: t('access.request.asRequested') }]),
+              { value: 'never', label: t('access.request.untilRemoved') },
               { value: 'day', ...choiceOption(t, 'accessExpiry.day') },
               { value: 'week', ...choiceOption(t, 'accessExpiry.week') },
               { value: 'month', ...choiceOption(t, 'accessExpiry.month') },
@@ -257,7 +264,7 @@ function DecidedRow({ approval }: { approval: Approval }) {
     <p data-access-row={approval.id} data-state={approval.state} className="flex items-center gap-2 py-3 text-sm text-text-muted first:pt-0 last:pb-0">
       <Icon className={approval.state === 'approved' ? 'shrink-0 text-success' : 'shrink-0 text-text-subtle'} aria-hidden />
       <span className="flex min-w-0 flex-1 flex-wrap gap-x-3 gap-y-1 wrap-anywhere">
-        <span className="font-medium text-text">{approval.title}</span><DecisionStatus approval={approval} />
+        <span className="font-medium text-text">{approval.title}</span>{approval.kind === 'access' && <RequestedEnd at={approval.request.expires_at} />}<DecisionStatus approval={approval} />
       </span>
     </p>
   );

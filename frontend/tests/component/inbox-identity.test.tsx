@@ -141,6 +141,16 @@ function LiveRows() {
   return <Rows rows={[...rows.values()]} />;
 }
 
+it.each(modes)('shows the requested end on an access notification in %s/%s', async (locale, theme) => {
+  await setLocale(locale); useAppearance.setState({ theme, resolvedTheme: theme });
+  const row = notice('duration', 'Review access', 'access.requested');
+  const end = '2100-04-05T12:34:56.123Z';
+  row.details = { v: 1, action: row.kind, parameters: { requested_expires_at: end } };
+  const view = show(<Rows rows={[row]} />);
+  expect(view.container.querySelector('[data-requested-end]')).toHaveTextContent(i18n.t('access.request.requestedUntil'));
+  expect(view.container.querySelector('[data-requested-end] time')).toHaveAttribute('datetime', end);
+});
+
 it.each(modes)('replaces the waiting request with its actual decision and decider on the same live row in %s/%s', async (locale, theme) => {
   await setLocale(locale); useAppearance.setState({ theme, resolvedTheme: theme });
   document.documentElement.dataset.theme = theme;

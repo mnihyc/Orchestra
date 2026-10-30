@@ -603,8 +603,7 @@ async fn what_the_system_was_seeded_with_stands_where_the_registrys_default_woul
         colocated: true,
     }];
     let release = Release {
-        environment_image: "registry.example/orch-env-base:0.1.0",
-        environment_image_digest: None,
+        version: "0.1.0",
         adapters: &adapters,
     };
     let mut conn = w.conn().await;

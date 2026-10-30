@@ -10,7 +10,8 @@
 # connector running as the Scheduled Task "Orch Connector" (at logon, started again when it fails).
 # It never needs administrator rights. Run again, it changes only what is not right yet: the same
 # connector is left in place, a bound Enroll again token replaces its retained identity, and the task is registered again and started. When it fails, it takes away what it placed
-# itself. It never closes the window it runs in: a failure is said, and the script returns.
+# itself where possible; an updated existing program or task is not restored. It never closes
+# the window it runs in: a failure is reported to the caller.
 param(
     [string]$Url = '',
     [string]$Token = '',
@@ -37,6 +38,7 @@ if ($Help) {
 程序：%LOCALAPPDATA%\Orch\orch-connector.exe；数据：%LOCALAPPDATA%\Orch\connector。
 默认作为登录任务“Orch Connector”以你的账号运行；退出登录后停止。
 停止（启动时改为 start）：& "$env:LOCALAPPDATA\Orch\orch-connector.exe" service stop
+仅移除服务：& "$env:LOCALAPPDATA\Orch\orch-connector.exe" service uninstall；数据和身份保留。
 前台运行：安装时加 -NoService，然后运行
   & "$env:LOCALAPPDATA\Orch\orch-connector.exe" run
 按 Ctrl+C 停止；已有登录任务需先停止。
@@ -69,6 +71,7 @@ Installs an Orch connector for your Windows account; no administrator rights are
 Program: %LOCALAPPDATA%\Orch\orch-connector.exe; data: %LOCALAPPDATA%\Orch\connector.
 Default: the logon task 'Orch Connector', running as your account until you log out.
 Stop (or use start): & "$env:LOCALAPPDATA\Orch\orch-connector.exe" service stop
+Remove only the task: & "$env:LOCALAPPDATA\Orch\orch-connector.exe" service uninstall; data and identity stay.
 Foreground: install with -NoService, then run
   & "$env:LOCALAPPDATA\Orch\orch-connector.exe" run
 Ctrl+C stops it; stop any existing logon task first.
@@ -283,6 +286,7 @@ try {
     if ($Placed.Task) { Unregister-ScheduledTask -TaskName $Placed.Task -Confirm:$false -ErrorAction SilentlyContinue }
     if ($Placed.Binary) { Remove-Item -LiteralPath $Bin -Force -ErrorAction SilentlyContinue }
     if ($Placed.Task -or $Placed.Binary) { Say 'what this run placed was taken away again' }
+    throw
 } finally {
     if ($null -ne $Work) { Remove-Item -LiteralPath $Work -Recurse -Force -ErrorAction SilentlyContinue }
 }

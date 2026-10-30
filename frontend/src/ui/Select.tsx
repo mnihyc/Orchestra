@@ -23,6 +23,8 @@ export type SelectOption<Value extends string> = ChoiceName & ChoiceDetails & {
   /** The complete original when a caller deliberately shortens an option label before rendering. */
   fullLabel?: string;
   disabled?: boolean;
+  /** Adjacent choices with the same label form an accessible group. */
+  group?: string;
   /** Separate an administrative view from the ordinary nested views. */
   separatorBefore?: boolean;
 };
@@ -78,6 +80,12 @@ export function Select<Value extends string>({
   const hasControls = hasGuides || options.some((option) => option.accessory !== undefined || option.preview !== undefined);
   const selected = options.find((option) => option.value === value);
   const active = options.find((option) => option.value === highlighted) ?? selected;
+  const sections: { group: string | undefined; options: SelectOption<Value>[] }[] = [];
+  for (const option of options) {
+    const last = sections.at(-1);
+    if (option.group !== undefined && last?.group === option.group) last.options.push(option);
+    else sections.push({ group: option.group, options: [option] });
+  }
   const activeHelp = active?.help;
   // A disabled value cannot take focus, but its explanation must remain reachable before choosing.
   const guides = options.flatMap((option) => {
@@ -103,6 +111,28 @@ export function Select<Value extends string>({
       && selected !== undefined && mirror.value !== value
       && !Array.from(mirror.options).some((option) => option.value === value)) event.stopPropagation();
   };
+  const optionItem = (option: SelectOption<Value>) => (
+    <div key={option.value} className="contents">{option.separatorBefore === true && <Primitive.Separator role="separator" className="my-1 h-px bg-border" />}<Choice
+      presentation="picker"
+      name={<Primitive.ItemText><span data-overflow-text={option.fullLabel}>{option.preview?.renderName === undefined ? option.name ?? option.label : option.preview.renderName(option.name ?? option.label)}</span></Primitive.ItemText>}
+      description={option.description}
+      compact
+    >{(content, choice) => <ChoiceCard preview={option.preview}><Primitive.Item
+      {...choice}
+      value={option.value}
+      disabled={option.disabled}
+      aria-keyshortcuts={option.help === undefined || option.disabled === true ? undefined : 'F1'}
+      onFocus={(event) => { lastItem.current = event.currentTarget; setHighlighted(option.value); }}
+      className="choice-option focus-inset flex min-h-8 min-w-0 flex-1 cursor-default items-center gap-2 rounded-sm px-2 py-1 select-none data-[disabled]:text-text-muted data-[highlighted]:bg-bg-muted"
+    >
+      <span className="flex size-4 shrink-0 items-center justify-center text-accent-text">
+        <Primitive.ItemIndicator>
+          <Check aria-hidden />
+        </Primitive.ItemIndicator>
+      </span>
+      {content}
+    </Primitive.Item></ChoiceCard>}</Choice></div>
+  );
   return (
     <Field label={label} optional={optional} hint={hint} error={error} hideLabel={hideLabel} aside={aside} help={help} className={fieldClassName} id={id}>
       {(control) => (
@@ -159,28 +189,11 @@ export function Select<Value extends string>({
               }}
             >
               <ChoiceInspection><Primitive.Viewport role={hasControls ? 'listbox' : 'presentation'} aria-labelledby={hasControls ? control['aria-labelledby'] : undefined} className="p-1">
-                {options.map((option) => (
-                  <div key={option.value} className="contents">{option.separatorBefore === true && <Primitive.Separator role="separator" className="my-1 h-px bg-border" />}<Choice
-                    presentation="picker"
-                    key={option.value}
-                    name={<Primitive.ItemText><span data-overflow-text={option.fullLabel}>{option.preview?.renderName === undefined ? option.name ?? option.label : option.preview.renderName(option.name ?? option.label)}</span></Primitive.ItemText>}
-                    description={option.description}
-                    compact
-                  >{(content, choice) => <ChoiceCard preview={option.preview}><Primitive.Item
-                    {...choice}
-                    value={option.value}
-                    disabled={option.disabled}
-                    aria-keyshortcuts={option.help === undefined || option.disabled === true ? undefined : 'F1'}
-                    onFocus={(event) => { lastItem.current = event.currentTarget; setHighlighted(option.value); }}
-                    className="choice-option focus-inset flex min-h-8 min-w-0 flex-1 cursor-default items-center gap-2 rounded-sm px-2 py-1 select-none data-[disabled]:text-text-muted data-[highlighted]:bg-bg-muted"
-                  >
-                    <span className="flex size-4 shrink-0 items-center justify-center text-accent-text">
-                      <Primitive.ItemIndicator>
-                        <Check aria-hidden />
-                      </Primitive.ItemIndicator>
-                    </span>
-                    {content}
-                  </Primitive.Item></ChoiceCard>}</Choice></div>
+                {sections.map((section) => section.group === undefined ? section.options.map(optionItem) : (
+                  <Primitive.Group key={section.options[0]?.value}>
+                    <Primitive.Label className="px-2 py-1 text-xs font-medium text-text-muted">{section.group}</Primitive.Label>
+                    {section.options.map(optionItem)}
+                  </Primitive.Group>
                 ))}
               </Primitive.Viewport>
               {guides.length > 0 && <div className="flex flex-col gap-2 border-t border-border p-2">

@@ -792,9 +792,21 @@ impl Files {
     }
 
     fn stale(&self, path: &RelPath) -> HostError {
-        HostError::Stale {
-            current: self.stat(path).ok().map(Box::new),
-        }
+        let current = self.stat(path).ok().map(|mut stat| {
+            if stat.hash.is_none() {
+                stat.hash = self
+                    .ws()
+                    .locate(path, Locate::THROUGH)
+                    .ok()
+                    .and_then(|located| {
+                        self.current_hash(&located.parent, located.name().ok()?, &located.real)
+                            .ok()
+                            .flatten()
+                    });
+            }
+            Box::new(stat)
+        });
+        HostError::Stale { current }
     }
 
     /// Writes the content `blob` holds to the file at `path`, creating the directories above it.

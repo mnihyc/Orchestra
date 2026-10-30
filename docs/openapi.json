@@ -71929,6 +71929,14 @@
             "type": "string",
             "description": "Why."
           },
+          "expires_at": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "format": "date-time",
+            "description": "The proposed end of the access, or no end when omitted."
+          },
           "for_thread": {
             "type": [
               "string",
@@ -73003,6 +73011,14 @@
           "reason": {
             "type": "string",
             "description": "Why."
+          },
+          "expires_at": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "format": "date-time",
+            "description": "The proposed end of the access, or no end when absent."
           },
           "for_thread": {
             "anyOf": [
@@ -121694,6 +121710,14 @@
               "null"
             ],
             "description": "The name as shared with the requester."
+          },
+          "expires_at": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "format": "date-time",
+            "description": "The proposed end of membership, or no end when omitted."
           }
         },
         "description": "A request to join a known group chat."

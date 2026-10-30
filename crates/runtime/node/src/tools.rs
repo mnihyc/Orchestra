@@ -20,7 +20,10 @@
 //! `tools/orch-connector/current` is moved to it), while the units that exist keep the build they were made
 //! with.
 
-use std::io::{Read, Write};
+use std::io::Read;
+#[cfg(unix)]
+use std::io::Write;
+#[cfg(unix)]
 use std::os::unix::fs::{DirBuilderExt, MetadataExt, OpenOptionsExt, PermissionsExt};
 use std::path::{Component, Path, PathBuf};
 use std::time::Duration;
@@ -211,6 +214,7 @@ fn io(what: impl Into<String>) -> impl FnOnce(std::io::Error) -> ToolError {
 /// Make new cache directories without granting write access to another user.
 /// Existing directories retain their permissions: an old cache cannot be made
 /// trustworthy merely by changing its mode after it may have been exposed.
+#[cfg(unix)]
 fn make_cache_directory(path: &Path, mode: u32) -> std::io::Result<()> {
     if let Some(parent) = path.parent() {
         std::fs::create_dir_all(parent)?;
@@ -222,8 +226,22 @@ fn make_cache_directory(path: &Path, mode: u32) -> std::io::Result<()> {
     }
 }
 
+#[cfg(not(unix))]
+fn unsupported_filesystem() -> std::io::Error {
+    std::io::Error::new(
+        std::io::ErrorKind::Unsupported,
+        "tool cache publication requires Unix file permissions",
+    )
+}
+
+#[cfg(not(unix))]
+fn make_cache_directory(_path: &Path, _mode: u32) -> std::io::Result<()> {
+    Err(unsupported_filesystem())
+}
+
 /// Markers belong to Orch, not the downloaded archive. Create them without
 /// following an archive-provided link or briefly granting group write access.
+#[cfg(unix)]
 fn write_marker(path: &Path, value: &str) -> Result<(), ToolError> {
     let mut file = std::fs::OpenOptions::new()
         .write(true)
@@ -235,6 +253,33 @@ fn write_marker(path: &Path, value: &str) -> Result<(), ToolError> {
         .map_err(io("writing a tool marker"))?;
     file.set_permissions(std::fs::Permissions::from_mode(0o644))
         .map_err(io("setting the mode of a tool marker"))
+}
+
+#[cfg(not(unix))]
+fn write_marker(_path: &Path, _value: &str) -> Result<(), ToolError> {
+    Err(io("creating a tool marker")(unsupported_filesystem()))
+}
+
+#[cfg(unix)]
+fn private_cache_directory(metadata: &std::fs::Metadata) -> bool {
+    metadata.is_dir()
+        && metadata.uid() == rustix::process::geteuid().as_raw()
+        && metadata.mode() & 0o7077 == 0
+}
+
+#[cfg(not(unix))]
+fn private_cache_directory(_metadata: &std::fs::Metadata) -> bool {
+    false
+}
+
+#[cfg(unix)]
+fn set_cache_mode(path: &Path, mode: u32) -> std::io::Result<()> {
+    std::fs::set_permissions(path, std::fs::Permissions::from_mode(mode))
+}
+
+#[cfg(not(unix))]
+fn set_cache_mode(_path: &Path, _mode: u32) -> std::io::Result<()> {
+    Err(unsupported_filesystem())
 }
 
 /// Whether `text` is a name or a version that can be a directory of the cache: letters, digits and the
@@ -688,10 +733,7 @@ impl ToolCache {
         make_cache_directory(&partial, 0o700).map_err(io("making the scratch directory"))?;
         let meta =
             std::fs::symlink_metadata(&partial).map_err(io("checking the scratch directory"))?;
-        if !meta.is_dir()
-            || meta.uid() != rustix::process::geteuid().as_raw()
-            || meta.mode() & 0o7077 != 0
-        {
+        if !private_cache_directory(&meta) {
             return Err(ToolError::Shape(
                 "the tool scratch directory is not private".into(),
             ));
@@ -771,6 +813,7 @@ impl ToolCache {
         Ok(hex::encode(hasher.finalize()))
     }
 
+    #[cfg(unix)]
     fn publish(
         &self,
         content: &Path,
@@ -809,7 +852,20 @@ impl ToolCache {
         }
     }
 
+    #[cfg(not(unix))]
+    fn publish(
+        &self,
+        _content: &Path,
+        _target: &Path,
+        _name: &str,
+        _version: &str,
+        _wanted: &str,
+    ) -> Result<(), ToolError> {
+        Err(io("publishing the tool")(unsupported_filesystem()))
+    }
+
     /// Points the link `current` of the connector tool at `version`, in one step.
+    #[cfg(unix)]
     fn point_current(&self, name: &str, version: &str) -> Result<(), ToolError> {
         if name != CONNECTOR_TOOL {
             return Ok(());
@@ -819,11 +875,16 @@ impl ToolCache {
         std::os::unix::fs::symlink(version, &temporary).map_err(io("making the link"))?;
         std::fs::rename(&temporary, directory.join(CURRENT_LINK)).map_err(io("moving the link"))
     }
+
+    #[cfg(not(unix))]
+    fn point_current(&self, _name: &str, _version: &str) -> Result<(), ToolError> {
+        Err(io("making the link")(unsupported_filesystem()))
+    }
 }
 
 /// The connector's program is at the top of its directory and can be run.
+#[cfg(unix)]
 fn check_connector(content: &Path) -> Result<(), ToolError> {
-    use std::os::unix::fs::PermissionsExt;
     let program = content.join(CONNECTOR_TOOL);
     let meta = std::fs::metadata(&program).map_err(|_| {
         ToolError::Shape(format!(
@@ -840,15 +901,18 @@ fn check_connector(content: &Path) -> Result<(), ToolError> {
     Ok(())
 }
 
+#[cfg(not(unix))]
+fn check_connector(_content: &Path) -> Result<(), ToolError> {
+    Err(io("checking the connector")(unsupported_filesystem()))
+}
+
 fn unpack(packing: Packing, download: &Path, content: &Path, name: &str) -> Result<(), ToolError> {
     make_cache_directory(content, 0o755).map_err(io("making the directory of the tool"))?;
     match packing {
         Packing::Program => {
-            use std::os::unix::fs::PermissionsExt;
             let program = content.join(name);
             std::fs::rename(download, &program).map_err(io("saving the program"))?;
-            std::fs::set_permissions(&program, std::fs::Permissions::from_mode(PROGRAM_MODE))
-                .map_err(io("making the program executable"))
+            set_cache_mode(&program, PROGRAM_MODE).map_err(io("making the program executable"))
         }
         Packing::Tar => unpack_tar(
             std::fs::File::open(download).map_err(io("opening the download"))?,
@@ -864,15 +928,14 @@ fn unpack(packing: Packing, download: &Path, content: &Path, name: &str) -> Resu
     }?;
     plain_modes(content)?;
     // The root is still inside the private scratch tree until publication.
-    std::fs::set_permissions(content, std::fs::Permissions::from_mode(0o755))
-        .map_err(io("setting the mode of the tool directory"))
+    set_cache_mode(content, 0o755).map_err(io("setting the mode of the tool directory"))
 }
 
 /// The mode of a file of the cache once it is unpacked: what an owner may do with it and what anyone may read
 /// and run. An archive's setuid and setgid bits, and the write bits of group and others, are not carried over:
 /// a tool is a program to run and nothing in it should change who runs it.
+#[cfg(unix)]
 fn plain_modes(directory: &Path) -> Result<(), ToolError> {
-    use std::os::unix::fs::PermissionsExt;
     for entry in std::fs::read_dir(directory).map_err(io("reading the unpacked tool"))? {
         let entry = entry.map_err(io("reading the unpacked tool"))?;
         let meta =
@@ -893,6 +956,13 @@ fn plain_modes(directory: &Path) -> Result<(), ToolError> {
         }
     }
     Ok(())
+}
+
+#[cfg(not(unix))]
+fn plain_modes(_directory: &Path) -> Result<(), ToolError> {
+    Err(io("setting the mode of an unpacked tool")(
+        unsupported_filesystem(),
+    ))
 }
 
 /// Unpacks a tar. Every path is held inside `content`: an entry that would leave it is an error, not skipped,
@@ -1021,6 +1091,7 @@ fn unpack_zip(download: &Path, content: &Path) -> Result<(), ToolError> {
 mod tests {
     use super::*;
 
+    #[cfg(unix)]
     #[test]
     fn competing_publications_never_replace_a_completed_entry() {
         use std::sync::{Arc, Barrier};
@@ -1069,6 +1140,7 @@ mod tests {
         );
     }
 
+    #[cfg(unix)]
     #[test]
     fn an_unmarked_destination_is_refused_without_removing_it() {
         let parent = tempfile::tempdir().unwrap();
@@ -1088,6 +1160,16 @@ mod tests {
             b"old content"
         );
         assert!(source.exists());
+    }
+
+    #[cfg(not(unix))]
+    #[test]
+    fn a_cache_without_supported_file_permissions_is_refused_before_creation() {
+        let parent = tempfile::tempdir().unwrap();
+        let settings = NodeSettings::in_dir(parent.path());
+        let result = ToolCache::open(&settings);
+        assert!(matches!(result, Err(ToolError::Io { .. })));
+        assert!(!settings.tools_dir().exists());
     }
 
     #[test]

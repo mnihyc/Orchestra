@@ -4,7 +4,6 @@
     clippy::expect_used,
     reason = "a test fails by panicking"
 )]
-#![cfg(target_os = "linux")]
 
 use orch_envhost::{
     blobs::MemoryBlobs,
@@ -111,7 +110,10 @@ fn instructions_marker_guard_refuses_files_links_content_and_forbidden_personal_
             "link" => {
                 std::fs::create_dir(root.path().join("owned")).unwrap();
                 std::fs::write(root.path().join("owned/mine"), "mine").unwrap();
+                #[cfg(unix)]
                 std::os::unix::fs::symlink("owned", &marker).unwrap();
+                #[cfg(windows)]
+                std::os::windows::fs::symlink_dir("owned", &marker).unwrap();
             }
             _ => {
                 std::fs::create_dir(&marker).unwrap();

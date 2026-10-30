@@ -1,6 +1,6 @@
 ---
 title: Getting started
-screens: /, /setup, /login, /register, /invite/$token, /org/$slug, /thread/$threadId
+screens: /, /setup, /login, /register, /invite/$token, /org/$slug, /project/$projectId, /topic/$topicId, /thread/$threadId
 keywords: first thread, team, solo, invitation, provider, key, sign in, scripted example, start here
 ---
 
@@ -18,7 +18,11 @@ it names; a personal invitation is for its named address, and a link invitation
 has its own expiry and number of uses. The first administrator uses the setup
 page on a new installation. A deployment may also enable open registration or
 an external sign-in provider; the sign-in page shows only the methods offered
-there. An implementation reserved by the deployment is unavailable.
+there. An implementation reserved by the deployment is unavailable. If an
+invitation shows the wrong account, sign out there and sign in as the intended
+person; a failed sign-out stays on the invitation so you can retry.
+
+If the sender can no longer grant the invitation's access, ask them for a new invitation.
 
 Every person has a space of their own. Choose that for solo work, or select your
 team's organization in the left bar. Start here belongs to the selected place;
@@ -67,6 +71,9 @@ Give the thread a title that names the work. Choose its provider, profile, model
 and environment from the available choices. How agents run explains where the
 harness, tools and credential will be placed. The first choice follows the
 place's effective defaults; a missing choice explains what is required.
+When the environment list contains both, **Can use** and **Ask for access**
+separate those you can use from those you can ask to use. Selecting the latter
+opens a request without starting the thread.
 
 Check the directory and standing instructions before the first input. The
 directory's instruction file is a workspace file; standing instructions are
@@ -111,7 +118,9 @@ for search and keyboard navigation, [workflows](workflows.md) for decisions and
 shared documents, and [resources](resources.md) for provider/environment choices.
 
 Your sign-in may require an authenticator or a mailed code when the place
-permits it. Repeated wrong proofs are bounded by the sign-in policy; a known
+permits it. If a code request fails, the page shows the error and lets you try
+again. An accepted request does not say whether a code could be sent. Repeated
+wrong proofs are bounded by the sign-in policy; a known
 browser has separate protection from strangers' guessing. Use the recovery
 page or ask the installation's administrator for a one-use reset link if you
 cannot complete the second step. A provider sign-in is separate from your

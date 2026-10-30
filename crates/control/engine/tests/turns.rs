@@ -147,6 +147,122 @@ async fn a_steer_reaches_the_turn_that_runs_and_its_words_join_that_turn() {
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn a_steer_uses_the_running_turns_model_permission() {
+    let world = World::new().await;
+    let thread = world.thread("Running model access").await;
+    world.running_turn(thread, "Begin").await;
+    world
+        .set(thread, "agent.model", serde_json::json!("next-model"))
+        .await;
+    world
+        .set(
+            world.topic,
+            "thread.inputs_without_use",
+            serde_json::json!("refused"),
+        )
+        .await;
+    let caller = Caller::session(world.ada);
+
+    world.access.deny_model(world.ada, common::MODEL);
+    let refused = world
+        .engine()
+        .submit_input(&caller, thread, steering("No access to this turn"))
+        .await;
+    assert!(matches!(refused, Err(InputError::Denied(_))));
+    assert_eq!(world.commands.issued_of("turn.steer"), 0);
+
+    world.access.allow_model(world.ada, common::MODEL);
+    world.access.deny_model(world.ada, "next-model");
+    let allowed = world
+        .engine()
+        .submit_input(&caller, thread, steering("Access to this turn"))
+        .await
+        .unwrap();
+    world.wait_input(allowed.input.id, "delivered").await;
+    let Command::TurnSteer(body) = world.seen.of_kind(CommandKind::TurnSteer)[0].clone() else {
+        panic!("a turn.steer")
+    };
+    assert_eq!(body.text, "Access to this turn");
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn converting_a_queued_input_to_a_steer_checks_its_running_model() {
+    let world = World::new().await;
+    let thread = world.thread("Queued model access").await;
+    world.running_turn(thread, "Begin").await;
+    world
+        .set(thread, "agent.model", serde_json::json!("next-model"))
+        .await;
+    let caller = Caller::session(world.ada);
+    let waiting = world
+        .engine()
+        .submit_input(&caller, thread, queued("Queued words"))
+        .await
+        .unwrap();
+    world.access.deny_model(world.ada, common::MODEL);
+    let mut tx = world.pool.begin().await.unwrap();
+    let principal = orch_authz::Principal::load(&mut tx, caller.clone(), world.clock.time())
+        .await
+        .unwrap();
+    let refused = world
+        .engine()
+        .update_input_guarded(
+            tx,
+            principal,
+            thread,
+            waiting.input.id,
+            orch_api_contract::threads::ThreadInputUpdateBody {
+                delivery: Some(orch_api_contract::threads::Delivery::Steer),
+                ..Default::default()
+            },
+        )
+        .await;
+    assert!(matches!(refused, Err(InputError::Denied(_))));
+    assert_eq!(world.input_state(waiting.input.id).await.0, "pending");
+    assert_eq!(world.commands.issued_of("turn.steer"), 0);
+
+    world.access.allow_model(world.ada, common::MODEL);
+    world.access.deny_model(world.ada, "next-model");
+    let mut tx = world.pool.begin().await.unwrap();
+    let principal = orch_authz::Principal::load(&mut tx, caller, world.clock.time())
+        .await
+        .unwrap();
+    world
+        .engine()
+        .update_input_guarded(
+            tx,
+            principal,
+            thread,
+            waiting.input.id,
+            orch_api_contract::threads::ThreadInputUpdateBody {
+                delivery: Some(orch_api_contract::threads::Delivery::Steer),
+                ..Default::default()
+            },
+        )
+        .await
+        .unwrap();
+    world.wait_input(waiting.input.id, "delivered").await;
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn a_steer_rechecks_model_use_before_dispatch_after_a_restart() {
+    let world = World::new().await;
+    let thread = world.thread("Steer access changed").await;
+    world.running_turn(thread, "Begin").await;
+    world.engine().stop();
+    let input = world
+        .engine()
+        .submit_input(&Caller::session(world.ada), thread, steering("Later words"))
+        .await
+        .unwrap();
+    assert_eq!(input.input.state, InputState::Delivering);
+    world.access.deny_model(world.ada, common::MODEL);
+    world.restart_api().await;
+    world.wait_input(input.input.id, "pending").await;
+    assert_eq!(world.commands.issued_of("turn.steer"), 0);
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn an_answer_that_comes_before_the_steer_is_acknowledged_never_stands_above_its_words() {
     let world = World::new().await;
     let thread = world.thread("Steered and answered at once").await;
@@ -203,6 +319,114 @@ async fn an_answer_that_comes_before_the_steer_is_acknowledged_never_stands_abov
     );
 }
 
+async fn a_late_steer_success_is_kept(restart: bool) {
+    let world = World::new().await;
+    let thread = world.thread("Steer acknowledged after the turn").await;
+    let (start, _) = world.running_turn(thread, "Begin").await;
+    let caller = Caller::session(world.ada);
+    world.machine.handler.hold(CommandKind::TurnSteer);
+    let steer = world
+        .engine()
+        .submit_input(&caller, thread, steering("Steered words"))
+        .await
+        .unwrap();
+    world.wait_began(CommandKind::TurnSteer, 1).await;
+    world
+        .engine()
+        .submit_input(&caller, thread, queued("Queued words"))
+        .await
+        .unwrap();
+    world
+        .say(thread, turn_ended(start.turn_id, TurnOutcome::Completed))
+        .await;
+    world.wait_turn(start.turn_id, "completed").await;
+    assert_eq!(world.input_state(steer.input.id).await.0, "delivering");
+
+    if restart {
+        world.restart_api().await;
+    }
+    // A direct send also runs pre-flight; it must not overtake the unsettled steer.
+    world
+        .engine()
+        .submit_input(&caller, thread, queued("Later words"))
+        .await
+        .unwrap();
+    meanwhile(Duration::from_millis(300)).await;
+    assert_eq!(world.turn_starts(thread).len(), 1);
+    world.machine.handler.release();
+    world.wait_input(steer.input.id, "delivered").await;
+    let next = world.turn_start(thread, 1).await;
+    assert_eq!(common::words_after_where(&next.text), "Queued words");
+    let stored: (String, Option<orch_types::Id>) =
+        sqlx::query_as("SELECT state,turn_id FROM thread_inputs WHERE id=$1")
+            .bind(steer.input.id)
+            .fetch_one(world.pool.pool())
+            .await
+            .unwrap();
+    assert_eq!(stored, ("delivered".to_owned(), Some(start.turn_id)));
+    let messages: i64 = sqlx::query_scalar(
+        "SELECT count(*) FROM items WHERE thread_id=$1 AND kind='user_message' AND payload->>'input_id'=$2::text AND status='completed'",
+    )
+    .bind(thread)
+    .bind(steer.input.id)
+    .fetch_one(world.pool.pool())
+    .await
+    .unwrap();
+    assert_eq!(messages, 1);
+    let model_input: String = sqlx::query_scalar(
+        "SELECT state FROM model_inputs WHERE node_id=$1 AND purpose='input' AND reference=$2",
+    )
+    .bind(thread)
+    .bind(steer.input.id.to_string())
+    .fetch_one(world.pool.pool())
+    .await
+    .unwrap();
+    assert_eq!(model_input, "sent");
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn a_successful_steer_acknowledged_after_the_turn_is_not_sent_again() {
+    a_late_steer_success_is_kept(false).await;
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn a_successful_steer_acknowledged_after_restart_is_not_sent_again() {
+    a_late_steer_success_is_kept(true).await;
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn a_steer_refused_after_the_turn_waits_for_its_own_turn() {
+    let world = World::new().await;
+    let thread = world.thread("Late rejected steer").await;
+    let (start, _) = world.running_turn(thread, "Begin").await;
+    world.machine.handler.hold(CommandKind::TurnSteer);
+    world.refuse(
+        CommandKind::TurnSteer,
+        vec![orch_link_contract::commands::CommandError::new(
+            orch_link_contract::commands::ErrorCode::NotFound,
+            "the turn ended before the message was taken",
+        )],
+    );
+    let steer = world
+        .engine()
+        .submit_input(&Caller::session(world.ada), thread, steering("Try next"))
+        .await
+        .unwrap();
+    world.wait_began(CommandKind::TurnSteer, 1).await;
+    world
+        .say(thread, turn_ended(start.turn_id, TurnOutcome::Completed))
+        .await;
+    world.wait_turn(start.turn_id, "completed").await;
+    assert_eq!(world.input_state(steer.input.id).await.0, "delivering");
+    world.machine.handler.release();
+    let next = world.turn_start(thread, 1).await;
+    assert_eq!(common::words_after_where(&next.text), "Try next");
+    world
+        .say(thread, turn_ended(next.turn_id, TurnOutcome::Completed))
+        .await;
+    world.wait_input(steer.input.id, "delivered").await;
+}
+
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn a_steer_into_a_thread_with_no_turn_waits_first_and_starts_one() {
     let world = World::new().await;
@@ -226,6 +450,246 @@ async fn a_steer_into_a_thread_with_no_turn_waits_first_and_starts_one() {
 /// How long the engine waits in the tests of a harness that does not answer an interrupt: long enough
 /// for a busy machine not to use it up before the test has looked.
 const FORCE_AFTER: Duration = Duration::from_secs(4);
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn stopping_a_turn_during_session_setup_keeps_its_input_held_without_starting_it() {
+    let world = World::new().await;
+    let thread = world.thread("Stop during setup").await;
+    let caller = Caller::session(world.ada);
+    world.machine.handler.hold(CommandKind::SessionOpen);
+    let submitted = world
+        .engine()
+        .submit_input(&caller, thread, queued("Do not start yet"))
+        .await
+        .unwrap();
+    world.wait_began(CommandKind::SessionOpen, 1).await;
+    let old: orch_types::Id = world
+        .scalar(
+            "SELECT current_turn_id FROM threads WHERE node_id=$1",
+            thread,
+        )
+        .await;
+    world
+        .engine()
+        .interrupt(&caller, thread, old)
+        .await
+        .unwrap();
+    world.wait_turn(old, "interrupted").await;
+    world.wait_input(submitted.input.id, "pending").await;
+    let queue = world.sync(thread).await.thread.queue;
+    assert!(queue.held);
+    assert_eq!(queue.held_inputs, 1);
+    let (thread_seq, queue_seq): (i64, i64) = sqlx::query_as(
+        "SELECT t.seq_state,GREATEST(i.seq_updated,COALESCE((SELECT max(seq_created) FROM items WHERE thread_id=t.node_id AND payload->>'marker'='queue_held'),0))
+         FROM threads t JOIN thread_inputs i ON i.id=$2 WHERE t.node_id=$1",
+    )
+    .bind(thread)
+    .bind(submitted.input.id)
+    .fetch_one(world.pool.pool())
+    .await
+    .unwrap();
+    assert!(
+        thread_seq >= queue_seq,
+        "the held queue is visible in thread sync"
+    );
+
+    world.machine.handler.release();
+    meanwhile(Duration::from_millis(500)).await;
+    assert!(world.turn_starts(thread).is_empty());
+
+    world
+        .engine()
+        .resume_queue(&caller, thread, queue.revision)
+        .await
+        .unwrap();
+    let next = world.turn_start(thread, 0).await;
+    assert_ne!(next.turn_id, old);
+    assert!(next.text.contains("Do not start yet"));
+    world
+        .say(thread, turn_ended(next.turn_id, TurnOutcome::Completed))
+        .await;
+    world.wait_input(submitted.input.id, "delivered").await;
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn stopping_a_retried_start_keeps_the_original_input_instead_of_failing_it() {
+    let world = World::new().await;
+    let thread = world.thread("Stop a retried start").await;
+    let caller = Caller::session(world.ada);
+    world.refuse(
+        CommandKind::TurnStart,
+        vec![
+            orch_link_contract::commands::CommandError::new(
+                orch_link_contract::commands::ErrorCode::Timeout,
+                "the first start was not taken",
+            )
+            .retryable(),
+        ],
+    );
+    let first = world
+        .engine()
+        .submit_input(&caller, thread, queued("Original work"))
+        .await
+        .unwrap();
+    world.wait_blocked(thread, "error").await;
+    assert_eq!(world.input_state(first.input.id).await.0, "pending");
+
+    // Changed instructions reopen the session before the retry can start.
+    world
+        .set(
+            thread,
+            "agent.instructions",
+            serde_json::json!("New instructions"),
+        )
+        .await;
+    world.machine.handler.hold(CommandKind::SessionOpen);
+    let later = world
+        .engine()
+        .submit_input(&caller, thread, queued("Later work"))
+        .await
+        .unwrap();
+    world.wait_began(CommandKind::SessionOpen, 2).await;
+    let retry: orch_types::Id = world
+        .scalar(
+            "SELECT current_turn_id FROM threads WHERE node_id=$1",
+            thread,
+        )
+        .await;
+    world
+        .engine()
+        .interrupt(&caller, thread, retry)
+        .await
+        .unwrap();
+    world.wait_turn(retry, "interrupted").await;
+    assert_eq!(world.input_state(first.input.id).await.0, "pending");
+    assert_eq!(world.input_state(later.input.id).await.0, "pending");
+    let queue = world.sync(thread).await.thread.queue;
+    assert!(queue.held);
+    assert_eq!(queue.held_inputs, 2);
+    world.machine.handler.release();
+}
+
+async fn a_starting_input_survives_a_resource_pause(run_waiting: bool) {
+    use orch_access_contract::decisions::ObjectRef;
+    use orch_access_contract::permissions::ObjectKind;
+    use orch_api_contract::resource_facts::FactTarget;
+    use orch_engine::resource_pause::{ResourceResume, ResourceStop};
+
+    let world = World::new().await;
+    let thread = world.thread("Pause during setup").await;
+    let caller = Caller::session(world.ada);
+    world.machine.handler.hold(CommandKind::SessionOpen);
+    let submitted = world
+        .engine()
+        .submit_input(&caller, thread, queued("Original work"))
+        .await
+        .unwrap();
+    world.wait_began(CommandKind::SessionOpen, 1).await;
+    let old: orch_types::Id = world
+        .scalar(
+            "SELECT current_turn_id FROM threads WHERE node_id=$1",
+            thread,
+        )
+        .await;
+    let target = FactTarget {
+        object: ObjectRef {
+            kind: ObjectKind::Provider,
+            id: world.provider,
+        },
+        model_id: None,
+    };
+    let mut tx = world.pool.begin().await.unwrap();
+    let (job, _) = world
+        .engine()
+        .stop_resource_in(
+            &mut tx,
+            ResourceStop {
+                target: target.clone(),
+                name: "Provider",
+                by: world.ada,
+                note: None,
+                deleted: false,
+            },
+            world.clock.now(),
+        )
+        .await
+        .unwrap();
+    sqlx::query("UPDATE providers SET status='disabled' WHERE id=$1")
+        .bind(world.provider)
+        .execute(&mut *tx)
+        .await
+        .unwrap();
+    tx.commit().await.unwrap();
+    world.engine().stop_resource_now(job.id).await.unwrap();
+    world.wait_turn(old, "interrupted").await;
+    world.wait_input(submitted.input.id, "pending").await;
+    world.machine.handler.release();
+    eventually("the resource stop finishes", || async {
+        let state: String = sqlx::query_scalar("SELECT state FROM jobs WHERE id=$1")
+            .bind(job.id)
+            .fetch_one(world.pool.pool())
+            .await
+            .unwrap();
+        state == "succeeded"
+    })
+    .await;
+
+    let mut tx = world.pool.begin().await.unwrap();
+    sqlx::query("UPDATE providers SET status='ready' WHERE id=$1")
+        .bind(world.provider)
+        .execute(&mut *tx)
+        .await
+        .unwrap();
+    let finished = world
+        .engine()
+        .enable_resource_waiting_in(
+            &mut tx,
+            ResourceResume {
+                target: &target,
+                name: "Provider",
+                by: world.ada,
+                run_waiting,
+            },
+            world.clock.now(),
+        )
+        .await
+        .unwrap();
+    tx.commit().await.unwrap();
+    for thread in finished.wakes {
+        world.engine().wake(thread);
+    }
+    if !run_waiting {
+        let queue = world.sync(thread).await.thread.queue;
+        assert!(queue.held);
+        assert_eq!(queue.held_inputs, 1);
+        meanwhile(Duration::from_millis(300)).await;
+        assert!(world.turn_starts(thread).is_empty());
+        world
+            .engine()
+            .resume_queue(&caller, thread, queue.revision)
+            .await
+            .unwrap();
+    }
+    let next = world.turn_start(thread, 0).await;
+    assert_ne!(next.turn_id, old);
+    assert!(next.text.contains("Original work"));
+    let actual: orch_types::Id = sqlx::query_scalar("SELECT input_id FROM turns WHERE id=$1")
+        .bind(next.turn_id)
+        .fetch_one(world.pool.pool())
+        .await
+        .unwrap();
+    assert_eq!(actual, submitted.input.id);
+    world
+        .say(thread, turn_ended(next.turn_id, TurnOutcome::Completed))
+        .await;
+    world.wait_input(submitted.input.id, "delivered").await;
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn enabling_a_resource_can_keep_a_starting_input_held_or_run_the_original() {
+    a_starting_input_survives_a_resource_pause(false).await;
+    a_starting_input_survives_a_resource_pause(true).await;
+}
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn an_interrupt_ends_the_turn_when_the_harness_stops() {

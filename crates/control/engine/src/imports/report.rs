@@ -1,9 +1,9 @@
 //! The report of an import: a row for each object and what became of it, the totals that come of the rows, and the report written out as JSON or as a table for a spreadsheet.
 
+use super::make::Made;
 use super::model::Object;
 use orch_api_contract::imports::{
-    ImportAction, ImportActionCounts, ImportCounts, ImportMade, ImportOutcome, ImportReportRow,
-    ImportWarning,
+    ImportAction, ImportActionCounts, ImportCounts, ImportOutcome, ImportReportRow,
 };
 use orch_api_contract::package::PackageKind;
 use orch_db::queries::imports::NewReportRow;
@@ -37,16 +37,7 @@ pub const fn kind_word(kind: PackageKind) -> &'static str {
 
 /// The row of the report for an object.
 #[must_use]
-pub fn row_of(
-    position: i64,
-    object: &Object,
-    outcome: ImportOutcome,
-    made: Option<ImportMade>,
-    message: Option<String>,
-    code: Option<String>,
-    warnings: Vec<ImportWarning>,
-    author: Option<String>,
-) -> ImportReportRow {
+pub fn row_of(position: i64, object: &Object, made: &Made) -> ImportReportRow {
     ImportReportRow {
         position,
         source_id: object.object.id,
@@ -54,13 +45,13 @@ pub fn row_of(
         name: object.object.name.clone(),
         path: object.path.clone(),
         action: object.action,
-        outcome,
-        made,
-        message,
-        code,
+        outcome: made.outcome,
+        made: made.made.clone(),
+        message: made.message.clone(),
+        code: made.code.clone(),
         params: None,
-        warnings,
-        author,
+        warnings: made.warnings.clone(),
+        author: made.author.clone(),
     }
 }
 

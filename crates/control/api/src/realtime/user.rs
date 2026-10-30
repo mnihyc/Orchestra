@@ -446,9 +446,16 @@ pub(crate) async fn read(inner: &Inner, person: Id, after: Seq, upto: Seq) -> Re
     };
     for row in &rows {
         if let Some(principal) = &principal
-            && !orch_authz::documents::notice_readable(&mut conn, principal, &row.kind, &row.data)
-                .await
-                .map_err(Fail::other)?
+            && !orch_authz::documents::notice_readable(
+                &mut conn,
+                principal,
+                &row.kind,
+                &row.data,
+                row.chat_id,
+                row.thread_id,
+            )
+            .await
+            .map_err(Fail::other)?
         {
             continue;
         }

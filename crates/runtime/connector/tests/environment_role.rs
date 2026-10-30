@@ -285,7 +285,10 @@ async fn a_path_outside_the_workspace_is_refused_whatever_the_command() {
     let workspace = rig.directory("work");
     let outside = rig.directory("outside");
     std::fs::write(outside.join("secret.txt"), "not yours").unwrap();
+    #[cfg(unix)]
     std::os::unix::fs::symlink(outside.join("secret.txt"), workspace.join("leak")).unwrap();
+    #[cfg(windows)]
+    std::os::windows::fs::symlink_file(outside.join("secret.txt"), workspace.join("leak")).unwrap();
     rig.start().await;
     rig.attach(&workspace).await;
     let environment_id = rig.environment;
@@ -522,7 +525,10 @@ async fn a_tree_is_snapshotted_and_materialized_in_another_environment_with_its_
     std::fs::create_dir_all(source.join("src/deep")).unwrap();
     std::fs::write(source.join("a.txt"), "first").unwrap();
     std::fs::write(source.join("src/deep/b.txt"), "second ".repeat(1000)).unwrap();
+    #[cfg(unix)]
     std::os::unix::fs::symlink("a.txt", source.join("link")).unwrap();
+    #[cfg(windows)]
+    std::os::windows::fs::symlink_file("a.txt", source.join("link")).unwrap();
     let target = rig.directory("target");
     rig.start().await;
     rig.attach(&source).await;

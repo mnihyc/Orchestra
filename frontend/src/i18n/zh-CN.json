@@ -7007,7 +7007,10 @@
     "runtime": "连接运行在",
     "sources": "模型、额度和用量",
     "later": "创建后在“登录和密钥”中添加密钥或登录。",
-    "create": "添加提供方"
+    "create": "添加提供方",
+    "partialTitle": "提供方已添加",
+    "partial": "{{name}} 已添加。打开其模型以完成设置。",
+    "openCreated": "打开提供方"
   },
   "providerDetails": {
     "notReadOnce": "尚未读取",
@@ -8093,10 +8096,12 @@
     },
     "code": {
       "title": "用验证码登录",
-      "sent": "如果这个账号可以用这种方式登录，验证码已发往它的邮箱，十分钟内有效。",
+      "sent": "如果这个账号可以用这种方式登录且验证码可以发送，验证码会发往它的邮箱。",
       "label": "验证码",
       "missing": "请输入验证码。",
       "wrong": "验证失败。请检查验证码，或者重新获取一个。",
+      "sending": "正在发送验证码…",
+      "send": "发送验证码",
       "resend": "重新发送",
       "resendIn_one": "{{count}} 秒后可重新发送",
       "resendIn_other": "{{count}} 秒后可重新发送",
@@ -8110,7 +8115,7 @@
       },
       "totpLabel": "身份验证器中的验证码",
       "recoveryLabel": "恢复码",
-      "codeSent": "验证码已发送到你的邮箱，十分钟内有效。",
+      "codeSent": "如果验证码可以发送，它会发往你的邮箱。",
       "missing": {
         "totp": "请输入验证码。",
         "recovery_code": "请输入保存的恢复码。",
@@ -8142,6 +8147,7 @@
       "domain_not_allowed": "你的邮箱地址不允许在这里登录。",
       "registration_closed": "这里没有开放注册，所以首次登录无法创建账号。",
       "invite_required": "这个系统通过邀请加入。请打开邀请链接，再从那里登录。",
+      "invitation_issuer_authority_lost": "发出这份邀请的人已无法授予访问权限。请向对方索取新的邀请。",
       "link_required": "已经有账号使用这个邮箱地址。请用原来的方式登录，再在个人资料中关联这种登录方式。",
       "disabled": "这种登录方式已被停用。",
       "idp_error": "身份提供方返回了错误。请再试一次；如果问题持续，请告知管理员。"
@@ -8188,6 +8194,7 @@
       "partOf": "它属于 {{org}}。",
       "goodUntil": "有效期至 {{time}}。",
       "bound": "这份邀请只对收到它的邮箱地址有效。",
+      "issuerAuthorityLost": "发出这份邀请的人已无法授予访问权限。请向对方索取新的邀请。",
       "spent": "这份邀请已经失效。请向发出邀请的人再要一份。",
       "accept": "接受邀请",
       "register": "创建账号",
@@ -9842,12 +9849,21 @@
         "full_manage": "管理"
       },
       "choose": "请求什么",
+      "duration": "需要访问多久？",
+      "untilRemoved": "直到移除",
+      "chooseDate": "选择日期",
+      "endsOn": "结束日期",
+      "futureDate": "请选择未来日期",
+      "requestedUntil": "申请至",
+      "requestedUntilRemoved": "申请至移除",
+      "asRequested": "按申请",
       "reason": "为什么需要？",
       "reasonHint": "最多 {{max}} 个字符。决定的人会看到。",
       "send": "发送",
       "goesTo": "将发送给 {{names}}。",
       "waiting": "你的请求已发送，等待决定。",
       "waitingFor": "你的请求已发送给 {{names}}，等待决定。",
+      "answered": "你的申请已有答复。",
       "complete": "你请求的权限现在都已具备。请重新检查。",
       "cancel": "撤回请求",
       "tooMany": "你已有 {{waiting}} 个申请在等待。请等待回复，或撤回一个，再继续申请。",
@@ -12031,6 +12047,7 @@
   "approvals": {
     "detailTitle": "请求",
     "incomplete": "无法显示这项请求。请重新读取后继续。",
+    "outcomeUnavailable": "无法读取处理结果。",
     "accept": "接受",
     "allowed": "已允许",
     "alreadyAnswered": "已由 {{name}} 答复",
@@ -12311,6 +12328,11 @@
       "access": {
         "title": "访问计划",
         "none": "无",
+        "names": {
+          "daybreakBlue": "Daybreak 蓝",
+          "daybreakRed": "Daybreak 红",
+          "standard": "标准"
+        },
         "startsWith": "此模型上的会话按其管理者的设定以 {{label}} 起步，会话无法改回不使用。",
         "line": "{{label}}：此会话的轮次会请求该访问计划。",
         "lineNone": "无：不请求任何访问计划。"
@@ -12705,6 +12727,7 @@
       "alsoUsedByMore_one": "另被 {{names}} 等 {{count}} 个主题使用",
       "alsoUsedByMore_other": "另被 {{names}} 等 {{count}} 个主题使用",
       "directoryIs": "此会话在环境中的工作位置。留空则为 {{directory}}。",
+      "canUse": "可以使用",
       "askAccess": "申请使用"
     },
     "arrangement": {
@@ -14286,7 +14309,7 @@
       "roleChoices": {
         "environment": {
           "name": "环境",
-          "description": "让人们在这台机器的目录中工作"
+          "description": "在 Linux 的文件夹中工作"
         },
         "agent": {
           "name": "智能体",
@@ -15167,6 +15190,7 @@
       "reachValue_other": "现在有 {{count}} 人",
       "lastActivity": "最近活动",
       "imageFailed": "请先让此宿主机能够获取模板镜像，再重试。镜像拉取或加载失败（{{reason}}）。请检查镜像名称和仓库权限，或构建并发布镜像。",
+      "hostCapacityFailed": "主机资源不足（{{reason}}）。请释放对应资源后重试。",
       "idleStop": "空闲停止时间",
       "may": "你可以",
       "removalScheduled": "计划于 {{time}} 移除",
@@ -18915,7 +18939,7 @@
     "runsOn": "运行于",
     "runtime": "运行时",
     "titles": {
-      "docker": "Docker",
+      "docker": "Docker 驱动",
       "dockerContainers": "Docker 容器",
       "directories": "已注册的目录",
       "hostPrograms": "宿主机上的程序"

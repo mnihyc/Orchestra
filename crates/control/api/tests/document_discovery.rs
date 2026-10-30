@@ -753,8 +753,7 @@ async fn deleting_an_unused_builtin_template_removes_only_its_live_dependency_fr
         seeds::seed(
             &mut tx,
             &Release {
-                environment_image: "registry.example/orch-test-env:1",
-                environment_image_digest: None,
+                version: "0.1.0",
                 adapters: &[],
             },
             desk.world.now(),

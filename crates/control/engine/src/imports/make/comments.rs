@@ -4,8 +4,8 @@ use super::{Batch, Made};
 use crate::imports::identity;
 use crate::imports::model::Object;
 use crate::imports::remap::{Found, Maps, remap};
+use orch_db::Tx;
 use orch_db::queries::documents::discussions::{self, Answered, NewComment, Opened};
-use orch_db::{DbError, Tx};
 use orch_types::{Id, Json};
 use serde_json::json;
 
@@ -138,9 +138,7 @@ pub(super) async fn bring(
                 .and_then(|text| text.parse::<Id>().ok());
             let at = resolved.get("at").and_then(parse_time).unwrap_or(batch.now);
             let user = credits.of(by).user;
-            discussions::resolve(tx, document, thread, true, user, at)
-                .await
-                .map_err(DbError::from)?;
+            discussions::resolve(tx, document, thread, true, user, at).await?;
         }
     }
     Ok(())

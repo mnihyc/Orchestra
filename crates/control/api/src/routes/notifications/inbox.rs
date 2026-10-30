@@ -161,9 +161,16 @@ pub async fn list(ctx: Ctx, query: NotificationListQuery, (): ()) -> ApiResult<P
         super::grouping::waiting_for(&ctx.app.engine, &mut conn, &principal, &rows).await?;
     let mut items = Vec::new();
     for row in &rows {
-        if orch_authz::documents::notice_readable(&mut conn, &principal, &row.kind, &row.data)
-            .await
-            .map_err(ApiError::internal)?
+        if orch_authz::documents::notice_readable(
+            &mut conn,
+            &principal,
+            &row.kind,
+            &row.data,
+            row.chat_id,
+            row.thread_id,
+        )
+        .await
+        .map_err(ApiError::internal)?
             && let Some(mut shown) = notification_view(row, &nodes, &actors)
         {
             shown.waiting_for_me = waiting.contains(&row.id);

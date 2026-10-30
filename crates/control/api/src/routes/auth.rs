@@ -226,7 +226,18 @@ async fn register(
             .await
             .map_err(|error| {
                 if error.code() == ErrorCode::Gone {
-                    invitation_needed("the invitation no longer admits this registration")
+                    let mut refusal =
+                        invitation_needed("the invitation no longer admits this registration");
+                    if error
+                        .problem
+                        .extra
+                        .get("reason")
+                        .and_then(serde_json::Value::as_str)
+                        == Some(super::users::ISSUER_AUTHORITY_LOST)
+                    {
+                        refusal = refusal.with("reason", super::users::ISSUER_AUTHORITY_LOST);
+                    }
+                    refusal
                 } else {
                     error
                 }

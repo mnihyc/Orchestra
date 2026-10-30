@@ -15,8 +15,9 @@ use std::time::Instant;
 
 use orch_driver_contract::driver::DriverError;
 use orch_driver_contract::runtime::ToolRef;
-use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
+
+use crate::stage_protocol::ArchiveReceipt;
 
 /// These are the node tool cache's own limits for one verified unpacked artifact.
 const MAX_ARTIFACT_BYTES: u64 = 8 * 1024 * 1024 * 1024;
@@ -27,13 +28,6 @@ const CHECKSUM_HEX_DIGITS: usize = 64;
 const MARKER: &str = ".complete";
 const CONNECTOR_NAME: &str = "orch-connector";
 const SUPERVISOR_NAME: &str = "orch-kube-supervisor";
-
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(deny_unknown_fields)]
-pub(crate) struct ArchiveReceipt {
-    pub sha256: String,
-    pub bytes: u64,
-}
 
 fn unavailable() -> DriverError {
     DriverError::Unavailable("the verified tool cache could not be staged".into())

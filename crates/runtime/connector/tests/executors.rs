@@ -137,12 +137,18 @@ async fn a_command_is_run_through_orch_exec_over_a_tunnel_with_its_output_and_it
         &session,
         call(
             "shell",
-            json!({ "command": "echo here-$ORCH_THREAD_ID; pwd" }),
+            json!({ "command": if cfg!(windows) {
+                "echo here-%ORCH_THREAD_ID% & cd"
+            } else {
+                "echo here-$ORCH_THREAD_ID; pwd"
+            } }),
         ),
     )
     .await
     .unwrap();
     let output = ran.iter().map(ToString::to_string).collect::<String>();
+    #[cfg(windows)]
+    let output = output.replace("\\\\", "\\");
     assert!(output.contains(&format!("here-{thread}")), "{output}");
     assert!(
         output.contains(&workspace.display().to_string()),
@@ -157,7 +163,11 @@ async fn a_command_is_run_through_orch_exec_over_a_tunnel_with_its_output_and_it
         &session,
         call(
             "shell",
-            json!({ "command": "sleep 30", "background": true }),
+            json!({ "command": if cfg!(windows) {
+                "powershell.exe -NoProfile -Command Start-Sleep -Seconds 30"
+            } else {
+                "sleep 30"
+            }, "background": true }),
         ),
     )
     .await

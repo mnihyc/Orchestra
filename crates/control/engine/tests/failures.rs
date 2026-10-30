@@ -86,6 +86,92 @@ async fn an_unexpected_session_exit_interrupts_the_running_turn_and_retains_its_
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn a_session_lost_before_the_turn_begins_keeps_its_input_for_retry() {
+    let world = World::new().await;
+    let thread = world.thread("Session lost at start").await;
+    let caller = Caller::session(world.ada);
+    let first = world
+        .engine()
+        .submit_input(&caller, thread, queued("First"))
+        .await
+        .unwrap();
+    let lost = world.turn_start(thread, 0).await;
+
+    // The command was taken but no turn-started event was heard. The session
+    // may have seen the input, so no automatic repeat is safe.
+    world
+        .say(
+            thread,
+            orch_link_contract::events::Event::SessionLost(
+                orch_link_contract::events::SessionLost {
+                    reason: "the session exited".into(),
+                },
+            ),
+        )
+        .await;
+    world.wait_turn(lost.turn_id, "failed").await;
+    world.wait_blocked(thread, "error").await;
+    assert_eq!(world.input_state(first.input.id).await.0, "pending");
+    meanwhile(Duration::from_millis(300)).await;
+    assert_eq!(world.turn_starts(thread).len(), 1);
+
+    // A subsequent send retries the original input before the new one.
+    let second = world
+        .engine()
+        .submit_input(&caller, thread, queued("Second"))
+        .await
+        .unwrap();
+    let retried = world.turn_start(thread, 1).await;
+    assert_eq!(common::words_after_where(&retried.text), "First");
+    world
+        .say(thread, turn_ended(retried.turn_id, TurnOutcome::Completed))
+        .await;
+    let next = world.turn_start(thread, 2).await;
+    assert_eq!(common::words_after_where(&next.text), "Second");
+    world
+        .say(thread, turn_ended(next.turn_id, TurnOutcome::Completed))
+        .await;
+    world.wait_state(thread, "idle").await;
+    assert_eq!(world.input_state(first.input.id).await.0, "delivered");
+    assert_eq!(world.input_state(second.input.id).await.0, "delivered");
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn a_restart_waits_for_the_admitted_start_even_if_instructions_change() {
+    let world = World::new().await;
+    let thread = world.thread("Start retained across restart").await;
+    world.machine.handler.hold(CommandKind::TurnStart);
+    let input = world
+        .engine()
+        .submit_input(
+            &Caller::session(world.ada),
+            thread,
+            queued("Original words"),
+        )
+        .await
+        .unwrap();
+    world.wait_began(CommandKind::TurnStart, 1).await;
+    let sent = world.commands.issued_bodies("turn.start")[0].1.clone();
+    world
+        .set(
+            thread,
+            "agent.instructions",
+            serde_json::json!("Instructions changed during startup"),
+        )
+        .await;
+    world.restart_api().await;
+    world.machine.handler.release();
+    let start = world.turn_start(thread, 0).await;
+    assert_eq!(start.text, sent["text"].as_str().unwrap());
+    assert_eq!(world.commands.issued_of("turn.start"), 1);
+    world.say(thread, common::turn_began(start.turn_id)).await;
+    world
+        .say(thread, turn_ended(start.turn_id, TurnOutcome::Completed))
+        .await;
+    world.wait_input(input.input.id, "delivered").await;
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn an_idle_session_exit_still_leaves_its_reason_in_the_conversation() {
     let world = World::new().await;
     let thread = world.thread("Idle exit").await;

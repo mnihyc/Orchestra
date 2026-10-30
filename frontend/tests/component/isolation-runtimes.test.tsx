@@ -186,4 +186,10 @@ describe('the Runtime and Limits rows of an environment', () => {
     expect(screen.getByText('Docker 容器 · runc')).toBeVisible();
     expect(screen.getByText(i18n.t('isolation.hint', { runtime: 'runc', boundary: i18n.t('isolation.boundary.shared_kernel') }))).toBeVisible();
   });
+
+  it('names the Docker driver in Chinese without translating the runtime name', async () => {
+    await setLocale('zh-CN');
+    show(<RuntimePair isolation={isolation} />);
+    expect(screen.getByText('Docker 驱动 · gVisor')).toBeVisible();
+  });
 });

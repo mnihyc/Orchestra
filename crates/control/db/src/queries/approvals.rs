@@ -13,7 +13,7 @@ use orch_types::{Id, Json};
 
 const APPROVAL_SELECT: &str = "SELECT id, kind, state, node_id, object_kind, object_id, thread_id, turn_id, item_id,
         environment_id, requester_user_id, requester_thread_id, title, request, required_permission, approver_node_id,
-        approver_scope, batch_id, native_ref, decided_by, decided_at, decision, expires_at, created_at, updated_at
+        approver_scope, batch_id, native_ref, decided_by, decided_at, decision, expires_at, requested_expires_at, created_at, updated_at
    FROM approvals";
 
 /// Something that waits for a decision, or was decided.
@@ -65,6 +65,8 @@ pub struct ApprovalRow {
     pub decision: Option<Json>,
     /// When it runs out.
     pub expires_at: Option<DateTime<Utc>>,
+    /// The proposed end of access, distinct from the request's own deadline.
+    pub requested_expires_at: Option<DateTime<Utc>>,
     /// When it was made.
     pub created_at: DateTime<Utc>,
     /// When it last changed.
@@ -391,7 +393,7 @@ pub async fn cancel_pending_of_turn(
           WHERE turn_id = $1 AND kind = 'harness' AND state = 'pending'
           RETURNING id, kind, state, node_id, object_kind, object_id, thread_id, turn_id, item_id, environment_id,
                     requester_user_id, requester_thread_id, title, request, required_permission, approver_node_id,
-                    approver_scope, batch_id, native_ref, decided_by, decided_at, decision, expires_at, created_at,
+                    approver_scope, batch_id, native_ref, decided_by, decided_at, decision, expires_at, requested_expires_at, created_at,
                     updated_at",
     )
     .bind(turn)
@@ -749,6 +751,8 @@ pub mod access {
         pub required_permission: &'a str,
         /// When it runs out.
         pub expires_at: DateTime<Utc>,
+        /// The proposed end of the access requested.
+        pub requested_expires_at: Option<DateTime<Utc>>,
         /// When.
         pub at: DateTime<Utc>,
     }
@@ -760,8 +764,8 @@ pub mod access {
     ) -> Result<ApprovalRow, DbError> {
         sqlx::query(
             "INSERT INTO approvals (id, kind, state, node_id, object_kind, object_id, thread_id, requester_user_id,
-                                    title, request, required_permission, batch_id, expires_at, created_at, updated_at)
-             VALUES ($1, 'access', 'pending', $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $12)",
+                                    title, request, required_permission, batch_id, expires_at, requested_expires_at, created_at, updated_at)
+             VALUES ($1, 'access', 'pending', $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $13)",
         )
         .bind(new.id)
         .bind(new.node_id)
@@ -774,6 +778,7 @@ pub mod access {
         .bind(new.required_permission)
         .bind(new.batch_id)
         .bind(new.expires_at)
+        .bind(new.requested_expires_at)
         .bind(new.at)
         .execute(&mut *conn)
         .await?;

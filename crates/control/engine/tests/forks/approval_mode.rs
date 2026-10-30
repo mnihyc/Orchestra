@@ -4,6 +4,55 @@ use super::*;
 use orch_agent_contract::descriptor::ApprovalMode;
 use orch_settings_contract::registry::keys;
 
+/// The target's session opens in execution order, regardless of their wire shapes.
+fn target_opens(rig: &Rig, thread: Id) -> Vec<orch_link_contract::commands::SessionOpen> {
+    use orch_link_contract::continuations::{
+        SessionContinuationResume, SessionOpenFenced, SessionPrefixOpen,
+    };
+
+    let kinds = [
+        CommandKind::SessionOpen,
+        CommandKind::SessionOpenFenced,
+        CommandKind::SessionPrefixOpen,
+        CommandKind::SessionContinuationResume,
+    ];
+    let issued: HashMap<_, _> = kinds
+        .iter()
+        .flat_map(|kind| rig.world.commands.issued_commands(kind.as_str()))
+        .filter(|(machine, _)| *machine == rig.world.machine_id)
+        .map(|(_, command)| (command.id, command))
+        .collect();
+    let mut opens = Vec::new();
+    for execution in rig.world.machine.handler.executions() {
+        let Some(command) = issued.get(&execution.id) else {
+            continue;
+        };
+        let open = match execution.kind {
+            CommandKind::SessionOpen => serde_json::from_value(command.body.clone()).unwrap(),
+            CommandKind::SessionOpenFenced => {
+                *serde_json::from_value::<SessionOpenFenced>(command.body.clone())
+                    .unwrap()
+                    .session
+            }
+            CommandKind::SessionPrefixOpen => {
+                *serde_json::from_value::<SessionPrefixOpen>(command.body.clone())
+                    .unwrap()
+                    .session
+            }
+            CommandKind::SessionContinuationResume => {
+                *serde_json::from_value::<SessionContinuationResume>(command.body.clone())
+                    .unwrap()
+                    .session
+            }
+            _ => continue,
+        };
+        if open.thread_id == thread && open.agent_id == rig.other_agent {
+            opens.push(open);
+        }
+    }
+    opens
+}
+
 async fn reduced_modes_rig() -> Rig {
     Rig::with_kinds(
         Can {
@@ -53,22 +102,19 @@ async fn codex_on_request_to_dsh_carry_uses_ask_and_keeps_the_model_words() {
         rig.asked(thread, "What should you remember?", 2).await,
         "I know: Remember blue comet / I know: Remember blue comet / What should you remember?"
     );
-    let opens = rig.world.seen.all();
-    let target_open = opens
-        .iter()
-        .rev()
-        .find_map(|command| match command {
-            Command::SessionOpen(open) => Some(open),
-            Command::SessionOpenFenced(open) => Some(open.session.as_ref()),
-            Command::SessionPrefixOpen(open) => Some(open.session.as_ref()),
-            Command::SessionContinuationResume(open) => Some(open.session.as_ref()),
-            _ => None,
-        })
-        .expect("the carried session was opened");
-    assert_eq!(target_open.mode, SessionMode::ImportNeutral);
+    let opens = target_opens(&rig, thread);
     assert_eq!(
-        target_open.approval_mode,
-        orch_link_contract::commands::ApprovalMode::Ask
+        opens.first().map(|open| open.mode),
+        Some(SessionMode::ImportNeutral)
+    );
+    assert_eq!(
+        opens.last().map(|open| open.mode),
+        Some(SessionMode::Resume)
+    );
+    assert!(
+        opens
+            .iter()
+            .all(|open| { open.approval_mode == orch_link_contract::commands::ApprovalMode::Ask })
     );
 }
 
@@ -256,18 +302,8 @@ async fn codex_on_request_to_dsh_without_history_uses_ask_on_the_next_turn() {
         rig.asked(thread, "Fresh side", 2).await,
         "I know: Fresh side"
     );
-    let opens = rig.world.seen.all();
-    let target_open = opens
-        .iter()
-        .rev()
-        .find_map(|command| match command {
-            Command::SessionOpen(open) => Some(open),
-            Command::SessionOpenFenced(open) => Some(open.session.as_ref()),
-            Command::SessionPrefixOpen(open) => Some(open.session.as_ref()),
-            Command::SessionContinuationResume(open) => Some(open.session.as_ref()),
-            _ => None,
-        })
-        .expect("the no-history session was opened for the next turn");
+    let opens = target_opens(&rig, thread);
+    let target_open = opens.last().expect("the no-history session was opened");
     assert_eq!(target_open.mode, SessionMode::New);
     assert_eq!(
         target_open.approval_mode,

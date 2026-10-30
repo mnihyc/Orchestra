@@ -75,8 +75,11 @@ pub fn certificates() -> Certificates {
     let dir = tempfile::tempdir().unwrap();
     write(dir.path(), "server.pem", &leaf_cert.pem());
     write(dir.path(), "server.key", &leaf_key.serialize_pem());
-    use std::os::unix::fs::PermissionsExt;
-    std::fs::set_permissions(dir.path(), std::fs::Permissions::from_mode(0o755)).unwrap();
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        std::fs::set_permissions(dir.path(), std::fs::Permissions::from_mode(0o755)).unwrap();
+    }
     Certificates {
         dir,
         ca_pem: ca_cert.pem(),
@@ -84,10 +87,13 @@ pub fn certificates() -> Certificates {
 }
 
 fn write(dir: &Path, name: &str, text: &str) {
-    use std::os::unix::fs::PermissionsExt;
     let path = dir.join(name);
     std::fs::write(&path, text).unwrap();
-    std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o644)).unwrap();
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o644)).unwrap();
+    }
 }
 
 /// A running server.

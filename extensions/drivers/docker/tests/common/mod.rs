@@ -471,16 +471,29 @@ impl Lab {
     }
 }
 
+#[cfg(unix)]
 fn make_executable(path: &std::path::Path) {
     use std::os::unix::fs::PermissionsExt;
     std::fs::set_permissions(path, std::fs::Permissions::from_mode(0o755)).unwrap();
 }
 
+#[cfg(not(unix))]
+fn make_executable(_path: &std::path::Path) {
+    panic!("the Docker test fixture requires Unix file permissions");
+}
+
 /// The numbers of the user running the tests, for files that the lab's units write and that must be removable.
+#[cfg(unix)]
 pub fn my_ids(path: &std::path::Path) -> (u32, u32) {
     use std::os::unix::fs::MetadataExt;
     let meta = std::fs::metadata(path).unwrap();
     (meta.uid(), meta.gid())
+}
+
+/// The Docker test fixture requires Unix user and group identities.
+#[cfg(not(unix))]
+pub fn my_ids(_path: &std::path::Path) -> (u32, u32) {
+    panic!("the Docker test fixture requires Unix user and group identities");
 }
 
 impl Drop for Lab {

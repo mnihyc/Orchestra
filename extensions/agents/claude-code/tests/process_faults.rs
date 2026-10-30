@@ -6,6 +6,7 @@
 //! written before any test runs, because a program that is being written while another thread starts a
 //! process cannot be started (the file is busy).
 
+#![cfg(unix)]
 #![allow(
     clippy::unwrap_used,
     clippy::expect_used,

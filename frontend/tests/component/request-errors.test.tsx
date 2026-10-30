@@ -29,6 +29,25 @@ const appearance = useAppearance.getState();
 beforeEach(() => { sessionStorage.clear(); calls.request.mockReset().mockResolvedValue({ batch_id: 'request-errors-batch', approvals: [] }); });
 afterEach(async () => { cleanup(); useAppearance.setState(appearance); await setLocale('en'); });
 
+it.each(surfaces)('$kind sends a proposed duration and retains it on retry', async (surface) => {
+  const missing: MissingAccess = { object: { kind: 'thread', id: 'thread-id', name: 'Release', owner: ADA }, permissions: ['thread.view'], ask: [ADA], ask_more: 0, options: null, closed: null, override: false };
+  calls.request.mockRejectedValueOnce(new Error('retry'));
+  show(surface.kind === 'access' ? <AccessRequest missing={[missing]} objectId="thread-id" fixed />
+    : surface.kind === 'export' ? <RequestExport target={{ kind: 'thread', id: 'thread-id', name: 'Release', owner: ADA }} open onClose={vi.fn()} />
+      : <RequestDefault place={{ id: TOPIC.id, kind: 'topic', name: 'Release', parentId: 'project', archived: false, status: 'open', folder: false }} owner={ADA} open onClose={vi.fn()} />);
+  const user = userEvent.setup();
+  await user.click(screen.getByRole('combobox', { name: i18n.t('access.request.duration') }));
+  await user.click(screen.getByRole('option', { name: /1\s*(week|周)/u }));
+  const send = screen.getByRole('button', { name: i18n.t(surface.send) });
+  await user.click(send);
+  await screen.findByRole('alert');
+  await user.click(send);
+  await waitFor(() => expect(calls.request).toHaveBeenCalledTimes(2));
+  const first = calls.request.mock.calls[0]?.[0].expires_at;
+  expect(first).toBeDefined();
+  expect(calls.request.mock.calls[1]?.[0].expires_at).toBe(first);
+});
+
 for (const locale of ['en', 'zh-CN'] as const) for (const surface of surfaces) {
   for (const status of [404, 500] as const) for (const hasOwner of [false, true]) {
     it(`${surface.kind} shows its ${status} error with owner=${hasOwner}, retaining the reason and retry in ${locale}`, async () => {

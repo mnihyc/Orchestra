@@ -151,9 +151,11 @@ impl Rig {
             config: {
                 // Offer the legacy scripted workspace and the test runner's selected scratch directory.
                 let mut config = ConnectorConfig::default();
-                config.environment.roots = vec!["/tmp".to_owned()];
                 let scratch = std::env::temp_dir().to_string_lossy().into_owned();
-                if scratch != "/tmp" {
+                if cfg!(unix) {
+                    config.environment.roots.push("/tmp".to_owned());
+                }
+                if !config.environment.roots.contains(&scratch) {
                     config.environment.roots.push(scratch);
                 }
                 config
@@ -278,6 +280,18 @@ impl Rig {
     /// The body of `session.open` for a new session of a thread, in the directory `directory`, which is also the
     /// workspace root, as an environment sends it: the working directory always lies inside the root.
     pub fn open_body(&self, thread: Id, segment: Id, directory: &str) -> Json {
+        let directory = if cfg!(windows) {
+            directory.strip_prefix("/tmp/").map_or_else(
+                || directory.to_owned(),
+                |name| {
+                    let path = self.data.path().join("fixture-workspaces").join(name);
+                    std::fs::create_dir_all(&path).unwrap();
+                    path.to_string_lossy().into_owned()
+                },
+            )
+        } else {
+            directory.to_owned()
+        };
         json!({
             "agent_id": self.agent, "thread_id": thread, "segment_id": segment, "mode": "new",
             "native_session_ref": null, "archive": null, "history": null, "upto_turn_ordinal": null,

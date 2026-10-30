@@ -112,6 +112,8 @@ export class Requests {
   }
 
   private create(person: Person, body: Record<string, unknown>): Answer {
+    const end = typeof body.expires_at === 'string' ? body.expires_at : null;
+    if (end !== null && (!Number.isFinite(Date.parse(end)) || Date.parse(end) <= Date.parse(this.access.now()))) throw new Refusal(400, 'request.invalid', 'the requested end must be in the future', { errors: [{ path: 'expires_at', message: 'must be in the future' }] });
     const items = Array.isArray(body.items) ? (body.items as { object?: { kind?: string; id?: string }; permissions?: string[]; options?: unknown; holder?: { kind?: string; id?: string } }[]) : [];
     if (items.length === 0 || items.length > ITEMS_MAX) throw new Refusal(400, 'request.invalid', 'ask for between one and eight things', { errors: [{ path: 'items', message: 'one to eight' }] });
     const waiting = new Set(this.records.filter((record) => record.requester.me.id === person.me.id && record.approval.state === 'pending').map((record) => record.approval.batch_id)).size;
@@ -136,7 +138,7 @@ export class Requests {
         kind: 'access',
         state: 'pending',
         title: `${person.me.display_name} asks for ${asked.join(', ')} on ${name}`,
-        request: { for_thread: typeof body.for_thread === 'string' ? this.nodeRef(body.for_thread) : null, holder: { kind: 'user', user: this.access.userRefOf(recipient) }, options: null, permissions: asked, reason: typeof body.reason === 'string' ? body.reason : '' },
+        request: { for_thread: typeof body.for_thread === 'string' ? this.nodeRef(body.for_thread) : null, holder: { kind: 'user', user: this.access.userRefOf(recipient) }, options: null, permissions: asked, reason: typeof body.reason === 'string' ? body.reason : '', ...(end === null ? {} : { expires_at: end }) },
         requester: { user: requester },
         node: row,
         object: { kind, id, name },
@@ -176,6 +178,7 @@ export class Requests {
     const kind = query.get('kind');
     let found = this.records;
     if (scope === 'requested') found = found.filter((record) => record.requester.me.id === person.me.id);
+    else if (scope === 'others') found = found.filter((record) => this.couldDecide(person, record) && !this.mayDecide(person, record));
     else if (scope.startsWith('node:')) {
       const node = scope.slice('node:'.length);
       this.access.holdingOn(person, node);
@@ -203,7 +206,7 @@ export class Requests {
         rows: given.map((permission) => ({ permission, add: [{ holder: { kind: 'user' as const, id: (record.recipient ?? record.requester).me.id }, ...(expires === null ? {} : { expires_at: expires }) }] })),
       });
     }
-    record.approval = { ...record.approval, state: approve ? 'approved' : 'denied', decided_at: this.access.now(), decided_by: this.access.userRefOf(person), decision: { approve, note: body.note ?? null, permissions: approve ? given : [] } };
+    record.approval = { ...record.approval, state: approve ? 'approved' : 'denied', decided_at: this.access.now(), decided_by: this.access.userRefOf(person), decision: { approve, note: body.note ?? null, permissions: approve ? given : [], expires_at: body.expires_at ?? null } };
     this.changed();
     return { status: 200, body: this.shape(person, record) };
   }

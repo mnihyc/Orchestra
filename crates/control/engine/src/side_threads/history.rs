@@ -677,6 +677,16 @@ pub(crate) async fn save_first_turn(
             "The side's actual first-input source changed before delivery.",
         ));
     }
+    if threads::turn(&mut tx, snap.turn.id)
+        .await?
+        .is_none_or(|turn| {
+            turn.state != threads::turn_state::STARTING || turn.interrupted_by.is_some()
+        })
+    {
+        return Err(EngineError::unreadable(
+            "The side's turn is no longer accepting input.",
+        ));
+    }
     authorize(engine, &mut tx, &side, engine.inner.clock.now()).await?;
     let old = link::command(&mut tx, command.id).await?;
     let deadline = old.as_ref().map_or_else(

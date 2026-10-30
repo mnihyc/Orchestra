@@ -56,6 +56,47 @@ async fn progress_where(
     panic!("the job's progress never showed {what}: it shows {last:?}");
 }
 
+/// Waits for the upload watcher to reach a table lock held by this test.
+async fn wait_for_locked_upload_look(rig: &Rig) {
+    eventually("the upload watcher to read the locked upload", || async {
+        sqlx::query_scalar::<_, bool>(
+            "SELECT EXISTS (
+                SELECT 1 FROM pg_locks l JOIN pg_stat_activity a ON a.pid = l.pid
+                WHERE l.relation = 'blob_uploads'::regclass AND NOT l.granted
+                  AND a.datname = current_database()
+                  AND a.query LIKE '%FROM blob_uploads WHERE hash = $1 AND machine_id = $2 AND command_id = $3%'
+            )",
+        )
+        .fetch_one(rig.world.pool.pool())
+        .await
+        .unwrap()
+    })
+    .await;
+}
+
+/// Reads progress after the watcher has inspected an upload and finished that observation.
+async fn progress_after_upload_look(rig: &Rig, job: Id) -> JobProgress {
+    let mut first = rig.world.pool.pool().begin().await.unwrap();
+    sqlx::query("LOCK TABLE blob_uploads IN ACCESS EXCLUSIVE MODE")
+        .execute(&mut *first)
+        .await
+        .unwrap();
+    wait_for_locked_upload_look(rig).await;
+    first.commit().await.unwrap();
+
+    // The blocked read precedes this lock in PostgreSQL's lock queue. When the next read reaches
+    // the lock, the previous observation and any progress update it caused have both finished.
+    let mut next = rig.world.pool.pool().begin().await.unwrap();
+    sqlx::query("LOCK TABLE blob_uploads IN ACCESS EXCLUSIVE MODE")
+        .execute(&mut *next)
+        .await
+        .unwrap();
+    wait_for_locked_upload_look(rig).await;
+    let (progress, _) = orch_engine::jobs::runner::read_progress(&rig.job(job).await);
+    next.commit().await.unwrap();
+    progress
+}
+
 fn native() -> Can {
     Can {
         export_native: true,
@@ -98,6 +139,11 @@ async fn the_bytes_that_reach_the_system_are_shown_while_the_machine_puts_the_ar
         first.percent,
         later.percent
     );
+    // Progress and the recovery checkpoint are separate commits; wait for both to be visible.
+    eventually("the uploaded bytes to be checkpointed", || async {
+        rig.job(job.id).await.plan["native_upload"]["received"] == json!(6_000_000)
+    })
+    .await;
     // The plan keeps where it was, for a runner that takes the job over.
     let kept = rig.job(job.id).await.plan["native_upload"].clone();
     assert_eq!(kept["received"], json!(6_000_000));
@@ -106,8 +152,7 @@ async fn the_bytes_that_reach_the_system_are_shown_while_the_machine_puts_the_ar
     assert_eq!(kept["command"], json!(command));
     // The hash stays the same, but another command now continues it. A locked watcher still verifies command identity.
     upload_under_way(&rig, new_id(), &hash, size, 7_000_000).await;
-    meanwhile(Duration::from_millis(3500)).await;
-    let (unchanged, _) = orch_engine::jobs::runner::read_progress(&rig.job(job.id).await);
+    let unchanged = progress_after_upload_look(&rig, job.id).await;
     assert_eq!(unchanged.bytes_done, 6_000_000, "{unchanged:?}");
     // The machine answers, and the switch goes on: the bytes of an upload that is over are not left in the progress.
     rig.world.machine.handler.release();

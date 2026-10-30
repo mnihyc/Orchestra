@@ -23,6 +23,7 @@ use orch_settings::Target;
 use orch_settings::secrets::{Owner, Put, put};
 use orch_types::Hash;
 use serde_json::json;
+use std::time::Duration;
 
 async fn follow_at(room: &Room, who: &places::Who, level: ChatLevel) {
     room.world
@@ -375,6 +376,106 @@ async fn a_message_carries_only_files_the_store_holds_and_pins_them_for_as_long_
         .await
         .ok();
     assert_eq!(room.pins(&hash).await, 0, "released with the message");
+}
+
+#[tokio::test]
+async fn an_overlapping_edit_preserves_the_first_edit_and_the_files_other_messages_hold() {
+    let room = Room::new().await;
+    let (old, old_size) = room.store(b"old attachment").await;
+    let (new, new_size) = room.store(b"new attachment").await;
+    let attachment = |blob, size| ChatPart::Attachment {
+        blob,
+        name: "file.txt".to_owned(),
+        size,
+        media_type: "text/plain".to_owned(),
+    };
+    let original = vec![attachment(old, old_size)];
+    let message = room
+        .send(&room.bea, room.chat, original.clone(), "first")
+        .await
+        .ok()
+        .message;
+    room.send(&room.bea, room.chat, original, "second")
+        .await
+        .ok();
+    assert_eq!(room.pins(&old).await, 2);
+
+    // Hold the first edit's chat lock and make its new message and file pins visible only on commit.
+    let mut first = room.world.db.pool.begin().await.unwrap();
+    let pid: i32 = sqlx::query_scalar("SELECT pg_backend_pid()")
+        .fetch_one(&mut *first)
+        .await
+        .unwrap();
+    let revision: i64 = sqlx::query_scalar(
+        "UPDATE chats SET next_seq = next_seq + 1 WHERE id = $1 RETURNING next_seq - 1",
+    )
+    .bind(room.chat)
+    .fetch_one(&mut *first)
+    .await
+    .unwrap();
+    let replacement = vec![attachment(new, new_size)];
+    sqlx::query("UPDATE chat_messages SET content = $2, seq_updated = $3 WHERE id = $1")
+        .bind(message.id)
+        .bind(serde_json::to_value(&replacement).unwrap())
+        .bind(revision)
+        .execute(&mut *first)
+        .await
+        .unwrap();
+    sqlx::query("UPDATE blobs SET pin_count = pin_count - 1 WHERE hash = $1")
+        .bind(old.as_bytes().to_vec())
+        .execute(&mut *first)
+        .await
+        .unwrap();
+    sqlx::query("UPDATE blobs SET pin_count = pin_count + 1 WHERE hash = $1")
+        .bind(new.as_bytes().to_vec())
+        .execute(&mut *first)
+        .await
+        .unwrap();
+
+    let app = room.world.app.clone();
+    let token = room.bea.token.clone();
+    let chat = room.chat;
+    let message_id = message.id;
+    let pending = tokio::spawn(async move {
+        app.call(ChatMessageUpdate, &[&chat, &message_id])
+            .token(&token)
+            .body(&ChatMessageUpdateBody {
+                parts: vec![text("Second edit")],
+            })
+            .send()
+            .await
+    });
+    // The database wait, not elapsed time, establishes that the second edit saw the old message.
+    tokio::time::timeout(Duration::from_secs(10), async {
+        loop {
+            let waiting: bool = sqlx::query_scalar(
+                "SELECT EXISTS (SELECT 1 FROM pg_stat_activity WHERE datname = current_database() AND $1 = ANY(pg_blocking_pids(pid)))",
+            )
+            .bind(pid)
+            .fetch_one(&room.world.db.pool)
+            .await
+            .unwrap();
+            if waiting {
+                break;
+            }
+            tokio::time::sleep(Duration::from_millis(10)).await;
+        }
+    })
+    .await
+    .expect("the second edit waits for the first");
+    first.commit().await.unwrap();
+    let problem = pending.await.unwrap().problem();
+    assert_eq!(problem.code, ErrorCode::ConflictStaleRevision);
+    assert_eq!(problem.extra["seq_updated"], revision);
+    let sync = room.sync(&room.bea, room.chat).await;
+    let saved = sync
+        .messages
+        .iter()
+        .find(|row| row.id == message.id)
+        .unwrap();
+    assert_eq!(saved.parts, replacement);
+    assert_eq!(room.pins(&old).await, 1, "the other message keeps its file");
+    assert_eq!(room.pins(&new).await, 1, "the first edit keeps its file");
 }
 
 #[tokio::test]
