@@ -295,7 +295,7 @@
       "on": [
         "topic"
       ],
-      "label": "Interact Topic",
+      "label": "Contribute to Topic",
       "allows": "Start threads in the topic, announce to its threads, set its status and tags, and create an environment for work there.",
       "profiles": false,
       "holders": [
@@ -342,6 +342,18 @@
       "options_schema": null
     },
     {
+      "name": "topic.start_threads",
+      "area": "topic",
+      "level": "advanced",
+      "with": "topic.interact",
+      "on": ["topic"],
+      "label": "Start threads",
+      "allows": "Start threads in the topic; whoever starts one owns it.",
+      "profiles": false,
+      "holders": ["role", "group", "user"],
+      "options_schema": null
+    },
+    {
       "name": "project.view",
       "area": "project",
       "level": "view",
@@ -367,7 +379,7 @@
       "on": [
         "project"
       ],
-      "label": "Interact Project",
+      "label": "Contribute to Project",
       "allows": "Create topics in the project, and an environment for work there.",
       "profiles": false,
       "holders": [
@@ -411,6 +423,18 @@
         "group",
         "user"
       ],
+      "options_schema": null
+    },
+    {
+      "name": "project.create_topics",
+      "area": "project",
+      "level": "advanced",
+      "with": "project.interact",
+      "on": ["project"],
+      "label": "Create topics",
+      "allows": "Create topics in the project; whoever creates one owns it.",
+      "profiles": false,
+      "holders": ["role", "group", "user"],
       "options_schema": null
     },
     {
@@ -1005,6 +1029,18 @@
         "group",
         "user"
       ],
+      "options_schema": null
+    },
+    {
+      "name": "environment.use",
+      "area": "environment",
+      "level": "use",
+      "with": null,
+      "on": ["environment"],
+      "label": "Use Environment",
+      "allows": "Start threads in the environment and have its agents act for oneself there.",
+      "profiles": true,
+      "holders": ["role", "group", "user", "node"],
       "options_schema": null
     },
     {

@@ -48,7 +48,8 @@ and name. Its network lists actual names, roles, subnets, gateways and unit/prox
 and addresses can be null; the unit's own isolated network has no host gateway. Its ports are the host
 openings this node currently holds, with opening id, host number, inside number and transports.
 
-Reasons are start, stop, recreate, move and delete. A new successor's first start uses why it was made;
+Reasons are start, stop, recreate, move and delete. A stop by a person, a stop of an idle unit and a recycle
+are all `stop`; the unit's next start is `start`. A new successor's first start uses why it was made;
 ordinary later starts use start. After node recovery, post_up runs again with `replay: true`, reason start.
 There is no separate node_start reason. Make hooks idempotent: replay must leave an already installed
 route or rule in the same state. A unit found to have ended receives its down observation at reconciliation.

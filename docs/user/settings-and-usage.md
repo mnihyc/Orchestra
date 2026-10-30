@@ -38,6 +38,9 @@ be used with. A provider manager first enables the offers the provider actually
 has. A thread's setting then chooses among them, independently of the model's
 maximum. Use the inherited choice to follow the place's default or select a
 local override; the page shows the one in force.
+The access choice and usage reports use the same readable program names as the
+provider's model editor. **None** means no access program; **Standard** is a
+program when the provider offers and enables it.
 
 Model, reasoning effort and parameters apply from the next turn. Steering a
 running turn adds a message and does not change that turn's parameters. Stop,

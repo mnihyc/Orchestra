@@ -1,3 +1,4 @@
 # Release tags that may be packaged before their CI run completes, each with a reason.
 # Every other release check still applies; a tag not listed here needs a successful CI run.
 v0.1.0 initial release
+v0.1.1 packaged beside its CI run to meet the release night; the draft is published only once that run is green

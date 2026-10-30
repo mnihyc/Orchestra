@@ -34,6 +34,10 @@ macOS) requests steering. The place's **Default delivery** setting can change it
 reads **Interrupt now**, it will stop that turn instead. Unsupported steering has a reason;
 choose interruption deliberately. Neither action bypasses a limit, access check or blocked setup.
 After Stop holds the queue, use its resume action when you want waiting messages to run again.
+If Stop interrupts a turn while it is still starting, its delivering input is not held.
+If the session is lost before the turn begins, the thread shows the failure and the input returns to the queue.
+After repeated start failures the input stays failed. Otherwise, send another message when you are ready to proceed;
+the waiting input goes first.
 
 ## 4. Put messages in order
 
@@ -48,6 +52,8 @@ A steer stands in the tray as **Steering…**. Use **Back to queue** before Orch
 handing it to the program. It returns to its place among the waiting messages, keeping
 its words and author. When **The agent is taking this message** appears, it cannot be
 returned. After the program takes it, the conversation says **Steered**.
+
+If the turn ends before a steer is confirmed, the message returns to the front of the queue.
 
 Returning a message does not undo work the agent already did. Send a correction as
 another message when the earlier one has been taken.
@@ -64,6 +70,8 @@ the shipped Held for approval policy, your input keeps its queue position and
 says **Waiting for someone who may use <model> and <environment>** (or only the
 model, for a thread in no environment). Other eligible inputs can go ahead. You
 can still edit or remove your held input under the ordinary rules.
+
+A steer checks the provider, model and effort of the turn running now. A changed model setting applies to the next turn.
 
 Someone who may drive the thread and use its current provider, model and effort
 and its environment can choose **Run it**. The turn runs on that person's current access and usage,

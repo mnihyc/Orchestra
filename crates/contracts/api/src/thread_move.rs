@@ -54,7 +54,7 @@ pub struct ThreadMoveBody {
 
 crate::endpoints! {
     /// Reviews moving this main thread to another topic without changing its workspace.
-    ThreadMovePreview: POST "/threads/{id}/move/preview", Rule("thread.manage at the source and topic.interact at the destination, within the same root tree"), none, json ThreadMovePreviewBody, json ThreadMovePlan, 200;
+    ThreadMovePreview: POST "/threads/{id}/move/preview", Rule("thread.manage at the source and topic.start_threads at the destination, within the same root tree"), none, json ThreadMovePreviewBody, json ThreadMovePlan, 200;
     /// Moves the reviewed idle conversation with its side lanes and held queue.
     ThreadMove: POST "/threads/{id}/move", Rule("the current source and destination rights and the actor's unchanged stored review"), none, json ThreadMoveBody, json Thread, 200;
 }

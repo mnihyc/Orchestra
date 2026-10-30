@@ -391,6 +391,7 @@ mod tests {
         assert!(!stands_in("--allowedTools2", "--allowedTools"));
     }
 
+    #[cfg(unix)]
     fn script(dir: &Path, body: &str) -> PathBuf {
         use std::os::unix::fs::PermissionsExt;
         let program = dir.join("program");
@@ -399,6 +400,7 @@ mod tests {
         program
     }
 
+    #[cfg(unix)]
     fn asking(args: &[&str], timeout_secs: u32) -> NodeToolCheck {
         NodeToolCheck {
             name: "program".to_owned(),
@@ -411,6 +413,7 @@ mod tests {
         }
     }
 
+    #[cfg(unix)]
     #[tokio::test]
     async fn a_program_runs_in_its_scratch_home_and_what_it_prints_and_writes_is_read() {
         let dir = tempfile::tempdir().unwrap();
@@ -441,6 +444,7 @@ printf '{"title":"Params","properties":{"member":{}}}' > "$1/params.json""#,
         assert!(Schema::read(&out).unwrap().has("Params.member"));
     }
 
+    #[cfg(unix)]
     #[tokio::test]
     async fn a_program_that_fails_or_runs_too_long_says_so_and_is_stopped() {
         let dir = tempfile::tempdir().unwrap();

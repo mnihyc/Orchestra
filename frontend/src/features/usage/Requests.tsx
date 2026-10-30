@@ -12,7 +12,7 @@ import { OUTCOMES, readOutcome } from '@/features/usage/outcomes';
 import { measured, requestSpeed, speedText, timeText } from '@/features/usage/performance';
 import { filtersOf, recordsParams, scopeText, type Span, type UsageScope, type UsageSearch } from '@/features/usage/search';
 import { turnOrdinal } from '@/features/thread/turnLink';
-import { effortDisplayName, modelDisplayName } from '@/features/models/names';
+import { accessProgramDisplayName, effortDisplayName, modelDisplayName } from '@/features/models/names';
 import { programNameIn } from '@/features/resources/programNames';
 import { Facts } from '@/features/resources/Facts';
 import { offeredChoice } from '@/i18n/choices';
@@ -122,7 +122,7 @@ export function Requests({ scope, search, span, onSearch, orgChoices = [] }: { s
     ...(row.harness_kind===null && row.agent===null?[]:[{name:t('usage.chip.agent'),value:agentLabel(row)}]),
     ...(row.tier===null?[]:[{name:t('usage.chip.tier'),value:offeredChoice(t,'serviceTier',row.tier)?.name??row.tier}]),
     ...(row.effort===null?[]:[{name:t('usage.chip.effort'),value:effortDisplayName(row.effort,t)}]),
-    ...(row.access_program===null || row.access_program===undefined?[]:[{name:t('usage.chip.program'),value:row.access_program}]),
+    ...(row.access_program===null || row.access_program===undefined?[]:[{name:t('usage.chip.program'),value:accessProgramDisplayName(row.access_program,t)}]),
     ];
     return <div className="flex min-w-0 flex-col gap-1 text-sm wrap-anywhere"><span className="font-medium">{modelDisplayName(row.model_display,t)}</span><Facts compact rows={facts} /></div>;
   };
@@ -179,10 +179,10 @@ export function Requests({ scope, search, span, onSearch, orgChoices = [] }: { s
           : key === 'environment' ? row.environment_kind === null ? null : [row.environment_kind, t(row.environment_kind === 'managed' ? 'usage.key.managed' : 'usage.key.connected')]
           : key === 'tier' ? [row.tier ?? NO_CHOICE, row.tier===null?t('usage.key.standard'):offeredChoice(t,'serviceTier',row.tier)?.name??row.tier]
           : key === 'effort' ? [row.effort ?? NO_CHOICE, row.effort===null?t('usage.key.noEffort'):effortDisplayName(row.effort,t)]
-          : key === 'program' ? [row.access_program ?? NO_CHOICE, row.access_program ?? t('usagePerf.noProgram')] : null;
+          : key === 'program' ? [row.access_program ?? NO_CHOICE, row.access_program === null || row.access_program === undefined ? t('usagePerf.noProgram') : accessProgramDisplayName(row.access_program,t)] : null;
         if (choice?.[0] !== undefined && choice[1] !== undefined) options.set(choice[0], choice[1]);
       }
-      if (search[key] !== undefined && !options.has(search[key])) options.set(search[key], t('usagePerf.selectedFilter'));
+      if (search[key] !== undefined && !options.has(search[key])) options.set(search[key], key === 'program' ? search[key] === NO_CHOICE ? t('usagePerf.noProgram') : accessProgramDisplayName(search[key],t) : t('usagePerf.selectedFilter'));
       return <Select key={key} size="sm" label={t(`usage.chip.${key}`)} value={search[key] ?? ALL_FILTER} onValueChange={(value) => onSearch({ [key]: value === ALL_FILTER ? undefined : value })} options={[{ value: ALL_FILTER, name: t('usagePerf.choices.all.name'), description: t('usagePerf.choices.all.description') }, ...[...options].map(([value, label]) => ({ value, name: t('usagePerf.choices.member.name', { name: label }), description: t('usagePerf.choices.member.description', { kind: t(`usage.chip.${key}`) }) }))]} />;
     })}</fieldset>
     {(history.isError || liveError) && <ErrorState error={history.error} onRetry={() => { setRetry((before) => before + 1); void history.refetch(); }} />}

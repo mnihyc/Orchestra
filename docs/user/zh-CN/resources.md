@@ -1,6 +1,6 @@
 ---
 title: 资源与移动
-screens: /resources, /resources/agents/$id, /resources/machines/$id, /thread/$threadId
+screens: /resources, /resources/agents/$id, /resources/machines/$id, /resources/providers/$id, /resources/environments/$id, /thread/$threadId
 keywords: 环境, 提供方, 主目录, 浏览器, 显示, 端口, 文件, 终端, 文件夹, 分支, 移动, 连接机器, 安装, 服务, 前台, 数据目录, 移除, 多个连接器
 heading_id.删除环境: delete-an-environment
 heading_id.提供方和模型: providers-and-models
@@ -58,6 +58,9 @@ Orch 停止并删除单元，再按确认时冻结的保留窗口保存自有卷
 工具在环境执行；转发模型调用把程序放在环境，模型请求经 Orch；复制登录访问借用允许
 的令牌副本；移动登录独占借出完整登录直到归还；使用本地登录使用环境已有登录。
 选择受所有者同意、策略、适配器声明及当前机器事实约束。
+
+提供方的模型编辑器将已知访问计划显示为 **Daybreak 蓝**、**Daybreak 红**和**标准**；
+其他计划按提供的名称显示。
 
 提供方拥有登录和续期。受管运行时空闲停止和重建后保留主目录，需要续期会启动。
 导入会复制凭据，外部刷新后管理者可再次导入。两份登录都可能续期时，遵循该方法对
@@ -157,6 +160,7 @@ Ctrl+C 停止；对话框完整命令已含启动。先停现有服务。每机�
 
 环境管理者控制线程放置、目录、隔离和移除，管理线程不授予此权。同环境可有多个视图，
 每条访问路径都检查线程和环境权限。
+已知驱动和运行时名称时，环境页面会将两者一起显示。
 
 端口按方案以 HTTP、TCP 或 UDP 发布监听程序。端点和接收范围属于环境。开放前读接收者、
 期限和外部共享披露。链接是另一入口，页面显示类型和收件人，不要认为开放端口属于单线程。

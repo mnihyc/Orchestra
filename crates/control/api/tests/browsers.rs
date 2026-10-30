@@ -1,4 +1,5 @@
 //! Browser gates, joining, tickets, view-only input and host-only sitting history over the real browser.
+#![cfg(unix)]
 #![allow(
     clippy::unwrap_used,
     clippy::expect_used,

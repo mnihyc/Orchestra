@@ -375,3 +375,94 @@ async fn a_harness_whose_environment_is_on_its_own_machine_reaches_its_tools_wit
     }
     rig.stop().await;
 }
+
+#[tokio::test]
+async fn a_local_harness_cannot_call_a_running_server_it_was_not_given() {
+    let mut rig = EnvRig::with_roles(vec![Role::Agent, Role::Environment]);
+    rig.with_the_scripted_harness();
+    rig.config.mcp.add = true;
+    rig.parts.ports = Some(41000..=41999);
+    let workspace = rig.directory("work");
+    rig.start().await;
+    let facts: EnvironmentFacts = serde_json::from_value(rig.attach(&workspace).await).unwrap();
+    for (name, value) in [("allowed", "allowed secret"), ("private", "private secret")] {
+        let command = new_id();
+        let sealed = rig.sealed(command, value);
+        let spec = json!({ "transport": "stdio", "command": stand_in::command(),
+            "env": { stand_in::FLAG: "1" }, "secret_env": ["STAND_IN_SECRET"], "startup_timeout_secs": 20 });
+        let started = rig
+            .send_as(
+                command,
+                &McpStart::Given(Box::new(McpStartGiven {
+                    server_id: None,
+                    environment_id: rig.environment,
+                    name: name.to_owned(),
+                    spec: serde_json::from_value(spec).unwrap(),
+                    secrets: BTreeMap::from([(
+                        "STAND_IN_SECRET".to_owned(),
+                        Secret::Sealed(sealed),
+                    )]),
+                })),
+            )
+            .await;
+        assert!(
+            matches!(started, orch_link::commands::Progress::Succeeded(_)),
+            "{started:?}"
+        );
+    }
+    let agent_start: orch_link_contract::commands::AgentStart = serde_json::from_value(json!({
+        "provider_id": rig.provider, "agent_id": rig.agent, "harness_kind": "fake",
+        "profile": { "harness_version": null, "config": {}, "env": {} }, "home": null
+    }))
+    .unwrap();
+    rig.succeed(&agent_start).await;
+    let thread = new_id();
+    let directory = workspace.join("thread").display().to_string();
+    let ticket = rig.ticket(
+        TicketSource::Machine(rig.machine_id),
+        Service::Mcp {
+            server: "allowed".to_owned(),
+        },
+        Some(thread),
+        None,
+    );
+    let open: SessionOpen = serde_json::from_value(json!({
+        "agent_id": rig.agent, "thread_id": thread, "segment_id": new_id(), "mode": "new",
+        "native_session_ref": null, "archive": null, "history": null, "upto_turn_ordinal": null,
+        "workspace_root": workspace, "instruction_root_marker": false,
+        "directory": directory, "cwd": directory, "mounts": [],
+        "model": "fake-large", "effort": "medium", "params": {}, "approval_mode": "on_request",
+        "sandbox_mode": "workspace", "instructions": "x", "memory": null,
+        "arrangement": "separated", "provider": { "path": "native", "provider_id": rig.provider },
+        "exec": { "executor": null, "environment_id": rig.environment, "generation": facts.generation },
+        "mcp": [{ "name": "allowed", "ticket": ticket }], "orch_tools": [], "raw_events": false
+    }))
+    .unwrap();
+    rig.succeed(&open).await;
+    let connector = rig.connector.as_ref().unwrap();
+    let process = connector
+        .hosting()
+        .unwrap()
+        .process(rig.provider, rig.agent)
+        .unwrap();
+    let harness = Harness {
+        port: connector.loopback().port(),
+        token: process.grant().token.expose().to_owned(),
+        key: process.session_key(thread).unwrap(),
+    };
+    let request = json!({ "jsonrpc": "2.0", "id": 1, "method": "tools/call", "params": { "name": "secret" } });
+    let (status, kind, body) = harness
+        .post(&format!("/mcp/{}/allowed", harness.key), &[], &request)
+        .await;
+    assert!(status.is_success(), "{status}: {body}");
+    assert_eq!(
+        messages(&kind, &body)[0]["result"]["content"][0]["text"],
+        "allowed secret"
+    );
+    let (status, _, body) = harness
+        .post(&format!("/mcp/{}/private", harness.key), &[], &request)
+        .await;
+    assert_eq!(status.as_u16(), 404, "{body}");
+    assert!(!body.contains("private secret"));
+    rig.stop().await;
+}

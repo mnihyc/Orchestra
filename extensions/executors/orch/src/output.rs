@@ -367,6 +367,7 @@ mod tests {
         assert_eq!(capture.total(), 40);
     }
 
+    #[cfg(unix)]
     #[test]
     fn the_file_is_private_to_the_user_that_runs_the_executor() {
         use std::os::unix::fs::PermissionsExt as _;

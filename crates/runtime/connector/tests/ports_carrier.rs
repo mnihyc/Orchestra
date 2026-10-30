@@ -4,20 +4,31 @@
     clippy::expect_used,
     reason = "a test fails by panicking"
 )]
-#![cfg(target_os = "linux")]
+#[cfg(target_os = "linux")]
 mod rig_environment;
 
+#[cfg(target_os = "linux")]
 use bytes::Bytes;
+#[cfg(target_os = "linux")]
 use orch_api_contract::ports::{PortCaller, PortConnectionOutside, PortTransport};
+#[cfg(target_os = "linux")]
 use orch_envhost::processes::{Processes, RootKind};
+#[cfg(target_os = "linux")]
 use orch_link_contract::ports::PortTicketClaims;
+#[cfg(target_os = "linux")]
 use orch_link_contract::tunnels::{TicketClaims, TicketSource, TunnelKind};
+#[cfg(target_os = "linux")]
 use orch_types::new_id;
+#[cfg(target_os = "linux")]
 use rig_environment::{EnvRig, PATIENCE};
+#[cfg(target_os = "linux")]
 use std::io::{BufRead, BufReader};
+#[cfg(target_os = "linux")]
 use std::process::{Child, Command, Stdio};
+#[cfg(target_os = "linux")]
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 
+#[cfg(target_os = "linux")]
 const SERVER: &str = r#"
 import socket,threading,json,sys,random
 fixed=int(sys.argv[1]); tag=sys.argv[2].encode()
@@ -45,10 +56,12 @@ def packets():
 threading.Thread(target=streams,daemon=True).start(); threading.Thread(target=packets,daemon=True).start()
 print(json.dumps({'port':port}),flush=True); sys.stdin.readline()
 "#;
+#[cfg(target_os = "linux")]
 struct Service {
     child: Child,
     port: u16,
 }
+#[cfg(target_os = "linux")]
 impl Service {
     fn start(processes: Option<&Processes>, port: u16, tag: &str) -> Self {
         let mut command = Command::new("python3");
@@ -81,12 +94,14 @@ impl Service {
         self.child.wait().unwrap();
     }
 }
+#[cfg(target_os = "linux")]
 impl Drop for Service {
     fn drop(&mut self) {
         let _ = self.child.kill();
         let _ = self.child.wait();
     }
 }
+#[cfg(target_os = "linux")]
 fn ticket(rig: &EnvRig, src: orch_types::Id, port: u16, transport: PortTransport) -> String {
     ticket_for(
         rig,
@@ -97,6 +112,7 @@ fn ticket(rig: &EnvRig, src: orch_types::Id, port: u16, transport: PortTransport
     )
 }
 
+#[cfg(target_os = "linux")]
 fn ticket_for(
     rig: &EnvRig,
     src: orch_types::Id,
@@ -125,6 +141,8 @@ fn ticket_for(
             service: format!("port/{id}"),
             thread_id: None,
             tool_set: None,
+            tool_environment_id: None,
+            tool_environment_generation: None,
             exp: rig.deadline().unix_millis() / 1000,
             port: Some(PortTicketClaims {
                 environment_id: rig.environment,
@@ -146,6 +164,7 @@ fn ticket_for(
         .unwrap()
 }
 
+#[cfg(target_os = "linux")]
 async fn opener_ready(rig: &EnvRig) -> rig_environment::tunnels::Opener {
     let opener = rig.opener().await;
     let mut current = opener.machine.link.port_control();
@@ -156,6 +175,7 @@ async fn opener_ready(rig: &EnvRig) -> rig_environment::tunnels::Opener {
     opener
 }
 
+#[cfg(target_os = "linux")]
 #[tokio::test]
 async fn a_host_accept_writes_proxy_at_the_owned_receiver_before_caller_supplied_prefix_bytes() {
     let mut rig = EnvRig::new();
@@ -243,6 +263,7 @@ async fn a_host_accept_writes_proxy_at_the_owned_receiver_before_caller_supplied
     rig.stop().await;
 }
 
+#[cfg(target_os = "linux")]
 #[tokio::test]
 async fn an_environment_only_machine_publishes_its_directory_and_withdraws_live_sockets_under_the_same_ports_key()
  {
@@ -360,6 +381,7 @@ async fn an_environment_only_machine_publishes_its_directory_and_withdraws_live_
     rig.stop().await;
 }
 
+#[cfg(target_os = "linux")]
 #[tokio::test]
 async fn the_carrier_rechecks_the_signed_audience_and_refuses_an_unlabelled_wider_opening() {
     use orch_api_contract::ports::PortOpeningKind as Audience;
@@ -442,6 +464,7 @@ async fn the_carrier_rechecks_the_signed_audience_and_refuses_an_unlabelled_wide
     rig.stop().await;
 }
 
+#[cfg(target_os = "linux")]
 #[tokio::test]
 async fn rule_2_tcp_half_close_udp_empty_two_senders_and_owned_replacement_use_the_same_real_connector_link()
  {
@@ -530,6 +553,7 @@ async fn rule_2_tcp_half_close_udp_empty_two_senders_and_owned_replacement_use_t
     rig.stop().await;
 }
 
+#[cfg(target_os = "linux")]
 #[tokio::test]
 async fn rule_2_loss_of_current_control_closes_tcp_and_udp_and_local_policy_refuses_new_ingress() {
     let mut rig = EnvRig::new();
@@ -641,6 +665,7 @@ async fn rule_2_loss_of_current_control_closes_tcp_and_udp_and_local_policy_refu
     rig.stop().await;
 }
 
+#[cfg(target_os = "linux")]
 #[tokio::test]
 async fn rule_2_native_udp_sender_limit_and_sixty_second_idle_are_shared_across_targets() {
     let mut rig = EnvRig::new();
@@ -726,6 +751,7 @@ async fn rule_2_native_udp_sender_limit_and_sixty_second_idle_are_shared_across_
     rig.stop().await;
 }
 
+#[cfg(target_os = "linux")]
 #[tokio::test]
 async fn rule_2_sixty_four_real_tcp_connections_and_sixteen_waiters_share_one_environment_and_one_deadline()
  {
@@ -815,6 +841,7 @@ async fn rule_2_sixty_four_real_tcp_connections_and_sixteen_waiters_share_one_en
     rig.stop().await;
 }
 
+#[cfg(target_os = "linux")]
 #[tokio::test]
 async fn rule_2_a_hundred_mebibytes_in_both_tcp_directions_are_byte_exact_with_bounded_shared_credit()
  {
@@ -883,6 +910,7 @@ async fn rule_2_a_hundred_mebibytes_in_both_tcp_directions_are_byte_exact_with_b
     rig.stop().await;
 }
 
+#[cfg(target_os = "linux")]
 async fn slow_native_transfer(up: u64, down: u64) {
     use orch_testkit::doubles::link::{Direction, Shape};
     use std::time::Duration;
@@ -1035,15 +1063,18 @@ async fn slow_native_transfer(up: u64, down: u64) {
     rig.stop().await;
 }
 
+#[cfg(target_os = "linux")]
 #[tokio::test]
 async fn rule_2_owned_tcp_100_mib_each_way_and_control_beside_full_udp_on_the_slow_profile() {
     slow_native_transfer(93_750, 200_000).await;
 }
+#[cfg(target_os = "linux")]
 #[tokio::test]
 async fn rule_2_owned_tcp_100_mib_each_way_and_control_beside_full_udp_at_a_tenth_rate() {
     slow_native_transfer(9_375, 20_000).await;
 }
 
+#[cfg(target_os = "linux")]
 #[tokio::test]
 async fn rule_2_a_private_unit_carries_loopback_tcp_and_udp_without_an_independent_outbound_route()
 {

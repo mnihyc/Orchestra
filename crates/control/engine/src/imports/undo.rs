@@ -145,9 +145,7 @@ async fn delete_place(
     entry.org_id = Some(org);
     entry.details =
         json!({ "archived_first": marked, "deleted_nodes": deleted, "import_undo": true });
-    append(conn, &entry, &Origin::default(), now)
-        .await
-        .map_err(DbError::from)?;
+    append(conn, &entry, &Origin::default(), now).await?;
     Ok(true)
 }
 

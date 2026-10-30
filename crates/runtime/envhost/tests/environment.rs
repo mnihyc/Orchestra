@@ -4,7 +4,6 @@
     clippy::expect_used,
     reason = "a test fails by panicking"
 )]
-#![cfg(target_os = "linux")]
 
 use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
@@ -32,6 +31,7 @@ const PATIENCE: Duration = Duration::from_secs(15);
 
 /// A shell must answer or end in the required order; this generous guard only
 /// prevents hanging while a busy machine starts or reaps its real process.
+#[cfg(target_os = "linux")]
 const SHELL_PATIENCE: Duration = Duration::from_secs(300);
 
 /// How long a test waits to be sure that the host does not do something.
@@ -71,6 +71,26 @@ fn write_tree(root: &Path, files: &[(&str, &str)]) {
         std::fs::create_dir_all(full.parent().unwrap()).unwrap();
         std::fs::write(full, content).unwrap();
     }
+}
+
+#[cfg(unix)]
+fn symlink_file(target: &Path, link: &Path) {
+    std::os::unix::fs::symlink(target, link).unwrap();
+}
+
+#[cfg(windows)]
+fn symlink_file(target: &Path, link: &Path) {
+    std::os::windows::fs::symlink_file(target, link).unwrap();
+}
+
+#[cfg(unix)]
+fn symlink_directory(target: &Path, link: &Path) {
+    std::os::unix::fs::symlink(target, link).unwrap();
+}
+
+#[cfg(windows)]
+fn symlink_directory(target: &Path, link: &Path) {
+    std::os::windows::fs::symlink_dir(target, link).unwrap();
 }
 
 /// A host that offers the temporary directory, with `files` in the workspace, tuned by `tune`.
@@ -634,14 +654,26 @@ async fn attaching_an_environment_says_where_it_is_and_what_it_can_do() {
     let rig = rig(&[("src/main.rs", "fn main() {}\n")]).await;
     let facts = &rig.facts;
     assert_eq!(facts.workspace_root, rig.root.to_string_lossy());
-    assert_eq!(facts.os, Os::Linux);
-    assert_eq!(facts.path_style, PathStyle::Posix);
-    assert!(
-        facts.case_sensitive,
-        "a temporary directory of Linux tells 'A' from 'a'"
+    let expected_os = if cfg!(windows) {
+        Os::Windows
+    } else if cfg!(target_os = "macos") {
+        Os::Macos
+    } else {
+        Os::Linux
+    };
+    assert_eq!(facts.os, expected_os);
+    assert_eq!(
+        facts.path_style,
+        if cfg!(windows) {
+            PathStyle::Windows
+        } else {
+            PathStyle::Posix
+        }
     );
+    std::fs::write(rig.root.join("CaseProbe"), "case probe").unwrap();
+    assert_eq!(facts.case_sensitive, !rig.root.join("caseprobe").exists());
     assert_eq!(facts.index, IndexMode::Full);
-    assert!(facts.suspend, "processes can be held still here");
+    assert_eq!(facts.suspend, cfg!(unix));
     assert_eq!(facts.generation, 7);
     assert_eq!(facts.git, git_exists());
     assert!(!facts.shell.path.is_empty(), "a person gets a shell");
@@ -770,7 +802,7 @@ async fn a_root_the_machines_owner_does_not_offer_is_refused_however_it_is_spell
     let outside = dir.path().join("outside");
     std::fs::create_dir_all(offered.join("ws")).unwrap();
     std::fs::create_dir_all(&outside).unwrap();
-    std::os::unix::fs::symlink(&outside, offered.join("link")).unwrap();
+    symlink_directory(&outside, &offered.join("link"));
     let settings = HostSettings::connected(dir.path().join("data"), vec![offered.clone()]);
     let (reports, _receiver) = Reports::channel(16);
     let host = EnvHost::new(
@@ -947,8 +979,8 @@ async fn a_file_is_listed_described_and_fetched_into_the_store_once() {
 async fn a_path_that_leaves_the_workspace_reaches_nothing_whatever_the_command() {
     let rig = rig(&[("inside.txt", "inside")]).await;
     std::fs::write(rig.dir.path().join("outside.txt"), "outside").unwrap();
-    std::os::unix::fs::symlink("../outside.txt", rig.root.join("escape.txt")).unwrap();
-    std::os::unix::fs::symlink(rig.dir.path(), rig.root.join("up")).unwrap();
+    symlink_file(Path::new("../outside.txt"), &rig.root.join("escape.txt"));
+    symlink_directory(rig.dir.path(), &rig.root.join("up"));
     let blob = rig.store_text("changed");
     let env = rig.env;
 
@@ -1515,6 +1547,8 @@ fn tree_of(root: &Path) -> BTreeMap<String, String> {
                 .unwrap()
                 .to_string_lossy()
                 .into_owned();
+            #[cfg(windows)]
+            let relative = relative.replace('\\', "/");
             let meta = std::fs::symlink_metadata(&path).unwrap();
             let kind = if meta.file_type().is_symlink() {
                 format!("link -> {}", std::fs::read_link(&path).unwrap().display())
@@ -1522,10 +1556,20 @@ fn tree_of(root: &Path) -> BTreeMap<String, String> {
                 walk(base, &path, out);
                 "dir".to_owned()
             } else {
-                use std::os::unix::fs::PermissionsExt;
+                #[cfg(unix)]
+                let permissions = {
+                    use std::os::unix::fs::PermissionsExt;
+                    format!("{:o}", meta.permissions().mode() & 0o777)
+                };
+                #[cfg(windows)]
+                let permissions = if meta.permissions().readonly() {
+                    "read-only"
+                } else {
+                    "writable"
+                };
                 format!(
-                    "file {:o} {}",
-                    meta.permissions().mode() & 0o777,
+                    "file {} {}",
+                    permissions,
                     Hash::of(&std::fs::read(&path).unwrap())
                 )
             };
@@ -1539,7 +1583,6 @@ fn tree_of(root: &Path) -> BTreeMap<String, String> {
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn a_snapshot_uploads_only_what_the_store_lacks_and_materializes_to_an_equal_tree() {
-    use std::os::unix::fs::PermissionsExt;
     let rig = rig_with(
         &[
             ("src/lib.rs", "pub fn f() {}\n"),
@@ -1553,12 +1596,16 @@ async fn a_snapshot_uploads_only_what_the_store_lacks_and_materializes_to_an_equ
     std::fs::create_dir(rig.root.join("empty")).unwrap();
     std::fs::create_dir_all(rig.root.join("bin")).unwrap();
     std::fs::write(rig.root.join("bin/run.sh"), "#!/bin/sh\necho hi\n").unwrap();
-    std::fs::set_permissions(
-        rig.root.join("bin/run.sh"),
-        std::fs::Permissions::from_mode(0o755),
-    )
-    .unwrap();
-    std::os::unix::fs::symlink("src/lib.rs", rig.root.join("link")).unwrap();
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        std::fs::set_permissions(
+            rig.root.join("bin/run.sh"),
+            std::fs::Permissions::from_mode(0o755),
+        )
+        .unwrap();
+    }
+    symlink_file(Path::new("src/lib.rs"), &rig.root.join("link"));
 
     let progress = ProgressLog::new();
     let snapshot = FsSnapshot {
@@ -2087,9 +2134,12 @@ async fn attaching_again_takes_the_new_ignore_rules_and_keeps_what_runs_in_the_e
         .host
         .pty_attach(terminal_id, true)
         .expect("the shell is still open");
-    screen
-        .send_input(b"echo variable-is-$ORCH_TEST_VARIABLE\nexit\n".to_vec())
-        .unwrap();
+    let command = if cfg!(windows) {
+        b"echo variable-is-%ORCH_TEST_VARIABLE%\r\nexit\r\n".as_slice()
+    } else {
+        b"echo variable-is-$ORCH_TEST_VARIABLE\nexit\n".as_slice()
+    };
+    screen.send_input(command.to_vec()).unwrap();
     let mut seen = String::new();
     while !seen.contains("variable-is-") {
         match tokio::time::timeout(PATIENCE, screen.next()).await.unwrap() {
@@ -2189,6 +2239,7 @@ async fn shells_a_previous_run_left_open_are_reported_as_ended_when_the_environm
     );
 }
 
+#[cfg(target_os = "linux")]
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn detaching_ends_the_shells_of_the_environment_and_forgets_it() {
     let rig = rig(&[]).await;
@@ -2231,6 +2282,7 @@ async fn detaching_ends_the_shells_of_the_environment_and_forgets_it() {
 // Shells and processes
 
 /// Asks the shell for its own process number.
+#[cfg(target_os = "linux")]
 async fn shell_pid(host: &EnvHost, terminal_id: Id) -> u32 {
     let mut screen = host.pty_attach(terminal_id, true).unwrap();
     screen
@@ -2257,6 +2309,7 @@ async fn shell_pid(host: &EnvHost, terminal_id: Id) -> u32 {
     }
 }
 
+#[cfg(target_os = "linux")]
 fn process_alive(pid: u32) -> bool {
     std::fs::read_to_string(format!("/proc/{pid}/stat")).is_ok_and(|text| {
         text.rsplit_once(')')
@@ -2264,10 +2317,12 @@ fn process_alive(pid: u32) -> bool {
     })
 }
 
+#[cfg(target_os = "linux")]
 async fn wait_for(what: &str, mut condition: impl FnMut() -> bool) {
     wait_for_within(PATIENCE, what, &mut condition).await;
 }
 
+#[cfg(target_os = "linux")]
 async fn wait_for_within(patience: Duration, what: &str, mut condition: impl FnMut() -> bool) {
     let deadline = tokio::time::Instant::now() + patience;
     while !condition() {
@@ -2279,6 +2334,7 @@ async fn wait_for_within(patience: Duration, what: &str, mut condition: impl FnM
     }
 }
 
+#[cfg(target_os = "linux")]
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn a_shell_opened_through_the_host_runs_where_it_was_asked_with_the_variables_and_is_listed_as_a_process()
  {
@@ -2371,10 +2427,12 @@ async fn a_shell_opened_through_the_host_runs_where_it_was_asked_with_the_variab
 
 /// Processes a test starts, ended when the test ends: each in a group of its own, so only those
 /// groups and numbers are ever signalled.
+#[cfg(target_os = "linux")]
 struct Sleepers {
     children: Vec<std::process::Child>,
 }
 
+#[cfg(target_os = "linux")]
 impl Sleepers {
     fn new() -> Self {
         Self {
@@ -2397,6 +2455,7 @@ impl Sleepers {
     }
 }
 
+#[cfg(target_os = "linux")]
 impl Drop for Sleepers {
     fn drop(&mut self) {
         for child in &mut self.children {
@@ -2406,6 +2465,7 @@ impl Drop for Sleepers {
     }
 }
 
+#[cfg(target_os = "linux")]
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn a_signal_reaches_a_process_the_host_started_and_nobody_else() {
     use orch_envhost::processes::RootKind;
@@ -2777,6 +2837,7 @@ async fn a_tool_server_definition_is_kept_by_the_connector_only_and_forgotten_on
         .join("data/mcp")
         .join(format!("{server_id}.json"));
     assert!(copy.is_file());
+    #[cfg(unix)]
     {
         use std::os::unix::fs::PermissionsExt;
         assert_eq!(

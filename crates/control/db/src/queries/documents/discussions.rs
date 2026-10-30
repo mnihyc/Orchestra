@@ -370,7 +370,7 @@ pub enum Opened {
     Created(Box<Full>),
 }
 
-/// Opens a discussion on a live block, with its first comment.
+/// Opens a discussion on a live block, with its first comment, in the caller's transaction.
 pub async fn open(
     conn: &mut Conn,
     document: Id,
@@ -380,6 +380,13 @@ pub async fn open(
     first: &NewComment<'_>,
     now: DateTime<Utc>,
 ) -> Result<Opened, DbError> {
+    // The replay and anchor checks must observe the writer that held this document before us.
+    if super::lock(conn, document)
+        .await?
+        .is_none_or(|row| row.deleted_at.is_some())
+    {
+        return Ok(Opened::NoSuchBlock);
+    }
     if let Some(known) = comment(conn, document, first.id).await? {
         return Ok(if known.author_id == author {
             match get(conn, document, known.discussion_id).await? {
@@ -466,7 +473,7 @@ pub enum Answered {
     },
 }
 
-/// Answers in a discussion.
+/// Answers in a discussion in the caller's transaction.
 pub async fn answer(
     conn: &mut Conn,
     document: Id,
@@ -475,6 +482,13 @@ pub async fn answer(
     new: &NewComment<'_>,
     now: DateTime<Utc>,
 ) -> Result<Answered, DbError> {
+    // Serialize the replay check with other comments and the document sequence.
+    if super::lock(conn, document)
+        .await?
+        .is_none_or(|row| row.deleted_at.is_some())
+    {
+        return Ok(Answered::NoSuchDiscussion);
+    }
     if let Some(known) = comment(conn, document, new.id).await? {
         return Ok(
             if known.author_id == author && known.discussion_id == discussion {

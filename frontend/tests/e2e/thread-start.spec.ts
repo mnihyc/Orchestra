@@ -67,7 +67,7 @@ test('a thread made with nothing chosen but a click takes the topic’s environm
 test('a refusal says what is missing and whom to ask, and the dialog stays with what was written in it', async ({ page }) => {
   await openDialog(page, PEOPLE.dora);
   // Somebody takes the right away after the page was loaded: the page still believes it, the server does not.
-  await deny('dora', ['topic.interact']);
+  await deny('dora', ['topic.start_threads']);
   const form = dialog(page);
   await form.getByRole('textbox', { name: nameField }).fill('Not allowed');
   await form.getByRole('button', { name: 'Create thread' }).click();
@@ -76,7 +76,7 @@ test('a refusal says what is missing and whom to ask, and the dialog stays with 
   await expect(refusal).toContainText('You do not have access to this.');
   await refusal.getByRole('button', { name: 'Review access', exact: true }).click();
   const review = page.getByRole('dialog', { name: 'Review access', exact: true });
-  await expect(review.getByText('You can’t take part in Fix login.', { exact: true })).toBeVisible();
+  await expect(review.getByText('You can’t start threads in Fix login.', { exact: true })).toBeVisible();
   await expect(review).toContainText('Fix login');
   await expect(review).toContainText('Ask Ada Lovelace.');
   await review.getByRole('button', { name: 'Close', exact: true }).click();

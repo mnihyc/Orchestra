@@ -1025,9 +1025,9 @@ impl Mapper {
         let native = text(turn, "id");
         let status = text(turn, "status");
         let (outcome, item_status) = match status {
+            "completed" => (TurnOutcome::Completed, ItemStatus::Completed),
             "interrupted" => (TurnOutcome::Interrupted, ItemStatus::Cancelled),
-            "failed" => (TurnOutcome::Failed, ItemStatus::Failed),
-            _ => (TurnOutcome::Completed, ItemStatus::Completed),
+            _ => (TurnOutcome::Failed, ItemStatus::Failed),
         };
         if thread != self.config.native_thread {
             if self.children.contains_key(thread) {
@@ -1047,6 +1047,14 @@ impl Mapper {
             return;
         }
         self.finish_turn(thread, outcome, item_status, ctx, out, |mapper, state| {
+            if status != "failed" {
+                return TurnError::new(
+                    turn_error::HARNESS_ERROR,
+                    "the harness returned an unrecognized turn status",
+                    false,
+                )
+                .saying(status);
+            }
             // What the turn ends with is read from the error it carries; the one the harness reported
             // as it happened is what is left where the turn carries none.
             turn.get("error")
@@ -2806,6 +2814,23 @@ mod tests {
 
     fn kinds(events: &[SessionEvent]) -> Vec<&'static str> {
         events.iter().map(SessionEvent::kind).collect()
+    }
+
+    #[test]
+    fn a_missing_or_unknown_turn_status_is_not_reported_as_success() {
+        for status in ["", "new_status"] {
+            let mut rig = Rig::new();
+            rig.begin();
+            let events = rig.end(status, Json::Null);
+            let [SessionEvent::TurnCompleted(end)] = events.as_slice() else {
+                panic!("one completed event");
+            };
+            assert_eq!(end.status, TurnOutcome::Failed);
+            let error = end.error.as_ref().expect("the failure has a reason");
+            assert_eq!(error.code, turn_error::HARNESS_ERROR);
+            assert!(error.message.contains("unrecognized turn status"));
+            assert_eq!(error.said.as_deref(), Some(status));
+        }
     }
 
     #[test]

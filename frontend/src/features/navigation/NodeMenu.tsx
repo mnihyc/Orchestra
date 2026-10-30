@@ -61,7 +61,7 @@ import { mayExportThread } from '@/features/export/pending';
 import { openNodeDialog } from '@/features/navigation/NodeDialogs';
 import { type PlaceRef, placePath, placeUrl, useGoToPlace } from '@/features/navigation/places';
 import type { Access, Node, TopicStatus, UserRef } from '@/generated/api-types';
-import { abilities, denial, holds } from '@/lib/permissions';
+import { abilities, canCreateIn, denial, holds } from '@/lib/permissions';
 import { copyText } from '@/ui/clipboard';
 import { ContextEntries, ContextMenu } from '@/ui/ContextMenu';
 import { useErrorText } from '@/ui/errorText';
@@ -194,13 +194,13 @@ export function nodeMenuEntries(context: NodeMenuContext, act: NodeMenuActions, 
       ...(context.personal === false ? gated('org.manage', can.manage, { id: 'new-department', label: t('places.menu.newDepartment'), icon: <LayoutGrid aria-hidden />, onSelect: act.newDepartment }) : []),
     );
   } else if (place.kind === 'project') {
-    // A project, and a folder as well, holds topics and folders: whoever opens topics there makes either.
+    // Topics and folders have separate creation permissions.
     make.push(
-      ...gated('project.interact', can.interact, { id: 'new-topic', label: t('places.menu.newTopic'), icon: <Plus aria-hidden />, onSelect: act.newTopic }),
+      ...gated('project.create_topics', !place.archived && canCreateIn('project', held), { id: 'new-topic', label: t('places.menu.newTopic'), icon: <Plus aria-hidden />, onSelect: act.newTopic }),
       ...gated('project.interact', can.interact, { id: 'new-folder', label: t('places.menu.newFolder'), icon: <FolderPlus aria-hidden />, onSelect: act.newFolder }),
     );
   } else if (place.kind === 'topic') {
-    make.push(...gated('topic.interact', can.interact, { id: 'new-thread', label: t('places.menu.newThread'), icon: <MessageSquarePlus aria-hidden />, onSelect: act.newThread }));
+    make.push(...gated('topic.start_threads', !place.archived && canCreateIn('topic', held), { id: 'new-thread', label: t('places.menu.newThread'), icon: <MessageSquarePlus aria-hidden />, onSelect: act.newThread }));
   }
   // A document is made beside any place, by whoever may make one there, as the places and threads it holds are.
   if (act.newDocument !== undefined) {

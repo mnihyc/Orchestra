@@ -397,6 +397,7 @@ pub async fn exists(
 
 /// The storages of the host with their sizes, as the node reports them.
 pub fn storages(config: &DockerConfig, facts: &DaemonFacts) -> Vec<StorageInfo> {
+    #[cfg(unix)]
     let measure = |path: &std::path::Path| -> (i64, i64) {
         match rustix::fs::statvfs(path) {
             Ok(stat) => {
@@ -409,6 +410,8 @@ pub fn storages(config: &DockerConfig, facts: &DaemonFacts) -> Vec<StorageInfo> 
             Err(_) => (0, 0),
         }
     };
+    #[cfg(not(unix))]
+    let measure = |_path: &std::path::Path| -> (i64, i64) { (0, 0) };
     let private_views = facts.private_views();
     if config.storages.is_empty() {
         // The daemon's own directory when the node sees it, otherwise the node's root: in a container that

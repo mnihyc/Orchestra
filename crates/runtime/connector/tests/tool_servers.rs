@@ -10,11 +10,14 @@ mod rig_environment;
 use std::collections::BTreeMap;
 use std::time::Duration;
 
+use orch_connector_core::tool_tunnels::ENVIRONMENT_HEADER;
 use orch_link::tunnels::channel::OpenError;
 use orch_link_contract::commands::{
-    McpStart, McpStartGiven, McpStop, ProcList, ProcSignal, Secret, Signal,
+    EnvAttach, EnvDetach, IndexMode, McpStart, McpStartGiven, McpStop, ProcList, ProcSignal,
+    Secret, Signal,
 };
 use orch_link_contract::tunnels::{OpenErrorCode, Service, TicketSource};
+use orch_pki::tickets::TicketRequest;
 use orch_types::{Id, Json, Time, new_id};
 use rig_environment::tunnels::{Opener, messages, post};
 use rig_environment::{EnvRig, PATIENCE, stand_in};
@@ -80,6 +83,101 @@ async fn call(
         .into_iter()
         .next()
         .unwrap_or(Json::Null))
+}
+
+#[tokio::test]
+async fn a_tool_ticket_cannot_reach_a_same_named_server_in_another_environment() {
+    let mut rig = EnvRig::new();
+    rig.config.mcp.add = true;
+    rig.parts.ports = Some(41000..=41999);
+    let first_workspace = rig.directory("first");
+    let second_workspace = rig.directory("second");
+    rig.start().await;
+    let first = rig.environment;
+    let first_facts = rig.attach(&first_workspace).await;
+    let first_generation = first_facts["generation"].as_i64().unwrap();
+    start(&rig, "files", definition(json!({}))).await;
+    let opener = rig.opener().await;
+    let first_ticket = ticket(&rig, &opener, "files", new_id());
+
+    rig.environment = new_id();
+    let second = rig.environment;
+    rig.attach(&second_workspace).await;
+    start(&rig, "files", definition(json!({}))).await;
+    let second_ticket = ticket(&rig, &opener, "files", new_id());
+    let request = tool("secret", json!({}));
+    let (status, kind, body) =
+        post(opener.open(&second_ticket).await.unwrap(), &[], &request).await;
+    assert!(status.is_success(), "{status}: {body}");
+    assert_eq!(
+        messages(&kind, &body)[0]["result"]["content"][0]["text"],
+        "s3cret-value"
+    );
+
+    let (status, _, body) = post(
+        opener.open(&first_ticket).await.unwrap(),
+        &[(ENVIRONMENT_HEADER, second.to_string())],
+        &request,
+    )
+    .await;
+    assert_eq!(status.as_u16(), 403, "{body}");
+    assert!(!body.contains("s3cret-value"));
+
+    let unscoped = rig
+        .signer
+        .issue(&TicketRequest {
+            src: TicketSource::Machine(opener.machine_id),
+            dst: rig.machine_id,
+            service: Service::Mcp {
+                server: "files".to_owned(),
+            },
+            thread_id: Some(new_id()),
+            tool_set: None,
+            expires_at: rig.deadline(),
+        })
+        .unwrap();
+    match opener.open(&unscoped).await {
+        Err(OpenError::Refused { code, .. }) => assert_eq!(code, OpenErrorCode::BadTicket),
+        other => panic!("an unscoped ticket must not reach a tool server: {other:?}"),
+    }
+
+    rig.environment = first;
+    rig.succeed(&McpStop {
+        environment_id: first,
+        name: "files".to_owned(),
+    })
+    .await;
+    match opener.open(&first_ticket).await {
+        Err(OpenError::Refused { code, .. }) => assert_eq!(code, OpenErrorCode::NoSuchService),
+        other => panic!("a server in the other environment must not be selected: {other:?}"),
+    }
+    rig.succeed(&EnvDetach {
+        environment_id: first,
+    })
+    .await;
+    rig.succeed(&EnvAttach {
+        resources: None,
+        data_generation: Some(first_generation + 1),
+        storage: None,
+        data_sources: None,
+        environment_id: first,
+        workspace_root: Some(first_workspace.display().to_string()),
+        ignore: Vec::new(),
+        index: IndexMode::Full,
+        mounts: Some(Vec::new()),
+        variables: BTreeMap::new(),
+        secrets: BTreeMap::new(),
+    })
+    .await;
+    start(&rig, "files", definition(json!({}))).await;
+    match opener.open(&first_ticket).await {
+        Err(OpenError::Refused { code, .. }) => assert_eq!(code, OpenErrorCode::BadTicket),
+        other => panic!("an old generation's ticket must not reach the rebuilt server: {other:?}"),
+    }
+    let fresh = ticket(&rig, &opener, "files", new_id());
+    let (status, _, body) = post(opener.open(&fresh).await.unwrap(), &[], &request).await;
+    assert!(status.is_success(), "{status}: {body}");
+    rig.stop().await;
 }
 
 fn tool(name: &str, arguments: Json) -> Json {

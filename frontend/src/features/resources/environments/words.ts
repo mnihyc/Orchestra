@@ -53,8 +53,12 @@ export const isBusy = (status: EnvironmentStatus): boolean => status === 'provis
 /** Old and new provisioning diagnostics use the same actionable words instead of repeating their image phase. */
 export function environmentStatusDetail(environment: Pick<Environment, 'status' | 'status_detail'>, t: TFunction): string | null {
   const detail = environment.status_detail;
-  return environment.status === 'failed' && detail !== null && /^image:\s*/u.test(detail)
-    ? t('environments.overview.imageFailed', { reason: detail.replace(/^(?:image:\s*)+/u, '') }) : detail;
+  if (environment.status !== 'failed' || detail === null || !/^image:\s*/u.test(detail)) return detail;
+  const reason = detail.replace(/^(?:image:\s*)+/u, '');
+  if (/^no capacity:\s*/u.test(reason)) {
+    return t('environments.overview.hostCapacityFailed', { reason: reason.replace(/^no capacity:\s*/u, '') });
+  }
+  return t('environments.overview.imageFailed', { reason });
 }
 
 /** An accepted lifecycle job precedes the next physical-status report from its unit. */

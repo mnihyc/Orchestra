@@ -7,6 +7,8 @@
  * is told apart by what its definition says (its options come from the model's speeds, from its access
  * programs, or its range ends at the model's largest context) and never by its key, which is the adapter's.
  */
+import type { TFunction } from 'i18next';
+import { accessProgramDisplayName } from '@/features/models/names';
 import type { ModelParameters, ParameterView, Rate, ServiceTier, SettingLock, ThreadParameters } from '@/generated/api-types';
 
 export type ChoiceKind = 'speed' | 'access';
@@ -133,7 +135,7 @@ const tiersOf = (model: ModelParameters): ServiceTier[] => model.service_tiers ?
  * from. `own` is the thread's own choices when they are known (what they are the object `agent.params`); without
  * it a value that the parameter shows is taken to be the thread's own where its source says the thread.
  */
-export function statesOf(parameters: ThreadParameters, own: Readonly<Record<string, unknown>> | null): State[] {
+export function statesOf(parameters: ThreadParameters, own: Readonly<Record<string, unknown>> | null, t?: TFunction): State[] {
   const model = parameters.model.options.find((option) => option.model_name === parameters.model.value)?.parameters;
   if (model === undefined) return [];
   const states: State[] = [];
@@ -177,7 +179,7 @@ export function statesOf(parameters: ThreadParameters, own: Readonly<Record<stri
       });
       continue;
     }
-    const list = kind === 'speed' ? tiersOf(model).map((tier) => ({ id: tier.id, label: tier.label })) : (model.access_programs ?? []).map((program) => ({ id: program, label: program }));
+    const list = kind === 'speed' ? tiersOf(model).map((tier) => ({ id: tier.id, label: tier.label })) : (model.access_programs ?? []).map((program) => ({ id: program, label: accessProgramDisplayName(program, t) }));
     const start = kind === 'speed' ? speedStart(model) : programStart(model);
     const open = typeof stored === 'string' && list.some((one) => one.id === stored);
     states.push({

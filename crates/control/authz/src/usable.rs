@@ -448,8 +448,7 @@ pub struct Usables {
 /// stand: the topic they are in, the node whose settings are being read), one page of them in the
 /// order of their identifiers, each with the options that apply to them there. A resource that is
 /// switched off or deleted is not among them, and neither is one that is only looked at. For an
-/// environment, putting a thread into it takes its Manage (its Use lets its threads' agents act for a
-/// person, and is asked when they give input), so what may be used here is what is managed. The statements are those
+/// environment, starting a thread there takes its Use. The statements are those
 /// of one batch of candidates however many there are.
 pub async fn usable_list(
     conn: &mut Conn,
@@ -458,6 +457,47 @@ pub async fn usable_list(
     node: Option<Id>,
     policies: &Policies,
     page: Page,
+) -> Result<Listing<Usables>, Error> {
+    usable_list_with_environment_right(
+        conn,
+        principal,
+        kind,
+        node,
+        policies,
+        page,
+        Permission::EnvironmentUse,
+    )
+    .await
+}
+
+/// Environments the caller manages, paged after applying Manage rather than after applying Use.
+pub async fn manageable_environments(
+    conn: &mut Conn,
+    principal: &Principal,
+    node: Option<Id>,
+    policies: &Policies,
+    page: Page,
+) -> Result<Listing<Usables>, Error> {
+    usable_list_with_environment_right(
+        conn,
+        principal,
+        ResourceKind::Environment,
+        node,
+        policies,
+        page,
+        Permission::EnvironmentManage,
+    )
+    .await
+}
+
+async fn usable_list_with_environment_right(
+    conn: &mut Conn,
+    principal: &Principal,
+    kind: ResourceKind,
+    node: Option<Id>,
+    policies: &Policies,
+    page: Page,
+    environment_right: Permission,
 ) -> Result<Listing<Usables>, Error> {
     let Page { after, limit } = page;
     let path = match node {
@@ -477,7 +517,7 @@ pub async fn usable_list(
             }
             let policy = policies.at(resource.home);
             let granted = if kind == ResourceKind::Environment {
-                let ways = batch.frame.ways(site, Permission::EnvironmentUse);
+                let ways = batch.frame.ways(site, environment_right);
                 (!ways.is_empty()).then(|| Use {
                     options: Options::None,
                     through: ways,
@@ -1012,7 +1052,7 @@ pub struct BindingAsk<'a> {
     /// The node the act is asked of: the topic a thread is made in or forked into, or the thread
     /// that is switched. The work that is to run on the resources is the work there.
     pub node: Id,
-    /// What the act needs on that node: `topic.interact` to create or fork there, `thread.manage`
+    /// What the act needs on that node: `topic.start_threads` to create or fork there, `thread.manage`
     /// to switch a thread.
     pub permission: Permission,
     /// The provider, with its model and effort.
@@ -1051,9 +1091,9 @@ pub enum BindingDecision {
 }
 
 /// Whether the caller may put a thread on what they chose: the permission the act needs on its node
-/// (`topic.interact` to create or fork, `thread.manage` to switch); their own use of the profile and
-/// of the provider with the model and effort; and for the environment, `environment.manage` on one
-/// that exists or what creating one takes. Nobody's access but the caller's is asked about, and a
+/// (`topic.start_threads` to create or fork, `thread.manage` to switch); their own use of the profile and
+/// of the provider with the model and effort; and for an existing environment its Use, or what making one
+/// takes. Moving or copying existing work also checks the environment's Manage separately. Nobody's access but the caller's is asked about, and a
 /// thread holds nothing by itself. A refusal names everything that is lacking, thing by thing.
 pub async fn check_binding(
     conn: &mut Conn,

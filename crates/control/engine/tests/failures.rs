@@ -9,10 +9,102 @@ mod common;
 
 use common::{World, meanwhile, queued, said, turn_ended};
 use orch_authz::Caller;
+use orch_engine::commands::{
+    Commands, CommandsError, Info, Outcome, Outgoing, RetainedCommand, Stage,
+};
 use orch_link_contract::commands::{CommandError, CommandKind, ErrorCode};
 use orch_link_contract::events::TurnOutcome;
-use orch_types::Id;
+use orch_types::{Clock, Id};
+use std::sync::{
+    Arc,
+    atomic::{AtomicBool, AtomicUsize, Ordering},
+};
 use std::time::Duration;
+
+/// Models a dispatcher that sees a durable queued row before it has adopted it.
+struct AdmissionGap {
+    inner: Arc<dyn Commands>,
+    db: orch_db::Db,
+    clock: Arc<dyn orch_types::Clock>,
+    reject: Arc<AtomicBool>,
+    attempts: Arc<AtomicUsize>,
+}
+
+#[async_trait::async_trait]
+impl Commands for AdmissionGap {
+    async fn issue(&self, command: Outgoing) -> Result<(), CommandsError> {
+        if matches!(
+            command.kind,
+            CommandKind::TurnStart | CommandKind::TurnStartFenced
+        ) && self.reject.load(Ordering::SeqCst)
+        {
+            self.attempts.fetch_add(1, Ordering::SeqCst);
+            return Err(CommandsError::Stopping);
+        }
+        self.inner.issue(command).await
+    }
+
+    async fn status(&self, id: Id) -> Result<Option<Info>, CommandsError> {
+        if let Some(info) = self.inner.status(id).await? {
+            return Ok(Some(info));
+        }
+        let mut conn = self
+            .db
+            .acquire()
+            .await
+            .map_err(|error| CommandsError::Other(error.to_string()))?;
+        let row = orch_db::queries::link::command(&mut conn, id)
+            .await
+            .map_err(|error| CommandsError::Other(error.to_string()))?;
+        Ok(row
+            .filter(|row| {
+                row.state == "queued"
+                    && matches!(row.kind.as_str(), "turn.start" | "turn.start.fenced")
+            })
+            .map(|row| Info {
+                stage: Stage::Queued,
+                issued_at: row.created_at,
+                outcome: None,
+            }))
+    }
+
+    async fn wait(&self, id: Id) -> Result<Outcome, CommandsError> {
+        self.inner.wait(id).await
+    }
+    async fn cancel(&self, id: Id) -> Result<bool, CommandsError> {
+        if self.inner.cancel(id).await? {
+            return Ok(true);
+        }
+        let mut conn = self
+            .db
+            .acquire()
+            .await
+            .map_err(|error| CommandsError::Other(error.to_string()))?;
+        orch_db::queries::link::finish_command(
+            &mut conn,
+            id,
+            &orch_db::queries::link::Ending::Cancelled,
+            self.clock.now(),
+        )
+        .await
+        .map_err(|error| CommandsError::Other(error.to_string()))
+    }
+    async fn observe(&self, command: Outgoing) -> Result<Outcome, CommandsError> {
+        self.inner.observe(command).await
+    }
+    async fn retained_body(&self, id: Id) -> Result<Option<serde_json::Value>, CommandsError> {
+        self.inner.retained_body(id).await
+    }
+    async fn retained_command(&self, id: Id) -> Result<Option<RetainedCommand>, CommandsError> {
+        self.inner.retained_command(id).await
+    }
+    async fn stopped(&self, id: Id) -> Result<bool, CommandsError> {
+        self.inner.stopped(id).await
+    }
+    fn hears_behind(&self, machine: Id, stream: &orch_link_contract::streams::Stream) -> bool {
+        self.inner.hears_behind(machine, stream)
+    }
+}
 
 async fn turns_of(world: &World, thread: Id) -> Vec<(i32, String)> {
     sqlx::query_as("SELECT ordinal, state FROM turns WHERE thread_id = $1 ORDER BY ordinal")
@@ -83,6 +175,379 @@ async fn an_unexpected_session_exit_interrupts_the_running_turn_and_retains_its_
     assert_eq!(retained.0, "online");
     assert_eq!(retained.1.as_deref(), Some(reason));
     assert!(retained.2.is_some());
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn a_session_lost_before_the_turn_begins_keeps_its_input_for_retry() {
+    let world = World::new().await;
+    let thread = world.thread("Session lost at start").await;
+    let caller = Caller::session(world.ada);
+    let first = world
+        .engine()
+        .submit_input(&caller, thread, queued("First"))
+        .await
+        .unwrap();
+    let lost = world.turn_start(thread, 0).await;
+
+    // The command was taken but no turn-started event was heard. The session
+    // may have seen the input, so no automatic repeat is safe.
+    world
+        .say(
+            thread,
+            orch_link_contract::events::Event::SessionLost(
+                orch_link_contract::events::SessionLost {
+                    reason: "the session exited".into(),
+                },
+            ),
+        )
+        .await;
+    world.wait_turn(lost.turn_id, "failed").await;
+    world.wait_blocked(thread, "error").await;
+    assert_eq!(world.input_state(first.input.id).await.0, "pending");
+    meanwhile(Duration::from_millis(300)).await;
+    assert_eq!(world.turn_starts(thread).len(), 1);
+
+    // A subsequent send retries the original input before the new one.
+    let second = world
+        .engine()
+        .submit_input(&caller, thread, queued("Second"))
+        .await
+        .unwrap();
+    let retried = world.turn_start(thread, 1).await;
+    assert_eq!(common::words_after_where(&retried.text), "First");
+    world
+        .say(thread, turn_ended(retried.turn_id, TurnOutcome::Completed))
+        .await;
+    let next = world.turn_start(thread, 2).await;
+    assert_eq!(common::words_after_where(&next.text), "Second");
+    world
+        .say(thread, turn_ended(next.turn_id, TurnOutcome::Completed))
+        .await;
+    world.wait_state(thread, "idle").await;
+    assert_eq!(world.input_state(first.input.id).await.0, "delivered");
+    assert_eq!(world.input_state(second.input.id).await.0, "delivered");
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn a_restart_waits_for_the_admitted_start_even_if_instructions_change() {
+    let world = World::new().await;
+    let thread = world.thread("Start retained across restart").await;
+    world.machine.handler.hold(CommandKind::TurnStart);
+    let input = world
+        .engine()
+        .submit_input(
+            &Caller::session(world.ada),
+            thread,
+            queued("Original words"),
+        )
+        .await
+        .unwrap();
+    world.wait_began(CommandKind::TurnStart, 1).await;
+    let sent = world.commands.issued_bodies("turn.start")[0].1.clone();
+    world
+        .set(
+            thread,
+            "agent.instructions",
+            serde_json::json!("Instructions changed during startup"),
+        )
+        .await;
+    world.restart_api().await;
+    world.machine.handler.release();
+    let start = world.turn_start(thread, 0).await;
+    assert_eq!(start.text, sent["text"].as_str().unwrap());
+    assert_eq!(world.commands.issued_of("turn.start"), 1);
+    world.say(thread, common::turn_began(start.turn_id)).await;
+    world
+        .say(thread, turn_ended(start.turn_id, TurnOutcome::Completed))
+        .await;
+    world.wait_input(input.input.id, "delivered").await;
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn an_admitted_but_unissued_start_is_adopted_after_restart_with_its_original_body() {
+    let world = World::new().await;
+    let reject = Arc::new(AtomicBool::new(true));
+    let attempts = Arc::new(AtomicUsize::new(0));
+    let db = world.pool.clone();
+    world
+        .restart_api_using(|inner| {
+            Arc::new(AdmissionGap {
+                inner,
+                db: db.clone(),
+                clock: world.clock.clone(),
+                reject: reject.clone(),
+                attempts: attempts.clone(),
+            })
+        })
+        .await;
+    let thread = world.thread("Admitted before restart").await;
+    let submitted = world
+        .engine()
+        .submit_input(&Caller::session(world.ada), thread, queued("Original work"))
+        .await
+        .unwrap();
+    common::eventually("the start was admitted but not issued", || async {
+        attempts.load(Ordering::SeqCst) > 0
+    })
+    .await;
+    world.engine().stop();
+    let (id, body, deadline): (Id, serde_json::Value, chrono::DateTime<chrono::Utc>) = sqlx::query_as(
+        "SELECT id,body,deadline_at FROM commands WHERE kind='turn.start' AND body->>'thread_id'=$1::text AND state='queued'",
+    )
+    .bind(thread)
+    .fetch_one(world.pool.pool())
+    .await
+    .unwrap();
+    assert_eq!(world.commands.issued_of("turn.start"), 0);
+    world
+        .set(
+            thread,
+            "agent.instructions",
+            serde_json::json!("Changed after admission"),
+        )
+        .await;
+    world
+        .restart_api_using(|inner| {
+            Arc::new(AdmissionGap {
+                inner,
+                db: db.clone(),
+                clock: world.clock.clone(),
+                reject: reject.clone(),
+                attempts: attempts.clone(),
+            })
+        })
+        .await;
+    reject.store(false, Ordering::SeqCst);
+    world.engine().wake(thread);
+    let start = world.turn_start(thread, 0).await;
+    let issued = world.commands.issued_commands("turn.start");
+    assert_eq!(issued.len(), 1);
+    assert_eq!(issued[0].1.id, id);
+    assert_eq!(issued[0].1.body, body);
+    assert_eq!(issued[0].1.deadline.get(), deadline);
+    assert_eq!(world.began(CommandKind::TurnStart), 1);
+    world.say(thread, common::turn_began(start.turn_id)).await;
+    world
+        .say(thread, turn_ended(start.turn_id, TurnOutcome::Completed))
+        .await;
+    world.wait_input(submitted.input.id, "delivered").await;
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn an_admitted_but_unissued_start_is_adopted_without_reconnecting_the_machine() {
+    let world = World::new().await;
+    let reject = Arc::new(AtomicBool::new(true));
+    let attempts = Arc::new(AtomicUsize::new(0));
+    let db = world.pool.clone();
+    world
+        .restart_api_using(|inner| {
+            Arc::new(AdmissionGap {
+                inner,
+                db: db.clone(),
+                clock: world.clock.clone(),
+                reject: reject.clone(),
+                attempts: attempts.clone(),
+            })
+        })
+        .await;
+    let thread = world.thread("Admitted while linked").await;
+    let submitted = world
+        .engine()
+        .submit_input(&Caller::session(world.ada), thread, queued("Original work"))
+        .await
+        .unwrap();
+    common::eventually("the start was admitted but not issued", || async {
+        attempts.load(Ordering::SeqCst) > 0
+    })
+    .await;
+    let (id, body): (Id, serde_json::Value) = sqlx::query_as(
+        "SELECT id,body FROM commands WHERE kind='turn.start' AND body->>'thread_id'=$1::text AND state='queued'",
+    )
+    .bind(thread)
+    .fetch_one(world.pool.pool())
+    .await
+    .unwrap();
+    reject.store(false, Ordering::SeqCst);
+    world.engine().wake(thread);
+    let start = world.turn_start(thread, 0).await;
+    let issued = world.commands.issued_commands("turn.start");
+    assert_eq!(issued.len(), 1);
+    assert_eq!(issued[0].1.id, id);
+    assert_eq!(issued[0].1.body, body);
+    assert_eq!(world.began(CommandKind::TurnStart), 1);
+    world.say(thread, common::turn_began(start.turn_id)).await;
+    world
+        .say(thread, turn_ended(start.turn_id, TurnOutcome::Completed))
+        .await;
+    world.wait_input(submitted.input.id, "delivered").await;
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn an_unissued_start_past_its_engine_deadline_is_cancelled_without_adoption() {
+    let clock = Arc::new(orch_testkit::clock::manual());
+    let world = World::with_clock(clock.clone()).await;
+    world.set_config(|waits| waits.start_timeout = Duration::from_secs(2));
+    let reject = Arc::new(AtomicBool::new(true));
+    let attempts = Arc::new(AtomicUsize::new(0));
+    let db = world.pool.clone();
+    world
+        .restart_api_using(|inner| {
+            Arc::new(AdmissionGap {
+                inner,
+                db: db.clone(),
+                clock: world.clock.clone(),
+                reject: reject.clone(),
+                attempts: attempts.clone(),
+            })
+        })
+        .await;
+    let thread = world.thread("Expired admission").await;
+    let submitted = world
+        .engine()
+        .submit_input(&Caller::session(world.ada), thread, queued("Original work"))
+        .await
+        .unwrap();
+    common::eventually("the start was admitted but not issued", || async {
+        attempts.load(Ordering::SeqCst) > 0
+    })
+    .await;
+    world.engine().stop();
+    let turn: Id = world
+        .scalar(
+            "SELECT current_turn_id FROM threads WHERE node_id=$1",
+            thread,
+        )
+        .await;
+    let command: Id = sqlx::query_scalar(
+        "SELECT id FROM commands WHERE kind='turn.start' AND body->>'turn_id'=$1::text",
+    )
+    .bind(turn)
+    .fetch_one(world.pool.pool())
+    .await
+    .unwrap();
+    // The link's retained command deadline is still ahead, while the engine's
+    // shorter test start timeout has elapsed.
+    clock.advance(chrono::Duration::seconds(3));
+    let retained_deadline_is_ahead: bool =
+        sqlx::query_scalar("SELECT deadline_at > $2 FROM commands WHERE id=$1")
+            .bind(command)
+            .bind(clock.now())
+            .fetch_one(world.pool.pool())
+            .await
+            .unwrap();
+    assert!(retained_deadline_is_ahead);
+    world
+        .restart_api_using(|inner| {
+            Arc::new(AdmissionGap {
+                inner,
+                db: db.clone(),
+                clock: world.clock.clone(),
+                reject: reject.clone(),
+                attempts: attempts.clone(),
+            })
+        })
+        .await;
+    reject.store(false, Ordering::SeqCst);
+    world.engine().wake(thread);
+    world.wait_turn(turn, "failed").await;
+    world.wait_input(submitted.input.id, "pending").await;
+    let error: Option<String> = sqlx::query_scalar("SELECT error->>'code' FROM turns WHERE id=$1")
+        .bind(turn)
+        .fetch_one(world.pool.pool())
+        .await
+        .unwrap();
+    let state: String = sqlx::query_scalar("SELECT state FROM commands WHERE id=$1")
+        .bind(command)
+        .fetch_one(world.pool.pool())
+        .await
+        .unwrap();
+    assert_eq!(error.as_deref(), Some("start_timeout"));
+    assert_eq!(state, "cancelled");
+    assert_eq!(world.commands.issued_of("turn.start"), 0);
+    assert_eq!(world.began(CommandKind::TurnStart), 0);
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn stopping_an_admitted_but_unissued_start_cancels_it_before_recovery() {
+    let world = World::new().await;
+    let reject = Arc::new(AtomicBool::new(true));
+    let attempts = Arc::new(AtomicUsize::new(0));
+    let db = world.pool.clone();
+    world
+        .restart_api_using(|inner| {
+            Arc::new(AdmissionGap {
+                inner,
+                db: db.clone(),
+                clock: world.clock.clone(),
+                reject: reject.clone(),
+                attempts: attempts.clone(),
+            })
+        })
+        .await;
+    let thread = world.thread("Stop before start issue").await;
+    let caller = Caller::session(world.ada);
+    let submitted = world
+        .engine()
+        .submit_input(&caller, thread, queued("Original work"))
+        .await
+        .unwrap();
+    common::eventually("the start was admitted but not issued", || async {
+        attempts.load(Ordering::SeqCst) > 0
+    })
+    .await;
+    let old: Id = world
+        .scalar(
+            "SELECT current_turn_id FROM threads WHERE node_id=$1",
+            thread,
+        )
+        .await;
+    let old_command: Id = sqlx::query_scalar(
+        "SELECT id FROM commands WHERE kind='turn.start' AND body->>'turn_id'=$1::text",
+    )
+    .bind(old)
+    .fetch_one(world.pool.pool())
+    .await
+    .unwrap();
+    world
+        .engine()
+        .interrupt(&caller, thread, old)
+        .await
+        .unwrap();
+    world.wait_turn(old, "interrupted").await;
+    world.wait_input(submitted.input.id, "pending").await;
+    let state: String = sqlx::query_scalar("SELECT state FROM commands WHERE id=$1")
+        .bind(old_command)
+        .fetch_one(world.pool.pool())
+        .await
+        .unwrap();
+    assert_eq!(state, "cancelled");
+    reject.store(false, Ordering::SeqCst);
+    world
+        .restart_api_using(|inner| {
+            Arc::new(AdmissionGap {
+                inner,
+                db: db.clone(),
+                clock: world.clock.clone(),
+                reject: reject.clone(),
+                attempts: attempts.clone(),
+            })
+        })
+        .await;
+    meanwhile(Duration::from_millis(300)).await;
+    assert_eq!(world.commands.issued_of("turn.start"), 0);
+    let queue = world.sync(thread).await.thread.queue;
+    assert!(queue.held);
+    world
+        .engine()
+        .resume_queue(&caller, thread, queue.revision)
+        .await
+        .unwrap();
+    let next = world.turn_start(thread, 0).await;
+    assert_ne!(next.turn_id, old);
+    assert_ne!(
+        world.commands.issued_commands("turn.start")[0].1.id,
+        old_command
+    );
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]

@@ -41,7 +41,7 @@ import { ProjectStar } from '@/features/project/ProjectStar';
 import { searchFromView, viewFromSearch } from '@/features/project/viewState';
 import type { Project as ProjectNode, Tag, TopicSort, TopicStatusFilter, ProjectView as PersonalProjectView } from '@/generated/api-types';
 import { useDebounced } from '@/lib/debounce';
-import { denial, holds } from '@/lib/permissions';
+import { canCreateIn, denial, holds } from '@/lib/permissions';
 import { useOrgTreeFeed } from '@/realtime/live';
 import { selectOrg } from '@/shell/org';
 import { Page, PageHeader, PlaceMark } from '@/shell/Page';
@@ -234,11 +234,11 @@ function ProjectScreen({ projectId, search, onSearch: navigate }: ProjectProps) 
   }
   const data = query.data;
   const place = placeOfNode(data);
-  const mayOpen = holds(data.access, 'project.interact');
+  const mayOpen = canCreateIn('project', data.access);
   const mayManage = holds(data.access, 'project.manage');
   const mayArchive = mayManage || holds(data.access, 'project.archive');
   const mayCreate = mayOpen && !data.archived;
-  const whyNot = data.archived ? t('places.project.archived') : denial(t, 'project.interact', data.name, data.owner);
+  const whyNot = data.archived ? t('places.project.archived') : denial(t, 'project.create_topics', data.name, data.owner);
 
   return (
     <Page>

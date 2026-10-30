@@ -88,6 +88,8 @@ const SESSION_ATTEMPTS: u32 = SESSION_REPAIRS + 1;
 pub enum InputAfter {
     /// It was taken (or was never in doubt): it stays as it is.
     Keep,
+    /// It was interrupted before delivery and returns without spending a failed-start attempt.
+    Return,
     /// It waits again where it stood, if the failure may be retried and it has
     /// not failed twice; otherwise it stays failed.
     Retry {
@@ -312,6 +314,7 @@ impl Engine {
         {
             let keep_trying = match end.input {
                 InputAfter::Keep => None,
+                InputAfter::Return => Some(true),
                 InputAfter::Retry { retryable } => Some(
                     retryable
                         && threads::count_failed_turns_of_input(&mut *unit.conn, input.id, turn.id)
@@ -368,6 +371,9 @@ impl Engine {
                 started: None,
             });
         }
+        // Earlier cleanup can stamp queue markers and approvals. Publish the
+        // thread row after those changes so readers see the whole end.
+        let seq = unit.stamp(thread_id).await?;
         threads::set_current(
             &mut *unit.conn,
             thread_id,
@@ -462,7 +468,7 @@ impl Engine {
     /// it returns when the turn has been handed to the harness, or has failed.
     pub(crate) async fn drive_start(&self, thread_id: Id) -> Result<(), EngineError> {
         let mut repairs: u32 = 0;
-        loop {
+        'driving: loop {
             if self.is_stopped() {
                 return Ok(());
             }
@@ -480,7 +486,8 @@ impl Engine {
             }
             let loaded = {
                 let mut conn = self.inner.db.acquire().await?;
-                self.load_start_snapshot(&mut conn, thread_id).await?
+                // Snapshot preparation walks shared material deeply; keep that future off the worker stack.
+                Box::pin(self.load_start_snapshot(&mut conn, thread_id)).await?
             };
             let mut snap = match loaded {
                 StartLoad::NoTurn => return Ok(()),
@@ -507,8 +514,8 @@ impl Engine {
             // that it began gets its own wait, counted from the latest moment the
             // command could have been answered (so that a restart counts the same),
             // and the turn is then given up as one that was not taken up in time.
-            for attempt in 0..=SESSION_REPAIRS {
-                let Some(info) = self
+            for attempt in repairs..=SESSION_REPAIRS {
+                let Some(mut info) = self
                     .inner
                     .commands
                     .status(ids::turn_start(snap.turn.id, attempt))
@@ -516,7 +523,77 @@ impl Engine {
                 else {
                     continue;
                 };
-                if matches!(info.outcome, Some(Outcome::Succeeded(_))) {
+                if snap.turn.interrupted_by.is_some() {
+                    return Ok(());
+                }
+                // Admission and link adoption are separate commits. A process
+                // can stop between them while the machine link stays up.
+                if info.stage == Stage::Queued {
+                    let due = info.issued_at
+                        + chrono::Duration::from_std(self.inner.config.start_timeout)
+                            .unwrap_or_else(|_| chrono::Duration::zero());
+                    if self.inner.clock.now() >= due {
+                        self.inner
+                            .commands
+                            .cancel(ids::turn_start(snap.turn.id, attempt))
+                            .await?;
+                        info.outcome = Some(Outcome::Expired);
+                    } else {
+                        if !self
+                            .reissue_admitted_start(&snap, ids::turn_start(snap.turn.id, attempt))
+                            .await?
+                        {
+                            return Ok(());
+                        }
+                        if let Some(current) = self
+                            .inner
+                            .commands
+                            .status(ids::turn_start(snap.turn.id, attempt))
+                            .await?
+                        {
+                            info = current;
+                        }
+                    }
+                }
+                let outcome = match info.outcome {
+                    Some(outcome) => outcome,
+                    None => {
+                        let due = info.issued_at
+                            + chrono::Duration::from_std(self.inner.config.start_timeout)
+                                .unwrap_or_else(|_| chrono::Duration::zero());
+                        let left = (due - self.inner.clock.now()).to_std().unwrap_or_default();
+                        match tokio::time::timeout(
+                            left,
+                            self.inner
+                                .commands
+                                .wait(ids::turn_start(snap.turn.id, attempt)),
+                        )
+                        .await
+                        {
+                            Ok(outcome) => outcome?,
+                            Err(_) => {
+                                self.inner
+                                    .commands
+                                    .cancel(ids::turn_start(snap.turn.id, attempt))
+                                    .await?;
+                                Outcome::Expired
+                            }
+                        }
+                    }
+                };
+                let record: Option<Id> = sqlx::query_scalar(
+                    "SELECT id FROM model_inputs WHERE node_id=$1 AND purpose='input' AND reference=$2 AND state IN ('prepared','uncertain')",
+                )
+                .bind(thread_id)
+                .bind(snap.turn.id.to_string())
+                .fetch_optional(&mut *self.inner.db.acquire().await?)
+                .await
+                .map_err(orch_db::DbError::from)?;
+                if let Some(record) = record {
+                    self.settle_model_input(thread_id, record, sent_of(&outcome))
+                        .await;
+                }
+                if matches!(&outcome, Outcome::Succeeded(_)) {
                     self.forget_notices_said(&snap).await;
                     self.forget_cut_said(&snap).await;
                     let now = self.inner.clock.now();
@@ -533,6 +610,19 @@ impl Engine {
                     }
                     return Ok(());
                 }
+                if matches!(&outcome, Outcome::Failed(_)) && snap.input.native_action.is_some() {
+                    self.revalidate_native_start(&snap, true).await?;
+                    return Ok(());
+                }
+                if matches!(&outcome, Outcome::Failed(failure)
+                    if failure.known() == Some(ErrorCode::SessionNotFound))
+                    && attempt < SESSION_REPAIRS
+                {
+                    repairs = attempt + 1;
+                    lock(&self.inner.sessions).closed(snap.segment.id);
+                    continue 'driving;
+                }
+                return self.fail_start(&snap, &outcome).await;
             }
             // The provider, where the turn goes through the forwarder: started on the machine
             // that keeps its key, unless the link's rows say that it was.
@@ -975,6 +1065,11 @@ impl Engine {
                 }
                 Err(error) => return Err(error),
             };
+            let Some(command) = self.admit_turn_start(&snap, command).await? else {
+                self.settle_model_input(thread_id, record, Sent::Unknown)
+                    .await;
+                return Ok(());
+            };
             self.inner.commands.issue(command).await?;
             let waited = tokio::time::timeout(
                 self.inner.config.start_timeout,
@@ -1014,6 +1109,178 @@ impl Engine {
                 },
             }
         }
+    }
+
+    /// Re-adopts a queued start from its original durable body and deadline.
+    async fn reissue_admitted_start(
+        &self,
+        snap: &StartSnapshot,
+        id: Id,
+    ) -> Result<bool, EngineError> {
+        let mut tx = self.db().begin().await?;
+        let Some(thread) = threads::lock(&mut tx, snap.thread.node_id).await? else {
+            return Ok(false);
+        };
+        let turn = threads::turn(&mut tx, snap.turn.id).await?;
+        let input = threads::input(&mut tx, snap.input.id).await?;
+        if thread.current_turn_id != Some(snap.turn.id)
+            || thread.current_segment_id != Some(snap.segment.id)
+            || thread.active_continuation_id != snap.input.continuation_id
+            || thread.execution_revision != snap.thread.execution_revision
+            || thread.deleted_at.is_some()
+            || thread.archived_at.is_some()
+            || turn.as_ref().is_none_or(|turn| {
+                turn.thread_id != thread.node_id
+                    || turn.segment_id != snap.segment.id
+                    || turn.input_id != snap.input.id
+                    || turn.state != turn_state::STARTING
+                    || turn.interrupted_by.is_some()
+            })
+            || input.as_ref().is_none_or(|input| {
+                input.thread_id != thread.node_id
+                    || input.continuation_id != thread.active_continuation_id
+                    || input.state != input_state::DELIVERING
+                    || input.turn_id != Some(snap.turn.id)
+            })
+        {
+            return Ok(false);
+        }
+        let Some(row) = orch_db::queries::link::command(&mut tx, id).await? else {
+            return Ok(false);
+        };
+        if row.state != "queued" {
+            return Ok(false);
+        }
+        let kind = match row.kind.as_str() {
+            "turn.start" => {
+                let body: TurnStart = serde_json::from_value(row.body.clone())?;
+                if body.thread_id != thread.node_id
+                    || body.turn_id != snap.turn.id
+                    || body.model != snap.turn.model
+                    || body.effort != snap.turn.effort
+                    || body.plan != snap.turn.plan
+                {
+                    return Err(EngineError::unreadable(
+                        "the retained turn start names another turn",
+                    ));
+                }
+                orch_link_contract::commands::CommandKind::TurnStart
+            }
+            "turn.start.fenced" => {
+                let body: orch_link_contract::continuations::TurnStartFenced =
+                    serde_json::from_value(row.body.clone())?;
+                if body.thread_id != thread.node_id
+                    || body.segment_id != snap.segment.id
+                    || body.turn.thread_id != thread.node_id
+                    || body.turn.turn_id != snap.turn.id
+                    || body.turn.model != snap.turn.model
+                    || body.turn.effort != snap.turn.effort
+                    || body.turn.plan != snap.turn.plan
+                {
+                    return Err(EngineError::unreadable(
+                        "the retained turn start names another lane",
+                    ));
+                }
+                orch_link_contract::commands::CommandKind::TurnStartFenced
+            }
+            _ => {
+                return Err(EngineError::unreadable(
+                    "the retained turn start has another kind",
+                ));
+            }
+        };
+        let key = SerialKey::Thread(thread.node_id);
+        if row.machine_id != snap.key.machine || row.serial_key() != key.wire().as_deref() {
+            return Err(EngineError::unreadable(
+                "the retained turn start has another recipient",
+            ));
+        }
+        let due = row.created_at
+            + chrono::Duration::from_std(self.inner.config.start_timeout)
+                .unwrap_or_else(|_| chrono::Duration::zero());
+        let command = Outgoing {
+            id,
+            machine: row.machine_id,
+            key,
+            kind,
+            body: row.body,
+            deadline: Some(Time::new(row.deadline_at)),
+        };
+        tx.commit().await.map_err(orch_db::DbError::from)?;
+        // Taking the lock may have consumed the remaining start time. The
+        // next supervisor pass cancels the row without issuing it.
+        if self.inner.clock.now() >= due {
+            return Ok(false);
+        }
+        self.inner.commands.issue(command).await?;
+        Ok(true)
+    }
+
+    /// Admits a start under the same thread lock as Stop, before it can be sent.
+    async fn admit_turn_start(
+        &self,
+        snap: &StartSnapshot,
+        mut command: Outgoing,
+    ) -> Result<Option<Outgoing>, EngineError> {
+        let mut tx = self.db().begin().await?;
+        let Some(thread) = threads::lock(&mut tx, snap.thread.node_id).await? else {
+            return Ok(None);
+        };
+        let turn = threads::turn(&mut tx, snap.turn.id).await?;
+        let input = threads::input(&mut tx, snap.input.id).await?;
+        if thread.current_turn_id != Some(snap.turn.id)
+            || thread.current_segment_id != Some(snap.segment.id)
+            || thread.active_continuation_id != snap.input.continuation_id
+            || thread.deleted_at.is_some()
+            || thread.archived_at.is_some()
+            || turn.as_ref().is_none_or(|turn| {
+                turn.state != turn_state::STARTING || turn.interrupted_by.is_some()
+            })
+            || input.as_ref().is_none_or(|input| {
+                input.state != input_state::DELIVERING || input.turn_id != Some(snap.turn.id)
+            })
+        {
+            return Ok(None);
+        }
+        let old = orch_db::queries::link::command(&mut tx, command.id).await?;
+        let deadline = old.as_ref().map_or_else(
+            || {
+                Time::new(
+                    self.inner.clock.now()
+                        + chrono::Duration::seconds(i64::from(command.kind.deadline_secs())),
+                )
+            },
+            |row| Time::new(row.deadline_at),
+        );
+        command.deadline = Some(deadline);
+        let key = command.key.wire();
+        orch_db::queries::link::insert_command(
+            &mut tx,
+            &orch_db::queries::link::NewCommand {
+                id: command.id,
+                machine_id: command.machine,
+                kind: command.kind.as_str(),
+                body: &command.body,
+                serial_key: key.as_deref(),
+                deadline_at: deadline.get(),
+            },
+            self.inner.clock.now(),
+        )
+        .await?;
+        let retained = orch_db::queries::link::command(&mut tx, command.id)
+            .await?
+            .ok_or_else(|| EngineError::unreadable("the admitted turn start disappeared"))?;
+        if retained.machine_id != command.machine
+            || retained.kind != command.kind.as_str()
+            || retained.serial_key() != key.as_deref()
+            || retained.body != command.body
+        {
+            return Err(EngineError::unreadable(
+                "the admitted turn start changed identity",
+            ));
+        }
+        tx.commit().await.map_err(orch_db::DbError::from)?;
+        Ok(Some(command))
     }
 
     /// Rechecks the loaded selector before file delivery; a changed mapping preserves the waiting input.
@@ -1461,7 +1728,7 @@ impl Engine {
             let Some(turn) = threads::turn(&mut *unit.conn, turn_id).await? else {
                 return Ok(());
             };
-            if turn.state != turn_state::STARTING {
+            if turn.state != turn_state::STARTING || turn.interrupted_by.is_some() {
                 return Ok(());
             }
             self.end_turn(
@@ -1513,7 +1780,7 @@ impl Engine {
             // Only a turn that the harness has not confirmed is a turn whose
             // start failed: one that has begun is running, whatever became of
             // the command that asked for it.
-            if turn.state != turn_state::STARTING {
+            if turn.state != turn_state::STARTING || turn.interrupted_by.is_some() {
                 return Ok(());
             }
             // A workspace's own harness configuration is a question, not an error of the thread's: asked once of
@@ -1951,8 +2218,38 @@ impl Engine {
         Ok(())
     }
 
-    /// Keeps the place of a steer's words in the timeline, under the thread's lock, while the input is still being
-    /// steered into that turn. Says whether it is (and so is to be sent).
+    /// Rechecks the author's authority for the running turn before native delivery.
+    async fn steer_authorized(
+        &self,
+        unit: &mut Unit<'_>,
+        thread: &ThreadRow,
+        turn: &TurnRow,
+        input: &InputRow,
+    ) -> Result<bool, EngineError> {
+        match self.check_input_author_driving(unit, thread, input).await {
+            Ok(()) => {}
+            Err(crate::inputs::InputError::Internal(error)) => return Err(error),
+            Err(_) => return Ok(false),
+        }
+        if let Some(author) = input.author_id
+            && crate::preflight::second_step_missing(unit.conn, author, thread.node_id).await?
+        {
+            return Ok(false);
+        }
+        let Some(caller) = crate::inputs::input_caller(unit, thread, input).await? else {
+            return Ok(false);
+        };
+        match self
+            .check_sender_for_turn(unit, &caller, thread, true, Some(turn))
+            .await
+        {
+            Ok(()) => Ok(true),
+            Err(crate::inputs::InputError::Internal(error)) => Err(error),
+            Err(_) => Ok(false),
+        }
+    }
+
+    /// Keeps a steer's words in the timeline before sending, under the thread's lock.
     async fn reserve_steer(
         &self,
         thread_id: Id,
@@ -1960,35 +2257,52 @@ impl Engine {
         input_id: Id,
     ) -> Result<bool, EngineError> {
         let mut tx = self.inner.db.begin().await?;
+        orch_db::queries::transaction_guard::lock_authority(&mut tx).await?;
         let (finished, steering) = {
             let mut unit = Unit::new(&mut tx, self.inner.clock.now());
-            if threads::lock(&mut *unit.conn, thread_id).await?.is_none() {
+            let Some(thread) = threads::lock(&mut *unit.conn, thread_id).await? else {
                 return Ok(false);
-            }
+            };
             let input = threads::input(&mut *unit.conn, input_id)
                 .await?
                 .filter(|input| {
                     input.state == input_state::DELIVERING && input.turn_id == Some(turn.id)
                 });
-            let steering = input.is_some();
+            let mut steering = false;
             if let Some(input) = input {
                 let seq = unit.stamp(thread_id).await?;
-                sqlx::query(
-                    "UPDATE thread_inputs SET state_detail='steering',seq_updated=$2 WHERE id=$1",
-                )
-                .bind(input.id)
-                .bind(seq)
-                .execute(&mut *unit.conn)
-                .await
-                .map_err(orch_db::DbError::from)?;
-                ingest::reserve_user_message(
-                    &mut unit,
-                    thread_id,
-                    turn.segment_id,
-                    Some(turn.id),
-                    &input,
-                )
-                .await?;
+                // Once this fence was crossed, a replay must keep the original
+                // decision: the command may already have reached the harness.
+                let allowed = input.state_detail.as_deref() == Some("steering")
+                    || Box::pin(self.steer_authorized(&mut unit, &thread, turn, &input)).await?;
+                if allowed {
+                    sqlx::query(
+                        "UPDATE thread_inputs SET state_detail='steering',seq_updated=$2 WHERE id=$1",
+                    )
+                    .bind(input.id)
+                    .bind(seq)
+                    .execute(&mut *unit.conn)
+                    .await
+                    .map_err(orch_db::DbError::from)?;
+                    ingest::reserve_user_message(
+                        &mut unit,
+                        thread_id,
+                        turn.segment_id,
+                        Some(turn.id),
+                        &input,
+                    )
+                    .await?;
+                    steering = true;
+                } else {
+                    threads::return_input_in_place(
+                        &mut *unit.conn,
+                        input.id,
+                        &[input_state::DELIVERING],
+                        seq,
+                    )
+                    .await?;
+                    unit.wake(thread_id);
+                }
             }
             (unit.finish().await?, steering)
         };
@@ -2296,7 +2610,9 @@ impl Engine {
                 TurnEnd {
                     state: turn_state::INTERRUPTED,
                     error,
-                    input: if resource_pause {
+                    input: if turn.state == turn_state::STARTING {
+                        InputAfter::Return
+                    } else if resource_pause {
                         InputAfter::Keep
                     } else {
                         InputAfter::Retry { retryable: true }
@@ -2459,7 +2775,8 @@ impl Engine {
         self.drive_goal(thread_id).await?;
         self.recheck_waiting(thread_id).await?;
         self.drive_preparation(thread_id).await?;
-        self.drive_start(thread_id).await?;
+        // A start includes the whole session setup; reconciliation should not hold it inline on the worker stack.
+        Box::pin(self.drive_start(thread_id)).await?;
         self.drive_steers(thread_id).await?;
         self.drive_interrupt(thread_id).await?;
         self.drive_approvals(thread_id).await?;

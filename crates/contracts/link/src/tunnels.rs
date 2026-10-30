@@ -298,6 +298,12 @@ pub struct TicketClaims {
     /// and no other; present for an executor that has several.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub tool_set: Option<String>,
+    /// The environment whose executor or tool server this ticket may reach.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub tool_environment_id: Option<Id>,
+    /// The generation of that environment when the tool ticket was issued.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub tool_environment_generation: Option<i64>,
     /// Port admission facts, absent from every other tunnel kind.
     #[serde(flatten, default, skip_serializing_if = "Option::is_none")]
     pub port: Option<crate::ports::PortTicketClaims>,
@@ -1077,6 +1083,8 @@ mod tests {
             service: "exec/codex-exec-server".into(),
             thread_id: Some(id(THING)),
             tool_set: None,
+            tool_environment_id: None,
+            tool_environment_generation: None,
             port: None,
             exp: 1_791_500_000,
         }

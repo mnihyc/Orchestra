@@ -34,8 +34,7 @@ async fn start(world: &World) -> Seeded {
     let made = seeds::seed(
         &mut transaction,
         &Release {
-            environment_image: "registry.example/orch-env-base:0.1.0",
-            environment_image_digest: None,
+            version: "0.1.0",
             adapters: ADAPTERS,
         },
         world.now(),

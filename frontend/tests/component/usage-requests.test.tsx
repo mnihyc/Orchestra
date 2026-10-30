@@ -83,6 +83,21 @@ for(const language of ['en','zh-CN'] as const)it(`names a third program from a r
   expect(screen.getByRole('option',{name})).toBeVisible();
 });
 
+for (const language of ['en', 'zh-CN'] as const) it(`names an access program while filtering by its original id in ${language}`, async () => {
+  await setLocale(language); useAppearance.setState({ locale: language }); fake.narrow = true;
+  fake.rows = [requestRow({ access_program: 'daybreakBlue' })];
+  const changed = vi.fn();
+  show(<Requests scope={{ kind: 'me' }} search={{}} span={span} onSearch={changed} />);
+  const name = language === 'en' ? 'Daybreak Blue' : 'Daybreak 蓝';
+  const table = await screen.findByRole('table', { name: i18n.t('usagePerf.requestsView') });
+  expect(await within(table).findByText(name)).toBeVisible();
+  expect(table).not.toHaveTextContent('daybreakBlue');
+  await userEvent.click(screen.getByRole('button', { name: i18n.t('usagePerf.filters') }));
+  await userEvent.click(screen.getByRole('combobox', { name: i18n.t('usage.chip.program') }));
+  await userEvent.click(screen.getByRole('option', { name }));
+  expect(changed).toHaveBeenCalledWith({ program: 'daybreakBlue' });
+});
+
 it('keeps unreported counts distinct from zero in the compact row', async () => {
   fake.narrow = true;
   fake.rows = [requestRow({ running: true, timing: timingFixture({ reported_tokens: null, outcome: { state: 'unread' } }) })];

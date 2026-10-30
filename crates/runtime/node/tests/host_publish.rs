@@ -147,6 +147,8 @@ async fn one_host_template_serves_two_tcp_callers_and_two_udp_senders_then_close
                 service: format!("port/{jti}"),
                 thread_id: None,
                 tool_set: None,
+                tool_environment_id: None,
+                tool_environment_generation: None,
                 exp: (clock.time().unix_millis() / 1000) + 300,
                 port: Some(PortTicketClaims {
                     environment_id: environment,

@@ -1021,6 +1021,75 @@ async fn withdrawn_system_issuers_cannot_admit_existing_or_new_accounts() {
 }
 
 #[tokio::test]
+async fn a_multi_use_system_link_cannot_register_or_admit_more_people_after_its_issuer_is_demoted()
+{
+    use orch_api_contract::admin::{AdminUserUpdate, AdminUserUpdateBody};
+    let world = World::new().await;
+    let issuer = places::admin(&world, "issuer").await;
+    let keeper = places::admin(&world, "keeper").await;
+    let recipient = person(&world, "recipient").await;
+    world.set("orgs.personal_enabled", json!(true)).await;
+    let invitation = invite(&world, &issuer, &system_invitation(3)).await.ok();
+    register_from_invitation(&world, "first-person", &invitation.token)
+        .await
+        .ok();
+    let homes_before: i64 =
+        sqlx::query_scalar("SELECT count(*) FROM orgs WHERE org_kind = 'personal'")
+            .fetch_one(&world.db.pool)
+            .await
+            .unwrap();
+    world
+        .app
+        .call(AdminUserUpdate, &[&issuer.id()])
+        .token(&keeper.token)
+        .body(&AdminUserUpdateBody {
+            status: None,
+            is_system_admin: Some(false),
+            acknowledge_admin_risk: Some(true),
+        })
+        .send()
+        .await
+        .ok();
+    let existing = accept(&world, &recipient, &invitation.token)
+        .await
+        .problem();
+    assert_eq!(existing.code, ErrorCode::Gone);
+    assert_eq!(existing.extra["reason"], "invitation_issuer_authority_lost");
+    let preview = world
+        .app
+        .call(InvitationLookup, &[&invitation.token])
+        .send()
+        .await
+        .problem();
+    assert_eq!(preview.extra["reason"], "invitation_issuer_authority_lost");
+    let registration = register_from_invitation(&world, "blocked-new", &invitation.token)
+        .await
+        .problem();
+    assert_eq!(registration.code, ErrorCode::RegistrationInviteRequired);
+    assert_eq!(
+        registration.extra["reason"],
+        "invitation_issuer_authority_lost"
+    );
+    let accounts: i64 =
+        sqlx::query_scalar("SELECT count(*) FROM users WHERE username = 'blocked-new'")
+            .fetch_one(&world.db.pool)
+            .await
+            .unwrap();
+    let homes_after: i64 =
+        sqlx::query_scalar("SELECT count(*) FROM orgs WHERE org_kind = 'personal'")
+            .fetch_one(&world.db.pool)
+            .await
+            .unwrap();
+    let (uses, receipts): (i32, i64) = sqlx::query_as(
+        "SELECT uses, (SELECT count(*) FROM invitation_uses WHERE invitation_id = $1) FROM invitations WHERE id = $1",
+    ).bind(invitation.invitation.id).fetch_one(&world.db.pool).await.unwrap();
+    assert_eq!(
+        (accounts, homes_after, uses, receipts),
+        (0, homes_before, 1, 1)
+    );
+}
+
+#[tokio::test]
 async fn target_invitation_registration_requires_explicit_acceptance_and_commits_one_membership() {
     use orch_api_contract::auth::AuthRegisterReply;
     let world = World::new().await;

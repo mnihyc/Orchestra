@@ -24,7 +24,7 @@ Enable makes the resource available again. Run the waiting messages starts unche
 
 Check it to run eligible waiting messages in their original order. Each message keeps its author and passes the normal use checks. A queue held by a person's Stop stays held.
 
-Checking it also continues the latest turns that Disable stopped. Each gets a visible Continue as the original author, before later queued messages. If that author can no longer run it, the task stays stopped and its history says why. The person enabling the resource does not become its author.
+Checking it also continues the latest turns that Disable stopped. Each started turn gets a visible Continue as the original author, before later queued messages. If the turn had not begun, its original input runs instead. If that author can no longer run it, the task stays stopped and its history says why. The person enabling the resource does not become its author.
 
 The count shows messages, threads and when the waiting began. Open it by hovering, focusing or tapping to see the thread names you may view. The last line counts the remaining threads.
 

@@ -401,7 +401,7 @@ describe('what the menu of a folder and of a topic offers', () => {
   const ids = (list: readonly MenuEntry[]) => list.flatMap((one) => ('id' in one && one.type !== 'separator' && one.type !== 'label' ? [one.id] : []));
 
   it('lets whoever opens topics in a project or a folder make a topic or a folder there, and nobody else', () => {
-    expect(ids(entries('project', ['project.view', 'project.interact'], {}, true))).toEqual(expect.arrayContaining(['new-topic', 'new-folder']));
+    expect(ids(entries('project', ['project.view', 'project.interact', 'project.create_topics'], {}, true))).toEqual(expect.arrayContaining(['new-topic', 'new-folder']));
     expect(ids(entries('project', ['project.view']))).not.toContain('new-folder');
   });
 

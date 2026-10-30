@@ -9,6 +9,7 @@ mod common;
 
 use std::collections::HashMap;
 use std::io::Write;
+#[cfg(unix)]
 use std::os::unix::fs::PermissionsExt;
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex};
@@ -204,6 +205,7 @@ async fn a_program_is_downloaded_verified_and_published_whole_and_executable() {
     assert!(path.ends_with("tools/codex/0.160.1"));
     let file = path.join("codex");
     assert_eq!(std::fs::read(&file).unwrap(), program);
+    #[cfg(unix)]
     assert_ne!(
         std::fs::metadata(&file).unwrap().permissions().mode() & 0o111,
         0,
@@ -220,6 +222,7 @@ async fn a_program_is_downloaded_verified_and_published_whole_and_executable() {
     assert!(std::fs::read_dir(partial).unwrap().next().is_none());
 }
 
+#[cfg(unix)]
 #[tokio::test]
 async fn newly_published_cache_paths_cannot_be_written_by_other_users() {
     let program = b"#!/bin/sh\necho hello\n".to_vec();
@@ -258,6 +261,7 @@ async fn an_existing_cache_entry_is_not_relabelled_or_replaced() {
     let (cache, _dir) = cache();
     let old = cache.dir().join("codex/1");
     std::fs::create_dir_all(&old).unwrap();
+    #[cfg(unix)]
     std::fs::set_permissions(&old, std::fs::Permissions::from_mode(0o775)).unwrap();
     std::fs::write(old.join("codex"), &program).unwrap();
     std::fs::write(old.join(".complete"), format!("{}\n", sha256(&program))).unwrap();
@@ -269,6 +273,7 @@ async fn an_existing_cache_entry_is_not_relabelled_or_replaced() {
         .await
         .unwrap();
     assert_eq!(result, old);
+    #[cfg(unix)]
     assert_eq!(
         std::fs::metadata(&old).unwrap().permissions().mode() & 0o777,
         0o775
@@ -481,6 +486,7 @@ async fn an_archive_is_unpacked_with_its_files_and_their_modes() {
         .await
         .unwrap();
     assert_eq!(std::fs::read(path.join("lib/data.txt")).unwrap(), b"data");
+    #[cfg(unix)]
     assert_ne!(
         std::fs::metadata(path.join("bin/codex"))
             .unwrap()
@@ -502,6 +508,7 @@ async fn an_archive_is_unpacked_with_its_files_and_their_modes() {
     assert_eq!(std::fs::read(path.join("README")).unwrap(), b"read me");
 }
 
+#[cfg(unix)]
 #[tokio::test]
 async fn nothing_in_an_unpacked_archive_can_change_who_runs_it_or_be_written_by_anyone_else() {
     let archive = tar_gz(&[

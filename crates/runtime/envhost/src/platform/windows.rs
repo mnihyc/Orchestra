@@ -14,7 +14,8 @@
 //!   at once as `Kill` does, and `Int`, `Stop` and `Continue` are refused, which is why the
 //!   environment says that processes cannot be held still here.
 //! - There are no process groups and no sessions: a tree is found by parentage alone, and a
-//!   group cannot be signalled.
+//!   group cannot be signalled. Since processes cannot be suspended, a child created between
+//!   the last tree scan and its parent ending can escape that scan.
 //!
 //! This module has been type-checked and linted for `x86_64-pc-windows-gnu` and never run.
 

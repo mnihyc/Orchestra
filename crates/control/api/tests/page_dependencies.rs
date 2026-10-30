@@ -121,6 +121,10 @@ async fn a_places_dependencies_follow_its_inherited_defaults_and_its_private_def
     let environment = w
         .thing("environment", w.maker, w.topic, "Private main")
         .await;
+    w.thing_row("environment", environment, P::EnvironmentUse, false)
+        .await;
+    w.thing_row("environment", environment, P::EnvironmentManage, false)
+        .await;
     setting(&w, w.project, "agent.default_provider_id", json!(provider)).await;
     setting(&w, w.project, "agent.default_agent_id", json!(profile)).await;
     setting(&w, w.project, "env.template_id", json!(template)).await;
@@ -142,7 +146,7 @@ async fn a_places_dependencies_follow_its_inherited_defaults_and_its_private_def
             .depends
             .iter()
             .any(|each| each.object.id == environment
-                && each.permission == "environment.manage"
+                && each.permission == "environment.use"
                 && !each.can_give)
     );
     assert!(

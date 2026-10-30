@@ -31,9 +31,9 @@ export function DirectorySign({ environmentId, directory }: { environmentId: str
   });
   if (!asked || settled !== directory || found.isPending) return null;
   if (found.data !== undefined) {
-    return found.data.type === 'file'
-      ? <span className="text-danger-text" data-directory-sign="file">{t('start.where.directoryIsFile')}</span>
-      : <span className="text-success-text" data-directory-sign="exists">{t('start.where.directoryExists')}</span>;
+    return found.data.type === 'dir'
+      ? <span className="text-success-text" data-directory-sign="exists">{t('start.where.directoryExists')}</span>
+      : <span className="text-danger-text" data-directory-sign="file">{t('start.where.directoryIsFile')}</span>;
   }
   return found.error instanceof ApiError && found.error.status === 404
     ? <span className="text-text-muted" data-directory-sign="new">{t('start.where.directoryNew')}</span>

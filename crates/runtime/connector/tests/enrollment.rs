@@ -134,8 +134,9 @@ async fn a_connector_given_a_token_enrolls_then_holds_its_session_and_says_what_
     assert!(config.endpoints.is_empty());
     assert_eq!(roles_of(&config), [Role::Agent]);
     let mut config = config;
-    // The owner offers /tmp, their own value as a file that names the key makes it.
-    config.environment.roots = vec!["/tmp".to_owned()];
+    // The owner offers the test's native temporary directory.
+    let offered_root = std::env::temp_dir().to_string_lossy().into_owned();
+    config.environment.roots = vec![offered_root.clone()];
     config
         .policy
         .local_keys
@@ -204,7 +205,7 @@ async fn a_connector_given_a_token_enrolls_then_holds_its_session_and_says_what_
     assert!(facts["cpus"].as_u64().unwrap() >= 1);
     assert_eq!(
         facts["policy"]["environment.roots"],
-        serde_json::json!(["/tmp"]),
+        serde_json::json!([offered_root]),
         "a machine a person connected reports the policy of its owner"
     );
     assert!(controller.violations().is_empty());

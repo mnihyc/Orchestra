@@ -110,9 +110,9 @@ function permissionsOf(kind: NodeKind, role: Role | null, system: boolean): stri
     case 'interactor':
       return base;
     case 'developer':
-      return [...base, ...(kind === 'org' ? ['org.interact'] : kind === 'project' ? ['project.interact'] : kind === 'topic' ? ['topic.interact', 'topic.manage', 'topic.archive'] : ['thread.interact', 'thread.manage', 'thread.archive'])];
+      return [...base, ...(kind === 'org' ? ['org.interact'] : kind === 'project' ? ['project.interact', 'project.create_topics'] : kind === 'topic' ? ['topic.interact', 'topic.start_threads', 'topic.manage', 'topic.archive'] : ['thread.interact', 'thread.manage', 'thread.archive'])];
     default:
-      return [...base, ...own(['interact', 'manage', 'archive']), ...crosses(['members.manage']), 'usage.view', 'usage.manage', 'usage.bypass', 'access.manage', 'access.own', 'chat.manage', 'settings.manage', 'audit.view', ...(kind === 'org' ? ['directs.view'] : [])];
+      return [...base, ...own(['interact', 'manage', 'archive']), ...(kind === 'project' ? ['project.create_topics'] : kind === 'topic' ? ['topic.start_threads'] : []), ...crosses(['members.manage']), 'usage.view', 'usage.manage', 'usage.bypass', 'access.manage', 'access.own', 'chat.manage', 'settings.manage', 'audit.view', ...(kind === 'org' ? ['directs.view'] : [])];
   }
 }
 
@@ -1178,7 +1178,7 @@ export class Places {
 
   makeTopic(person: Person, projectId: string, body: Record<string, unknown>): Topic {
     this.node(person, projectId);
-    this.need(person, projectId, 'project.interact');
+    this.need(person, projectId, 'project.create_topics');
     const given = typeof body.name === 'string' ? body.name.trim() : '';
     const name = given === '' ? 'New topic' : given;
     const row = this.fresh('topic', name, projectId);
@@ -1452,7 +1452,7 @@ export class Places {
 
   /** What the one who moves something must hold where it goes: the right to make that kind of thing there. */
   private needsWhereItGoes(moved: TreeNode, target: TreeNode): string {
-    if (moved.kind === 'topic') return 'project.interact';
+    if (moved.kind === 'topic') return 'project.create_topics';
     if (moved.kind === 'project') return target.kind === 'org' ? 'org.interact' : 'project.interact';
     return 'org.manage';
   }

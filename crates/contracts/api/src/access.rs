@@ -1468,6 +1468,9 @@ pub struct AccessRequestCreateBody {
     pub items: Vec<AccessRequestItem>,
     /// Why.
     pub reason: String,
+    /// The proposed end of the access, or no end when omitted.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub expires_at: Option<Time>,
     /// Shown to each approver to explain why they were asked: the thread that the person was
     /// attempting to act on.
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -1552,6 +1555,20 @@ mod tests {
         );
     }
     use serde_json::json;
+
+    #[test]
+    fn an_access_request_can_propose_an_end_or_leave_it_open() {
+        let timed = json!({
+            "items": [{"object":{"kind":"thread","id":"0199d1a8-7f3c-7a1e-8b3a-1c2d3e4f5a6b"},"permissions":["thread.view"]}],
+            "reason":"For the review", "expires_at":"2026-11-02T12:00:00.000Z"
+        });
+        let body: AccessRequestCreateBody = serde_json::from_value(timed.clone()).unwrap();
+        assert_eq!(serde_json::to_value(body).unwrap(), timed);
+        let open = json!({"items":[], "reason":""});
+        let body: AccessRequestCreateBody = serde_json::from_value(open.clone()).unwrap();
+        assert!(body.expires_at.is_none());
+        assert_eq!(serde_json::to_value(body).unwrap(), open);
+    }
 
     #[test]
     fn administration_keeps_its_place_and_system_ownership_keeps_its_distinct_cause() {

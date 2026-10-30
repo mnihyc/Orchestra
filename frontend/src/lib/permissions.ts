@@ -17,6 +17,12 @@ export function holds(held: Held, permission: string): boolean {
   return held?.permissions.includes(permission) ?? false;
 }
 
+/** The API reports the effective creation permission, including grants through a higher level. */
+export function canCreateIn(kind: 'project' | 'topic', held: Held): boolean {
+  const right = kind === 'project' ? 'project.create_topics' : 'topic.start_threads';
+  return holds(held, right);
+}
+
 /** What the holder of a node's kind may do with it, from the permissions of that kind and the two that cross kinds. */
 export function abilities(kind: NodeKind, held: Held) {
   return {
@@ -62,6 +68,10 @@ export function permissionDenial(t: TFunction, permission: string, place: string
       return t('access.refusal.view', { place });
     case 'org.interact': case 'project.interact': case 'topic.interact': case 'thread.interact':
       return t('access.refusal.interact', { place });
+    case 'project.create_topics':
+      return t('access.refusal.createTopics', { place });
+    case 'topic.start_threads':
+      return t('access.refusal.startThreads', { place });
     case 'org.archive': case 'project.archive': case 'topic.archive': case 'thread.archive':
       return t('access.refusal.archive', { place });
     case 'doc.edit':

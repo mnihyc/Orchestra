@@ -93,6 +93,30 @@ impl TicketSigner {
 
     /// Makes and signs the ticket that `request` asks for.
     pub fn issue(&self, request: &TicketRequest) -> Result<String, PkiError> {
+        self.issue_with_environment(request, None)
+    }
+
+    /// Signs a tool ticket for one environment on the destination machine.
+    pub fn issue_for_tool(
+        &self,
+        request: &TicketRequest,
+        environment: Id,
+        generation: i64,
+    ) -> Result<String, PkiError> {
+        if generation < 0 || !matches!(request.service, Service::Exec { .. } | Service::Mcp { .. })
+        {
+            return Err(PkiError::Signature(
+                "a tool ticket needs an environment and a nonnegative generation".to_owned(),
+            ));
+        }
+        self.issue_with_environment(request, Some((environment, generation)))
+    }
+
+    fn issue_with_environment(
+        &self,
+        request: &TicketRequest,
+        environment: Option<(Id, i64)>,
+    ) -> Result<String, PkiError> {
         let claims = TicketClaims {
             jti: new_id(),
             kind: request.service.kind(),
@@ -101,6 +125,8 @@ impl TicketSigner {
             service: request.service.to_string(),
             thread_id: request.thread_id,
             tool_set: request.tool_set.clone(),
+            tool_environment_id: environment.map(|(id, _)| id),
+            tool_environment_generation: environment.map(|(_, generation)| generation),
             port: None,
             exp: request.expires_at.unix_millis().div_euclid(SECOND_MILLIS),
         };

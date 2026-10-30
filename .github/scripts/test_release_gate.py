@@ -1,12 +1,18 @@
 """Release gates refuse misleading publication and preserve verified architecture inputs."""
 
 import json
+import hashlib
+import os
 from pathlib import Path
+import sys
 import tempfile
 import unittest
+from unittest.mock import patch
+import subprocess
 
-from release_assemble import assemble
+from release_assemble import assemble, assemble_checked
 from release_gate import compare, eligibility, waivers
+from release_publish import check_draft_assets, check_existing_draft, main as publish
 
 HEAD = "a" * 40
 
@@ -47,6 +53,61 @@ class ReleaseGateTests(unittest.TestCase):
         with self.assertRaisesRegex(ValueError, "no reason"):
             waivers("v1.2.3\n")
 
+    def test_completing_a_draft_checks_its_tag_not_the_tag_creation_default(self):
+        draft = {"draft": True, "target_commitish": "main"}
+        check_existing_draft(draft, True, HEAD, HEAD)
+        for current, published, tagged in [({"draft": False}, True, HEAD), (draft, False, HEAD), (draft, True, "b" * 40)]:
+            with self.subTest(current=current, published=published, tagged=tagged), self.assertRaises(ValueError):
+                check_existing_draft(current, published, tagged, HEAD)
+
+    def test_an_existing_published_release_is_refused_before_any_image_is_published(self):
+        with tempfile.TemporaryDirectory() as name:
+            directory = Path(name)
+            (directory / "version.json").write_text(json.dumps({"tag": "v1.2.3", "version": "1.2.3", "commit": HEAD}))
+            def command(args, **_kwargs):
+                if args[0] == "cargo":
+                    return subprocess.CompletedProcess(args, 0)
+                if args[0] == "gh":
+                    return subprocess.CompletedProcess(args, 0, json.dumps({"draft": False, "assets": []}))
+                self.fail(f"an image was touched before the release was checked: {args}")
+            argv = ["release_publish.py", "--release", str(directory), "--repo", "example/orch", "--images", str(directory)]
+            with patch.object(sys, "argv", argv), patch.dict(os.environ, {"PUBLISH_IMAGES": "true"}), \
+                    patch("release_publish.subprocess.run", side_effect=command), patch("release_publish.run", return_value=json.dumps({"sha": HEAD})):
+                with self.assertRaisesRegex(ValueError, "existing release"):
+                    publish()
+
+    def test_an_existing_draft_has_exactly_the_verified_assets(self):
+        with tempfile.TemporaryDirectory() as name:
+            directory = Path(name)
+            (directory / "version.json").write_text("{}")
+            (directory / "payload").write_bytes(b"release bytes")
+            digest = "sha256:" + hashlib.sha256(b"release bytes").hexdigest()
+            draft = {"assets": [{"name": "version.json"}, {"name": "payload", "digest": digest}]}
+            check_draft_assets(draft, directory)
+            with self.assertRaisesRegex(ValueError, "asset set"):
+                check_draft_assets({"assets": draft["assets"] + [{"name": "unreviewed"}]}, directory)
+            with self.assertRaisesRegex(ValueError, "asset set"):
+                check_draft_assets({"assets": draft["assets"][:-1]}, directory)
+            (directory / "payload").write_bytes(b"different bytes")
+            with self.assertRaisesRegex(ValueError, "draft asset differs"):
+                check_draft_assets(draft, directory)
+
+    def test_an_unavailable_release_api_does_not_start_image_publication(self):
+        with tempfile.TemporaryDirectory() as name:
+            directory = Path(name)
+            (directory / "version.json").write_text(json.dumps({"tag": "v1.2.3", "version": "1.2.3", "commit": HEAD}))
+            def command(args, **_kwargs):
+                if args[0] == "cargo":
+                    return subprocess.CompletedProcess(args, 0)
+                if args[0] == "gh":
+                    return subprocess.CompletedProcess(args, 1, "", "service unavailable")
+                self.fail(f"an image was touched while release status was unknown: {args}")
+            argv = ["release_publish.py", "--release", str(directory), "--repo", "example/orch", "--images", str(directory)]
+            with patch.object(sys, "argv", argv), patch.dict(os.environ, {"PUBLISH_IMAGES": "true"}), \
+                    patch("release_publish.subprocess.run", side_effect=command):
+                with self.assertRaisesRegex(ValueError, "could not be checked"):
+                    publish()
+
 
 class ArchitectureAssemblyTests(unittest.TestCase):
     def inputs(self, directory):
@@ -85,6 +146,27 @@ class ArchitectureAssemblyTests(unittest.TestCase):
             (root / "aarch64/orch-frontend-dist.tar.gz").write_bytes(b"another build")
             with self.assertRaisesRegex(ValueError, "shared asset"):
                 assemble(root, directory / "different")
+
+    def test_two_packages_for_the_same_processor_do_not_make_a_complete_release(self):
+        with tempfile.TemporaryDirectory() as name:
+            directory = Path(name)
+            root = self.inputs(directory)
+            path = root / "aarch64/version.json"
+            listing = json.loads(path.read_text())
+            listing["assets"][0]["name"] = "orch-server-linux-x86_64.zip"
+            path.write_text(json.dumps(listing))
+            with self.assertRaisesRegex(ValueError, "different Linux server architecture"):
+                assemble(root, directory / "duplicate")
+
+    def test_a_damaged_download_is_refused_before_a_new_manifest_can_bless_it(self):
+        with tempfile.TemporaryDirectory() as name:
+            directory = Path(name)
+            root = self.inputs(directory)
+            out = directory / "release"
+            with patch("release_assemble.subprocess.run", side_effect=subprocess.CalledProcessError(1, "check")):
+                with self.assertRaises(subprocess.CalledProcessError):
+                    assemble_checked(root, out, "https://release.example/v1.2.3")
+            self.assertFalse(out.exists())
 
 
 if __name__ == "__main__":

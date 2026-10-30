@@ -10,6 +10,7 @@ import { contextChoices, firstStep, formatContext, readTokens, stepBelow } from 
 import { groupPattern, isGroupName, listNames, patternNames } from '@/features/models/patterns';
 import { faultsOf, formOf, parametersOf, refusedAt } from '@/features/resources/providers/entry';
 import type { ModelParameters, Problem, ThreadParameters } from '@/generated/api-types';
+import { setLocale } from '@/i18n';
 
 /** A translation that says its key and what it was given, so that a test sees which sentence was chosen. */
 const t = ((key: string, options?: Record<string, unknown>) => (options === undefined ? key : `${key} ${JSON.stringify(options)}`)) as unknown as TFunction;
@@ -345,6 +346,14 @@ describe("what a turn ran with, as its footer says it", () => {
 
   it('names the speed, the program and the context it was started with, in that order', () => {
     expect(ranWithParts({ context: 400_000, cyber_access_program: 'Daybreak Blue', service_tier: 'fast', context_window: 272_000 }, defs, 'sol', options, 'en-US')).toEqual(['Fast', 'Daybreak Blue', '400K']);
+  });
+
+  it('names recorded access programs in the reader’s language and retains unknown ids', async () => {
+    expect(ranWithParts({ cyber_access_program: 'daybreakBlue' }, defs, 'sol', options, 'en')).toEqual(['Daybreak Blue']);
+    await setLocale('zh-CN');
+    expect(ranWithParts({ cyber_access_program: 'standard' }, defs, 'sol', options, 'zh-CN')).toEqual(['标准']);
+    await setLocale('en');
+    expect(ranWithParts({ cyber_access_program: 'daybreakGreen' }, defs, 'sol', options, 'en')).toEqual(['daybreakGreen']);
   });
 
   it('says nothing of what it did not record, and nothing that no definition tells apart', () => {

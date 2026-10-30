@@ -8,6 +8,7 @@
 import { type QueryClient, useMutation, useQuery, useQueryClient } from '@tanstack/react-query';
 import { useViewShown } from '@/features/workbench/viewOpening';
 import { useState } from 'react';
+import { useTranslation } from 'react-i18next';
 import { modelDisplayName } from '@/features/models/names';
 import { useShallow } from 'zustand/react/shallow';
 
@@ -123,6 +124,7 @@ export interface RunsWith {
 
 /** What a thread runs with. `withOwn` reads the thread's own choices as well, for a control that is opened. */
 export function useRunsWith(thread: Thread, withOwn: boolean): RunsWith {
+  const { t } = useTranslation();
   const shown = useViewShown();
   const queryClient = useQueryClient();
   // A thread that is not bound to anything yet runs with nothing to choose.
@@ -163,7 +165,7 @@ export function useRunsWith(thread: Thread, withOwn: boolean): RunsWith {
   };
 
   const own = withOwn ? ownChoices(settings.data) : null;
-  const states = parameters.data === undefined ? [] : statesOf(parameters.data, own);
+  const states = parameters.data === undefined ? [] : statesOf(parameters.data, own, t);
 
   const choose = useMutation({
     mutationFn: (change: { state: State; value: string | number | null }) => changeThreadChoices(thread.id, (choices) => withChoice(choices, change.state, change.value), settingOf(settings.data, 'agent.params')),

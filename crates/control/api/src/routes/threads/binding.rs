@@ -806,6 +806,8 @@ async fn providers_of(
 /// The reason an environment the caller sees, and may not start a thread in, is listed with: asked for
 /// through an access request, as a missing Use is.
 const ENVIRONMENT_USE_REQUIRED: &str = "environment_use_required";
+/// Moving an existing thread also needs management of its destination.
+const ENVIRONMENT_MANAGE_REQUIRED: &str = "environment_manage_required";
 
 /// The environments the caller may start a thread in, this topic's first, each with what a thread would
 /// get there; then those they only see, with the reason that asks for their Use.
@@ -815,6 +817,7 @@ async fn environments_of(
     app: &crate::state::AppState,
     topic: Id,
     thread: Id,
+    required: Permission,
 ) -> ApiResult<Vec<BindingEnvironment>> {
     let page = Page {
         after: None,
@@ -824,15 +827,19 @@ async fn environments_of(
         owners_name_outsiders: false,
         shared_subscriptions: None,
     });
-    let managed = usable::usable_list(
-        conn,
-        principal,
-        ResourceKind::Environment,
-        Some(thread),
-        &policies,
-        page,
-    )
-    .await
+    let managed = if required == Permission::EnvironmentManage {
+        usable::manageable_environments(conn, principal, Some(thread), &policies, page).await
+    } else {
+        usable::usable_list(
+            conn,
+            principal,
+            ResourceKind::Environment,
+            Some(thread),
+            &policies,
+            page,
+        )
+        .await
+    }
     .map_err(ApiError::internal)?;
     let mut ids: Vec<Id> = managed.items.iter().map(|each| each.resource.id).collect();
     let placeable: std::collections::HashSet<Id> = ids.iter().copied().collect();
@@ -845,11 +852,12 @@ async fn environments_of(
     )
     .await
     .map_err(ApiError::internal)?;
+    let already: std::collections::HashSet<Id> = ids.iter().copied().collect();
     ids.extend(
         seen.items
             .iter()
             .map(|each| each.resource.id)
-            .filter(|id| !placeable.contains(id)),
+            .filter(|id| !already.contains(id)),
     );
     let rows = environment_queries::environments(conn, &ids).await?;
     let ids: Vec<Id> = rows.iter().map(|row| row.id).collect();
@@ -896,7 +904,11 @@ async fn environments_of(
         } else if row.status == "failed" || row.status == "removed" {
             Some("environment_failed")
         } else if !placeable.contains(&row.id) {
-            Some(ENVIRONMENT_USE_REQUIRED)
+            Some(if required == Permission::EnvironmentUse {
+                ENVIRONMENT_USE_REQUIRED
+            } else {
+                ENVIRONMENT_MANAGE_REQUIRED
+            })
         } else {
             None
         };
@@ -972,14 +984,14 @@ fn covers(entry: &Holder, who: &Holder) -> bool {
     }
 }
 
-/// The row that makes a choice what it is on a kind of thing: the level of its area. An environment
-/// has no middle level.
+/// The row that makes a choice what it is on a kind of thing: the level of its area.
 fn level_of(kind: ObjectKind, choice: Choice) -> Option<Permission> {
     match (kind, choice) {
         (ObjectKind::Thread, Choice::FullView) => Some(Permission::ThreadView),
         (ObjectKind::Thread, Choice::FullInteract) => Some(Permission::ThreadInteract),
         (ObjectKind::Thread, Choice::FullManage) => Some(Permission::ThreadManage),
         (ObjectKind::Environment, Choice::FullView) => Some(Permission::EnvironmentView),
+        (ObjectKind::Environment, Choice::FullInteract) => Some(Permission::EnvironmentUse),
         (ObjectKind::Environment, Choice::FullManage) => Some(Permission::EnvironmentManage),
         _ => None,
     }
@@ -1302,7 +1314,15 @@ async fn options(ctx: Ctx, (): (), (): ()) -> ApiResult<BindingOptions> {
     )
     .await?;
     timing.phase("providers");
-    let environments = environments_of(&mut conn, &principal, &ctx.app, topic, thread).await?;
+    let environments = environments_of(
+        &mut conn,
+        &principal,
+        &ctx.app,
+        topic,
+        thread,
+        Permission::EnvironmentManage,
+    )
+    .await?;
     timing.phase("environments");
     let environment_default =
         match setting::<String>(&mut conn, Place::Node(topic), keys::ENV_THREAD_DEFAULT)

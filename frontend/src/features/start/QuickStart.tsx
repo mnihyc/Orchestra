@@ -14,7 +14,7 @@ import { useTranslation } from 'react-i18next';
 
 import { placeOfNode } from '@/features/navigation/places';
 import type { Project, Topic } from '@/generated/api-types';
-import { holds } from '@/lib/permissions';
+import { canCreateIn } from '@/lib/permissions';
 import { isComposing } from '@/lib/shortcuts';
 import { Button } from '@/ui/Button';
 import { ErrorAlert, ErrorState } from '@/ui/ErrorState';
@@ -33,7 +33,7 @@ import { bindingReason, runsLine } from './words';
 const QUICK_SETUP: Mode = { suggest: true, respectDefaults: true };
 
 export function canQuickStart(node: Topic | Project): boolean {
-  return holds(node.access, `${node.kind}.interact`) && !node.archived;
+  return canCreateIn(node.kind, node.access) && !node.archived;
 }
 
 export function QuickStart({ node }: { node: Topic | Project }) {

@@ -732,6 +732,21 @@ pub struct ProxyMaking<'a> {
     pub system: Option<&'a str>,
 }
 
+#[cfg(unix)]
+fn proxy_user() -> Result<(u32, u32), DriverError> {
+    Ok((
+        rustix::process::getuid().as_raw(),
+        rustix::process::getgid().as_raw(),
+    ))
+}
+
+#[cfg(not(unix))]
+fn proxy_user() -> Result<(u32, u32), DriverError> {
+    Err(DriverError::Unsupported(
+        "restricted networking requires a Unix process identity".to_owned(),
+    ))
+}
+
 /// Makes sure the unit's proxy's container exists; makes it when it does not, on the unit's network at its fixed
 /// address and on the ordinary network.
 pub async fn ensure_proxy(
@@ -740,6 +755,7 @@ pub async fn ensure_proxy(
     private: &Private,
     making: &ProxyMaking<'_>,
 ) -> Result<(), DriverError> {
+    let user = proxy_user()?;
     let configured = config.egress.proxy_image.as_deref().ok_or_else(|| DriverError::Unsupported(
         "network.restricted_unavailable: the node has no trusted sidecar image; a runtime's image is never used for a host-owned proxy".to_owned()))?;
     let image = daemon
@@ -772,10 +788,6 @@ pub async fn ensure_proxy(
         if let Some(system) = making.system {
             labels.insert(LABEL_SYSTEM.to_owned(), system.to_owned());
         }
-        let user = (
-            rustix::process::getuid().as_raw(),
-            rustix::process::getgid().as_raw(),
-        );
         let body = ContainerCreateBody {
             image: Some(image.clone()),
             user: Some(format!("{}:{}", user.0, user.1)),
@@ -853,10 +865,6 @@ pub async fn ensure_proxy(
     if let Some(system) = making.system {
         labels.insert(LABEL_SYSTEM.to_owned(), system.to_owned());
     }
-    let user = (
-        rustix::process::getuid().as_raw(),
-        rustix::process::getgid().as_raw(),
-    );
     let body = proxy_body(
         private,
         &image,
@@ -1680,6 +1688,12 @@ impl DockerDriver {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[cfg(not(unix))]
+    #[test]
+    fn a_proxy_without_a_unix_process_identity_is_refused() {
+        assert!(matches!(proxy_user(), Err(DriverError::Unsupported(_))));
+    }
 
     fn private() -> Private {
         let subnet: Ipv4Net = "10.199.4.16/28".parse().unwrap();

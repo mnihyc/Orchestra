@@ -7,7 +7,7 @@ import { createEnvironment } from '@/api/environments';
 import { useActKey } from '@/lib/forms';
 import { resourceChoice, resourcePreview } from '@/features/resource-facts/ResourceFacts';
 import type { PlaceRef } from '@/features/navigation/places';
-import type { Environment, Thread } from '@/generated/api-types';
+import type { BindingEnvironment, Environment, Thread } from '@/generated/api-types';
 import { Button } from '@/ui/Button';
 import { Dialog } from '@/ui/Dialog';
 import { ErrorAlert, ErrorState } from '@/ui/ErrorState';
@@ -26,6 +26,7 @@ export function SetUpThread({ thread, onClose }: { thread: Thread; onClose: () =
   const actKey = useActKey();
   const [created, setCreated] = useState<Environment | null>(null);
   const [picks, setPicks] = useState<Picks>({ ...NO_PICKS, environment: thread.environment?.id ?? null });
+  const [requesting, setRequesting] = useState<BindingEnvironment | null>(null);
   const { options, resolved, loading, failed, refreshing, retry } = useStartOptions(thread.topic_id, picks, SUGGEST);
   // A binding refusal leaves the accepted environment standing. Retry that same choice without making another.
   const made = useRef<Environment | null>(null);
@@ -35,7 +36,7 @@ export function SetUpThread({ thread, onClose }: { thread: Thread; onClose: () =
   const pick = (patch: Partial<Picks>) => setPicks((before) => ({ ...before, ...patch }));
   const save = useMutation({
     mutationFn: async () => {
-      if (resolved === null) return;
+      if (resolved === null || requesting !== null) return;
       if (resolved.provider === null || resolved.agent === null || resolved.model === null || resolved.arrangement === null) return;
       const choice = resolved.fresh ? NEW_ENVIRONMENT : resolved.environment?.environment.id;
       if (choice === undefined) return;
@@ -64,7 +65,7 @@ export function SetUpThread({ thread, onClose }: { thread: Thread; onClose: () =
     onSuccess: onClose,
   });
   const missing = resolved?.missing[0];
-  const why = loading ? t('start.why.loading') : refreshing || resolved?.settling ? t('start.why.checking')
+  const why = loading ? t('start.why.loading') : requesting !== null ? t('start.why.environment') : refreshing || resolved?.settling ? t('start.why.checking')
     : missing === undefined ? null : t(`start.why.${missing.kind === 'agent' && missing.unreported ? 'agentUnreported' : missing.kind}`);
   const unavailable = resolved === null || options === null || why !== null;
   return <Dialog open onOpenChange={(open) => { if (!open && !save.isPending) onClose(); }} dismissible={!save.isPending}
@@ -86,9 +87,9 @@ export function SetUpThread({ thread, onClose }: { thread: Thread; onClose: () =
           options={resolved.models.map((model) => ({ value: model.model_name, label: modelName(model), ...resourceChoice({ kind: 'model', model, providerId: resolved.provider?.id ?? '' }) }))} />
         <section className="flex flex-col gap-2"><h3 className="text-sm font-medium">{t('start.where.title')}</h3>
           <Where compact place={place} options={options} value={resolved.fresh ? NEW_ENVIRONMENT : resolved.environment?.environment.id ?? null}
-            onChange={(environment) => { if (!save.isPending) pick({ environment, arrangement: null }); }} machines={[]} homeId={thread.org_id} />
+            onChange={(environment) => { if (!save.isPending) pick({ environment, arrangement: null }); }} machines={[]} homeId={thread.org_id} requesting={requesting} onRequestingChange={setRequesting} onRefresh={retry} />
         </section>
-        <ArrangementSection resolved={resolved} refreshing={refreshing} onChange={(arrangement) => { if (!save.isPending) pick({ arrangement }); }} />
+        {requesting === null && <ArrangementSection resolved={resolved} refreshing={refreshing} onChange={(arrangement) => { if (!save.isPending) pick({ arrangement }); }} />}
       </>}
       {save.error !== null && <><ErrorAlert error={save.error} message={bindingReason(save.error, t) ?? undefined} />
         {created !== null && <InlineAlert tone="info">{t('start.made.environment', { name: created.name })}</InlineAlert>}

@@ -74,6 +74,9 @@ name, so `update.sh` writes `runtime/postgres/passwd` and Compose binds it over
 `/etc/passwd` of that one service. When `update.sh` is run as root it takes the
 owner of this directory, or the unprivileged id 10001 if root owns it, and gives
 `runtime/` to that id. The node needs the Docker socket and is given its group.
+This assumes the service's numeric UID is unchanged across bind mounts, as with
+a rootful Docker daemon without user-namespace remapping. Rootless Docker and
+remapping need a different ownership and mount arrangement.
 
 **The node's directory** is mounted at the same path inside the container as it
 has on the host and named by `ORCH_NODE_DATA_DIR`, because the Docker driver
@@ -143,23 +146,34 @@ losing `orch_ca_key.pem` means enrolling every machine again. Back
 ## Releases and the updater
 
 A release is a directory of files and a `version.json` that lists them with the
-size and BLAKE3 hash of each. `cargo xtask package --out DIR` makes one for the
-platform of the machine's Docker (see [xtask](../crates/tooling/xtask/README.md));
-`update.sh` checks every file against the manifest before it installs anything,
-and with `--from DIR` it never needs the network. `b3sum` is used if the host has
+size and BLAKE3 hash of each. `cargo xtask package --out DIR` makes one from a
+source checkout for the platform of the machine's Docker. `update.sh` requires and
+checks the server, frontend and CLI payloads, and checks any other listed file
+present, before installing anything. With `--from DIR` it does not fetch release
+files; Docker may still need network access for images or the database build.
+`b3sum` is used if the host has
 it; otherwise the release's own `orchctl checksum` (the same hash, in the format
-`b3sum` prints). Without `--from`, `update.sh` fetches
+`b3sum` prints). Without `b3sum`, the updater checks the CLI's size before running
+it as the checksum tool, so the CLI itself is part of the release the operator
+trusts. Install `b3sum` independently to check the CLI without executing it.
+Without `--from`, `update.sh` fetches
 `<ORCH_RELEASE_URL>/download/<tag>/version.json` or
-`<ORCH_RELEASE_URL>/latest/download/version.json` and then the files it names;
-nothing is published at any address yet, so that path has not been run.
+`<ORCH_RELEASE_URL>/latest/download/version.json` and then the three payloads.
+Set `ORCH_RELEASE_URL` before the first start if fetching: after installation,
+the updater can also read the release source from the installed configuration.
+The API reads the installation's port assertion key from `config/secrets/`;
+keep it with the other secrets so a restart preserves the signing identity. If
+an older complete set lacks that key, the updater adds it without replacing the
+other secrets before it starts the services.
 
 Three payloads are installed: `server`, `frontend` and `cli`. Each lives in
 `runtime/<payload>/releases/<tag>-<hash>/`, and `current` and `previous` beside
 it are links to a release. A link is replaced by one rename, so it is never half
 made; unpacking happens in a staging directory that is renamed into place when
-it is whole. `compose.yml`, `nginx.conf`, `.env`, `config/orch.toml` and the
-secrets are never changed by an update; when a release needs a change to them its
-notes say so. The server archive is unpacked with `unzip` where the host has it, and
+it is whole. `compose.yml`, `nginx.conf`, `.env`, `config/orch.toml` and existing
+secrets are kept by an update; a missing port assertion key is added to an older
+complete set. When a release needs a configuration change its notes say so. The
+server archive is unpacked with `unzip` where the host has it, and
 otherwise by a container of the web edge's image (`ORCH_UPDATE_NO_UNZIP=1` takes that
 path on any host). The images that the manifest names (the default environment image)
 are pulled when they are not on the host; a release made on the host has them.
@@ -190,7 +204,8 @@ verified. `update.sh recover` reads the journal after a power cut or a Ctrl-C:
 | `starting`, `verifying` | The new release may be fine: it is started, and kept if it becomes ready and reports its tag, undone like a failed update if not |
 | `done` | The record is closed |
 
-A first start that was cut off is taken up again by running `first-start` again.
+A first start that was cut off is taken up again by repeating the original
+`first-start` command, including `--from` and any `--restore-database` option.
 
 `rollback` swaps `current` and `previous` with the same safeguards, and puts the
 database back as it was when the release being entered was left: compatible
@@ -202,7 +217,10 @@ What an update does to running work is printed before it starts: the number of
 threads running (their turns are not interrupted, but exec tunnels that are not
 back within the 60 s grace are reset) and how many environments and provider
 runtimes a raised `connector_minimum` leaves unable to work until they are
-updated. `--yes` answers the question when nobody can be asked.
+updated. Prerelease connectors on the minimum's numeric version are reported for
+an explicit compatibility check. If the work inventory cannot be read, the
+updater stops before stopping services. `--yes` answers the question when nobody
+can be asked; no question is needed when there is no affected work.
 
 ## Installers
 
@@ -228,7 +246,10 @@ loopback hosts, `127.0.0.0/8` in four decimal octets, `[::1]` (including its exp
 `localhost`, with an optional port. Run a loopback command on the computer hosting that address.
 LAN/public HTTP, DNS lookalikes, userinfo, query strings and fragments are refused before a download.
 For a node this rule applies to `--from`; its pinned gateway `--url` remains wss/https. Curl follows
-HTTPS redirects only; wget and PowerShell need the canonical address without a redirect.
+HTTPS redirects only; wget and PowerShell need the canonical address without a redirect. The shell
+installers need curl or a wget that supports `--max-redirect` (BusyBox wget does not).
+For a node's usual direct gateway on port 9443, pass the people's system address as `--from`: the
+gateway port does not serve the installer downloads. The command in Orch supplies both addresses.
 
 **Connectors.** Stop or start with `orch-connector service stop` / `service start`; on Windows,
 invoke `& "$env:LOCALAPPDATA\Orch\orch-connector.exe"` before those subcommands. For **Foreground**,
@@ -246,21 +267,20 @@ For **Foreground**, install with `--no-service`, then run as root:
 systemd and does not disable an existing service. Share the host through **Access** to serve
 other organizations; another node or data directory on the same machine is not supported.
 
-**Remove cleanly.** For a connector, revoke its machine in Orch, then run
-`orch-connector service uninstall` with the same instance selection; this stops and removes the
-service and keeps data and identity. Inspect its data before removing it, preserving other
-instances (including any nested `instances/` directories) and registered work folders. Remove
-the shared program only after the last connector. For a node, remove its environments and their
-volumes, then its host, in Orch before stopping it. Run `systemctl disable --now orch-node.service`,
-remove `/etc/systemd/system/orch-node.service`, and run `systemctl daemon-reload`. After inspecting
-them, remove only `/usr/local/bin/orch-node` and this node's data directory; remove
-`/etc/orch/orch.toml` only if no other Orch program uses it. A foreground installation has no
-service to remove. Stopping or removing a service alone does not revoke enrollment or delete data.
+**Remove cleanly.** Revoke a connector's machine in Orch, then run `orch-connector uninstall` with
+the same instance selection. For a node, remove its environments and their volumes, then its host,
+in Orch; run `orch-node uninstall` as root on that host. Each command prints a plan and asks for the
+machine or host name. Without `--purge` it keeps data and identity; `--purge` also removes the data
+and objects named in the plan. `--plan` previews and `--yes` confirms without typing the name.
+The connector keeps existing work folders and removes its shared program only after the last instance.
+Stopping or removing a service alone does not revoke enrollment or delete data.
 
-Each installer may be run again: a matching program is kept, an enrolled instance's token is not
-used again, and its service is written and restarted unless service installation is disabled.
-Failed runs remove only what they placed. Named connector services have a suffix derived from
-the data directory, so their service commands must use the exact same path.
+Each installer may be run again: a matching program is kept, and a supplied token is checked even
+for an existing identity. Use a bound **Enroll again** token for that identity. The service is
+written and restarted unless service installation is disabled. After a failed run, a newly
+installed program or service is removed where possible; a replacement of an existing one is not
+restored. Named connector services have a suffix derived from the data directory, so their service
+commands must use the exact same path.
 
 ## Checked here
 

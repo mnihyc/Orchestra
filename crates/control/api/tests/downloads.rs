@@ -154,11 +154,16 @@ async fn a_build_for_musl_or_for_windows_is_found_under_the_name_the_release_giv
 
     let linux = connector(&world, "linux", "aarch64").await;
     let windows = connector(&world, "windows", "x86_64").await;
+    let windows_arm64 = connector(&world, "windows", "aarch64").await;
 
     assert_eq!(linux.raw.as_ref(), b"static");
     assert!(header(&linux, "content-disposition").contains("orch-connector-linux-aarch64-musl"));
     assert_eq!(windows.raw.as_ref(), b"portable executable");
     assert!(header(&windows, "content-disposition").contains("orch-connector-windows-x86_64.exe"));
+    assert_eq!(
+        windows_arm64.status, 404,
+        "an x86-64 build is not a native ARM64 download"
+    );
 }
 
 #[tokio::test]
