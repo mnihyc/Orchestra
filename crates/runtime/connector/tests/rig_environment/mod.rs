@@ -345,15 +345,28 @@ impl EnvRig {
         thread: Option<Id>,
         tool_set: Option<&str>,
     ) -> String {
-        self.signer
-            .issue(&TicketRequest {
-                src,
-                dst: self.machine_id,
-                service,
-                thread_id: thread,
-                tool_set: tool_set.map(str::to_owned),
-                expires_at: Time::new(self.clock.now() + chrono::Duration::hours(1)),
-            })
-            .unwrap()
+        let tool = matches!(service, Service::Exec { .. } | Service::Mcp { .. });
+        let request = TicketRequest {
+            src,
+            dst: self.machine_id,
+            service,
+            thread_id: thread,
+            tool_set: tool_set.map(str::to_owned),
+            expires_at: Time::new(self.clock.now() + chrono::Duration::hours(1)),
+        };
+        if tool {
+            let generation = self
+                .connector
+                .as_ref()
+                .and_then(|connector| connector.environment_role())
+                .and_then(|role| role.host().environment(self.environment).ok())
+                .map(|environment| environment.generation())
+                .unwrap_or(0);
+            self.signer
+                .issue_for_tool(&request, self.environment, generation)
+        } else {
+            self.signer.issue(&request)
+        }
+        .unwrap()
     }
 }

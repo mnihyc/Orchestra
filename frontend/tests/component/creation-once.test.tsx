@@ -29,14 +29,14 @@ function makeOrg(personal = false): Org {
 let root = makeOrg();
 const project: Project = { ...root, kind: 'project', id: 'project', name: 'Release project', parent_id: root.id, topic_count: 0,
   path: [...root.path, { id: 'project', kind: 'project', name: 'Release project', redacted: false }],
-  access: { ...root.access, permissions: ['project.view', 'project.interact', 'project.manage', 'doc.create'] } };
+  access: { ...root.access, permissions: ['project.view', 'project.interact', 'project.create_topics', 'project.manage', 'doc.create'] } };
 let projectData = project;
 let children: (Org | Project)[] = [];
 const topic: Topic = { ...project, kind: 'topic', id: 'topic', name: 'Release topic', parent_id: project.id, status: 'open', done_at: null, thread_display_state: null,
   path: [...project.path, { id: 'topic', kind: 'topic', name: 'Release topic', redacted: false }],
   thread_count: 0, attention: { blocked: 0, running: 0, waiting_approval: 0 }, work_attention: { uncommitted: 0, unpushed: 0, failed: 0 },
   default_environment_id: null, environments: [], last_activity_at: null, seq: 0,
-  access: { ...root.access, permissions: ['topic.view', 'topic.interact', 'topic.manage', 'doc.create'] } };
+  access: { ...root.access, permissions: ['topic.view', 'topic.interact', 'topic.start_threads', 'topic.manage', 'doc.create'] } };
 let nodes = new Map<string, TreeNode>();
 function emptyPages(key: readonly unknown[]) {
   return { queryKey: key, initialPageParam: null, queryFn: () => Promise.resolve({ items: [], next_cursor: null }), getNextPageParam: () => undefined };

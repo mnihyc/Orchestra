@@ -5,53 +5,88 @@
     reason = "a test fails by panicking"
 )]
 // The program is stopped the way a service manager stops it, with a termination signal.
-#![cfg(unix)]
 
+#[cfg(unix)]
 use std::convert::Infallible;
+#[cfg(unix)]
 use std::path::Path;
+#[cfg(unix)]
 use std::process::Stdio;
+#[cfg(unix)]
 use std::sync::atomic::{AtomicBool, Ordering};
+#[cfg(unix)]
 use std::sync::{Arc, Mutex};
+#[cfg(unix)]
 use std::time::Duration;
 
+#[cfg(unix)]
 use bytes::Bytes;
+#[cfg(unix)]
 use http_body_util::{BodyExt, Full};
+#[cfg(unix)]
 use hyper::body::Incoming;
+#[cfg(unix)]
 use hyper::service::service_fn;
+#[cfg(unix)]
 use hyper::{Method, Request, Response, StatusCode};
+#[cfg(unix)]
 use hyper_util::rt::TokioIo;
+#[cfg(unix)]
 use orch_db::queries::{link as cursors, raw_events};
+#[cfg(unix)]
 use orch_link::controller::{ControllerLink, Notice};
+#[cfg(unix)]
 use orch_link::framing::{Connection, MessageSink, MessageSource};
+#[cfg(unix)]
 use orch_link::spool::{Spool, SpoolEvent, SpoolOptions};
+#[cfg(unix)]
 use orch_link::websocket::accept_tls;
+#[cfg(unix)]
 use orch_link_contract::enrollment::{
     ENROLL_PATH, Endpoint, EnrollReply, EnrollReplySystem, EnrollRequest, Trust,
 };
+#[cfg(unix)]
 use orch_link_contract::streams::Stream;
+#[cfg(unix)]
 use orch_pki::ca::Holder;
+#[cfg(unix)]
 use orch_pki::certificates::ServiceName;
+#[cfg(unix)]
 use orch_pki::enrollment::{MemoryLedger, TokenGrant, TokenPurpose, issue_token};
+#[cfg(unix)]
 use orch_pki::verification::{TlsIdentity, pinned_server_config, plain_server_config};
+#[cfg(unix)]
 use orch_testkit::database::TestDb;
+#[cfg(unix)]
 use orch_testkit::doubles::link::MachineRecord;
+#[cfg(unix)]
 use orch_testkit::doubles::link::{Hub, TestPki};
+#[cfg(unix)]
 use orch_types::{Clock, Id, SystemClock, Time, new_id};
+#[cfg(unix)]
 use serde_json::json;
+#[cfg(unix)]
 use tokio::net::TcpListener;
+#[cfg(unix)]
 use tokio::process::{Child, Command};
+#[cfg(unix)]
 use tokio_rustls::TlsAcceptor;
 
 /// How long the test waits for something that has to happen, in real time.
+#[cfg(unix)]
 const PATIENCE: Duration = Duration::from_secs(60);
 /// Four runs with three frames each exercise three service restarts and fill the frame allowance.
+#[cfg(unix)]
 const FRAME_ALLOWANCE: i64 = 12;
 /// Gives the ACK time to cross the local socket before the termination signal.
+#[cfg(unix)]
 const ACK_SETTLE: Duration = Duration::from_millis(250);
 /// Use zstd's default level, as the engine does for diagnostics.
+#[cfg(unix)]
 const COMPRESSION_LEVEL: i32 = 3;
 
 /// The system: an authority, the hub behind it, the tokens it gave, and the machine it enrolled.
+#[cfg(unix)]
 struct System {
     clock: Arc<dyn Clock>,
     pki: TestPki,
@@ -65,6 +100,7 @@ struct System {
     tasks: Mutex<Vec<tokio::task::JoinHandle<()>>>,
 }
 
+#[cfg(unix)]
 impl System {
     fn token(&self) -> String {
         let issued = issue_token(
@@ -163,6 +199,7 @@ impl System {
 
 /// Carries the messages of one half of a connection to the other, and lets the other half go when this
 /// one has ended: a sink that is dropped is how the end of a connection reaches the hub.
+#[cfg(unix)]
 async fn pump(mut from: Box<dyn MessageSource>, mut to: Box<dyn MessageSink>) {
     while let Ok(Some(message)) = from.recv().await {
         if to.send(message).await.is_err() {
@@ -173,6 +210,7 @@ async fn pump(mut from: Box<dyn MessageSource>, mut to: Box<dyn MessageSink>) {
 
 /// The gateway's listener: TLS under the system's authority with the machine's certificate asked for,
 /// then the WebSocket, then the hub, which holds the session as it would in memory.
+#[cfg(unix)]
 async fn serve_gateway(system: Arc<System>, listener: TcpListener) {
     let tls = pinned_server_config(
         &system.server_identity(),
@@ -212,6 +250,7 @@ async fn serve_gateway(system: Arc<System>, listener: TcpListener) {
 }
 
 /// The listener for enrollment: HTTPS under the system's authority, answering `POST /link/v1/enroll`.
+#[cfg(unix)]
 async fn serve_enrollment(system: Arc<System>, listener: TcpListener) {
     let acceptor = TlsAcceptor::from(
         plain_server_config(&system.server_identity(), Arc::clone(&system.clock)).unwrap(),
@@ -236,6 +275,7 @@ async fn serve_enrollment(system: Arc<System>, listener: TcpListener) {
     }
 }
 
+#[cfg(unix)]
 async fn answer(system: &System, request: Request<Incoming>) -> Response<Full<Bytes>> {
     let reply = |status: StatusCode, body: Vec<u8>| {
         Response::builder()
@@ -258,6 +298,7 @@ async fn answer(system: &System, request: Request<Incoming>) -> Response<Full<By
 }
 
 /// A system on two loopback sockets.
+#[cfg(unix)]
 async fn start_system(database: sqlx::PgPool) -> (Arc<System>, u16) {
     let clock: Arc<dyn Clock> = Arc::new(SystemClock);
     let pki = TestPki::new(Arc::clone(&clock));
@@ -294,6 +335,7 @@ async fn start_system(database: sqlx::PgPool) -> (Arc<System>, u16) {
 }
 
 /// The program, as a command with the data directory it is to work in.
+#[cfg(unix)]
 fn program(data_dir: &Path) -> Command {
     let mut command = Command::new(env!("CARGO_BIN_EXE_orch-connector"));
     command.arg("--data-dir").arg(data_dir);
@@ -303,6 +345,7 @@ fn program(data_dir: &Path) -> Command {
 }
 
 /// Runs the program to its end and returns what it printed on standard output; the test fails if it fails.
+#[cfg(unix)]
 async fn succeeds(mut command: Command) -> String {
     let output = command.stdin(Stdio::null()).output().await.unwrap();
     assert!(
@@ -315,6 +358,7 @@ async fn succeeds(mut command: Command) -> String {
 }
 
 /// Asks the process to stop as a service manager does, and waits for it to end.
+#[cfg(unix)]
 async fn terminate(child: &mut Child) -> std::process::ExitStatus {
     let pid = child.id().expect("the program already ended");
     let sent = Command::new("kill")
@@ -331,6 +375,7 @@ async fn terminate(child: &mut Child) -> std::process::ExitStatus {
 }
 
 // All listeners stay in the test-port range. Random choices avoid collisions with other workers.
+#[cfg(unix)]
 async fn listener() -> TcpListener {
     const FIRST: u16 = 41_000;
     const PORTS: u128 = 1_000;
@@ -350,6 +395,7 @@ async fn listener() -> TcpListener {
     panic!("no free test listener");
 }
 
+#[cfg(unix)]
 async fn keep_events(
     pool: sqlx::PgPool,
     machine: Id,
@@ -436,6 +482,7 @@ async fn keep_events(
     }
 }
 
+#[cfg(unix)]
 #[tokio::test]
 async fn three_sigterm_restarts_keep_each_raw_frame_once_in_order_in_a_real_database() {
     let database = TestDb::fresh().await;
@@ -572,6 +619,7 @@ async fn three_sigterm_restarts_keep_each_raw_frame_once_in_order_in_a_real_data
     }
 }
 
+#[cfg(unix)]
 async fn seed_segment(pool: &sqlx::PgPool, thread: Id, segment: Id) {
     let user = new_id();
     sqlx::query("INSERT INTO users (id, username, display_name, avatar_color) VALUES ($1, $2, 'Raw tester', 0)")
@@ -621,6 +669,7 @@ async fn seed_segment(pool: &sqlx::PgPool, thread: Id, segment: Id) {
     .unwrap();
 }
 
+#[cfg(unix)]
 #[tokio::test]
 async fn a_session_open_installs_the_server_raw_floor_before_a_real_connector_restart() {
     use orch_link::commands::CommandFailure;

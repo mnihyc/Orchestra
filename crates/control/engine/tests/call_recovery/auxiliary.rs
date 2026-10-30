@@ -970,6 +970,7 @@ async fn recorded_token(world: &World, model_use: bool) -> (Id, Caller) {
     let mut scopes = vec!["thread.view".to_owned(), "thread.interact".to_owned()];
     if model_use {
         scopes.push("provider.use".to_owned());
+        scopes.push("environment.use".to_owned());
     }
     let digest = orch_types::Hash::of(id.as_bytes());
     let name = format!("call-{id}");

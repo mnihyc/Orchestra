@@ -107,7 +107,7 @@ async fn a_certificate_due_after_two_thirds_of_its_life_is_renewed_and_the_conne
             url: Hub::endpoint().url,
             trust: "pinned".to_owned(),
         }];
-        config.environment.roots = vec!["/tmp".to_owned()];
+        config.environment.roots = vec![std::env::temp_dir().to_string_lossy().into_owned()];
     })
     .unwrap();
     let old_fingerprint = first.certificate.fingerprint();

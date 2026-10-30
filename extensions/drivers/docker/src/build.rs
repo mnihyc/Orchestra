@@ -27,7 +27,7 @@ use orch_driver_contract::sources::{
 use orch_types::Hash;
 
 use crate::archive::spool;
-use crate::client::map_error;
+use crate::client::{daemon_capacity_failure, map_error};
 use crate::config::DockerConfig;
 use crate::driver::DockerDriver;
 use crate::images::{digest_of, is_step, parse_reference};
@@ -811,10 +811,12 @@ impl DockerDriver {
                     }
                 }
                 Err(bollard::errors::Error::DockerStreamError { error }) => {
-                    return Err(DriverError::Image(format!(
-                        "the build failed: {error}\n{}",
-                        log.as_str()
-                    )));
+                    let message = format!("the build failed: {error}\n{}", log.as_str());
+                    return Err(if daemon_capacity_failure(&error) {
+                        DriverError::NoCapacity(message)
+                    } else {
+                        DriverError::Image(message)
+                    });
                 }
                 Err(other) => {
                     return Err(match map_error(other) {

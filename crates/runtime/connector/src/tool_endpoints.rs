@@ -130,6 +130,12 @@ impl Endpoint for McpEndpoint {
             );
         };
         let is_exec = server == EXEC_SERVER;
+        if !is_exec && !session.tickets.mcp.contains_key(&server) {
+            return text(
+                StatusCode::NOT_FOUND,
+                &format!("this session was given no way to reach {server}"),
+            );
+        }
         let scope = if is_exec {
             match scope_of(&session, &reach) {
                 Some(scope) => Some(scope),
@@ -146,13 +152,19 @@ impl Endpoint for McpEndpoint {
 
         // The tool is here: the environment it acts in is attached on this machine.
         if self.relay.has_environment(reach.environment_id) {
-            let targets = self.relay.mcp_targets(&server).await;
-            let target = self
+            if !self
                 .relay
-                .pick(targets, Some(reach.environment_id), None)
-                .filter(|target| target.environment_id == reach.environment_id);
+                .environment_matches(reach.environment_id, reach.generation)
+            {
+                return text(
+                    StatusCode::NOT_FOUND,
+                    "this session's environment was made anew",
+                );
+            }
+            let targets = self.relay.mcp_targets(&server).await;
+            let target = ToolRelay::pick(targets, reach.environment_id);
             let Some(target) = target else {
-                return match self.relay.failure_of(&server) {
+                return match self.relay.failure_of(&server, reach.environment_id) {
                     Some(reason) => text(
                         StatusCode::SERVICE_UNAVAILABLE,
                         &format!("the tool server {server} failed: {reason}"),
@@ -175,7 +187,10 @@ impl Endpoint for McpEndpoint {
                 }
                 _ => None,
             };
-            return self.relay.forward_local(request, target, header).await;
+            return self
+                .relay
+                .forward_local(request, target, header, reach.generation)
+                .await;
         }
 
         // The tool is on another machine: through a tunnel of the ticket the system signed.
@@ -276,11 +291,17 @@ impl Endpoint for ExecEndpoint {
         // The executor is reached before the harness is told it is: a harness whose executor is not there
         // learns it from the answer to its request, not from a connection that closes.
         let upstream = if self.relay.has_environment(reach.environment_id) {
-            let targets = self.relay.exec_targets(&executor).await;
-            let target = self
+            if !self
                 .relay
-                .pick(targets, Some(reach.environment_id), None)
-                .filter(|target| target.environment_id == reach.environment_id);
+                .environment_matches(reach.environment_id, reach.generation)
+            {
+                return text(
+                    StatusCode::NOT_FOUND,
+                    "this session's environment was made anew",
+                );
+            }
+            let targets = self.relay.exec_targets(&executor).await;
+            let target = ToolRelay::pick(targets, reach.environment_id);
             let Some(target) = target else {
                 return text(
                     StatusCode::NOT_FOUND,
@@ -311,6 +332,16 @@ impl Endpoint for ExecEndpoint {
                 Err(error) => return open_failure(&error),
             }
         };
+        if matches!(&upstream, Upstream::Here(_))
+            && !self
+                .relay
+                .environment_matches(reach.environment_id, reach.generation)
+        {
+            return text(
+                StatusCode::NOT_FOUND,
+                "this session's environment was made anew",
+            );
+        }
         let upgrade = hyper::upgrade::on(&mut request);
         tokio::spawn(async move {
             let Ok(upgraded) = upgrade.await else {

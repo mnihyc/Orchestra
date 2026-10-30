@@ -782,6 +782,19 @@ impl Engine {
         Result<(orch_db::queries::threads::tools::TopicThread, String, Id), Refusal>,
         EngineError,
     > {
+        // A known aside in this topic is not a message target, even though it is not a shared-tree sibling.
+        if let Some(Named::Id(id)) = tree::parse_path(asked) {
+            super::source::check(conn).await?;
+            if orch_db::queries::threads::thread(conn, id)
+                .await?
+                .is_some_and(|row| row.topic_id == thread.topic_id && row.side_of.is_some())
+            {
+                return Ok(Err(Refusal::new(
+                    Code::WrongKind,
+                    "A side thread is not a message target.",
+                )));
+            }
+        }
         let resolved = match self
             .resolve_write(conn, thread.node_id, asked, false)
             .await?

@@ -72,6 +72,77 @@ fn meta_of(stat: &rustix::fs::Stat) -> Meta {
 }
 
 impl Dir {
+    /// Opens an existing directory beneath an already resolved root without following new links.
+    #[cfg(target_os = "linux")]
+    pub(crate) fn open_beneath(root: &Path, relative: &Path, path: &Path) -> io::Result<Self> {
+        use rustix::fs::{ResolveFlags, openat2};
+        let base = openat2(
+            CWD,
+            root,
+            OFlags::PATH | OFlags::DIRECTORY | OFlags::CLOEXEC,
+            Mode::empty(),
+            ResolveFlags::NO_SYMLINKS | ResolveFlags::NO_MAGICLINKS,
+        )
+        .map_err(io_error)?;
+        let relative = if relative.as_os_str().is_empty() {
+            Path::new(".")
+        } else {
+            relative
+        };
+        let fd = openat2(
+            &base,
+            relative,
+            OFlags::PATH | OFlags::DIRECTORY | OFlags::CLOEXEC,
+            Mode::empty(),
+            ResolveFlags::BENEATH | ResolveFlags::NO_SYMLINKS | ResolveFlags::NO_MAGICLINKS,
+        )
+        .map_err(io_error)?;
+        Ok(Self {
+            fd,
+            path: path.to_path_buf(),
+        })
+    }
+
+    /// Opens a readable handle to this same held directory.
+    #[cfg(target_os = "linux")]
+    pub(crate) fn readable(self) -> io::Result<Self> {
+        let fd = rustix::fs::openat(
+            &self.fd,
+            ".",
+            OFlags::RDONLY | OFlags::DIRECTORY | OFlags::CLOEXEC,
+            Mode::empty(),
+        )
+        .map_err(io_error)?;
+        Ok(Self {
+            fd,
+            path: self.path,
+        })
+    }
+
+    /// Checks access on the held directory rather than reopening its pathname.
+    #[cfg(target_os = "linux")]
+    pub(crate) fn require_writable(&self) -> io::Result<()> {
+        rustix::fs::accessat(
+            &self.fd,
+            ".",
+            rustix::fs::Access::WRITE_OK | rustix::fs::Access::EXEC_OK,
+            AtFlags::EACCESS,
+        )
+        .map_err(io_error)
+    }
+
+    /// An external process can enter this directory while this handle remains open.
+    #[cfg(target_os = "linux")]
+    #[must_use]
+    pub fn process_path(&self) -> PathBuf {
+        use std::os::fd::AsRawFd;
+        PathBuf::from(format!(
+            "/proc/{}/fd/{}",
+            std::process::id(),
+            self.fd.as_raw_fd()
+        ))
+    }
+
     /// Opens the directory at `path`, following links in the path: the root of a workspace, which
     /// is given by whoever set the environment up and is not a request's to name.
     pub fn open_path(path: &Path) -> io::Result<Self> {
@@ -448,13 +519,30 @@ pub fn send_signal(pid: u32, expect_start_ms: Option<i64>, sig: Sig) -> io::Resu
     if let Some(done) = super::os::signal_via_handle(pid, expect_start_ms, sig) {
         return done;
     }
-    if let Some(expected) = expect_start_ms
-        && super::os::exact_start_ms(pid).is_some_and(|found| found != expected)
-    {
-        return Err(io::Error::new(
-            io::ErrorKind::NotFound,
-            "that number now names another process",
-        ));
+    if let Some(expected) = expect_start_ms {
+        let found = super::os::exact_start_ms(pid);
+        #[cfg(target_os = "macos")]
+        let found = found.or_else(|| {
+            use sysinfo::{Pid, ProcessRefreshKind, ProcessesToUpdate, System};
+            let mut system = System::new();
+            let id = Pid::from_u32(pid);
+            system.refresh_processes_specifics(
+                ProcessesToUpdate::Some(&[id]),
+                true,
+                ProcessRefreshKind::nothing(),
+            );
+            system.process(id).map(|process| {
+                i64::try_from(process.start_time())
+                    .unwrap_or(0)
+                    .saturating_mul(1000)
+            })
+        });
+        if found != Some(expected) {
+            return Err(io::Error::new(
+                io::ErrorKind::NotFound,
+                "that number now names another process",
+            ));
+        }
     }
     rustix::process::kill_process(target, rustix_signal_of(sig)).map_err(io_error)
 }

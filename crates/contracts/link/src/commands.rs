@@ -4267,6 +4267,9 @@ pub struct NodeSkillFetch {
     pub source: SkillFetchSource,
     /// The most bytes the archive put up may have; a larger one is refused as `too_large`.
     pub max_bytes: i64,
+    /// Private source hosts the system operator permits for an archive download.
+    #[serde(default)]
+    pub allowed_private_hosts: Vec<String>,
 }
 
 /// The result of `node.skill.fetch`.

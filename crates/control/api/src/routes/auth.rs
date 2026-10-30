@@ -24,8 +24,8 @@ use crate::sign_in::mail::{self, Addressee, Link, Purpose};
 use crate::sign_in::throttle::{self, Who};
 use crate::sign_in::{
     Limits, NOT_KEPT, Opened, access_life, cleared_session_cookie, login as sign_in_login,
-    open_session, passwords, people, record, remember_browser, session_cookie, session_life,
-    system_policy,
+    open_session, passwords, people, record, remember_browser, require_json, session_cookie,
+    session_life, system_policy,
 };
 use http::StatusCode;
 use http::header::{CACHE_CONTROL, SET_COOKIE};
@@ -92,6 +92,7 @@ async fn register(
     (): (),
     body: AuthRegisterBody,
 ) -> ApiResult<Answer<AuthRegisterReply>> {
+    require_json(&ctx)?;
     let auth = &ctx.app.config.auth;
     let limits = Limits::of(auth);
     let (policy, invitation) = {
@@ -226,7 +227,18 @@ async fn register(
             .await
             .map_err(|error| {
                 if error.code() == ErrorCode::Gone {
-                    invitation_needed("the invitation no longer admits this registration")
+                    let mut refusal =
+                        invitation_needed("the invitation no longer admits this registration");
+                    if error
+                        .problem
+                        .extra
+                        .get("reason")
+                        .and_then(serde_json::Value::as_str)
+                        == Some(super::users::ISSUER_AUTHORITY_LOST)
+                    {
+                        refusal = refusal.with("reason", super::users::ISSUER_AUTHORITY_LOST);
+                    }
+                    refusal
                 } else {
                     error
                 }
@@ -292,6 +304,7 @@ async fn login(
     (): (),
     body: orch_api_contract::auth::AuthLoginBody,
 ) -> ApiResult<Answer<AuthResult>> {
+    require_json(&ctx)?;
     // The proof and session futures include policy and notification branches;
     // keep them out of the routing and authority wrappers' inline state.
     Ok(Box::pin(sign_in_login::login(&ctx, &body)).await?.answer())
@@ -405,10 +418,23 @@ async fn logout(ctx: Ctx, (): (), (): ()) -> ApiResult<Answer<()>> {
 /// work.
 async fn recovery(ctx: Ctx, (): (), body: AuthRecoveryStartBody) -> ApiResult<()> {
     let limits = Limits::of(&ctx.app.config.auth);
-    let mut conn = ctx.app.db.acquire().await?;
+    let mut conn = ctx.app.db.begin().await?;
     throttle::by_address(&ctx, &mut conn, &limits, "recovery").await?;
     let email = throttle::normalize(&body.email);
     let user = identity::user_by_confirmed_email(&mut conn, &email).await?;
+    let user = orch_db::queries::transaction_guard::lock_person(
+        &mut conn,
+        user.as_ref().map_or_else(Id::nil, |user| user.id),
+    )
+    .await?
+    .filter(|user| {
+        !user.suspended()
+            && user.email_confirmed()
+            && user
+                .email
+                .as_deref()
+                .is_some_and(|current| same_address(current, &email))
+    });
     let policy = system_policy(&mut conn).await?;
     // So that nobody is sent mail without end by somebody else, links are
     // paced like codes are: by the name, here the address.
@@ -442,20 +468,25 @@ async fn recovery(ctx: Ctx, (): (), body: AuthRecoveryStartBody) -> ApiResult<()
         go,
     )
     .await?;
+    conn.commit().await.map_err(orch_db::DbError::from)?;
     Ok(())
 }
 
 /// Checks a reset link without spending it or returning the account it belongs to.
 async fn recovery_check(ctx: Ctx, (): (), (): ()) -> ApiResult<Answer<()>> {
     let mut conn = ctx.app.db.acquire().await?;
-    if !identity::email_token_live(
-        &mut conn,
-        &token_hash(ctx.param("token")?),
-        Purpose::Reset.stored(),
-        ctx.now,
+    let live: bool = sqlx::query_scalar(
+        "SELECT EXISTS(SELECT 1 FROM email_tokens t JOIN users u ON u.id=t.user_id
+          WHERE t.token_hash=$1 AND t.purpose=$2 AND t.used_at IS NULL AND t.expires_at>$3
+            AND u.status='active' AND lower(trim(t.email))=lower(trim(COALESCE(u.email,''))))",
     )
-    .await?
-    {
+    .bind(token_hash(ctx.param("token")?))
+    .bind(Purpose::Reset.stored())
+    .bind(ctx.now)
+    .fetch_one(&mut *conn)
+    .await
+    .map_err(orch_db::DbError::from)?;
+    if !live {
         return Err(gone());
     }
     Ok(Answer::from(()).header(CACHE_CONTROL, NOT_KEPT))
@@ -510,6 +541,9 @@ async fn recovery_confirm(
     let token = identity::use_email_token(&mut tx, &hash, Purpose::Reset.stored(), ctx.now)
         .await?
         .ok_or_else(gone)?;
+    if user.suspended() || !same_address(user.email.as_deref().unwrap_or_default(), &token.email) {
+        return Err(gone());
+    }
     // A password that is refused leaves the link unused: the transaction ends
     // here, and so does the use of it.
     if let Err(refused) = passwords::check_new(
@@ -560,6 +594,7 @@ async fn recovery_confirm(
 /// it signs the browser in, as the link that reached the address does, unless
 /// the person has a second step that a link cannot stand for.
 async fn verify_email(mut ctx: Ctx, (): (), body: AuthEmailVerifyBody) -> ApiResult<Answer<()>> {
+    require_json(&ctx)?;
     let limits = Limits::of(&ctx.app.config.auth);
     {
         let mut conn = ctx.app.db.acquire().await?;
@@ -577,6 +612,9 @@ async fn verify_email(mut ctx: Ctx, (): (), body: AuthEmailVerifyBody) -> ApiRes
     let token = identity::use_email_token(&mut tx, &hash, Purpose::Verify.stored(), ctx.now)
         .await?
         .ok_or_else(gone)?;
+    if user.suspended() {
+        return Err(gone());
+    }
     // The address they have takes another's place, or is given for the first time.
     let changes = user
         .email
@@ -592,6 +630,13 @@ async fn verify_email(mut ctx: Ctx, (): (), body: AuthEmailVerifyBody) -> ApiRes
             other => ApiError::from(other),
         })?;
     if changes {
+        // Mail sent to the former address must not remain a way into this account.
+        identity::void_email_tokens(&mut tx, user.id, Purpose::Reset.stored(), ctx.now).await?;
+        sqlx::query("DELETE FROM sign_in_codes WHERE user_id = $1")
+            .bind(user.id)
+            .execute(&mut *tx)
+            .await
+            .map_err(orch_db::DbError::from)?;
         record(
             &ctx,
             &mut tx,
@@ -626,10 +671,15 @@ async fn verify_email(mut ctx: Ctx, (): (), body: AuthEmailVerifyBody) -> ApiRes
 /// same work.
 async fn verify_resend(ctx: Ctx, (): (), body: AuthEmailVerifyResendBody) -> ApiResult<()> {
     let limits = Limits::of(&ctx.app.config.auth);
-    let mut conn = ctx.app.db.acquire().await?;
+    let mut conn = ctx.app.db.begin().await?;
     throttle::by_address(&ctx, &mut conn, &limits, "verify").await?;
     let name = throttle::normalize(&body.login);
     let user = identity::user_by_login(&mut conn, &name).await?;
+    let user = orch_db::queries::transaction_guard::lock_person(
+        &mut conn,
+        user.as_ref().map_or_else(Id::nil, |user| user.id),
+    )
+    .await?;
     let policy = system_policy(&mut conn).await?;
     let who = Who::named(user.as_ref().map(|user| user.id), &name);
     let may_go = policy.mail()
@@ -664,5 +714,6 @@ async fn verify_resend(ctx: Ctx, (): (), body: AuthEmailVerifyResendBody) -> Api
         go,
     )
     .await?;
+    conn.commit().await.map_err(orch_db::DbError::from)?;
     Ok(())
 }

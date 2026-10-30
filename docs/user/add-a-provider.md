@@ -47,6 +47,8 @@ subscription sign-in. Saving a key also reads its available models and facts. **
 accept and enable the models you want in **Models**. Discovery never adds them by itself.
 Choose the provider and an enabled model in a thread, then send a small request.
 Saved setup is not proof of a working model: a completed turn is.
+If the provider is added but a later setup step fails, open the provider and
+check its models before finishing setup.
 
 An address refusal belongs beside that field: choose another machine or ask its operator to
 allow it. A missing program must be registered on the selected machine. If a sign-in expires,

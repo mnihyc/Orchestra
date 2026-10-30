@@ -1109,6 +1109,141 @@ async fn an_environment_manager_reads_its_machine_ceiling_without_gaining_machin
 }
 
 #[tokio::test]
+async fn only_a_machine_manager_can_confirm_or_remove_a_harness_and_each_change_is_audited() {
+    let world = World::new().await;
+    let owner = person(&world, "ada").await;
+    let other = person(&world, "bea").await;
+    let org = make_org(&world, &owner, "Office", "office").await.base.id;
+    let machine = machine_with_policy(&world, &owner, &["agent.harnesses"]).await;
+    let mut conn = world.conn().await;
+    sqlx::query("UPDATE machines SET roles=ARRAY['environment'] WHERE id=$1")
+        .bind(machine)
+        .execute(&mut *conn)
+        .await
+        .unwrap();
+    let environment = fixtures::insert_resource(
+        &mut conn,
+        "environment",
+        Some(owner.id()),
+        Some(org),
+        "Work",
+    )
+    .await
+    .unwrap();
+    sqlx::query(
+        "UPDATE environments SET placement='connected',template_id=NULL,machine_id=$2 WHERE id=$1",
+    )
+    .bind(environment)
+    .bind(machine)
+    .execute(&mut *conn)
+    .await
+    .unwrap();
+    orch_db::queries::access::testing::add_entry(
+        &mut conn,
+        &orch_db::queries::access::PageKey::new("environment", environment, "live"),
+        "any",
+        "environment.manage",
+        ("user", Some(other.id()), None),
+        None,
+        world.now(),
+    )
+    .await
+    .unwrap();
+    drop(conn);
+    online(&world, machine).await;
+    let body = std::collections::BTreeMap::from([(
+        "agent.harnesses".to_owned(),
+        json!([
+            {"kind":"claude-code","path":"/usr/local/bin/claude"}
+        ]),
+    )]);
+    assert_eq!(
+        world
+            .app
+            .call(MachinePolicyUpdate, &[&machine])
+            .token(&other.token)
+            .body(&body)
+            .send()
+            .await
+            .problem()
+            .code,
+        ErrorCode::AuthzDenied
+    );
+    let read = world
+        .app
+        .call(MachinePolicyGet, &[&machine])
+        .token(&owner.token)
+        .send()
+        .await
+        .ok();
+    assert!(
+        read.keys
+            .iter()
+            .any(|key| key.key == "agent.harnesses" && key.writable)
+    );
+    let mut confirmed = LocalPolicy {
+        policy_delegated: vec!["agent.harnesses".into()],
+        ..LocalPolicy::default()
+    };
+    confirmed.agent_harnesses = vec![orch_link_contract::policy::PolicyHarness {
+        kind: "claude-code".into(),
+        path: "/usr/local/bin/claude".into(),
+    }];
+    let ack = answer(
+        &world,
+        machine,
+        json!({"applied":["agent.harnesses"],"refused":[],"policy":confirmed}),
+    );
+    world
+        .app
+        .call(MachinePolicyUpdate, &[&machine])
+        .token(&owner.token)
+        .body(&body)
+        .send()
+        .await
+        .ok();
+    ack.await.unwrap();
+    let removed = LocalPolicy {
+        policy_delegated: vec!["agent.harnesses".into()],
+        ..LocalPolicy::default()
+    };
+    let ack = answer(
+        &world,
+        machine,
+        json!({"applied":["agent.harnesses"],"refused":[],"policy":removed}),
+    );
+    let clear = std::collections::BTreeMap::from([("agent.harnesses".to_owned(), json!([]))]);
+    world
+        .app
+        .call(MachinePolicyUpdate, &[&machine])
+        .token(&owner.token)
+        .body(&clear)
+        .send()
+        .await
+        .ok();
+    ack.await.unwrap();
+    let audited: Vec<Json> = sqlx::query_scalar(
+        "SELECT details FROM audit_log WHERE action='machine.policy_changed' ORDER BY at",
+    )
+    .fetch_all(&world.db.pool)
+    .await
+    .unwrap();
+    assert_eq!(audited.len(), 2);
+    assert!(
+        audited
+            .iter()
+            .any(|entry| entry["before"]["agent.harnesses"] == json!([])
+                && entry["after"]["agent.harnesses"] == body["agent.harnesses"])
+    );
+    assert!(
+        audited.iter().any(
+            |entry| entry["before"]["agent.harnesses"] == body["agent.harnesses"]
+                && entry["after"]["agent.harnesses"] == json!([])
+        )
+    );
+}
+
+#[tokio::test]
 async fn a_key_is_changed_from_here_when_its_owner_handed_it_over_and_the_machine_confirms() {
     let world = World::new().await;
     let ada = person(&world, "ada").await;
@@ -1695,6 +1830,128 @@ async fn programs_reads_are_stored_and_the_native_acknowledgement_updates_the_re
     assert_eq!(
         commands, 2,
         "profile creation and provider choices use the acknowledged declarations without another native read"
+    );
+}
+
+#[tokio::test]
+async fn a_machine_manager_confirms_and_removes_a_found_harness_through_the_program_registry() {
+    use orch_api_contract::machine_programs::{MachineHarnessProgram, MachineProgramsCommand};
+    use orch_api_contract::resources::MachineProgramsChange;
+    let world = World::new().await;
+    let owner = person(&world, "ada").await;
+    let other = person(&world, "bea").await;
+    let machine = machine_with_policy(&world, &owner, &["agent.harnesses"]).await;
+    let mut conn = world.conn().await;
+    orch_db::queries::access::testing::add_entry(
+        &mut conn,
+        &orch_db::queries::access::PageKey::new("machine", machine, "live"),
+        "any",
+        "machine.view",
+        ("user", Some(other.id()), None),
+        None,
+        world.now(),
+    )
+    .await
+    .unwrap();
+    drop(conn);
+    online(&world, machine).await;
+    let program = MachineHarnessProgram {
+        kind: "claude-code".into(),
+        path: "/usr/local/bin/claude".into(),
+    };
+    let confirm = MachineProgramsCommand::ConfirmHarness(program.clone());
+    let unauthorized_remove = MachineProgramsCommand::RemoveHarness(program.clone());
+    assert_eq!(
+        world
+            .app
+            .call(MachineProgramsChange, &[&machine])
+            .token(&other.token)
+            .body(&unauthorized_remove)
+            .send()
+            .await
+            .problem()
+            .code,
+        ErrorCode::NotFound
+    );
+    assert_eq!(
+        world
+            .app
+            .call(MachineProgramsChange, &[&machine])
+            .token(&other.token)
+            .body(&confirm)
+            .send()
+            .await
+            .problem()
+            .code,
+        ErrorCode::NotFound
+    );
+    let mut policy = LocalPolicy {
+        policy_delegated: vec!["agent.harnesses".into()],
+        ..LocalPolicy::default()
+    };
+    policy
+        .agent_harnesses
+        .push(orch_link_contract::policy::PolicyHarness {
+            kind: program.kind.clone(),
+            path: program.path.clone(),
+        });
+    let facts = |policy: &LocalPolicy, installed: Json, found: Json| {
+        json!({
+            "hostname":"laptop","os_version":"Linux","cpus":4,"memory_bytes":8192,
+            "harnesses":installed,"discovered_harnesses":found,"searched_harness_kinds":["claude-code"],
+            "adapters":[],"plugins":[],"policy":policy,"rates":{"up_bps":0,"down_bps":0,"round_trip_ms":1},"clock_offset_ms":0
+        })
+    };
+    let item = json!({"kind":program.kind.clone(),"path":program.path.clone(),"version":"2.1.309","daemon":false});
+    let ack = answer(
+        &world,
+        machine,
+        facts(&policy, json!([item.clone()]), json!([])),
+    );
+    let confirmed = world
+        .app
+        .call(MachineProgramsChange, &[&machine])
+        .token(&owner.token)
+        .body(&confirm)
+        .send()
+        .await
+        .ok();
+    ack.await.unwrap();
+    assert_eq!(
+        confirmed.machine_view.unwrap().facts["harnesses"][0]["version"],
+        "2.1.309"
+    );
+    policy.agent_harnesses.clear();
+    let ack = answer(&world, machine, facts(&policy, json!([]), json!([item])));
+    let remove = MachineProgramsCommand::RemoveHarness(program.clone());
+    let removed = world
+        .app
+        .call(MachineProgramsChange, &[&machine])
+        .token(&owner.token)
+        .body(&remove)
+        .send()
+        .await
+        .ok();
+    ack.await.unwrap();
+    assert!(
+        removed.machine_view.unwrap().facts["harnesses"]
+            .as_array()
+            .unwrap()
+            .is_empty()
+    );
+    let audit: Vec<Json> =
+        sqlx::query_scalar("SELECT details FROM audit_log WHERE action='machine.programs_changed'")
+            .fetch_all(&world.db.pool)
+            .await
+            .unwrap();
+    assert_eq!(audit.len(), 2);
+    assert!(audit.iter().any(|entry| entry["operation"] == "confirmed"
+        && entry["name"] == "claude-code"
+        && entry["path"] == "/usr/local/bin/claude"));
+    assert!(
+        audit
+            .iter()
+            .any(|entry| entry["operation"] == "unconfirmed" && entry["name"] == "claude-code")
     );
 }
 

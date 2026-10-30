@@ -1383,8 +1383,10 @@ impl Engine {
         if input.native_action.is_some() {
             return Ok(None);
         }
-        let effects: bool = sqlx::query_scalar("SELECT EXISTS(SELECT 1 FROM items WHERE turn_id=$1 AND ((kind='tool_call') OR (kind='agent_message' AND length(COALESCE(payload->>'text',''))>0)))")
-            .bind(turn.id).fetch_one(&mut *unit.conn).await.map_err(DbError::from)?;
+        let effects: bool = sqlx::query_scalar("SELECT EXISTS(SELECT 1 FROM items WHERE turn_id=$1 AND ((kind='tool_call') OR (kind='agent_message' AND length(COALESCE(payload->>'text',''))>0)))
+            OR EXISTS(SELECT 1 FROM thread_inputs WHERE turn_id=$1 AND id<>$2 AND thread_id=$3
+              AND (state='delivered' OR (state='delivering' AND state_detail='steering')))")
+            .bind(turn.id).bind(turn.input_id).bind(thread.node_id).fetch_one(&mut *unit.conn).await.map_err(DbError::from)?;
         let previous = read(unit.conn, thread.node_id, Purpose::Agent).await?;
         if previous
             .as_ref()

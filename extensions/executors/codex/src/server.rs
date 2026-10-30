@@ -36,7 +36,7 @@ use orch_executor_contract::descriptor::{ExecutorAvailability, ExecutorDescripto
 use orch_executor_contract::executor::{Executor, ExecutorEndpoint};
 use orch_plugin_contract::Secret;
 use sha2::{Digest as _, Sha256};
-use tokio::io::{AsyncBufReadExt as _, BufReader};
+use tokio::io::{AsyncBufReadExt as _, AsyncReadExt as _, BufReader};
 use tokio::process::{Child, Command};
 use tokio::task::JoinHandle;
 use tokio_tungstenite::tungstenite::Message;
@@ -53,6 +53,12 @@ pub const DEFAULT_START_TIMEOUT: Duration = Duration::from_secs(30);
 /// How long a command of the sandbox probe, or the question for the program's version, may take: the
 /// probe runs up to six, and with the start they have to fit in the node's two minutes.
 pub const DEFAULT_PROBE_TIMEOUT: Duration = Duration::from_secs(10);
+
+/// A local program's version is a quick observation, not a reason to delay the offer.
+const LOCAL_VERSION_TIMEOUT: Duration = Duration::from_secs(3);
+
+/// A version is one short line; a bounded read keeps a faulty program from filling memory.
+const VERSION_OUTPUT_LIMIT: u64 = 4096;
 
 /// How long the handshake with the started server may take.
 pub const DEFAULT_HANDSHAKE_TIMEOUT: Duration = Duration::from_secs(10);
@@ -122,7 +128,7 @@ impl Default for CodexConfig {
 #[derive(Debug, Clone)]
 struct Found {
     program: PathBuf,
-    version: semver::Version,
+    version: Option<semver::Version>,
     modes: Vec<SandboxMode>,
 }
 
@@ -178,8 +184,22 @@ impl CodexExecServer {
     /// found anew.
     async fn examine(&self, env: &EnvironmentContext) -> Result<Found, String> {
         let build = descriptor::locate(env).map_err(|missing| missing.to_string())?;
-        let version = self.version_of(&build, env).await?;
-        let vars = environment(env, &codex_home(env));
+        let version = match self.version_of(&build, env).await {
+            Ok(version) => Some(version),
+            Err(reason) if env.tools_dir.is_none() => {
+                tracing::info!(%reason, "the local program's version is unknown");
+                None
+            }
+            Err(reason) => return Err(reason),
+        };
+        if version.is_none() {
+            return Ok(Found {
+                program: build.program,
+                version,
+                modes: vec![orch_agent_contract::descriptor::SandboxMode::Open],
+            });
+        }
+        let vars = environment(env, &codex_home(env), env.tools_dir.is_some());
         let scratch = sandbox::scratch_dir(Path::new(&env.data_dir));
         let enforceable = sandbox::probe(&Probe {
             program: &build.program,
@@ -205,7 +225,7 @@ impl CodexExecServer {
         build: &Build,
         env: &EnvironmentContext,
     ) -> Result<semver::Version, String> {
-        let vars = environment(env, &codex_home(env));
+        let vars = environment(env, &codex_home(env), env.tools_dir.is_some());
         let argv = env.launch(build.program.clone());
         let mut command = Command::new(&argv[0]);
         command.args(&argv[1..]);
@@ -219,23 +239,43 @@ impl CodexExecServer {
             .kill_on_drop(true);
         std::fs::create_dir_all(codex_home(env))
             .map_err(|error| format!("the program's home could not be made: {error}"))?;
-        let child = command
+        let mut child = command
             .spawn()
             .map_err(|error| format!("{} could not be run: {error}", build.program.display()))?;
-        let output = tokio::time::timeout(self.config.probe_timeout, child.wait_with_output())
-            .await
-            .map_err(|_| {
-                format!(
-                    "{} did not answer --version in time",
-                    build.program.display()
-                )
-            })?
-            .map_err(|error| error.to_string())?;
-        descriptor::version_in(&String::from_utf8_lossy(&output.stdout)).ok_or_else(|| {
+        let stdout = child
+            .stdout
+            .take()
+            .ok_or("the version probe has no output stream")?;
+        let timeout = if env.tools_dir.is_none() {
+            self.config.probe_timeout.min(LOCAL_VERSION_TIMEOUT)
+        } else {
+            self.config.probe_timeout
+        };
+        let output = tokio::time::timeout(timeout, async {
+            let mut bytes = Vec::new();
+            stdout
+                .take(VERSION_OUTPUT_LIMIT + 1)
+                .read_to_end(&mut bytes)
+                .await
+                .map_err(|error| error.to_string())?;
+            let status = child.wait().await.map_err(|error| error.to_string())?;
+            if !status.success() || bytes.len() > VERSION_OUTPUT_LIMIT as usize {
+                return Err("the version probe failed or wrote too much output".to_owned());
+            }
+            Ok(bytes)
+        })
+        .await
+        .map_err(|_| {
+            format!(
+                "{} did not answer --version in time",
+                build.program.display()
+            )
+        })??;
+        descriptor::version_in(&String::from_utf8_lossy(&output)).ok_or_else(|| {
             format!(
                 "{} did not say which version it is (it printed {:?})",
                 build.program.display(),
-                String::from_utf8_lossy(&output.stdout).trim()
+                String::from_utf8_lossy(&output).trim()
             )
         })
     }
@@ -247,9 +287,12 @@ fn codex_home(env: &EnvironmentContext) -> PathBuf {
     Path::new(&env.data_dir).join("codex-home")
 }
 
-/// The environment the server is started with, and nothing else: a few variables every program needs, the
-/// variables the environment gives its agents' commands, and the home of the program.
-fn environment(env: &EnvironmentContext, home: &Path) -> Vec<(OsString, OsString)> {
+/// Minimal operating-system variables and a private home, plus work variables only for an actual server.
+fn environment(
+    env: &EnvironmentContext,
+    home: &Path,
+    with_variables: bool,
+) -> Vec<(OsString, OsString)> {
     let mut vars: Vec<(OsString, OsString)> = INHERITED_VARIABLES
         .iter()
         .filter_map(|name| std::env::var_os(name).map(|value| (OsString::from(name), value)))
@@ -266,11 +309,13 @@ fn environment(env: &EnvironmentContext, home: &Path) -> Vec<(OsString, OsString
         vars.push((OsString::from(name), OsString::from(&env.user)));
     }
     vars.push((OsString::from("SHELL"), OsString::from(&env.shell.path)));
-    vars.extend(
-        env.variables
-            .iter()
-            .map(|(name, value)| (OsString::from(name), OsString::from(value))),
-    );
+    if with_variables {
+        vars.extend(
+            env.variables
+                .iter()
+                .map(|(name, value)| (OsString::from(name), OsString::from(value))),
+        );
+    }
     vars.push((OsString::from("CODEX_HOME"), home.as_os_str().to_owned()));
     vars
 }
@@ -293,13 +338,28 @@ impl Executor for CodexExecServer {
         }
         let mut found = self.found.lock().await;
         let usable = match (&*found, descriptor::locate(env)) {
-            (Some(known), Ok(build)) if known.program == build.program => Ok(known.clone()),
+            (Some(known), Ok(build))
+                if known.program == build.program && env.tools_dir.is_some() =>
+            {
+                Ok(known.clone())
+            }
+            (Some(known), Ok(build)) if known.program == build.program => {
+                let version = self.version_of(&build, env).await.ok();
+                if version == known.version {
+                    Ok(known.clone())
+                } else {
+                    self.examine(env).await
+                }
+            }
             (_, Err(missing)) => Err(missing.to_string()),
             _ => self.examine(env).await,
         };
         match usable {
             Ok(now) => {
-                let report = descriptor::availability(&now.version, now.modes.clone());
+                let report = now.version.as_ref().map_or_else(
+                    || ExecutorAvailability::available("unknown", now.modes.clone()),
+                    |version| descriptor::availability(version, now.modes.clone()),
+                );
                 *found = Some(now);
                 report
             }
@@ -312,7 +372,25 @@ impl Executor for CodexExecServer {
             return Err(AdapterError::HarnessUnavailable("this executor is declared for Linux; this host's native execution has not been verified".into()));
         }
         if let Some(running) = &self.running {
-            return Ok(running.endpoint.clone());
+            let endpoint = running.endpoint.clone();
+            if env.tools_dir.is_some() {
+                return Ok(endpoint);
+            }
+            let build = match descriptor::locate(env) {
+                Ok(build) => build,
+                Err(missing) => {
+                    self.stop().await?;
+                    return Err(AdapterError::HarnessUnavailable(missing.to_string()));
+                }
+            };
+            let version = self.version_of(&build, env).await.ok();
+            if version
+                .as_ref()
+                .is_some_and(|version| version.to_string() == endpoint.version)
+            {
+                return Ok(endpoint);
+            }
+            self.stop().await?;
         }
         let build = descriptor::locate(env)
             .map_err(|missing: Missing| AdapterError::HarnessUnavailable(missing.to_string()))?;
@@ -331,7 +409,7 @@ impl Executor for CodexExecServer {
         let mut raw = [0u8; 32];
         rand::fill(&mut raw[..]);
         let token = base64::engine::general_purpose::URL_SAFE_NO_PAD.encode(raw);
-        let vars = environment(env, &home);
+        let vars = environment(env, &home, true);
 
         let mut last = String::new();
         for attempt in 0..PORT_TRIES {
@@ -364,8 +442,12 @@ impl Executor for CodexExecServer {
                             )));
                         }
                     };
-                    if version != found.version {
-                        tracing::warn!(%version, listed = %found.version, "the exec server is not the build its program reported");
+                    if found
+                        .version
+                        .as_ref()
+                        .is_some_and(|reported| version != *reported)
+                    {
+                        tracing::warn!(%version, listed = ?found.version, "the exec server is not the build its program reported");
                     }
                     let endpoint = ExecutorEndpoint {
                         address: format!("ws://127.0.0.1:{}", spawned.port),
@@ -708,4 +790,68 @@ async fn handshake(port: u16, token: &str, within: Duration) -> Result<semver::V
     tokio::time::timeout(within, work)
         .await
         .map_err(|_| format!("no answer within {} seconds", within.as_secs()))?
+}
+
+#[cfg(all(test, unix))]
+mod tests {
+    use super::*;
+    use std::os::unix::fs::PermissionsExt;
+
+    fn local_environment(root: &Path, source: &str) -> (EnvironmentContext, PathBuf) {
+        let program = root.join("codex");
+        std::fs::write(&program, source).unwrap();
+        std::fs::set_permissions(&program, std::fs::Permissions::from_mode(0o755)).unwrap();
+        let context = serde_json::from_value(serde_json::json!({
+            "environment_id":"0199abcd-1234-7000-8000-0000000000e1","generation":1,
+            "data_dir":root.join("data"),"workspace_root":root,"home":null,"tools_dir":null,"tools":[],
+            "local_programs":{"codex":program.clone()},"mounts":[],"user":"test",
+            "shell":{"name":"sh","path":"/bin/sh"},"os":"linux","arch":"x86_64",
+            "path_style":"posix","limits":{},"variables":{},"mcp_servers_enabled":false
+        })).unwrap();
+        (context, program)
+    }
+
+    #[tokio::test]
+    async fn a_confirmed_program_that_does_not_report_a_version_is_offered_with_open_only() {
+        let root = tempfile::tempdir().unwrap();
+        let (env, _) = local_environment(root.path(), "#!/bin/sh\nexec /bin/sleep 5\n");
+        let exec = CodexExecServer::with_config(CodexConfig {
+            probe_timeout: Duration::from_millis(100),
+            ..CodexConfig::default()
+        });
+        let report = exec.available(&env).await;
+        assert!(report.available);
+        assert_eq!(report.version.as_deref(), Some("unknown"));
+        assert_eq!(
+            report.sandbox_modes,
+            [orch_agent_contract::descriptor::SandboxMode::Open]
+        );
+    }
+
+    #[tokio::test]
+    async fn a_program_replaced_at_the_same_path_reports_its_new_version() {
+        let root = tempfile::tempdir().unwrap();
+        let (env, program) = local_environment(
+            root.path(),
+            "#!/bin/sh\nif [ \"$1\" = --version ]; then echo 'codex-cli 1.0.0'; exit 0; fi\nexit 1\n",
+        );
+        let exec = CodexExecServer::new();
+        assert_eq!(exec.available(&env).await.version.as_deref(), Some("1.0.0"));
+        std::fs::write(program, "#!/bin/sh\nif [ \"$1\" = --version ]; then echo 'codex-cli 1.1.0'; exit 0; fi\nexit 1\n").unwrap();
+        assert_eq!(exec.available(&env).await.version.as_deref(), Some("1.1.0"));
+    }
+
+    #[tokio::test]
+    async fn version_and_sandbox_probes_do_not_receive_environment_secrets() {
+        let root = tempfile::tempdir().unwrap();
+        let source = "#!/bin/sh\nprintf '%s' \"${ORCH_EXEC_TEST_SECRET-unset}\" >> \"$0.env\"\nif [ \"$1\" = --version ]; then echo 'codex-cli 1.0.0'; exit 0; fi\nexit 1\n";
+        let (mut env, program) = local_environment(root.path(), source);
+        env.variables
+            .insert("ORCH_EXEC_TEST_SECRET".into(), "synthetic-secret".into());
+        let report = CodexExecServer::new().available(&env).await;
+        assert!(report.available);
+        let observed = std::fs::read_to_string(format!("{}.env", program.display())).unwrap();
+        assert!(!observed.contains("synthetic-secret"));
+        assert!(observed.contains("unset"));
+    }
 }

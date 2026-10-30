@@ -220,6 +220,39 @@ pub fn machine_has_harness(machine: &MachinePlace, kind: &str) -> bool {
         || (harness_permitted(&machine.facts, kind) && listed("harnesses"))
 }
 
+/// A newly observed local program is not interchangeable with an agent of a different or unknown version.
+fn local_harness_version_problem(
+    facts: &Json,
+    kind: &str,
+    agent_version: Option<&str>,
+) -> Option<String> {
+    let searched = facts.get("searched_harness_kinds")?.as_array()?;
+    if !searched.iter().any(|item| item.as_str() == Some(kind)) {
+        return None;
+    }
+    let local = facts
+        .get("harnesses")
+        .and_then(Json::as_array)
+        .and_then(|entries| {
+            entries
+                .iter()
+                .find(|entry| entry.get("kind").and_then(Json::as_str) == Some(kind))
+        })
+        .and_then(|entry| entry.get("version"))
+        .and_then(Json::as_str)
+        .filter(|version| !version.is_empty())
+        .unwrap_or("unknown");
+    let agent = agent_version
+        .filter(|version| !version.is_empty())
+        .unwrap_or("unknown");
+    if local != "unknown" && agent != "unknown" && local == agent {
+        return None;
+    }
+    Some(format!(
+        "The environment has {kind} {local}; the agent uses {agent}. Install the agent's version on that machine."
+    ))
+}
+
 fn needs_harness_program(facts: &Json, kind: &str) -> bool {
     facts
         .get("adapters")
@@ -380,11 +413,24 @@ pub async fn runtime_facts(
     let unit_lifecycle = orch_db::queries::environment_facts::of(conn, environment.id)
         .await?
         .is_some_and(|facts| facts.makes_units());
-    let environment_problem = if unit_lifecycle && environment_machine.is_none() {
+    let mut environment_problem = if unit_lifecycle && environment_machine.is_none() {
         None
     } else {
         reported_harness_problem(conn, environment_machine.as_ref(), agent).await?
     };
+    if environment_problem.is_none()
+        && environment.placement == "connected"
+        && let Some(machine) = &environment_machine
+    {
+        let descriptor = harnesses::descriptor_of(agent)?;
+        environment_problem = local_harness_version_problem(
+            &machine.facts,
+            &agent.harness_kind,
+            descriptor
+                .as_ref()
+                .map(|descriptor| descriptor.harness.version.as_str()),
+        );
+    }
     let issuer = match provider.agent_id {
         Some(id) if id == agent.id => Some(agent.clone()),
         Some(id) => resources::agent(conn, id).await?,
@@ -2643,6 +2689,18 @@ async fn record_bound(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn a_new_local_harness_needs_review_when_its_version_is_different_or_unknown() {
+        let facts = json!({"searched_harness_kinds":["claude-code"],"harnesses":[{"kind":"claude-code","version":"2.1.312"}]});
+        assert!(local_harness_version_problem(&facts, "claude-code", Some("2.1.312")).is_none());
+        let mismatch =
+            local_harness_version_problem(&facts, "claude-code", Some("2.1.313")).unwrap();
+        assert!(mismatch.contains("2.1.312") && mismatch.contains("2.1.313"));
+        let unknown = json!({"searched_harness_kinds":["claude-code"],"harnesses":[{"kind":"claude-code","version":"unknown"}]});
+        assert!(local_harness_version_problem(&unknown, "claude-code", Some("unknown")).is_some());
+        assert!(local_harness_version_problem(&json!({}), "claude-code", None).is_none());
+    }
 
     #[test]
     fn a_supervised_adapter_supplies_its_own_harness_but_an_older_report_still_needs_an_allowed_binary()

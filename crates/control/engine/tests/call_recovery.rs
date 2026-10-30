@@ -9,7 +9,7 @@
 mod auxiliary;
 mod common;
 
-use common::{World, eventually, queued, turn_began};
+use common::{World, eventually, queued, steering, turn_began};
 use orch_authz::Caller;
 use orch_link_contract::events::{Event, TurnCompleted, TurnError, TurnOutcome};
 use orch_provider_contract::calls::{Purpose, Step};
@@ -64,6 +64,42 @@ async fn a_failure_without_effects_reuses_the_same_input_and_its_author() {
             .await,
         1
     );
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn a_failed_turn_that_received_a_steer_is_continued_instead_of_repeating_its_first_input() {
+    let world = World::new().await;
+    let thread = world.thread("Steered before failure").await;
+    immediate(&world, thread, "provider_busy").await;
+    let caller = Caller::session(world.ada);
+    let first = world
+        .engine()
+        .submit_input(&caller, thread, queued("Make the change"))
+        .await
+        .unwrap();
+    let turn = world.turn_start(thread, 0).await;
+    world.say(thread, turn_began(turn.turn_id)).await;
+    world.wait_turn(turn.turn_id, "running").await;
+    let steer = world
+        .engine()
+        .submit_input(&caller, thread, steering("Also update the tests"))
+        .await
+        .unwrap();
+    world.wait_input(steer.input.id, "delivered").await;
+    failed(&world, thread, turn.turn_id, "provider_busy").await;
+
+    let next = world.turn_start(thread, 1).await;
+    let input: (Id, Option<Id>, Json) = sqlx::query_as(
+        "SELECT i.id,i.author_id,i.content FROM turns t JOIN thread_inputs i ON i.id=t.input_id WHERE t.id=$1",
+    )
+    .bind(next.turn_id)
+    .fetch_one(world.pool.pool())
+    .await
+    .unwrap();
+    assert_ne!(input.0, first.input.id);
+    assert_eq!(input.1, Some(world.ada));
+    assert_eq!(input.2, json!([{"type":"text","text":"Continue"}]));
+    assert!(recovery(&world, thread).await.context["effects"] == true);
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]

@@ -13,9 +13,9 @@ version = 1
 [system]
 name = "Orch"
 # The address people open in a browser, as the HTTPS edge in front of the stack
-# serves it. It is used in links and in mail, and the node fetches the connector
-# it puts in a managed environment from it, so the containers of this host have to
-# reach it. Change it before the first start.
+# serves it. It is used in links, in mail, and for installer downloads by people.
+# The node fetches managed-runtime programs through its own authenticated connection.
+# Change this address before the first start.
 public_url = "https://orch.example.com"
 
 [release]
@@ -48,7 +48,7 @@ backplane_url = "wss://api:8444/internal/backplane"
 gateway_id = "compose-gateway"
 # What runtimes made by this system's node are told to connect to. The node adds
 # a host entry for gateway.orch.internal that reaches the Docker host, where the
-# pinned port is published.
+# pinned port is published. If its host port differs from 9443, use that port here.
 managed_endpoint = "wss://gateway.orch.internal:9443"
 
 # The addresses advertised to connected machines, in order of preference. A

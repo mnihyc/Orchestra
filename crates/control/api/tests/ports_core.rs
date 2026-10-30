@@ -104,6 +104,98 @@ async fn setup_with_domain(domain: &str) -> (World, Who, Who, Id, Id, Id) {
         .id;
     (world, manager, colleague, env, project, machine)
 }
+
+#[tokio::test]
+async fn a_port_browser_entry_stops_with_its_session_and_environment_generation() {
+    use tower::ServiceExt;
+
+    for loss in ["session", "generation"] {
+        let (world, manager, _, env, _, _) = setup().await;
+        sqlx::query("UPDATE environments SET status='running', facts=jsonb_set(COALESCE(facts,'{}'::jsonb),'{ports}', $2::jsonb) WHERE id=$1")
+            .bind(env)
+            .bind(json!({"transports":["tcp"]}))
+            .execute(&world.db.pool)
+            .await
+            .unwrap();
+        let entry = world
+            .app
+            .call(EnvironmentPortEnter, &[&env, &"41042"])
+            .token(&manager.token)
+            .body(&EnvironmentPortEnterBody::default())
+            .send()
+            .await
+            .ok();
+        let url = url::Url::parse(&entry.url).unwrap();
+        if loss == "session" {
+            sqlx::query("UPDATE sessions SET revoked_at=$2 WHERE user_id=$1")
+                .bind(manager.id())
+                .bind(world.now())
+                .execute(&world.db.pool)
+                .await
+                .unwrap();
+        } else {
+            sqlx::query("UPDATE environments SET generation=generation+1 WHERE id=$1")
+                .bind(env)
+                .execute(&world.db.pool)
+                .await
+                .unwrap();
+        }
+        let mut registry = orch_api_core::registry::Registry::new();
+        orch_api_core::routes::mount(&mut registry);
+        let router = orch_api_core::server::router(world.app.app.clone(), registry);
+        let response = router
+            .oneshot(
+                http::Request::builder()
+                    .uri(format!("{}?{}", url.path(), url.query().unwrap()))
+                    .header("host", url.host_str().unwrap())
+                    .body(axum::body::Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(
+            response.status(),
+            403,
+            "a {loss} change invalidates the code"
+        );
+        assert!(response.headers().get(http::header::SET_COOKIE).is_none());
+    }
+}
+
+#[tokio::test]
+async fn a_closed_port_link_cannot_be_exchanged_for_a_browser_cookie() {
+    use tower::ServiceExt;
+    let (world, manager, _, env, _, _) = setup().await;
+    links_asked(&world).await;
+    let mut asked = request(41043, new_id(), "preview link");
+    asked.kind = PortOpeningKind::Link;
+    asked.place_id = None;
+    asked.until = Some(Time::new(world.now() + chrono::Duration::hours(1)));
+    asked.entry_methods = Some(vec![PortLinkMethod::Browser]);
+    let plan = review(&world, &manager, env, &asked).await;
+    let opened = confirm(&world, &manager, env, &plan, new_id()).await;
+    let url = url::Url::parse(&opened.link.unwrap().browser_url_once.unwrap()).unwrap();
+    sqlx::query("UPDATE port_openings SET state='closed' WHERE id=$1")
+        .bind(opened.opening.id)
+        .execute(&world.db.pool)
+        .await
+        .unwrap();
+    let mut registry = orch_api_core::registry::Registry::new();
+    orch_api_core::routes::mount(&mut registry);
+    let router = orch_api_core::server::router(world.app.app.clone(), registry);
+    let response = router
+        .oneshot(
+            http::Request::builder()
+                .uri(format!("{}?{}", url.path(), url.query().unwrap()))
+                .header("host", url.host_str().unwrap())
+                .body(axum::body::Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(response.status(), 403);
+    assert!(response.headers().get(http::header::SET_COOKIE).is_none());
+}
 /// Sets `capability.policy` at the system for one port capability, with its approvers the holders of
 /// Ports Manage on the environment, as shipped.
 async fn port_policy(world: &World, key: &str, decision: &str) {

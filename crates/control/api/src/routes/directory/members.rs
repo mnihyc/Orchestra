@@ -14,7 +14,7 @@ use crate::middleware::authorization::{self, exact, refusals};
 use crate::middleware::requests::{ApiError, ApiResult};
 use crate::registry::{Ctx, Registry};
 use crate::routes::access::page::same;
-use crate::routes::access::{admin_matters, roles_held};
+use crate::routes::access::{require_role_giving, roles_held};
 use crate::routes::nodes::{
     Placed, actor_name, invalid, placed, policy_at, record, record_about, view,
 };
@@ -476,6 +476,10 @@ async fn move_preview(ctx: Ctx, (): (), body: MemberMoveBody) -> ApiResult<Membe
         )
         .await?;
     }
+    if missing.is_empty() {
+        let policy = policy_at(&mut conn, to.id).await?;
+        require_role_giving(&mut conn, &principal, to.id, wanted, policy).await?;
+    }
     let existing: Option<Role> = access::role_at(&mut conn, to.id, user)
         .await?
         .and_then(|word| serde_json::from_value(json!(word)).ok());
@@ -549,18 +553,17 @@ async fn move_member(ctx: Ctx, (): (), body: MemberMoveBody) -> ApiResult<Member
         )
         .await?;
     }
-    if wanted == Role::Admin {
-        let policy = policy_at(&mut tx, to.id).await?;
-        admin_matters(&mut tx, &principal, to.id, policy).await?;
-    }
+    let policy = policy_at(&mut tx, to.id).await?;
+    require_role_giving(&mut tx, &principal, to.id, wanted, policy).await?;
     let word: String = same(&wanted).ok_or_else(|| invalid("role", "is not a role"))?;
-    let held = access::move_member(
+    let held = access::move_member_with_choice(
         &mut tx,
         root.id,
         user,
         domain,
         to.id,
         &word,
+        body.role.is_some(),
         principal.user(),
         ctx.now,
     )

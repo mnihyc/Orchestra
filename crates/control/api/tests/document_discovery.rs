@@ -753,8 +753,7 @@ async fn deleting_an_unused_builtin_template_removes_only_its_live_dependency_fr
         seeds::seed(
             &mut tx,
             &Release {
-                environment_image: "registry.example/orch-test-env:1",
-                environment_image_digest: None,
+                version: "0.1.0",
                 adapters: &[],
             },
             desk.world.now(),
@@ -774,7 +773,7 @@ async fn deleting_an_unused_builtin_template_removes_only_its_live_dependency_fr
     let dependency = &before.depends[0];
     assert_eq!(dependency.object.id, template);
     assert_eq!(dependency.permission, "template.use");
-    assert_eq!(dependency.for_permission, "topic.interact");
+    assert_eq!(dependency.for_permission, "topic.start_threads");
     assert!(
         dependency.object.owner.is_none(),
         "a shipped system template has no invented person owner"

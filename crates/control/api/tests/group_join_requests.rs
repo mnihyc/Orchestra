@@ -29,6 +29,70 @@ fn reference(id: Id) -> ReferencePreviewGetQuery {
 }
 
 #[tokio::test]
+async fn a_group_join_request_carries_the_proposed_end_into_the_membership() {
+    let room = Room::new().await;
+    let chat = room
+        .group(&room.bea, &[&room.cai], Some("Group"))
+        .await
+        .base
+        .id;
+    let end = Time::new(room.world.now() + Duration::days(7));
+    let past = room
+        .world
+        .app
+        .call(ChatJoinRequest, &[&chat])
+        .token(&room.gus.token)
+        .body(&ChatJoinRequestBody {
+            expires_at: Some(Time::new(room.world.now())),
+            ..Default::default()
+        })
+        .send()
+        .await
+        .problem();
+    assert_eq!(past.code, ErrorCode::RequestInvalid);
+    let made = room
+        .world
+        .app
+        .call(ChatJoinRequest, &[&chat])
+        .token(&room.gus.token)
+        .body(&ChatJoinRequestBody {
+            expires_at: Some(end),
+            ..Default::default()
+        })
+        .send()
+        .await
+        .ok();
+    let approval = &made.approvals[0];
+    let orch_api_contract::approvals::ApprovalRequest::Access(request) = &approval.request else {
+        panic!("access approval")
+    };
+    assert_eq!(request.expires_at, Some(end));
+    room.world
+        .app
+        .call(ApprovalDecide, &[&approval.id])
+        .token(&room.cai.token)
+        .body(&ApprovalDecision::Access(AccessDecision {
+            approve: true,
+            expires_at: Some(end),
+            quick_duration: None,
+            permissions: None,
+            options: None,
+            note: None,
+        }))
+        .send()
+        .await
+        .ok();
+    let saved: Option<chrono::DateTime<chrono::Utc>> =
+        sqlx::query_scalar("SELECT expires_at FROM chat_members WHERE chat_id=$1 AND user_id=$2")
+            .bind(chat)
+            .bind(room.gus.id())
+            .fetch_one(&mut *room.world.conn().await)
+            .await
+            .unwrap();
+    assert_eq!(saved.map(Time::new), Some(end));
+}
+
+#[tokio::test]
 async fn a_direct_chat_card_is_unnamed_and_has_no_join_form() {
     let room = Room::new().await;
     let chat = room.direct(&room.bea, &room.cai).await.base.id;
@@ -116,6 +180,7 @@ async fn every_quick_grant_joins_the_group_and_expiry_removes_membership_and_gre
             .body(&ChatJoinRequestBody {
                 label: Some("Shared group label".into()),
                 reason: "Working together".into(),
+                expires_at: None,
             })
             .send()
             .await

@@ -348,7 +348,7 @@ async fn what_is_done_in_a_browser_refuses_a_token_and_a_cookie_request_needs_it
         world
             .app
             .call(CookieOnly, &[])
-            .cookie("orch_session", "ors_x")
+            .cookie("__Host-orch_session", "ors_x")
             .send()
             .await
             .status,

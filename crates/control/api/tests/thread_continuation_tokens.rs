@@ -198,7 +198,12 @@ async fn ordinary_input_and_prompt_edit_require_provider_scope_without_narrowing
     let allowed = token(
         &scene,
         thread,
-        &["thread.view", "thread.interact", "provider.use"],
+        &[
+            "thread.view",
+            "thread.interact",
+            "provider.use",
+            "environment.use",
+        ],
     )
     .await?;
     let before = counts(&scene, thread).await?;
@@ -1053,7 +1058,12 @@ async fn narrowing_only_provider_use_before_effects_or_activation_keeps_original
         let secret = token(
             &scene,
             thread,
-            &["thread.view", "thread.interact", "provider.use"],
+            &[
+                "thread.view",
+                "thread.interact",
+                "provider.use",
+                "environment.use",
+            ],
         )
         .await?;
         let token:Id=sqlx::query_scalar("SELECT id FROM api_tokens WHERE user_id=$1 AND scopes @> ARRAY['provider.use']::text[]")

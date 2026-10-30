@@ -5,7 +5,7 @@ import { useTranslation } from 'react-i18next';
 import { nodeQuery } from '@/api/nodes';
 import { moveThread, previewThreadMove } from '@/api/thread-move';
 import type { Thread, ThreadMovePlan, PreviewPerson } from '@/generated/api-types';
-import { holds, permissionLabel } from '@/lib/permissions';
+import { canCreateIn, permissionLabel } from '@/lib/permissions';
 import { newActKey } from '@/lib/requests';
 import { useOrgTree } from '@/realtime/stores/tree';
 import { threadWriter } from '@/realtime/stores/thread';
@@ -43,7 +43,7 @@ export function MoveToTopic({ thread, close }: { thread: Thread; close: () => vo
   const renderRow = useCallback((row: TreeRow<MovePlace>) => {
     const check = permissions.get(row.id);
     const topic = check?.data?.kind === 'topic' ? check.data : null;
-    const mayChoose = row.item.kind === 'topic' && row.id !== thread.topic_id && topic !== null && holds(topic.access, 'topic.interact');
+    const mayChoose = row.item.kind === 'topic' && row.id !== thread.topic_id && topic !== null && canCreateIn('topic', topic.access);
     const reason = row.id === thread.topic_id ? t('threadMove.here') : row.item.kind !== 'topic' ? null : check?.isPending === true ? t('threadMove.checking') : !mayChoose ? t('threadMove.needsInteract') : null;
     return <a href={`#move-topic-${row.id}`} aria-disabled={!mayChoose} className={`flex min-w-0 flex-1 items-center gap-2 py-1 ${mayChoose ? 'text-text' : 'text-text-muted'}`} onClick={(event) => { event.preventDefault(); if (mayChoose && !move.isPending) { key.current = newActKey(); move.reset(); setTarget(row.id); } }}>
       <NodeIcon kind={row.item.kind === 'project' && tree.nodes.get(row.item.parent_id ?? '')?.kind === 'project' ? 'folder' : row.item.kind} color={row.item.color} />

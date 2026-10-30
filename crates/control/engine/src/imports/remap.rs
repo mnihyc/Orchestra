@@ -64,32 +64,29 @@ pub fn remap(value: &mut Json, maps: &Maps<'_>, found: &mut Found) {
             }
         }
         Json::Object(object) => {
-            match object.get("type").and_then(Json::as_str) {
-                Some("mention") => {
-                    if let Some(person) = object.get("user_id").and_then(id_of) {
-                        if let Some(account) = maps.credits.mention(person) {
-                            object.insert("user_id".to_owned(), json!(account));
-                            object.remove("user");
-                        } else {
-                            let name = maps.credits.username(person).map_or_else(
-                                || maps.credits.name(person),
-                                |name| format!("@{name}"),
-                            );
-                            found.named += 1;
-                            *value = json!({ "type": "text", "text": name });
-                            return;
-                        }
-                    }
+            if object.get("type").and_then(Json::as_str) == Some("mention")
+                && let Some(person) = object.get("user_id").and_then(id_of)
+            {
+                if let Some(account) = maps.credits.mention(person) {
+                    object.insert("user_id".to_owned(), json!(account));
+                    object.remove("user");
+                } else {
+                    let name = maps
+                        .credits
+                        .username(person)
+                        .map_or_else(|| maps.credits.name(person), |name| format!("@{name}"));
+                    found.named += 1;
+                    *value = json!({ "type": "text", "text": name });
+                    return;
                 }
-                Some("ref") => {
-                    if !remap_reference(object, maps, found) {
-                        let text = words(object);
-                        found.degraded += 1;
-                        *value = json!({ "type": "text", "text": text });
-                        return;
-                    }
-                }
-                _ => {}
+            }
+            if object.get("type").and_then(Json::as_str) == Some("ref")
+                && !remap_reference(object, maps, found)
+            {
+                let text = words(object);
+                found.degraded += 1;
+                *value = json!({ "type": "text", "text": text });
+                return;
             }
             // The file an image, a file or a film block names.
             if let Some(file) = object.get("file_id").and_then(id_of)

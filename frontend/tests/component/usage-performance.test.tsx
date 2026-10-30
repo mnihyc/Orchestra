@@ -49,6 +49,18 @@ it('sorts the comparison by a measured column and filters all four choice dimens
   expect(table).not.toHaveTextContent('swift-route');expect(table).not.toHaveTextContent('steady-route');
 });
 
+it('shows a readable access program and filters with its original id', async () => {
+  const onFilter = vi.fn();
+  show(<PerformanceComparison rows={[{ model: 'route', tier: null, effort: null, program: 'daybreakRed', performance: measured() }]} modelNames={new Map([['route', 'Model']])} onFilter={onFilter} />);
+  const table = screen.getByRole('table', { name: 'Compare models' });
+  expect(table).toHaveTextContent('Daybreak Red');
+  expect(table).not.toHaveTextContent('daybreakRed');
+  const row = within(table).getAllByRole('row')[1];
+  if (row === undefined) throw new Error('The model comparison has no row');
+  await userEvent.click(within(row).getByRole('button'));
+  expect(onFilter).toHaveBeenCalledWith({ model: 'route', tier: 'none', effort: 'none', program: 'daybreakRed' });
+});
+
 it('keeps hidden comparison columns readable in the narrow row and sortable from a named control', async () => {
   const user = userEvent.setup();
   show(<PerformanceComparison rows={[{ model: 'Swift', tier: 'fast', effort: 'high', program: 'research', performance: measured({ requests: 10 }) }]} modelNames={new Map([['Swift','Swift']])} onFilter={() => undefined} />);

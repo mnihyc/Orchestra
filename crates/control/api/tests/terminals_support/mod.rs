@@ -747,7 +747,19 @@ impl Floor {
         let mut registry = Registry::new();
         orch_api_core::routes::mount(&mut registry);
         let router = orch_api_core::server::router(app, registry);
-        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        // Keep test listeners in the range reserved for this machine's test services.
+        const FIRST_PORT: u16 = 41000;
+        const PORTS: u16 = 1000;
+        let start = rand::random::<u16>() % PORTS;
+        let mut listener = None;
+        for offset in 0..PORTS {
+            let port = FIRST_PORT + (start + offset) % PORTS;
+            if let Ok(bound) = tokio::net::TcpListener::bind(("127.0.0.1", port)).await {
+                listener = Some(bound);
+                break;
+            }
+        }
+        let listener = listener.expect("a reserved test port is available");
         let addr = listener.local_addr().unwrap();
         tokio::spawn(async move {
             let _ =

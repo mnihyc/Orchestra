@@ -381,15 +381,21 @@ async fn create(
             return Err(open_failed(&mut conn, &shells, error).await?);
         }
     };
+    let mut conn = ctx.app.db.acquire().await?;
+    let site = rows::site(&mut conn, opened.session.environment_id)
+        .await?
+        .ok_or_else(ApiError::not_found)?;
     let TerminalTicket {
         ticket,
         ticket_expires_at,
     } = ctx.app.realtime.terminals().issue(
         ctx.app.clock.now(),
-        person,
+        ctx.user()?,
         Door::Shell(opened.session.id),
+        opened.session.environment_id,
+        opened.session.env_generation,
+        site.machine_id,
     );
-    let mut conn = ctx.app.db.acquire().await?;
     let session = views(&mut conn, &shells, std::slice::from_ref(&opened.session))
         .await?
         .into_iter()
@@ -458,11 +464,26 @@ async fn ticket(ctx: Ctx, (): (), (): ()) -> ApiResult<TerminalTicket> {
     if holding != Holding::Yes {
         return Err(lost(&ctx, &mut conn, &principal, &row, holding).await?);
     }
-    Ok(ctx
-        .app
-        .realtime
-        .terminals()
-        .issue(ctx.app.clock.now(), person, Door::Shell(id)))
+    authorization::require_resource(
+        &mut conn,
+        &principal,
+        ResourceKind::Environment,
+        row.environment_id,
+        Permission::TerminalManage,
+        Policy::default(),
+    )
+    .await?;
+    let site = rows::site(&mut conn, row.environment_id)
+        .await?
+        .ok_or_else(ApiError::not_found)?;
+    Ok(ctx.app.realtime.terminals().issue(
+        ctx.app.clock.now(),
+        ctx.user()?,
+        Door::Shell(id),
+        row.environment_id,
+        row.env_generation,
+        site.machine_id,
+    ))
 }
 
 /// Closes a shell: its opener may, and so may whoever manages its environment. Closing one that is
@@ -567,15 +588,14 @@ async fn agent_ticket(
     body: AgentTerminalTicketCreateBody,
 ) -> ApiResult<TerminalTicket> {
     let thread = ctx.id("id")?;
-    let person = ctx.user()?.id();
     let control = body.control.unwrap_or(false);
     let mut conn = ctx.app.db.acquire().await?;
     let principal = authorization::principal(&ctx, &mut conn).await?;
-    let environment = threads::thread(&mut conn, thread)
+    let row = threads::thread(&mut conn, thread)
         .await?
         .filter(|row| row.deleted_at.is_none())
-        .and_then(|row| row.environment_id)
         .ok_or_else(ApiError::not_found)?;
+    let environment = row.environment_id.ok_or_else(ApiError::not_found)?;
     authorization::require_resource(
         &mut conn,
         &principal,
@@ -603,7 +623,7 @@ async fn agent_ticket(
         .agent_screen(&mut conn, thread)
         .await
         .map_err(ApiError::internal)?;
-    let declared = screen.map(|screen| screen.declared);
+    let declared = screen.as_ref().map(|screen| screen.declared);
     let fits = match declared {
         Some(AgentTerminal::Interactive) => true,
         Some(AgentTerminal::View) => !control,
@@ -619,9 +639,19 @@ async fn agent_ticket(
             },
         ));
     }
+    let site = rows::site(&mut conn, environment)
+        .await?
+        .ok_or_else(ApiError::not_found)?;
     Ok(ctx.app.realtime.terminals().issue(
         ctx.app.clock.now(),
-        person,
-        Door::Agent { thread, control },
+        ctx.user()?,
+        Door::Agent {
+            thread,
+            control,
+            segment: row.current_segment_id,
+        },
+        environment,
+        site.generation,
+        screen.and_then(|screen| screen.machine),
     ))
 }

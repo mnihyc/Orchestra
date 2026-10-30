@@ -3456,7 +3456,7 @@
             }
           }
         },
-        "x-orch-permission": "project.interact",
+        "x-orch-permission": "project.create_topics",
         "security": [
           {
             "bearer": []
@@ -3751,7 +3751,7 @@
             }
           }
         },
-        "x-orch-rule": "topic.manage on the topic, and project.interact on the project or folder it moves to",
+        "x-orch-rule": "topic.manage on the topic, and project.create_topics on the project or folder it moves to",
         "security": [
           {
             "bearer": []
@@ -3807,7 +3807,7 @@
             }
           }
         },
-        "x-orch-permission": "topic.interact",
+        "x-orch-permission": "topic.start_threads",
         "security": [
           {
             "bearer": []
@@ -3863,7 +3863,7 @@
             }
           }
         },
-        "x-orch-rule": "topic.interact, the use of the provider and agent, and environment.manage on the environment",
+        "x-orch-rule": "topic.start_threads, the use of the provider and agent, and environment.use on the environment",
         "security": [
           {
             "bearer": []
@@ -11419,7 +11419,7 @@
             }
           }
         },
-        "x-orch-rule": "thread.manage at the source and topic.interact at the destination, within the same root tree",
+        "x-orch-rule": "thread.manage at the source and topic.start_threads at the destination, within the same root tree",
         "security": [
           {
             "bearer": []
@@ -11717,7 +11717,7 @@
             }
           }
         },
-        "x-orch-rule": "topic.interact on a topic or project.interact on a project or folder, and environment.manage on an environment named",
+        "x-orch-rule": "topic.start_threads on a topic or project.create_topics on a project or folder, and environment.use on an environment named",
         "security": [
           {
             "bearer": []
@@ -71929,6 +71929,14 @@
             "type": "string",
             "description": "Why."
           },
+          "expires_at": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "format": "date-time",
+            "description": "The proposed end of the access, or no end when omitted."
+          },
           "for_thread": {
             "type": [
               "string",
@@ -73003,6 +73011,14 @@
           "reason": {
             "type": "string",
             "description": "Why."
+          },
+          "expires_at": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "format": "date-time",
+            "description": "The proposed end of the access, or no end when absent."
           },
           "for_thread": {
             "anyOf": [
@@ -121694,6 +121710,14 @@
               "null"
             ],
             "description": "The name as shared with the requester."
+          },
+          "expires_at": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "format": "date-time",
+            "description": "The proposed end of membership, or no end when omitted."
           }
         },
         "description": "A request to join a known group chat."

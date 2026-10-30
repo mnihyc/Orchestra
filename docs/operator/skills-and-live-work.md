@@ -11,6 +11,10 @@ Use permits enablement, not editing. Review imported scripts and their origin,
 then test in an ordinary bounded environment without production secrets.
 Private source credentials are sealed; diagnose imports from the safe error,
 host readiness and allowed network route rather than printing credential values.
+For an archive imported from an address, the system setting
+`outbound.allowed_private_hosts` names any private hosts the chosen host may reach.
+The same check applies to each redirect. Leave the list empty to permit only
+public destinations.
 
 An enabled update reaches a thread before its next turn. If Updating skills
 persists, inspect the thread's work detail and its machine connection. Check

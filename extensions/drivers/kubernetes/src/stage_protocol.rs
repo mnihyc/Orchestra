@@ -1,29 +1,36 @@
 //! A bounded, Pod-bound header for the trusted tool-staging transfer.
 //! The header is not authentication: the caller must protect the exec channel and Pod identity.
 
-#![cfg_attr(
-    not(target_os = "linux"),
-    allow(
-        dead_code,
-        reason = "the stage runs on Linux; receipts keep its header everywhere"
-    )
-)]
-
+#[cfg(target_os = "linux")]
 use std::io::{self, Write};
 
+#[cfg(target_os = "linux")]
 use orch_driver_contract::driver::DriverError;
 use orch_driver_contract::runtime::ToolRef;
 use serde::{Deserialize, Serialize};
+#[cfg(target_os = "linux")]
 use sha2::{Digest, Sha256};
+#[cfg(target_os = "linux")]
 use tokio::io::{AsyncRead, AsyncReadExt, AsyncWrite, AsyncWriteExt};
+#[cfg(target_os = "linux")]
 use tokio::time::Instant;
 
-use crate::staging::{ArchiveReceipt, validate_receipt};
+#[cfg(target_os = "linux")]
+use crate::staging::validate_receipt;
 
 /// Enough for many named tool versions without letting an untrusted peer allocate an arbitrary header.
+#[cfg(target_os = "linux")]
 const MAX_HEADER_BYTES: usize = 256 * 1024;
 /// A 64 KiB buffer keeps memory fixed without making large tool transfers use tiny writes.
+#[cfg(target_os = "linux")]
 const TRANSFER_CHUNK_BYTES: usize = 64 * 1024;
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub(crate) struct ArchiveReceipt {
+    pub sha256: String,
+    pub bytes: u64,
+}
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -55,6 +62,27 @@ fn strict_tools<'de, D: serde::Deserializer<'de>>(
     })
 }
 
+#[cfg(test)]
+mod header_tests {
+    use super::StageHeader;
+    use serde_json::json;
+
+    #[test]
+    fn a_recorded_header_keeps_its_receipt_and_rejects_unexpected_tool_fields() {
+        let recorded = json!({
+            "pod_uid": "pod-uid",
+            "receipt": { "sha256": "a".repeat(64), "bytes": 1024 },
+            "tools": [{ "name": "codex", "version": "1.0.0" }]
+        });
+        let header: StageHeader = serde_json::from_value(recorded.clone()).unwrap();
+        assert_eq!(serde_json::to_value(&header).unwrap(), recorded);
+        let mut unexpected = recorded;
+        unexpected["tools"][0]["extra"] = json!(true);
+        assert!(serde_json::from_value::<StageHeader>(unexpected).is_err());
+    }
+}
+
+#[cfg(target_os = "linux")]
 impl StageHeader {
     /// The expected UID comes from the stager's own Pod identity, not the transfer.
     pub(crate) fn check(&self, expected_uid: &str) -> Result<(), DriverError> {
@@ -67,7 +95,9 @@ impl StageHeader {
     }
 }
 
+#[cfg(target_os = "linux")]
 struct Bounded(Vec<u8>);
+#[cfg(target_os = "linux")]
 impl Write for Bounded {
     fn write(&mut self, bytes: &[u8]) -> io::Result<usize> {
         let size = self
@@ -86,10 +116,12 @@ impl Write for Bounded {
     }
 }
 
+#[cfg(target_os = "linux")]
 fn unavailable() -> DriverError {
     DriverError::Unavailable("the staging header could not be exchanged".into())
 }
 
+#[cfg(target_os = "linux")]
 pub(crate) async fn write_header<W: AsyncWrite + Unpin>(
     output: &mut W,
     header: &StageHeader,
@@ -117,6 +149,7 @@ pub(crate) async fn write_header<W: AsyncWrite + Unpin>(
     Ok(())
 }
 
+#[cfg(target_os = "linux")]
 pub(crate) async fn read_header<R: AsyncRead + Unpin>(
     input: &mut R,
     expected_uid: &str,
@@ -155,6 +188,7 @@ pub(crate) async fn read_header<R: AsyncRead + Unpin>(
 /// Copy exactly the announced archive, with a stall limit and one absolute deadline.
 /// The stream carries one archive and is closed afterwards, not reused for another command.
 /// On any error the caller must discard the partial, still-private output.
+#[cfg(target_os = "linux")]
 pub(crate) async fn transfer_archive<R: AsyncRead + Unpin, W: AsyncWrite + Unpin>(
     input: &mut R,
     output: &mut W,
@@ -212,7 +246,7 @@ pub(crate) async fn transfer_archive<R: AsyncRead + Unpin, W: AsyncWrite + Unpin
     Ok(())
 }
 
-#[cfg(test)]
+#[cfg(all(test, target_os = "linux"))]
 mod tests {
     use super::*;
     use std::time::Duration;

@@ -133,7 +133,8 @@ async fn deleted(
     let after = cursor.map(parse_deleted_cursor).transpose()?;
     let purged_before = ctx.now - kept_for(ctx.app.config.retention.soft_delete_days);
     let mut rows =
-        hierarchy::deleted_root_orgs(conn, purged_before, q, after, read_ahead(size)).await?;
+        hierarchy::deleted_root_orgs(conn, purged_before, ctx.now, q, after, read_ahead(size))
+            .await?;
     let more = rows.len() > size;
     rows.truncate(size);
     let ids: Vec<Id> = rows.iter().map(|row| row.id).collect();

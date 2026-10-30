@@ -68,6 +68,13 @@ host that offers builds, or an uploaded image archive. A tag can change; a diges
 keeps the same image. Dockerfiles use the classic Docker builder. A build context
 provides files from an uploaded archive or a public Git repository.
 
+The built-in **Default** and **Developer tools** templates have editable
+Dockerfiles under **Image**. Their recipes need no build context. A host that
+offers builds makes the chosen image on first use and keeps it for later
+environments; the job shows its progress. The first build needs network access
+to the recipe's package and download sources. Developer tools includes the
+Default recipe, so it does not need a Default image built beforehand.
+
 **Confinement** selects the container runtime and security options. Leaving the
 runtime unset uses the host's default. Read-only image files still allow writes
 to writable volumes. Tool confinement controls the agent's file access inside

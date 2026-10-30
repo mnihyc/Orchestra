@@ -84,6 +84,10 @@ const RESERVATION_MARGIN: Duration = Duration::from_secs(60);
 /// finds: enough that several workers at once each find one, few enough that it ends soon.
 const CANDIDATES_PER_TRY: usize = 16;
 
+/// One try per concurrent delivery worker lets a short database race settle; a persistent
+/// conflict is returned for the next scheduled run.
+const TRANSACTION_ATTEMPTS: usize = CONCURRENCY;
+
 /// Why a run of the outbox stopped.
 #[derive(Debug, thiserror::Error)]
 pub enum OutboxError {
@@ -96,6 +100,20 @@ pub enum OutboxError {
     /// Current recipient access could not be checked.
     #[error(transparent)]
     Access(#[from] orch_authz::Error),
+}
+
+impl OutboxError {
+    fn retryable(&self) -> bool {
+        matches!(
+            self,
+            Self::Db(DbError::Retry)
+                | Self::Channel(ChannelError::Db(DbError::Retry))
+                | Self::Channel(ChannelError::Setting(orch_settings::Error::Db(
+                    DbError::Retry
+                )))
+                | Self::Access(orch_authz::Error::Db(DbError::Retry))
+        )
+    }
 }
 
 /// What a run delivered.
@@ -255,6 +273,7 @@ struct Attempt {
 }
 
 /// What the call of an attempt came to.
+#[derive(Clone)]
 enum Called {
     /// One delivery's answer.
     One(Result<(), DeliverError>),
@@ -269,6 +288,12 @@ enum Step {
     /// It was settled without a call: held, cancelled or failed before it could go.
     Settled(Run),
     /// It is reserved and goes.
+    Go(Box<Attempt>),
+}
+
+/// A committed reservation or a delivery settled before its call.
+enum Ready {
+    Settled(Run),
     Go(Box<Attempt>),
 }
 
@@ -359,6 +384,23 @@ impl Outbox {
     /// where it is not to go now. None where nothing is due, or everything that is due is held
     /// by other workers.
     pub async fn deliver_next(&self) -> Result<Option<Run>, OutboxError> {
+        let mut tries = 1;
+        loop {
+            match self.reserve_next().await {
+                Err(error) if error.retryable() && tries < TRANSACTION_ATTEMPTS => {
+                    tries += 1;
+                    tokio::task::yield_now().await;
+                }
+                Err(error) => return Err(error),
+                Ok(None) => return Ok(None),
+                Ok(Some(Ready::Settled(done))) => return Ok(Some(done)),
+                Ok(Some(Ready::Go(work))) => return Ok(Some(self.go(*work).await?)),
+            }
+        }
+    }
+
+    /// Reserves one candidate and commits before any remote call.
+    async fn reserve_next(&self) -> Result<Option<Ready>, OutboxError> {
         let inner = &self.inner;
         let mut passed: Vec<Id> = Vec::new();
         let mut passed_routes: Vec<Id> = Vec::new();
@@ -395,11 +437,11 @@ impl Outbox {
                 Step::Passed => tx.rollback().await.map_err(DbError::from)?,
                 Step::Settled(done) => {
                     tx.commit().await.map_err(DbError::from)?;
-                    return Ok(Some(done));
+                    return Ok(Some(Ready::Settled(done)));
                 }
                 Step::Go(attempt) => {
                     tx.commit().await.map_err(DbError::from)?;
-                    return Ok(Some(self.go(*attempt).await?));
+                    return Ok(Some(Ready::Go(attempt)));
                 }
             }
         }
@@ -614,7 +656,7 @@ impl Outbox {
     }
 
     /// The notifications of a unit that are still to be told: what the person read since is left
-    /// out, and so is a document's notice they may no longer read. Says too whether anything was
+    /// out, and so is a notice about work they may no longer read. Says too whether anything was
     /// left out for having been read.
     async fn still_to_tell(
         &self,
@@ -637,7 +679,7 @@ impl Outbox {
         };
         let mut read = false;
         let mut snapshots = Vec::new();
-        for snapshot in merged {
+        for mut snapshot in merged {
             // A notification the Inbox still has and that was read since is not told.
             if let Some(id) = snapshot.id
                 && known.contains(&id)
@@ -646,10 +688,14 @@ impl Outbox {
                 read = true;
                 continue;
             }
-            if matches!(
-                snapshot.kind.as_str(),
-                "doc.comment" | "doc.mention" | "person.notify"
-            ) {
+            let thread_content = snapshot.thread_id.is_some()
+                && orch_authz::documents::notice_contains_thread_content(&snapshot.kind);
+            if thread_content
+                || matches!(
+                    snapshot.kind.as_str(),
+                    "doc.comment" | "doc.mention" | "person.notify" | "mention" | "chat.message"
+                )
+            {
                 let principal = match orch_authz::Principal::load(
                     conn,
                     orch_authz::Caller::session(user),
@@ -668,11 +714,23 @@ impl Outbox {
                     &principal,
                     &snapshot.kind,
                     &snapshot.data,
+                    snapshot.chat_id,
+                    snapshot.thread_id,
                 )
                 .await?
                 {
                     continue;
                 }
+                if let Some(thread) = snapshot.thread_id
+                    && thread_content
+                    && !orch_authz::documents::notice_thread_readable(conn, &principal, thread)
+                        .await?
+                {
+                    continue;
+                }
+            }
+            if people::machine_notice_has_unscoped_thread_text(&snapshot.kind, &snapshot.data) {
+                snapshot.body.clear();
             }
             snapshots.push(snapshot);
         }
@@ -904,13 +962,39 @@ impl Outbox {
     /// Makes the call of a reserved attempt, then records what it came to.
     async fn go(&self, attempt: Attempt) -> Result<Run, OutboxError> {
         let called = self.call(&attempt).await;
+        let mut tries = 1;
+        loop {
+            match self.conclude_once(&attempt, called.clone()).await {
+                Err(error) if error.retryable() && tries < TRANSACTION_ATTEMPTS => {
+                    tries += 1;
+                    tokio::task::yield_now().await;
+                }
+                Err(error) => return Err(error),
+                Ok(done) => {
+                    self.count(&attempt.kind, attempt.form, done);
+                    return Ok(done);
+                }
+            }
+        }
+    }
+
+    /// Records the answer in a fresh transaction, without repeating the remote call.
+    async fn conclude_once(&self, attempt: &Attempt, called: Called) -> Result<Run, OutboxError> {
         let mut tx =
             orch_db::queries::transaction_guard::scope(false, self.inner.db.begin()).await?;
         orch_db::queries::transaction_guard::lock_action(&mut tx).await?;
+        if let Work::Route { channel, route, .. } = &attempt.work {
+            rows::lock_channel_for_update(&mut tx, *channel).await?;
+            let _ = routes::lock_route(&mut tx, *route).await?;
+        }
+        let ids: Vec<Id> = attempt.unit.iter().map(|row| row.id).collect();
+        if !db_outbox::lock_attempt(&mut tx, &ids, attempt.dispatch).await? {
+            tx.rollback().await.map_err(DbError::from)?;
+            return Ok(Run::default());
+        }
         let now = self.inner.clock.now();
-        let done = self.conclude(&mut tx, now, &attempt, called).await?;
+        let done = self.conclude(&mut tx, now, attempt, called).await?;
         tx.commit().await.map_err(DbError::from)?;
-        self.count(&attempt.kind, attempt.form, done);
         Ok(done)
     }
 
@@ -1270,7 +1354,8 @@ impl Outbox {
         notifier: &Arc<dyn Notifier>,
         delivery: Delivery,
     ) -> Result<(), DeliverError> {
-        guarded(notifier.deliver(delivery)).await
+        let secrets = delivery.config.secrets.clone();
+        guarded(notifier.deliver(delivery), &secrets).await
     }
 
     /// Writes what a try came to into every row of the attempt, under that attempt.

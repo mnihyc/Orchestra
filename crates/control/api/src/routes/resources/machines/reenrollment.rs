@@ -67,6 +67,13 @@ async fn create(ctx: Ctx, (): (), (): ()) -> ApiResult<EnrollmentToken> {
         })
         .await
         .map_err(|fault| ApiError::internal(format!("{}: {}", fault.code, fault.detail)))?;
+    let mut conn = ctx.app.db.acquire().await?;
+    if !crate::certificates::bind_issuer(&mut conn, &made.receipt, ctx.user()?).await? {
+        return Err(ApiError::internal(
+            "the enrollment issuer could not be recorded",
+        ));
+    }
+    drop(conn);
     let mut commands = enrollment_commands(&ctx.app.config, &made.token, installer);
     if matches!(installer, Installer::Connector) {
         let roles = row

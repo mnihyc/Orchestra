@@ -12,6 +12,8 @@ Open **Resources → Machines → Add**, then choose its roles. **Environment** 
 you register; **Agent** runs agents; **Provider** keeps model credentials. These roles share
 one connector. **Node** is separate: it makes managed environments on a Linux host.
 Choose the home where you may add it. Connecting a machine does not share all its folders.
+Directory environments are available on Linux. macOS and Windows connectors can still connect
+for their other roles.
 
 ## 2. Choose its account and lifetime
 
@@ -42,9 +44,11 @@ lower case), and on macOS or Windows, where none is set, the proxy settings of t
 to `http://`, `socks5://` and `socks5h://` proxies (with `socks5h` the proxy resolves names), with
 `user:password@` in the address where the proxy asks for them.
 
-A service starts with its manager's variables, not your shell's: `orch-connector service install`
-writes the proxy variables of the shell you run it from into the service, and the programs it
-starts (agent programs, `git`) inherit them. To use another proxy than the shell's, install with
+A service starts with its manager's variables, not your shell's. The Linux and macOS connector
+installers, the Linux node installer and `orch-connector service install` write the shell's proxy
+variables into the service; the programs it starts (agent programs, `git`) inherit them. These
+service files are readable only by their owner because a proxy address can contain a password.
+To use another proxy than the shell's, install the connector service with
 `--proxy socks5h://proxy.example:1080` (or `--proxy none` to reach every host directly) and
 `--no-proxy` for the hosts reached directly; install again to change it. On Windows the logon task
 starts with your account's variables: set them with `setx`. `orch-connector doctor` shows the proxy
@@ -80,6 +84,14 @@ handed that setting to Orch. For a driver that has reported a configuration sche
 are named beside the value; fix them and save again. The editor keeps your draft. If the driver has
 not reported a schema, Orch cannot check its connection fields here. A connection change takes
 effect after the node restarts.
+
+## Confirm an agent program
+
+On the machine's **Programs** tab, Orch lists the agent programs it finds and their versions. A
+program says **Found** until a machine manager chooses **Use**. The machine's operator can keep
+the harness setting local; in that case, change it on the machine. The operator can also name or
+remove a program there. Choose **Search again** to refresh the list. A version that could not be
+read says **Version unknown**.
 
 ## 4. Enroll the same machine again
 

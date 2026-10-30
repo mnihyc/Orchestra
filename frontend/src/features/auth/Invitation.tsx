@@ -12,7 +12,7 @@ import { useStore } from 'zustand';
 import { useTranslation } from 'react-i18next';
 
 import { meQuery, signOut } from '@/api/auth';
-import { ApiError, client } from '@/api/client';
+import { ApiError, client, invitationIssuerAuthorityLost } from '@/api/client';
 import { acceptInvitation, invitationQuery } from '@/api/users';
 import { AuthCard } from '@/features/auth/Frame';
 import { acceptedDestination } from '@/features/auth/accepted';
@@ -29,7 +29,7 @@ import { Skeleton, SkeletonGroup } from '@/ui/Skeleton';
 
 /** Whether a lookup failed because the invitation ended, was used up or was withdrawn: the answer says no more than that. */
 export function isSpent(error: unknown): boolean {
-  return error instanceof ApiError && (error.status === 410 || error.status === 404);
+  return error instanceof ApiError && !invitationIssuerAuthorityLost(error) && (error.status === 410 || error.status === 404);
 }
 
 /** The org an invitation is into, named with its address where an org the reader is in already has its name. */
@@ -120,12 +120,15 @@ export function Invitation({ token, system }: { token: string; system: string })
       title={t('auth.invite.title')}
       foot={
         signedIn ? (
-          <p>
-            {t('auth.invite.signedInAs', { name: me.data?.display_name ?? '' })}{' '}
-            <button type="button" className={linkButtonClasses} disabled={leave.isPending} onClick={() => leave.mutate()}>
-              {t('auth.invite.notYou')}
-            </button>
-          </p>
+          <div className="flex flex-col gap-2">
+            <p>
+              {t('auth.invite.signedInAs', { name: me.data?.display_name ?? '' })}{' '}
+              <button type="button" className={linkButtonClasses} disabled={leave.isPending || accept.isPending} onClick={() => leave.mutate()}>
+                {t('auth.invite.notYou')}
+              </button>
+            </p>
+            {leave.error !== null && <ErrorAlert error={leave.error} />}
+          </div>
         ) : undefined
       }
     >
@@ -153,6 +156,7 @@ export function Invitation({ token, system }: { token: string; system: string })
               block
               icon={<MailCheck aria-hidden />}
               pending={accept.isPending}
+              disabled={leave.isPending}
               onClick={() => accept.mutate()}
             >
               {t('auth.invite.accept')}

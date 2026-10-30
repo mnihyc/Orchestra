@@ -53,6 +53,15 @@ fn tool_set_name<'a>(offer: &'a str, executor: &str) -> Option<&'a str> {
     }
 }
 
+fn policy_allows(kind: &str, descriptor: &ExecutorDescriptor, allowed: Option<&[String]>) -> bool {
+    allowed.is_none_or(|list| {
+        list.iter().any(|name| {
+            name == kind
+                || tool_set_name(name, kind).is_some_and(|set| descriptor.has_tool_set(set))
+        })
+    })
+}
+
 /// The executors a connector can run.
 #[derive(Default)]
 pub struct Executors {
@@ -137,11 +146,31 @@ impl Executors {
         for (kind, entry) in entries.iter_mut() {
             let availability = entry.executor.available(context).await;
             let mut fact = availability.clone().into_fact(kind);
+            if context.tools_dir.is_none()
+                && entry
+                    .descriptor
+                    .program
+                    .as_ref()
+                    .is_some_and(|program| context.local_programs.contains_key(program))
+                && entry.running.as_ref().is_some_and(|running| {
+                    !availability.available
+                        || availability.version.as_deref() != Some(running.version.as_str())
+                })
+                && let Some(previous) = entry.running.take()
+                && let Err(error) = entry.executor.stop().await
+            {
+                fact.available = false;
+                fact.version.clone_from(&previous.version);
+                fact.reason = Some(format!(
+                    "the previous executor could not be stopped: {error}"
+                ));
+                entry.running = Some(previous);
+            }
             // A tool set is offered only if it is one the executor declared.
             if let Some(sets) = &mut fact.tool_sets {
                 sets.retain(|name| entry.descriptor.has_tool_set(name));
             }
-            if fact.version.is_empty()
+            if (fact.version.is_empty() || fact.version == "unknown")
                 && let Some(running) = &entry.running
             {
                 fact.version.clone_from(&running.version);
@@ -218,17 +247,10 @@ impl Executors {
         let entry = entries
             .get_mut(kind)
             .ok_or_else(|| HostError::NotFound(format!("there is no executor {kind:?}")))?;
-        if let Some(list) = allowed {
-            let offered = list.iter().any(|name| {
-                name == kind
-                    || tool_set_name(name, kind)
-                        .is_some_and(|set| entry.descriptor.has_tool_set(set))
-            });
-            if !offered {
-                return Err(HostError::ExecNotOffered(format!(
-                    "this machine's owner does not let its exec node offer {kind:?}"
-                )));
-            }
+        if !policy_allows(kind, &entry.descriptor, allowed) {
+            return Err(HostError::ExecNotOffered(format!(
+                "this machine's owner does not let its exec node offer {kind:?}"
+            )));
         }
         let availability = entry.executor.available(context).await;
         if !availability.available {
@@ -309,7 +331,23 @@ impl Executors {
         context: &EnvironmentContext,
     ) -> Result<ExecutorEndpoint> {
         if let Some(endpoint) = self.endpoint(kind).await {
-            if answers(&endpoint).await {
+            let current = {
+                let mut entries = self.entries.lock().await;
+                match entries.get_mut(kind) {
+                    Some(entry) if policy_allows(kind, &entry.descriptor, allowed) => {
+                        let available = entry.executor.available(context).await;
+                        let local_program = context.tools_dir.is_none()
+                            && entry.descriptor.program.as_ref().is_some_and(|program| {
+                                context.local_programs.contains_key(program)
+                            });
+                        available.available
+                            && (!local_program
+                                || available.version.as_deref() == Some(endpoint.version.as_str()))
+                    }
+                    _ => false,
+                }
+            };
+            if current && answers(&endpoint).await {
                 return Ok(endpoint);
             }
             let _ = self.stop(kind).await;
@@ -334,6 +372,30 @@ impl Executors {
                 .map_err(|error| HostError::Internal(format!("{kind:?} did not stop: {error}")))?;
         }
         Ok(())
+    }
+
+    /// Stops running executors whose locally authorized program was removed or replaced.
+    pub async fn stop_changed_programs(
+        &self,
+        before: &BTreeMap<String, String>,
+        after: &BTreeMap<String, String>,
+    ) {
+        let kinds: Vec<String> = self
+            .entries
+            .lock()
+            .await
+            .iter()
+            .filter_map(|(kind, entry)| {
+                let program = entry.descriptor.program.as_ref()?;
+                (entry.running.is_some() && before.get(program) != after.get(program))
+                    .then(|| kind.clone())
+            })
+            .collect();
+        for kind in kinds {
+            if let Err(error) = self.stop(&kind).await {
+                tracing::warn!(%kind, %error, "an executor of a withdrawn program could not be stopped");
+            }
+        }
     }
 
     /// Stops every running executor, as when the environment is detached.
@@ -466,6 +528,86 @@ mod tests {
 
     /// An executor of a harness's own protocol, which is not there.
     struct Missing;
+
+    struct LocalProgram;
+
+    #[async_trait]
+    impl Executor for LocalProgram {
+        fn kind(&self) -> &'static str {
+            "local-program"
+        }
+        fn describe(&self) -> ExecutorDescriptor {
+            serde_json::from_value(
+                json!({"kind":"local-program","title":"Local program","program":"codex",
+                "protocol":"harness","sandbox_modes":["open"]}),
+            )
+            .unwrap()
+        }
+        async fn available(&self, env: &EnvironmentContext) -> ExecutorAvailability {
+            if env.local_programs.contains_key("codex") {
+                ExecutorAvailability::available(
+                    env.variables
+                        .get("TEST_VERSION")
+                        .map_or("1.0.0", String::as_str),
+                    vec![SandboxMode::Open],
+                )
+            } else {
+                ExecutorAvailability::unavailable("the program is no longer allowed")
+            }
+        }
+        async fn start(
+            &mut self,
+            _env: &EnvironmentContext,
+        ) -> std::result::Result<ExecutorEndpoint, AdapterError> {
+            Ok(ExecutorEndpoint {
+                address: "127.0.0.1:41777".into(),
+                token: None,
+                version: "1.0.0".into(),
+                tool_sets: vec![],
+                sandbox_modes: vec![SandboxMode::Open],
+            })
+        }
+        async fn stop(&mut self) -> std::result::Result<(), AdapterError> {
+            Ok(())
+        }
+    }
+
+    #[tokio::test]
+    async fn removing_a_confirmed_program_stops_its_executor_without_stopping_other_tools() {
+        let registry = registry().await;
+        registry.register(Box::new(LocalProgram)).await.unwrap();
+        let mut env = context(false);
+        env.local_programs
+            .insert("codex".into(), "/local/codex".into());
+        registry.start("local-program", None, &env).await.unwrap();
+        registry.start("orch-exec", None, &env).await.unwrap();
+        registry
+            .stop_changed_programs(&env.local_programs, &BTreeMap::new())
+            .await;
+        assert!(registry.endpoint("local-program").await.is_none());
+        assert!(registry.endpoint("orch-exec").await.is_some());
+        env.local_programs.clear();
+        assert!(registry.start("local-program", None, &env).await.is_err());
+    }
+
+    #[tokio::test]
+    async fn an_updated_program_retires_the_old_executor_before_reporting_the_new_version() {
+        let registry = registry().await;
+        registry.register(Box::new(LocalProgram)).await.unwrap();
+        let mut env = context(false);
+        env.local_programs
+            .insert("codex".into(), "/local/codex".into());
+        registry.start("local-program", None, &env).await.unwrap();
+        env.variables.insert("TEST_VERSION".into(), "2.0.0".into());
+        let facts = registry.facts(&env).await;
+        assert!(registry.endpoint("local-program").await.is_none());
+        let changed = facts
+            .iter()
+            .find(|fact| fact.kind == "local-program")
+            .unwrap();
+        assert!(changed.available);
+        assert_eq!(changed.version, "2.0.0");
+    }
 
     #[async_trait]
     impl Executor for Missing {

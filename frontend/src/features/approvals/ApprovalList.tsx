@@ -6,12 +6,13 @@
  */
 import { useInfiniteQuery, useQuery, useQueryClient } from '@tanstack/react-query';
 import { ShieldCheck } from 'lucide-react';
-import { type ReactNode, useEffect, useMemo, useRef, useState } from 'react';
+import { type ReactNode, useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import { useTranslation } from 'react-i18next';
 
 import { asPortApproval, PortApprovalCard } from '@/features/ports/Request';
 import { approvalQuery, approvalsQuery, type ApprovalsFilter, cancelApproval } from '@/api/approvals';
 import { meQuery } from '@/api/auth';
+import { RequestedEnd } from '@/features/access/RequestEnd';
 import { AccessCard, type AccessApproval } from '@/features/approvals/Access';
 import { CapabilityCard } from '@/features/approvals/Capability';
 import { SourceCard, SourceBrief } from '@/features/approvals/Source';
@@ -29,7 +30,7 @@ import { Button } from '@/ui/Button';
 import { EmptyState } from '@/ui/EmptyState';
 import { ErrorAlert, ErrorState } from '@/ui/ErrorState';
 import { Pagination } from '@/ui/Pagination';
-import { Skeleton, SkeletonGroup } from '@/ui/Skeleton';
+import { Skeleton, SkeletonGroup, SkeletonRows } from '@/ui/Skeleton';
 
 /** Whether answering is possible now: decisions depend on current state, so they wait for the live connection. */
 export function useLive(): boolean {
@@ -168,6 +169,7 @@ function RequestBrief({ approval }: { approval: Approval }) {
   return (
     <>
       <p>{approval.request.permissions.map((permission) => permissionLabel(permission)).join(', ')}</p>
+      <RequestedEnd at={approval.request.expires_at} />
       {approval.request.reason !== '' && <p>{approval.request.reason}</p>}
       <p className="sr-only">{kindWord(approval.kind, t)}</p>
     </>
@@ -211,47 +213,61 @@ function HarnessCard({ approval, live, onSettled }: { approval: HarnessApproval;
  * What leaves the waiting list while it is on screen: remembered here as the approval it became, so
  * that it can be drawn as a decided line in its place. `remember` is told of what the person decided.
  */
+interface OutcomeRead { createdAt: string; error: unknown; pending: boolean }
+
 function useSettled(items: readonly Approval[]) {
   const queryClient = useQueryClient();
   const [settled, setSettled] = useState<ReadonlyMap<string, Approval>>(new Map());
+  const [outcomes, setOutcomes] = useState<ReadonlyMap<string, OutcomeRead>>(new Map());
   const known = useRef(new Set<string>());
   const seen = useRef(new Map<string, Approval>());
   const remember = (approval: Approval) => {
     known.current.add(approval.id);
     setSettled((held) => new Map(held).set(approval.id, approval));
   };
+  const readOutcome = useCallback((id: string, createdAt: string) => {
+    setOutcomes((held) => new Map(held).set(id, { createdAt, error: null, pending: true }));
+    void queryClient.query({ ...approvalQuery(id), staleTime: 0 }).then(
+      (approval) => {
+        setOutcomes((held) => { const next = new Map(held); next.delete(id); return next; });
+        if (approval.state !== 'pending') setSettled((held) => new Map(held).set(id, approval));
+      },
+      (error: unknown) => setOutcomes((held) => new Map(held).set(id, { createdAt, error, pending: false })),
+    );
+  }, [queryClient]);
   useEffect(() => {
     const present = new Set(items.map((item) => item.id));
     for (const id of [...seen.current.keys()]) {
       if (present.has(id) || known.current.has(id)) continue;
+      const previous = seen.current.get(id);
       seen.current.delete(id);
       known.current.add(id);
       // It left the list: somebody decided it, or it was taken back. Reading it says which.
-      queryClient.query({ ...approvalQuery(id), staleTime: 0 }).then(
-        (approval) => {
-          if (approval.state !== 'pending') setSettled((held) => new Map(held).set(id, approval));
-        },
-        () => undefined,
-      );
+      if (previous !== undefined) readOutcome(id, previous.created_at);
     }
     for (const item of items) if (!known.current.has(item.id)) seen.current.set(item.id, item);
-  }, [items, queryClient]);
-  return { settled, remember };
+  }, [items, readOutcome]);
+  const retry = (id: string) => {
+    const outcome = outcomes.get(id);
+    if (outcome !== undefined && !outcome.pending) readOutcome(id, outcome.createdAt);
+  };
+  return { settled, remember, outcomes, retry };
 }
 
 /** What the person has to decide. */
 export function WaitingList({ shape }: { shape: ListShape }) {
   const list = useApprovalPages(shape.filter);
   // Held here, above the check for an empty list: what was the last card to be decided must not take its line with it.
-  const { settled, remember } = useSettled(list.items);
+  const { settled, remember, outcomes, retry } = useSettled(list.items);
   return (
-    <ListFrame list={list} empty={shape.empty} kept={settled.size}>
-      {(more) => <Waiting items={list.items} settled={settled} remember={remember} more={more} />}
+    <ListFrame list={list} empty={shape.empty} kept={settled.size + outcomes.size}>
+      {(more) => <Waiting items={list.items} settled={settled} remember={remember} more={more} outcomes={outcomes} retryOutcome={retry} />}
     </ListFrame>
   );
 }
 
-function Waiting({ items, settled, remember, more }: { items: Approval[]; settled: ReadonlyMap<string, Approval>; remember: (approval: Approval) => void; more: ReactNode }) {
+function Waiting({ items, settled, remember, more, outcomes, retryOutcome }: { items: Approval[]; settled: ReadonlyMap<string, Approval>; remember: (approval: Approval) => void; more: ReactNode; outcomes?: ReadonlyMap<string, OutcomeRead>; retryOutcome?: (id: string) => void }) {
+  const { t } = useTranslation();
   const live = useLive();
   const me = useQuery(meQuery).data;
   // What was decided meanwhile stays where it stood: the cards in the order they were made, newest first.
@@ -260,9 +276,21 @@ function Waiting({ items, settled, remember, more }: { items: Approval[]; settle
     const gone = [...settled.values()].filter((approval) => !present.has(approval.id));
     return [...items, ...gone].sort((a, b) => (a.created_at < b.created_at ? 1 : a.created_at > b.created_at ? -1 : 0));
   }, [items, settled]);
+  const present = new Set(items.map((item) => item.id));
+  const outcomeRows = outcomes === undefined ? [] : [...outcomes].filter(([id]) => !present.has(id) && !settled.has(id))
+    .map(([id, outcome]) => ({ kind: 'outcome' as const, createdAt: outcome.createdAt, id, outcome }));
+  const rows = [
+    ...groupBatches(cards).map((group) => ({ kind: 'group' as const, createdAt: group[0]?.created_at ?? '', group })),
+    ...outcomeRows,
+  ].sort((a, b) => a.createdAt < b.createdAt ? 1 : a.createdAt > b.createdAt ? -1 : 0);
   return (
     <ul className="flex flex-col gap-3">
-      {groupBatches(cards).map((group) => {
+      {rows.map((row) => {
+        if (row.kind === 'outcome') return <li key={`outcome-${row.id}`}>
+          {row.outcome.pending ? <SkeletonRows rows={1} /> : <ErrorState compact error={row.outcome.error} title={t('approvals.outcomeUnavailable')}
+            action={<Button size="sm" onClick={() => retryOutcome?.(row.id)}>{t('common.tryAgain')}</Button>} />}
+        </li>;
+        const group = row.group;
         const first = group[0];
         if (first === undefined) return null;
         if (first.kind === 'access') {

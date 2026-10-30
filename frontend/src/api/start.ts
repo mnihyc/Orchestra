@@ -1,9 +1,9 @@
-/** API client for what the dialog that starts a thread chooses among, beyond the lists every screen of resources reads: the environments the person manages, and a topic's default environment.
+/** API client for what the dialog that starts a thread chooses among, beyond the lists every screen of resources reads: the environments the person may use, and a topic's default environment.
  *
  * What a thread made in a place could be bound to is asked of the server before the thread exists, once
  * for the dialog and the inline starter (`startOptionsQuery`): the providers with the reason one cannot be
  * used, their profiles and models, every arrangement with whether it can be had, the environments the person
- * manages and whether they may make one. The lists the screens of resources read (`api/resources`) only add
+ * may use, the visible environments they can request, and whether they may make one. The lists the screens of resources read (`api/resources`) only add
  * what is drawn beside a choice, never the choice. A default that is missing is mended by writing the setting
  * (`setStartDefault`) where the person may. The directory of a connected machine becomes an environment when it
  * is registered (`registerEnvironment` of `api/environments`), which a thread then joins.

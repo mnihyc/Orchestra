@@ -247,7 +247,11 @@ async fn enter(
     let code = ctx.app.cache.ports().enter_code(
         BrowserEntry {
             person: Some(guard.principal().user()),
+            identity: Some(crate::middleware::authorization::RetainedIdentity::of(
+                guard.user(),
+            )),
             environment: env.id,
+            generation: env.generation,
             port,
             opening: body.opening_id,
             expires: expires_at,

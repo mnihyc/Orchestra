@@ -12,7 +12,9 @@ use orch_config::ServerConfig;
 use orch_db::Db;
 use orch_db::audit::{Actor, Origin};
 use orch_db::queries::{hierarchy, resources};
-use orch_link_contract::enrollment::{EnrollRequest, EnrollmentToken, RenewRequest};
+use orch_link_contract::enrollment::{
+    Endpoint, EnrollRequest, EnrollmentToken, RenewRequest, Trust,
+};
 use orch_link_contract::session::{Arch, Os, Platform, Role};
 use orch_pki::ca::CertificateAuthority;
 use orch_pki::certificates::Certificate;
@@ -38,11 +40,16 @@ async fn fixture() -> Fixture {
     let db = Db::from_pool(test.pool.clone());
     let clock = ManualClock::new(clock::start());
     let authority = Arc::new(CertificateAuthority::create("Test", 3_650, &clock).unwrap());
+    let mut settings = CertificateSettings::from_config(&ServerConfig::default());
+    settings.endpoints.push(Endpoint {
+        url: "wss://orch.example.com/link".to_owned(),
+        trust: Trust::Public,
+    });
     let service = CertificateService::new(
         db.clone(),
         Arc::new(clock.clone()),
         Arc::clone(&authority),
-        CertificateSettings::from_config(&ServerConfig::default()),
+        settings,
     );
     let user = {
         let mut conn = db.acquire().await.unwrap();
@@ -142,8 +149,9 @@ async fn a_token_enrolls_one_machine_that_belongs_to_whoever_made_the_token() {
     assert_eq!(
         reply.endpoints.len(),
         2,
-        "and the machine is told where to connect"
+        "both configured connection paths are advertised"
     );
+    assert_eq!(reply.endpoints, fixture.service.advertised_endpoints());
 
     // The same token again: it is gone.
     let again = fixture

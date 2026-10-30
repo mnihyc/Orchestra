@@ -9,9 +9,10 @@
 //! before anything does, and writes nothing.
 
 use super::{create_failed, one};
-use crate::middleware::authorization;
 use crate::middleware::requests::{ApiError, ApiResult};
+use crate::middleware::{authorization, transaction_guard};
 use crate::registry::{Ctx, Registry};
+use orch_access_contract::permissions::{Permission, ResourceKind};
 use orch_api_contract::common::ErrorCode;
 use orch_api_contract::nodes::{AdoptPlan, ThreadAdopt, ThreadAdoptBody, ThreadAdoptPreview};
 use orch_api_contract::threads::{
@@ -19,6 +20,7 @@ use orch_api_contract::threads::{
 };
 use orch_db::Conn;
 use orch_engine::adoption::{AdoptError, Adoption};
+use orch_types::Id;
 
 /// The longest reference to a session that is taken as one: what a harness names its sessions with
 /// is a UUID or a path, and nothing longer.
@@ -97,13 +99,65 @@ fn adoption_of(ctx: &Ctx, body: ThreadAdoptBody) -> ApiResult<Adoption> {
     })
 }
 
+/// The environment named in an adoption is checked before its folder or details are read.
+async fn require_environment(ctx: &Ctx, environment: Id) -> ApiResult<()> {
+    let (mut tx, guard) = transaction_guard::begin(ctx).await?;
+    authorization::require_resource(
+        &mut tx,
+        guard.principal(),
+        ResourceKind::Environment,
+        environment,
+        Permission::EnvironmentUse,
+        orch_authz::Policy::default(),
+    )
+    .await?;
+    tx.commit().await.map_err(orch_db::DbError::from)?;
+    Ok(())
+}
+
+/// A session can name its existing thread only to someone who may read that thread.
+async fn visible_thread(ctx: &Ctx, thread: Id) -> ApiResult<bool> {
+    let (mut tx, guard) = transaction_guard::begin(ctx).await?;
+    let visible = crate::routes::nodes::view::refs(
+        &mut tx,
+        guard.principal(),
+        &[thread],
+        orch_authz::Policy::default(),
+    )
+    .await?
+    .get(&thread)
+    .is_some_and(|row| !row.redacted);
+    tx.commit().await.map_err(orch_db::DbError::from)?;
+    Ok(visible)
+}
+
 /// Says what taking a session in would do, before anything does.
 async fn preview(ctx: Ctx, (): (), body: ThreadAdoptBody) -> ApiResult<AdoptPlan> {
     let adoption = adoption_of(&ctx, body)?;
+    let selected = adoption.environment;
+    if let Some(environment) = selected {
+        require_environment(&ctx, environment).await?;
+    }
     let caller = authorization::caller_of(ctx.user()?)?;
     let planned = ctx.app.engine.adoption_plan(&caller, adoption).await;
+    if let Some(environment) = selected {
+        require_environment(&ctx, environment).await?;
+    }
     match planned {
-        Ok(plan) => Ok(plan),
+        Ok(mut plan) => {
+            if let Some(environment) = plan.environment.as_ref().map(|row| row.id)
+                && Some(environment) != selected
+            {
+                require_environment(&ctx, environment).await?;
+            }
+            if let Some(thread) = plan.adopted_thread_id
+                && !visible_thread(&ctx, thread).await?
+            {
+                plan.adopted_thread_id = None;
+                plan.session.adopted_thread_id = None;
+            }
+            Ok(plan)
+        }
         Err(error) => {
             let mut conn = ctx.app.db.acquire().await?;
             Err(failed(&mut conn, error).await)
@@ -114,11 +168,26 @@ async fn preview(ctx: Ctx, (): (), body: ThreadAdoptBody) -> ApiResult<AdoptPlan
 /// Takes a session in as a thread of the topic.
 async fn adopt(ctx: Ctx, (): (), body: ThreadAdoptBody) -> ApiResult<Thread> {
     let adoption = adoption_of(&ctx, body)?;
+    let selected = adoption.environment;
+    if let Some(environment) = selected {
+        require_environment(&ctx, environment).await?;
+    }
     let caller = authorization::caller_of(ctx.user()?)?;
     let adopted = ctx.app.engine.adopt_thread(&caller, adoption).await;
+    if adopted.is_err()
+        && let Some(environment) = selected
+    {
+        require_environment(&ctx, environment).await?;
+    }
     let mut conn = ctx.app.db.acquire().await?;
     match adopted {
         Ok(created) => one(&ctx, &mut conn, created.thread).await,
+        Err(AdoptError::AlreadyAdopted { thread }) if !visible_thread(&ctx, thread).await? => {
+            Err(ApiError::new(
+                ErrorCode::ConflictExists,
+                "a thread has taken this session in already",
+            ))
+        }
         Err(error) => Err(failed(&mut conn, error).await),
     }
 }

@@ -184,6 +184,65 @@ async fn two_plan_deciders_share_one_outcome_and_only_one_follow_up_is_queued() 
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn a_plan_proceeds_as_the_person_who_approved_it() {
+    let world = World::new().await;
+    let writer = world.person("plan-writer").await;
+    world.give(writer, "interactor").await;
+    let thread = world.thread("Plan authority").await;
+    let item = proposal(&world, thread).await;
+    let chosen = plan_decision(&world, writer, thread, item, true)
+        .await
+        .unwrap();
+    assert_eq!(chosen.input.author.as_ref().unwrap().id, writer);
+    assert_eq!(chosen.input.run_as, None);
+    assert_eq!(chosen.decision.decided_by.as_ref().unwrap().id, writer);
+    let start = world.turn_start(thread, 1).await;
+    assert!(!start.plan);
+    let responsible: Option<Id> = world
+        .scalar(
+            "SELECT audit_for_user_id FROM turns WHERE id=$1",
+            start.turn_id,
+        )
+        .await;
+    assert_eq!(responsible, Some(writer));
+    world.say(thread, turn_began(start.turn_id)).await;
+    world
+        .say(
+            thread,
+            turn_ended(
+                start.turn_id,
+                orch_link_contract::events::TurnOutcome::Completed,
+            ),
+        )
+        .await;
+    world.wait_state(thread, "idle").await;
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn a_plan_proceed_without_the_writers_model_use_waits_for_an_authorized_person() {
+    let world = World::new().await;
+    let writer = world.person("plan-writer-without-model").await;
+    world.give(writer, "interactor").await;
+    let thread = world.thread("Plan without model use").await;
+    let item = proposal(&world, thread).await;
+    world.access.deny_model(writer, common::MODEL);
+    let chosen = plan_decision(&world, writer, thread, item, true)
+        .await
+        .unwrap();
+    assert_eq!(chosen.input.author.as_ref().unwrap().id, writer);
+    assert_eq!(chosen.input.run_as, None);
+    assert_eq!(
+        world.input_state(chosen.input.id).await,
+        ("pending".into(), Some("model_use_required".into()))
+    );
+    assert_eq!(
+        world.turn_starts(thread).len(),
+        1,
+        "only the earlier plan turn ran"
+    );
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn two_model_users_may_run_one_held_input_once_and_its_author_stays_named() {
     let world = World::new().await;
     let bo = world.person("bob").await;

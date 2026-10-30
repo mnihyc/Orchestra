@@ -148,6 +148,7 @@ independent outbound access. The port agent tools and local CLI are later parts.
 | [tunnels](src/tunnels.rs) | The tunnels other machines open to this one, handed to whatever serves their kind, and the opening of the ones this machine needs. |
 | [events](src/events.rs) | What an adapter reports, as events of the link: which stream each goes on, and how the text that grows is bundled. |
 | [facts](src/facts.rs) | What the machine reports of itself: the host, its roles' contributions, its local policy and its link. |
+| [local_harnesses](src/local_harnesses.rs) | Discovery of local harness programs, without treating discovery as permission to run them. |
 | [storages](src/storages.rs) | Named machine storages and pinned owned directories under the machine's allowed roots. |
 | [mount_data](tests/mount_data.rs) | A directory machine uses volume commands and the common storage factory to create, attach, read and remove owned mount data safely. |
 | [ledger](src/ledger.rs) | What the connector hosts, kept on disk: the harness processes it started and the sessions that are open in them. |

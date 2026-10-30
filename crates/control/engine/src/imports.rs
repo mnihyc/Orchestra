@@ -941,6 +941,7 @@ impl Engine {
             "node": node,
             "credential": credential_of(caller),
             "undo": true,
+            "undo_retention_secs": self.inner.config.soft_delete.as_secs(),
         });
         let job = job_rows::insert(
             &mut *tx,

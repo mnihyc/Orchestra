@@ -64,7 +64,7 @@ use crate::manifest::{self, Publisher};
 use crate::mcp::{McpGates, McpServers, Origin, ServerState};
 use crate::mcp_host::{Launch, McpEndpoint, McpHost, McpHostConfig};
 use crate::mounts::{MountPolicy, Mounts, RUN_DIR};
-use crate::paths::{Locate, RelPath, Workspace};
+use crate::paths::{HeldRoot, Locate, RelPath, Workspace};
 use crate::platform::{self, Dir};
 use crate::processes::{Processes, ScopeKind};
 use crate::resources::Sampler;
@@ -85,6 +85,13 @@ mod directory_retirement_tests;
 mod directory_watch_tests;
 #[cfg(all(test, target_os = "linux"))]
 mod recording_admission_tests;
+#[cfg(all(test, target_os = "linux"))]
+#[allow(
+    clippy::unwrap_used,
+    clippy::expect_used,
+    reason = "a test fails by panicking"
+)]
+mod workspace_handoff_tests;
 
 // ---------------------------------------------------------------------------------------------
 // Limits and gates
@@ -418,6 +425,8 @@ pub struct HostSettings {
     pub managed: Option<ManagedPlaces>,
     /// The harness builds the environment has.
     pub tools: Vec<ToolRef>,
+    /// Programs explicitly allowed by this connected machine's local policy, by harness kind.
+    pub local_programs: BTreeMap<String, String>,
     /// The most the unit may use, as its driver set it.
     pub unit_limits: Resources,
     /// The shell a person gets, when the machine's own is not wanted.
@@ -450,6 +459,7 @@ impl HostSettings {
             watch: WatchMode::Native,
             managed: None,
             tools: Vec::new(),
+            local_programs: BTreeMap::new(),
             unit_limits: Resources::default(),
             shell: None,
             generation: 0,
@@ -774,9 +784,10 @@ impl Environment {
     pub fn context(&self) -> EnvironmentContext {
         let facts = self.facts();
         let settings = self.host.upgrade().map(|host| host.settings());
-        let (tools, _unit_limits, tools_dir, data_dir) = match &settings {
+        let (tools, local_programs, _unit_limits, tools_dir, data_dir) = match &settings {
             Some(settings) => (
                 settings.tools.clone(),
+                settings.local_programs.clone(),
                 settings.unit_limits,
                 settings
                     .managed
@@ -790,7 +801,13 @@ impl Environment {
                     .to_string_lossy()
                     .into_owned(),
             ),
-            None => (Vec::new(), Resources::default(), None, String::new()),
+            None => (
+                Vec::new(),
+                BTreeMap::new(),
+                Resources::default(),
+                None,
+                String::new(),
+            ),
         };
         EnvironmentContext {
             process_launcher: self.processes.launcher(),
@@ -801,6 +818,7 @@ impl Environment {
             home: Some(facts.home.clone()).filter(|home| !home.is_empty()),
             tools_dir,
             tools,
+            local_programs,
             mounts: self.mounts.roots(),
             user: facts.user.clone(),
             shell: orch_agent_contract::facts::ShellInfo {
@@ -1415,6 +1433,28 @@ impl EnvHost {
         }
     }
 
+    /// Replaces the locally permitted programs and withdraws executors whose program changed.
+    pub async fn set_local_programs(&self, programs: BTreeMap<String, String>) {
+        let before = {
+            let mut settings = self
+                .inner
+                .settings
+                .write()
+                .unwrap_or_else(PoisonError::into_inner);
+            if settings.local_programs == programs {
+                return;
+            }
+            std::mem::replace(&mut settings.local_programs, programs.clone())
+        };
+        for environment in self.environments() {
+            environment
+                .executors
+                .stop_changed_programs(&before, &programs)
+                .await;
+            environment.announce_facts().await;
+        }
+    }
+
     /// Says that a turn of a thread in the environment completed, so that a manifest is due if the
     /// tree changed.
     pub fn turn_completed(&self, environment_id: Id) {
@@ -1447,6 +1487,16 @@ impl EnvHost {
         body: &EnvAttach,
         secrets: &BTreeMap<String, String>,
     ) -> Result<EnvironmentFacts> {
+        self.env_attach_with_root(body, secrets, None).await
+    }
+
+    /// Attaches using a root already verified and held by the local connector, when it has one.
+    pub async fn env_attach_with_root(
+        &self,
+        body: &EnvAttach,
+        secrets: &BTreeMap<String, String>,
+        root: Option<HeldRoot>,
+    ) -> Result<EnvironmentFacts> {
         retirement::require_room(&lock(&self.inner.retiring), body.environment_id)?;
         let settings = self.inner.settings();
         let previous = lock(&self.inner.envs).get(&body.environment_id).cloned();
@@ -1454,7 +1504,15 @@ impl EnvHost {
             environment,
             first_scan,
             lost_shells,
-        } = attach(&self.inner, &settings, body, secrets, previous.as_ref()).await?;
+        } = attach(
+            &self.inner,
+            &settings,
+            body,
+            secrets,
+            previous.as_ref(),
+            root,
+        )
+        .await?;
         let (cleanup, start) = {
             let mut environments = lock(&self.inner.envs);
             let mut retiring = lock(&self.inner.retiring);
@@ -3059,6 +3117,14 @@ impl EnvHost {
         if !located.meta.is_some_and(|meta| meta.is_dir()) {
             return Err(HostError::NotFound(format!("{cwd} is not a directory")));
         }
+        #[cfg(target_os = "linux")]
+        let cwd_handle = files.root().open_dir(&located)?;
+        #[cfg(all(test, target_os = "linux"))]
+        workspace_handoff_tests::before_shell_spawn().await;
+        #[cfg(target_os = "linux")]
+        let shell_cwd = cwd_handle.process_path();
+        #[cfg(not(target_os = "linux"))]
+        let shell_cwd = located.real.under(files.root().root_path());
         let (_, program) = find_shell(settings.shell.as_deref()).ok_or_else(|| {
             HostError::Unsupported("this machine has no shell to open".to_owned())
         })?;
@@ -3069,13 +3135,16 @@ impl EnvHost {
             program,
             args: Vec::new(),
             login: !cfg!(windows),
-            cwd: located.real.under(files.root().root_path()),
+            cwd: shell_cwd,
             env: environment.variables.clone(),
             cols: body.cols,
             rows: body.rows,
             record: body.record,
         };
-        let opened = environment.terminals.open(spec)?;
+        let opened = environment.terminals.open(spec);
+        #[cfg(target_os = "linux")]
+        drop(cwd_handle);
+        let opened = opened?;
         let service = Service::Pty {
             terminal_id: body.terminal_id,
         }
@@ -3521,7 +3590,48 @@ struct Attached {
 }
 
 /// Opens the workspace root and finds out how it spells its names.
-fn open_workspace(configured: &Path, allowed: Option<&[PathBuf]>) -> Result<(Workspace, bool)> {
+fn open_workspace(
+    configured: &Path,
+    allowed: Option<&[PathBuf]>,
+    held: Option<HeldRoot>,
+) -> Result<(Workspace, bool)> {
+    if let Some(held) = held {
+        if configured != held.path() {
+            return Err(HostError::RootNotAllowed(
+                "the held workspace does not match the requested directory".into(),
+            ));
+        }
+        if let Some(roots) = allowed
+            && !roots.iter().any(|root| {
+                std::fs::canonicalize(root).is_ok_and(|root| held.path().starts_with(root))
+            })
+        {
+            return Err(HostError::RootNotAllowed(
+                "the held workspace is outside the offered directories".into(),
+            ));
+        }
+        #[cfg(target_os = "linux")]
+        let held = held.readable()?;
+        let case_sensitive = held
+            .case_sensitivity()
+            .unwrap_or(platform::DEFAULT_CASE_SENSITIVE);
+        return Ok((
+            Workspace::from_held(held, configured, &[], path_style(), case_sensitive),
+            case_sensitive,
+        ));
+    }
+    #[cfg(target_os = "linux")]
+    if let Some(roots) = allowed {
+        let held = HeldRoot::open(roots, configured)?.readable()?;
+        let case_sensitive = held
+            .case_sensitivity()
+            .unwrap_or(platform::DEFAULT_CASE_SENSITIVE);
+        return Ok((
+            Workspace::from_held(held, configured, &[], path_style(), case_sensitive),
+            case_sensitive,
+        ));
+    }
+    #[cfg(not(target_os = "linux"))]
     if let Some(roots) = allowed {
         let real = std::fs::canonicalize(configured)
             .map_err(|error| HostError::io(format!("opening {}", configured.display()), error))?;
@@ -3535,12 +3645,14 @@ fn open_workspace(configured: &Path, allowed: Option<&[PathBuf]>) -> Result<(Wor
             )));
         }
     }
-    let dir = Dir::open_path(configured)
+    let real = std::fs::canonicalize(configured)
+        .map_err(|error| HostError::io(format!("opening {}", configured.display()), error))?;
+    let dir = Dir::open_path(&real)
         .map_err(|error| HostError::io(format!("opening {}", configured.display()), error))?;
     let case_sensitive =
         Workspace::probe_case_sensitivity(&dir).unwrap_or(platform::DEFAULT_CASE_SENSITIVE);
     Ok((
-        Workspace::open(configured, &[], path_style(), case_sensitive)?,
+        Workspace::from_directory(dir, real, configured, &[], path_style(), case_sensitive),
         case_sensitive,
     ))
 }
@@ -3552,6 +3664,7 @@ async fn attach(
     body: &EnvAttach,
     secrets: &BTreeMap<String, String>,
     previous: Option<&Arc<Environment>>,
+    root: Option<HeldRoot>,
 ) -> Result<Attached> {
     if body
         .data_generation
@@ -3603,7 +3716,7 @@ async fn attach(
     };
     let (workspace, case_sensitive) = {
         let (configured, allowed) = (configured.clone(), settings.allowed_roots.clone());
-        blocking(move || open_workspace(&configured, allowed.as_deref())).await?
+        blocking(move || open_workspace(&configured, allowed.as_deref(), root)).await?
     };
     let rules = Arc::new(IgnoreRules::new(&body.ignore, case_sensitive));
     for rejected in rules.rejected() {

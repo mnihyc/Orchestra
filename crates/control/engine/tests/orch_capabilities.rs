@@ -543,6 +543,100 @@ async fn a_world_with_capabilities() -> CapabilityWorld {
     CapabilityWorld { world, host }
 }
 
+async fn withdrawing_capability_policy_prevents_its_prepared_request(initial: &str) {
+    let world = a_world_with_capabilities().await;
+    world
+        .set(
+            world.topic,
+            "capability.policy",
+            json!({"kvm":{"decision":initial,"approver_scope":"host"}}),
+        )
+        .await;
+    let thread = tool_thread(&world, "Capability policy race").await;
+    let turn = native_tools::active(&world, thread).await;
+
+    // The request reads its initial policy before projecting the environment for its approval card.
+    let mut gate = world.pool.begin().await.unwrap();
+    let gate_pid: i32 = sqlx::query_scalar("SELECT pg_backend_pid()")
+        .fetch_one(&mut *gate)
+        .await
+        .unwrap();
+    sqlx::query("LOCK TABLE port_openings IN ACCESS EXCLUSIVE MODE")
+        .execute(&mut *gate)
+        .await
+        .unwrap();
+    native_tools::send(
+        &world,
+        thread,
+        turn,
+        "policy-withdrawn",
+        OrchTool::RequestCapability,
+        json!({"capability":"kvm","reason":"Exercise the policy boundary."}),
+    )
+    .await;
+    eventually(
+        "the request has read policy and waits to project its approval",
+        || async {
+            sqlx::query_scalar::<_, bool>(
+                "SELECT EXISTS(SELECT 1 FROM pg_stat_activity
+             WHERE datname=current_database() AND $1=ANY(pg_blocking_pids(pid))
+             AND query LIKE 'SELECT * FROM port_openings WHERE environment_id=ANY%')",
+            )
+            .bind(gate_pid)
+            .fetch_one(world.pool.pool())
+            .await
+            .unwrap()
+        },
+    )
+    .await;
+    world
+        .set(
+            world.topic,
+            "capability.policy",
+            json!({"kvm":{"decision":"deny","approver_scope":"host"}}),
+        )
+        .await;
+    gate.commit().await.unwrap();
+
+    let answer = native_tools::answer(&world, thread, "policy-withdrawn").await;
+    assert_eq!(
+        answer.error.as_ref().map(|error| error.code.as_str()),
+        Some("changed")
+    );
+    let mut conn = world.pool.acquire().await.unwrap();
+    let current = world
+        .engine()
+        .environment_capabilities(&mut conn, world.environment)
+        .await
+        .unwrap()
+        .unwrap();
+    assert!(
+        current
+            .held
+            .iter()
+            .all(|capability| capability.key != "kvm")
+    );
+    assert_eq!(
+        world
+            .count(
+                "SELECT count(*) FROM approvals WHERE thread_id=$1 AND kind='capability'",
+                thread
+            )
+            .await,
+        0
+    );
+}
+
+#[tokio::test]
+async fn a_capability_is_not_granted_after_its_allow_policy_is_withdrawn() {
+    withdrawing_capability_policy_prevents_its_prepared_request("allow").await;
+}
+
+#[tokio::test]
+async fn a_capability_approval_is_not_created_after_its_ask_policy_is_withdrawn() {
+    withdrawing_capability_policy_prevents_its_prepared_request("ask").await;
+}
+
 async fn own_tool_bytes(world: &World, thread: Id) -> Vec<u8> {
     let mut conn = world.pool.acquire().await.unwrap();
     let row = orch_db::queries::threads::thread(&mut conn, thread)

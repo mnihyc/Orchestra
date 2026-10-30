@@ -23,6 +23,55 @@ fn scripted(text: &str, directives: &[&str]) -> String {
 }
 
 #[tokio::test]
+async fn an_upstream_error_cannot_echo_the_providers_key_in_the_harness_response() {
+    let p = ProviderRig::new().await;
+    p.start_responses_provider().await;
+    p.open_lease(p.thread, &[MODEL], Some(RESPONSES), None)
+        .await;
+    p.mock
+        .queue(&format!(
+            "header x-echo {}\nerror authentication The gateway rejected {}",
+            p.key, p.key
+        ))
+        .unwrap();
+    let reply = p
+        .harness(p.thread)
+        .post("/v1/responses", &responses_request(MODEL, "hello"))
+        .await;
+    assert_eq!(reply.status, 401);
+    assert!(reply.text().contains("The gateway rejected"));
+    assert!(!reply.text().contains(&p.key));
+    assert!(
+        reply
+            .text()
+            .contains(orch_plugin_contract::secret::REDACTED)
+    );
+    let echo = reply
+        .header("x-echo")
+        .expect("the upstream returned its header");
+    assert!(!echo.contains(&p.key));
+    assert!(echo.contains(orch_plugin_contract::secret::REDACTED));
+}
+
+#[tokio::test]
+async fn an_encoded_upstream_response_is_refused_before_it_can_hide_a_credential() {
+    let p = ProviderRig::new().await;
+    p.start_responses_provider().await;
+    p.open_lease(p.thread, &[MODEL], Some(RESPONSES), None)
+        .await;
+    p.mock
+        .queue("header content-encoding gzip\nsay hello")
+        .unwrap();
+    let reply = p
+        .harness(p.thread)
+        .post("/v1/responses", &responses_request(MODEL, "hello"))
+        .await;
+    assert_eq!(reply.status, 502);
+    assert_eq!(reply.json()["error"]["code"], "upstream_unreachable");
+    assert!(!reply.text().contains(&p.key));
+}
+
+#[tokio::test]
 async fn a_turn_of_the_scripted_adapter_on_the_forwarded_path_calls_the_model_through_the_forwarder_which_adds_the_key()
  {
     let p = ProviderRig::new().await;
@@ -576,7 +625,7 @@ async fn the_scripted_server_is_asked_in_the_way_each_endpoint_says_with_its_own
         "protocols": [RESPONSES, MESSAGES],
         "upstreams": [
             { "protocol": RESPONSES, "base_url": p.mock.responses_base_url(), "options": {
-                "headers": { "x-route": "team-a" }, "query": { "api-version": "2025-01-01" },
+                "headers": { "x-route": "team-a", "x-forwarded-host": "manager.example" }, "query": { "api-version": "2025-01-01" },
                 "secret_headers": ["x-gateway-key"] } },
             { "protocol": MESSAGES, "base_url": p.mock.messages_base_url(), "options": { "auth": "x-api-key" } }
         ],
@@ -590,13 +639,19 @@ async fn the_scripted_server_is_asked_in_the_way_each_endpoint_says_with_its_own
     let harness = p.harness(p.thread);
     let mut responses_call = harness.request(
         "POST",
-        "/v1/responses",
+        "/v1/responses?api%2Dversion=wrong&prompt-cache-key=ok",
         Some(&responses_request(MODEL, "hi")),
     );
     responses_call = responses_call
         .header("x-route", "from-the-harness")
         .header("cookie", "session=1")
         .header("x-api-key", "harness-key")
+        .header("x-forwarded-host", "attacker.example")
+        .header("forwarded", "host=attacker.example")
+        .header("connection", "x-internal-hop")
+        .header("x-internal-hop", "unwanted")
+        .header("x-original-url", "/attacker")
+        .header("x-rewrite-url", "/attacker")
         .header("x-codex-turn-metadata", "{}");
     assert_eq!(
         harness.client().send(responses_call).await.unwrap().status,
@@ -605,6 +660,7 @@ async fn the_scripted_server_is_asked_in_the_way_each_endpoint_says_with_its_own
     let messages_call = harness
         .request("POST", "/v1/messages", Some(&messages_request(MODEL, "hi")))
         .messages_version()
+        .header("x-forwarded-host", "attacker.example")
         .header("anthropic-beta", "tools-2024");
     assert_eq!(
         harness.client().send(messages_call).await.unwrap().status,
@@ -620,11 +676,19 @@ async fn the_scripted_server_is_asked_in_the_way_each_endpoint_says_with_its_own
         [orch_testkit::doubles::model::Presentation::Bearer]
     );
     assert_eq!(responses.headers["x-route"], "team-a");
+    assert_eq!(responses.headers["x-forwarded-host"], "manager.example");
+    assert!(!responses.headers.contains_key("forwarded"));
+    assert!(!responses.headers.contains_key("x-internal-hop"));
+    assert!(!responses.headers.contains_key("x-original-url"));
+    assert!(!responses.headers.contains_key("x-rewrite-url"));
     assert_eq!(
         responses.headers["x-gateway-key"],
         orch_testkit::doubles::model::fingerprint(secret)
     );
-    assert_eq!(responses.query.as_deref(), Some("api-version=2025-01-01"));
+    assert_eq!(
+        responses.query.as_deref(),
+        Some("prompt-cache-key=ok&api-version=2025-01-01")
+    );
     assert!(
         !responses.headers.contains_key("cookie"),
         "the harness's cookie goes no further"
@@ -643,6 +707,7 @@ async fn the_scripted_server_is_asked_in_the_way_each_endpoint_says_with_its_own
         [orch_testkit::doubles::model::Presentation::XApiKey]
     );
     assert_eq!(messages.headers["anthropic-beta"], "tools-2024");
+    assert!(!messages.headers.contains_key("x-forwarded-host"));
     assert!(
         !messages.headers.contains_key("x-gateway-key"),
         "a secret of one endpoint is for that endpoint"

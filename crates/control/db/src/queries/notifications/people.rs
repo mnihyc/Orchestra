@@ -14,6 +14,13 @@ pub const NOTIFICATION_DETAILS_MEMBER: &str = "_orch_action";
 /// The stable action vocabulary written by this release.
 pub const NOTIFICATION_DETAILS_VERSION: u32 = 1;
 
+/// Machine outage notices contain thread names without the identifiers needed to authorize them.
+#[must_use]
+pub fn machine_notice_has_unscoped_thread_text(kind: &str, data: &Json) -> bool {
+    kind == "machine.offline"
+        && data.get("reason").and_then(Json::as_str) != Some("certificate_expiring")
+}
+
 /// Current facts for an approval already named in the recipient's notification page.
 #[derive(Debug, Clone, sqlx::FromRow)]
 pub struct NoticeApproval {

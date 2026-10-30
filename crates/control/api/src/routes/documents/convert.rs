@@ -174,7 +174,7 @@ async fn convert_text(
         DocumentConvertFormat::Text => Format::Text,
     };
     // What the text may be, and what the document it is for already holds.
-    let (limit, document, names, settings) = {
+    let (limit, document, names) = {
         let (mut tx, guard) = transaction_guard::begin(&ctx).await?;
         ctx.now = guard.now().get();
         let principal = guard.principal().clone();
@@ -193,9 +193,8 @@ async fn convert_text(
                 let files = rows::files(&mut tx, id).await?;
                 (
                     settings.max_bytes.value,
-                    Some((row, principal)),
+                    Some((row.id, principal.user())),
                     files,
-                    Some(settings),
                 )
             }
             None => {
@@ -207,7 +206,7 @@ async fn convert_text(
                 .await
                 .map_err(ApiError::internal)?
                 .unwrap_or(i64::MAX);
-                (limit, None, Vec::new(), None)
+                (limit, None, Vec::new())
             }
         }
     };
@@ -251,13 +250,12 @@ async fn convert_text(
     let mut read = prepared.finish(&held);
     let mut stored: Vec<DocumentFile> = Vec::new();
     if !read.embedded.is_empty() {
-        match (&document, &settings) {
-            (Some((row, principal)), Some(settings)) => {
+        match document {
+            Some((id, user)) => {
                 let mut taken: HashSet<String> =
                     names.iter().map(|file| file.name.clone()).collect();
-                let files =
-                    hold(&ctx, &read.embedded, &mut taken, principal.user(), ctx.now).await?;
-                stored = install(&ctx, row.id, settings, principal, files).await?;
+                let files = hold(&ctx, &read.embedded, &mut taken, user, ctx.now).await?;
+                stored = install(&ctx, id, files).await?;
             }
             _ => {
                 let gone: HashSet<Id> = read.embedded.iter().map(|each| each.id).collect();
@@ -268,6 +266,20 @@ async fn convert_text(
                 );
             }
         }
+    }
+    if let Some((id, _)) = document {
+        // Parsing may take time; the returned references are for this document only while its edit grant holds.
+        let (mut tx, guard) = transaction_guard::begin(&ctx).await?;
+        authorization::require_document(
+            &mut tx,
+            guard.principal(),
+            id,
+            Permission::DocEdit,
+            Policy::default(),
+        )
+        .await?;
+        super::live(&mut tx, id).await?;
+        tx.commit().await.map_err(DbError::from)?;
     }
     Ok(DocumentConvertReply {
         blocks: read.blocks,
@@ -285,23 +297,29 @@ async fn convert_text(
 }
 
 /// Makes `files` files of the document, within what its place allows.
-async fn install(
-    ctx: &Ctx,
-    document: Id,
-    settings: &DocSettings,
-    principal: &Principal,
-    files: Vec<HeldFile>,
-) -> ApiResult<Vec<DocumentFile>> {
-    let (mut tx, guard) = transaction_guard::begin(ctx).await?;
-    let now = guard.now().get();
+async fn install(ctx: &Ctx, document: Id, files: Vec<HeldFile>) -> ApiResult<Vec<DocumentFile>> {
+    let (mut tx, _guard) = transaction_guard::begin(ctx).await?;
+    orch_db::queries::documents::containers::lock_document_scope(&mut tx, document).await?;
     let row = super::live_locked(&mut tx, document).await?;
+    let guard = transaction_guard::check(ctx, &mut tx).await?;
+    let principal = guard.principal();
+    authorization::require_document(
+        &mut tx,
+        principal,
+        document,
+        Permission::DocEdit,
+        Policy::default(),
+    )
+    .await?;
+    let settings = DocSettings::at(&mut tx, row.node_id).await?;
+    let now = guard.now().get();
     let mut total = row.files_bytes;
     for file in &files {
         if file.file.size > settings.file_max_bytes.value {
             return Err(limits::too_large(
                 &mut tx,
                 principal,
-                settings,
+                &settings,
                 Limit::FileBytes,
                 Policy::default(),
             )
@@ -313,7 +331,7 @@ async fn install(
         return Err(limits::too_large(
             &mut tx,
             principal,
-            settings,
+            &settings,
             Limit::FilesBytes,
             Policy::default(),
         )
@@ -354,4 +372,126 @@ async fn install(
             added_at: Time::new(now),
         })
         .collect())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::middleware::authentication;
+    use crate::rig::Scene;
+    use orch_api_contract::routes::Endpoint;
+    use orch_db::queries::access::{self, PageKey};
+
+    #[tokio::test]
+    async fn pasted_files_require_edit_access_when_they_are_installed() {
+        let scene = Scene::new().await;
+        let app = scene.rig.world.app.app.clone();
+        let document = scene
+            .rig
+            .world
+            .app
+            .call(
+                orch_api_contract::documents::NodeDocumentCreate,
+                &[&scene.tree.topic.base.id],
+            )
+            .token(&scene.ada.token)
+            .body(&orch_api_contract::documents::NodeDocumentCreateBody {
+                title: "A document".into(),
+                blocks: None,
+                markdown: None,
+                access: None,
+            })
+            .send()
+            .await
+            .ok()
+            .base
+            .id;
+        let mut conn = app.db.acquire().await.unwrap();
+        let page = PageKey::new("document", document, "live");
+        access::testing::set_row(&mut conn, &page, "any", "doc.edit", false, false)
+            .await
+            .unwrap();
+        let entry = access::testing::add_entry(
+            &mut conn,
+            &page,
+            "any",
+            "doc.edit",
+            ("user", Some(scene.dan.id()), None),
+            None,
+            app.clock.now(),
+        )
+        .await
+        .unwrap();
+        drop(conn);
+        let mut headers = http::HeaderMap::new();
+        headers.insert(
+            http::header::AUTHORIZATION,
+            format!("Bearer {}", scene.dan.token).parse().unwrap(),
+        );
+        let caller = authentication::authenticate(&app, &headers, app.clock.now())
+            .await
+            .unwrap();
+        let mut ctx = Ctx::for_tool(app.clone(), caller, DocumentConvert::ROUTE, document);
+        ctx.headers = headers;
+        let (mut tx, guard) = transaction_guard::begin(&ctx).await.unwrap();
+        let principal = guard.into_principal();
+        authorization::require_document(
+            &mut tx,
+            &principal,
+            document,
+            Permission::DocEdit,
+            Policy::default(),
+        )
+        .await
+        .unwrap();
+        tx.rollback().await.unwrap();
+        let blob = app
+            .blobs
+            .put_bytes(bytes::Bytes::from_static(b"picture"))
+            .await
+            .unwrap();
+        let file = |name: &str| HeldFile {
+            file: rows::FileRow {
+                id: orch_types::new_id(),
+                name: name.to_owned(),
+                media_type: "image/png".into(),
+                size: blob.size,
+                is_text: false,
+                added_by: Some(scene.dan.id()),
+                added_by_thread: None,
+                added_at: app.clock.now(),
+            },
+            blob: blob.hash,
+        };
+        install(&ctx, document, vec![file("first.png")])
+            .await
+            .unwrap();
+        let mut conn = app.db.acquire().await.unwrap();
+        assert!(
+            access::remove_entry(&mut conn, entry, scene.ada.id(), app.clock.now())
+                .await
+                .unwrap()
+        );
+        access::bump_epoch(&mut conn).await.unwrap();
+        let current = authorization::principal(&ctx, &mut conn).await.unwrap();
+        assert!(
+            authorization::require_document(
+                &mut conn,
+                &current,
+                document,
+                Permission::DocEdit,
+                Policy::default(),
+            )
+            .await
+            .is_err(),
+            "the caller no longer holds edit"
+        );
+        drop(conn);
+        let result = install(&ctx, document, vec![file("after-revocation.png")]).await;
+        assert!(result.is_err(), "a revoked editor cannot install a file");
+        let mut conn = app.db.acquire().await.unwrap();
+        let files = rows::files(&mut conn, document).await.unwrap();
+        assert_eq!(files.len(), 1);
+        assert_eq!(files[0].name, "first.png");
+    }
 }

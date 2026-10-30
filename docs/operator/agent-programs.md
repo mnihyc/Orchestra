@@ -34,6 +34,18 @@ setting locks and environment confinement still apply. Auto is never selected as
 
 ## Where builds come from
 
+### Programs on connected machines
+
+A connector searches for the executable names declared by its adapters when it connects or receives a machine
+probe. It checks PATH, the usual user and system binary directories, and npm's global binary directory. Each
+version probe has a three-second limit; an unanswered version is reported as unknown. A search result is not
+permission to run it.
+
+The machine operator may name a program in `agent.harnesses` locally. If that key is delegated, a machine
+manager can confirm a discovered path or remove that confirmation on the Programs page. The connector changes
+one kind at a time and refuses a stale selection. An explicit local value continues to win. A connected
+environment uses the program selected by that policy; a managed tool cache remains authoritative where present.
+
 `agents.harness_versions` chooses, for each kind, the shipped build, the newest checked, the newest, or an exact
 version. Orch reads a program's channels only when an effective choice asks for newer builds, when the interval
 `agents.harness_channel_hours` is due, or when a system administrator presses Refresh. A channel is one of:

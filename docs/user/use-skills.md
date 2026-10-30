@@ -16,6 +16,7 @@ An archive can select a folder inside it. Git and address imports use the host
 you choose; Git also takes a revision and optional subfolder. A directory import
 uses an environment you may manage. These acts copy a version into Orch;
 they do not bind the skill to that environment for later use.
+An address import can reach a private host only when the system operator allows it.
 
 Treat scripts as executable content. Review the source and files before making
 the skill available. Private source credentials stay sealed; reading the skill

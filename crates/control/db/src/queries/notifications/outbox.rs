@@ -332,6 +332,19 @@ pub async fn reserve_as(
     Ok(done.rows_affected() == 1)
 }
 
+/// Locks the rows still reserved for this attempt before applying its answer's side effects.
+pub async fn lock_attempt(conn: &mut Conn, ids: &[Id], dispatch: Id) -> Result<bool, DbError> {
+    let current: Vec<Id> = sqlx::query_scalar(
+        "SELECT id FROM outbox WHERE id = ANY($1) AND state = 'sending' AND dispatch_id = $2
+         ORDER BY id FOR UPDATE",
+    )
+    .bind(ids)
+    .bind(dispatch)
+    .fetch_all(conn)
+    .await?;
+    Ok(!current.is_empty())
+}
+
 /// Records what an attempt came to, only where the delivery is still `sending` under that very
 /// attempt: a result that comes back after the attempt was given up, retried or cancelled
 /// changes nothing. A try that is to be made again is `pending` again; a try is counted. Says

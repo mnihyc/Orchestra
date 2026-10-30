@@ -68,7 +68,7 @@ export class Starts implements Part {
       const row = places.rowOf(id);
       if (!this.served) throw new Refusal(404, 'not_found', 'there is no such thing, or it was deleted');
       if (row === undefined || row.deleted || (row.kind !== 'topic' && row.kind !== 'project')) throw new Refusal(404, 'not_found', 'there is no such place, or it was deleted');
-      places.need(person, id, `${row.kind}.interact`);
+      places.need(person, id, row.kind === 'project' ? 'project.create_topics' : 'topic.start_threads');
       const fresh = query.get('environment_new') === 'true';
       if (fresh && query.has('environment_id')) throw new Refusal(400, 'request.invalid', 'choose one environment target');
       return { status: 200, body: this.world.resources.bindingOptions(person, this.ground(id, row.kind), query.get('environment_id'), fresh) };

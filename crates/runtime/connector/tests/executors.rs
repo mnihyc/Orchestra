@@ -12,8 +12,11 @@ use std::sync::Arc;
 use orch_connector_core::tool_tunnels::{ENVIRONMENT_HEADER, ExecMount, ExecScope, SESSION_HEADER};
 use orch_executor_orch::server::{ExecConfig, OrchExec};
 use orch_link::tunnels::channel::OpenError;
-use orch_link_contract::commands::{ExecStart, ProcList, SandboxMode};
+use orch_link_contract::commands::{
+    EnvAttach, EnvDetach, ExecStart, IndexMode, ProcList, SandboxMode,
+};
 use orch_link_contract::tunnels::{ExecMessage, ExecOpcode, OpenErrorCode, Service, TicketSource};
+use orch_pki::tickets::TicketRequest;
 use orch_types::{Id, Json, new_id};
 use rig_environment::tunnels::{Opener, messages, post};
 use rig_environment::{EnvRig, PATIENCE, stand_in_executors};
@@ -137,12 +140,18 @@ async fn a_command_is_run_through_orch_exec_over_a_tunnel_with_its_output_and_it
         &session,
         call(
             "shell",
-            json!({ "command": "echo here-$ORCH_THREAD_ID; pwd" }),
+            json!({ "command": if cfg!(windows) {
+                "echo here-%ORCH_THREAD_ID% & cd"
+            } else {
+                "echo here-$ORCH_THREAD_ID; pwd"
+            } }),
         ),
     )
     .await
     .unwrap();
     let output = ran.iter().map(ToString::to_string).collect::<String>();
+    #[cfg(windows)]
+    let output = output.replace("\\\\", "\\");
     assert!(output.contains(&format!("here-{thread}")), "{output}");
     assert!(
         output.contains(&workspace.display().to_string()),
@@ -157,7 +166,11 @@ async fn a_command_is_run_through_orch_exec_over_a_tunnel_with_its_output_and_it
         &session,
         call(
             "shell",
-            json!({ "command": "sleep 30", "background": true }),
+            json!({ "command": if cfg!(windows) {
+                "powershell.exe -NoProfile -Command Start-Sleep -Seconds 30"
+            } else {
+                "sleep 30"
+            }, "background": true }),
         ),
     )
     .await
@@ -236,7 +249,7 @@ async fn what_a_session_says_of_itself_is_held_to_the_environment_and_to_the_mac
     std::fs::write(outside.join("private.txt"), "not for the agent").unwrap();
     std::fs::write(workspace.join("inside.txt"), "for the agent").unwrap();
     rig.start().await;
-    rig.attach(&workspace).await;
+    let facts = rig.attach(&workspace).await;
     let opener = rig.opener().await;
     rig.succeed(&ExecStart {
         environment_id: rig.environment,
@@ -244,6 +257,24 @@ async fn what_a_session_says_of_itself_is_held_to_the_environment_and_to_the_mac
     })
     .await;
     let thread = new_id();
+
+    // The real connector sends the current environment generation in every session header.
+    let mut current = scope(&workspace);
+    current.generation = facts["generation"].as_i64();
+    assert!(current.generation.is_some());
+    let listed = exchange(
+        &rig,
+        &opener,
+        thread,
+        &current,
+        json!({ "jsonrpc": "2.0", "id": 1, "method": "tools/list" }),
+    )
+    .await
+    .unwrap();
+    assert!(
+        listed.iter().any(|message| message.get("result").is_some()),
+        "{listed:?}"
+    );
 
     // A directory outside the environment's workspace is refused.
     let wrong = exchange(
@@ -380,7 +411,8 @@ async fn the_messages_of_an_executor_with_a_protocol_of_its_own_go_both_ways_thr
     rig.config.exec.offers.push("echo-exec".to_owned());
     let workspace = rig.directory("work");
     rig.start().await;
-    rig.attach(&workspace).await;
+    let first_environment = rig.environment;
+    let first_generation = rig.attach(&workspace).await["generation"].as_i64().unwrap();
     let opener = rig.opener().await;
     let started = rig
         .succeed(&ExecStart {
@@ -438,5 +470,78 @@ async fn the_messages_of_an_executor_with_a_protocol_of_its_own_go_both_ways_thr
         Err(OpenError::Refused { code, .. }) => assert_eq!(code, OpenErrorCode::NoSuchService),
         other => panic!("{other:?}"),
     }
+
+    // The executor in the first environment cannot satisfy a ticket for a second one.
+    let second_workspace = rig.directory("other-work");
+    rig.environment = new_id();
+    rig.attach(&second_workspace).await;
+    let second = rig.ticket(
+        TicketSource::Machine(opener.machine_id),
+        Service::Exec {
+            executor: "echo-exec".to_owned(),
+        },
+        Some(new_id()),
+        None,
+    );
+    match opener.open(&second).await {
+        Err(OpenError::Refused { code, .. }) => assert_eq!(code, OpenErrorCode::NoSuchService),
+        other => panic!("an executor in another environment must not be selected: {other:?}"),
+    }
+    let unscoped = rig
+        .signer
+        .issue(&TicketRequest {
+            src: TicketSource::Machine(opener.machine_id),
+            dst: rig.machine_id,
+            service: Service::Exec {
+                executor: "echo-exec".to_owned(),
+            },
+            thread_id: Some(new_id()),
+            tool_set: None,
+            expires_at: rig.deadline(),
+        })
+        .unwrap();
+    match opener.open(&unscoped).await {
+        Err(OpenError::Refused { code, .. }) => assert_eq!(code, OpenErrorCode::BadTicket),
+        other => panic!("an unscoped ticket must not reach an executor: {other:?}"),
+    }
+    rig.environment = first_environment;
+    rig.succeed(&EnvDetach {
+        environment_id: first_environment,
+    })
+    .await;
+    rig.succeed(&EnvAttach {
+        resources: None,
+        data_generation: Some(first_generation + 1),
+        storage: None,
+        data_sources: None,
+        environment_id: first_environment,
+        workspace_root: Some(workspace.display().to_string()),
+        ignore: Vec::new(),
+        index: IndexMode::Full,
+        mounts: Some(Vec::new()),
+        variables: std::collections::BTreeMap::new(),
+        secrets: std::collections::BTreeMap::new(),
+    })
+    .await;
+    rig.succeed(&ExecStart {
+        environment_id: first_environment,
+        executor: "echo-exec".to_owned(),
+    })
+    .await;
+    match opener.open(&ticket).await {
+        Err(OpenError::Refused { code, .. }) => assert_eq!(code, OpenErrorCode::BadTicket),
+        other => {
+            panic!("an old generation's ticket must not reach the rebuilt executor: {other:?}")
+        }
+    }
+    let fresh = rig.ticket(
+        TicketSource::Machine(opener.machine_id),
+        Service::Exec {
+            executor: "echo-exec".to_owned(),
+        },
+        Some(new_id()),
+        None,
+    );
+    let _fresh_tunnel = opener.open(&fresh).await.unwrap();
     rig.stop().await;
 }

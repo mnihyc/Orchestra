@@ -106,8 +106,9 @@ pub async fn cut(
     let blocks = super::live_blocks(conn, doc.id).await?;
     let rows: Vec<Json> = blocks
         .iter()
-        .filter_map(|block| serde_json::to_value(block).ok())
-        .collect();
+        .map(serde_json::to_value)
+        .collect::<Result<_, _>>()
+        .map_err(|error| DbError::Other(sqlx::Error::Decode(error.into())))?;
     let span = doc.span();
     let number = doc.version + 1;
     let held = held_form(conn, doc.id, number, rows).await?;
@@ -217,15 +218,39 @@ fn change_between(before: &[Json], after: &[Json]) -> Json {
     serde_json::json!({ "put": put, "gone": gone })
 }
 
+fn invalid_history() -> DbError {
+    DbError::Other(sqlx::Error::Decode(
+        "a document version is unreadable".into(),
+    ))
+}
+
+fn validate_blocks(blocks: &[Json]) -> Result<(), DbError> {
+    for block in blocks {
+        serde_json::from_value::<BlockRow>(block.clone())
+            .map_err(|error| DbError::Other(sqlx::Error::Decode(error.into())))?;
+    }
+    Ok(())
+}
+
 /// The blocks after `change`, in the page's order.
-fn applied(before: Vec<Json>, change: &Json) -> Vec<Json> {
-    let gone: HashSet<&str> = change["gone"]
-        .as_array()
-        .into_iter()
-        .flatten()
-        .filter_map(Json::as_str)
-        .collect();
-    let put: Vec<Json> = change["put"].as_array().cloned().unwrap_or_default();
+fn applied(before: Vec<Json>, change: &Json) -> Result<Vec<Json>, DbError> {
+    let gone: HashSet<&str> = change
+        .get("gone")
+        .and_then(Json::as_array)
+        .ok_or_else(invalid_history)?
+        .iter()
+        .map(|id| {
+            let id = id.as_str().ok_or_else(invalid_history)?;
+            id.parse::<Id>().map_err(|_| invalid_history())?;
+            Ok(id)
+        })
+        .collect::<Result<_, DbError>>()?;
+    let put: Vec<Json> = change
+        .get("put")
+        .and_then(Json::as_array)
+        .cloned()
+        .ok_or_else(invalid_history)?;
+    validate_blocks(&put)?;
     let replaced: HashSet<String> = put
         .iter()
         .filter_map(|block| block_id(block).map(str::to_owned))
@@ -238,7 +263,7 @@ fn applied(before: Vec<Json>, change: &Json) -> Vec<Json> {
         .collect();
     blocks.extend(put);
     blocks.sort_by(page_order);
-    blocks
+    Ok(blocks)
 }
 
 /// The blocks of a version, rebuilt from the whole version it goes back to and
@@ -267,10 +292,12 @@ async fn rebuilt(
     let Some((Some(Json::Array(mut blocks)), _, _)) = rows.next() else {
         return Ok(None);
     };
+    // Validate before each delta can mistake a malformed block for a removed one.
+    validate_blocks(&blocks)?;
     let mut changes = 0_i64;
     for (_, change, stored) in rows {
         if let Some(change) = change {
-            blocks = applied(blocks, &change);
+            blocks = applied(blocks, &change)?;
             changes = changes.saturating_add(stored);
         }
     }
@@ -454,12 +481,16 @@ pub async fn snapshot(
     document: Id,
     version: i32,
 ) -> Result<Option<Vec<BlockRow>>, DbError> {
-    Ok(rebuilt(conn, document, version).await?.map(|(blocks, _)| {
-        blocks
-            .into_iter()
-            .filter_map(|block| serde_json::from_value(block).ok())
-            .collect()
-    }))
+    rebuilt(conn, document, version)
+        .await?
+        .map(|(blocks, _)| {
+            blocks
+                .into_iter()
+                .map(serde_json::from_value)
+                .collect::<Result<Vec<BlockRow>, _>>()
+                .map_err(|error| DbError::Other(sqlx::Error::Decode(error.into())))
+        })
+        .transpose()
 }
 
 /// The last version whose changes ended before `seen`: the one cut before a

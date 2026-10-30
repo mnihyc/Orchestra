@@ -21,9 +21,9 @@ pub const CSRF_HEADER: &str = "x-orch-csrf";
 /// The header by which a creating request is made safe to repeat.
 pub const IDEMPOTENCY_HEADER: &str = "idempotency-key";
 /// The cookie that holds a browser's session.
-pub const SESSION_COOKIE: &str = "orch_session";
+pub const SESSION_COOKIE: &str = "__Host-orch_session";
 /// The cookie by which a browser its person signed in from is known.
-pub const DEVICE_COOKIE: &str = "orch_device";
+pub const DEVICE_COOKIE: &str = "__Host-orch_device";
 /// The media type of an error.
 pub const PROBLEM_JSON: &str = "application/problem+json";
 

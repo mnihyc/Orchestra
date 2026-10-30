@@ -1044,6 +1044,7 @@ async fn a_token_that_carries_model_use_can_start_its_authors_turn() {
                 "thread.view".to_owned(),
                 "thread.interact".to_owned(),
                 "provider.use".to_owned(),
+                "environment.use".to_owned(),
             ],
             Some(world.topic),
         )
@@ -1078,6 +1079,7 @@ async fn scoped_input_token(world: &World, provider_use: bool) -> (Id, Caller) {
     let mut scopes = vec!["thread.view".to_owned(), "thread.interact".to_owned()];
     if provider_use {
         scopes.push("provider.use".to_owned());
+        scopes.push("environment.use".to_owned());
     }
     let digest = orch_types::Hash::of(id.as_bytes());
     let name = format!("input-{id}");
@@ -1105,6 +1107,128 @@ async fn scoped_input_token(world: &World, provider_use: bool) -> (Id, Caller) {
                 .for_token(id),
         ),
     )
+}
+
+async fn token_without_environment_use(world: &World) -> (Id, Caller) {
+    let (id, _) = scoped_input_token(world, true).await;
+    let scopes = vec![
+        "thread.view".to_owned(),
+        "thread.interact".to_owned(),
+        "provider.use".to_owned(),
+    ];
+    sqlx::query("UPDATE api_tokens SET scopes=$2 WHERE id=$1")
+        .bind(id)
+        .bind(&scopes)
+        .execute(world.pool.pool())
+        .await
+        .unwrap();
+    let caller = Caller::token(
+        world.ada,
+        orch_authz::TokenGrant::from_stored(&scopes, Some(world.topic))
+            .unwrap()
+            .for_token(id),
+    );
+    (id, caller)
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn a_token_without_environment_use_cannot_run_a_held_input_on_its_owners_access() {
+    let world = World::new().await;
+    let thread = world.thread("Token environment scope").await;
+    let (_, narrow) = token_without_environment_use(&world).await;
+    let submitted = world
+        .engine()
+        .submit_input(&narrow, thread, queued("Work needing the environment"))
+        .await
+        .unwrap();
+    assert_eq!(
+        world.input_state(submitted.input.id).await,
+        ("pending".into(), Some("model_use_required".into()))
+    );
+    assert!(matches!(
+        world
+            .engine()
+            .run_input(&narrow, thread, submitted.input.id)
+            .await,
+        Err(InputError::Denied(_))
+    ));
+    assert_eq!(world.input_run_as(submitted.input.id).await, None);
+    assert_eq!(world.turn_starts(thread).len(), 0);
+    let (_, entitled) = scoped_input_token(&world, true).await;
+    let approval: Id = world
+        .scalar(
+            "SELECT approval_id FROM thread_inputs WHERE id=$1",
+            submitted.input.id,
+        )
+        .await;
+    let mut conn = world.pool.acquire().await.unwrap();
+    let row = orch_db::queries::approvals::approval(&mut conn, approval)
+        .await
+        .unwrap()
+        .unwrap();
+    for (caller, expected) in [(&narrow, false), (&entitled, true)] {
+        let principal = orch_authz::Principal::load(
+            &mut conn,
+            caller.clone(),
+            orch_types::Time::new(world.clock.now()),
+        )
+        .await
+        .unwrap();
+        assert_eq!(
+            world
+                .engine()
+                .may_decide_source_request(&mut conn, &principal, &row)
+                .await
+                .unwrap(),
+            expected
+        );
+    }
+    drop(conn);
+    let approved = world
+        .engine()
+        .run_input(&entitled, thread, submitted.input.id)
+        .await
+        .unwrap();
+    assert_eq!(approved.author.as_ref().unwrap().id, world.ada);
+    assert_eq!(approved.run_as.as_ref().unwrap().id, world.ada);
+    world
+        .run_turn(thread, 0, "Only the entitled token runs it.")
+        .await;
+    world.wait_state(thread, "idle").await;
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn removing_only_a_tokens_environment_scope_holds_its_waiting_input() {
+    let world = World::new().await;
+    let thread = world.thread("Environment scope withdrawn").await;
+    let (token, caller) = scoped_input_token(&world, true).await;
+    world
+        .exec("UPDATE environments SET status='failed',status_detail='waiting for the environment'")
+        .await;
+    let submitted = world
+        .engine()
+        .submit_input(&caller, thread, queued("Pending original"))
+        .await
+        .unwrap();
+    sqlx::query("UPDATE api_tokens SET scopes=ARRAY['thread.view','thread.interact','provider.use'] WHERE id=$1")
+        .bind(token).execute(world.pool.pool()).await.unwrap();
+    world
+        .exec("UPDATE environments SET status='running',status_detail=NULL")
+        .await;
+    world.engine().preflight(thread).await.unwrap();
+    assert_eq!(
+        world.input_state(submitted.input.id).await,
+        ("pending".into(), Some("model_use_required".into()))
+    );
+    assert_eq!(world.turn_starts(thread).len(), 0);
+    assert!(matches!(
+        world
+            .engine()
+            .run_input(&caller, thread, submitted.input.id)
+            .await,
+        Err(InputError::Denied(_))
+    ));
+    assert_eq!(world.input_run_as(submitted.input.id).await, None);
 }
 
 async fn derive_waiting_input(world: &World, thread: Id, origin: Id) -> Id {
@@ -1429,7 +1553,7 @@ async fn broadening_a_stored_token_does_not_release_words_accepted_with_its_narr
     let original = stored_input(&world, sent.input.id)
         .await
         .submission_authority;
-    sqlx::query("UPDATE api_tokens SET scopes=ARRAY['thread.view','thread.interact','provider.use'] WHERE id=$1")
+    sqlx::query("UPDATE api_tokens SET scopes=ARRAY['thread.view','thread.interact','provider.use','environment.use'] WHERE id=$1")
         .bind(token).execute(world.pool.pool()).await.unwrap();
     world.restart_api().await;
     world.engine().preflight(thread).await.unwrap();
@@ -1456,6 +1580,7 @@ async fn broadening_a_stored_token_does_not_release_words_accepted_with_its_narr
                 "thread.view".to_owned(),
                 "thread.interact".to_owned(),
                 "provider.use".to_owned(),
+                "environment.use".to_owned(),
             ],
             Some(world.topic),
         )

@@ -4,8 +4,8 @@
 //! environment holds. The node does not speak the vendor's protocol and chooses nothing about it; it starts
 //! the program, hands back the loopback address, and reports which build it is.
 //!
-//! The build is the one in the environment's tool cache, in the directory of the tool `codex`. That directory
-//! holds either the program itself (`codex`), or the vendor's package layout, which names its program in
+//! The build is the one in the environment's tool cache, in the directory of the tool `codex`, or the local
+//! program selected by the machine's policy when there is no cache. The cache directory holds either the program itself (`codex`), or the vendor's package layout, which names its program in
 //! `codex-package.json` (`entrypoint`, `bin/codex` in the builds seen) and brings what the sandbox needs with
 //! it. Which build an adapter needs is decided where the arrangement is chosen, from the version reported here.
 //!
@@ -36,8 +36,15 @@ pub const TOOL_CALL_VARIABLE: &str = "CODEX_TOOL_CALL_ID";
 const PACKAGE_MANIFEST: &str = "codex-package.json";
 
 /// The places of the program in a directory that holds it without a manifest, in the order tried: the
-/// program itself, as a static build is shipped, and below `bin`, as the package layout has it.
-const PROGRAM_PLACES: [&str; 2] = ["codex", "bin/codex"];
+/// program itself, including Windows executable names, and below `bin`, as the package layout has it.
+const PROGRAM_PLACES: [&str; 6] = [
+    "codex",
+    "codex.exe",
+    "codex.cmd",
+    "bin/codex",
+    "bin/codex.exe",
+    "bin/codex.cmd",
+];
 
 /// The variables through which a command carries its ids.
 #[must_use]
@@ -87,14 +94,32 @@ pub enum Missing {
     /// The directory of the tool has no program in it.
     #[error("the build of {TOOL} in {0} has no program in it")]
     NoProgram(String),
+    /// The selected local program no longer exists.
+    #[error("the locally confirmed program {0} is not a file")]
+    LocalProgramMissing(String),
 }
 
 /// The build of the tool `codex` that the environment holds, and its program.
 pub fn locate(env: &EnvironmentContext) -> Result<Build, Missing> {
-    let listed = env.tool(TOOL).ok_or(Missing::NotListed)?;
     if env.tools_dir.is_none() {
-        return Err(Missing::NoToolsDirectory);
+        if let Some(path) = env.local_programs.get(TOOL) {
+            let program = PathBuf::from(path);
+            if !program.is_file() {
+                return Err(Missing::LocalProgramMissing(path.clone()));
+            }
+            return Ok(Build {
+                directory: program.parent().unwrap_or(Path::new(".")).to_path_buf(),
+                program,
+                listed_version: "unknown".to_owned(),
+            });
+        }
+        return Err(if env.tool(TOOL).is_some() {
+            Missing::NoToolsDirectory
+        } else {
+            Missing::NotListed
+        });
     }
+    let listed = env.tool(TOOL).ok_or(Missing::NotListed)?;
     let directory = PathBuf::from(env.tool_dir(TOOL).ok_or(Missing::NoToolsDirectory)?);
     let program = program_in(&directory)
         .ok_or_else(|| Missing::NoProgram(directory.display().to_string()))?;
@@ -271,6 +296,50 @@ mod tests {
         assert_eq!(
             locate(&environment(None, true)),
             Err(Missing::NoToolsDirectory)
+        );
+    }
+
+    #[test]
+    fn a_connected_environment_can_use_its_confirmed_codex_program() {
+        let dir = tempfile::tempdir().expect("a directory");
+        let program = dir.path().join("codex");
+        make(&program);
+        let mut context = serde_json::to_value(environment(None, false)).expect("context");
+        context["local_programs"] = serde_json::json!({"codex": program});
+        let mut context: EnvironmentContext = serde_json::from_value(context).expect("context");
+
+        assert_eq!(
+            locate(&context).expect("confirmed program").program,
+            program
+        );
+        context.local_programs.clear();
+        assert_eq!(locate(&context), Err(Missing::NotListed));
+    }
+
+    #[test]
+    fn a_managed_cache_stays_authoritative_when_a_local_program_is_also_listed() {
+        let dir = tempfile::tempdir().expect("a directory");
+        let local = dir.path().join("local");
+        let cached = dir.path().join("codex/codex");
+        make(&local);
+        make(&cached);
+        let mut context =
+            serde_json::to_value(environment(Some(dir.path()), true)).expect("context");
+        context["local_programs"] = serde_json::json!({"codex": local});
+        let context: EnvironmentContext = serde_json::from_value(context).expect("context");
+        assert_eq!(locate(&context).expect("cached program").program, cached);
+    }
+
+    #[test]
+    fn a_cached_windows_executable_can_be_found_by_its_native_name() {
+        let dir = tempfile::tempdir().expect("a directory");
+        let exe = dir.path().join("codex/bin/codex.exe");
+        make(&exe);
+        assert_eq!(
+            locate(&environment(Some(dir.path()), true))
+                .expect("program")
+                .program,
+            exe
         );
     }
 

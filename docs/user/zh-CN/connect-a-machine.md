@@ -7,6 +7,7 @@ heading_id.2-选择账号和运行方式: 2-choose-its-account-and-lifetime
 heading_id.通过代理连接: behind-a-proxy
 heading_id.3-执行命令等待机器出现: 3-connect-and-wait-for-its-name
 heading_id.修改驱动设置: change-driver-settings
+heading_id.确认代理程序: confirm-an-agent-program
 heading_id.4-重新登记同一台机器: 4-enroll-the-same-machine-again
 heading_id.5-停止或完整移除: 5-stop-or-remove-it
 ---
@@ -18,6 +19,7 @@ heading_id.5-停止或完整移除: 5-stop-or-remove-it
 打开**资源 → 机器 → 添加**，选择角色。**环境**使用你注册的文件夹，**代理**运行代理，
 **提供方**保管模型凭据；这三种角色可共用一个连接器。**节点**是另一个程序，在 Linux
 主机上创建受管环境。选择你有权添加机器的位置。连接机器并不等于共享它的全部文件夹。
+目录环境目前可用于 Linux。macOS 和 Windows 连接器仍可连接并使用其他角色。
 
 ## 2. 选择账号和运行方式
 
@@ -47,9 +49,10 @@ Linux 未启用 lingering 时会随退出登录停止；macOS 和 Windows 在登
 设置。支持 `http://`、`socks5://` 和 `socks5h://` 代理（`socks5h` 由代理解析域名），代理需要认证时可在
 地址中写 `用户名:密码@`。
 
-服务启动时使用服务管理器的变量，而不是你的 shell 的变量：`orch-connector service install` 会把运行它的
-shell 中的代理变量写进服务，连接器启动的程序（智能体程序、`git`）也会继承这些变量。要使用其他代理，
-安装时加上 `--proxy socks5h://proxy.example:1080`（或 `--proxy none` 直接连接所有主机），并用 `--no-proxy`
+服务启动时使用服务管理器的变量，而不是你的 shell 的变量。Linux 和 macOS 连接器安装程序、Linux 节点安装程序
+以及 `orch-connector service install` 会把 shell 的代理变量写进服务，连接器启动的程序（智能体程序、`git`）
+也会继承这些变量。代理地址可能包含密码，因此服务文件仅供其所有者读取。要使用其他代理，安装连接器服务时
+加上 `--proxy socks5h://proxy.example:1080`（或 `--proxy none` 直接连接所有主机），并用 `--no-proxy`
 指定直接连接的主机；重新安装即可修改。Windows 的登录任务使用你账号的变量，请用 `setx` 设置。
 `orch-connector doctor` 会显示连接网关每个地址时经过的代理。
 
@@ -76,6 +79,12 @@ shell 中的代理变量写进服务，连接器启动的程序（智能体程�
 在节点的**策略**页，机器运维人员交出**驱动**设置后，可以打开并编辑其 JSON。对于已报告
 配置架构的驱动，错误字段会显示在值旁；修正后再次保存即可。编辑器会保留草稿。如果驱动
 尚未报告架构，Orch 无法在此检查其连接字段。连接修改会在节点重启后生效。
+
+## 确认代理程序
+
+机器的**程序**页会列出发现的代理程序及其版本。机器管理员选择**使用**之前，程序显示
+**已发现**。机器运维人员可以在本机保留此设置；此时需在机器上修改。运维人员也可以在本机
+指定或移除程序。选择**重新搜索**可刷新列表；无法读取版本时显示**版本未知**。
 
 ## 4. 重新登记同一台机器
 

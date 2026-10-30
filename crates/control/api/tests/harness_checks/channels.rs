@@ -111,14 +111,26 @@ async fn mirror_for(world: &World) -> Mirror {
     mirror
 }
 
+async fn trust_mirror(world: &World) {
+    setting(
+        world,
+        None,
+        "agents.harness_trust_mirror",
+        json!(true),
+        false,
+    )
+    .await;
+}
+
 #[tokio::test]
 async fn a_typed_exact_release_uses_its_own_manifest_checksum_and_background_native_check() {
     use orch_api_contract::admin::{
-        HarnessBuildStatus, HarnessVersionFetch, HarnessVersionFetchBody,
+        HarnessBuildSource, HarnessBuildStatus, HarnessVersionFetch, HarnessVersionFetchBody,
     };
     let world = World::new().await;
     let people = cast(&world).await;
     let mirror = mirror_for(&world).await;
+    trust_mirror(&world).await;
     let machine = system_host(&world).await;
     let answering = super::node_answering(&world, machine, &[]);
     world
@@ -140,6 +152,7 @@ async fn a_typed_exact_release_uses_its_own_manifest_checksum_and_background_nat
     let build = super::checked(&world, &people.root).await;
     assert_eq!(build.version, super::VERSION);
     assert_eq!(build.status, HarnessBuildStatus::Checked);
+    assert_eq!(build.source, HarnessBuildSource::Mirror);
     let ensure: Value =
         sqlx::query_scalar("SELECT body FROM commands WHERE kind='node.tool.ensure'")
             .fetch_one(&world.db.pool)
@@ -217,6 +230,7 @@ async fn an_org_requests_only_its_vendor_and_an_ancestor_lock_can_take_that_requ
     let world = World::new().await;
     let people = cast(&world).await;
     let mirror = mirror_for(&world).await;
+    trust_mirror(&world).await;
     setting(
         &world,
         Some(people.acme),
@@ -266,6 +280,7 @@ async fn zero_disables_the_schedule_but_an_admin_refresh_still_reads_and_keeps_i
     let world = World::new().await;
     let people = cast(&world).await;
     let mirror = mirror_for(&world).await;
+    trust_mirror(&world).await;
     setting(
         &world,
         None,

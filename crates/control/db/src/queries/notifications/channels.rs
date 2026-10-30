@@ -99,6 +99,15 @@ pub async fn lock_channel_shared(conn: &mut Conn, id: Id) -> Result<Option<Chann
     .await?)
 }
 
+/// Locks the channel before recording a delivery outcome that may update it.
+pub async fn lock_channel_for_update(conn: &mut Conn, id: Id) -> Result<(), DbError> {
+    sqlx::query("SELECT id FROM notification_channels WHERE id = $1 FOR UPDATE")
+        .bind(id)
+        .execute(conn)
+        .await?;
+    Ok(())
+}
+
 /// The system's channel of a kind, if it has one (a system has one mail
 /// server and one bot).
 pub async fn system_channel(conn: &mut Conn, kind: &str) -> Result<Option<ChannelRow>, DbError> {

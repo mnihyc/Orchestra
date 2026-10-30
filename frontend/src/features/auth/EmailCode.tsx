@@ -8,6 +8,7 @@ import { type ReactNode, type SyntheticEvent, useEffect, useRef, useState } from
 import { useTranslation } from 'react-i18next';
 
 import { Button } from '@/ui/Button';
+import { ErrorAlert } from '@/ui/ErrorState';
 import { InlineAlert } from '@/ui/InlineAlert';
 import { Input } from '@/ui/Input';
 import { linkButtonClasses } from '@/ui/link';
@@ -30,8 +31,8 @@ function useSecondsUntil(at: number): number {
 export interface EmailCodeProps {
   /** What is true whoever asked: that a code is on its way if the name may have one. */
   sentence: ReactNode;
-  /** When the last code was asked for, on this device's clock. */
-  sentAt: number;
+  /** When the last request was accepted, or null before any request was accepted. */
+  sentAt: number | null;
   /** Signs in with the code. */
   onSubmit: (code: string) => void;
   /** Asks for another code. */
@@ -48,6 +49,8 @@ export interface EmailCodeProps {
   fieldError?: string | undefined;
   /** What the sign-in was refused with otherwise, drawn by the caller. */
   refusal?: ReactNode;
+  /** A code request that did not receive an accepted response. */
+  sendError?: unknown;
   /** Other ways on, under the button. */
   children?: ReactNode;
 }
@@ -63,13 +66,13 @@ export function EmailCode({
   failures,
   fieldError,
   refusal,
+  sendError,
   children,
 }: EmailCodeProps) {
   const { t } = useTranslation();
   const [code, setCode] = useState('');
   const [missing, setMissing] = useState(false);
   const field = useRef<HTMLInputElement>(null);
-  const wait = useSecondsUntil(sentAt + RESEND_AFTER_MS);
 
   // A code that was refused is typed again from the start.
   useEffect(() => {
@@ -78,7 +81,7 @@ export function EmailCode({
 
   const submit = (event: SyntheticEvent) => {
     event.preventDefault();
-    if (pending) return;
+    if (pending || resending) return;
     const typed = code.trim();
     if (typed === '') {
       setMissing(true);
@@ -90,7 +93,8 @@ export function EmailCode({
 
   return (
     <form noValidate className="flex flex-col gap-4" onSubmit={submit}>
-      <InlineAlert tone="info">{sentence}</InlineAlert>
+      {sentence !== null && <InlineAlert tone="info">{sentence}</InlineAlert>}
+      {resending && <span role="status" className="text-sm text-text-muted">{t('auth.code.sending')}</span>}
       <Input
         ref={field}
         label={t('auth.code.label')}
@@ -108,20 +112,23 @@ export function EmailCode({
         }}
       />
       {refusal}
-      <Button type="submit" variant="primary" block pending={pending}>
+      {sendError !== null && sendError !== undefined && <ErrorAlert error={sendError} />}
+      <Button type="submit" variant="primary" block pending={pending} disabled={resending}>
         {t('auth.login.submit')}
       </Button>
       <div className="flex flex-col items-start gap-2 text-sm">
-        {canResend && <button
-          type="button"
-          className={linkButtonClasses}
-          disabled={wait > 0 || resending}
-          onClick={onResend}
-        >
-          {wait > 0 ? t('auth.code.resendIn', { count: wait }) : t('auth.code.resend')}
-        </button>}
+        {canResend && <ResendButton key={sentAt ?? 'none'} sentAt={sentAt} resending={resending} onResend={onResend} />}
         {children}
       </div>
     </form>
   );
+}
+
+/** Reset just the countdown after an accepted send, keeping any code the person typed. */
+function ResendButton({ sentAt, resending, onResend }: { sentAt: number | null; resending: boolean; onResend: () => void }) {
+  const { t } = useTranslation();
+  const wait = useSecondsUntil(sentAt === null ? 0 : sentAt + RESEND_AFTER_MS);
+  return <button type="button" className={linkButtonClasses} disabled={wait > 0 || resending} onClick={onResend}>
+    {wait > 0 ? t('auth.code.resendIn', { count: wait }) : t(sentAt === null ? 'auth.code.send' : 'auth.code.resend')}
+  </button>;
 }

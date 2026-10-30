@@ -749,11 +749,16 @@ async fn require_decision_authority(
     use orch_authz::approvals::Authority;
     match orch_authz::approvals::authority(&row.kind) {
         Some(Authority::HarnessThread) => {
+            let thread = row.thread_id.ok_or_else(ApiError::not_found)?;
+            let permission =
+                orch_engine::approvals::deciding_permission(conn, thread, &row.request)
+                    .await
+                    .map_err(ApiError::internal)?;
             authorization::require(
                 conn,
                 principal,
-                row.thread_id.ok_or_else(ApiError::not_found)?,
-                exact(Permission::ThreadManage),
+                thread,
+                exact(permission),
                 Act::Use,
                 Policy::default(),
             )

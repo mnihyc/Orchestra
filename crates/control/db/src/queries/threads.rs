@@ -1285,6 +1285,19 @@ pub async fn delivering_inputs(conn: &mut Conn, thread: Id) -> Result<Vec<InputR
         .await?)
 }
 
+/// Whether a dispatched steer still needs its durable command result.
+pub async fn unsettled_steer(conn: &mut Conn, thread: Id) -> Result<bool, DbError> {
+    Ok(sqlx::query_scalar(
+        "SELECT EXISTS(SELECT 1 FROM thread_inputs i JOIN threads t ON t.node_id=i.thread_id
+          WHERE i.thread_id=$1 AND i.continuation_id=t.active_continuation_id
+            AND i.state='delivering' AND i.delivery='steer' AND i.state_detail='steering'
+            AND i.turn_id IS NOT NULL)",
+    )
+    .bind(thread)
+    .fetch_one(conn)
+    .await?)
+}
+
 /// The inputs, of every thread, that are being handed to a turn that is
 /// running, which a restart may have interrupted.
 pub async fn delivering_inputs_of_running_turns(
@@ -1513,7 +1526,7 @@ pub async fn set_side_reading(conn: &mut Conn, thread: Id, mode: &str) -> Result
 pub async fn resume_queue(conn: &mut Conn, thread: Id, seq: Seq) -> Result<(i64, i64), DbError> {
     let freed = sqlx::query(
         "UPDATE thread_inputs SET queue_held = false, seq_updated = $2
-          WHERE thread_id = $1 AND continuation_id=(SELECT active_continuation_id FROM threads WHERE node_id=$1) AND state = 'pending' AND queue_held",
+          WHERE thread_id = $1 AND continuation_id=(SELECT active_continuation_id FROM threads WHERE node_id=$1) AND state IN ('pending','delivering') AND queue_held",
     )
     .bind(thread)
     .bind(seq)
@@ -3704,18 +3717,21 @@ pub mod binding {
         .await?)
     }
 
-    /// The threads that adopted a conversation a harness holds, by the harness's reference to it: for
-    /// each reference, the first thread whose segments hold it.
+    /// The threads that hold a conversation of this provider and agent, by its native reference.
     pub async fn adopting_threads(
         conn: &mut Conn,
+        provider: Id,
+        agent: Id,
         references: &[String],
     ) -> Result<Vec<(String, Id)>, DbError> {
         Ok(sqlx::query_as(
             "SELECT DISTINCT ON (s.native_session_ref) s.native_session_ref, s.thread_id
                FROM segments s JOIN nodes n ON n.id = s.thread_id AND n.deleted_at IS NULL
-              WHERE s.native_session_ref = ANY($1)
+              WHERE s.provider_id = $1 AND s.agent_id = $2 AND s.native_session_ref = ANY($3)
               ORDER BY s.native_session_ref, s.thread_id",
         )
+        .bind(provider)
+        .bind(agent)
         .bind(references)
         .fetch_all(conn)
         .await?)

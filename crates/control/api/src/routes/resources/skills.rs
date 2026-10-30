@@ -600,7 +600,7 @@ async fn fetch_on_host(
     source: SkillFetchSource,
     limits: Limits,
 ) -> ApiResult<(bytes::Bytes, Option<String>)> {
-    let machine = {
+    let (machine, allowed_private_hosts) = {
         let mut conn = ctx.app.db.acquire().await?;
         require(
             &mut conn,
@@ -610,10 +610,14 @@ async fn fetch_on_host(
             Permission::HostUse,
         )
         .await?;
-        orch_db::queries::resources::hosting::host(&mut conn, host)
+        let machine = orch_db::queries::resources::hosting::host(&mut conn, host)
             .await?
             .ok_or_else(ApiError::not_found)?
-            .machine_id
+            .machine_id;
+        let allowed_private_hosts = orch_worker_core::channels::outbound_hosts(&mut conn)
+            .await
+            .map_err(ApiError::internal)?;
+        (machine, allowed_private_hosts)
     };
     let limit = i64::try_from(limits.archive_bytes()).unwrap_or(i64::MAX);
     let fetched: NodeSkillFetchResult = ctx
@@ -626,6 +630,7 @@ async fn fetch_on_host(
             &NodeSkillFetch {
                 source,
                 max_bytes: limit,
+                allowed_private_hosts,
             },
         )
         .await

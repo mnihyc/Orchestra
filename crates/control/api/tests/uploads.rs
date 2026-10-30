@@ -1223,3 +1223,23 @@ async fn a_file_forwarded_into_a_thread_is_carried_by_it_too() {
             .contains("notes.txt")
     );
 }
+#[tokio::test]
+async fn an_upload_is_refused_at_its_expiration_instant() {
+    let site = Site::new().await;
+    let upload = begin(&site, &site.ada, 2, "boundary.bin").await;
+    site.world
+        .advance(Duration::hours(24) - Duration::milliseconds(1));
+    assert_eq!(
+        put(&site, &site.ada, upload, 0, b"a").await.ok().received,
+        1
+    );
+    site.world.advance(Duration::milliseconds(1));
+    assert_eq!(
+        put(&site, &site.ada, upload, 1, b"b").await.problem().code,
+        ErrorCode::Gone
+    );
+    assert_eq!(
+        end(&site, &site.ada, upload).await.problem().code,
+        ErrorCode::Gone
+    );
+}

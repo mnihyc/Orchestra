@@ -189,6 +189,28 @@ pub fn directory_generation(
     requested: Option<&str>,
     generation: i64,
 ) -> Result<PathBuf, CommandError> {
+    directory_generation_binding(
+        data_dir,
+        config,
+        policy,
+        environment,
+        role,
+        requested,
+        generation,
+    )
+    .map(|(binding, _held)| PathBuf::from(binding.path))
+}
+
+/// Keeps the recorded identity and the directory it names together for attachment.
+pub(crate) fn directory_generation_binding(
+    data_dir: &Path,
+    config: &ConnectorConfig,
+    policy: &LocalPolicy,
+    environment: Id,
+    role: &str,
+    requested: Option<&str>,
+    generation: i64,
+) -> Result<(DirectoryBinding, orch_envhost::paths::HeldRoot), CommandError> {
     if generation < 0 {
         return Err(refused("an owned-data generation is not negative"));
     }
@@ -212,16 +234,14 @@ pub fn directory_generation(
                     "existing data keeps its recorded storage; use an explicit move before choosing another",
                 ));
             }
-            let actual = crate::policy::inspect_environment_directory(
-                policy,
-                Path::new(&kept.directory.path),
-            )?;
+            let (actual, held) =
+                crate::policy::hold_environment_directory(policy, Path::new(&kept.directory.path))?;
             if actual != kept.directory {
                 return Err(refused(
                     "the kept data directory changed identity; it is not replaced",
                 ));
             }
-            return Ok(PathBuf::from(actual.path));
+            return Ok((actual, held));
         }
         Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
         Err(_) => return Err(refused("the kept data storage record cannot be opened")),
@@ -234,7 +254,11 @@ pub fn directory_generation(
             refused("the machine has no requested or default storage under its allowed roots")
         })?;
     let path = make(&storage.path, environment, role, generation)?;
-    let directory = crate::policy::inspect_environment_directory(policy, &path)?;
+    let (directory, held) = crate::policy::hold_environment_directory(policy, &path)?;
+    #[cfg(target_os = "linux")]
+    held.require_writable()
+        .map_err(|error| refused(error.to_string()))?;
+    #[cfg(not(target_os = "linux"))]
     crate::policy::writable_environment_directory(&path)?;
     let kept = Kept {
         storage: storage.name.clone(),
@@ -246,7 +270,7 @@ pub fn directory_generation(
         serde_json::to_vec(&kept).map_err(|_| refused("the storage record cannot be encoded"))?;
     crate::policy::write_atomically(&record, &bytes)
         .map_err(|_| refused("the storage record cannot be saved"))?;
-    Ok(path)
+    Ok((kept.directory, held))
 }
 
 fn make(
@@ -387,6 +411,57 @@ pub fn remove_generation(
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    #[cfg(target_os = "linux")]
+    #[allow(clippy::unwrap_used, reason = "a test fails by panicking")]
+    fn an_owned_workspace_keeps_its_verified_handle_and_refuses_a_replacement() {
+        use std::os::unix::fs::MetadataExt;
+
+        let root = tempfile::tempdir().unwrap();
+        let data = tempfile::tempdir().unwrap();
+        let policy = LocalPolicy {
+            environment_roots: vec![root.path().to_string_lossy().into_owned()],
+            ..Default::default()
+        };
+        let config = ConnectorConfig::default();
+        let environment = orch_types::new_id();
+        let (binding, held) = directory_generation_binding(
+            data.path(),
+            &config,
+            &policy,
+            environment,
+            "workspace",
+            None,
+            0,
+        )
+        .unwrap();
+        let original = PathBuf::from(&binding.path);
+        let moved = original.with_extension("moved");
+        let replacement = root.path().join("replacement");
+        std::fs::create_dir(&replacement).unwrap();
+        std::fs::rename(&original, &moved).unwrap();
+        std::os::unix::fs::symlink(&replacement, &original).unwrap();
+
+        let metadata = std::fs::metadata(&moved).unwrap();
+        let still_held = held.metadata().unwrap();
+        assert_eq!(
+            (still_held.dev, still_held.ino),
+            (metadata.dev(), metadata.ino())
+        );
+        let error = directory_generation_binding(
+            data.path(),
+            &config,
+            &policy,
+            environment,
+            "workspace",
+            None,
+            0,
+        )
+        .unwrap_err();
+        assert_eq!(error.code, ErrorCode::PolicyRootNotAllowed.as_str());
+        assert!(error.detail.contains("changed identity"));
+    }
+
     #[test]
     #[cfg(target_os = "linux")]
     fn a_move_generation_is_fresh_and_retry_keeps_it_without_replacing_an_earlier_directory() {

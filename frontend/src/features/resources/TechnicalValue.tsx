@@ -13,10 +13,10 @@ import { i18n } from '@/i18n';
 
 const CHANGE_SIDES = ['from', 'to'] as const;
 
-export function PathValue({ path }: { path: string }) {
+export function PathValue({ path, full = false }: { path: string; full?: boolean }) {
   const { t } = useTranslation();
   return <span className="inline-flex min-w-0 items-center gap-1">
-    <Tooltip content={path}><code tabIndex={0} className="min-w-0 truncate rounded-sm text-sm">{shortRoot(path)}</code></Tooltip>
+    <Tooltip content={path}><code tabIndex={0} className={full?'min-w-0 break-all rounded-sm text-sm':'min-w-0 truncate rounded-sm text-sm'}>{full?path:shortRoot(path)}</code></Tooltip>
     <CopyButton value={path} label={t('resourceDetails.copyPath')} />
   </span>;
 }

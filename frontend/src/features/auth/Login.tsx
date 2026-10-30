@@ -77,8 +77,9 @@ export function Login({ onward, callbackError }: LoginProps) {
 
   /** Tries to sign in with what is at hand, and moves to the second step when the answer asks for one. */
   const attempt = (proofs: Proofs, more: Partial<Record<SignInProof, string>> = {}, onRefused?: () => void) => {
-    if (enter.isPending) return;
+    if (enter.isPending || code.isPending) return;
     setRefused(null);
+    code.reset();
     enter.mutate(
       { ...proofs, ...more },
       {
@@ -96,12 +97,13 @@ export function Login({ onward, callbackError }: LoginProps) {
             return;
           }
           const right: Proofs = { ...proofs, ...more };
-          // A code that is the only second step is on its way before the field for it is shown.
+          setStage({ at: 'second', proofs: right, methods, using, sentAt: null });
+          // Keep the verified proof while the separate request for a code is in flight.
           if (using === 'email_code' && right.password !== undefined) {
-            code.mutate({ login: right.login, password: right.password });
-            setStage({ at: 'second', proofs: right, methods, using, sentAt: Date.now() });
-          } else {
-            setStage({ at: 'second', proofs: right, methods, using, sentAt: null });
+            code.mutate({ login: right.login, password: right.password }, {
+              onSuccess: () => setStage((current) => current.at === 'second' && current.proofs === right && current.using === 'email_code'
+                ? { ...current, sentAt: Date.now() } : current),
+            });
           }
         },
       },
@@ -111,6 +113,7 @@ export function Login({ onward, callbackError }: LoginProps) {
   const restart = () => {
     setRefused(null);
     enter.reset();
+    code.reset();
     setStage({ at: 'first' });
   };
 
@@ -142,18 +145,17 @@ export function Login({ onward, callbackError }: LoginProps) {
           pending={enter.isPending}
           asking={code.isPending}
           refused={refused}
+          codeError={code.error}
           onSubmit={(login, password, onRefused) => attempt({ login, password }, {}, onRefused)}
           onMailCode={(login) => {
             setRefused(null);
-            code.mutate({ login });
-            setStage({ at: 'code', login, sentAt: Date.now() });
+            code.mutate({ login }, { onSuccess: () => setStage({ at: 'code', login, sentAt: Date.now() }) });
           }}
         />
       )}
 
       {stage.at === 'code' && (
         <EmailCode
-          key={stage.sentAt}
           sentence={t('auth.code.sent')}
           sentAt={stage.sentAt}
           pending={enter.isPending}
@@ -162,11 +164,14 @@ export function Login({ onward, callbackError }: LoginProps) {
           failures={failures}
           fieldError={isWrongProof(refused) ? t('auth.code.wrong') : undefined}
           refusal={<Refusal error={isWrongProof(refused) ? null : refused} meta={meta} way="email_code" />}
+          sendError={code.error}
           onSubmit={(typed) => attempt({ login: stage.login }, { email_code: typed })}
           onResend={() => {
             setRefused(null);
-            code.mutate({ login: stage.login });
-            setStage({ ...stage, sentAt: Date.now() });
+            code.mutate({ login: stage.login }, {
+              onSuccess: () => setStage((current) => current.at === 'code' && current.login === stage.login
+                ? { ...current, sentAt: Date.now() } : current),
+            });
           }}
         >
           <button type="button" className={linkButtonClasses} onClick={restart}>
@@ -182,14 +187,19 @@ export function Login({ onward, callbackError }: LoginProps) {
           pending={enter.isPending}
           asking={code.isPending}
           refused={refused}
+          codeError={code.error}
           failures={failures}
           onSubmit={(value) => attempt(stage.proofs, { [stage.using]: value })}
           onUse={(using) => {
             setRefused(null);
             if (using === 'email_code' && stage.proofs.password !== undefined) {
-              code.mutate({ login: stage.proofs.login, password: stage.proofs.password });
-              setStage({ ...stage, using, sentAt: Date.now() });
+              setStage({ ...stage, using });
+              code.mutate({ login: stage.proofs.login, password: stage.proofs.password }, {
+                onSuccess: () => setStage((current) => current.at === 'second' && current.proofs === stage.proofs && current.using === 'email_code'
+                  ? { ...current, sentAt: Date.now() } : current),
+              });
             } else {
+              code.reset();
               setStage({ ...stage, using });
             }
           }}
@@ -215,6 +225,7 @@ interface FirstStepProps {
   pending: boolean;
   asking: boolean;
   refused: unknown;
+  codeError: unknown;
   /** Signs in. `onRefused` is called when the attempt was refused, to empty the password for a new one. */
   onSubmit: (login: string, password: string, onRefused: () => void) => void;
   onMailCode: (login: string) => void;
@@ -229,6 +240,7 @@ function FirstStep({
   pending,
   asking,
   refused,
+  codeError,
   onSubmit,
   onMailCode,
 }: FirstStepProps) {
@@ -257,7 +269,7 @@ function FirstStep({
           noValidate
           className="flex flex-col gap-4"
           onSubmit={form.submit((values) => {
-            if (pending) return;
+            if (pending || asking) return;
             // A password that was refused is typed again; the name stays.
             onSubmit(values.login.trim(), values.password, () => {
               form.set('password', '');
@@ -287,7 +299,7 @@ function FirstStep({
             {t('auth.links.forgot')}
           </Link>}
           <Refusal error={wrong ? null : refused} meta={meta} way="password" login={form.values.login.trim()} />
-          <Button type="submit" variant="primary" block pending={pending}>
+          <Button type="submit" variant="primary" block pending={pending} disabled={asking}>
             {t('auth.login.submit')}
           </Button>
         </form>
@@ -304,10 +316,12 @@ function FirstStep({
       <IdentityProviders providers={providers} redirect={onward} />
 
       {showForm && meta.mail && meta.email_code_login && (
+        <>
+        {codeError !== null && <ErrorAlert error={codeError} />}
         <button
           type="button"
           className={`${linkButtonClasses} self-start text-sm`}
-          disabled={asking}
+          disabled={asking || pending}
           onClick={() => {
             const name = form.values.login.trim();
             if (name === '') {
@@ -318,8 +332,9 @@ function FirstStep({
             onMailCode(name);
           }}
         >
-          {t('auth.login.mailCode')}
+          {asking ? t('auth.code.sending') : t('auth.login.mailCode')}
         </button>
+        </>
       )}
 
       {!showForm && (
@@ -357,12 +372,13 @@ interface SecondStepProps {
   pending: boolean;
   asking: boolean;
   refused: unknown;
+  codeError: unknown;
   failures: number;
   onSubmit: (value: string) => void;
   onUse: (method: SignInProof) => void;
 }
 
-function SecondStep({ stage, meta, pending, asking, refused, failures, onSubmit, onUse }: SecondStepProps) {
+function SecondStep({ stage, meta, pending, asking, refused, codeError, failures, onSubmit, onUse }: SecondStepProps) {
   const { t } = useTranslation();
   const wrong = isWrongProof(refused);
   const refusal = <Refusal error={wrong ? null : refused} meta={meta} way={stage.using} />;
@@ -378,15 +394,15 @@ function SecondStep({ stage, meta, pending, asking, refused, failures, onSubmit,
   if (stage.using === 'email_code') {
     return (
       <>{account}<EmailCode
-        key={stage.sentAt ?? 0}
-        sentence={t('auth.second.codeSent')}
-        sentAt={stage.sentAt ?? 0}
+        sentence={stage.sentAt === null ? null : t('auth.second.codeSent')}
+        sentAt={stage.sentAt}
         pending={pending}
         resending={asking}
         canResend={meta.mail}
         failures={failures}
         fieldError={wrong ? t('auth.code.wrong') : undefined}
         refusal={refusal}
+        sendError={codeError}
         onSubmit={onSubmit}
         onResend={() => onUse('email_code')}
       >

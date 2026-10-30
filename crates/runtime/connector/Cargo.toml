@@ -9,6 +9,7 @@ repository.workspace = true
 publish.workspace = true
 
 [dependencies]
+regex.workspace = true
 flate2.workspace = true
 orch-agent-contract.workspace = true
 orch-agent-programs.workspace = true

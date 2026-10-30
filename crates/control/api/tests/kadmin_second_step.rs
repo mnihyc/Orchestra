@@ -10,8 +10,10 @@ mod support;
 
 use chrono::Duration;
 use orch_api_contract::auth::{
-    MeGet, MeSecondStepVerify, MeSecondStepVerifyBody, MeTotpEnable, MeTotpEnableBody, MeTotpSetup,
-    MeTotpSetupBody,
+    ApiTokenCreateBody, MeEmailCodeDisable, MeEmailCodeDisableBody, MeEmailCodeEnable,
+    MeEmailCodeEnableBody, MeEmailCodeSend, MeEmailCodeSendBody, MeGet, MeSecondStepVerify,
+    MeSecondStepVerifyBody, MeTokenCreate, MeTotpDisable, MeTotpDisableBody, MeTotpEnable,
+    MeTotpEnableBody, MeTotpSetup, MeTotpSetupBody, SensitiveProof,
 };
 use orch_api_contract::common::{ErrorCode, Page};
 use orch_api_contract::directory::{Member, MemberSecondStep, OrgMemberList, OrgMemberListQuery};
@@ -90,6 +92,88 @@ async fn require_at(world: &World, org: Id, value: &str) {
     world
         .set_at(Target::Node(org), "auth.second_step", json!(value))
         .await;
+}
+
+#[tokio::test]
+async fn a_session_held_for_a_second_step_cannot_mint_a_token_that_reaches_that_org() {
+    let world = World::new().await;
+    let root = admin(&world, "root").await;
+    let team = make_org(&world, &root, "Team", "token-team").await.base.id;
+    let ada = person(&world, "ada").await;
+    join(&world, team, team, &ada, "developer", &root).await;
+    let secret = authenticator(&world, &ada.token).await;
+    require_at(&world, team, "required").await;
+    let later = another_session(&world, &ada).await;
+    world.advance(step());
+    let code = world.totp_code(&secret);
+    let create = |node_id| ApiTokenCreateBody {
+        name: "test token".to_owned(),
+        scopes: Some(vec!["*".to_owned()]),
+        node_id,
+        expires_at: None,
+        proof: SensitiveProof {
+            password: Some(PASSWORD.to_owned()),
+            totp: Some(code.clone()),
+            ..Default::default()
+        },
+    };
+    for node in [Some(team), None] {
+        let denied = world
+            .app
+            .call(MeTokenCreate, &[])
+            .token(&later)
+            .body(&create(node))
+            .send()
+            .await
+            .problem();
+        assert_eq!(denied.code, ErrorCode::AuthSecondStepRequired);
+    }
+    let own = world
+        .app
+        .call(MeTokenCreate, &[])
+        .token(&later)
+        .body(&create(Some(ada.person.personal_org)))
+        .send()
+        .await
+        .ok();
+    assert!(
+        own.token.is_some(),
+        "the unaffected personal home remains available"
+    );
+    world.advance(step());
+    world
+        .app
+        .call(MeSecondStepVerify, &[])
+        .token(&later)
+        .body(&MeSecondStepVerifyBody {
+            totp: Some(world.totp_code(&secret)),
+            email_code: None,
+            recovery_code: None,
+        })
+        .send()
+        .await
+        .ok();
+    world.advance(step());
+    let verified = ApiTokenCreateBody {
+        proof: SensitiveProof {
+            password: Some(PASSWORD.to_owned()),
+            totp: Some(world.totp_code(&secret)),
+            ..Default::default()
+        },
+        ..create(Some(team))
+    };
+    assert!(
+        world
+            .app
+            .call(MeTokenCreate, &[])
+            .token(&later)
+            .body(&verified)
+            .send()
+            .await
+            .ok()
+            .token
+            .is_some()
+    );
 }
 
 #[tokio::test]
@@ -180,6 +264,160 @@ async fn a_session_that_has_not_given_the_second_step_is_asked_for_it_and_one_co
         read(&world, &third, acme).await.problem().code,
         ErrorCode::AuthSecondStepRequired
     );
+}
+
+#[tokio::test]
+async fn replacing_an_authenticator_requires_each_other_browser_to_prove_the_new_one() {
+    let world = World::new().await;
+    let root = admin(&world, "root").await;
+    let acme = make_org(&world, &root, "Acme", "acme").await.base.id;
+    let ada = person(&world, "ada").await;
+    join(&world, acme, acme, &ada, "developer", &root).await;
+    let old_secret = authenticator(&world, &ada.token).await;
+    require_at(&world, acme, "required").await;
+
+    let other = another_session(&world, &ada).await;
+    world.advance(step());
+    world
+        .app
+        .call(MeSecondStepVerify, &[])
+        .token(&other)
+        .body(&MeSecondStepVerifyBody {
+            totp: Some(world.totp_code(&old_secret)),
+            email_code: None,
+            recovery_code: None,
+        })
+        .send()
+        .await
+        .ok();
+    read(&world, &other, acme).await.ok();
+
+    world.advance(step());
+    let disabled = world
+        .app
+        .call(MeTotpDisable, &[])
+        .token(&ada.token)
+        .body(&MeTotpDisableBody {
+            password: PASSWORD.to_owned(),
+            code: world.totp_code(&old_secret),
+        })
+        .send()
+        .await;
+    assert_eq!(disabled.status, 204);
+    assert_eq!(
+        read(&world, &other, acme).await.problem().code,
+        ErrorCode::AuthSecondStepSetup
+    );
+
+    let new_secret = authenticator(&world, &ada.token).await;
+    read(&world, &ada.token, acme).await.ok();
+    assert_eq!(
+        read(&world, &other, acme).await.problem().code,
+        ErrorCode::AuthSecondStepRequired
+    );
+    world.advance(step());
+    world
+        .app
+        .call(MeSecondStepVerify, &[])
+        .token(&other)
+        .body(&MeSecondStepVerifyBody {
+            totp: Some(world.totp_code(&new_secret)),
+            email_code: None,
+            recovery_code: None,
+        })
+        .send()
+        .await
+        .ok();
+    read(&world, &other, acme).await.ok();
+}
+
+#[tokio::test]
+async fn removing_a_mailed_second_step_requires_browsers_to_prove_a_remaining_method() {
+    let world = World::new().await;
+    world.mail_server().await;
+    let root = admin(&world, "root").await;
+    let acme = make_org(&world, &root, "Acme", "acme").await.base.id;
+    let ada = person(&world, "ada").await;
+    join(&world, acme, acme, &ada, "developer", &root).await;
+    world
+        .set_at(
+            Target::Node(acme),
+            "auth.email_code",
+            json!(["second_step"]),
+        )
+        .await;
+    let secret = authenticator(&world, &ada.token).await;
+    world
+        .app
+        .call(MeEmailCodeSend, &[])
+        .token(&ada.token)
+        .body(&MeEmailCodeSendBody {
+            password: Some(PASSWORD.to_owned()),
+            identity_proof: None,
+        })
+        .send()
+        .await
+        .ok();
+    world
+        .app
+        .call(MeEmailCodeEnable, &[])
+        .token(&ada.token)
+        .body(&MeEmailCodeEnableBody {
+            code: world.mailed_code(&ada.person.email).await,
+        })
+        .send()
+        .await
+        .ok();
+    require_at(&world, acme, "required").await;
+
+    let other = another_session(&world, &ada).await;
+    world.advance(step());
+    world
+        .app
+        .call(MeSecondStepVerify, &[])
+        .token(&other)
+        .body(&MeSecondStepVerifyBody {
+            totp: Some(world.totp_code(&secret)),
+            email_code: None,
+            recovery_code: None,
+        })
+        .send()
+        .await
+        .ok();
+    read(&world, &other, acme).await.ok();
+
+    world.advance(step());
+    let disabled = world
+        .app
+        .call(MeEmailCodeDisable, &[])
+        .token(&ada.token)
+        .body(&MeEmailCodeDisableBody {
+            password: PASSWORD.to_owned(),
+            code: world.totp_code(&secret),
+        })
+        .send()
+        .await;
+    assert_eq!(disabled.status, 204);
+    for token in [&ada.token, &other] {
+        assert_eq!(
+            read(&world, token, acme).await.problem().code,
+            ErrorCode::AuthSecondStepRequired
+        );
+    }
+    world.advance(step());
+    world
+        .app
+        .call(MeSecondStepVerify, &[])
+        .token(&other)
+        .body(&MeSecondStepVerifyBody {
+            totp: Some(world.totp_code(&secret)),
+            email_code: None,
+            recovery_code: None,
+        })
+        .send()
+        .await
+        .ok();
+    read(&world, &other, acme).await.ok();
 }
 
 #[tokio::test]

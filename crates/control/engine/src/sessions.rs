@@ -803,6 +803,8 @@ fn ticket(
     dst: Id,
     thread: Id,
     tool_set: Option<&str>,
+    provider: Option<Id>,
+    environment: Option<(Id, i64)>,
 ) -> link::TicketSlot {
     let mut more = serde_json::Map::new();
     more.insert("service".to_owned(), Json::String(service.to_string()));
@@ -810,6 +812,16 @@ fn ticket(
     more.insert("thread_id".to_owned(), Json::String(thread.to_string()));
     if let Some(set) = tool_set {
         more.insert("tool_set".to_owned(), Json::String(set.to_owned()));
+    }
+    if let Some(provider) = provider {
+        more.insert("provider_id".to_owned(), Json::String(provider.to_string()));
+    }
+    if let Some((environment, generation)) = environment {
+        more.insert(
+            "environment_id".to_owned(),
+            Json::String(environment.to_string()),
+        );
+        more.insert("environment_generation".to_owned(), Json::from(generation));
     }
     link::TicketSlot::Asked(link::TicketAsk {
         ticket: link::TicketWanted { kind, more },
@@ -868,6 +880,8 @@ pub fn session_open_body_importing(
                     dst,
                     thread,
                     None,
+                    Some(provider),
+                    None,
                 ),
             }
         }
@@ -917,6 +931,11 @@ pub fn session_open_body_importing(
             machine,
             thread,
             tool_set.as_deref(),
+            None,
+            Some((
+                snapshot.environment.id,
+                i64::from(snapshot.environment.generation),
+            )),
         )),
         (Some(other), Some(machine)) => Some(ticket(
             TunnelKind::Exec,
@@ -926,6 +945,11 @@ pub fn session_open_body_importing(
             machine,
             thread,
             None,
+            None,
+            Some((
+                snapshot.environment.id,
+                i64::from(snapshot.environment.generation),
+            )),
         )),
     };
     let parameters = snapshot.adapter_params()?;

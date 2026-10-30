@@ -71,7 +71,12 @@ async fn a_shell_is_typed_into_through_a_tunnel_left_and_taken_up_again_with_its
 
     // Typed into through a tunnel, it answers.
     let mut first = attach(&rig, terminal_id).await;
-    first.write_all(b"echo $((6*7))\n").await.unwrap();
+    let calculate = if cfg!(windows) {
+        b"set /A 6*7\r\n".as_slice()
+    } else {
+        b"echo $((6*7))\n".as_slice()
+    };
+    first.write_all(calculate).await.unwrap();
     let screen = read_until(&mut first, "42").await;
     assert!(screen.contains("42"));
 
@@ -81,10 +86,18 @@ async fn a_shell_is_typed_into_through_a_tunnel_left_and_taken_up_again_with_its
     let mut second = {
         // The command runs while nobody is attached: a file appears, and the shell says so later.
         let mut again = attach(&rig, terminal_id).await;
-        again
-            .write_all(format!("touch {} && echo kept-$((5+4))\n", away.display()).as_bytes())
-            .await
-            .unwrap();
+        let command = if cfg!(windows) {
+            format!(
+                "type nul > \"{}\" & cmd /V:ON /C \"set /A n=5+4 & echo kept-!n!\"\r\n",
+                away.display()
+            )
+        } else {
+            format!(
+                "touch '{}' && echo kept-$((5+4))\n",
+                away.display().to_string().replace('\'', "'\\''")
+            )
+        };
+        again.write_all(command.as_bytes()).await.unwrap();
         read_until(&mut again, "kept-9").await;
         drop(again);
         tokio::time::sleep(Duration::from_millis(200)).await;
@@ -100,7 +113,14 @@ async fn a_shell_is_typed_into_through_a_tunnel_left_and_taken_up_again_with_its
 
     // The shell ends: the tunnel is told with the code, and closes.
     let mut events = second.take_events().unwrap();
-    second.write_all(b"exit 3\n").await.unwrap();
+    second
+        .write_all(if cfg!(windows) {
+            b"exit 3\r\n"
+        } else {
+            b"exit 3\n"
+        })
+        .await
+        .unwrap();
     let told = tokio::time::timeout(PATIENCE, async {
         loop {
             match events.recv().await {
@@ -128,7 +148,12 @@ async fn the_size_of_the_screen_follows_the_tunnel_and_a_second_screen_takes_the
 
     let mut first = attach(&rig, terminal_id).await;
     first.resize(132, 43);
-    first.write_all(b"stty size\n").await.unwrap();
+    let query_size = if cfg!(windows) {
+        b"powershell.exe -NoProfile -Command \"$s=$Host.UI.RawUI.WindowSize; Write-Output ($s.Height.ToString()+' '+$s.Width.ToString())\"\r\n".as_slice()
+    } else {
+        b"stty size\n".as_slice()
+    };
+    first.write_all(query_size).await.unwrap();
     read_until(&mut first, "43 132").await;
 
     // A second tunnel to the shell ends the first, which is told why.
@@ -136,7 +161,12 @@ async fn the_size_of_the_screen_follows_the_tunnel_and_a_second_screen_takes_the
     let mut rest = Vec::new();
     let ended = tokio::time::timeout(PATIENCE, first.read_to_end(&mut rest)).await;
     assert!(ended.is_ok(), "the first screen kept the shell");
-    second.write_all(b"echo second-$((1+1))\n").await.unwrap();
+    let calculate = if cfg!(windows) {
+        b"cmd /V:ON /C \"set /A n=1+1 & echo second-!n!\"\r\n".as_slice()
+    } else {
+        b"echo second-$((1+1))\n".as_slice()
+    };
+    second.write_all(calculate).await.unwrap();
     read_until(&mut second, "second-2").await;
 
     // Closing the shell says how it ended.

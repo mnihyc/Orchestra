@@ -1128,7 +1128,7 @@ impl Relay {
                         .as_ref()
                         .is_some_and(|port| port.host_template.is_some())
             }
-            None => route.claims.service == claims.service,
+            None => route.claims.jti == claims.jti && route.claims.service == claims.service,
         };
         if !opener_is_from || route.claims.dst != claims.dst || !same_service {
             return reset(self, "that ticket is not the tunnel's");

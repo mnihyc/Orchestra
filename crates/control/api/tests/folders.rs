@@ -806,7 +806,7 @@ async fn a_topic_is_moved_by_whoever_manages_it_to_a_place_where_they_may_open_t
     assert_eq!(refused.code, ErrorCode::AuthzDenied);
     assert_eq!(
         first_missing(&refused)["permissions"],
-        json!(["project.interact"])
+        json!(["project.create_topics"])
     );
     // Somebody who does not manage the topic is refused whatever they hold where it goes.
     let nope = topic_move_refused(&world, &a.viewer, mine, docs).await;

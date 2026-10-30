@@ -63,17 +63,32 @@ async fn change(ctx: Ctx, (): (), body: MachineProgramsCommand) -> ApiResult<Mac
     let row = own_machine(&ctx, &mut conn, id).await?;
     require_machine(&mut conn, &principal, id, Permission::MachineManage).await?;
     require_online(&ctx, &row)?;
-    let (operation, name, kind) = match &body {
-        MachineProgramsCommand::Register(entry) => {
-            ("registered", Some(entry.name.clone()), Some(entry.kind))
-        }
+    let (operation, name, kind, path) = match &body {
+        MachineProgramsCommand::Register(entry) => (
+            "registered",
+            Some(entry.name.clone()),
+            Some(entry.kind),
+            None,
+        ),
         MachineProgramsCommand::Test(entry) => {
-            ("tested", Some(entry.name.clone()), Some(entry.kind))
+            ("tested", Some(entry.name.clone()), Some(entry.kind), None)
         }
         MachineProgramsCommand::Remove(entry) => {
-            ("removed", Some(entry.name.clone()), Some(entry.kind))
+            ("removed", Some(entry.name.clone()), Some(entry.kind), None)
         }
-        MachineProgramsCommand::Reload => ("reloaded", None, None),
+        MachineProgramsCommand::ConfirmHarness(entry) => (
+            "confirmed",
+            Some(entry.kind.clone()),
+            None,
+            Some(entry.path.clone()),
+        ),
+        MachineProgramsCommand::RemoveHarness(entry) => (
+            "unconfirmed",
+            Some(entry.kind.clone()),
+            None,
+            Some(entry.path.clone()),
+        ),
+        MachineProgramsCommand::Reload => ("reloaded", None, None, None),
     };
     // The same credential/authority decision as other native machine mutations, committed first.
     conn.commit().await.map_err(DbError::from)?;
@@ -84,14 +99,29 @@ async fn change(ctx: Ctx, (): (), body: MachineProgramsCommand) -> ApiResult<Mac
         .run(id, &SerialKey::Machine, &body)
         .await
         .map_err(|failure| match failure {
+            RunError::Command(CommandFailure::Failed(refusal)) if refusal.code == "conflict" => {
+                ApiError::new(ErrorCode::ConflictStaleRevision, &refusal.detail)
+            }
+            RunError::Command(CommandFailure::Failed(refusal))
+                if refusal
+                    .details
+                    .as_ref()
+                    .and_then(|details| details.get("policy_key"))
+                    .and_then(Json::as_str)
+                    == Some("agent.harnesses") =>
+            {
+                ApiError::new(ErrorCode::PolicyNotDelegated, &refusal.detail)
+                    .with("keys", vec!["agent.harnesses"])
+            }
             RunError::Command(CommandFailure::Failed(refusal)) => {
                 ApiError::invalid("program", &refusal.detail)
             }
             other => command_failed(id, other),
         })?;
     let written = serde_json::to_value(&facts).map_err(ApiError::internal)?;
-    let (mut tx, guard) = crate::middleware::transaction_guard::begin(&ctx).await?;
-    require_machine(&mut tx, guard.principal(), id, Permission::MachineManage).await?;
+    // Native acknowledgement follows the already committed authority decision. Keep the
+    // resulting audit even if that authority changed while the machine was answering.
+    let mut tx = ctx.app.db.begin().await?;
     queries_set_facts(&mut tx, id, &written, &facts, ctx.app.clock.now()).await?;
     let who = actor_name(&ctx)?;
     audit_machine(
@@ -100,9 +130,13 @@ async fn change(ctx: Ctx, (): (), body: MachineProgramsCommand) -> ApiResult<Mac
         orch_db::audit::action!(AuditAction::MachineProgramsChanged),
         id,
         &format!("{who} {operation} programs on {}", row.name),
-        json!({"operation":operation,"name":name,"kind":kind}),
+        json!({"operation":operation,"name":name,"kind":kind,"path":path}),
     )
     .await?;
+    tx.commit().await.map_err(DbError::from)?;
+    // A revoked reader must not receive the updated machine view.
+    let (mut tx, guard) = crate::middleware::transaction_guard::begin(&ctx).await?;
+    require_machine(&mut tx, guard.principal(), id, Permission::MachineManage).await?;
     let current = rows::machine(&mut tx, id)
         .await?
         .ok_or_else(ApiError::not_found)?;

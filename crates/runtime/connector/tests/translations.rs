@@ -26,7 +26,10 @@ async fn an_external_translator_carries_json_streamed_tools_errors_and_usage_thr
     let registration = registration_of(
         "translator",
         "controlled-translator",
-        &["python3".to_owned(), program.to_string_lossy().into_owned()],
+        &[
+            if cfg!(windows) { "python" } else { "python3" }.to_owned(),
+            program.to_string_lossy().into_owned(),
+        ],
         None,
         &std::collections::BTreeMap::new(),
         "never",

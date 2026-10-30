@@ -17,7 +17,6 @@ use orch_access_contract::permissions::Permission;
 use orch_api_contract::browsers::{
     BROWSER_TICKET_SECONDS, BrowserAttachQuery, BrowserTicketCreateReply,
 };
-use orch_authz::{Caller, Principal};
 use orch_db::queries::browsers as rows;
 use orch_engine::browsers::{BrowserActions, SITTING_GAP};
 use orch_link::tunnels::channel::Tunnel;
@@ -29,8 +28,8 @@ use serde_json::json;
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::sync::{mpsc, watch};
 
-use crate::middleware::authentication::{Via, new_token, token_hash};
-use crate::middleware::authorization;
+use crate::middleware::authentication::{new_token, token_hash};
+use crate::middleware::authorization::RetainedIdentity;
 use crate::middleware::requests::{ApiError, ApiResult};
 use crate::registry::Ctx;
 use crate::routes::browsers as views;
@@ -63,8 +62,7 @@ fn lock<T>(mutex: &Mutex<T>) -> std::sync::MutexGuard<'_, T> {
 struct Ticket {
     browser: Id,
     user: Id,
-    caller: Caller,
-    via: Via,
+    identity: RetainedIdentity,
     control: bool,
     expires: DateTime<Utc>,
 }
@@ -211,8 +209,7 @@ impl Sockets {
             Ticket {
                 browser,
                 user: authed.id(),
-                caller: authorization::caller_of(authed)?,
-                via: authed.via.clone(),
+                identity: RetainedIdentity::of(authed),
                 control,
                 expires,
             },
@@ -491,18 +488,9 @@ impl Sockets {
     async fn gates(app: &App, ticket: &Ticket) -> ApiResult<(bool, bool, bool)> {
         let mut conn = app.db.acquire().await?;
         let now = app.clock.now();
-        let valid: bool = match ticket.via {
-            Via::Session { session_id } => rows::session_live(&mut conn, session_id, now).await?,
-            Via::Token { token_id, .. } => rows::token_live(&mut conn, token_id, now).await?,
-        };
-        if !valid {
+        let Some(principal) = ticket.identity.principal(&mut conn, Time::new(now)).await? else {
             return Ok((false, false, false));
-        }
-        let principal =
-            match Principal::load(&mut conn, ticket.caller.clone(), Time::new(now)).await {
-                Ok(p) => p,
-                Err(_) => return Ok((false, false, false)),
-            };
+        };
         let Some(row) = rows::get(&mut conn, ticket.browser).await? else {
             return Ok((false, false, false));
         };
@@ -545,6 +533,20 @@ impl Sockets {
     }
 
     async fn socket(&self, app: App, ticket: Ticket, mut socket: WebSocket) {
+        match Self::gates(&app, &ticket).await {
+            Ok((true, _, _)) => {}
+            Ok(_) => {
+                let _ = send(
+                    &mut socket,
+                    &BrowserServerFrame::Closed {
+                        reason: BrowserClosedReason::Revoked,
+                    },
+                )
+                .await;
+                return;
+            }
+            Err(_) => return,
+        }
         let group = match self.ensure(&app, ticket.browser).await {
             Ok(g) => g,
             Err(_) => {

@@ -161,7 +161,15 @@ async fn options(ctx: Ctx, query: NodeBindingOptionsGetQuery, (): ()) -> ApiResu
             Some("fresh") => EnvironmentDefault::Fresh,
             _ => EnvironmentDefault::Shared,
         };
-    let mut environments = environments_of(conn, principal, &ctx.app, id, id).await?;
+    let mut environments = environments_of(
+        conn,
+        principal,
+        &ctx.app,
+        id,
+        id,
+        Permission::EnvironmentUse,
+    )
+    .await?;
     let existing = match query.environment_id {
         Some(environment) => Some(chosen_environment(conn, principal, environment, id).await?),
         None if !query.environment_new && environment_default == EnvironmentDefault::Shared => {
@@ -170,8 +178,7 @@ async fn options(ctx: Ctx, query: NodeBindingOptionsGetQuery, (): ()) -> ApiResu
                 .map_err(ApiError::internal)?
             {
                 Some(environment) => {
-                    // Environments have Manage rather than Use. The shared list already
-                    // includes only the caller's manageable environments and their readiness.
+                    // The shared list already says whether the caller can use the environment now.
                     if environments
                         .iter()
                         .any(|entry| entry.environment.id == environment && entry.usable)

@@ -70,6 +70,17 @@ exit and its masked first lines, with the setting link. History keeps
 the name, result and duration, never output or a secret. Fix the actual
 command or image, then start again under a new reviewed run.
 
+Nothing runs inside the unit when it stops, idles out or is recycled; the
+next start runs these commands again. Work that belongs to a stop, such as
+removing a route, is the host operator's `pre_down` or `post_down` node
+hook ([Node hooks](../operator/node-hooks.md)).
+
+A template writes the same commands as a list, each with its name:
+
+```json
+"after_up": [{"name": "10-cache", "command": ["/usr/bin/mkdir", "-p", "/workspace/.orch/cache"], "timeout_secs": 30}]
+```
+
 ## A person's own machine
 
 There is no managed unit, so Commands after start and driver storage/

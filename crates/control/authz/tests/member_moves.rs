@@ -42,7 +42,17 @@ async fn move_by(
     to: Id,
     role: Option<Role>,
 ) -> Result<Moved, MoveError> {
-    let principal = w.principal(Caller::session(by)).await;
+    move_as(w, Caller::session(by), user, to, role).await
+}
+
+async fn move_as(
+    w: &World,
+    caller: Caller,
+    user: Id,
+    to: Id,
+    role: Option<Role>,
+) -> Result<Moved, MoveError> {
+    let principal = w.principal(caller).await;
     let mut tx = w.db.pool.begin().await.unwrap();
     let moved = ownership::move_member(
         &mut tx,
@@ -93,6 +103,25 @@ async fn roles_of(w: &World, user: Id) -> Vec<(Id, String)> {
 }
 
 #[tokio::test]
+async fn a_member_manager_cannot_move_someone_with_a_role_above_their_own() {
+    let w = World::new().await;
+    let d = w.deep().await;
+    let manager = member_in(&w, "manager", w.root, Role::Viewer).await;
+    let member = member_in(&w, "member", d.d3, Role::Viewer).await;
+    for place in [d.d3, d.sales] {
+        w.name(place, P::MembersManage, Holder::User { id: manager })
+            .await;
+    }
+    let refused = move_by(&w, manager, member, d.sales, Some(Role::Developer)).await;
+    assert!(matches!(refused, Err(MoveError::Refused(_))));
+    assert_eq!(domain_of(&w, member).await, d.d3);
+    let moved = move_by(&w, w.boss, member, d.sales, Some(Role::Developer))
+        .await
+        .unwrap();
+    assert_eq!(moved.role_after, Some(Role::Developer));
+}
+
+#[tokio::test]
 async fn a_member_moves_up_down_and_sideways_by_an_admin_of_the_root_or_of_both_ends_and_not_of_one()
  {
     let w = World::new().await;
@@ -122,7 +151,15 @@ async fn a_member_moves_up_down_and_sideways_by_an_admin_of_the_root_or_of_both_
     let pair = w.member("pair").await;
     w.give(d.sales, pair, Role::Admin).await;
     w.give(d.ops, pair, Role::Admin).await;
-    move_by(&w, pair, mel, d.ops, None).await.unwrap();
+    move_as(
+        &w,
+        Caller::session(pair).with_admin_mode(true),
+        mel,
+        d.ops,
+        None,
+    )
+    .await
+    .unwrap();
     assert_eq!(domain_of(&w, mel).await, d.ops);
     // An admin of one end alone is refused, and told who holds the other.
     let half = w.member("half").await;
@@ -295,7 +332,10 @@ async fn a_role_held_already_on_the_new_org_is_combined_with_the_moved_one_and_a
         "who may give it is told"
     );
     assert_eq!(domain_of(&w, ann).await, d.d3);
-    // Another role than Admin is theirs to give.
+    // Once they hold Developer and can share at the destination, that role is theirs to give.
+    w.give(d.sales, mover, Role::Developer).await;
+    w.name(d.sales, P::AccessManage, Holder::User { id: mover })
+        .await;
     let moved = move_by(&w, mover, ann, d.sales, Some(Role::Developer))
         .await
         .unwrap();

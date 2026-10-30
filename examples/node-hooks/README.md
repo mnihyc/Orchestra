@@ -66,8 +66,9 @@ never what the hook printed.
 }
 ```
 
-- `reason` is `start`, `stop`, `recreate` (a unit replaced by a successor on the same volumes, or that successor's
-  first start), `move` (an environment leaving its host, or its first start on the new one) or `delete`.
+- `reason` is `start`, `stop` (a person's stop, an idle stop and a recycle alike), `recreate` (a unit replaced by a
+  successor on the same volumes, or that successor's first start), `move` (an environment leaving its host, or its
+  first start on the new one) or `delete`.
 - `network.networks` lists every network of the unit's own with its role: `unit` for the unit's network, and for a
   restricted unit `egress` for the network its proxy goes out on (the unit's own network then has no `gateway`:
   its bridge has no address on the host). `address` is `null` while the unit does not run.

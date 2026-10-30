@@ -30,6 +30,8 @@ Settings → Security manages your sign-in methods, second step, recovery codes
 and signed-in browsers. Complete the offered setup before relying on a new
 method. Keep recovery codes in a place you control. Sign out another browser
 from the session list when it should no longer use your account.
+Removing a second-step method clears the second-step approval in every browser.
+Each browser must give a current method again where a second step is required.
 
 API tokens are managed in Tokens. Name a token, choose its permissions, place
 and expiry, and copy its secret when it is created. Later lists show metadata,

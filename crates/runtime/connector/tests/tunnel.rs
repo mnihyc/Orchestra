@@ -11,6 +11,7 @@ use std::time::Duration;
 
 use common::model::{MODEL, ProviderRig, RESPONSES, files_holding, responses_request};
 use orch_connector_core::loopback::Tickets;
+use orch_link_contract::commands::{LeaseOpen, ProviderStart, SerialKey};
 use orch_link_contract::tunnels::{Service, TicketSource};
 use orch_pki::tickets::{TicketRequest, TicketSigner};
 use orch_testkit::doubles::model::Verdict;
@@ -19,14 +20,17 @@ use serde_json::json;
 
 fn ticket(signer: &TicketSigner, p: &ProviderRig, from: Id, lease: Id, thread: Id) -> String {
     signer
-        .issue(&TicketRequest {
-            src: TicketSource::Machine(from),
-            dst: p.rig.machine_id,
-            service: Service::Llm { lease_id: lease },
-            thread_id: Some(thread),
-            tool_set: None,
-            expires_at: Time::new(p.rig.clock.now() + chrono::Duration::hours(1)),
-        })
+        .issue_for_provider(
+            &TicketRequest {
+                src: TicketSource::Machine(from),
+                dst: p.rig.machine_id,
+                service: Service::Llm { lease_id: lease },
+                thread_id: Some(thread),
+                tool_set: None,
+                expires_at: Time::new(p.rig.clock.now() + chrono::Duration::hours(1)),
+            },
+            p.rig.provider,
+        )
         .unwrap()
 }
 
@@ -156,6 +160,107 @@ async fn a_ticket_names_the_lease_but_the_next_turn_of_the_thread_is_served_unde
     p.open_lease(new_id(), &[MODEL], Some(RESPONSES), None)
         .await;
     assert_eq!(call().await.unwrap().status, 403);
+}
+
+#[tokio::test]
+async fn an_old_provider_ticket_cannot_use_another_providers_lease_for_the_same_thread() {
+    let p = ProviderRig::new().await;
+    let signer = TicketSigner::generate();
+    p.rig.hub.set_ticket_verifier(signer.verifier());
+    p.start_responses_provider().await;
+    let first = p
+        .open_lease(p.thread, &[MODEL], Some(RESPONSES), None)
+        .await;
+    let agent = p.add_agent_machine().await;
+    let loopback = agent.connector.loopback();
+    let grant = loopback.grant();
+    let binding = loopback.bind(
+        grant.id,
+        p.thread,
+        p.segment,
+        p.rig.provider,
+        p.rig.agent,
+        Tickets {
+            llm: Some(ticket(&signer, &p, agent.machine_id, first, p.thread)),
+            ..Tickets::default()
+        },
+    );
+    p.close_lease(first).await;
+
+    let other = new_id();
+    let command_id = new_id();
+    let start: ProviderStart = serde_json::from_value(json!({
+        "provider_id": other,
+        "protocols": [RESPONSES],
+        "upstreams": [{"protocol": RESPONSES, "base_url": p.mock.responses_base_url(), "options": {}}],
+        "credential": p.sealed_key_for(command_id, "other-provider-key"),
+        "secrets": {}
+    })).unwrap();
+    assert!(matches!(
+        p.command_with_id(command_id, &SerialKey::Provider(other), &start)
+            .await,
+        orch_link::commands::Progress::Succeeded(_)
+    ));
+    let other_lease: LeaseOpen = serde_json::from_value(json!({
+        "lease_id": new_id(), "provider_id": other, "thread_id": p.thread,
+        "mode": "forwarded", "protocol": RESPONSES, "allowed_models": [MODEL]
+    }))
+    .unwrap();
+    p.rig
+        .succeed(&SerialKey::Provider(other), &other_lease)
+        .await;
+    p.mock.set_credential(Some("other-provider-key"));
+    let client = orch_testkit::doubles::model::ModelClient::new(&format!(
+        "http://127.0.0.1:{}",
+        loopback.port()
+    ));
+    let request = orch_testkit::doubles::model::ClientRequest::post_json(
+        &format!("/llm/{}/v1/responses", binding.session_key),
+        &responses_request(MODEL, "hello"),
+    )
+    .bearer(grant.token.expose());
+    let reply = client.send(request).await.unwrap();
+    assert_eq!(reply.status, 403, "{}", reply.text());
+    assert_eq!(reply.json()["error"]["code"], "lease_closed");
+    assert!(
+        p.model_requests().is_empty(),
+        "the other provider was not called"
+    );
+}
+
+#[tokio::test]
+async fn a_pre_turn_ticket_without_a_known_lease_uses_only_its_signed_provider() {
+    let p = ProviderRig::new().await;
+    let signer = TicketSigner::generate();
+    p.rig.hub.set_ticket_verifier(signer.verifier());
+    p.start_responses_provider().await;
+    let agent = p.add_agent_machine().await;
+    let loopback = agent.connector.loopback();
+    let grant = loopback.grant();
+    let binding = loopback.bind(
+        grant.id,
+        p.thread,
+        p.segment,
+        p.rig.provider,
+        p.rig.agent,
+        Tickets {
+            llm: Some(ticket(&signer, &p, agent.machine_id, new_id(), p.thread)),
+            ..Tickets::default()
+        },
+    );
+    p.open_lease(p.thread, &[MODEL], Some(RESPONSES), None)
+        .await;
+    let client = orch_testkit::doubles::model::ModelClient::new(&format!(
+        "http://127.0.0.1:{}",
+        loopback.port()
+    ));
+    let request = orch_testkit::doubles::model::ClientRequest::post_json(
+        &format!("/llm/{}/v1/responses", binding.session_key),
+        &responses_request(MODEL, "hello"),
+    )
+    .bearer(grant.token.expose());
+    let reply = client.send(request).await.unwrap();
+    assert_eq!(reply.status, 200, "{}", reply.text());
 }
 
 #[tokio::test]

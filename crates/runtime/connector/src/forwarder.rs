@@ -71,7 +71,8 @@ use crate::roles::Services;
 use crate::roles::provider::{EndpointEntry, ProviderEntry, Providers};
 use crate::tunnels::TunnelServer;
 use crate::upstream::{
-    End, IDLE_TIMEOUT, Relay, Upstream, UpstreamError, UpstreamRequest, Watcher,
+    CredentialMask, End, IDLE_TIMEOUT, MaskedBody, Relay, Upstream, UpstreamError, UpstreamRequest,
+    Watcher,
 };
 use crate::usage::{lease_denied, lease_usage};
 
@@ -81,6 +82,23 @@ pub const RETRY_AFTER_SECS: u32 = 5;
 /// The host a request is given on the far side of a tunnel: the exchange is one HTTP exchange on a stream,
 /// and the name only has to be a name.
 const TUNNEL_HOST: &str = "llm.orch.internal";
+
+/// A harness cannot nominate a gateway's host, path or method through proxy metadata. A provider manager
+/// can still configure the headers required by the chosen endpoint after these incoming values are removed.
+const HARNESS_ROUTING_HEADERS: [&str; 12] = [
+    "forwarded",
+    "x-forwarded-for",
+    "x-forwarded-host",
+    "x-forwarded-server",
+    "x-forwarded-proto",
+    "x-forwarded-prefix",
+    "x-original-host",
+    "x-host",
+    "x-original-url",
+    "x-rewrite-url",
+    "x-http-method-override",
+    "x-method-override",
+];
 
 /// The refusal codes of the forwarder, written in the error of the protocol the call is in.
 pub mod code {
@@ -299,6 +317,37 @@ fn is_hop_by_hop(name: &HeaderName) -> bool {
     orch_model_contract::endpoint::HOP_BY_HOP.contains(&name.as_str())
 }
 
+/// Values that an upstream must not return to the harness or to the system's request history.
+fn protected_credentials(
+    provider: &ProviderEntry,
+    credential: Option<&orch_model_contract::credentials::Credential>,
+    headers: &HeaderMap,
+) -> Vec<String> {
+    let mut protected: Vec<String> = headers
+        .iter()
+        .filter(|(_, value)| value.is_sensitive())
+        .filter_map(|(name, value)| {
+            std::str::from_utf8(value.as_bytes())
+                .ok()
+                .map(|value| (name, value))
+        })
+        .flat_map(|(name, value)| {
+            let token = (name == hyper::header::AUTHORIZATION)
+                .then(|| value.split_once(' ').map(|(_, token)| token.trim_start()))
+                .flatten();
+            std::iter::once(value.to_owned()).chain(token.map(str::to_owned))
+        })
+        .collect();
+    protected.extend(credential.map(|credential| credential.expose().to_owned()));
+    protected.extend(
+        provider
+            .secrets()
+            .values()
+            .map(|secret| secret.expose().to_owned()),
+    );
+    protected
+}
+
 /// What leaves with a model call and what does not, whichever harness made it.
 ///
 /// A program may add to its requests what Orch never asked for: headers that name the client and the person's
@@ -381,7 +430,11 @@ enum Origin<'a> {
     /// A harness beside this machine's listener, under the key of its session.
     Session(&'a SessionBinding),
     /// Another machine, through a tunnel, under the lease its ticket names.
-    Ticket { lease_id: Id, thread_id: Option<Id> },
+    Ticket {
+        lease_id: Id,
+        thread_id: Option<Id>,
+        provider_id: Option<Id>,
+    },
 }
 
 enum AuthorizationError {
@@ -537,6 +590,7 @@ impl Forwarder {
         request: Request<Incoming>,
         lease_id: Id,
         thread_id: Option<Id>,
+        provider_id: Option<Id>,
     ) -> Response<Body> {
         let path = request.uri().path().to_owned();
         self.serve(
@@ -544,6 +598,7 @@ impl Forwarder {
             Origin::Ticket {
                 lease_id,
                 thread_id,
+                provider_id,
             },
             &path,
         )
@@ -563,7 +618,8 @@ impl Forwarder {
             Origin::Ticket {
                 lease_id,
                 thread_id,
-            } => self.leases.of_ticket(*lease_id, *thread_id),
+                provider_id,
+            } => self.leases.of_ticket(*lease_id, *thread_id, *provider_id),
         };
         if let (Origin::Session(session), None) = (&origin, &lease)
             && !self.providers.contains(session.provider_id)
@@ -756,6 +812,17 @@ impl Forwarder {
 
         // 6. The key, and everything else the endpoint adds.
         let mut headers = parts.headers.clone();
+        let connection_fields: Vec<HeaderName> = parts
+            .headers
+            .get_all(CONNECTION)
+            .iter()
+            .filter_map(|value| value.to_str().ok())
+            .flat_map(|value| value.split(','))
+            .filter_map(|name| HeaderName::from_bytes(name.trim().as_bytes()).ok())
+            .collect();
+        for name in connection_fields {
+            headers.remove(name);
+        }
         for name in [
             HOST,
             CONTENT_LENGTH,
@@ -763,6 +830,9 @@ impl Forwarder {
             TRANSFER_ENCODING,
             CONNECTION,
         ] {
+            headers.remove(name);
+        }
+        for name in HARNESS_ROUTING_HEADERS {
             headers.remove(name);
         }
         headers.insert(ACCEPT_ENCODING, HeaderValue::from_static("identity"));
@@ -929,6 +999,20 @@ impl Forwarder {
             }
         };
         let url = upstream_url(endpoint, &sent_path, sent_query.as_deref(), &extra_query);
+        let protected = protected_credentials(&provider, credential.as_ref(), &headers);
+        let mask = match CredentialMask::new(&protected) {
+            Ok(mask) => mask,
+            Err(_) => {
+                return self.refuse(
+                    Some(entry),
+                    Refusal::new(
+                        StatusCode::BAD_GATEWAY,
+                        code::UPSTREAM_UNREACHABLE,
+                        "the upstream response could not be protected",
+                    ),
+                );
+            }
+        };
 
         // 7. Send it, and hand the answer on as it comes.
         let sent = self
@@ -956,11 +1040,28 @@ impl Forwarder {
                 );
             }
         };
+        if mask.is_some()
+            && answer
+                .headers
+                .get_all(CONTENT_ENCODING)
+                .iter()
+                .any(|encoding| !encoding.as_bytes().eq_ignore_ascii_case(b"identity"))
+        {
+            return self.refuse(
+                Some(entry),
+                Refusal::new(
+                    StatusCode::BAD_GATEWAY,
+                    code::UPSTREAM_UNREACHABLE,
+                    "the upstream returned an encoded response that cannot be protected",
+                ),
+            );
+        }
         self.note_key(&provider, answer.status).await;
         let watcher = Metered {
             observer: entry.protocol.usage_observer(),
             meter: Meter::start(Arc::clone(&lease)),
             model,
+            mask: mask.clone(),
             publisher: Arc::clone(&self.services.publisher),
             runtime: tokio::runtime::Handle::current(),
         };
@@ -974,6 +1075,10 @@ impl Forwarder {
             .boxed(),
             None => Relay::new(answer.body, Box::new(watcher), IDLE_TIMEOUT).boxed(),
         };
+        let body = match mask.as_ref() {
+            Some(mask) => MaskedBody::new(body, mask.clone()).boxed(),
+            None => body,
+        };
         let mut response = Response::new(body);
         *response.status_mut() = answer.status;
         for (name, value) in &answer.headers {
@@ -981,7 +1086,13 @@ impl Forwarder {
                 && name != CONTENT_LENGTH
                 && !(translated && name == CONTENT_ENCODING)
             {
-                response.headers_mut().append(name.clone(), value.clone());
+                let value = match &mask {
+                    Some(mask) => mask.header(value),
+                    None => Some(value.clone()),
+                };
+                if let Some(value) = value {
+                    response.headers_mut().append(name.clone(), value);
+                }
             }
         }
         response
@@ -1178,6 +1289,10 @@ impl Forwarder {
                     AuthorizationError::Presentation(error) => error.message,
                 })
             })?;
+        let protected = protected_credentials(provider, credential.as_ref(), &headers);
+        let mask = CredentialMask::new(&protected).map_err(|_| {
+            UpstreamError::Http("the upstream response could not be protected".to_owned())
+        })?;
         let mut url = page;
         {
             let mut query = url.query_pairs_mut();
@@ -1185,7 +1300,7 @@ impl Forwarder {
                 query.append_pair(&name, &value);
             }
         }
-        let (status, _, body) = self
+        let (status, response_headers, body) = self
             .upstream
             .fetch(
                 UpstreamRequest {
@@ -1197,8 +1312,21 @@ impl Forwarder {
                 crate::upstream::MAX_WHOLE_REPLY_BYTES,
             )
             .await?;
+        if mask.is_some()
+            && response_headers
+                .get_all(CONTENT_ENCODING)
+                .iter()
+                .any(|encoding| !encoding.as_bytes().eq_ignore_ascii_case(b"identity"))
+        {
+            return Err(UpstreamError::Http(
+                "the upstream returned an encoded response that cannot be protected".to_owned(),
+            ));
+        }
         self.note_key(provider, status).await;
-        Ok((status, body))
+        Ok((
+            status,
+            mask.as_ref().map_or(body.clone(), |mask| mask.bytes(&body)),
+        ))
     }
 
     /// One non-streaming text request using the key already held in the provider runtime.
@@ -1370,26 +1498,25 @@ impl Forwarder {
                 },
             })?;
         let url = upstream_url(endpoint, path, None, &extra);
+        let protected = protected_credentials(provider, credential.as_ref(), &headers);
+        let mask = CredentialMask::new(&protected).map_err(|_| {
+            CommandError::new(
+                ErrorCode::Internal,
+                "the upstream response could not be protected",
+            )
+        })?;
         let timeout = std::time::Duration::from_secs(u64::from(call.kind.deadline_secs()));
         // This is Orch's own non-streaming model client, not the harness proxy.
         // Whole request time is observable; a buffered reply exposes no first/last token boundary.
         let started = self.services.clock.time();
         let failed = |error: CommandError, code: &str, said: Option<String>| {
-            let said = said.map(|mut words| {
-                if let Some(credential) = credential
+            let said = said.map(|words| {
+                let safe = mask
                     .as_ref()
-                    .filter(|credential| !credential.expose().is_empty())
-                {
-                    words = words.replace(credential.expose(), "[redacted]");
-                }
-                for secret in provider
-                    .secrets()
-                    .values()
-                    .filter(|secret| !secret.is_empty())
-                {
-                    words = words.replace(secret.expose(), "[redacted]");
-                }
-                words
+                    .map_or(words.clone(), |mask| mask.text(&words));
+                safe.chars()
+                    .take(orch_provider_contract::limits::ERROR_MESSAGE_MAX_CHARS)
+                    .collect::<String>()
             });
             let mut request = orch_agent_contract::requests::UsageRequest {
                 id: call.label.to_owned(),
@@ -1437,6 +1564,22 @@ impl Forwarder {
                 None,
             )
         })?;
+        if mask.is_some()
+            && response_headers
+                .get_all(CONTENT_ENCODING)
+                .iter()
+                .any(|encoding| !encoding.as_bytes().eq_ignore_ascii_case(b"identity"))
+        {
+            return Err(failed(
+                CommandError::new(
+                    ErrorCode::Internal,
+                    "the upstream returned an encoded response that cannot be protected",
+                ),
+                "harness_error",
+                None,
+            ));
+        }
+        let body = mask.as_ref().map_or(body.clone(), |mask| mask.bytes(&body));
         let reply: serde_json::Value = serde_json::from_slice(&body).unwrap_or_default();
         if !status.is_success() || reply.get("error").is_some_and(|error| !error.is_null()) {
             let raw = String::from_utf8_lossy(&body);
@@ -1806,7 +1949,23 @@ fn upstream_url(
     url.set_path(&joined);
     let mut pieces: Vec<String> = Vec::new();
     pieces.extend(url.query().map(str::to_owned));
-    pieces.extend(query.map(str::to_owned));
+    if let Some(query) = query {
+        let kept = query
+            .split('&')
+            .filter(|pair| {
+                let name = url::form_urlencoded::parse(pair.as_bytes())
+                    .next()
+                    .map(|(name, _)| name);
+                !name.is_some_and(|name| {
+                    endpoint_query
+                        .iter()
+                        .any(|(fixed, _)| fixed.as_str() == name.as_ref())
+                })
+            })
+            .collect::<Vec<_>>()
+            .join("&");
+        pieces.push(kept);
+    }
     if !endpoint_query.is_empty() {
         let mut added = url::form_urlencoded::Serializer::new(String::new());
         for (name, value) in endpoint_query {
@@ -1825,6 +1984,7 @@ struct Metered {
     observer: Box<dyn UsageObserver>,
     meter: Meter,
     model: String,
+    mask: Option<CredentialMask>,
     publisher: Arc<dyn Publisher>,
     runtime: tokio::runtime::Handle,
 }
@@ -1838,7 +1998,12 @@ impl Watcher for Metered {
     }
 
     fn end(&mut self, end: End) {
-        let seen: Option<ObservedUsage> = self.observer.usage();
+        let mut seen: Option<ObservedUsage> = self.observer.usage();
+        if let (Some(mask), Some(seen)) = (&self.mask, &mut seen)
+            && let Some(reference) = &mut seen.request_ref
+        {
+            *reference = mask.text(reference);
+        }
         if let Some(seen) = &seen {
             self.meter.update(&seen.tokens);
         }
@@ -1921,6 +2086,7 @@ impl TunnelServer for LlmTunnels {
             return;
         };
         let thread_id = incoming.claims.thread_id;
+        let provider_id = incoming.claims.provider_id;
         let Ok(tunnel) = incoming.accept() else {
             return;
         };
@@ -1928,7 +2094,11 @@ impl TunnelServer for LlmTunnels {
         let service = service_fn(move |request: Request<Incoming>| {
             let forwarder = Arc::clone(&forwarder);
             async move {
-                Ok::<_, Infallible>(forwarder.serve_ticket(request, lease_id, thread_id).await)
+                Ok::<_, Infallible>(
+                    forwarder
+                        .serve_ticket(request, lease_id, thread_id, provider_id)
+                        .await,
+                )
             }
         });
         let connection = hyper::server::conn::http1::Builder::new()

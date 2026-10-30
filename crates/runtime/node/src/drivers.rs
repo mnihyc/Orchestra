@@ -416,20 +416,24 @@ pub trait DriverExtras: Send + Sync + 'static {
 }
 
 /// A driver that has nothing beyond the contract.
+#[cfg(unix)]
 fn transfer_error(error: impl std::fmt::Display) -> DriverError {
     DriverError::Internal(error.to_string())
 }
 
 struct ContractExtras {
     driver: Arc<dyn EnvironmentDriver>,
+    #[cfg(unix)]
     staging: Arc<RwLock<Option<std::path::PathBuf>>>,
 }
 
+#[cfg(unix)]
 struct VolumeInputWork {
     inner: Arc<dyn orch_driver_contract::volumes::VolumeWork>,
     ready: tokio::sync::Notify,
 }
 
+#[cfg(unix)]
 #[async_trait]
 impl orch_driver_contract::volumes::VolumeWork for VolumeInputWork {
     fn input_ready(&self) {
@@ -454,6 +458,7 @@ impl orch_driver_contract::volumes::VolumeWork for VolumeInputWork {
     }
 }
 
+#[cfg(unix)]
 impl ContractExtras {
     async fn archive_pipe(&self) -> Result<(tempfile::TempDir, std::path::PathBuf), DriverError> {
         let directory = self
@@ -532,6 +537,7 @@ impl DriverExtras for ContractExtras {
             .export_volume(volume, selector, into, work)
             .await
     }
+    #[cfg(unix)]
     async fn import_selected_volume_stream_reporting(
         &self,
         volume: &orch_driver_contract::volumes::VolumeRequest,
@@ -575,6 +581,18 @@ impl DriverExtras for ContractExtras {
             self.driver.stop_volume_work(command).await?;
         }
         outcome
+    }
+    #[cfg(not(unix))]
+    async fn import_selected_volume_stream_reporting(
+        &self,
+        _volume: &orch_driver_contract::volumes::VolumeRequest,
+        _selector: orch_driver_contract::volumes::OwnedVolumeSelector,
+        _input: &mut (dyn tokio::io::AsyncRead + Unpin + Send),
+        _work: &Arc<dyn orch_driver_contract::volumes::VolumeWork>,
+    ) -> Result<(), DriverError> {
+        Err(DriverError::Unavailable(
+            "volume transfers run on Linux hosts only".into(),
+        ))
     }
     async fn measure_selected_volume(
         &self,
@@ -674,6 +692,7 @@ impl DriverExtras for ContractExtras {
             )
             .await
     }
+    #[cfg(unix)]
     async fn export_volume_stream(
         &self,
         volume: &orch_driver_contract::volumes::VolumeRequest,
@@ -711,6 +730,17 @@ impl DriverExtras for ContractExtras {
         };
         tokio::try_join!(exporting, reading)?;
         Ok(())
+    }
+
+    #[cfg(not(unix))]
+    async fn export_volume_stream(
+        &self,
+        _volume: &orch_driver_contract::volumes::VolumeRequest,
+        _output: &mut (dyn tokio::io::AsyncWrite + Unpin + Send),
+    ) -> Result<(), DriverError> {
+        Err(DriverError::Unavailable(
+            "volume transfers run on Linux hosts only".into(),
+        ))
     }
 
     fn storages(&self) -> Option<Vec<StorageInfo>> {
@@ -776,6 +806,7 @@ impl HostDriver {
         Self {
             extras: Arc::new(ContractExtras {
                 driver: Arc::clone(&driver),
+                #[cfg(unix)]
                 staging: Arc::clone(&transfer_staging),
             }),
             transfer_staging,

@@ -58,7 +58,7 @@ async fn recreation_asked(rig: &Rig) -> Id {
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn a_job_about_an_environment_reaches_its_reader_as_its_http_state_says_and_a_late_reader_catches_up()
  {
-    let rig = Rig::with_time_held().await;
+    let rig = Rig::with_unstarted_engine_and_time_held().await;
     let mut registry = Registry::new();
     orch_api_core::routes::mount(&mut registry);
     let app = TestApp::over(
@@ -67,7 +67,6 @@ async fn a_job_about_an_environment_reaches_its_reader_as_its_http_state_says_an
         registry,
     );
     // Nothing takes the job up: what the feed says of it is what was asked.
-    rig.server.engine.stop();
     let before = env_seq(&rig).await;
     let feed = format!("env:{}", rig.environment);
     let mut ada = Client::signed_in(rig.server.addr, &rig.token).await;

@@ -1,7 +1,7 @@
 /** A work screen uses a model's reported display name and keeps routing identities out of labels. */
 import { MODEL_ESTIMATE } from '../doubles/fixtures';
 import { afterEach, expect, it } from 'vitest';
-import { effortDisplayName, modelDisplayName } from '@/features/models/names';
+import { accessProgramDisplayName, effortDisplayName, modelDisplayName } from '@/features/models/names';
 import { programName } from '@/features/resources/programNames';
 import { keyDetail, keyLabel } from '@/features/usage/keys';
 import { modelName as threadModelName } from '@/features/composer/ModelEffort';
@@ -44,6 +44,19 @@ it.each(['en', 'zh-CN'] as const)('uses reported names and an honest missing-nam
   const reviewer = { agent: { name: 'Reviewer', kind: 'claude_code', ...named } };
   expect(keyDetail('agent', reviewer, i18n.t)).toBe('Claude Code');
   expect(keyDetail('agent', { agent: { name: 'Reviewer', kind: 'private_harness_key' } }, i18n.t)).toBeNull();
+});
+
+it.each([
+  ['en', 'Daybreak Blue', 'Daybreak Red', 'Standard'],
+  ['zh-CN', 'Daybreak 蓝', 'Daybreak 红', '标准'],
+] as const)('names known access programs but keeps unknown ids in %s', async (locale, blue, red, standard) => {
+  await setLocale(locale);
+  expect(accessProgramDisplayName('daybreakBlue')).toBe(blue);
+  expect(accessProgramDisplayName('daybreakRed')).toBe(red);
+  expect(accessProgramDisplayName('standard')).toBe(standard);
+  expect(accessProgramDisplayName('daybreakGreen')).toBe('daybreakGreen');
+  expect(keyLabel('program', { program: 'daybreakBlue' }, i18n.t)).toBe(blue);
+  expect(keyLabel('program', { program: 'daybreakGreen' }, i18n.t)).toBe('daybreakGreen');
 });
 
 it.each(['en', 'zh-CN'] as const)('distinguishes namesake providers through the same review and result labels in %s', async (locale) => {

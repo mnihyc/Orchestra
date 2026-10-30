@@ -228,7 +228,24 @@ async fn each_resource_enable_continues_the_stopped_task_as_its_author_then_runs
                     .ok();
             }
         }
-        let continued = s.rig.turn_start(thread, 1).await;
+        let receipt: Json = sqlx::query_scalar("SELECT payload FROM items WHERE turn_id=$1 AND kind='marker' AND payload->>'marker'='resource_resumed'")
+            .bind(stopped.turn_id)
+            .fetch_optional(s.rig.db.pool())
+            .await
+            .unwrap()
+            .unwrap_or_else(|| panic!("no resumption receipt after enabling {kind}"));
+        assert!(
+            receipt["data"]["input_id"].is_string(),
+            "the stopped task could not continue after enabling {kind}: {receipt}"
+        );
+        let mut continued = None;
+        eventually(&format!("turn.start after enabling {kind}"), || {
+            continued = s.rig.turn_starts(thread).get(1).cloned();
+            let found = continued.is_some();
+            async move { found }
+        })
+        .await;
+        let continued = continued.expect("a continued turn was seen");
         let (input,content):(Id,Json)=sqlx::query_as("SELECT i.id,i.content FROM turns t JOIN thread_inputs i ON i.id=t.input_id WHERE t.id=$1").bind(continued.turn_id).fetch_one(s.rig.db.pool()).await.unwrap();
         assert_ne!(input, origin);
         assert_ne!(input, pending);
@@ -240,7 +257,6 @@ async fn each_resource_enable_continues_the_stopped_task_as_its_author_then_runs
         );
         assert_eq!(actual.0, Some(s.ada.id()));
         assert_ne!(actual.0, Some(s.eve.id()));
-        let receipt:Json=sqlx::query_scalar("SELECT payload FROM items WHERE turn_id=$1 AND kind='marker' AND payload->>'marker'='resource_resumed'").bind(stopped.turn_id).fetch_one(s.rig.db.pool()).await.unwrap();
         assert_eq!(receipt["data"]["input_id"], input.to_string());
         assert_eq!(receipt["data"]["by"]["id"], s.eve.id().to_string());
         assert!(receipt["data"]["reason"].is_null());

@@ -8,7 +8,8 @@
 use crate::queries::imports::OriginRow;
 use crate::{Conn, DbError};
 use chrono::{DateTime, Utc};
-use orch_types::{Id, Json, Seq};
+use orch_types::{Hash, Id, Json, Seq};
+use std::collections::HashSet;
 
 /// Which of the messages `ids` of the chat `chat` are there, each with whether it was deleted. A message that is not there is
 /// not among them.
@@ -24,6 +25,58 @@ pub async fn present_messages(
     .bind(ids)
     .fetch_all(conn)
     .await?)
+}
+
+/// Which requested file hashes a live message of this chat already carries.
+/// A package may reuse those files when adding another message to the same chat;
+/// global blob existence alone does not make a file this chat's to share.
+pub async fn held_blobs(
+    conn: &mut Conn,
+    chat: Id,
+    hashes: &HashSet<Hash>,
+) -> Result<HashSet<Hash>, DbError> {
+    if hashes.is_empty() {
+        return Ok(HashSet::new());
+    }
+    let wanted: Vec<String> = hashes.iter().map(ToString::to_string).collect();
+    // One pass over the destination chat per imported page, with at most one result
+    // per requested hash. Only the file-bearing part shapes count; deleted messages
+    // have given up their files.
+    let found: Vec<String> = sqlx::query_scalar(
+        "SELECT DISTINCT candidate.hash
+           FROM chat_messages m
+           CROSS JOIN LATERAL jsonb_array_elements(
+             CASE WHEN jsonb_typeof(m.content) = 'array' THEN m.content ELSE '[]'::jsonb END
+           ) AS part(value)
+           CROSS JOIN LATERAL (
+             SELECT part.value->>'blob' AS hash
+               WHERE part.value->>'type' IN ('image', 'attachment', 'pasted_text')
+             UNION ALL
+             SELECT image.value->>'blob' AS hash
+               FROM jsonb_array_elements(
+                 CASE WHEN part.value->>'type' = 'forwarded'
+                            AND jsonb_typeof(part.value->'images') = 'array'
+                      THEN part.value->'images' ELSE '[]'::jsonb END
+               ) AS image(value)
+             UNION ALL
+             SELECT attachment.value->>'blob' AS hash
+               FROM jsonb_array_elements(
+                 CASE WHEN part.value->>'type' = 'forwarded'
+                            AND jsonb_typeof(part.value->'attachments') = 'array'
+                      THEN part.value->'attachments' ELSE '[]'::jsonb END
+               ) AS attachment(value)
+           ) AS candidate
+          WHERE m.chat_id = $1 AND m.kind = 'message' AND m.deleted_at IS NULL
+            AND candidate.hash = ANY($2)",
+    )
+    .bind(chat)
+    .bind(&wanted)
+    .fetch_all(conn)
+    .await?;
+    Ok(found
+        .into_iter()
+        .filter_map(|word| word.parse().ok())
+        .collect())
 }
 
 /// Takes `count` numbers of the sequence of `chat` at once and answers the first of them; none where there is no such chat.

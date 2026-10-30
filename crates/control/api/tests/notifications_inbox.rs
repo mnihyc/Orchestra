@@ -13,7 +13,7 @@ use base64::Engine as _;
 use base64::engine::general_purpose::URL_SAFE_NO_PAD;
 use chat_world::Room;
 use chrono::{DateTime, Duration, Utc};
-use orch_api_contract::chats::ChatLevel;
+use orch_api_contract::chats::{ChatLevel, ChatMemberAdd, ChatMemberRemove};
 use orch_api_contract::common::ErrorCode;
 use orch_api_contract::notifications::{
     MeNotificationPrefsGet, MeNotificationPrefsSet, MeNotificationPrefsSetBody,
@@ -78,6 +78,58 @@ async fn list(
 
 fn titles(page: &orch_api_contract::common::Page<Notification>) -> Vec<&str> {
     page.items.iter().map(|each| each.title.as_str()).collect()
+}
+
+#[tokio::test]
+async fn chat_notices_disappear_when_the_recipient_can_no_longer_read_the_chat() {
+    let room = Room::new().await;
+    let group = room
+        .group(&room.cai, &[&room.bea], Some("Release"))
+        .await
+        .base
+        .id;
+    room.say(&room.cai, group, "@bea confidential mention")
+        .await;
+    room.say(&room.cai, group, "confidential follow-up").await;
+    let query = |group_by| NotificationListQuery {
+        kind: Some("mention,chat.message".to_owned()),
+        group_by,
+        ..NotificationListQuery::default()
+    };
+    for group_by in [None, Some(NotificationGrouping::Place)] {
+        let visible = list(&room.world, &room.bea, &query(group_by)).await;
+        let related: Vec<_> = visible
+            .items
+            .iter()
+            .filter(|row| row.chat_id == Some(group))
+            .collect();
+        assert_eq!(
+            related.len(),
+            2,
+            "both chat notices are visible while Bea is a member"
+        );
+        assert!(related.iter().any(|row| row.body.contains("confidential")));
+    }
+    room.world
+        .app
+        .call(ChatMemberRemove, &[&group, &room.bea.id()])
+        .token(&room.cai.token)
+        .send()
+        .await
+        .ok();
+    for group_by in [None, Some(NotificationGrouping::Place)] {
+        let visible = list(&room.world, &room.bea, &query(group_by)).await;
+        assert!(visible.items.iter().all(|row| row.chat_id != Some(group)));
+    }
+    room.world
+        .app
+        .call(ChatMemberAdd, &[&group, &room.bea.id()])
+        .token(&room.cai.token)
+        .send()
+        .await
+        .ok();
+    let restored = list(&room.world, &room.bea, &query(None)).await;
+    assert!(restored.items.iter().any(|row| row.chat_id == Some(group)));
 }
 
 #[tokio::test]

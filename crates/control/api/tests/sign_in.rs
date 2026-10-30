@@ -8,7 +8,10 @@
 mod support;
 
 use chrono::Duration;
-use orch_api_contract::auth::{AuthEmailCodeSend, AuthEmailCodeSendBody, AuthLoginBody, MeGet};
+use orch_api_contract::auth::{
+    AuthEmailCodeSend, AuthEmailCodeSendBody, AuthEmailVerify, AuthLogin, AuthLoginBody,
+    AuthRegister, MeGet, SetupCreate,
+};
 use orch_api_contract::common::ErrorCode;
 use orch_api_core::testing::Reply;
 use orch_db::queries::identity::{self, testing as rows};
@@ -104,6 +107,87 @@ async fn statements_of(world: &World, login: &str, password: &str, ip: &str) -> 
 }
 
 #[tokio::test]
+async fn cross_site_forms_cannot_create_a_browser_session() {
+    let world = World::new().await;
+    // A text/plain form inserts '=' between its field name and value. Placed
+    // inside a display name, that makes a valid setup or registration body.
+    let setup =
+        format!("{{\"username\":\"root\",\"display_name\":\"=\",\"password\":\"{PASSWORD}\"}}\r\n");
+    let refused = world
+        .app
+        .call(SetupCreate, &[])
+        .header("content-type", "text/plain")
+        .bytes(setup.as_bytes())
+        .send()
+        .await;
+    assert_eq!(refused.status, 400);
+    assert!(refused.headers.get("set-cookie").is_none());
+    let humans: i64 = sqlx::query_scalar("SELECT count(*) FROM users WHERE kind = 'human'")
+        .fetch_one(&world.db.pool)
+        .await
+        .unwrap();
+    assert_eq!(humans, 0);
+
+    world.person("ada").await;
+    world.set("registration.mode", json!("open")).await;
+    let register = format!(
+        "{{\"username\":\"newuser\",\"display_name\":\"=\",\"password\":\"{PASSWORD}\"}}\r\n"
+    );
+    let refused = world
+        .app
+        .call(AuthRegister, &[])
+        .header("content-type", "text/plain")
+        .bytes(register.as_bytes())
+        .send()
+        .await;
+    assert_eq!(refused.status, 400);
+    assert!(refused.headers.get("set-cookie").is_none());
+    let humans: i64 = sqlx::query_scalar("SELECT count(*) FROM users WHERE kind = 'human'")
+        .fetch_one(&world.db.pool)
+        .await
+        .unwrap();
+    assert_eq!(humans, 1);
+
+    // '=' can also go in an unused second-step field when the attacker has
+    // no second step configured for their own account.
+    let login = format!("{{\"login\":\"ada\",\"password\":\"{PASSWORD}\",\"totp\":\"=\"}}\r\n");
+    let refused = world
+        .app
+        .call(AuthLogin, &[])
+        .header("content-type", "text/plain")
+        .bytes(login.as_bytes())
+        .send()
+        .await;
+    assert_eq!(refused.status, 400);
+    assert!(refused.headers.get("set-cookie").is_none());
+    let sessions: i64 = sqlx::query_scalar("SELECT count(*) FROM sessions")
+        .fetch_one(&world.db.pool)
+        .await
+        .unwrap();
+    assert_eq!(sessions, 0);
+
+    let verify = world
+        .app
+        .call(AuthEmailVerify, &[])
+        .header("content-type", "text/plain")
+        .bytes(b"{\"token\":\"=\"}\r\n")
+        .send()
+        .await;
+    assert_eq!(verify.status, 400);
+    assert!(verify.headers.get("set-cookie").is_none());
+
+    let accepted = world
+        .app
+        .call(AuthLogin, &[])
+        .header("content-type", "Application/JSON; charset=UTF-8")
+        .body(&with("ada", Some(PASSWORD), None, None))
+        .send()
+        .await;
+    assert_eq!(accepted.status, 200);
+    assert!(accepted.headers.get("set-cookie").is_some());
+}
+
+#[tokio::test]
 async fn signing_in_gives_an_access_token_a_session_cookie_and_the_mark_of_the_browser() {
     let world = World::new().await;
     world.person("ada").await;
@@ -125,11 +209,11 @@ async fn signing_in_gives_an_access_token_a_session_cookie_and_the_mark_of_the_b
     // The attributes of the cookies, exactly: out of reach of scripts, only
     // over TLS, never sent along from another site, only to the sign-in's own
     // requests; the session for its thirty days, the mark for ninety.
-    let session = cookie(&headers, "orch_session").unwrap();
-    let device = cookie(&headers, "orch_device").unwrap();
+    let session = cookie(&headers, "__Host-orch_session").unwrap();
+    let device = cookie(&headers, "__Host-orch_device").unwrap();
     assert!(session.value.starts_with("ors_"));
     assert!(device.value.starts_with("odv_"));
-    let same = ["Path=/api/v1/auth", "HttpOnly", "Secure", "SameSite=Strict"];
+    let same = ["Path=/", "HttpOnly", "Secure", "SameSite=Strict"];
     assert_eq!(
         session.attributes,
         [&["Max-Age=2592000"], &same[..]].concat()
@@ -803,7 +887,7 @@ async fn a_mailed_code_gets_a_person_in_once_where_their_orgs_allow_it() {
         .attempt(with("ada", None, Some(&typed), None), STRANGER, "")
         .await;
     assert_eq!(reply.status, 200);
-    assert!(cookie(&reply.headers, "orch_session").is_some());
+    assert!(cookie(&reply.headers, "__Host-orch_session").is_some());
     // One use.
     let again = world
         .attempt(with("ada", None, Some(&code), None), STRANGER, "")
@@ -827,6 +911,27 @@ async fn a_mailed_code_gets_a_person_in_once_where_their_orgs_allow_it() {
         .attempt(with("ada", None, Some(&late), None), STRANGER, "")
         .await;
     assert_eq!(reply.problem().code, ErrorCode::AuthInvalidCredentials);
+}
+
+#[tokio::test]
+async fn a_code_for_an_old_address_cannot_sign_in_after_the_address_changes() {
+    let world = World::new().await;
+    world.mail_server().await;
+    world.set("auth.email_code", json!(["sign_in"])).await;
+    let ada = world.person("ada").await;
+    ask_for_code(&world, "ada", None, STRANGER, "").await;
+    let old = world.mailed_code("ada@example.org").await;
+    // Simulates an old-address issuance that raced a committed address replacement.
+    sqlx::query("UPDATE users SET email='new@example.org', email_verified_at=$2 WHERE id=$1")
+        .bind(ada.id)
+        .bind(world.now())
+        .execute(&world.db.pool)
+        .await
+        .unwrap();
+    let denied = world
+        .attempt(with("ada", None, Some(&old), None), STRANGER, "")
+        .await;
+    assert_eq!(denied.problem().code, ErrorCode::AuthInvalidCredentials);
 }
 
 #[tokio::test]

@@ -13,7 +13,9 @@ import { agentQuery } from '@/api/resources';
 import { parametersQuery } from '@/api/threads';
 import { kindOf, type ParamDef, readDef } from '@/features/composer/modelState';
 import { formatContext } from '@/features/models/context';
+import { accessProgramDisplayName } from '@/features/models/names';
 import type { ModelOption, Turn } from '@/generated/api-types';
+import { i18n } from '@/i18n';
 import { useAppearance } from '@/lib/appearance';
 import { useThreadPart } from '@/realtime/stores/thread';
 
@@ -47,7 +49,7 @@ export function ranWithParts(params: unknown, defs: readonly ParamDef[], model: 
     if (kind === 'context') {
       if (typeof recorded === 'number') parts.context ??= formatContext(recorded, locale);
     } else if (typeof recorded === 'string' && recorded !== '') {
-      parts[kind] ??= kind === 'speed' ? ((entry?.service_tiers ?? []).find((tier) => tier.id === recorded)?.label ?? recorded) : recorded;
+      parts[kind] ??= kind === 'speed' ? ((entry?.service_tiers ?? []).find((tier) => tier.id === recorded)?.label ?? recorded) : accessProgramDisplayName(recorded, i18n.getFixedT(locale));
     }
   }
   return [parts.speed, parts.access, parts.context].filter((part): part is string => part !== undefined);

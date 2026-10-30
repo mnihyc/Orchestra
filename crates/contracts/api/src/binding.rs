@@ -530,7 +530,7 @@ pub struct NodeBindingOptionsGetQuery {
 
 crate::endpoints! {
     /// Lists what the caller could choose before starting a thread in a topic, project or folder.
-    NodeBindingOptionsGet: GET "/nodes/{id}/binding/options", Rule("topic.interact on a topic or project.interact on a project or folder, and environment.manage on an environment named"), query NodeBindingOptionsGetQuery, none, json BindingOptions, 200;
+    NodeBindingOptionsGet: GET "/nodes/{id}/binding/options", Rule("topic.start_threads on a topic or project.create_topics on a project or folder, and environment.use on an environment named"), query NodeBindingOptionsGetQuery, none, json BindingOptions, 200;
     /// Lists what the caller could choose when binding a thread: providers, agents, models, efforts and environments.
     ThreadBindingOptionsGet: GET "/threads/{id}/binding/options", Permission("thread.manage"), none, none, json BindingOptions, 200;
     /// Binds a thread that has no execution history to an agent profile and provider.
