@@ -27,7 +27,14 @@ allow = [
 # MPL applies to ece's own files, which are unmodified and separately licensed;
 # it permits linking into an Apache-2.0 larger work. The release's license list
 # gives recipients the exact version's source download and includes its license.
-exceptions = [{ crate = "ece@2.4.2", allow = ["MPL-2.0"] }]
+exceptions = [
+    { crate = "ece@2.4.2", allow = ["MPL-2.0"] },
+    # Unicode's data-file terms, the predecessor of the Unicode-3.0 terms allowed above.
+    { crate = "finl_unicode@1.5.0", allow = ["Unicode-DFS-2016"] },
+    { crate = "wezterm-bidi@0.2.3", allow = ["Unicode-DFS-2016"] },
+    # A terminal capability database reader under a public-domain-like permission.
+    { crate = "terminfo@0.9.0", allow = ["WTFPL"] },
+]
 
 [bans]
 multiple-versions = "deny"
