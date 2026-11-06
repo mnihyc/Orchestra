@@ -7,7 +7,7 @@
 //! keeps that machine's owner as its first owner; further owners are added to its page as to any.
 
 use orch_access_contract::pages::{Holder, OwnersChange, PageChange};
-use orch_access_contract::permissions::Permission;
+use orch_access_contract::permissions::{ObjectKind, Permission};
 use orch_db::Conn;
 use orch_db::audit::Origin;
 use orch_db::queries::access;
@@ -63,18 +63,42 @@ pub struct Handed {
     pub previous_stays: bool,
 }
 
-/// Makes `to` the first owner of `thing`: named in its Owners row and first in it from now on.
-/// The person who was first stays in the row unless `keep_previous` is false, in which case their
-/// own entry is taken out in the same step. `policy` is what the settings say at the thing's home.
-pub async fn hand_over(
+/// The ordinary handover's effect-free materialization. It carries facts and the
+/// already constructed native Owners change, never an authorization grant or wire token.
+pub struct PreparedHandover {
+    thing: Thing,
+    kind: ObjectKind,
+    from: Option<Id>,
+    to: Id,
+    keep_previous: bool,
+    change: Option<PageChange>,
+    previous_stays: bool,
+}
+impl PreparedHandover {
+    /// The original no-op takes no page target lock.
+    pub fn mutation_target(&self) -> Option<crate::pages::Target> {
+        self.change.as_ref().map(|_| self.thing.target())
+    }
+    fn same_facts(&self, current: &Self) -> bool {
+        self.thing == current.thing
+            && self.kind == current.kind
+            && self.from == current.from
+            && self.to == current.to
+            && self.keep_previous == current.keep_previous
+            && self.change.is_some() == current.change.is_some()
+    }
+}
+
+/// The same native eligibility, receiver checks and ownership change preparation.
+/// It performs no write; a no-op remains distinguishable before target serialization.
+pub async fn prepare_hand_over(
     conn: &mut Conn,
     principal: &Principal,
     thing: Thing,
     to: Id,
     keep_previous: bool,
     policy: &ResourcePolicy,
-    origin: &Origin,
-) -> Result<Handed, TransferError> {
+) -> Result<PreparedHandover, TransferError> {
     let (graph, site) = things::site(conn, thing).await?;
     // Whether the caller may hand it over is settled before anything is said of the person it goes
     // to: one of its owners or an admin of the place it is in, as for any change of the Owners row.
@@ -116,10 +140,13 @@ pub async fn hand_over(
     }
     let previous = site.first_owner;
     if previous == Some(to) {
-        return Ok(Handed {
-            changed: false,
+        return Ok(PreparedHandover {
+            thing,
+            kind: site.kind,
             from: previous,
             to,
+            keep_previous,
+            change: None,
             previous_stays: true,
         });
     }
@@ -141,26 +168,131 @@ pub async fn hand_over(
         }),
         ..PageChange::default()
     };
+    Ok(PreparedHandover {
+        thing,
+        kind: site.kind,
+        from: previous,
+        to,
+        keep_previous,
+        change: Some(change),
+        previous_stays,
+    })
+}
+
+/// Makes `to` the first owner of `thing`: named in its Owners row and first in it from now on.
+/// The person who was first stays in the row unless `keep_previous` is false, in which case their
+/// own entry is taken out in the same step. `policy` is what the settings say at the thing's home.
+pub async fn hand_over(
+    conn: &mut Conn,
+    principal: &Principal,
+    thing: Thing,
+    to: Id,
+    keep_previous: bool,
+    policy: &ResourcePolicy,
+    origin: &Origin,
+) -> Result<Handed, TransferError> {
+    let prepared = prepare_hand_over(conn, principal, thing, to, keep_previous, policy).await?;
+    apply_hand_over(conn, principal, prepared, policy, origin).await
+}
+
+/// Re-evaluate the same ordinary preparation after the entry owner's actual HTTP
+/// checkpoint. Changed owner/no-op facts cannot create an unrefreshed new mutation.
+pub async fn hand_over_prepared_fenced<E: Send, F: FnOnce() -> Result<(), E> + Send>(
+    conn: &mut Conn,
+    principal: &Principal,
+    prepared: PreparedHandover,
+    policy: &ResourcePolicy,
+    origin: &Origin,
+    before_effect: F,
+) -> Result<Handed, pages::EffectFailure<TransferError, E>> {
+    let current = prepare_hand_over(
+        conn,
+        principal,
+        prepared.thing,
+        prepared.to,
+        prepared.keep_previous,
+        policy,
+    )
+    .await
+    .map_err(pages::EffectFailure::Native)?;
+    if !prepared.same_facts(&current) {
+        return Err(pages::EffectFailure::Native(orch_db::DbError::Retry.into()));
+    }
+    apply_hand_over_fenced(conn, principal, current, policy, origin, before_effect).await
+}
+
+async fn apply_hand_over(
+    conn: &mut Conn,
+    principal: &Principal,
+    prepared: PreparedHandover,
+    policy: &ResourcePolicy,
+    origin: &Origin,
+) -> Result<Handed, TransferError> {
+    match apply_hand_over_fenced(conn, principal, prepared, policy, origin, || {
+        Ok::<(), std::convert::Infallible>(())
+    })
+    .await
+    {
+        Ok(handed) => Ok(handed),
+        Err(pages::EffectFailure::Native(error)) => Err(error),
+        Err(pages::EffectFailure::BeforeEffect(never)) => match never {},
+    }
+}
+
+async fn apply_hand_over_fenced<E: Send, F: FnOnce() -> Result<(), E> + Send>(
+    conn: &mut Conn,
+    principal: &Principal,
+    prepared: PreparedHandover,
+    policy: &ResourcePolicy,
+    origin: &Origin,
+    before_effect: F,
+) -> Result<Handed, pages::EffectFailure<TransferError, E>> {
+    let Some(change) = prepared.change else {
+        return Ok(Handed {
+            changed: false,
+            from: prepared.from,
+            to: prepared.to,
+            previous_stays: true,
+        });
+    };
+    let thing = prepared.thing;
     let outcome: Outcome = match thing {
         Thing::Node(_) => {
-            pages::change(
+            pages::change_fenced(
                 conn,
                 principal,
                 thing.target(),
                 &change,
                 policy.node_policy(),
                 origin,
+                before_effect,
             )
-            .await?
+            .await
         }
         Thing::Other(object) => {
-            pages::change_resource(conn, principal, object, &change, policy, origin).await?
+            pages::change_resource_under_fenced(
+                conn,
+                principal,
+                object,
+                &change,
+                policy.node_policy(),
+                policy,
+                origin,
+                before_effect,
+            )
+            .await
         }
-    };
+    }
+    .map_err(|error| match error {
+        pages::ChangeFailure::Native(error) => {
+            pages::EffectFailure::Native(TransferError::from(error))
+        }
+        pages::ChangeFailure::BeforeEffect(error) => pages::EffectFailure::BeforeEffect(error),
+    })?;
     Ok(Handed {
         changed: outcome.changed,
-        from: previous,
-        to,
-        previous_stays,
+        from: prepared.from,
+        to: prepared.to,
+        previous_stays: prepared.previous_stays,
     })
 }

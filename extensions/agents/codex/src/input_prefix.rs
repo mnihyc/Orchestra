@@ -275,7 +275,7 @@ impl CodexAdapter {
             (
                 record.mapper.native_thread().to_owned(),
                 record.mapper.segment_id(),
-                record.mapper.turn_in_progress(),
+                record.mapper.turn_in_progress() || record.mapper.background_running(),
             )
         }) {
             if native != source.native_session_ref || segment != source.segment_id {

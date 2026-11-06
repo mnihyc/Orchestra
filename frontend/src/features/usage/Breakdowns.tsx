@@ -38,7 +38,7 @@ export interface BreakdownsProps {
   onTab: (dimension: UsageDimension) => void;
   tableOf: (dimension: UsageDimension) => TableState;
   search: UsageSearch;
-  onFilter: (name: FilterName, value: string) => void;
+  onFilter: (name: FilterName, value: string | boolean) => void;
   /** The tables list a hundred rows. */
   showingMore: boolean;
   onMore: () => void;
@@ -79,7 +79,6 @@ function RowsOf({ dimension, table, search, onFilter, showingMore, onMore, perfo
   const { t } = useTranslation();
   const { locale } = useFormatContext();
   const name = filterOf(dimension);
-  const active = name === null ? undefined : search[name];
   const NARROW_COLUMN = 'credits';
 
   const columns: Column<UsageRow>[] = [
@@ -87,7 +86,9 @@ function RowsOf({ dimension, table, search, onFilter, showingMore, onMore, perfo
       id: 'name',
       header: t(`usage.tables.by.${dimension}`),
       cell: (row, shown) => {
-        const value = name === null ? null : filterValue(dimension, row.key);
+        const rowName = dimension === 'tier' && row.key.tier_unknown === true ? 'tier_unknown' : name;
+        const value = rowName === 'tier_unknown' ? true : rowName === null ? null : filterValue(dimension, row.key);
+        const active = rowName === null ? undefined : search[rowName];
         const pressed = value !== null && active === value;
         const content = <Member dimension={dimension} row={row} />;
         const p = row.figures.performance;
@@ -99,14 +100,14 @@ function RowsOf({ dimension, table, search, onFilter, showingMore, onMore, perfo
         ].filter((part):part is string=>part!==null);
         return (
           <span className="flex min-w-0 flex-col gap-1">
-            {name === null || value === null ? (
+            {rowName === null || value === null ? (
               content
             ) : (
               <button
                 type="button"
                 aria-pressed={pressed}
                 title={t('usage.tables.narrow', { name: keyLabel(dimension, row.key, t) })}
-                onClick={() => onFilter(name, value)}
+                onClick={() => onFilter(rowName, value)}
                 className={cx('flex min-w-0 rounded-md text-left hover:underline', pressed && 'underline')}
               >
                 {content}

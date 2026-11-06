@@ -3,6 +3,11 @@
 //! A target exists before a program listens. An opening widens its audience, while a use is
 //! one currently admitted connection. Observations and caller records are live measurements.
 
+use crate::operations::{FacetSpec as Facet, OperationSpec as Op, TargetResolver as Target};
+use orch_access_contract::key_scope::KeyAction::{Manage, Read, Write};
+use orch_access_contract::key_scope::KeyTargetKind::Object;
+use orch_access_contract::permissions::ObjectKind as K;
+
 use orch_types::{Id, Revision, Time};
 use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
@@ -427,6 +432,78 @@ pub struct PortOpening {
     pub counts: Option<PortCounts>,
     /// Actions permitted to this reader now.
     pub can: PortOpeningCan,
+}
+
+/// The committed opening identity and revision, without existing program/audience/publication data.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+#[serde(deny_unknown_fields)]
+pub struct PortOpeningWriteReceipt {
+    /// Existing restricted-response discriminator.
+    pub projection: crate::common::ReceiptProjection,
+    /// The actual opening changed or checked by an idempotent close.
+    pub opening_id: Id,
+    /// Its actual governing environment at the accepted write.
+    pub environment_id: Id,
+    /// Its revision at that accepted checkpoint.
+    pub revision: Revision,
+}
+
+/// Ordinary opening data, or the same successful act's restricted acknowledgement.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, JsonSchema)]
+#[serde(untagged)]
+pub enum PortOpeningWriteResponse {
+    /// Content-free acknowledgement, never a partially filled opening.
+    Receipt(PortOpeningWriteReceipt),
+    /// The existing full wire shape, admitted by this act's own Read facets.
+    Full(Box<PortOpening>),
+}
+
+impl PortOpeningWriteResponse {
+    /// Takes a genuine Full opening without interpreting an acknowledgement as port state.
+    pub fn into_full(self) -> Result<PortOpening, PortOpeningWriteReceipt> {
+        match self {
+            Self::Full(opening) => Ok(*opening),
+            Self::Receipt(receipt) => Err(receipt),
+        }
+    }
+}
+
+const fn opening_write_facets() -> [Facet; 8] {
+    [
+        Facet::required(
+            Manage,
+            &[Object(K::Environment)],
+            Target::Resolved("opening_environment"),
+        ),
+        Facet::response_content(
+            &[Object(K::Environment)],
+            Target::Resolved("opening_environment"),
+        ),
+        Facet::response_content(
+            &[Object(K::Host)],
+            Target::ResolvedCollection("opening_hosts"),
+        ),
+        Facet::response_content(
+            &[Object(K::Machine)],
+            Target::ResolvedCollection("opening_publishers"),
+        ),
+        Facet::response_content(
+            &[Object(K::Org)],
+            Target::ResolvedCollection("opening_names_orgs"),
+        ),
+        Facet::response_content(
+            &[Object(K::Project)],
+            Target::ResolvedCollection("opening_names_projects"),
+        ),
+        Facet::response_content(
+            &[Object(K::Topic)],
+            Target::ResolvedCollection("opening_names_topics"),
+        ),
+        Facet::response_content(
+            &[Object(K::Thread)],
+            Target::ResolvedCollection("opening_names_threads"),
+        ),
+    ]
 }
 
 /// An intended direct result's once-delivered link addresses.
@@ -1162,39 +1239,101 @@ crate::endpoints! {
     /// Reads one stable target before or after a program listens.
     EnvironmentPortGet: GET "/environments/{id}/ports/{port}", Permission("ports.view"), query EnvironmentPortGetQuery, none, json PortTarget, 200;
     /// Changes one target's program options without widening its audience.
-    EnvironmentPortProgramUpdate: PATCH "/environments/{id}/ports/{port}/program", Permission("ports.manage"), none, json EnvironmentPortProgramUpdateBody, json PortTarget, 200;
+    EnvironmentPortProgramUpdate: PATCH "/environments/{id}/ports/{port}/program", Permission("ports.manage"), none, json EnvironmentPortProgramUpdateBody, json PortTarget, 200,
+        operation Op::returning(Manage, &[Object(K::Environment)], Target::PermissionObject);
     /// Reviews an audience and current program and host options without effect.
-    EnvironmentPortOpeningPreflight: POST "/environments/{id}/ports/{port}/openings/preflight", Rule("Ports Manage and current View of the named place"), none, json PortOpeningRequest, json PortOpeningPlan, 200;
+    EnvironmentPortOpeningPreflight: POST "/environments/{id}/ports/{port}/openings/preflight", Rule("Ports Manage and current View of the named place"), none, json PortOpeningRequest, json PortOpeningPlan, 200,
+        operation Op::facets(&[
+            Facet::required(Manage, &[Object(K::Environment)], Target::Path("id")),
+            Facet::required(
+                Read,
+                &[
+                    Object(K::Org),
+                    Object(K::Project),
+                    Object(K::Topic),
+                    Object(K::Thread),
+                ],
+                Target::Resolved("named_place"),
+            ),
+        ]);
     /// Confirms the exact stored audience review once.
-    EnvironmentPortOpeningCreate: POST "/environments/{id}/ports/{port}/openings", Rule("Ports Manage and current View of the named place"), none, json EnvironmentPortOpeningCreateBody, json PortOpenReply, 201;
+    EnvironmentPortOpeningCreate: POST "/environments/{id}/ports/{port}/openings", Rule("Ports Manage and current View of the named place"), none, json EnvironmentPortOpeningCreateBody, json PortOpenReply, 201,
+        operation Op::facets(&[
+            Facet::required(Manage, &[Object(K::Environment)], Target::Path("id")),
+            Facet::required(
+                Read,
+                &[
+                    Object(K::Org),
+                    Object(K::Project),
+                    Object(K::Topic),
+                    Object(K::Thread),
+                ],
+                Target::Resolved("named_place"),
+            ),
+        ]);
     /// Requests this thread's own environment port decision or replays its outcome.
     ThreadPortRequestCreate: POST "/threads/{id}/port-requests", Permission("thread.interact"), none, json PortOpeningRequest, json PortOpenReply, 200;
     /// Reads an opening through the current door or its named audience.
-    PortOpeningGet: GET "/port-openings/{opening_id}", Rule("Ports View or the current admitted named-place viewer"), none, none, json PortOpening, 200;
+    PortOpeningGet: GET "/port-openings/{opening_id}", Rule("Ports View or the current admitted named-place viewer"), none, none, json PortOpening, 200,
+        operation Op::facets(&[
+            Facet::required(Read, &[Object(K::Environment)], Target::Resolved("opening_environment")),
+            Facet::required(Read, &[Object(K::Host)], Target::ResolvedCollection("opening_hosts")),
+            Facet::required(Read, &[Object(K::Machine)], Target::ResolvedCollection("opening_publishers")),
+            Facet::required(Read, &[Object(K::Org)], Target::ResolvedCollection("opening_names_orgs")),
+            Facet::required(Read, &[Object(K::Project)], Target::ResolvedCollection("opening_names_projects")),
+            Facet::required(Read, &[Object(K::Topic)], Target::ResolvedCollection("opening_names_topics")),
+            Facet::required(Read, &[Object(K::Thread)], Target::ResolvedCollection("opening_names_threads")),
+        ]);
     /// Changes a link's bounded lapse without reviving closed admission.
-    PortOpeningUpdate: PATCH "/port-openings/{opening_id}", Rule("Ports Manage on the opening's environment"), none, json PortOpeningUpdateBody, json PortOpening, 200;
+    PortOpeningUpdate: PATCH "/port-openings/{opening_id}", Rule("Ports Manage on the opening's environment"), none, json PortOpeningUpdateBody, json PortOpeningWriteResponse, 200,
+        operation Op::receipt(&Op::facets(&opening_write_facets()));
     /// Closes one opening and its current uses, idempotently.
-    PortOpeningDelete: DELETE "/port-openings/{opening_id}", Rule("Ports Manage or the requesting agent thread"), none, json PortRevisionBody, json PortOpening, 200;
+    PortOpeningDelete: DELETE "/port-openings/{opening_id}", Rule("Ports Manage on the opening's environment; requesting-thread tool close keeps its separate fence"), none, json PortRevisionBody, json PortOpeningWriteResponse, 200,
+        operation Op::receipt(&Op::facets(&opening_write_facets()));
     /// Reads live counts and the caller facts current Manage permits.
     EnvironmentPortConnectionList: GET "/environments/{id}/ports/connections", Permission("ports.view"), query EnvironmentPortConnectionListQuery, none, json PortConnectionList, 200;
     /// Lists safe effective wider openings under an administered place.
-    NodePortOpeningList: GET "/nodes/{id}/port-openings", Rule("Admin of this place; Close uses ordinary Ports Manage or explicit bypass"), query NodePortOpeningListQuery, none, json Page<PortOpening>, 200;
+    NodePortOpeningList: GET "/nodes/{id}/port-openings", Rule("Admin of this place; Close uses ordinary Ports Manage or explicit bypass"), query NodePortOpeningListQuery, none, json Page<PortOpening>, 200,
+        operation Op::single(
+            Manage,
+            &[
+                Object(K::Org),
+                Object(K::Project),
+                Object(K::Topic),
+                Object(K::Thread),
+            ],
+            Target::Path("id"),
+        );
     /// Grants the environment one audience's port capability, so that agents open that kind without a card; nothing of its unit changes. It is taken back as every capability is.
-    EnvironmentPortCapabilityGrant: PUT "/environments/{id}/ports/capabilities/{key}", Rule("Ports Manage, and among the capability's approvers by its policy"), none, none, json PortCapability, 200;
+    EnvironmentPortCapabilityGrant: PUT "/environments/{id}/ports/capabilities/{key}", Rule("Ports Manage, and among the capability's approvers by its policy"), none, none, json PortCapability, 200,
+        operation Op::single(Manage, &[Object(K::Environment)], Target::Path("id"));
     /// Admits one owned port connection without a self opening.
-    EnvironmentPortUseCreate: POST "/environments/{id}/ports/{port}/use", Rule("Current Ports View or View of a named-place opening admitting this port"), none, json EnvironmentPortUseCreateBody, json PortUse, 200;
+    EnvironmentPortUseCreate: POST "/environments/{id}/ports/{port}/use", Rule("Current Ports View or View of a named-place opening admitting this port"), none, json EnvironmentPortUseCreateBody, json PortUse, 200,
+        operation Op::facets(&[
+            Facet::required(Read, &[Object(K::Environment)], Target::Path("id")),
+            Facet::required(Write, &[Object(K::Environment)], Target::Path("id")),
+        ]);
     /// Admits a valid link's one selected entry and transport.
-    PortLinkUseCreate: POST "/port-links/use", Public, none, json PortLinkUseCreateBody, json PortUse, 200;
+    PortLinkUseCreate: POST "/port-links/use", Public, none, json PortLinkUseCreateBody, json PortUse, 200,
+        operation Op::protocol();
     /// Carries the admitted use as TCP bytes or whole UDP datagrams.
-    PortUseSocket: GET "/ws/ports/{use_id}", Public, query PortUseSocketQuery, none, raw, 101;
+    PortUseSocket: GET "/ws/ports/{use_id}", Public, query PortUseSocketQuery, none, raw, 101,
+        operation Op::protocol();
     /// Makes a signed-in short-lived entry for the target's stable browser host.
-    EnvironmentPortEnter: POST "/environments/{id}/ports/{port}/enter", Rule("Signed-in current door holder or admitted named-place viewer"), none, json EnvironmentPortEnterBody, json EnvironmentPortEnterReply, 200;
+    EnvironmentPortEnter: POST "/environments/{id}/ports/{port}/enter", Rule("Signed-in current door holder or admitted named-place viewer"), none, json EnvironmentPortEnterBody, json EnvironmentPortEnterReply, 200,
+        operation Op::facets(&[
+            Facet::required(Read, &[Object(K::Environment)], Target::Path("id")),
+            Facet::required(Write, &[Object(K::Environment)], Target::Path("id")),
+        ]);
     /// Serves a generic link landing and platform downloads without private metadata.
-    PortLinkLanding: GET "/ports/links/{opening_id}", Public, none, none, raw, 200;
+    PortLinkLanding: GET "/ports/links/{opening_id}", Public, none, none, raw, 200,
+        operation Op::protocol();
     /// Reads safe link metadata after proof without making a connection.
-    PortLinkInspect: POST "/port-links/inspect", Public, none, json PortLinkInspectBody, json PortLinkInfo, 200;
+    PortLinkInspect: POST "/port-links/inspect", Public, none, json PortLinkInspectBody, json PortLinkInfo, 200,
+        operation Op::protocol();
     /// Publishes the installation's target-bound assertion verification keys.
-    PortAssertionKeysGet: GET "/ports/assertion-keys", Public, none, none, json PortAssertionKeys, 200;
+    PortAssertionKeysGet: GET "/ports/assertion-keys", Public, none, none, json PortAssertionKeys, 200,
+        operation Op::public();
 }
 
 #[cfg(test)]

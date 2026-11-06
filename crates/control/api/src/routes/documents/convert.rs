@@ -129,7 +129,7 @@ pub(super) fn named_files(blocks: &[NewBlock]) -> HashSet<Id> {
 
 /// The blocks of a text that name files which will not be held: an image block becomes the words that said it, any
 /// other block that names one is taken out.
-fn without_files(blocks: &mut Vec<NewBlock>, gone: &HashSet<Id>) {
+fn without_files(blocks: &mut [NewBlock], gone: &HashSet<Id>) {
     use orch_api_contract::documents::{BlockContent, BlockProps, BlockType, Inline};
     for block in blocks.iter_mut() {
         if let Some(children) = block.children.as_mut() {

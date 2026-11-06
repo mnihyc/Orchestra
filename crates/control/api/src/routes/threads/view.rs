@@ -337,6 +337,18 @@ pub async fn thread(
     base: NodeBase<ThreadKind>,
     now: DateTime<Utc>,
 ) -> ApiResult<Thread> {
+    thread_with_name_sources(conn, principal, base, now, None).await
+}
+
+/// The same native Thread projection, with an optional trusted bound on its
+/// separately referenced parent name. This supplies no Thread or parent authority.
+pub(crate) async fn thread_with_name_sources(
+    conn: &mut Conn,
+    principal: &Principal,
+    base: NodeBase<ThreadKind>,
+    now: DateTime<Utc>,
+    name_sources: Option<&std::collections::BTreeSet<Id>>,
+) -> ApiResult<Thread> {
     let id = base.id;
     let inspecting = orch_db::queries::trace::retained_read(id);
     let parts = thread_parts(conn, id, Some(principal.user()), orch_types::Time::new(now))
@@ -430,8 +442,12 @@ pub async fn thread(
             thread_display: None,
             id: parent,
             kind: orch_api_contract::nodes::NodeKind::Thread,
-            name: rows::node_name(conn, parent).await?,
-            redacted: false,
+            name: if name_sources.is_none_or(|names| names.contains(&parent)) {
+                rows::node_name(conn, parent).await?
+            } else {
+                None
+            },
+            redacted: name_sources.is_some_and(|names| !names.contains(&parent)),
         }),
         None => None,
     };
@@ -463,12 +479,39 @@ pub async fn thread(
         }
     }
     let mut base = base;
+    let background = if inspecting {
+        None
+    } else if let Some(row) = rows::thread(conn, id).await? {
+        let interact = parts
+            .binding
+            .as_ref()
+            .and_then(|binding| binding.descriptor.as_ref())
+            .is_some_and(|descriptor| descriptor.capabilities.background_commands)
+            && nodes::check(
+                conn,
+                principal,
+                id,
+                Permission::ThreadInteract,
+                Act::Use,
+                Policy::default(),
+            )
+            .await
+            .is_ok_and(|decision| decision.is_allowed());
+        Some(
+            orch_engine::background_wake::status(conn, &row, &[], interact)
+                .await
+                .map_err(ApiError::engine)?,
+        )
+    } else {
+        None
+    };
     for reference in &mut base.path {
         if reference.id == facts.id {
             reference.thread_display = Some(Box::new(facts.display.clone()));
         }
     }
     Ok(Thread {
+        background,
         active_continuation_id: Some(facts.active_continuation_id),
         execution_revision: Some(facts.execution_revision),
         base,

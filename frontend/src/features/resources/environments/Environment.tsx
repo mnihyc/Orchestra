@@ -36,7 +36,7 @@ import { HarnessTrustSection } from '@/features/resources/environments/HarnessTr
 import { AgentReach } from '@/features/resources/environments/AgentReach';
 import { DataSourcesSummary } from '@/features/resources/environments/DataSources';
 import { TemporaryStatus } from '@/features/resources/environments/Temporary';
-import { McpServers } from '@/features/resources/environments/McpServers';
+import { EnvironmentTools } from '@/features/resources/environments/Tools';
 import { EnvironmentStatusText } from '@/features/resources/environments/EnvironmentList';
 import { environmentChangesVisible, environmentDisplayStatus, environmentRemovalPhase, environmentStatusDetail, holding, isBusy } from '@/features/resources/environments/words';
 import { Facts } from '@/features/resources/Facts';
@@ -45,6 +45,7 @@ import { PathValue, RuntimeChange } from '@/features/resources/TechnicalValue';
 import { EnvironmentPrograms } from '@/features/resources/agents/ProgramBuild';
 import { Hint } from '@/features/help/Hint';
 import { MachineLimits } from '@/features/resources/machines/Policy';
+import { ThreadGatewayDetails } from '@/features/gateways/ThreadGatewayStatus';
 import { ResourceAccess } from '@/features/resources/ResourceAccess';
 import { useResourceHeading } from '@/features/resources/trail';
 import type { Environment as EnvironmentRow } from '@/generated/api-types';
@@ -197,6 +198,7 @@ function Threads({ environment, manage }: { environment: EnvironmentRow; manage:
             <Link to="/thread/$threadId" params={{ threadId: row.thread.id }} className="truncate font-medium text-text hover:underline">
               {row.thread.name ?? t('providers.threads.hiddenName')}
             </Link>
+            <ThreadGatewayDetails threadId={row.thread.id} />
             {withoutTopic && (
               <>
                 <Link to="/topic/$topicId" params={{ topicId: row.topic.id }} className="truncate text-sm text-text-muted hover:underline">
@@ -299,7 +301,7 @@ export function EnvironmentScreen({ environmentId, initialPort, tab, onTab, want
   const keep = acts.keepAwake(environment);
   const sectionHref = (section: string) => `/resources/environments/${encodeURIComponent(environment.id)}?tab=${section}`;
   const toolSections = [
-    { value: 'tools' as const, label: t('mcpServers.title'), panel: <McpServers environment={environment} /> },
+    { value: 'tools' as const, label: t('resourceDetails.layout.tools'), panel: <EnvironmentTools key={environment.id} environment={environment} /> },
     { value: 'terminal' as const, label: t('views.terminal.title'), panel: <EnvironmentDoor environment={environment} kind="terminal" /> },
     ...(viewPorts ? [{ value: 'ports' as const, label: t('ports.title'), panel: <PortsPanel environment={environment} initialPort={initialPort} browser={portsBrowser(environment, () => onTab('browsers'))} /> }] : []),
     ...(environment.access.permissions.includes('browser.view') ? [{ value: 'browsers' as const, label: t('browser.tab'), panel: <BrowsersPanel environment={environment} threadId={null} /> }] : []),

@@ -315,7 +315,7 @@ def verify(directory, expected=None):
 
 def import_checksums(args, directory):
     if not args.api_url or not args.token_file:
-        raise ValueError("checksum import needs --api-url and --token-file for a system administrator session")
+        raise ValueError("checksum import needs --api-url matching the credential in --token-file")
     address = urllib.parse.urlsplit(args.api_url)
     try:
         loopback = address.hostname == "localhost" or ipaddress.ip_address(address.hostname).is_loopback
@@ -498,8 +498,8 @@ def main():
     installing.add_argument("--target", type=Path, help="empty install directory or existing deploy directory / 安装目录或已有 deploy 目录")
     installing.add_argument("--config", type=Path, help="prepared orch.toml for a first install / 首次安装准备好的 orch.toml")
     installing.add_argument("--env", type=Path, help="private .env for a first install / 首次安装的私有 .env")
-    installing.add_argument("--api-url", help="internal API URL ending in /api/v1 / 内网 API 地址")
-    installing.add_argument("--token-file", type=Path, help="administrator browser-session token file / 管理员会话令牌文件")
+    installing.add_argument("--api-url", help="explicit API root: /api/v1 for a browser session, /openapi/v1 for an account key / 显式 API 根路径：浏览器会话用 /api/v1，账户密钥用 /openapi/v1")
+    installing.add_argument("--token-file", type=Path, help="authorized browser access token or account-key file; match --api-url / 有权限的浏览器访问令牌或账户密钥文件，须与 --api-url 匹配")
     installing.add_argument("updater_args", nargs=argparse.REMAINDER, help="ordinary updater options after -- / -- 后传入常规更新器选项")
     args = parser.parse_args()
     if args.command == "install" and args.updater_args[:1] == ["--"]:

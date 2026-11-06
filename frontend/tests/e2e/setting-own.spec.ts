@@ -1,9 +1,8 @@
 /** A person edits only a place's own instructions, sees every ancestor and cannot bypass a higher lock. */
 import { expect, test } from '@playwright/test';
 
-import { ACME, deny, PEOPLE, scenario, signIn } from './support.ts';
+import { ACME, deny, DOUBLE, PEOPLE, scenario, signIn } from './support.ts';
 
-const DOUBLE = `http://127.0.0.1:${process.env.ORCH_DOUBLE_PORT ?? '41830'}`;
 async function set(node: string, value: string, locked = false) {
   const response = await fetch(`${DOUBLE}/__double/day100/setting`, { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ node, key: 'agent.instructions', value, locked }) });
   expect(response.ok).toBe(true);

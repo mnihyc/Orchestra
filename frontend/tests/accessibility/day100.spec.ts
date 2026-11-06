@@ -1,20 +1,20 @@
 /** Own-part settings, personal views, tag definition and status reviews remain readable and keyboard-operable on a phone. */
 import { expect, test } from '@playwright/test';
 
-import { ACME, expectAccessibleSettled, PEOPLE, scenario, signIn } from '../e2e/support.ts';
-
-const DOUBLE = `http://127.0.0.1:${process.env.ORCH_DOUBLE_PORT ?? '41830'}`;
+import { ACME, DOUBLE, expectAccessibleSettled, PEOPLE, scenario, signIn } from '../e2e/support.ts';
 
 test.beforeEach(async () => { await scenario(); });
 
 for (const language of ['en', 'zh-CN'] as const) {
   test(`${language} own controls have no serious barriers in either theme at their intended width`, async ({ page }) => {
     if (language === 'zh-CN') await page.setViewportSize({ width: 390, height: 844 });
-    await fetch(`${DOUBLE}/__double/day100/appearance`, { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ locale: language }) });
+    const appearance = await fetch(`${DOUBLE}/__double/day100/appearance`, { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ locale: language }) });
+    expect(appearance.ok).toBe(true);
     await signIn(page, PEOPLE.ada);
     await page.goto(`/project/${ACME.web}/settings?section=policies`);
     const row = page.locator('[data-setting="agent.instructions"]');
     await expect(row).toBeVisible();
+    await row.locator('[data-setting-editor-trigger]').click();
     await expectAccessibleSettled(page, '[data-setting="agent.instructions"]');
     const proposed = language === 'en' ? 'Only this project\nKeeps two lines' : '只给这个项目\n保留第二行';
     await row.getByRole('textbox').fill(proposed);

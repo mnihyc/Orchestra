@@ -18,6 +18,7 @@ import { KEY_ACTIONS } from '@/shell/keyActions';
 import { me, userRef } from '../doubles/fixtures';
 import { threadInput, userMessage } from '../doubles/thread-rows';
 import { show } from './support';
+import { backgroundWake } from '../doubles/background-wake';
 import { snapshot } from '../unit/continuation-fixtures';
 
 const calls = vi.hoisted(() => ({ update: vi.fn<typeof ThreadsApi.updateInput>(), remove: vi.fn<typeof ThreadsApi.cancelInput>(), resume: vi.fn<typeof ThreadsApi.resumeQueue>() }));
@@ -494,4 +495,18 @@ it('preserves an open pending editor but cannot save after interaction access is
   expect(editor).toHaveValue('Unsent edited words'); expect(editor).toBeDisabled();
   const save = screen.getByRole('button', { name: i18n.t('composer.queue.save') });
   await user.click(save); expect(calls.update).not.toHaveBeenCalled();
+});
+
+it('names an earlier author’s background work with the existing held-input line', () => {
+  mount([input('later-author', 'Continue after the build', '1', { state_detail: 'background_author', author: GRACE })], {
+    background: backgroundWake({ tasks: [], waiting_author: ADA, waiting_running: 2 }),
+  });
+  expect(screen.getByText("Waiting for Ada Lovelace's background tasks (2 running)")).toBeVisible();
+});
+
+it('keeps Stop-held background completions separate from ordinary queue resume', () => {
+  mount([], { background: backgroundWake({ tasks: [], held_completions: 2 }), queue: { held: false, by: null, at: null, held_inputs: 0, revision: 1 } });
+  expect(screen.getByText('2 finished tasks waiting')).toBeVisible();
+  expect(screen.queryByRole('button', { name: i18n.t('composer.queue.resume') })).not.toBeInTheDocument();
+  expect(calls.resume).not.toHaveBeenCalled();
 });

@@ -485,6 +485,7 @@ pub(super) async fn link(
     ctx: &Ctx,
     provider: &IdentityProviderRow,
     identity: &VerifiedIdentity,
+    state: &SignInState,
     user: Id,
 ) -> ApiResult<Response> {
     let refused = |error: SignInError| {
@@ -502,6 +503,11 @@ pub(super) async fn link(
     };
     if person.suspended() {
         return refused(SignInError::Disabled);
+    }
+    // Stay in the existing personal-write transaction. Restore the original key's
+    // current restrictions and freshly admit this same account operation before linking.
+    if !super::authority::restore(&mut tx, state, user, ctx.app.clock.as_ref()).await? {
+        return refused(SignInError::StateExpired);
     }
     let Some(current_provider) = identity::identity_provider(&mut tx, provider.id).await? else {
         return refused(SignInError::Disabled);

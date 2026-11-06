@@ -16,6 +16,7 @@ import { i18n, setLocale } from '@/i18n';
 import { defaultThreadRead } from '@/realtime/threadScope';
 import { threadViewOf, threadWriter } from '@/realtime/stores/thread';
 import { ACME } from '../doubles/fixtures';
+import { backgroundWork } from '../doubles/background-wake';
 import { World } from '../doubles/world';
 import { agentMessage, change, command, fileChange, LOGIN_DIFF, toolCall, turn } from '../doubles/thread-rows';
 import { show } from './support';
@@ -79,7 +80,7 @@ describe('a sub-agent lane', () => {
     await waitFor(() => expect(calls.read).toHaveBeenCalledTimes(1));
   });
 
-  it('names the model its program says the sub-agent runs on, and nothing where it says none', async () => {
+  it('names the model its program says the sub-agent runs on, and nothing where it says none', () => {
     draw(true);
     const lane = screen.getByRole('region', { name: 'Sub-agent reviewer' });
     expect(lane.querySelector('[data-subagent-model]')).toBeNull();
@@ -284,4 +285,29 @@ describe('a sub-agent lane', () => {
     act(() => threadWriter.apply(THREAD, { items: [{ ...numbered(parent('completed'), 1), seq_updated: 22 }] }));
     expect(screen.queryByRole('group', { name: 'Running sub-agents' })).not.toBeInTheDocument();
   });
+});
+
+it('keeps the named task on its existing child lane and separates native End from opening the lane', async () => {
+  const task = backgroundWork({ id: 'recorded-review', kind: 'subagent', item_id: 'review-call', turn_id: 'turn-1', label: 'Authentication reviewer' });
+  const end = vi.fn();
+  show(<SubagentChips threadId={THREAD} tasks={[task]} mayEnd onEnd={end} />);
+  expect(screen.getAllByRole('button', { name: i18n.t('timeline.subagent.jump', { name: task.label }) })).toHaveLength(1);
+  await userEvent.click(screen.getByRole('button', { name: i18n.t('backgroundWake.endNamed', { name: task.label }) }));
+  expect(end).toHaveBeenCalledExactlyOnceWith(task);
+  expect(calls.panel).not.toHaveBeenCalled();
+  await userEvent.click(screen.getByRole('button', { name: i18n.t('timeline.subagent.jump', { name: task.label }) }));
+  expect(calls.panel).toHaveBeenCalledWith('subagent', expect.objectContaining({ thread: THREAD, item: 'review-call' }));
+});
+
+it('keeps an unsupported or lost subagent named without advertising End or reviving its running state', () => {
+  const task = backgroundWork({ id: 'recorded-review', kind: 'subagent', item_id: 'review-call', turn_id: 'turn-1', label: 'Authentication reviewer', can_end: false, state: 'lost' });
+  show(<SubagentChips threadId={THREAD} tasks={[task]} mayEnd onEnd={vi.fn()} />);
+  expect(screen.getByRole('button', { name: i18n.t('timeline.subagent.jump', { name: task.label }) })).toHaveTextContent(i18n.t('backgroundWake.states.lost'));
+  expect(screen.queryByRole('button', { name: i18n.t('backgroundWake.endNamed', { name: task.label }) })).not.toBeInTheDocument();
+});
+
+it('does not restore a finished background child from a stale running transcript row', () => {
+  act(() => threadWriter.apply(THREAD, { turns: [turn('turn-1', { ordinal: 1, state: 'completed', inputId: 'input-1' })] }));
+  show(<SubagentChips threadId={THREAD} tasks={[]} mayEnd onEnd={vi.fn()} />);
+  expect(screen.queryByRole('group', { name: i18n.t('timeline.subagent.running') })).not.toBeInTheDocument();
 });

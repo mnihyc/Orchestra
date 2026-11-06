@@ -9,6 +9,7 @@ mod places;
 mod support;
 mod workspace;
 
+use crate::support::FullPermissionPageReply;
 use orch_api_contract::access::{PermissionPage, PermissionPageGet, PermissionPageUpdate};
 use orch_api_contract::common::ErrorCode;
 use orch_api_contract::environment::{
@@ -151,6 +152,7 @@ async fn name_row(site: &Site, object: &str, id: Id, by: &Who, user: &Who, permi
         }] }))
         .send()
         .await
+        .full_permission_page()
         .ok();
 }
 
@@ -165,6 +167,7 @@ async fn name_choice(site: &Site, object: &str, id: Id, by: &Who, user: &Who, ch
         }] }))
         .send()
         .await
+        .full_permission_page()
         .ok();
 }
 
@@ -574,6 +577,7 @@ async fn a_restricted_thread_keeps_its_conversation_and_not_its_files_and_its_pa
         .raw_body(&json!({ "whole": "private" }))
         .send()
         .await
+        .full_permission_page()
         .ok();
     let closed = site
         .app()

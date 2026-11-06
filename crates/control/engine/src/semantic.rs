@@ -10,7 +10,7 @@
 //!
 //! | Module | What it does |
 //! |--------|--------------|
-//! | [`choice`] | The org's choice: on or off, the provider and model and who named them, the disk share, the tuning |
+//! | [`mod@choice`] | The org's choice: on or off, the provider and model and who named them, the disk share, the tuning |
 //! | [`embed`] | Texts made into vectors through the named provider, checked and counted |
 //! | [`vectors`] | Length, likeness and shortening of vectors |
 //! | [`chunks`] | A source cut into pieces of about one size, sections kept together |

@@ -3,6 +3,7 @@
 mod places;
 mod rig;
 mod support;
+mod thread_history_scope;
 
 use orch_api_contract::common::ErrorCode;
 use orch_api_contract::threads::{
@@ -37,6 +38,10 @@ struct History {
 }
 
 async fn seed() -> Proof<History> {
+    seed_history(SEGMENTS, MESSAGES).await
+}
+
+async fn seed_history(segments: usize, messages: usize) -> Proof<History> {
     let scene = Scene::new().await;
     let thread = scene.thread().await.base.id;
     // Synthetic historical rows use native persistence helpers in one committed fixture, with
@@ -55,7 +60,7 @@ async fn seed() -> Proof<History> {
     let mut points = BTreeSet::new();
     let params = json!({});
     let mut last_segment = None;
-    for ordinal in 1..=SEGMENTS {
+    for ordinal in 1..=segments {
         let segment = if ordinal == 1 {
             first_segment
         } else {
@@ -188,7 +193,7 @@ async fn seed() -> Proof<History> {
                 .ok_or("command absent")?;
                 points.insert(command); // First non-marker item remains the numbered turn's anchor.
             }
-            for message in 0..MESSAGES {
+            for message in 0..messages {
                 let item = new_id();
                 let text = format!(" \n\n Historical answer {ordinal}-{message}\nExtra details");
                 let payload = json!({"text":text,"text_len":text.len()});
@@ -229,7 +234,7 @@ async fn seed() -> Proof<History> {
             .await?
             .ok_or("thread absent")?;
         assert!(threads::finish_turn(&mut tx, turn, "completed", None, at, seq).await?);
-        if ordinal < SEGMENTS {
+        if ordinal < segments {
             assert!(threads::end_segment(&mut tx, segment, "switched", at, seq).await?);
         }
         last_segment = Some(segment);
@@ -247,6 +252,425 @@ async fn seed() -> Proof<History> {
         points,
     })
 }
+
+// Two segments and one message per turn are sufficient to force a second metadata page.
+// The existing twenty-four-segment controls above keep their original scale and constants.
+async fn scoped_read<E>(endpoint: E) -> Proof
+where
+    E: orch_api_contract::routes::Endpoint<Query = ThreadHistoryListQuery, Body = ()> + Copy,
+{
+    use thread_history_scope::{key, ok, request, rule};
+    let history = seed_history(2, 1).await?;
+    let world = &history.scene.rig.world;
+    let operation = format!("{}.read", E::ROUTE.name);
+    let selected = key(
+        world,
+        history.scene.cai.id(),
+        vec![rule(&operation, "thread", history.thread, "self", "read")],
+    )
+    .await?;
+    let query = ThreadHistoryListQuery {
+        limit: Some(1),
+        ..Default::default()
+    };
+    let browser = ok(&request(
+        world,
+        endpoint,
+        history.thread,
+        &history.scene.cai.token,
+        &query,
+    )
+    .await)?;
+    let scoped = ok(&request(world, endpoint, history.thread, &selected.secret, &query).await)?;
+    assert_eq!(
+        scoped, browser,
+        "the key must use the ordinary history projection"
+    );
+    let segments = scoped["segments"].as_array().ok_or("segments absent")?;
+    assert_eq!(segments.len(), 1);
+    assert_eq!(segments[0]["agent"]["id"], json!(history.scene.on.agent));
+    assert_eq!(
+        segments[0]["provider"]["id"],
+        json!(history.scene.on.provider)
+    );
+    assert_eq!(
+        segments[0]["environment"]["id"],
+        json!(history.scene.on.environment)
+    );
+    assert_eq!(segments[0]["ordinal"], 2);
+    if E::ROUTE.name == "ThreadTurnList" {
+        let turns = scoped["turns"].as_array().ok_or("turns absent")?;
+        assert_eq!(turns.len(), 1);
+        assert_eq!(turns[0]["segment_id"], segments[0]["id"]);
+        assert_eq!(turns[0]["ordinal"], 2);
+    }
+    let before = serde_json::from_value(scoped["next_before"].clone())?;
+    let older = ok(&request(
+        world,
+        endpoint,
+        history.thread,
+        &selected.secret,
+        &ThreadHistoryListQuery {
+            before,
+            limit: Some(1),
+            ..Default::default()
+        },
+    )
+    .await)?;
+    assert_eq!(older["segments"][0]["ordinal"], 1);
+    assert!(older["next_before"].is_null());
+    // Intrinsic history references give no direct permission over those other resources.
+    for reply in [
+        world
+            .app
+            .call(
+                orch_api_contract::environment::EnvironmentGet,
+                &[&history.scene.on.environment],
+            )
+            .token(&selected.secret)
+            .send_bytes()
+            .await,
+        world
+            .app
+            .call(
+                orch_api_contract::resources::ProviderGet,
+                &[&history.scene.on.provider],
+            )
+            .token(&selected.secret)
+            .send_bytes()
+            .await,
+    ] {
+        thread_history_scope::denied(&reply);
+    }
+    Ok(())
+}
+
+async fn scoped_inspection<E>(endpoint: E) -> Proof
+where
+    E: orch_api_contract::routes::Endpoint<Query = ThreadHistoryListQuery, Body = ()> + Copy,
+{
+    use thread_history_scope::{denied, key, ok, request, rule};
+    let history = seed_history(2, 1).await?;
+    let world = &history.scene.rig.world;
+    world
+        .app
+        .call(orch_api_contract::ownership::NodeDelete, &[&history.thread])
+        .token(&history.scene.ada.token)
+        .raw_body(&json!({}))
+        .send()
+        .await
+        .ok();
+    let query = ThreadHistoryListQuery {
+        inspect_deleted: Some(true),
+        ..Default::default()
+    };
+    let inspect = format!("{}.inspect_deleted", E::ROUTE.name);
+    let selected = key(
+        world,
+        history.scene.ada.id(),
+        vec![rule(&inspect, "thread", history.thread, "self", "manage")],
+    )
+    .await?;
+    let counts: (i64, i64, i64) = sqlx::query_as("SELECT (SELECT count(*) FROM items WHERE thread_id=$1),(SELECT count(*) FROM turns WHERE thread_id=$1),(SELECT count(*) FROM thread_inputs WHERE thread_id=$1)")
+        .bind(history.thread).fetch_one(&world.db.pool).await?;
+    let browser = ok(&request(
+        world,
+        endpoint,
+        history.thread,
+        &history.scene.ada.token,
+        &query,
+    )
+    .await)?;
+    let scoped_reply = request(world, endpoint, history.thread, &selected.secret, &query).await;
+    let scoped = ok(&scoped_reply)?;
+    assert_eq!(scoped, browser);
+    assert_eq!(
+        scoped["segments"]
+            .as_array()
+            .ok_or("segments absent")?
+            .len(),
+        2
+    );
+    // Metadata pages preserve their payload shape and carry inspection in the existing header.
+    let inspection: serde_json::Value = serde_json::from_str(
+        scoped_reply
+            .headers
+            .get("orch-inspection")
+            .ok_or("inspection header absent")?
+            .to_str()?,
+    )?;
+    assert_eq!(inspection["readonly"], true);
+    assert_eq!(
+        scoped_reply
+            .headers
+            .get(http::header::CACHE_CONTROL)
+            .ok_or("cache control absent")?,
+        "no-store"
+    );
+    let after: (i64, i64, i64) = sqlx::query_as("SELECT (SELECT count(*) FROM items WHERE thread_id=$1),(SELECT count(*) FROM turns WHERE thread_id=$1),(SELECT count(*) FROM thread_inputs WHERE thread_id=$1)")
+        .bind(history.thread).fetch_one(&world.db.pool).await?;
+    assert_eq!(
+        after, counts,
+        "inspection must not submit or change history"
+    );
+    let reads: i64 = sqlx::query_scalar(
+        "SELECT count(*) FROM audit_log WHERE action='deleted.inspected' AND object_id=$1",
+    )
+    .bind(history.thread)
+    .fetch_one(&world.db.pool)
+    .await?;
+    assert_eq!(reads, 1, "ordinary daily inspection audit remains shared");
+    let read = key(
+        world,
+        history.scene.ada.id(),
+        vec![rule(
+            &format!("{}.read", E::ROUTE.name),
+            "thread",
+            history.thread,
+            "self",
+            "read",
+        )],
+    )
+    .await?;
+    denied(&request(world, endpoint, history.thread, &read.secret, &query).await);
+    let viewer = key(
+        world,
+        history.scene.cai.id(),
+        vec![rule(&inspect, "thread", history.thread, "self", "manage")],
+    )
+    .await?;
+    denied(&request(world, endpoint, history.thread, &viewer.secret, &query).await);
+    // A Manage inspection selection cannot stand in for the distinct ordinary Read variant.
+    denied(
+        &request(
+            world,
+            endpoint,
+            history.thread,
+            &selected.secret,
+            &ThreadHistoryListQuery::default(),
+        )
+        .await,
+    );
+    Ok(())
+}
+
+async fn scoped_bounds<E>(endpoint: E) -> Proof
+where
+    E: orch_api_contract::routes::Endpoint<Query = ThreadHistoryListQuery, Body = ()> + Copy,
+{
+    use thread_history_scope::{denied, key, request, rule};
+    let history = seed_history(2, 1).await?;
+    let world = &history.scene.rig.world;
+    let operation = format!("{}.read", E::ROUTE.name);
+    let sibling = history
+        .scene
+        .thread_by(&history.scene.ada, "Unrelated history")
+        .await
+        .base
+        .id;
+    for selected_rule in [
+        rule(
+            "ThreadOutlineGet.read",
+            "thread",
+            history.thread,
+            "self",
+            "read",
+        ),
+        rule(&operation, "thread", history.thread, "self", "write"),
+        rule(&operation, "thread", sibling, "self", "read"),
+        rule(&operation, "document", history.thread, "self", "read"),
+    ] {
+        let selected = key(world, history.scene.ada.id(), vec![selected_rule]).await?;
+        denied(
+            &request(
+                world,
+                endpoint,
+                history.thread,
+                &selected.secret,
+                &ThreadHistoryListQuery::default(),
+            )
+            .await,
+        );
+    }
+    let powerless = key(
+        world,
+        history.scene.bea.id(),
+        vec![rule(&operation, "thread", history.thread, "self", "read")],
+    )
+    .await?;
+    let reply = request(
+        world,
+        endpoint,
+        history.thread,
+        &powerless.secret,
+        &ThreadHistoryListQuery::default(),
+    )
+    .await;
+    assert_eq!(reply.problem().code, ErrorCode::AuthzDenied);
+    let selected = key(
+        world,
+        history.scene.ada.id(),
+        vec![rule(&operation, "thread", history.thread, "self", "read")],
+    )
+    .await?;
+    // Another thread's continuation is not usable through this admitted thread.
+    let foreign: Id =
+        sqlx::query_scalar("SELECT active_continuation_id FROM threads WHERE node_id=$1")
+            .bind(sibling)
+            .fetch_one(&world.db.pool)
+            .await?;
+    let foreign = request(
+        world,
+        endpoint,
+        history.thread,
+        &selected.secret,
+        &ThreadHistoryListQuery {
+            continuation_id: Some(foreign),
+            ..Default::default()
+        },
+    )
+    .await;
+    assert_eq!(foreign.problem().code, ErrorCode::NotFound);
+    Ok(())
+}
+
+async fn scoped_current<E>(endpoint: E) -> Proof
+where
+    E: orch_api_contract::routes::Endpoint<Query = ThreadHistoryListQuery, Body = ()> + Copy,
+{
+    use thread_history_scope::{denied, key, narrow, ok, request, rule};
+    let history = seed_history(2, 1).await?;
+    let world = &history.scene.rig.world;
+    let operation = format!("{}.read", E::ROUTE.name);
+    let original = vec![rule(&operation, "thread", history.thread, "self", "read")];
+    let selected = key(world, history.scene.ada.id(), original.clone()).await?;
+    let page = ok(&request(
+        world,
+        endpoint,
+        history.thread,
+        &selected.secret,
+        &ThreadHistoryListQuery {
+            limit: Some(1),
+            ..Default::default()
+        },
+    )
+    .await)?;
+    let query = ThreadHistoryListQuery {
+        before: serde_json::from_value(page["next_before"].clone())?,
+        limit: Some(1),
+        ..Default::default()
+    };
+    narrow(
+        world,
+        &selected,
+        vec![rule(
+            "ThreadOutlineGet.read",
+            "thread",
+            history.thread,
+            "self",
+            "read",
+        )],
+    )
+    .await?;
+    denied(&request(world, endpoint, history.thread, &selected.secret, &query).await);
+    for revoked in [false, true] {
+        let selected = key(world, history.scene.ada.id(), original.clone()).await?;
+        if revoked {
+            assert!(
+                orch_db::queries::identity::revoke_api_token(
+                    &mut *world.conn().await,
+                    selected.id,
+                    history.scene.ada.id(),
+                    world.now()
+                )
+                .await?
+            );
+        } else {
+            sqlx::query("UPDATE api_tokens SET expires_at=$2 WHERE id=$1")
+                .bind(selected.id)
+                .bind(world.now())
+                .execute(&world.db.pool)
+                .await?;
+        }
+        assert_eq!(
+            request(world, endpoint, history.thread, &selected.secret, &query)
+                .await
+                .status,
+            http::StatusCode::UNAUTHORIZED
+        );
+    }
+    let source = key(
+        world,
+        history.scene.ada.id(),
+        vec![rule(
+            &operation,
+            "topic",
+            history.scene.tree.topic.base.id,
+            "subtree",
+            "read",
+        )],
+    )
+    .await?;
+    ok(&request(world, endpoint, history.thread, &source.secret, &query).await)?;
+    let destination = places::make_topic(
+        world,
+        &history.scene.ada,
+        history.scene.tree.project.base.id,
+        "Moved history",
+    )
+    .await;
+    {
+        let mut conn = world.conn().await;
+        orch_db::queries::hierarchy::move_under(
+            &mut conn,
+            history.thread,
+            destination.base.id,
+            world.now(),
+        )
+        .await?;
+        orch_authz::epoch::bump(&mut conn).await?;
+    }
+    denied(&request(world, endpoint, history.thread, &source.secret, &query).await);
+    let exact = key(world, history.scene.ada.id(), original).await?;
+    ok(&request(world, endpoint, history.thread, &exact.secret, &query).await)?;
+    Ok(())
+}
+
+macro_rules! scoped_history_controls {
+    ($read:ident, $inspect:ident, $bounds:ident, $current:ident, $endpoint:expr) => {
+        #[tokio::test]
+        async fn $read() -> Proof {
+            scoped_read($endpoint).await
+        }
+        #[tokio::test]
+        async fn $inspect() -> Proof {
+            scoped_inspection($endpoint).await
+        }
+        #[tokio::test]
+        async fn $bounds() -> Proof {
+            scoped_bounds($endpoint).await
+        }
+        #[tokio::test]
+        async fn $current() -> Proof {
+            scoped_current($endpoint).await
+        }
+    };
+}
+
+scoped_history_controls!(
+    scoped_segment_read_matches_browser_and_keeps_exact_references,
+    scoped_segment_inspection_uses_current_restoration_authority,
+    scoped_segment_read_refuses_other_operations_targets_and_accounts,
+    scoped_segment_pagination_rechecks_current_key_and_placement,
+    ThreadSegmentList
+);
+scoped_history_controls!(
+    scoped_turn_read_matches_browser_and_keeps_exact_references,
+    scoped_turn_inspection_uses_current_restoration_authority,
+    scoped_turn_read_refuses_other_operations_targets_and_accounts,
+    scoped_turn_pagination_rechecks_current_key_and_placement,
+    ThreadTurnList
+);
 
 #[tokio::test]
 async fn opening_is_a_window_and_old_item_pages_supply_their_own_historical_references() -> Proof {
@@ -589,3 +1013,379 @@ async fn explicit_metadata_pages_include_empty_turns_and_all_older_segments_with
     );
     Ok(())
 }
+
+// Seven content readers share real history fixtures and retain each endpoint's native wire shape.
+#[derive(Clone, Copy)]
+enum ContentReadCase {
+    Sync,
+    Items,
+    Item,
+    Output,
+    Outline,
+    Catchup,
+    Blob,
+}
+
+impl ContentReadCase {
+    fn operation(self) -> &'static str {
+        use orch_api_contract::routes::Endpoint as _;
+        use orch_api_contract::threads::*;
+        match self {
+            Self::Sync => ThreadSyncGet::ROUTE.name,
+            Self::Items => ThreadItemList::ROUTE.name,
+            Self::Item => ThreadItemGet::ROUTE.name,
+            Self::Output => ThreadItemOutputGet::ROUTE.name,
+            Self::Outline => ThreadOutlineGet::ROUTE.name,
+            Self::Catchup => ThreadCatchupGet::ROUTE.name,
+            Self::Blob => ThreadBlobGet::ROUTE.name,
+        }
+    }
+
+    async fn request(
+        self,
+        history: &History,
+        token: &str,
+        inspect: bool,
+        foreign_thread: Option<Id>,
+        range: bool,
+    ) -> Proof<orch_api_core::testing::RawReply> {
+        use orch_api_contract::threads::*;
+        let world = &history.scene.rig.world;
+        let thread = foreign_thread.unwrap_or(history.thread);
+        let item = history
+            .anchors
+            .first()
+            .ok_or("historical message absent")?
+            .item;
+        let command: Id = sqlx::query_scalar("SELECT id FROM items WHERE thread_id=$1 AND kind='tool_call' ORDER BY seq_created LIMIT 1")
+            .bind(history.thread).fetch_one(&world.db.pool).await?;
+        let revision: i64 =
+            sqlx::query_scalar("SELECT execution_revision FROM threads WHERE node_id=$1")
+                .bind(history.thread)
+                .fetch_one(&world.db.pool)
+                .await?;
+        let base = format!("inspect_deleted={inspect}&projection_revision={revision}");
+        let app = &world.app;
+        let reply = match self {
+            Self::Sync => {
+                app.call(ThreadSyncGet, &[&thread])
+                    .token(token)
+                    .raw_query(&base)
+                    .send_bytes()
+                    .await
+            }
+            Self::Items => {
+                app.call(ThreadItemList, &[&thread])
+                    .token(token)
+                    .raw_query(&format!("{base}&around={item}"))
+                    .send_bytes()
+                    .await
+            }
+            Self::Item => {
+                app.call(ThreadItemGet, &[&thread, &item])
+                    .token(token)
+                    .raw_query(&base)
+                    .send_bytes()
+                    .await
+            }
+            Self::Output => {
+                app.call(ThreadItemOutputGet, &[&thread, &command])
+                    .token(token)
+                    .raw_query(&format!("{base}&offset=2&limit=17"))
+                    .send_bytes()
+                    .await
+            }
+            Self::Outline => {
+                app.call(ThreadOutlineGet, &[&thread])
+                    .token(token)
+                    .raw_query(&base)
+                    .send_bytes()
+                    .await
+            }
+            Self::Catchup => {
+                app.call(ThreadCatchupGet, &[&thread])
+                    .token(token)
+                    .raw_query(&format!("{base}&since=0"))
+                    .send_bytes()
+                    .await
+            }
+            Self::Blob => {
+                let hash = orch_types::Hash::of(CONTENT_SCOPE_BLOB);
+                let call = app
+                    .call(ThreadBlobGet, &[&thread, &hash])
+                    .token(token)
+                    .raw_query(&format!("inspect_deleted={inspect}"));
+                if range {
+                    call.header("range", "bytes=2-7").send_bytes().await
+                } else {
+                    call.send_bytes().await
+                }
+            }
+        };
+        Ok(reply)
+    }
+}
+
+const CONTENT_SCOPE_BLOB: &[u8] = b"Scoped thread image original body";
+
+async fn content_scope_fixture() -> Proof<History> {
+    use orch_api_contract::threads::{ContentPart, ImageMediaType, UploadCreate};
+    let history = seed_history(2, 1).await?;
+    let world = &history.scene.rig.world;
+    // The existing image uploader accepts the declared media type; this cohort reads original
+    // bytes, without image decoding. Preview format correctness has its own upload controls.
+    let stored = world
+        .app
+        .call(UploadCreate, &[])
+        .token(&history.scene.ada.token)
+        .header("content-type", "image/png")
+        .bytes(CONTENT_SCOPE_BLOB)
+        .send()
+        .await
+        .ok();
+    let parts = vec![ContentPart::Image {
+        blob: stored.blob,
+        media_type: ImageMediaType::Png,
+        name: "scoped-history.png".into(),
+        path: None,
+    }];
+    let changed = sqlx::query("UPDATE thread_inputs SET content=$2 WHERE id=(SELECT input_id FROM turns WHERE thread_id=$1 ORDER BY ordinal LIMIT 1)")
+        .bind(history.thread).bind(serde_json::to_value(parts)?).execute(&world.db.pool).await?;
+    assert_eq!(changed.rows_affected(), 1);
+    Ok(history)
+}
+
+async fn scoped_content_positive(case: ContentReadCase, inspect: bool) -> Proof {
+    use thread_history_scope::{denied, key, rule};
+    let history = content_scope_fixture().await?;
+    let world = &history.scene.rig.world;
+    let sibling = history
+        .scene
+        .thread_by(&history.scene.ada, "Scoped content sibling")
+        .await
+        .base
+        .id;
+    if inspect {
+        world
+            .app
+            .call(orch_api_contract::ownership::NodeDelete, &[&history.thread])
+            .token(&history.scene.ada.token)
+            .raw_body(&json!({}))
+            .send()
+            .await
+            .ok();
+    }
+    let action = if inspect { "manage" } else { "read" };
+    let variant = if inspect { "inspect_deleted" } else { "read" };
+    let operation = format!("{}.{variant}", case.operation());
+    let user = if inspect {
+        &history.scene.ada
+    } else {
+        &history.scene.cai
+    };
+    let selected = key(
+        world,
+        user.id(),
+        vec![rule(&operation, "thread", history.thread, "self", action)],
+    )
+    .await?;
+    let ordinary = case
+        .request(&history, &user.token, inspect, None, false)
+        .await?;
+    assert_eq!(
+        ordinary.status,
+        http::StatusCode::OK,
+        "ordinary {} premise: {}",
+        operation,
+        String::from_utf8_lossy(&ordinary.raw)
+    );
+    match case {
+        ContentReadCase::Blob => assert_eq!(ordinary.raw.as_ref(), CONTENT_SCOPE_BLOB),
+        ContentReadCase::Output => {
+            assert_eq!(
+                ordinary.raw.as_ref(),
+                &b"large-command-body-must-not-enter-outline".repeat(256)[2..19]
+            );
+            assert!(
+                ordinary
+                    .headers
+                    .contains_key(orch_api_contract::threads::TOTAL_LENGTH_HEADER)
+            );
+        }
+        ContentReadCase::Catchup => {
+            let body: serde_json::Value = serde_json::from_slice(&ordinary.raw)?;
+            assert!(body["items"].as_i64().ok_or("catchup item count absent")? >= 2);
+        }
+        _ => assert!(
+            String::from_utf8_lossy(&ordinary.raw).contains("Historical answer"),
+            "actual historical content premise absent"
+        ),
+    }
+    if inspect {
+        let banner: serde_json::Value = serde_json::from_str(
+            ordinary
+                .headers
+                .get("orch-inspection")
+                .ok_or("inspection header absent")?
+                .to_str()?,
+        )?;
+        assert_eq!(banner["readonly"], true);
+    }
+    let scoped = case
+        .request(&history, &selected.secret, inspect, None, false)
+        .await?;
+    assert_eq!(
+        scoped.status,
+        ordinary.status,
+        "{} actual key: {}",
+        operation,
+        String::from_utf8_lossy(&scoped.raw)
+    );
+    assert_eq!(
+        scoped.raw, ordinary.raw,
+        "the same producer must preserve {} output",
+        operation
+    );
+    for header in [
+        http::header::CONTENT_TYPE.as_str(),
+        orch_api_contract::threads::TOTAL_LENGTH_HEADER,
+        "etag",
+        "cache-control",
+        "content-disposition",
+        "orch-inspection",
+    ] {
+        assert_eq!(
+            scoped.headers.get(header),
+            ordinary.headers.get(header),
+            "same {} header {header}",
+            operation
+        );
+    }
+    if matches!(case, ContentReadCase::Blob) {
+        let partial = case
+            .request(&history, &selected.secret, inspect, None, true)
+            .await?;
+        assert_eq!(partial.status, http::StatusCode::PARTIAL_CONTENT);
+        assert_eq!(partial.raw.as_ref(), &CONTENT_SCOPE_BLOB[2..8]);
+        assert!(partial.headers.contains_key(http::header::CONTENT_RANGE));
+    }
+    let wrong = key(
+        world,
+        user.id(),
+        vec![rule(
+            "ThreadRawList",
+            "thread",
+            history.thread,
+            "self",
+            "manage",
+        )],
+    )
+    .await?;
+    denied(
+        &case
+            .request(&history, &wrong.secret, inspect, None, false)
+            .await?,
+    );
+    let wrong_action = key(
+        world,
+        user.id(),
+        vec![rule(
+            &operation,
+            "thread",
+            history.thread,
+            "self",
+            if inspect { "read" } else { "write" },
+        )],
+    )
+    .await?;
+    denied(
+        &case
+            .request(&history, &wrong_action.secret, inspect, None, false)
+            .await?,
+    );
+    let wrong_target = key(
+        world,
+        user.id(),
+        vec![rule(&operation, "thread", sibling, "self", action)],
+    )
+    .await?;
+    denied(
+        &case
+            .request(&history, &wrong_target.secret, inspect, None, false)
+            .await?,
+    );
+    let wrong_kind = key(
+        world,
+        user.id(),
+        vec![rule(&operation, "document", history.thread, "self", action)],
+    )
+    .await?;
+    denied(
+        &case
+            .request(&history, &wrong_kind.secret, inspect, None, false)
+            .await?,
+    );
+    let powerless = key(
+        world,
+        if inspect {
+            history.scene.cai.id()
+        } else {
+            history.scene.bea.id()
+        },
+        vec![rule(&operation, "thread", history.thread, "self", action)],
+    )
+    .await?;
+    let reply = case
+        .request(&history, &powerless.secret, inspect, None, false)
+        .await?;
+    assert_eq!(reply.problem().code, ErrorCode::AuthzDenied);
+    Ok(())
+}
+
+macro_rules! content_scope_controls {
+    ($read:ident, $inspect:ident, $case:expr) => {
+        #[tokio::test]
+        async fn $read() -> Proof {
+            scoped_content_positive($case, false).await
+        }
+        #[tokio::test]
+        async fn $inspect() -> Proof {
+            scoped_content_positive($case, true).await
+        }
+    };
+}
+content_scope_controls!(
+    scoped_content_sync_read,
+    scoped_content_sync_inspect,
+    ContentReadCase::Sync
+);
+content_scope_controls!(
+    scoped_content_items_read,
+    scoped_content_items_inspect,
+    ContentReadCase::Items
+);
+content_scope_controls!(
+    scoped_content_item_read,
+    scoped_content_item_inspect,
+    ContentReadCase::Item
+);
+content_scope_controls!(
+    scoped_content_output_read,
+    scoped_content_output_inspect,
+    ContentReadCase::Output
+);
+content_scope_controls!(
+    scoped_content_outline_read,
+    scoped_content_outline_inspect,
+    ContentReadCase::Outline
+);
+content_scope_controls!(
+    scoped_content_catchup_read,
+    scoped_content_catchup_inspect,
+    ContentReadCase::Catchup
+);
+content_scope_controls!(
+    scoped_content_blob_read,
+    scoped_content_blob_inspect,
+    ContentReadCase::Blob
+);

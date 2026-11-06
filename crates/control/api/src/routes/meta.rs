@@ -72,11 +72,10 @@ pub fn health_router() -> axum::Router<App> {
 
 /// The address a connector reaches the server at, as the configuration
 /// names its trust.
-fn trust_of(word: &str) -> LinkTrust {
-    if word == "public" {
-        LinkTrust::Public
-    } else {
-        LinkTrust::Pinned
+fn trust_of(trust: orch_link_contract::enrollment::Trust) -> LinkTrust {
+    match trust {
+        orch_link_contract::enrollment::Trust::Public => LinkTrust::Public,
+        orch_link_contract::enrollment::Trust::Pinned => LinkTrust::Pinned,
     }
 }
 
@@ -132,13 +131,15 @@ pub(crate) async fn meta(ctx: Ctx, (): (), (): ()) -> ApiResult<Meta> {
         push_public_key: crate::routes::notifications::push_public_key(),
         link_endpoints: ctx
             .app
-            .config
-            .gateway
-            .endpoints
-            .iter()
+            .link
+            .certificates()
+            .gateway_discovery()
+            .gateways
+            .into_iter()
+            .flat_map(|gateway| gateway.endpoints)
             .map(|endpoint| MetaLinkEndpoint {
-                url: endpoint.url.clone(),
-                trust: trust_of(&endpoint.trust),
+                url: endpoint.url,
+                trust: trust_of(endpoint.trust),
             })
             .collect(),
         limits: MetaLimits {

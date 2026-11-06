@@ -23,6 +23,9 @@ import { chatOpening, nodeChatOpening, documentPages } from './screen-openings.t
 const BASE = '/api/v1';
 const HOST = '127.0.0.1';
 const PORT = Number(process.env.ORCH_DOUBLE_PORT ?? 41871);
+const TRACE_HTTP = process.env.ORCH_DOUBLE_TRACE === '1';
+let nextTrace = 0;
+let activeTraces = 0;
 
 const world = new World(process.argv.includes('--fresh') ? { scenario: 'fresh' } : {});
 const requestIds = new WeakMap<IncomingMessage, string>();
@@ -295,7 +298,7 @@ async function control(request: IncomingMessage, path: string): Promise<Answer> 
     case '/model/entry': {
       // A manager of the provider writes a model's entry anew: what it offers, what it opens to threads, what a thread starts with.
       const modelName = typeof body.model_name === 'string' ? body.model_name : '';
-      world.threads.setEntry(modelName, typeof body.display_name === 'string' ? body.display_name : '', body.parameters ?? {}, Array.isArray(body.groups) ? body.groups.map(String) : undefined);
+      world.threads.setEntry(modelName, typeof body.display_name === 'string' ? body.display_name : '', body.parameters ?? {}, Array.isArray(body.groups) ? body.groups.map(String) : undefined, typeof body.provider_id === 'string' ? body.provider_id : undefined);
       return { status: 204 };
     }
     case '/model/feature': {
@@ -322,6 +325,21 @@ const server = createServer((request, response) => {
   const requestId = randomUUID();
   requestIds.set(request, requestId);
   const url = new URL(request.url ?? '/', `http://${HOST}`);
+  if (TRACE_HTTP) {
+    const trace = ++nextTrace;
+    const started = performance.now();
+    activeTraces += 1;
+    console.warn(`[double-http] #${trace} begin ${request.method ?? 'GET'} ${url.pathname} active=${activeTraces}`);
+    let ended = false;
+    const finish = (state: string) => {
+      if (ended) return;
+      ended = true;
+      activeTraces -= 1;
+      console.warn(`[double-http] #${trace} ${state} status=${response.statusCode} ms=${(performance.now() - started).toFixed(1)} active=${activeTraces}`);
+    };
+    response.once('finish', () => finish('finish'));
+    response.once('close', () => finish('closed'));
+  }
   const answer = async (): Promise<Answer> => {
     if (url.pathname === '/health') return { status: 200, body: 'ok' };
     if (url.pathname.startsWith('/__double/')) return control(request, url.pathname.slice('/__double'.length));

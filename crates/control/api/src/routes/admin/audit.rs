@@ -273,11 +273,9 @@ impl Writing {
             }
         }
         let (mut authority, guard) = transaction_guard::begin(&self.ctx).await?;
-        if !self.place && !guard.user().is_system_admin() {
-            return Err(ApiError::new(
-                orch_api_contract::common::ErrorCode::AuthzDenied,
-                "system administration was withdrawn",
-            ));
+        if !self.place {
+            self.ctx
+                .ordinary_system_admin_with(guard.user(), guard.principal().caller())?;
         }
         if self.place
             && let Some(node) = self.filter.node
@@ -372,11 +370,8 @@ pub(crate) async fn export_scope(
     }
     let (mut tx, guard) = transaction_guard::begin(&ctx).await?;
     ctx.now = guard.now().get();
-    if !place && !guard.user().is_system_admin() {
-        return Err(ApiError::new(
-            orch_api_contract::common::ErrorCode::AuthzDenied,
-            "system administration was withdrawn",
-        ));
+    if !place {
+        ctx.ordinary_system_admin_with(guard.user(), guard.principal().caller())?;
     }
     let admin = guard.user().id();
     let who = guard.user().user.display_name.clone();

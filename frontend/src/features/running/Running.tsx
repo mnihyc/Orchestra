@@ -1,14 +1,15 @@
 /** The same live native list on a desktop dialog and a phone sheet, with reviewed exact End and actual outcomes. */
 import { useMutation, useQuery } from '@tanstack/react-query';
 import { Link } from '@tanstack/react-router';
+import { SquareTerminal } from 'lucide-react';
 import { useCallback, useEffect, useRef, useState } from 'react';
 import { useTranslation } from 'react-i18next';
 import { EmptyState } from '@/ui/EmptyState';
 import { endBackground } from '@/api/background';
 import { jobQuery, isOver } from '@/api/forks';
-import type { BackgroundCommand, BackgroundEndRequest, BackgroundEndResult, ThreadBackground } from '@/generated/api-types';
+import type { BackgroundCommand, BackgroundEndRequest, BackgroundEndResult, BackgroundWork, ThreadBackground } from '@/generated/api-types';
 import { useFormatContext } from '@/lib/appearance';
-import { formatBytes, formatPercent } from '@/lib/format';
+import { formatBytes, formatNumber, formatPercent } from '@/lib/format';
 import { newActKey } from '@/lib/requests';
 import { socket } from '@/realtime/live';
 import { Button } from '@/ui/Button';
@@ -17,22 +18,27 @@ import { ConfirmDialog } from '@/ui/ConfirmDialog';
 import { Dialog } from '@/ui/Dialog';
 import { Drawer } from '@/ui/Drawer';
 import { ErrorAlert } from '@/ui/ErrorState';
+import { IconButton } from '@/ui/IconButton';
 import { RelativeTime } from '@/ui/RelativeTime';
-import { useRunning } from './live';
-import { canEndAll, endResults, loadReview, reviewedRequest } from './review';
+import { Tooltip } from '@/ui/Tooltip';
+import { canEndAll, endResults, loadReview, reviewedRequest, reviewedTargetRequest, type BackgroundEndTarget } from './review';
+import { backgroundName } from './backgroundWake';
 
 /** The phone boundary matches the application's md layout breakpoint. */
 const PHONE = '(max-width: 767px)';
 /** Selected requests have the same two-hundred-id bound as the served contract. */
 const SELECTED_MAX = 200;
 
-function CommandCard({ thread, command, canEnd, checked, onCheck, onEnd }: { thread: string; command: BackgroundCommand; canEnd: boolean; checked: boolean; onCheck: (checked: boolean) => void; onEnd: () => void }) {
+function CommandCard({ thread, command, task, canEnd, checked, onCheck, onEnd }: { thread: string; command: BackgroundCommand; task?: BackgroundWork; canEnd: boolean; checked: boolean; onCheck: (checked: boolean) => void; onEnd: () => void }) {
   const { t } = useTranslation(); const format = useFormatContext();
+  const name = task === undefined ? command.command ?? t('running.unknownCommand') : backgroundName(task, t);
+  const label = task?.kind === 'subagent' ? <span className="wrap-anywhere text-sm">{name}</span> : <code className="break-all text-sm">{name}</code>;
   return <li className="flex flex-col gap-2 rounded-lg border border-border p-3">
     <div className="flex min-w-0 items-start justify-between gap-2">
-      {canEnd ? <Checkbox checked={checked} onCheckedChange={onCheck} label={<code className="break-all text-sm">{command.command ?? t('running.unknownCommand')}</code>} /> : <code className="break-all text-sm">{command.command ?? t('running.unknownCommand')}</code>}
+      {canEnd ? <Checkbox checked={checked} onCheckedChange={onCheck} label={label} /> : label}
       {canEnd && <Button size="sm" variant="ghost" onClick={onEnd}>{t('running.end')}</Button>}
     </div>
+    {task !== undefined && <span className="text-xs text-text-muted">{t(`backgroundWake.states.${task.state}`)}</span>}
     <dl className="grid grid-cols-[auto_minmax(0,1fr)] gap-x-3 gap-y-1 text-xs text-text-muted">
       <dt>{t('running.directory')}</dt><dd className="break-all">{command.cwd_redacted ? t('running.redacted') : command.cwd ?? t('running.notReported')}</dd>
       <dt>{t('running.since')}</dt><dd>{command.since === null ? t('running.notReported') : <RelativeTime at={command.since} />}</dd>
@@ -45,7 +51,7 @@ function CommandCard({ thread, command, canEnd, checked, onCheck, onEnd }: { thr
   </li>;
 }
 
-export function RunningDialog({ thread, close }: { thread: string; close: () => void }) {
+export function RunningDialog({ thread, close, endTarget }: { thread: string; close: () => void; endTarget?: BackgroundEndTarget }) {
   const { t } = useTranslation();
   const [phone, setPhone] = useState(() => window.matchMedia(PHONE).matches);
   const [roster, setRoster] = useState<ThreadBackground | null>(null);
@@ -56,6 +62,7 @@ export function RunningDialog({ thread, close }: { thread: string; close: () => 
   const [jobId, setJobId] = useState<string | null>(null);
   const [results, setResults] = useState<BackgroundEndResult['results']>([]);
   const transfer = useRef<AbortController | null>(null);
+  const requestedEnd = useRef(false);
   const refresh = useCallback(async () => {
     transfer.current?.abort(); const controller = new AbortController(); transfer.current = controller;
     setLoading(true); setRoster(null); setSelected(new Set()); setConfirm(null); setError(null);
@@ -73,6 +80,18 @@ export function RunningDialog({ thread, close }: { thread: string; close: () => 
     if (status.phase !== 'ready') { transfer.current?.abort(); setRoster(null); setConfirm(null); setLoading(false); }
     else if (previous.phase !== 'ready') void refresh();
   }), [refresh]);
+  useEffect(() => {
+    if (requestedEnd.current || endTarget === undefined || roster === null || loading) return;
+    let active = true;
+    queueMicrotask(() => {
+      if (!active || socket.status.getState().phase !== 'ready') return;
+      requestedEnd.current = true;
+      const request = reviewedTargetRequest(roster, endTarget);
+      if (request === null) setError(new Error(t('backgroundWake.reviewChanged')));
+      else setConfirm({ request, key: newActKey(), count: 1 });
+    });
+    return () => { active = false; };
+  }, [endTarget, roster, loading, t]);
   const end = useMutation({ mutationFn: ({ request, key }: { request: BackgroundEndRequest; key: string }) => endBackground(thread, request, key), onSuccess: (job) => { setJobId(job.id); setConfirm(null); setRoster(null); } });
   const job = useQuery({ ...jobQuery(jobId ?? ''), enabled: jobId !== null });
   const finished = useRef<string | null>(null);
@@ -98,7 +117,10 @@ export function RunningDialog({ thread, close }: { thread: string; close: () => 
       {roster.state !== 'live' || !roster.supported ? <p role="status" className="text-sm text-text-muted">{unavailableMessage}</p> : null}
       {roster.total === null && roster.state === 'live' && <p className="text-sm text-text-muted">{t('running.partial')}</p>}
       {roster.state === 'live' && roster.total === 0 && <EmptyState compact title={t('running.empty')} />}
-      <ul className="flex flex-col gap-2">{roster.items.map((command) => <CommandCard key={command.id} thread={thread} command={command} canEnd={roster.can_end && !busy} checked={selected.has(command.id)} onCheck={(checked) => setSelected((current) => { const next = new Set(current); if (checked && next.size < SELECTED_MAX) next.add(command.id); else if (!checked) next.delete(command.id); return next; })} onEnd={() => choose([command.id])} />)}</ul>
+      <ul className="flex flex-col gap-2">{roster.items.map((command) => {
+        const task = roster.wake?.tasks.find((task) => task.end_id === command.id);
+        return <CommandCard key={command.id} thread={thread} command={command} {...(task === undefined ? {} : { task })} canEnd={roster.can_end && !busy && (task === undefined || task.can_end && task.state === 'running')} checked={selected.has(command.id)} onCheck={(checked) => setSelected((current) => { const next = new Set(current); if (checked && next.size < SELECTED_MAX) next.add(command.id); else if (!checked) next.delete(command.id); return next; })} onEnd={() => choose([command.id])} />;
+      })}</ul>
     </>}
     {job.data !== undefined && (job.data.error === null ? <p role="status" className="text-sm text-text-muted">{t('running.job', { percent: job.data.progress.percent })}</p> : <ErrorAlert error={job.data.error} />)}
     {job.error !== null && <ErrorAlert error={job.error} />}
@@ -114,9 +136,13 @@ export function RunningDialog({ thread, close }: { thread: string; close: () => 
   </>;
 }
 
-export function RunningControl({ threadId }: { threadId: string }) {
-  const { t } = useTranslation(); const { roster, closed } = useRunning(threadId); const [open, setOpen] = useState(false);
-  if (closed || (!open && roster?.supported === true && roster.state === 'live' && roster.total === 0)) return null;
-  const label = roster?.state === 'live' && roster.total !== null ? t('running.count', { count: roster.total }) : t('running.title');
-  return <><Button size="sm" variant="ghost" onClick={() => setOpen(true)}>{label}</Button>{open && <RunningDialog key={threadId} thread={threadId} close={() => setOpen(false)} />}</>;
+export function RunningControl({ roster, closed, opened, onOpen }: { roster: ThreadBackground | null; closed: boolean; opened: boolean; onOpen: () => void }) {
+  const { t } = useTranslation();
+  const { locale } = useFormatContext();
+  const total = roster?.supported === true && roster.state === 'live' ? roster.total : null;
+  if (closed || (!opened && total === 0)) return null;
+  const label = total === null ? t('running.title') : t('running.count', { count: total, replace: { count: formatNumber(total, locale) } });
+  const firstLine = { marginBlockStart: 'calc((var(--text-lg--line-height) - var(--control-sm)) / 2)' };
+  return total === null ? <IconButton size="sm" style={firstLine} label={t('running.title')} icon={<SquareTerminal aria-hidden />} aria-haspopup="dialog" aria-expanded={opened} onClick={onOpen} />
+    : <Tooltip content={t('running.title')}><Button size="sm" variant="ghost" style={firstLine} aria-haspopup="dialog" aria-expanded={opened} onClick={onOpen}>{label}</Button></Tooltip>;
 }

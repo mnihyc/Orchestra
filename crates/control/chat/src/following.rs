@@ -26,24 +26,110 @@ use orch_db::queries::chats::{self as rows, ChatRow, StateRow};
 use orch_db::queries::{storage, uploads};
 use orch_realtime_contract::feeds::UserEvent;
 use orch_types::{Hash, Id, Seq, Time};
+use std::collections::HashSet;
 
-/// Whether the caller retained these bytes or may currently read a saved source of them.
-pub async fn may_use_blob(
+/// A possible or selected source of supplied bytes. The identity alone grants no authority;
+/// a content hash is never an object identifier, and candidates may not be readable.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub enum BlobOrigin {
+    /// The person already retained the bytes through an upload or authorized copy.
+    RetainedByCaller,
+    /// A saved chat source.
+    Chat(Id),
+    /// A saved thread source.
+    Thread(Id),
+    /// A saved document source.
+    Document(Id),
+    /// A saved environment-file source.
+    Environment(Id),
+}
+
+/// Current candidate identities associated with these bytes, without projecting resource names
+/// or content and without granting access to any candidate. Personal retention comes first.
+pub async fn blob_origins(
+    conn: &mut Conn,
+    user: Id,
+    hash: &Hash,
+) -> Result<Vec<BlobOrigin>, Error> {
+    let mut origins = Vec::new();
+    if uploads::owns(conn, user, hash).await? {
+        origins.push(BlobOrigin::RetainedByCaller);
+    }
+    origins.extend(saved_blob_origins(conn, user, hash).await?);
+    Ok(origins)
+}
+
+async fn saved_blob_origins(
+    conn: &mut Conn,
+    user: Id,
+    hash: &Hash,
+) -> Result<Vec<BlobOrigin>, Error> {
+    Ok(uploads::sources(conn, user, hash)
+        .await?
+        .into_iter()
+        .filter_map(|(kind, id)| match kind.as_str() {
+            "chat" => Some(BlobOrigin::Chat(id)),
+            "thread" => Some(BlobOrigin::Thread(id)),
+            "document" => Some(BlobOrigin::Document(id)),
+            "environment" => Some(BlobOrigin::Environment(id)),
+            _ => None,
+        })
+        .collect())
+}
+
+/// Selects the same authority source as the ordinary blob-use check: personal retention first,
+/// otherwise the first currently readable saved source. No policy or additional scope is inferred.
+pub async fn blob_origin(
     conn: &mut Conn,
     principal: &Principal,
     hash: &Hash,
-) -> Result<bool, Error> {
-    if uploads::owns(conn, principal.user(), hash).await? {
-        return Ok(true);
+) -> Result<Option<BlobOrigin>, Error> {
+    select_blob_origin(conn, principal, hash, None).await
+}
+
+/// Selects an allowed candidate only while its association with this hash and its ordinary read
+/// authority still hold. The central operation planner supplies `allowed`; this helper never
+/// evaluates key scope. A disallowed retained-upload path does not hide a valid saved-source path.
+pub async fn blob_origin_in(
+    conn: &mut Conn,
+    principal: &Principal,
+    hash: &Hash,
+    allowed: &[BlobOrigin],
+) -> Result<Option<BlobOrigin>, Error> {
+    if allowed.is_empty() {
+        return Ok(None);
     }
-    for (kind, id) in uploads::sources(conn, principal.user(), hash).await? {
-        let allowed = match kind.as_str() {
-            "chat" => {
-                let origin = orch_db::audit::Origin::default();
+    // A hash may appear in many resources. Set membership avoids comparing every current source
+    // with every planner candidate while keeping the existing source traversal order.
+    let allowed: HashSet<_> = allowed.iter().copied().collect();
+    select_blob_origin(conn, principal, hash, Some(&allowed)).await
+}
+
+async fn select_blob_origin(
+    conn: &mut Conn,
+    principal: &Principal,
+    hash: &Hash,
+    allowed: Option<&HashSet<BlobOrigin>>,
+) -> Result<Option<BlobOrigin>, Error> {
+    let permitted = |origin: BlobOrigin| allowed.is_none_or(|allowed| allowed.contains(&origin));
+    if permitted(BlobOrigin::RetainedByCaller)
+        && uploads::owns(conn, principal.user(), hash).await?
+    {
+        return Ok(Some(BlobOrigin::RetainedByCaller));
+    }
+    // Resolve associations again here: a candidate supplied earlier or by another caller is no proof.
+    for origin in saved_blob_origins(conn, principal.user(), hash).await? {
+        if !permitted(origin) {
+            continue;
+        }
+        let allowed = match origin {
+            BlobOrigin::RetainedByCaller => false,
+            BlobOrigin::Chat(id) => {
+                let audit_origin = orch_db::audit::Origin::default();
                 let act = Acting {
                     principal,
                     now: principal.now().get(),
-                    origin: &origin,
+                    origin: &audit_origin,
                 };
                 match crate::chats::load(conn, &act, id, crate::chats::Mode::Read).await {
                     Ok(_) => true,
@@ -52,7 +138,7 @@ pub async fn may_use_blob(
                     Err(_) => false,
                 }
             }
-            "thread" => matches!(
+            BlobOrigin::Thread(id) => matches!(
                 nodes::check(
                     conn,
                     principal,
@@ -64,11 +150,11 @@ pub async fn may_use_blob(
                 .await,
                 Ok(Decision::Allowed { .. })
             ),
-            "document" => matches!(
+            BlobOrigin::Document(id) => matches!(
                 documents::check(conn, principal, id, Permission::DocView, Policy::default()).await,
                 Ok(Decision::Allowed { .. })
             ),
-            "environment" => matches!(
+            BlobOrigin::Environment(id) => matches!(
                 resources::check(
                     conn,
                     principal,
@@ -82,13 +168,21 @@ pub async fn may_use_blob(
                 .await,
                 Ok(Decision::Allowed { .. })
             ),
-            _ => false,
         };
         if allowed {
-            return Ok(true);
+            return Ok(Some(origin));
         }
     }
-    Ok(false)
+    Ok(None)
+}
+
+/// Whether the caller retained these bytes or may currently read a saved source of them.
+pub async fn may_use_blob(
+    conn: &mut Conn,
+    principal: &Principal,
+    hash: &Hash,
+) -> Result<bool, Error> {
+    Ok(blob_origin(conn, principal, hash).await?.is_some())
 }
 
 /// Refuses a hash without an authorized upload or readable saved source, concealing its existence.
@@ -99,6 +193,29 @@ pub async fn require_blobs(
 ) -> Result<(), Error> {
     for hash in hashes {
         if !may_use_blob(conn, principal, hash).await? {
+            return Err(Error::NotFound);
+        }
+    }
+    Ok(())
+}
+
+/// Rechecks only the operation planner's selected source for each requested hash.
+/// An unselected readable source or newly retained personal copy grants no fallback.
+pub async fn require_blobs_in(
+    conn: &mut Conn,
+    principal: &Principal,
+    hashes: &[Hash],
+    selected: &[(Hash, BlobOrigin)],
+) -> Result<(), Error> {
+    for hash in hashes {
+        let allowed: Vec<_> = selected
+            .iter()
+            .filter_map(|(selected_hash, origin)| (selected_hash == hash).then_some(*origin))
+            .collect();
+        if blob_origin_in(conn, principal, hash, &allowed)
+            .await?
+            .is_none()
+        {
             return Err(Error::NotFound);
         }
     }
@@ -585,6 +702,28 @@ pub async fn save_draft(
     parts: &[ChatPart],
     reply_to: Option<Id>,
 ) -> Result<ChatDraft, Error> {
+    save_draft_in(conn, act, loaded, parts, reply_to, None).await
+}
+
+/// The same ordinary draft writer, restricted to the planner's admitted byte witnesses.
+pub async fn save_draft_with_blob_origins(
+    conn: &mut Conn,
+    act: &Acting<'_>,
+    loaded: &Loaded,
+    parts: &[ChatPart],
+    reply_to: Option<Id>,
+    selected: &[(Hash, BlobOrigin)],
+) -> Result<ChatDraft, Error> {
+    save_draft_in(conn, act, loaded, parts, reply_to, Some(selected)).await
+}
+
+/// The writer's existing effect-free validation, also used before selecting stored sources.
+pub async fn check_draft(
+    conn: &mut Conn,
+    loaded: &Loaded,
+    parts: &[ChatPart],
+    reply_to: Option<Id>,
+) -> Result<(), Error> {
     loaded.ensure_send()?;
     ensure_own(loaded)?;
     if parts.len() > usize::try_from(CHAT_MESSAGE_MAX_PARTS).unwrap_or(usize::MAX) {
@@ -607,6 +746,18 @@ pub async fn save_draft(
     {
         return Err(Error::invalid("reply_to", "is not a message of this chat"));
     }
+    Ok(())
+}
+
+async fn save_draft_in(
+    conn: &mut Conn,
+    act: &Acting<'_>,
+    loaded: &Loaded,
+    parts: &[ChatPart],
+    reply_to: Option<Id>,
+    selected: Option<&[(Hash, BlobOrigin)]>,
+) -> Result<ChatDraft, Error> {
+    check_draft(conn, loaded, parts, reply_to).await?;
     let content =
         serde_json::to_value(parts).map_err(|error| Error::Internal(error.to_string()))?;
     uploads::lock_chat_draft(conn, act.user(), loaded.id()).await?;
@@ -621,7 +772,11 @@ pub async fn save_draft(
     let mut all = old.clone();
     all.extend(new.iter().copied());
     uploads::lock_blobs(conn, &all).await?;
-    require_blobs(conn, act.principal, &new).await?;
+    if let Some(selected) = selected {
+        require_blobs_in(conn, act.principal, &new, selected).await?;
+    } else {
+        require_blobs(conn, act.principal, &new).await?;
+    }
     let largest = attachments::largest(conn, &loaded.row).await?;
     attachments::check(conn, parts, largest).await?;
     let added: Vec<Hash> = new

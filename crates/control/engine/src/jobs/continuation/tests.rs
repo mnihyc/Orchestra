@@ -85,6 +85,8 @@ impl crate::commands::Commands for RecoveredCommands {
         if id == self.expected.id {
             Ok(Some(crate::commands::RetainedCommand {
                 machine: self.expected.machine,
+                kind: self.command.kind.clone(),
+                key: self.command.key.clone(),
                 body: self.expected.body.clone(),
             }))
         } else {
@@ -140,6 +142,17 @@ impl crate::commands::Commands for RecoveredCommands {
                 .await;
         }
         Ok(active)
+    }
+    async fn stopped(&self, id: Id) -> Result<bool, crate::commands::CommandsError> {
+        if id != self.expected.id {
+            return self.inner.stopped(id).await;
+        }
+        // This recovered Started command writes its real refusal only after
+        // CommandServer has joined the handler's interrupted cleanup.
+        Ok(self
+            .server
+            .entry(id)
+            .is_some_and(|entry| entry.result().is_some()))
     }
     fn hears_behind(&self, machine: Id, stream: &orch_link_contract::streams::Stream) -> bool {
         self.inner.hears_behind(machine, stream)

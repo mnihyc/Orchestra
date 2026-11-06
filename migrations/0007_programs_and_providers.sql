@@ -170,6 +170,7 @@ CREATE TABLE providers (
     config jsonb DEFAULT '{}'::jsonb NOT NULL,
     login_state jsonb,
     login_pending bytea,
+    login_authority jsonb,
     login_pending_at timestamp with time zone,
     protocols text[] DEFAULT '{}'::text[] NOT NULL,
     machine_id uuid,

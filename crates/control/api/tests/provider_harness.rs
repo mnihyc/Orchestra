@@ -11,13 +11,14 @@ mod support;
 
 use orch_api_contract::binding::{EnvironmentChoice, ThreadBindingSet, ThreadBindingSetBody};
 use orch_api_contract::common::ErrorCode;
-use orch_api_contract::nodes::{CreateThread, CreateThreadBinding, ThreadCreate};
+use orch_api_contract::nodes::{
+    CreateThread, CreateThreadBinding, ThreadCreate, ThreadCreateResponse,
+};
 use orch_api_contract::resources::{
     NativeSession, Provider, ProviderFactsOverridesSet, ProviderFactsOverridesSetBody, ProviderGet,
     ProviderHarnessRestart, ProviderHarnessSessionList, ProviderKeySet, ProviderKeySetBody,
     ProviderRefresh, ProviderStatus,
 };
-use orch_api_contract::threads::Thread;
 use orch_link_contract::commands::{
     AgentDiscoverSessionsResult, AgentStartResult, CommandKind, CommandResult, Empty,
     ProviderDiscoverModelsResult, ProviderRefreshResult,
@@ -77,7 +78,7 @@ async fn a_provider_read_keeps_the_last_program_error_beside_a_restarted_online_
     );
 }
 
-async fn try_thread(s: &Scene, by: &Who) -> orch_api_core::testing::Reply<Thread> {
+async fn try_thread(s: &Scene, by: &Who) -> orch_api_core::testing::Reply<ThreadCreateResponse> {
     s.rig
         .world
         .app
@@ -119,7 +120,7 @@ async fn the_first_thread_on_a_profile_whose_harness_never_ran_has_the_harness_s
     forget_what_the_harness_is(&s).await;
     let made = try_thread(&s, &s.ada).await;
     assert!(made.status.is_success(), "{:?}", made.body);
-    let thread = made.ok();
+    let thread = made.ok().into_full().unwrap();
     assert_eq!(
         started(&s),
         1,

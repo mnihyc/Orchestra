@@ -1,0 +1,49 @@
+import type { ConnectorGatewayStatus, GatewayCatalogue, ThreadTunnelGatewayStatus } from '@/generated/api-types';
+import { setLocale } from '@/i18n';
+import { useAppearance } from '@/lib/appearance';
+
+export const catalogue: GatewayCatalogue = { revision: 'catalogue-before', gateways: [
+  { id: 'eu', label: 'Europe gateway', region: 'Europe', endpoints: [
+    { url: 'wss://eu.gateway.example.test:9443', trust: 'pinned' },
+    { url: 'wss://europe-public.gateway.example.test/link', trust: 'public' },
+  ] },
+  { id: 'asia', label: 'Asia tools', region: 'Asia', endpoints: [{ url: 'wss://asia.gateway.example.test:9443', trust: 'pinned' }] },
+] };
+export const connector: ConnectorGatewayStatus = {
+  machine_id: '00000000-0000-4000-8000-000000000001', selection: 'automatic', selected_gateway_id: null,
+  primary_gateway_id: 'asia', connected: true, measured_at: '2026-11-06T10:00:00Z',
+  measurements: [
+    { gateway_id: 'eu', endpoint: catalogue.gateways[0]!.endpoints[0]!, round_trip_ms: 190 },
+    { gateway_id: 'eu', endpoint: catalogue.gateways[0]!.endpoints[1]!, round_trip_ms: 205 },
+    { gateway_id: 'asia', endpoint: catalogue.gateways[1]!.endpoints[0]!, round_trip_ms: 18 },
+  ],
+};
+export const tunnel: ThreadTunnelGatewayStatus = {
+  thread_id: '00000000-0000-4000-8000-000000000002', state: 'attached', source_primary_gateway_id: 'eu',
+  destination_primary_gateway_id: 'asia', attached_gateway_id: 'asia', refusal: null,
+  plan: { plan_id: '00000000-0000-4000-8000-000000000003', src: connector.machine_id,
+    dst: '00000000-0000-4000-8000-000000000004', preferred_gateway: catalogue.gateways[1]!,
+    common_fallbacks: [catalogue.gateways[0]!], catalogue_revision: catalogue.revision },
+};
+export const modes = (['en', 'zh-CN'] as const).flatMap((locale) => (['light', 'dark'] as const).flatMap((theme) =>
+  ([400, 1440] as const).map((width) => ({ locale, theme, width }))));
+const appearance = useAppearance.getState();
+const beforeTheme = document.documentElement.dataset.theme;
+const beforeDark = document.documentElement.classList.contains('dark');
+const beforeWidth = window.innerWidth;
+export async function look(mode: (typeof modes)[number]) {
+  await setLocale(mode.locale);
+  useAppearance.setState({ theme: mode.theme, resolvedTheme: mode.theme });
+  document.documentElement.dataset.theme = mode.theme;
+  document.documentElement.classList.toggle('dark', mode.theme === 'dark');
+  Object.defineProperty(window, 'innerWidth', { configurable: true, value: mode.width });
+  window.dispatchEvent(new Event('resize'));
+}
+export async function restore() {
+  useAppearance.setState(appearance);
+  if (beforeTheme === undefined) delete document.documentElement.dataset.theme;
+  else document.documentElement.dataset.theme = beforeTheme;
+  document.documentElement.classList.toggle('dark', beforeDark);
+  Object.defineProperty(window, 'innerWidth', { configurable: true, value: beforeWidth });
+  await setLocale('en');
+}

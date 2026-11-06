@@ -173,6 +173,9 @@ pub struct Recipe {
     pub result: ForkResult,
     /// What was asked.
     pub request: ForkRequest,
+    /// Captured at preview; old jobs must not acquire a later parent preset.
+    #[serde(default)]
+    pub agent_access: Option<crate::binding::BirthAgentAccess>,
     /// The plan as it was worked out when it was confirmed.
     pub forkplan: ForkPlan,
     /// The options that apply.
@@ -185,6 +188,12 @@ pub struct Recipe {
     pub new_segment: Id,
     /// Who confirmed it.
     pub by: Id,
+    /// An agent that confirmed a fork, while its giver remains the new thread's first owner.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub by_agent: Option<Id>,
+    /// The original directing turn, retained for truthful responsibility after the tool returns.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub by_agent_turn: Option<Id>,
     /// The environment the source is in.
     pub from_environment: Id,
     /// The environment the result lands in, when it exists already.
@@ -311,6 +320,16 @@ impl Engine {
         if let Some(job) = crate::locks::held_by(&mut tx, thread).await? {
             return Err(PlanError::Held(job));
         }
+        let agent_access = match stored.agent_access {
+            Some(crate::binding::BirthAgentAccess::ResolvePreset) => {
+                return Err(PlanError::Expired);
+            }
+            Some(choice) => choice,
+            None if stored.request.result == ForkResult::Replace => {
+                crate::binding::BirthAgentAccess::nothing()
+            }
+            None => return Err(PlanError::Expired),
+        };
         let mut request = stored.request.clone();
         // A fingerprint is the observation shown at preflight, never a condition of moving or starting work.
         request.check_fingerprints = None;
@@ -332,6 +351,7 @@ impl Engine {
                 &request,
                 crate::fork_plan::Reach::Seen,
                 None,
+                Some(agent_access),
             )
             .await?;
         if !draft.is_clear() {
@@ -358,6 +378,76 @@ impl Engine {
         batch: Option<Id>,
         preflight: Id,
     ) -> Result<JobRow, PlanError> {
+        self.start_fork_job_with_authority(
+            tx,
+            source::Authority::Direct(caller),
+            thread,
+            draft,
+            batch,
+            preflight,
+        )
+        .await
+    }
+
+    /// Starts a normal fork with retained agent/giver authority at every deferred boundary.
+    pub(crate) async fn start_agent_fork_job(
+        &self,
+        tx: &mut orch_db::Tx,
+        caller: &Caller,
+        origin: (Id, Id),
+        thread: &threads::ThreadRow,
+        draft: Draft,
+    ) -> Result<JobRow, PlanError> {
+        self.start_fork_job_with_authority(
+            tx,
+            source::Authority::Agent {
+                caller,
+                thread: origin.0,
+                turn: origin.1,
+            },
+            thread,
+            draft,
+            None,
+            new_id(),
+        )
+        .await
+    }
+
+    /// The configured recovery only replaces its existing binding. Its accepted input
+    /// origins remain independent through every later job checkpoint.
+    pub(crate) async fn start_recovery_fork_job(
+        &self,
+        tx: &mut orch_db::Tx,
+        callers: &crate::inputs::InputCallers,
+        input_id: Id,
+        thread: &threads::ThreadRow,
+        draft: Draft,
+        preflight: Id,
+    ) -> Result<JobRow, PlanError> {
+        self.start_fork_job_with_authority(
+            tx,
+            source::Authority::Recovery { input_id, callers },
+            thread,
+            draft,
+            None,
+            preflight,
+        )
+        .await
+    }
+
+    async fn start_fork_job_with_authority(
+        &self,
+        tx: &mut orch_db::Tx,
+        authority: source::Authority<'_>,
+        thread: &threads::ThreadRow,
+        draft: Draft,
+        batch: Option<Id>,
+        preflight: Id,
+    ) -> Result<JobRow, PlanError> {
+        if matches!(&authority, source::Authority::Recovery { .. }) && draft.copy_worktree {
+            return Err(EngineError::unreadable("an input recovery cannot copy a worktree").into());
+        }
+        let actor = authority.actor();
         let now = self.inner.clock.now();
         let conn: &mut orch_db::Conn = &mut *tx;
         let replace = draft.request.result == ForkResult::Replace;
@@ -380,12 +470,21 @@ impl Engine {
         let recipe = Recipe {
             preflight_id: preflight,
             result: draft.request.result,
+            agent_access: Some(draft.agent_access),
             request: draft.request,
             options: plan.options.clone(),
             source_thread: thread.node_id,
             new_thread: (!replace).then(new_id),
             new_segment: new_id(),
-            by: caller.user(),
+            by: actor,
+            by_agent: match &authority {
+                source::Authority::Agent { thread, .. } => Some(*thread),
+                _ => None,
+            },
+            by_agent_turn: match &authority {
+                source::Authority::Agent { turn, .. } => Some(*turn),
+                _ => None,
+            },
             from_environment,
             to_environment,
             source_segment: thread.current_segment_id,
@@ -395,11 +494,14 @@ impl Engine {
         let phases = phases_of(&recipe.forkplan);
         let mut plan_json = serde_json::to_value(&recipe)?;
         let operation = new_id();
-        let confirmed = source::confirmed(conn, thread, caller, &recipe, operation, reach).await?;
+        let confirmed =
+            source::confirmed(conn, thread, &authority, &recipe, operation, reach).await?;
         source::attach(&mut plan_json, &confirmed)?;
         plan_json["copy_worktree"] = json!(copy_worktree);
         plan_json["mount_decisions"] = serde_json::to_value(&mount_decisions)?;
-        plan_json["file_caller_token"] = json!(caller.grant().and_then(|grant| grant.token()));
+        if let source::Authority::Direct(caller) = &authority {
+            plan_json["file_caller_token"] = json!(caller.grant().and_then(|grant| grant.token()));
+        }
         if let Some(object) = plan_json.as_object_mut() {
             object.insert(
                 "origin".to_owned(),
@@ -438,7 +540,7 @@ impl Engine {
                 batch,
                 plan: &plan_json,
                 progress: &progress,
-                created_by: caller.user(),
+                created_by: actor,
             },
             now,
         )
@@ -577,6 +679,19 @@ impl Forking {
     async fn lock(&self, job: &Job) -> Result<Done, Stop> {
         let engine = job.engine();
         let thread = self.recipe.source_thread;
+        if crate::background_wake::running(
+            &mut *engine.db().acquire().await.map_err(EngineError::from)?,
+            Some(thread),
+            None,
+            None,
+        )
+        .await?
+        {
+            return Err(failed(
+                "background_tasks_running",
+                "Review and end the running background tasks before forking or switching this session.",
+            ));
+        }
         if !self.replace() && wants_history(&self.recipe.request) {
             // All on a confirmed empty source still owns an explicit empty cut
             // before any target is created. Missing is never evidence of empty.
@@ -624,6 +739,19 @@ impl Forking {
                 job.progress(0.0, Some("waiting for the turn to end"))
                     .await?;
                 job.pause(LOOK_EVERY).await?;
+            }
+            if crate::background_wake::running(
+                &mut *engine.db().acquire().await.map_err(EngineError::from)?,
+                Some(thread),
+                None,
+                None,
+            )
+            .await?
+            {
+                return Err(failed(
+                    "background_tasks_running",
+                    "Review and end the running background tasks before changing this session.",
+                ));
             }
             // With the turn out of the way, the thread stands blocked as `switching`.
             if let Err(error) = engine.preflight(thread).await {
@@ -701,7 +829,9 @@ impl Forking {
         // no override. The history snapshot and publication still enforce the confirmed preview.
         let page = fork_page(request.access.as_ref());
         let mut tx = engine.db().begin().await?;
-        let caller = source::authorize(&mut tx, job, &self.recipe, &confirmed, None).await?;
+        let caller = source::authorize(&mut tx, job, &self.recipe, &confirmed, None)
+            .await?
+            .creation_caller()?;
         let created = engine
             .create_thread_in_transaction(
                 &mut tx,
@@ -718,6 +848,12 @@ impl Forking {
                     effort: plan.to.effort.clone(),
                 },
                 &crate::binding::Birth {
+                    // Jobs written before this field existed do not gain a new preset on retry.
+                    agent_access: self
+                        .recipe
+                        .agent_access
+                        .clone()
+                        .unwrap_or_else(crate::binding::BirthAgentAccess::nothing),
                     first_input: None,
                     prepare_source: Some(false),
                     worktree: None,
@@ -898,7 +1034,9 @@ impl Forking {
         };
         let owned = job.lock_owned(&mut tx).await?.ok_or(Stop::Lost)?;
         let confirmed = source::retained(&owned.plan)?;
-        let caller = source::authorize(&mut tx, job, &self.recipe, &confirmed, None).await?;
+        let caller = source::authorize(&mut tx, job, &self.recipe, &confirmed, None)
+            .await?
+            .creation_caller()?;
         let principal = orch_authz::Principal::load(&mut tx, caller, Time::new(now))
             .await
             .map_err(EngineError::from)?;
@@ -1043,9 +1181,10 @@ impl Forking {
     }
 }
 
-/// The rows of the page a fork is given in its request; a fork that names none starts with the defaults
-/// of the place it is made in.
-fn fork_page(
+/// The page change applied during Birth, before the optional source overlay at commit.
+/// Omission initially follows destination defaults; `fork_page_source` selects the later copy.
+#[must_use]
+pub fn fork_page(
     access: Option<&orch_api_contract::access::ThreadAccess>,
 ) -> Option<orch_access_contract::pages::PageChange> {
     use orch_api_contract::access::{AccessPreset, ThreadAccess};
@@ -1068,6 +1207,36 @@ fn fork_page(
     }
 }
 
+/// The human page actually overlaid at fork commit, after the normal Birth page change.
+/// An explicit defaults/private/custom page carries no source; omission copies the source thread.
+#[must_use]
+pub fn fork_page_source(
+    source: Id,
+    access: Option<&orch_api_contract::access::ThreadAccess>,
+) -> Option<Id> {
+    match access {
+        None => Some(source),
+        Some(orch_api_contract::access::ThreadAccess::As(page)) => Some(page.source),
+        Some(_) => None,
+    }
+}
+
+/// The existing interrupt decision inside a caller's already guarded Unit; driving follows commit.
+pub(crate) async fn interrupt_for_change_in(
+    unit: &mut Unit<'_>,
+    thread: Id,
+    turn: &threads::TurnRow,
+    by: Id,
+) -> Result<(), EngineError> {
+    if turn.interrupted_by.is_none() && threads::lock(&mut *unit.conn, thread).await?.is_some() {
+        let seq = unit.stamp(thread).await?;
+        threads::set_interrupt_cause(&mut *unit.conn, turn.id, "environment_change").await?;
+        threads::mark_interrupted_by(&mut *unit.conn, turn.id, by, seq).await?;
+        unit.wake(thread);
+    }
+    Ok(())
+}
+
 impl Engine {
     /// Stops a turn for a person who confirmed a change that cannot wait for it, and sees that it is
     /// driven to its end: the harness is asked, and the engine ends it by force if it does not answer.
@@ -1081,13 +1250,7 @@ impl Engine {
             let mut tx = self.inner.db.begin().await?;
             let finished = {
                 let mut unit = Unit::new(&mut tx, self.inner.clock.now());
-                if threads::lock(&mut *unit.conn, thread).await?.is_some() {
-                    let seq = unit.stamp(thread).await?;
-                    threads::set_interrupt_cause(&mut *unit.conn, turn.id, "environment_change")
-                        .await?;
-                    threads::mark_interrupted_by(&mut *unit.conn, turn.id, by, seq).await?;
-                    unit.wake(thread);
-                }
+                interrupt_for_change_in(&mut unit, thread, turn, by).await?;
                 unit.finish().await?
             };
             self.commit(tx, finished).await?;
@@ -2456,7 +2619,8 @@ impl Engine {
             &parameters,
             &settings,
             path,
-        );
+        )
+        .map_err(EngineError::unreadable)?;
         if let Some(why) = self
             .bypass_environment(conn, environment.id, approval)
             .await?
@@ -2792,7 +2956,7 @@ impl Forking {
             .await
             .map_err(EngineError::from)?
             .ok_or_else(|| failed("verify_failed", "the provider is gone"))?;
-        if provider.status != "ready" {
+        if !crate::providers::request_status_available(&provider.status) {
             return Err(failed(
                 "verify_failed",
                 format!("the provider is {}", provider.status),
@@ -3301,6 +3465,7 @@ impl Forking {
                 turn_id: last_turn,
                 report: report.clone(),
                 by: by_ref.clone(),
+                by_agent: self.recipe.by_agent,
             },
         );
         crate::ingest::add_marker(
@@ -3324,6 +3489,7 @@ impl Forking {
                     },
                     turn_id: last_turn,
                     by: by_ref,
+                    by_agent: self.recipe.by_agent,
                 },
             );
             crate::ingest::add_marker(
@@ -3533,13 +3699,16 @@ impl Forking {
         sentence: &str,
     ) -> Result<(), Stop> {
         use orch_db::audit::{self, Actor, Entry, Origin};
-        let mut entry = Entry::new(
-            Actor::User(self.recipe.by),
-            action.as_str(),
-            "thread",
-            Some(thread),
-            sentence,
-        );
+        let action = if self.recipe.by_agent.is_some() && action == AuditAction::ThreadForked {
+            AuditAction::ThreadForkedByAgent
+        } else {
+            action
+        };
+        let actor = self
+            .recipe
+            .by_agent
+            .map_or(Actor::User(self.recipe.by), Actor::Agent);
+        let mut entry = Entry::new(actor, action.as_str(), "thread", Some(thread), sentence);
         entry.history = action.is_history_line();
         entry.node_id = Some(thread);
         entry.environment_id = Some(environment);
@@ -3550,6 +3719,8 @@ impl Forking {
             "to_provider": self.recipe.forkplan.to.provider.id,
             "result": self.recipe.result,
             "job": self.recipe.preflight_id,
+            "giver": self.recipe.by_agent.map(|_| self.recipe.by),
+            "turn_id": self.recipe.by_agent_turn,
         });
         let now = unit.now();
         audit::append(&mut *unit.conn, &entry, &Origin::default(), now)
@@ -3570,69 +3741,11 @@ impl Forking {
         new: Id,
         by: Id,
     ) -> Result<(), Stop> {
-        use orch_access_contract::permissions::Permission;
-        use orch_api_contract::access::ThreadAccess;
-        use orch_db::queries::access::{self, NewEntry, PageKey, RowWrite};
-        let from = match &self.recipe.request.access {
-            None => source,
-            Some(ThreadAccess::As(as_page)) => as_page.source,
-            Some(_) => return Ok(()),
+        let Some(from) = fork_page_source(source, self.recipe.request.access.as_ref()) else {
+            return Ok(());
         };
-        let now = unit.now();
-        let (from_page, new_page) = (
-            PageKey::new("node", from, "live"),
-            PageKey::new("node", new, "live"),
-        );
-        let owners = Permission::AccessOwn.as_str();
-        for row in access::stored_rows_of(&mut *unit.conn, &from_page)
-            .await
-            .map_err(EngineError::from)?
-            .into_iter()
-            .filter(|row| row.permission != owners)
-        {
-            access::write_row(
-                &mut *unit.conn,
-                &RowWrite {
-                    page: &new_page,
-                    profile: &row.profile,
-                    permission: &row.permission,
-                    inherit: row.inherit,
-                    locked: row.locked,
-                },
-                Some(by),
-                now,
-            )
-            .await
-            .map_err(EngineError::from)?;
-        }
-        for entry in access::entries_of(&mut *unit.conn, &from_page)
-            .await
-            .map_err(EngineError::from)?
-            .into_iter()
-            .filter(|entry| entry.permission != owners)
-        {
-            access::insert_entry(
-                &mut *unit.conn,
-                &NewEntry {
-                    id: new_id(),
-                    page: &new_page,
-                    profile: &entry.profile,
-                    permission: &entry.permission,
-                    holder_kind: &entry.holder_kind,
-                    holder_id: entry.holder_id,
-                    holder_role: entry.holder_role.as_deref(),
-                    options: &entry.options,
-                    expires_at: entry.expires_at,
-                    note: &entry.note,
-                    source: orch_access_contract::pages::EntrySource::Creation.as_str(),
-                    created_by: Some(by),
-                    at: now,
-                },
-            )
-            .await
-            .map_err(EngineError::from)?;
-        }
-        access::bump_epoch(&mut *unit.conn)
+        let now = Time::new(unit.now());
+        orch_authz::ownership::carry_fork_page(&mut *unit.conn, from, new, by, now)
             .await
             .map_err(EngineError::from)?;
         Ok(())

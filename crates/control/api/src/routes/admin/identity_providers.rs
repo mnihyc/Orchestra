@@ -9,7 +9,6 @@
 
 use super::{admin_of, invalid, record};
 use crate::middleware::requests::{ApiError, ApiResult};
-use crate::middleware::transaction_guard;
 use crate::registry::{Ctx, Registry};
 use crate::routes::auth::oidc::{kind_of, settings_of};
 use crate::routes::nodes::placed;
@@ -304,7 +303,7 @@ async fn create(mut ctx: Ctx, (): (), body: IdentityProviderInput) -> ApiResult<
             "needs default_org_id: it is the role in that org",
         ));
     }
-    let (mut tx, guard) = transaction_guard::begin(&ctx).await?;
+    let (mut tx, guard) = super::action(&ctx).await?;
     ctx.now = guard.now().get();
     let admin = guard.user().id();
     if let Some(org) = body.default_org_id {
@@ -392,7 +391,7 @@ async fn update(
         .default_role
         .map(|role| role.map(role_word).transpose())
         .transpose()?;
-    let (mut tx, guard) = transaction_guard::begin(&ctx).await?;
+    let (mut tx, guard) = super::action(&ctx).await?;
     ctx.now = guard.now().get();
     let admin = guard.user().id();
     let before = identity::identity_provider(&mut tx, id)
@@ -492,7 +491,7 @@ async fn update(
 async fn delete(mut ctx: Ctx, (): (), (): ()) -> ApiResult<()> {
     admin_of(&ctx)?;
     let id = ctx.id("id")?;
-    let (mut tx, guard) = transaction_guard::begin(&ctx).await?;
+    let (mut tx, guard) = super::action(&ctx).await?;
     ctx.now = guard.now().get();
     let admin = guard.user().id();
     let row = identity::identity_provider(&mut tx, id)
@@ -536,7 +535,7 @@ async fn test(ctx: Ctx, (): (), (): ()) -> ApiResult<IdentityProviderTestReply> 
     admin_of(&ctx)?;
     let id = ctx.id("id")?;
     let row = {
-        let (mut tx, _guard) = transaction_guard::begin(&ctx).await?;
+        let (mut tx, _guard) = super::action(&ctx).await?;
         let row = identity::identity_provider(&mut tx, id)
             .await?
             .ok_or_else(ApiError::not_found)?;

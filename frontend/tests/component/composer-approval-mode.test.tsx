@@ -64,6 +64,24 @@ it('shows the current mode, offers only declared choices and writes their displa
   expect(server.parameterReads).toHaveBeenCalledTimes(1);
 });
 
+it('offers a served Auto mode and saves the current setting revision before a native session reports its reviewer', async () => {
+  server.parameters = {
+    ...parameters('on_request'),
+    approval_modes: ['on_request', 'auto'],
+    approval_reviewer: null,
+  };
+  show(<ApprovalModePicker thread={thread} />);
+  await userEvent.click(await screen.findByRole('button', { name: 'Approval mode: On request' }));
+  const picker = screen.getByRole('dialog', { name: 'Approval mode' });
+  const auto = await within(picker).findByRole('button', { name: 'Auto' });
+  await waitFor(() => expect(auto).toBeEnabled());
+  expect(within(picker).queryByRole('button', { name: 'Bypass' })).not.toBeInTheDocument();
+  await userEvent.click(auto);
+  await waitFor(() => expect(server.write).toHaveBeenCalledExactlyOnceWith(thread.id, 'approval.mode', { value: 'auto', expected_revision: 3 }));
+  expect(await screen.findByRole('button', { name: 'Approval mode: Auto' })).toBeVisible();
+  expect(screen.queryByRole('dialog', { name: 'Approval mode' })).not.toBeInTheDocument();
+});
+
 it.each([false, true])('keeps a refused choice open with the current mode and credits only its exact revision (overtaken: %s)', async (overtaken) => {
   show(<ApprovalModePicker thread={thread} />);
   const picker = await open();

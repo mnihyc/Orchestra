@@ -9,6 +9,7 @@ mod places;
 mod rig;
 mod support;
 
+use crate::support::FullPermissionPageReply;
 use orch_api_contract::access::{
     AccessChoice, HolderInput, PageChange, PageChangeName, PermissionPageUpdate,
 };
@@ -20,7 +21,7 @@ use orch_api_contract::share::{
     AgentShareList, AgentShareListQuery, AgentShareSide, ShareAgentCreate, ShareAgentCreateReply,
     ShareAgentDelete, ShareAgentUpdate, ShareAgentUpdateBody, ShareDocumentsLevel, ShareLevel,
     ShareParts, ShareTo, ShareToThread, ShareWhat, ShareWhatNode, ShareWithAgents, SharedEntry,
-    SharedEntryKind, SharedEntryVia, ThreadSharedGet, ThreadSharedPolicy, ThreadSharedTreeGet,
+    SharedEntryKind, SharedEntryVia, ThreadSharedGet, ThreadSharedTreeGet,
     ThreadSharedTreeGetQuery,
 };
 use orch_api_contract::threads::{ShareMode, Thread};
@@ -38,6 +39,7 @@ fn body(
     client: &str,
 ) -> ShareWithAgents {
     ShareWithAgents {
+        viewers_read: None,
         read_first: None,
         download: None,
         what: ShareWhat::Node(ShareWhatNode { node_id: what }),
@@ -63,14 +65,25 @@ async fn create(
     by: &Who,
     request: &ShareWithAgents,
 ) -> orch_api_core::testing::Reply<ShareAgentCreateReply> {
-    s.rig
+    let reply = s
+        .rig
         .world
         .app
         .call(ShareAgentCreate, &[])
         .token(&by.token)
         .body(request)
         .send()
-        .await
+        .await;
+    orch_api_core::testing::Reply {
+        status: reply.status,
+        headers: reply.headers,
+        raw: reply.raw,
+        body: reply.body.map(|answer| {
+            answer
+                .into_full()
+                .expect("the ordinary session receives the full share projection")
+        }),
+    }
 }
 
 /// The agents of the world take an MCP server, so that the tools can be shared.
@@ -99,11 +112,21 @@ async fn thread_in(s: &Scene, by: &Who, topic: Id, name: &str) -> Thread {
         .send()
         .await
         .ok()
+        .into_full()
+        .unwrap()
 }
 
 /// A scene with a thread that writes, and a thread whose agent is to be given it.
 async fn two_threads() -> (Scene, Thread, Thread) {
     let s = Scene::new().await;
+    s.rig
+        .world
+        .set_at(
+            Target::Node(s.tree.org.base.id),
+            "threads.agent_access",
+            json!({"where":"nothing","parts":{}}),
+        )
+        .await;
     agents_take_tools(&s).await;
     let shared = s.thread_by(&s.ada, "Builder").await;
     let reader = s.thread_by(&s.ada, "Reader").await;
@@ -142,7 +165,7 @@ async fn a_thread_shared_live_is_listed_from_every_side_changed_and_taken_back()
         "the agents may copy what is shared, as it comes"
     );
     assert_eq!(share.to.id, reader_id);
-    assert_eq!(share.by.id, s.ada.id());
+    assert_eq!(share.by.as_ref().map(|by| by.id), Some(s.ada.id()));
 
     // The three sides.
     let of = s
@@ -179,7 +202,6 @@ async fn a_thread_shared_live_is_listed_from_every_side_changed_and_taken_back()
         .send()
         .await
         .ok();
-    assert_eq!(known.policy, ThreadSharedPolicy::None);
     assert_eq!(known.shares.len(), 1);
 
     // The tree the agent lists is the one the person is shown.
@@ -297,22 +319,34 @@ async fn somebody_who_cannot_see_the_thing_finds_nothing_there() {
 }
 
 #[tokio::test]
-async fn somebody_who_sees_it_but_does_not_manage_its_page_is_told_what_is_missing() {
+async fn a_viewer_can_lend_the_reading_they_hold_without_managing_or_directing_the_thread() {
     let (s, shared, reader) = two_threads().await;
-    let refused = create(
+    let inputs_before: i64 =
+        sqlx::query_scalar("SELECT count(*) FROM thread_inputs WHERE thread_id=$1")
+            .bind(reader.base.id)
+            .fetch_one(s.rig.db.pool())
+            .await
+            .unwrap();
+    let turns_before = s.rig.turn_starts(reader.base.id).len();
+    let granted = create(
         &s,
         &s.cai,
         &body(shared.base.id, None, ShareMode::Live, reader.base.id, "c1"),
     )
     .await;
-    let problem = refused.problem();
-    assert_eq!(problem.code, ErrorCode::AuthzDenied);
-    assert!(
-        places::missing_permissions(&problem)
-            .iter()
-            .any(|each| each.ends_with(".interact") || each == "access.manage"),
-        "{problem:?}"
+    assert_eq!(granted.status, http::StatusCode::CREATED);
+    assert_eq!(
+        granted.ok().shares[0].parts.timeline,
+        Some(ShareLevel::Read)
     );
+    let inputs_after: i64 =
+        sqlx::query_scalar("SELECT count(*) FROM thread_inputs WHERE thread_id=$1")
+            .bind(reader.base.id)
+            .fetch_one(s.rig.db.pool())
+            .await
+            .unwrap();
+    assert_eq!(inputs_after, inputs_before);
+    assert_eq!(s.rig.turn_starts(reader.base.id).len(), turns_before);
 }
 
 #[tokio::test]
@@ -379,18 +413,32 @@ async fn a_copy_cannot_be_asked_for_writing_and_a_share_names_some_thread() {
 }
 
 #[tokio::test]
-async fn a_thread_of_a_topic_without_the_tools_cannot_be_shared_with() {
+async fn a_thread_without_tools_can_receive_a_pure_grant_without_starting_work() {
     let (s, shared, reader) = two_threads().await;
     s.rig.tools_of_agents(json!("none")).await;
-    let refused = create(
+    let inputs_before: i64 =
+        sqlx::query_scalar("SELECT count(*) FROM thread_inputs WHERE thread_id=$1")
+            .bind(reader.base.id)
+            .fetch_one(s.rig.db.pool())
+            .await
+            .unwrap();
+    let turns_before = s.rig.turn_starts(reader.base.id).len();
+    let granted = create(
         &s,
         &s.ada,
         &body(shared.base.id, None, ShareMode::Live, reader.base.id, "c1"),
     )
     .await;
-    let problem = refused.problem();
-    assert_eq!(problem.code, ErrorCode::ShareUnavailable);
-    assert_eq!(problem.extra["reason"], "no_tools");
+    assert_eq!(granted.status, http::StatusCode::CREATED);
+    assert_eq!(granted.ok().shares[0].mode, ShareMode::Live);
+    let inputs_after: i64 =
+        sqlx::query_scalar("SELECT count(*) FROM thread_inputs WHERE thread_id=$1")
+            .bind(reader.base.id)
+            .fetch_one(s.rig.db.pool())
+            .await
+            .unwrap();
+    assert_eq!(inputs_after, inputs_before);
+    assert_eq!(s.rig.turn_starts(reader.base.id).len(), turns_before);
 }
 
 #[tokio::test]
@@ -532,15 +580,7 @@ async fn a_place_is_shared_by_itself_or_with_what_is_in_it_and_the_list_tells_wh
     let (s, _, reader) = two_threads().await;
     let (project, topic, reader_id) =
         (s.tree.project.base.id, s.tree.topic.base.id, reader.base.id);
-    // As shipped the agents of a topic write the documents beside it; here only shares give any.
-    s.rig
-        .world
-        .set_at(
-            Target::Node(s.tree.org.base.id),
-            "sharing.agent_documents",
-            json!("none"),
-        )
-        .await;
+    // These holders were created with Nothing; only the shares below give them material.
     let (outer, inner) = (
         document_beside(&s, project, "Outer").await,
         document_beside(&s, topic, "Inner").await,
@@ -655,7 +695,11 @@ async fn somebody_who_holds_what_they_share_shares_it_and_takes_back_their_own_w
     };
     // Dan is a Developer of the org: he holds the documents and does not manage the project's page.
     let made = create(&s, &s.dan, &by_dan).await.ok().shares.remove(0);
-    assert_eq!(made.by.id, s.dan.id(), "the share says who gave it");
+    assert_eq!(
+        made.by.as_ref().map(|by| by.id),
+        Some(s.dan.id()),
+        "the share says who gave it"
+    );
     assert!(
         made.entries
             .iter()
@@ -684,6 +728,7 @@ async fn somebody_who_holds_what_they_share_shares_it_and_takes_back_their_own_w
         })
         .send()
         .await
+        .full_permission_page()
         .ok();
     let write = create(
         &s,
@@ -715,10 +760,11 @@ async fn somebody_who_holds_what_they_share_shares_it_and_takes_back_their_own_w
     .ok()
     .shares
     .remove(0);
-    assert_eq!(read.by.id, s.cai.id());
+    assert_eq!(read.by.as_ref().map(|by| by.id), Some(s.cai.id()));
     // Eve shares the topic by itself, which is another share: nobody takes back what another
     // shared unless they manage the page.
     let by_eve = ShareWithAgents {
+        viewers_read: None,
         read_first: None,
         download: None,
         what: ShareWhat::Node(ShareWhatNode {

@@ -1,5 +1,10 @@
 //! Model-call recovery state and the controls available to a thread's readers and drivers.
 
+use crate::operations::{OperationSpec as Op, TargetResolver as Target};
+use orch_access_contract::key_scope::KeyAction::{Read, Write};
+use orch_access_contract::key_scope::KeyTargetKind::Object;
+use orch_access_contract::permissions::ObjectKind as K;
+
 use crate::routes::Access::Permission;
 use crate::threads::TurnError;
 use orch_provider_contract::calls::Step;
@@ -64,7 +69,9 @@ pub struct ThreadCallRecoveryUpdateBody {
 
 crate::endpoints! {
     /// Reads the thread's current automatic call recovery.
-    ThreadCallRecoveryGet: GET "/threads/{id}/calls/recovery", Permission("thread.view"), none, none, json ThreadCallRecoveryReply, 200;
+    ThreadCallRecoveryGet: GET "/threads/{id}/calls/recovery", Permission("thread.view"), none, none, json ThreadCallRecoveryReply, 200,
+        operation Op::single(Read, &[Object(K::Thread)], Target::TypedPath { parameter: "id", kind: Object(K::Thread) });
     /// Retries now or stops the thread's automatic call recovery.
-    ThreadCallRecoveryUpdate: POST "/threads/{id}/calls/recovery", Permission("thread.interact"), none, json ThreadCallRecoveryUpdateBody, json ThreadCallRecoveryReply, 200;
+    ThreadCallRecoveryUpdate: POST "/threads/{id}/calls/recovery", Permission("thread.interact"), none, json ThreadCallRecoveryUpdateBody, json ThreadCallRecoveryReply, 200,
+        operation Op::returning(Write, &[Object(K::Thread)], Target::PermissionObject);
 }

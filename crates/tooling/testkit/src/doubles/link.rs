@@ -574,6 +574,8 @@ struct HubAuthority {
 impl SessionAuthority for HubAuthority {
     async fn authorize(&self, query: AuthQuery) -> AuthReply {
         let refuse = |code| AuthReply {
+            tunnel_session_idle_secs: orch_link_contract::gateways::TUNNEL_IDLE_SECS,
+            gateways: Vec::new(),
             endpoints: None,
             update_permit: None,
             n: query.n,
@@ -601,6 +603,8 @@ impl SessionAuthority for HubAuthority {
             return refuse(RejectCode::Revoked);
         }
         AuthReply {
+            tunnel_session_idle_secs: orch_link_contract::gateways::TUNNEL_IDLE_SECS,
+            gateways: Vec::new(),
             endpoints: lock(&self.hub.advertised).clone(),
             update_permit: None,
             n: query.n,
@@ -721,7 +725,7 @@ impl Hub {
     ) -> (ControllerLink, mpsc::UnboundedReceiver<Notice>) {
         let (controller, outputs) =
             ControllerLink::new(machine_id, roles, cursors, Arc::clone(&self.inner.clock));
-        let ControllerOutputs { down, notices } = outputs;
+        let ControllerOutputs { down, notices, .. } = outputs;
         let previous = lock(&self.inner.machines).insert(
             machine_id,
             Slot {
@@ -886,6 +890,7 @@ impl Dialer for HubDialer {
                 ..PeerInfo::default()
             },
             PeerInfo {
+                purpose: Default::default(),
                 remote_ip: Some(std::net::IpAddr::V4(std::net::Ipv4Addr::LOCALHOST)),
                 host: Some(HUB_HOST.to_owned()),
                 client_certificate: self.certificate.clone(),
@@ -919,6 +924,15 @@ async fn carry_down(
                 DownFrame::PortConnectionsQuery(query) => {
                     sender.send(Frame::PortConnectionsQuery(query))
                 }
+                DownFrame::Gateways(advertisement) => sender.send(Frame::Gateways(advertisement)),
+                DownFrame::TunnelRouteAnswer(answer) => {
+                    sender.send(Frame::TunnelRouteAnswer(answer))
+                }
+                DownFrame::TunnelAttach(attach) => sender.send(Frame::TunnelAttach(attach)),
+                DownFrame::TunnelPrepareAnswer(answer) => {
+                    sender.send(Frame::TunnelPrepareAnswer(answer))
+                }
+                DownFrame::TunnelRelease(release) => sender.send(Frame::TunnelRelease(release)),
             };
         }
     }

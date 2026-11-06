@@ -9,6 +9,7 @@ mod places;
 mod support;
 mod workspace;
 
+use crate::support::FullPermissionPageReply;
 use async_trait::async_trait;
 use chrono::Duration;
 use http::StatusCode;
@@ -1092,6 +1093,7 @@ async fn the_environments_files_are_given_on_its_own_page_and_a_thread_named_giv
         }] }))
         .send()
         .await
+        .full_permission_page()
         .ok();
     let through_the_thread = listing(Some(site.thread), &guest.token).await.problem();
     assert_eq!(through_the_thread.code, ErrorCode::AuthzDenied);
