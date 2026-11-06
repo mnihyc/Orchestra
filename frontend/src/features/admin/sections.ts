@@ -11,6 +11,7 @@ import {
   KeyRound,
   LayoutTemplate,
   ListTree,
+  Network,
   type LucideIcon,
   Mail,
   Puzzle,
@@ -58,6 +59,7 @@ export const SECTIONS = [
   { id: 'storage', group: 'system', icon: Database },
   { id: 'semantic-search', group: 'system', icon: ScanSearch },
   { id: 'system', group: 'system', icon: Server },
+  { id: 'gateways', group: 'system', icon: Network },
   { id: 'pki', group: 'system', icon: FileKey },
   { id: 'audit', group: 'system', icon: ScrollText },
 ] as const satisfies readonly SectionDef[];

@@ -17,7 +17,7 @@ import { EmptyState } from '@/ui/EmptyState';
 import { useStore } from 'zustand';
 
 import { client } from '@/api/client';
-import { usageQuery } from '@/api/usage';
+import { usageQuery, type UsageParams } from '@/api/usage';
 import type { UsageAnalytics, UsageDimension, UsageFigures } from '@/generated/api-types';
 import { creditsState, decimal, ESTIMATE_MARK, formatCredits, measureOf } from '@/features/usage/figures';
 import { keyId, keyLabel } from '@/features/usage/keys';
@@ -140,6 +140,14 @@ export interface UsageBoardProps {
   nodeId: string;
   name: string;
   className?: string;
+}
+
+/** The overview and its native board use identical restored controls and bounds. */
+export function useUsageBoardParams(nodeId: string): UsageParams {
+  const [now] = useState(Date.now);
+  const [period] = useListChoice<BoardPeriod>('usage-board', 'period', DEFAULT_PERIOD);
+  const [other] = useListChoice<OtherWay>('usage-board', 'other', 'model');
+  return { scope: `node:${nodeId}`, ...boardSpan(period, now), breakdowns: ['person', other], limit: PEOPLE_ASKED, filters: {} };
 }
 
 export function UsageBoard({ nodeId, name, className }: UsageBoardProps) {

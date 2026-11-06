@@ -6,12 +6,14 @@
 use crate::middleware::authorization::{self, refusals};
 use crate::middleware::requests::{ApiError, ApiResult};
 use crate::registry::{Ctx, Registry};
+use crate::routes::access::page::{NameBounds, NameSources};
 use crate::routes::nodes::{invalid, placed, policy_at, view as node_view};
 use crate::routes::resources::providers::{home_policies, refused_making};
 use crate::routes::resources::view::{
-    Holding, accesses, addresses, environment_refs, machine_refs, parse,
+    Holding, PreparedAccess, accesses_prepared, addresses, environment_refs, machine_refs, parse,
+    prepare_accesses,
 };
-use crate::routes::resources::{Home, LIST_LIMIT, begin_mutation, record, require};
+use crate::routes::resources::{Home, begin_mutation, record, require};
 use orch_access_contract::audit::AuditAction;
 use orch_access_contract::decisions::ObjectRef;
 use orch_access_contract::permissions::{Permission, ResourceKind};
@@ -22,7 +24,6 @@ use orch_api_contract::mounts::{
 };
 use orch_api_contract::nodes::NodeKind;
 use orch_api_contract::resources::HostRef;
-use orch_authz::nodes::Page;
 use orch_authz::ownership::{self, Making, NewAccess};
 use orch_authz::resources::{Locating, LocationAsk, LocationKind, may_add_location};
 use orch_authz::usable::Policies;
@@ -39,14 +40,15 @@ use std::collections::{BTreeMap, BTreeSet};
 const NAME_MIN: usize = 2;
 const NAME_MAX: usize = 32;
 
+mod read;
+
 /// Binds all mount resource requests.
 pub fn mount(registry: &mut Registry) {
+    read::mount(registry);
     registry
         .on(api::MachineMountList, on_machine)
         .on(api::MachineEnvironmentDataGet, environment_data)
-        .on(api::MountList, list)
         .on(api::MountCreate, create)
-        .on(api::MountGet, get)
         .on(api::MountUpdate, update)
         .on(api::MountDelete, delete)
         .on(api::MountLocationSet, location_set)
@@ -435,37 +437,134 @@ pub(crate) async fn show(
     principal: &Principal,
     id: Id,
 ) -> ApiResult<Mount> {
+    let prepared = prepare_inventory_one(ctx, conn, principal, id).await?;
+    show_inventory_one(conn, principal, &prepared, None).await
+}
+
+pub(crate) struct PreparedInventory {
+    items: Vec<PreparedMount>,
+    sources: NameSources,
+    bounds: NameBounds,
+    machines: Vec<Id>,
+}
+
+struct PreparedMount {
+    row: MountRow,
+    effective: resources::Effective,
+    access: PreparedAccess,
+    locations_total: usize,
+    locations: Vec<MountLocation>,
+    kept: Vec<api::MountKeptData>,
+    lost_locations: Vec<api::MountLostLocation>,
+    attached_environments: i64,
+    sources: NameSources,
+    publication: BTreeMap<NativeLocation, bool>,
+}
+
+/// Native location keys are captured before formatting; the boolean is the existing
+/// native source-path visibility gate, not authority reconstructed from a reply.
+#[derive(PartialEq, Eq, PartialOrd, Ord)]
+enum NativeLocation {
+    Active(Id, String, Option<String>, String),
+    Kept(Id, Id),
+}
+
+impl PreparedInventory {
+    pub(crate) fn preserves_sources(&self, fresh: &Self) -> bool {
+        let items = fresh
+            .items
+            .iter()
+            .map(|item| (item.row.id, item))
+            .collect::<BTreeMap<_, _>>();
+        self.items.iter().all(|old| {
+            items.get(&old.row.id).is_some_and(|current| {
+                old.publication.iter().all(|(source, disclosed)| {
+                    current
+                        .publication
+                        .get(source)
+                        .is_some_and(|now| !*disclosed || *now)
+                })
+            })
+        })
+    }
+    pub(crate) fn name_sources(&self) -> &NameSources {
+        &self.sources
+    }
+    pub(crate) fn machine_ids(&self) -> &[Id] {
+        &self.machines
+    }
+    pub(crate) fn bound_names(&mut self, bounds: NameBounds) {
+        self.bounds = bounds;
+    }
+}
+
+pub(crate) async fn prepare_inventory(
+    ctx: &Ctx,
+    conn: &mut Conn,
+    principal: &Principal,
+    ids: &[Id],
+) -> ApiResult<PreparedInventory> {
+    let mut items = Vec::with_capacity(ids.len());
+    let mut sources = NameSources::default();
+    let mut machines = BTreeSet::new();
+    // Preserve the native scalar reader/lifecycle and per-location visibility. No Get endpoint
+    // or another operation's proof is called, and no extra native Machine View is introduced.
+    for id in ids {
+        let item = prepare_inventory_one(ctx, conn, principal, *id).await?;
+        sources.users.extend(&item.sources.users);
+        sources.groups.extend(&item.sources.groups);
+        sources.nodes.extend(&item.sources.nodes);
+        sources.containers.extend(&item.sources.containers);
+        machines.extend(item.locations.iter().map(|location| location.machine.id));
+        machines.extend(item.kept.iter().map(|data| data.machine.id));
+        items.push(item);
+    }
+    Ok(PreparedInventory {
+        items,
+        sources,
+        machines: machines.into_iter().collect(),
+        bounds: NameBounds::default(),
+    })
+}
+
+pub(crate) async fn show_inventory_prepared(
+    conn: &mut Conn,
+    principal: &Principal,
+    prepared: &PreparedInventory,
+) -> ApiResult<Vec<Mount>> {
+    let mut rows = Vec::with_capacity(prepared.items.len());
+    for item in &prepared.items {
+        rows.push(
+            show_inventory_one(
+                conn,
+                principal,
+                item,
+                prepared.bounds.limited.then_some(&prepared.bounds),
+            )
+            .await?,
+        );
+    }
+    Ok(rows)
+}
+
+async fn prepare_inventory_one(
+    ctx: &Ctx,
+    conn: &mut Conn,
+    principal: &Principal,
+    id: Id,
+) -> ApiResult<PreparedMount> {
     let row = rows::mounts(conn, &[id])
         .await?
         .pop()
         .ok_or_else(ApiError::not_found)?;
     let effective = standing(conn, principal, id).await?;
-    let access = accesses(
-        conn,
-        principal,
-        &[Holding {
-            admin_only: &effective.admin_only,
-            admin_access: effective.admin_access,
-            admin_place: effective.admin_place,
-            participating: effective.participating,
-            id,
-            owner: effective.owner,
-            administers: effective.administers,
-            held: &effective.held,
-        }],
-    )
-    .await?;
-    let addresses = addresses(conn, &[id]).await?;
-    let homes = node_view::refs(
-        conn,
-        principal,
-        &row.home_id.into_iter().collect::<Vec<_>>(),
-        Policy::default(),
-    )
-    .await?;
+    let access = prepare_accesses(conn, &[Holding::from_effective(&effective)]).await?;
+    let mut sources = access.names.clone();
+    sources.nodes.extend(row.home_id);
     let known_locations = rows::locations(conn, &[id]).await?;
     let locations_total = known_locations.len();
     let mut locations = Vec::new();
+    let mut publication = BTreeMap::new();
     for location in known_locations {
         let Some((machine, host)) = seen(ctx, conn, principal, location.machine_id).await? else {
             continue;
@@ -475,6 +574,15 @@ pub(crate) async fn show(
                 .await
                 .map_err(ApiError::internal)?,
             Locating::Allowed
+        );
+        publication.insert(
+            NativeLocation::Active(
+                location.machine_id,
+                location.kind.clone(),
+                location.storage.clone(),
+                location.source.clone(),
+            ),
+            changeable,
         );
         let by = refusals::user_refs(conn, &[location.created_by]).await?;
         let sizes: Json = sqlx::query_scalar(
@@ -526,6 +634,7 @@ pub(crate) async fn show(
                 .map_err(ApiError::internal)?,
             Locating::Allowed
         );
+        publication.insert(NativeLocation::Kept(data.id, data.machine_id), can_purge);
         let by = refusals::user_refs(conn, &[data.kept_by]).await?;
         kept.push(api::MountKeptData {
             id: data.id,
@@ -545,7 +654,6 @@ pub(crate) async fn show(
             can_purge,
         });
     }
-    let people = refusals::user_refs(conn, &row.owner_id.into_iter().collect::<Vec<_>>()).await?;
     let lost_locations = if effective
         .held
         .iter()
@@ -572,6 +680,48 @@ pub(crate) async fn show(
           jsonb_array_elements(CASE WHEN jsonb_typeof(e.facts->'mounts')='array' THEN e.facts->'mounts' ELSE '[]'::jsonb END) attachment
          WHERE e.deleted_at IS NULL AND e.status <> 'removed' AND attachment->>'mount_id'=$1::uuid::text AND attachment->>'state'='attached'",
     ).bind(id).fetch_one(&mut *conn).await.map_err(DbError::from)?;
+    Ok(PreparedMount {
+        row,
+        effective,
+        access,
+        locations_total,
+        locations,
+        kept,
+        lost_locations,
+        attached_environments,
+        sources,
+        publication,
+    })
+}
+
+async fn show_inventory_one(
+    conn: &mut Conn,
+    principal: &Principal,
+    prepared: &PreparedMount,
+    bounds: Option<&NameBounds>,
+) -> ApiResult<Mount> {
+    let row = prepared.row.clone();
+    let id = row.id;
+    let access = accesses_prepared(
+        conn,
+        principal,
+        &[Holding::from_effective(&prepared.effective)],
+        &prepared.access,
+        bounds,
+    )
+    .await?;
+    let addresses = addresses(conn, &[id]).await?;
+    let home_ids: Vec<_> = row.home_id.into_iter().collect();
+    let homes = match bounds {
+        Some(bounds) => bounds.refs(conn, principal, &home_ids).await?,
+        None => node_view::refs(conn, principal, &home_ids, Policy::default()).await?,
+    };
+    let people = refusals::user_refs(conn, &row.owner_id.into_iter().collect::<Vec<_>>()).await?;
+    let locations_total = prepared.locations_total;
+    let locations = prepared.locations.clone();
+    let kept = prepared.kept.clone();
+    let lost_locations = prepared.lost_locations.clone();
+    let attached_environments = prepared.attached_environments;
     Ok(Mount {
         lost_locations,
         attached_environments: Some(attached_environments),
@@ -681,73 +831,6 @@ async fn addresses_for_host(conn: &mut Conn, id: Id) -> ApiResult<String> {
         .await?
         .remove(&id)
         .unwrap_or_default())
-}
-
-async fn list(
-    ctx: Ctx,
-    query: api::MountListQuery,
-    (): (),
-) -> ApiResult<Vec<orch_api_contract::common::Listed<Mount>>> {
-    let mut conn = ctx.app.db.acquire().await?;
-    let principal = authorization::principal(&ctx, &mut conn).await?;
-    let mut after = None;
-    let mut result = Vec::new();
-    let mut private = Vec::new();
-    loop {
-        let visible = resources::visible(
-            &mut conn,
-            &principal,
-            ResourceKind::Mount,
-            Page {
-                after,
-                limit: LIST_LIMIT,
-            },
-            Policy::default(),
-        )
-        .await
-        .map_err(ApiError::internal)?;
-        let homes: Vec<Id> = visible
-            .items
-            .iter()
-            .filter_map(|seen| seen.resource.home)
-            .collect();
-        let inside = match query.org_id {
-            Some(org) => {
-                orch_db::queries::resources::routes::homes_under(&mut conn, org, &homes).await?
-            }
-            None => homes,
-        };
-        let mut seen: Vec<_> = visible
-            .items
-            .into_iter()
-            .filter(|seen| seen.resource.home.is_none_or(|home| inside.contains(&home)))
-            .collect();
-        private.extend(super::hidden_items(&mut conn, &principal, &mut seen).await?);
-        for seen in seen {
-            result.push(show(&ctx, &mut conn, &principal, seen.resource.id).await?);
-        }
-        after = visible.next;
-        if after.is_none() {
-            break;
-        }
-    }
-    private.sort_by(|a, b| a.name.cmp(&b.name).then(a.id.cmp(&b.id)));
-    Ok(super::listed(result, private))
-}
-
-async fn get(ctx: Ctx, (): (), (): ()) -> ApiResult<Mount> {
-    let id = ctx.id("id")?;
-    let mut conn = ctx.app.db.acquire().await?;
-    let principal = authorization::principal(&ctx, &mut conn).await?;
-    require(
-        &mut conn,
-        &principal,
-        ResourceKind::Mount,
-        id,
-        Permission::MountView,
-    )
-    .await?;
-    show(&ctx, &mut conn, &principal, id).await
 }
 
 async fn create(ctx: Ctx, (): (), body: api::MountCreateBody) -> ApiResult<Mount> {

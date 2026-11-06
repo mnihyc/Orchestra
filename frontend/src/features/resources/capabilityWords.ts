@@ -26,6 +26,8 @@ export function capabilityDescription(key: string, description: string, t: TFunc
 
 /** Shipped live-application guidance is translated; authored consequences keep their own words. */
 export function capabilityConsequence(line: string, t: TFunction = i18n.t): string {
-  const path = 'approvals.capability.liveEffect';
-  return line === i18n.getFixedT('en')(path) ? t(path) : line;
+  for (const path of ['approvals.capability.liveEffect', 'approvals.capability.gatewayEffect'] as const) {
+    if (line === i18n.getFixedT('en')(path)) return t(path);
+  }
+  return line;
 }

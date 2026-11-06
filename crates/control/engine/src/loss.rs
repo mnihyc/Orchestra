@@ -50,6 +50,12 @@ struct Stored {
     fingerprint: Hash,
 }
 
+/// The actual loss subject of the privately kept native preview, before audience formatting.
+pub fn recipient_subject(plan: &orch_types::Json) -> Result<ObjectRef, EngineError> {
+    let stored: Stored = serde_json::from_value(plan.clone())?;
+    Ok(stored.plan.target.object())
+}
+
 /// Checks the source actor without borrowing authority over environments that merely run there.
 pub async fn allowed(
     conn: &mut Conn,

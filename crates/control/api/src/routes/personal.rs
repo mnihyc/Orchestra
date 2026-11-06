@@ -16,7 +16,7 @@ use crate::middleware::transaction_guard;
 use crate::registry::{Ctx, Registry};
 use crate::routes::nodes::{invalid, placed, view};
 use orch_api_contract::common::ErrorCode;
-use orch_api_contract::nodes::{NodeKind, NodeRef};
+use orch_api_contract::nodes::NodeKind;
 use orch_api_contract::personal::{
     Favorite, MeFavoriteDelete, MeFavoriteList, MeFavoriteSet, MeFavoriteSetBody,
     MeItemFavoriteDelete, MeItemFavoriteSet, MeItemFavoriteSetBody, MeProjectViewDelete,
@@ -30,18 +30,32 @@ use orch_db::queries::hierarchy::{self, Placing};
 use orch_db::queries::identity;
 use orch_types::{Id, Json, Time};
 
+pub(crate) mod native;
+
 /// Binds this module's requests.
 pub fn mount(registry: &mut Registry) {
     registry
-        .on(MeFavoriteList, favorite_list)
+        .on_snapshot_read_with_optional_operation(
+            MeFavoriteList,
+            crate::key_operations::native::selected::<native::Favorites>,
+            favorite_list,
+        )
         .on(MeFavoriteSet, favorite_set)
         .on(MeFavoriteDelete, favorite_delete)
         .on(MeRecentCreate, recent_create)
         .on(MeItemFavoriteSet, item_favorite_set)
         .on(MeItemFavoriteDelete, item_favorite_delete)
         .on(MeVisitCreate, visit_create)
-        .on(MeReadStateList, read_state_list)
-        .on(MeSubscriptionList, subscription_list)
+        .on_snapshot_read_with_optional_operation(
+            MeReadStateList,
+            crate::key_operations::native::selected::<native::ReadStates>,
+            read_state_list,
+        )
+        .on_snapshot_read_with_optional_operation(
+            MeSubscriptionList,
+            crate::key_operations::native::selected::<native::Subscriptions>,
+            subscription_list,
+        )
         .on(MeStateGet, state_get)
         .on(MeStateSet, state_set)
         .on(MeProjectViewSet, project_view_set)
@@ -51,38 +65,7 @@ pub fn mount(registry: &mut Registry) {
 /// The caller's favorites in order, each with the way down to it, as far as
 /// they may still view them.
 async fn favorite_list(ctx: Ctx, (): (), (): ()) -> ApiResult<Vec<Favorite>> {
-    let mut conn = ctx.app.db.acquire().await?;
-    let principal = authorization::principal(&ctx, &mut conn).await?;
-    favorites_for(&mut conn, &principal, ctx.now).await
-}
-
-/// The ordered personal stars, shared by the individual read and the shell bootstrap.
-pub(crate) async fn favorites_for(
-    conn: &mut orch_db::Conn,
-    principal: &Principal,
-    now: chrono::DateTime<chrono::Utc>,
-) -> ApiResult<Vec<Favorite>> {
-    let rows = hierarchy::favorites_of(conn, principal.user()).await?;
-    let ids: Vec<Id> = rows.iter().map(|row| row.node_id).collect();
-    let nodes = view::visible(conn, principal, &ids, now, Policy::default()).await?;
-    let ways = view::ways(conn, principal, &ids, Policy::default()).await?;
-    let viewable: std::collections::HashSet<Id> =
-        nodes.iter().map(crate::routes::nodes::node_id).collect();
-    Ok(rows
-        .into_iter()
-        .filter(|row| viewable.contains(&row.node_id))
-        .filter_map(|row| {
-            let mut path = ways.get(&row.node_id)?.clone();
-            let node: NodeRef = path.pop()?;
-            Some(Favorite {
-                node,
-                path,
-                position: row.position,
-                // A view that no longer reads as one stars the place alone.
-                view: row.view.and_then(|view| serde_json::from_value(view).ok()),
-            })
-        })
-        .collect())
+    crate::key_operations::native::selected_read::<native::Favorites>(ctx, (), ()).await
 }
 
 /// Makes a node a favorite, or moves it within the list.
@@ -267,24 +250,7 @@ async fn read_state_list(
     query: MeReadStateListQuery,
     (): (),
 ) -> ApiResult<Vec<ReadState>> {
-    let mut conn = ctx.app.db.acquire().await?;
-    read_states_for(&mut conn, ctx.user()?.id(), query.org_id).await
-}
-
-pub(crate) async fn read_states_for(
-    conn: &mut orch_db::Conn,
-    user: Id,
-    org: Option<Id>,
-) -> ApiResult<Vec<ReadState>> {
-    Ok(hierarchy::read_states_of(conn, user, org)
-        .await?
-        .into_iter()
-        .map(|(thread_id, continuation_id, last_read_seq)| ReadState {
-            thread_id,
-            continuation_id: Some(continuation_id),
-            last_read_seq,
-        })
-        .collect())
+    crate::key_operations::native::selected_read::<native::ReadStates>(ctx, query, ()).await
 }
 
 /// The caller's subscriptions.
@@ -293,36 +259,26 @@ async fn subscription_list(
     query: MeSubscriptionListQuery,
     (): (),
 ) -> ApiResult<Vec<MeSubscription>> {
-    let mut conn = ctx.app.db.acquire().await?;
-    subscriptions_for(&mut conn, ctx.user()?.id(), query.org_id).await
+    crate::key_operations::native::selected_read::<native::Subscriptions>(ctx, query, ()).await
 }
 
-pub(crate) async fn subscriptions_for(
-    conn: &mut orch_db::Conn,
-    user: Id,
-    org: Option<Id>,
-) -> ApiResult<Vec<MeSubscription>> {
-    Ok(hierarchy::subscriptions_of(conn, user, org)
-        .await?
-        .into_iter()
-        .filter_map(|row| {
-            Some(MeSubscription {
-                node_id: row.node_id,
-                level: serde_json::from_value(Json::String(row.level)).ok()?,
-                source: if row.source == "manual" {
-                    SubscriptionSource::Manual
-                } else {
-                    SubscriptionSource::Auto
-                },
-            })
-        })
-        .collect())
+fn subscription(row: &hierarchy::SubscriptionRow) -> Option<MeSubscription> {
+    Some(MeSubscription {
+        node_id: row.node_id,
+        level: serde_json::from_value(Json::String(row.level.clone())).ok()?,
+        source: if row.source == "manual" {
+            SubscriptionSource::Manual
+        } else {
+            SubscriptionSource::Auto
+        },
+    })
 }
 
 /// What the caller's interface remembers for them.
 async fn state_get(ctx: Ctx, (): (), (): ()) -> ApiResult<PersonalState> {
     let mut conn = ctx.app.db.acquire().await?;
-    Ok(identity::interface_state(&mut conn, ctx.user()?.id())
+    let principal = ctx.operation_principal(&mut conn).await?;
+    Ok(identity::interface_state(&mut conn, principal.user())
         .await?
         .into_iter()
         .collect())
@@ -434,9 +390,9 @@ async fn project_view_set(ctx: Ctx, (): (), body: ProjectView) -> ApiResult<()> 
 /// for a place one can no longer see is one's own to clear.
 async fn project_view_delete(ctx: Ctx, (): (), (): ()) -> ApiResult<()> {
     let project = ctx.id("project_id")?;
-    let mut conn = ctx.app.db.begin().await?;
-    let user = ctx.user()?.id();
-    identity::delete_project_view(&mut conn, user, project, ctx.now).await?;
+    let (mut conn, guard) = transaction_guard::begin(&ctx).await?;
+    let user = guard.principal().user();
+    identity::delete_project_view(&mut conn, user, project, guard.now().get()).await?;
     orch_db::sequences::notify_user_event(
         &mut conn,
         &[user],

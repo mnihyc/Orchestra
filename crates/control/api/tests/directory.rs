@@ -8,6 +8,7 @@
 mod places;
 mod support;
 
+use crate::support::FullPermissionPageReply;
 use orch_api_contract::access::{
     AccessChoice, HolderInput, PageChange, PageChangeName, PermissionPageUpdate, Role,
 };
@@ -60,6 +61,8 @@ async fn make_group(
         .send()
         .await
         .ok()
+        .into_full()
+        .expect("this ordinary control requires the full native creation response")
 }
 
 #[tokio::test]
@@ -119,7 +122,9 @@ async fn a_group_is_made_listed_described_anew_and_deleted_by_whoever_manages_th
         })
         .send()
         .await
-        .ok();
+        .ok()
+        .into_full()
+        .expect("this browser control expects the ordinary full group response");
     assert_eq!(renamed.name, "Crew A");
     assert_eq!(renamed.description, "the people");
     let refused = world
@@ -232,7 +237,8 @@ async fn a_member_of_the_root_org_is_put_into_a_group_and_taken_out_and_access_f
             ..PageChange::default()
         })
         .send()
-        .await;
+        .await
+        .full_permission_page();
     assert!(private.status.is_success(), "{:?}", private.status);
     assert!(matches!(read(&world, &eve, s.web).await, Node::Project(_)));
     // Out of the group, out of the project, at the next request.
@@ -433,6 +439,9 @@ async fn a_suspended_member_is_shut_out_of_the_org_until_it_is_lifted() {
     let held = suspend(&s.boss, s.dan.id(), Some("left the building"))
         .await
         .ok();
+    let held = held
+        .into_full()
+        .expect("ordinary suspension retains its full response");
     assert_eq!(held.user.username, "dan");
     assert_eq!(held.reason, "left the building");
     assert_eq!(held.by.username, "boss");
@@ -527,7 +536,11 @@ async fn nobody_suspends_themself_an_owner_or_a_system_admin_and_somebody_let_in
     // Somebody of another tree who was let into a project here.
     let outsider = person(&world, "visitor").await;
     give_role(&world, s.web, &outsider, "viewer", &s.boss).await;
-    let held = suspend(&admin, outsider.id()).await.ok();
+    let held = suspend(&admin, outsider.id())
+        .await
+        .ok()
+        .into_full()
+        .expect("the admin's own full suspension view");
     assert!(held.outside);
     // Somebody who has nothing here is not found.
     let nobody = person(&world, "nobody").await;

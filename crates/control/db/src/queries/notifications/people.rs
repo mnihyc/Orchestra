@@ -467,6 +467,35 @@ pub struct Announced {
     pub inbox_seq: i64,
 }
 
+/// The exact ordinary announce receiver/absence predicate, without allocating a sequence.
+/// Sorted locks precede the caller's current HTTP checkpoint; normal announce reuses them.
+pub async fn lock_announce_receivers(
+    conn: &mut Conn,
+    users: &[Id],
+    kind: &str,
+    key: &str,
+) -> Result<(), DbError> {
+    let receivers = super::operations::receivers(conn, users, kind).await?;
+    lock_untold_receivers(conn, &receivers, key).await?;
+    Ok(())
+}
+
+async fn lock_untold_receivers(
+    conn: &mut Conn,
+    receivers: &[Id],
+    key: &str,
+) -> Result<Vec<Id>, DbError> {
+    Ok(sqlx::query_scalar(
+        "SELECT u.id FROM users u WHERE u.id=ANY($1)
+         AND NOT EXISTS(SELECT 1 FROM notifications n WHERE n.user_id=u.id AND n.dedupe_key=$2)
+         ORDER BY u.id FOR UPDATE OF u",
+    )
+    .bind(receivers)
+    .bind(key)
+    .fetch_all(conn)
+    .await?)
+}
+
 /// Writes a row to the Inbox of a person and moves their feed on, unless they
 /// have a row with that key already. The database is told that their feed
 /// moved when the transaction ends.
@@ -474,12 +503,42 @@ pub async fn announce(
     conn: &mut Conn,
     new: &NewNotification<'_>,
 ) -> Result<Option<Announced>, DbError> {
+    announce_with(conn, new, None::<fn() -> Result<(), DbError>>).await
+}
+
+/// The same announce producer, with an opaque check after receiver and absence reads.
+/// A deduplicated row consumes no first-effect check. The existing user lock pins absence.
+pub async fn announce_with<E, F>(
+    conn: &mut Conn,
+    new: &NewNotification<'_>,
+    before_effect: Option<F>,
+) -> Result<Option<Announced>, E>
+where
+    E: From<DbError>,
+    F: FnOnce() -> Result<(), E> + Send,
+{
     if super::operations::receivers(conn, &[new.user_id], new.kind)
         .await?
         .is_empty()
     {
         return Ok(None);
     }
+    if let Some(check) = before_effect {
+        if lock_untold_receivers(conn, &[new.user_id], new.dedupe_key)
+            .await?
+            .is_empty()
+        {
+            return Ok(None);
+        }
+        check()?;
+    }
+    announce_effect(conn, new).await.map_err(E::from)
+}
+
+async fn announce_effect(
+    conn: &mut Conn,
+    new: &NewNotification<'_>,
+) -> Result<Option<Announced>, DbError> {
     let seq: Option<i64> = sqlx::query_scalar(
         "UPDATE users SET inbox_seq = inbox_seq + 1
           WHERE id = $1 AND NOT EXISTS (SELECT 1 FROM notifications WHERE user_id = $1 AND dedupe_key = $2)

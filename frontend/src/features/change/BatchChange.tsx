@@ -295,7 +295,7 @@ export function BatchChange({ source, batch, open, onClose }: BatchChangeProps) 
               setModel(null);
               setEffort(undefined);
             }}
-            options={(providers.data ?? []).filter((candidate) => candidate.status === 'ready').map((candidate) => ({ value: candidate.id, name: candidate.name, ...resourceChoice({ kind: 'provider', provider: candidate }) }))}
+            options={(providers.data ?? []).filter((candidate) => (candidate.status === 'ready' || candidate.status === 'exhausted')).map((candidate) => ({ value: candidate.id, name: candidate.name, ...resourceChoice({ kind: 'provider', provider: candidate }) }))}
           />
           <Select
             label={t('change.runs.agent')}

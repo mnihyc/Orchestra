@@ -112,6 +112,9 @@ pub struct Written {
 /// Why a value could not be written.
 #[derive(Debug, thiserror::Error)]
 pub enum WriteError {
+    /// The native operation closed after preparation, before its first write.
+    #[error("the original operation no longer permits this setting write")]
+    OperationRefused,
     /// The database refused.
     #[error(transparent)]
     Db(#[from] DbError),
@@ -303,6 +306,17 @@ pub async fn write(
     request: &Write<'_>,
     now: DateTime<Utc>,
 ) -> Result<Written, WriteError> {
+    write_before(conn, request, now, || Ok(())).await
+}
+
+/// The same native writer with its once-only check after validation and immediately before SQL.
+/// The caller prepares its native serialization footprint on this transaction first.
+pub async fn write_before(
+    conn: &mut Conn,
+    request: &Write<'_>,
+    now: DateTime<Utc>,
+    guard: impl FnOnce() -> Result<(), WriteError>,
+) -> Result<Written, WriteError> {
     let def =
         registry::get(request.key).ok_or_else(|| Invalid::UnknownKey(request.key.to_owned()))?;
     let mut snapshot = Snapshot::load(conn, request.target.into(), Wanted::Keys(&[def])).await?;
@@ -342,6 +356,7 @@ pub async fn write(
         by: user_of(request.actor),
         at: now,
     };
+    guard()?;
     let row = match queries::put(conn, node, def.key, &stored, request.expected_revision).await? {
         Put::Written(row) => row,
         Put::Stale => {

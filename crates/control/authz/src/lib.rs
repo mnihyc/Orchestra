@@ -41,6 +41,7 @@ pub mod approvals;
 pub mod caps;
 pub mod chats;
 pub mod covers;
+pub mod creation;
 pub mod defaults;
 pub mod depends;
 pub mod documents;
@@ -64,6 +65,7 @@ pub mod requests;
 pub mod resources;
 pub mod standing;
 pub mod suspension;
+pub mod system_administration;
 pub mod things;
 pub mod tokens;
 pub mod transfer;
@@ -73,7 +75,10 @@ use orch_types::Id;
 
 pub use engine::{Frame, Site};
 pub use holders::Principal;
-pub use tokens::{Caller, KeptOut, TokenGrant};
+pub use tokens::{
+    AdmittedOperation, Caller, CapturedCaller, CapturedOperation, KeptOut, KeyScopeRefusal,
+    ResolvedFacetRole, TokenGrant,
+};
 
 /// What an act is, for the one thing that depends on it: what archive
 /// leaves of a permission. Most acts are `Use`.

@@ -25,6 +25,7 @@
 
 use crate::tools::texts;
 use chrono::{DateTime, Duration, Utc};
+use orch_agent_contract::descriptor::SideReading;
 use orch_agent_contract::events::OrchTool;
 use orch_api_contract::documents::DOCUMENT_DESCRIPTION_MAX_CHARS;
 use orch_types::{Id, Json};
@@ -186,7 +187,7 @@ const fn title_of(tool: OrchTool) -> &'static str {
         OrchTool::SearchShared => "Search what was shared",
         OrchTool::DownloadShared => "Copy a shared entry into the workspace",
         OrchTool::EditDocument => "Edit a document",
-        OrchTool::ManageShared => "Organize documents and folders",
+        OrchTool::ManageShared => "Manage shared things",
         OrchTool::SendMessage | OrchTool::SendChatMessage | OrchTool::SendThreadMessage => {
             "Send a message"
         }
@@ -695,14 +696,23 @@ fn input_schema_of(tool: OrchTool) -> Json {
                 (
                     "command",
                     choice(
-                        "What to do: create_folder, copy, move, delete or restore. Only delete uses preview and confirm.",
-                        &["create_folder", "copy", "move", "delete", "restore"],
+                        "Organize documents, archive or unarchive one thread, fork one thread, or delete a chat message. Thread and chat acts always preview and confirm; document delete also confirms.",
+                        &[
+                            "create_folder",
+                            "copy",
+                            "move",
+                            "delete",
+                            "restore",
+                            "archive",
+                            "unarchive",
+                            "fork",
+                        ],
                     ),
                 ),
                 (
                     "paths",
                     list_between(
-                        "One to twenty document or document-folder paths or id references from list_shared. create_folder takes exactly one new folder path whose parent exists. At most fifty documents and folders, including all descendants, may be affected; overlapping selections are refused. restore also accepts a deleted item or one earlier document version.",
+                        "One thread or chat path, or one to twenty document or document-folder paths or id references from list_shared. create_folder takes exactly one new folder path whose parent exists. At most fifty documents and folders, including all descendants, may be affected; overlapping selections are refused. restore also accepts a deleted item or one earlier document version.",
                         json!({ "type": "string" }),
                         1,
                         MANAGE_PATHS_MAX,
@@ -711,19 +721,25 @@ fn input_schema_of(tool: OrchTool) -> Json {
                 (
                     "to",
                     string(
-                        "Required for copy and move: an existing writable document directory. Parent directories are never created implicitly.",
+                        "Required for copy and move: an existing writable document directory. For fork: an existing topic; omitted keeps the source topic. Parent directories are never created implicitly.",
                     ),
                 ),
                 (
                     "name",
                     string(
-                        "Optional new basename for copy or move with exactly one source; keep .md for a text document. No separators, overwrite or automatic renaming.",
+                        "Optional new name for a fork, or basename for copy or move with exactly one source; keep .md for a text document. No separators, overwrite or automatic renaming.",
+                    ),
+                ),
+                (
+                    "message_id",
+                    string(
+                        "For delete on a chat path: the exact message id read from that chat; never a system line.",
                     ),
                 ),
                 (
                     "confirm",
                     string(
-                        "For delete only: repeat the same arguments with the confirmation token from the complete deletion preview. All other commands execute directly without confirm.",
+                        "Repeat the same arguments with the token from the complete preview for delete, archive, unarchive or fork. Other document commands execute directly without confirm.",
                     ),
                 ),
             ],
@@ -1014,21 +1030,15 @@ pub fn definition(tool: OrchTool, messages: &BTreeMap<String, String>) -> ToolDe
     }
 }
 
-/// Advertises only the current place's announcement choices. Actual calls still recheck current policy.
+/// Advertises the place's delivery choices. Every audience still checks current recipient rights.
 #[must_use]
 pub fn definition_at(
     tool: OrchTool,
     messages: &BTreeMap<String, String>,
-    reach: &str,
     options: &[String],
 ) -> ToolDefinition {
     let mut definition = definition(tool, messages);
     if tool == OrchTool::Announce {
-        definition.input_schema["properties"]["audience"]["enum"] = match reach {
-            "org" => json!(["followers", "topic", "project", "org"]),
-            "project" => json!(["followers", "topic", "project"]),
-            _ => json!(["followers", "topic"]),
-        };
         let deliveries: Vec<_> = ["interrupt", "steer", "next_turn"]
             .into_iter()
             .filter(|value| options.iter().any(|allowed| allowed.as_str() == *value))
@@ -1058,10 +1068,10 @@ pub fn all(messages: &BTreeMap<String, String>) -> Vec<ToolDefinition> {
 }
 
 /// The tools a thread is offered: those of `enabled` (the resolved `orch_tools.enabled`) that are built, in
-/// their fixed order. A side thread is a quick aside from another thread and tells nobody: it has no
-/// `announce`.
+/// their fixed order. A reading side thread receives only tools whose whole operation is read-only;
+/// a no-tools side receives none. The same selection gates fresh calls, not just advertised tools.
 #[must_use]
-pub fn offered(enabled: &[String], side_thread: bool) -> Vec<OrchTool> {
+pub fn offered(enabled: &[String], side_reading: Option<SideReading>) -> Vec<OrchTool> {
     OrchTool::ALL
         .iter()
         .copied()
@@ -1073,7 +1083,11 @@ pub fn offered(enabled: &[String], side_thread: bool) -> Vec<OrchTool> {
                         && matches!(name.as_str(), "send_chat_message" | "send_thread_message"))
             })
         })
-        .filter(|tool| !(side_thread && *tool == OrchTool::Announce))
+        .filter(|tool| match side_reading {
+            None => true,
+            Some(SideReading::NoTools) => false,
+            Some(SideReading::ReadOnly | SideReading::ApprovalGated) => hints_of(*tool).read_only,
+        })
         .collect()
 }
 
@@ -1098,7 +1112,7 @@ pub enum Code {
     NotFound,
     /// The agent may read it and not write it.
     NotWritable,
-    /// `manage_shared` on a document or folder the agent may read or write but lacks the required Manage.
+    /// Shared document, thread or chat management lacks the required current giver-bound row.
     NotManageable,
     /// `manage_shared` with a word that is not the one of a first call with these arguments, was used, or is older
     /// than ten minutes; or what would be affected is no longer what that call listed.
@@ -1527,20 +1541,34 @@ mod tests {
     fn the_tool_that_manages_documents_is_declared_as_the_specification_gives_it() {
         let tool = definition(OrchTool::ManageShared, &BTreeMap::new());
         assert_eq!(tool.name, "manage_shared");
-        assert_eq!(tool.title, "Organize documents and folders");
+        assert_eq!(tool.title, "Manage shared things");
         assert_eq!(tool.description, texts::MANAGE_SHARED);
         assert!(
             tool.description.starts_with(
-                "Organize shared documents and document folders using paths from list_shared."
-            ) && tool.description.ends_with(
-                "These operations organize Orch documents, not your execution workspace."
+                "Manage shared documents and folders, threads, and chat messages using paths from list_shared."
+            ) && tool.description.contains(
+                "Use edit_document for document content and file tools for workspace files."
             )
         );
-        assert!(tool.description.contains("Only delete requires two calls"));
+        assert!(
+            tool.description
+                .contains("For documents, only delete requires two calls")
+        );
         assert!(
             tool.description
                 .contains("create_folder, copy, move and restore execute directly")
         );
+        for required in [
+            "archive and unarchive need thread.archive",
+            "fork needs thread.fork",
+            "first owned by that row's giver",
+            "delete on a thread needs thread.manage",
+            "under chat.manage",
+            "All thread and chat acts require two calls",
+            "Every lent act stays bound to its recorded giver's current authority",
+        ] {
+            assert!(tool.description.contains(required), "{required}");
+        }
         // It removes or moves, though it can be brought back; and doing it twice is not doing it once.
         assert_eq!(
             tool.hints,
@@ -1555,29 +1583,58 @@ mod tests {
         assert_eq!(schema["required"], json!(["command", "paths"]));
         assert_eq!(
             schema["properties"]["command"]["enum"],
-            json!(["create_folder", "copy", "move", "delete", "restore"])
+            json!([
+                "create_folder",
+                "copy",
+                "move",
+                "delete",
+                "restore",
+                "archive",
+                "unarchive",
+                "fork"
+            ])
         );
         assert_eq!(schema["properties"]["paths"]["minItems"], 1);
         assert_eq!(schema["properties"]["paths"]["maxItems"], 20);
         assert_eq!(schema["properties"]["paths"]["items"]["type"], "string");
         assert_eq!(schema["properties"]["to"]["type"], "string");
         assert_eq!(schema["properties"]["name"]["type"], "string");
+        assert_eq!(schema["properties"]["message_id"]["type"], "string");
         assert_eq!(schema["properties"]["confirm"]["type"], "string");
         assert_eq!(
             schema["properties"].as_object().map(serde_json::Map::len),
-            Some(7),
-            "command, paths, to, name and confirm accompany the common answer options"
+            Some(8),
+            "command, paths, to, name, message_id and confirm accompany the common answer options"
         );
+        for arguments in [
+            json!({"command":"archive","paths":["Repro/conversation.md"]}),
+            json!({"command":"unarchive","paths":["Repro/"]}),
+            json!({"command":"fork","paths":["Repro/"],"to":"../Other topic/","name":"New thread"}),
+            json!({"command":"delete","paths":["chat.md"],"message_id":"0199d1a8-7f3c-7a1e-8b3a-1c2d3e4f5a6b","confirm":"preview-token"}),
+        ] {
+            assert!(
+                check_arguments(OrchTool::ManageShared, &arguments).is_ok(),
+                "{arguments}"
+            );
+        }
+        for name in ["giver", "owner", "as_admin"] {
+            let mut arguments = json!({"command":"fork","paths":["Repro/"]});
+            arguments[name] = json!("caller-supplied-authority");
+            assert!(
+                check_arguments(OrchTool::ManageShared, &arguments).is_err(),
+                "{name}"
+            );
+        }
     }
 
     #[test]
-    fn an_announcement_lists_only_the_current_places_delivery_and_audience_choices() {
+    fn an_announcement_lists_all_audiences_and_only_permitted_delivery_choices() {
         let messages = BTreeMap::new();
         let stock = definition(OrchTool::Announce, &messages);
-        let default = definition_at(OrchTool::Announce, &messages, "topic", &[]);
+        let default = definition_at(OrchTool::Announce, &messages, &[]);
         assert_eq!(
             default.input_schema["properties"]["audience"]["enum"],
-            json!(["followers", "topic"])
+            json!(["followers", "topic", "project", "org"])
         );
         assert!(default.input_schema["properties"].get("delivery").is_none());
         assert!(
@@ -1588,7 +1645,6 @@ mod tests {
         let allowed = definition_at(
             OrchTool::Announce,
             &messages,
-            "org",
             &["steer".to_owned(), "wake_idle".to_owned()],
         );
         assert_eq!(
@@ -1703,7 +1759,7 @@ mod tests {
             );
         }
         let description = shipped_description(OrchTool::ManageShared);
-        assert!(description.contains("Only delete requires two calls"));
+        assert!(description.contains("For documents, only delete requires two calls"));
         assert!(
             description
                 .contains("Every operation authorizes the whole tree and executes all or none")
@@ -1722,7 +1778,7 @@ mod tests {
                     .contains("existing writable docs root or document folder"))
         );
         assert_eq!(
-            definition_at(OrchTool::EditDocument, &BTreeMap::new(), "topic", &[]).input_schema,
+            definition_at(OrchTool::EditDocument, &BTreeMap::new(), &[]).input_schema,
             edit.input_schema,
             "offered definitions have no second create(from) workflow at any place"
         );
@@ -1765,22 +1821,33 @@ mod tests {
     }
 
     #[test]
-    fn a_thread_is_offered_what_it_enables_that_is_built_and_a_side_thread_has_no_announce() {
+    fn a_thread_is_offered_what_it_enables_and_sides_receive_only_their_reading_tools() {
         let enabled: Vec<String> = OrchTool::ALL
             .iter()
             .map(|tool| tool.name().to_owned())
             .collect();
-        let everything = offered(&enabled, false);
+        let everything = offered(&enabled, None);
         assert_eq!(
             everything, BUILT,
             "all enabled: the ones that are built, in their order"
         );
-        let aside = offered(&enabled, true);
-        assert!(!aside.contains(&OrchTool::Announce));
-        assert!(aside.contains(&OrchTool::SendMessage));
-        assert!(offered(&[], false).is_empty());
+        for mode in [SideReading::ReadOnly, SideReading::ApprovalGated] {
+            assert_eq!(
+                offered(&enabled, Some(mode)),
+                [
+                    OrchTool::ListShared,
+                    OrchTool::ReadShared,
+                    OrchTool::SearchShared,
+                    OrchTool::ListPorts,
+                    OrchTool::ListPortConnections,
+                ],
+                "a reading side has no mutation or control path, including a workspace download"
+            );
+        }
+        assert!(offered(&enabled, Some(SideReading::NoTools)).is_empty());
+        assert!(offered(&[], None).is_empty());
         assert_eq!(
-            offered(&["list_shared".to_owned()], false),
+            offered(&["list_shared".to_owned()], None),
             [OrchTool::ListShared],
             "only what is enabled is offered"
         );
@@ -1890,7 +1957,7 @@ mod tests {
         for historical in ["send_chat_message", "send_thread_message"] {
             assert!(!names.contains(&historical));
             assert_eq!(
-                offered(&[historical.to_owned()], false),
+                offered(&[historical.to_owned()], None),
                 [OrchTool::SendMessage]
             );
         }

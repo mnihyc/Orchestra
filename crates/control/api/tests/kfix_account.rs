@@ -8,6 +8,8 @@
 mod chat_world;
 mod places;
 mod support;
+use support::FullInvitationReply as _;
+use support::FullRoleReply as _;
 
 use chat_world::Room;
 use chrono::Duration;
@@ -161,6 +163,7 @@ async fn invite(
         .body(body)
         .send()
         .await
+        .full_invitation()
 }
 
 async fn accept(
@@ -177,6 +180,7 @@ async fn accept(
         })
         .send()
         .await
+        .full_invitation()
 }
 
 async fn update(world: &World, by: &Who, body: Value) -> Reply<Me> {
@@ -598,6 +602,7 @@ async fn a_removed_node_or_a_withdrawn_makers_role_returns_no_navigation_target(
         })
         .send()
         .await
+        .full_role()
         .ok();
     let mut conn = room.world.conn().await;
     assert!(

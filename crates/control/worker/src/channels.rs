@@ -19,6 +19,7 @@
 
 use crate::render::{self, Rendering};
 use chrono::{DateTime, Utc};
+use futures::future::BoxFuture;
 use orch_db::queries::notifications::channels::{self as rows, ChannelRow, DestinationRow, owner};
 use orch_db::queries::notifications::outbox::Snapshot;
 use orch_db::queries::notifications::people::{self, PushSubscriptionRow, Recipient};
@@ -511,6 +512,38 @@ pub enum TestPrepared {
     Done(TestOutcome),
 }
 
+/// Actual native sample attempts and their result, separate from permission for later work.
+/// Only the sender constructs this receipt; a stopped batch never replays accepted attempts.
+#[must_use = "reconcile the actual sample attempts before finishing their outcome"]
+pub struct TestRun<E> {
+    outcome: TestOutcome,
+    attempted: usize,
+    interruption: Option<E>,
+}
+
+impl<E> TestRun<E> {
+    /// The generated sample outcome, including a partial batch that stopped before a later send.
+    #[must_use]
+    pub fn outcome(&self) -> &TestOutcome {
+        &self.outcome
+    }
+    /// The real native attempts made before completion or interruption.
+    #[must_use]
+    pub fn attempted(&self) -> usize {
+        self.attempted
+    }
+    /// A current source refusal before an unsent sample, never a far-side result.
+    #[must_use]
+    pub fn interruption(&self) -> Option<&E> {
+        self.interruption.as_ref()
+    }
+    /// Finish the original result after its owner reconciles only the actual accepted work.
+    #[must_use]
+    pub fn into_outcome(self) -> TestOutcome {
+        self.outcome
+    }
+}
+
 /// Sends one sample message through a channel, as it would reach the caller
 /// through their route, or, for a mail server, to the address given. What the
 /// far side answers is returned when it does not take the message. The caller
@@ -531,16 +564,56 @@ pub async fn send_test(
 /// Sends a sample message that was made ready: the far side is called with nothing of the
 /// database held.
 pub async fn run_test(ready: PreparedTest) -> TestOutcome {
-    let mut first_error = None;
+    fn ordinary<'a>(
+        _delivery: &'a Delivery,
+    ) -> BoxFuture<'a, Result<(), std::convert::Infallible>> {
+        Box::pin(async { Ok(()) })
+    }
+    match run_test_before(ready, ordinary).await {
+        Ok(run) => run.into_outcome(),
+        Err(never) => match never {},
+    }
+}
+
+/// Invoke the owner's current native source/first-effect check immediately before each send.
+/// Its connection/transaction must be released by the callback before notifier IO starts.
+/// The Body/config is already prepared once; this never reloads, renders or retries a send.
+/// A refusal before any attempt is an error. Later refusal retains the genuine prior attempts
+/// and a truthful partial result, leaving their exact owned reconciliation to the caller.
+pub async fn run_test_before<E, F>(ready: PreparedTest, mut before: F) -> Result<TestRun<E>, E>
+where
+    F: for<'a> FnMut(&'a Delivery) -> BoxFuture<'a, Result<(), E>> + Send,
+    E: Send,
+{
+    let mut first_error: Option<String> = None;
+    let mut attempted = 0;
     for delivery in ready.deliveries {
+        if let Err(error) = before(&delivery).await {
+            if attempted == 0 {
+                return Err(error);
+            }
+            return Ok(TestRun {
+                outcome: TestOutcome::failed(first_error.as_deref().unwrap_or(
+                    "the remaining sample deliveries could not start under their original authority",
+                )),
+                attempted,
+                interruption: Some(error),
+            });
+        }
+        attempted += 1;
         if let Err(error) = guarded(ready.notifier.deliver(delivery)).await {
             first_error.get_or_insert(error.message);
         }
     }
-    match first_error {
+    let outcome = match first_error {
         None => TestOutcome::of(Ok(())),
         Some(error) => TestOutcome::failed(&error),
-    }
+    };
+    Ok(TestRun {
+        outcome,
+        attempted,
+        interruption: None,
+    })
 }
 
 /// Makes a sample message through a channel ready: what it says, and where it goes.
@@ -688,6 +761,154 @@ mod tests {
     use orch_notifier_contract::templates::{BodyKind, TemplatePair, TemplateText};
     use orch_types::{Field, FieldType};
     use serde_json::json;
+
+    #[derive(Debug, PartialEq, Eq)]
+    enum SampleEvent {
+        Before(usize),
+        Sent(Id),
+    }
+
+    struct SampleNotifier {
+        events: Arc<std::sync::Mutex<Vec<SampleEvent>>>,
+        refuse: Option<Id>,
+    }
+
+    #[async_trait]
+    impl Notifier for SampleNotifier {
+        fn describe(&self) -> NotifierDescriptor {
+            Fake {
+                name: "sample",
+                check: Ok(Json::Null),
+            }
+            .describe()
+        }
+        async fn check(&self, _: &Config) -> Result<Json, DeliverError> {
+            Ok(Json::Null)
+        }
+        async fn deliver(&self, delivery: Delivery) -> Result<(), DeliverError> {
+            self.events
+                .lock()
+                .unwrap()
+                .push(SampleEvent::Sent(delivery.id));
+            if self.refuse == Some(delivery.id) {
+                Err(DeliverError::refused(
+                    "sample_refused",
+                    "the first far-side refusal",
+                ))
+            } else {
+                Ok(())
+            }
+        }
+        async fn poll_links(
+            &self,
+            _: &Config,
+            _: Option<String>,
+            _: Duration,
+        ) -> Result<LinkPoll, DeliverError> {
+            Ok(LinkPoll::default())
+        }
+    }
+
+    fn sample_batch(
+        events: Arc<std::sync::Mutex<Vec<SampleEvent>>>,
+        refuse: Option<Id>,
+    ) -> PreparedTest {
+        PreparedTest {
+            notifier: Arc::new(SampleNotifier { events, refuse }),
+            deliveries: (1..=3)
+                .map(|id| Delivery {
+                    id: Id::from_u128(id),
+                    attempt: 1,
+                    config: Config::default(),
+                    to: json!({}),
+                    recipient: None,
+                    language: "en".into(),
+                    subject: None,
+                    body: "native prepared sample".into(),
+                    notifications: Vec::new(),
+                })
+                .collect(),
+        }
+    }
+
+    #[tokio::test]
+    async fn native_sample_cut_precedes_every_send_and_keeps_actual_partial_attempts() {
+        for stop in [Some(0), Some(1), None] {
+            let events = Arc::new(std::sync::Mutex::new(Vec::new()));
+            let observed = Arc::clone(&events);
+            let mut index = 0;
+            let result =
+                run_test_before(sample_batch(Arc::clone(&events), None), move |_delivery| {
+                    let here = index;
+                    index += 1;
+                    observed.lock().unwrap().push(SampleEvent::Before(here));
+                    Box::pin(async move {
+                        if stop == Some(here) {
+                            Err("closed native source")
+                        } else {
+                            Ok(())
+                        }
+                    })
+                })
+                .await;
+            let expected = match stop {
+                Some(0) => {
+                    assert!(matches!(result, Err("closed native source")));
+                    vec![SampleEvent::Before(0)]
+                }
+                Some(1) => {
+                    let run = result.unwrap();
+                    assert_eq!(run.attempted(), 1);
+                    assert_eq!(run.interruption(), Some(&"closed native source"));
+                    assert!(!run.outcome().ok);
+                    assert!(
+                        run.outcome()
+                            .error
+                            .as_deref()
+                            .unwrap()
+                            .contains("remaining")
+                    );
+                    vec![
+                        SampleEvent::Before(0),
+                        SampleEvent::Sent(Id::from_u128(1)),
+                        SampleEvent::Before(1),
+                    ]
+                }
+                None => {
+                    let run = result.unwrap();
+                    assert_eq!(run.attempted(), 3);
+                    assert!(run.interruption().is_none());
+                    assert!(run.into_outcome().ok);
+                    vec![
+                        SampleEvent::Before(0),
+                        SampleEvent::Sent(Id::from_u128(1)),
+                        SampleEvent::Before(1),
+                        SampleEvent::Sent(Id::from_u128(2)),
+                        SampleEvent::Before(2),
+                        SampleEvent::Sent(Id::from_u128(3)),
+                    ]
+                }
+                _ => unreachable!(),
+            };
+            assert_eq!(*events.lock().unwrap(), expected);
+        }
+    }
+
+    #[tokio::test]
+    async fn uncut_sample_sender_keeps_native_first_error_and_sends_each_delivery_once() {
+        let events = Arc::new(std::sync::Mutex::new(Vec::new()));
+        let outcome = run_test(sample_batch(Arc::clone(&events), Some(Id::from_u128(1)))).await;
+        assert!(!outcome.ok);
+        assert_eq!(outcome.error.as_deref(), Some("the first far-side refusal"));
+        assert_eq!(
+            *events.lock().unwrap(),
+            vec![
+                SampleEvent::Sent(Id::from_u128(1)),
+                SampleEvent::Sent(Id::from_u128(2)),
+                SampleEvent::Sent(Id::from_u128(3))
+            ]
+        );
+    }
 
     struct Fake {
         name: &'static str,

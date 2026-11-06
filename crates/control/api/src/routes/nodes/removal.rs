@@ -8,7 +8,7 @@
 //! request names. Nothing is removed until the retention days have passed.
 //! The first owner of a node is passed on by the page change that does it.
 
-use super::{Placed, actor_name, invalid, placed, record, shown, view};
+use super::{Placed, actor_name, invalid, placed, record, view};
 use crate::middleware::authorization::{self, MANAGE, exact, refusals};
 use crate::middleware::requests::{ApiError, ApiResult};
 use crate::registry::{Ctx, Registry};
@@ -33,24 +33,43 @@ use orch_db::{Conn, DbError};
 use orch_types::{Id, Time};
 use serde_json::json;
 
+mod restoring;
+mod review;
+
 /// Binds this module's requests.
 pub fn mount(registry: &mut Registry) {
     registry
-        .on(NodeDeletePreview, node_delete_preview)
+        .on_with_operation(
+            NodeDeletePreview,
+            crate::key_operations::native::effects::prepare::<review::Preview>,
+            node_delete_preview,
+        )
         .on(NodeDelete, node_delete)
         .on(NodeDeletedList, deleted_list)
-        .on(NodeRestore, node_restore)
-        .on(OrgDeletedList, org_deleted_list)
-        .on(NodeTransfer, node_transfer);
+        .on_with_operation(
+            NodeRestore,
+            crate::key_operations::native::effects::prepare::<restoring::Restore>,
+            node_restore,
+        )
+        .on_snapshot_read_with_optional_operation(
+            OrgDeletedList,
+            crate::key_operations::native::selected::<super::deleted_orgs::Orgs>,
+            org_deleted_list,
+        )
+        .on_with_operation(
+            NodeTransfer,
+            crate::routes::transfer::operation::node,
+            node_transfer,
+        );
 }
 
 /// When what was deleted at `at` is gone for good.
-fn purge_at(at: DateTime<Utc>, days: u64) -> DateTime<Utc> {
+pub(super) fn purge_at(at: DateTime<Utc>, days: u64) -> DateTime<Utc> {
     at + Duration::days(i64::try_from(days).unwrap_or(i64::MAX / 86_400))
 }
 
 /// The moment before which a deletion has been purged by `now`.
-fn purged_before(now: DateTime<Utc>, days: u64) -> DateTime<Utc> {
+pub(super) fn purged_before(now: DateTime<Utc>, days: u64) -> DateTime<Utc> {
     now - Duration::days(i64::try_from(days).unwrap_or(i64::MAX / 86_400))
 }
 
@@ -68,6 +87,9 @@ struct KeptPlan {
     fingerprint: String,
     /// When what it deleted would have been purged.
     purge_at: DateTime<Utc>,
+    /// Original accepted review capability for its later confirmation.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    origins: Vec<orch_authz::CapturedOperation>,
 }
 
 /// The hash of a deletion set: changed, added or replaced rows give another, whatever the totals.
@@ -122,83 +144,117 @@ async fn restore_by(
     })
 }
 
-/// Counts what deleting `id` removes and keeps it as a plan, in the caller's transaction.
+/// The immutable native preparation of the existing deletion review.
+struct DeleteReview {
+    node: hierarchy::NodeRow,
+    set: Vec<(String, Id, i64)>,
+    purge_at: DateTime<Utc>,
+}
+
+async fn prepare_delete_review(
+    ctx: &Ctx,
+    conn: &mut Conn,
+    id: Id,
+    set: &[(String, Id, i64)],
+) -> ApiResult<DeleteReview> {
+    let rows = hierarchy::with_ancestors(conn, &[id]).await?;
+    let node = rows
+        .into_iter()
+        .find(|row| row.id == id)
+        .ok_or_else(ApiError::not_found)?;
+    Ok(DeleteReview {
+        node,
+        set: set.to_vec(),
+        purge_at: purge_at(ctx.now, ctx.app.config.retention.soft_delete_days),
+    })
+}
+
+struct SavedReview {
+    preflight: orch_db::queries::jobs::forks::PreflightRow,
+    review: std::sync::Arc<DeleteReview>,
+}
+
+async fn save_delete_review(
+    ctx: &Ctx,
+    conn: &mut Conn,
+    principal: &orch_authz::Principal,
+    review: std::sync::Arc<DeleteReview>,
+    before: impl FnOnce() -> ApiResult<()> + Send,
+    inherited: &[orch_authz::CapturedOperation],
+) -> ApiResult<SavedReview> {
+    let kept = KeptPlan {
+        revision: review.node.revision,
+        fingerprint: fingerprint_of(&review.set),
+        purge_at: review.purge_at,
+        origins: {
+            let mut origins = inherited.to_vec();
+            if crate::key_operations::native::modern(principal.caller()) {
+                let current = orch_authz::CapturedOperation::capture(principal.caller())
+                    .map_err(ApiError::internal)?;
+                if !origins.contains(&current) {
+                    origins.push(current);
+                }
+            }
+            origins
+        },
+    };
+    let preflight = orch_db::queries::jobs::forks::PreflightRow {
+        id: orch_types::new_id(),
+        kind: DELETE_PLAN_KIND.to_owned(),
+        node_id: Some(review.node.id),
+        environment_id: None,
+        created_by: principal.user(),
+        plan: serde_json::to_value(&kept).map_err(ApiError::internal)?,
+        expires_at: ctx.now + Duration::minutes(DELETE_PLAN_MINUTES),
+        created_at: ctx.now,
+    };
+    before()?;
+    orch_db::queries::jobs::forks::save_preflight(conn, &preflight).await?;
+    Ok(SavedReview { preflight, review })
+}
+
+async fn render_delete_review(
+    conn: &mut Conn,
+    principal: &orch_authz::Principal,
+    saved: &SavedReview,
+) -> ApiResult<NodeDeletePlan> {
+    let review = &saved.review;
+    let refs = view::refs(conn, principal, &[review.node.id], Policy::default()).await?;
+    Ok(NodeDeletePlan {
+        preflight_id: saved.preflight.id,
+        expires_at: Time::new(saved.preflight.expires_at),
+        node: refs
+            .get(&review.node.id)
+            .cloned()
+            .ok_or_else(|| ApiError::internal("a node to delete has no reference"))?,
+        revision: review.node.revision,
+        counts: counts_of(&review.set),
+        purge_at: Time::new(review.purge_at),
+        restore_by: restore_by(conn, principal, &review.node).await?,
+    })
+}
+
+/// The same native planner remains shared with stale deletion confirmations.
 async fn delete_plan(
     ctx: &Ctx,
     conn: &mut Conn,
     principal: &orch_authz::Principal,
     id: Id,
     set: &[(String, Id, i64)],
+    origins: &[orch_authz::CapturedOperation],
 ) -> ApiResult<NodeDeletePlan> {
-    let rows = hierarchy::with_ancestors(conn, &[id]).await?;
-    let node = rows
-        .iter()
-        .find(|row| row.id == id)
-        .ok_or_else(ApiError::not_found)?
-        .clone();
-    let purge = purge_at(ctx.now, ctx.app.config.retention.soft_delete_days);
-    let kept = KeptPlan {
-        revision: node.revision,
-        fingerprint: fingerprint_of(set),
-        purge_at: purge,
-    };
-    let preflight_id = orch_types::new_id();
-    let expires_at = ctx.now + Duration::minutes(DELETE_PLAN_MINUTES);
-    orch_db::queries::jobs::forks::save_preflight(
-        conn,
-        &orch_db::queries::jobs::forks::PreflightRow {
-            id: preflight_id,
-            kind: DELETE_PLAN_KIND.to_owned(),
-            node_id: Some(id),
-            environment_id: None,
-            created_by: principal.user(),
-            plan: serde_json::to_value(&kept).map_err(ApiError::internal)?,
-            expires_at,
-            created_at: ctx.now,
-        },
-    )
-    .await?;
-    let refs = view::refs(conn, principal, &[id], Policy::default()).await?;
-    Ok(NodeDeletePlan {
-        preflight_id,
-        expires_at: Time::new(expires_at),
-        node: refs
-            .get(&id)
-            .cloned()
-            .ok_or_else(|| ApiError::internal("a node to delete has no reference"))?,
-        revision: node.revision,
-        counts: counts_of(set),
-        purge_at: Time::new(purge),
-        restore_by: restore_by(conn, principal, &node).await?,
-    })
+    let review = std::sync::Arc::new(prepare_delete_review(ctx, conn, id, set).await?);
+    let saved = save_delete_review(ctx, conn, principal, review, || Ok(()), origins).await?;
+    render_delete_review(conn, principal, &saved).await
 }
 
-/// Says what deleting a node would remove, until when and by whom it can be brought back, and keeps
-/// that as a plan for the deletion to name. Nothing is deleted.
-async fn node_delete_preview(ctx: Ctx, (): (), (): ()) -> ApiResult<NodeDeletePlan> {
-    let id = ctx.id("id")?;
-    let (ctx, mut tx, principal) = super::action(&ctx).await?;
-    let (_, kind) = placed(&mut tx, id).await?;
-    authorization::require(
-        &mut tx,
-        &principal,
-        id,
-        MANAGE,
-        Act::Delete,
-        Policy::default(),
-    )
-    .await?;
-    if kind == NodeKind::Org
-        && hierarchy::org(&mut tx, id)
-            .await?
-            .is_some_and(|org| org.org_kind == "personal")
-    {
-        return Err(invalid("id", "a personal org is never deleted"));
-    }
-    let set = hierarchy::deletion_set(&mut tx, id, false).await?;
-    let plan = delete_plan(&ctx, &mut tx, &principal, id, &set).await?;
-    tx.commit().await.map_err(DbError::from)?;
-    Ok(plan)
+/// Stores a reviewed deletion without deleting anything; full names have their own Read boundary.
+async fn node_delete_preview(
+    ctx: Ctx,
+    (): (),
+    (): (),
+) -> ApiResult<orch_api_contract::ownership::NodeDeletePreviewResponse> {
+    review::run(ctx).await
 }
 
 /// Holds a deletion that names a plan to what the plan counted: the plan is the caller's own, of this
@@ -214,6 +270,11 @@ async fn hold_to_plan(
     preflight: Id,
     expected_revision: Option<i64>,
 ) -> ApiResult<Option<NodeDeletePlan>> {
+    sqlx::query("SELECT id FROM preflights WHERE id=$1 FOR UPDATE")
+        .bind(preflight)
+        .fetch_optional(&mut *conn)
+        .await
+        .map_err(DbError::from)?;
     let row = orch_db::queries::jobs::forks::preflight(conn, preflight)
         .await?
         .filter(|row| {
@@ -235,6 +296,7 @@ async fn hold_to_plan(
     }
     let kept: KeptPlan = serde_json::from_value(row.plan).map_err(ApiError::internal)?;
     let set = hierarchy::deletion_set(conn, id, true).await?;
+    review::require_origins(ctx, conn, principal, id, &kept.origins).await?;
     let revision = set
         .iter()
         .find(|(_, each, _)| *each == id)
@@ -249,7 +311,17 @@ async fn hold_to_plan(
     if same {
         return Ok(None);
     }
-    Ok(Some(delete_plan(ctx, conn, principal, id, &set).await?))
+    Ok(Some(
+        delete_plan(ctx, conn, principal, id, &set, &kept.origins).await?,
+    ))
+}
+
+fn stale_delete_plan(current: NodeDeletePlan) -> ApiError {
+    ApiError::new(
+        ErrorCode::ConflictStaleRevision,
+        "what this deletion would remove changed since the plan: confirm the plan as it now is",
+    )
+    .with("current", current)
 }
 
 /// Deletes a node, archiving it first when it is not archived.
@@ -260,6 +332,20 @@ async fn node_delete(ctx: Ctx, (): (), body: NodeDeleteBody) -> ApiResult<NodeDe
     if kind == NodeKind::Thread {
         // The part that forks and switches: a side thread is closed here, and nothing else of a thread is.
         if let Some(parent) = orch_db::queries::threads::forking::side_parent(&mut tx, id).await? {
+            if let Some(preflight) = body.preflight_id
+                && let Some(current) = hold_to_plan(
+                    &ctx,
+                    &mut tx,
+                    &principal,
+                    id,
+                    preflight,
+                    body.expected_revision,
+                )
+                .await?
+            {
+                tx.commit().await.map_err(DbError::from)?;
+                return Err(stale_delete_plan(current));
+            }
             return close_side_thread(&ctx, tx, &principal, id, parent)
                 .await
                 .map(|()| NodeDeleted { deletion_id: None });
@@ -302,13 +388,29 @@ async fn node_delete(ctx: Ctx, (): (), body: NodeDeleteBody) -> ApiResult<NodeDe
         .await?
     {
         tx.commit().await.map_err(DbError::from)?;
-        return Err(ApiError::new(
-            ErrorCode::ConflictStaleRevision,
-            "what this deletion would remove changed since the plan: confirm the plan as it now is",
-        )
-        .with("current", current));
+        return Err(stale_delete_plan(current));
     }
     // An org that lies in another gives its members to the org above first.
+    if kind == NodeKind::Thread {
+        let removed = ctx
+            .app
+            .engine
+            .delete_thread_in(&mut tx, id, Some(principal.user()), principal.now())
+            .await
+            .map_err(crate::routes::environments::removal_schedule_error)?;
+        let settled = &removed.settled;
+        let who = actor_name(&ctx)?;
+        record(&ctx, &mut tx, orch_db::audit::action!(AuditAction::NodeDeleted), place,
+            &format!("{who} deleted the thread {}", node.name),
+            json!({"nodes":removed.gone,"archived_first":removed.archived_first,"threads":settled.threads,
+                "turns":settled.turns,"inputs":settled.inputs,"approvals":settled.approvals,
+                "environments":removed.environments.len(),"resources_before":[],"deleted_nodes":removed.deleted_nodes,
+                "purge_at":purge_at(ctx.now,ctx.app.config.retention.soft_delete_days)})).await?;
+        let deletion_id = orch_db::queries::trace::node_deletion(&mut tx, id).await?;
+        tx.commit().await.map_err(DbError::from)?;
+        ctx.app.engine.kick();
+        return Ok(NodeDeleted { deletion_id });
+    }
     if kind == NodeKind::Org
         && let Some(above) = node.parent_id
     {
@@ -341,7 +443,7 @@ async fn node_delete(ctx: Ctx, (): (), body: NodeDeleteBody) -> ApiResult<NodeDe
         .engine
         .lock_home_in(&mut tx, id)
         .await
-        .map_err(ApiError::internal)?;
+        .map_err(ApiError::engine)?;
     let deleted_nodes: Vec<Id> = std::iter::once(id)
         .chain(
             hierarchy::descendants(&mut tx, id)
@@ -361,7 +463,7 @@ async fn node_delete(ctx: Ctx, (): (), body: NodeDeleteBody) -> ApiResult<NodeDe
             .engine
             .archive_in(&mut tx, id, principal.user(), principal.now())
             .await
-            .map_err(ApiError::internal)?
+            .map_err(ApiError::engine)?
     } else {
         orch_engine::archive::Settled::default()
     };
@@ -588,183 +690,37 @@ async fn node_restore(
     ctx: Ctx,
     (): (),
     body: orch_api_contract::ownership::NodeRestoreBody,
-) -> ApiResult<Node> {
-    let id = ctx.id("id")?;
-    let days = ctx.app.config.retention.soft_delete_days;
-    let (ctx, mut tx, principal) = super::action(&ctx).await?;
-    let row = hierarchy::deleted_node(&mut tx, id)
-        .await?
-        .ok_or_else(ApiError::not_found)?;
-    match row.parent_id {
-        // A root org is brought back by one of its owners or a system admin.
-        None => {
-            let owner = access::owns_page(&mut tx, id, principal.user()).await?;
-            if !principal.caller().permits(Permission::AccessOwn)
-                || !principal.caller().reaches(Some(&[id]))
-                || (!owner && !principal.is_system_admin())
-            {
-                return Err(ApiError::new(
-                    ErrorCode::AuthzDenied,
-                    "a deleted root org is brought back by one of its owners or a system admin",
-                )
-                .with("required", "access.own")
-                .with("object", json!({ "kind": "org", "id": id }))
-                .with("requestable", false)
-                .with("override", false)
-                .with("missing", Vec::<serde_json::Value>::new()));
-            }
-        }
-        Some(parent) => {
-            orch_db::queries::trace::read_scope(
-                &[parent],
-                authorization::require(
-                    &mut tx,
-                    &principal,
-                    parent,
-                    MANAGE,
-                    Act::Delete,
-                    Policy::default(),
-                ),
-            )
-            .await?;
-        }
-    }
-    if purge_at(row.deleted_at, days) <= ctx.now {
-        return Err(ApiError::new(
-            ErrorCode::Gone,
-            "it was deleted so long ago that it is gone for good",
-        ));
-    }
-    let current = orch_db::queries::trace::node_deletion(&mut tx, id).await?;
-    if body.expected_deletion_id.is_some() && body.expected_deletion_id != current {
-        return Err(ApiError::new(
-            ErrorCode::ConflictStaleRevision,
-            "the selected deletion is no longer current",
-        )
-        .with("current_deletion_id", current));
-    }
-    if let Some(parent) = row.parent_id
-        && hierarchy::deleted_node(&mut tx, parent).await?.is_some()
-    {
-        let refs = view::refs(&mut tx, &principal, &[parent], Policy::default()).await?;
-        return Err(ApiError::new(
-            ErrorCode::NodeRestoreParentFirst,
-            "bring back the parent under its own restoration authority first",
-        )
-        .with("parent", refs.get(&parent)));
-    }
-    // The Undo of a deletion names its group: only the current one puts back how each node of it stood, and
-    // what was not archived before is unarchived under the ordinary authority to do so. An org is never
-    // archived by itself, so bringing one back is all its Undo asks.
-    let kept = match body.undo_delete {
-        None => None,
-        Some(group) => {
-            if current != Some(group) {
-                return Err(ApiError::new(
-                    ErrorCode::ConflictStaleRevision,
-                    "the deletion this undoes is no longer the current one",
-                )
-                .with("current_deletion_id", current));
-            }
-            Some(hierarchy::kept_archive_states(&mut tx, group).await?)
-        }
-    };
-    ctx.app
-        .engine
-        .lock_archive_in(&mut tx, id)
-        .await
-        .map_err(ApiError::internal)?;
-    hierarchy::restore_subtree(&mut tx, id, row.deleted_at, principal.user(), ctx.now).await?;
-    ctx.app
-        .engine
-        .restore_home_resources_in(&mut tx, id, current, principal.now())
-        .await
-        .map_err(ApiError::internal)?;
-    // Each node the Undo takes out of the archive again is taken out under that node's own ordinary authority,
-    // asked of it as it stands brought back (a deleted node is nobody's to act on), in this same transaction:
-    // one refusal leaves the whole group deleted as it was, since nothing here is kept until the end.
-    let reopened: Vec<(Id, NodeKind, String)> = kept
-        .iter()
-        .flatten()
-        .filter(|one| one.archived_at.is_none())
-        .filter_map(|one| {
-            refusals::node_kind(&one.kind).map(|kind| (one.id, kind, one.name.clone()))
-        })
-        .filter(|(_, kind, _)| *kind != NodeKind::Org)
-        .collect();
-    for (node, _, _) in &reopened {
-        super::may_archive(&mut tx, &principal, *node, Act::Unarchive).await?;
-    }
-    if let Some(kept) = &kept {
-        hierarchy::put_back_archive_states(&mut tx, kept).await?;
-    }
-    epoch::bump(&mut tx).await.map_err(ApiError::internal)?;
-    let (place, _) = placed(&mut tx, id).await?;
-    let who = actor_name(&ctx)?;
-    record(
-        &ctx,
-        &mut tx,
-        orch_db::audit::action!(AuditAction::NodeRestored),
-        place,
-        &format!("{who} brought back {}", row.name),
-        json!({ "deleted_at": row.deleted_at, "undo": kept.is_some() }),
-    )
-    .await?;
-    // What the Undo took out of the archive has its ordinary line, as an Unarchive would have written; nothing
-    // else of an unarchive happens: no turn, input or sign-in comes back with it.
-    for (node, _, name) in &reopened {
-        let (place, _) = placed(&mut tx, *node).await?;
-        record(
-            &ctx,
-            &mut tx,
-            AuditAction::NodeUnarchived,
-            place,
-            &format!("{who} brought back {name} as it stood before it was deleted"),
-            json!({ "undo": body.undo_delete }),
-        )
-        .await?;
-    }
-    hierarchy::stamp_subtree(&mut tx, id).await?;
-    let principal = authorization::principal(&ctx, &mut tx).await?;
-    let node = shown(&ctx, &mut tx, &principal, id).await?;
-    tx.commit().await.map_err(DbError::from)?;
-    Ok(node)
+) -> ApiResult<orch_api_contract::ownership::NodeRestoreResponse> {
+    restoring::run(ctx, body).await
 }
 
 /// The team root orgs the caller owns that were deleted and are not purged.
 async fn org_deleted_list(ctx: Ctx, (): (), (): ()) -> ApiResult<Vec<DeletedOrg>> {
-    let days = ctx.app.config.retention.soft_delete_days;
-    let mut conn = ctx.app.db.acquire().await?;
-    let rows =
-        hierarchy::deleted_orgs_of(&mut conn, ctx.user()?.id(), purged_before(ctx.now, days))
-            .await?;
-    let mut users: Vec<Id> = rows.iter().filter_map(|row| row.deleted_by).collect();
-    users.sort_unstable();
-    let people = refusals::user_refs(&mut conn, &users).await?;
-    Ok(rows
-        .iter()
-        .map(|row| DeletedOrg {
-            org: orch_api_contract::nodes::NodeRef {
-                thread_display: None,
-                id: row.id,
-                kind: NodeKind::Org,
-                name: Some(row.name.clone()),
-                redacted: false,
-            },
-            slug: row.slug.clone().unwrap_or_default(),
-            deleted_at: Time::new(row.deleted_at),
-            deleted_by: row.deleted_by.and_then(|user| people.get(&user).cloned()),
-            purge_at: Time::new(purge_at(row.deleted_at, days)),
-        })
-        .collect())
+    crate::key_operations::native::selected_read::<super::deleted_orgs::Orgs>(ctx, (), ()).await
 }
 
 /// Hands the first place among a node's owners to another person: the page
 /// change that names them first, which only an owner or an admin of the place
 /// makes.
-async fn node_transfer(ctx: Ctx, (): (), body: TransferBody) -> ApiResult<Node> {
+async fn node_transfer(
+    ctx: Ctx,
+    (): (),
+    body: TransferBody,
+) -> ApiResult<orch_api_contract::ownership::NodeTransferResponse> {
+    crate::middleware::authorization::projected_result(
+        ctx.clone(),
+        node_transfer_action(ctx, body),
+        false,
+    )
+    .await
+}
+async fn node_transfer_action(
+    ctx: Ctx,
+    body: TransferBody,
+) -> ApiResult<orch_api_contract::ownership::NodeTransferResponse> {
     let id = ctx.id("id")?;
-    let (ctx, mut tx, principal) = super::action(&ctx).await?;
+    let (ctx, mut tx, guard) = crate::routes::transfer::operation::node_action(&ctx).await?;
+    let principal = guard.principal().clone();
     let (place, kind): (Placed, NodeKind) = placed(&mut tx, id).await?;
     if kind == NodeKind::Thread {
         return Err(super::threads_are_not_served_here());
@@ -797,7 +753,7 @@ async fn node_transfer(ctx: Ctx, (): (), body: TransferBody) -> ApiResult<Node> 
                 .collect(),
         );
     }
-    let outcome = pages::change(
+    let outcome = pages::change_fenced(
         &mut tx,
         &principal,
         Target::Live(id),
@@ -807,18 +763,24 @@ async fn node_transfer(ctx: Ctx, (): (), body: TransferBody) -> ApiResult<Node> 
         },
         policy,
         &origin(&ctx),
+        || guard.check_deadline(&ctx),
     )
     .await;
+    let changed;
     match outcome {
         Ok(outcome) => {
+            changed = outcome.changed;
             if outcome.changed {
                 hierarchy::stamp(&mut tx, id).await?;
             }
         }
-        Err(error) => return Err(refusals::change_failed(&mut tx, error).await),
+        Err(pages::ChangeFailure::Native(error)) => {
+            return Err(refusals::change_failed(&mut tx, error).await);
+        }
+        Err(pages::ChangeFailure::BeforeEffect(error)) => return Err(error),
     }
     let _ = place;
-    let node = shown(&ctx, &mut tx, &principal, id).await?;
+    let receipt = crate::routes::transfer::operation::receipt(&ctx, body.user_id, changed)?;
     tx.commit().await.map_err(DbError::from)?;
-    Ok(node)
+    crate::routes::transfer::operation::node_reply(&ctx, &principal, receipt).await
 }

@@ -274,6 +274,19 @@ pub async fn job(conn: &mut Conn, id: Id) -> Result<Option<JobRow>, DbError> {
     .await?)
 }
 
+/// Exact existing file-job owners of a pending native command. The additional publication
+/// journal is the same single-command association as creator source preparation.
+pub async fn lock_source_command_owners(conn: &mut Conn, command: Id) -> Result<Vec<Id>, DbError> {
+    Ok(sqlx::query_scalar(
+        "SELECT id FROM jobs WHERE plan->'active_command'->>'id'=$1::text
+        OR plan->'creator_command'->>'id'=$1::text
+        OR plan->'publication_command'->>'id'=$1::text ORDER BY id FOR UPDATE",
+    )
+    .bind(command)
+    .fetch_all(conn)
+    .await?)
+}
+
 /// The job `id`, locked until the transaction ends.
 pub async fn lock(conn: &mut Conn, id: Id) -> Result<Option<JobRow>, DbError> {
     Ok(sqlx::query_as(sqlx::AssertSqlSafe(format!(
@@ -282,6 +295,98 @@ pub async fn lock(conn: &mut Conn, id: Id) -> Result<Option<JobRow>, DbError> {
     .bind(id)
     .fetch_optional(conn)
     .await?)
+}
+
+/// Locks jobs retaining this creator-provision command, including an older queued frame
+/// whose active pointer has moved. The caller must still validate its exact active fence.
+pub async fn lock_creator_provision_command_owners(
+    conn: &mut Conn,
+    command: Id,
+) -> Result<Vec<Id>, DbError> {
+    Ok(sqlx::query_scalar(
+        "SELECT id FROM jobs WHERE plan ? 'creator_provision' AND
+        (plan->'active_command'->>'id'=$1::text OR plan->'creator_provision_commands' ? $1::text)
+        ORDER BY id FOR UPDATE",
+    )
+    .bind(command)
+    .fetch_all(conn)
+    .await?)
+}
+
+/// Locks jobs retaining this initial-file command, including an older queued frame
+/// whose active pointer has moved. The caller must still validate its exact active fence.
+pub async fn lock_initial_files_command_owners(
+    conn: &mut Conn,
+    command: Id,
+) -> Result<Vec<Id>, DbError> {
+    Ok(sqlx::query_scalar(
+        "SELECT id FROM jobs WHERE plan ? 'initial_files' AND
+        (plan->'active_command'->>'id'=$1::text OR plan->'initial_files_commands' ? $1::text)
+        ORDER BY id FOR UPDATE",
+    )
+    .bind(command)
+    .fetch_all(conn)
+    .await?)
+}
+
+/// Locks creator-owned provider jobs for the exact active or retained command ID.
+/// Retained IDs must remain findable after cancellation or a later phase moves the active fence.
+pub async fn lock_provider_creator_command_owners(
+    conn: &mut Conn,
+    command: Id,
+) -> Result<Vec<Id>, DbError> {
+    Ok(sqlx::query_scalar(
+        "SELECT id FROM jobs WHERE
+        (plan ? 'provider_creator' AND plan->'active_command'->>'id'=$1::text)
+        OR plan->'provider_creator_commands' ? $1::text
+        ORDER BY id FOR UPDATE",
+    )
+    .bind(command)
+    .fetch_all(conn)
+    .await?)
+}
+
+/// Pins the exact provider candidate while its creator job checks and publishes pending work.
+pub async fn lock_provider_creator_candidate(
+    conn: &mut Conn,
+    provider: Id,
+    runtime: Id,
+) -> Result<bool, DbError> {
+    let found: Option<Id> = sqlx::query_scalar(
+        "SELECT id FROM runtimes WHERE id=$1 AND provider_id=$2 AND kind='provider' FOR UPDATE",
+    )
+    .bind(runtime)
+    .bind(provider)
+    .fetch_optional(conn)
+    .await?;
+    Ok(found.is_some())
+}
+
+/// Pins the actual old/candidate pair of a provider update member, in stable lock order.
+pub async fn lock_provider_update_runtimes(
+    conn: &mut Conn,
+    provider: Id,
+    old: Id,
+    next: Option<Id>,
+) -> Result<bool, DbError> {
+    let ids:Vec<Id>=sqlx::query_scalar("SELECT id FROM runtimes WHERE provider_id=$1 AND kind='provider' AND (id=$2 OR id=$3) ORDER BY id FOR UPDATE")
+        .bind(provider).bind(old).bind(next).fetch_all(conn).await?;
+    Ok(ids.contains(&old) && next.is_none_or(|next| next != old && ids.contains(&next)))
+}
+
+/// Retained native IDs remain associated even after the active pointer/origin is cleared.
+pub async fn lock_provider_update_command_owners(
+    conn: &mut Conn,
+    command: Id,
+) -> Result<Vec<Id>, DbError> {
+    Ok(sqlx::query_scalar("SELECT id FROM jobs WHERE
+        ((plan ? 'provider_update_origins' OR plan ? 'provider_update_binding'
+            OR plan ? 'provider_update_commands' OR plan ? 'provider_update_notice_commands'
+            OR kind='provider_recreate')
+            AND plan->'active_command'->>'id'=$1::text)
+        OR plan->'provider_update_commands' ? $1::text OR plan->'provider_update_notice_commands' ? $1::text
+        OR plan->'provider_recreate_commands' ? $1::text OR plan->'provider_recreate_notice_commands' ? $1::text
+        ORDER BY id FOR UPDATE").bind(command).fetch_all(conn).await?)
 }
 
 /// The jobs of the kinds that run one at a time that are not over, for an environment: at most one
@@ -882,6 +987,17 @@ pub mod forks {
         .execute(conn)
         .await?;
         Ok(())
+    }
+
+    /// The native review writer consumes its once-only deadline check after its caller
+    /// serialized the actual environment/account footprint, immediately before INSERT.
+    pub async fn save_preflight_before<E: From<DbError>>(
+        conn: &mut Conn,
+        row: &PreflightRow,
+        before: impl FnOnce() -> Result<(), E>,
+    ) -> Result<(), E> {
+        before()?;
+        save_preflight(conn, row).await.map_err(E::from)
     }
 
     /// A plan, if it is there.
@@ -1863,4 +1979,17 @@ pub async fn claim_document_notices(
         }
     }
     Ok(taken)
+}
+
+/// Existing live-capability owner/journal association, independent of its current active pointer.
+pub async fn lock_capability_command_owners(
+    conn: &mut Conn,
+    command: Id,
+) -> Result<Vec<Id>, DbError> {
+    Ok(sqlx::query_scalar(
+        "SELECT id FROM jobs WHERE kind='capability_change' AND ((plan->'active_command'->>'id'=$1::text AND (plan ? 'approval_origin' OR plan ? 'approval_binding' OR plan->>'approval_origin_required'='true')) OR plan->'capability_commands' ? $1::text) ORDER BY id FOR UPDATE",
+    )
+    .bind(command)
+    .fetch_all(conn)
+    .await?)
 }

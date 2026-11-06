@@ -77,22 +77,27 @@ pub(crate) async fn among(
         .collect())
 }
 
-/// Topic summaries use exactly the same binding set and reading door as full environment cards.
-pub(crate) async fn topic_summaries(
+/// The existing topic-summary producer's actual bindings after its ordinary visibility check.
+/// This returns identities only, before any environment name or current status is projected.
+pub(crate) struct TopicSummarySources {
+    pub bindings: Vec<(Id, Id)>,
+    pub defaults: HashMap<Id, Option<Id>>,
+}
+
+pub(crate) async fn topic_summary_sources(
     conn: &mut Conn,
     principal: &Principal,
     topics: &[Id],
-    now: orch_types::Time,
-) -> ApiResult<HashMap<Id, Vec<orch_api_contract::environment::EnvironmentRef>>> {
+) -> ApiResult<TopicSummarySources> {
     let mut bindings = env_rows::hosting::environments_under_many(conn, topics).await?;
-    for (node, default) in orch_settings::resolver::get_at_nodes::<Id>(
+    let defaults = orch_settings::resolver::get_at_nodes::<Id>(
         conn,
         topics,
         orch_settings_contract::registry::keys::ENV_DEFAULT_ID,
     )
     .await
-    .map_err(ApiError::internal)?
-    {
+    .map_err(ApiError::internal)?;
+    for (&node, &default) in &defaults {
         if let Some(id) = default
             && !bindings.contains(&(node, id))
         {
@@ -103,7 +108,51 @@ pub(crate) async fn topic_summaries(
     ids.sort_unstable();
     ids.dedup();
     let allowed = among(conn, principal, &ids).await?;
-    ids.retain(|id| allowed.contains_key(id));
+    bindings.retain(|(_, id)| allowed.contains_key(id));
+    Ok(TopicSummarySources { bindings, defaults })
+}
+
+/// Topic summaries use exactly the same binding set and reading door as full environment cards.
+pub(crate) async fn topic_summaries(
+    conn: &mut Conn,
+    principal: &Principal,
+    topics: &[Id],
+    now: orch_types::Time,
+) -> ApiResult<HashMap<Id, Vec<orch_api_contract::environment::EnvironmentRef>>> {
+    let sources = topic_summary_sources(conn, principal, topics).await?;
+    project_topic_summaries(conn, &sources.bindings, now).await
+}
+
+/// Materialize only the bindings the caller's actual producer selected. Settings
+/// may change without moving an authorization epoch, so a bounded response must
+/// not reselect a default after admitting its source set.
+pub(crate) async fn topic_summaries_from_sources(
+    conn: &mut Conn,
+    principal: &Principal,
+    sources: &TopicSummarySources,
+    now: orch_types::Time,
+) -> ApiResult<HashMap<Id, Vec<orch_api_contract::environment::EnvironmentRef>>> {
+    let mut ids: Vec<Id> = sources.bindings.iter().map(|(_, id)| *id).collect();
+    ids.sort_unstable();
+    ids.dedup();
+    let allowed = among(conn, principal, &ids).await?;
+    let bindings: Vec<_> = sources
+        .bindings
+        .iter()
+        .copied()
+        .filter(|(_, id)| allowed.contains_key(id))
+        .collect();
+    project_topic_summaries(conn, &bindings, now).await
+}
+
+async fn project_topic_summaries(
+    conn: &mut Conn,
+    bindings: &[(Id, Id)],
+    now: orch_types::Time,
+) -> ApiResult<HashMap<Id, Vec<orch_api_contract::environment::EnvironmentRef>>> {
+    let mut ids: Vec<Id> = bindings.iter().map(|(_, id)| *id).collect();
+    ids.sort_unstable();
+    ids.dedup();
     let refs: HashMap<Id, orch_api_contract::environment::EnvironmentRef> =
         crate::routes::resources::view::environment_refs(conn, &ids, &[], now)
             .await?
@@ -112,7 +161,7 @@ pub(crate) async fn topic_summaries(
             .collect();
     let mut summaries: HashMap<Id, Vec<orch_api_contract::environment::EnvironmentRef>> =
         HashMap::new();
-    for (topic, id) in bindings {
+    for &(topic, id) in bindings {
         if let Some(environment) = refs.get(&id) {
             summaries
                 .entry(topic)
@@ -223,6 +272,7 @@ pub(crate) fn through_a_thread(view: Environment) -> Environment {
             offers: Vec::new(),
             orch_tools: true,
             machine_offers: None,
+            machine_programs: Vec::new(),
         },
         mcp_found: Vec::new(),
         index: view.index,

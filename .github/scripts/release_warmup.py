@@ -7,19 +7,20 @@ import subprocess
 from release_gate import version
 
 
-def check_request(tag, event, ref, default_branch, source_run, publish_images):
+def check_request(tag, event, ref, default_branch, source_run, publish_images, *, rehearsal=False):
     """A cache warm-up cannot create a release or consume another run."""
     version(tag)
     if event != "workflow_dispatch" or not default_branch or ref != f"refs/heads/{default_branch}":
         raise ValueError("cache warm-up must be dispatched from the default branch")
-    if source_run or publish_images:
+    if source_run or publish_images or rehearsal:
         raise ValueError("cache warm-up cannot repackage or publish images")
 
 
 def main():
     tag = os.environ["RELEASE_TAG"]
     check_request(tag, os.environ["GITHUB_EVENT_NAME"], os.environ["GITHUB_REF"], os.environ["DEFAULT_BRANCH"],
-                  os.environ.get("SOURCE_RUN_ID", ""), os.environ.get("PUBLISH_IMAGES") == "true")
+                  os.environ.get("SOURCE_RUN_ID", ""), os.environ.get("PUBLISH_IMAGES") == "true",
+                  rehearsal=os.environ.get("REHEARSAL") == "true")
     commit = subprocess.run(["git", "rev-parse", "HEAD"], check=True, capture_output=True, text=True).stdout.strip()
     if commit != os.environ["GITHUB_SHA"]:
         raise ValueError("cache warm-up must build the dispatched branch commit")

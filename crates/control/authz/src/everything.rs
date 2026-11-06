@@ -1,5 +1,7 @@
 //! Exact access-engine projections for SQL hierarchy pages, without expanding ordinary threads into memory.
 
+pub mod scope;
+
 use std::collections::{HashMap, HashSet};
 
 use orch_access_contract::decisions::Held;
@@ -303,6 +305,17 @@ pub async fn project_search(
     project_seeds(conn, principal, seeds, true, true, hints).await
 }
 
+/// Prepares inherited candidate hints around a selected document for a person's related list.
+/// Every delivered neighbor still needs its own current access check.
+pub async fn project_related(
+    conn: &mut Conn,
+    principal: &Principal,
+    document: Id,
+) -> Result<Projection, Error> {
+    let seeds = rows::search_seeds(conn, None, &[document], &[], &[]).await?;
+    project_seeds(conn, principal, seeds, true, true, true).await
+}
+
 /// Derives complete small-scope hints or declines them before loading a large access graph.
 pub async fn project_search_scope(
     conn: &mut Conn,
@@ -324,6 +337,93 @@ pub async fn project_search_scope(
         .map(Some)
 }
 
+/// The native factual inventory before the same current principal's Frame projects it.
+/// Stored identities are not permission grants or proof that a key may disclose a row.
+pub struct Inventory {
+    graph: Graph,
+    resources: Vec<resources::Resource>,
+    direct_ids: Vec<Id>,
+    direct_chats: Vec<chats::ChatRow>,
+    node_chats: HashMap<Id, chats::ChatRow>,
+    participants: Vec<orch_db::queries::search::ParticipantChat>,
+    sites: Vec<Site>,
+    decision_sites: Vec<Site>,
+    document_sites: Vec<Site>,
+    document_hints: bool,
+    searching: bool,
+    include_inherited: bool,
+}
+
+/// Prepare the existing inventory's raw facts, without materializing permissions or payloads.
+/// Callers must still use its native Frame and their exact operation before returning data.
+pub async fn prepare(
+    conn: &mut Conn,
+    principal: &Principal,
+    parent: Option<Id>,
+) -> Result<Inventory, Error> {
+    let seeds = rows::access_seeds(conn, parent).await?;
+    prepare_seeds(conn, principal, seeds, false, false, true).await
+}
+
+/// The same factual loader with bounded current identities needed by an operation-scoped view.
+/// Anchors only discover real sites: the native Frame still decides every materialized grant.
+pub async fn prepare_scoped(
+    conn: &mut Conn,
+    principal: &Principal,
+    parent: Option<Id>,
+    node_anchors: &[Id],
+    chat_anchors: &[Id],
+    include_thread_candidates: bool,
+) -> Result<Inventory, Error> {
+    let mut seeds = rows::access_seeds(conn, parent).await?;
+    let anchor_chats = chats::chats(conn, chat_anchors).await?;
+    let mut exact_nodes = node_anchors.to_vec();
+    exact_nodes.extend(anchor_chats.iter().filter_map(|chat| chat.node_id));
+    if include_thread_candidates {
+        let places: Vec<_> = seeds
+            .iter()
+            .filter(|seed| seed.kind == "node")
+            .map(|seed| seed.id)
+            .collect();
+        // Exact selections/cuts form separate native entries. A generic sample must
+        // come from their complement, or one excluded ID could hide eligible peers.
+        seeds.extend(rows::main_thread_samples(conn, &places, &exact_nodes).await?);
+    }
+    seeds.extend(node_anchors.iter().map(|id| rows::AccessSeed {
+        kind: "node".to_owned(),
+        id: *id,
+    }));
+    // A Chat rule carries a Chat identity, never a submitted keeping-node relation.
+    for chat in anchor_chats {
+        seeds.push(rows::AccessSeed {
+            kind: "node".to_owned(),
+            id: chat.node_id.unwrap_or(chat.org_id),
+        });
+        if chat.node_id.is_none() {
+            seeds.push(rows::AccessSeed {
+                kind: "chat".to_owned(),
+                id: chat.id,
+            });
+        }
+    }
+    seeds.sort_unstable_by(|left, right| left.kind.cmp(&right.kind).then(left.id.cmp(&right.id)));
+    seeds.dedup_by(|left, right| left.kind == right.kind && left.id == right.id);
+    let mut inventory = prepare_seeds(conn, principal, seeds, false, false, true).await?;
+    // The native SQL excludes chats whose keeping root is deleted. Keep that same
+    // live-site predicate before a scoped raw candidate can prime preparation.
+    let graph = &inventory.graph;
+    inventory
+        .direct_chats
+        .retain(|chat| graph.site_of(chat.org_id).is_some());
+    let nodes: Vec<_> = inventory.graph.nodes().map(|node| node.id).collect();
+    inventory.node_chats = chats::chats_of_nodes(conn, &nodes)
+        .await?
+        .into_iter()
+        .filter_map(|chat| chat.node_id.map(|node| (node, chat)))
+        .collect();
+    Ok(inventory)
+}
+
 async fn project_seeds(
     conn: &mut Conn,
     principal: &Principal,
@@ -332,6 +432,27 @@ async fn project_seeds(
     searching: bool,
     include_inherited: bool,
 ) -> Result<Projection, Error> {
+    prepare_seeds(
+        conn,
+        principal,
+        seeds,
+        document_hints,
+        searching,
+        include_inherited,
+    )
+    .await?
+    .project(conn, principal)
+    .await
+}
+
+async fn prepare_seeds(
+    conn: &mut Conn,
+    principal: &Principal,
+    seeds: Vec<rows::AccessSeed>,
+    document_hints: bool,
+    searching: bool,
+    include_inherited: bool,
+) -> Result<Inventory, Error> {
     let mut node_ids: Vec<Id> = seeds
         .iter()
         .filter(|seed| seed.kind == "node")
@@ -444,178 +565,336 @@ async fn project_seeds(
     if document_hints {
         tracing::debug!(target: "orch::search::timing", phase="access_graph", elapsed_ms=phase.elapsed().as_secs_f64()*1000., sites=decision_sites.len());
     }
-    let phase = std::time::Instant::now();
-    let frame = Frame::load(
-        conn,
-        principal,
-        Policy::default(),
+    Ok(Inventory {
         graph,
-        &decision_sites,
-        if document_hints {
-            SEARCH_READ_PERMISSIONS
-        } else {
-            Permission::ALL
-        },
-    )
-    .await?;
-    if document_hints {
-        tracing::debug!(target: "orch::search::timing", phase="access_frame", elapsed_ms=phase.elapsed().as_secs_f64()*1000.);
-    }
-    let phase = std::time::Instant::now();
-    let projected = |site: &Site, owned, names| {
-        if document_hints {
-            search_grant(&frame, site, owned, names)
-        } else {
-            grant(&frame, site, owned)
-        }
-    };
-    let document_defaults: serde_json::Map<String, Json> = document_sites.iter().filter_map(|site| site.beside.map(|node| (
-        node.to_string(), json!({"view": projected(site, false, false).view, "owned": projected(site, true, false).view})
-    ))).collect();
-    let mut objects = serde_json::Map::new();
-    let mut names = HashMap::new();
-    let mut reachable = HashSet::new();
-    for site in &sites {
-        let held = projected(site, false, true);
-        if site.kind.node().is_some() {
-            names.insert(
-                site.id,
-                Step {
-                    id: site.id,
-                    kind: site.kind.node().unwrap_or(NodeKind::Org),
-                    name: held.named.then(|| site.name.clone()),
-                },
-            );
-        }
-        if (held.view || held.chat.as_ref().is_some_and(|chat| chat.view))
-            && site.kind.resource().is_none()
-        {
-            reachable.extend(site.path.iter().flatten().copied());
-        }
-        objects.insert(
-            site.id.to_string(),
-            serde_json::to_value(held).map_err(|error| Error::Stored(error.to_string()))?,
-        );
-    }
-    let mut inherited = serde_json::Map::new();
-    for topic in frame
-        .graph()
-        .nodes()
-        .filter(|node| include_inherited && node.kind == NodeKind::Topic)
-    {
-        let Some(place) = frame.graph().site_of(topic.id) else {
-            continue;
-        };
-        let mut child = place.clone();
-        child.id = Id::nil();
-        child.kind = ObjectKind::Thread;
-        child.first_owner = None;
-        child.chain.insert(0, PlaceRef::Node(topic.id));
-        child.admin_places.insert(0, topic.id);
-        child.role_place = Some(topic.id);
-        child.path = Some(topic.path.iter().copied().chain([Id::nil()]).collect());
-        let mut profiles = serde_json::Map::new();
-        for placement in [Placement::Managed, Placement::Connected] {
-            child.placement = placement;
-            child.archived_node = place.archived_node;
-            let live = json!({"ordinary": projected(&child, false, false), "owned": projected(&child, true, false)});
-            child.archived_node = Some(topic.id);
-            let archived = json!({"ordinary": projected(&child, false, false), "owned": projected(&child, true, false)});
-            profiles.insert(
-                placement.as_str().to_owned(),
-                json!({"live":live,"archived":archived}),
-            );
-        }
-        inherited.insert(topic.id.to_string(), Json::Object(profiles));
-    }
-    if document_hints {
-        tracing::debug!(target: "orch::search::timing", phase="access_projection", elapsed_ms=phase.elapsed().as_secs_f64()*1000.);
-    }
-    let inspected_chats = crate::chats::people_chat_access_in(conn, &frame, &direct_ids).await?;
-    for chat in direct_chats {
-        let member = participants.iter().find(|each| each.id == chat.id);
-        let root = frame.graph().site_of(chat.org_id);
-        // Exactly the finder's participant rule: inspection rights never create a name hit.
-        let member_access = member.is_some_and(|member| {
-            !principal.suspension().applies(&[member.org_id])
-                && (principal.is_in_tree(member.org_id) || member.guest)
-                && principal.caller().permits(Permission::ChatView)
-                && principal.caller().reaches(Some(&[member.org_id]))
-        });
-        let inspection = inspected_chats.get(&chat.id);
-        let native = inspection.is_some_and(|access| access.admin_place.is_some());
-        let view = member_access || (!searching && inspection.is_some());
-        let participating = member_access && frame.follows_chat(chat.id);
-        let archived = root.as_ref().is_some_and(Site::is_archived);
-        if view {
-            reachable.extend(
-                root.iter()
-                    .flat_map(|site| site.path.iter().flatten().copied()),
-            );
-        }
-        objects.insert(
-            chat.id.to_string(),
-            json!(Grant {
-                admin_access: if member_access {
-                    None
-                } else {
-                    inspection.and_then(|access| access.admin_access)
-                },
-                participating,
-                view,
-                listed: view,
-                named: member_access,
-                access: if native && !archived {
-                    "manage"
-                } else if view && !archived && principal.caller().permits(Permission::ChatInteract)
-                {
-                    "take_part"
-                } else if view {
-                    "view"
-                } else {
-                    "path_only"
-                }
-                .to_owned(),
-                share: false,
-                settings: false,
-                chat: None,
-            }),
-        );
-    }
-    let environment_columns: std::collections::BTreeMap<String, &str> = frame
-        .graph()
-        .environment_profiles()
-        .map(|(id, column)| (id.to_string(), column.as_str()))
-        .collect();
-    let resources = resources
-        .into_iter()
-        .filter_map(|resource| {
-            let site = resources::site_of(frame.graph(), &resource)?;
-            if principal.suspension().applies(&site.orgs) {
-                return None;
-            }
-            let held = frame.effective(&site);
-            if held.is_empty() {
-                return None;
-            }
-            Some(resources::Seen {
-                admin_place: frame.admin_place(&site),
-                admin_only: frame.admin_only(&site),
-                admin_access: frame.admin_access(&site),
-                participating: frame.participates(&site),
-                owner: frame.owns(&site),
-                administers: frame.administers(&site),
-                resource,
-                held,
-            })
-        })
-        .collect();
-    Ok(Projection {
         resources,
-        grants: json!({"document_defaults":document_defaults,"objects":objects,"threads":inherited,"environments":environment_columns,"reachable":reachable,"system_admin":principal.is_system_admin(),"machines":principal.caller().reaches(None),
-            "participating_nodes":frame.participation_ids(orch_access_contract::pages::StoredKind::Node),
-            "participating_chats":frame.participation_ids(orch_access_contract::pages::StoredKind::Chat)}),
-        names,
-        member_roots: principal.memberships().roots(),
+        direct_ids,
+        direct_chats,
+        node_chats: HashMap::new(),
+        participants,
+        sites,
+        decision_sites,
+        document_sites,
+        document_hints,
+        searching,
+        include_inherited,
     })
+}
+
+impl Inventory {
+    /// Actual stored sites and complete paths prepared by the native inventory reader.
+    #[must_use]
+    pub fn sites(&self) -> (&Graph, &[Site]) {
+        (&self.graph, &self.sites)
+    }
+
+    /// Stored direct-chat identities, without message contents or permission decisions.
+    #[must_use]
+    pub fn direct_chats(&self) -> &[chats::ChatRow] {
+        &self.direct_chats
+    }
+
+    /// The native resource rows, including each Host's actual physical-machine identity.
+    #[must_use]
+    pub fn resources(&self) -> &[resources::Resource] {
+        &self.resources
+    }
+
+    /// A real node Chat found by the native bulk lookup, without messages or authority.
+    #[must_use]
+    pub fn node_chat(&self, node: Id) -> Option<&chats::ChatRow> {
+        self.node_chats.get(&node)
+    }
+
+    /// Apply the original ordinary access Frame and grant projection to these native facts.
+    pub async fn project(
+        self,
+        conn: &mut Conn,
+        principal: &Principal,
+    ) -> Result<Projection, Error> {
+        self.project_with(conn, principal, None).await
+    }
+
+    /// Intersect the native Frame's decisions with an additional typed operation predicate.
+    /// This does not create native rights, and inherited profiles remain candidate hints.
+    pub async fn project_scoped(
+        self,
+        conn: &mut Conn,
+        principal: &Principal,
+        boundary: &dyn scope::Boundary,
+    ) -> Result<Projection, Error> {
+        self.project_with(conn, principal, Some(boundary)).await
+    }
+
+    async fn project_with(
+        self,
+        conn: &mut Conn,
+        principal: &Principal,
+        boundary: Option<&dyn scope::Boundary>,
+    ) -> Result<Projection, Error> {
+        let Self {
+            graph,
+            resources,
+            direct_ids,
+            direct_chats,
+            node_chats,
+            participants,
+            sites,
+            decision_sites,
+            document_sites,
+            document_hints,
+            searching,
+            include_inherited,
+        } = self;
+        let phase = std::time::Instant::now();
+        let frame = Frame::load(
+            conn,
+            principal,
+            Policy::default(),
+            graph,
+            &decision_sites,
+            if document_hints {
+                SEARCH_READ_PERMISSIONS
+            } else {
+                Permission::ALL
+            },
+        )
+        .await?;
+        if document_hints {
+            tracing::debug!(target: "orch::search::timing", phase="access_frame", elapsed_ms=phase.elapsed().as_secs_f64()*1000.);
+        }
+        let phase = std::time::Instant::now();
+        let projected = |site: &Site, owned, names| {
+            if document_hints {
+                search_grant(&frame, site, owned, names)
+            } else {
+                grant(&frame, site, owned)
+            }
+        };
+        let document_defaults: serde_json::Map<String, Json> = document_sites.iter().filter_map(|site| site.beside.map(|node| (
+            node.to_string(), json!({"view": projected(site, false, false).view, "owned": projected(site, true, false).view})
+        ))).collect();
+        let mut objects = serde_json::Map::new();
+        let mut names = HashMap::new();
+        let mut reachable = HashSet::new();
+        let mut allowed_resources = HashSet::new();
+        for site in &sites {
+            let mask = boundary
+                .map(|boundary| {
+                    let main = boundary.object(frame.graph(), site, site.kind)?;
+                    let chat = match node_chats
+                        .get(&site.id)
+                        .filter(|_| site.kind.node().is_some())
+                    {
+                        Some(chat) => boundary.chat(frame.graph(), chat)?,
+                        None => false,
+                    };
+                    Ok::<_, Error>(scope::Mask { main, chat })
+                })
+                .transpose()?;
+            if mask.is_some_and(|mask| mask.main) && site.kind.resource().is_some() {
+                allowed_resources.insert(site.id);
+            }
+            let native = projected(site, false, true);
+            let held = match mask {
+                Some(mask) => mask.apply(native),
+                None => native,
+            };
+            if site.kind.node().is_some() {
+                names.insert(
+                    site.id,
+                    Step {
+                        id: site.id,
+                        kind: site.kind.node().unwrap_or(NodeKind::Org),
+                        name: held.named.then(|| site.name.clone()),
+                    },
+                );
+            }
+            if (held.view || held.chat.as_ref().is_some_and(|chat| chat.view))
+                && site.kind.resource().is_none()
+            {
+                reachable.extend(site.path.iter().flatten().copied());
+            }
+            let value = match mask {
+                Some(mask) => mask.encode(held)?,
+                None => {
+                    serde_json::to_value(held).map_err(|error| Error::Stored(error.to_string()))?
+                }
+            };
+            objects.insert(site.id.to_string(), value);
+        }
+        let mut inherited = serde_json::Map::new();
+        for topic in frame
+            .graph()
+            .nodes()
+            .filter(|node| include_inherited && node.kind == NodeKind::Topic)
+        {
+            let Some(place) = frame.graph().site_of(topic.id) else {
+                continue;
+            };
+            let mut child = place.clone();
+            child.id = Id::nil();
+            child.kind = ObjectKind::Thread;
+            child.first_owner = None;
+            child.chain.insert(0, PlaceRef::Node(topic.id));
+            child.admin_places.insert(0, topic.id);
+            child.role_place = Some(topic.id);
+            child.path = Some(topic.path.iter().copied().chain([Id::nil()]).collect());
+            let mask = boundary
+                .map(|boundary| {
+                    Ok::<_, Error>(scope::Mask {
+                        main: boundary.thread_profile(frame.graph(), &place, false)?,
+                        chat: boundary.thread_profile(frame.graph(), &place, true)?,
+                    })
+                })
+                .transpose()?;
+            let profile = |site: &Site, owned| -> Result<Json, Error> {
+                let native = projected(site, owned, false);
+                match mask {
+                    Some(mask) => mask.encode(mask.apply(native)),
+                    None => serde_json::to_value(native)
+                        .map_err(|error| Error::Stored(error.to_string())),
+                }
+            };
+            let mut profiles = serde_json::Map::new();
+            for placement in [Placement::Managed, Placement::Connected] {
+                child.placement = placement;
+                child.archived_node = place.archived_node;
+                let live =
+                    json!({"ordinary": profile(&child, false)?, "owned": profile(&child, true)?});
+                child.archived_node = Some(topic.id);
+                let archived =
+                    json!({"ordinary": profile(&child, false)?, "owned": profile(&child, true)?});
+                profiles.insert(
+                    placement.as_str().to_owned(),
+                    json!({"live":live,"archived":archived}),
+                );
+            }
+            inherited.insert(topic.id.to_string(), Json::Object(profiles));
+        }
+        if document_hints {
+            tracing::debug!(target: "orch::search::timing", phase="access_projection", elapsed_ms=phase.elapsed().as_secs_f64()*1000.);
+        }
+        let inspected_chats =
+            crate::chats::people_chat_access_in(conn, &frame, &direct_ids).await?;
+        for chat in direct_chats {
+            let member = participants.iter().find(|each| each.id == chat.id);
+            let root = frame.graph().site_of(chat.org_id);
+            // The same current membership rule as native Chat readers. Expiry removes
+            // this contribution; an independent valid inspection still keeps its own door.
+            let member_access = member.zip(root.as_ref()).is_some_and(|(member, root)| {
+                crate::chats::ordinary_participant(principal, root, member, Permission::ChatView)
+            });
+            let inspection = inspected_chats.get(&chat.id);
+            let native = inspection.is_some_and(|access| access.admin_place.is_some());
+            let allowed = match boundary {
+                Some(boundary) => boundary.chat(frame.graph(), &chat)?,
+                None => true,
+            };
+            let view = allowed && (member_access || (!searching && inspection.is_some()));
+            let participating = allowed && member_access && frame.follows_chat(chat.id);
+            let archived = root.as_ref().is_some_and(Site::is_archived);
+            if view {
+                reachable.extend(
+                    root.iter()
+                        .flat_map(|site| site.path.iter().flatten().copied()),
+                );
+            }
+            objects.insert(
+                chat.id.to_string(),
+                json!(Grant {
+                    admin_access: if !allowed || member_access {
+                        None
+                    } else {
+                        inspection.and_then(|access| access.admin_access)
+                    },
+                    participating,
+                    view,
+                    listed: view,
+                    named: allowed && member_access,
+                    access: if allowed && native && !archived {
+                        "manage"
+                    } else if view
+                        && !archived
+                        && principal.caller().permits(Permission::ChatInteract)
+                    {
+                        "take_part"
+                    } else if view {
+                        "view"
+                    } else {
+                        "path_only"
+                    }
+                    .to_owned(),
+                    share: false,
+                    settings: false,
+                    chat: None,
+                }),
+            );
+        }
+        let environment_columns: std::collections::BTreeMap<String, &str> = frame
+            .graph()
+            .environment_profiles()
+            .map(|(id, column)| (id.to_string(), column.as_str()))
+            .collect();
+        let mut machine_grants = serde_json::Map::new();
+        if let Some(boundary) = boundary {
+            for resource in &resources {
+                let machine = match resource.kind {
+                    orch_access_contract::permissions::ResourceKind::Host => resource.machine,
+                    orch_access_contract::permissions::ResourceKind::Machine => Some(resource.id),
+                    _ => None,
+                };
+                if let Some(machine) = machine {
+                    let Some(site) = resources::site_of(frame.graph(), resource) else {
+                        continue;
+                    };
+                    let allowed = boundary.object(frame.graph(), &site, ObjectKind::Machine)?;
+                    let mask = scope::Mask {
+                        main: allowed,
+                        chat: false,
+                    };
+                    machine_grants.insert(
+                        machine.to_string(),
+                        mask.encode(mask.apply(grant(&frame, &site, false)))?,
+                    );
+                }
+            }
+        }
+        let resources = resources
+            .into_iter()
+            .filter(|resource| boundary.is_none() || allowed_resources.contains(&resource.id))
+            .filter_map(|resource| {
+                let site = resources::site_of(frame.graph(), &resource)?;
+                if principal.suspension().applies(&site.orgs) {
+                    return None;
+                }
+                let held = frame.effective(&site);
+                if held.is_empty() {
+                    return None;
+                }
+                Some(resources::Seen {
+                    admin_place: frame.admin_place(&site),
+                    admin_only: frame.admin_only(&site),
+                    admin_access: frame.admin_access(&site),
+                    participating: frame.participates(&site),
+                    owner: frame.owns(&site),
+                    administers: frame.administers(&site),
+                    resource,
+                    held,
+                })
+            })
+            .collect();
+        let mut grants = json!({"document_defaults":document_defaults,"objects":objects,"threads":inherited,"environments":environment_columns,"reachable":reachable,"system_admin":principal.is_system_admin(),"machines":principal.caller().reaches(None),
+            "participating_nodes":frame.participation_ids(orch_access_contract::pages::StoredKind::Node),
+            "participating_chats":frame.participation_ids(orch_access_contract::pages::StoredKind::Chat)});
+        if boundary.is_some() {
+            grants["inventory_machines"] = Json::Object(machine_grants);
+        }
+        Ok(Projection {
+            resources,
+            grants,
+            names,
+            member_roots: principal.memberships().roots(),
+        })
+    }
 }

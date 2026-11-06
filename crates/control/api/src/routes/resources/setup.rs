@@ -8,7 +8,7 @@
 
 use crate::middleware::authorization::{self, refusals};
 use crate::middleware::requests::{ApiError, ApiResult};
-use crate::registry::{Ctx, Registry};
+use crate::registry::{Ctx, OperationPlan, Registry};
 use crate::routes::access::page::same;
 use crate::routes::nodes::{placed, policy_at, view as node_view};
 use crate::routes::resources::LIST_LIMIT;
@@ -27,7 +27,8 @@ use orch_api_contract::resources::{
 };
 use orch_authz::nodes::Page;
 use orch_authz::ownership::{Basis, Making};
-use orch_authz::{Policy, ownership, resources};
+use orch_authz::{Caller, Policy, Principal, ownership, resources};
+use orch_db::Conn;
 use orch_db::queries::environments::routes as env_queries;
 use orch_db::queries::resources::routes as queries;
 use orch_model_contract::endpoint::standard_options;
@@ -52,7 +53,11 @@ fn protocol_title(name: &str) -> &'static str {
 
 /// Binds this module's requests.
 pub fn mount(registry: &mut Registry) {
-    registry.on(api::ProviderSetupGet, setup);
+    registry.on_with_operation(
+        api::ProviderSetupGet,
+        super::provider_setup_operation::prepare,
+        super::provider_setup_operation::get,
+    );
 }
 
 /// The descriptor a profile last reported, with what the system sets over it; none when no
@@ -173,21 +178,26 @@ fn presets_of(value: Option<Json>, home: Id) -> Vec<ProviderPreset> {
 
 /// Gives everything the page that adds a provider needs, for the caller and for the org that
 /// would be its home.
-async fn setup(ctx: Ctx, query: api::ProviderSetupGetQuery, (): ()) -> ApiResult<ProviderSetup> {
+pub(super) async fn prepare_reply(
+    ctx: &Ctx,
+    conn: &mut Conn,
+    principal: &Principal,
+    caller: &Caller,
+    plan: &mut OperationPlan,
+    query: api::ProviderSetupGetQuery,
+) -> ApiResult<ProviderSetup> {
     let org = query.org_id;
-    let mut conn = ctx.app.db.acquire().await?;
-    let principal = authorization::principal(&ctx, &mut conn).await?;
     let provider = if let Some(id) = query.provider_id {
         authorization::require_resource(
-            &mut conn,
-            &principal,
+            conn,
+            principal,
             ResourceKind::Provider,
             id,
             Permission::ProviderManage,
             Policy::default(),
         )
         .await?;
-        let row = queries::providers(&mut conn, &[id])
+        let row = queries::providers(conn, &[id])
             .await?
             .pop()
             .ok_or_else(ApiError::not_found)?;
@@ -201,16 +211,16 @@ async fn setup(ctx: Ctx, query: api::ProviderSetupGetQuery, (): ()) -> ApiResult
     } else {
         None
     };
-    let (_, kind) = placed(&mut conn, org).await?;
+    let (_, kind) = placed(conn, org).await?;
     if kind != NodeKind::Org {
         return Err(ApiError::not_found());
     }
-    let policies = home_policies(&mut conn, org).await?;
-    let policy = policy_at(&mut conn, org).await?;
+    let policies = home_policies(conn, org).await?;
+    let policy = policy_at(conn, org).await?;
     if provider.is_none() {
         match ownership::may_make(
-            &mut conn,
-            &principal,
+            conn,
+            principal,
             ResourceKind::Provider,
             Some(org),
             &policies.members_make,
@@ -219,8 +229,8 @@ async fn setup(ctx: Ctx, query: api::ProviderSetupGetQuery, (): ()) -> ApiResult
         .await
         {
             Ok(Making::Allowed(Basis::Member | Basis::Rules(_) | Basis::SystemAdmin)) => {}
-            Ok(Making::Refused(why)) => return Err(refused_making(&mut conn, org, why).await),
-            Err(error) => return Err(refusals::problem(&mut conn, error).await),
+            Ok(Making::Refused(why)) => return Err(refused_making(conn, org, why).await),
+            Err(error) => return Err(refusals::problem(conn, error).await),
         }
     }
     // The profiles the caller may use, with what their adapters declare.
@@ -229,8 +239,8 @@ async fn setup(ctx: Ctx, query: api::ProviderSetupGetQuery, (): ()) -> ApiResult
         limit: LIST_LIMIT,
     };
     let seen = resources::visible(
-        &mut conn,
-        &principal,
+        conn,
+        principal,
         ResourceKind::Agent,
         page,
         Policy::default(),
@@ -251,28 +261,27 @@ async fn setup(ctx: Ctx, query: api::ProviderSetupGetQuery, (): ()) -> ApiResult
         })
         .map(|each| each.resource.id)
         .collect();
-    let rows = orch_db::queries::resources::routes::agents(&mut conn, &usable).await?;
-    let refs = agent_refs(&ctx.app, &mut conn, &usable, &[]).await?;
+    // Bind only actual admitted profile offers before deriving any ancillary list or
+    // suppressing a public system-catalogue fallback. Ordinary Use eligibility is unchanged.
+    let usable = super::provider_setup_operation::agents(conn, caller, plan, &usable).await?;
+    let rows = orch_db::queries::resources::routes::agents(conn, &usable).await?;
+    let refs = agent_refs(&ctx.app, conn, &usable, &[]).await?;
     // Where the policies that govern subscriptions are set.
     let harnesses = resolve(
-        &mut conn,
+        conn,
         Place::Node(org),
         keys::PROVIDERS_SUBSCRIPTION_HARNESSES,
     )
     .await
     .map_err(ApiError::internal)?;
-    let sharing = resolve(
-        &mut conn,
-        Place::Node(org),
-        keys::PROVIDERS_SUBSCRIPTION_SHARING,
-    )
-    .await
-    .map_err(ApiError::internal)?;
+    let sharing = resolve(conn, Place::Node(org), keys::PROVIDERS_SUBSCRIPTION_SHARING)
+        .await
+        .map_err(ApiError::internal)?;
     let scopes: Vec<Id> = [&harnesses, &sharing]
         .iter()
         .filter_map(|view| view.resolved.source.node)
         .collect();
-    let scope_refs = node_view::refs(&mut conn, &principal, &scopes, Policy::default()).await?;
+    let scope_refs = node_view::refs(conn, principal, &scopes, Policy::default()).await?;
     let scope_of = |view: &orch_settings::SettingView| {
         view.resolved
             .source
@@ -280,11 +289,11 @@ async fn setup(ctx: Ctx, query: api::ProviderSetupGetQuery, (): ()) -> ApiResult
             .and_then(|node| scope_refs.get(&node).cloned())
     };
     // The template a provider's runtime would be made from.
-    let template_id: Id = setting::<Id>(&mut conn, Place::Node(org), keys::RUNTIME_TEMPLATE_ID)
+    let template_id: Id = setting::<Id>(conn, Place::Node(org), keys::RUNTIME_TEMPLATE_ID)
         .await
         .map_err(ApiError::internal)?
         .unwrap_or(orch_db::seeds::PROVIDER_RUNTIME_TEMPLATE_ID);
-    let named = env_queries::template_names(&mut conn, &[template_id]).await?;
+    let named = env_queries::template_names(conn, &[template_id]).await?;
     let template = TemplateRef {
         id: template_id,
         name: named.first().map_or_else(
@@ -388,7 +397,7 @@ async fn setup(ctx: Ctx, query: api::ProviderSetupGetQuery, (): ()) -> ApiResult
     }
     // The public system catalogue names built-ins even before a person has a usable profile.
     // Never copy another person's private profile, or infer native support from a kind or a process.
-    for named in orch_db::queries::resources::binding::system_agent_kinds(&mut conn).await? {
+    for named in orch_db::queries::resources::binding::system_agent_kinds(conn).await? {
         for choice in unavailable.iter_mut().filter(|choice| {
             choice.harness.kind == named.harness_kind
                 && choice.reason == api::ProviderSetupSubscriptionUnavailableReason::NotReported
@@ -432,18 +441,18 @@ async fn setup(ctx: Ctx, query: api::ProviderSetupGetQuery, (): ()) -> ApiResult
         })
         .collect();
     let presets = presets_of(
-        setting::<Json>(&mut conn, Place::Node(org), keys::PROVIDERS_PRESETS)
+        setting::<Json>(conn, Place::Node(org), keys::PROVIDERS_PRESETS)
             .await
             .map_err(ApiError::internal)?,
         org,
     );
-    let physical = queries::physical_machines(&mut conn)
+    let physical = queries::physical_machines(conn)
         .await?
         .into_iter()
         .filter(|row| row.is_active())
         .collect();
     let choices: Vec<api::ProviderSetupMachine> =
-        super::machines::machine_views(&ctx, &mut conn, physical)
+        super::machines::machine_views_as(ctx, conn, principal, physical)
             .await?
             .into_iter()
             .filter(|machine| {
@@ -498,15 +507,15 @@ async fn setup(ctx: Ctx, query: api::ProviderSetupGetQuery, (): ()) -> ApiResult
             .map(|choice| choice.machine.id)
             .collect()
     };
-    let machine_refs = machine_refs(&ctx.app, &mut conn, &mine).await?;
+    let machine_refs = machine_refs(&ctx.app, conn, &mine).await?;
     let key_machines: Vec<api::MachineRef> = mine
         .iter()
         .filter_map(|id| machine_refs.get(id).cloned())
         .collect();
     // The templates of the pool of providers' runtimes the caller may use.
     let templates = resources::visible(
-        &mut conn,
-        &principal,
+        conn,
+        principal,
         ResourceKind::Template,
         Page {
             after: None,
@@ -518,12 +527,12 @@ async fn setup(ctx: Ctx, query: api::ProviderSetupGetQuery, (): ()) -> ApiResult
     .map_err(ApiError::internal)?;
     let usable_templates: Vec<Id> = if let Some(provider) = &provider {
         if (provider.key_machine_id.is_none() || provider.key_machine_id == provider.machine_id)
-            && orch_db::queries::environment_facts::of_provider(&mut conn, provider.id)
+            && orch_db::queries::environment_facts::of_provider(conn, provider.id)
                 .await?
                 .is_none_or(|machine| !machine.attaches())
         {
             let selected = setting::<Id>(
-                &mut conn,
+                conn,
                 Place::Provider(provider.id),
                 keys::RUNTIME_TEMPLATE_ID,
             )
@@ -531,12 +540,11 @@ async fn setup(ctx: Ctx, query: api::ProviderSetupGetQuery, (): ()) -> ApiResult
             .map_err(ApiError::internal)?;
             let selected = match selected {
                 Some(selected) => Some(selected),
-                None => orch_db::queries::resources::provider_runtime::live_runtime(
-                    &mut conn,
-                    provider.id,
-                )
-                .await?
-                .map(|runtime| runtime.template_id),
+                None => {
+                    orch_db::queries::resources::provider_runtime::live_runtime(conn, provider.id)
+                        .await?
+                        .map(|runtime| runtime.template_id)
+                }
             };
             selected.into_iter().collect()
         } else {
@@ -557,14 +565,14 @@ async fn setup(ctx: Ctx, query: api::ProviderSetupGetQuery, (): ()) -> ApiResult
             .map(|each| each.resource.id)
             .collect()
     };
-    let template_rows = queries::runtime_templates(&mut conn, &usable_templates).await?;
+    let template_rows = queries::runtime_templates(conn, &usable_templates).await?;
     let owners: Vec<Id> = template_rows
         .iter()
         .filter_map(|row| row.owner_id)
         .collect();
-    let owners = refusals::user_refs(&mut conn, &owners).await?;
+    let owners = refusals::user_refs(conn, &owners).await?;
     let sources = super::provider_sources::offers(
-        &mut conn,
+        conn,
         &key_machines,
         &template_rows,
         &ctx.app.builtin_sources,

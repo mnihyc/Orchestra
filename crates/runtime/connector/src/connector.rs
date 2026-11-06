@@ -328,6 +328,10 @@ impl Connector {
         policy.offered_roles(&params.roles);
         let link = MachineLink::start(
             machine_config(LinkSettings {
+                gateways: data
+                    .record()
+                    .map(|record| record.gateways)
+                    .unwrap_or_default(),
                 version: &params.version,
                 platform: params.platform,
                 roles: params.roles.clone(),
@@ -395,6 +399,9 @@ impl Connector {
             data_dir: data.root().to_owned(),
             publisher: Arc::new(link.clone()),
             policy: Arc::clone(&policy),
+            local_harnesses: Arc::new(crate::local_harnesses::Discovery::new(Arc::new(
+                params.adapters.clone(),
+            ))),
             provider_sources,
             builtin_sources,
             source_runtime: Arc::new(crate::sources::dispatch::Runtime::default()),
@@ -515,6 +522,8 @@ impl Connector {
                 facts_link.rates(),
                 facts_link.clock_offset_ms(),
             );
+            facts_services.local_harnesses.apply(&mut facts);
+            facts.gateway = Some(facts_link.gateway_status());
             facts.programs = facts_programs
                 .as_ref()
                 .map(|handler| handler.snapshot(&facts_policy));
@@ -523,6 +532,10 @@ impl Connector {
             facts
         });
         let mut dispatcher = Dispatcher::new(Arc::clone(&policy), Arc::clone(&facts_now));
+        dispatcher.local_harnesses(
+            Arc::clone(&services.local_harnesses),
+            Arc::clone(&services.publisher),
+        );
         let update_requests = Arc::new(crate::automatic::Requests::new(
             !params.managed || node,
             if node {
@@ -556,18 +569,28 @@ impl Connector {
         let stop = CancellationToken::new();
         let mut tasks = vec![tokio::spawn(watch(link.clone())), tunnels.run()];
         let mut advertised = link.advertised_endpoints();
+        let mut gateways = link.advertised_gateways();
+        let gateway_link = link.clone();
         let endpoint_data = data.clone();
         let endpoint_stop = stop.clone();
         tasks.push(tokio::spawn(async move {
             loop {
-                if let Some(endpoints) = advertised.borrow_and_update().clone()
-                    && let Err(error) = endpoint_data.store_server_endpoints(endpoints)
+                let endpoints = advertised.borrow_and_update().clone();
+                let catalogue = gateways.borrow_and_update().clone();
+                if (endpoints.is_some() || catalogue.is_some())
+                    && let Err(error) = endpoint_data.store_server_advertisement(
+                        endpoints,
+                        catalogue,
+                        Some(gateway_link.gateway_measurements()),
+                        gateway_link.gateway_status().measured_at,
+                    )
                 {
-                    tracing::warn!(%error, "the system's address list could not be saved");
+                    tracing::warn!(%error, "the system's gateway advertisement could not be saved");
                 }
                 tokio::select! {
                     () = endpoint_stop.cancelled() => return,
                     changed = advertised.changed() => if changed.is_err() { return; },
+                    changed = gateways.changed() => if changed.is_err() { return; },
                 }
             }
         }));
@@ -594,12 +617,17 @@ impl Connector {
         tasks.push(tokio::spawn(crate::facts::on_connections(
             link.clone(),
             roles.clone(),
+            Arc::clone(&policy),
+            Arc::clone(&services.local_harnesses),
+            Arc::clone(&facts_now),
             stop.clone(),
         )));
         tasks.push(tokio::spawn(report_facts(
             link.clone(),
             facts_now,
             policy.changes(),
+            Arc::clone(&policy),
+            Arc::clone(&services.local_harnesses),
             stop.clone(),
         )));
         // What the owner changes in the file while the connector runs holds without a restart.
@@ -722,6 +750,8 @@ impl Connector {
             self.link.rates(),
             self.link.clock_offset_ms(),
         );
+        self.services.local_harnesses.apply(&mut facts);
+        facts.gateway = Some(self.link.gateway_status());
         facts.role_management = Some(self.role_changes.capability(&self.services.policy));
         facts
     }
@@ -773,8 +803,11 @@ async fn report_facts(
     link: MachineLink,
     facts: Arc<crate::dispatch::FactsNow>,
     mut policy_changes: tokio::sync::watch::Receiver<u64>,
+    policy: Arc<PolicyStore>,
+    discovery: Arc<crate::local_harnesses::Discovery>,
     stop: CancellationToken,
 ) {
+    let mut program_changes = discovery.changes();
     let mut ticker = tokio::time::interval(FACTS_EVERY);
     ticker.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
     // The first tick is at once: the facts are reported when the connector starts, whether or not a
@@ -787,7 +820,10 @@ async fn report_facts(
                 if changed.is_err() {
                     return;
                 }
+                discovery.refresh(&policy).await;
+                program_changes.borrow_and_update();
             }
+            changed = program_changes.changed() => if changed.is_err() { return; },
         }
         let now = facts();
         if let Err(error) = link

@@ -895,3 +895,5 @@ async fn switching_off_an_embeddings_provider_stops_its_batch_and_keeps_stored_s
     );
     assert_eq!(s.rig.commands.issued_of("provider.embed"), before);
 }
+
+mod administration;

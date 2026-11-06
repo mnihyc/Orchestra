@@ -16,7 +16,7 @@ import { useStore } from 'zustand';
 import { accessRequestQuery, cancelApproval, permissionsQuery, requestAccess, requestJoin } from '@/api/access';
 import { ApiError, client } from '@/api/client';
 import { approvalQuery } from '@/api/approvals';
-import type { AccessChoice, AccessRequestCreateReply, Approval, MissingAccess } from '@/generated/api-types';
+import type { AccessChoice, Approval, MissingAccess } from '@/generated/api-types';
 import { useActKey } from '@/lib/forms';
 import { Button } from '@/ui/Button';
 import { ErrorAlert } from '@/ui/ErrorState';
@@ -39,17 +39,23 @@ const REASON_MAX = 500;
 const rememberKey = (reader: string, objectId: string, forThread: string | undefined, membership: boolean) =>
   `orch.access.request.v2.${JSON.stringify([reader, objectId, forThread ?? null, membership])}`;
 
-function remembered(key: string | null): AccessRequestCreateReply | null {
+/** Only the accepted identity is needed before current cards are loaded. */
+interface SentRequest {
+  batch_id: string;
+  approvals?: Approval[];
+}
+
+function remembered(key: string | null): SentRequest | null {
   if (key === null) return null;
   try {
     const batch = sessionStorage.getItem(key);
-    return batch === null || batch === '' ? null : { batch_id: batch, approvals: [] };
+    return batch === null || batch === '' ? null : { batch_id: batch };
   } catch {
     return null;
   }
 }
 
-function remember(key: string | null, reply: AccessRequestCreateReply | null): void {
+function remember(key: string | null, reply: SentRequest | null): void {
   if (key === null) return;
   try {
     if (reply === null) sessionStorage.removeItem(key);
@@ -127,7 +133,7 @@ function AccessRequestForm({ missing, objectId, forThread, fixed = false, privat
   const [existingId, setExistingId] = useState(pendingId ?? null);
   const existing = useQuery({ ...approvalQuery(existingId ?? ''), enabled: existingId !== null });
   const storageKey = reader === null || privateReference ? null : rememberKey(reader, rememberAs ?? objectId, forThread, membership);
-  const [sent, setSent] = useState<AccessRequestCreateReply | null>(() => remembered(storageKey));
+  const [sent, setSent] = useState<SentRequest | null>(() => remembered(storageKey));
   const choice: AccessChoice = chosen ?? (index === null ? 'full_view' : leastChoice(index, kind, main?.permissions ?? []));
 
   const [attempt,setAttempt]=useState(0);

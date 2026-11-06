@@ -6,6 +6,7 @@
 )]
 
 mod support;
+use support::FullInvitationReply as _;
 
 use chrono::Duration;
 use http::HeaderMap;
@@ -25,7 +26,7 @@ use orch_identity_oidc::OidcKind;
 use orch_testkit::oidc::{
     CLIENT_ID, CLIENT_SECRET, Faults, OidcProvider, Person as Somebody, ProviderConfig,
 };
-use orch_types::{Id, new_id};
+use orch_types::{Clock, Id, new_id};
 use serde_json::json;
 use std::collections::{BTreeMap, HashMap};
 use std::sync::{Arc, Once};
@@ -950,6 +951,8 @@ async fn oidc_keeps_system_admission_and_explicit_team_acceptance_separate_from_
                     .send()
                     .await
                     .ok()
+                    .into_full()
+                    .expect("ordinary created organization content")
                     .base
                     .id,
             );
@@ -993,6 +996,7 @@ async fn oidc_keeps_system_admission_and_explicit_team_acceptance_separate_from_
             })
             .send()
             .await
+            .full_invitation()
             .ok();
         sso.provider.sign_in_as(dana());
         let mut browser = Browser::default();
@@ -1067,6 +1071,7 @@ async fn an_oidc_registration_withdrawn_by_its_issuer_makes_no_account_or_home()
         })
         .send()
         .await
+        .full_invitation()
         .ok();
     sso.provider.sign_in_as(dana());
     let mut browser = Browser::default();
@@ -1100,4 +1105,219 @@ async fn an_oidc_registration_withdrawn_by_its_issuer_makes_no_account_or_home()
         "SELECT uses, (SELECT count(*) FROM invitation_uses WHERE invitation_id = $1) FROM invitations WHERE id = $1",
     ).bind(invitation.invitation.id).fetch_one(&sso.world.db.pool).await.unwrap();
     assert_eq!((homes_after, uses, receipts), (homes_before, 0, 0));
+}
+
+/// A real stored account key, with the same declared operation/action/target rules as HTTP.
+async fn identity_link_key(sso: &Sso, user: Id) -> (Id, String) {
+    use orch_access_contract::key_scope::{
+        KeyAction, KeyIdentityKind, KeyOperation, KeyReach, KeyRule, KeyScope, KeyTarget,
+        KeyTargetKind,
+    };
+    use orch_api_core::middleware::authentication::{API_TOKEN_PREFIX, new_token, token_hash};
+    use orch_db::queries::identity::{NewApiToken, create_api_token_scoped};
+
+    let kind = KeyTargetKind::Identity(KeyIdentityKind::Account);
+    let scope = KeyScope {
+        rules: vec![KeyRule {
+            target: KeyTarget {
+                kind,
+                id: Some(user),
+                reach: KeyReach::SelfOnly,
+            },
+            resources: Some(vec![kind]),
+            allow: ["MeIdentityLink", "MeIdentityDelete"]
+                .into_iter()
+                .map(|operation| KeyOperation {
+                    operation: operation.to_owned(),
+                    actions: vec![KeyAction::Manage],
+                })
+                .collect(),
+        }],
+        constraints: Vec::new(),
+        excluded_places: Vec::new(),
+    };
+    let key = new_token(API_TOKEN_PREFIX);
+    let hash = token_hash(&key);
+    let id = new_id();
+    let policy = serde_json::to_value(scope).unwrap();
+    create_api_token_scoped(
+        &mut sso.world.db.pool.acquire().await.unwrap(),
+        &NewApiToken {
+            id,
+            user_id: user,
+            name: "account identity automation",
+            token_hash: &hash,
+            scopes: &[],
+            node_id: None,
+            at: sso.world.app.clock.now(),
+            expires_at: Some(sso.world.app.clock.now() + Duration::minutes(5)),
+        },
+        Some(&policy),
+    )
+    .await
+    .unwrap();
+    (id, key)
+}
+
+#[tokio::test]
+async fn an_explicit_account_key_links_and_unlinks_through_the_existing_verified_oidc_flow() {
+    let sso = sso().await;
+    let ada = sso.world.person("automation").await;
+    let (_, key) = identity_link_key(&sso, ada.id).await;
+    let sessions_before = sso.sessions(ada.id).await;
+    sso.provider
+        .sign_in_as(Somebody::new("sub-automation").with_email(&ada.email, true));
+    let mut browser = Browser::default();
+    for second_link in [false, true] {
+        let reply = sso
+            .world
+            .app
+            .call(MeIdentityLink, &[&KEY])
+            .token(&key)
+            .send()
+            .await;
+        browser.keep(&reply.headers);
+        let to_provider = reply.ok().redirect_url;
+        assert!(browser.has("orch_oidc"));
+        let back = sso.provider.authorize(&to_provider).await.unwrap();
+        assert_eq!(
+            sso.come_back(&mut browser, &back).await,
+            "/settings/security"
+        );
+        assert_eq!(sso.identities_at("sub-automation").await, [ada.id]);
+        assert_eq!(
+            sso.sessions(ada.id).await,
+            sessions_before,
+            "linking mints no session"
+        );
+        assert!(!browser.has(orch_api_contract::common::SESSION_COOKIE));
+        if second_link {
+            // The same ordinary last-way-in guard applies to an explicitly scoped key.
+            sqlx::query("UPDATE users SET password_hash=NULL WHERE id=$1")
+                .bind(ada.id)
+                .execute(&sso.world.db.pool)
+                .await
+                .unwrap();
+            let denied = sso
+                .world
+                .app
+                .call(MeIdentityDelete, &[&KEY])
+                .token(&key)
+                .send()
+                .await
+                .problem();
+            assert_eq!(denied.code, ErrorCode::ResourceInUse);
+            assert_eq!(sso.identities_at("sub-automation").await, [ada.id]);
+        } else {
+            assert_eq!(
+                sso.world
+                    .app
+                    .call(MeIdentityDelete, &[&KEY])
+                    .token(&key)
+                    .send()
+                    .await
+                    .status,
+                204
+            );
+            assert!(sso.identities_at("sub-automation").await.is_empty());
+        }
+    }
+}
+
+#[tokio::test]
+async fn an_oidc_link_rechecks_its_originating_key_at_callback_and_does_not_borrow_a_session() {
+    use orch_api_core::middleware::authentication::token_hash;
+    use orch_db::queries::identity;
+    use serde_json::Value;
+
+    let sso = sso().await;
+    for (index, loss) in ["revoke", "expiry", "scope"].into_iter().enumerate() {
+        let person = sso.world.person(&format!("keyholder{index}")).await;
+        let (id, key) = identity_link_key(&sso, person.id).await;
+        let sessions_before = sso.sessions(person.id).await;
+        let subject = format!("sub-keyholder{index}");
+        sso.provider
+            .sign_in_as(Somebody::new(&subject).with_email(&person.email, true));
+        let mut browser = Browser::default();
+        let reply = sso
+            .world
+            .app
+            .call(MeIdentityLink, &[&KEY])
+            .token(&key)
+            .send()
+            .await;
+        browser.keep(&reply.headers);
+        let to_provider = reply.ok().redirect_url;
+        let state = query_of(&to_provider)["state"].clone();
+        let captured: Value =
+            sqlx::query_scalar("SELECT link_authority FROM oidc_states WHERE state=$1")
+                .bind(&state)
+                .fetch_one(&sso.world.db.pool)
+                .await
+                .unwrap();
+        assert_eq!(captured["origin"]["operation"], "MeIdentityLink");
+        assert_eq!(captured["origin"]["caller"]["user"], person.id.to_string());
+        assert!(
+            captured["session"].is_null(),
+            "a key must not become a browser origin"
+        );
+        assert!(!captured.to_string().contains(&key), "no bearer is stored");
+        assert!(captured["origin"]["caller"].get("admission").is_none());
+        // Complete the real provider proof; only the accepted account credential is lost.
+        let back = sso.provider.authorize(&to_provider).await.unwrap();
+        match loss {
+            "revoke" => {
+                assert!(
+                    identity::revoke_api_token(
+                        &mut sso.world.db.pool.acquire().await.unwrap(),
+                        id,
+                        person.id,
+                        sso.world.app.clock.now()
+                    )
+                    .await
+                    .unwrap()
+                );
+            }
+            "expiry" => {
+                sqlx::query("UPDATE api_tokens SET expires_at=$2 WHERE id=$1")
+                    .bind(id)
+                    .bind(sso.world.app.clock.now() + Duration::seconds(1))
+                    .execute(&sso.world.db.pool)
+                    .await
+                    .unwrap();
+                sso.world.app.clock.advance(Duration::seconds(2));
+            }
+            "scope" => {
+                // The current authoritative policy no longer permits the accepted operation.
+                sqlx::query("UPDATE api_tokens SET operation_scope=$2 WHERE id=$1")
+                    .bind(id)
+                    .bind(json!({"rules":[],"constraints":[],"excluded_places":[]}))
+                    .execute(&sso.world.db.pool)
+                    .await
+                    .unwrap();
+            }
+            _ => unreachable!(),
+        }
+        assert_eq!(
+            sso.come_back(&mut browser, &back).await,
+            "/settings/security#identity_link_error=state_expired"
+        );
+        assert!(sso.identities_at(&subject).await.is_empty());
+        assert_eq!(sso.sessions(person.id).await, sessions_before);
+        assert!(!browser.has(orch_api_contract::common::SESSION_COOKIE));
+        let remains: i64 = sqlx::query_scalar("SELECT count(*) FROM oidc_states WHERE state=$1")
+            .bind(&state)
+            .fetch_one(&sso.world.db.pool)
+            .await
+            .unwrap();
+        assert_eq!(remains, 0, "refused callbacks still consume the state once");
+        let credential = identity::api_token_by_hash(
+            &mut sso.world.db.pool.acquire().await.unwrap(),
+            &token_hash(&key),
+            sso.world.app.clock.now(),
+        )
+        .await
+        .unwrap();
+        assert_eq!(credential.is_some(), loss == "scope");
+    }
 }

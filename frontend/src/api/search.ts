@@ -7,6 +7,7 @@
  */
 import { infiniteQueryOptions, queryOptions } from '@tanstack/react-query';
 
+import { suppliedRead } from '@/api/readScheduler';
 import { api, ok } from '@/api/client';
 import { NetworkError } from '@/lib/requests';
 import { readInThread, receiveThreadRead, threadQueryRead, threadReadSelector } from '@/api/threadRead';
@@ -81,6 +82,7 @@ export const namesKey = (search: NameSearch) => ['names', search.kinds.join(',')
 export const namesQuery = (search: NameSearch) =>
   queryOptions({
     queryKey: namesKey(search),
+    ...suppliedRead(namesKey(search)),
     queryFn: async ({ signal }): Promise<NameSearchPage> => {
       const length = Array.from(search.q.trim()).length;
       if (length > 0 && length < NAME_MIN_CHARS) return { items: [], partial: false };

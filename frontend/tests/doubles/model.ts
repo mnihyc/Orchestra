@@ -212,6 +212,29 @@ export interface ThreadChoices {
 
 const SOURCE_DEFAULT: SettingSource = { scope: 'default', node: null };
 
+const record = (value: unknown): value is Record<string, unknown> => typeof value === 'object' && value !== null && !Array.isArray(value);
+
+/** Native declarations expose resolved choices and the same provider constraint carried by dispatch. */
+export function projectNativeParameter(def: Record<string, unknown> & { key: string }, model: ModelParameters): Record<string, unknown> | null {
+  const native = record(model.request_options) ? model.request_options.native : undefined;
+  const properties = record(native) && record(native.properties) ? native.properties : {};
+  const rule = properties[def.key];
+  if (rule === false) return null;
+  const from = record(def.options) ? def.options.from_model : undefined;
+  const search = from === 'web_search' || from === 'live_web_search';
+  if (search && (model.web_search ?? []).length === 0) return null;
+  const options = search ? ['disabled', ...(model.web_search ?? []).filter((mode) => mode !== 'disabled' && (from !== 'live_web_search' || mode === 'live'))]
+    .map((value) => ({ value, label: value === 'disabled' ? 'Disabled' : value })) : Array.isArray(def.options) ? def.options : null;
+  const defaultFrom = record(def.default) ? def.default.from_model : undefined;
+  const start = typeof defaultFrom === 'string' ? (model as Record<string, unknown>)[defaultFrom] ?? (defaultFrom === 'default_web_search' ? 'disabled' : null) : def.default ?? null;
+  const resolved = record(rule) && Object.hasOwn(rule, 'const') ? rule.const : record(rule) && Object.hasOwn(rule, 'default') ? rule.default : start;
+  return { ...def, resolved_default: resolved,
+    ...(options === null ? {} : { resolved_options: options.filter((option) => !record(rule) ||
+      (!Object.hasOwn(rule, 'const') || option.value === rule.const) && (!Array.isArray(rule.enum) || rule.enum.includes(option.value))) }),
+    ...(record(rule) ? { provider_constraint: { type: def.type === 'enum' ? 'string' : def.type, title: def.title, ...rule, 'x-orch-source': 'provider' }, constraint_source: 'provider' } : {}),
+  };
+}
+
 /** The parameters of the thread's agent that exist for its model, each with the thread's own choice. */
 export function parameterViews(model: ModelParameters, choices: ThreadChoices): ParameterView[] {
   const source: SettingSource = Object.keys(choices.own).length > 0 ? { scope: 'thread', node: null } : SOURCE_DEFAULT;

@@ -341,6 +341,8 @@ async fn an_existing_directory_is_kept_even_without_write_permission_and_a_missi
                     thread: Some(thread),
                     caller: world.ada,
                     token: None,
+                    creator_origin: None,
+                    scheduled_input: None,
                     action: Action::Prepare {
                         directory: row.workspace_dir,
                         source: frozen,
@@ -659,6 +661,8 @@ async fn a_reported_physical_write_denial_or_missing_policy_stops_before_native_
                     thread: Some(fixture.thread),
                     caller: world.ada,
                     token: None,
+                    creator_origin: None,
+                    scheduled_input: None,
                     action: Action::Prepare {
                         directory: row.workspace_dir,
                         source: RepositorySource {

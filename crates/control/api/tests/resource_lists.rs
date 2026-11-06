@@ -521,6 +521,8 @@ async fn a_provider(world: &World, c: &Company) -> Id {
         .send()
         .await
         .ok()
+        .into_full()
+        .unwrap()
         .provider
         .base
         .id
