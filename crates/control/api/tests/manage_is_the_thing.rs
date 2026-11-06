@@ -10,6 +10,7 @@ mod places;
 mod resources;
 mod support;
 
+use crate::support::FullMoveReply as _;
 use desk::Desk;
 use orch_api_contract::common::{ErrorCode, Problem};
 use orch_api_contract::documents::{
@@ -90,6 +91,7 @@ async fn move_project(world: &World, who: &Who, project: Id, under: Id) -> Reply
         .body(&body)
         .send()
         .await
+        .full_move()
 }
 
 async fn move_org(world: &World, who: &Who, org: Id, under: Id) -> Reply<Org> {
@@ -105,6 +107,7 @@ async fn move_org(world: &World, who: &Who, org: Id, under: Id) -> Reply<Org> {
         .body(&body)
         .send()
         .await
+        .full_move()
 }
 
 #[tokio::test]

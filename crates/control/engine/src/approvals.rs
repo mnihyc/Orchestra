@@ -21,6 +21,8 @@
 //! can give it, carries out a decision as the approver's own change of the
 //! page, and lets a request nobody answered run out.
 
+pub mod operation;
+
 use crate::commands::{Outcome, Outgoing};
 use crate::engine::Engine;
 use crate::error::EngineError;
@@ -40,6 +42,122 @@ use orch_link_contract::events::{ApprovalClosed, ApprovalRequested};
 use orch_types::{Id, Json, Time, new_id};
 use serde_json::json;
 use std::collections::BTreeSet;
+
+fn notice_event(
+    notice: SourceNotice,
+    thread: &ThreadRow,
+    approval: Id,
+    at: chrono::DateTime<chrono::Utc>,
+) -> crate::notifications::Event {
+    let mut data = json!({"approval_id":approval,"request_kind":notice.kind,"path":"/approvals"});
+    data[notice.key] = json!(notice.id);
+    crate::notifications::Event {
+        kind: crate::notifications::Kind::ApprovalRequested,
+        node: Some(thread.node_id),
+        thread: Some(thread.node_id),
+        approval: Some(approval),
+        title: notice.title.to_owned(),
+        body: String::new(),
+        data,
+        source: approval.to_string(),
+        actor: None,
+        at,
+    }
+}
+
+#[derive(Clone, Copy)]
+struct SourceNotice {
+    id: Id,
+    kind: &'static str,
+    key: &'static str,
+    title: &'static str,
+}
+/// Existing native source facts only; no credential, admission or stored lifecycle.
+struct SourceRequestFacts {
+    notice: SourceNotice,
+    permission: Permission,
+    request: Json,
+    requester: Option<Id>,
+    linked: Option<Id>,
+}
+
+async fn source_request_facts(
+    conn: &mut orch_db::Conn,
+    thread: &ThreadRow,
+    source: orch_db::queries::notifications::inbox::RequestSource,
+) -> Result<Option<SourceRequestFacts>, EngineError> {
+    use orch_db::queries::notifications::inbox::RequestSource;
+    let (id, kind, key, title, permission, request, requester, linked) = match source {
+        RequestSource::Plan(id) => {
+            let item = threads::item(conn, id)
+                .await?
+                .ok_or_else(|| EngineError::unreadable("a proposed plan has no source"))?;
+            if item.continuation_id != thread.active_continuation_id
+                || thread.current_turn_id.is_some()
+                || threads::count_pending_inputs(conn, thread.node_id).await? > 0
+                || !threads::latest_active_turn(conn, thread.node_id)
+                    .await?
+                    .is_some_and(|turn| Some(turn.id) == item.turn_id)
+            {
+                return Ok(None);
+            }
+            let linked = item
+                .payload
+                .get("approval_id")
+                .and_then(Json::as_str)
+                .and_then(|id| id.parse::<Id>().ok());
+            let mut plan = item.payload.clone();
+            if let Some(object) = plan.as_object_mut() {
+                object.remove("approval_id");
+                object.remove("decision");
+            }
+            (
+                id,
+                "plan",
+                "plan_item_id",
+                "A proposed plan needs an answer",
+                deciding_permission(conn, thread.node_id, &json!({"request_kind":"plan"})).await?,
+                json!({"item_id":id,"plan":plan}),
+                None,
+                linked,
+            )
+        }
+        RequestSource::Input(id) => {
+            let input = threads::input(conn, id)
+                .await?
+                .ok_or_else(|| EngineError::unreadable("a model-use wait has no input"))?;
+            if input.continuation_id != thread.active_continuation_id
+                || input.state != "pending"
+                || input.state_detail.as_deref() != Some(threads::HELD_MODEL_USE)
+            {
+                return Ok(None);
+            }
+            (
+                id,
+                "input",
+                "input_id",
+                "A message waits for someone who may use the model",
+                Permission::ThreadInteract,
+                json!({"input_id":id,"revision":input.seq_updated,"content":input.content}),
+                input.author_id,
+                input.approval_id,
+            )
+        }
+        RequestSource::Approval(_) => return Ok(None),
+    };
+    Ok(Some(SourceRequestFacts {
+        notice: SourceNotice {
+            id,
+            kind,
+            key,
+            title,
+        },
+        permission,
+        request,
+        requester,
+        linked,
+    }))
+}
 
 /// How many times the decision on one approval is handed to the harness
 /// before the engine gives the approval up as cancelled.
@@ -298,6 +416,77 @@ impl Engine {
         }
     }
 
+    /// The native first-effect prefix for a direct Plan/Input decision or input bypass.
+    /// Bypass has no source claim. Missing/settled legacy sources keep the writer's own
+    /// existing validation/status order; no Approval or caller is fabricated here.
+    pub async fn lock_source_control(
+        &self,
+        conn: &mut orch_db::Conn,
+        thread: Id,
+        source: orch_db::queries::notifications::inbox::RequestSource,
+        claims_source: bool,
+    ) -> Result<Option<ThreadRow>, EngineError> {
+        let Some(thread) = threads::lock(conn, thread).await? else {
+            return Ok(None);
+        };
+        if !claims_source || thread.archived_at.is_some() {
+            return Ok(Some(thread));
+        }
+        use orch_db::queries::notifications::inbox::RequestSource;
+        let owned = match source {
+            RequestSource::Plan(id) => threads::item(conn, id)
+                .await?
+                .is_some_and(|row| row.thread_id == thread.node_id && row.kind == "plan"),
+            RequestSource::Input(id) => threads::input(conn, id)
+                .await?
+                .is_some_and(|row| row.thread_id == thread.node_id),
+            RequestSource::Approval(_) => false,
+        };
+        if !owned {
+            return Ok(Some(thread));
+        }
+        let Some(facts) = source_request_facts(conn, &thread, source).await? else {
+            return Ok(Some(thread));
+        };
+        let Some(linked) = facts.linked else {
+            return Ok(Some(thread));
+        };
+        let Some(initial) = queries::approval(conn, linked).await? else {
+            return Ok(Some(thread));
+        };
+        if initial.kind != facts.notice.kind
+            || initial.thread_id != Some(thread.node_id)
+            || initial.object_id != Some(facts.notice.id)
+            || initial.state != "pending"
+        {
+            return Ok(Some(thread));
+        }
+        let Some(current) = queries::lock(conn, linked).await? else {
+            return Ok(Some(thread));
+        };
+        if current.kind != initial.kind
+            || current.thread_id != initial.thread_id
+            || current.object_id != initial.object_id
+        {
+            return Err(EngineError::unreadable(
+                "the source decision's immutable identity changed",
+            ));
+        }
+        // Only this native branch can reach a recipient update before an Approval write.
+        // A new/replaced source writes/cancels its canonical Approval first; settled sources
+        // return their original outcome without invented recipient locks.
+        if current.state == "pending"
+            && (facts.notice.kind == "plan"
+                || current.request.get("content") == facts.request.get("content"))
+        {
+            let now = self.inner.clock.time();
+            let recipients = self.approval_recipients(conn, &current, now).await?;
+            let event = notice_event(facts.notice, &thread, current.id, now.get());
+            crate::notifications::lock_tell_targets(conn, &event, &recipients).await?;
+        }
+        Ok(Some(thread))
+    }
+
     /// Materializes a source wait in the same ledger as every other approval and links its source.
     pub(crate) async fn source_requested(
         &self,
@@ -316,69 +505,22 @@ impl Engine {
             return Ok(());
         }
         let now = unit.now();
-        let (id, kind, key, title, permission, request, requester, linked) = match source {
-            RequestSource::Plan(id) => {
-                let item = threads::item(&mut *unit.conn, id)
-                    .await?
-                    .ok_or_else(|| EngineError::unreadable("a proposed plan has no source"))?;
-                if item.continuation_id != thread.active_continuation_id
-                    || thread.current_turn_id.is_some()
-                    || threads::count_pending_inputs(&mut *unit.conn, thread.node_id).await? > 0
-                    || !threads::latest_active_turn(&mut *unit.conn, thread.node_id)
-                        .await?
-                        .is_some_and(|turn| Some(turn.id) == item.turn_id)
-                {
-                    return Ok(());
-                }
-                let linked = item
-                    .payload
-                    .get("approval_id")
-                    .and_then(Json::as_str)
-                    .and_then(|id| id.parse::<Id>().ok());
-                let mut plan = item.payload.clone();
-                if let Some(object) = plan.as_object_mut() {
-                    object.remove("approval_id");
-                    object.remove("decision");
-                }
-                (
-                    id,
-                    "plan",
-                    "plan_item_id",
-                    "A proposed plan needs an answer",
-                    deciding_permission(
-                        &mut *unit.conn,
-                        thread.node_id,
-                        &json!({"request_kind":"plan"}),
-                    )
-                    .await?,
-                    json!({"item_id":id,"plan":plan}),
-                    None,
-                    linked,
-                )
-            }
-            RequestSource::Input(id) => {
-                let input = threads::input(&mut *unit.conn, id)
-                    .await?
-                    .ok_or_else(|| EngineError::unreadable("a model-use wait has no input"))?;
-                if input.continuation_id != thread.active_continuation_id
-                    || input.state != "pending"
-                    || input.state_detail.as_deref() != Some(threads::HELD_MODEL_USE)
-                {
-                    return Ok(());
-                }
-                (
-                    id,
-                    "input",
-                    "input_id",
-                    "A message waits for someone who may use the model",
-                    Permission::ThreadInteract,
-                    json!({"input_id":id,"revision":input.seq_updated,"content":input.content}),
-                    input.author_id,
-                    input.approval_id,
-                )
-            }
-            RequestSource::Approval(_) => return Ok(()),
+        let Some(facts) = source_request_facts(unit.conn, thread, source).await? else {
+            return Ok(());
         };
+        let SourceRequestFacts {
+            notice,
+            permission,
+            request,
+            requester,
+            linked,
+        } = facts;
+        let SourceNotice {
+            id,
+            kind,
+            key: _,
+            title,
+        } = notice;
         let existing = match linked {
             Some(linked) => queries::approval(&mut *unit.conn, linked).await?,
             None => None,
@@ -401,9 +543,11 @@ impl Engine {
             existing.ok_or_else(|| EngineError::unreadable("a source lost its pending record"))?
         } else {
             if let Some(old) = existing.filter(|row| row.state == "pending") {
+                unit.before_effect()?;
                 queries::cancel_pending(&mut *unit.conn, old.id, now).await?;
                 crate::notifications::approval_settled(unit, old.id).await?;
             }
+            unit.before_effect()?;
             queries::insert_source(
                 &mut *unit.conn,
                 &queries::NewSourceApproval {
@@ -450,22 +594,8 @@ impl Engine {
         let recipients = self
             .approval_recipients(&mut *unit.conn, &row, Time::new(now))
             .await?;
-        let mut data = json!({"approval_id":row.id,"request_kind":kind,"path":"/approvals"});
-        data[key] = json!(id);
-        let event = crate::notifications::Event {
-            kind: crate::notifications::Kind::ApprovalRequested,
-            node: Some(thread.node_id),
-            thread: Some(thread.node_id),
-            approval: Some(row.id),
-            title: title.to_owned(),
-            body: String::new(),
-            data,
-            source: row.id.to_string(),
-            actor: None,
-            at: now,
-        };
-        crate::notifications::tell(&mut *unit.conn, &event, &recipients, Some(thread.org_id))
-            .await?;
+        let event = notice_event(notice, thread, row.id, now);
+        crate::notifications::tell_in(unit, &event, &recipients, Some(thread.org_id)).await?;
         unit.approvals_changed(&recipients);
         Ok(())
     }
@@ -516,6 +646,7 @@ impl Engine {
             "approved"
         };
         let now = unit.now();
+        unit.before_effect()?;
         if !queries::decide(&mut *unit.conn, row.id, state, Some(by), decision, now).await? {
             let current = queries::approval(&mut *unit.conn, row.id)
                 .await?
@@ -1096,7 +1227,8 @@ impl Engine {
 
     /// Decides as [`Self::decide_approval`] does, in a transaction whose caller was asked again once
     /// the request had come (the API's action guard): `principal` was loaded in `tx` by that check
-    /// before any thread was locked, and its caller and its time are the ones that decide.
+    /// before any thread was locked. The shared native prefix restores that same credential
+    /// after its normal locks; synchronous HTTP entrypoints additionally refresh their full Guard.
     pub async fn decide_approval_guarded(
         &self,
         mut tx: orch_db::Tx,
@@ -1104,18 +1236,32 @@ impl Engine {
         approval_id: Id,
         decision: &ApprovalDecision,
     ) -> Result<ApprovalRow, ApprovalError> {
+        let approval = operation::lock_decision(self, &mut tx, approval_id, decision)
+            .await?
+            .map(|locked| locked.row().clone())
+            .filter(|row| row.kind == "harness")
+            .ok_or(ApprovalError::NotFound)?;
+        let thread_id = approval.thread_id.ok_or(ApprovalError::NotFound)?;
+        let thread: ThreadRow = threads::lock(&mut tx, thread_id)
+            .await?
+            .ok_or(ApprovalError::NotFound)?;
+        let principal =
+            operation::current_principal(self, &mut tx, &principal, &approval, decision)
+                .await?
+                .ok_or_else(|| {
+                    ApprovalError::Denied(Box::new(Refusal::of(
+                        Permission::ThreadManage,
+                        orch_access_contract::decisions::ObjectRef {
+                            kind: orch_access_contract::permissions::ObjectKind::Thread,
+                            id: thread_id,
+                        },
+                        Vec::new(),
+                    )))
+                })?;
+        let now = self.inner.clock.now();
         let caller = principal.caller().clone();
-        let now = principal.now().get();
         let (finished, row) = {
             let mut unit = Unit::new(&mut tx, now);
-            let approval = queries::approval(&mut *unit.conn, approval_id)
-                .await?
-                .filter(|row| row.kind == "harness")
-                .ok_or(ApprovalError::NotFound)?;
-            let thread_id = approval.thread_id.ok_or(ApprovalError::NotFound)?;
-            let thread: ThreadRow = threads::lock(&mut *unit.conn, thread_id)
-                .await?
-                .ok_or(ApprovalError::NotFound)?;
             let permission = Box::pin(deciding_permission(
                 &mut *unit.conn,
                 thread_id,
@@ -1458,6 +1604,27 @@ pub mod access {
         pub approvals: Vec<ApprovalRow>,
     }
 
+    /// Effect-free native request preparation, consumed once by its existing writer.
+    /// This is not serialized and contains no credential or delegated authority model.
+    pub struct PreparedAccessRequests {
+        requester: Id,
+        now: DateTime<Utc>,
+        batch: Id,
+        reason: String,
+        who: String,
+        for_thread: Option<Id>,
+        requested_expires_at: Option<Time>,
+        expires_at: DateTime<Utc>,
+        items: Vec<PreparedAccessRequest>,
+    }
+    struct PreparedAccessRequest {
+        id: Id,
+        sent: Sent,
+        permissions: Vec<Permission>,
+        title: String,
+        stored: Json,
+    }
+
     /// Why a request for access could not be decided as it was.
     #[derive(Debug, thiserror::Error)]
     pub enum DecideError {
@@ -1619,10 +1786,43 @@ pub mod access {
             requested_expires_at: Option<Time>,
             origin: &Origin,
         ) -> Result<Raised, RaiseError> {
+            rows::lock_requester(&mut tx, principal.user()).await?;
+            let prepared = self
+                .prepare_access_requests(
+                    &mut tx,
+                    &principal,
+                    asks,
+                    reason,
+                    for_thread,
+                    requested_expires_at,
+                )
+                .await?;
+            self.raise_prepared_access_requests(tx, prepared, origin)
+                .await
+        }
+
+        /// The same native checks/materialization before any Approval insert. HTTP callers
+        /// retain their full Guard and check its deadline after this preparation, before write.
+        pub async fn prepare_access_requests(
+            &self,
+            conn: &mut orch_db::Conn,
+            principal: &Principal,
+            asks: &[Ask],
+            reason: &str,
+            for_thread: Option<Id>,
+            requested_expires_at: Option<Time>,
+        ) -> Result<PreparedAccessRequests, RaiseError> {
             let caller = principal.caller().clone();
             let caller = &caller;
+            rows::lock_requester(&mut *conn, caller.user()).await?;
+            let current =
+                Principal::load(conn, caller.clone(), Time::new(self.inner.clock.now())).await?;
+            let current = match principal.second_step_hold() {
+                Some(hold) => current.held_for_second_step(hold.clone()),
+                None => current,
+            };
+            let principal = &current;
             let now = principal.now().get();
-            rows::lock_requester(&mut tx, caller.user()).await?;
             let mut objects = std::collections::HashSet::new();
             for (index, ask) in asks.iter().enumerate() {
                 if !objects.insert(ask.object.id) {
@@ -1637,7 +1837,7 @@ pub mod access {
             }
             for ask in asks {
                 if let Some(waiting) =
-                    rows::pending_for_person(&mut tx, caller.user(), ask.object.id, now).await?
+                    rows::pending_for_person(&mut *conn, caller.user(), ask.object.id, now).await?
                 {
                     return Err(RaiseError::AlreadyWaiting {
                         approval: waiting.id,
@@ -1645,14 +1845,14 @@ pub mod access {
                 }
             }
             let most: i64 = get(
-                &mut tx,
+                &mut *conn,
                 SettingsPlace::System,
                 keys::ACCESS_MAX_PENDING_REQUESTS,
             )
             .await
             .map_err(EngineError::from)?
             .unwrap_or(MOST_WAITING);
-            let waiting = rows::waiting_batches(&mut tx, caller.user(), now).await?;
+            let waiting = rows::waiting_batches(&mut *conn, caller.user(), now).await?;
             if waiting >= most {
                 return Err(RaiseError::Waiting {
                     limit: most,
@@ -1660,7 +1860,7 @@ pub mod access {
                 });
             }
             let days: i64 = get(
-                &mut tx,
+                &mut *conn,
                 SettingsPlace::System,
                 keys::ACCESS_REQUEST_EXPIRY_DAYS,
             )
@@ -1668,78 +1868,127 @@ pub mod access {
             .map_err(EngineError::from)?
             .unwrap_or(EXPIRY_DAYS);
             if let Some(thread) = for_thread
-                && threads::thread(&mut tx, thread)
+                && threads::thread(&mut *conn, thread)
                     .await
                     .map_err(EngineError::from)?
                     .is_none()
             {
                 return Err(RaiseError::NoSuchThread);
             }
-            let who = access_rows::user_names(&mut tx, &[caller.user()])
+            let who = access_rows::user_names(&mut *conn, &[caller.user()])
                 .await?
                 .into_iter()
                 .next()
                 .map_or_else(|| "Somebody".to_owned(), |named| named.name);
             // What the request keeps is what the API shows of it, so that names are kept as they
             // were when it was asked.
-            let requester_ref = views::user_ref_json(&mut tx, caller.user()).await?;
+            let requester_ref = views::user_ref_json(&mut *conn, caller.user()).await?;
             let thread_ref = match for_thread {
-                Some(thread) => node_ref_json(&mut tx, thread).await?,
+                Some(thread) => node_ref_json(&mut *conn, thread).await?,
                 None => Json::Null,
             };
             let batch = new_id();
-            let mut made: Vec<(ApprovalRow, Sent, Vec<Permission>)> =
-                Vec::with_capacity(asks.len());
+            let mut items = Vec::with_capacity(asks.len());
             for (index, ask) in asks.iter().enumerate() {
-                let place = requests::summary(&mut tx, ask.object)
+                let place = requests::summary(&mut *conn, ask.object)
                     .await
                     .map_err(|error| RaiseError::Item { index, error })?
                     .place;
-                let policy = policy_at(&mut tx, place).await?;
-                let sent = requests::plan(&mut tx, &principal, ask, &policy)
+                let policy = policy_at(&mut *conn, place).await?;
+                let sent = requests::plan(&mut *conn, principal, ask, &policy)
                     .await
                     .map_err(|error| RaiseError::Item { index, error })?;
                 let asked = Asked::of(ask, reason);
                 let holder = match ask.whom {
                     Whom::Requester => json!({ "kind": "user", "user": requester_ref }),
                     Whom::Person { id } => {
-                        json!({ "kind": "user", "user": views::user_ref_json(&mut tx, id).await? })
+                        json!({ "kind": "user", "user": views::user_ref_json(&mut *conn, id).await? })
                     }
                     Whom::Work { id } => {
-                        json!({ "kind": "node", "node": node_ref_json(&mut tx, id).await? })
+                        json!({ "kind": "node", "node": node_ref_json(&mut *conn, id).await? })
                     }
                 };
                 let stored = asked.to_json(holder, thread_ref.clone());
-                let is_node = sent.node.is_some();
                 let title = format!(
                     "{who} asks for {} on {}",
                     labels(&ask.permissions),
                     sent.name
                 );
+                items.push(PreparedAccessRequest {
+                    id: new_id(),
+                    sent,
+                    permissions: ask.permissions.clone(),
+                    title,
+                    stored,
+                });
+            }
+            Ok(PreparedAccessRequests {
+                requester: caller.user(),
+                now,
+                batch,
+                reason: reason.to_owned(),
+                who,
+                for_thread,
+                requested_expires_at,
+                expires_at: expiry(now, days),
+                items,
+            })
+        }
+
+        /// The ordinary atomic writer, using exactly the native preparation. Its first await is
+        /// the first Approval insert; no target, giver, holder or caller is rediscovered here.
+        pub async fn raise_prepared_access_requests(
+            &self,
+            mut tx: orch_db::Tx,
+            prepared: PreparedAccessRequests,
+            origin: &Origin,
+        ) -> Result<Raised, RaiseError> {
+            let PreparedAccessRequests {
+                requester,
+                now,
+                batch,
+                reason,
+                who,
+                for_thread,
+                requested_expires_at,
+                expires_at,
+                items,
+            } = prepared;
+            let mut made: Vec<(ApprovalRow, Sent, Vec<Permission>)> =
+                Vec::with_capacity(items.len());
+            for PreparedAccessRequest {
+                id,
+                sent,
+                permissions,
+                title,
+                stored,
+            } in items
+            {
+                let is_node = sent.node.is_some();
                 let row = rows::insert(
                     &mut tx,
                     &rows::NewAccessApproval {
-                        id: new_id(),
+                        id,
                         batch_id: batch,
                         node_id: sent.node.or(sent.beside),
                         object_kind: (!is_node).then(|| sent.kind.as_str()),
                         object_id: (!is_node).then_some(sent.id),
                         thread_id: for_thread,
-                        requester: caller.user(),
+                        requester,
                         title: &title,
                         request: &stored,
                         required_permission: rows::REQUIRED_PERMISSION,
-                        expires_at: expiry(now, days),
+                        expires_at,
                         requested_expires_at: requested_expires_at.map(Time::get),
                         at: now,
                     },
                 )
                 .await?;
-                made.push((row, sent, ask.permissions.clone()));
+                made.push((row, sent, permissions));
             }
             let summary = format!("{who} asked for access to {} things", made.len());
             let mut entry = Entry::new(
-                Actor::User(caller.user()),
+                Actor::User(requester),
                 orch_db::audit::action!(AuditAction::AccessRequested).as_str(),
                 "access",
                 Some(batch),
@@ -1777,7 +2026,7 @@ pub mod access {
                         "path": "/approvals",
                     }),
                     source: row.id.to_string(),
-                    actor: Some(caller.user()),
+                    actor: Some(requester),
                     at: now,
                 };
                 let eligible: Vec<_> = sent
@@ -1896,7 +2145,8 @@ pub mod access {
 
         /// Decides as [`Self::decide_access_request`] does, in a transaction whose caller was asked
         /// again once the request had come (the API's action guard): `approver` was loaded in `tx` by
-        /// that check, and its caller and its time are the ones the decision is made with.
+        /// that check. Its same credential is refreshed after the ordinary native lock footprint;
+        /// synchronous HTTP entrypoints separately retain their complete current Guard.
         pub async fn decide_access_request_guarded(
             &self,
             mut tx: orch_db::Tx,
@@ -1905,9 +2155,33 @@ pub mod access {
             decided: &Decided,
             origin: &Origin,
         ) -> Result<ApprovalRow, DecideError> {
+            let body = orch_api_contract::approvals::ApprovalDecision::Capability(
+                orch_api_contract::approvals::CapabilityDecision {
+                    approve: decided.approve,
+                    note: decided.note.clone(),
+                },
+            );
+            let locked = super::operation::lock_decision(self, &mut tx, approval_id, &body)
+                .await?
+                .map(|locked| locked.row().clone())
+                .filter(|row| row.kind == "access")
+                .ok_or(DecideError::NotFound)?;
+            let approver =
+                super::operation::current_principal(self, &mut tx, &approver, &locked, &body)
+                    .await?
+                    .ok_or_else(|| {
+                        DecideError::Denied(Box::new(Refusal::of(
+                            Permission::AccessManage,
+                            ObjectRef {
+                                kind: orch_access_contract::permissions::ObjectKind::Org,
+                                id: locked.node_id.unwrap_or(approval_id),
+                            },
+                            Vec::new(),
+                        )))
+                    })?;
+            let now = self.inner.clock.now();
             let caller = approver.caller().clone();
             let caller = &caller;
-            let now = approver.now().get();
             // A request that ran out is not decided; it is let lapse at once, and that is all this
             // transaction does.
             let overdue = approval_rows::approval(&mut tx, approval_id)
@@ -2179,6 +2453,18 @@ pub mod access {
                 .await
         }
 
+        /// The same native completion fact within the reader's current batch snapshot.
+        pub async fn access_batch_is_held_in(
+            &self,
+            conn: &mut orch_db::Conn,
+            requester: Id,
+            batch: Id,
+            now: Time,
+        ) -> Result<bool, EngineError> {
+            self.batch_is_held(conn, requester, Some(batch), now.get())
+                .await
+        }
+
         /// Lets the requests for access that nobody decided in time lapse. Called by the
         /// supervisor.
         pub async fn expire_access_requests(&self) -> Result<(), EngineError> {
@@ -2223,23 +2509,50 @@ pub mod access {
         Ok(rows
             .iter()
             .filter_map(|row| {
-                let object = match (row.object_kind.as_deref(), row.object_id) {
-                    (Some(kind), Some(id)) => ObjectRef {
-                        kind: kind.parse().ok()?,
-                        id,
-                    },
-                    _ => {
-                        let node = row.node_id?;
-                        ObjectRef {
-                            kind: *kinds.get(&node)?,
-                            id: node,
-                        }
-                    }
-                };
+                let object = object_from(row, &kinds)?;
                 let asked = Asked::from_json(object, &row.request)?;
                 Some((row.id, (object, asked, row.requester_user_id?)))
             })
             .collect())
+    }
+
+    fn object_from(
+        row: &ApprovalRow,
+        kinds: &HashMap<Id, orch_access_contract::permissions::ObjectKind>,
+    ) -> Option<ObjectRef> {
+        match (row.object_kind.as_deref(), row.object_id) {
+            (Some(kind), Some(id)) => Some(ObjectRef {
+                kind: kind.parse().ok()?,
+                id,
+            }),
+            _ => {
+                let node = row.node_id?;
+                Some(ObjectRef {
+                    kind: *kinds.get(&node)?,
+                    id: node,
+                })
+            }
+        }
+    }
+
+    /// The same stored permission object, without parsing or copying the request payload.
+    pub(crate) async fn request_object(
+        conn: &mut orch_db::Conn,
+        row: &ApprovalRow,
+    ) -> Result<Option<ObjectRef>, orch_db::DbError> {
+        let kinds = if row.object_kind.is_none() {
+            match row.node_id {
+                Some(node) => hierarchy::with_ancestors(conn, &[node])
+                    .await?
+                    .into_iter()
+                    .filter_map(|found| Some((found.id, found.kind.parse().ok()?)))
+                    .collect(),
+                None => HashMap::new(),
+            }
+        } else {
+            HashMap::new()
+        };
+        Ok(object_from(row, &kinds))
     }
 
     /// What the stored request of `row` says: the thing it asks about, what it asks and who asked.

@@ -70,6 +70,7 @@ interface Common {
   from: From;
   /** A choice is stored that the model's entry no longer opens: it is not sent, and the thread runs with the start. */
   stale: boolean;
+  providerFixed?: boolean;
 }
 
 export interface SpeedOrAccess extends Common {
@@ -82,6 +83,7 @@ export interface SpeedOrAccess extends Common {
   chosen: string | null;
   /** What it runs with now. */
   force: string | null;
+  allowNone?: boolean;
 }
 
 export interface ContextState extends Common {
@@ -149,7 +151,11 @@ export function statesOf(parameters: ThreadParameters, own: Readonly<Record<stri
     const heldHere = own === null ? view.source.scope === 'thread' : ownNamed;
     // None of a speed or a program is a choice of its own, stored as null where the member is named.
     const namedNone = stored === null && (ownNamed || view.source.scope !== 'default');
+    const projection = isRecord(view.def) ? view.def : {};
+    const constraint = isRecord(projection.provider_constraint) ? projection.provider_constraint : {};
+    const providerFixed = Object.hasOwn(constraint, 'const');
     const common = {
+      providerFixed,
       key: def.key,
       title: def.title,
       description: def.description,
@@ -160,35 +166,39 @@ export function statesOf(parameters: ThreadParameters, own: Readonly<Record<stri
     };
     const named = stored !== undefined && stored !== null;
     if (kind === 'context') {
-      const largest = model.context_max;
-      const start = contextStart(model);
+      const range = isRecord(projection.resolved_range) ? projection.resolved_range : {};
+      const largest = typeof range.max === 'number' ? range.max : model.context_max;
+      const least = typeof range.min === 'number' ? range.min : def.range?.least;
+      const start = typeof projection.resolved_default === 'number' ? projection.resolved_default : contextStart(model);
       if (largest === undefined || largest === null || start === null || def.range === null) continue;
-      const open = contextFits(stored, model, def.range.least);
+      const open = contextFits(stored, model, least ?? def.range.least) && stored <= largest;
       states.push({
         ...common,
         kind,
-        least: def.range.least,
+        least: least ?? def.range.least,
         window: model.context_window ?? null,
         largest,
         start,
         chosen: open ? stored : null,
-        force: open ? stored : start,
+        force: providerFixed && typeof constraint.const === 'number' ? constraint.const : open ? stored : start,
         rate: model.rate ?? null,
         from: open ? (heldHere ? 'chosen' : 'above') : 'start',
         stale: named && !open,
       });
       continue;
     }
-    const list = kind === 'speed' ? tiersOf(model).map((tier) => ({ id: tier.id, label: tier.label })) : (model.access_programs ?? []).map((program) => ({ id: program, label: accessProgramDisplayName(program, t) }));
-    const start = kind === 'speed' ? speedStart(model) : programStart(model);
+    const rawList = kind === 'speed' ? tiersOf(model).map((tier) => ({ id: tier.id, label: tier.label })) : (model.access_programs ?? []).map((program) => ({ id: program, label: accessProgramDisplayName(program, t) }));
+    const list = Array.isArray(projection.resolved_options) ? projection.resolved_options.flatMap((option: unknown) => isRecord(option) && typeof option.value === 'string' ? [{ id: option.value, label: kind === 'access' ? accessProgramDisplayName(option.value, t) : typeof option.label === 'string' ? option.label : option.value }] : []) : rawList;
+    const start = Object.hasOwn(projection, 'resolved_default') ? typeof projection.resolved_default === 'string' ? projection.resolved_default : null : kind === 'speed' ? speedStart(model) : programStart(model);
     const open = typeof stored === 'string' && list.some((one) => one.id === stored);
     states.push({
       ...common,
       kind,
       open: list,
+      allowNone: projection.allows_none !== false,
       start,
       chosen: open ? stored : null,
-      force: open ? stored : namedNone ? null : start,
+      force: providerFixed ? typeof constraint.const === 'string' ? constraint.const : null : open ? stored : namedNone ? null : start,
       from: open || namedNone ? (heldHere ? 'chosen' : 'above') : 'start',
       stale: named && !open,
     });

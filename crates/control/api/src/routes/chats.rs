@@ -15,12 +15,26 @@
 
 mod agents;
 mod asking;
+mod defaults;
 mod files;
+mod forwarding;
+mod group_mutation;
+mod mention_operation;
 mod mentions;
+mod message_edit;
+mod mutation;
+mod names;
+mod node_opening;
+mod operation;
+mod personal;
+pub(crate) mod read_operation;
 mod readers;
+mod state_collection;
 
+use crate::key_operations::resolver::Disclosure;
 use crate::middleware::authorization::{self, refusals};
 use crate::middleware::requests::{ApiError, ApiResult};
+use crate::middleware::transaction_guard;
 use crate::registry::{Answer, Ctx, Registry};
 use crate::routes::nodes::view;
 use crate::routes::resources::sealing;
@@ -31,22 +45,25 @@ use orch_access_contract::decisions::Decision;
 use orch_access_contract::permissions::Permission;
 use orch_api_contract::access::MissingAccess;
 use orch_api_contract::chats::{
-    Chat, ChatDraft, ChatDraftDelete, ChatDraftGet, ChatDraftSet, ChatDraftSetBody, ChatGet,
-    ChatListScope, ChatMemberAdd, ChatMemberRemove, ChatMessage, ChatMessageCreate,
-    ChatMessageCreateBody, ChatMessageCreateReply, ChatMessageDelete, ChatMessageList,
-    ChatMessageListQuery, ChatMessageListReply, ChatMessagePinDelete, ChatMessagePinSet,
-    ChatMessageReactionAdd, ChatMessageReactionRemove, ChatMessageUpdate, ChatMessageUpdateBody,
-    ChatOpening, ChatOpeningGet, ChatRead, ChatReadBody, ChatState, ChatStateSet, ChatStateSetBody,
+    Chat, ChatChangeResponse, ChatDraft, ChatDraftDelete, ChatDraftGet, ChatDraftSet,
+    ChatDraftSetBody, ChatDraftSetResponse, ChatGet, ChatListScope, ChatMemberAdd,
+    ChatMemberRemove, ChatMessage, ChatMessageCreate, ChatMessageCreateBody,
+    ChatMessageCreateReply, ChatMessageCreateResponse, ChatMessageDelete, ChatMessageList,
+    ChatMessageListQuery, ChatMessageListReply, ChatMessageMutationResponse, ChatMessagePinDelete,
+    ChatMessagePinSet, ChatMessageReactionAdd, ChatMessageReactionRemove, ChatMessageReceipt,
+    ChatMessageUpdate, ChatMessageUpdateBody, ChatOpening, ChatOpeningGet, ChatPersonalReceipt,
+    ChatRead, ChatReadBody, ChatState, ChatStateSet, ChatStateSetBody, ChatStateSetResponse,
     ChatSync, ChatSyncGet, ChatSyncGetQuery, ChatUpdate, ChatUpdateBody, ForwardChatMessage,
-    ForwardCreate, ForwardCreateBody, ForwardCreateReply, ForwardDestination, ForwardSource,
-    NodeChatOpening, NodeChatOpeningGet, NodeChatOpeningGetQuery, NodeChatScope, OrgChatCreate,
-    OrgChatCreateBody, OrgChatList, OrgChatListQuery, OrgChatsRead,
+    ForwardChatReceipt, ForwardCreate, ForwardCreateBody, ForwardCreateReceipt, ForwardCreateReply,
+    ForwardCreateResponse, ForwardDestination, ForwardInputReceipt, ForwardSource, NodeChatOpening,
+    NodeChatOpeningGet, NodeChatOpeningGetQuery, NodeChatScope, OrgChatCreate, OrgChatCreateBody,
+    OrgChatList, OrgChatListQuery, OrgChatsRead,
 };
 use orch_api_contract::chats::{
     ChatPart, FORWARD_MAX_DESTINATIONS, FORWARD_MAX_PARTS, ForwardThreadInput,
 };
-use orch_api_contract::common::{ErrorCode, Page, PageQuery};
-use orch_api_contract::nodes::{Node, NodeKind, NodeRef, TreeChat};
+use orch_api_contract::common::{ErrorCode, Page, PageQuery, ReceiptProjection};
+use orch_api_contract::nodes::{NodeKind, NodeRef, TreeChat};
 use orch_api_contract::personal::MeChatStateList;
 use orch_api_contract::routes::Endpoint;
 use orch_api_contract::threads::{
@@ -80,30 +97,46 @@ pub fn mount(registry: &mut Registry) {
     registry
         .on(OrgChatList, org_chat_list)
         .on(OrgChatCreate, org_chat_create)
-        .on(ChatGet, chat_get)
-        .on(ChatUpdate, chat_update)
-        .on(ChatMemberAdd, member_add)
-        .on(orch_api_contract::chats::ChatJoinRequest, join_request)
-        .on(ChatMemberRemove, member_remove)
-        .on(ChatSyncGet, sync_get)
-        .on(ChatOpeningGet, opening_get)
-        .on(NodeChatOpeningGet, node_opening_get)
-        .on(ChatMessageList, message_list)
-        .on(ChatMessageCreate, message_create)
-        .on(ChatMessageUpdate, message_update)
-        .on(ChatMessageDelete, message_delete)
-        .on(ChatMessageReactionAdd, reaction_add)
-        .on(ChatMessageReactionRemove, reaction_remove)
-        .on(ChatMessagePinSet, pin_set)
-        .on(ChatMessagePinDelete, pin_delete)
-        .on(ChatRead, chat_read)
+        .on_with_operation(ChatGet, read_operation::get, chat_get)
+        .on_with_operation(ChatUpdate, group_mutation::update, chat_update)
+        .on_with_operation(ChatMemberAdd, group_mutation::add, member_add)
+        .on_with_optional_operation(
+            orch_api_contract::chats::ChatJoinRequest,
+            crate::routes::access::request_operation::join,
+            join_request,
+        )
+        .on_with_operation(ChatMemberRemove, group_mutation::remove, member_remove)
+        .on_with_operation(ChatSyncGet, read_operation::sync, sync_get)
+        .on_with_operation(ChatOpeningGet, read_operation::opening, opening_get)
+        .on_with_operation(NodeChatOpeningGet, node_opening::prepare, node_opening_get)
+        .on_with_operation(ChatMessageList, read_operation::list, message_list)
+        .on_with_operation(ChatMessageCreate, operation::resolve, message_create)
+        .on_with_operation(ChatMessageUpdate, message_edit::resolve, message_update)
+        .on_with_operation(ChatMessageDelete, mutation::delete, message_delete)
+        .on_with_operation(ChatMessageReactionAdd, mutation::direct, reaction_add)
+        .on_with_operation(ChatMessageReactionRemove, mutation::direct, reaction_remove)
+        .on_with_operation(ChatMessagePinSet, mutation::direct, pin_set)
+        .on_with_operation(ChatMessagePinDelete, mutation::direct, pin_delete)
+        .on_with_operation(ChatRead, crate::key_operations::direct::declared, chat_read)
         .on(OrgChatsRead, org_chats_read)
-        .on(ChatStateSet, state_set)
-        .on(ChatDraftGet, draft_get)
-        .on(ChatDraftSet, draft_set)
-        .on(ChatDraftDelete, draft_delete)
-        .on(ForwardCreate, forward_create)
-        .on(MeChatStateList, me_chat_states);
+        .on_with_operation(
+            ChatStateSet,
+            crate::key_operations::direct::declared,
+            state_set,
+        )
+        .on_with_operation(ChatDraftGet, personal::get, draft_get)
+        .on_with_operation(ChatDraftSet, personal::set, draft_set)
+        .on_with_operation(
+            ChatDraftDelete,
+            crate::key_operations::direct::declared,
+            draft_delete,
+        )
+        .on_with_operation(ForwardCreate, forwarding::prepare, forward_create)
+        .on_snapshot_read_with_optional_operation(
+            MeChatStateList,
+            crate::key_operations::native::selected::<state_collection::States>,
+            me_chat_states,
+        );
     files::mount(registry);
 }
 
@@ -142,6 +175,10 @@ pub async fn failed(
             "this chat reserves role and group mentions to its current managers",
         )
         .with("policy", "chat.group_mentions"),
+        ChatError::StaleDestination => ApiError::new(
+            ErrorCode::ConflictStaleRevision,
+            "the direct destination changed during preparation; retry the same request",
+        ),
         ChatError::StaleRead { revision } => ApiError::new(
             ErrorCode::ConflictStaleRevision,
             "the chat's read position was changed on another device",
@@ -205,8 +242,65 @@ pub async fn failed(
     }
 }
 
+/// Choose a typed refusal before any rich identity/permission-page projection is built.
+async fn failed_projected(
+    conn: &mut Conn,
+    principal: &Principal,
+    chat: Option<Id>,
+    error: ChatError,
+    receipt_only: bool,
+) -> ApiError {
+    if !receipt_only {
+        return failed(conn, principal, chat, error).await;
+    }
+    match error {
+        ChatError::Suspended { org } => ApiError::new(
+            if org.is_some() {
+                ErrorCode::OrgSuspended
+            } else {
+                ErrorCode::AuthSuspended
+            },
+            "the caller is suspended",
+        ),
+        ChatError::Archived { .. } => {
+            ApiError::new(ErrorCode::NodeArchived, "this is archived and read-only")
+        }
+        ChatError::Lacks { permission, .. } => denied_for(
+            chat,
+            permission.as_str(),
+            "the caller lacks the required permission",
+        ),
+        ChatError::Outsider { .. } => ApiError::new(
+            ErrorCode::SharingExternalForbidden,
+            "this caller may not bring somebody from outside into this chat",
+        ),
+        ChatError::Destination { error, .. } => {
+            Box::pin(failed_projected(conn, principal, chat, *error, true)).await
+        }
+        safe @ (ChatError::Db(_)
+        | ChatError::Authz(_)
+        | ChatError::Settings(_)
+        | ChatError::NotFound
+        | ChatError::MentionRestricted
+        | ChatError::StaleDestination
+        | ChatError::StaleRead { .. }
+        | ChatError::StaleMessage { .. }
+        | ChatError::NotAllowed(_)
+        | ChatError::Inspecting
+        | ChatError::Invalid { .. }
+        | ChatError::NotTheAuthor
+        | ChatError::Unmasked(_)
+        | ChatError::Unsupported(_)
+        | ChatError::Internal(_)) => {
+            authorization::problem_without_content(failed(conn, principal, chat, safe).await)
+        }
+    }
+}
+
 /// What a handler works with: the connection or transaction, who acts and when.
 struct Work {
+    // The shared request disclosure decision can narrow at a later guarded checkpoint.
+    projection_ctx: Ctx,
     principal: Principal,
     origin: orch_db::audit::Origin,
     now: DateTime<Utc>,
@@ -217,6 +311,7 @@ impl Work {
         let principal = authorization::principal(ctx, conn).await?;
         let now = principal.now().get();
         Ok(Self {
+            projection_ctx: ctx.clone(),
             principal,
             origin: origin(ctx),
             now,
@@ -239,7 +334,14 @@ impl Work {
     ) -> ApiResult<T> {
         match result {
             Ok(value) => Ok(value),
-            Err(error) => Err(failed(conn, &self.principal, chat, error).await),
+            Err(error) => Err(failed_projected(
+                conn,
+                &self.principal,
+                chat,
+                error,
+                self.projection_ctx.key_receipt_required(),
+            )
+            .await),
         }
     }
 }
@@ -261,11 +363,11 @@ async fn lookups(
     nodes: &[Id],
     groups: &[Id],
 ) -> ApiResult<Lookups> {
-    Ok(Lookups {
-        people: refusals::user_refs(conn, people).await?,
-        nodes: view::refs(conn, principal, nodes, Policy::default()).await?,
-        groups: mentions::qualified_groups(conn, principal, groups).await?,
-    })
+    Ok(
+        names::lookups(conn, principal, people, nodes, groups, &[], None)
+            .await?
+            .lookups,
+    )
 }
 
 /// The current title of a people's chat, called only after its reader has been authorized.
@@ -322,6 +424,18 @@ async fn chat_view_without_preview(
     members: &[orch_db::queries::chats::MemberRow],
     standing: &orch_authz::chats::Standing,
 ) -> ApiResult<Chat> {
+    chat_base(conn, principal, row, members, standing, None).await
+}
+
+/// The existing chat header/state projection with an optional admitted live-name bound.
+async fn chat_base(
+    conn: &mut Conn,
+    principal: &Principal,
+    row: &ChatRow,
+    members: &[orch_db::queries::chats::MemberRow],
+    standing: &orch_authz::chats::Standing,
+    allowed: Option<&names::AllowSet>,
+) -> ApiResult<Chat> {
     let my = if standing.inspects() || !standing.participating {
         None
     } else {
@@ -347,10 +461,25 @@ async fn chat_view_without_preview(
         .filter(|place| row.node_id != Some(*place))
         .collect();
     nodes.extend(admin_places.iter().copied());
-    let mut names = lookups(conn, principal, &people, &nodes, &[]).await?;
-    names
-        .nodes
-        .extend(view::qualified_refs(conn, principal, &admin_places, Policy::default()).await?);
+    let names = if let Some(allowed) = allowed {
+        names::lookups(
+            conn,
+            principal,
+            &people,
+            &nodes,
+            &[],
+            &admin_places,
+            Some(allowed),
+        )
+        .await?
+        .lookups
+    } else {
+        let mut names = lookups(conn, principal, &people, &nodes, &[]).await?;
+        names
+            .nodes
+            .extend(view::qualified_refs(conn, principal, &admin_places, Policy::default()).await?);
+        names
+    };
     Ok(views::chat(
         &Seen {
             chat: row,
@@ -414,32 +543,15 @@ pub async fn messages_view(
     chat: Id,
     list: &[MessageRow],
 ) -> ApiResult<Vec<ChatMessage>> {
-    let replies = messages::replies_of(conn, chat, list)
-        .await
-        .map_err(ApiError::internal)?;
-    let everything: Vec<&MessageRow> = list.iter().chain(replies.values()).collect();
-    let people = views::people_of(&everything);
-    let threads = views::threads_of(&everything);
-    let mut names = lookups(
-        conn,
-        principal,
-        &people,
-        &threads,
-        &views::groups_of(&everything),
-    )
-    .await?;
-    names.nodes.extend(
-        view::qualified_refs(
-            conn,
-            principal,
-            &views::role_places_of(&everything),
-            Policy::default(),
-        )
-        .await?,
-    );
-    Ok(views::messages(list, &replies, &names))
+    Ok(names::messages(conn, principal, chat, list, None)
+        .await?
+        .messages)
 }
 
+#[expect(
+    dead_code,
+    reason = "retained single-message wrapper over the shared message projection"
+)]
 async fn message_view(
     conn: &mut Conn,
     principal: &Principal,
@@ -604,99 +716,150 @@ async fn org_chat_create(ctx: Ctx, (): (), body: OrgChatCreateBody) -> ApiResult
 
 /// Reads a chat.
 async fn chat_get(ctx: Ctx, (): (), (): ()) -> ApiResult<Chat> {
-    let id = ctx.id("id")?;
-    let mut tx = transaction(&ctx).await?;
-    let work = Work::begin(&ctx, &mut tx).await?;
-    let loaded = load(&mut tx, &work, id, Mode::Read).await?;
-    note_opened(&mut tx, &work, &loaded).await?;
-    let chat = shown(&mut tx, &work.principal, &loaded).await?;
+    let mut tx = ctx.app.db.begin_snapshot().await?;
+    let principal = ctx.operation_principal(&mut tx).await?;
+    let prepared = ctx.operation_data::<read_operation::PreparedRead>()?;
+    let work = Work {
+        projection_ctx: ctx.clone(),
+        now: principal.now().get(),
+        principal,
+        origin: origin(&ctx),
+    };
+    note_opened(&mut tx, &work, &prepared.loaded).await?;
+    let chat = read_operation::project(&mut tx, &work.principal, &prepared)
+        .await?
+        .chat
+        .ok_or_else(|| ApiError::internal("the chat read has no chat projection"))?;
     tx.commit().await.map_err(DbError::from)?;
     Ok(chat)
 }
 
 /// Renames a group.
-async fn chat_update(ctx: Ctx, (): (), body: ChatUpdateBody) -> ApiResult<Chat> {
+async fn chat_update(ctx: Ctx, (): (), _body: ChatUpdateBody) -> ApiResult<ChatChangeResponse> {
     let id = ctx.id("id")?;
-    let mut tx = transaction(&ctx).await?;
-    let work = Work::begin(&ctx, &mut tx).await?;
-    let mut loaded = load(&mut tx, &work, id, Mode::Write).await?;
-    let renamed = chats::rename(&mut tx, &work.acting(), &mut loaded, body.name.as_deref()).await;
-    let row = work.refuse(&mut tx, Some(id), renamed).await?;
-    loaded.row = row;
-    let chat = shown(&mut tx, &work.principal, &loaded).await?;
+    let (ctx, mut tx, guard) = group_mutation::begin(&ctx).await?;
+    let work = Work {
+        projection_ctx: ctx.clone(),
+        principal: guard.principal().clone(),
+        origin: origin(&ctx),
+        now: guard.now().get(),
+    };
+    let group_mutation::PreparedGroup { mut loaded, effect } = guard
+        .operation_data::<group_mutation::PreparedGroup>()?
+        .as_ref()
+        .clone();
+    let group_mutation::Effect::Rename(prepared) = effect else {
+        return Err(ApiError::internal("the group rename operands changed kind"));
+    };
+    guard.check_deadline(&ctx)?;
+    let renamed = chats::apply_rename(&mut tx, &work.acting(), &mut loaded, prepared).await;
+    operation::refuse(&work, &mut tx, id, renamed).await?;
+    let full = group_mutation::response(&ctx, &mut tx, &work.principal).await?;
     tx.commit().await.map_err(DbError::from)?;
-    Ok(chat)
+    Ok(group_mutation::finish(&ctx, id, full))
 }
 
 /// Puts a person in a group.
 async fn join_request(
-    mut ctx: Ctx,
+    ctx: Ctx,
     (): (),
     body: orch_api_contract::chats::ChatJoinRequestBody,
-) -> ApiResult<orch_api_contract::access::AccessRequestCreateReply> {
+) -> ApiResult<orch_api_contract::access::AccessRequestWriteResponse> {
     if body.reason.chars().count() > orch_authz::requests::REASON_MAX_CHARS {
         return Err(ApiError::invalid("reason", "is too long"));
     }
     let chat = ctx.id("id")?;
-    let (tx, guard) = crate::middleware::transaction_guard::begin(&ctx).await?;
-    ctx.now = guard.now().get();
-    let principal = guard.into_principal();
-    if body.expires_at.is_some_and(|end| end <= principal.now()) {
-        return Err(ApiError::invalid("expires_at", "must be in the future"));
-    }
-    let raised = ctx
+    let (mut tx, initial) = crate::middleware::transaction_guard::begin(&ctx).await?;
+    let prefix = ctx
         .app
         .engine
-        .ask_to_join_guarded(
-            tx,
-            principal.clone(),
+        .prepare_join_request_prefix(&mut tx, initial.user().id(), chat)
+        .await;
+    // A failed transaction cannot run a new identity query. Preserve its real internal
+    // cause, but apply the same pure HTTP deadline cut before publishing any held error.
+    initial.check_deadline(&ctx)?;
+    let prefix = match prefix {
+        Err(error @ orch_engine::approvals::access::RaiseError::Internal(_)) => {
+            return Err(crate::routes::access::requests::raise_failed(error));
+        }
+        other => other,
+    };
+    let (ctx, guard) = crate::middleware::transaction_guard::after_wait(&ctx, &mut tx).await?;
+    prefix.map_err(crate::routes::access::requests::raise_failed)?;
+    if body.expires_at.is_some_and(|end| end <= guard.now()) {
+        return Err(ApiError::invalid("expires_at", "must be in the future"));
+    }
+    let principal = guard.principal().clone();
+    let prepared = ctx
+        .app
+        .engine
+        .prepare_join_request(
+            &mut tx,
+            &principal,
             chat,
             body.reason.trim(),
             body.label.as_deref(),
             body.expires_at,
-            &origin(&ctx),
         )
         .await
+        .map_err(crate::routes::access::requests::raise_failed);
+    guard.check_deadline(&ctx)?;
+    let prepared = prepared?;
+    let raised = ctx
+        .app
+        .engine
+        .raise_prepared_join_request(tx, prepared, &origin(&ctx))
+        .await
         .map_err(crate::routes::access::requests::raise_failed)?;
-    let mut conn = ctx.app.db.acquire().await?;
-    let approvals = crate::routes::approvals::views(
-        &mut conn,
-        &principal,
-        &raised.approvals,
-        ctx.now,
-        &ctx.app.engine,
-    )
-    .await?;
-    Ok(orch_api_contract::access::AccessRequestCreateReply {
-        batch_id: raised.batch_id,
-        approvals,
-    })
+    crate::routes::access::request_operation::created_reply(&ctx, principal.caller(), raised).await
 }
 
-async fn member_add(ctx: Ctx, (): (), (): ()) -> ApiResult<Chat> {
-    let (id, user) = (ctx.id("id")?, ctx.id("user_id")?);
-    let mut tx = transaction(&ctx).await?;
-    let work = Work::begin(&ctx, &mut tx).await?;
-    let mut loaded = load(&mut tx, &work, id, Mode::Write).await?;
-    let outsiders = owners_name_outsiders(&mut tx, loaded.row.org_id).await?;
-    let added = chats::add_member(&mut tx, &work.acting(), &mut loaded, user, outsiders).await;
-    work.refuse(&mut tx, Some(id), added).await?;
-    loaded.row = rows::chat(&mut tx, id)
-        .await?
-        .ok_or_else(ApiError::not_found)?;
-    let chat = shown(&mut tx, &work.principal, &loaded).await?;
+async fn member_add(ctx: Ctx, (): (), (): ()) -> ApiResult<ChatChangeResponse> {
+    let id = ctx.id("id")?;
+    let (ctx, mut tx, guard) = group_mutation::begin(&ctx).await?;
+    let work = Work {
+        projection_ctx: ctx.clone(),
+        principal: guard.principal().clone(),
+        origin: origin(&ctx),
+        now: guard.now().get(),
+    };
+    let group_mutation::PreparedGroup { mut loaded, effect } = guard
+        .operation_data::<group_mutation::PreparedGroup>()?
+        .as_ref()
+        .clone();
+    let group_mutation::Effect::Add(prepared) = effect else {
+        return Err(ApiError::internal("the group add operands changed kind"));
+    };
+    guard.check_deadline(&ctx)?;
+    let added = chats::apply_add_member(&mut tx, &work.acting(), &mut loaded, prepared).await;
+    operation::refuse(&work, &mut tx, id, added).await?;
+    let full = group_mutation::response(&ctx, &mut tx, &work.principal).await?;
     tx.commit().await.map_err(DbError::from)?;
-    Ok(chat)
+    Ok(group_mutation::finish(&ctx, id, full))
 }
 
 /// Takes a person out of a group, or lets them leave.
 async fn member_remove(ctx: Ctx, (): (), (): ()) -> ApiResult<()> {
-    let (id, user) = (ctx.id("id")?, ctx.id("user_id")?);
-    let mut tx = transaction(&ctx).await?;
-    let work = Work::begin(&ctx, &mut tx).await?;
-    let mut loaded = load(&mut tx, &work, id, Mode::Write).await?;
-    let removed = chats::remove_member(&mut tx, &work.acting(), &mut loaded, user).await;
-    work.refuse(&mut tx, Some(id), removed).await?;
+    let id = ctx.id("id")?;
+    let (ctx, mut tx, guard) = group_mutation::begin(&ctx).await?;
+    let work = Work {
+        projection_ctx: ctx.clone(),
+        principal: guard.principal().clone(),
+        origin: origin(&ctx),
+        now: guard.now().get(),
+    };
+    let group_mutation::PreparedGroup { mut loaded, effect } = guard
+        .operation_data::<group_mutation::PreparedGroup>()?
+        .as_ref()
+        .clone();
+    let group_mutation::Effect::Remove(prepared) = effect else {
+        return Err(ApiError::internal(
+            "the group removal operands changed kind",
+        ));
+    };
+    guard.check_deadline(&ctx)?;
+    let removed = chats::apply_remove_member(&mut tx, &work.acting(), &mut loaded, prepared).await;
+    operation::refuse(&work, &mut tx, id, removed).await?;
     tx.commit().await.map_err(DbError::from)?;
     Ok(())
 }
@@ -704,214 +867,86 @@ async fn member_remove(ctx: Ctx, (): (), (): ()) -> ApiResult<()> {
 // ------------------------------------------------------------------ reading messages
 
 /// Keep the native conversation and draft checks, including inspection's private-draft refusal.
-async fn opening_get(ctx: Ctx, query: ChatSyncGetQuery, (): ()) -> ApiResult<ChatOpening> {
-    if query.since.is_some() {
-        return Err(ApiError::invalid(
-            "since",
-            "an opening starts without a position",
-        ));
-    }
-    let sync = sync_get(ctx.clone(), query, ()).await?;
-    let draft = match draft_get(ctx, (), ()).await {
-        Ok(draft) => draft,
-        Err(error) if error.problem.status == 403 => None,
-        Err(error) => return Err(error),
+async fn opening_get(ctx: Ctx, _query: ChatSyncGetQuery, (): ()) -> ApiResult<ChatOpening> {
+    let mut tx = ctx.app.db.begin_snapshot().await?;
+    let principal = ctx.operation_principal(&mut tx).await?;
+    let prepared = ctx.operation_data::<read_operation::PreparedRead>()?;
+    let work = Work {
+        projection_ctx: ctx.clone(),
+        now: principal.now().get(),
+        principal,
+        origin: origin(&ctx),
     };
-    Ok(ChatOpening { sync, draft })
+    note_opened(&mut tx, &work, &prepared.loaded).await?;
+    let projected = read_operation::project(&mut tx, &work.principal, &prepared).await?;
+    let opening = read_operation::opening_view(&prepared, projected)?;
+    tx.commit().await.map_err(DbError::from)?;
+    Ok(opening)
 }
 
 /// A cached path names candidates, never admits their chats. Each scope is checked here now.
 async fn node_opening_get(
     ctx: Ctx,
-    query: NodeChatOpeningGetQuery,
+    _query: NodeChatOpeningGetQuery,
     (): (),
 ) -> ApiResult<NodeChatOpening> {
-    let id = ctx.id("id")?;
-    let mut tx = transaction(&ctx).await?;
-    let work = Work::begin(&ctx, &mut tx).await?;
-    let node = view::visible(&mut tx, &work.principal, &[id], work.now, Policy::default())
-        .await?
-        .into_iter()
-        .next()
-        .ok_or_else(ApiError::not_found)?;
-    let (kind, path) = match &node {
-        Node::Org(node) => (NodeKind::Org, &node.base.path),
-        Node::Project(node) => (NodeKind::Project, &node.base.path),
-        Node::Topic(node) => (NodeKind::Topic, &node.base.path),
-        Node::Thread(node) => (NodeKind::Thread, &node.base.path),
-    };
-    let wanted: &[NodeKind] = match kind {
-        NodeKind::Org => &[NodeKind::Org],
-        NodeKind::Project => &[NodeKind::Project],
-        NodeKind::Topic => &[NodeKind::Topic, NodeKind::Project],
-        NodeKind::Thread => &[NodeKind::Thread, NodeKind::Topic, NodeKind::Project],
-    };
-    let candidates: Vec<Id> = wanted
-        .iter()
-        .filter_map(|kind| {
-            path.iter()
-                .rev()
-                .find(|node| node.kind == *kind && !node.redacted)
-                .map(|node| node.id)
-        })
-        .collect();
-    let visible = view::visible(
-        &mut tx,
-        &work.principal,
-        &candidates,
-        work.now,
-        Policy::default(),
-    )
-    .await?;
-    let mut scopes = Vec::new();
-    for node in visible {
-        let (id, kind, name, chat_id) = match node {
-            Node::Org(node) => (
-                node.base.id,
-                NodeKind::Org,
-                node.base.name,
-                node.base.chat_id,
-            ),
-            Node::Project(node) => (
-                node.base.id,
-                NodeKind::Project,
-                node.base.name,
-                node.base.chat_id,
-            ),
-            Node::Topic(node) => (
-                node.base.id,
-                NodeKind::Topic,
-                node.base.name,
-                node.base.chat_id,
-            ),
-            Node::Thread(node) => (
-                node.base.id,
-                NodeKind::Thread,
-                node.base.name,
-                node.base.chat_id,
-            ),
-        };
-        match load(&mut tx, &work, chat_id, Mode::Read).await {
-            Ok(loaded) => scopes.push(NodeChatScope {
-                node: NodeRef {
-                    thread_display: None,
-                    id,
-                    kind,
-                    name: Some(name),
-                    redacted: false,
-                },
-                chat: TreeChat {
-                    id: chat_id,
-                    seq: loaded.row.seq(),
-                },
-            }),
-            Err(error) if matches!(error.problem.status, 403 | 404) => {}
-            Err(error) => return Err(error),
-        }
-    }
-    let chosen = query
-        .chat_id
-        .and_then(|id| scopes.iter().find(|scope| scope.chat.id == id))
-        .or_else(|| {
-            query
-                .scope
-                .and_then(|kind| scopes.iter().find(|scope| scope.node.kind == kind))
-        })
-        .or_else(|| scopes.first())
-        .map(|scope| scope.chat.id);
+    let mut tx = ctx.app.db.begin_snapshot().await?;
+    let principal = ctx.operation_principal(&mut tx).await?;
+    let prepared = ctx.operation_data::<node_opening::PreparedNodeOpening>()?;
+    let shown = node_opening::show(&ctx, &mut tx, principal, &prepared).await?;
     tx.commit().await.map_err(DbError::from)?;
-    let opening = if let Some(id) = chosen {
-        let mut child = ctx.for_id(id);
-        child.route = ChatOpeningGet::ROUTE;
-        Some(
-            opening_get(
-                child,
-                ChatSyncGetQuery {
-                    since: None,
-                    limit: query.limit,
-                },
-                (),
-            )
-            .await?,
-        )
-    } else {
-        None
-    };
-    Ok(NodeChatOpening { scopes, opening })
+    Ok(shown)
 }
 
 /// A chat and its latest messages, or what changed since a sequence.
 async fn sync_get(ctx: Ctx, query: ChatSyncGetQuery, (): ()) -> ApiResult<ChatSync> {
-    let id = ctx.id("id")?;
-    let mut tx = transaction(&ctx).await?;
-    let work = Work::begin(&ctx, &mut tx).await?;
-    let loaded = load(&mut tx, &work, id, Mode::Read).await?;
-    note_opened(&mut tx, &work, &loaded).await?;
-    if query.since.is_some_and(|since| since < 0) {
-        return Err(ApiError::invalid(
-            "since",
-            "is a position in the chat, from 0",
-        ));
-    }
-    let limit = work
-        .refuse(&mut tx, Some(id), messages::limit_of(query.limit))
-        .await?;
-    let synced = messages::sync(&mut tx, &loaded.row, query.since, limit).await;
-    let synced = work.refuse(&mut tx, Some(id), synced).await?;
-    let chat = shown(&mut tx, &work.principal, &loaded).await?;
-    let list = messages_view(&mut tx, &work.principal, id, &synced.messages).await?;
+    let mut tx = ctx.app.db.begin_snapshot().await?;
+    let principal = ctx.operation_principal(&mut tx).await?;
+    let prepared = ctx.operation_data::<read_operation::PreparedRead>()?;
+    let work = Work {
+        projection_ctx: ctx.clone(),
+        now: principal.now().get(),
+        principal,
+        origin: origin(&ctx),
+    };
+    note_opened(&mut tx, &work, &prepared.loaded).await?;
+    let projected = read_operation::project(&mut tx, &work.principal, &prepared).await?;
+    let chat = projected
+        .chat
+        .ok_or_else(|| ApiError::internal("the sync read has no chat projection"))?;
     tx.commit().await.map_err(DbError::from)?;
     Ok(ChatSync {
         seq: chat.seq,
         chat,
         since: query.since,
-        complete: synced.complete,
-        messages: list,
-        has_older: synced.has_older,
+        complete: prepared.complete,
+        messages: projected.messages,
+        has_older: prepared.has_older,
     })
 }
 
 /// A stretch of a chat's messages.
 async fn message_list(
     ctx: Ctx,
-    query: ChatMessageListQuery,
+    _query: ChatMessageListQuery,
     (): (),
 ) -> ApiResult<ChatMessageListReply> {
-    let id = ctx.id("id")?;
-    let asked: Vec<Window> = [
-        query.before.map(Window::Before),
-        query.after.map(Window::After),
-        query.around.map(Window::Around),
-        query
-            .pinned
-            .filter(|pinned| *pinned)
-            .map(|_| Window::Pinned),
-        query.item_id.map(Window::Quoting),
-    ]
-    .into_iter()
-    .flatten()
-    .collect();
-    let [window] = asked.as_slice() else {
-        return Err(ApiError::invalid(
-            "",
-            "name exactly one of before, after, around, pinned and item_id",
-        ));
+    let mut tx = ctx.app.db.begin_snapshot().await?;
+    let principal = ctx.operation_principal(&mut tx).await?;
+    let prepared = ctx.operation_data::<read_operation::PreparedMessageList>()?;
+    let work = Work {
+        projection_ctx: ctx.clone(),
+        now: principal.now().get(),
+        principal,
+        origin: origin(&ctx),
     };
-    let mut tx = transaction(&ctx).await?;
-    let work = Work::begin(&ctx, &mut tx).await?;
-    let loaded = load(&mut tx, &work, id, Mode::Read).await?;
-    note_opened(&mut tx, &work, &loaded).await?;
-    let limit = work
-        .refuse(&mut tx, Some(id), messages::limit_of(query.limit))
-        .await?;
-    let slice = messages::window(&mut tx, &loaded.row, *window, limit).await;
-    let slice = work.refuse(&mut tx, Some(id), slice).await?;
-    let list = messages_view(&mut tx, &work.principal, id, &slice.messages).await?;
+    note_opened(&mut tx, &work, &prepared.read.loaded).await?;
+    let projected = read_operation::project(&mut tx, &work.principal, &prepared.read).await?;
     tx.commit().await.map_err(DbError::from)?;
     Ok(ChatMessageListReply {
-        messages: list,
-        has_older: slice.has_older,
-        has_newer: slice.has_newer,
+        messages: projected.messages,
+        has_older: prepared.read.has_older,
+        has_newer: prepared.has_newer,
     })
 }
 
@@ -923,28 +958,131 @@ async fn redactor(conn: &mut Conn, work: &Work, loaded: &Loaded) -> ApiResult<re
     work.refuse(conn, Some(loaded.id()), made).await
 }
 
+/// Hold the receipt separately so a commit that narrows disclosure never releases the full message.
+struct MessageProjection {
+    receipt: ChatMessageReceipt,
+    full: Option<ChatMessageCreateReply>,
+}
+
+impl MessageProjection {
+    async fn load(
+        ctx: &Ctx,
+        conn: &mut Conn,
+        principal: &Principal,
+        row: &MessageRow,
+        seq: orch_types::Seq,
+    ) -> ApiResult<Self> {
+        let full = if ctx.disclosure() == Disclosure::Denied {
+            None
+        } else {
+            operation::read_message(ctx, conn, principal, row, seq).await?
+        };
+        Ok(Self::new(row, seq, full))
+    }
+
+    async fn changed(
+        ctx: &Ctx,
+        conn: &mut Conn,
+        principal: &Principal,
+        row: &MessageRow,
+        seq: orch_types::Seq,
+    ) -> ApiResult<Self> {
+        if ctx.disclosure() == Disclosure::Denied {
+            return Ok(Self::new(row, seq, None));
+        }
+        let plan = mutation::response_plan(ctx, conn, principal.caller(), row).await?;
+        Self::changed_with_plan(ctx, conn, principal, row, seq, plan).await
+    }
+
+    async fn edited(
+        ctx: &Ctx,
+        conn: &mut Conn,
+        principal: &Principal,
+        row: &MessageRow,
+        seq: orch_types::Seq,
+    ) -> ApiResult<Self> {
+        if ctx.disclosure() == Disclosure::Denied {
+            return Ok(Self::new(row, seq, None));
+        }
+        let plan = message_edit::response_plan(ctx, conn, row).await?;
+        Self::changed_with_plan(ctx, conn, principal, row, seq, plan).await
+    }
+
+    async fn changed_with_plan(
+        ctx: &Ctx,
+        conn: &mut Conn,
+        principal: &Principal,
+        row: &MessageRow,
+        seq: orch_types::Seq,
+        plan: crate::registry::OperationPlan,
+    ) -> ApiResult<Self> {
+        let full = if ctx.disclosure() == Disclosure::Denied {
+            None
+        } else {
+            operation::read_message_with_plan(ctx, conn, principal, row, seq, plan).await?
+        };
+        Ok(Self::new(row, seq, full))
+    }
+
+    fn new(row: &MessageRow, seq: orch_types::Seq, full: Option<ChatMessageCreateReply>) -> Self {
+        Self {
+            receipt: ChatMessageReceipt {
+                projection: ReceiptProjection::Receipt,
+                chat_id: row.chat_id,
+                message_id: row.id,
+                seq,
+            },
+            full,
+        }
+    }
+
+    fn finish(self, ctx: &Ctx) -> ChatMessageCreateResponse {
+        match (self.full, ctx.key_receipt_required()) {
+            (Some(full), false) => ChatMessageCreateResponse::full(full),
+            _ => ChatMessageCreateResponse::Receipt(self.receipt),
+        }
+    }
+
+    fn finish_changed(self, ctx: &Ctx) -> ChatMessageMutationResponse {
+        match (self.full, ctx.key_receipt_required()) {
+            (Some(full), false) => ChatMessageMutationResponse::full(full.message),
+            _ => ChatMessageMutationResponse::Receipt(self.receipt),
+        }
+    }
+}
+
 /// Sends a message.
 async fn message_create(
     ctx: Ctx,
     (): (),
     body: ChatMessageCreateBody,
-) -> ApiResult<Answer<ChatMessageCreateReply>> {
+) -> ApiResult<Answer<ChatMessageCreateResponse>> {
     let id = ctx.id("id")?;
-    let mut tx = transaction(&ctx).await?;
-    let work = Work::begin(&ctx, &mut tx).await?;
+    let (mut tx, guard) = transaction_guard::begin(&ctx).await?;
+    let effects = guard.operation_data::<operation::MessageEffects>()?;
+    let work = Work {
+        projection_ctx: ctx.clone(),
+        principal: guard.principal().clone(),
+        origin: origin(&ctx),
+        now: guard.now().get(),
+    };
     let mut loaded = load(&mut tx, &work, id, Mode::Read).await?;
     work.refuse(&mut tx, Some(id), loaded.ensure_send()).await?;
     // A retry returns the stored acceptance before reviewing a changed model or binding.
     if let Some(previous) =
         rows::message_by_client(&mut tx, id, work.principal.user(), body.client_id.trim()).await?
     {
-        let message = message_view(&mut tx, &work.principal, &previous).await?;
+        let reply =
+            MessageProjection::load(&ctx, &mut tx, &work.principal, &previous, loaded.row.seq())
+                .await?;
         tx.commit().await.map_err(DbError::from)?;
-        return Ok(Answer::from(ChatMessageCreateReply {
-            message,
-            seq: loaded.row.seq(),
-        })
-        .status(StatusCode::OK));
+        return Ok(Answer::from(reply.finish(&ctx)).status(StatusCode::OK));
+    }
+    if effects.replayed.is_some() {
+        return Err(ApiError::new(
+            ErrorCode::ConflictStaleRevision,
+            "the accepted message changed during operation preparation",
+        ));
     }
     work.refuse(&mut tx, Some(id), messages::check_parts(&body.parts, None))
         .await?;
@@ -956,13 +1094,16 @@ async fn message_create(
             rows::message_by_client(&mut tx, id, work.principal.user(), body.client_id.trim())
                 .await?
         {
-            let message = message_view(&mut tx, &work.principal, &previous).await?;
+            let reply = MessageProjection::load(
+                &ctx,
+                &mut tx,
+                &work.principal,
+                &previous,
+                loaded.row.seq(),
+            )
+            .await?;
             tx.commit().await.map_err(DbError::from)?;
-            return Ok(Answer::from(ChatMessageCreateReply {
-                message,
-                seq: loaded.row.seq(),
-            })
-            .status(StatusCode::OK));
+            return Ok(Answer::from(reply.finish(&ctx)).status(StatusCode::OK));
         }
         let review = asking::review(
             &mut tx,
@@ -981,7 +1122,7 @@ async fn message_create(
         }
     }
     let masking = redactor(&mut tx, &work, &loaded).await?;
-    let written = messages::post(
+    let written = messages::post_with_blob_origins(
         &mut tx,
         &work.acting(),
         &mut loaded,
@@ -991,12 +1132,20 @@ async fn message_create(
             client_id: body.client_id,
         },
         &masking,
+        &effects.blobs,
     )
     .await;
     let mut written = work.refuse(&mut tx, Some(id), written).await?;
     let queued = if written.created && !targets.is_empty() {
-        let done =
-            asking::forward_message(&ctx, &mut tx, &work, &written.message, &targets).await?;
+        let done = asking::forward_message(
+            &ctx,
+            &mut tx,
+            &work,
+            &written.message,
+            &targets,
+            Some(&effects.names),
+        )
+        .await?;
         let asked = serde_json::to_value(
             done.inputs
                 .iter()
@@ -1010,7 +1159,14 @@ async fn message_create(
     } else {
         None
     };
-    let message = message_view(&mut tx, &work.principal, &written.message).await?;
+    let reply = MessageProjection::load(
+        &ctx,
+        &mut tx,
+        &work.principal,
+        &written.message,
+        written.seq,
+    )
+    .await?;
     tx.commit().await.map_err(DbError::from)?;
     if written.created {
         metrics::counter!("orch_chat_messages_total","kind"=>loaded.row.kind.clone()).increment(1);
@@ -1018,10 +1174,7 @@ async fn message_create(
     if let Some(done) = &queued {
         ctx.app.engine.after_forward(done);
     }
-    let answer = Answer::from(ChatMessageCreateReply {
-        message,
-        seq: written.seq,
-    });
+    let answer = Answer::from(reply.finish(&ctx));
     Ok(if written.created {
         answer
     } else {
@@ -1030,38 +1183,134 @@ async fn message_create(
 }
 
 /// Edits a message.
-async fn message_update(ctx: Ctx, (): (), body: ChatMessageUpdateBody) -> ApiResult<ChatMessage> {
+async fn message_update(
+    ctx: Ctx,
+    (): (),
+    body: ChatMessageUpdateBody,
+) -> ApiResult<ChatMessageMutationResponse> {
     let (id, message) = (ctx.id("id")?, ctx.id("message_id")?);
-    let mut tx = transaction(&ctx).await?;
-    let work = Work::begin(&ctx, &mut tx).await?;
+    let (mut tx, initial) = transaction_guard::begin(&ctx).await?;
+    let effects = initial.operation_data::<message_edit::Effects>()?;
+    let selected = effects.selected.clone();
+    let mut ctx = ctx.for_operation_checkpoint(initial.user().clone(), initial.now().get());
+    if initial.principal().caller().admitted_operation().is_some() {
+        ctx = ctx.with_admitted_caller(initial.principal().caller().clone())?;
+    }
+    let work = Work {
+        projection_ctx: ctx.clone(),
+        now: initial.now().get(),
+        principal: initial.principal().clone(),
+        origin: origin(&ctx),
+    };
     let mut loaded = load(&mut tx, &work, id, Mode::Read).await?;
     let masking = redactor(&mut tx, &work, &loaded).await?;
-    let edited = messages::edit(
+    let prepared = messages::prepare_edit(
         &mut tx,
         &work.acting(),
-        &mut loaded,
+        &loaded,
         message,
         body.parts,
         &masking,
     )
     .await;
-    let row = work.refuse(&mut tx, Some(id), edited).await?;
-    let shown = message_view(&mut tx, &work.principal, &row).await?;
+    let prepared = work.refuse(&mut tx, Some(id), prepared).await;
+    initial.check_deadline(&ctx)?;
+    let prepared = prepared?;
+    let (ctx, work, row, seq) = if let Some(unchanged) = prepared.unchanged() {
+        // The exact native no-op consumes no byte/quote source and takes no lock.
+        (ctx, work, unchanged.clone(), loaded.row.seq())
+    } else {
+        let parts = prepared.parts().to_vec();
+        // A metadata-only no-op is not the writer's first native observation.
+        // If that observation is changed, admit its actual source set once before
+        // retaining an association; do not synthesize a conflict or rebase its CAS.
+        let (work, selected) = if effects.no_op {
+            let first = message_edit::first_sources(&ctx, &mut tx, &work, &loaded, &parts).await;
+            initial.check_deadline(&ctx)?;
+            let (principal, selected) = first?;
+            (
+                Work {
+                    projection_ctx: ctx.clone(),
+                    now: principal.now().get(),
+                    principal,
+                    origin: origin(&ctx),
+                },
+                selected,
+            )
+        } else {
+            (work, selected)
+        };
+        message_edit::retain_sources(&ctx, &selected)?;
+        let locked = messages::lock_edit(
+            &mut tx,
+            &work.acting(),
+            &mut loaded,
+            prepared,
+            Some(&selected),
+        )
+        .await;
+        // Keep the native first observation and CAS result. Re-preparing this
+        // credential's current metadata must never rebase the writer's revision.
+        let (current, checked) = transaction_guard::after_wait(&ctx, &mut tx).await?;
+        let work = Work {
+            projection_ctx: current.clone(),
+            now: checked.now().get(),
+            principal: checked.principal().clone(),
+            origin: origin(&current),
+        };
+        let locked = work.refuse(&mut tx, Some(id), locked).await;
+        checked.check_deadline(&current)?;
+        let locked = locked?;
+        let mut loaded = load(&mut tx, &work, id, Mode::Read).await?;
+        let principal =
+            message_edit::current_sources(&current, &mut tx, &work, &loaded, &parts, &selected)
+                .await;
+        checked.check_deadline(&current)?;
+        let principal = principal?;
+        let work = Work {
+            projection_ctx: current.clone(),
+            now: principal.now().get(),
+            principal,
+            origin: origin(&current),
+        };
+        let prepared =
+            messages::check_edit(&mut tx, &work.acting(), &loaded, locked, Some(&selected)).await;
+        // All awaited native byte/attachment/quote checks precede the final
+        // actual HTTP/operation boundary; its producer also checks current send/author.
+        let (current, final_guard) = transaction_guard::after_wait(&current, &mut tx).await?;
+        let work = Work {
+            projection_ctx: current.clone(),
+            now: final_guard.now().get(),
+            principal: final_guard.principal().clone(),
+            origin: origin(&current),
+        };
+        let prepared = work.refuse(&mut tx, Some(id), prepared).await;
+        // No awaited preparation occurs between this raw HTTP/key lifetime
+        // check and write_checked_edit's first thread/chat sequence mutation.
+        final_guard.check_deadline(&current)?;
+        let prepared = prepared?;
+        let written =
+            messages::write_checked_edit(&mut tx, &work.acting(), &mut loaded, prepared).await;
+        let row = work.refuse(&mut tx, Some(id), written).await?;
+        (current, work, row, loaded.row.seq())
+    };
+    let shown = MessageProjection::edited(&ctx, &mut tx, &work.principal, &row, seq).await?;
     tx.commit().await.map_err(DbError::from)?;
-    Ok(shown)
+    Ok(shown.finish_changed(&ctx))
 }
 
 /// Deletes a message.
-async fn message_delete(ctx: Ctx, (): (), (): ()) -> ApiResult<ChatMessage> {
+async fn message_delete(ctx: Ctx, (): (), (): ()) -> ApiResult<ChatMessageMutationResponse> {
     let (id, message) = (ctx.id("id")?, ctx.id("message_id")?);
     let mut tx = transaction(&ctx).await?;
     let work = Work::begin(&ctx, &mut tx).await?;
     let mut loaded = load(&mut tx, &work, id, Mode::Read).await?;
     let deleted = messages::delete(&mut tx, &work.acting(), &mut loaded, message).await;
     let row = work.refuse(&mut tx, Some(id), deleted).await?;
-    let shown = message_view(&mut tx, &work.principal, &row).await?;
+    let shown =
+        MessageProjection::changed(&ctx, &mut tx, &work.principal, &row, loaded.row.seq()).await?;
     tx.commit().await.map_err(DbError::from)?;
-    Ok(shown)
+    Ok(shown.finish_changed(&ctx))
 }
 
 /// The emoji of a path, as a client wrote it.
@@ -1069,7 +1318,7 @@ fn emoji_of(ctx: &Ctx) -> ApiResult<String> {
     Ok(ctx.param("emoji")?.to_owned())
 }
 
-async fn react(ctx: &Ctx, add: bool) -> ApiResult<ChatMessage> {
+async fn react(ctx: &Ctx, add: bool) -> ApiResult<ChatMessageMutationResponse> {
     let (id, message) = (ctx.id("id")?, ctx.id("message_id")?);
     let emoji = emoji_of(ctx)?;
     let mut tx = transaction(ctx).await?;
@@ -1077,40 +1326,42 @@ async fn react(ctx: &Ctx, add: bool) -> ApiResult<ChatMessage> {
     let mut loaded = load(&mut tx, &work, id, Mode::Write).await?;
     let changed = messages::react(&mut tx, &work.acting(), &mut loaded, message, &emoji, add).await;
     let row = work.refuse(&mut tx, Some(id), changed).await?;
-    let shown = message_view(&mut tx, &work.principal, &row).await?;
+    let shown =
+        MessageProjection::changed(ctx, &mut tx, &work.principal, &row, loaded.row.seq()).await?;
     tx.commit().await.map_err(DbError::from)?;
-    Ok(shown)
+    Ok(shown.finish_changed(ctx))
 }
 
 /// Adds the caller's reaction.
-async fn reaction_add(ctx: Ctx, (): (), (): ()) -> ApiResult<ChatMessage> {
+async fn reaction_add(ctx: Ctx, (): (), (): ()) -> ApiResult<ChatMessageMutationResponse> {
     react(&ctx, true).await
 }
 
 /// Takes the caller's reaction away.
-async fn reaction_remove(ctx: Ctx, (): (), (): ()) -> ApiResult<ChatMessage> {
+async fn reaction_remove(ctx: Ctx, (): (), (): ()) -> ApiResult<ChatMessageMutationResponse> {
     react(&ctx, false).await
 }
 
-async fn pin(ctx: &Ctx, pinned: bool) -> ApiResult<ChatMessage> {
+async fn pin(ctx: &Ctx, pinned: bool) -> ApiResult<ChatMessageMutationResponse> {
     let (id, message) = (ctx.id("id")?, ctx.id("message_id")?);
     let mut tx = transaction(ctx).await?;
     let work = Work::begin(ctx, &mut tx).await?;
     let mut loaded = load(&mut tx, &work, id, Mode::Write).await?;
     let changed = messages::pin(&mut tx, &work.acting(), &mut loaded, message, pinned).await;
     let row = work.refuse(&mut tx, Some(id), changed).await?;
-    let shown = message_view(&mut tx, &work.principal, &row).await?;
+    let shown =
+        MessageProjection::changed(ctx, &mut tx, &work.principal, &row, loaded.row.seq()).await?;
     tx.commit().await.map_err(DbError::from)?;
-    Ok(shown)
+    Ok(shown.finish_changed(ctx))
 }
 
 /// Pins a message.
-async fn pin_set(ctx: Ctx, (): (), (): ()) -> ApiResult<ChatMessage> {
+async fn pin_set(ctx: Ctx, (): (), (): ()) -> ApiResult<ChatMessageMutationResponse> {
     pin(&ctx, true).await
 }
 
 /// Takes the pin off a message.
-async fn pin_delete(ctx: Ctx, (): (), (): ()) -> ApiResult<ChatMessage> {
+async fn pin_delete(ctx: Ctx, (): (), (): ()) -> ApiResult<ChatMessageMutationResponse> {
     pin(&ctx, false).await
 }
 
@@ -1154,11 +1405,17 @@ async fn org_chats_read(ctx: Ctx, (): (), (): ()) -> ApiResult<()> {
 }
 
 /// Sets the bell and the hiding of a chat.
-async fn state_set(ctx: Ctx, (): (), body: ChatStateSetBody) -> ApiResult<ChatState> {
+async fn state_set(ctx: Ctx, (): (), body: ChatStateSetBody) -> ApiResult<ChatStateSetResponse> {
     let id = ctx.id("id")?;
-    let mut tx = transaction(&ctx).await?;
-    let work = Work::begin(&ctx, &mut tx).await?;
-    let loaded = load(&mut tx, &work, id, Mode::Read).await?;
+    let (mut tx, guard) = transaction_guard::begin(&ctx).await?;
+    let work = Work {
+        projection_ctx: ctx.clone(),
+        principal: guard.principal().clone(),
+        now: guard.now().get(),
+        origin: origin(&ctx),
+    };
+    let loaded = chats::load(&mut tx, &work.acting(), id, Mode::Read).await;
+    let loaded = operation::refuse(&work, &mut tx, id, loaded).await?;
     let changed = following::set_state(
         &mut tx,
         &work.acting(),
@@ -1169,36 +1426,32 @@ async fn state_set(ctx: Ctx, (): (), body: ChatStateSetBody) -> ApiResult<ChatSt
         },
     )
     .await;
-    let state = work.refuse(&mut tx, Some(id), changed).await?;
+    let state = operation::refuse(&work, &mut tx, id, changed).await?;
+    let full = personal::state_response(&ctx, &mut tx, &work.principal, state).await?;
     tx.commit().await.map_err(DbError::from)?;
-    Ok(state)
+    Ok(match (full, ctx.key_receipt_required()) {
+        (Some(full), false) => ChatStateSetResponse::full(full),
+        _ => ChatStateSetResponse::Receipt(ChatPersonalReceipt {
+            projection: ReceiptProjection::Receipt,
+            chat_id: id,
+        }),
+    })
 }
 
 /// The caller's state in every chat they have one in.
 async fn me_chat_states(ctx: Ctx, (): (), (): ()) -> ApiResult<Vec<ChatState>> {
-    let mut conn = ctx.app.db.acquire().await?;
-    let principal = authorization::principal(&ctx, &mut conn).await?;
-    states_for(&ctx, &mut conn, &principal).await
+    crate::key_operations::native::selected_read::<state_collection::States>(ctx, (), ()).await
 }
 
-/// Personal chat state through the same standing as its individual read, without chat contents.
-pub(crate) async fn states_for(
-    ctx: &Ctx,
+/// The same native account-state selectors, before any chat DTO is projected.
+pub(crate) async fn state_candidates(
     conn: &mut Conn,
-    principal: &Principal,
-) -> ApiResult<Vec<ChatState>> {
-    let user = principal.user();
-    let now = principal.now().get();
-    let origin = origin(ctx);
-    let acting = Acting {
-        principal,
-        now,
-        origin: &origin,
-    };
+    user: Id,
+    now: DateTime<Utc>,
+) -> ApiResult<Vec<orch_db::queries::chats::ChatRow>> {
     let stored = rows::states_of(conn, user).await?;
-    let member_of = rows::chats_of_member(conn, user).await?;
-    let mut ids: Vec<Id> = stored.iter().map(|state| state.chat_id).collect();
-    ids.extend(member_of.iter().copied());
+    let mut ids = stored.iter().map(|state| state.chat_id).collect::<Vec<_>>();
+    ids.extend(rows::chats_of_member(conn, user).await?);
     ids.extend(
         rows::following::derived(conn, Some(user), None, now)
             .await?
@@ -1207,9 +1460,34 @@ pub(crate) async fn states_for(
     );
     ids.sort_unstable();
     ids.dedup();
+    let mut selected = rows::chats(conn, &ids).await?;
+    selected.sort_by_key(|row| row.id);
+    Ok(selected)
+}
+
+pub(crate) struct NativeState {
+    pub(crate) chat: orch_db::queries::chats::ChatRow,
+    pub(crate) state: ChatState,
+}
+
+/// Ordinary native readability, inspection exclusion and current own-state projection.
+pub(crate) async fn prepare_state_rows(
+    ctx: &Ctx,
+    conn: &mut Conn,
+    principal: &Principal,
+    selected: &[orch_db::queries::chats::ChatRow],
+) -> ApiResult<Vec<NativeState>> {
+    let user = principal.user();
+    let now = principal.now().get();
+    let origin = origin(ctx);
+    let acting = Acting {
+        principal,
+        now,
+        origin: &origin,
+    };
     let mut states = Vec::new();
-    for id in ids {
-        let loaded = match chats::load(conn, &acting, id, Mode::Read).await {
+    for row in selected {
+        let loaded = match chats::read_selected(conn, &acting, row.clone()).await {
             Ok(loaded) if !loaded.standing.inspects() => loaded,
             Err(ChatError::Db(error)) => return Err(error.into()),
             Err(ChatError::Internal(error)) => return Err(ApiError::internal(error)),
@@ -1220,45 +1498,76 @@ pub(crate) async fn states_for(
                 .await
                 .map_err(ApiError::internal)?
         {
-            states.push(state);
+            states.push(NativeState {
+                chat: loaded.row,
+                state,
+            });
         }
     }
     Ok(states)
+}
+
+/// Personal chat state through its ordinary native gate, without chat contents.
+pub(crate) async fn states_for(
+    ctx: &Ctx,
+    conn: &mut Conn,
+    principal: &Principal,
+) -> ApiResult<Vec<ChatState>> {
+    let selected = state_candidates(conn, principal.user(), principal.now().get()).await?;
+    Ok(prepare_state_rows(ctx, conn, principal, &selected)
+        .await?
+        .into_iter()
+        .map(|row| row.state)
+        .collect())
 }
 
 // ------------------------------------------------------------------ drafts
 
 /// The caller's draft in a chat, if they have one.
 async fn draft_get(ctx: Ctx, (): (), (): ()) -> ApiResult<Option<ChatDraft>> {
-    let id = ctx.id("id")?;
-    let mut tx = transaction(&ctx).await?;
-    let work = Work::begin(&ctx, &mut tx).await?;
-    let loaded = load(&mut tx, &work, id, Mode::Read).await?;
-    if loaded.standing.inspects() {
-        let refused = Err(ChatError::Inspecting);
-        return work.refuse(&mut tx, Some(id), refused).await;
-    }
-    let draft = following::draft(&mut tx, &work.acting(), id).await;
-    let mut draft = work.refuse(&mut tx, Some(id), draft).await?;
+    let mut tx = ctx.app.db.begin_snapshot().await?;
+    let principal = ctx.operation_principal(&mut tx).await?;
+    let prepared = ctx.operation_data::<personal::PreparedDraft>()?;
+    let mut draft = prepared.draft.clone();
     if let Some(draft) = &mut draft {
-        mentions::draft_names(&mut tx, &work.principal, draft).await?;
+        mentions::draft_names_bounded(&mut tx, &principal, draft, Some(&prepared.names)).await?;
     }
     tx.commit().await.map_err(DbError::from)?;
     Ok(draft)
 }
 
 /// Saves the caller's draft.
-async fn draft_set(ctx: Ctx, (): (), body: ChatDraftSetBody) -> ApiResult<ChatDraft> {
+async fn draft_set(ctx: Ctx, (): (), body: ChatDraftSetBody) -> ApiResult<ChatDraftSetResponse> {
     let id = ctx.id("id")?;
-    let mut tx = transaction(&ctx).await?;
-    let work = Work::begin(&ctx, &mut tx).await?;
-    let loaded = load(&mut tx, &work, id, Mode::Read).await?;
-    let saved =
-        following::save_draft(&mut tx, &work.acting(), &loaded, &body.parts, body.reply_to).await;
-    let mut draft = work.refuse(&mut tx, Some(id), saved).await?;
-    mentions::draft_names(&mut tx, &work.principal, &mut draft).await?;
+    let (mut tx, guard) = transaction_guard::begin(&ctx).await?;
+    let effects = guard.operation_data::<personal::DraftEffects>()?;
+    let work = Work {
+        projection_ctx: ctx.clone(),
+        principal: guard.principal().clone(),
+        now: guard.now().get(),
+        origin: origin(&ctx),
+    };
+    let loaded = chats::load(&mut tx, &work.acting(), id, Mode::Read).await;
+    let loaded = operation::refuse(&work, &mut tx, id, loaded).await?;
+    let saved = following::save_draft_with_blob_origins(
+        &mut tx,
+        &work.acting(),
+        &loaded,
+        &body.parts,
+        body.reply_to,
+        &effects.blobs,
+    )
+    .await;
+    let draft = operation::refuse(&work, &mut tx, id, saved).await?;
+    let full = personal::draft_response(&ctx, &mut tx, &work.principal, draft).await?;
     tx.commit().await.map_err(DbError::from)?;
-    Ok(draft)
+    Ok(match (full, ctx.key_receipt_required()) {
+        (Some(full), false) => ChatDraftSetResponse::full(full),
+        _ => ChatDraftSetResponse::Receipt(ChatPersonalReceipt {
+            projection: ReceiptProjection::Receipt,
+            chat_id: id,
+        }),
+    })
 }
 
 /// Throws the caller's draft away.
@@ -1284,6 +1593,7 @@ fn destination_of(to: &ForwardDestination) -> Destination {
 }
 
 /// What a forward carries to its destinations.
+#[derive(Clone)]
 struct Carried {
     /// The root org the source belongs to.
     root: Id,
@@ -1320,155 +1630,24 @@ async fn forward_create(
     ctx: Ctx,
     (): (),
     body: ForwardCreateBody,
-) -> ApiResult<Answer<ForwardCreateReply>> {
-    let mut tx = transaction(&ctx).await?;
-    let work = Work::begin(&ctx, &mut tx).await?;
-    let act = work.acting();
-    let to: Vec<Destination> = body.to.iter().map(destination_of).collect();
-    if to.is_empty() || to.len() > usize::try_from(FORWARD_MAX_DESTINATIONS).unwrap_or(usize::MAX) {
-        return Err(ApiError::invalid(
-            "to",
-            &format!("name 1 to {FORWARD_MAX_DESTINATIONS} destinations"),
-        ));
-    }
-    let (chats_to, threads_to): (Vec<Destination>, Vec<Destination>) = to
-        .iter()
-        .copied()
-        .partition(|each| !matches!(each, Destination::Thread(_)));
-    let thread_ids: Vec<Id> = threads_to
-        .iter()
-        .filter_map(|each| match each {
-            Destination::Thread(thread) => Some(*thread),
-            _ => None,
-        })
-        .collect();
-    let carried = match &body.from {
-        ForwardSource::Chat(from) => {
-            let prepared = forward::prepare(&mut tx, &act, from.chat_id, &from.message_ids).await;
-            let prepared = work.refuse(&mut tx, Some(from.chat_id), prepared).await?;
-            let people = forward::people_of(&prepared);
-            let source_rows: Vec<_> = prepared.messages.iter().collect();
-            let nodes: Vec<Id> = prepared
-                .chat
-                .row
-                .node_id
-                .into_iter()
-                .chain(views::threads_of(&source_rows))
-                .collect();
-            let mut names = lookups(
-                &mut tx,
-                &work.principal,
-                &people,
-                &nodes,
-                &views::groups_of(&source_rows),
-            )
-            .await?;
-            names.nodes.extend(
-                view::qualified_refs(
-                    &mut tx,
-                    &work.principal,
-                    &views::role_places_of(&source_rows),
-                    Policy::default(),
-                )
-                .await?,
-            );
-            let source = chat_view(
-                &mut tx,
-                &work.principal,
-                &prepared.chat.row,
-                &prepared.chat.members,
-                &prepared.chat.standing,
-            )
-            .await?;
-            Carried {
-                root: prepared.chat.row.org_id,
-                copies: forward::copies_of(&prepared, &source.base, &names),
-                quotes: None,
-            }
-        }
-        ForwardSource::Thread(from) => {
-            let found = hierarchy::with_ancestors(&mut tx, &[from.thread_id]).await?;
-            let node = found
-                .iter()
-                .find(|node| node.id == from.thread_id && node.deleted_at.is_none())
-                .filter(|node| refusals::node_kind(&node.kind) == Some(NodeKind::Thread))
-                .ok_or_else(ApiError::not_found)?;
-            let own = rows::chat_of_node(&mut tx, from.thread_id)
-                .await?
-                .ok_or_else(ApiError::not_found)?;
-            // Whoever forwards what a conversation says reads it.
-            match nodes::check(
-                &mut tx,
-                &work.principal,
-                from.thread_id,
-                Permission::ThreadView,
-                Act::Use,
-                Policy::default(),
-            )
-            .await
-            {
-                Ok(Decision::Allowed { .. }) => {}
-                Ok(Decision::Refused(refusal)) => {
-                    return Err(refusals::denied(&mut tx, refusal).await?);
-                }
-                Err(error) => return Err(refusals::problem(&mut tx, error).await),
-            }
-            let quotes = forward::quote_items(&mut tx, from.thread_id, &from.item_ids).await;
-            let quotes = work.refuse(&mut tx, Some(own.id), quotes).await?;
-            let parts = written::forward_parts(&mut tx, from.thread_id, &from.item_ids)
-                .await
-                .map_err(ApiError::internal)?;
-            if parts.len() > usize::try_from(FORWARD_MAX_PARTS).unwrap_or(usize::MAX) {
-                return Err(ApiError::invalid(
-                    "from.item_ids",
-                    &format!("come to more than the {FORWARD_MAX_PARTS} parts of a forward"),
-                ));
-            }
-            let refs = view::refs(
-                &mut tx,
-                &work.principal,
-                &[from.thread_id],
-                Policy::default(),
-            )
-            .await?;
-            let thread_ref = refs
-                .get(&from.thread_id)
-                .cloned()
-                .ok_or_else(ApiError::not_found)?;
-            let copies: Vec<ChatPart> = parts
-                .into_iter()
-                .filter(|part| !part.text.trim().is_empty() || !part.images.is_empty())
-                .map(|part| {
-                    ChatPart::Forwarded(Box::new(Forwarded {
-                        r#type: orch_api_contract::threads::ForwardedType::Forwarded,
-                        from: ForwardedFrom::Thread {
-                            thread: thread_ref.clone(),
-                        },
-                        source_id: part.source,
-                        author: match (part.person, part.agent) {
-                            (Some(person), _) => Some(ForwardedAuthor::User(person)),
-                            (None, Some(agent)) => {
-                                Some(ForwardedAuthor::Agent(AgentName { agent }))
-                            }
-                            (None, None) => None,
-                        },
-                        at: part.at,
-                        text: part.text,
-                        images: part.images,
-                        attachments: Vec::new(),
-                    }))
-                })
-                .collect();
-            if copies.is_empty() {
-                return Err(ApiError::invalid("from.item_ids", "say nothing to forward"));
-            }
-            Carried {
-                root: node.org_id,
-                copies,
-                quotes: Some((quotes, own.id)),
-            }
-        }
+) -> ApiResult<Answer<ForwardCreateResponse>> {
+    let (mut tx, guard) = transaction_guard::begin(&ctx).await?;
+    let prepared = guard.operation_data::<forwarding::PreparedForward>()?;
+    let work = Work {
+        projection_ctx: ctx.clone(),
+        principal: guard.principal().clone(),
+        origin: origin(&ctx),
+        now: guard.now().get(),
     };
+    let act = work.acting();
+    let chats_to: Vec<_> = body
+        .to
+        .iter()
+        .map(destination_of)
+        .filter(|to| !matches!(to, Destination::Thread(_)))
+        .collect();
+    let thread_ids = prepared.threads.clone();
+    let carried = &prepared.carried;
     // Shared lock order: authority, sorted source/destination threads, then destination chats.
     let mut locks = thread_ids.clone();
     if let ForwardSource::Thread(from) = &body.from {
@@ -1486,7 +1665,7 @@ async fn forward_create(
             None => (Vec::new(), chats_to.clone()),
         };
         if let (false, Some((quotes, own))) = (home.is_empty(), &carried.quotes) {
-            let done = forward::deliver(
+            let done = forward::deliver_checked(
                 &mut tx,
                 &act,
                 &Delivery {
@@ -1498,12 +1677,14 @@ async fn forward_create(
                     client_id: &body.client_id,
                 },
                 &keys,
+                &prepared.chats,
+                &prepared.blobs,
             )
             .await;
             sent.extend(work.refuse(&mut tx, None, done).await?);
         }
         if !elsewhere.is_empty() {
-            let done = forward::deliver(
+            let done = forward::deliver_checked(
                 &mut tx,
                 &act,
                 &Delivery {
@@ -1515,6 +1696,8 @@ async fn forward_create(
                     client_id: &body.client_id,
                 },
                 &keys,
+                &prepared.chats,
+                &prepared.blobs,
             )
             .await;
             sent.extend(work.refuse(&mut tx, None, done).await?);
@@ -1540,20 +1723,29 @@ async fn forward_create(
             });
         }
         parts.extend(input_parts(&carried.copies));
-        let caller = authorization::caller_of(ctx.user()?)?;
+        let caller = work.principal.caller();
         match ctx
             .app
             .engine
-            .forward_to_threads(&mut tx, &caller, &thread_ids, &parts, &body.client_id)
+            .forward_create_to_threads(
+                &mut tx,
+                caller,
+                &prepared.source,
+                &thread_ids,
+                &parts,
+                &body.client_id,
+                true,
+                &prepared.blobs,
+            )
             .await
         {
             Ok(done) => queued = Some(done),
             Err((thread, error)) => {
-                let mut conn = ctx.app.db.acquire().await?;
-                let failed = crate::routes::threads::input_failed(
-                    &mut conn,
+                let failed = crate::routes::threads::input_failed_projected(
+                    &mut tx,
                     thread.unwrap_or_else(Id::nil),
                     error,
+                    ctx.key_receipt_required(),
                 )
                 .await;
                 return Err(match thread {
@@ -1563,34 +1755,43 @@ async fn forward_create(
             }
         }
     }
-    let mut chats_written = Vec::new();
-    let mut every_one_before = true;
-    for each in &sent {
-        every_one_before &= !each.written.created;
-        chats_written.push(ForwardChatMessage {
-            chat_id: each.chat,
-            message: message_view(&mut tx, &work.principal, &each.written.message).await?,
-        });
-    }
-    let mut threads_written = Vec::new();
-    if let Some(done) = &queued {
-        for each in &done.inputs {
-            every_one_before &= !each.created;
-            threads_written.push(ForwardThreadInput {
-                thread_id: each.thread,
-                input: each.input.clone(),
-            });
-        }
-    }
+    let every_chat_before = sent.iter().all(|each| !each.written.created);
+    let every_thread_before = queued
+        .as_ref()
+        .is_none_or(|done| done.inputs.iter().all(|input| !input.created));
+    let receipt = ForwardCreateReceipt {
+        projection: ReceiptProjection::Receipt,
+        chats: sent
+            .iter()
+            .map(|each| ForwardChatReceipt {
+                chat_id: each.chat,
+                message_id: each.written.message.id,
+                seq: each.written.seq,
+            })
+            .collect(),
+        threads: queued
+            .as_ref()
+            .into_iter()
+            .flat_map(|done| &done.inputs)
+            .map(|input| ForwardInputReceipt {
+                thread_id: input.thread_id,
+                input_id: input.input_id,
+                seq: input.seq,
+            })
+            .collect(),
+    };
+    let full =
+        forwarding::read_response(&ctx, &mut tx, &work.principal, &sent, &receipt.threads).await?;
     tx.commit().await.map_err(DbError::from)?;
     if let Some(done) = &queued {
-        ctx.app.engine.after_forward(done);
+        ctx.app.engine.after_forward_projected(done);
     }
-    let answer = Answer::from(ForwardCreateReply {
-        chats: chats_written,
-        threads: threads_written,
-    });
-    Ok(if every_one_before {
+    let response = match (full, ctx.key_receipt_required()) {
+        (Some(full), false) => ForwardCreateResponse::full(full),
+        _ => ForwardCreateResponse::Receipt(receipt),
+    };
+    let answer = Answer::from(response);
+    Ok(if every_chat_before && every_thread_before {
         answer.status(StatusCode::OK)
     } else {
         answer

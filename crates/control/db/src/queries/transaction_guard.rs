@@ -348,6 +348,8 @@ pub struct Identity {
     pub user: UserRow,
     /// API token scopes; none for a browser session.
     pub scopes: Option<Vec<String>>,
+    /// Current operation rules/ceilings, reloaded under the same credential lock.
+    pub operation_scope: Option<orch_types::Json>,
     /// The API token's current subtree boundary.
     pub node_id: Option<Id>,
     /// The first end of the credential or its session; none for a lasting token.
@@ -429,7 +431,7 @@ async fn identity_in(
     let user_lock = if personal { "UPDATE" } else { "KEY SHARE" };
     let (identity, id, hash) = match credential {
         Credential::Session { id, hash } => (
-            "SELECT u.*, s.as_admin, NULL::text[] AS scopes, NULL::uuid AS node_id,
+            "SELECT u.*, s.as_admin, NULL::text[] AS scopes, NULL::jsonb AS operation_scope, NULL::uuid AS node_id,
                     LEAST(a.expires_at, s.expires_at) AS expires_at
                FROM marked CROSS JOIN users u
                JOIN sessions s ON s.user_id = u.id
@@ -441,7 +443,7 @@ async fn identity_in(
             hash,
         ),
         Credential::Token { id, hash } => (
-            "SELECT u.*, false AS as_admin, t.scopes, t.node_id, t.expires_at
+            "SELECT u.*, false AS as_admin, t.scopes, t.operation_scope, t.node_id, t.expires_at
                FROM marked CROSS JOIN users u
                JOIN api_tokens t ON t.user_id = u.id
               WHERE u.id = $1 AND t.id = $2 AND t.token_hash = $3

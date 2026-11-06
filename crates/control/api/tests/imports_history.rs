@@ -545,6 +545,56 @@ async fn a_chat_of_twelve_hundred_messages_goes_through_a_package_with_its_repli
     assert_eq!(messages_of(&o, chat).await, at_source);
 }
 
+#[tokio::test(flavor = "current_thread")]
+async fn statement_measurement_counts_the_request_and_keeps_background_work_in_the_legacy_total() {
+    let db = orch_testkit::database::TestDb::fresh().await;
+    let mut request_connection = db.pool.acquire().await.unwrap();
+    let mut background_connection = db.pool.acquire().await.unwrap();
+    let request_thread = std::thread::current().id();
+    let (release, released) = tokio::sync::oneshot::channel::<()>();
+    let (finished, wait_finished) = tokio::sync::oneshot::channel::<()>();
+    let before = Statements::now();
+    let background = tokio::spawn(async move {
+        released.await.unwrap();
+        sqlx::query("SELECT 1")
+            .execute(&mut *background_connection)
+            .await
+            .unwrap();
+        finished.send(()).unwrap();
+        (std::thread::current().id(), background_connection)
+    });
+    let (_, observed) = Statements::measure(async {
+        sqlx::query("SELECT 1")
+            .execute(&mut *request_connection)
+            .await
+            .unwrap();
+        release.send(()).unwrap();
+        wait_finished.await.unwrap();
+        sqlx::query("SELECT 1")
+            .execute(&mut *request_connection)
+            .await
+            .unwrap();
+    })
+    .await;
+    let (background_thread, background_connection) = background.await.unwrap();
+    let legacy_total = Statements::now() - before;
+    drop(request_connection);
+    drop(background_connection);
+    db.close().await.unwrap();
+    assert_eq!(
+        background_thread, request_thread,
+        "the control runs on one executor thread"
+    );
+    assert_eq!(
+        legacy_total, 3,
+        "the legacy total keeps all three statements"
+    );
+    assert_eq!(
+        observed, 2,
+        "the request counts both its statements and excludes the sibling task"
+    );
+}
+
 #[tokio::test]
 async fn the_plan_of_a_package_asks_the_database_as_often_for_sixty_documents_as_for_ten_and_a_page_of_it_as_often_wherever_it_lies()
  {
@@ -558,9 +608,8 @@ async fn the_plan_of_a_package_asks_the_database_as_often_for_sixty_documents_as
     let request = asked("plan-few", &few);
     // The first plan of a request reads what is kept for the next (settings, the shape of the place); the one that is counted is the second.
     planned(&o, ada, project, &request, ImportView::default()).await;
-    let before = Statements::now();
-    let small = planned(&o, ada, project, &request, ImportView::default()).await;
-    let small_statements = Statements::now() - before;
+    let (small, small_statements) =
+        Statements::measure(planned(&o, ada, project, &request, ImportView::default())).await;
     assert!(
         small_statements > 0,
         "the statements of the plan are counted on this thread"
@@ -572,9 +621,8 @@ async fn the_plan_of_a_package_asks_the_database_as_often_for_sixty_documents_as
     let many = upload(&o, ada, "many.zip", &package_of(&o, o.topic()).await).await;
     let request = asked("plan-many", &many);
     planned(&o, ada, project, &request, ImportView::default()).await;
-    let before = Statements::now();
-    let large = planned(&o, ada, project, &request, ImportView::default()).await;
-    let large_statements = Statements::now() - before;
+    let (large, large_statements) =
+        Statements::measure(planned(&o, ada, project, &request, ImportView::default())).await;
     assert!(
         large.counts.documents >= small.counts.documents + 50,
         "the second package holds fifty documents more: {} against {}",
@@ -587,8 +635,7 @@ async fn the_plan_of_a_package_asks_the_database_as_often_for_sixty_documents_as
     );
 
     // A page of the plan costs the same whichever page it is: the plan is read from memory, a page of it is cut from the list.
-    let first_page = Statements::now();
-    let first = planned(
+    let (first, first_page) = Statements::measure(planned(
         &o,
         ada,
         project,
@@ -597,13 +644,11 @@ async fn the_plan_of_a_package_asks_the_database_as_often_for_sixty_documents_as
             limit: Some(10),
             ..ImportView::default()
         },
-    )
+    ))
     .await;
-    let first_page = Statements::now() - first_page;
     assert_eq!(first.objects.items.len(), 10);
     let cursor = first.objects.next_cursor.clone().expect("more than a page");
-    let later_page = Statements::now();
-    let later = planned(
+    let (later, later_page) = Statements::measure(planned(
         &o,
         ada,
         project,
@@ -613,9 +658,8 @@ async fn the_plan_of_a_package_asks_the_database_as_often_for_sixty_documents_as
             cursor: Some(cursor),
             ..ImportView::default()
         },
-    )
+    ))
     .await;
-    let later_page = Statements::now() - later_page;
     assert_eq!(later.objects.items.len(), 10);
     assert_eq!(
         first_page, later_page,

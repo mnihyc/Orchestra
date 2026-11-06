@@ -7,6 +7,8 @@
 
 mod admin_support;
 mod places;
+#[path = "admin_users/scoped_update.rs"]
+mod scoped_update;
 mod support;
 
 use admin_support::{Cast, api_token, assert_no_system_admin, cast, lines_of, refused_to};
@@ -58,13 +60,22 @@ async fn update(
     id: Id,
     body: &AdminUserUpdateBody,
 ) -> orch_api_core::testing::Reply<AdminUser> {
-    world
+    let reply = world
         .app
         .call(AdminUserUpdate, &[&id])
         .token(&by.token)
         .body(body)
         .send()
-        .await
+        .await;
+    orch_api_core::testing::Reply {
+        status: reply.status,
+        headers: reply.headers,
+        body: reply.body.map(|body| {
+            body.into_full()
+                .expect("this ordinary control requires the full account projection")
+        }),
+        raw: reply.raw,
+    }
 }
 
 fn acknowledged(body: AdminUserUpdateBody) -> AdminUserUpdateBody {

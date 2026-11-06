@@ -18,6 +18,10 @@
 #![cfg(unix)]
 
 mod places;
+#[path = "workspace_snapshots/scope_helpers.rs"]
+mod snapshot_scope_helpers;
+#[path = "workspace_connector/snapshot_scopes.rs"]
+mod snapshot_scopes;
 mod support;
 mod workspace;
 
@@ -187,6 +191,7 @@ impl System {
             notices: Some(notices),
         });
         Ok(EnrollReply {
+            gateways: Vec::new(),
             machine_id: enrolled.machine_id,
             certificate_pem: enrolled.certificate.pem(),
             ca_pem: self.pki.authority().certificate_pem(),
@@ -254,6 +259,7 @@ fn upgrade(
         )
         .await;
         let peer = PeerInfo {
+            purpose: Default::default(),
             remote_ip: Some(remote.ip()),
             host: Some("127.0.0.1".to_owned()),
             client_certificate: certificate.clone(),

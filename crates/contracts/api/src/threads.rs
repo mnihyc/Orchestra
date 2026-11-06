@@ -9,6 +9,14 @@
 //! person says goes in as a [`ThreadInput`], which a [`Turn`] answers; a
 //! [`ThreadSync`] brings a client up to date.
 
+use crate::operations::{
+    FacetSpec as Facet, OperationSpec as Op, TargetResolver as Target, VariantSpec as Variant,
+};
+use orch_access_contract::key_scope::KeyAction::{Manage, Read, Write};
+use orch_access_contract::key_scope::KeyIdentityKind as I;
+use orch_access_contract::key_scope::KeyTargetKind::{Identity, Object};
+use orch_access_contract::permissions::ObjectKind as K;
+
 use orch_types::{Hash, Id, Json, Revision, Seq, Time};
 use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
@@ -681,6 +689,9 @@ pub struct ThreadCan {
 /// A thread: a conversation with an agent, in a topic.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
 pub struct Thread {
+    /// Recorded owned background work; absent in historical inspections and older producers.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub background: Option<crate::background::BackgroundWakeStatus>,
     /// Selected execution, independent of the read selector; omitted only by an older producer.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub active_continuation_id: Option<Id>,
@@ -1227,7 +1238,9 @@ pub enum OrchTool {
     DownloadShared,
     /// Edits a document.
     EditDocument,
-    /// Organizes documents and folders, including version restore; only deletion requires confirmation.
+    /// Organizes documents and folders, including version restore. Document creation, copying,
+    /// moving and restoration execute directly; document deletion and thread/chat management
+    /// require a preview and confirmation.
     ManageShared,
     /// Posts to a chat or queues a note to a thread's agent, according to its typed target.
     SendMessage,
@@ -1489,6 +1502,18 @@ pub struct PlanPayload {
     pub approval_id: Option<Id>,
 }
 
+/// Reader-visible causes of a background continuation.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+pub struct MarkerBackgroundWake {
+    /// False while the completion waits for admission.
+    #[serde(default)]
+    pub admitted: bool,
+    /// The originating tasks and their outcomes.
+    pub causes: Vec<crate::native::BackgroundTask>,
+    /// The continuation input, including while held.
+    pub input_id: Id,
+}
+
 /// A call of a tool, as an item.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
 pub struct ToolCallPayload {
@@ -1590,6 +1615,8 @@ pub struct ErrorPayload {
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize, JsonSchema)]
 #[serde(rename_all = "snake_case")]
 pub enum MarkerKind {
+    /// The recorded cause of an admitted or held background continuation.
+    BackgroundWake,
     /// A resource's resumption continued its stopped original task or kept a refusal visible.
     ResourceResumed,
     /// A resource's switch or deletion stopped the turn immediately.
@@ -2027,8 +2054,11 @@ pub struct MarkerForkedFrom {
     pub turn_id: Id,
     /// How the history travelled.
     pub report: HistoryReport,
-    /// Who forked it.
+    /// Who forked it, or the responsible giver when an agent performed the act.
     pub by: UserRef,
+    /// The agent actor, separately from its giver. Its thread name is not disclosed here.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub by_agent: Option<Id>,
 }
 
 /// Recorded in the thread that the fork was taken from.
@@ -2038,8 +2068,11 @@ pub struct MarkerForked {
     pub into: NodeRef,
     /// The turn whose end it took.
     pub turn_id: Id,
-    /// Who forked it.
+    /// Who forked it, or the responsible giver when an agent performed the act.
     pub by: UserRef,
+    /// The agent actor, separately from its giver. Its thread name is not disclosed here.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub by_agent: Option<Id>,
 }
 
 /// Why the unit of an environment was replaced.
@@ -2204,7 +2237,8 @@ pub enum SharedThing {
 pub struct MarkerShareDocument {
     /// Its identifier.
     pub id: Id,
-    /// Its title at the time of the share.
+    /// Its title at the time of the share, or its stable identifier when the creating
+    /// operation may give access but may not copy the protected title into history.
     pub title: String,
 }
 
@@ -2289,6 +2323,8 @@ pub struct MarkerSideClosed {
     reason = "a marker is built once to be written or read; boxing its data would put a layer in every use"
 )]
 pub enum MarkerPayload {
+    /// The recorded cause of an admitted or held background continuation.
+    BackgroundWake(MarkerBackgroundWake),
     /// The factual result of continuing original work after a resource becomes available.
     ResourceResumed(MarkerResourceResumed),
     /// A resource's switch or deletion stopped the turn immediately.
@@ -2394,6 +2430,7 @@ impl MarkerPayload {
     #[must_use]
     pub const fn kind(&self) -> MarkerKind {
         match self {
+            Self::BackgroundWake(_) => MarkerKind::BackgroundWake,
             Self::ResourceResumed(_) => MarkerKind::ResourceResumed,
             Self::ResourceStopped(_) => MarkerKind::ResourceStopped,
             Self::CallRecovery(_) => MarkerKind::CallRecovery,
@@ -2687,7 +2724,7 @@ pub struct LimitBypass {
     pub at: Time,
     /// The caps it is let past.
     pub caps: Vec<Id>,
-    /// Whether the provider's own limit, as the vendor last reported it, is passed as well.
+    /// Historical vendor-limit marker; new bypass records name configured Orch caps only.
     pub provider_limit: bool,
 }
 
@@ -2908,19 +2945,19 @@ pub struct ThreadInputUpdateReply {
     pub inputs: Vec<ThreadInput>,
 }
 
-/// Limits to let an input past: caps by identifier, and the provider's own limit.
+/// Configured Orch caps to let an input past.
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
 #[serde(deny_unknown_fields)]
 pub struct LimitBypassRequest {
     /// The caps; one that has room is left out without an error.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub caps: Option<Vec<Id>>,
-    /// Whether to let it past the provider's own limit.
+    /// Legacy compatibility member, accepted and ignored. Vendor quota needs no override.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub provider_limit: Option<bool>,
 }
 
-/// The provider's own limit, as the vendor last reported it.
+/// Historical vendor-limit projection, retained for compatibility; not current admission.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
 pub struct ProviderLimit {
     /// The provider.
@@ -2936,10 +2973,10 @@ pub struct ProviderLimit {
 /// One limit that stands in the way of a turn, and who may let it past.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize, JsonSchema)]
 pub struct LimitReached {
-    /// A cap that has no room, as it stands for the author of the input; `null` when the provider's
-    /// own limit is what is reached.
+    /// A configured Orch cap that has no room for this input. Current rows always name a cap;
+    /// the nullable shape remains for historical clients.
     pub cap: Option<CapStatus>,
-    /// The provider's own limit, when that is what is reached.
+    /// Legacy projection member; current limit rows return `null`.
     pub provider_limit: Option<ProviderLimit>,
     /// Whether the caller holds the bypass row for it.
     pub can_bypass: bool,
@@ -3570,6 +3607,41 @@ pub struct ThreadInputCreateReply {
     pub seq: Seq,
 }
 
+/// A committed operation acknowledgement without pre-existing resource content.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+pub struct ThreadInputReceipt {
+    /// The response is an acknowledgement rather than a full resource projection.
+    pub projection: crate::common::ReceiptProjection,
+    /// The thread that accepted the input.
+    pub thread_id: Id,
+    /// The newly accepted or previously accepted input.
+    pub input_id: Id,
+    /// The thread sequence acknowledged by this operation.
+    pub seq: Seq,
+}
+
+crate::common::full_or_receipt! {
+    /// The existing full reply, or its explicit restricted receipt.
+    #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+    pub enum ThreadInputCreateResponse {
+        /// The full ordinary response.
+        Full(ThreadInputCreateReply),
+        /// A successful outcome with no existing resource content.
+        Receipt(ThreadInputReceipt),
+    }
+}
+
+crate::common::full_or_receipt! {
+    /// An existing input mutation's ordinary view, or its acknowledged identity without old content.
+    #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+    pub enum ThreadInputMutationResponse {
+        /// The unchanged full ordinary input reply.
+        Full(ThreadInput),
+        /// The committed input identity/sequence without words, people or previous grants.
+        Receipt(ThreadInputReceipt),
+    }
+}
+
 /// Answers a proposed plan once, under the current policy for who may answer.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
 #[serde(deny_unknown_fields)]
@@ -3588,6 +3660,17 @@ pub struct ThreadPlanDecideReply {
     pub input: ThreadInput,
     /// Who decided what and when.
     pub decision: crate::approvals::RequestDecisionStatus,
+}
+
+crate::common::full_or_receipt! {
+    /// The normal plan decision reply, or the newly accepted input identity without old content.
+    #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+    pub enum ThreadPlanDecideResponse {
+        /// The unchanged ordinary full result.
+        Full(ThreadPlanDecideReply),
+        /// The actual committed follow-up input and sequence.
+        Receipt(ThreadInputReceipt),
+    }
 }
 
 /// The limits to look at before sending.
@@ -3816,87 +3899,411 @@ crate::endpoints! {
     /// Reads only one continuation's pending and failed inputs in a bounded stable queue page.
     ThreadInputList: GET "/threads/{id}/inputs", Permission("thread.view"), query ThreadInputListQuery, none, json ThreadInputPage, 200;
     /// Prepares and selects revised words as their actual author under current interaction/provider use.
-    ThreadPromptVersionCreate: POST "/threads/{id}/inputs/{input_id}/versions", Rule("thread.view and thread.interact, the original input's actual author, and current provider/model/effort use"), none, json ThreadPromptVersionCreateBody, json ThreadContinuationAccepted, 202;
+    ThreadPromptVersionCreate: POST "/threads/{id}/inputs/{input_id}/versions", Rule("thread.view and thread.interact, the original input's actual author, and current provider/model/effort use"), none, json ThreadPromptVersionCreateBody, json ThreadContinuationAccepted, 202,
+        operation Op::facets(&[
+            Facet::required(Read, &[Object(K::Thread)], Target::Path("id")),
+            Facet::required(Write, &[Object(K::Thread)], Target::Path("id")),
+        ]);
     /// Explicitly selects a retained continuation for future execution, preserving its held queue.
-    ThreadContinuationActivate: POST "/threads/{id}/continuations/{continuation_id}/activate", Rule("thread.view and thread.interact, and current provider/model/effort use"), none, json ThreadContinuationActivateBody, json ThreadContinuationAccepted, 202;
+    ThreadContinuationActivate: POST "/threads/{id}/continuations/{continuation_id}/activate", Rule("thread.view and thread.interact, and current provider/model/effort use"), none, json ThreadContinuationActivateBody, json ThreadContinuationAccepted, 202,
+        operation Op::facets(&[
+            Facet::required(Read, &[Object(K::Thread)], Target::Path("id")),
+            Facet::required(Write, &[Object(K::Thread)], Target::Path("id")),
+        ]);
     /// Opens the signed-in person's thread screen in one read, preserving every component's native access checks.
-    ThreadOpeningGet: GET "/threads/{id}/opening", Session, query ThreadOpeningGetQuery, none, json ThreadOpening, 200;
+    ThreadOpeningGet: GET "/threads/{id}/opening", Session, query ThreadOpeningGetQuery, none, json ThreadOpening, 200,
+        operation Op::single(Read, &[Object(K::Thread)], Target::Path("id"));
     /// Brings a client up to date on a thread: the thread, its latest items, turns, inputs and segments, or what changed since a sequence.
-    ThreadSyncGet: GET "/threads/{id}/sync", Permission("thread.view"), query ThreadSyncGetQuery, none, json ThreadSync, 200;
+    ThreadSyncGet: GET "/threads/{id}/sync", Permission("thread.view"), query ThreadSyncGetQuery, none, json ThreadSync, 200,
+        operation Op::variants(&[
+            Variant {
+                name: "read",
+                selector: "inspect_deleted is not true",
+                facets: &[Facet::required(
+                    Read,
+                    &[Object(K::Thread)],
+                    Target::PermissionObject,
+                )],
+            },
+            Variant {
+                name: "inspect_deleted",
+                selector: "inspect_deleted is true; apply the stored thread restoration rule",
+                facets: &[Facet::required(
+                    Manage,
+                    &[Object(K::Thread)],
+                    Target::PermissionObject,
+                )],
+            },
+        ]);
     /// Reads a stretch of a thread's timeline before, after or around a place.
-    ThreadItemList: GET "/threads/{id}/items", Permission("thread.view"), query ThreadItemListQuery, none, json ThreadItemListReply, 200;
+    ThreadItemList: GET "/threads/{id}/items", Permission("thread.view"), query ThreadItemListQuery, none, json ThreadItemListReply, 200,
+        operation Op::variants(&[
+            Variant {
+                name: "read",
+                selector: "inspect_deleted is not true",
+                facets: &[Facet::required(
+                    Read,
+                    &[Object(K::Thread)],
+                    Target::PermissionObject,
+                )],
+            },
+            Variant {
+                name: "inspect_deleted",
+                selector: "inspect_deleted is true; apply the stored thread restoration rule",
+                facets: &[Facet::required(
+                    Manage,
+                    &[Object(K::Thread)],
+                    Target::PermissionObject,
+                )],
+            },
+        ]);
     /// Counts what happened in a thread after a sequence.
-    ThreadCatchupGet: GET "/threads/{id}/catchup", Permission("thread.view"), query ThreadCatchupGetQuery, none, json Catchup, 200;
+    ThreadCatchupGet: GET "/threads/{id}/catchup", Permission("thread.view"), query ThreadCatchupGetQuery, none, json Catchup, 200,
+        operation Op::variants(&[
+            Variant {
+                name: "read",
+                selector: "inspect_deleted is not true",
+                facets: &[Facet::required(
+                    Read,
+                    &[Object(K::Thread)],
+                    Target::PermissionObject,
+                )],
+            },
+            Variant {
+                name: "inspect_deleted",
+                selector: "inspect_deleted is true; apply the stored thread restoration rule",
+                facets: &[Facet::required(
+                    Manage,
+                    &[Object(K::Thread)],
+                    Target::PermissionObject,
+                )],
+            },
+        ]);
     /// Reads one item of a thread.
-    ThreadItemGet: GET "/threads/{id}/items/{item_id}", Permission("thread.view"), query continuations::ThreadReadSelector, none, json Item, 200;
+    ThreadItemGet: GET "/threads/{id}/items/{item_id}", Permission("thread.view"), query continuations::ThreadReadSelector, none, json Item, 200,
+        operation Op::variants(&[
+            Variant {
+                name: "read",
+                selector: "inspect_deleted is not true",
+                facets: &[Facet::required(
+                    Read,
+                    &[Object(K::Thread)],
+                    Target::PermissionObject,
+                )],
+            },
+            Variant {
+                name: "inspect_deleted",
+                selector: "inspect_deleted is true; apply the stored thread restoration rule",
+                facets: &[Facet::required(
+                    Manage,
+                    &[Object(K::Thread)],
+                    Target::PermissionObject,
+                )],
+            },
+        ]);
     /// Reads a piece of a command's output as plain text, with its total length in a header.
-    ThreadItemOutputGet: GET "/threads/{id}/items/{item_id}/output", Permission("thread.view"), query ThreadItemOutputGetQuery, none, raw, 200;
+    ThreadItemOutputGet: GET "/threads/{id}/items/{item_id}/output", Permission("thread.view"), query ThreadItemOutputGetQuery, none, raw, 200,
+        operation Op::variants(&[
+            Variant {
+                name: "read",
+                selector: "inspect_deleted is not true",
+                facets: &[Facet::required(
+                    Read,
+                    &[Object(K::Thread)],
+                    Target::PermissionObject,
+                )],
+            },
+            Variant {
+                name: "inspect_deleted",
+                selector: "inspect_deleted is true; apply the stored thread restoration rule",
+                facets: &[Facet::required(
+                    Manage,
+                    &[Object(K::Thread)],
+                    Target::PermissionObject,
+                )],
+            },
+        ]);
     /// Reads the raw events between Orch and a harness for one segment.
-    ThreadRawList: GET "/threads/{id}/raw", Permission("thread.manage"), query ThreadRawListQuery, none, json ThreadRawListReply, 200;
+    ThreadRawList: GET "/threads/{id}/raw", Permission("thread.manage"), query ThreadRawListQuery, none, json ThreadRawListReply, 200,
+        operation Op::single(Manage, &[Object(K::Thread)], Target::TypedPath { parameter: "id", kind: Object(K::Thread) });
     /// Reads the missing history of an adopted session again, importing its earlier entries once without starting a turn.
-    ThreadAdoptRetryHistory: POST "/threads/{id}/adopt/retry-history", Permission("thread.manage"), none, none, json Thread, 200;
+    ThreadAdoptRetryHistory: POST "/threads/{id}/adopt/retry-history", Permission("thread.manage"), none, none, json Thread, 200,
+        operation Op::facets(&[
+            Facet::required(Manage, &[Object(K::Thread)], Target::PermissionObject),
+            Facet::required(
+                Read,
+                &[Object(K::Provider)],
+                Target::Resolved("adopted_history_source"),
+            ),
+            Facet::response_content(&[Object(K::Thread)], Target::PermissionObject),
+        ]);
     /// Reads the before-Orch band's last read reason, present machine state and current retry act, without native I/O.
-    ThreadAdoptHistoryGet: GET "/threads/{id}/adopt/history", Permission("thread.view"), none, none, json Option<AdoptHistoryStatus>, 200;
+    ThreadAdoptHistoryGet: GET "/threads/{id}/adopt/history", Permission("thread.view"), none, none, json Option<AdoptHistoryStatus>, 200,
+        operation Op::single(Read, &[Object(K::Thread)], Target::TypedPath { parameter: "id", kind: Object(K::Thread) });
     /// Lists the outline of a thread, ascending.
-    ThreadOutlineGet: GET "/threads/{id}/outline", Permission("thread.view"), query ThreadOutlineGetQuery, none, json ThreadOutlinePage, 200;
+    ThreadOutlineGet: GET "/threads/{id}/outline", Permission("thread.view"), query ThreadOutlineGetQuery, none, json ThreadOutlinePage, 200,
+        operation Op::variants(&[
+            Variant {
+                name: "read",
+                selector: "inspect_deleted is not true",
+                facets: &[Facet::required(
+                    Read,
+                    &[Object(K::Thread)],
+                    Target::PermissionObject,
+                )],
+            },
+            Variant {
+                name: "inspect_deleted",
+                selector: "inspect_deleted is true; apply the stored thread restoration rule",
+                facets: &[Facet::required(
+                    Manage,
+                    &[Object(K::Thread)],
+                    Target::PermissionObject,
+                )],
+            },
+        ]);
     /// Reads a bounded historical segment page; all older segments remain explicitly discoverable.
-    ThreadSegmentList: GET "/threads/{id}/segments", Permission("thread.view"), query ThreadHistoryListQuery, none, json ThreadSegmentPage, 200;
+    ThreadSegmentList: GET "/threads/{id}/segments", Permission("thread.view"), query ThreadHistoryListQuery, none, json ThreadSegmentPage, 200,
+        operation Op::variants(&[
+            Variant {
+                name: "read",
+                selector: "inspect_deleted is not true",
+                facets: &[Facet::required(
+                    Read,
+                    &[Object(K::Thread)],
+                    Target::PermissionObject,
+                )],
+            },
+            Variant {
+                name: "inspect_deleted",
+                selector: "inspect_deleted is true; apply the stored thread restoration rule",
+                facets: &[Facet::required(
+                    Manage,
+                    &[Object(K::Thread)],
+                    Target::PermissionObject,
+                )],
+            },
+        ]);
     /// Reads a bounded historical turn page with its exact segment references.
-    ThreadTurnList: GET "/threads/{id}/turns", Permission("thread.view"), query ThreadHistoryListQuery, none, json ThreadTurnPage, 200;
+    ThreadTurnList: GET "/threads/{id}/turns", Permission("thread.view"), query ThreadHistoryListQuery, none, json ThreadTurnPage, 200,
+        operation Op::variants(&[
+            Variant {
+                name: "read",
+                selector: "inspect_deleted is not true",
+                facets: &[Facet::required(
+                    Read,
+                    &[Object(K::Thread)],
+                    Target::PermissionObject,
+                )],
+            },
+            Variant {
+                name: "inspect_deleted",
+                selector: "inspect_deleted is true; apply the stored thread restoration rule",
+                facets: &[Facet::required(
+                    Manage,
+                    &[Object(K::Thread)],
+                    Target::PermissionObject,
+                )],
+            },
+        ]);
     /// Reads an image or a file that an input of the thread carries.
-    ThreadBlobGet: GET "/threads/{id}/blobs/{hash}", Permission("thread.view"), query ThreadBlobGetQuery, none, raw, 200;
+    ThreadBlobGet: GET "/threads/{id}/blobs/{hash}", Permission("thread.view"), query ThreadBlobGetQuery, none, raw, 200,
+        operation Op::variants(&[
+            Variant {
+                name: "read",
+                selector: "inspect_deleted is not true",
+                facets: &[Facet::required(
+                    Read,
+                    &[Object(K::Thread)],
+                    Target::PermissionObject,
+                )],
+            },
+            Variant {
+                name: "inspect_deleted",
+                selector: "inspect_deleted is true; apply the stored thread restoration rule",
+                facets: &[Facet::required(
+                    Manage,
+                    &[Object(K::Thread)],
+                    Target::PermissionObject,
+                )],
+            },
+        ]);
     /// Reads a finished upload only for the caller who holds its upload authority.
-    UploadBlobGet: GET "/uploads/{hash}", User, query UploadBlobGetQuery, none, raw, 200;
+    UploadBlobGet: GET "/uploads/{hash}", User, query UploadBlobGetQuery, none, raw, 200,
+        operation Op::single(Read, &[Identity(I::Upload)], Target::Resolved("upload"));
     /// Exports a thread as a file, in Markdown or JSON, at a depth. It takes the thread's Export row, and reading the thread as well.
     ThreadExport: GET "/threads/{id}/export", Permission("thread.export"), query ThreadExportQuery, none, raw, 200;
     /// Says something to the agent. A repeated `client_id` of the same author answers `200` with the stored input instead of `201`.
-    ThreadInputCreate: POST "/threads/{id}/inputs", Rule("thread.interact on the thread, and the sender's own use of the model it runs on"), none, json ThreadInputCreateBody, json ThreadInputCreateReply, 201;
+    ThreadInputCreate: POST "/threads/{id}/inputs", Rule("thread.interact on the thread, and the sender's own use of the model it runs on"), none, json ThreadInputCreateBody, json ThreadInputCreateResponse, 201,
+        operation Op::receipt(&Op::facets(&[
+            Facet::required(Write, &[Object(K::Thread)], Target::Path("id")),
+            Facet::response_content(&[Object(K::Thread)], Target::Path("id")),
+            Facet::required(Manage, &[Object(K::Thread)], Target::ResolvedCollection("input_native_manage")),
+            Facet::required(Manage, &[Object(K::Provider)], Target::ResolvedCollection("input_bypass_providers")),
+            Facet::required(Manage, &[Object(K::Org)], Target::ResolvedCollection("input_bypass_orgs")),
+            Facet::required(Manage, &[Object(K::Project)], Target::ResolvedCollection("input_bypass_projects")),
+            Facet::required(Manage, &[Object(K::Topic)], Target::ResolvedCollection("input_bypass_topics")),
+            Facet::required(Manage, &[Object(K::Thread)], Target::ResolvedCollection("input_bypass_threads")),
+            Facet::required(Manage, &[Identity(I::System)], Target::ResolvedCollection("input_bypass_system")),
+            Facet::required(Read, &[Identity(I::Chat)], Target::ResolvedCollection("message_source_chats")),
+            Facet::required(Read, &[Object(K::Thread)], Target::ResolvedCollection("message_source_threads")),
+            Facet::required(Read, &[Object(K::Document)], Target::ResolvedCollection("message_source_documents")),
+            Facet::required(Read, &[Object(K::Environment)], Target::ResolvedCollection("message_source_environments")),
+            Facet::required(Read, &[Identity(I::Upload)], Target::ResolvedCollection("message_retained_uploads")),
+        ]));
     /// Lists the limits that stand in the way of a turn, and which of them the caller may let past.
     ThreadLimitsGet: GET "/threads/{id}/limits", Permission("thread.view"), query ThreadLimitsGetQuery, none, json ThreadLimits, 200;
     /// Lets a pending input past the limits named.
-    ThreadInputBypass: POST "/threads/{id}/inputs/{input_id}/bypass", Rule("thread.interact, and the bypass row for each limit named"), none, json LimitBypassRequest, json ThreadInput, 200;
+    ThreadInputBypass: POST "/threads/{id}/inputs/{input_id}/bypass", Rule("thread.interact, and the bypass row for each limit named"), none, json LimitBypassRequest, json ThreadInputMutationResponse, 200,
+        operation Op::receipt(&Op::facets(&[
+            Facet::required(Write, &[Object(K::Thread)], Target::Path("id")),
+            Facet::required(Manage, &[Object(K::Provider)], Target::ResolvedCollection("input_bypass_providers")),
+            Facet::required(Manage, &[Object(K::Org)], Target::ResolvedCollection("input_bypass_orgs")),
+            Facet::required(Manage, &[Object(K::Project)], Target::ResolvedCollection("input_bypass_projects")),
+            Facet::required(Manage, &[Object(K::Topic)], Target::ResolvedCollection("input_bypass_topics")),
+            Facet::required(Manage, &[Object(K::Thread)], Target::ResolvedCollection("input_bypass_threads")),
+            Facet::required(Manage, &[Identity(I::System)], Target::ResolvedCollection("input_bypass_system")),
+            Facet::response_content(&[Object(K::Thread)], Target::Path("id")),
+        ]));
     /// Runs a message that waits for somebody who may use the thread's model on the caller's own access.
-    ThreadInputRun: POST "/threads/{id}/inputs/{input_id}/run", Rule("thread.interact, and the caller's own use of the model, model and effort the thread runs on"), none, none, json ThreadInput, 200;
+    ThreadInputRun: POST "/threads/{id}/inputs/{input_id}/run", Rule("thread.interact, and the caller's own use of the model, model and effort the thread runs on"), none, none, json ThreadInputMutationResponse, 200,
+        operation Op::receipt(&Op::facets(&[
+            Facet::required(Write, &[Object(K::Thread)], Target::Path("id")),
+            Facet::required(Manage, &[Object(K::Thread)], Target::ResolvedCollection("input_native_manage")),
+            Facet::response_content(&[Object(K::Thread)], Target::Path("id")),
+        ]));
     /// Answers a proposed plan once, creating one attributed follow-up input.
-    ThreadPlanDecide: POST "/threads/{id}/plans/{item_id}/decision", Rule("the current permission for answering the thread's plans and the caller's own model use"), none, json ThreadPlanDecideBody, json ThreadPlanDecideReply, 200;
+    ThreadPlanDecide: POST "/threads/{id}/plans/{item_id}/decision", Rule("the current permission for answering the thread's plans and the caller's own model use"), none, json ThreadPlanDecideBody, json ThreadPlanDecideResponse, 200,
+        operation Op::receipt(&Op::variants(&[
+            Variant {
+                name: "plan_interact",
+                selector: "shared deciding_permission is thread.interact",
+                facets: &[
+                    Facet::required(Write, &[Object(K::Thread)], Target::Path("id")),
+                    Facet::response_content(&[Object(K::Thread)], Target::Path("id")),
+                ],
+            },
+            Variant {
+                name: "plan_manage",
+                selector: "shared deciding_permission is thread.manage",
+                facets: &[
+                    Facet::required(Manage, &[Object(K::Thread)], Target::Path("id")),
+                    Facet::response_content(&[Object(K::Thread)], Target::Path("id")),
+                ],
+            },
+        ]));
     /// Changes a pending input's delivery, place or words, preserving existing holds.
-    ThreadInputUpdate: PATCH "/threads/{id}/inputs/{input_id}", Rule("thread.interact; its content only by its author"), none, json ThreadInputUpdateBody, json ThreadInputUpdateReply, 200;
+    ThreadInputUpdate: PATCH "/threads/{id}/inputs/{input_id}", Rule("thread.interact; its content only by its author"), none, json ThreadInputUpdateBody, json ThreadInputUpdateReply, 200,
+        operation Op::facets(&[
+            Facet::required(Write, &[Object(K::Thread)], Target::Path("id")),
+            Facet::required(Manage, &[Object(K::Thread)], Target::ResolvedCollection("input_native_manage")),
+            Facet::required(Read, &[Identity(I::Chat)], Target::ResolvedCollection("message_source_chats")),
+            Facet::required(Read, &[Object(K::Thread)], Target::ResolvedCollection("message_source_threads")),
+            Facet::required(Read, &[Object(K::Document)], Target::ResolvedCollection("message_source_documents")),
+            Facet::required(Read, &[Object(K::Environment)], Target::ResolvedCollection("message_source_environments")),
+            Facet::required(Read, &[Identity(I::Upload)], Target::ResolvedCollection("message_retained_uploads")),
+            Facet::response_content(&[Object(K::Thread)], Target::Path("id")),
+        ]);
     /// Cancels a pending input, whoever's it is.
-    ThreadInputCancel: DELETE "/threads/{id}/inputs/{input_id}", Permission("thread.interact"), none, none, json ThreadInput, 200;
+    ThreadInputCancel: DELETE "/threads/{id}/inputs/{input_id}", Permission("thread.interact"), none, none, json ThreadInput, 200,
+        operation Op::returning(Write, &[Object(K::Thread)], Target::PermissionObject);
     /// Tries again to deliver the files that hold an input; the same input, held again if they still cannot go.
-    ThreadInputRetry: POST "/threads/{id}/inputs/{input_id}/retry", Rule("thread.interact, its author, and their own use of the current model"), none, none, json ThreadInput, 200;
+    ThreadInputRetry: POST "/threads/{id}/inputs/{input_id}/retry", Rule("thread.interact, its author, and their own use of the current model"), none, none, json ThreadInput, 200,
+        operation Op::facets(&[
+            Facet::required(Write, &[Object(K::Thread)], Target::Path("id")),
+            Facet::required(Manage, &[Object(K::Thread)], Target::ResolvedCollection("input_native_manage")),
+            Facet::response_content(&[Object(K::Thread)], Target::Path("id")),
+        ]);
     /// Stops a running turn, and holds what waits in the queue until somebody resumes it.
-    ThreadInterrupt: POST "/threads/{id}/interrupt", Permission("thread.interact"), none, json ThreadInterruptBody, json Turn, 200;
+    ThreadInterrupt: POST "/threads/{id}/interrupt", Permission("thread.interact"), none, json ThreadInterruptBody, json Turn, 200,
+        operation Op::returning(Write, &[Object(K::Thread)], Target::PermissionObject);
     /// Resumes what a person's Stop held, naming the revision of the queue that was seen.
-    ThreadQueueResume: POST "/threads/{id}/queue/resume", Permission("thread.interact"), none, json ThreadQueueResumeBody, json ThreadQueue, 200;
+    ThreadQueueResume: POST "/threads/{id}/queue/resume", Permission("thread.interact"), none, json ThreadQueueResumeBody, json ThreadQueue, 200,
+        operation Op::returning(Write, &[Object(K::Thread)], Target::PermissionObject);
     /// Uploads an image in one request.
-    UploadCreate: POST "/uploads", User, none, bytes, json UploadedBlob, 200;
+    UploadCreate: POST "/uploads", User, none, bytes, json UploadedBlob, 200,
+        operation Op::single(Write, &[Identity(I::Upload)], Target::CurrentAccount);
     /// Begins an upload in pieces.
-    UploadSessionCreate: POST "/uploads/sessions", User, none, json UploadSessionCreateBody, json UploadSessionCreateReply, 200;
+    UploadSessionCreate: POST "/uploads/sessions", User, none, json UploadSessionCreateBody, json UploadSessionCreateReply, 200,
+        operation Op::single(Write, &[Identity(I::Upload)], Target::CurrentAccount);
     /// Sends one piece of an upload, at the offset where the last one ended.
-    UploadSessionPut: PUT "/uploads/sessions/{upload_id}", Rule("the person who began the upload"), query UploadSessionPutQuery, bytes, json UploadSessionPutReply, 200;
+    UploadSessionPut: PUT "/uploads/sessions/{upload_id}", Rule("the person who began the upload"), query UploadSessionPutQuery, bytes, json UploadSessionPutReply, 200,
+        operation Op::single(Write, &[Identity(I::Upload)], Target::Path("upload_id"));
     /// Ends an upload in pieces; the server computes the hash.
-    UploadSessionComplete: POST "/uploads/sessions/{upload_id}/complete", Rule("the person who began the upload"), none, none, json UploadedBlob, 200;
+    UploadSessionComplete: POST "/uploads/sessions/{upload_id}/complete", Rule("the person who began the upload"), none, none, json UploadedBlob, 200,
+        operation Op::single(Write, &[Identity(I::Upload)], Target::Path("upload_id"));
     /// Cancels an unfinished upload owned by the caller and discards its partial bytes.
-    UploadSessionDelete: DELETE "/uploads/sessions/{upload_id}", Rule("the person who began the upload"), none, none, none, 204;
+    UploadSessionDelete: DELETE "/uploads/sessions/{upload_id}", Rule("the person who began the upload"), none, none, none, 204,
+        operation Op::single(Write, &[Identity(I::Upload)], Target::Path("upload_id"));
     /// Releases the caller's upload reference; saved sources keep their own bytes.
-    UploadBlobDelete: DELETE "/uploads/blobs/{hash}", User, query UploadBlobDeleteQuery, none, none, 204;
+    UploadBlobDelete: DELETE "/uploads/blobs/{hash}", User, query UploadBlobDeleteQuery, none, none, 204,
+        operation Op::single(Write, &[Identity(I::Upload)], Target::Resolved("upload"));
     /// Attaches a file to a thread, from a raw body with a filename header or from a finished upload.
-    ThreadAttachmentCreate: POST "/threads/{id}/attachments", Permission("thread.interact"), none, bytes, json ThreadAttachmentCreateReply, 200;
+    ThreadAttachmentCreate: POST "/threads/{id}/attachments", Permission("thread.interact"), none, bytes, json ThreadAttachmentCreateReply, 200,
+        operation Op::variants(&[
+            Variant {
+                name: "direct",
+                selector: "raw content supplied in this request",
+                facets: &[Facet::required(
+                    Write,
+                    &[Object(K::Thread)],
+                    Target::PermissionObject,
+                )],
+            },
+            Variant {
+                name: "from_upload",
+                selector: "the handler resolves the supplied finished-upload reference",
+                facets: &[
+                    Facet::required(
+                        Read,
+                        &[Identity(I::Upload)],
+                        Target::Resolved("attachment_source"),
+                    ),
+                    Facet::required(Write, &[Object(K::Thread)], Target::PermissionObject),
+                ],
+            },
+        ]);
     /// Queues a copy of the input of a turn that failed or was stopped.
-    ThreadTurnRetry: POST "/threads/{id}/turns/{turn_id}/retry", Rule("thread.interact, and the caller's own access as for an input"), none, json ThreadTurnRetryBody, json ThreadInputCreateReply, 201;
+    ThreadTurnRetry: POST "/threads/{id}/turns/{turn_id}/retry", Rule("thread.interact, and the caller's own access as for an input"), none, json ThreadTurnRetryBody, json ThreadInputCreateReply, 201,
+        operation Op::facets(&[
+            Facet::required(Read, &[Object(K::Thread)], Target::Path("id")),
+            Facet::required(Write, &[Object(K::Thread)], Target::Path("id")),
+            Facet::required(Manage, &[Object(K::Thread)], Target::ResolvedCollection("input_native_manage")),
+            Facet::required(Manage, &[Object(K::Provider)], Target::ResolvedCollection("input_bypass_providers")),
+            Facet::required(Manage, &[Object(K::Org)], Target::ResolvedCollection("input_bypass_orgs")),
+            Facet::required(Manage, &[Object(K::Project)], Target::ResolvedCollection("input_bypass_projects")),
+            Facet::required(Manage, &[Object(K::Topic)], Target::ResolvedCollection("input_bypass_topics")),
+            Facet::required(Manage, &[Object(K::Thread)], Target::ResolvedCollection("input_bypass_threads")),
+            Facet::required(Manage, &[Identity(I::System)], Target::ResolvedCollection("input_bypass_system")),
+            Facet::required(Read, &[Identity(I::Chat)], Target::ResolvedCollection("message_source_chats")),
+            Facet::required(Read, &[Object(K::Thread)], Target::ResolvedCollection("message_source_threads")),
+            Facet::required(Read, &[Object(K::Document)], Target::ResolvedCollection("message_source_documents")),
+            Facet::required(Read, &[Object(K::Environment)], Target::ResolvedCollection("message_source_environments")),
+            Facet::required(Read, &[Identity(I::Upload)], Target::ResolvedCollection("message_retained_uploads")),
+            Facet::response_content(&[Object(K::Thread)], Target::Path("id")),
+        ]);
     /// Pins an item.
-    ThreadItemPin: PUT "/threads/{id}/items/{item_id}/pin", Permission("thread.interact"), none, none, json Item, 200;
+    ThreadItemPin: PUT "/threads/{id}/items/{item_id}/pin", Permission("thread.interact"), none, none, json Item, 200,
+        operation Op::returning(Write, &[Object(K::Thread)], Target::PermissionObject);
     /// Takes the pin off an item.
-    ThreadItemUnpin: DELETE "/threads/{id}/items/{item_id}/pin", Permission("thread.interact"), none, none, json Item, 200;
+    ThreadItemUnpin: DELETE "/threads/{id}/items/{item_id}/pin", Permission("thread.interact"), none, none, json Item, 200,
+        operation Op::returning(Write, &[Object(K::Thread)], Target::PermissionObject);
     /// Reads the caller's draft for a thread, if they have one.
-    ThreadDraftGet: GET "/threads/{id}/draft", Permission("thread.interact"), none, none, json Option<Draft>, 200;
+    ThreadDraftGet: GET "/threads/{id}/draft", Permission("thread.interact"), none, none, json Option<Draft>, 200,
+        operation Op::single(Read, &[Object(K::Thread)], Target::PermissionObject);
     /// Saves the caller's draft for a thread.
-    ThreadDraftSet: PUT "/threads/{id}/draft", Permission("thread.interact"), none, json ThreadDraftSetBody, json Draft, 200;
+    ThreadDraftSet: PUT "/threads/{id}/draft", Permission("thread.interact"), none, json ThreadDraftSetBody, json Draft, 200,
+        operation Op::returning(Write, &[Object(K::Thread)], Target::PermissionObject);
     /// Deletes the caller's draft for a thread.
-    ThreadDraftDelete: DELETE "/threads/{id}/draft", Permission("thread.interact"), none, none, none, 204;
+    ThreadDraftDelete: DELETE "/threads/{id}/draft", Permission("thread.interact"), none, none, none, 204,
+        operation Op::returning(Write, &[Object(K::Thread)], Target::TypedPath { parameter: "id", kind: Object(K::Thread) });
     /// Starts a side thread from any turn of a thread, with one message queued in it.
-    ThreadSideCreate: POST "/threads/{id}/side", Rule("thread.interact, and the caller's own access as for an input"), none, json ThreadSideCreateBody, json ThreadSideCreateReply, 201;
+    ThreadSideCreate: POST "/threads/{id}/side", Rule("thread.interact, and the caller's own access as for an input"), none, json ThreadSideCreateBody, json ThreadSideCreateReply, 201,
+        operation Op::facets(&[
+            Facet::required(Read, &[Object(K::Thread)], Target::Path("id")),
+            Facet::required(Write, &[Object(K::Thread)], Target::Path("id")),
+            Facet::response_content(&[Object(K::Thread)], Target::Resolved("created_thread")),
+        ]);
     /// Lists the side threads of a thread, oldest first.
     ThreadSideList: GET "/threads/{id}/side", Permission("thread.view"), query ThreadSideListQuery, none, json Vec<Thread>, 200;
 }

@@ -115,15 +115,57 @@ fn changed_projection(
 
 /// Serves a page of current content the caller can read.
 pub(super) async fn search(ctx: Ctx, query: SearchListQuery, (): ()) -> ApiResult<Page<SearchHit>> {
+    let checked = validate(&query)?;
+    let mut tx = ctx.app.db.begin().await?;
+    rows::snapshot(&mut tx).await?;
+    let mut cancellation = rows::cancel_on_drop(&ctx.app.db, &mut tx).await?;
+    let principal = authorization::principal(&ctx, &mut tx).await?;
+    let prepared = prepare(&ctx, &mut tx, &principal, &query, checked).await?;
+    let items = hydrate(
+        &mut tx,
+        &principal,
+        &prepared.hits,
+        &prepared.query,
+        ctx.now,
+    )
+    .await?;
+    cancellation.disarm();
+    tx.commit().await.map_err(orch_db::DbError::from)?;
+    Ok(Page {
+        items,
+        next_cursor: prepared.next_cursor,
+    })
+}
+
+/// Native matched rows and their original continuation, before payload/reference hydration.
+pub(super) struct PreparedContent {
+    pub hits: Vec<rows::HitRow>,
+    pub next_cursor: Option<String>,
+    pub query: SearchListQuery,
+}
+impl PreparedContent {
+    fn empty(query: SearchListQuery) -> Self {
+        Self {
+            hits: Vec::new(),
+            next_cursor: None,
+            query,
+        }
+    }
+}
+pub(super) struct ValidatedContent {
+    length: u32,
+    requested: Vec<String>,
+    continued: Option<Continuation>,
+    limit: u32,
+}
+pub(super) fn validate(query: &SearchListQuery) -> ApiResult<ValidatedContent> {
     if query.regex == Some(true) {
         return Err(invalid("regex", "use the streamed search for expressions"));
     }
-    let text = query.q.trim();
-    let length = u32::try_from(text.chars().count()).unwrap_or(u32::MAX);
-    if length < SEARCH_QUERY_MIN_CHARS {
+    if u32::try_from(query.q.trim().chars().count()).unwrap_or(u32::MAX) < SEARCH_QUERY_MIN_CHARS {
         return Err(invalid("q", "needs at least two characters"));
     }
-    if rows::Query::parse(text).terms().is_empty() {
+    if rows::Query::parse(query.q.trim()).terms().is_empty() {
         return Err(invalid("q", "give at least one word or quoted phrase"));
     }
     if query
@@ -138,20 +180,35 @@ pub(super) async fn search(ctx: Ctx, query: SearchListQuery, (): ()) -> ApiResul
     if query.chat_id.is_some() && query.document_id.is_some() {
         return Err(invalid("document_id", "cannot be combined with a chat"));
     }
-    let requested = kinds(query.kinds.as_deref(), CONTENT_KINDS)?;
-    let continued = cursor(&query)?;
+    Ok(ValidatedContent {
+        length: u32::try_from(query.q.trim().chars().count()).unwrap_or(u32::MAX),
+        requested: kinds(query.kinds.as_deref(), CONTENT_KINDS)?,
+        continued: cursor(query)?,
+        limit: PageQuery {
+            limit: query.limit,
+            cursor: None,
+        }
+        .limit(),
+    })
+}
+/// The original lexical selector, shared by the page and exact-history stream source.
+pub(super) async fn prepare(
+    ctx: &Ctx,
+    conn: &mut Conn,
+    principal: &Principal,
+    query: &SearchListQuery,
+    checked: ValidatedContent,
+) -> ApiResult<PreparedContent> {
+    let text = query.q.trim();
+    let ValidatedContent {
+        length,
+        requested,
+        continued,
+        limit,
+    } = checked;
     let after = continued.as_ref().map(|continued| &continued.position);
-    let limit = PageQuery {
-        limit: query.limit,
-        cursor: None,
-    }
-    .limit();
-    let mut tx = ctx.app.db.begin().await?;
-    rows::snapshot(&mut tx).await?;
-    let mut cancellation = rows::cancel_on_drop(&ctx.app.db, &mut tx).await?;
-    let principal = authorization::principal(&ctx, &mut tx).await?;
     let scoped = match query.scope {
-        Some(id) => rows::place(&mut tx, id).await?,
+        Some(id) => rows::place(conn, id).await?,
         None => None,
     };
     let readable_scope = if length < SEARCH_INDEXED_MIN_CHARS {
@@ -159,7 +216,7 @@ pub(super) async fn search(ctx: Ctx, query: SearchListQuery, (): ()) -> ApiResul
             .as_ref()
             .is_some_and(|node| matches!(node.kind.as_str(), "topic" | "thread"));
         if let Some(node) = scoped.as_ref().filter(|_| eligible) {
-            view::refs(&mut tx, &principal, &[node.id], Policy::default())
+            view::refs(conn, principal, &[node.id], Policy::default())
                 .await?
                 .get(&node.id)
                 .is_some_and(|node| !node.redacted)
@@ -185,7 +242,7 @@ pub(super) async fn search(ctx: Ctx, query: SearchListQuery, (): ()) -> ApiResul
         let readable = if length < SEARCH_INDEXED_MIN_CHARS {
             readable_scope
         } else {
-            view::refs(&mut tx, &principal, &[thread], Policy::default())
+            view::refs(conn, principal, &[thread], Policy::default())
                 .await?
                 .get(&thread)
                 .is_some_and(|node| !node.redacted)
@@ -200,20 +257,12 @@ pub(super) async fn search(ctx: Ctx, query: SearchListQuery, (): ()) -> ApiResul
                     "needs three characters unless the scope is a readable topic or thread",
                 ));
             }
-            cancellation.disarm();
-            tx.commit().await.map_err(orch_db::DbError::from)?;
-            return Ok(Page {
-                items: Vec::new(),
-                next_cursor: None,
-            });
+            return Ok(PreparedContent::empty(query.clone()));
         }
-        let scope = orch_db::queries::thread_continuations::projection(
-            &mut tx,
-            thread,
-            query.continuation_id,
-        )
-        .await?
-        .ok_or_else(ApiError::not_found)?;
+        let scope =
+            orch_db::queries::thread_continuations::projection(conn, thread, query.continuation_id)
+                .await?
+                .ok_or_else(ApiError::not_found)?;
         let dto = orch_engine::continuations::projection::scope(&scope);
         if !scope.accepts_cursor(false, query.projection_revision) {
             return Err(changed_projection(&dto));
@@ -244,11 +293,11 @@ pub(super) async fn search(ctx: Ctx, query: SearchListQuery, (): ()) -> ApiResul
     }
     // Exact selections need only their own metadata; they never enumerate an installation to choose a projection root.
     let selected_doc = match query.document_id {
-        Some(id) => documents::get(&mut tx, id).await?,
+        Some(id) => documents::get(conn, id).await?,
         None => None,
     };
     let selected_chat = match query.chat_id {
-        Some(id) => chats::chat(&mut tx, id).await?,
+        Some(id) => chats::chat(conn, id).await?,
         None => None,
     };
     if query.document_id.is_some() && selected_doc.is_none()
@@ -260,57 +309,47 @@ pub(super) async fn search(ctx: Ctx, query: SearchListQuery, (): ()) -> ApiResul
                 "needs three characters unless a readable conversation or document is selected",
             ));
         }
-        cancellation.disarm();
-        tx.commit().await.map_err(orch_db::DbError::from)?;
-        return Ok(Page {
-            items: Vec::new(),
-            next_cursor: None,
-        });
+        return Ok(PreparedContent::empty(query.clone()));
     }
     // The two-character exception checks at most the exact chosen objects; all result access is decided by SQL below.
     if length < SEARCH_INDEXED_MIN_CHARS && !readable_scope {
         let mut readable = false;
         if let Some(doc) = &selected_doc {
             let live_home =
-                query.scope.is_none() || rows::place(&mut tx, doc.node_id).await?.is_some();
-            if live_home && rows::within(&mut tx, doc.node_id, query.scope).await? {
-                readable = orch_authz::documents::listed(
-                    &mut tx,
-                    &principal,
-                    &[doc.id],
-                    Policy::default(),
-                )
-                .await
-                .map_err(ApiError::internal)?
-                .iter()
-                .any(|held| {
-                    !held.document.deleted
-                        && held.holds(Permission::DocView)
-                        && (!query.participating.unwrap_or(false) || held.participating)
-                });
+                query.scope.is_none() || rows::place(conn, doc.node_id).await?.is_some();
+            if live_home && rows::within(conn, doc.node_id, query.scope).await? {
+                readable =
+                    orch_authz::documents::listed(conn, principal, &[doc.id], Policy::default())
+                        .await
+                        .map_err(ApiError::internal)?
+                        .iter()
+                        .any(|held| {
+                            !held.document.deleted
+                                && held.holds(Permission::DocView)
+                                && (!query.participating.unwrap_or(false) || held.participating)
+                        });
             }
         }
         if let Some(chat) = &selected_chat {
             let within = match chat.node_id {
                 Some(node) => {
-                    rows::place(&mut tx, node).await?.is_some()
-                        && rows::within(&mut tx, node, query.scope).await?
+                    rows::place(conn, node).await?.is_some()
+                        && rows::within(conn, node, query.scope).await?
                 }
                 None => {
                     (query.scope.is_none() || query.scope == Some(chat.org_id))
-                        && rows::within(&mut tx, chat.org_id, None).await?
+                        && rows::within(conn, chat.org_id, None).await?
                 }
             };
             if within {
-                readable |= orch_authz::chats::listed_access(
-                    &mut tx,
-                    &principal,
-                    std::slice::from_ref(chat),
-                )
-                .await
-                .map_err(ApiError::internal)?
-                .get(&chat.id)
-                .is_some_and(|held| !query.participating.unwrap_or(false) || held.participating);
+                readable |=
+                    orch_authz::chats::listed_access(conn, principal, std::slice::from_ref(chat))
+                        .await
+                        .map_err(ApiError::internal)?
+                        .get(&chat.id)
+                        .is_some_and(|held| {
+                            !query.participating.unwrap_or(false) || held.participating
+                        });
             }
         }
         if !readable {
@@ -328,7 +367,7 @@ pub(super) async fn search(ctx: Ctx, query: SearchListQuery, (): ()) -> ApiResul
                 .as_ref()
                 .map(|chat| chat.node_id.unwrap_or(chat.org_id))
         });
-    let advanced = super::advanced_selection(&mut tx, &principal, &query, ctx.now).await?;
+    let advanced = super::advanced_selection(conn, principal, &query, ctx.now).await?;
     let candidate_grants = serde_json::json!({"search_advanced": advanced});
     let item_kinds: Vec<String> = requested
         .iter()
@@ -371,11 +410,11 @@ pub(super) async fn search(ctx: Ctx, query: SearchListQuery, (): ()) -> ApiResul
     // needs (`search::items`): a long history is never matched whole. Best matches rank the newest matches
     // up to the word search's recent sample, the same pool on every page of one search.
     let place = query.scope.map_or(Place::System, Place::Node);
-    let recent = get::<i64>(&mut tx, place, keys::SEARCH_WORD_RECENT_CANDIDATES)
+    let recent = get::<i64>(conn, place, keys::SEARCH_WORD_RECENT_CANDIDATES)
         .await
         .map_err(ApiError::internal)?
         .ok_or_else(|| ApiError::internal("recent word setting missing"))?;
-    let probe = get::<i64>(&mut tx, place, keys::SEARCH_WORD_PROBE_CANDIDATES)
+    let probe = get::<i64>(conn, place, keys::SEARCH_WORD_PROBE_CANDIDATES)
         .await
         .map_err(ApiError::internal)?
         .ok_or_else(|| ApiError::internal("word probe setting missing"))?;
@@ -400,7 +439,7 @@ pub(super) async fn search(ctx: Ctx, query: SearchListQuery, (): ()) -> ApiResul
             .filter(|_| !base.relevance)
             .map(|cursor| (cursor.at, cursor.id));
         let items = rows::items::newest(
-            &mut tx,
+            conn,
             &rows::Content {
                 after: page_after.as_ref(),
                 ..base
@@ -410,7 +449,7 @@ pub(super) async fn search(ctx: Ctx, query: SearchListQuery, (): ()) -> ApiResul
         )
         .await?;
         let raw = rows::content_candidates(
-            &mut tx,
+            conn,
             &rows::Content {
                 after: page_after.as_ref(),
                 items: Some(&items),
@@ -425,8 +464,8 @@ pub(super) async fn search(ctx: Ctx, query: SearchListQuery, (): ()) -> ApiResul
         scan = raw.last().map(rows::HitRow::cursor);
         let selected = rows::CandidateSet::from_content(&raw);
         let projection = orch_authz::everything::project_search(
-            &mut tx,
-            &principal,
+            conn,
+            principal,
             parent,
             &selected.documents,
             &selected.chats,
@@ -439,7 +478,7 @@ pub(super) async fn search(ctx: Ctx, query: SearchListQuery, (): ()) -> ApiResul
         let remaining =
             i64::from(limit) + 1 - i64::try_from(hits.len()).map_err(ApiError::internal)?;
         let found = rows::content(
-            &mut tx,
+            conn,
             &rows::Content {
                 selected: Some(&selected),
                 member_roots: &projection.member_roots,
@@ -466,10 +505,11 @@ pub(super) async fn search(ctx: Ctx, query: SearchListQuery, (): ()) -> ApiResul
     } else {
         None
     };
-    let items = hydrate(&mut tx, &principal, &hits, &query, ctx.now).await?;
-    cancellation.disarm();
-    tx.commit().await.map_err(orch_db::DbError::from)?;
-    Ok(Page { items, next_cursor })
+    Ok(PreparedContent {
+        hits,
+        next_cursor,
+        query: query.clone(),
+    })
 }
 
 /// The hits of a page as they are answered, with what each names read in the same snapshot.
@@ -479,6 +519,16 @@ pub(super) async fn hydrate(
     hits: &[rows::HitRow],
     query: &SearchListQuery,
     now: chrono::DateTime<chrono::Utc>,
+) -> ApiResult<Vec<SearchHit>> {
+    hydrate_with_names(conn, principal, hits, query, now, None).await
+}
+pub(super) async fn hydrate_with_names(
+    conn: &mut Conn,
+    principal: &Principal,
+    hits: &[rows::HitRow],
+    query: &SearchListQuery,
+    now: chrono::DateTime<chrono::Utc>,
+    bounds: Option<&crate::routes::access::page::NameBounds>,
 ) -> ApiResult<Vec<SearchHit>> {
     if hits.is_empty() {
         return Ok(Vec::new());
@@ -510,7 +560,10 @@ pub(super) async fn hydrate(
         .map(|held| (held.document.id, held))
         .collect();
     tracing::debug!(target: "orch::search::timing", phase="document_access", elapsed_ms=phase.elapsed().as_secs_f64()*1000., documents=doc_ids.len());
-    assemble(conn, principal, hits, &chat_rows, &listed, query, now).await
+    assemble(
+        conn, principal, hits, &chat_rows, &listed, query, now, bounds,
+    )
+    .await
 }
 
 async fn assemble(
@@ -521,6 +574,7 @@ async fn assemble(
     listed: &HashMap<Id, orch_authz::documents::Listed>,
     query: &SearchListQuery,
     now: chrono::DateTime<chrono::Utc>,
+    bounds: Option<&crate::routes::access::page::NameBounds>,
 ) -> ApiResult<Vec<SearchHit>> {
     let blocks: Vec<_> = hits.iter().filter_map(|hit| hit.block_id).collect();
     let headings: HashSet<Id> = if blocks.is_empty() {
@@ -578,9 +632,22 @@ async fn assemble(
             wanted.node(thread);
         }
     }
-    let authors =
-        crate::routes::documents::build::Cast::load(conn, principal, wanted, Policy::default())
-            .await?;
+    let allowed = bounds.filter(|bounds| bounds.limited).map(|bounds| {
+        bounds
+            .nodes
+            .iter()
+            .copied()
+            .map(crate::routes::documents::build::WrittenLabelSource::Node)
+            .collect()
+    });
+    let authors = crate::routes::documents::build::Cast::load_for_labels(
+        conn,
+        principal,
+        wanted,
+        Policy::default(),
+        allowed.as_ref(),
+    )
+    .await?;
     let matching_files: HashMap<_, _> = matched
         .into_iter()
         .map(|matched| {
@@ -656,7 +723,7 @@ async fn assemble(
         .collect();
     let docs = documents::get_many(conn, &doc_ids).await?;
     let phase = std::time::Instant::now();
-    let docs = document_refs(conn, principal, &docs, listed, now).await?;
+    let docs = document_refs(conn, principal, &docs, listed, now, bounds).await?;
     tracing::debug!(target: "orch::search::timing", phase="document_metadata", elapsed_ms=phase.elapsed().as_secs_f64()*1000., documents=docs.len());
     let mut paths: Vec<Id> = item_rows.iter().map(|item| item.thread_id).collect();
     paths.extend(
@@ -670,8 +737,14 @@ async fn assemble(
     );
     paths.extend(docs.values().map(|doc| doc.node.id));
     let phase = std::time::Instant::now();
-    let (ways, thread_markers) =
-        view::ways_with_admin(conn, principal, &paths, Policy::default()).await?;
+    let (ways, thread_markers) = match bounds.filter(|bounds| bounds.limited) {
+        Some(bounds) => (
+            view::ways_with_name_sources(conn, principal, &paths, Policy::default(), &bounds.nodes)
+                .await?,
+            HashMap::new(),
+        ),
+        None => view::ways_with_admin(conn, principal, &paths, Policy::default()).await?,
+    };
     tracing::debug!(target: "orch::search::timing", phase="search_paths", elapsed_ms=phase.elapsed().as_secs_f64()*1000., paths=paths.len());
     let chat_rows: Vec<_> = hits
         .iter()
@@ -685,7 +758,11 @@ async fn assemble(
         .iter()
         .filter_map(|(id, access)| access.admin_access.map(|place| (*id, place)))
         .collect();
-    let chat_markers = view::named_admin_access(conn, principal, &chat_places).await?;
+    let chat_markers = if bounds.is_some_and(|bounds| bounds.limited) {
+        HashMap::new()
+    } else {
+        view::named_admin_access(conn, principal, &chat_places).await?
+    };
     let mut messages: HashMap<Id, ChatMessage> = HashMap::new();
     for chat in hits
         .iter()
@@ -890,6 +967,7 @@ async fn document_refs(
     docs: &[documents::DocumentRow],
     listed: &HashMap<Id, orch_authz::documents::Listed>,
     now: chrono::DateTime<chrono::Utc>,
+    bounds: Option<&crate::routes::access::page::NameBounds>,
 ) -> ApiResult<HashMap<Id, DocumentRef>> {
     if docs.is_empty() {
         return Ok(HashMap::new());
@@ -911,12 +989,19 @@ async fn document_refs(
         .flat_map(|doc| std::iter::once(doc.node_id).chain(doc.created_by_thread))
         .chain(agents.values().map(|(thread, _)| *thread))
         .collect();
-    let nodes = view::refs(conn, principal, &node_ids, Policy::default()).await?;
+    let nodes = match bounds.filter(|bounds| bounds.limited) {
+        Some(bounds) => bounds.refs(conn, principal, &node_ids).await?,
+        None => view::refs(conn, principal, &node_ids, Policy::default()).await?,
+    };
     let marker_places: HashMap<_, _> = listed
         .iter()
         .filter_map(|(id, held)| held.admin_access.map(|place| (*id, place)))
         .collect();
-    let admin_markers = view::named_admin_access(conn, principal, &marker_places).await?;
+    let admin_markers = if bounds.is_some_and(|bounds| bounds.limited) {
+        HashMap::new()
+    } else {
+        view::named_admin_access(conn, principal, &marker_places).await?
+    };
     let agent = |thread: Id, name: &str| {
         nodes.get(&thread).cloned().map(|thread| {
             Author::Agent(AuthorAgent {

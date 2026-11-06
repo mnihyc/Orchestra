@@ -94,6 +94,18 @@ async function dismissTooltips(page: Page, selector?: string): Promise<{ x: numb
   return { x: state.x, y: state.y };
 }
 
+/** A preceding full-value probe may leave a focused name's inspection card open.
+ * Close only identified information layers before starting another independent input walk.
+ */
+async function dismissPageDisclosures(page: Page): Promise<void> {
+  const selector = ':is([role="tooltip"],[data-inspection-card],[data-reference-card]):visible';
+  const layers = page.locator(selector);
+  const open = page.locator(`${selector}:not([data-state="closed"],[data-state="closed"] *)`);
+  const limit = await layers.count() + 1;
+  for (let attempt = 0; attempt < limit && await open.count() > 0; attempt += 1) await pressLayoutKey(page, 'Escape');
+  await expect(layers).toHaveCount(0);
+}
+
 /** The measurement proves the actual pointer hit after its two render frames. Repeated menu probes
  * need no separate stabilization wait before that checked native pointer action.
  */
@@ -116,14 +128,17 @@ export async function duplicateAccessibleNames(page: Page): Promise<LayoutFault[
     // shared floating content identify that boundary; no word grants an exemption.
     // Existing row/landmark context still rejects duplicate controls within a layer.
     const layers = new Map<number, number>();
-    if (await page.locator('[data-content-role],[role="dialog"],[role="alertdialog"],[role="menu"],dialog[open],.floating-layer').count() > 0) {
+    const timelineRows = new Map<number, number>();
+    if (await page.locator('[data-content-role],[data-timeline-row],[role="dialog"],[role="alertdialog"],[role="menu"],dialog[open],.floating-layer').count() > 0) {
       const dom = await session.send('DOM.getDocument', { depth: -1, pierce: true });
       type DomNode = typeof dom.root;
-      function visit(node: DomNode, source = false, documentRoot = 0, block = 0, toolbar = false, control = false, layer = 0): void {
+      function visit(node: DomNode, source = false, documentRoot = 0, block = 0, toolbar = false, control = false, layer = 0, timelineRow = 0): void {
         const attrs = new Map<string, string>();
         for (let index = 0; index < (node.attributes?.length ?? 0); index += 2) attrs.set(node.attributes![index]!, node.attributes![index + 1]!);
         if (['dialog', 'alertdialog', 'menu'].includes(attrs.get('role') ?? '') || node.nodeName === 'DIALOG' && attrs.has('open') || (attrs.get('class') ?? '').split(/\s+/).includes('floating-layer')) layer = node.backendNodeId;
         if (layer !== 0) layers.set(node.backendNodeId, layer);
+        if (attrs.has('data-timeline-row')) timelineRow = node.backendNodeId;
+        if (timelineRow !== 0) timelineRows.set(node.backendNodeId, timelineRow);
         const content = attrs.get('data-content-role');
         if (content === 'source' || content === 'document') { source = content === 'source'; documentRoot = content === 'document' ? node.backendNodeId : 0; block = documentRoot; toolbar = false; control = false; }
         else {
@@ -133,7 +148,7 @@ export async function duplicateAccessibleNames(page: Page): Promise<LayoutFault[
         }
         if (documentRoot !== 0 && ['block', 'leaf'].includes(attrs.get('data-ob') ?? '')) block = node.backendNodeId;
         if ((/^H[1-6]$/.test(node.nodeName) || attrs.get('role') === 'heading') && !control && !toolbar && (source || documentRoot !== 0)) authored.set(node.backendNodeId, { source, block });
-        for (const child of [...(node.children ?? []), ...(node.shadowRoots ?? [])]) visit(child, source, documentRoot, block, toolbar, control, layer);
+        for (const child of [...(node.children ?? []), ...(node.shadowRoots ?? [])]) visit(child, source, documentRoot, block, toolbar, control, layer, timelineRow);
       }
       visit(dom.root);
     }
@@ -166,8 +181,12 @@ export async function duplicateAccessibleNames(page: Page): Promise<LayoutFault[
       while (parent !== undefined && !landmarks.has(word(parent.role?.value)) && !rows.has(word(parent.role?.value))) parent = parent.parentId === undefined ? undefined : byId.get(parent.parentId);
       const landmark = content !== undefined ? `authored block ${content.block}` : parent === undefined ? 'document' : `${word(parent.role?.value)} ${word(parent.name?.value)} [AX ${parent.nodeId}]`;
       const layer = node.backendDOMNodeId === undefined ? 0 : layers.get(node.backendDOMNodeId) ?? 0;
-      const key = `${layer}:${content === undefined ? parent?.nodeId ?? 'document' : `authored:${content.block}`}:${name}`;
-      const group: NameGroup = grouped.get(key) ?? { name, landmark, nodes: [] };
+      const timelineRow = node.backendDOMNodeId === undefined ? undefined : timelineRows.get(node.backendDOMNodeId);
+      // The timeline's actual message rows carry the same repeated-row context as
+      // the DOM rules. An author's name may recur across messages, not twice in one.
+      const context = content !== undefined ? `authored:${content.block}` : timelineRow !== undefined ? `timeline:${timelineRow}` : parent?.nodeId ?? 'document';
+      const key = `${layer}:${context}:${name}`;
+      const group: NameGroup = grouped.get(key) ?? { name, landmark: timelineRow === undefined ? landmark : `timeline row ${timelineRow}`, nodes: [] };
       // A heading containing its own link/button is one rendered occurrence, not two controls.
       if (group.nodes.some((prior) => contains(node.nodeId, prior))) continue;
       group.nodes = group.nodes.filter((prior) => !contains(prior.nodeId, node));
@@ -191,9 +210,12 @@ export async function screenReady(page: Page, locale: string, theme: string): Pr
   });
 }
 
-export async function auditPage(page: Page): Promise<LayoutResult> {
-  const result = await page.evaluate(inspectLayout, LAYOUT_INPUT);
+export async function auditPage(page: Page, cutWithin?: string): Promise<LayoutResult> {
+  const result = await page.evaluate(inspectLayout, { ...LAYOUT_INPUT, ...(cutWithin === undefined ? {} : { cutWithin }) });
   result.faults.push(...await duplicateAccessibleNames(page));
+  // The settled page already revealed every underlying value. A menu pass still
+  // measures all rules, but only exercises disclosures belonging to its open layer.
+  // Hovering the page behind a picker repeats tooltip delays and can close the picker.
   for (const cut of result.cuts) {
     try {
       await dismissTooltips(page);
@@ -230,11 +252,16 @@ export async function auditPage(page: Page): Promise<LayoutResult> {
 export async function auditOpenMenus(page: Page, selectors: string[]): Promise<LayoutFault[]> {
   const faults: LayoutFault[] = [];
   for (const selector of selectors) {
+    await dismissPageDisclosures(page);
     const trigger = page.locator(selector);
     if (!await dismissTooltips(page, selector)) continue;
-    await trigger.click();
+    // A tab's click selects it; its announced context menu has a separate keyboard entrance.
+    if (await trigger.getAttribute('role') === 'tab') {
+      await trigger.focus();
+      await trigger.press('Shift+F10');
+    } else await trigger.click();
     await expect(page.locator('[role="menu"]:visible,[role="listbox"]:visible').first()).toBeVisible();
-    faults.push(...(await auditPage(page)).faults);
+    faults.push(...(await auditPage(page, '[role="menu"],[role="listbox"],[data-inspection-card],[data-reference-card]')).faults);
     faults.push(...await auditHighlightedOptions(page));
     // Close only the open pickers, including a submenu exposed by hover. An extra Escape may
     // dismiss a tooltip; never keep sending Escape into the underlying dialog after they close.
@@ -274,6 +301,7 @@ export async function auditHighlightedOptions(page: Page): Promise<LayoutFault[]
 
 /** CSS opacity on a row's resting actions cannot hide a misplaced icon from the suite. */
 export async function auditHoverIcons(page: Page, selectors: string[]): Promise<LayoutFault[]> {
+  await dismissPageDisclosures(page);
   await page.evaluate(trackLayoutPointer);
   const inputs = await installLayoutProbe(page);
   const first = await measureInBrowser(page, prepareLayoutPointer, selectors);

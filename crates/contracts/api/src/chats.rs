@@ -9,6 +9,14 @@
 //! its feed. [`ForwardCreate`] copies the messages somebody selected, or
 //! the items of a thread, into chats and into the threads of agents.
 
+use crate::operations::{
+    FacetSpec as Facet, OperationSpec as Op, TargetResolver as Target, VariantSpec as Variant,
+};
+use orch_access_contract::key_scope::KeyAction::{Manage, Read, Write};
+use orch_access_contract::key_scope::KeyIdentityKind as I;
+use orch_access_contract::key_scope::KeyTargetKind::{Identity, Object};
+use orch_access_contract::permissions::ObjectKind as K;
+
 use orch_types::{Hash, Id, Seq, Time};
 use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
@@ -442,12 +450,57 @@ pub struct NodeChatScope {
 }
 
 /// The readable scopes of a place and the selected chat's first window.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, JsonSchema)]
 pub struct NodeChatOpening {
     /// Only scopes whose place and chat the current caller may read.
     pub scopes: Vec<NodeChatScope>,
     /// The selected scope; absent when none is readable.
     pub opening: Option<ChatOpening>,
+    /// An explicitly requested Defaults projection; absent for ordinary chat readers.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub defaults: Option<NodeDefaultsOpening>,
+}
+
+/// The existing native reads used by a place's Defaults editor, independently admitted.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, JsonSchema)]
+pub struct NodeDefaultsOpening {
+    /// The same current node projection that the native node reader supplies.
+    pub node: crate::nodes::Node,
+    /// The native registry, or its ordinary refusal/failure.
+    pub registry: Option<Vec<crate::settings::SettingDef>>,
+    /// The registry's native problem, never a successful empty registry.
+    pub registry_problem: Option<crate::common::Problem>,
+    /// The native error's Retry-After seconds, when that reader supplied them.
+    pub registry_retry_after: Option<u64>,
+    /// The native resolved settings, including writability, inheritance and locks.
+    pub settings: Option<Vec<crate::settings::ResolvedSetting>>,
+    /// The settings reader's native problem, independent from the chat.
+    pub settings_problem: Option<crate::common::Problem>,
+    /// The native error's Retry-After seconds, when that reader supplied them.
+    pub settings_retry_after: Option<u64>,
+    /// Only configured secret names and their ordinary redacted provenance, never values.
+    pub secrets: Option<Vec<crate::settings::SecretInfo>>,
+    /// The secret-name reader's native problem; it supplies no secret value.
+    pub secrets_problem: Option<crate::common::Problem>,
+    /// The native error's Retry-After seconds, when that reader supplied them.
+    pub secrets_retry_after: Option<u64>,
+    /// Only currently selected provider references needed by the requested editor.
+    pub providers: Vec<NodeDefaultsProvider>,
+}
+
+/// One configured provider read; the containing node's permission never authorizes it.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, JsonSchema)]
+pub struct NodeDefaultsProvider {
+    /// The actual resolved setting whose selected value named this provider.
+    pub setting: String,
+    /// The configured identity, not one supplied separately by the caller.
+    pub id: Id,
+    /// The native permitted provider projection.
+    pub provider: Option<crate::resources::Provider>,
+    /// The native provider refusal/failure, independent from the containing node.
+    pub problem: Option<crate::common::Problem>,
+    /// The native error's Retry-After seconds, when supplied.
+    pub retry_after: Option<u64>,
 }
 
 /// Selects a familiar chat scope without exposing any unread conversation.
@@ -463,6 +516,18 @@ pub struct NodeChatOpeningGetQuery {
     /// The initial message page size, with the same bounds as chat sync.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub limit: Option<u32>,
+    /// Include the existing Defaults reads when that editor and this chat are both visible.
+    #[serde(default, skip_serializing_if = "crate::common::is_false")]
+    pub defaults: bool,
+    /// The Defaults view currently mounts its configured secret-name section.
+    #[serde(default, skip_serializing_if = "crate::common::is_false")]
+    pub secret_names: bool,
+    /// The Defaults view currently mounts a name reader for its ordinary provider default.
+    #[serde(default, skip_serializing_if = "crate::common::is_false")]
+    pub default_provider_name: bool,
+    /// The Defaults view currently mounts a name reader for its effective embeddings provider.
+    #[serde(default, skip_serializing_if = "crate::common::is_false")]
+    pub embeddings_provider_name: bool,
 }
 
 /// A message that was begun in a chat's composer and not sent. Drafts are private to their
@@ -545,6 +610,26 @@ pub struct ChatUpdateBody {
     pub name: Option<String>,
 }
 
+/// A committed group change without reading its existing roster, preview or access description.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+pub struct ChatChangeReceipt {
+    /// This response acknowledges a change without its full Chat projection.
+    pub projection: crate::common::ReceiptProjection,
+    /// The actual group that accepted the change.
+    pub chat_id: Id,
+}
+
+crate::common::full_or_receipt! {
+    /// The ordinary group reply, or the same change's content-free acknowledgement.
+    #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+    pub enum ChatChangeResponse {
+        /// The unchanged ordinary readable Chat.
+        Full(Chat),
+        /// The change committed without existing content.
+        Receipt(ChatChangeReceipt),
+    }
+}
+
 /// What to read of a chat's messages from a sync.
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
 #[serde(deny_unknown_fields)]
@@ -620,6 +705,41 @@ pub struct ChatMessageCreateReply {
     pub seq: Seq,
 }
 
+/// A committed operation acknowledgement without pre-existing resource content.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+pub struct ChatMessageReceipt {
+    /// The response is an acknowledgement rather than a full resource projection.
+    pub projection: crate::common::ReceiptProjection,
+    /// The chat that accepted the message.
+    pub chat_id: Id,
+    /// The newly accepted or previously accepted message.
+    pub message_id: Id,
+    /// The chat sequence acknowledged by this operation.
+    pub seq: Seq,
+}
+
+crate::common::full_or_receipt! {
+    /// The existing full reply, or its explicit restricted receipt.
+    #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+    pub enum ChatMessageCreateResponse {
+        /// The full ordinary response.
+        Full(ChatMessageCreateReply),
+        /// A successful outcome with no existing resource content.
+        Receipt(ChatMessageReceipt),
+    }
+}
+
+crate::common::full_or_receipt! {
+    /// The unchanged full mutation reply, or its committed acknowledgement without chat content.
+    #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+    pub enum ChatMessageMutationResponse {
+        /// The ordinary readable message, with the existing browser wire shape.
+        Full(ChatMessage),
+        /// The change committed, without a full message projection.
+        Receipt(ChatMessageReceipt),
+    }
+}
+
 /// Edits a message.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
 #[serde(deny_unknown_fields)]
@@ -672,6 +792,37 @@ pub struct ChatStateSetBody {
     /// Whether the chat is off the caller's list until its next message.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub hidden: Option<bool>,
+}
+
+/// A committed change to the caller's own chat state or draft, without existing content.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+pub struct ChatPersonalReceipt {
+    /// This response acknowledges the change without its readable projection.
+    pub projection: crate::common::ReceiptProjection,
+    /// The chat in which the caller's change was accepted.
+    pub chat_id: Id,
+}
+
+crate::common::full_or_receipt! {
+    /// The ordinary state reply, or acknowledgement without private counters and defaults.
+    #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+    pub enum ChatStateSetResponse {
+        /// The caller's current ordinary chat state.
+        Full(ChatState),
+        /// The change committed without readable state.
+        Receipt(ChatPersonalReceipt),
+    }
+}
+
+crate::common::full_or_receipt! {
+    /// The ordinary saved draft reply, or acknowledgement without private draft content.
+    #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+    pub enum ChatDraftSetResponse {
+        /// The caller's current readable saved draft.
+        Full(ChatDraft),
+        /// The draft committed without readable content.
+        Receipt(ChatPersonalReceipt),
+    }
 }
 
 /// Saves a draft. The chat keeps one for each person.
@@ -833,6 +984,50 @@ pub struct ForwardCreateReply {
     pub threads: Vec<ForwardThreadInput>,
 }
 
+/// One accepted chat write, without existing message content.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+pub struct ForwardChatReceipt {
+    /// Actual destination chat, including one created for a person.
+    pub chat_id: Id,
+    /// The accepted message.
+    pub message_id: Id,
+    /// Its accepted chat sequence.
+    pub seq: Seq,
+}
+
+/// One accepted agent input, without existing input or conversation content.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+pub struct ForwardInputReceipt {
+    /// Actual destination thread.
+    pub thread_id: Id,
+    /// The accepted input.
+    pub input_id: Id,
+    /// The thread sequence acknowledged by the operation.
+    pub seq: Seq,
+}
+
+/// A complete atomic-forward acknowledgement when full destination content is unavailable.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+pub struct ForwardCreateReceipt {
+    /// This is an acknowledged operation rather than a full content projection.
+    pub projection: crate::common::ReceiptProjection,
+    /// Every chat result.
+    pub chats: Vec<ForwardChatReceipt>,
+    /// Every thread-input result.
+    pub threads: Vec<ForwardInputReceipt>,
+}
+
+crate::common::full_or_receipt! {
+    /// The existing full forward result, or its explicit receipt alternative.
+    #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+    pub enum ForwardCreateResponse {
+        /// Current destination content under its normal Read authority and this operation's Read scope.
+        Full(ForwardCreateReply),
+        /// Successful or repeated acceptance without that content.
+        Receipt(ForwardCreateReceipt),
+    }
+}
+
 /// The stable target of a deliberate human chat mention.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
 #[serde(tag = "kind", rename_all = "snake_case", deny_unknown_fields)]
@@ -985,67 +1180,502 @@ pub struct ChatAgentReach {
     pub next_allowed_at: Option<Time>,
 }
 
+// Opening and sync project the same conversation/message sources under their own
+// operation identities. The reader binds the actual inspection and name collections.
+const fn conversation_read_facets(target: Target) -> [Facet; 7] {
+    [
+        Facet::required(Read, &[Identity(I::Chat)], target),
+        Facet::required(
+            Read,
+            &[Identity(I::Group)],
+            Target::ResolvedCollection("chat_inspection_groups"),
+        ),
+        Facet::required(
+            Read,
+            &[Object(K::Org)],
+            Target::ResolvedCollection("message_name_orgs"),
+        ),
+        Facet::required(
+            Read,
+            &[Object(K::Project)],
+            Target::ResolvedCollection("message_name_projects"),
+        ),
+        Facet::required(
+            Read,
+            &[Object(K::Topic)],
+            Target::ResolvedCollection("message_name_topics"),
+        ),
+        Facet::required(
+            Read,
+            &[Object(K::Thread)],
+            Target::ResolvedCollection("message_name_threads"),
+        ),
+        Facet::required(
+            Read,
+            &[Identity(I::Group)],
+            Target::ResolvedCollection("message_name_groups"),
+        ),
+    ]
+}
+const CHAT_SYNC_READ_FACETS: &[Facet] = &conversation_read_facets(Target::Path("id"));
+const MESSAGE_LIST_SOURCES: [Facet; 7] = conversation_read_facets(Target::TypedPath {
+    parameter: "id",
+    kind: Identity(I::Chat),
+});
+// A message window returns no full Chat/inspection-holder payload. It retains
+// the same five protected current-name sources as the shared message renderer.
+const MESSAGE_LIST_READ_FACETS: &[Facet] = &[
+    MESSAGE_LIST_SOURCES[0],
+    MESSAGE_LIST_SOURCES[2],
+    MESSAGE_LIST_SOURCES[3],
+    MESSAGE_LIST_SOURCES[4],
+    MESSAGE_LIST_SOURCES[5],
+    MESSAGE_LIST_SOURCES[6],
+];
+const NODE_OPENING_CONVERSATION: [Facet; 7] =
+    conversation_read_facets(Target::ResolvedCollection("node_chat"));
+// Optional components bind only actual successful reads. An independently refused
+// Defaults part remains its ordinary problem; it cannot veto the admitted conversation.
+const NODE_OPENING_READ_FACETS: &[Facet] = &[
+    Facet::required(
+        Read,
+        &[
+            Object(K::Org),
+            Object(K::Project),
+            Object(K::Topic),
+            Object(K::Thread),
+        ],
+        Target::Resolved("opening_node"),
+    ),
+    Facet::required(
+        Read,
+        &[Identity(I::Chat)],
+        Target::ResolvedCollection("opening_scope_chats"),
+    ),
+    NODE_OPENING_CONVERSATION[0],
+    NODE_OPENING_CONVERSATION[1],
+    NODE_OPENING_CONVERSATION[2],
+    NODE_OPENING_CONVERSATION[3],
+    NODE_OPENING_CONVERSATION[4],
+    NODE_OPENING_CONVERSATION[5],
+    NODE_OPENING_CONVERSATION[6],
+    Facet::required(
+        Read,
+        &[Object(K::Org)],
+        Target::ResolvedCollection("opening_names_orgs"),
+    ),
+    Facet::required(
+        Read,
+        &[Object(K::Project)],
+        Target::ResolvedCollection("opening_names_projects"),
+    ),
+    Facet::required(
+        Read,
+        &[Object(K::Topic)],
+        Target::ResolvedCollection("opening_names_topics"),
+    ),
+    Facet::required(
+        Read,
+        &[Object(K::Thread)],
+        Target::ResolvedCollection("opening_names_threads"),
+    ),
+    Facet::required(
+        Read,
+        &[Identity(I::System)],
+        Target::ResolvedCollection("opening_registry"),
+    ),
+    Facet::required(
+        Read,
+        &[Object(K::Provider)],
+        Target::ResolvedCollection("opening_providers"),
+    ),
+    Facet::required(
+        Read,
+        &[Identity(I::Group)],
+        Target::ResolvedCollection("provider_groups"),
+    ),
+    Facet::required(
+        Read,
+        &[Object(K::Org)],
+        Target::ResolvedCollection("provider_names_orgs"),
+    ),
+    Facet::required(
+        Read,
+        &[Object(K::Project)],
+        Target::ResolvedCollection("provider_names_projects"),
+    ),
+    Facet::required(
+        Read,
+        &[Object(K::Topic)],
+        Target::ResolvedCollection("provider_names_topics"),
+    ),
+    Facet::required(
+        Read,
+        &[Object(K::Thread)],
+        Target::ResolvedCollection("provider_names_threads"),
+    ),
+    Facet::required(
+        Read,
+        &[Object(K::Document)],
+        Target::ResolvedCollection("opening_readme_documents"),
+    ),
+    Facet::required(
+        Read,
+        &[Object(K::Environment)],
+        Target::ResolvedCollection("opening_node_environments"),
+    ),
+];
+
+/// A mutation changes only its actual chat. Live names are optional content sources of
+/// that same response, rather than new effects or grants to another message operation.
+const fn message_mutation_facets(action: orch_access_contract::key_scope::KeyAction) -> [Facet; 7] {
+    [
+        Facet::required(
+            action,
+            &[Identity(I::Chat)],
+            Target::TypedPath {
+                parameter: "id",
+                kind: Identity(I::Chat),
+            },
+        ),
+        Facet::response_content(
+            &[Identity(I::Chat)],
+            Target::TypedPath {
+                parameter: "id",
+                kind: Identity(I::Chat),
+            },
+        ),
+        Facet::response_content(
+            &[Object(K::Org)],
+            Target::ResolvedCollection("message_name_orgs"),
+        ),
+        Facet::response_content(
+            &[Object(K::Project)],
+            Target::ResolvedCollection("message_name_projects"),
+        ),
+        Facet::response_content(
+            &[Object(K::Topic)],
+            Target::ResolvedCollection("message_name_topics"),
+        ),
+        Facet::response_content(
+            &[Object(K::Thread)],
+            Target::ResolvedCollection("message_name_threads"),
+        ),
+        Facet::response_content(
+            &[Identity(I::Group)],
+            Target::ResolvedCollection("message_name_groups"),
+        ),
+    ]
+}
+const MESSAGE_MUTATION_WRITE: &[Facet] = &message_mutation_facets(Write);
+const MESSAGE_MUTATION_MANAGE: &[Facet] = &message_mutation_facets(Manage);
+
+// A draft keeps authored typed parts rather than rendering a message. Its current
+// labels use the same five protected name families, without a chat/inspection payload.
+const DRAFT_READ_FACETS: &[Facet] = MESSAGE_LIST_READ_FACETS;
+const fn message_source_write_facets() -> [Facet; 12] {
+    let response = message_mutation_facets(Write);
+    [
+        response[0],
+        response[1],
+        response[2],
+        response[3],
+        response[4],
+        response[5],
+        response[6],
+        Facet::required(
+            Read,
+            &[Identity(I::Chat)],
+            Target::ResolvedCollection("message_source_chats"),
+        ),
+        Facet::required(
+            Read,
+            &[Object(K::Thread)],
+            Target::ResolvedCollection("message_source_threads"),
+        ),
+        Facet::required(
+            Read,
+            &[Object(K::Document)],
+            Target::ResolvedCollection("message_source_documents"),
+        ),
+        Facet::required(
+            Read,
+            &[Object(K::Environment)],
+            Target::ResolvedCollection("message_source_environments"),
+        ),
+        Facet::required(
+            Read,
+            &[Identity(I::Upload)],
+            Target::ResolvedCollection("message_retained_uploads"),
+        ),
+    ]
+}
+const DRAFT_WRITE_FACETS: &[Facet] = &message_source_write_facets();
+const MESSAGE_EDIT_FACETS: &[Facet] = &message_source_write_facets();
+
+// Mention search and previews read their actual current Chat and selected audience/name sources.
+const MENTION_READ_FACETS: &[Facet] = MESSAGE_LIST_READ_FACETS;
+const fn mention_preview_facets() -> [Facet; 11] {
+    let read = MESSAGE_LIST_SOURCES;
+    [
+        read[0],
+        read[2],
+        read[3],
+        read[4],
+        read[5],
+        read[6],
+        Facet::required(
+            Read,
+            &[Identity(I::Chat)],
+            Target::ResolvedCollection("message_source_chats"),
+        ),
+        Facet::required(
+            Read,
+            &[Object(K::Thread)],
+            Target::ResolvedCollection("message_source_threads"),
+        ),
+        Facet::required(
+            Read,
+            &[Object(K::Document)],
+            Target::ResolvedCollection("message_source_documents"),
+        ),
+        Facet::required(
+            Read,
+            &[Object(K::Environment)],
+            Target::ResolvedCollection("message_source_environments"),
+        ),
+        Facet::required(
+            Read,
+            &[Identity(I::Upload)],
+            Target::ResolvedCollection("message_retained_uploads"),
+        ),
+    ]
+}
+const MENTION_PREVIEW_FACETS: &[Facet] = &mention_preview_facets();
+
+/// Group writers publish the same native Chat, including its existing optional
+/// preview/agent/inspection sources. Missing response Read does not refuse a write.
+const fn group_change_facets(action: orch_access_contract::key_scope::KeyAction) -> [Facet; 8] {
+    let path = Target::TypedPath {
+        parameter: "id",
+        kind: Identity(I::Chat),
+    };
+    [
+        Facet::required(action, &[Identity(I::Chat)], path),
+        Facet::response_content(&[Identity(I::Chat)], path),
+        Facet::response_content(
+            &[Identity(I::Group)],
+            Target::ResolvedCollection("chat_inspection_groups"),
+        ),
+        Facet::response_content(
+            &[Object(K::Org)],
+            Target::ResolvedCollection("message_name_orgs"),
+        ),
+        Facet::response_content(
+            &[Object(K::Project)],
+            Target::ResolvedCollection("message_name_projects"),
+        ),
+        Facet::response_content(
+            &[Object(K::Topic)],
+            Target::ResolvedCollection("message_name_topics"),
+        ),
+        Facet::response_content(
+            &[Object(K::Thread)],
+            Target::ResolvedCollection("message_name_threads"),
+        ),
+        Facet::response_content(
+            &[Identity(I::Group)],
+            Target::ResolvedCollection("message_name_groups"),
+        ),
+    ]
+}
+
 crate::endpoints! {
     /// Opens a place's independently readable chat scopes and the selected conversation.
-    NodeChatOpeningGet: GET "/nodes/{id}/chat-opening", Permission("node.view"), query NodeChatOpeningGetQuery, none, json NodeChatOpening, 200;
+    NodeChatOpeningGet: GET "/nodes/{id}/chat-opening", Permission("node.view"), query NodeChatOpeningGetQuery, none, json NodeChatOpening, 200,
+        operation Op::facets(NODE_OPENING_READ_FACETS);
     /// Opens a chat and the current reader's draft under their native checks.
-    ChatOpeningGet: GET "/chats/{id}/opening", READ, query ChatSyncGetQuery, none, json ChatOpening, 200;
+    ChatOpeningGet: GET "/chats/{id}/opening", READ, query ChatSyncGetQuery, none, json ChatOpening, 200,
+        operation Op::facets(CHAT_SYNC_READ_FACETS);
     /// Stops or allows one origin here under current chat management.
-    ChatAgentPostingSet: PUT "/chats/{id}/agents/{thread_id}/posting", Rule("chat.manage on a node chat; the creator of a group chat"), none, json ChatAgentPostingSetBody, none, 204;
+    ChatAgentPostingSet: PUT "/chats/{id}/agents/{thread_id}/posting", Rule("chat.manage on a node chat; the creator of a group chat"), none, json ChatAgentPostingSetBody, none, 204,
+        operation Op::returning(Manage, &[Identity(I::Chat)], Target::TypedPath { parameter: "id", kind: Identity(I::Chat) });
     /// Lists this chat's current readable people and permitted role and group audiences.
-    ChatMentionList: GET "/chats/{id}/mentions", SEND, query ChatMentionListQuery, none, json ChatMentionPage, 200;
+    ChatMentionList: GET "/chats/{id}/mentions", SEND, query ChatMentionListQuery, none, json ChatMentionPage, 200,
+        operation Op::facets(MENTION_READ_FACETS);
     /// Counts the message's distinct current human audience before Send.
-    ChatMentionPreview: POST "/chats/{id}/mentions/preview", SEND, none, json ChatMentionPreviewBody, json ChatMentionPreviewReply, 200;
+    ChatMentionPreview: POST "/chats/{id}/mentions/preview", SEND, none, json ChatMentionPreviewBody, json ChatMentionPreviewReply, 200,
+        operation Op::facets(MENTION_PREVIEW_FACETS);
     /// Lists the chats of a root org that the caller may see, newest activity first.
-    OrgChatList: GET "/orgs/{id}/chats", Rule("a member of that root org, or a guest of one of its group chats, who gets those chats only; directs.view for the chats of others"), query OrgChatListQuery, none, json Page<Chat>, 200;
+    OrgChatList: GET "/orgs/{id}/chats", Rule("a member of that root org, or a guest of one of its group chats, who gets those chats only; directs.view for the chats of others"), query OrgChatListQuery, none, json Page<Chat>, 200,
+        operation Op::variants(&[
+            Variant {
+                name: "member",
+                selector: "ordinary member or guest chat visibility",
+                facets: &[Facet::required(
+                    Read,
+                    &[Identity(I::Chat)],
+                    Target::Resolved("results"),
+                )],
+            },
+            Variant {
+                name: "inspect",
+                selector: "directs.view inspection of other peoples chats",
+                facets: &[Facet::required(
+                    Manage,
+                    &[Identity(I::Chat)],
+                    Target::Resolved("results"),
+                )],
+            },
+        ]);
     /// Opens a chat among people: the direct chat with one other person (`200` when it exists already), otherwise a new group (`201`).
-    OrgChatCreate: POST "/orgs/{id}/chats", Rule("a member of the org, with chat.direct resolving to members there"), none, json OrgChatCreateBody, json Chat, 201;
+    OrgChatCreate: POST "/orgs/{id}/chats", Rule("a member of the org, with chat.direct resolving to members there"), none, json OrgChatCreateBody, json Chat, 201,
+        operation Op::facets(&[
+            Facet::required(Write, &[Identity(I::Chat)], Target::Path("id")),
+            Facet::response_content(
+                &[Identity(I::Chat)],
+                Target::Resolved("created_or_existing_chat"),
+            ),
+        ]);
     /// Reads a chat.
-    ChatGet: GET "/chats/{id}", READ, none, none, json Chat, 200;
+    ChatGet: GET "/chats/{id}", READ, none, none, json Chat, 200,
+        operation Op::facets(&[
+            Facet::required(Read, &[Identity(I::Chat)], Target::Path("id")),
+            Facet::required(Read, &[Identity(I::Group)], Target::ResolvedCollection("chat_inspection_groups")),
+            Facet::required(Read, &[Object(K::Org)], Target::ResolvedCollection("message_name_orgs")),
+            Facet::required(Read, &[Object(K::Project)], Target::ResolvedCollection("message_name_projects")),
+            Facet::required(Read, &[Object(K::Topic)], Target::ResolvedCollection("message_name_topics")),
+            Facet::required(Read, &[Object(K::Thread)], Target::ResolvedCollection("message_name_threads")),
+            Facet::required(Read, &[Identity(I::Group)], Target::ResolvedCollection("message_name_groups")),
+        ]);
     /// Asks the people who may add members to join a known group chat.
-    ChatJoinRequest: POST "/chats/{id}/join-requests", Access::User, none, json ChatJoinRequestBody, json crate::access::AccessRequestCreateReply, 201;
+    ChatJoinRequest: POST "/chats/{id}/join-requests", Access::User, none, json ChatJoinRequestBody, json crate::access::AccessRequestWriteResponse, 201,
+        operation Op::receipt(&Op::facets(&crate::access::join_request_facets()));
     /// Renames a group chat, or names it after its members again.
-    ChatUpdate: PATCH "/chats/{id}", Rule("someone in the group chat"), none, json ChatUpdateBody, json Chat, 200;
+    ChatUpdate: PATCH "/chats/{id}", Rule("someone in the group chat"), none, json ChatUpdateBody, json ChatChangeResponse, 200,
+        operation Op::receipt(&Op::facets(&group_change_facets(Write)));
     /// Adds a person to a group chat; somebody who is no member of the root org joins as a guest when the caller may bring an outsider in.
-    ChatMemberAdd: PUT "/chats/{id}/members/{user_id}", Rule("someone in the group chat who is a member of the root org"), none, none, json Chat, 200;
+    ChatMemberAdd: PUT "/chats/{id}/members/{user_id}", Rule("someone in the group chat who is a member of the root org"), none, none, json ChatChangeResponse, 200,
+        operation Op::receipt(&Op::facets(&group_change_facets(Manage)));
     /// Takes a person out of a group chat, or lets them leave.
-    ChatMemberRemove: DELETE "/chats/{id}/members/{user_id}", Rule("that person, to leave; or the creator of the group"), none, none, none, 204;
+    ChatMemberRemove: DELETE "/chats/{id}/members/{user_id}", Rule("that person, to leave; or the creator of the group"), none, none, none, 204,
+        operation Op::variants(&[
+            Variant {
+                name: "leave",
+                selector: "member is the caller",
+                facets: &[Facet::required(
+                    Write,
+                    &[Identity(I::Chat)],
+                    Target::TypedPath { parameter:"id",kind:Identity(I::Chat) },
+                )],
+            },
+            Variant {
+                name: "remove",
+                selector: "another member is removed",
+                facets: &[Facet::required(
+                    Manage,
+                    &[Identity(I::Chat)],
+                    Target::TypedPath { parameter:"id",kind:Identity(I::Chat) },
+                )],
+            },
+        ]);
     /// Reads a chat and its latest messages, or what changed since a chat sequence.
-    ChatSyncGet: GET "/chats/{id}/sync", READ, query ChatSyncGetQuery, none, json ChatSync, 200;
+    ChatSyncGet: GET "/chats/{id}/sync", READ, query ChatSyncGetQuery, none, json ChatSync, 200,
+        operation Op::facets(CHAT_SYNC_READ_FACETS);
     /// Reads messages of a chat: before or after a sequence, around a message, the pinned ones, or those that quote an item.
-    ChatMessageList: GET "/chats/{id}/messages", READ, query ChatMessageListQuery, none, json ChatMessageListReply, 200;
+    ChatMessageList: GET "/chats/{id}/messages", READ, query ChatMessageListQuery, none, json ChatMessageListReply, 200,
+        operation Op::facets(MESSAGE_LIST_READ_FACETS);
     /// Sends a message; a repeated `client_id` of the same author answers `200` with the stored message instead of `201`.
-    ChatMessageCreate: POST "/chats/{id}/messages", SEND, none, json ChatMessageCreateBody, json ChatMessageCreateReply, 201;
+    ChatMessageCreate: POST "/chats/{id}/messages", SEND, none, json ChatMessageCreateBody, json ChatMessageCreateResponse, 201,
+        operation Op::receipt(&Op::facets(&[
+            Facet::required(Write, &[Identity(I::Chat)], Target::Path("id")),
+            Facet::response_content(&[Identity(I::Chat)], Target::Path("id")),
+            Facet::required(Read, &[Identity(I::Chat)], Target::ResolvedCollection("message_source_chats")),
+            Facet::required(Read, &[Object(K::Thread)], Target::ResolvedCollection("message_source_threads")),
+            Facet::required(Read, &[Object(K::Document)], Target::ResolvedCollection("message_source_documents")),
+            Facet::required(Read, &[Object(K::Environment)], Target::ResolvedCollection("message_source_environments")),
+            Facet::required(Read, &[Identity(I::Upload)], Target::ResolvedCollection("message_retained_uploads")),
+            Facet::required(Write, &[Object(K::Thread)], Target::ResolvedCollection("message_agent_threads")),
+            Facet::required(Read, &[Object(K::Org)], Target::ResolvedCollection("message_name_orgs")),
+            Facet::required(Read, &[Object(K::Project)], Target::ResolvedCollection("message_name_projects")),
+            Facet::required(Read, &[Object(K::Topic)], Target::ResolvedCollection("message_name_topics")),
+            Facet::required(Read, &[Object(K::Thread)], Target::ResolvedCollection("message_name_threads")),
+            Facet::required(Read, &[Identity(I::Group)], Target::ResolvedCollection("message_name_groups")),
+        ]));
     /// Edits a message.
-    ChatMessageUpdate: PATCH "/chats/{id}/messages/{message_id}", Rule("the message's author, who can still send"), none, json ChatMessageUpdateBody, json ChatMessage, 200;
+    ChatMessageUpdate: PATCH "/chats/{id}/messages/{message_id}", Rule("the message's author, who can still send"), none, json ChatMessageUpdateBody, json ChatMessageMutationResponse, 200,
+        operation Op::receipt(&Op::facets(MESSAGE_EDIT_FACETS));
     /// Deletes a message, which stays as a row with `deleted: true`.
-    ChatMessageDelete: DELETE "/chats/{id}/messages/{message_id}", Rule("the message's author; or chat.manage in a node's chat"), none, none, json ChatMessage, 200;
+    ChatMessageDelete: DELETE "/chats/{id}/messages/{message_id}", Rule("the message's author; or chat.manage in a node's chat"), none, none, json ChatMessageMutationResponse, 200,
+        operation Op::receipt(&Op::variants(&[
+            Variant {
+                name: "own",
+                selector: "stored message author is the caller",
+                facets: MESSAGE_MUTATION_WRITE,
+            },
+            Variant {
+                name: "moderate",
+                selector: "another author is moderated",
+                facets: MESSAGE_MUTATION_MANAGE,
+            },
+        ]));
     /// Adds the caller's own reaction to a message.
-    ChatMessageReactionAdd: PUT "/chats/{id}/messages/{message_id}/reactions/{emoji}", SEND, none, none, json ChatMessage, 200;
+    ChatMessageReactionAdd: PUT "/chats/{id}/messages/{message_id}/reactions/{emoji}", SEND, none, none, json ChatMessageMutationResponse, 200,
+        operation Op::receipt(&Op::facets(MESSAGE_MUTATION_WRITE));
     /// Removes the caller's own reaction from a message.
-    ChatMessageReactionRemove: DELETE "/chats/{id}/messages/{message_id}/reactions/{emoji}", SEND, none, none, json ChatMessage, 200;
+    ChatMessageReactionRemove: DELETE "/chats/{id}/messages/{message_id}/reactions/{emoji}", SEND, none, none, json ChatMessageMutationResponse, 200,
+        operation Op::receipt(&Op::facets(MESSAGE_MUTATION_WRITE));
     /// Pins a message.
-    ChatMessagePinSet: PUT "/chats/{id}/messages/{message_id}/pin", SEND, none, none, json ChatMessage, 200;
+    ChatMessagePinSet: PUT "/chats/{id}/messages/{message_id}/pin", SEND, none, none, json ChatMessageMutationResponse, 200,
+        operation Op::receipt(&Op::facets(MESSAGE_MUTATION_WRITE));
     /// Unpins a message.
-    ChatMessagePinDelete: DELETE "/chats/{id}/messages/{message_id}/pin", SEND, none, none, json ChatMessage, 200;
+    ChatMessagePinDelete: DELETE "/chats/{id}/messages/{message_id}/pin", SEND, none, none, json ChatMessageMutationResponse, 200,
+        operation Op::receipt(&Op::facets(MESSAGE_MUTATION_WRITE));
     /// Moves the caller's read position forward, clears their unread mentions and marks the chat's notifications read.
-    ChatRead: POST "/chats/{id}/read", Rule("read, as someone who is in the chat or holds chat.view"), none, json ChatReadBody, none, 204;
+    ChatRead: POST "/chats/{id}/read", Rule("read, as someone who is in the chat or holds chat.view"), none, json ChatReadBody, none, 204,
+        operation Op::returning(Write, &[Identity(I::Chat)], Target::TypedPath { parameter: "id", kind: Identity(I::Chat) });
     /// Marks every chat of the org that the caller follows as read up to now.
-    OrgChatsRead: POST "/orgs/{id}/chats/read", Permission("node.view"), none, none, none, 204;
+    OrgChatsRead: POST "/orgs/{id}/chats/read", Permission("node.view"), none, none, none, 204,
+        operation Op::single(Write, &[Identity(I::Chat)], Target::Resolved("org_chats"));
     /// Sets the bell and the hiding of a chat for the caller.
-    ChatStateSet: PUT "/chats/{id}/state", Rule("the same as for marking it read"), none, json ChatStateSetBody, json ChatState, 200;
+    ChatStateSet: PUT "/chats/{id}/state", Rule("the same as for marking it read"), none, json ChatStateSetBody, json ChatStateSetResponse, 200,
+        operation Op::receipt(&Op::returning(Write, &[Identity(I::Chat)], Target::TypedPath { parameter: "id", kind: Identity(I::Chat) }));
     /// Reads the caller's draft in a chat, if they have one.
-    ChatDraftGet: GET "/chats/{id}/draft", SEND, none, none, json Option<ChatDraft>, 200;
+    ChatDraftGet: GET "/chats/{id}/draft", SEND, none, none, json Option<ChatDraft>, 200,
+        operation Op::facets(DRAFT_READ_FACETS);
     /// Saves the caller's draft in a chat.
-    ChatDraftSet: PUT "/chats/{id}/draft", SEND, none, json ChatDraftSetBody, json ChatDraft, 200;
+    ChatDraftSet: PUT "/chats/{id}/draft", SEND, none, json ChatDraftSetBody, json ChatDraftSetResponse, 200,
+        operation Op::receipt(&Op::facets(DRAFT_WRITE_FACETS));
     /// Discards the caller's draft in a chat.
-    ChatDraftDelete: DELETE "/chats/{id}/draft", SEND, none, none, none, 204;
+    ChatDraftDelete: DELETE "/chats/{id}/draft", SEND, none, none, none, 204,
+        operation Op::returning(Write, &[Identity(I::Chat)], Target::TypedPath { parameter: "id", kind: Identity(I::Chat) });
     /// Stores a file for an `attachment` part, from a raw body with a filename header or from a finished upload.
-    ChatAttachmentCreate: POST "/chats/{id}/attachments", SEND, none, bytes, json ChatAttachmentCreateReply, 200;
+    ChatAttachmentCreate: POST "/chats/{id}/attachments", SEND, none, bytes, json ChatAttachmentCreateReply, 200,
+        operation Op::single(Write, &[Identity(I::Chat)], Target::Path("id"));
     /// Serves an image or an attachment carried by a message of this chat, forwarded copies included.
-    ChatBlobGet: GET "/chats/{id}/blobs/{hash}", READ, query ChatBlobGetQuery, none, raw, 200;
+    ChatBlobGet: GET "/chats/{id}/blobs/{hash}", READ, query ChatBlobGetQuery, none, raw, 200,
+        operation Op::single(Read, &[Identity(I::Chat)], Target::Path("id"));
     /// Forwards messages of a chat, or items of a thread, into chats and the threads of agents, all or nothing.
-    ForwardCreate: POST "/forward", Rule("read what is forwarded, and send in each destination chat or hold thread.interact on each destination thread"), none, json ForwardCreateBody, json ForwardCreateReply, 201;
+    ForwardCreate: POST "/forward", Rule("read what is forwarded, and send in each destination chat or hold thread.interact on each destination thread"), none, json ForwardCreateBody, json ForwardCreateResponse, 201,
+        operation Op::receipt(&Op::facets(&[
+            Facet::required(Read, &[Identity(I::Chat)], Target::ResolvedCollection("copy_source_chats")),
+            Facet::required(Read, &[Object(K::Thread)], Target::ResolvedCollection("copy_source_threads")),
+            Facet::required(Write, &[Identity(I::Chat)], Target::ResolvedCollection("forward_destination_chats")),
+            Facet::required(Write, &[Object(K::Thread)], Target::ResolvedCollection("forward_destination_threads")),
+            Facet::required(Write, &[Identity(I::Chat)], Target::ResolvedCollection("forward_new_chat_parents")),
+            Facet::response_content(&[Identity(I::Chat)], Target::ResolvedCollection("response_chats")),
+            Facet::response_content(&[Object(K::Thread)], Target::ResolvedCollection("response_threads")),
+            Facet::required(Read, &[Identity(I::Chat)], Target::ResolvedCollection("message_source_chats")),
+            Facet::required(Read, &[Object(K::Thread)], Target::ResolvedCollection("message_source_threads")),
+            Facet::required(Read, &[Object(K::Document)], Target::ResolvedCollection("message_source_documents")),
+            Facet::required(Read, &[Object(K::Environment)], Target::ResolvedCollection("message_source_environments")),
+            Facet::required(Read, &[Identity(I::Upload)], Target::ResolvedCollection("message_retained_uploads")),
+            Facet::required(Read, &[Object(K::Org)], Target::ResolvedCollection("message_name_orgs")),
+            Facet::required(Read, &[Object(K::Project)], Target::ResolvedCollection("message_name_projects")),
+            Facet::required(Read, &[Object(K::Topic)], Target::ResolvedCollection("message_name_topics")),
+            Facet::required(Read, &[Object(K::Thread)], Target::ResolvedCollection("message_name_threads")),
+            Facet::required(Read, &[Identity(I::Group)], Target::ResolvedCollection("message_name_groups")),
+        ]));
 }
 
 #[cfg(test)]

@@ -40,17 +40,25 @@ pub fn mount(registry: &mut Registry) {
         .on(NodeDelete, node_delete)
         .on(NodeDeletedList, deleted_list)
         .on(NodeRestore, node_restore)
-        .on(OrgDeletedList, org_deleted_list)
-        .on(NodeTransfer, node_transfer);
+        .on_snapshot_read_with_optional_operation(
+            OrgDeletedList,
+            crate::key_operations::native::selected::<super::deleted_orgs::Orgs>,
+            org_deleted_list,
+        )
+        .on_with_operation(
+            NodeTransfer,
+            crate::routes::transfer::operation::node,
+            node_transfer,
+        );
 }
 
 /// When what was deleted at `at` is gone for good.
-fn purge_at(at: DateTime<Utc>, days: u64) -> DateTime<Utc> {
+pub(super) fn purge_at(at: DateTime<Utc>, days: u64) -> DateTime<Utc> {
     at + Duration::days(i64::try_from(days).unwrap_or(i64::MAX / 86_400))
 }
 
 /// The moment before which a deletion has been purged by `now`.
-fn purged_before(now: DateTime<Utc>, days: u64) -> DateTime<Utc> {
+pub(super) fn purged_before(now: DateTime<Utc>, days: u64) -> DateTime<Utc> {
     now - Duration::days(i64::try_from(days).unwrap_or(i64::MAX / 86_400))
 }
 
@@ -309,6 +317,26 @@ async fn node_delete(ctx: Ctx, (): (), body: NodeDeleteBody) -> ApiResult<NodeDe
         .with("current", current));
     }
     // An org that lies in another gives its members to the org above first.
+    if kind == NodeKind::Thread {
+        let removed = ctx
+            .app
+            .engine
+            .delete_thread_in(&mut tx, id, Some(principal.user()), principal.now())
+            .await
+            .map_err(crate::routes::environments::removal_schedule_error)?;
+        let settled = &removed.settled;
+        let who = actor_name(&ctx)?;
+        record(&ctx, &mut tx, orch_db::audit::action!(AuditAction::NodeDeleted), place,
+            &format!("{who} deleted the thread {}", node.name),
+            json!({"nodes":removed.gone,"archived_first":removed.archived_first,"threads":settled.threads,
+                "turns":settled.turns,"inputs":settled.inputs,"approvals":settled.approvals,
+                "environments":removed.environments.len(),"resources_before":[],"deleted_nodes":removed.deleted_nodes,
+                "purge_at":purge_at(ctx.now,ctx.app.config.retention.soft_delete_days)})).await?;
+        let deletion_id = orch_db::queries::trace::node_deletion(&mut tx, id).await?;
+        tx.commit().await.map_err(DbError::from)?;
+        ctx.app.engine.kick();
+        return Ok(NodeDeleted { deletion_id });
+    }
     if kind == NodeKind::Org
         && let Some(above) = node.parent_id
     {
@@ -341,7 +369,7 @@ async fn node_delete(ctx: Ctx, (): (), body: NodeDeleteBody) -> ApiResult<NodeDe
         .engine
         .lock_home_in(&mut tx, id)
         .await
-        .map_err(ApiError::internal)?;
+        .map_err(ApiError::engine)?;
     let deleted_nodes: Vec<Id> = std::iter::once(id)
         .chain(
             hierarchy::descendants(&mut tx, id)
@@ -361,7 +389,7 @@ async fn node_delete(ctx: Ctx, (): (), body: NodeDeleteBody) -> ApiResult<NodeDe
             .engine
             .archive_in(&mut tx, id, principal.user(), principal.now())
             .await
-            .map_err(ApiError::internal)?
+            .map_err(ApiError::engine)?
     } else {
         orch_engine::archive::Settled::default()
     };
@@ -673,7 +701,7 @@ async fn node_restore(
         .engine
         .lock_archive_in(&mut tx, id)
         .await
-        .map_err(ApiError::internal)?;
+        .map_err(ApiError::engine)?;
     hierarchy::restore_subtree(&mut tx, id, row.deleted_at, principal.user(), ctx.now).await?;
     ctx.app
         .engine
@@ -733,38 +761,31 @@ async fn node_restore(
 
 /// The team root orgs the caller owns that were deleted and are not purged.
 async fn org_deleted_list(ctx: Ctx, (): (), (): ()) -> ApiResult<Vec<DeletedOrg>> {
-    let days = ctx.app.config.retention.soft_delete_days;
-    let mut conn = ctx.app.db.acquire().await?;
-    let rows =
-        hierarchy::deleted_orgs_of(&mut conn, ctx.user()?.id(), purged_before(ctx.now, days))
-            .await?;
-    let mut users: Vec<Id> = rows.iter().filter_map(|row| row.deleted_by).collect();
-    users.sort_unstable();
-    let people = refusals::user_refs(&mut conn, &users).await?;
-    Ok(rows
-        .iter()
-        .map(|row| DeletedOrg {
-            org: orch_api_contract::nodes::NodeRef {
-                thread_display: None,
-                id: row.id,
-                kind: NodeKind::Org,
-                name: Some(row.name.clone()),
-                redacted: false,
-            },
-            slug: row.slug.clone().unwrap_or_default(),
-            deleted_at: Time::new(row.deleted_at),
-            deleted_by: row.deleted_by.and_then(|user| people.get(&user).cloned()),
-            purge_at: Time::new(purge_at(row.deleted_at, days)),
-        })
-        .collect())
+    crate::key_operations::native::selected_read::<super::deleted_orgs::Orgs>(ctx, (), ()).await
 }
 
 /// Hands the first place among a node's owners to another person: the page
 /// change that names them first, which only an owner or an admin of the place
 /// makes.
-async fn node_transfer(ctx: Ctx, (): (), body: TransferBody) -> ApiResult<Node> {
+async fn node_transfer(
+    ctx: Ctx,
+    (): (),
+    body: TransferBody,
+) -> ApiResult<orch_api_contract::ownership::NodeTransferResponse> {
+    crate::middleware::authorization::projected_result(
+        ctx.clone(),
+        node_transfer_action(ctx, body),
+        false,
+    )
+    .await
+}
+async fn node_transfer_action(
+    ctx: Ctx,
+    body: TransferBody,
+) -> ApiResult<orch_api_contract::ownership::NodeTransferResponse> {
     let id = ctx.id("id")?;
-    let (ctx, mut tx, principal) = super::action(&ctx).await?;
+    let (ctx, mut tx, guard) = crate::routes::transfer::operation::node_action(&ctx).await?;
+    let principal = guard.principal().clone();
     let (place, kind): (Placed, NodeKind) = placed(&mut tx, id).await?;
     if kind == NodeKind::Thread {
         return Err(super::threads_are_not_served_here());
@@ -797,7 +818,7 @@ async fn node_transfer(ctx: Ctx, (): (), body: TransferBody) -> ApiResult<Node> 
                 .collect(),
         );
     }
-    let outcome = pages::change(
+    let outcome = pages::change_fenced(
         &mut tx,
         &principal,
         Target::Live(id),
@@ -807,18 +828,24 @@ async fn node_transfer(ctx: Ctx, (): (), body: TransferBody) -> ApiResult<Node> 
         },
         policy,
         &origin(&ctx),
+        || guard.check_deadline(&ctx),
     )
     .await;
+    let changed;
     match outcome {
         Ok(outcome) => {
+            changed = outcome.changed;
             if outcome.changed {
                 hierarchy::stamp(&mut tx, id).await?;
             }
         }
-        Err(error) => return Err(refusals::change_failed(&mut tx, error).await),
+        Err(pages::ChangeFailure::Native(error)) => {
+            return Err(refusals::change_failed(&mut tx, error).await);
+        }
+        Err(pages::ChangeFailure::BeforeEffect(error)) => return Err(error),
     }
     let _ = place;
-    let node = shown(&ctx, &mut tx, &principal, id).await?;
+    let receipt = crate::routes::transfer::operation::receipt(&ctx, body.user_id, changed)?;
     tx.commit().await.map_err(DbError::from)?;
-    Ok(node)
+    crate::routes::transfer::operation::node_reply(&ctx, &principal, receipt).await
 }

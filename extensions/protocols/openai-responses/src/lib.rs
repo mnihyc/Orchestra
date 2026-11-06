@@ -29,6 +29,7 @@ pub mod embeddings;
 pub mod models;
 pub mod requests;
 pub mod usage;
+pub mod web_search;
 
 pub use chat::OpenAiChat;
 pub use embeddings::OpenAiEmbeddings;

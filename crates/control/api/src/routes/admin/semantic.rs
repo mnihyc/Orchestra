@@ -14,7 +14,7 @@ use orch_api_contract::admin::{
 };
 use orch_api_contract::nodes::{NodeKind, NodeRef};
 use orch_db::DbError;
-use orch_engine::semantic::state::{Generation, OrgState};
+use orch_engine::semantic::state::{Generation, OrgState, rebuild_in_place};
 use serde_json::json;
 
 /// Binds this module's requests.
@@ -117,18 +117,18 @@ async fn overview(ctx: Ctx, (): (), (): ()) -> ApiResult<SemanticSearchOverview>
 async fn rebuild(ctx: Ctx, (): (), (): ()) -> ApiResult<SemanticSearchOrg> {
     admin_of(&ctx)?;
     let id = ctx.id("id")?;
-    let mut conn = ctx.app.db.acquire().await?;
-    let (_, name) = orch_db::queries::semantic::root_orgs(&mut conn)
+    let (ctx, mut tx, _) = super::action_context(&ctx).await?;
+    admin_of(&ctx)?;
+    let (_, name) = orch_db::queries::semantic::root_orgs(&mut tx)
         .await?
         .into_iter()
         .find(|(org, _)| *org == id)
         .ok_or_else(ApiError::not_found)?;
-    drop(conn);
-    let engine = &ctx.app.engine;
-    engine
-        .semantic_rebuild_in_place(id)
+    rebuild_in_place(&mut tx, id, ctx.now)
         .await
         .map_err(ApiError::internal)?;
+    tx.commit().await.map_err(DbError::from)?;
+    let engine = &ctx.app.engine;
     let state = engine
         .semantic_state(id)
         .await
@@ -146,7 +146,7 @@ async fn keep(ctx: Ctx, (): (), body: SemanticSearchKeepBody) -> ApiResult<Seman
 
     admin_of(&ctx)?;
     let org = ctx.id("id")?;
-    let (ctx, mut tx, principal) = crate::routes::nodes::action(&ctx).await?;
+    let (ctx, mut tx, principal) = super::action_context(&ctx).await?;
     admin_of(&ctx)?;
     let name = rows::root_orgs(&mut tx)
         .await?
@@ -197,13 +197,15 @@ async fn keep(ctx: Ctx, (): (), body: SemanticSearchKeepBody) -> ApiResult<Seman
     .ok_or_else(|| ApiError::internal("search tuning has no value"))?;
     tuning["chunk_tokens"] = json!(chunk_tokens);
     let policy = crate::routes::nodes::policy_at(&mut tx, org).await?;
+    let administration = ctx.administrative_node(&principal, org)?;
     let origin = crate::sign_in::origin(&ctx);
     for (key, value) in [
         (keys::SEARCH_SEMANTIC_EMBEDDINGS, named),
         (keys::SEARCH_SEMANTIC_TUNING, tuning),
     ] {
         let may_lock =
-            crate::routes::settings::permit(&mut tx, &principal, org, key, policy).await?;
+            crate::routes::settings::permit_admin_operation(&mut tx, &administration, key, policy)
+                .await?;
         let written = write(
             &mut tx,
             &Write {

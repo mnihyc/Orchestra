@@ -6,7 +6,11 @@
 )]
 
 mod places;
+#[path = "service_accounts/scoped_delete.rs"]
+mod scoped_delete;
 mod support;
+use support::FullRoleReply as _;
+use support::FullTokenReply as _;
 
 use chrono::Duration;
 use orch_api_contract::access::{
@@ -80,14 +84,15 @@ async fn list(world: &World, who: &Who, org: Id) -> Reply<Vec<ServiceAccount>> {
 
 fn named(name: &str) -> ApiTokenCreateBody {
     ApiTokenCreateBody {
+        rules: None,
         name: name.to_owned(),
         scopes: Some(vec!["*".to_owned()]),
         node_id: None,
         expires_at: None,
-        proof: orch_api_contract::auth::SensitiveProof {
+        proof: Some(orch_api_contract::auth::SensitiveProof {
             password: Some(support::PASSWORD.to_owned()),
             ..Default::default()
-        },
+        }),
     }
 }
 
@@ -104,6 +109,7 @@ async fn token(
         .body(body)
         .send()
         .await
+        .full_token()
 }
 
 async fn tokens(world: &World, who: &Who, service: Id) -> Reply<Vec<ApiTokenInfo>> {
@@ -133,6 +139,7 @@ async fn give(world: &World, by: &Who, place: Id, service: Id, role: Role) {
         })
         .send()
         .await
+        .full_role()
         .ok();
 }
 

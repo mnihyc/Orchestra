@@ -19,6 +19,7 @@ use orch_db::Conn;
 use orch_db::queries::jobs::{self as rows, JobRow, kind};
 use orch_engine::jobs::runner::read_progress;
 use orch_types::{Id, Time};
+use std::collections::HashMap;
 
 /// Binds this module's requests.
 pub fn mount(registry: &mut Registry) {
@@ -39,16 +40,46 @@ fn state_of(word: &str) -> JobState {
 
 /// The job as the API shows it.
 pub(crate) async fn view(conn: &mut Conn, row: &JobRow) -> ApiResult<Job> {
-    let (mut progress, log) = read_progress(row);
-    let waiting_for = match row
-        .plan
+    view_with_machine_sources(conn, row, None).await
+}
+
+fn waiting_machine(row: &JobRow) -> Option<Id> {
+    row.plan
         .pointer("/active_command/machine")
         .and_then(orch_types::Json::as_str)
-        .and_then(|value| value.parse::<Id>().ok())
-    {
-        Some(machine) => orch_db::queries::resources::machine(conn, machine)
+        .and_then(|value| value.parse().ok())
+}
+
+/// Actual native waiting-name sources, before any job DTO is produced.
+pub(crate) async fn machine_name_sources(
+    conn: &mut Conn,
+    rows: &[JobRow],
+) -> ApiResult<HashMap<Id, String>> {
+    let ids = rows.iter().filter_map(waiting_machine).collect::<Vec<_>>();
+    Ok(
+        orch_db::queries::resources::routes::machine_names(conn, &ids)
             .await?
-            .map(|machine| machine.name),
+            .into_iter()
+            .map(|row| (row.id, row.name))
+            .collect(),
+    )
+}
+
+/// The same native projection, with an optional trusted bound on emitted machine names.
+/// Ordinary callers retain their original current/historical progress presentation.
+pub(crate) async fn view_with_machine_sources(
+    conn: &mut Conn,
+    row: &JobRow,
+    names: Option<&HashMap<Id, String>>,
+) -> ApiResult<Job> {
+    let (mut progress, log) = read_progress(row);
+    let waiting_for = match waiting_machine(row) {
+        Some(machine) => match names {
+            Some(names) => names.get(&machine).cloned(),
+            None => orch_db::queries::resources::machine(conn, machine)
+                .await?
+                .map(|machine| machine.name),
+        },
         None => None,
     };
     let stall_after_seconds = orch_settings::get::<i64>(
@@ -66,6 +97,15 @@ pub(crate) async fn view(conn: &mut Conn, row: &JobRow) -> ApiResult<Job> {
         directories_done: None,
         stopping: false,
     });
+    if names.is_some()
+        && matches!(
+            activity.waiting_for.as_ref(),
+            Some(api::JobWaiting::Machine { .. })
+        )
+    {
+        // An old cached label is not evidence for the currently selected source.
+        activity.waiting_for = None;
+    }
     activity.stall_after_seconds = stall_after_seconds;
     activity.stopping = row.is_open() && row.cancel_requested();
     if activity.stopping {

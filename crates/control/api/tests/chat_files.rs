@@ -9,6 +9,7 @@ mod chat_world;
 mod places;
 mod support;
 
+use crate::support::FullArchiveReply as _;
 use chat_world::{Room, text};
 use http::StatusCode;
 use orch_api_contract::chats::{
@@ -731,6 +732,7 @@ async fn a_chat_under_an_archived_node_takes_no_file() {
         .body(&places::archive_body(&room.world, &room.ada.token, room.project, true).await)
         .send()
         .await
+        .full_archive()
         .ok();
     let refused = upload(&room, &room.bea, room.chat, "late.pdf", &pdf(5))
         .await

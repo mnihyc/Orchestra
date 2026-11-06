@@ -100,7 +100,7 @@ BEGIN
         SELECT e.holder_kind, e.holder_id, '', n.path, n.org_id, NULL
           FROM nodes n JOIN permission_entries e ON e.object_kind = 'node' AND e.object_id = n.id
            AND e.page = 'live' AND e.permission = 'access.own'
-         WHERE w.kind IN ('role','visible') AND n.id = w.id AND n.kind <> 'thread'
+         WHERE w.kind IN ('role','visible') AND n.id = w.id AND (n.kind <> 'thread' OR w.kind = 'visible')
            AND e.holder_kind = 'group' AND e.removed_at IS NULL
            AND (e.expires_at IS NULL OR e.expires_at > sampled_at)
         UNION ALL
@@ -116,7 +116,8 @@ BEGIN
                     WHEN e.holder_kind = 'role' AND e.holder_id IS NOT NULL AND e.holder_role = 'viewer' THEN 'visible'
                     ELSE e.holder_kind END,
                CASE WHEN e.source = 'creation' THEN COALESCE(n.parent_id, n.id)
-                    WHEN e.holder_kind = 'everyone' THEN n.id ELSE COALESCE(e.holder_id, n.id) END,
+                    WHEN e.holder_kind = 'everyone' THEN n.id
+                    ELSE COALESCE(e.holder_id, CASE WHEN n.kind = 'thread' THEN n.parent_id ELSE n.id END) END,
                CASE WHEN e.source <> 'creation' AND e.holder_kind = 'role'
                           AND NOT (e.holder_id IS NOT NULL AND e.holder_role = 'viewer')
                     THEN e.holder_role ELSE '' END,
@@ -152,7 +153,7 @@ BEGIN
                AND NOT EXISTS (SELECT 1 FROM scopes s WHERE s.permission = p.permission AND NOT s.inherit AND s.rank > p.rank
                  AND s.rank <= COALESCE((SELECT min(l.rank) FROM scopes l WHERE l.permission = p.permission AND l.locked), 2147483647))
           ) e
-         WHERE w.kind IN ('visible','reachable') AND n.id = w.id AND n.kind <> 'thread'
+         WHERE w.kind IN ('visible','reachable') AND n.id = w.id AND (n.kind <> 'thread' OR w.kind = 'visible')
            AND (CASE WHEN e.permission IN (n.kind || '.view', n.kind || '.interact', n.kind || '.manage')
                      THEN 'visible' ELSE 'reachable' END) = w.kind
       ) edge
@@ -171,7 +172,7 @@ BEGIN
       SELECT n.path AS owner_path, n.org_id AS owner_root, e.holder_kind, e.holder_id
         FROM nodes n JOIN permission_entries e ON e.object_kind = 'node' AND e.object_id = n.id
          AND e.page = 'live' AND e.permission = 'access.own'
-       WHERE n.id = w.id AND n.kind <> 'thread' AND e.holder_kind IN ('user','group')
+       WHERE n.id = w.id AND (n.kind <> 'thread' OR w.kind = 'visible') AND e.holder_kind IN ('user','group')
          AND e.removed_at IS NULL AND (e.expires_at IS NULL OR e.expires_at > sampled_at)
        OFFSET 0
     ) owner WHERE w.kind IN ('role','visible')
@@ -1150,9 +1151,11 @@ BEGIN
  IF TG_OP='INSERT' THEN
   fresh_live_paths:=NOT EXISTS(SELECT 1 FROM participation_new_objects WHERE deleted_at IS NOT NULL);
   IF fresh_live_paths THEN
-   INSERT INTO participation_paths(node_id,path,live)
+   -- A plan kept from the first small insert can scan the grown node table for every path.
+   -- Plan this fixed set read against the current table instead of retaining that initial scan.
+   EXECUTE 'INSERT INTO participation_paths(node_id,path,live)
    SELECT n.id,n.path,NOT EXISTS(SELECT 1 FROM nodes gone WHERE gone.id=ANY(n.path) AND gone.deleted_at IS NOT NULL)
-   FROM participation_new_objects n;
+   FROM participation_new_objects n';
   END IF;
  END IF;
  IF NOT fresh_live_paths THEN

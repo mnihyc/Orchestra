@@ -939,7 +939,7 @@ pub(super) fn advanced_shared_sql(selection: &str, kind: &str, source: &str) -> 
         WHEN 'item' THEN {source} WHEN 'name' THEN {source} \
         WHEN 'chat_message' THEN (SELECT node_id FROM chats WHERE id={source}) END"
     );
-    let path = format!("(SELECT path FROM nodes WHERE id=({node}))");
+    let path = format!("(SELECT path FROM nodes WHERE id=({node}))::uuid[]");
     let holders = format!(
         "jsonb_to_recordset(COALESCE({selection}->'search_holders','[]'::jsonb)) AS adv_h(kind text,id uuid,role text)"
     );
@@ -1451,7 +1451,9 @@ pub const CANDIDATE_ACCESS: &str = r#"(__ACCESS__::jsonb IS NULL
  OR (__KIND__='document' AND __SOURCE__ IN(SELECT jsonb_array_elements_text(__ACCESS__->'documents')::uuid))
  OR (__KIND__ IN ('chat','chat_message') AND __SOURCE__ IN(SELECT jsonb_array_elements_text(__ACCESS__->'chats')::uuid))
  OR (__KIND__='name' AND (__SOURCE__ IN(SELECT jsonb_array_elements_text(__ACCESS__->'names')::uuid)
-    OR (__ACCESS__->'names' IS NULL AND __PATH__ && ARRAY(SELECT jsonb_array_elements_text(__ACCESS__->'scopes')::uuid))))
+    OR (__ACCESS__->'names' IS NULL AND __PATH__ && ARRAY(SELECT jsonb_array_elements_text(__ACCESS__->'scopes')::uuid))
+    OR (__PATH__ && ARRAY(SELECT jsonb_array_elements_text(COALESCE(__ACCESS__->'thread_scopes',__ACCESS__->'scopes'))::uuid)
+      AND EXISTS(SELECT 1 FROM nodes named_thread WHERE named_thread.id=__SOURCE__ AND named_thread.kind='thread' OFFSET 0))))
  OR (__KIND__='document' AND __PATH__ && ARRAY(SELECT jsonb_array_elements_text(COALESCE(__ACCESS__->'doc_scopes',__ACCESS__->'scopes'))::uuid))
  OR (__KIND__ IN ('item','conversation') AND __PATH__ && ARRAY(SELECT jsonb_array_elements_text(COALESCE(__ACCESS__->'thread_scopes',__ACCESS__->'scopes'))::uuid))
  OR (__KIND__ IN ('chat','chat_message') AND EXISTS(SELECT 1 FROM chats visible_chat WHERE visible_chat.id=__SOURCE__ AND visible_chat.node_id IS NOT NULL

@@ -7,21 +7,22 @@ import { agentMessage, turn } from '../doubles/thread-rows.ts';
 import { asAdmin } from '../e2e/admin-mode-support.ts';
 import { DOCS } from '../e2e/documents-support.ts';
 import { documentTreeFixture, TREE } from '../e2e/document-tree-support.ts';
-import { resourceFixtures } from '../../e2e/layout-fixtures.ts';
-import { SKILL_ID } from '../../e2e/layout-routes.ts';
+import { openLayoutRoute, personalReportFixtures, prepareLayoutRoute, resourceFixtures, signInScreenRoute } from '../../e2e/layout-fixtures.ts';
+import { layoutRouteName, SCREEN_GATE_ROUTES, SCREEN_PRESENTATIONS, SKILL_ID, type LayoutRoute } from '../../e2e/layout-routes.ts';
 import { id, RUNS_ON, TRACE } from '../doubles/fixtures.ts';
 
 /** These are product limits, independent of machine speed. The socket and static assets cost no HTTP API read. */
 const FIRST_LOAD = 8;
 const IDLE_MS = 60_000;
 const DOUBLE = `http://127.0.0.1:${process.env.ORCH_DOUBLE_PORT ?? '41871'}`;
-interface RouteCase { template: string; path: string; anonymous?: boolean; admin?: boolean }
+interface RouteCase { template: string; path: string; anonymous?: boolean; admin?: boolean; screen?: LayoutRoute }
 
 const routes: RouteCase[] = [
   { template: '/', path: '/' },
   { template: '/resources', path: '/resources' },
   { template: '/settings', path: '/settings' },
   { template: '/workbench', path: '/workbench' },
+  { template: '/storage', path: '/storage' },
   ...['login', 'register', 'recover', 'setup'].map((name) => ({ template: `/${name}`, path: `/${name}`, anonymous: true })),
   ...['reset', 'verify-email', 'invite'].map((name) => ({ template: `/${name}/$token`, path: `/${name}/expired-token`, anonymous: true })),
   { template: '/org/$slug', path: '/org/acme' },
@@ -40,7 +41,7 @@ const routes: RouteCase[] = [
   { template: '/u/$username', path: '/u/ada' },
   ...['inbox', 'approvals', 'shared', 'everything', 'search', 'help', 'usage', 'admin'].map((name) => ({ template: `/${name}`, path: `/${name}`, admin: name === 'admin' })),
   { template: '/help/$article', path: '/help/speed-first-output-and-errors' },
-  ...['interface', 'tokens', 'usage', 'your-page', 'notifications', 'exports', 'security', 'profile'].map((section) => ({ template: `/settings/${section}`, path: `/settings/${section}` })),
+  ...['interface', 'tokens', 'usage', 'your-page', 'notifications', 'imports', 'exports', 'security', 'profile'].map((section) => ({ template: `/settings/${section}`, path: `/settings/${section}` })),
   ...['general', 'departments', 'members', 'roles', 'groups', 'policies', 'service-accounts', 'channels', 'destinations', 'tags', 'audit', 'everything'].map((section) => ({ template: '/org/$slug/settings/$section', path: `/org/acme/settings/${section}` })),
   ...['overview', 'users', 'orgs', 'everything', 'sign-in', 'email', 'hosts', 'runtimes', 'templates', 'mcp', 'capabilities', 'harnesses', 'agents', 'plugins', 'defaults', 'rates', 'settings', 'storage', 'system', 'pki', 'audit'].map((section) => ({ template: '/admin/$section', path: `/admin/${section}`, admin: true })),
   ...Object.entries({ machines: RUNS_ON.laptop, providers: RUNS_ON.openAiKey, agents: RUNS_ON.codex, environments: RUNS_ON.workspace, hosts: RUNS_ON.buildHost, templates: RUNS_ON.defaultTemplate, mcp: id(0x31, 1), mounts: id(0x32, 1) }).flatMap(([kind, resource]) => [
@@ -51,6 +52,7 @@ const routes: RouteCase[] = [
   { template: '/resources/skills', path: '/resources/skills' },
   { template: '/resources/skills/$id', path: `/resources/skills/${SKILL_ID}` },
   { template: '/not-found', path: '/a-page-that-does-not-exist' },
+  ...SCREEN_GATE_ROUTES.map((screen) => ({ template: screen.pattern, path: screen.url, admin: true, screen })),
 ];
 
 function routeTemplates(directory: string): string[] {
@@ -125,18 +127,26 @@ for (const navigation of ['open', 'closed'] as const) test(`a cold thread with t
   } finally { measured.stop(); }
 });
 
-for (const route of routes) test(`${route.path}: at most eight initial requests and none in a minute idle`, async ({ page, request }) => {
+for (const route of routes) for (const mode of route.screen === undefined ? [null] : SCREEN_PRESENTATIONS) test(`${route.screen === undefined ? route.path : layoutRouteName(route.screen)}${mode === null ? '' : ` ${mode.width}px ${mode.theme} ${mode.locale}`}: at most eight initial requests and none in a minute idle`, async ({ page, request }) => {
   await scenario();
   if (route.template === '/document-folder/$folderId') await documentTreeFixture(page);
   if (route.template.startsWith('/resources/skills')) await resourceFixtures(page);
+  if (route.template === '/storage' || route.template === '/settings/imports') await personalReportFixtures(page);
   expect((await request.post(`${DOUBLE}/__double/usage/performance`)).ok()).toBe(true);
   expect((await request.post(`${DOUBLE}/__double/request-feeds/fixtures`)).ok()).toBe(true);
+  if (route.screen !== undefined) await prepareLayoutRoute(page, route.screen);
   if (route.anonymous !== true) {
-    await signIn(page);
-    if (route.admin === true) await asAdmin(page, true);
+    if (mode !== null) await signInScreenRoute(page, mode);
+    else await signIn(page);
+    if (route.admin === true && mode === null) {
+      await asAdmin(page, true);
+    }
+    // Every cold route owns its traffic after the setup document is retired.
+    await page.goto('about:blank');
   }
   const measured = traffic(page);
   await page.goto(route.path);
+  if (route.screen !== undefined) await openLayoutRoute(page, route.screen);
   await settled(page);
   expect(measured.requests.length, `Initial traffic on ${route.path}\n${measured.requests.join('\n')}`).toBeLessThanOrEqual(FIRST_LOAD);
   for (const read of new Set(measured.requests.filter((entry) => entry.startsWith('GET ')))) expect(measured.requests.filter((entry) => entry === read), `Duplicate startup read: ${read}`).toHaveLength(1);
@@ -172,7 +182,9 @@ test('another person’s live rename updates the loaded row with no HTTP refresh
   await scenario(); await signIn(page); await page.goto('/org/acme'); await settled(page);
   const measured = traffic(page);
   await changeTree([{ id: ACME.web, name: 'Web services' }]);
-  await expect(page.getByRole('treeitem', { name: /Web services/ })).toBeVisible();
+  const changed = page.locator(`[role="treeitem"][data-tree-row="${ACME.web}"]`);
+  await expect(changed).toBeVisible();
+  await expect(changed).toHaveAccessibleName(/^Web services(?:\s|$)/);
   await settled(page);
   expect(measured.requests).toEqual([]);
   measured.stop();

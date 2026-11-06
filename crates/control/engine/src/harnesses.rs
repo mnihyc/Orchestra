@@ -62,19 +62,45 @@ impl OrchToolsRevision {
 }
 
 /// Session-only values which a turn cannot replace on an already open native conversation.
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize)]
 pub struct SessionConfiguration {
     /// The resolved absolute start directory.
     pub cwd: String,
+    /// The background completion preference accepted when the session opened.
+    pub background_wake: bool,
+    /// Native process-bound turn choices, absent for live-switchable harnesses.
+    pub restart_sensitive: Option<Json>,
     /// The resolved notes directory/keeper, or disabled native and agent notes.
     pub memory: Option<orch_link_contract::commands::SessionOpenMemory>,
+    /// The native executor build named by the accepted tool ticket.
+    pub executor_version: Option<String>,
 }
 
 impl From<&orch_link_contract::commands::SessionOpen> for SessionConfiguration {
     fn from(open: &orch_link_contract::commands::SessionOpen) -> Self {
         Self {
             cwd: open.cwd.clone(),
+            background_wake: open.background_wake,
+            restart_sensitive: open.turn_changes_require_restart.then(|| {
+                serde_json::json!({
+                    "model":open.model,"effort":open.effort,"params":open.params,
+                    "approval_mode":open.approval_mode,"sandbox_mode":open.sandbox_mode,
+                })
+            }),
             memory: open.memory.clone(),
+            executor_version: open.exec.ticket.as_ref().and_then(|ticket| match ticket {
+                orch_link_contract::commands::TicketSlot::Asked(asked)
+                    if asked.ticket.kind == orch_link_contract::tunnels::TunnelKind::Exec =>
+                {
+                    asked
+                        .ticket
+                        .more
+                        .get("executor_version")
+                        .and_then(Json::as_str)
+                        .map(str::to_owned)
+                }
+                _ => None,
+            }),
         }
     }
 }
@@ -107,6 +133,11 @@ impl OpenSessions {
     #[must_use]
     pub fn configuration_changed(&self, segment: Id, configuration: &SessionConfiguration) -> bool {
         self.accepted_configuration.get(&segment) != Some(configuration)
+    }
+
+    /// Whether this API process observed the actual successful opening.
+    pub(crate) fn configuration_known(&self, segment: Id) -> bool {
+        self.accepted_configuration.contains_key(&segment)
     }
 
     /// Records only an actual successful SessionOpen body, never a requested or refused change.
@@ -586,6 +617,18 @@ impl Engine {
         if configured {
             return Ok(Started::Up);
         }
+        if was_ready
+            && crate::background_wake::live_harness_thread(
+                &mut *self.inner.db.acquire().await?,
+                key.provider,
+                key.agent,
+                Some(key.machine),
+            )
+            .await?
+            .is_some()
+        {
+            return Ok(Started::Up);
+        }
         let mut proposed = self.provider_attach_plan(key).await?;
         proposed.request = Some(body.clone());
         proposed.ready_before_start = was_ready || prior_configuration.is_some();
@@ -830,6 +873,26 @@ impl Engine {
         if effective != ONLINE {
             lock(&self.inner.sessions).restarted(key);
         }
+        if matches!(status.status.as_str(), "stopped" | "error")
+            || status.status == "offline" && status.sessions_open == 0
+        {
+            let sources: Vec<(Id, Id)> = sqlx::query_as(
+                r#"SELECT DISTINCT i.thread_id,i.segment_id FROM items i
+                JOIN segments s ON s.id=i.segment_id WHERE s.provider_id=$1 AND s.agent_id=$2
+                AND s.machine_id=$3 AND i.kind='tool_call'
+                AND (i.payload @? '$.background_tasks.*.task.state ? (@ == "running")'
+                  OR i.payload @? '$.background_tasks.*.awaiting_native_wake ? (@ == true)')"#,
+            )
+            .bind(provider)
+            .bind(agent)
+            .bind(machine)
+            .fetch_all(&mut *unit.conn)
+            .await
+            .map_err(orch_db::DbError::from)?;
+            for (thread, segment) in sources {
+                crate::background_wake::lost(unit, thread, segment).await?;
+            }
+        }
         if status.status == ONLINE && before.as_deref() != Some(ONLINE) {
             for thread in orch_db::queries::threads::blocked_threads_of_provider(
                 &mut *unit.conn,
@@ -969,6 +1032,11 @@ impl Engine {
     /// provider runs.
     pub async fn restart_harness(&self, provider: Id, agent: Id) -> Result<Restarted, EngineError> {
         let mut conn = self.inner.db.acquire().await?;
+        if let Some(thread) =
+            crate::background_wake::live_harness_thread(&mut conn, provider, agent, None).await?
+        {
+            return Err(EngineError::BackgroundRunning(thread));
+        }
         let Some(keeper) = resources::provider(&mut conn, provider)
             .await?
             .filter(|row| row.deleted_at.is_none())
@@ -1304,7 +1372,10 @@ mod tests {
         let thread = new_id();
         let configuration = SessionConfiguration {
             cwd: "/workspace/child".into(),
+            background_wake: true,
+            restart_sensitive: None,
             memory: None,
+            executor_version: None,
         };
         let mut sessions = OpenSessions::default();
         sessions.opened(segment, thread, process);

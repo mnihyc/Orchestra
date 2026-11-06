@@ -12,6 +12,7 @@ const SPLITS: readonly Split[] = ['person','model','provider','agent','environme
 const DIMENSIONS = ['person','model','provider','agent','environment','effort','tier','program','org','project','topic','thread'] as const;
 const BUCKETS = ['auto','hour','day','week','month'] as const;
 const PLAN_MODES = ['current','history'] as const;
+const PLAN_METRICS = ['subscription','credits'] as const;
 
 /** Each surface has its own key; each chart's choices survive a visit to another chart. */
 export function useUsageChoices(raw: UsageSearch, kind: 'usage' | 'providerUsage',defaultTable:UsageDimension): [UsageSearch, (patch: SearchPatch) => void] {
@@ -21,6 +22,7 @@ export function useUsageChoices(raw: UsageSearch, kind: 'usage' | 'providerUsage
   const [series, keepSeries] = useRememberedView<Split>(kind,`${chart}.split`,raw.series,DEFAULT_SPLIT,SPLITS);
   const [bucket, keepBucket] = useRememberedView(kind,`${chart}.bucket`,raw.bucket,'auto',BUCKETS);
   const [plan, keepPlan] = useRememberedView(kind,'plan.mode',raw.plan,'current',PLAN_MODES);
+  const [planMetric, keepPlanMetric] = useRememberedView(kind,'plan.metric',raw.plan_metric,'subscription',PLAN_METRICS);
   const [planBucket, keepPlanBucket] = useRememberedView(kind,'plan.bucket',raw.plan_bucket,'auto',BUCKETS);
   const [by, keepBy] = useRememberedView(kind,'breakdown',raw.by,defaultTable,DIMENSIONS);
   const [range, keepRange] = useRememberedView(kind,'period',raw.range,DEFAULT_RANGE,RANGES);
@@ -33,10 +35,11 @@ export function useUsageChoices(raw: UsageSearch, kind: 'usage' | 'providerUsage
       if (patch.bucket !== undefined) keepBucket(patch.bucket);
     }
     if (patch.plan !== undefined) keepPlan(patch.plan);
+    if (patch.plan_metric !== undefined) keepPlanMetric(patch.plan_metric);
     if (patch.plan_bucket !== undefined) keepPlanBucket(patch.plan_bucket);
     if (patch.by !== undefined) keepBy(patch.by);
     if (patch.range !== undefined) keepRange(patch.range);
-  },[keepView,keepShow,keepSeries,keepBucket,keepPlan,keepPlanBucket,keepBy,keepRange]);
-  const search=useMemo(()=>({...raw,view,show,series,bucket,plan,plan_bucket:planBucket,by,range}),[raw,view,show,series,bucket,plan,planBucket,by,range]);
+  },[keepView,keepShow,keepSeries,keepBucket,keepPlan,keepPlanMetric,keepPlanBucket,keepBy,keepRange]);
+  const search=useMemo(()=>({...raw,view,show,series,bucket,plan,plan_metric:planMetric,plan_bucket:planBucket,by,range}),[raw,view,show,series,bucket,plan,planMetric,planBucket,by,range]);
   return [search,keep];
 }

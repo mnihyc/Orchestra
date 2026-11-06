@@ -229,6 +229,10 @@ pub fn build(root: &Path, out: &Path, target: &str) -> Result<(), ReleaseError> 
             program.display()
         )));
     }
+    if std::env::var("GITHUB_ACTIONS").is_ok_and(|value| value.eq_ignore_ascii_case("true")) {
+        let counter = orch_build_support::take_build_number("connector")?;
+        check_ci_identity(&said, &release.version, &tag, counter)?;
+    }
     let path = out.join(name);
     fs::copy(&program, &path).map_err(io(&path))?;
     check_program(&path, name)?;
@@ -272,6 +276,21 @@ pub fn build(root: &Path, out: &Path, target: &str) -> Result<(), ReleaseError> 
         harness_builds: Vec::new(),
     }
     .write(out)
+}
+
+fn check_ci_identity(
+    said: &str,
+    version: &str,
+    tag: &str,
+    counter: u64,
+) -> Result<(), ReleaseError> {
+    let expected = format!("connector {version} (build {counter}) [{tag}]");
+    if said != expected {
+        return Err(invalid(format!(
+            "the native connector identity differs from the committed CI identity: expected {expected}, got {said}"
+        )));
+    }
+    Ok(())
 }
 
 /// Reads verified connector builds of this exact release, refusing mixed commits, duplicate targets or damaged bytes.
@@ -348,6 +367,20 @@ pub fn require_all(names: &BTreeSet<String>) -> Result<(), ReleaseError> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn native_ci_requires_the_committed_component_identity_not_a_fresh_sandbox_counter() {
+        let said =
+            orch_build_info::BuildInfo::new("connector", "1.2.3", "v1.2.3", "42").to_string();
+        check_ci_identity(&said, "1.2.3", "v1.2.3", 42).unwrap();
+        for wrong in [
+            orch_build_info::BuildInfo::new("connector", "1.2.3", "v1.2.3", "1"),
+            orch_build_info::BuildInfo::new("connector", "1.2.2", "v1.2.3", "42"),
+            orch_build_info::BuildInfo::new("connector", "1.2.3", "v1.2.2", "42"),
+        ] {
+            assert!(check_ci_identity(&wrong.to_string(), "1.2.3", "v1.2.3", 42).is_err());
+        }
+    }
 
     fn input(dir: &Path, name: &str, bytes: &[u8]) {
         let path = dir.join(name);

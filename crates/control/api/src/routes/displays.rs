@@ -5,7 +5,8 @@ use crate::middleware::authentication::Caller;
 use crate::middleware::authorization::{self, refusals};
 use crate::middleware::requests::{ApiError, ApiResult};
 use crate::middleware::transaction_guard::{self, Guard};
-use crate::registry::{Ctx, Registry};
+use crate::registry::{Ctx, OperationFuture, Registry};
+use crate::routes::access::page::NameBounds;
 use crate::state::App;
 use orch_access_contract::permissions::Permission;
 use orch_api_contract::browsers::EnvironmentBrowsersLimit;
@@ -28,8 +29,8 @@ pub fn mount(registry: &mut Registry) {
     registry
         .on(EnvironmentDisplayList, list)
         .on(EnvironmentDisplayCreate, open)
-        .on(DisplayClose, close)
-        .on(DisplayTicketCreate, ticket)
+        .on_with_operation(DisplayClose, close_operation, close)
+        .on_with_operation(DisplayTicketCreate, ticket_operation, ticket)
         .on_socket(DisplayAttach, crate::realtime::displays::attach);
 }
 fn parse<T: DeserializeOwned>(value: &str) -> ApiResult<T> {
@@ -42,6 +43,16 @@ pub(crate) async fn current(
     conn: &mut Conn,
     principal: Option<&Principal>,
     environment: Id,
+) -> ApiResult<EnvironmentDisplays> {
+    current_with_names(app, conn, principal, environment, None).await
+}
+
+async fn current_with_names(
+    app: &App,
+    conn: &mut Conn,
+    principal: Option<&Principal>,
+    environment: Id,
+    names: Option<&NameBounds>,
 ) -> ApiResult<EnvironmentDisplays> {
     let site = rows::site(conn, environment)
         .await?
@@ -92,11 +103,13 @@ pub(crate) async fn current(
     for row in found {
         let thread = match (row.thread_id, principal) {
             (Some(id), Some(p)) => {
-                crate::routes::nodes::view::refs(conn, p, &[id], Policy::default())
-                    .await?
-                    .get(&id)
-                    .filter(|r| !r.redacted)
-                    .cloned()
+                let visible = match names {
+                    Some(names) => names.refs(conn, p, &[id]).await?,
+                    None => {
+                        crate::routes::nodes::view::refs(conn, p, &[id], Policy::default()).await?
+                    }
+                };
+                visible.get(&id).filter(|r| !r.redacted).cloned()
             }
             (Some(id), None) => {
                 orch_db::queries::browsers::node_name(conn, id)
@@ -218,18 +231,31 @@ fn action_context(mut ctx: Ctx, guard: &Guard) -> Ctx {
 async fn display(ctx: &Ctx, row: &rows::DisplayRow) -> ApiResult<Display> {
     let mut conn = ctx.app.db.acquire().await?;
     let principal = authorization::principal(ctx, &mut conn).await?;
-    require(
+    display_in(
+        &ctx.app,
         &mut conn,
         &principal,
         row.environment_id,
-        Permission::VncView,
+        row.id,
+        None,
     )
-    .await?;
-    current(&ctx.app, &mut conn, Some(&principal), row.environment_id)
+    .await
+}
+
+async fn display_in(
+    app: &App,
+    conn: &mut Conn,
+    principal: &Principal,
+    environment: Id,
+    id: Id,
+    names: Option<&NameBounds>,
+) -> ApiResult<Display> {
+    require(conn, principal, environment, Permission::VncView).await?;
+    current_with_names(app, conn, Some(principal), environment, names)
         .await?
         .displays
         .into_iter()
-        .find(|d| d.id == row.id)
+        .find(|d| d.id == id)
         .ok_or_else(ApiError::not_found)
 }
 async fn open(
@@ -271,34 +297,168 @@ async fn open(
         Err(error) => Err(failure(&ctx.app, error).await),
     }
 }
-async fn close(ctx: Ctx, (): (), (): ()) -> ApiResult<Display> {
+fn close_operation<'a>(
+    ctx: &'a Ctx,
+    conn: &'a mut Conn,
+    caller: &'a orch_authz::Caller,
+    (): (),
+    (): (),
+) -> OperationFuture<'a> {
+    Box::pin(async move {
+        let row = rows::get(conn, ctx.id("display_id")?)
+            .await?
+            .ok_or_else(ApiError::not_found)?;
+        Ok(super::interactive_close::plan(
+            ctx,
+            conn,
+            caller,
+            row.environment_id,
+            row.thread_id,
+            true,
+        )
+        .await?
+        .0
+        .with_data(row.environment_id))
+    })
+}
+
+async fn close_content(
+    ctx: &Ctx,
+    caller: &orch_authz::Caller,
+    environment: Id,
+    id: Id,
+) -> ApiResult<Option<Display>> {
+    if ctx.key_receipt_required() {
+        return Ok(None);
+    }
+    let mut conn = ctx.app.db.begin_snapshot().await?;
+    let now = orch_types::Time::new(ctx.app.clock.now());
+    let Some(current) = crate::key_operations::admission::response_caller(
+        ctx,
+        &mut conn,
+        caller,
+        ctx.route.name,
+        now,
+    )
+    .await?
+    else {
+        return Ok(None);
+    };
+    let Some(row) = rows::get(&mut conn, id).await? else {
+        ctx.complete_disclosure(crate::key_operations::resolver::Disclosure::Denied);
+        return Ok(None);
+    };
+    let (plan, names) = match super::interactive_close::plan(
+        ctx,
+        &mut conn,
+        &current.caller,
+        environment,
+        row.thread_id,
+        false,
+    )
+    .await
+    {
+        Ok(plan) => plan,
+        Err(error) if matches!(error.problem.status, 403 | 404 | 410) => {
+            ctx.complete_disclosure(crate::key_operations::resolver::Disclosure::Denied);
+            return Ok(None);
+        }
+        Err(error) => return Err(error),
+    };
+    #[cfg(test)]
+    crate::realtime::history_read_tests::close_name_sources_cut(&plan).await?;
+    let app = ctx.app.clone();
+    let result = plan
+        .read_response(ctx, &mut conn, caller, move |conn, reader| {
+            Box::pin(
+                async move { display_in(&app, conn, reader, environment, id, Some(&names)).await },
+            )
+        })
+        .await;
+    conn.commit().await.map_err(orch_db::DbError::from)?;
+    super::interactive_close::projection(ctx, result)
+}
+
+async fn close(ctx: Ctx, (): (), (): ()) -> ApiResult<DisplayCloseResponse> {
     let id = ctx.id("display_id")?;
-    let (tx, guard) = transaction_guard::begin(&ctx).await?;
-    let ctx = action_context(ctx, &guard);
-    let result = ctx
-        .app
-        .engine
-        .displays()
-        .close(
+    let (mut tx, guard) = transaction_guard::begin(&ctx).await?;
+    let caller = guard.principal().caller().clone();
+    let environment = *guard.operation_data::<Id>()?;
+    let ctx = action_context(ctx, &guard).with_admitted_caller(caller.clone())?;
+    let closer = ctx.app.engine.displays();
+    let result = closer
+        .close_in(
+            &mut tx,
             id,
             "closed_by_user",
-            Requester::Person(authorization::caller_of(ctx.user()?)?),
+            Requester::Person(caller.clone()),
             &crate::sign_in::origin(&ctx),
+            Some(environment),
         )
         .await;
-    tx.commit().await.map_err(orch_db::DbError::from)?;
-    let row = match result {
-        Ok(Some(row)) => row,
-        Ok(None) => {
-            let mut conn = ctx.app.db.acquire().await?;
-            rows::get(&mut conn, id)
-                .await?
-                .ok_or_else(ApiError::not_found)?
+    let closed = match result {
+        Ok(closed) => {
+            tx.commit().await.map_err(orch_db::DbError::from)?;
+            closed
         }
-        Err(error) => return Err(failure(&ctx.app, error).await),
+        Err(error) => {
+            tx.rollback().await.map_err(orch_db::DbError::from)?;
+            let disclose = super::interactive_close::may_disclose(
+                &ctx,
+                &caller,
+                environment,
+                Permission::VncView,
+            )
+            .await;
+            return Err(super::interactive_close::error(
+                &ctx,
+                failure(&ctx.app, error).await,
+                disclose,
+            ));
+        }
     };
-    display(&ctx, &row).await
+    // The actual effect and its audit are committed before best-effort native cleanup.
+    // No database lease or later key revocation can strand this accepted close.
+    let Some((row, site)) = closed else {
+        return Err(ApiError::not_found());
+    };
+    closer.finish_close(id, &site, row.is_some()).await;
+    match crate::key_operations::completed_projection::run(
+        &ctx,
+        close_content(&ctx, &caller, environment, id),
+    )
+    .await?
+    {
+        Some(full) if !ctx.key_receipt_required() => Ok(DisplayCloseResponse::Full(Box::new(full))),
+        _ => Ok(DisplayCloseResponse::Receipt(DisplayCloseReceipt {
+            projection: orch_api_contract::common::ReceiptProjection::Receipt,
+            display_id: id,
+            environment_id: environment,
+            closed: true,
+        })),
+    }
 }
+
+fn ticket_operation<'a>(
+    ctx: &'a Ctx,
+    conn: &'a mut Conn,
+    _caller: &'a orch_authz::Caller,
+    (): (),
+    body: DisplayTicketCreateBody,
+) -> OperationFuture<'a> {
+    Box::pin(async move {
+        let row = rows::get(conn, ctx.id("display_id")?)
+            .await?
+            .ok_or_else(ApiError::not_found)?;
+        let selection = if body.control.unwrap_or(false) {
+            "DisplayTicketCreate.control"
+        } else {
+            "DisplayTicketCreate.view"
+        };
+        super::interactive_tickets::plan(ctx, conn, selection, row.environment_id).await
+    })
+}
+
 async fn ticket(
     ctx: Ctx,
     (): (),
@@ -307,11 +467,15 @@ async fn ticket(
     let id = ctx.id("display_id")?;
     let control = body.control.unwrap_or(false);
     let (mut tx, guard) = transaction_guard::begin(&ctx).await?;
-    let ctx = action_context(ctx, &guard);
+    let ctx =
+        action_context(ctx, &guard).with_admitted_caller(guard.principal().caller().clone())?;
     let row = rows::get(&mut tx, id)
         .await?
         .filter(|r| r.state == "open")
         .ok_or_else(ApiError::not_found)?;
+    if row.environment_id != *guard.operation_data::<Id>()? {
+        return Err(ApiError::not_found());
+    }
     require(
         &mut tx,
         guard.principal(),
@@ -341,11 +505,14 @@ async fn ticket(
         return Err(ApiError::not_found());
     }
     let machine = site.machine_id.ok_or_else(ApiError::not_found)?;
-    let ticket = ctx
-        .app
-        .realtime
-        .displays()
-        .ticket(&ctx, id, control, machine, site.generation)?;
+    let ticket = ctx.app.realtime.displays().ticket(
+        &ctx,
+        id,
+        control,
+        row.environment_id,
+        machine,
+        site.generation,
+    )?;
     tx.commit().await.map_err(orch_db::DbError::from)?;
     Ok(ticket)
 }

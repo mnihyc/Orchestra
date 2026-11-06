@@ -101,6 +101,18 @@ pub(crate) async fn create_in(
     principal: &Principal,
     body: NewEnvironment,
 ) -> ApiResult<orch_engine::environments::Made> {
+    create_with_prepared_initial(ctx, conn, principal, body, None).await
+}
+
+/// Reuses a creator's single ordinary initial-file plan on its private creation
+/// transaction; no body choice or source is resampled before the existing writer.
+pub(crate) async fn create_with_prepared_initial(
+    ctx: &Ctx,
+    conn: &mut Conn,
+    principal: &Principal,
+    body: NewEnvironment,
+    prepared: Option<orch_engine::initial_files::Plan>,
+) -> ApiResult<orch_engine::environments::Made> {
     let mut config = body.config.clone().unwrap_or_else(|| json!({}));
     if let Some(sources) = &body.data_sources {
         let own = config
@@ -112,6 +124,8 @@ pub(crate) async fn create_in(
         );
     }
     clean_config("config", &config)?;
+    orch_engine::environments::check_initial_program_consent(&config)
+        .map_err(|reason| invalid("config.exec.version_overrides", reason))?;
     let name = body
         .name
         .as_deref()
@@ -131,26 +145,18 @@ pub(crate) async fn create_in(
         Policy::default(),
     )
     .await?;
-    let initial = match body.files.as_ref() {
-        None => None,
-        Some(files) => Some(
+    let initial = match (body.files.as_ref(), prepared) {
+        (None, None) => None,
+        (None, Some(_)) => {
+            return Err(ApiError::internal(
+                "an initial file plan has no matching creation request",
+            ));
+        }
+        (Some(_), Some(plan)) => Some(plan),
+        (Some(files), None) => Some(
             orch_engine::initial_files::plan(conn, principal, files)
                 .await
-                .map_err(|error| match error {
-                    orch_engine::initial_files::Error::NotFound => ApiError::not_found(),
-                    orch_engine::initial_files::Error::Denied(refusal) => ApiError::new(
-                        ErrorCode::AuthzDenied,
-                        "the initial file source is not authorized",
-                    )
-                    .with("missing", refusal.missing),
-                    orch_engine::initial_files::Error::Invalid(message) => {
-                        invalid("files", &message)
-                    }
-                    orch_engine::initial_files::Error::Unavailable(message) => {
-                        ApiError::new(ErrorCode::EnvironmentUnavailable, message)
-                    }
-                    orch_engine::initial_files::Error::Internal(error) => ApiError::engine(error),
-                })?,
+                .map_err(initial_failed)?,
         ),
     };
     let request = Request {
@@ -588,4 +594,21 @@ async fn managed_hosts(conn: &mut Conn, principal: &Principal) -> ApiResult<Vec<
         });
     }
     Ok(found)
+}
+
+/// The existing initial-file refusal projection, shared by atomic creator prefixes.
+pub(crate) fn initial_failed(error: orch_engine::initial_files::Error) -> ApiError {
+    match error {
+        orch_engine::initial_files::Error::NotFound => ApiError::not_found(),
+        orch_engine::initial_files::Error::Denied(refusal) => ApiError::new(
+            ErrorCode::AuthzDenied,
+            "the initial file source is not authorized",
+        )
+        .with("missing", refusal.missing),
+        orch_engine::initial_files::Error::Invalid(message) => invalid("files", &message),
+        orch_engine::initial_files::Error::Unavailable(message) => {
+            ApiError::new(ErrorCode::EnvironmentUnavailable, message)
+        }
+        orch_engine::initial_files::Error::Internal(error) => ApiError::engine(error),
+    }
 }

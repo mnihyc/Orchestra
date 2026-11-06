@@ -283,6 +283,10 @@ async fn landing(ctx: Ctx, (): (), _body: Body) -> ApiResult<Response> {
 /// `GET /ws/ports/{use_id}`: the raw socket of one admitted use. The use is taken, and its channel
 /// opened, before the upgrade, so that a refused or spent use is an ordinary answer.
 async fn socket(ctx: Ctx, query: PortUseSocketQuery, upgrade: WebSocketUpgrade) -> Response {
+    let surface = match ctx.http_surface() {
+        Ok(surface) => surface,
+        Err(error) => return error.into_response_for(&ctx.request_id),
+    };
     let id = match ctx.id("use_id") {
         Ok(id) => id,
         Err(error) => return error.into_response_for(&ctx.request_id),
@@ -297,7 +301,7 @@ async fn socket(ctx: Ctx, query: PortUseSocketQuery, upgrade: WebSocketUpgrade) 
         .app
         .cache
         .ports()
-        .open_channel(id, &query.ticket, outside)
+        .open_channel(id, &query.ticket, outside, surface)
         .await
     {
         Ok(tunnel) => upgrade

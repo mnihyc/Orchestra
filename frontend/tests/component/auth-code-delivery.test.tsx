@@ -91,7 +91,7 @@ for (const locale of ['en', 'zh-CN'] as const) {
 
 it('keeps a pending send from being submitted twice or replaced by password sign-in', async () => {
   await setLocale('en');
-  const pending = deferred<void>();
+  const pending = deferred<undefined>();
   calls.askCode.mockReturnValueOnce(pending.promise);
   show(<Login onward={null} callbackError={null} />);
   const user = userEvent.setup();
@@ -158,7 +158,7 @@ it('keeps the entered code and leaves a failed resend immediately retryable', as
 
 it('does not return to a second step when a send completes after starting over', async () => {
   await setLocale('en');
-  const pending = deferred<void>();
+  const pending = deferred<undefined>();
   calls.signIn.mockRejectedValueOnce(secondStep());
   calls.askCode.mockReturnValueOnce(pending.promise);
   show(<Login onward={null} callbackError={null} />);
@@ -168,7 +168,7 @@ it('does not return to a second step when a send completes after starting over',
   await user.click(screen.getByRole('button', { name: i18n.t('auth.login.submit') }));
   expect(await screen.findByText(i18n.t('auth.code.sending'))).toBeVisible();
   await user.click(screen.getByRole('button', { name: i18n.t('auth.login.startOver') }));
-  await act(async () => { pending.resolve(); await Promise.resolve(); });
+  await act(async () => { pending.resolve(undefined); await Promise.resolve(); });
   expect(screen.getByLabelText(i18n.t('auth.fields.login'))).toBeVisible();
   expect(screen.queryByText(i18n.t('auth.second.codeSent'))).not.toBeInTheDocument();
 });

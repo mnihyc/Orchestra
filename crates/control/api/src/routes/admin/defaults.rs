@@ -12,7 +12,6 @@
 use super::{admin_of, record};
 use crate::middleware::authorization::{self, refusals};
 use crate::middleware::requests::{ApiError, ApiResult};
-use crate::middleware::transaction_guard;
 use crate::registry::{Ctx, Registry};
 use crate::routes::access::page::permission_page;
 use crate::sign_in::origin;
@@ -93,7 +92,7 @@ async fn update(mut ctx: Ctx, (): (), body: PageChange) -> ApiResult<PermissionP
         ));
     }
     let resets = change.whole == Some(stored::Whole::Reset);
-    let (mut tx, guard) = transaction_guard::begin(&ctx).await?;
+    let (mut tx, guard) = super::action(&ctx).await?;
     ctx.now = guard.now().get();
     let admin = guard.user().id();
     let principal = guard.principal();

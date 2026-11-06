@@ -22,7 +22,9 @@
 //! or those of the step of `above` with the largest prompt size that the use's prompt exceeds. The arithmetic
 //! is exact: a price is a decimal number and is multiplied as one, never as a floating-point number, so a rate
 //! of `2.50` and a million tokens come to exactly `2.500000` and the rows of a day add up to the figure of
-//! the day.
+//! the day. A close snapshot is priced once for each factual aggregate group, following the same
+//! six-place row convention; that can differ by millionths from adding individually rounded requests.
+//! These are Orch credits at the recorded rate, not a vendor invoice.
 
 use crate::error::EngineError;
 use orch_agent_contract::discovery::ModelPattern;
@@ -205,6 +207,30 @@ struct Prices {
     output: Dec,
 }
 
+/// The existing strict context-band selector, shared by pricing and aggregate
+/// sufficiency checks. Comparing prices alone would miss intermediate bands.
+fn context_step(rate: &Rate, context: Option<i64>) -> Option<&RateStep> {
+    context.and_then(|context| {
+        rate.above
+            .iter()
+            .flatten()
+            .filter(|step| context > step.context_tokens)
+            .max_by_key(|step| step.context_tokens)
+    })
+}
+
+fn same_context_band(rate: &Rate, low: i64, high: i64) -> bool {
+    low <= high
+        && match (
+            context_step(rate, Some(low)),
+            context_step(rate, Some(high)),
+        ) {
+            (None, None) => true,
+            (Some(a), Some(b)) => std::ptr::eq(a, b),
+            _ => false,
+        }
+}
+
 impl Prices {
     /// The prices of `rate` for a use whose prompt was `context_tokens` large.
     fn of(rate: &Rate, context_tokens: Option<i64>) -> Option<Self> {
@@ -215,13 +241,7 @@ impl Prices {
             Some(price) => Dec::parse(price)?,
             None => input,
         };
-        let step: Option<&RateStep> = context_tokens.and_then(|context| {
-            rate.above
-                .iter()
-                .flatten()
-                .filter(|step| context > step.context_tokens)
-                .max_by_key(|step| step.context_tokens)
-        });
+        let step = context_step(rate, context_tokens);
         let Some(step) = step else {
             return Some(Self {
                 input,
@@ -256,6 +276,17 @@ pub fn credits(
     context_tokens: Option<i64>,
     tier: Option<&str>,
 ) -> Option<String> {
+    token_charge(rate, tokens, context_tokens, tier)?
+        .rounded(CREDIT_PLACES)?
+        .text(CREDIT_PLACES)
+}
+
+fn token_charge(
+    rate: &Rate,
+    tokens: &Tokens,
+    context_tokens: Option<i64>,
+    tier: Option<&str>,
+) -> Option<Dec> {
     let prices = Prices::of(rate, context_tokens)?;
     let cached = tokens.cached_input.max(0);
     let written = tokens.cache_write.max(0);
@@ -276,7 +307,7 @@ pub fn credits(
         None => Dec::ONE,
     };
     credits = credits.mul(multiple)?;
-    credits.rounded(CREDIT_PLACES)?.text(CREDIT_PLACES)
+    Some(credits)
 }
 
 /// The rate a use at service tier `tier` is counted at: every price times the tier's multiple where
@@ -290,6 +321,7 @@ pub fn for_tier(rate: &Rate, tier: Option<&str>) -> Option<Rate> {
         None => Dec::ONE,
     };
     let mut applied = scaled(rate, multiple)?;
+    applied.web_search_per_call = rate.web_search_per_call.clone();
     applied.tiers = None;
     Some(applied)
 }
@@ -322,6 +354,7 @@ fn scaled(rate: &Rate, scale: Dec) -> Option<Rate> {
         None => None,
     };
     Some(Rate {
+        web_search_per_call: optional(&rate.web_search_per_call)?,
         input_per_mtok: price(&rate.input_per_mtok)?,
         cached_input_per_mtok: price(&rate.cached_input_per_mtok)?,
         output_per_mtok: price(&rate.output_per_mtok)?,
@@ -347,7 +380,7 @@ pub struct Found {
 pub struct Priced {
     /// The rate and its source; none when no rate names the model.
     pub found: Option<Found>,
-    /// The credits it comes to; none exactly when there is no rate.
+    /// The credits it comes to; none when the rate or the actual processing tier is unavailable.
     pub credits: Option<String>,
 }
 
@@ -452,21 +485,146 @@ impl RateBook {
         context_tokens: Option<i64>,
         tier: Option<&str>,
     ) -> Result<Priced, EngineError> {
-        let Some(found) = self.find(conn, own, model).await? else {
+        self.price_with_alias(conn, own, model, tokens, context_tokens, (tier, None))
+            .await
+    }
+
+    /// As `price`, with one protocol-proven alias when no multiplier is set for the actual tier.
+    /// Retain the resolved multiplier in the event's copied rate; the provider's rate is unchanged.
+    pub(crate) async fn price_with_alias(
+        &self,
+        conn: &mut Conn,
+        own: Option<&Rate>,
+        model: &str,
+        tokens: &Tokens,
+        context_tokens: Option<i64>,
+        processing_tier: (Option<&str>, Option<&str>),
+    ) -> Result<Priced, EngineError> {
+        let (tier, alias) = processing_tier;
+        let Some(mut found) = self.find(conn, own, model).await? else {
             return Ok(Priced::default());
         };
-        match credits(&found.rate, tokens, context_tokens, tier) {
-            Some(credits) => Ok(Priced {
-                found: Some(found),
-                credits: Some(credits),
-            }),
-            None => {
-                tracing::warn!(
-                    model,
-                    "a rate has a price that is not a decimal; the use is counted without one"
-                );
-                Ok(Priced::default())
-            }
+        materialize_alias(&mut found.rate, tier, alias);
+        Ok(price_found(found, model, tokens, context_tokens, tier))
+    }
+
+    /// The same actual-tier decision used by structured OwnUse and raw observers.
+    /// Old callers without an observation retain their explicit legacy tier separately.
+    pub(crate) async fn price_observed(
+        &self,
+        conn: &mut Conn,
+        own: Option<&Rate>,
+        model: &str,
+        tokens: &Tokens,
+        context: (i64, i64),
+        timing: &orch_api_contract::usage::RequestTiming,
+        protocol: Option<&str>,
+    ) -> Result<(Option<String>, Priced), EngineError> {
+        use orch_api_contract::usage::UsageMeasurement;
+        let tier = timing
+            .reported_service_tier
+            .value()
+            .map(String::as_str)
+            .filter(|tier| !matches!(*tier, "default" | "standard"));
+        let unavailable = matches!(
+            timing.reported_service_tier,
+            UsageMeasurement::Unread | UsageMeasurement::Empty
+        ) || (timing
+            .requested_service_tier
+            .as_deref()
+            .is_some_and(|tier| !matches!(tier, "default" | "standard"))
+            && timing.reported_service_tier.value().is_none());
+        let alias = timing
+            .wire_protocol
+            .as_deref()
+            .or(protocol)
+            .and_then(|protocol| {
+                tier.and_then(|tier| {
+                    orch_model_contract::parameters::service_tier_price_alias(protocol, tier)
+                })
+            });
+        let Some(mut found) = self.find(conn, own, model).await? else {
+            return Ok((tier.map(str::to_owned), Priced::default()));
+        };
+        materialize_alias(&mut found.rate, tier, alias);
+        if unavailable || !same_context_band(&found.rate, context.0, context.1) {
+            return Ok((
+                tier.map(str::to_owned),
+                Priced {
+                    found: Some(found),
+                    credits: None,
+                },
+            ));
+        }
+        let mut priced = price_found(found, model, tokens, Some(context.1), tier);
+        if let Some(rate) = priced.found.as_ref() {
+            priced.credits = credits_with_searches(
+                &rate.rate,
+                tokens,
+                Some(context.1),
+                tier,
+                &timing.web_searches,
+            );
+        }
+        Ok((tier.map(str::to_owned), priced))
+    }
+}
+
+/// Search fees are additional and are not multiplied by a model's processing tier.
+#[must_use]
+pub fn credits_with_searches(
+    rate: &Rate,
+    tokens: &Tokens,
+    context: Option<i64>,
+    tier: Option<&str>,
+    searches: &orch_api_contract::usage::UsageMeasurement<i64>,
+) -> Option<String> {
+    use orch_api_contract::usage::UsageMeasurement;
+    let tokens = token_charge(rate, tokens, context, tier)?;
+    let count = match searches {
+        UsageMeasurement::Told { value } if *value >= 0 => *value,
+        UsageMeasurement::Unsupported => return tokens.rounded(CREDIT_PLACES)?.text(CREDIT_PLACES),
+        _ => return None,
+    };
+    if count == 0 {
+        return tokens.rounded(CREDIT_PLACES)?.text(CREDIT_PLACES);
+    }
+    let price = Dec::parse(rate.web_search_per_call.as_deref()?)?;
+    tokens
+        .add(price.mul(Dec::whole(i128::from(count)))?)?
+        .rounded(CREDIT_PLACES)?
+        .text(CREDIT_PLACES)
+}
+
+fn materialize_alias(rate: &mut Rate, tier: Option<&str>, alias: Option<&str>) {
+    if let (Some(tier), Some(alias), Some(tiers)) = (tier, alias, rate.tiers.as_mut()) {
+        if !tiers.contains_key(tier)
+            && let Some(multiplier) = tiers.get(alias).cloned()
+        {
+            tiers.insert(tier.to_owned(), multiplier);
+        }
+    }
+}
+
+/// The single existing exact decimal/kernel/rounding path for every priced row.
+fn price_found(
+    found: Found,
+    model: &str,
+    tokens: &Tokens,
+    context: Option<i64>,
+    tier: Option<&str>,
+) -> Priced {
+    match credits(&found.rate, tokens, context, tier) {
+        Some(credits) => Priced {
+            found: Some(found),
+            credits: Some(credits),
+        },
+        None => {
+            tracing::warn!(
+                model,
+                "a rate has a price that is not a decimal; the use is counted without one"
+            );
+            Priced::default()
         }
     }
 }
@@ -612,6 +770,77 @@ mod tests {
     }
 
     #[test]
+    fn equal_prices_do_not_make_distinct_context_bands_interchangeable() {
+        let stepped = rate(&json!({
+            "input_per_mtok": "2", "cached_input_per_mtok": "0.2", "output_per_mtok": "10",
+            "above": [
+                { "context_tokens": 100, "input_per_mtok": "4", "output_per_mtok": "20" },
+                { "context_tokens": 200, "input_per_mtok": "2", "output_per_mtok": "10" }
+            ]
+        }));
+        let used = tokens(1_000_000, 0, 0);
+        assert_eq!(
+            credits(&stepped, &used, Some(100), None),
+            Some("2.000000".to_owned())
+        );
+        assert_eq!(
+            credits(&stepped, &used, Some(150), None),
+            Some("4.000000".to_owned())
+        );
+        assert_eq!(
+            credits(&stepped, &used, Some(201), None),
+            Some("2.000000".to_owned())
+        );
+        assert!(
+            !same_context_band(&stepped, 100, 201),
+            "equal endpoint prices hide an intermediate band"
+        );
+        assert!(same_context_band(&stepped, 0, 100));
+        assert!(same_context_band(&stepped, 101, 200));
+        assert!(same_context_band(&stepped, 201, 300));
+        assert!(
+            !same_context_band(&stepped, 100, 101),
+            "threshold is strict"
+        );
+        assert!(!same_context_band(&stepped, 200, 201));
+        assert!(
+            !same_context_band(&stepped, 201, 100),
+            "reversed bounds are not evidence"
+        );
+    }
+
+    #[test]
+    fn a_documented_tier_alias_fills_only_an_absent_actual_multiplier() {
+        let alias = orch_model_contract::parameters::service_tier_price_alias(
+            "openai-responses",
+            "priority",
+        );
+        assert_eq!(alias, Some("fast"));
+        let mut explicit = rate(&json!({
+            "input_per_mtok": "2", "cached_input_per_mtok": "0.2", "output_per_mtok": "10",
+            "tiers": { "fast": "2", "priority": "3" }
+        }));
+        let used = tokens(1_000_000, 0, 0);
+        materialize_alias(&mut explicit, Some("priority"), alias);
+        assert_eq!(
+            credits(&explicit, &used, None, Some("priority")),
+            Some("6.000000".to_owned())
+        );
+        assert_eq!(explicit.tiers.as_ref().unwrap()["priority"], "3");
+        let mut absent = rate(&json!({
+            "input_per_mtok": "2", "cached_input_per_mtok": "0.2", "output_per_mtok": "10",
+            "tiers": { "fast": "2" }
+        }));
+        materialize_alias(&mut absent, Some("priority"), alias);
+        assert_eq!(
+            credits(&absent, &used, None, Some("priority")),
+            Some("4.000000".to_owned())
+        );
+        assert_eq!(absent.tiers.as_ref().unwrap()["fast"], "2");
+        assert_eq!(absent.tiers.as_ref().unwrap()["priority"], "2");
+    }
+
+    #[test]
     fn a_half_of_the_sixth_place_goes_up() {
         // One token at 2.5 per million is 0.0000025 credits.
         assert_eq!(
@@ -722,5 +951,52 @@ mod tests {
         let families = families_of(&document);
         assert_eq!(families.len(), 1);
         assert_eq!(families[0].0, "claude-opus-5*");
+    }
+    #[test]
+    fn native_search_fees_are_additive_exact_and_not_tier_multipliers() {
+        use orch_api_contract::usage::UsageMeasurement;
+        let rate = rate(
+            &json!({"input_per_mtok":"2","cached_input_per_mtok":"0.5","output_per_mtok":"8",
+            "tiers":{"fast":"2"},"web_search_per_call":"0.01"}),
+        );
+        let tokens = Tokens {
+            input: 1000,
+            total: 1000,
+            ..Tokens::default()
+        };
+        assert_eq!(
+            credits_with_searches(
+                &rate,
+                &tokens,
+                Some(1000),
+                Some("fast"),
+                &UsageMeasurement::Told { value: 2 }
+            )
+            .as_deref(),
+            Some("0.024000")
+        );
+        assert_eq!(
+            credits_with_searches(&rate, &tokens, Some(1000), None, &UsageMeasurement::Unread),
+            None
+        );
+        assert_eq!(
+            for_tier(&rate, Some("fast"))
+                .unwrap()
+                .web_search_per_call
+                .as_deref(),
+            Some("0.01")
+        );
+        let mut missing = rate.clone();
+        missing.web_search_per_call = None;
+        assert_eq!(
+            credits_with_searches(
+                &missing,
+                &tokens,
+                Some(1000),
+                None,
+                &UsageMeasurement::Told { value: 1 }
+            ),
+            None
+        );
     }
 }

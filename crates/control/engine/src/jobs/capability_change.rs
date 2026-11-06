@@ -1,5 +1,7 @@
 //! Durable live capability decisions, applied on the prepared unit before they are announced as available.
 
+pub mod authority;
+
 use super::runner::{Done, Failure, Job, MakeError, Making, Phase, Phased, Stop, Undone, make};
 use crate::{Engine, EngineError, commands::Outgoing, ids, unit::Unit};
 use async_trait::async_trait;
@@ -35,6 +37,17 @@ pub(crate) struct Plan {
     pub after: CapabilityState,
     pub requester: Option<Id>,
     pub decided_by: Option<Id>,
+    /// The actual accepted approval, set by that producer before this job is queued.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub approval: Option<Id>,
+    /// Known key-origin authority stays on the existing private plan, never an inferred Session.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub approval_origin: Option<orch_authz::CapturedOperation>,
+    /// A malformed/missing known origin is not an older ordinary job.
+    #[serde(default)]
+    pub approval_origin_required: bool,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub approval_binding: Option<authority::Binding>,
 }
 
 pub(crate) async fn queue(
@@ -43,6 +56,8 @@ pub(crate) async fn queue(
     plan: &Plan,
     now: chrono::DateTime<chrono::Utc>,
 ) -> Result<jobs::JobRow, MakeError> {
+    let mut plan = plan.clone();
+    authority::bind(conn, environment, &mut plan).await?;
     make(
         conn,
         &Making {
@@ -74,6 +89,14 @@ impl Applying {
     }
 
     async fn command(&self, job: &Job, undo: bool) -> Result<(), Stop> {
+        if let Some(command) = authority::accepted_command(job, undo).await? {
+            let result = if undo {
+                job.command_to_undo(command).await?
+            } else {
+                job.command(command).await?
+            };
+            return applied_result(result);
+        }
         let mut conn = self
             .engine
             .db()
@@ -142,31 +165,41 @@ impl Applying {
             &body,
         )
         .map_err(EngineError::from)?;
+        let command = if self.plan.approval_origin_required || self.plan.approval_origin.is_some() {
+            command.with_authority(crate::commands::CommandAuthority::capability_change(
+                authority::CapabilityChangeAuthority::capture(job.id(), undo),
+            ))
+        } else {
+            command
+        };
         let reply = if undo {
             job.command_to_undo(command).await?
         } else {
             job.command(command).await?
         };
-        let reply: NodeCapabilitiesApplyResult =
-            serde_json::from_value(reply).map_err(EngineError::from)?;
-        if !reply.applied {
-            let reason = reply.reason.unwrap_or_else(|| {
-                "the node could not apply this capability; recreate is needed".into()
-            });
-            return Err(Failure::new(
-                "live_unavailable",
-                if reply.restarted {
-                    format!(
-                        "{reason}. The environment restarted to restore its previous permissions."
-                    )
-                } else {
-                    reason
-                },
-            )
-            .into());
-        }
-        Ok(())
+        applied_result(reply)
     }
+}
+
+/// A replay reports the original native application result in exactly the same way as first issue.
+fn applied_result(value: Json) -> Result<(), Stop> {
+    let reply: NodeCapabilitiesApplyResult =
+        serde_json::from_value(value).map_err(EngineError::from)?;
+    if !reply.applied {
+        let reason = reply.reason.unwrap_or_else(|| {
+            "the node could not apply this capability; recreate is needed".into()
+        });
+        return Err(Failure::new(
+            "live_unavailable",
+            if reply.restarted {
+                format!("{reason}. The environment restarted to restore its previous permissions.")
+            } else {
+                reason
+            },
+        )
+        .into());
+    }
+    Ok(())
 }
 
 /// Keep the application result with the terminal job transaction, including after a runner crashes.

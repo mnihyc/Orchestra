@@ -163,7 +163,7 @@ async fn system(ctx: Ctx, (): (), (): ()) -> ApiResult<SystemInfo> {
 /// Check current browser/admin authority in a completed short transaction. External installation
 /// reads occur between checks, with no transaction or pooled connection retained by this task.
 async fn installation_read_authority(ctx: &Ctx) -> ApiResult<Time> {
-    let (tx, guard) = crate::middleware::transaction_guard::begin(ctx).await?;
+    let (tx, guard) = super::action(ctx).await?;
     let now = guard.now();
     tx.commit().await.map_err(orch_db::DbError::from)?;
     Ok(now)
