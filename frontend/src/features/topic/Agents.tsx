@@ -20,7 +20,7 @@ function usable(agent: BindingAgent): boolean {
 
 /** A profile offered by several providers is still one agent; keep its name and default marker once. */
 function available(options: StartOptions) {
-  const providers = options.providers.filter((entry) => entry.usable && entry.reason === null && entry.provider.status === 'ready'
+  const providers = options.providers.filter((entry) => entry.usable && entry.reason === null && (entry.provider.status === 'ready' || entry.provider.status === 'exhausted')
     && entry.models.some((model) => model.allowed) && entry.agents.some(usable));
   const agents = new Map<string, AgentRef>();
   for (const provider of providers) for (const entry of provider.agents) if (usable(entry)) agents.set(entry.agent.id, entry.agent);

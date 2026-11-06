@@ -17,7 +17,8 @@ import { useAppearance } from '@/lib/appearance';
 import { Skeleton } from '@/ui/Skeleton';
 
 import { AREAS, stepOf } from './agentShares';
-import { AREA_WORDS, stepWords } from './AgentRow';
+import { AREA_WORDS, stepWords } from './agentShareWords';
+import { CurrentAgentContribution, ViewerReadStanding } from './AgentContribution';
 import { shortDate } from './holders';
 
 /** What was shared, by its name, and the mark of its kind. */
@@ -55,11 +56,13 @@ export function KnownToAgents({ target }: { target: AccessTarget }) {
                   <span className="min-w-0 font-medium wrap-anywhere">{name === '' ? t('access.agents.know.unseen') : name}</span>
                 </span>
                 <span className="text-text-muted">
-                  {levels.join(t('startFlow.separator'))}
+                  {t('agentContributions.requested')}: {levels.join(t('startFlow.separator'))}
                   {share.mode === 'snapshot' && <span className="ml-3">{t('access.agents.know.copy')}</span>}
                 </span>
+                {share.mode === 'live' && <CurrentAgentContribution current={share.current} />}
+                <ViewerReadStanding entries={share.viewer_entries} />
                 <span className="text-text-muted">
-                  {from === null ? t('access.agents.know.here') : t('access.agents.know.from', { place: from })}{' '}{t('access.agents.by', { name: share.by.display_name, date: shortDate(locale, share.at) })}
+                  {from === null ? t('access.agents.know.here') : t('access.agents.know.from', { place: from })}{' '}{t('access.agents.by', { name: (share.by?.display_name ?? '').length > 0 ? share.by?.display_name : t('agentContributions.giverUnavailable'), date: shortDate(locale, share.at) })}
                 </span>
               </li>
             );

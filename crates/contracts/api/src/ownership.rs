@@ -7,6 +7,13 @@
 //! lose, gain and leave alone. What is deleted stays for a while and can be
 //! brought back; so can ownership be handed to another person.
 
+use crate::operations::{
+    FacetSpec as Facet, OperationSpec as Op, TargetResolver as Target, VariantSpec as Variant,
+};
+use orch_access_contract::key_scope::KeyAction::Manage;
+use orch_access_contract::key_scope::KeyTargetKind::Object;
+use orch_access_contract::permissions::ObjectKind as K;
+
 use std::collections::BTreeMap;
 
 use orch_types::{Id, Revision, Time};
@@ -331,27 +338,123 @@ pub struct NodeRestoreBody {
 
 crate::endpoints! {
     /// Ends a membership of a root org, with everything that follows from it.
-    OrgMemberRemove: DELETE "/orgs/{id}/members/{user_id}", Rule("members.manage on an org that is the person's domain or lies above it, or the member themself"), none, json OrgMemberRemoveBody, none, 204;
+    OrgMemberRemove: DELETE "/orgs/{id}/members/{user_id}", Rule("members.manage on an org that is the person's domain or lies above it, or the member themself"), none, json OrgMemberRemoveBody, none, 204,
+        operation Op::variants(&[
+            Variant {
+                name: "leave",
+                selector: "membership belongs to caller",
+                facets: &[Facet::required(
+                    Manage,
+                    &[Object(K::Org)],
+                    Target::Path("id"),
+                )],
+            },
+            Variant {
+                name: "remove",
+                selector: "another member is removed",
+                facets: &[Facet::required(
+                    Manage,
+                    &[Object(K::Org)],
+                    Target::Path("id"),
+                )],
+            },
+        ]);
     /// Lists everything of a person's in a tree that ending their membership would touch.
-    OrgMemberHoldings: GET "/orgs/{id}/members/{user_id}/holdings", Rule("the same as ending the membership"), none, none, json Holdings, 200;
+    OrgMemberHoldings: GET "/orgs/{id}/members/{user_id}/holdings", Rule("the same as ending the membership"), none, none, json Holdings, 200,
+        operation Op::single(Manage, &[Object(K::Org)], Target::Path("id"));
     /// Shows what changing a member's domain would do, before anything does.
-    OrgMemberMovePreview: POST "/orgs/{id}/members/{user_id}/move/preview", Rule("the same as the move itself"), none, json MemberMoveBody, json MemberMovePlan, 200;
+    OrgMemberMovePreview: POST "/orgs/{id}/members/{user_id}/move/preview", Rule("the same as the move itself"), none, json MemberMoveBody, json MemberMovePlan, 200,
+        operation Op::facets(&[
+            Facet::required(Manage, &[Object(K::Org)], Target::Path("id")),
+            Facet::required(Manage, &[Object(K::Org)], Target::Resolved("destination")),
+        ]);
     /// Changes a member's domain, carrying the role they held along.
-    OrgMemberMove: POST "/orgs/{id}/members/{user_id}/move", Rule("members.manage on the org that is the person's domain and on the org they move to"), none, json MemberMoveBody, json Member, 200;
+    OrgMemberMove: POST "/orgs/{id}/members/{user_id}/move", Rule("members.manage on the org that is the person's domain and on the org they move to"), none, json MemberMoveBody, json Member, 200,
+        operation Op::facets(&[
+            Facet::required(Manage, &[Object(K::Org)], Target::Path("id")),
+            Facet::required(Manage, &[Object(K::Org)], Target::Resolved("destination")),
+        ]);
     /// Says what deleting a node would remove, until when and by whom it can be brought back, and keeps that as a plan for the deletion to name; nothing is deleted.
-    NodeDeletePreview: POST "/nodes/{id}/delete/preview", Rule("the same as deleting the node"), none, none, json NodeDeletePlan, 200;
+    NodeDeletePreview: POST "/nodes/{id}/delete/preview", Rule("the same as deleting the node"), none, none, json NodeDeletePlan, 200,
+        operation Op::single(
+            Manage,
+            &[
+                Object(K::Org),
+                Object(K::Project),
+                Object(K::Topic),
+                Object(K::Thread),
+            ],
+            Target::Path("id"),
+        );
     /// Deletes a node with everything in it, archiving it first when it is not.
-    NodeDelete: DELETE "/nodes/{id}", Rule("node manager; side thread maker, parent manager or environment manager"), none, json NodeDeleteBody, json NodeDeleted, 200;
+    NodeDelete: DELETE "/nodes/{id}", Rule("node manager; side thread maker, parent manager or environment manager"), none, json NodeDeleteBody, json NodeDeleted, 200,
+        operation Op::single(
+            Manage,
+            &[
+                Object(K::Org),
+                Object(K::Project),
+                Object(K::Topic),
+                Object(K::Thread),
+            ],
+            Target::Path("id"),
+        );
     /// Lists what was deleted directly under a node and can still be brought back.
     NodeDeletedList: GET "/nodes/{id}/deleted", Permission("node.manage"), query PageQuery, none, json Page<DeletedNode>, 200;
     /// Brings a deleted node back, archived, with everything under it.
-    NodeRestore: POST "/nodes/{id}/restore", Rule("node.manage on the deleted node's parent; for a root org, one of its owners or a system admin"), none, json NodeRestoreBody, json Node, 200;
+    NodeRestore: POST "/nodes/{id}/restore", Rule("node.manage on the deleted node's parent; for a root org, one of its owners or a system admin"), none, json NodeRestoreBody, json Node, 200,
+        operation Op::facets(&[
+            Facet::required(
+                Manage,
+                &[
+                    Object(K::Org),
+                    Object(K::Project),
+                    Object(K::Topic),
+                    Object(K::Thread),
+                ],
+                Target::Resolved("restoration_parent"),
+            ),
+            Facet::response_content(
+                &[
+                    Object(K::Org),
+                    Object(K::Project),
+                    Object(K::Topic),
+                    Object(K::Thread),
+                ],
+                Target::Resolved("restored_node"),
+            ),
+        ]);
     /// Lists the deleted team root orgs of the caller that can still be restored.
-    OrgDeletedList: GET "/orgs/deleted", User, none, none, json Vec<DeletedOrg>, 200;
+    OrgDeletedList: GET "/orgs/deleted", User, none, none, json Vec<DeletedOrg>, 200,
+        operation Op::single(Manage, &[Object(K::Org)], Target::Resolved("results"));
     /// Makes another person the first owner of a node.
-    NodeTransfer: POST "/nodes/{id}/transfer", Rule("one of the node's owners, or an admin of the place it is in"), none, json TransferBody, json Node, 200;
+    NodeTransfer: POST "/nodes/{id}/transfer", Rule("one of the node's owners, or an admin of the place it is in"), none, json TransferBody, json Node, 200,
+        operation Op::returning(
+            Manage,
+            &[
+                Object(K::Org),
+                Object(K::Project),
+                Object(K::Topic),
+                Object(K::Thread),
+            ],
+            Target::Path("id"),
+        );
     /// Makes another person the first owner of a resource or a document.
-    ObjectTransfer: POST "/{object}/{id}/transfer", Rule("one of the resource's owners, or an admin of its home"), none, json TransferBody, json Resource, 200;
+    ObjectTransfer: POST "/{object}/{id}/transfer", Rule("one of the resource's owners, or an admin of its home"), none, json TransferBody, json Resource, 200,
+        operation Op::returning(
+            Manage,
+            &[
+                Object(K::Provider),
+                Object(K::Agent),
+                Object(K::Environment),
+                Object(K::Host),
+                Object(K::Machine),
+                Object(K::Template),
+                Object(K::McpServer),
+                Object(K::Mount),
+                Object(K::Skill),
+            ],
+            Target::Resolved("object"),
+        );
 }
 
 #[cfg(test)]

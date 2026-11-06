@@ -30,6 +30,7 @@ import type {
   RoleHeld,
   SharePreview,
   SharePreviewBody,
+  ShareParts,
   Problem,
   RowProfile,
   UserRef,
@@ -768,8 +769,8 @@ export class Access implements Part {
   private givesOf(person: Person, page: StoredPage, rows: readonly PermissionRow[], held: ReadonlySet<string>, sharing: boolean, manages: boolean): PageGives {
     const holdersShare = this.holdersMayShare(page);
     // A defaults page is changed by whoever manages it, with the bound of what its pages' holders hold (not drawn by any form).
-    if (page.defaults) return { choices: manages ? [...CHOICES] : [], roles: [], agents: [], holders_share: holdersShare };
-    if (!sharing) return { choices: [], roles: [], agents: [], holders_share: holdersShare };
+    if (page.defaults) return { choices: manages ? [...CHOICES] : [], roles: [], agents: [], agent_parts: {}, holders_share: holdersShare };
+    if (!sharing) return { choices: [], roles: [], agents: [], agent_parts: {}, holders_share: holdersShare };
     const given = (permission: string) => rows.find((row) => row.permission === permission)?.can_give === true;
     const choices = CHOICES.filter((choice) => {
       const needed = (CATALOGUE.choices.find((entry) => entry.key === choice)?.permissions[page.kind] ?? []).filter((name) => rows.some((row) => row.permission === name));
@@ -783,7 +784,51 @@ export class Access implements Part {
       ...(mayAny(['thread.interact', 'chat.interact', 'doc.edit']) ? (['edit'] as const) : []),
       ...(held.has('doc.manage') ? (['manage'] as const) : []),
     ];
-    return { choices, roles, agents: isResource(page.path) ? [] : agents, holders_share: holdersShare };
+    return { choices, roles, agents: isResource(page.path) ? [] : agents, agent_parts: this.agentPartsOf(person, page), holders_share: holdersShare };
+  }
+
+  /** The extra source projection uses the same rows/holders/locks under ordinary authority.
+   * Human page choices and management retain their existing request principal above.
+   */
+  private agentPartsOf(person: Person, page: StoredPage): ShareParts {
+    if (page.defaults || isResource(page.path)) return {};
+    const ordinary: Person = { ...person, me: { ...person.me, is_system_admin: false } };
+    const live = this.rowsFor(page, ordinary);
+    if (!live.sharing) return {};
+    const given = (permission: string) => live.rows.some((row) => row.permission === permission && row.can_give);
+    const place = ['org', 'project', 'topic'].includes(page.kind);
+    const directThread = page.kind === 'thread';
+    const document = page.kind === 'document' || page.path === 'documents';
+    if (!place && !directThread && !document) return {};
+    const parts: ShareParts = {};
+    const level = (read: boolean, write: boolean) => write ? 'write' as const : read ? 'read' as const : null;
+    if (place || directThread) {
+      let canRead = given('thread.view'), canWrite = given('thread.interact');
+      if (place) {
+        const defaults = this.pageOf('nodes', page.id, true);
+        const rows = this.rowsFor(defaults, ordinary).rows;
+        const administersPlace = this.owns(ordinary, page) || this.roleOf(ordinary, page.id) === 'admin';
+        const inside = (permission: string) => (['managed', 'connected'] as const).some((profile) => {
+          const selected = rows.filter((row) => row.profile === 'any' || row.profile === profile);
+          const row = selected.find((row) => row.permission === permission);
+          return row !== undefined && !(row.locked !== null && !row.locked.here)
+            && (administersPlace || this.heldOn(ordinary, defaults, selected).has(permission));
+        });
+        canRead = inside('thread.view'); canWrite = inside('thread.interact');
+      }
+      const timeline = level(canRead, canWrite);
+      if (timeline !== null) parts.timeline = timeline;
+    }
+    if (place || directThread) {
+      const chats = level(given('chat.view'), given('chat.interact'));
+      if (chats !== null) parts.chat = chats;
+    }
+    if (place || directThread || document) {
+      if (given('doc.manage')) parts.documents = 'manage';
+      else if (given('doc.edit')) parts.documents = 'edit';
+      else if (given('doc.view')) parts.documents = 'read';
+    }
+    return parts;
   }
 
   /** The places and threads and documents inside a place that follow it, and those that stay apart because they were made private; as far as the reader may see them. */

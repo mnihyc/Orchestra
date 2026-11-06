@@ -6,7 +6,7 @@
 //! (whether its owners may name somebody from outside its root org, and whether the subscription it
 //! may be is kept to its first owner) are the settings of that org.
 
-use crate::middleware::authorization::{self, refusals, resource_kind_of};
+use crate::middleware::authorization::{refusals, resource_kind_of};
 use crate::middleware::requests::{ApiError, ApiResult};
 use crate::registry::Ctx;
 use crate::routes::access::page::permission_page;
@@ -69,27 +69,7 @@ async fn read(
 
 /// Reads the page of a resource: whoever holds any permission on it.
 pub async fn get(ctx: &Ctx) -> ApiResult<api::PermissionPage> {
-    let (kind, id) = named(ctx)?;
-    let mut conn = ctx.app.db.acquire().await?;
-    let principal = authorization::principal(ctx, &mut conn).await?;
-    let object = ObjectRef {
-        kind: kind.into(),
-        id,
-    };
-    let (_, resource, _) =
-        resources::site(&mut conn, object)
-            .await
-            .map_err(|error| match error {
-                orch_authz::Error::NotFound(_) => ApiError::not_found(),
-                other => ApiError::internal(other),
-            })?;
-    if resource.deleted {
-        return Err(ApiError::not_found());
-    }
-    let (sharing, _) = policy_of(&mut conn, resource.home, kind).await?;
-    crate::routes::access::subject::require_resource_reader(&mut conn, &principal, object, sharing)
-        .await?;
-    read(ctx, &mut conn, &principal, object, resource.root, sharing).await
+    crate::routes::access::operations::read_page(ctx).await
 }
 
 /// Changes the page of a resource, as a whole or not at all: the one change that names owners and

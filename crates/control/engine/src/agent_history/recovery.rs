@@ -6,7 +6,7 @@ use crate::manifest::{Entry, EntryKind, Header, MANIFEST_VERSION, build};
 use crate::sessions::{SessionImport, StartSnapshot};
 use crate::summaries::handoff_notice;
 use crate::unit::Unit;
-use orch_db::queries::{agent_history, thread_history_cuts as cuts};
+use orch_db::queries::{agent_history, link, thread_history_cuts as cuts};
 use orch_link_contract::commands::{
     FsMaterialize, FsMaterializeResult, MaterializePurpose, SessionMode, SessionOpenHistory,
 };
@@ -493,7 +493,7 @@ impl Engine {
         let machine = snapshot.environment.machine_id.ok_or_else(|| {
             EngineError::unreadable("The thread has no machine for its transcript.")
         })?;
-        let command = Outgoing::new(
+        let mut command = Outgoing::new(
             crate::ids::derived(
                 "history.materialize",
                 &[
@@ -514,13 +514,49 @@ impl Engine {
                 purpose: MaterializePurpose::Delivery,
             },
         )?;
-        cuts::hold_command(
-            &mut *self.db().acquire().await?,
-            cut.id,
-            command.id,
-            machine,
+        // Publish the durable receipt and its history hold together before issuing the command.
+        let mut tx = self.db().begin().await?;
+        let retained = link::command(&mut tx, command.id).await?;
+        let deadline = retained.as_ref().map_or_else(
+            || {
+                self.inner.clock.now()
+                    + chrono::Duration::seconds(i64::from(command.kind.deadline_secs()))
+            },
+            |row| row.deadline_at,
+        );
+        let key = command.key.wire();
+        link::insert_command(
+            &mut tx,
+            &link::NewCommand {
+                id: command.id,
+                machine_id: command.machine,
+                kind: command.kind.as_str(),
+                body: &command.body,
+                serial_key: key.as_deref(),
+                deadline_at: deadline,
+            },
+            self.inner.clock.now(),
         )
         .await?;
+        let admitted = link::command(&mut tx, command.id)
+            .await?
+            .ok_or_else(|| EngineError::unreadable("The recovery file command is unavailable."))?;
+        if admitted.machine_id != command.machine
+            || admitted.kind != command.kind.as_str()
+            || admitted.body != command.body
+            || admitted.serial_key() != key.as_deref()
+            || retained
+                .as_ref()
+                .is_some_and(|row| admitted.deadline_at != row.deadline_at)
+        {
+            return Err(EngineError::unreadable(
+                "The recovery file command changed identity or budget.",
+            ));
+        }
+        // The first committed row owns the deadline, including a concurrent first admission.
+        command.deadline = Some(Time::new(admitted.deadline_at));
+        cuts::hold_command(&mut tx, cut.id, command.id, machine).await?;
+        tx.commit().await.map_err(orch_db::DbError::from)?;
         let command_id = command.id;
         match crate::commands::run(self.inner.commands.as_ref(), command).await? {
             Outcome::Succeeded(value) => {

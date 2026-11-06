@@ -3,6 +3,9 @@
 //! Settlement and its native controls are committed together. The command journal carries an
 //! interrupt, lease return and session close through restart; terminal work is never revived.
 
+/// Existing Snapshot custody, operation facts and the origin of a recorded-store read.
+pub mod snapshot_authority;
+
 use crate::commands::{Outcome, Outgoing};
 use crate::engine::{Engine, lock};
 use crate::error::EngineError;
@@ -205,6 +208,7 @@ impl Engine {
                 }
                 Err(MakeError::NoEnvironment) => return Err(RemovalScheduleError::Gone),
                 Err(MakeError::Db(error)) => return Err(EngineError::from(error).into()),
+                Err(MakeError::Internal(error)) => return Err(error.into()),
             }
         }
         Ok(accepted)
@@ -657,6 +661,7 @@ impl Engine {
             self.inner
                 .commands
                 .issue(Outgoing {
+                    authority: None,
                     id: row.id,
                     machine: row.machine_id,
                     key,

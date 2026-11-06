@@ -10,17 +10,14 @@ use crate::middleware::authorization;
 use crate::middleware::requests::{ApiError, ApiResult};
 use crate::registry::{Ctx, Registry};
 use crate::routes::resources::providers::show;
-use crate::routes::resources::view::addresses;
-use orch_access_contract::permissions::{Permission, ResourceKind};
 use orch_api_contract::common::ErrorCode;
 use orch_api_contract::nodes::{JobRef, JobState};
 use orch_api_contract::resources::{
     self as api, HostRef, Provider, ProviderRuntime, ProviderRuntimeTemplate,
 };
 use orch_api_contract::users::UserRef;
-use orch_authz::Policy;
 use orch_db::Conn;
-use orch_db::queries::environments::hosting::runtime_state;
+use orch_db::queries::environments::hosting::{RuntimeFull, runtime_state};
 use orch_db::queries::jobs::{JobRow, provider_jobs};
 use orch_db::queries::resources::hosting as host_rows;
 use orch_db::queries::resources::provider_runtime::{self as rows};
@@ -37,7 +34,11 @@ pub fn mount(registry: &mut Registry) {
     registry
         .on(api::ProviderStart, start)
         .on(api::ProviderStop, stop)
-        .on(api::ProviderHandoverReturn, handover_return);
+        .on_with_operation(
+            api::ProviderHandoverReturn,
+            super::provider_handover::operation,
+            super::provider_handover::return_credential,
+        );
 }
 
 /// A job in the few words a provider's page carries it in.
@@ -79,21 +80,27 @@ type TemplateShown = (Option<host_rows::TemplateState>, Option<UserRef>);
 /// job at work on it, or the last that ended when none is. What is read for each provider is read once
 /// for all of them, or once for each home and set of values they share, so that a list of many costs
 /// what a list of a few does.
+/// Runtime rows and addresses come from the same filtered provider projection.
 pub(crate) async fn runtime_views(
     ctx: &Ctx,
     conn: &mut Conn,
     managed: &[&ProviderRow],
+    live: &[RuntimeFull],
+    host_addresses: &HashMap<Id, String>,
 ) -> ApiResult<HashMap<Id, ProviderRuntime>> {
     if managed.is_empty() {
         return Ok(HashMap::new());
     }
     let ids: Vec<Id> = managed.iter().map(|row| row.id).collect();
-    let live = rows::live_runtimes(conn, &ids).await?;
-    let renewed: HashMap<Id, Option<chrono::DateTime<chrono::Utc>>> =
+    let only_creating = !live.is_empty() && live.iter().all(|runtime| runtime.state == BEING_MADE);
+    let renewed: HashMap<Id, Option<chrono::DateTime<chrono::Utc>>> = if only_creating {
+        HashMap::new()
+    } else {
         rows::renewal_stamps(conn, &ids)
             .await?
             .into_iter()
-            .collect();
+            .collect()
+    };
     let networks = crate::routes::environments::network::of_runtimes(
         conn,
         &live.iter().map(|runtime| runtime.id).collect::<Vec<_>>(),
@@ -116,9 +123,11 @@ pub(crate) async fn runtime_views(
     let open = provider_jobs::open_for(conn, &ids).await?;
     let host_ids: Vec<Id> = live.iter().map(|runtime| runtime.host_id).collect();
     let hosts = host_rows::hosts(conn, Some(&host_ids)).await?;
-    let host_addresses = addresses(conn, &host_ids).await?;
-    let activity: HashMap<Id, Option<chrono::DateTime<chrono::Utc>>> =
-        rows::activities_at(conn, &ids).await?.into_iter().collect();
+    let activity: HashMap<Id, Option<chrono::DateTime<chrono::Utc>>> = if only_creating {
+        HashMap::new()
+    } else {
+        rows::activities_at(conn, &ids).await?.into_iter().collect()
+    };
     let settings_at: Vec<ProviderAt<'_>> = managed
         .iter()
         .map(|row| ProviderAt {
@@ -359,7 +368,7 @@ async fn stop(ctx: Ctx, (): (), body: api::ProviderStartStopBody) -> ApiResult<P
 }
 
 /// What a refusal to bring a credential home is to the caller.
-fn not_home(error: ReturnError) -> ApiError {
+pub(super) fn not_home(error: ReturnError) -> ApiError {
     match error {
         ReturnError::NotHeld => ApiError::new(
             ErrorCode::RequestInvalid,
@@ -373,71 +382,4 @@ fn not_home(error: ReturnError) -> ApiError {
         ReturnError::Failed(why) => ApiError::new(ErrorCode::CredentialReturnFailed, why),
         ReturnError::Internal(error) => ApiError::engine(error),
     }
-}
-
-/// Brings home a credential that was handed over to an environment, or gives it up when the
-/// environment cannot give it back. Whoever manages the provider may do either; whoever manages only
-/// the environment that holds it may bring it home. Turns of that environment that run on the provider
-/// refuse it, unless the request says to interrupt them.
-async fn handover_return(
-    ctx: Ctx,
-    (): (),
-    body: api::ProviderHandoverReturnBody,
-) -> ApiResult<Provider> {
-    let id = ctx.id("id")?;
-    let (ctx, mut tx, principal) = super::begin_mutation(&ctx).await?;
-    let state = rows::state(&mut tx, id)
-        .await?
-        .filter(|state| state.deleted_at.is_none())
-        .ok_or_else(ApiError::not_found)?;
-    let manages = authorization::require_resource(
-        &mut tx,
-        &principal,
-        ResourceKind::Provider,
-        id,
-        Permission::ProviderManage,
-        Policy::default(),
-    )
-    .await;
-    let lost = body.declare_lost.unwrap_or(false);
-    match (manages, state.held_by_environment_id) {
-        (Ok(()), _) => {}
-        // Whoever manages only the environment that holds the credential may bring it home, and may
-        // not give it up: that is for those who manage the provider.
-        (Err(denied), Some(holder)) => {
-            if lost {
-                return Err(denied);
-            }
-            if authorization::require_resource(
-                &mut tx,
-                &principal,
-                ResourceKind::Environment,
-                holder,
-                Permission::EnvironmentManage,
-                Policy::default(),
-            )
-            .await
-            .is_err()
-            {
-                return Err(denied);
-            }
-        }
-        (Err(denied), None) => return Err(denied),
-    }
-    let done = ctx
-        .app
-        .engine
-        .return_credential_in(
-            tx,
-            &principal,
-            &crate::sign_in::origin(&ctx),
-            id,
-            body.interrupt.unwrap_or(false),
-            lost,
-        )
-        .await;
-    done.map_err(not_home)?;
-    let mut conn = ctx.app.db.acquire().await?;
-    let principal = authorization::principal(&ctx, &mut conn).await?;
-    show(&ctx, &mut conn, &principal, id).await
 }

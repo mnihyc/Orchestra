@@ -7,6 +7,7 @@
 
 mod places;
 mod support;
+use support::FullRoleReply as _;
 
 use orch_api_contract::access::{
     AccessChoice, AccessThrough, EffectiveAccessGet, EffectiveAccessGetQuery, Holder, HolderInput,
@@ -428,6 +429,7 @@ async fn giving_dep2_developers_developer_at_dep3_reaches_a_dep2_developer_and_n
         })
         .send()
         .await
+        .full_role()
         .ok();
     assert_eq!(given.subject.at.as_ref().unwrap().id, t.dep2);
     let Node::Org(bob) = read(&world, &t.bob, t.dep3).await else {

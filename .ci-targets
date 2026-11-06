@@ -1,0 +1,19 @@
+# batch-1: integ + wt/ci-triage (2026-11-06 08:30Z)
+fmt
+clippy
+doc
+test -p orch-node --test environment
+test -p orch-model-contract --lib protocol::tests::
+test -p orch-connector-core --test forwarding
+test -p orch-testkit --test database_budget
+test -p orch-testkit --test driver_boundary
+test -p orch-xtask --lib names::tests::
+test -p orch-provider-contract --lib calls::
+test -p orch-api-core --test chat_message_update_scopes
+test -p orch-api-core --test binder
+test -p orch-api-core --test admin_mode
+test -p orch-api-core --test resource_facts
+test -p orch-api-core --test provider_plan
+test -p orch-api-core --test access_requests
+web typecheck
+web lint

@@ -2,6 +2,7 @@
 import { QueryObserver, type QueryClient, type QueryKey, type QueryObserverResult } from '@tanstack/react-query';
 import { applyRow, feedSequences, record } from '@/api/cache';
 import { ApiError } from '@/api/client';
+import { seedEnvironmentLibrary } from '@/api/resourceLibrary';
 import { isOver, jobQuery } from '@/api/forks';
 import { deliverLiveValue, refuseLiveValue } from '@/api/liveValue';
 import type { EnvironmentPorts as NativePorts, Job, ResolvedSetting } from '@/generated/api-types';
@@ -52,7 +53,9 @@ export function applyQueryFrame(cache: QueryClient, key: QueryKey, frame: FeedFr
   }
   let next: unknown = source.member === undefined ? envelope : envelope[source.member];
   if (key[0] === 'environment') {
+    if (next === undefined) { seedEnvironmentLibrary(cache, String(key[1]), envelope.library); return; }
     if (!record(next) || next.id !== key[1] || typeof next.generation !== 'number' || typeof next.workspace_root !== 'string') return;
+    seedEnvironmentLibrary(cache, String(key[1]), envelope.library);
     const query = cache.getQueryCache().find({ queryKey: key, exact: true });
     if (query !== undefined) void query.cancel({ revert: false, silent: true });
     applyRow(cache, { kind: 'environment', id: String(key[1]), value: next });

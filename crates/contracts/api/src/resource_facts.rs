@@ -1,5 +1,10 @@
 //! Shared current dependents and reported use of resources, with explicit history coverage.
 
+use crate::operations::{OperationSpec as Op, TargetResolver as Target};
+use orch_access_contract::key_scope::KeyAction::Read;
+use orch_access_contract::key_scope::KeyTargetKind::Object;
+use orch_access_contract::permissions::ObjectKind as K;
+
 use orch_access_contract::decisions::ObjectRef;
 use orch_types::{Id, Time};
 use schemars::JsonSchema;
@@ -82,7 +87,22 @@ pub struct ResourceImpact {
 
 crate::endpoints! {
     /// Reads current consequences using the resource's native view or management authority.
-    ResourceImpactRead: POST "/resources/impact", crate::routes::Access::User, none, json FactTarget, json ResourceImpact, 200;
+    ResourceImpactRead: POST "/resources/impact", crate::routes::Access::User, none, json FactTarget, json ResourceImpact, 200,
+        operation Op::single(
+            Read,
+            &[
+                Object(K::Provider),
+                Object(K::Agent),
+                Object(K::Environment),
+                Object(K::Host),
+                Object(K::Machine),
+                Object(K::Template),
+                Object(K::McpServer),
+                Object(K::Mount),
+                Object(K::Skill),
+            ],
+            Target::Resolved("requested_resources"),
+        );
 }
 
 /// A stable subject of the shared facts service. An artifact belongs to one host.

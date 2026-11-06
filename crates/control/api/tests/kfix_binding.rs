@@ -99,7 +99,9 @@ async fn a_topic_and_a_folder_can_show_binding_choices_without_making_a_thread()
         })
         .send()
         .await
-        .ok();
+        .ok()
+        .into_full()
+        .unwrap();
     let choices = options(&s, folder.base.id, None).await;
     assert!(
         choices
@@ -399,7 +401,9 @@ async fn a_provider_only_machine_offers_the_environment_harness_and_refuses_the_
         .body(&body)
         .send()
         .await
-        .ok();
+        .ok()
+        .into_full()
+        .unwrap();
     let binding = thread.binding.as_ref().unwrap();
     assert_eq!(binding.arrangement, first.kind);
     assert_eq!(binding.isolation.harness_runs_in, HarnessPlace::Environment);
@@ -417,6 +421,7 @@ async fn a_provider_only_machine_offers_the_environment_harness_and_refuses_the_
             topic_id: None,
             name: Some("Try again".to_owned()),
             access: None,
+            agent_access: None,
             history: None,
             to: None,
             environment: None,

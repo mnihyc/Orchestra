@@ -9,15 +9,47 @@ mod rig_environment;
 
 use std::collections::BTreeMap;
 
+use orch_link_contract::commands::{EnvAttach, IndexMode};
+#[cfg(target_os = "linux")]
 use orch_link_contract::commands::{
-    EnvAttach, ExecStart, FsCopy, FsFetch, FsList, FsMaterialize, FsMkdir, FsRemove, FsRename,
-    FsSnapshot, FsStat, FsWrite, IndexMode, MaterializePurpose, McpImport, McpStart, McpStartGiven,
-    Selection,
+    ExecStart, FsCopy, FsFetch, FsList, FsMaterialize, FsMkdir, FsRemove, FsRename, FsSnapshot,
+    FsStat, FsWrite, MaterializePurpose, McpImport, McpStart, McpStartGiven, Selection,
 };
+#[cfg(target_os = "linux")]
 use orch_types::new_id;
 use rig_environment::EnvRig;
+#[cfg(target_os = "linux")]
 use serde_json::json;
 
+#[cfg(not(target_os = "linux"))]
+#[tokio::test]
+async fn an_unverified_environment_runtime_refuses_attachment_without_changing_the_directory() {
+    let mut rig = EnvRig::new();
+    let workspace = rig.directory("native-refusal");
+    std::fs::write(workspace.join("kept.txt"), "kept workspace").unwrap();
+    rig.start().await;
+    assert_eq!(
+        rig.fail(&attach_body(rig.environment, &workspace)).await,
+        "unsupported"
+    );
+    assert!(
+        rig.connector
+            .as_ref()
+            .unwrap()
+            .environment_role()
+            .unwrap()
+            .host()
+            .environment(rig.environment)
+            .is_err()
+    );
+    assert_eq!(
+        std::fs::read_to_string(workspace.join("kept.txt")).unwrap(),
+        "kept workspace"
+    );
+    rig.stop().await;
+}
+
+#[cfg(target_os = "linux")]
 #[tokio::test]
 async fn a_restart_reconstructs_attachment_and_executor_without_new_start_commands_and_detach_stays_detached()
  {
@@ -86,6 +118,7 @@ async fn a_restart_reconstructs_attachment_and_executor_without_new_start_comman
     rig.stop().await;
 }
 
+#[cfg(target_os = "linux")]
 #[tokio::test]
 async fn saved_attachment_cannot_outlive_the_machine_owners_current_allowed_roots() {
     let mut rig = EnvRig::new();
@@ -108,6 +141,7 @@ async fn saved_attachment_cannot_outlive_the_machine_owners_current_allowed_root
     rig.stop().await;
 }
 
+#[cfg(target_os = "linux")]
 #[tokio::test]
 async fn a_directory_is_listed_and_a_file_is_written_through_a_content_transfer_and_read_back() {
     let mut rig = EnvRig::new();
@@ -196,6 +230,7 @@ async fn a_directory_reports_its_actual_controllers_and_applies_the_declared_mem
     let mut rig = EnvRig::new();
     rig.start().await;
     let controls = rig.connector.as_ref().unwrap().services().process_controls;
+    eprintln!("connector detected process controls: {controls:?}");
     let facts = rig
         .succeed(&orch_link_contract::commands::MachineProbe {})
         .await;
@@ -252,6 +287,7 @@ async fn a_directory_reports_its_actual_controllers_and_applies_the_declared_mem
         .unwrap()
         .unwrap()
         .unwrap();
+        eprintln!("connector over-limit allocation status: {}", output.status);
         assert!(!output.status.success());
         assert!(!String::from_utf8_lossy(&output.stdout).contains("escaped"));
     } else {
@@ -279,6 +315,7 @@ fn attach_body(environment_id: orch_types::Id, root: &std::path::Path) -> EnvAtt
     }
 }
 
+#[cfg(target_os = "linux")]
 #[tokio::test]
 async fn a_path_outside_the_workspace_is_refused_whatever_the_command() {
     let mut rig = EnvRig::new();
@@ -378,6 +415,7 @@ async fn a_path_outside_the_workspace_is_refused_whatever_the_command() {
     rig.stop().await;
 }
 
+#[cfg(target_os = "linux")]
 #[tokio::test]
 async fn a_write_the_machines_owner_forbids_is_refused_with_the_policys_code_and_changes_nothing() {
     let mut rig = EnvRig::new();
@@ -463,6 +501,7 @@ async fn a_write_the_machines_owner_forbids_is_refused_with_the_policys_code_and
     rig.stop().await;
 }
 
+#[cfg(target_os = "linux")]
 #[tokio::test]
 async fn an_environment_outside_what_the_owner_offers_is_refused_and_so_is_what_the_owner_did_not_allow()
  {
@@ -517,6 +556,7 @@ async fn an_environment_outside_what_the_owner_offers_is_refused_and_so_is_what_
     rig.stop().await;
 }
 
+#[cfg(target_os = "linux")]
 #[tokio::test]
 async fn a_tree_is_snapshotted_and_materialized_in_another_environment_with_its_progress_reported()
 {
@@ -606,6 +646,7 @@ async fn a_tree_is_snapshotted_and_materialized_in_another_environment_with_its_
     rig.stop().await;
 }
 
+#[cfg(target_os = "linux")]
 #[tokio::test]
 async fn what_the_environment_says_on_its_own_account_goes_on_its_stream() {
     let mut rig = EnvRig::new();
@@ -656,7 +697,7 @@ async fn what_the_environment_says_on_its_own_account_goes_on_its_stream() {
 
 /// A tools directory as the node leaves it for a build of Codex: the package's program below `bin`, and the
 /// version the directory says.
-#[cfg(unix)]
+#[cfg(target_os = "linux")]
 fn tools_with_codex() -> tempfile::TempDir {
     use std::os::unix::fs::PermissionsExt;
     let tools = tempfile::tempdir().unwrap();
@@ -670,7 +711,7 @@ fn tools_with_codex() -> tempfile::TempDir {
 
 /// A rig for a runtime the system made, whose connector can host Codex and whose environment offers an executor
 /// that runs only where the build of Codex is.
-#[cfg(unix)]
+#[cfg(target_os = "linux")]
 fn rig_of_a_runtime(tools: &std::path::Path) -> EnvRig {
     use orch_adapter_fake::FakeAdapter;
     use orch_connector_core::harnesses::{AdapterRegistration, HomeRule};
@@ -691,6 +732,7 @@ fn rig_of_a_runtime(tools: &std::path::Path) -> EnvRig {
 }
 
 #[cfg(unix)]
+#[cfg(target_os = "linux")]
 #[tokio::test]
 async fn an_executor_that_runs_a_harnesss_build_is_available_where_the_system_put_the_build_and_the_machine_says_it_has_it()
  {
@@ -730,6 +772,7 @@ async fn an_executor_that_runs_a_harnesss_build_is_available_where_the_system_pu
 }
 
 #[cfg(unix)]
+#[cfg(target_os = "linux")]
 #[tokio::test]
 async fn an_executor_that_runs_a_harnesss_build_is_not_available_in_a_runtime_that_was_not_given_the_build()
  {

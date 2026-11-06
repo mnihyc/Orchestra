@@ -56,24 +56,7 @@ async fn read(
 
 /// Reads the page of a document: whoever may read the document or manage its permission page.
 pub async fn get(ctx: &Ctx) -> ApiResult<api::PermissionPage> {
-    let id = ctx.id("id")?;
-    let mut conn = ctx.app.db.acquire().await?;
-    let principal = authorization::principal(ctx, &mut conn).await?;
-    crate::routes::access::subject::require_page(
-        &mut conn,
-        &principal,
-        orch_authz::things::Thing::Other(object_of(ctx, id)),
-        Policy::default(),
-    )
-    .await?;
-    let (_, row, _) = orch_authz::documents::site(&mut conn, id)
-        .await
-        .map_err(ApiError::internal)?;
-    if row.kind != object_of(ctx, id).kind {
-        return Err(ApiError::not_found());
-    }
-    let policy = policy_at(&mut conn, row.node).await?;
-    read(ctx, &mut conn, &principal, &row, policy).await
+    crate::routes::access::operations::read_page(ctx).await
 }
 
 /// Changes the page of a document, as a whole or not at all. Who may is the

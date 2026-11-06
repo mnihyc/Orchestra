@@ -21,6 +21,8 @@
 //! can give it, carries out a decision as the approver's own change of the
 //! page, and lets a request nobody answered run out.
 
+pub mod operation;
+
 use crate::commands::{Outcome, Outgoing};
 use crate::engine::Engine;
 use crate::error::EngineError;
@@ -1096,7 +1098,8 @@ impl Engine {
 
     /// Decides as [`Self::decide_approval`] does, in a transaction whose caller was asked again once
     /// the request had come (the API's action guard): `principal` was loaded in `tx` by that check
-    /// before any thread was locked, and its caller and its time are the ones that decide.
+    /// before any thread was locked. The shared native prefix restores that same credential
+    /// after its normal locks; synchronous HTTP entrypoints additionally refresh their full Guard.
     pub async fn decide_approval_guarded(
         &self,
         mut tx: orch_db::Tx,
@@ -1104,18 +1107,32 @@ impl Engine {
         approval_id: Id,
         decision: &ApprovalDecision,
     ) -> Result<ApprovalRow, ApprovalError> {
+        let approval = operation::lock_decision(self, &mut tx, approval_id, decision)
+            .await?
+            .map(|locked| locked.row().clone())
+            .filter(|row| row.kind == "harness")
+            .ok_or(ApprovalError::NotFound)?;
+        let thread_id = approval.thread_id.ok_or(ApprovalError::NotFound)?;
+        let thread: ThreadRow = threads::lock(&mut tx, thread_id)
+            .await?
+            .ok_or(ApprovalError::NotFound)?;
+        let principal =
+            operation::current_principal(self, &mut tx, &principal, &approval, decision)
+                .await?
+                .ok_or_else(|| {
+                    ApprovalError::Denied(Box::new(Refusal::of(
+                        Permission::ThreadManage,
+                        orch_access_contract::decisions::ObjectRef {
+                            kind: orch_access_contract::permissions::ObjectKind::Thread,
+                            id: thread_id,
+                        },
+                        Vec::new(),
+                    )))
+                })?;
+        let now = self.inner.clock.now();
         let caller = principal.caller().clone();
-        let now = principal.now().get();
         let (finished, row) = {
             let mut unit = Unit::new(&mut tx, now);
-            let approval = queries::approval(&mut *unit.conn, approval_id)
-                .await?
-                .filter(|row| row.kind == "harness")
-                .ok_or(ApprovalError::NotFound)?;
-            let thread_id = approval.thread_id.ok_or(ApprovalError::NotFound)?;
-            let thread: ThreadRow = threads::lock(&mut *unit.conn, thread_id)
-                .await?
-                .ok_or(ApprovalError::NotFound)?;
             let permission = Box::pin(deciding_permission(
                 &mut *unit.conn,
                 thread_id,
@@ -1896,7 +1913,8 @@ pub mod access {
 
         /// Decides as [`Self::decide_access_request`] does, in a transaction whose caller was asked
         /// again once the request had come (the API's action guard): `approver` was loaded in `tx` by
-        /// that check, and its caller and its time are the ones the decision is made with.
+        /// that check. Its same credential is refreshed after the ordinary native lock footprint;
+        /// synchronous HTTP entrypoints separately retain their complete current Guard.
         pub async fn decide_access_request_guarded(
             &self,
             mut tx: orch_db::Tx,
@@ -1905,9 +1923,33 @@ pub mod access {
             decided: &Decided,
             origin: &Origin,
         ) -> Result<ApprovalRow, DecideError> {
+            let body = orch_api_contract::approvals::ApprovalDecision::Capability(
+                orch_api_contract::approvals::CapabilityDecision {
+                    approve: decided.approve,
+                    note: decided.note.clone(),
+                },
+            );
+            let locked = super::operation::lock_decision(self, &mut tx, approval_id, &body)
+                .await?
+                .map(|locked| locked.row().clone())
+                .filter(|row| row.kind == "access")
+                .ok_or(DecideError::NotFound)?;
+            let approver =
+                super::operation::current_principal(self, &mut tx, &approver, &locked, &body)
+                    .await?
+                    .ok_or_else(|| {
+                        DecideError::Denied(Box::new(Refusal::of(
+                            Permission::AccessManage,
+                            ObjectRef {
+                                kind: orch_access_contract::permissions::ObjectKind::Org,
+                                id: locked.node_id.unwrap_or(approval_id),
+                            },
+                            Vec::new(),
+                        )))
+                    })?;
+            let now = self.inner.clock.now();
             let caller = approver.caller().clone();
             let caller = &caller;
-            let now = approver.now().get();
             // A request that ran out is not decided; it is let lapse at once, and that is all this
             // transaction does.
             let overdue = approval_rows::approval(&mut tx, approval_id)
@@ -2223,23 +2265,50 @@ pub mod access {
         Ok(rows
             .iter()
             .filter_map(|row| {
-                let object = match (row.object_kind.as_deref(), row.object_id) {
-                    (Some(kind), Some(id)) => ObjectRef {
-                        kind: kind.parse().ok()?,
-                        id,
-                    },
-                    _ => {
-                        let node = row.node_id?;
-                        ObjectRef {
-                            kind: *kinds.get(&node)?,
-                            id: node,
-                        }
-                    }
-                };
+                let object = object_from(row, &kinds)?;
                 let asked = Asked::from_json(object, &row.request)?;
                 Some((row.id, (object, asked, row.requester_user_id?)))
             })
             .collect())
+    }
+
+    fn object_from(
+        row: &ApprovalRow,
+        kinds: &HashMap<Id, orch_access_contract::permissions::ObjectKind>,
+    ) -> Option<ObjectRef> {
+        match (row.object_kind.as_deref(), row.object_id) {
+            (Some(kind), Some(id)) => Some(ObjectRef {
+                kind: kind.parse().ok()?,
+                id,
+            }),
+            _ => {
+                let node = row.node_id?;
+                Some(ObjectRef {
+                    kind: *kinds.get(&node)?,
+                    id: node,
+                })
+            }
+        }
+    }
+
+    /// The same stored permission object, without parsing or copying the request payload.
+    pub(crate) async fn request_object(
+        conn: &mut orch_db::Conn,
+        row: &ApprovalRow,
+    ) -> Result<Option<ObjectRef>, orch_db::DbError> {
+        let kinds = if row.object_kind.is_none() {
+            match row.node_id {
+                Some(node) => hierarchy::with_ancestors(conn, &[node])
+                    .await?
+                    .into_iter()
+                    .filter_map(|found| Some((found.id, found.kind.parse().ok()?)))
+                    .collect(),
+                None => HashMap::new(),
+            }
+        } else {
+            HashMap::new()
+        };
+        Ok(object_from(row, &kinds))
     }
 
     /// What the stored request of `row` says: the thing it asks about, what it asks and who asked.

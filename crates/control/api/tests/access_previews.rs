@@ -381,6 +381,8 @@ async fn a_preview_of_a_resource_and_of_a_document_says_who_would_gain() {
         .send()
         .await
         .ok()
+        .into_full()
+        .unwrap()
         .provider
         .base
         .id;

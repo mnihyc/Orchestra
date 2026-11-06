@@ -395,6 +395,7 @@ async fn change(mut ctx: Ctx, expected: i64, purge: bool, confirm: Option<&str>)
             "another job owns this environment",
         )
         .with("job", job.id),
+        orch_engine::jobs::runner::MakeError::Internal(error) => ApiError::engine(error),
         _ => ApiError::new(ErrorCode::ConflictStaleRevision, "the removal changed"),
     })?;
     let shown = jobs::view(&mut tx, &job).await?;

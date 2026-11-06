@@ -93,17 +93,29 @@ async fn comment_pages_keep_equal_timestamps_authority_and_every_exported_reply(
     assert!(after.is_none());
     assert_eq!(all, expected);
     assert_eq!(all.iter().collect::<HashSet<_>>().len(), 125);
-    desk.world
+    let resolved = desk
+        .world
         .app
         .call(DocumentDiscussionResolve, &[&document, &discussion])
         .token(&other.token)
         .body(&DocumentDiscussionResolveBody { resolved: true })
         .send()
         .await
-        .ok();
-    let full_export = discussions::changed(&mut conn, document, 0, 200)
+        .ok()
+        .into_full()
+        .expect("the ordinary discussion reader keeps its full result");
+    assert!(
+        resolved.seq_updated > 200,
+        "resolving stamps a new document sequence"
+    );
+    let full_export = discussions::changed(&mut conn, document, 0, resolved.seq_updated)
         .await
         .unwrap();
+    assert_eq!(
+        full_export.len(),
+        1,
+        "the current export includes the resolved discussion"
+    );
     assert_eq!(
         full_export[0].comments.len(),
         125,

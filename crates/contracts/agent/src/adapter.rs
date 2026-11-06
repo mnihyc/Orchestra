@@ -621,6 +621,16 @@ pub trait AgentAdapter: Send + 'static {
         Ok(())
     }
 
+    /// Adapter-owned structural validation of staged native classifier evidence. This does not
+    /// alter decisions or provide model/provider authorization.
+    fn verify_native_classifier(
+        &self,
+        evidence: &crate::conformance::NativeClassifierEvidence<'_>,
+    ) -> Result<(), String> {
+        let _ = evidence;
+        Err("this adapter has no staged-classifier evidence validator".to_owned())
+    }
+
     /// Starts the harness or attaches to a running one. Idempotent.
     async fn start(
         &mut self,

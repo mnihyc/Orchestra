@@ -193,12 +193,14 @@ fn ranked(
             };
             return value(b)
                 .total_cmp(&value(a))
-                .then_with(|| a.key.cmp(&b.key));
+                .then_with(|| a.key.cmp(&b.key))
+                .then_with(|| a.tier_unknown.cmp(&b.tier_unknown));
         }
         credits_of(&b.figures)
             .cmp(&credits_of(&a.figures))
             .then_with(|| b.figures.total_tokens.cmp(&a.figures.total_tokens))
             .then_with(|| a.key.cmp(&b.key))
+            .then_with(|| a.tier_unknown.cmp(&b.tier_unknown))
     });
     cells
 }
@@ -278,6 +280,7 @@ pub async fn get(ctx: Ctx, query: UsageGetQuery, _body: Body) -> ApiResult<Respo
     let mut filter = scope::filter(&mut conn, &principal, &opened, &wanted, false).await?;
     filter.effort = query.effort.clone();
     filter.tier = query.tier.clone();
+    filter.tier_unknown = query.tier_unknown;
     filter.program = query.program.clone();
     filter.outcome = query.outcome;
     filter.org = query.org_id;
@@ -353,10 +356,10 @@ pub async fn get(ctx: Ctx, query: UsageGetQuery, _body: Body) -> ApiResult<Respo
             );
             let per_bucket = rollup::read(&mut conn, &read(Some(bucket), Some(dimension))).await?;
             let keep = usize::try_from(USAGE_SERIES_KEYS_MAX).unwrap_or(usize::MAX);
-            let kept: Vec<Option<String>> = over_span
+            let kept: Vec<(Option<String>, bool)> = over_span
                 .iter()
                 .take(keep)
-                .map(|cell| cell.key.clone())
+                .map(|cell| (cell.key.clone(), cell.tier_unknown))
                 .collect();
             let values: Vec<Option<String>> =
                 over_span.iter().map(|cell| cell.key.clone()).collect();
@@ -378,12 +381,12 @@ pub async fn get(ctx: Ctx, query: UsageGetQuery, _body: Body) -> ApiResult<Respo
                     .collect();
                 let mut by: Vec<UsageSplit> = kept
                     .iter()
-                    .map(|key| UsageSplit {
-                        key: names.key(*dimension, key.as_deref()),
+                    .map(|(key, tier_unknown)| UsageSplit {
+                        key: names.key(*dimension, key.as_deref(), *tier_unknown),
                         figures: figures(
                             &in_bucket
                                 .iter()
-                                .find(|cell| &cell.key == key)
+                                .find(|cell| &cell.key == key && cell.tier_unknown == *tier_unknown)
                                 .map(|cell| cell.figures.clone())
                                 .unwrap_or_default(),
                         ),
@@ -392,7 +395,7 @@ pub async fn get(ctx: Ctx, query: UsageGetQuery, _body: Body) -> ApiResult<Respo
                 if *has_rest {
                     let rest: Vec<&Figures> = in_bucket
                         .iter()
-                        .filter(|cell| !kept.contains(&cell.key))
+                        .filter(|cell| !kept.contains(&(cell.key.clone(), cell.tier_unknown)))
                         .map(|cell| &cell.figures)
                         .collect();
                     by.push(UsageSplit {
@@ -425,7 +428,7 @@ pub async fn get(ctx: Ctx, query: UsageGetQuery, _body: Body) -> ApiResult<Respo
             .iter()
             .take(limit)
             .map(|cell| UsageRow {
-                key: names.key(dimension, cell.key.as_deref()),
+                key: names.key(dimension, cell.key.as_deref(), cell.tier_unknown),
                 share: if total_credits > Micros::ZERO {
                     credits_of(&cell.figures).share_of(total_credits)
                 } else {

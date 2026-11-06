@@ -8,6 +8,7 @@
 //! change here is decided by the access engine on the org that keeps the
 //! thing, and writes its audit row in the same transaction.
 
+use crate::key_operations::credentials::key_info as token_info;
 use crate::middleware::authorization::{self, exact, refusals};
 use crate::middleware::requests::{ApiError, ApiResult};
 use crate::registry::{Answer, Ctx, Registry};
@@ -20,11 +21,11 @@ use orch_api_contract::common::ErrorCode;
 use orch_api_contract::common::{Page, PageQuery};
 use orch_api_contract::directory::{
     Group, GroupDelete, GroupHolderAdd, GroupHolderList, GroupHolderRemove, GroupMemberAdd,
-    GroupMemberList, GroupMemberRemove, GroupUpdate, GroupUpdateBody, Member, NodeGroupList,
-    NodeTagCreate, NodeTagCreateBody, NodeTagList, OrgGroupCreate, OrgGroupCreateBody,
-    OrgGroupList, OrgGroupListQuery, OrgMemberList, OrgMemberListQuery, OrgMemberResume,
-    OrgMemberSuspend, OrgMemberSuspendBody, OrgSuspensionList, Suspension, TagDelete, TagUpdate,
-    TagUpdateBody,
+    GroupMemberList, GroupMemberRemove, GroupUpdate, GroupUpdateBody, GroupUpdateReceipt,
+    GroupUpdateResponse, Member, NodeGroupList, NodeTagCreate, NodeTagCreateBody, NodeTagList,
+    OrgGroupCreate, OrgGroupCreateBody, OrgGroupList, OrgGroupListQuery, OrgMemberList,
+    OrgMemberListQuery, OrgMemberResume, OrgMemberSuspend, OrgMemberSuspendBody, OrgSuspensionList,
+    Suspension, TagDelete, TagUpdate, TagUpdateBody,
 };
 use orch_api_contract::nodes::{NodeKind, NodeRef, Tag};
 use orch_api_contract::users::COLOR_COUNT;
@@ -37,6 +38,8 @@ use orch_types::{Id, new_id};
 use serde_json::json;
 use std::collections::HashMap;
 
+mod group_lists;
+mod group_operations;
 mod members;
 mod outsiders;
 
@@ -48,17 +51,45 @@ pub fn mount(registry: &mut Registry) {
     members::mount(registry);
     outsiders::mount(registry);
     registry
-        .on(OrgGroupList, group_list)
-        .on(NodeGroupList, place_groups)
+        .on_with_operation(OrgGroupList, group_lists::org, group_lists::org_list)
+        .on_with_operation(NodeGroupList, group_lists::node, group_lists::node_list)
         .on(OrgGroupCreate, group_create)
-        .on(GroupUpdate, group_update)
-        .on(GroupDelete, group_delete)
-        .on(GroupMemberList, group_member_list)
-        .on(GroupHolderList, group_holder_list)
-        .on(GroupHolderAdd, group_holder_add)
-        .on(GroupHolderRemove, group_holder_remove)
-        .on(GroupMemberAdd, group_member_add)
-        .on(GroupMemberRemove, group_member_remove)
+        .on_with_operation(GroupUpdate, group_operations::update, group_update)
+        .on_with_operation(
+            GroupDelete,
+            crate::key_operations::direct::declared,
+            group_delete,
+        )
+        .on_with_operation(
+            GroupMemberList,
+            crate::key_operations::direct::declared,
+            group_member_list,
+        )
+        .on_with_operation(
+            GroupHolderList,
+            group_operations::holders,
+            group_operations::holder_list,
+        )
+        .on_with_operation(
+            GroupHolderAdd,
+            crate::key_operations::direct::declared,
+            group_holder_add,
+        )
+        .on_with_operation(
+            GroupHolderRemove,
+            crate::key_operations::direct::declared,
+            group_holder_remove,
+        )
+        .on_with_operation(
+            GroupMemberAdd,
+            crate::key_operations::direct::declared,
+            group_member_add,
+        )
+        .on_with_operation(
+            GroupMemberRemove,
+            crate::key_operations::direct::declared,
+            group_member_remove,
+        )
         .on(OrgMemberList, member_list)
         .on(OrgMemberSuspend, member_suspend)
         .on(OrgMemberResume, member_resume)
@@ -71,20 +102,24 @@ pub fn mount(registry: &mut Registry) {
             orch_api_contract::directory::OrgServiceAccountCreate,
             service_create,
         )
-        .on(
+        .on_with_operation(
             orch_api_contract::directory::ServiceAccountDelete,
+            crate::key_operations::direct::declared,
             service_delete,
         )
-        .on(
+        .on_with_operation(
             orch_api_contract::directory::ServiceAccountTokenList,
+            service_token_list_operation,
             service_token_list,
         )
-        .on(
+        .on_with_operation(
             orch_api_contract::directory::ServiceAccountTokenCreate,
+            service_token_create_operation,
             service_token_create,
         )
-        .on(
+        .on_with_operation(
             orch_api_contract::directory::ServiceAccountTokenDelete,
+            service_token_delete_operation,
             service_token_delete,
         )
         .on(NodeTagList, tag_list)
@@ -337,13 +372,31 @@ pub(crate) async fn groups_named(
     principal: &orch_authz::Principal,
     rows: Vec<access::GroupFull>,
 ) -> ApiResult<Vec<Group>> {
+    groups_named_bounded(conn, principal, rows, None).await
+}
+
+/// The same full Group projection after its source has been admitted, with only
+/// the existing optional group-home qualification restricted by a name bound.
+pub(crate) async fn groups_named_bounded(
+    conn: &mut Conn,
+    principal: &orch_authz::Principal,
+    rows: Vec<access::GroupFull>,
+    bounds: Option<&crate::routes::access::page::NameBounds>,
+) -> ApiResult<Vec<Group>> {
     let orgs: Vec<Id> = rows.iter().map(|row| row.org_id).collect();
-    let places =
-        crate::routes::nodes::view::qualified_refs(conn, principal, &orgs, Policy::default())
-            .await?;
+    let places = match bounds {
+        Some(bounds) => bounds.qualified_refs(conn, principal, &orgs).await?,
+        None => {
+            crate::routes::nodes::view::qualified_refs(conn, principal, &orgs, Policy::default())
+                .await?
+        }
+    };
     let groups: Vec<Id> = rows.iter().map(|row| row.id).collect();
     let mut counts = HashMap::<Id, i64>::new();
-    for (group, _) in access::group_people(conn, &groups, i64::MAX, principal.now().get()).await? {
+    for (group, _) in orch_authz::holders::group_people(conn, &groups, principal.now())
+        .await
+        .map_err(ApiError::internal)?
+    {
         *counts.entry(group).or_default() += 1;
     }
     Ok(rows
@@ -378,49 +431,6 @@ async fn the_org(conn: &mut Conn, id: Id) -> ApiResult<Placed> {
     } else {
         Err(ApiError::not_found())
     }
-}
-
-/// The groups an org keeps.
-async fn group_list(ctx: Ctx, query: OrgGroupListQuery, (): ()) -> ApiResult<Vec<Group>> {
-    let id = ctx.id("id")?;
-    let mut conn = ctx.app.db.acquire().await?;
-    the_org(&mut conn, id).await?;
-    let principal = authorization::principal(&ctx, &mut conn).await?;
-    let rows = access::groups_of_orgs(&mut conn, id, query.under.unwrap_or(false)).await?;
-    groups_named(&mut conn, &principal, rows).await
-}
-
-/// A project or topic uses the groups its nearest org keeps; a private org discloses none.
-async fn place_groups(ctx: Ctx, (): (), (): ()) -> ApiResult<Vec<Group>> {
-    let id = ctx.id("id")?;
-    let mut conn = ctx.app.db.acquire().await?;
-    let principal = authorization::principal(&ctx, &mut conn).await?;
-    let rows = hierarchy::with_ancestors(&mut conn, &[id]).await?;
-    let Some(node) = rows.iter().find(|row| row.id == id && row.kind != "thread") else {
-        return Err(ApiError::not_found());
-    };
-    let Some(org) = rows
-        .iter()
-        .filter(|row| row.kind == "org" && node.path.contains(&row.id))
-        .max_by_key(|row| row.path.len())
-    else {
-        return Ok(Vec::new());
-    };
-    if authorization::require(
-        &mut conn,
-        &principal,
-        org.id,
-        authorization::VIEW,
-        Act::Use,
-        Policy::default(),
-    )
-    .await
-    .is_err()
-    {
-        return Ok(Vec::new());
-    }
-    let groups = access::groups_of_orgs(&mut conn, org.id, false).await?;
-    groups_named(&mut conn, &principal, groups).await
 }
 
 fn group_taken(error: DbError) -> ApiError {
@@ -500,13 +510,35 @@ async fn require_on_keeper(
     .await
 }
 
+/// Keep the same keeper permission decision while honoring this operation's
+/// current optional disclosure before constructing names in a denial.
+async fn require_on_keeper_projected(
+    ctx: &Ctx,
+    conn: &mut Conn,
+    principal: &orch_authz::Principal,
+    org: Id,
+    permission: orch_access_contract::permissions::PermissionName,
+) -> ApiResult<()> {
+    authorization::require_projected(
+        conn,
+        principal,
+        org,
+        permission,
+        Act::Use,
+        Policy::default(),
+        ctx.key_receipt_required(),
+    )
+    .await
+}
+
 /// Renames a group or describes it anew.
-async fn group_update(ctx: Ctx, (): (), body: GroupUpdateBody) -> ApiResult<Group> {
+async fn group_update(ctx: Ctx, (): (), body: GroupUpdateBody) -> ApiResult<GroupUpdateResponse> {
     let id = ctx.id("id")?;
     let name = body.name.as_deref().map(clean_group_name).transpose()?;
     let (ctx, mut tx, principal) = crate::routes::nodes::action(&ctx).await?;
     let (group, place) = the_group(&mut tx, id).await?;
-    require_on_keeper(
+    require_on_keeper_projected(
+        &ctx,
         &mut tx,
         &principal,
         group.org_id,
@@ -536,13 +568,15 @@ async fn group_update(ctx: Ctx, (): (), body: GroupUpdateBody) -> ApiResult<Grou
         json!({ "group": id, "name": name }),
     )
     .await?;
-    let rows = access::groups_full(&mut tx, &[id]).await?;
-    let changed = groups_named(&mut tx, &principal, rows).await?;
+    let changed = group_operations::updated_group(&ctx, &mut tx, &principal).await?;
     tx.commit().await.map_err(DbError::from)?;
-    changed
-        .into_iter()
-        .next()
-        .ok_or_else(|| ApiError::internal("a group was changed and is not there"))
+    match (changed, ctx.key_receipt_required()) {
+        (Some(group), false) => Ok(GroupUpdateResponse::Full(group)),
+        _ => Ok(GroupUpdateResponse::Receipt(GroupUpdateReceipt {
+            projection: orch_api_contract::common::ReceiptProjection::Receipt,
+            group_id: id,
+        })),
+    }
 }
 
 /// Deletes a group, with the roles it holds and the entries that name it.
@@ -550,7 +584,8 @@ async fn group_delete(ctx: Ctx, (): (), (): ()) -> ApiResult<()> {
     let id = ctx.id("id")?;
     let (ctx, mut tx, principal) = crate::routes::nodes::action(&ctx).await?;
     let (group, place) = the_group(&mut tx, id).await?;
-    require_on_keeper(
+    require_on_keeper_projected(
+        &ctx,
         &mut tx,
         &principal,
         group.org_id,
@@ -580,11 +615,12 @@ async fn group_delete(ctx: Ctx, (): (), (): ()) -> ApiResult<()> {
 async fn group_member_list(ctx: Ctx, (): (), (): ()) -> ApiResult<Vec<UserRef>> {
     let id = ctx.id("id")?;
     let mut conn = ctx.app.db.acquire().await?;
-    let principal = authorization::principal(&ctx, &mut conn).await?;
+    let principal = ctx.operation_principal(&mut conn).await?;
     let (group, place) = the_group(&mut conn, id).await?;
     require_on_keeper(&mut conn, &principal, group.org_id, authorization::VIEW).await?;
-    let ids: Vec<Id> = access::group_people(&mut conn, &[id], i64::MAX, principal.now().get())
-        .await?
+    let ids: Vec<Id> = orch_authz::holders::group_people(&mut conn, &[id], principal.now())
+        .await
+        .map_err(ApiError::internal)?
         .into_iter()
         .map(|(_, user)| user)
         .collect();
@@ -610,41 +646,6 @@ fn group_holder(row: &access::GroupHolderRow) -> ApiResult<orch_access_contract:
     } else {
         return Err(ApiError::internal("a group member has no holder"));
     })
-}
-
-async fn group_holder_list(
-    ctx: Ctx,
-    (): (),
-    (): (),
-) -> ApiResult<Vec<orch_api_contract::access::Holder>> {
-    let id = ctx.id("id")?;
-    let mut conn = ctx.app.db.acquire().await?;
-    let principal = authorization::principal(&ctx, &mut conn).await?;
-    let (group, place) = require_group(&mut conn, &principal, id, authorization::VIEW).await?;
-    let members = access::group_holders(&mut conn, id)
-        .await?
-        .iter()
-        .map(group_holder)
-        .collect::<ApiResult<Vec<_>>>()?;
-    crate::routes::access::page::Names::holders(
-        &mut conn,
-        &principal,
-        Some(place.org),
-        Some(group.org_id),
-        &members,
-    )
-    .await
-}
-
-async fn require_group(
-    conn: &mut Conn,
-    principal: &orch_authz::Principal,
-    id: Id,
-    permission: orch_access_contract::permissions::PermissionName,
-) -> ApiResult<(access::GroupFull, Placed)> {
-    let (group, place) = the_group(conn, id).await?;
-    require_on_keeper(conn, principal, group.org_id, permission).await?;
-    Ok((group, place))
 }
 
 fn group_holder_input(
@@ -690,8 +691,23 @@ async fn group_holder_add(
 ) -> ApiResult<()> {
     let id = ctx.id("id")?;
     let (ctx, mut tx, principal) = crate::routes::nodes::action(&ctx).await?;
-    let (group, place) =
-        require_group(&mut tx, &principal, id, exact(Permission::MembersManage)).await?;
+    let (group, place) = the_group(&mut tx, id).await?;
+    // This empty writer has no Group/Node projection. A scoped key's normal
+    // permission refusal must not materialize source-place names as a side effect.
+    let limited = principal
+        .caller()
+        .grant()
+        .is_some_and(|grant| grant.operation_scope().is_some());
+    authorization::require_projected(
+        &mut tx,
+        &principal,
+        group.org_id,
+        exact(Permission::MembersManage),
+        Act::Use,
+        Policy::default(),
+        limited,
+    )
+    .await?;
     let member = group_holder_input(&input, group.org_id)?;
     if let Some(user) = member.user_id
         && identity::users_brief(&mut tx, &[user]).await?.is_empty()
@@ -716,13 +732,14 @@ async fn group_holder_add(
         if kind == NodeKind::Thread || (member.member_org_id.is_some() && kind != NodeKind::Org) {
             return Err(invalid("id", "is no place of the requested kind"));
         }
-        authorization::require(
+        authorization::require_projected(
             &mut tx,
             &principal,
             source,
             authorization::VIEW,
             Act::Use,
             Policy::default(),
+            limited,
         )
         .await?;
     }
@@ -732,7 +749,15 @@ async fn group_holder_add(
         .map_err(ApiError::internal)?
     {
         let policy = crate::routes::nodes::policy_at(&mut tx, group.org_id).await?;
-        crate::routes::access::outsiders_matter(&mut tx, &principal, group.org_id, policy).await?;
+        crate::routes::access::outsiders_matter(&mut tx, &principal, group.org_id, policy)
+            .await
+            .map_err(|error| {
+                if limited {
+                    authorization::problem_without_content(error)
+                } else {
+                    error
+                }
+            })?;
     }
     access::add_group_holder(&mut tx, id, &member, principal.user(), ctx.now).await?;
     orch_authz::epoch::bump(&mut tx)
@@ -759,8 +784,15 @@ async fn group_holder_remove(
 ) -> ApiResult<()> {
     let id = ctx.id("id")?;
     let (ctx, mut tx, principal) = crate::routes::nodes::action(&ctx).await?;
-    let (group, place) =
-        require_group(&mut tx, &principal, id, exact(Permission::MembersManage)).await?;
+    let (group, place) = the_group(&mut tx, id).await?;
+    require_on_keeper_projected(
+        &ctx,
+        &mut tx,
+        &principal,
+        group.org_id,
+        exact(Permission::MembersManage),
+    )
+    .await?;
     let member = group_holder_input(&input, group.org_id)?;
     if access::remove_group_holder(&mut tx, id, &member).await? {
         orch_authz::epoch::bump(&mut tx)
@@ -787,7 +819,8 @@ async fn group_member_add(ctx: Ctx, (): (), (): ()) -> ApiResult<()> {
     let user = ctx.id("user_id")?;
     let (ctx, mut tx, principal) = crate::routes::nodes::action(&ctx).await?;
     let (group, place) = the_group(&mut tx, id).await?;
-    require_on_keeper(
+    require_on_keeper_projected(
+        &ctx,
         &mut tx,
         &principal,
         group.org_id,
@@ -829,7 +862,8 @@ async fn group_member_remove(ctx: Ctx, (): (), (): ()) -> ApiResult<()> {
     let user = ctx.id("user_id")?;
     let (ctx, mut tx, principal) = crate::routes::nodes::action(&ctx).await?;
     let (group, place) = the_group(&mut tx, id).await?;
-    require_on_keeper(
+    require_on_keeper_projected(
+        &ctx,
         &mut tx,
         &principal,
         group.org_id,
@@ -1252,77 +1286,163 @@ async fn service_delete(ctx: Ctx, (): (), (): ()) -> ApiResult<()> {
     Ok(())
 }
 
-fn token_info(row: identity::ApiTokenListed) -> orch_api_contract::auth::ApiTokenInfo {
-    orch_api_contract::auth::ApiTokenInfo {
-        id: row.id,
-        name: row.name,
-        scopes: row.scopes,
-        node: row.node_id.map(|id| NodeRef {
-            thread_display: None,
-            id,
-            kind: row
-                .node_kind
-                .as_deref()
-                .and_then(refusals::node_kind)
-                .unwrap_or(NodeKind::Org),
-            name: row.node_name.clone(),
-            redacted: false,
-        }),
-        created_at: orch_types::Time::new(row.created_at),
-        last_used_at: row.last_used_at.map(orch_types::Time::new),
-        expires_at: row.expires_at.map(orch_types::Time::new),
+/// The tokens of a service identity: never the secrets.
+/// Ordinary browser/legacy authorization retains its original precedence. A
+/// scoped caller first needs the declared collection root (or exact revoke key).
+async fn service_before_scope(
+    ctx: &Ctx,
+    conn: &mut Conn,
+    caller: &orch_authz::Caller,
+    account: Id,
+) -> ApiResult<()> {
+    if caller
+        .grant()
+        .and_then(orch_authz::TokenGrant::operation_scope)
+        .is_none()
+    {
+        let principal = authorization::load_principal(
+            conn,
+            caller.clone(),
+            orch_types::Time::new(ctx.app.clock.now()),
+        )
+        .await?;
+        let principal = crate::sign_in::second_step::hold(conn, ctx.user()?, principal).await?;
+        the_service(conn, &principal, account).await?;
     }
+    Ok(())
 }
 
-/// The tokens of a service identity: never the secrets.
+fn service_token_list_operation<'a>(
+    ctx: &'a Ctx,
+    conn: &'a mut Conn,
+    caller: &'a orch_authz::Caller,
+    (): (),
+    (): (),
+) -> crate::registry::OperationFuture<'a> {
+    Box::pin(async move {
+        use crate::key_operations::credentials::{self, Collection};
+        let owner = ctx.id("id")?;
+        service_before_scope(ctx, conn, caller, owner).await?;
+        let collection = Collection::begin(
+            ctx,
+            conn,
+            caller,
+            owner,
+            orch_access_contract::key_scope::KeyIdentityKind::Key,
+        )
+        .await?;
+        // Do not query or log private child identities before this same ordinary check.
+        the_service(conn, collection.principal(), owner)
+            .await
+            .map_err(|error| credentials::project_error(ctx, error))?;
+        let read = collection.keys(conn).await?;
+        Ok(read.plan.clone().with_data(read))
+    })
+}
+
 async fn service_token_list(
     ctx: Ctx,
     (): (),
     (): (),
 ) -> ApiResult<Vec<orch_api_contract::auth::ApiTokenInfo>> {
-    let id = ctx.id("id")?;
-    let mut conn = ctx.app.db.acquire().await?;
-    let principal = authorization::principal(&ctx, &mut conn).await?;
-    the_service(&mut conn, &principal, id).await?;
-    Ok(identity::api_tokens_of(&mut conn, id)
-        .await?
-        .into_iter()
-        .map(token_info)
-        .collect())
+    use crate::key_operations::credentials::{self, Read};
+    let mut tx = orch_db::queries::feeds::begin_reading(&ctx.app.db).await?;
+    let principal = ctx.operation_principal(&mut tx).await?;
+    the_service(&mut tx, &principal, ctx.id("id")?)
+        .await
+        .map_err(|error| credentials::project_error(&ctx, error))?;
+    let read = ctx.operation_data::<Read<Vec<orch_api_contract::auth::ApiTokenInfo>>>()?;
+    let data = credentials::complete(&ctx, &mut tx, &principal, read.as_ref()).await?;
+    tx.commit().await.map_err(DbError::from)?;
+    Ok(data)
 }
 
-/// Makes a token for a service identity, narrow (no scopes, nothing) and with the human maker's fresh
-/// proof in this request: its secret is shown once, and the same creation asked again by its key
-/// answers what was made, without it.
+/// Preserve the historical legacy-key refusal before generic catalogue admission.
+/// Explicit operation-scoped keys use the same authoritative Account-parent adapter.
+fn service_token_create_operation<'a>(
+    ctx: &'a Ctx,
+    conn: &'a mut Conn,
+    caller: &'a orch_authz::Caller,
+    (): (),
+    body: orch_api_contract::auth::ApiTokenCreateBody,
+) -> crate::registry::OperationFuture<'a> {
+    Box::pin(async move {
+        if caller
+            .grant()
+            .is_some_and(|grant| grant.requires_legacy_compatibility())
+        {
+            return Err(ApiError::new(
+                ErrorCode::AuthSessionRequired,
+                "this is done from a browser sign-in",
+            ));
+        }
+        crate::key_operations::direct::declared(ctx, conn, caller, (), body).await
+    })
+}
+
+/// Creates a service key through the existing guarded issuer; the first reply alone
+/// contains its secret. Browser fresh proof and scoped-key authentication stay distinct.
 async fn service_token_create(
     ctx: Ctx,
     (): (),
     body: orch_api_contract::auth::ApiTokenCreateBody,
-) -> ApiResult<Answer<orch_api_contract::auth::TokenCreated>> {
+) -> ApiResult<Answer<orch_api_contract::auth::TokenCreateResponse>> {
+    let projection = ctx.clone();
+    service_token_create_in(ctx, body).await.map_err(|problem| {
+        if projection.key_receipt_required() {
+            authorization::problem_without_content(problem)
+        } else {
+            problem
+        }
+    })
+}
+
+/// The ordinary issuance producer retains its service/member/lifecycle/proof and
+/// current issuer-ceiling checks. Only its optional error disclosure is projected above.
+async fn service_token_create_in(
+    ctx: Ctx,
+    body: orch_api_contract::auth::ApiTokenCreateBody,
+) -> ApiResult<Answer<orch_api_contract::auth::TokenCreateResponse>> {
     use crate::middleware::authentication::{API_TOKEN_PREFIX, new_token, token_hash};
     use crate::routes::auth::tokens;
     use crate::sign_in::fresh::{self, Purpose};
     let authed = std::sync::Arc::clone(ctx.user()?);
-    if !authed.is_session() {
-        return Err(ApiError::new(
-            ErrorCode::AuthSessionRequired,
-            "this is done from a browser sign-in",
-        ));
-    }
     let id = ctx.id("id")?;
     {
-        let mut conn = ctx.app.db.acquire().await?;
-        if let Some(again) = tokens::replayed(&ctx, &mut conn, authed.id()).await? {
-            return Ok(Answer::from(again).header(CACHE_CONTROL, NOT_KEPT));
+        let (current, mut tx, principal) = crate::routes::nodes::action(&ctx).await?;
+        the_service(&mut tx, &principal, id).await?;
+        let again = tokens::replayed(&current, &mut tx, authed.id()).await?;
+        tx.commit().await.map_err(DbError::from)?;
+        if let Some(again) = again {
+            return Ok(
+                Answer::from(orch_api_contract::auth::TokenCreateResponse::project(
+                    again,
+                    ctx.key_receipt_required(),
+                ))
+                .header(CACHE_CONTROL, NOT_KEPT),
+            );
         }
     }
     let asked = tokens::asked(&body, ctx.now)?;
     // An identity provider's proof for this act names the service identity it is for.
-    let proven = fresh::prove(&ctx, &authed, &body.proof, Purpose::TokenCreate)
-        .await?
-        .for_target(Some(id));
+    let proven = if authed.is_session() {
+        Some(
+            fresh::prove(
+                &ctx,
+                &authed,
+                body.proof.as_ref().unwrap_or(&Default::default()),
+                Purpose::TokenCreate,
+            )
+            .await?
+            .for_target(Some(id)),
+        )
+    } else {
+        None
+    };
     let (ctx, mut tx, principal) = crate::routes::nodes::action(&ctx).await?;
     let (row, place) = the_service(&mut tx, &principal, id).await?;
+    let asked = asked.for_issuer(principal.caller(), &ctx.route, id)?;
+    let operation_scope = asked.stored_scope()?;
     if let Some(node) = body.node_id {
         // The token is kept to a place of the tree that keeps the identity,
         // which the caller may view.
@@ -1345,13 +1465,15 @@ async fn service_token_create(
     }
     let bounded_at = orch_settings::Place::Node(body.node_id.unwrap_or(row.org_id));
     tokens::within_lifetime(&mut tx, bounded_at, ctx.now, asked.expires_at).await?;
-    proven
-        .spend(&ctx, &mut tx, authed.id(), Purpose::TokenCreate)
-        .await?;
+    if let Some(proven) = proven {
+        proven
+            .spend(&ctx, &mut tx, authed.id(), Purpose::TokenCreate)
+            .await?;
+    }
     let token_id = new_id();
     let secret = new_token(API_TOKEN_PREFIX);
     let name = asked.name.clone();
-    identity::create_api_token(
+    identity::create_api_token_scoped(
         &mut tx,
         &identity::NewApiToken {
             id: token_id,
@@ -1363,6 +1485,7 @@ async fn service_token_create(
             at: ctx.now,
             expires_at: asked.expires_at,
         },
+        operation_scope.as_ref(),
     )
     .await?;
     let who = actor_name(&ctx)?;
@@ -1373,25 +1496,68 @@ async fn service_token_create(
         row.id,
         place,
         &format!("{who} made the API token {name} for a service identity"),
-        json!({ "token": token_id, "user": row.id, "name": name, "scopes": asked.scopes, "node_id": body.node_id }),
+        json!({ "token": token_id, "user": row.id, "name": name, "scopes": asked.scopes, "node_id": body.node_id, "operation_scope": operation_scope,
+            "issuer_key_ids": principal.caller().grant().into_iter().flat_map(orch_authz::TokenGrant::token_ids).collect::<Vec<_>>() }),
     )
     .await?;
-    let info = identity::api_token_listed(&mut tx, token_id, id)
-        .await?
-        .map(token_info)
-        .ok_or_else(|| ApiError::internal("a token that was just made is not there"))?;
+    let info = if ctx.key_receipt_required() {
+        asked.created_info(token_id, ctx.now)?
+    } else {
+        identity::api_token_listed(&mut tx, token_id, id)
+            .await?
+            .map(token_info)
+            .transpose()?
+            .ok_or_else(|| ApiError::internal("a token that was just made is not there"))?
+    };
     tokens::keep(&ctx, &mut tx, authed.id(), &info).await?;
     tx.commit().await.map_err(DbError::from)?;
-    Ok(Answer::from(orch_api_contract::auth::TokenCreated {
-        token: Some(secret),
-        info,
-        already_created: false,
+    Ok(
+        Answer::from(orch_api_contract::auth::TokenCreateResponse::project(
+            orch_api_contract::auth::TokenCreated {
+                token: Some(secret),
+                info,
+                already_created: false,
+            },
+            ctx.key_receipt_required(),
+        ))
+        .header(CACHE_CONTROL, NOT_KEPT),
+    )
+}
+
+fn service_token_delete_operation<'a>(
+    ctx: &'a Ctx,
+    conn: &'a mut Conn,
+    caller: &'a orch_authz::Caller,
+    (): (),
+    (): (),
+) -> crate::registry::OperationFuture<'a> {
+    Box::pin(async move {
+        use crate::key_operations::{credentials, targets};
+        use orch_access_contract::key_scope::{KeyIdentityKind, KeyTargetKind};
+        let owner = ctx.id("id")?;
+        service_before_scope(ctx, conn, caller, owner).await?;
+        let target = targets::key_of_account(conn, ctx.id("token_id")?, owner).await?;
+        let family = KeyTargetKind::Identity(KeyIdentityKind::Key);
+        let mut plan = crate::registry::OperationPlan::new(ctx.route, ctx.route.name)?;
+        plan.bind(0, family, std::slice::from_ref(&target))?;
+        plan.bind(1, family, &[target])?;
+        let principal = plan.preparation_principal(ctx, conn, caller).await?;
+        the_service(conn, &principal, owner)
+            .await
+            .map_err(|error| credentials::project_error(ctx, error))?;
+        Ok(plan)
     })
-    .header(CACHE_CONTROL, NOT_KEPT))
 }
 
 /// Revokes a token of a service identity.
 async fn service_token_delete(ctx: Ctx, (): (), (): ()) -> ApiResult<()> {
+    let projection = ctx.clone();
+    service_token_delete_in(ctx)
+        .await
+        .map_err(|error| crate::key_operations::credentials::project_error(&projection, error))
+}
+
+async fn service_token_delete_in(ctx: Ctx) -> ApiResult<()> {
     let id = ctx.id("id")?;
     let token = ctx.id("token_id")?;
     let (ctx, mut tx, principal) = crate::routes::nodes::action(&ctx).await?;

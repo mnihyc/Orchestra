@@ -99,6 +99,23 @@ pub async fn lock_channel_shared(conn: &mut Conn, id: Id) -> Result<Option<Chann
     .await?)
 }
 
+/// Locks a channel before a delivery can update its outcome. Take this before preferences,
+/// routes and outbox rows, including when preparation itself can record a channel failure.
+/// A shared lock cannot be upgraded while another delivery holds it and waits for the route.
+pub async fn lock_channel_for_write(
+    conn: &mut Conn,
+    id: Id,
+) -> Result<Option<ChannelRow>, DbError> {
+    Ok(sqlx::query_as(concat!(
+        "SELECT ",
+        channel_columns!(),
+        " FROM notification_channels WHERE id = $1 FOR NO KEY UPDATE"
+    ))
+    .bind(id)
+    .fetch_optional(conn)
+    .await?)
+}
+
 /// The system's channel of a kind, if it has one (a system has one mail
 /// server and one bot).
 pub async fn system_channel(conn: &mut Conn, kind: &str) -> Result<Option<ChannelRow>, DbError> {
@@ -389,6 +406,33 @@ pub async fn destination(conn: &mut Conn, id: Id) -> Result<Option<DestinationRo
         "SELECT ",
         destination_columns!(),
         " FROM destinations WHERE id = $1"
+    ))
+    .bind(id)
+    .fetch_optional(conn)
+    .await?)
+}
+
+/// The actual node of this destination, under the existing destination write-lock discipline.
+/// This identity-only reader does not load public fields or sealed secret references to bind scope.
+pub async fn destination_node_for_write(conn: &mut Conn, id: Id) -> Result<Option<Id>, DbError> {
+    Ok(
+        sqlx::query_scalar("SELECT node_id FROM destinations WHERE id=$1 FOR NO KEY UPDATE")
+            .bind(id)
+            .fetch_optional(conn)
+            .await?,
+    )
+}
+
+/// Locks a destination before recording its outcome and changing the attempt's outbox row.
+/// Removal takes the same destination before removing its deliveries.
+pub async fn lock_destination_for_write(
+    conn: &mut Conn,
+    id: Id,
+) -> Result<Option<DestinationRow>, DbError> {
+    Ok(sqlx::query_as(concat!(
+        "SELECT ",
+        destination_columns!(),
+        " FROM destinations WHERE id = $1 FOR NO KEY UPDATE"
     ))
     .bind(id)
     .fetch_optional(conn)

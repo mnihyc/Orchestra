@@ -38,13 +38,13 @@ for(const locale of ['en','zh-CN'] as const)for(const theme of ['light','dark'] 
     expect(screen.queryByText(i18n.t('errors.provider.unavailable'))).not.toBeInTheDocument();
     expect(screen.queryAllByRole('button',{name:i18n.t('common.tryAgain')})).toHaveLength(status===503?1:0);
   });
-  it(`${locale}/${theme} says Not reported once instead of listing unsupported members`,async()=>{
+  it(`${locale}/${theme} hides unsupported members without a generic unknown footer`,async()=>{
     await setLocale(locale);document.documentElement.dataset.theme=theme;
     const provider=planProvider();
     for(const member of FACT_MEMBERS)provider.facts_state[member]='unsupported';
     const view=show(<ProviderUsageCard provider={provider}/>);
-    expect(screen.getAllByText(i18n.t('providerPlan.notReported'),{exact:true})).toHaveLength(1);
-    expect(view.container.querySelectorAll('[data-unsupported-members]')).toHaveLength(1);
+    expect(screen.queryByText(i18n.t('providerPlan.notReported'),{exact:true})).not.toBeInTheDocument();
+    expect(view.container.querySelector('[data-unsupported-members]')).not.toBeInTheDocument();
     for(const member of FACT_MEMBERS)expect(screen.queryByText(i18n.t(`providerDetails.members.${member}`),{exact:true})).not.toBeInTheDocument();
     expect(screen.queryByRole('meter')).not.toBeInTheDocument();
   });

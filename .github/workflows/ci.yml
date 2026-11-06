@@ -1,9 +1,10 @@
 name: CI
 
 on:
-  # Branches only: a release tag names a commit its branch's push has already tested.
   push:
-    branches: ['**']
+    # A branch under ci-t/ runs only its targeted checks (ci-targeted.yml).
+    branches: ['**', '!ci-t/**']
+    tags: ['v*']
   pull_request:
   workflow_dispatch:
   # The deployment scenarios package two releases and run stacks on Docker: an hour and more,
@@ -171,6 +172,9 @@ jobs:
       - name: Build the connector the tests start
         if: ${{ !cancelled() }}
         run: cargo build --locked -p orch-connector
+      - name: Prepare the assigned tests' Docker fixtures
+        if: ${{ !cancelled() }}
+        run: python3 -I -B .github/scripts/ci_fixtures.py --shard '${{ matrix.shard }}'
       - name: Run every test program
         if: ${{ !cancelled() }}
         run: python3 .github/scripts/ci_test_shard.py --shard '${{ matrix.shard }}'
@@ -191,34 +195,158 @@ jobs:
           SHARD_RESULT: ${{ needs.tests.result }}
         run: test "$SHARD_RESULT" = success
 
-  web:
-    name: Web application
+  web-analysis:
+    name: Web types and lint
     runs-on: ubuntu-24.04
     timeout-minutes: 60
-    # The Node release the repository pins (frontend/.nvmrc), as its official image.
-    container: node:24.16.0-bookworm@sha256:40ad9f3064e67d6860b4bc3fe1880b2953934fd6320ada990e45fe0efa6badd7 # node:24.16.0-bookworm
     defaults:
       run:
         working-directory: frontend
     steps:
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
-      - name: Install from the lock file
-        run: npm ci
-      - name: Check the DeepSeek Harness plugin's committed bundle (rebuilt from its sources with this install's bundler)
-        run: npm run check
-        working-directory: extensions/agents/acp/dsh-bridge
+      - uses: actions/setup-node@249970729cb0ef3589644e2896645e5dc5ba9c38 # v6.5.0
+        with:
+          node-version-file: frontend/.nvmrc
+      - run: npm ci
       - name: Type-check
         run: npm run typecheck
       - name: Lint
+        if: ${{ !cancelled() }}
         run: npm run lint
+
+  web-build:
+    name: Web units and production build
+    runs-on: ubuntu-24.04
+    timeout-minutes: 60
+    outputs:
+      matrix: ${{ steps.plan.outputs.matrix }}
+      artifact: ${{ steps.artifact.outputs.name }}
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+      - uses: actions/setup-node@249970729cb0ef3589644e2896645e5dc5ba9c38 # v6.5.0
+        with:
+          node-version-file: frontend/.nvmrc
+      - run: npm ci
+        working-directory: frontend
+      - name: Check the committed plugin bundle
+        run: npm run check
+        working-directory: extensions/agents/acp/dsh-bridge
       - name: Unit and component tests
+        if: ${{ !cancelled() }}
         run: npm run test
-      - name: Build
+        working-directory: frontend
+      - name: Build the one production artifact
+        if: ${{ !cancelled() }}
+        env:
+          ORCH_BUILD_NUMBER_DIR: ${{ github.workspace }}/.tmp/ci-web-build-numbers
         run: npm run build
-      - name: Install the browser of the end-to-end suites
+        working-directory: frontend
+      - name: Discover this checkout's complete browser inventory
+        if: ${{ !cancelled() }}
+        env:
+          ORCH_E2E_NO_DEV_SERVER: '1'
+        run: |
+          mkdir -p ../.tmp/ci-web
+          node node_modules/playwright/cli.js test --list --reporter=json > ../.tmp/ci-web/inventory.json
+        working-directory: frontend
+      - name: Check allocation and report-reconciliation controls
+        if: ${{ !cancelled() }}
+        run: python3 -I -B -m unittest discover -s .github/scripts -p 'test_ci_web.py'
+      - name: Plan every discovered case exactly once
+        if: ${{ !cancelled() }}
+        id: plan
+        run: python3 -I -B .github/scripts/ci_web.py plan --inventory .tmp/ci-web/inventory.json
+      - name: Seal the production artifact to source and lock
+        if: ${{ !cancelled() }}
+        run: python3 -I -B .github/scripts/ci_web.py seal
+      - id: artifact
+        if: ${{ !cancelled() }}
+        run: echo "name=web-build-${GITHUB_RUN_ATTEMPT}" >> "$GITHUB_OUTPUT"
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        if: ${{ !cancelled() }}
+        with:
+          name: ${{ steps.artifact.outputs.name }}
+          path: |
+            frontend/dist/
+            .tmp/ci-web/
+          include-hidden-files: true
+          if-no-files-found: error
+
+  web-browser:
+    name: Web browser (${{ matrix.name }})
+    needs: web-build
+    if: ${{ !cancelled() && needs.web-build.outputs.matrix != '' }}
+    runs-on: ubuntu-24.04
+    timeout-minutes: 60
+    strategy:
+      fail-fast: false
+      matrix: ${{ fromJSON(needs.web-build.outputs.matrix || '{"include":[{"name":"unavailable"}]}') }}
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+      - uses: actions/setup-node@249970729cb0ef3589644e2896645e5dc5ba9c38 # v6.5.0
+        with:
+          node-version-file: frontend/.nvmrc
+      - run: npm ci
+        working-directory: frontend
+      - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4
+        with:
+          name: ${{ needs.web-build.outputs.artifact }}
+      - name: Install the repository browser
         run: npx playwright install --with-deps chromium
-      - name: End-to-end, accessibility and performance suites (against the tests' fake API)
-        run: npx playwright test
+        working-directory: frontend
+      - name: Verify selectors and run the complete assigned inventory
+        run: python3 -I -B .github/scripts/ci_web.py run --group '${{ matrix.name }}'
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        if: ${{ always() }}
+        with:
+          name: web-report-${{ matrix.name }}-${{ github.run_attempt }}
+          path: .tmp/ci-web-reports/
+          include-hidden-files: true
+          if-no-files-found: error
+          compression-level: 0
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        if: ${{ failure() }}
+        with:
+          name: web-failure-${{ matrix.name }}-${{ github.run_attempt }}
+          path: .tmp/ci-web-results/
+          include-hidden-files: true
+          if-no-files-found: ignore
+          compression-level: 0
+
+  web:
+    name: Web application
+    if: ${{ always() }}
+    needs: [web-analysis, web-build, web-browser]
+    runs-on: ubuntu-24.04
+    timeout-minutes: 60
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+      - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4
+        with:
+          name: ${{ needs.web-build.outputs.artifact }}
+      - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4
+        if: ${{ !cancelled() }}
+        with:
+          pattern: web-report-*
+          path: .tmp/ci-web-reports/
+          merge-multiple: true
+      - name: Reconcile the actual report union with final discovery
+        if: ${{ !cancelled() }}
+        run: python3 -I -B .github/scripts/ci_web.py audit
+      - name: Require every static and browser result
+        if: ${{ always() }}
+        env:
+          ANALYSIS: ${{ needs.web-analysis.result }}
+          BUILD: ${{ needs.web-build.result }}
+          BROWSERS: ${{ needs.web-browser.result }}
+        run: test "$ANALYSIS" = success && test "$BUILD" = success && test "$BROWSERS" = success
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        if: ${{ always() }}
+        with:
+          name: web-coverage-${{ github.run_attempt }}
+          path: .tmp/ci-web/coverage.json
+          include-hidden-files: true
+          if-no-files-found: error
 
   deploy-smoke:
     name: Deployment scenarios

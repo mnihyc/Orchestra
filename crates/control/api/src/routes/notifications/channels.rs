@@ -18,6 +18,7 @@ use crate::middleware::transaction_guard;
 use crate::registry::Ctx;
 use crate::sign_in;
 use orch_access_contract::audit::AuditAction;
+use orch_access_contract::key_scope::{KeyIdentityKind, KeyTargetKind};
 use orch_access_contract::permissions::Permission;
 use orch_api_contract::common::{ErrorCode, FieldFault, Problem};
 use orch_api_contract::nodes::{NodeKind, NodeRef};
@@ -233,8 +234,17 @@ async fn may_change(
             Ok(held)
         }
         (None, Some(person)) => Ok(person == principal.user()),
-        (None, None) => Ok(principal.is_system_admin()),
+        (None, None) => Ok(system_channel_admin(principal)),
     }
+}
+
+/// Ordinary authority for the system's own channels, under this operation's current
+/// admission. Org/person channels continue through their existing permission branches.
+fn system_channel_admin(principal: &Principal) -> bool {
+    orch_authz::system_administration::on_system(
+        principal,
+        KeyTargetKind::Identity(KeyIdentityKind::Notification),
+    )
 }
 
 /// Refuses the caller who may not change the channel, with what asks them to
@@ -254,7 +264,7 @@ async fn require_change(conn: &mut Conn, principal: &Principal, row: &ChannelRow
         }
         (None, Some(person)) if person == principal.user() => Ok(()),
         (None, Some(_)) => Err(ApiError::not_found()),
-        (None, None) if principal.is_system_admin() => Ok(()),
+        (None, None) if system_channel_admin(principal) => Ok(()),
         (None, None) => Err(refusals::system_admin_only(
             "only a system admin changes a channel of the system",
         )),
@@ -435,7 +445,7 @@ pub async fn list(
             // Where the system's mail server may not be used by an org that has none of its own,
             // it is no way out for the people of any org: there is no such channel in their list.
             // The admin who set it up is shown it all the same.
-            if !principal.is_system_admin()
+            if !system_channel_admin(&principal)
                 && !channels::mail_may_be_shared(&mut conn)
                     .await
                     .map_err(internal)?
@@ -565,10 +575,8 @@ async fn make(ctx: &Ctx, making: Making<'_>) -> ApiResult<NotificationChannel> {
     let ctx = &current;
     let me = guard.user().id();
     match making.maker {
-        Maker::System if !guard.user().is_system_admin() => {
-            return Err(refusals::system_admin_only(
-                "only a system admin sets up a channel of the system",
-            ));
+        Maker::System => {
+            ctx.ordinary_system_admin_with(guard.user(), guard.principal().caller())?;
         }
         Maker::Org(org) => {
             root_org(&mut tx, org, ctx).await?;
@@ -583,7 +591,7 @@ async fn make(ctx: &Ctx, making: Making<'_>) -> ApiResult<NotificationChannel> {
             .await?;
         }
         Maker::Person(person) if person != me => return Err(ApiError::not_found()),
-        Maker::System | Maker::Person(_) => {}
+        Maker::Person(_) => {}
     }
     if descriptor.is_single() {
         // A mail server and a bot: one for the system and one for each root
@@ -723,11 +731,7 @@ pub async fn create_system(
     (): (),
     body: NotificationChannelCreateBody,
 ) -> ApiResult<NotificationChannel> {
-    if !ctx.user()?.is_system_admin() {
-        return Err(refusals::system_admin_only(
-            "only a system admin sets up a channel of the system",
-        ));
-    }
+    crate::routes::admin::admin_of(&ctx)?;
     make(
         &ctx,
         Making {

@@ -48,6 +48,7 @@ const RESPONSE_EVENTS: [&str; 6] = [
 struct ResponseView {
     id: Option<Value>,
     model: Option<Value>,
+    service_tier: Option<Value>,
     usage: Option<Box<RawValue>>,
 }
 
@@ -146,6 +147,7 @@ fn tokens(usage: &UsageView) -> Option<TokenUsage> {
 struct Seen {
     id: Option<String>,
     model: Option<String>,
+    service_tier: Option<String>,
     tokens: Option<TokenUsage>,
     cost: Option<String>,
 }
@@ -153,6 +155,9 @@ struct Seen {
 impl Seen {
     /// Takes in a response object.
     fn take(&mut self, response: ResponseView) {
+        if let Some(tier) = text(response.service_tier) {
+            self.service_tier = Some(tier);
+        }
         if let Some(id) = text(response.id) {
             self.id = Some(id);
         }
@@ -197,6 +202,7 @@ impl Seen {
     /// What was seen, if it holds figures.
     fn observed(&self) -> Option<ObservedUsage> {
         Some(ObservedUsage {
+            service_tier: self.service_tier.clone(),
             model: self.model.clone(),
             tokens: self.tokens?,
             cost: self.cost.clone(),

@@ -9,6 +9,7 @@ mod desk;
 mod places;
 mod support;
 
+use crate::support::FullArchiveReply as _;
 use desk::{Desk, body, paragraph, said};
 use orch_api_contract::access::{
     AccessChoice, HolderInput, PageChange, PageChangeName, PageChangeWhole, PermissionPageGet,
@@ -1104,6 +1105,7 @@ async fn under_an_archived_node_a_document_is_read_but_nothing_in_it_is_changed(
         .body(&places::archive_body(&desk.world, &desk.ada.token, desk.topic, true).await)
         .send()
         .await
+        .full_archive()
         .ok();
     let read = desk
         .world

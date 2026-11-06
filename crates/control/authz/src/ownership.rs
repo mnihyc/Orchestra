@@ -1552,6 +1552,70 @@ pub async fn may_restore(
 
 // ---- A fork -------------------------------------------------------------------------------------
 
+/// Carry the production fork's live-page overlay onto its already-created thread.
+/// The normal Birth page has already been applied. Owners remain the new thread's;
+/// row inheritance, locks, entry options and creation provenance stay exactly as the
+/// fork job writes them. Admission belongs to that existing producer.
+pub async fn carry_fork_page(
+    conn: &mut Conn,
+    source: Id,
+    fork: Id,
+    by: Id,
+    at: Time,
+) -> Result<(), orch_db::DbError> {
+    let (from_page, new_page) = (
+        PageKey::new("node", source, "live"),
+        PageKey::new("node", fork, "live"),
+    );
+    let owners = Permission::AccessOwn.as_str();
+    for row in access::stored_rows_of(conn, &from_page)
+        .await?
+        .into_iter()
+        .filter(|row| row.permission != owners)
+    {
+        access::write_row(
+            conn,
+            &RowWrite {
+                page: &new_page,
+                profile: &row.profile,
+                permission: &row.permission,
+                inherit: row.inherit,
+                locked: row.locked,
+            },
+            Some(by),
+            at.get(),
+        )
+        .await?;
+    }
+    for entry in access::entries_of(conn, &from_page)
+        .await?
+        .into_iter()
+        .filter(|entry| entry.permission != owners)
+    {
+        access::insert_entry(
+            conn,
+            &NewEntry {
+                id: orch_types::new_id(),
+                page: &new_page,
+                profile: &entry.profile,
+                permission: &entry.permission,
+                holder_kind: &entry.holder_kind,
+                holder_id: entry.holder_id,
+                holder_role: entry.holder_role.as_deref(),
+                options: &entry.options,
+                expires_at: entry.expires_at,
+                note: &entry.note,
+                source: EntrySource::Creation.as_str(),
+                created_by: Some(by),
+                at: at.get(),
+            },
+        )
+        .await?;
+    }
+    access::bump_epoch(conn).await?;
+    Ok(())
+}
+
 /// How a fork's page starts, as its maker chose.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum ForkPage {

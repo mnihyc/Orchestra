@@ -82,6 +82,7 @@ fn documents(level: ShareDocumentsLevel) -> Option<ShareParts> {
 
 fn ask(what: ShareWhat, parts: Option<ShareParts>, to: ShareTo, client: &str) -> ShareWithAgents {
     ShareWithAgents {
+        viewers_read: None,
         read_first: None,
         what,
         inside: None,

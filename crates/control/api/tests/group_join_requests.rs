@@ -17,6 +17,7 @@ use orch_api_contract::chats::{ChatGet, ChatJoinRequest, ChatJoinRequestBody};
 use orch_api_contract::common::ErrorCode;
 use orch_api_contract::documents::{InlineRefKind, ReferencePreviewGet, ReferencePreviewGetQuery};
 use orch_types::{Id, Time};
+use support::FullApprovalReply;
 
 fn reference(id: Id) -> ReferencePreviewGetQuery {
     ReferencePreviewGetQuery {
@@ -81,6 +82,7 @@ async fn a_group_join_request_carries_the_proposed_end_into_the_membership() {
         }))
         .send()
         .await
+        .full_approval()
         .ok();
     let saved: Option<chrono::DateTime<chrono::Utc>> =
         sqlx::query_scalar("SELECT expires_at FROM chat_members WHERE chat_id=$1 AND user_id=$2")
@@ -239,6 +241,7 @@ async fn every_quick_grant_joins_the_group_and_expiry_removes_membership_and_gre
             }))
             .send()
             .await
+            .full_approval()
             .ok();
         assert_eq!(decided.state, ApprovalState::Approved);
         let expected = days.map(|days| decided.decided_at.unwrap().get() + Duration::days(days));
@@ -301,6 +304,7 @@ async fn every_quick_grant_joins_the_group_and_expiry_removes_membership_and_gre
             }))
             .send()
             .await
+            .full_approval()
             .problem();
         assert_eq!(late.code, ErrorCode::ApprovalAlreadyDecided);
         if let Some(days) = days {

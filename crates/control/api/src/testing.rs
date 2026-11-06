@@ -125,6 +125,7 @@ impl RawReply {
 pub struct Call<'a, E: Endpoint> {
     app: &'a TestApp,
     path: String,
+    surface: Option<orch_api_contract::surface::HttpSurface>,
     query: Option<String>,
     headers: HeaderMap,
     body: Option<Vec<u8>>,
@@ -203,7 +204,7 @@ impl TestApp {
     pub fn over(app: App, clock: ManualClock, registry: Registry) -> Self {
         crate::machine_requests::install(&app);
         crate::port_tools::install(&app);
-        let router = registry.into_router().with_state(app.clone());
+        let router = crate::server::http_routes(registry).with_state(app.clone());
         Self { app, clock, router }
     }
 
@@ -254,6 +255,7 @@ impl TestApp {
         Call {
             app: self,
             path,
+            surface: None,
             query: None,
             headers: HeaderMap::new(),
             body: None,
@@ -277,6 +279,13 @@ impl<E: Endpoint> Call<'_, E> {
         if let Ok(value) = HeaderValue::from_str(&format!("Bearer {token}")) {
             self.headers.insert(header::AUTHORIZATION, value);
         }
+        self
+    }
+
+    /// Fixes the actual request plane; a later token never overrides an explicit cross-kind control.
+    #[must_use]
+    pub fn surface(mut self, surface: orch_api_contract::surface::HttpSurface) -> Self {
+        self.surface = Some(surface);
         self
     }
 
@@ -371,9 +380,17 @@ impl<E: Endpoint> Call<'_, E> {
         reason = "test support: a missing router answer fails the test"
     )]
     pub async fn send_response(self) -> axum::response::Response {
+        let surface = self
+            .surface
+            .or_else(|| {
+                crate::middleware::authentication::bearer(&self.headers)
+                    .and_then(orch_api_contract::surface::HttpSurface::for_token)
+            })
+            .unwrap_or(orch_api_contract::surface::HttpSurface::Browser);
+        let path = format!("{}{}", surface.base_path(), self.path);
         let uri = match &self.query {
-            Some(query) if !query.is_empty() => format!("{}?{query}", self.path),
-            _ => self.path.clone(),
+            Some(query) if !query.is_empty() => format!("{path}?{query}"),
+            _ => path,
         };
         let mut request = Request::builder().method(E::ROUTE.method.as_str()).uri(uri);
         if let Some(peer) = self.peer {

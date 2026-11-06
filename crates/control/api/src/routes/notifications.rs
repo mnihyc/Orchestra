@@ -141,7 +141,19 @@ pub fn mount(registry: &mut Registry) {
         .on(MeNotificationRouteDelete, routing::delete)
         .on(NodeDestinationList, destinations::list)
         .on(NodeDestinationCreate, destinations::create)
-        .on(DestinationUpdate, destinations::update)
-        .on(DestinationDelete, destinations::delete)
-        .on(DestinationTest, destinations::test);
+        .on_with_operation(
+            DestinationUpdate,
+            destinations::operation::prepare,
+            destinations::update,
+        )
+        .on_with_operation(
+            DestinationDelete,
+            destinations::operation::prepare,
+            destinations::delete,
+        )
+        .on_with_operation(
+            DestinationTest,
+            destinations::operation::prepare,
+            destinations::test,
+        );
 }

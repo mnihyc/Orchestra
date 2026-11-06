@@ -7,6 +7,8 @@
 
 mod places;
 mod support;
+use support::FullRoleReply as _;
+use support::FullTokenReply as _;
 
 use chrono::Duration;
 use orch_api_contract::access::{
@@ -25,17 +27,19 @@ async fn token(world: &World, owner: &Who, project: Id, scopes: Vec<String>) -> 
         .call(MeTokenCreate, &[])
         .token(&owner.token)
         .body(&ApiTokenCreateBody {
+            rules: None,
             name: "Bounded role giver".to_owned(),
             scopes: Some(scopes),
             node_id: Some(project),
             expires_at: None,
-            proof: orch_api_contract::auth::SensitiveProof {
+            proof: Some(orch_api_contract::auth::SensitiveProof {
                 password: Some(support::PASSWORD.to_owned()),
                 ..Default::default()
-            },
+            }),
         })
         .send()
         .await
+        .full_token()
         .ok()
         .token
         .expect("the first answer carries the secret")
@@ -128,7 +132,7 @@ async fn sufficient_scopes_allow_roles_but_changed_defaults_stop_holder_only_upd
     .await;
     let given = world.app.call(NodeRoleCreate, &[&project]).token(&credential).raw_body(&json!({
         "subject": {"kind": "user", "id": recipient.id()}, "role": "viewer", "expires_at": Time::new(world.now() + Duration::hours(1))
-    })).send().await.ok();
+    })).send().await.full_role().ok();
     world
         .app
         .call(RoleUpdate, &[&given.id])
@@ -138,6 +142,7 @@ async fn sufficient_scopes_allow_roles_but_changed_defaults_stop_holder_only_upd
         }))
         .send()
         .await
+        .full_role()
         .ok();
     world.app.call(NodeDefaultsUpdate, &[&project]).token(&owner.token).raw_body(&json!({
         "rows": [{"permission": "thread.interact", "profile": "managed", "add": [{"holder": {"kind": "role", "role": "viewer"}}]}]
@@ -186,11 +191,11 @@ async fn a_management_only_token_cannot_lengthen_a_role_into_permission_names_it
         .id;
     let given = world.app.call(NodeRoleCreate, &[&project]).token(&owner.token).raw_body(&json!({
         "subject": {"kind": "user", "id": recipient.id()}, "role": "viewer", "expires_at": Time::new(world.now() + Duration::hours(2))
-    })).send().await.ok();
+    })).send().await.full_role().ok();
     let credential = token(&world, &owner, project, vec!["access.manage".to_owned()]).await;
     let shortened = world.app.call(RoleUpdate, &[&given.id]).token(&credential).raw_body(&json!({
         "expected_revision": given.revision, "expires_at": Time::new(world.now() + Duration::hours(1))
-    })).send().await.ok();
+    })).send().await.full_role().ok();
     let problem = world
         .app
         .call(RoleUpdate, &[&given.id])

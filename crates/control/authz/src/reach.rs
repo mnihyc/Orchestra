@@ -25,19 +25,21 @@
 //! Two things reach an agent without any entry, and neither is a share: the policy `sharing.agent_reach` (the
 //! conversations of the other threads of its topic, or of its project, never a chat nor a document, and never a
 //! restricted thread), and its own topic and thread: the other threads of the topic are always listed, and may
-//! always be sent to, as they may be announced to; its own conversation is its own to read.
+//! be sent to without a share only where automatic topic messages are enabled; its own conversation is its own to read.
 //!
 //! Nothing here is cached: an agent's reach is worked out from the pages at every call, so that an entry which
 //! was removed ends at the next one. Settings are not read here; the policy is given in.
 
-use std::collections::{BTreeSet, HashSet};
+use std::collections::{BTreeSet, HashMap, HashSet};
 
 use orch_access_contract::pages::{Chain, Entry, Holder, PageKind, StoredKind};
 use orch_access_contract::permissions::{HolderKind, Permission, Profile};
-use orch_access_contract::roles::{NodeKind, PlaceRef};
+use orch_access_contract::roles::NodeKind;
 use orch_db::Conn;
 use orch_db::queries::shares as rows;
 use orch_types::{Id, Time};
+
+mod givers;
 
 use crate::Error;
 use crate::documents::{self, Document};
@@ -107,8 +109,6 @@ impl DocumentPolicy {
 /// Why an agent has something.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub enum Via {
-    /// The policy of its topic or project lets it.
-    Policy,
     /// An entry names the agents of a place on its way.
     Share,
     /// It lies in its own topic or is its own thread.
@@ -309,28 +309,47 @@ pub struct Things {
 #[derive(Debug)]
 pub struct Reach {
     agent: Agent,
-    policy: AgentReach,
     now: Time,
     graph: Graph,
     store: Store,
     stopped_chats: HashSet<Id>,
     stopped_nodes: HashSet<Id>,
-    documents_policy: DocumentPolicy,
-    side_threads: HashSet<Id>,
+    outside_bounds: crate::external::LifeBounds,
+    people_chat_roots: HashMap<Id, Id>,
+    givers: givers::Givers,
 }
 
 impl Reach {
-    /// Reads what is needed to say what `agent` may do with `things`. `policy` is `sharing.agent_reach` as it
-    /// resolves at the agent's topic.
+    /// Compatibility entry point. Former automatic reach choices grant nothing.
     pub async fn load(
         conn: &mut Conn,
         agent: Agent,
-        policy: AgentReach,
+        _policy: AgentReach,
         now: Time,
         things: &Things,
     ) -> Result<Self, Error> {
+        Self::load_current(conn, agent, now, things).await
+    }
+
+    /// Prepares current entry-based rights and each distinct giver once for this read.
+    pub async fn load_current(
+        conn: &mut Conn,
+        agent: Agent,
+        now: Time,
+        things: &Things,
+    ) -> Result<Self, Error> {
+        let people_chats = if things.people_chats.is_empty() {
+            Vec::new()
+        } else {
+            orch_db::queries::chats::chats(conn, &things.people_chats).await?
+        };
+        let people_chat_roots: HashMap<Id, Id> = people_chats
+            .iter()
+            .map(|chat| (chat.id, chat.org_id))
+            .collect();
         let mut ids: Vec<Id> = agent.path.clone();
         ids.extend(things.nodes.iter().copied());
+        ids.extend(people_chat_roots.values().copied());
         ids.extend(things.documents.iter().map(|document| document.node));
         let mut graph = Graph::load(conn, &ids).await?;
         graph
@@ -380,73 +399,60 @@ impl Reach {
             .copied()
             .collect();
         let store = Store::load(conn, &pages, &rows).await?;
+        let foreign = sites
+            .iter()
+            .any(|site| site.root.is_some_and(|root| root != agent.root))
+            || people_chat_roots.values().any(|root| *root != agent.root);
+        let matching = foreign
+            && pages.iter().any(|page| {
+                store.rows_of(*page).any(|row| {
+                    row.entries
+                        .iter()
+                        .any(|entry| entry.holder.is_agents_on(&agent.path))
+                })
+            });
+        let outside_bounds = if foreign && matching {
+            crate::external::LifeBounds::load(conn).await?
+        } else {
+            crate::external::LifeBounds::default()
+        };
+        let givers = givers::Givers::load(
+            conn,
+            &agent,
+            &graph,
+            &store,
+            &pages,
+            &sites,
+            &people_chats,
+            now,
+        )
+        .await?;
         let stops = orch_db::queries::chats::posting::stopped(conn, agent.thread).await?;
         let stopped_chats = stops.iter().map(|(chat, _)| *chat).collect();
         let stopped_nodes = stops.iter().filter_map(|(_, node)| *node).collect();
-        let side_threads = orch_db::queries::threads::side_threads_among(conn, &ids)
-            .await?
-            .into_iter()
-            .collect();
         Ok(Self {
             agent,
-            policy,
             now,
             graph,
             store,
             stopped_chats,
             stopped_nodes,
-            documents_policy: DocumentPolicy::None,
-            side_threads,
+            outside_bounds,
+            people_chat_roots,
+            givers,
         })
     }
 
-    /// Applies the independently resolved topic-document setting to this same current page resolver.
-    /// Explicit-share-only callers retain `None` unless they supply the setting.
+    /// Compatibility only: former topic-document policy values grant no access.
     #[must_use]
-    pub fn with_document_policy(mut self, policy: DocumentPolicy) -> Self {
-        self.documents_policy = policy;
+    pub fn with_document_policy(self, _policy: DocumentPolicy) -> Self {
         self
     }
 
-    fn policy_documents(&self, site: &Site, node: Id) -> Standing {
-        let public_place = self.graph.get(node).is_some_and(|facts| {
-            node == self.agent.topic
-                || (facts.kind == NodeKind::Thread
-                    && self.is_in_topic(facts)
-                    && !self.side_threads.contains(&node)
-                    && self
-                        .graph
-                        .site_of(node)
-                        .is_some_and(|site| !self.restricted(&site)))
-        });
-        if !public_place || self.documents_policy == DocumentPolicy::None {
-            return Standing::default();
-        }
-        let public_row = |permission| {
-            !self
-                .chain(site, permission)
-                .cut_below(PlaceRef::Node(self.agent.root))
-        };
-        let read = public_row(Permission::DocView);
-        Standing {
-            read: read.then_some(Via::Policy),
-            write: (read
-                && self.documents_policy == DocumentPolicy::Write
-                && public_row(Permission::DocEdit)
-                && !site.is_archived())
-            .then_some(Via::Policy),
-            manage: None,
-            shared_by: None,
-        }
-    }
-
-    fn including_document_policy(&self, shared: Standing, site: &Site, node: Id) -> Standing {
-        let policy = self.policy_documents(site, node);
-        Standing {
-            read: shared.read.or(policy.read),
-            write: shared.write.or(policy.write),
-            ..shared
-        }
+    /// Compatibility only: automatic same-topic messaging no longer grants control.
+    #[must_use]
+    pub fn with_topic_messages(self, _enabled: bool) -> Self {
+        self
     }
 
     /// The agent.
@@ -495,22 +501,90 @@ impl Reach {
         chain
     }
 
+    fn entry_within_bound(&self, entry: &Entry, root: Id, way: &[Id]) -> bool {
+        root == self.agent.root
+            || self
+                .outside_bounds
+                .at(way)
+                .is_none_or(|bound| bound.admits_entry(entry))
+    }
+
+    fn entry_at_site(&self, entry: &Entry, site: &Site) -> bool {
+        site.root.is_some_and(|root| {
+            self.entry_within_bound(entry, root, &crate::external::way_of(site))
+                && self.givers.at(entry.created_by, site, Permission::DocView)
+        })
+    }
+
     /// The first entry of the rows `permissions` of a site that names the agents of a place on this agent's way.
-    fn named(&self, site: &Site, permissions: &[Permission]) -> Option<(Id, Option<Id>)> {
+    fn named(
+        &self,
+        site: &Site,
+        needed: Permission,
+        permissions: &[Permission],
+    ) -> Option<(Id, Option<Id>)> {
+        self.named_from(site, needed, permissions, None)
+    }
+
+    fn named_from(
+        &self,
+        site: &Site,
+        needed: Permission,
+        permissions: &[Permission],
+        entries: Option<&HashSet<Id>>,
+    ) -> Option<(Id, Option<Id>)> {
+        let root = site.root?;
+        let bound = (root != self.agent.root)
+            .then(|| self.outside_bounds.at(&crate::external::way_of(site)))
+            .flatten();
         permissions.iter().find_map(|permission| {
-            agents_in(&self.chain(site, *permission), &self.agent.path, self.now)
+            agents_in(
+                &self.chain(site, *permission),
+                &self.agent.path,
+                self.now,
+                |entry| {
+                    entries.is_none_or(|entries| entries.contains(&entry.id))
+                        && (root == self.agent.root
+                            || bound.is_none_or(|bound| bound.admits_entry(entry)))
+                        && self.givers.at(entry.created_by, site, needed)
+                },
+            )
         })
     }
 
     /// The first entry of the rows `permissions` of a direct or group chat that names this agent's places.
-    fn named_for_chat(&self, chat: Id, permissions: &[Permission]) -> Option<(Id, Option<Id>)> {
+    fn named_for_chat(
+        &self,
+        chat: Id,
+        needed: Permission,
+        permissions: &[Permission],
+    ) -> Option<(Id, Option<Id>)> {
+        self.named_for_chat_from(chat, needed, permissions, None)
+    }
+
+    fn named_for_chat_from(
+        &self,
+        chat: Id,
+        needed: Permission,
+        permissions: &[Permission],
+        entries: Option<&HashSet<Id>>,
+    ) -> Option<(Id, Option<Id>)> {
+        let root = *self.people_chat_roots.get(&chat)?;
+        let bound = (root != self.agent.root)
+            .then(|| self.outside_bounds.at(&[root]))
+            .flatten();
         permissions.iter().find_map(|permission| {
             let chain = Chain::of(self.store.row(
                 PageRef::live(StoredKind::Chat, chat),
                 Profile::Any,
                 *permission,
             ));
-            agents_in(&chain, &self.agent.path, self.now)
+            agents_in(&chain, &self.agent.path, self.now, |entry| {
+                entries.is_none_or(|entries| entries.contains(&entry.id))
+                    && (root == self.agent.root
+                        || bound.is_none_or(|bound| bound.admits_entry(entry)))
+                    && self.givers.in_chat(entry.created_by, chat, needed)
+            })
         })
     }
 
@@ -527,20 +601,6 @@ impl Reach {
         }
     }
 
-    /// The thread's own topic, and its project, as the agent's topic and project are known.
-    fn is_in_topic(&self, facts: &NodeFacts) -> bool {
-        nearest(facts, &self.graph, NodeKind::Topic) == Some(self.agent.topic)
-    }
-
-    /// Whether a thread lies in the agent's project: the one its topic lies in directly, and the projects inside
-    /// that one. The agent's project is the nearest one, so the folders above it are not reached, and the
-    /// folders inside it are, as the orgs inside an org are.
-    fn is_in_project(&self, facts: &NodeFacts) -> bool {
-        self.agent
-            .project
-            .is_some_and(|project| facts.path.contains(&project))
-    }
-
     /// What the agent may do with the conversation of a thread: read it, and send to its agent. `side` says it is
     /// a side thread, which is an aside of another thread and is none of these.
     #[must_use]
@@ -553,44 +613,26 @@ impl Reach {
                 shared_by: None,
             };
         }
-        let (Some(facts), Some(site)) = (self.graph.get(thread), self.graph.site_of(thread)) else {
+        let Some(site) = self.graph.site_of(thread) else {
             return Standing::default();
         };
         if side {
             return Standing::default();
         }
         let shared = Self::share_standing(
-            self.named(&site, &[Permission::ThreadView, Permission::ThreadInteract]),
-            self.named(&site, &[Permission::ThreadInteract]),
+            self.named(
+                &site,
+                Permission::ThreadView,
+                &[Permission::ThreadView, Permission::ThreadInteract],
+            ),
+            self.named(
+                &site,
+                Permission::ThreadInteract,
+                &[Permission::ThreadInteract],
+            ),
             None,
         );
-        let in_topic = self.is_in_topic(facts);
-        let by_policy = !self.restricted(&site)
-            && match self.policy {
-                AgentReach::None => false,
-                AgentReach::Topic => in_topic,
-                AgentReach::Project => self.is_in_project(facts),
-            };
-        Standing {
-            read: shared.read.or(by_policy.then_some(Via::Policy)),
-            write: if in_topic {
-                Some(Via::Topic)
-            } else {
-                shared.write
-            },
-            manage: None,
-            shared_by: shared.shared_by,
-        }
-    }
-
-    /// Whether a thread's View row is cut loose below its root org: it is restricted, and what the policy reaches
-    /// leaves it out.
-    fn restricted(&self, site: &Site) -> bool {
-        let Some(root) = site.root else {
-            return false;
-        };
-        self.chain(site, Permission::ThreadView)
-            .cut_below(PlaceRef::Node(root))
+        shared
     }
 
     /// What the agent may do with the chat of a node: read it and post in it.
@@ -600,8 +642,12 @@ impl Reach {
             return Standing::default();
         };
         let mut standing = Self::share_standing(
-            self.named(&site, &[Permission::ChatView, Permission::ChatInteract]),
-            self.named(&site, &[Permission::ChatInteract]),
+            self.named(
+                &site,
+                Permission::ChatView,
+                &[Permission::ChatView, Permission::ChatInteract],
+            ),
+            self.named(&site, Permission::ChatInteract, &[Permission::ChatInteract]),
             None,
         );
         if self.stopped_nodes.contains(&node) {
@@ -614,8 +660,12 @@ impl Reach {
     #[must_use]
     pub fn people_chat(&self, chat: Id) -> Standing {
         let mut standing = Self::share_standing(
-            self.named_for_chat(chat, &[Permission::ChatView, Permission::ChatInteract]),
-            self.named_for_chat(chat, &[Permission::ChatInteract]),
+            self.named_for_chat(
+                chat,
+                Permission::ChatView,
+                &[Permission::ChatView, Permission::ChatInteract],
+            ),
+            self.named_for_chat(chat, Permission::ChatInteract, &[Permission::ChatInteract]),
             None,
         );
         if self.stopped_chats.contains(&chat) {
@@ -634,11 +684,65 @@ impl Reach {
             return Standing::default();
         };
         let shared = Self::share_standing(
-            self.named(&site, &DOCUMENT_READ),
-            self.named(&site, &DOCUMENT_WRITE),
-            self.named(&site, &DOCUMENT_MANAGE),
+            self.named(&site, Permission::DocView, &DOCUMENT_READ),
+            self.named(&site, Permission::DocEdit, &DOCUMENT_WRITE),
+            self.named(&site, Permission::DocManage, &DOCUMENT_MANAGE),
         );
-        self.including_document_policy(shared, &site, document.node)
+        shared
+    }
+
+    /// Current rights supplied by only the named entries on this exact document. Other givers
+    /// and intrinsic own context cannot make an inactive contribution appear active.
+    #[must_use]
+    pub fn contribution_document(&self, document: &Document, entries: &HashSet<Id>) -> Standing {
+        let Some(site) = documents::site_of(&self.graph, document) else {
+            return Standing::default();
+        };
+        let mut standing = Self::share_standing(
+            self.named_from(&site, Permission::DocView, &DOCUMENT_READ, Some(entries)),
+            self.named_from(&site, Permission::DocEdit, &DOCUMENT_WRITE, Some(entries)),
+            self.named_from(
+                &site,
+                Permission::DocManage,
+                &DOCUMENT_MANAGE,
+                Some(entries),
+            ),
+        );
+        // Match the shared tree's existing read-only treatment of archived sources.
+        if self.archived(document.node) {
+            standing.write = None;
+            standing.manage = None;
+        }
+        standing
+    }
+
+    /// Current rights supplied by only these entries on one chat. `node` is the chat's actual
+    /// owning node, or none for a direct/group chat. Posting stops still apply to this recipient.
+    #[must_use]
+    pub fn contribution_chat(&self, chat: Id, node: Option<Id>, entries: &HashSet<Id>) -> Standing {
+        let named = |needed, permissions: &[Permission]| match node {
+            Some(node) => self
+                .graph
+                .site_of(node)
+                .and_then(|site| self.named_from(&site, needed, permissions, Some(entries))),
+            None => self.named_for_chat_from(chat, needed, permissions, Some(entries)),
+        };
+        let mut standing = Self::share_standing(
+            named(
+                Permission::ChatView,
+                &[Permission::ChatView, Permission::ChatInteract],
+            ),
+            named(Permission::ChatInteract, &[Permission::ChatInteract]),
+            None,
+        );
+        let source = node.or_else(|| self.people_chat_roots.get(&chat).copied());
+        if node.is_some_and(|node| self.stopped_nodes.contains(&node))
+            || self.stopped_chats.contains(&chat)
+            || source.is_some_and(|source| self.archived(source))
+        {
+            standing.write = None;
+        }
+        standing
     }
 
     /// What the agent may do with the documents beside a node: read them (some, at least), make new ones there,
@@ -650,11 +754,11 @@ impl Reach {
             return Standing::default();
         };
         let shared = Self::share_standing(
-            self.named(&site, &DOCUMENT_READ),
-            self.named(&site, &DOCUMENT_WRITE),
-            self.named(&site, &DOCUMENT_MANAGE),
+            self.named(&site, Permission::DocView, &DOCUMENT_READ),
+            self.named(&site, Permission::DocEdit, &DOCUMENT_WRITE),
+            self.named(&site, Permission::DocManage, &DOCUMENT_MANAGE),
         );
-        self.including_document_policy(shared, &site, node)
+        shared
     }
 
     /// The places whose agents are named in a row that gives a document to agents, on the document's own page or
@@ -688,6 +792,7 @@ impl Reach {
                     .any(|named| {
                         hinted.contains(&named.entry.id)
                             && named.entry.holder.is_agents_on(&self.agent.path)
+                            && self.entry_at_site(named.entry, &site)
                     })
         })
     }
@@ -713,13 +818,20 @@ const DOCUMENT_WRITE: [Permission; 2] = [Permission::DocEdit, Permission::DocMan
 const DOCUMENT_MANAGE: [Permission; 1] = [Permission::DocManage];
 
 /// The first entry of a row, or of what it follows, that names the agents of one of the places on `path`.
-fn agents_in(chain: &Chain<'_>, path: &[Id], now: Time) -> Option<(Id, Option<Id>)> {
+fn agents_in(
+    chain: &Chain<'_>,
+    path: &[Id],
+    now: Time,
+    admitted: impl Fn(&Entry) -> bool,
+) -> Option<(Id, Option<Id>)> {
     chain
         .holders(now)
         .into_iter()
         .map(|named| named.entry)
         .find(|entry: &&Entry| {
-            entry.holder.kind() == HolderKind::Agents && entry.holder.is_agents_on(path)
+            entry.holder.kind() == HolderKind::Agents
+                && entry.holder.is_agents_on(path)
+                && admitted(entry)
         })
         .map(|entry| (entry.id, entry.created_by))
 }
@@ -744,23 +856,25 @@ impl Reach {
         if side {
             return false;
         }
-        self.graph
-            .site_of(thread)
-            .is_some_and(|site| self.named(&site, &[Permission::ThreadExport]).is_some())
+        self.graph.site_of(thread).is_some_and(|site| {
+            self.named(&site, Permission::ThreadExport, &[Permission::ThreadExport])
+                .is_some()
+        })
     }
 
     /// Whether the agent may copy the chat of a node into its workspace: its Export row names the agents.
     #[must_use]
     pub fn may_download_node_chat(&self, node: Id) -> bool {
-        self.graph
-            .site_of(node)
-            .is_some_and(|site| self.named(&site, &[Permission::ChatExport]).is_some())
+        self.graph.site_of(node).is_some_and(|site| {
+            self.named(&site, Permission::ChatExport, &[Permission::ChatExport])
+                .is_some()
+        })
     }
 
     /// Whether the agent may copy a direct or group chat into its workspace.
     #[must_use]
     pub fn may_download_people_chat(&self, chat: Id) -> bool {
-        self.named_for_chat(chat, &[Permission::ChatExport])
+        self.named_for_chat(chat, Permission::ChatExport, &[Permission::ChatExport])
             .is_some()
     }
 
@@ -771,7 +885,9 @@ impl Reach {
         if document.made_by_thread == Some(self.agent.thread) {
             return true;
         }
-        documents::site_of(&self.graph, document)
-            .is_some_and(|site| self.named(&site, &[Permission::DocExport]).is_some())
+        documents::site_of(&self.graph, document).is_some_and(|site| {
+            self.named(&site, Permission::DocExport, &[Permission::DocExport])
+                .is_some()
+        })
     }
 }

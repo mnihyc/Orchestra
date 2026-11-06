@@ -321,7 +321,9 @@ async fn a_child_kind_filter_pages_folders_without_consuming_topics_and_refuses_
             })
             .send()
             .await
-            .ok();
+            .ok()
+            .into_full()
+            .expect("this control expects the ordinary full project response");
         folders.push(made.base.id);
         make_topic(&office.world, &office.ada, office.project, "Between").await;
     }

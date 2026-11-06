@@ -9,16 +9,21 @@ import { ThreadHeader } from '@/features/thread/Header';
 import type * as NodesApi from '@/api/nodes';
 import type * as ThreadsApi from '@/api/threads';
 import type * as ThreadStore from '@/realtime/stores/thread';
+import type * as RunningUi from '@/features/running/Running';
 import { approvalKey } from '@/api/approvals';
-import type { HarnessRequest, Item, Segment, Thread, ThreadGoal } from '@/generated/api-types';
+import type { HarnessRequest, Item, Segment, Thread, ThreadBackground, ThreadGoal } from '@/generated/api-types';
 import { i18n, setLocale } from '@/i18n';
 import { ThreadStateIcon } from '@/ui/ThreadState';
+import { actionName } from '@/ui/actions';
+import { client } from '@/api/client';
+import { ViewOpeningContext } from '@/features/workbench/viewOpening';
+import { commandsNow } from '@/features/finder/commands';
 import { show } from './support';
 import { snapshot } from '../unit/continuation-fixtures';
 import { ALLOW_DENY, approvalItem, harnessApproval } from '../doubles/thread-rows';
 import { me, memberAccess, userRef } from '../doubles/fixtures';
 
-const calls = vi.hoisted(() => ({ share: vi.fn(), update: vi.fn(), apply: vi.fn(), fork: vi.fn(), change: vi.fn(), ask: vi.fn(), find: vi.fn(), goal: vi.fn(), starred: false, items: new Map<string, Item>(), segments: [] as Segment[] }));
+const calls = vi.hoisted(() => ({ share: vi.fn(), update: vi.fn(), apply: vi.fn(), fork: vi.fn(), change: vi.fn(), ask: vi.fn(), find: vi.fn(), goal: vi.fn(), starred: false, items: new Map<string, Item>(), segments: [] as Segment[], background: null as ThreadBackground | null, backgroundClosed: false }));
 vi.mock('@/features/goal/editor', () => ({ openGoalEditor: calls.goal }));
 vi.mock('@/api/nodes', async (importOriginal) => ({ ...await importOriginal<typeof NodesApi>(), updateNode: calls.update }));
 vi.mock('@/api/threads', async (importOriginal) => ({ ...await importOriginal<typeof ThreadsApi>(), resumeAutomatic: vi.fn() }));
@@ -27,6 +32,13 @@ vi.mock('@/features/navigation/favorites', () => ({ StarButton: () => <button>{c
 vi.mock('@/features/thread/SubscriptionBell', () => ({ SubscriptionBell: () => <button>Notifications</button> }));
 vi.mock('@/features/navigation/NodeMenu', () => ({ useNodeMenu: () => [calls.starred ? 'Unstar' : 'Star', 'Export', 'Archive', 'Delete'].map((label) => ({ id: label.toLowerCase(), label, onSelect: vi.fn() })) }));
 vi.mock('@/features/thread/forkNow', () => ({ useForkNow: () => ({ pending: false, start: calls.fork }) }));
+vi.mock('@/api/forks', async (original) => ({ ...await original<object>(), planFork: () => Promise.resolve({
+  access: { summary: { custom: false, from: null, interact: [], manage: [], view: [] } },
+  agent_access: { preset: { where: 'nothing', parts: {} }, choices: [
+    { where: 'nothing', parts: {} }, { where: 'thread', parts: {} },
+    { where: 'topic', parts: {} }, { where: 'project', parts: {} },
+  ] },
+}) }));
 vi.mock('@/features/change/target', () => ({ openChange: calls.change }));
 vi.mock('@/features/side-threads/ask', () => ({ openSideAsk: calls.ask }));
 vi.mock('@/features/side-threads/SideChips', () => ({ SideThreadList: () => <p>Open side threads</p> }));
@@ -34,7 +46,8 @@ vi.mock('@/features/thread-move/MoveToTopic', () => ({ MoveToTopic: () => null }
 vi.mock('@/features/start/SetUpThread', () => ({ SetUpThread: ({ thread, onClose }: { thread: Thread; onClose: () => void }) => <div role="dialog" aria-label={`Setup ${thread.name}`}><button onClick={onClose}>Close setup</button></div> }));
 vi.mock('@/features/timeline/FindInConversation', () => ({ openFind: calls.find }));
 vi.mock('@/features/inbox/away/Catchup', () => ({ CatchupRequest: () => null }));
-vi.mock('@/features/running/Running', () => ({ RunningDialog: () => <div role="dialog">Running commands</div> }));
+vi.mock('@/features/running/Running', async (importOriginal) => ({ ...await importOriginal<typeof RunningUi>(), RunningDialog: ({ thread, close }: { thread: string; close: () => void }) => <div role="dialog" aria-label={i18n.t('running.title')} data-running-thread={thread}><button onClick={close}>{i18n.t('common.close')}</button></div> }));
+vi.mock('@/features/running/live', () => ({ useRunning: () => ({ roster: calls.background, closed: calls.backgroundClosed, error: null }) }));
 vi.mock('@/features/timeline/preferences', () => ({ useTimelinePreferences: () => ({ detail: 'steps', hideHistory: false, setDetail: vi.fn(), setHideHistory: vi.fn() }) }));
 vi.mock('@/realtime/stores/thread', async (importOriginal) => {
   const actual = await importOriginal<typeof ThreadStore>();
@@ -53,7 +66,8 @@ const path: Thread['path'] = [
 ];
 const approvalRequest: HarnessRequest = { request_kind: 'command', options: ALLOW_DENY, detail: { command: 'check redirect', cwd: '/workspace', reason: null } };
 
-beforeEach(() => { vi.clearAllMocks(); calls.starred = false; calls.items.clear(); calls.segments = []; });
+const background = (more: Partial<ThreadBackground> = {}): ThreadBackground => ({ supported: true, state: 'live', total: 0, items: [], next_cursor: null, list_ref: null, expires_at: null, as_of: null, can_end: true, reason: null, ...more });
+beforeEach(() => { vi.clearAllMocks(); calls.starred = false; calls.items.clear(); calls.segments = []; calls.background = background(); calls.backgroundClosed = false; });
 afterEach(async () => { cleanup(); await setLocale('en'); });
 
 function draw(more: Partial<Thread> = {}, cache?: QueryClient) {
@@ -66,6 +80,71 @@ function draw(more: Partial<Thread> = {}, cache?: QueryClient) {
   const drawn = show(cache === undefined ? content : <QueryClientProvider client={cache}>{content}</QueryClientProvider>);
   return { thread, header: screen.getByRole('banner'), ...drawn };
 }
+
+async function confirmFork(user: ReturnType<typeof userEvent.setup>) {
+  const dialog = await screen.findByRole('dialog', { name: i18n.t('agentAccess.forkTitle', { name: 'Repair login' }) });
+  expect(calls.fork).not.toHaveBeenCalled();
+  const confirm = within(dialog).getByRole('button', { name: i18n.t('change.menu.forkNow') });
+  await waitFor(() => expect(confirm).toBeEnabled());
+  await user.click(confirm);
+  expect(calls.fork).toHaveBeenCalledExactlyOnceWith(undefined, { where: 'nothing', parts: {} });
+}
+
+it.each(['en', 'zh-CN'] as const)('shows native work from an earlier turn beside Idle in the actual header (%s)', async (locale) => {
+  await setLocale(locale);
+  calls.background = background({ total: 2, items: ['one', 'two'].map((id) => ({ id, segment_id: 'earlier-segment', turn_id: 'earlier-turn', item_id: `source-${id}`, command: 'sleep 300', command_truncated: false, cwd: null, cwd_redacted: false, place: 'environment', since: null, cpu_percent: null, memory_bytes: null })) });
+  const { header } = draw({ state: 'idle' });
+  expect(within(header).getByText(i18n.t('state.idle'), { exact: true })).toBeVisible();
+  const count = within(header).getByRole('button', { name: i18n.t('running.count', { count: 2 }) });
+  expect(count).toBeVisible();
+  expect(count.closest('[data-thread-title-row]')).not.toBeNull();
+});
+
+async function openRunningFromView(user: ReturnType<typeof userEvent.setup>, thread: Thread) {
+  await user.click(within(screen.getByRole('banner')).getByRole('button', { name: actionName('actions', thread.name) }));
+  const view = screen.getByRole('menuitem', { name: i18n.t('thread.header.view') });
+  act(() => view.focus());
+  await user.keyboard('{ArrowRight}');
+  await user.click(await screen.findByRole('menuitem', { name: i18n.t('running.title') }));
+}
+
+for (const change of ['view opening', 'reader authority', 'thread target', 'forbidden source'] as const) it(`retires the background review owner after ${change}`, async () => {
+  const user = userEvent.setup(), thread = snapshot().thread;
+  const content = (opening: string, target = thread) => <ViewOpeningContext value={opening}><ThreadHeader thread={target} /></ViewOpeningContext>;
+  const view = show(content('first-opening'));
+  await openRunningFromView(user, thread);
+  expect(screen.getAllByRole('dialog', { name: i18n.t('running.title') })).toHaveLength(1);
+  const before = client.session.getState();
+  try {
+    if (change === 'reader authority') act(() => client.session.setState({ readerVersion: (before.readerVersion ?? 0) + 1 }));
+    if (change === 'forbidden source') calls.backgroundClosed = true;
+    const other = change === 'thread target' ? { ...thread, id: 'other-thread', path: thread.path.map((part) => part.id === thread.id ? { ...part, id: 'other-thread' } : part) } : thread;
+    view.rerender(content(change === 'view opening' ? 'second-opening' : 'first-opening', other));
+    expect(screen.queryByRole('dialog', { name: i18n.t('running.title') })).not.toBeInTheDocument();
+  } finally { act(() => client.session.setState(before)); }
+});
+
+it('registers one current background action for the existing finder and View menu', async () => {
+  const user = userEvent.setup(), { thread } = draw();
+  const command = commandsNow().find((entry) => entry.id === 'thread.running');
+  expect(command).toBeDefined();
+  if (command === undefined) throw new Error('The current header must register its running action');
+  act(() => command.run('here'));
+  expect(screen.getAllByRole('dialog', { name: i18n.t('running.title') })).toHaveLength(1);
+  await user.click(screen.getByRole('button', { name: i18n.t('common.close') }));
+  await openRunningFromView(user, thread);
+  expect(screen.getAllByRole('dialog', { name: i18n.t('running.title') })).toHaveLength(1);
+});
+
+it('returns a command opening without an element opener to the current header actions', async () => {
+  const user = userEvent.setup(), { header, thread } = draw();
+  expect(document.body).toHaveFocus();
+  const command = commandsNow().find((entry) => entry.id === 'thread.running');
+  if (command === undefined) throw new Error('The current header must register its running action');
+  act(() => command.run('here'));
+  await user.click(screen.getByRole('button', { name: i18n.t('common.close') }));
+  await waitFor(() => expect(within(header).getByRole('button', { name: actionName('actions', thread.name) })).toHaveFocus());
+});
 
 describe('a thread header', () => {
   const importedSegment: Segment = {
@@ -193,6 +272,7 @@ describe('a thread header', () => {
     const { header, thread } = draw();
     const actions = within(header).getByRole('group', { name: t('thread.header.quickActions') });
     await user.click(within(actions).getByRole('button', { name: t('change.menu.forkNow') }));
+    await confirmFork(user);
     expect(calls.fork).toHaveBeenCalledOnce();
     await user.click(within(actions).getByRole('button', { name: t('change.menu.fork') }));
     expect(calls.change).toHaveBeenCalledWith({ kind: 'thread', id: thread.id, name: thread.name }, { kind: 'fork' });
@@ -224,6 +304,7 @@ describe('a thread header', () => {
     await userEvent.keyboard('{ArrowRight}');
     const fork = await screen.findByRole('menuitem', { name: /^Fork$/ });
     act(() => fork.focus()); await userEvent.keyboard('{Enter}');
+    await confirmFork(userEvent.setup());
     expect(calls.fork).toHaveBeenCalledOnce();
   });
 
@@ -277,6 +358,7 @@ describe('a thread header', () => {
     expect(calls.ask).not.toHaveBeenCalled();
     if (via === 'pointer') await user.click(buttons[0]!);
     else { act(() => buttons[0]!.focus()); await user.keyboard('{Enter}'); }
+    await confirmFork(user);
     expect(calls.fork).toHaveBeenCalledOnce();
     if (via === 'pointer') await user.click(buttons[1]!);
     else { act(() => buttons[1]!.focus()); await user.keyboard('{Enter}'); }

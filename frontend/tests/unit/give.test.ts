@@ -27,7 +27,7 @@ function page(gives: Partial<PageGives>, more: Partial<PermissionPage> = {}): Pe
     depends: [],
     reaches: null,
     covers: null,
-    gives: { choices: [], roles: [], agents: [], holders_share: true, ...gives },
+    gives: { choices: [], roles: [], agents: [], holders_share: true, ...gives, agent_parts: gives.agent_parts ?? {} },
     rows: [],
     ...more,
   };
@@ -108,12 +108,13 @@ describe('what sharing with agents comes to', () => {
 
   it('lets a reader share only what they may do themself: reading for a share to read, writing for one to write, and managing for one that manages', () => {
     const edit = { timeline: 'write', chat: 'write', documents: 'edit' } as const;
-    expect(mayGiveParts(edit, ['view', 'edit'])).toBe(true);
-    expect(mayGiveParts(edit, ['view'])).toBe(false);
-    expect(mayGiveParts({ documents: 'manage' }, ['view', 'edit'])).toBe(false);
-    expect(mayGiveParts({ documents: 'manage' }, ['view', 'edit', 'manage'])).toBe(true);
+    expect(mayGiveParts(edit, edit)).toBe(true);
+    expect(mayGiveParts(edit, partsOfLevel('view', areasOf('topic', 'inside')))).toBe(false);
+    expect(mayGiveParts({ documents: 'manage' }, edit)).toBe(false);
+    expect(mayGiveParts({ documents: 'edit' }, { documents: 'edit' })).toBe(true);
+    expect(mayGiveParts({ documents: 'manage' }, { documents: 'manage' })).toBe(true);
     // A share that names nothing needs nothing.
-    expect(mayGiveParts({}, [])).toBe(true);
+    expect(mayGiveParts({}, {})).toBe(true);
   });
 
   it('changes one area at a time and leaves the others as they were', () => {

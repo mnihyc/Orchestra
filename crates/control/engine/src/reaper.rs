@@ -132,6 +132,7 @@ impl Engine {
             }
             Err(MakeError::Running(_) | MakeError::NoEnvironment) => Ok(false),
             Err(MakeError::Db(error)) => Err(error.into()),
+            Err(MakeError::Internal(error)) => Err(error.into()),
         }
     }
 
@@ -329,6 +330,7 @@ impl Engine {
             Ok(_) | Err(MakeError::Running(_)) => {}
             Err(MakeError::NoEnvironment) => return Ok(()),
             Err(MakeError::Db(error)) => return Err(error.into()),
+            Err(MakeError::Internal(error)) => return Err(error.into()),
         }
         tx.commit().await.map_err(DbError::from)?;
         self.kick();

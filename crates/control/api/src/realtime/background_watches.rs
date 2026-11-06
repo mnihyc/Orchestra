@@ -128,12 +128,21 @@ pub(crate) async fn project(
     connection: &Connection,
     thread: Id,
     data: &Json,
-) -> Result<Json, Fail> {
+) -> Result<Option<Json>, Fail> {
+    let Some(caller) =
+        super::key_reads::admit(inner, connection, &Feed::ThreadBackground(thread)).await?
+    else {
+        return Ok(None);
+    };
     let capture: Capture = serde_json::from_value(data.clone()).map_err(Fail::other)?;
     let mut conn = inner.db.acquire().await?;
-    let principal = super::subscriptions::principal_for_connection(inner, &mut conn, connection)
-        .await?
-        .ok_or_else(|| Fail::other("the reader no longer exists"))?;
+    let principal = super::subscriptions::viewing_admitted(
+        connection,
+        caller,
+        super::subscriptions::principal_of(inner, &mut conn, connection.user),
+    )
+    .await??
+    .ok_or_else(|| Fail::other("the reader no longer exists"))?;
     let (mut roster, _) = inner
         .engine()?
         .project_background(&mut conn, &principal, thread, &capture)
@@ -149,5 +158,5 @@ pub(crate) async fn project(
             ));
         }
     }
-    serde_json::to_value(roster).map_err(Fail::other)
+    serde_json::to_value(roster).map(Some).map_err(Fail::other)
 }

@@ -10,19 +10,28 @@ use orch_api_contract::{
     resources as api,
     workspace::Job,
 };
-use orch_authz::Principal;
+use orch_authz::{CapturedOperation, Principal};
 use orch_db::{Conn, DbError};
 use orch_engine::updates::{self, Target, UpdateError};
-use orch_settings::Place;
 use orch_types::{Id, Time, new_id};
+
+mod batch_operation;
 
 /// Binds provider-runtime update plans and their confirmations.
 pub fn mount(registry: &mut Registry) {
     registry
         .on(api::ProviderRuntimeUpdatePreflight, preflight)
         .on(api::ProviderRuntimeUpdateCreate, create)
-        .on(api::ProviderRuntimeUpdateBatchPreflight, batch_preflight)
-        .on(api::ProviderRuntimeUpdateBatchCreate, batch_create);
+        .on_with_operation(
+            api::ProviderRuntimeUpdateBatchPreflight,
+            batch_operation::preview,
+            batch_preflight,
+        )
+        .on_with_operation(
+            api::ProviderRuntimeUpdateBatchCreate,
+            batch_operation::confirm,
+            batch_create,
+        );
 }
 
 async fn preflight(
@@ -104,135 +113,122 @@ async fn reference(
 async fn batch_preflight(
     mut ctx: Ctx,
     (): (),
-    body: api::ProviderRuntimeUpdateBatchPreflightBody,
-) -> ApiResult<api::ProviderRuntimeUpdateBatchPreflightReply> {
+    _body: api::ProviderRuntimeUpdateBatchPreflightBody,
+) -> ApiResult<api::ProviderRuntimeUpdateBatchPreflightResponse> {
     let (mut tx, guard) = transaction_guard::begin(&ctx).await?;
     ctx.now = guard.now().get();
+    let prepared = guard.operation_data::<batch_operation::Preview>()?;
     let principal = guard.into_principal();
-    let mut ids = body.provider_ids;
-    ids.sort_unstable();
-    ids.dedup();
-    let id = new_id();
-    let mut recipes = Vec::new();
-    let mut plans_shown = Vec::new();
-    let mut skipped = Vec::new();
-    for provider in ids {
-        let Some(reference) = reference(&mut tx, &principal, provider).await? else {
-            continue;
-        };
-        let draft = match ctx
-            .app
-            .engine
-            .draft_update(
-                &mut tx,
-                &principal,
-                Target::Provider(provider),
-                UpdatePreflightReason::Update,
-                None,
-            )
-            .await
-        {
-            Ok(draft) => draft,
-            Err(UpdateError::Denied) => {
-                skipped.push(api::ProviderUpdateSkipped {
-                    provider: reference,
-                    reason: api::ProviderUpdateSkipReason::NoPermission,
-                });
-                continue;
-            }
-            Err(UpdateError::Blocked(_)) | Err(UpdateError::NotFound) => {
-                skipped.push(api::ProviderUpdateSkipped {
-                    provider: reference,
-                    reason: api::ProviderUpdateSkipReason::NotManaged,
-                });
-                continue;
-            }
-            Err(error) => return Err(plans::refused(error)),
-        };
-        if draft.updates.is_empty() {
-            skipped.push(api::ProviderUpdateSkipped {
-                provider: reference,
-                reason: api::ProviderUpdateSkipReason::UpToDate,
-            });
-            continue;
-        }
-        plans_shown.push(plans::provider_plan(&ctx, &mut tx, &principal, id, &draft).await?);
-        if draft.blockers.is_empty() {
-            recipes.push(draft.recipe);
-        }
-    }
-    let options = updates::options(&mut tx, Place::System, None)
-        .await
-        .map_err(plans::refused)?;
-    let parallel = orch_settings::get::<i64>(
-        &mut tx,
-        Place::System,
-        orch_settings_contract::registry::keys::SWITCH_BATCH_PARALLEL,
-    )
-    .await
-    .map_err(ApiError::internal)?
-    .unwrap_or(updates::DEFAULT_BATCH_PARALLEL);
-    let estimate = orch_engine::jobs::estimates::together(
-        &plans_shown
-            .iter()
-            .map(|p| p.estimate.clone())
-            .collect::<Vec<_>>(),
-        parallel,
-    );
-    plans::keep_batch(&ctx, &mut tx, id, None, &recipes, true).await?;
-    let executable = recipes.len() as i64;
-    let affected: Vec<_> = recipes
+    let origin = CapturedOperation::capture(principal.caller()).map_err(ApiError::internal)?;
+    let recipes: Vec<_> = prepared
+        .drafts
         .iter()
-        .flat_map(|recipe| recipe.threads.iter().copied())
+        .filter(|draft| draft.blockers.is_empty())
+        .map(|draft| draft.recipe.clone())
         .collect();
-    let notify = Some(plans::audience(&ctx, &mut tx, &principal, &affected).await?);
+    plans::keep_provider_batch(&ctx, &mut tx, prepared.id, &recipes, &origin).await?;
+    if prepared.full.is_some() {
+        // The fresh guarded producer completed every actual response source. Denied
+        // remains terminal; only this proven Pending projection can become Full.
+        ctx.complete_disclosure(crate::key_operations::resolver::Disclosure::Full);
+    }
+    let reply = match &prepared.full {
+        Some(full) if !ctx.key_receipt_required() => {
+            api::ProviderRuntimeUpdateBatchPreflightResponse::Full(full.clone())
+        }
+        _ => api::ProviderRuntimeUpdateBatchPreflightResponse::Receipt(
+            api::ProviderRuntimeUpdateBatchPreflightReceipt {
+                projection: orch_api_contract::common::ReceiptProjection::Receipt,
+                preflight_id: prepared.id,
+                expires_at: Time::new(updates::expires(ctx.now)),
+                executable: recipes.len() as i64,
+                provider_ids: recipes.iter().map(|recipe| recipe.target.id()).collect(),
+                blocked: prepared
+                    .drafts
+                    .iter()
+                    .filter(|draft| !draft.blockers.is_empty())
+                    .map(|draft| draft.recipe.target.id())
+                    .collect(),
+                skipped: prepared.skipped.clone(),
+            },
+        ),
+    };
     tx.commit().await.map_err(DbError::from)?;
-    Ok(api::ProviderRuntimeUpdateBatchPreflightReply {
-        notify,
-        preflight_id: id,
-        expires_at: Time::new(updates::expires(ctx.now)),
-        plans: plans_shown,
-        skipped,
-        executable,
-        options,
-        estimate,
-    })
+    Ok(reply)
 }
 
 async fn batch_create(
     mut ctx: Ctx,
     query: orch_api_contract::forks::UpdateConfirmQuery,
     body: ForkCreateBody,
-) -> ApiResult<api::ProviderBatch> {
+) -> ApiResult<api::ProviderBatchResponse> {
     let (mut tx, guard) = transaction_guard::begin(&ctx).await?;
     ctx.now = guard.now().get();
+    let prepared = guard.operation_data::<batch_operation::Confirmation>()?;
     let principal = guard.into_principal();
-    let drafts = plans::batch_drafts(&ctx, &mut tx, &principal, None, true, &body).await?;
+    let mut origins = prepared.origins.clone();
+    let origin = CapturedOperation::capture(principal.caller()).map_err(ApiError::internal)?;
+    if !origins.contains(&origin) {
+        origins.push(origin);
+    }
     let batch_id = new_id();
-    let affected: Vec<_> = drafts
+    let affected: Vec<_> = prepared
+        .drafts
         .iter()
         .flat_map(|draft| draft.recipe.threads.iter().copied())
         .collect();
     let mut jobs = Vec::new();
-    for draft in drafts {
-        let provider = super::view::provider_refs(&mut tx, &[draft.recipe.target.id()], &[])
-            .await?
-            .pop()
-            .ok_or_else(ApiError::not_found)?
-            .1;
-        let row = orch_engine::jobs::recreate::queue(&mut tx, draft, Some(batch_id), ctx.now)
-            .await
-            .map_err(plans::refused)?;
-        jobs.push(api::ProviderBatchJob {
-            provider,
-            job: shown_jobs::view(&mut tx, &row).await?,
+    let mut receipts = Vec::new();
+    if prepared.full {
+        ctx.complete_disclosure(crate::key_operations::resolver::Disclosure::Full);
+    }
+    let mut full = prepared.full && !ctx.key_receipt_required();
+    for draft in &prepared.drafts {
+        let provider_id = draft.recipe.target.id();
+        let provider = if full {
+            reference(&mut tx, &principal, provider_id).await?
+        } else {
+            None
+        };
+        full &= provider.is_some();
+        let row =
+            orch_engine::jobs::recreate::queue(&mut tx, draft.clone(), Some(batch_id), ctx.now)
+                .await
+                .map_err(plans::refused)?;
+        orch_engine::jobs::recreate::batch_authority::retain(
+            &mut tx,
+            row.id,
+            batch_id,
+            &origins,
+            Time::new(ctx.now),
+        )
+        .await
+        .map_err(ApiError::engine)?;
+        receipts.push(api::ProviderBatchJobReceipt {
+            provider_id,
+            job_id: row.id,
         });
+        if let Some(provider) = provider {
+            jobs.push(api::ProviderBatchJob {
+                provider,
+                job: shown_jobs::view(&mut tx, &row).await?,
+            });
+        }
     }
     if query.notify.unwrap_or(true) {
         plans::tell_update(&ctx, &mut tx, &affected, batch_id).await?;
     }
     orch_db::queries::jobs::forks::forget_preflight(&mut tx, body.preflight_id).await?;
+    let reply = if full {
+        api::ProviderBatchResponse::Full(api::ProviderBatch { batch_id, jobs })
+    } else {
+        api::ProviderBatchResponse::Receipt(api::ProviderBatchReceipt {
+            projection: orch_api_contract::common::ReceiptProjection::Receipt,
+            batch_id,
+            jobs: receipts,
+        })
+    };
     tx.commit().await.map_err(DbError::from)?;
     ctx.app.engine.kick();
-    Ok(api::ProviderBatch { batch_id, jobs })
+    Ok(reply)
 }

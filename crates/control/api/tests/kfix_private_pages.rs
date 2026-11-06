@@ -8,6 +8,7 @@
 mod desk;
 mod places;
 mod support;
+use support::FullTokenReply as _;
 
 use desk::Desk;
 use orch_api_contract::access::{
@@ -28,17 +29,19 @@ async fn credential(desk: &Desk, owner: &Who, node: Id, scopes: &[&str]) -> Stri
         .call(MeTokenCreate, &[])
         .token(&owner.token)
         .body(&ApiTokenCreateBody {
+            rules: None,
             name: "Permission inspector".to_owned(),
             scopes: Some(scopes.iter().map(|scope| (*scope).to_owned()).collect()),
             node_id: Some(node),
             expires_at: None,
-            proof: orch_api_contract::auth::SensitiveProof {
+            proof: Some(orch_api_contract::auth::SensitiveProof {
                 password: Some(support::PASSWORD.to_owned()),
                 ..Default::default()
-            },
+            }),
         })
         .send()
         .await
+        .full_token()
         .ok()
         .token
         .expect("the first answer carries the secret")

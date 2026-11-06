@@ -908,6 +908,44 @@ pub async fn set_node_tags(
     Ok(())
 }
 
+/// The actual rows changed by `move_under`, before its caller's final authority
+/// checkpoint. Retained descendants are included because the native path UPDATE
+/// includes them too. This resolves no permission and changes no hierarchy state.
+pub async fn lock_move_rows(conn: &mut Conn, node: Id, parent: Id) -> Result<bool, DbError> {
+    if !lock(conn, node).await? {
+        return Ok(false);
+    }
+    // Root is already owned in the native order. Acquire the remaining exact
+    // source-path Node set in id order before the bulk UPDATE can wait on it.
+    sqlx::query_scalar::<_, Id>(
+        "SELECT id FROM nodes WHERE $1=ANY(path) AND id<>$1 ORDER BY id FOR UPDATE",
+    )
+    .bind(node)
+    .fetch_all(&mut *conn)
+    .await?;
+    if !crate::queries::transaction_guard::lock_parent(conn, parent).await? {
+        return Ok(false);
+    }
+    let org: Option<Id> =
+        sqlx::query_scalar("SELECT node_id FROM orgs WHERE node_id=$1 FOR UPDATE")
+            .bind(node)
+            .fetch_optional(&mut *conn)
+            .await?;
+    if org.is_some() {
+        // The final native org-parent UPDATE takes this same FK row. Other node
+        // kinds have no org row and gain no additional organization prerequisite.
+        let parent_org: Option<Id> =
+            sqlx::query_scalar("SELECT node_id FROM orgs WHERE node_id=$1 FOR KEY SHARE")
+                .bind(parent)
+                .fetch_optional(&mut *conn)
+                .await?;
+        if parent_org.is_none() {
+            return Ok(false);
+        }
+    }
+    Ok(true)
+}
+
 /// Moves `node` under `parent`: its path and everything under it is
 /// rewritten, an org's own parent follows, and the move counts as a change
 /// of the node. The caller has checked that both lie in one tree and that

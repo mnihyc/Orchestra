@@ -9,8 +9,8 @@
 //! announced, and is audited.
 //!
 //! **Which thread.** The shared tree resolves names, paths and identifiers exactly as it does for reads and
-//! documents. An ambiguous write is refused with reachable candidates. A thread of the sender's own topic
-//! accepts a message by policy; one in another topic needs an explicit write share. Paths are never reduced
+//! documents. An ambiguous write is refused with reachable candidates. A message needs an explicit write share,
+//! or the sender's topic must enable automatic same-topic messages. Paths are never reduced
 //! to their last component or tried in another topic first.
 //!
 //! **References** that the message names (a shared-tree path or `id:` in a link or in backquotes, with `#n` for a

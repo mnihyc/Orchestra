@@ -639,7 +639,13 @@ async fn pages_of_turns_give_the_turns_and_items_the_whole_reading_gives_and_a_t
 #[tokio::test]
 async fn a_transcript_written_in_pages_is_the_file_the_whole_reading_wrote_on_a_small_thread()
 -> Proof {
+    let began = std::time::Instant::now();
+    eprintln!("history small diagnostic phase=fixture_wait");
     let world = common::World::new().await;
+    eprintln!(
+        "history small diagnostic phase=fixture_ready elapsed_ms={}",
+        began.elapsed().as_millis()
+    );
     let store = std::sync::Arc::new(
         orch_blob_local::LocalBlobStore::open(
             std::env::temp_dir().join(format!("orch-pages-{}", new_id())),
@@ -1014,7 +1020,20 @@ async fn a_summary_of_a_large_cut_reads_only_the_brief_tail_and_newest_older_ind
 #[tokio::test]
 async fn a_cut_of_two_hundred_thousand_turns_gives_its_carry_from_the_end_its_transcript_and_its_copy_a_page_at_a_time()
 -> Proof {
+    let began = std::time::Instant::now();
+    eprintln!("history scale diagnostic phase=fixture_wait");
     let world = common::World::new().await;
+    let database = world
+        .pool
+        .pool()
+        .connect_options()
+        .get_database()
+        .unwrap_or("unknown")
+        .to_owned();
+    eprintln!(
+        "history scale diagnostic phase=fixture_ready database={database} elapsed_ms={}",
+        began.elapsed().as_millis()
+    );
     let store = std::sync::Arc::new(
         orch_blob_local::LocalBlobStore::open(
             std::env::temp_dir().join(format!("orch-pages-{}", new_id())),
@@ -1023,8 +1042,20 @@ async fn a_cut_of_two_hundred_thousand_turns_gives_its_carry_from_the_end_its_tr
     );
     world.engine().attach_blobs(store);
     let thread = conversation(&world, 1).await?;
+    eprintln!(
+        "history scale diagnostic phase=grow_begin elapsed_ms={}",
+        began.elapsed().as_millis()
+    );
     world.grow_history(thread, SCALE_TURNS).await;
+    eprintln!(
+        "history scale diagnostic phase=grow_end elapsed_ms={}",
+        began.elapsed().as_millis()
+    );
     let cut = captured(&world, thread).await?;
+    eprintln!(
+        "history scale diagnostic phase=capture_end elapsed_ms={}",
+        began.elapsed().as_millis()
+    );
     let mut conn = world.pool.acquire().await?;
     let counted = cuts::counts(&mut conn, cut.id).await?;
     assert_eq!(counted.turns, SCALE_TURNS);
@@ -1051,8 +1082,16 @@ async fn a_cut_of_two_hundred_thousand_turns_gives_its_carry_from_the_end_its_tr
         "{reading} statements read the end of the cut"
     );
     drop(conn);
+    eprintln!(
+        "history scale diagnostic phase=carry_end elapsed_ms={}",
+        began.elapsed().as_millis()
+    );
     // The transcript: every turn, a page at a time. What is held is a page, and what is written is the file.
     let artifact = cut::transcript_file(&world.engine(), &cut, "transcript").await?;
+    eprintln!(
+        "history scale diagnostic phase=transcript_end elapsed_ms={}",
+        began.elapsed().as_millis()
+    );
     assert_eq!(artifact.turns, SCALE_TURNS);
     let store = world.engine().blobs().ok_or("no store")?;
     let mut body = store.get(&artifact.blob, None).await?.body;
@@ -1081,11 +1120,46 @@ async fn a_cut_of_two_hundred_thousand_turns_gives_its_carry_from_the_end_its_tr
     // the identities of all of them held or sent. (Such a table of 400,000 items was sent again with each of 800 pages.)
     let target = world.thread("A copy of a long history").await;
     let target_segment = world.segment_of(target).await;
-    let mut tx = world.pool.begin().await?;
-    // A fork publishes through the API pool, whose statement budget is 15 seconds.
-    sqlx::query("SET LOCAL statement_timeout='15s'")
-        .execute(&mut *tx)
+    let initial_items: Vec<Json> = sqlx::query_scalar(
+        "SELECT to_jsonb(i) FROM items i WHERE thread_id=$1 ORDER BY seq_created,id",
+    )
+    .bind(target)
+    .fetch_all(world.pool.pool())
+    .await?;
+    assert_eq!(initial_items.len(), 1);
+    assert_eq!(
+        initial_items[0]["kind"], "marker",
+        "the target's creation is its own history"
+    );
+    // Only publication uses the production request profile; bulk fixture setup keeps its own pool.
+    let request_defaults = orch_config::ServerConfig::default().database;
+    let requests = orch_db::Db::connect_with_limits(
+        &world.db.url,
+        1,
+        std::time::Duration::from_millis(request_defaults.slow_statement_ms),
+        std::time::Duration::from_millis(request_defaults.slow_acquire_ms),
+        orch_db::pool::Limits::REQUESTS,
+    )
+    .await?;
+    let mut tx = requests.begin().await?;
+    let profile: (String, String, String) = sqlx::query_as(
+        "SELECT current_setting('jit'),current_setting('statement_timeout'),
+          current_setting('idle_in_transaction_session_timeout')",
+    )
+    .fetch_one(&mut *tx)
+    .await?;
+    assert_eq!(
+        profile,
+        ("off".to_owned(), "15s".to_owned(), "10s".to_owned()),
+        "the copy uses the API connection's actual profile"
+    );
+    let backend: i32 = sqlx::query_scalar("SELECT pg_backend_pid()")
+        .fetch_one(&mut *tx)
         .await?;
+    eprintln!(
+        "history scale diagnostic phase=copy_begin database={database} backend={backend} elapsed_ms={}",
+        began.elapsed().as_millis()
+    );
     let (copied, statements) = Statements::of(async {
         let mut unit = crate::unit::Unit::new(&mut tx, world.clock.now());
         fork_history::copy_conversation(
@@ -1100,6 +1174,11 @@ async fn a_cut_of_two_hundred_thousand_turns_gives_its_carry_from_the_end_its_tr
         Ok::<(), Box<dyn std::error::Error + Send + Sync>>(())
     })
     .await;
+    eprintln!(
+        "history scale diagnostic phase=copy_end success={} statements={statements} elapsed_ms={}",
+        copied.is_ok(),
+        began.elapsed().as_millis()
+    );
     copied?;
     tx.commit().await?;
     let pages = 2 * SCALE_TURNS / cuts::PAGE;
@@ -1108,12 +1187,22 @@ async fn a_cut_of_two_hundred_thousand_turns_gives_its_carry_from_the_end_its_tr
         "{statements} statements copied {pages} pages of items"
     );
     let copy: (i64, i64) = sqlx::query_as(
-        "SELECT (SELECT count(*) FROM turns WHERE thread_id=$1),(SELECT count(*) FROM items WHERE thread_id=$1)",
+        "SELECT (SELECT count(*) FROM turns WHERE thread_id=$1),(SELECT count(*) FROM items WHERE thread_id=$1 AND kind<>'marker')",
     )
     .bind(target)
     .fetch_one(world.pool.pool())
     .await?;
     assert_eq!(copy, (SCALE_TURNS, 2 * SCALE_TURNS));
+    let remaining_metadata: Vec<Json> = sqlx::query_scalar(
+        "SELECT to_jsonb(i) FROM items i WHERE thread_id=$1 AND kind='marker' ORDER BY seq_created,id",
+    )
+    .bind(target)
+    .fetch_all(world.pool.pool())
+    .await?;
+    assert_eq!(
+        remaining_metadata, initial_items,
+        "the target's metadata is unchanged and source markers were omitted"
+    );
     // An identity in the copy is made from the target's and the original's.
     let (made, derived): (Id, Id) = sqlx::query_as(
         "SELECT t.id, md5($1::text||o.id::text)::uuid FROM turns t, turns o
@@ -1124,6 +1213,160 @@ async fn a_cut_of_two_hundred_thousand_turns_gives_its_carry_from_the_end_its_tr
     .fetch_one(world.pool.pool())
     .await?;
     assert_eq!(made, derived);
+    requests.pool().close().await;
+    world.shutdown().await;
+    Ok(())
+}
+
+#[tokio::test]
+async fn copy_pages_keep_empty_turns_and_restore_a_later_parent_from_its_frozen_body() -> Proof {
+    let world = common::World::new().await;
+    let source = conversation(&world, 1).await?;
+    let total = cuts::PAGE + 1;
+    world.grow_history(source, total).await;
+    sqlx::query(
+        "DELETE FROM items i USING turns t WHERE i.turn_id=t.id AND t.thread_id=$1 AND t.ordinal=2",
+    )
+    .bind(source)
+    .execute(world.pool.pool())
+    .await?;
+    let (child, parent, parent_seq): (Id, Id, i64) = sqlx::query_as(
+        "SELECT child.id,parent.id,parent.seq_created FROM items child JOIN turns first_turn ON first_turn.id=child.turn_id
+         CROSS JOIN items parent JOIN turns last_turn ON last_turn.id=parent.turn_id
+         WHERE first_turn.thread_id=$1 AND first_turn.ordinal=1 AND child.kind='agent_message'
+           AND last_turn.thread_id=$1 AND last_turn.ordinal=$2 AND parent.kind='agent_message'",
+    ).bind(source).bind(i32::try_from(total)?).fetch_one(world.pool.pool()).await?;
+    sqlx::query("UPDATE items SET parent_item_id=$2 WHERE id=$1")
+        .bind(child)
+        .bind(parent)
+        .execute(world.pool.pool())
+        .await?;
+    let held_payload: Json = sqlx::query_scalar("SELECT payload FROM items WHERE id=$1")
+        .bind(child)
+        .fetch_one(world.pool.pool())
+        .await?;
+    let held = captured(&world, source).await?;
+    let before_parent: i64 = sqlx::query_scalar(
+        "SELECT count(*) FROM thread_history_cut_members($1) WHERE seq_created<$2",
+    )
+    .bind(held.id)
+    .bind(parent_seq)
+    .fetch_one(world.pool.pool())
+    .await?;
+    assert!(
+        before_parent >= cuts::PAGE,
+        "the parent belongs to a later item page"
+    );
+    sqlx::query("UPDATE items SET parent_item_id=NULL,payload=jsonb_build_object('text','changed after capture'),
+        seq_updated=(SELECT next_seq FROM threads WHERE node_id=$2) WHERE id=$1")
+        .bind(child).bind(source).execute(world.pool.pool()).await?;
+    sqlx::query("UPDATE threads SET next_seq=next_seq+1 WHERE node_id=$1")
+        .bind(source)
+        .execute(world.pool.pool())
+        .await?;
+    let target = world.thread("A bounded frozen copy").await;
+    let segment = world.segment_of(target).await;
+    let mut tx = world.pool.begin().await?;
+    let mut unit = crate::unit::Unit::new(&mut tx, world.clock.now());
+    cut::copy(&mut unit, &held, target, segment, None).await?;
+    unit.finish().await?;
+    tx.commit().await?;
+    let turns: i64 = sqlx::query_scalar("SELECT count(*) FROM turns WHERE thread_id=$1")
+        .bind(target)
+        .fetch_one(world.pool.pool())
+        .await?;
+    assert_eq!(turns, total, "metadata pages retain the turn without items");
+    let empty_items: i64 = sqlx::query_scalar(
+        "SELECT count(*) FROM items i JOIN turns t ON t.id=i.turn_id
+        WHERE t.thread_id=$1 AND t.ordinal=2",
+    )
+    .bind(target)
+    .fetch_one(world.pool.pool())
+    .await?;
+    assert_eq!(empty_items, 0);
+    let (copied_parent, expected_parent, payload): (Option<Id>, Id, Json) = sqlx::query_as(
+        "SELECT parent_item_id,md5($1::text||$3::uuid::text)::uuid,payload FROM items
+         WHERE thread_id=$1 AND id=md5($1::text||$2::uuid::text)::uuid",
+    )
+    .bind(target)
+    .bind(child)
+    .bind(parent)
+    .fetch_one(world.pool.pool())
+    .await?;
+    assert_eq!(copied_parent, Some(expected_parent));
+    assert_eq!(
+        payload, held_payload,
+        "parent restoration uses the captured body"
+    );
+    world.shutdown().await;
+    Ok(())
+}
+
+#[tokio::test]
+async fn a_malformed_frozen_parent_rolls_back_every_copied_row() -> Proof {
+    let world = common::World::new().await;
+    let source = conversation(&world, 1).await?;
+    let child: Id = sqlx::query_scalar(
+        "SELECT id FROM items WHERE thread_id=$1 AND kind='agent_message' ORDER BY seq_created LIMIT 1",
+    )
+    .bind(source)
+    .fetch_one(world.pool.pool())
+    .await?;
+    let held = captured(&world, source).await?;
+    sqlx::query(
+        "UPDATE items SET payload=jsonb_build_object('text','changed after capture'),
+        seq_updated=(SELECT next_seq FROM threads WHERE node_id=$2) WHERE id=$1",
+    )
+    .bind(child)
+    .bind(source)
+    .execute(world.pool.pool())
+    .await?;
+    sqlx::query("UPDATE threads SET next_seq=next_seq+1 WHERE node_id=$1")
+        .bind(source)
+        .execute(world.pool.pool())
+        .await?;
+    // Deliberate private-record damage, which ordinary typed item writes cannot produce.
+    let damaged = sqlx::query(
+        "UPDATE thread_history_cut_items SET body=jsonb_set(body,'{parent_item_id}',
+        to_jsonb('invalid-copy-parent'::text)) WHERE cut_id=$1 AND item_id=$2 AND body IS NOT NULL",
+    )
+    .bind(held.id)
+    .bind(child)
+    .execute(world.pool.pool())
+    .await?;
+    assert_eq!(damaged.rows_affected(), 1);
+    let target = world.thread("An unpublished damaged copy").await;
+    let segment = world.segment_of(target).await;
+    const STATE: &str = "SELECT (SELECT count(*) FROM turns WHERE thread_id=$1),
+        (SELECT count(*) FROM items WHERE thread_id=$1),next_seq FROM threads WHERE node_id=$1";
+    let before: (i64, i64, i64) = sqlx::query_as(STATE)
+        .bind(target)
+        .fetch_one(world.pool.pool())
+        .await?;
+    let mut tx = world.pool.begin().await?;
+    let result = {
+        let mut unit = crate::unit::Unit::new(&mut tx, world.clock.now());
+        cut::copy(&mut unit, &held, target, segment, None).await
+    };
+    match result {
+        Err(crate::error::EngineError::Db(orch_db::DbError::Other(sqlx::Error::Database(
+            error,
+        )))) => {
+            assert_eq!(error.code().as_deref(), Some("22P02"));
+        }
+        other => {
+            return Err(format!("malformed parent metadata was not rejected: {other:?}").into());
+        }
+    }
+    tx.rollback().await?;
+    let after: (i64, i64, i64) = sqlx::query_as(STATE)
+        .bind(target)
+        .fetch_one(world.pool.pool())
+        .await?;
+    assert_eq!(
+        after, before,
+        "no copied row or reserved position was published"
+    );
     world.shutdown().await;
     Ok(())
 }
@@ -1231,6 +1474,199 @@ async fn sparse_turns_keep_their_items_without_looking_ahead_through_the_empty_h
         );
     }
     drop(conn);
+    world.shutdown().await;
+    Ok(())
+}
+
+#[tokio::test]
+async fn copy_pages_skip_markers_but_keep_order_identity_and_the_reserved_sequence() -> Proof {
+    let world = common::World::new().await;
+    let mut queries = Vec::new();
+    let mut positions = Vec::new();
+    let mut raw_counts = Vec::new();
+    for extra_markers in [0, 3 * cuts::PAGE] {
+        let source = conversation(&world, 1).await?;
+        if extra_markers != 0 {
+            let next: i64 = world
+                .scalar("SELECT next_seq FROM threads WHERE node_id=$1", source)
+                .await;
+            let added = sqlx::query(
+                "WITH seed AS MATERIALIZED (
+                   SELECT i.* FROM items i WHERE i.thread_id=$1 AND i.kind='marker'
+                     AND i.turn_id IS NOT NULL ORDER BY i.seq_created LIMIT 1)
+                 INSERT INTO items SELECT copied.* FROM seed,generate_series(1,$2::bigint) g(n)
+                 CROSS JOIN LATERAL jsonb_populate_record(NULL::items,to_jsonb(seed)||jsonb_build_object(
+                   'id',md5($1::text||':extra-marker:'||g.n::text)::uuid,'native_ref',NULL,
+                   'seq_created',$3::bigint+g.n,'seq_updated',$3::bigint+g.n,
+                   'parent_item_id',NULL,'model_input_id',NULL,'pinned_at',NULL,'pinned_by',NULL,'chat_refs',0)) copied",
+            ).bind(source).bind(extra_markers).bind(next).execute(world.pool.pool()).await?;
+            assert_eq!(added.rows_affected(), u64::try_from(extra_markers)?);
+            sqlx::query("UPDATE threads SET next_seq=$2 WHERE node_id=$1")
+                .bind(source)
+                .bind(next + extra_markers + 1)
+                .execute(world.pool.pool())
+                .await?;
+        }
+        let held = captured(&world, source).await?;
+        let mut conn = world.pool.acquire().await?;
+        let raw = cuts::item_count(&mut conn, held.id).await?;
+        let marker_count: i64 = sqlx::query_scalar(
+            "SELECT count(*) FROM thread_history_cut_members($1) WHERE kind='marker'",
+        )
+        .bind(held.id)
+        .fetch_one(&mut *conn)
+        .await?;
+        let page = cuts::items_page(&mut conn, held.id, 0, i64::MAX, None).await?;
+        assert_eq!(i64::try_from(page.len())?, raw.min(cuts::PAGE));
+        assert!(
+            page.iter().any(|item| item.kind == "marker"),
+            "ordinary readers retain markers"
+        );
+        let expected = page
+            .into_iter()
+            .filter(|item| item.kind != "marker")
+            .collect::<Vec<_>>();
+        assert_eq!(
+            expected.len(),
+            2,
+            "the markers follow the same real input and answer"
+        );
+        assert_eq!(raw - marker_count, 2);
+        raw_counts.push(raw);
+        drop(conn);
+
+        let target = world.thread("A marker-aware copy").await;
+        let segment = world.segment_of(target).await;
+        let initial: Vec<Json> = sqlx::query_scalar(
+            "SELECT to_jsonb(i) FROM items i WHERE thread_id=$1 ORDER BY seq_created,id",
+        )
+        .bind(target)
+        .fetch_all(world.pool.pool())
+        .await?;
+        assert_eq!(initial.len(), 1);
+        assert_eq!(
+            initial[0]["kind"], "marker",
+            "the target has its own creation line"
+        );
+        let first: i64 = world
+            .scalar("SELECT next_seq FROM threads WHERE node_id=$1", target)
+            .await;
+        let mut tx = world.pool.begin().await?;
+        let (copied, count) = Statements::of(async {
+            let mut unit = crate::unit::Unit::new(&mut tx, world.clock.now());
+            cut::copy(&mut unit, &held, target, segment, None).await?;
+            unit.finish().await?;
+            Ok::<(), Box<dyn std::error::Error + Send + Sync>>(())
+        })
+        .await;
+        copied?;
+        tx.commit().await?;
+        assert!(count > 0, "the SQL statement observer recorded this copy");
+        eprintln!("history copy marker control markers={extra_markers} statements={count}");
+        queries.push(count);
+        let next: i64 = world
+            .scalar("SELECT next_seq FROM threads WHERE node_id=$1", target)
+            .await;
+        assert_eq!(
+            next,
+            first + raw + 2,
+            "the same raw reservation and final stamp remain"
+        );
+        let unchanged: Vec<Json> = sqlx::query_scalar(
+            "SELECT to_jsonb(i) FROM items i WHERE thread_id=$1 AND kind='marker' ORDER BY seq_created,id",
+        ).bind(target).fetch_all(world.pool.pool()).await?;
+        assert_eq!(
+            unchanged, initial,
+            "copying preserves the target's own metadata and copies no source marker"
+        );
+        let made = orch_db::queries::thread_history::items_between(
+            &mut *world.pool.acquire().await?,
+            target,
+            target,
+            0,
+            i64::MAX,
+            None,
+        )
+        .await?;
+        let made = made
+            .into_iter()
+            .filter(|item| item.kind != "marker")
+            .collect::<Vec<_>>();
+        assert_eq!(made.len(), expected.len());
+        let mut stamped = Vec::new();
+        for (made, old) in made.iter().zip(&expected) {
+            let expected_id: Id = sqlx::query_scalar("SELECT md5($1::text||$2::uuid::text)::uuid")
+                .bind(target)
+                .bind(old.id)
+                .fetch_one(world.pool.pool())
+                .await?;
+            let expected_turn: Option<Id> =
+                sqlx::query_scalar("SELECT md5($1::text||$2::uuid::text)::uuid")
+                    .bind(target)
+                    .bind(old.turn_id)
+                    .fetch_one(world.pool.pool())
+                    .await?;
+            assert_eq!(made.id, expected_id);
+            assert_eq!(made.turn_id, expected_turn);
+            assert_eq!(made.kind, old.kind);
+            let mut payload = old.payload.clone();
+            if old.kind == "user_message" {
+                let input: Id = serde_json::from_value(payload["input_id"].clone())?;
+                let copied_input: Id =
+                    sqlx::query_scalar("SELECT md5($1::text||$2::uuid::text)::uuid")
+                        .bind(target)
+                        .bind(input)
+                        .fetch_one(world.pool.pool())
+                        .await?;
+                payload["input_id"] = serde_json::to_value(copied_input)?;
+                assert!(made.native_ref.is_none());
+            } else {
+                assert_eq!(
+                    made.native_ref.as_deref(),
+                    Some(format!("fork-copy:{}", old.id).as_str())
+                );
+            }
+            assert_eq!(made.payload, payload);
+            assert_eq!(made.seq_updated, made.seq_created);
+            stamped.push(made.seq_created);
+        }
+        assert!(stamped.windows(2).all(|pair| pair[0] < pair[1]));
+        let forward = orch_db::queries::thread_history::items_between(
+            &mut *world.pool.acquire().await?,
+            target,
+            target,
+            made[0].seq_created,
+            i64::MAX,
+            None,
+        )
+        .await?;
+        assert_eq!(
+            forward
+                .iter()
+                .filter(|item| item.kind != "marker")
+                .map(|item| item.id)
+                .collect::<Vec<_>>(),
+            vec![made[1].id]
+        );
+        positions.push((first, stamped));
+        let after_raw = cuts::item_count(&mut *world.pool.acquire().await?, held.id).await?;
+        assert_eq!(
+            after_raw, raw,
+            "the retained source membership is untouched"
+        );
+    }
+    assert_eq!(raw_counts[1] - raw_counts[0], 3 * cuts::PAGE);
+    assert_eq!(
+        queries[1], queries[0],
+        "discarded marker-only pages add no copy/read/parent queries"
+    );
+    for (first, stamped) in positions {
+        assert_eq!(
+            stamped,
+            vec![first + 1, first + 2],
+            "new copied payloads receive dense positions in their frozen order"
+        );
+    }
     world.shutdown().await;
     Ok(())
 }

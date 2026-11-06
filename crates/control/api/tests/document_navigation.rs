@@ -6,6 +6,7 @@ mod realtime_support;
 mod rig;
 mod support;
 
+use crate::support::FullArchiveReply as _;
 use base64::{Engine as _, engine::general_purpose::URL_SAFE_NO_PAD};
 use desk::Desk;
 use orch_api_contract::{
@@ -298,6 +299,7 @@ async fn direct_folder_navigation_redacts_ancestors_and_creation_matches_the_act
         .body(&archive)
         .send()
         .await
+        .full_archive()
         .ok();
     assert!(
         !list(&desk, &visitor, Some(shared), false, None, None)
@@ -1104,6 +1106,7 @@ async fn read_first_paths_never_publish_an_agents_readable_folder_name_to_a_pers
         .raw_body(&json!({"name":[{"holders":[{"kind":"user","id":scene.dan.id()}],"choice":"full_view","export":false}]})).send().await,
         "give the actual person leaf Read without ancestor Read")?;
     let request = ShareWithAgents {
+        viewers_read: None,
         what: ShareWhat::Document(ShareWhatDocument {
             document_id: document.base.id,
         }),
@@ -1204,7 +1207,9 @@ async fn read_first_paths_never_publish_an_agents_readable_folder_name_to_a_pers
             .send()
             .await,
         "share the synthetic leaf for first reading",
-    )?;
+    )?
+    .into_full()
+    .map_err(|_| "the ordinary session unexpectedly received a share receipt")?;
     assert_eq!(made.shares.len(), 1);
     assert!(
         made.shares[0].read_first,
@@ -1424,6 +1429,7 @@ async fn live_text_rows_keep_the_native_personal_list_facts_without_fetching_eac
         .body(&archive)
         .send()
         .await
+        .full_archive()
         .ok();
     let archived = list(&desk, &reader, None, false, None, None).await.ok();
     assert!(!archived.directory.can_create);

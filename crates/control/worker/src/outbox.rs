@@ -463,8 +463,9 @@ impl Outbox {
             return Ok(Step::Passed);
         };
         // The locks in their order: the channel, the person's choices, the route, the delivery.
+        // Preparation can record a channel error, so it must not upgrade a shared lock later.
         let channel = match seen.channel_id {
-            Some(channel) => rows::lock_channel_shared(conn, channel).await?,
+            Some(channel) => rows::lock_channel_for_write(conn, channel).await?,
             None => None,
         };
         people::lock_prefs_shared(conn, seen.user_id).await?;
@@ -910,6 +911,26 @@ impl Outbox {
             orch_db::queries::transaction_guard::scope(false, self.inner.db.begin()).await?;
         orch_db::queries::transaction_guard::lock_action(&mut tx).await?;
         let now = self.inner.clock.now();
+        // Results use the same parent-before-delivery order as admission. A removed parent
+        // does not erase a native answer; the existing attempt comparison still decides it.
+        match &attempt.work {
+            Work::Route {
+                route,
+                channel,
+                person,
+                ..
+            } => {
+                let _ = rows::lock_channel_for_write(&mut tx, *channel).await?;
+                people::lock_prefs_shared(&mut tx, person.id).await?;
+                let _ = routes::lock_route(&mut tx, *route).await?;
+            }
+            Work::Mail { channel, .. } => {
+                let _ = rows::lock_channel_for_write(&mut tx, *channel).await?;
+            }
+            Work::Destination { destination, .. } => {
+                let _ = rows::lock_destination_for_write(&mut tx, *destination).await?;
+            }
+        }
         let done = self.conclude(&mut tx, now, &attempt, called).await?;
         tx.commit().await.map_err(DbError::from)?;
         self.count(&attempt.kind, attempt.form, done);

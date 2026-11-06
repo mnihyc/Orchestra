@@ -6,6 +6,10 @@
 )]
 
 mod places;
+#[path = "workspace_snapshots/scope_helpers.rs"]
+mod snapshot_scope_helpers;
+#[path = "workspace_snapshots/scopes.rs"]
+mod snapshot_scopes;
 mod support;
 mod workspace;
 

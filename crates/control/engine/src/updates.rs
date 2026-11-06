@@ -118,6 +118,44 @@ impl From<DbError> for UpdateError {
     }
 }
 
+/// A provider runtime's actual owner must currently be eligible to use its
+/// selected destination. The requesting principal and its key bounds are unchanged.
+pub(crate) async fn provider_owner_host_usable(
+    conn: &mut Conn,
+    provider: Id,
+    host: Id,
+    now: orch_types::Time,
+) -> Result<bool, EngineError> {
+    orch_authz::resources::provider_owner_host_use(conn, provider, host, now)
+        .await
+        .map_err(Into::into)
+}
+
+/// The ordinary update prerequisite: keeping a template needs no fresh Use check;
+/// selecting another one retains the same current TemplateUse permission decision.
+pub async fn template_usable(
+    conn: &mut Conn,
+    principal: &Principal,
+    selected: Id,
+    old: Id,
+) -> Result<bool, EngineError> {
+    if selected == old {
+        return Ok(true);
+    }
+    Ok(orch_authz::resources::check(
+        conn,
+        principal,
+        ObjectRef {
+            kind: ResourceKind::Template.into(),
+            id: selected,
+        },
+        Permission::TemplateUse,
+        Policy::default(),
+    )
+    .await?
+    .is_allowed())
+}
+
 /// The durable inputs of a replacement, separate from the names shown to a caller.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Recipe {
@@ -692,11 +730,13 @@ impl Engine {
         // A provider's runtime whose host is changed moves: its new unit is made on the selected host and given the
         // sign-ins and harness homes of the old one before it first starts, as the plan says before anything is done.
         let mut move_to: Option<(Id, String)> = None;
+        let mut provider_destination = None;
         if matches!(
             reason,
             UpdatePreflightReason::Update | UpdatePreflightReason::Recreate
         ) && let Target::Provider(_) = target
         {
+            provider_destination = Some(old.host_id);
             let desired: Option<Id> = get(conn, target.place(), keys::RUNTIME_HOST_ID)
                 .await
                 .map_err(EngineError::from)?;
@@ -714,10 +754,30 @@ impl Engine {
                     ),
                 });
                 match to {
-                    Some(to) => move_to = Some((desired, to.name)),
-                    None => blockers.push(blocker("no_host", "the selected host is gone")),
+                    Some(to) => {
+                        provider_destination = Some(desired);
+                        move_to = Some((desired, to.name));
+                    }
+                    None => {
+                        provider_destination = None;
+                        blockers.push(blocker("no_host", "the selected host is gone"));
+                    }
                 }
             }
+        }
+        if let (Target::Provider(provider), Some(destination)) = (target, provider_destination)
+            && !provider_owner_host_usable(
+                conn,
+                provider,
+                destination,
+                orch_types::Time::new(self.inner.clock.now()),
+            )
+            .await?
+        {
+            blockers.push(blocker(
+                "host_unusable",
+                "the provider's owner may not use the selected host",
+            ));
         }
         if missing_old_build {
             blockers.push(blocker(
@@ -827,21 +887,7 @@ impl Engine {
                 "changing the driver cannot preserve these volumes",
             ));
         }
-        if template_id != old.template_id
-            && !orch_authz::resources::check(
-                conn,
-                principal,
-                ObjectRef {
-                    kind: ResourceKind::Template.into(),
-                    id: template_id,
-                },
-                Permission::TemplateUse,
-                Policy::default(),
-            )
-            .await
-            .map_err(EngineError::from)?
-            .is_allowed()
-        {
+        if !template_usable(conn, principal, template_id, old.template_id).await? {
             blockers.push(blocker(
                 "template_unusable",
                 "the caller may not use the newly chosen template",

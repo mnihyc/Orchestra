@@ -950,11 +950,7 @@ impl Engine {
             &thread,
             &turn,
             TurnEnd {
-                state: if turn.state == turn_state::RUNNING {
-                    turn_state::INTERRUPTED
-                } else {
-                    turn_state::FAILED
-                },
+                state: turn_state::FAILED,
                 error: Some(error_json("session_lost", &message, true)),
                 // With no confirmation that the turn began, its input still needs
                 // a decision. Keep it in the queue and wait for a person before
@@ -964,7 +960,7 @@ impl Engine {
                 } else {
                     InputAfter::Keep
                 },
-                then_block: (turn.state == turn_state::STARTING).then(|| Blocked {
+                then_block: (turn.state == turn_state::STARTING).then_some(Blocked {
                     reason: "error",
                     detail: Some(message),
                 }),
@@ -1279,11 +1275,32 @@ impl Engine {
             batch.segment.agent_id,
         )
         .await?;
-        let descriptor = agent
-            .as_ref()
-            .map(crate::harnesses::descriptor_of)
-            .transpose()?
-            .flatten();
+        let descriptor = if let Some(mut agent) = agent {
+            // Native observations depend only on their reporting declaration. An unrelated
+            // legacy display override must not prevent a later usage report from committing;
+            // terminal accounting still validates the complete profile in its retained work.
+            let reporting = agent.descriptor_overrides.get("capabilities").map(|value| {
+                value.as_object().map_or_else(
+                    || value.clone(),
+                    |members| {
+                        let fields: serde_json::Map<_, _> = ["usage_tokens", "usage_context"]
+                            .into_iter()
+                            .filter_map(|name| {
+                                members
+                                    .get(name)
+                                    .map(|value| (name.to_owned(), value.clone()))
+                            })
+                            .collect();
+                        Json::Object(fields)
+                    },
+                )
+            });
+            agent.descriptor_overrides =
+                reporting.map_or_else(|| json!({}), |value| json!({"capabilities": value}));
+            crate::harnesses::descriptor_of(&agent)?
+        } else {
+            None
+        };
         Ok(descriptor.map_or((true, true), |descriptor| {
             (
                 descriptor.capabilities.usage_tokens,
@@ -1366,12 +1383,12 @@ impl Engine {
             && completed.status == TurnOutcome::Failed
         {
             // What passes (`provider_busy`, `provider_unreachable`) and every failure that no row knows leave
-            // the provider as it was. A limit of the plan closes it until the time the vendor names; a refused
-            // credential puts it in `error`; a limit that covers one family of models or the spending, which
-            // another model may get round, closes nothing.
+            // the provider as it was. Vendor quota remains an observation attached to this
+            // actual failure, never a gate on later requests. A refused credential still
+            // puts the provider in `error` under its existing recovery rules.
             match failure.code.as_str() {
                 "provider_exhausted" if !failure.retryable => {
-                    self.close_provider_by_limit(unit, batch.segment.provider_id, failure)
+                    self.record_provider_limit(unit, batch.segment.provider_id, failure)
                         .await?;
                 }
                 "provider_unauthorized" => {

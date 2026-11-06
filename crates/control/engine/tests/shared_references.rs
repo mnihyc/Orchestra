@@ -24,6 +24,19 @@ struct Desk {
 async fn desk() -> Desk {
     let world = a_world_whose_agent_takes_tools().await;
     let agent = world.thread("Writer").await;
+    // Reference editing needs this actual source gift; the fixture selected Nothing at birth.
+    for permission in ["doc.view", "doc.edit"] {
+        share(
+            &world,
+            "node",
+            world.topic,
+            "live",
+            permission,
+            "any",
+            agent,
+        )
+        .await;
+    }
     let plan = world
         .document_beside(
             world.topic,
@@ -384,6 +397,26 @@ async fn a_chat_message_keeps_its_references_typed_and_each_reader_is_given_them
 async fn a_note_to_another_thread_is_written_in_the_receiving_agents_terms() {
     let d = desk().await;
     let other = d.world.thread("Validator").await;
+    share(
+        &d.world,
+        "node",
+        other,
+        "live",
+        "thread.interact",
+        "any",
+        d.agent,
+    )
+    .await;
+    share(
+        &d.world,
+        "node",
+        d.world.topic,
+        "live",
+        "doc.view",
+        "any",
+        other,
+    )
+    .await;
     let sent = ok(call(
         &d.world,
         d.agent,
@@ -634,13 +667,22 @@ async fn an_announcement_keeps_typed_references_and_writes_each_agents_own_paths
     let other = thread_in_topic(&d.world, elsewhere, "Receiver there").await;
     let hidden_topic = d.world.topic("No target access").await;
     let hidden = thread_in_topic(&d.world, hidden_topic, "Receiver without target").await;
+    for recipient in [same, other, hidden] {
+        share(
+            &d.world,
+            "node",
+            recipient,
+            "live",
+            "thread.interact",
+            "any",
+            d.agent,
+        )
+        .await;
+    }
     share(
         &d.world, "document", d.plan, "live", "doc.view", "any", other,
     )
     .await;
-    d.world
-        .set(d.world.topic, "broadcast.agent_scope", json!("project"))
-        .await;
     prepare_call_turn(&d.world, same).await;
     let sent = ok(call(&d.world, d.agent, OrchTool::Announce, json!({
         "audience":"project", "title":"Ready", "body":"Read [the plan](<docs/Rollout plan.md#2>) and keep [these words](docs/Gone.md#1)."
@@ -813,6 +855,7 @@ async fn person_snapshots_and_agent_exports_write_references_for_each_receiving_
             &Caller::session(d.world.ada),
             &Origin::default(),
             &ShareWithAgents {
+                viewers_read: None,
                 read_first: None,
                 download: None,
                 what: ShareWhat::Document(ShareWhatDocument { document_id: notes }),

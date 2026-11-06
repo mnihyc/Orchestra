@@ -250,7 +250,9 @@ impl<'p> Setup<'p> {
     fn ways_to_change(&self) -> Vec<Through> {
         match &self.site {
             Some(site) => self.frame.ways(site, Permission::AccessManage),
-            None if self.frame.principal().is_system_admin() => vec![Through::SystemAdmin],
+            None if crate::system_administration::system_defaults(self.frame.principal()) => {
+                vec![Through::SystemAdmin]
+            }
             None => Vec::new(),
         }
     }
@@ -262,7 +264,7 @@ impl<'p> Setup<'p> {
     fn owns_or_administers(&self) -> bool {
         match &self.site {
             Some(site) => self.frame.owns(site) || self.frame.administers(site),
-            None => self.frame.principal().is_system_admin(),
+            None => crate::system_administration::system_defaults(self.frame.principal()),
         }
     }
 }
@@ -365,6 +367,21 @@ pub async fn read(
         }
         _ => None,
     };
+    let mut gives = giving.gives();
+    if principal.caller().as_admin() {
+        // Administration of human grants remains available; only agent loans exclude native reach.
+        let ordinary = principal.ordinary(conn).await?;
+        let source = Setup::load(conn, &ordinary, target, policy).await?;
+        let ordinary_gives = Giving::of(
+            &source.frame,
+            source.site.as_ref(),
+            source.page.page,
+            Acting::Ordinary,
+        )
+        .gives();
+        gives.agents = ordinary_gives.agents;
+        gives.agent_permissions = ordinary_gives.agent_permissions;
+    }
     Ok(PageView {
         target,
         name: setup
@@ -386,7 +403,7 @@ pub async fn read(
         followers,
         revision,
         writable,
-        gives: giving.gives(),
+        gives,
         role_place: setup.site.as_ref().and_then(|site| site.role_place),
         archived_node: setup.site.as_ref().and_then(|site| site.archived_node),
     })
@@ -763,7 +780,7 @@ impl Writer<'_> {
         let options = entry.options.to_json();
         let given_options = !matches!(&options, Json::Object(members) if members.is_empty());
         let expires_at = entry.expires_at.map(Time::get);
-        let existing = access::find_entry_for_share(
+        let existing = access::find_entry_for_share_by(
             self.conn,
             &self.page_key,
             profile.as_str(),
@@ -772,6 +789,7 @@ impl Writer<'_> {
             holder_id,
             holder_role.map(Role::as_str),
             self.share_inside,
+            Some(self.by),
         )
         .await?;
         let who = self.names.holder(self.conn, &entry.holder).await?;
@@ -800,8 +818,16 @@ impl Writer<'_> {
             {
                 return Ok(());
             }
-            access::rewrite_entry(self.conn, existing.id, &now_options, now_expires, &now_note)
-                .await?;
+            access::rewrite_entry(
+                self.conn,
+                existing.id,
+                &now_options,
+                now_expires,
+                &now_note,
+                (existing.expires_at.map(Time::new) != now_expires.map(Time::new))
+                    .then_some(self.now),
+            )
+            .await?;
             self.changed = true;
             let (action, word) = if ended {
                 self.overridden |= r#override;
@@ -884,6 +910,7 @@ impl Writer<'_> {
                 source: self.source,
                 created_by: Some(self.by),
                 created_at: Time::new(self.now),
+                renewed_at: None,
                 removed_at: None,
                 revision: 1,
             },
@@ -935,6 +962,7 @@ impl Writer<'_> {
             &options,
             expires_at.map(Time::get),
             &note,
+            (expires_at != before.expires_at).then_some(self.now),
         )
         .await?;
         self.changed = true;
@@ -950,6 +978,9 @@ impl Writer<'_> {
         let entry = &mut self.entries_now[position].entry;
         entry.options = options.clone();
         entry.expires_at = expires_at;
+        if expires_at != before.expires_at {
+            entry.renewed_at = Some(Time::new(self.now));
+        }
         entry.note = note;
         self.audit(
             AuditAction::PermissionUpdated,
@@ -1509,6 +1540,42 @@ pub async fn change_for_request(
     .await
 }
 
+/// Serialize exactly the target used by the ordinary page writer. This is no authority
+/// grant; callers still run that writer's current policy, giving and ownership checks.
+pub async fn lock_change_target(conn: &mut Conn, target: Target) -> Result<(), Error> {
+    match target {
+        Target::Live(node) | Target::Defaults(PlaceRef::Node(node)) => {
+            if !hierarchy::lock(conn, node).await? {
+                return Err(Error::NotFound(node));
+            }
+        }
+        Target::Resource(object) if object.kind == ObjectKind::DocumentContainer => {
+            let alive = orch_db::queries::documents::containers::lock(conn, object.id)
+                .await?
+                .is_some_and(|row| row.deleted_at.is_none());
+            if !alive {
+                return Err(Error::NotFound(object.id));
+            }
+        }
+        Target::Resource(object) if object.kind == ObjectKind::Document => {
+            orch_db::queries::documents::containers::lock_document_scope(conn, object.id).await?;
+            let alive = orch_db::queries::documents::lock(conn, object.id)
+                .await?
+                .is_some_and(|document| document.deleted_at.is_none());
+            if !alive {
+                return Err(Error::NotFound(object.id));
+            }
+        }
+        Target::Resource(object) => {
+            if !resource_rows::lock_resource(conn, object.kind.as_str(), object.id).await? {
+                return Err(Error::NotFound(object.id));
+            }
+        }
+        Target::Defaults(PlaceRef::System) => access::lock_system_defaults(conn).await?,
+    }
+    Ok(())
+}
+
 #[allow(
     clippy::too_many_arguments,
     reason = "the caller, the page and the change, the two policies, how entries come about, how the change is made, and where from"
@@ -1525,36 +1592,7 @@ async fn change_with(
     acting: Acting,
     origin: &audit::Origin,
 ) -> Result<Outcome, ChangeError> {
-    match target {
-        Target::Live(node) | Target::Defaults(PlaceRef::Node(node)) => {
-            if !hierarchy::lock(conn, node).await? {
-                return Err(Error::NotFound(node).into());
-            }
-        }
-        Target::Resource(object) if object.kind == ObjectKind::DocumentContainer => {
-            let alive = orch_db::queries::documents::containers::lock(conn, object.id)
-                .await?
-                .is_some_and(|row| row.deleted_at.is_none());
-            if !alive {
-                return Err(Error::NotFound(object.id).into());
-            }
-        }
-        Target::Resource(object) if object.kind == ObjectKind::Document => {
-            orch_db::queries::documents::containers::lock_document_scope(conn, object.id).await?;
-            let alive = orch_db::queries::documents::lock(conn, object.id)
-                .await?
-                .is_some_and(|document| document.deleted_at.is_none());
-            if !alive {
-                return Err(Error::NotFound(object.id).into());
-            }
-        }
-        Target::Resource(object) => {
-            if !resource_rows::lock_resource(conn, object.kind.as_str(), object.id).await? {
-                return Err(Error::NotFound(object.id).into());
-            }
-        }
-        Target::Defaults(PlaceRef::System) => access::lock_system_defaults(conn).await?,
-    }
+    lock_change_target(conn, target).await?;
     let setup = Setup::load(conn, principal, target, policy).await?;
     let now = principal.now();
     let by = principal.user();
@@ -1675,7 +1713,7 @@ async fn change_with(
     if asks.admin {
         let admin = match &setup.site {
             Some(site) => setup.frame.administers(site),
-            None => principal.is_system_admin(),
+            None => crate::system_administration::system_defaults(principal),
         };
         if !admin {
             return Err(match &setup.site {
@@ -1715,6 +1753,94 @@ async fn change_with(
             stored.profile.parse::<Profile>(),
         ) {
             rows_now.insert((permission, profile), (stored.inherit, stored.locked));
+        }
+    }
+
+    if principal.caller().as_admin()
+        && checked.rows.iter().any(|row| {
+            row.add
+                .iter()
+                .any(|entry| matches!(entry.holder, Holder::Agents { .. }))
+                || row.update.iter().any(|update| {
+                    entries_now.iter().any(|stored| {
+                        stored.entry.id == update.entry
+                            && matches!(stored.entry.holder, Holder::Agents { .. })
+                            && crate::giving::entry_widens(&stored.entry, update)
+                    })
+                })
+        })
+    {
+        let ordinary = principal.ordinary(conn).await?;
+        let source = Setup::load(conn, &ordinary, target, policy).await?;
+        let lend = Giving::of(
+            &source.frame,
+            source.site.as_ref(),
+            source.page.page,
+            Acting::Share,
+        );
+        // Optional Export remains optional, even when an administrator can give it to people.
+        for row in checked.rows.iter_mut().filter(|row| row.optional) {
+            if !lend.can_give(row.permission, row.profile) {
+                row.add
+                    .retain(|entry| !matches!(entry.holder, Holder::Agents { .. }));
+            }
+        }
+        let asked: Vec<_> = checked
+            .rows
+            .iter()
+            .filter(|row| {
+                row.add
+                    .iter()
+                    .any(|entry| matches!(entry.holder, Holder::Agents { .. }))
+                    || row.update.iter().any(|update| {
+                        entries_now.iter().any(|stored| {
+                            stored.entry.id == update.entry
+                                && matches!(stored.entry.holder, Holder::Agents { .. })
+                                && crate::giving::entry_widens(&stored.entry, update)
+                        })
+                    })
+            })
+            .map(|row| (row.permission, row.profile))
+            .collect();
+        let strict_missing: Vec<_> = checked
+            .rows
+            .iter()
+            .filter(|row| {
+                !lend.can_give(row.permission, row.profile)
+                    && row.update.iter().any(|update| {
+                        entries_now.iter().any(|stored| {
+                            stored.entry.id == update.entry
+                                && matches!(stored.entry.holder, Holder::Agents { .. })
+                                && crate::giving::entry_widens(&stored.entry, update)
+                        })
+                    })
+            })
+            .map(|row| row.permission)
+            .collect();
+        let lacking = if !strict_missing.is_empty() {
+            strict_missing
+        } else if asked.is_empty() {
+            Vec::new()
+        } else {
+            match lend.judge(&asked) {
+                Judgement::Allowed { rows } => {
+                    for row in &mut checked.rows {
+                        if !rows.contains(&(row.permission, row.profile)) {
+                            row.add
+                                .retain(|entry| !matches!(entry.holder, Holder::Agents { .. }));
+                        }
+                    }
+                    Vec::new()
+                }
+                Judgement::KeptToOwners => vec![Permission::AccessManage],
+                Judgement::Lacks(lacking) => lacking,
+            }
+        };
+        if let Some(required) = lacking.first().copied() {
+            return Err(match &source.site {
+                Some(site) => refuse(conn, &source, site, required, &lacking).await?,
+                None => ChangeError::SystemAdminOnly,
+            });
         }
     }
 
@@ -1895,8 +2021,26 @@ async fn change_with(
         if named_holders.iter().any(|holder| matches!(holder, Holder::Members { id } if !nodes.iter().any(|node| node.id == *id && node.kind == "org"))) {
             faults.push(FieldError { path: "holder".into(), message: "members by domain belong to an org".into() });
         }
-        if named_holders.iter().any(|holder| matches!(holder, Holder::Role { at: Some(id), .. } if !nodes.iter().any(|node| node.id == *id && matches!(node.kind.as_str(), "org" | "project" | "topic")))) {
-            faults.push(FieldError { path: "holder".into(), message: "a role is held at an org, project or topic".into() });
+        if named_holders.iter().any(|holder| matches!(holder, Holder::Role { role, at: Some(id) } if !nodes.iter().any(|node| node.id == *id && (matches!(node.kind.as_str(), "org" | "project" | "topic") || (*role == Role::Viewer && node.kind == "thread"))))) {
+            faults.push(FieldError { path: "holder".into(), message: "a role is held at an org, project or topic; an explicit viewers audience may also name a thread".into() });
+        }
+    }
+
+    for row in &checked.rows {
+        for update in &row.update {
+            if let Some(before) = entries_now
+                .iter()
+                .find(|stored| stored.entry.id == update.entry)
+                && before.entry.holder.kind()
+                    == orch_access_contract::permissions::HolderKind::Agents
+                && before.entry.created_by != Some(by)
+                && crate::giving::entry_widens(&before.entry, update)
+            {
+                faults.push(FieldError {
+                    path: "rows.update".into(),
+                    message: "another giver's contribution may be narrowed or removed; add your own to give more".into(),
+                });
+            }
         }
     }
 

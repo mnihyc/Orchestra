@@ -13,6 +13,82 @@ const SOURCE: &str = "confirmed_history_source";
 /// it, and the opening that follows imports what came; the other half is left to those.
 const EXPORT_SHARE: f64 = 0.5;
 
+/// Ordinary confirmations have one caller; automatic input recovery retains every origin.
+pub(super) enum Authority<'a> {
+    Direct(&'a Caller),
+    Recovery {
+        input_id: Id,
+        callers: &'a crate::inputs::InputCallers,
+    },
+}
+
+impl Authority<'_> {
+    pub(super) fn actor(&self) -> Id {
+        match self {
+            Self::Direct(caller) => caller.user(),
+            Self::Recovery { callers, .. } => callers.user(),
+        }
+    }
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub(super) struct RecoveryInputAuthority {
+    input_id: Id,
+    captured: crate::inputs::InputAuthority,
+}
+
+pub(super) enum Authorized {
+    Direct(Caller),
+    Recovery,
+}
+
+impl Authorized {
+    /// The bounded recovery producer never creates a thread or environment. Do not
+    /// collapse its origins to satisfy an unrelated single-caller birth interface.
+    pub(super) fn creation_caller(self) -> Result<Caller, Stop> {
+        match self {
+            Self::Direct(caller) => Ok(caller),
+            Self::Recovery => Err(failed(
+                "recovery_shape_changed",
+                "An input recovery cannot create a new thread or environment.",
+            )),
+        }
+    }
+}
+
+fn recovery_shape_matches(
+    recipe: &Recipe,
+    thread: &threads::ThreadRow,
+    reach: crate::fork_plan::Reach,
+) -> bool {
+    recipe.result == ForkResult::Replace
+        && recipe.request.result == ForkResult::Replace
+        && recipe.forkplan.result == ForkResult::Replace
+        && recipe.new_thread.is_none()
+        && recipe.batch_id.is_none()
+        && reach == crate::fork_plan::Reach::Seen
+        && matches!(
+            recipe.request.environment,
+            None | Some(ForkEnvironment::Same { same: true })
+        )
+        && recipe.request.topic_id.is_none()
+        && recipe.request.name.is_none()
+        && recipe.request.access.is_none()
+        && recipe.request.agent_access.is_none()
+        && recipe.request.directory.is_none()
+        && recipe.request.cwd.is_none()
+        && recipe.request.mounts.is_none()
+        && recipe.request.worktree.is_none()
+        && recipe.request.files_at.is_none()
+        && recipe.forkplan.files.is_none()
+        && recipe.forkplan.worktree.is_none()
+        && recipe.forkplan.files_at.is_none()
+        && recipe.to_environment == Some(recipe.from_environment)
+        && matches!(&recipe.forkplan.to.environment, ForkPlanTarget::Existing(environment) if environment.id == recipe.from_environment)
+        && recipe.forkplan.to.directory == thread.workspace_dir
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub(super) struct Source {
     pub cut_id: Id,
@@ -33,16 +109,45 @@ pub(super) struct Source {
     pub model: Option<String>,
     pub token: Option<Id>,
     pub scope: Option<crate::continuations::recipe::AuthorizationScope>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub recovery_input: Option<RecoveryInputAuthority>,
 }
 
 pub(super) async fn confirmed(
     conn: &mut orch_db::Conn,
     thread: &threads::ThreadRow,
-    caller: &Caller,
+    authority: &Authority<'_>,
     recipe: &Recipe,
     cut_id: Id,
     reach: crate::fork_plan::Reach,
 ) -> Result<Source, EngineError> {
+    let (token, scope, recovery_input) = match authority {
+        Authority::Direct(caller) => (
+            caller.grant().and_then(|grant| grant.token()),
+            caller
+                .grant()
+                .map(|grant| crate::continuations::recipe::AuthorizationScope {
+                    scopes: grant.scopes().to_strings(),
+                    subtree: grant.subtree(),
+                }),
+            None,
+        ),
+        Authority::Recovery { input_id, callers } => {
+            if !recovery_shape_matches(recipe, thread, reach) {
+                return Err(EngineError::unreadable(
+                    "the input recovery changed its bounded switch shape",
+                ));
+            }
+            (
+                None,
+                None,
+                Some(RecoveryInputAuthority {
+                    input_id: *input_id,
+                    captured: callers.captured().clone(),
+                }),
+            )
+        }
+    };
     let native_ref = match thread.current_segment_id {
         Some(id) => threads::segment(conn, id)
             .await?
@@ -88,13 +193,9 @@ pub(super) async fn confirmed(
         arrangement: thread.arrangement.clone(),
         own_params,
         model,
-        token: caller.grant().and_then(|grant| grant.token()),
-        scope: caller
-            .grant()
-            .map(|grant| crate::continuations::recipe::AuthorizationScope {
-                scopes: grant.scopes().to_strings(),
-                subtree: grant.subtree(),
-            }),
+        token,
+        scope,
+        recovery_input,
     })
 }
 
@@ -176,7 +277,7 @@ pub(super) async fn authorize(
     recipe: &Recipe,
     source: &Source,
     target: Option<&threads::ThreadRow>,
-) -> Result<Caller, Stop> {
+) -> Result<Authorized, Stop> {
     let row = job.lock_owned(conn).await?.ok_or(Stop::Lost)?;
     if row.cancel_requested() {
         return Err(Stop::Cancelled);
@@ -240,25 +341,87 @@ pub(super) async fn authorize(
             ));
         }
     }
-    let principal =
-        super::super::source::load_principal(conn, job, recipe.by, source.token).await?;
-    let current = principal.caller().clone();
-    let mut principals = vec![principal];
-    if let Some(scope) = &source.scope {
-        principals.push(
-            Principal::load(
-                conn,
-                Caller::token(
-                    recipe.by,
-                    TokenGrant::from_stored(&scope.scopes, scope.subtree)
-                        .map_err(EngineError::unreadable)?,
-                ),
-                Time::new(job.now()),
+    let (principals, current) = if let Some(recovery) = &source.recovery_input {
+        if source.token.is_some()
+            || source.scope.is_some()
+            || row.plan.get("copy_worktree").and_then(Json::as_bool) != Some(false)
+            || !recovery_shape_matches(recipe, &thread, source.reach)
+        {
+            return Err(failed(
+                "recovery_shape_changed",
+                "The retained input recovery changed its bounded switch shape.",
+            ));
+        }
+        let input = threads::input(conn, recovery.input_id)
+            .await?
+            .filter(|input| input.thread_id == source.thread && input.author_id == Some(recipe.by))
+            .ok_or_else(|| {
+                failed(
+                    "origin_authority",
+                    "The accepted recovery input is unavailable.",
+                )
+            })?;
+        let current_authority = crate::inputs::saved_authority(
+            input.submission_authority.as_ref(),
+        )?
+        .ok_or_else(|| {
+            failed(
+                "origin_authority",
+                "The recovery input's current authority is unavailable.",
             )
-            .await
-            .map_err(EngineError::from)?,
-        );
-    }
+        })?;
+        let captured = recovery
+            .captured
+            .retaining_current(recipe.by, &current_authority)?;
+        let authority = {
+            let mut unit = Unit::new(conn, job.now());
+            crate::inputs::input_authority_callers(
+                &mut unit,
+                &thread,
+                &input,
+                recipe.by,
+                &captured,
+                job.engine().inner.clock.as_ref(),
+            )
+            .await?
+            .ok_or_else(|| {
+                failed(
+                    "origin_authority",
+                    "The accepted recovery credentials are no longer available.",
+                )
+            })?
+        };
+        let mut principals = Vec::with_capacity(authority.callers().len());
+        for caller in authority.callers() {
+            principals.push(
+                Principal::load(conn, caller.clone(), Time::new(job.now()))
+                    .await
+                    .map_err(EngineError::from)?,
+            );
+        }
+        (principals, None)
+    } else {
+        let principal =
+            super::super::source::load_principal(conn, job, recipe.by, source.token).await?;
+        let current = principal.caller().clone();
+        let mut principals = vec![principal];
+        if let Some(scope) = &source.scope {
+            principals.push(
+                Principal::load(
+                    conn,
+                    Caller::token(
+                        recipe.by,
+                        TokenGrant::from_stored(&scope.scopes, scope.subtree)
+                            .map_err(EngineError::unreadable)?,
+                    ),
+                    Time::new(job.now()),
+                )
+                .await
+                .map_err(EngineError::from)?,
+            );
+        }
+        (principals, Some(current))
+    };
     for principal in principals {
         let environment_reach = source.reach == crate::fork_plan::Reach::Environment
             && recipe.result == ForkResult::Replace;
@@ -469,10 +632,13 @@ pub(super) async fn authorize(
             ));
         }
     }
+    let Some(current) = current else {
+        return Ok(Authorized::Recovery);
+    };
     // Birth suppliers take one Caller. Supply the actual intersection, rather
     // than silently upgrading a stored token back to its person's session.
     let Some(scope) = &source.scope else {
-        return Ok(current);
+        return Ok(Authorized::Direct(current));
     };
     let accepted = orch_access_contract::decisions::Scopes::parse(&scope.scopes)
         .map_err(EngineError::unreadable)?;
@@ -523,7 +689,7 @@ pub(super) async fn authorize(
     if let Some(token) = source.token {
         grant = grant.for_token(token);
     }
-    Ok(Caller::token(recipe.by, grant))
+    Ok(Authorized::Direct(Caller::token(recipe.by, grant)))
 }
 
 pub(super) async fn capture(
@@ -770,7 +936,7 @@ pub(super) async fn check_target(
     if environment.deleted_at.is_some()
         || environment.remove_at.is_some()
         || environment.status != "running"
-        || provider.status != "ready"
+        || !crate::providers::request_status_available(&provider.status)
         || machine.status != "active"
         || machine.deleted_at.is_some()
         || !machine.online

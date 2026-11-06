@@ -322,14 +322,11 @@ impl Floor {
     /// Attaches a real WebSocket client with its single-use ticket.
     pub async fn screen(&self, browser: Id, ticket: &str) -> Screen {
         let addr = self.serve().await;
-        let mut request = format!("ws://{addr}/api/v1/ws/browsers/{browser}?ticket={ticket}")
-            .into_client_request()
-            .unwrap();
-        request
-            .headers_mut()
-            .insert("sec-websocket-protocol", "orch.browser.v1".parse().unwrap());
-        let (socket, _) = tokio_tungstenite::connect_async(request).await.unwrap();
-        Screen { socket }
+        Screen::connect_at(
+            addr,
+            &format!("/api/v1/ws/browsers/{browser}?ticket={ticket}"),
+        )
+        .await
     }
     /// Verifies a reused ticket is rejected before an upgrade.
     pub async fn a_spent_ticket_is_refused(&self, browser: Id, ticket: &str) {
@@ -396,6 +393,25 @@ pub struct Screen {
     >,
 }
 impl Screen {
+    /// The same real client can target either declared HTTP surface with an already minted ticket.
+    pub async fn connect_at(addr: std::net::SocketAddr, path: &str) -> Self {
+        let mut request = format!("ws://{addr}{path}").into_client_request().unwrap();
+        request
+            .headers_mut()
+            .insert("sec-websocket-protocol", "orch.browser.v1".parse().unwrap());
+        let (socket, _) = tokio_tungstenite::connect_async(request).await.unwrap();
+        Self { socket }
+    }
+    pub async fn next_wire(&mut self) -> Option<Message> {
+        tokio::time::timeout(WAIT, self.socket.next())
+            .await
+            .unwrap()
+            .map(Result::unwrap)
+    }
+    pub async fn close(mut self) {
+        let _ = self.socket.close(None).await;
+    }
+
     /// Sends one frame exactly as a browser client would.
     pub async fn send(&mut self, value: Json) {
         self.socket

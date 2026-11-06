@@ -23,6 +23,144 @@ fn scripted(text: &str, directives: &[&str]) -> String {
 }
 
 #[tokio::test]
+async fn raw_forwarded_actual_tiers_stay_per_request_and_per_close_group_under_one_lease() {
+    let mut p = ProviderRig::new().await;
+    p.start_responses_provider().await;
+    let lease = p
+        .open_lease(p.thread, &[MODEL], Some(RESPONSES), None)
+        .await;
+    let harness = p.harness(p.thread);
+    let cases = [
+        ("raw-tier-default", Some("default")),
+        ("raw-tier-priority", Some("priority")),
+        ("raw-tier-omitted", None),
+    ];
+    for (id, actual) in cases {
+        let mut upstream = json!({
+            "id": id, "object": "response", "model": MODEL, "status": "completed",
+            "output": [{"id": format!("message-{id}"), "type": "message", "role": "assistant",
+                "content": [{"type": "output_text", "text": id, "annotations": []}]}],
+            "usage": {"input_tokens":100,"output_tokens":11,"total_tokens":111,
+                "input_tokens_details":{"cached_tokens":10,"cache_write_tokens":5},
+                "output_tokens_details":{"reasoning_tokens":1}}
+        });
+        if let Some(actual) = actual {
+            upstream["service_tier"] = json!(actual);
+        }
+        p.mock.queue(&format!("body 200 {upstream}")).unwrap();
+        let mut request = responses_request(MODEL, id);
+        request["stream"] = json!(false);
+        request["service_tier"] = json!("fast");
+        let reply = harness.post("/v1/responses", &request).await;
+        assert_eq!(reply.status, 200);
+        assert_eq!(
+            reply.json(),
+            upstream,
+            "forwarded reply bytes retain actual facts"
+        );
+    }
+
+    // Establish real wire and token premises before asserting new accounting metadata.
+    let requests = p.model_requests();
+    assert_eq!(requests.len(), cases.len());
+    for request in &requests {
+        assert!(request.path.ends_with("/responses"));
+        assert_eq!(request.body["service_tier"], "fast");
+        assert_eq!(request.body["stream"], false);
+        assert_eq!(request.credential.verdict, Verdict::Accepted);
+        assert_eq!(request.credential.presented_by.len(), 1);
+    }
+    let usage = p.wait_provider_event("lease.usage", cases.len()).await;
+    assert_eq!(usage.len(), cases.len());
+    let tokens = json!({"input_tokens":100,"output_tokens":11,"total_tokens":111,
+        "cached_input_tokens":10,"cache_write_tokens":5,"reasoning_tokens":1});
+    for (id, _) in cases {
+        let event = usage
+            .iter()
+            .find(|event| event.body["request_ref"] == id)
+            .expect("the actual upstream response has its own usage event");
+        assert_eq!(event.body["lease_id"], json!(lease));
+        assert_eq!(event.body["model"], MODEL);
+        for field in [
+            "input_tokens",
+            "output_tokens",
+            "total_tokens",
+            "cached_input_tokens",
+            "cache_write_tokens",
+            "reasoning_tokens",
+        ] {
+            assert_eq!(event.body["usage"][field], tokens[field], "{id} {field}");
+        }
+    }
+    let closed = p.close_lease(lease).await;
+    assert_eq!(closed["requests"], 3);
+    for (field, total) in [
+        ("input_tokens", 300),
+        ("output_tokens", 33),
+        ("total_tokens", 333),
+        ("cached_input_tokens", 30),
+        ("cache_write_tokens", 15),
+        ("reasoning_tokens", 3),
+    ] {
+        assert_eq!(
+            closed["usage"][field], total,
+            "aggregate {field} remains exact"
+        );
+    }
+
+    let expected_states = cases.map(|(_, actual)| match actual {
+        Some(actual) => json!({"state":"told","value":actual}),
+        None => json!({"state":"empty"}),
+    });
+    let events: Vec<_> = cases
+        .iter()
+        .map(|(id, _)| {
+            let event = usage
+                .iter()
+                .find(|event| event.body["request_ref"] == *id)
+                .unwrap();
+            json!({"request_ref":id,
+            "wire_protocol":event.body["timing"]["wire_protocol"],
+            "requested_service_tier":event.body["timing"]["requested_service_tier"],
+            "reported_service_tier":event.body["timing"]["reported_service_tier"]})
+        })
+        .collect();
+    let expected_events: Vec<_> = cases
+        .iter()
+        .zip(&expected_states)
+        .map(|((id, _), state)| {
+            json!({"request_ref":id,"wire_protocol":RESPONSES,
+            "requested_service_tier":"fast","reported_service_tier":state})
+        })
+        .collect();
+    let groups = closed["usage_groups"].as_array();
+    let grouped: Vec<_> = expected_states.iter().map(|state| {
+        groups.and_then(|groups| groups.iter().find(|group|
+            group["timing"]["reported_service_tier"] == *state))
+            .map(|group| json!({"model":group["model"],"requests":group["requests"],
+                "min_context_tokens":group["min_context_tokens"],"max_context_tokens":group["max_context_tokens"],
+                "wire_protocol":group["timing"]["wire_protocol"],
+                "requested_service_tier":group["timing"]["requested_service_tier"],
+                "reported_service_tier":group["timing"]["reported_service_tier"],"usage":group["usage"]}))
+            .unwrap_or(serde_json::Value::Null)
+    }).collect();
+    let expected_groups: Vec<_> = expected_states
+        .iter()
+        .map(|state| {
+            json!({"model":MODEL,"requests":1,"min_context_tokens":100,"max_context_tokens":100,
+            "wire_protocol":RESPONSES,"requested_service_tier":"fast",
+            "reported_service_tier":state,"usage":tokens})
+        })
+        .collect();
+    assert_eq!(
+        json!({"events":events,"group_count":groups.map(Vec::len),"groups":grouped}),
+        json!({"events":expected_events,"group_count":3,"groups":expected_groups}),
+        "one lease must not collapse actual downgrade, priority and omitted tier facts: {closed}"
+    );
+    p.rig.kill().await;
+}
+
+#[tokio::test]
 async fn a_turn_of_the_scripted_adapter_on_the_forwarded_path_calls_the_model_through_the_forwarder_which_adds_the_key()
  {
     let p = ProviderRig::new().await;

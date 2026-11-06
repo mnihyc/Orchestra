@@ -156,6 +156,7 @@ pub(super) async fn forward_message(
     work: &Work,
     message: &MessageRow,
     to: &[Id],
+    name_sources: Option<&names::AllowSet>,
 ) -> ApiResult<ForwardedToThreads> {
     let ids: Vec<Id> = message
         .reply_to_id
@@ -164,54 +165,52 @@ pub(super) async fn forward_message(
         .collect();
     let prepared = forward::prepare(tx, &work.acting(), message.chat_id, &ids).await;
     let prepared = work.refuse(tx, Some(message.chat_id), prepared).await?;
-    let people = forward::people_of(&prepared);
-    let mut nodes: Vec<Id> = prepared
-        .chat
-        .row
-        .node_id
-        .into_iter()
-        .chain(to.iter().copied())
-        .collect();
     let source_rows: Vec<_> = prepared.messages.iter().collect();
-    nodes.extend(views::threads_of(&source_rows));
-    let mut names = lookups(
+    let captured = names::capture(
         tx,
         &work.principal,
-        &people,
-        &nodes,
-        &views::groups_of(&source_rows),
+        &source_rows,
+        &[],
+        Some(&prepared.chat.row),
+        name_sources,
     )
     .await?;
-    names.nodes.extend(
-        view::qualified_refs(
-            tx,
-            &work.principal,
-            &views::role_places_of(&source_rows),
-            Policy::default(),
-        )
-        .await?,
-    );
-    let chat = chat_view(
-        tx,
-        &work.principal,
-        &prepared.chat.row,
-        &prepared.chat.members,
-        &prepared.chat.standing,
-    )
-    .await?;
-    let parts = input_parts(&forward::copies_of(&prepared, &chat.base, &names));
+    let chat = names::chat_reference(tx, &work.principal, &prepared.chat.row, name_sources).await?;
+    let parts = input_parts(&forward::copies_of(
+        &prepared,
+        &chat.reference,
+        &captured.lookups,
+    ));
     let client = format!("chat-mention:{}", message.id);
-    match ctx
-        .app
-        .engine
-        .forward_to_threads(tx, work.principal.caller(), to, &parts, &client)
-        .await
-    {
+    let forwarded = if ctx.route.name == "ChatMessageCreate" {
+        ctx.app
+            .engine
+            .forward_chat_message_to_threads(
+                tx,
+                work.principal.caller(),
+                message.chat_id,
+                message.id,
+                to,
+                &parts,
+                &client,
+            )
+            .await
+    } else {
+        ctx.app
+            .engine
+            .forward_to_threads(tx, work.principal.caller(), to, &parts, &client)
+            .await
+    };
+    match forwarded {
         Ok(done) => Ok(done),
         Err((thread, error)) => {
-            let failed =
-                crate::routes::threads::input_failed(tx, thread.unwrap_or_else(Id::nil), error)
-                    .await;
+            let failed = crate::routes::threads::input_failed_projected(
+                tx,
+                thread.unwrap_or_else(Id::nil),
+                error,
+                ctx.key_receipt_required(),
+            )
+            .await;
             Err(match thread {
                 Some(thread) => failed.with("object", Destination::Thread(thread).named()),
                 None => failed,

@@ -437,6 +437,8 @@ async fn a_conversation_match_carries_the_item_and_its_nearest_folder_with_unico
         .send()
         .await
         .ok()
+        .into_full()
+        .expect("this control expects the ordinary full project response")
         .base
         .id;
     let topic = places::make_topic(&desk.world, &desk.ada, folder, "Payments")
@@ -545,6 +547,8 @@ async fn short_unscoped_queries_unknown_kinds_bad_cursors_limits_and_reversed_da
 
 #[tokio::test]
 async fn kinds_authors_and_inclusive_dates_filter_what_was_written() {
+    use orch_api_contract::search::{SearchStreamEvent, SearchStreamList};
+
     let desk = Desk::new().await;
     let bea = desk.member("bea", "viewer").await;
     let (thread, segment) = thread(&desk, &desk.ada, desk.topic, "Main").await;
@@ -607,6 +611,33 @@ async fn kinds_authors_and_inclusive_dates_filter_what_was_written() {
     };
     let empty = find(&desk, &desk.ada, &no_kinds).await;
     assert!(empty.items.is_empty() && empty.next_cursor.is_none());
+    let response = desk
+        .world
+        .app
+        .call(SearchStreamList, &[])
+        .token(&desk.ada.token)
+        .query(&SearchListQuery {
+            immediate: Some(true),
+            ..no_kinds
+        })
+        .send_bytes()
+        .await;
+    assert_eq!(response.status, 200);
+    let events: Vec<SearchStreamEvent> = response
+        .raw
+        .split(|byte| *byte == b'\n')
+        .filter(|line| !line.is_empty())
+        .map(|line| serde_json::from_slice(line).unwrap())
+        .collect();
+    assert!(
+        events
+            .iter()
+            .all(|event| !matches!(event, SearchStreamEvent::Hit { .. }))
+    );
+    assert!(events.iter().any(|event| matches!(event,
+        SearchStreamEvent::Source { source, state, received: 0, .. }
+            if source == "words" && state == "done"
+    )));
 }
 
 #[tokio::test]

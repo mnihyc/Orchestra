@@ -8,6 +8,7 @@
 mod desk;
 mod places;
 mod support;
+use support::FullInvitationReply as _;
 
 use chrono::Duration;
 use orch_api_contract::access::{PermissionPageGet, Role};
@@ -72,6 +73,7 @@ async fn invite(
         .body(body)
         .send()
         .await
+        .full_invitation()
 }
 
 async fn accept(
@@ -88,6 +90,7 @@ async fn accept(
         })
         .send()
         .await
+        .full_invitation()
 }
 
 #[tokio::test]
@@ -871,6 +874,7 @@ async fn independent_account_document_and_team(personal: bool) {
         })
         .send()
         .await
+        .full_invitation()
         .ok();
     assert_eq!(joined.org.unwrap().base.id, desk.org);
     let (same_home, count): (Option<Id>, i64) = sqlx::query_as(
@@ -1183,6 +1187,7 @@ async fn open_registration_stays_independent_of_an_organization_offer_until_expl
         .body(&InvitationAcceptBody { token: made.token })
         .send()
         .await
+        .full_invitation()
         .ok();
     assert_eq!(joined.org.unwrap().base.id, s.acme);
 }
@@ -1264,6 +1269,7 @@ async fn an_invitation_keeps_its_issuers_explicit_admin_mode_without_elevating_t
         .body(&org_invitation(s.acme))
         .send()
         .await
+        .full_invitation()
         .ok();
     let delegated: Option<bool> =
         sqlx::query_scalar("SELECT created_as_admin FROM invitations WHERE id=$1")

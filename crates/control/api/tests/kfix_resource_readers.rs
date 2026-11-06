@@ -248,6 +248,8 @@ async fn an_actual_provider_creation_leaves_its_home_admin_the_permission_page_w
         .send()
         .await
         .ok()
+        .into_full()
+        .unwrap()
         .provider
         .base
         .id;

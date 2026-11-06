@@ -941,7 +941,7 @@ async fn the_program_enrolls_takes_its_limits_holds_a_session_hosts_a_turn_and_s
     step(began, "policy set, delegate and status done");
     assert!(status.contains("by-hand"), "{status}");
     assert!(
-        status.contains("Adapters     claude-code, codex, fake"),
+        status.contains("Adapters     claude-code, codex, dsh, fake"),
         "{status}"
     );
     assert!(

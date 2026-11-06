@@ -20,10 +20,11 @@
 //! by steering or by interrupting, only on the threads where the sender holds `thread.interact`: the others get
 //! it at their next turn, and the result counts them.
 //!
-//! **An agent's announcement** reaches no further than its topic unless `broadcast.agent_scope` is `project`,
+//! **An agent's announcement** checks its current Interact right separately on every recipient. It
 //! chooses its own `delivery` and `wake_idle` only where `broadcast.agent_options` lists them, and may send at most
 //! `broadcast.rate_per_hour` of them, with what it hands to single threads, in a rolling hour. What it received as
-//! an announcement it is told not to announce again.
+//! an announcement it is told not to announce again. Topic, project and org audiences select candidates;
+//! they never supply authority to send to those candidates.
 //!
 //! **Not here.** The people who follow a thread are told by the notifications; the row is made and the thread's
 //! attention moved, and `tell_followers` is the one place that calls them.
@@ -46,7 +47,8 @@ use orch_api_contract::topics::{
     AnnouncementFallback, AnnouncementFile, AnnouncementTargets, AnnouncementThreadTarget,
 };
 use orch_api_contract::users::UserRef;
-use orch_authz::{Act, Caller, Principal, nodes};
+use orch_authz::reach;
+use orch_authz::{Act, Principal, nodes};
 use orch_db::audit::{Actor, Entry, Origin, append};
 use orch_db::queries::hierarchy;
 use orch_db::queries::threads::{self, ThreadRow, thread_state, tools as rows, turn_state};
@@ -84,8 +86,6 @@ pub struct Broadcast {
     pub agent_options: Vec<String>,
     /// How many an agent may send in a rolling hour.
     pub rate_per_hour: i64,
-    /// `topic`, `project` or `org`: how far an agent's announcement may reach.
-    pub agent_scope: String,
     /// The texts Orch says to agents here.
     pub messages: BTreeMap<String, String>,
 }
@@ -99,7 +99,6 @@ impl Broadcast {
             definition_of(keys::BROADCAST_WAKE_IDLE)?,
             definition_of(keys::BROADCAST_AGENT_OPTIONS)?,
             definition_of(keys::BROADCAST_RATE_PER_HOUR)?,
-            definition_of(keys::BROADCAST_AGENT_SCOPE)?,
             definition_of(keys::AGENT_MESSAGES)?,
         ];
         let snapshot =
@@ -120,7 +119,6 @@ impl Broadcast {
             wake_idle: setting(&snapshot, keys::BROADCAST_WAKE_IDLE)?.unwrap_or(false),
             agent_options: setting(&snapshot, keys::BROADCAST_AGENT_OPTIONS)?.unwrap_or_default(),
             rate_per_hour: setting(&snapshot, keys::BROADCAST_RATE_PER_HOUR)?.unwrap_or_default(),
-            agent_scope: word(keys::BROADCAST_AGENT_SCOPE)?.unwrap_or_else(|| "topic".to_owned()),
             messages: setting(&snapshot, keys::AGENT_MESSAGES)?.unwrap_or_default(),
         })
     }
@@ -446,11 +444,38 @@ impl Engine {
                 already: false,
             });
         }
+        let agent_reach = if let Sender::Agent(source) = sender {
+            let asking = self
+                .asking(&mut *unit.conn, source.node_id)
+                .await?
+                .ok_or(EngineError::StaleToolSource)?;
+            Some(
+                reach::Reach::load_current(
+                    &mut *unit.conn,
+                    asking.agent,
+                    asking.now,
+                    &reach::Things {
+                        nodes: found.iter().map(|thread| thread.node_id).collect(),
+                        ..Default::default()
+                    },
+                )
+                .await?,
+            )
+        } else {
+            None
+        };
         for thread in found
             .iter()
             .filter(|thread| !thread.archived && thread.side_of.is_none())
         {
             let is_source = Some(thread.node_id) == sender.thread();
+            if !is_source
+                && agent_reach
+                    .as_ref()
+                    .is_some_and(|reach| !reach.conversation(thread.node_id, false).writes())
+            {
+                continue;
+            }
             // The thread's own place is asked only where a person announced.
             let names_people = is_source
                 || !matches!(sender, Sender::Person { .. })
@@ -849,15 +874,6 @@ impl Engine {
             let mut conn = self.inner.db.acquire().await?;
             Broadcast::load(&mut conn, thread.topic_id).await?
         };
-        if (audience == Audience::Project
-            && !matches!(broadcast.agent_scope.as_str(), "project" | "org"))
-            || (audience == Audience::Org && broadcast.agent_scope != "org")
-        {
-            return Ok(Refusal::invalid(
-                "That audience is outside the announcement reach set by broadcast.agent_scope here. Use the topic audience, or ask a person to change the announcement reach.",
-            )
-            .into());
-        }
         let now = self.inner.clock.now();
         let id = announcement_id(thread.node_id, &call.call_ref);
         if audience != Audience::Followers
@@ -991,20 +1007,39 @@ impl Engine {
             rows::node_parent(&mut *unit.conn, thread.topic_id).await?
         };
         let topics = match project {
-            Some(project) => {
-                let reachable = rows::open_topics_of(&mut *unit.conn, project).await?;
-                // What was made private is passed over; whether it is does not depend on who asks.
-                let now = Time::new(unit.now());
-                let sender =
-                    Principal::load(&mut *unit.conn, Caller::session(thread.owner_id), now).await?;
-                Self::those_that_follow(unit, &sender, project, reachable).await?
-            }
+            Some(project) => rows::open_topics_of(&mut *unit.conn, project).await?,
             None => vec![thread.topic_id],
         };
+        // A wider audience names candidates, not the owner's authority. Check all candidates in one
+        // batch and leave no announcement row in a topic with no authorized recipient. Reach retains
+        // private/cut boundaries and permits a separately shared recipient inside such a boundary.
+        let candidates = rows::announcement_candidates(&mut *unit.conn, &topics).await?;
+        let asking = self
+            .asking(&mut *unit.conn, thread.node_id)
+            .await?
+            .ok_or(EngineError::StaleToolSource)?;
+        let current = reach::Reach::load_current(
+            &mut *unit.conn,
+            asking.agent,
+            asking.now,
+            &reach::Things {
+                nodes: candidates.iter().map(|(id, _)| *id).collect(),
+                ..Default::default()
+            },
+        )
+        .await?;
+        let eligible: HashSet<Id> = candidates
+            .iter()
+            .filter(|(id, _)| current.conversation(*id, false).writes())
+            .map(|(_, topic)| *topic)
+            .collect();
         let group = id;
         let mut own: Option<Sent> = None;
         let mut totals = no_delivery();
-        for topic in topics {
+        for topic in topics
+            .into_iter()
+            .filter(|topic| *topic == thread.topic_id || eligible.contains(topic))
+        {
             let broadcast = Broadcast::load(&mut *unit.conn, topic).await?;
             let mut here = plan.clone();
             // What the agent was not given the choice of, the topic decides.

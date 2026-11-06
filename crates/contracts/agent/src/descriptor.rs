@@ -629,6 +629,14 @@ pub struct Capabilities {
     pub phases: bool,
     /// The facts it reports of its provider.
     pub provider_facts: Vec<ProviderFactKind>,
+    /// Optional normalized credit field declarations, passed through to the facts source.
+    /// Older adapters may omit this without changing their current unknown-state behavior.
+    #[serde(
+        default,
+        skip_serializing_if = "BTreeMap::is_empty",
+        deserialize_with = "orch_provider_contract::credit_fields::deserialize_reports"
+    )]
+    pub provider_fact_fields: BTreeMap<String, Vec<String>>,
     /// It can list the models of its provider.
     pub model_discovery: bool,
     /// It reports a title for a session.

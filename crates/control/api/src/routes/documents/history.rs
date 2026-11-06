@@ -16,12 +16,10 @@ use crate::middleware::transaction_guard;
 use crate::registry::{Ctx, Registry};
 use crate::routes::nodes::{actor_name, invalid};
 use orch_access_contract::audit::AuditAction;
-use orch_api_contract::common::{Page, PageQuery};
 use orch_api_contract::documents::{
     Author, DocumentBlock, DocumentChanges, DocumentChangesGet, DocumentChangesGetQuery,
-    DocumentSync, DocumentVersion, DocumentVersionGet, DocumentVersionGetReply,
-    DocumentVersionList, DocumentVersionListQuery, DocumentVersionRestore, VersionCause,
-    VersionChanged,
+    DocumentSync, DocumentVersion, DocumentVersionGet, DocumentVersionList, DocumentVersionRestore,
+    VersionCause, VersionChanged,
 };
 use orch_authz::Policy;
 use orch_db::queries::documents::batch::{self, Restored};
@@ -37,6 +35,8 @@ use std::collections::HashMap;
 use build::{Cast, Wanted};
 use limits::{DocSettings, Limit};
 
+mod readers;
+
 /// The word for the version that was last cut before the caller last had the
 /// document open.
 const SEEN: &str = "seen";
@@ -46,9 +46,9 @@ const THREAD_PREFIX: &str = "thread:";
 /// Binds this module's requests.
 pub fn mount(registry: &mut Registry) {
     registry
-        .on(DocumentVersionList, list)
+        .on_with_operation(DocumentVersionList, readers::list, readers::list_get)
         .on(DocumentChangesGet, changes_get)
-        .on(DocumentVersionGet, get)
+        .on_with_operation(DocumentVersionGet, readers::version, readers::version_get)
         .on(DocumentVersionRestore, restore);
 }
 
@@ -157,99 +157,10 @@ fn wrote_in(span: &Span, author: ByAuthor) -> bool {
     })
 }
 
-/// The entries of a document's history, newest first.
-async fn list(
-    ctx: Ctx,
-    query: DocumentVersionListQuery,
-    (): (),
-) -> ApiResult<Page<DocumentVersion>> {
-    let id = ctx.id("id")?;
-    let paging = PageQuery {
-        limit: query.limit,
-        cursor: query.cursor.clone(),
-    };
-    let limit = usize::try_from(paging.limit()).unwrap_or(usize::MAX);
-    let author = parse_author(query.author.as_deref())?;
-    let before: Option<i32> = match query.cursor.as_deref() {
-        None => None,
-        Some(text) => Some(
-            text.parse()
-                .map_err(|_| invalid("cursor", "is not a cursor of this list"))?,
-        ),
-    };
-    let mut conn = ctx.app.db.acquire().await?;
-    let principal = authorization::principal(&ctx, &mut conn).await?;
-    let row = super::live(&mut conn, id).await?;
-    let span = row.span();
-    let with_open =
-        before.is_none() && !span.is_empty() && author.is_none_or(|author| wrote_in(&span, author));
-    let take = limit - usize::from(with_open);
-    let found = history::list(
-        &mut conn,
-        id,
-        author,
-        before,
-        i64::try_from(take + 1).unwrap_or(i64::MAX),
-    )
-    .await?;
-    let more = found.len() > take;
-    let shown: Vec<&VersionRow> = found.iter().take(take).collect();
-    let mut wanted = Wanted::default();
-    want_writers(&mut wanted, &span.authors);
-    for each in &shown {
-        want_writers(&mut wanted, &writers_of(&each.authors));
-    }
-    let cast = Cast::load(&mut conn, &principal, wanted, Policy::default()).await?;
-    let mut items: Vec<DocumentVersion> = Vec::new();
-    if with_open {
-        items.extend(open_span(
-            &row.title,
-            row.bytes,
-            i64::from(row.block_count),
-            &span,
-            &cast,
-        ));
-    }
-    items.extend(shown.iter().map(|each| entry(each, &cast)));
-    let next_cursor = more
-        .then(|| shown.last().map(|each| each.version.to_string()))
-        .flatten();
-    Ok(Page { items, next_cursor })
-}
-
 fn version_number(ctx: &Ctx) -> ApiResult<i32> {
     ctx.param("version")?
         .parse()
         .map_err(|_| ApiError::not_found())
-}
-
-/// A document as it stood at a version.
-async fn get(
-    ctx: Ctx,
-    _query: orch_api_contract::nodes::DeletedInspectionQuery,
-    (): (),
-) -> ApiResult<DocumentVersionGetReply> {
-    let id = ctx.id("id")?;
-    let number = version_number(&ctx)?;
-    let mut conn = ctx.app.db.acquire().await?;
-    let principal = authorization::principal(&ctx, &mut conn).await?;
-    super::live(&mut conn, id).await?;
-    let found = history::get(&mut conn, id, number)
-        .await?
-        .ok_or_else(ApiError::not_found)?;
-    let held: Vec<BlockRow> = history::snapshot(&mut conn, id, number)
-        .await?
-        .ok_or_else(ApiError::not_found)?;
-    let mut wanted = Wanted::default();
-    want_writers(&mut wanted, &writers_of(&found.authors));
-    for each in &held {
-        wanted.block(each);
-    }
-    let cast = Cast::load(&mut conn, &principal, wanted, Policy::default()).await?;
-    Ok(DocumentVersionGetReply {
-        version: entry(&found, &cast),
-        blocks: held.iter().map(|each| cast.block(each)).collect(),
-    })
 }
 
 /// The version a `from` names: a number, `0` for the empty document, or `seen`.

@@ -10,7 +10,7 @@
 //! page to read is answered plainly by [`subject`], never as a
 //! fault of the server.
 
-use super::page::{entries_named, same};
+use super::page::same;
 use super::subject::{self, Named};
 use crate::middleware::authorization::{self, exact, refusals};
 use crate::middleware::requests::{ApiError, ApiResult};
@@ -28,7 +28,7 @@ use orch_api_contract::users::UserRef;
 use orch_authz::engine::{Frame, Graph, Site};
 use orch_authz::pages;
 use orch_authz::things::{self, Thing};
-use orch_authz::{Act, Caller, Policy, Principal, holders, nodes};
+use orch_authz::{Act, Policy, Principal, holders, nodes};
 use orch_db::Conn;
 use orch_db::queries::access;
 use orch_db::queries::access::everything::{self, HistoryFilter};
@@ -58,63 +58,38 @@ pub async fn effective(
     query: api::EffectiveAccessGetQuery,
     (): (),
 ) -> ApiResult<api::EffectiveAccess> {
-    let named = subject::named(&ctx)?;
-    let mut conn = ctx.app.db.acquire().await?;
-    let principal = authorization::principal(&ctx, &mut conn).await?;
-    let (graph, site, policy) = found(&mut conn, &named).await?;
-    if query.user_id == principal.user() {
-        subject::require_page(&mut conn, &principal, named.thing, policy).await?;
-    } else {
-        subject::require_manage(&mut conn, &principal, named.thing, policy).await?;
-    }
-    let person = if query.user_id == principal.user() {
-        principal.clone()
-    } else {
-        Principal::load(
-            &mut conn,
-            Caller::session(query.user_id),
-            Time::new(ctx.now),
-        )
-        .await
-        .map_err(|_| ApiError::not_found())?
-    };
-    let held = things::effective_at(&mut conn, &person, graph, &site, policy)
-        .await
-        .map_err(ApiError::internal)?;
-    let entry_ids: Vec<Id> = held
-        .held
+    let mut conn = ctx.app.db.begin_snapshot().await?;
+    let principal = ctx.operation_principal(&mut conn).await?;
+    let prepared = ctx.operation_data::<super::operations::PreparedEffective>()?;
+    let held = &prepared.held;
+    let entries = &prepared.entries;
+    let described = super::page::entries_named_at_bounded(
+        &mut conn,
+        &principal,
+        held.root,
+        None,
+        entries,
+        &prepared.names,
+    )
+    .await?;
+    let lists: Vec<_> = prepared
+        .paths
         .iter()
-        .flat_map(|held| held.through.iter())
-        .filter_map(|through| match through {
-            Through::Entry(via) => Some(via.entry),
-            _ => None,
-        })
+        .map(|(_, path)| path.clone())
         .collect();
-    let rows = access::entries_by_id(&mut conn, &entry_ids).await?;
-    let entries: Vec<stored::Entry> = rows
+    let lists_named = super::page::Names::holder_lists_bounded(
+        &mut conn,
+        &principal,
+        held.root,
+        prepared.role_place,
+        &lists,
+        &prepared.names,
+    )
+    .await?;
+    let by_holder: std::collections::HashMap<_, _> = prepared
+        .paths
         .iter()
-        .filter_map(|row| orch_authz::engine::entry_of(row).ok())
-        .collect();
-    let described = entries_named(&mut conn, &principal, held.root, &entries).await?;
-    // The defaults give a role one entry for each permission, and every entry of one holder has the
-    // same chain: each holder's chain is found once, and all of them are named together.
-    let mut paths: Vec<(stored::Holder, Vec<stored::Holder>)> = Vec::new();
-    for entry in &entries {
-        if paths.iter().any(|(holder, _)| *holder == entry.holder) {
-            continue;
-        }
-        let path = orch_authz::holders::chain(&mut conn, &person, entry.holder, site.role_place)
-            .await
-            .map_err(ApiError::internal)?;
-        paths.push((entry.holder, path));
-    }
-    let lists: Vec<Vec<stored::Holder>> = paths.iter().map(|(_, path)| path.clone()).collect();
-    let lists_named =
-        super::page::Names::holder_lists(&mut conn, &principal, held.root, site.role_place, &lists)
-            .await?;
-    let by_holder: std::collections::HashMap<stored::Holder, Vec<api::Holder>> = paths
-        .into_iter()
-        .map(|(holder, _)| holder)
+        .map(|(holder, _)| *holder)
         .zip(lists_named)
         .collect();
     let chains: std::collections::HashMap<Id, Vec<api::Holder>> = entries
@@ -122,7 +97,8 @@ pub async fn effective(
         .filter_map(|entry| {
             by_holder
                 .get(&entry.holder)
-                .map(|named| (entry.id, named.clone()))
+                .cloned()
+                .map(|chain| (entry.id, chain))
         })
         .collect();
     let user = refusals::user_refs(&mut conn, &[query.user_id])
@@ -149,9 +125,14 @@ pub async fn effective(
             }
         }
     }
-    let refs = view::qualified_refs(&mut conn, &principal, &places, Policy::default()).await?;
-    let container_refs =
-        crate::routes::document_tree::container_refs(&mut conn, &principal, &container_ids).await?;
+    let refs = prepared
+        .names
+        .qualified_refs(&mut conn, &principal, &places)
+        .await?;
+    let container_refs = prepared
+        .names
+        .container_refs(&mut conn, &principal, &container_ids)
+        .await?;
     let role_from = held.role.and_then(|role| match role.at {
         PlaceRef::Node(place) => refs.get(&place).cloned().map(NodeOrSystem::Node),
         PlaceRef::System => Some(NodeOrSystem::SYSTEM),
@@ -198,7 +179,7 @@ pub async fn effective(
                     .collect(),
             })
             .collect();
-    Ok(api::EffectiveAccess {
+    let answer = api::EffectiveAccess {
         admin_only: held
             .admin_only
             .iter()
@@ -209,7 +190,9 @@ pub async fn effective(
         role_from,
         administers: held.administers,
         permissions,
-    })
+    };
+    conn.commit().await.map_err(orch_db::DbError::from)?;
+    Ok(answer)
 }
 
 // ---- the people behind a holder ----
@@ -260,8 +243,8 @@ pub async fn people(
         cursor: query.cursor.clone(),
     };
     let limit = usize::try_from(page_query.limit()).unwrap_or(usize::MAX);
-    let mut conn = ctx.app.db.acquire().await?;
-    let principal = authorization::principal(&ctx, &mut conn).await?;
+    let mut conn = ctx.app.db.begin_snapshot().await?;
+    let principal = ctx.operation_principal(&mut conn).await?;
     let (graph, site, policy) = found(&mut conn, &named).await?;
     subject::require_page(&mut conn, &principal, named.thing, policy).await?;
     let chip = parse_chip(&query.holder).ok_or_else(ApiError::not_found)?;
@@ -352,7 +335,7 @@ pub async fn people(
         .map_err(ApiError::internal)?
         .into_iter()
         .collect();
-    Ok(api::PermissionPeopleListReply {
+    let answer = api::PermissionPeopleListReply {
         owners: items
             .iter()
             .filter(|user| owner_people.contains(&user.id))
@@ -362,7 +345,9 @@ pub async fn people(
             .then(|| items.last().map(|user| user.id.to_string()))
             .flatten(),
         items,
-    })
+    };
+    conn.commit().await.map_err(orch_db::DbError::from)?;
+    Ok(answer)
 }
 
 // ---- what was done to a thing ----

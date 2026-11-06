@@ -119,7 +119,9 @@ async fn a_group_is_made_listed_described_anew_and_deleted_by_whoever_manages_th
         })
         .send()
         .await
-        .ok();
+        .ok()
+        .into_full()
+        .expect("this browser control expects the ordinary full group response");
     assert_eq!(renamed.name, "Crew A");
     assert_eq!(renamed.description, "the people");
     let refused = world

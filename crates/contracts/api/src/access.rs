@@ -9,6 +9,14 @@
 //! page by page when somebody asks. What a caller lacks for an act is a list of
 //! [`MissingAccess`], which can be sent back as an access request.
 
+use crate::operations::{
+    FacetSpec as Facet, OperationSpec as Op, TargetResolver as Target, VariantSpec as Variant,
+};
+use orch_access_contract::key_scope::KeyAction::{Manage, Read, Write};
+use orch_access_contract::key_scope::KeyIdentityKind as I;
+use orch_access_contract::key_scope::KeyTargetKind::{Identity, Object};
+use orch_access_contract::permissions::ObjectKind as K;
+
 use std::collections::BTreeMap;
 
 use orch_types::{Id, Json, Revision, Time};
@@ -496,6 +504,9 @@ pub struct PageGives {
     pub roles: Vec<Role>,
     /// What they may share with agents.
     pub agents: Vec<AgentLevel>,
+    /// Maximum ordinary level independently in each agent-share area. Missing areas are unavailable;
+    /// recipient visibility and outside-sharing checks still apply to the actual share.
+    pub agent_parts: crate::share::ShareParts,
     /// The policy `sharing.allow_holders` as it resolves here. The lists above are empty for a
     /// holder who is neither an owner nor a manager of the page where it is false, and this lets a
     /// form say why.
@@ -775,15 +786,24 @@ pub struct SharePreviewRule {
 /// The current and proposed live areas for one agent destination, or the bounded size of a proposed copy.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize, JsonSchema)]
 pub struct SharePreviewAgent {
+    /// Ordinary human `doc.view` entries after this preview, separate from the live agent
+    /// contribution; they follow normal expiry/revocation, rather than the giver's future rights.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub viewer_entries: Vec<Entry>,
     /// The thread or place whose agents receive it, named only as far as the reader may know it.
     pub to: NodeRef,
     /// Whether this live share includes what follows the source place inside it.
     pub inside: bool,
     /// The areas the ordinary producer would give.
     pub parts: crate::share::ShareParts,
-    /// Current direct live areas for this same destination and reach; implicit topic/project access remains separate.
+    /// This giver's existing requested ceiling for the same destination and reach, not effective
+    /// rights or another giver's contribution.
     pub already_shared: crate::share::ShareParts,
-    /// Whether these agents may also take the material away as files.
+    /// Current assessment of this giver's proposed live contribution. Absent for copies.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub current: Option<crate::share::AgentShareCurrent>,
+    /// Whether the proposed share includes Export entries (or is a copy); current export
+    /// authority is checked separately when used.
     pub download: bool,
     /// Whether this destination includes threads made later under the named place.
     pub future_threads: bool,
@@ -1038,6 +1058,39 @@ pub struct RoleHeld {
     pub created_at: Time,
     /// How many times it was changed.
     pub revision: Revision,
+}
+
+/// An accepted role write without the role's existing content or holder metadata.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+pub struct RoleWriteReceipt {
+    /// Restricted response marker.
+    pub projection: crate::common::ReceiptProjection,
+    /// The actual role written.
+    pub role_id: Id,
+    /// The actual place of the role.
+    pub node_id: Id,
+    /// The revision accepted by this write.
+    pub revision: Revision,
+}
+
+/// The ordinary role projection or the same write's restricted acknowledgement.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+#[serde(untagged)]
+pub enum RoleWriteResponse {
+    /// Existing role metadata admitted by this operation's own Read.
+    Full(Box<RoleHeld>),
+    /// Identifiers and revision only.
+    Receipt(RoleWriteReceipt),
+}
+
+impl RoleWriteResponse {
+    /// Keeps a restricted acknowledgement distinct from an ordinary role projection.
+    pub fn into_full(self) -> Result<RoleHeld, RoleWriteReceipt> {
+        match self {
+            Self::Full(role) => Ok(*role),
+            Self::Receipt(receipt) => Err(receipt),
+        }
+    }
 }
 
 /// A page boiled down to three lines, for places with no room for the page itself.
@@ -1497,43 +1550,569 @@ pub struct AccessRequestGetReply {
     pub complete: bool,
 }
 
+// The existing page/effective readers share the same protected external projection sources.
+// Intrinsic ACL rows/counts remain governed by the page facet; public UserRefs add no Account facet.
+macro_rules! inspection_facets {
+    ($primary:expr) => {
+        &[
+            $primary,
+            Facet::required(
+                Read,
+                &[Identity(I::Group)],
+                Target::ResolvedCollection("inspection_groups"),
+            ),
+            Facet::required(
+                Read,
+                &[Object(K::Org)],
+                Target::ResolvedCollection("inspection_names_orgs"),
+            ),
+            Facet::required(
+                Read,
+                &[Object(K::Project)],
+                Target::ResolvedCollection("inspection_names_projects"),
+            ),
+            Facet::required(
+                Read,
+                &[Object(K::Topic)],
+                Target::ResolvedCollection("inspection_names_topics"),
+            ),
+            Facet::required(
+                Read,
+                &[Object(K::Thread)],
+                Target::ResolvedCollection("inspection_names_threads"),
+            ),
+            Facet::required(
+                Read,
+                &[Object(K::DocumentContainer)],
+                Target::ResolvedCollection("inspection_names_containers"),
+            ),
+            Facet::required(
+                Read,
+                &[Object(K::Provider)],
+                Target::ResolvedCollection("inspection_providers"),
+            ),
+            Facet::required(
+                Read,
+                &[Object(K::Agent)],
+                Target::ResolvedCollection("inspection_agents"),
+            ),
+            Facet::required(
+                Read,
+                &[Object(K::Environment)],
+                Target::ResolvedCollection("inspection_environments"),
+            ),
+            Facet::required(
+                Read,
+                &[Object(K::Host)],
+                Target::ResolvedCollection("inspection_hosts"),
+            ),
+            Facet::required(
+                Read,
+                &[Object(K::Template)],
+                Target::ResolvedCollection("inspection_templates"),
+            ),
+        ]
+    };
+}
+
+// Role writers keep full metadata optional. Names use the same bounded source producer
+// as permission inspection; a full Group DTO is never fabricated or partially emptied.
+const ROLE_WRITE_FACETS: &[Facet] = &[
+    Facet::required(
+        Manage,
+        &[
+            Object(K::Org),
+            Object(K::Project),
+            Object(K::Topic),
+            Object(K::Thread),
+        ],
+        Target::Resolved("role_place"),
+    ),
+    Facet::response_content(
+        &[
+            Object(K::Org),
+            Object(K::Project),
+            Object(K::Topic),
+            Object(K::Thread),
+        ],
+        Target::Resolved("role_place"),
+    ),
+    Facet::response_content(
+        &[Identity(I::Group)],
+        Target::ResolvedCollection("role_groups"),
+    ),
+    Facet::response_content(
+        &[Object(K::Org)],
+        Target::ResolvedCollection("role_names_orgs"),
+    ),
+    Facet::response_content(
+        &[Object(K::Project)],
+        Target::ResolvedCollection("role_names_projects"),
+    ),
+    Facet::response_content(
+        &[Object(K::Topic)],
+        Target::ResolvedCollection("role_names_topics"),
+    ),
+    Facet::response_content(
+        &[Object(K::Thread)],
+        Target::ResolvedCollection("role_names_threads"),
+    ),
+];
+
 crate::endpoints! {
     /// Reads the catalogue of permissions, the everyday choices and the roles, as data.
-    PermissionCatalogueGet: GET "/permissions", User, none, none, json PermissionCatalogueGetReply, 200;
+    PermissionCatalogueGet: GET "/permissions", User, none, none, json PermissionCatalogueGetReply, 200,
+        operation Op::single(Read, &[Identity(I::System)], Target::System);
     /// Resolves a holder locator only among places the caller may view.
-    HolderSearch: GET "/holders/search", User, query HolderSearchQuery, none, json HolderSearchReply, 200;
+    HolderSearch: GET "/holders/search", User, query HolderSearchQuery, none, json HolderSearchReply, 200,
+        operation Op::single(
+            Read,
+            &[
+                Object(K::Org),
+                Object(K::Project),
+                Object(K::Topic),
+                Object(K::Thread),
+                Identity(I::Group),
+                Identity(I::Account),
+            ],
+            Target::Resolved("results"),
+        );
     /// Lists who holds which role in a place and in the places above it.
     NodeRoleList: GET "/nodes/{id}/roles", Permission("node.view"), none, none, json NodeRoleListReply, 200;
     /// Gives a role in a place, up to the role the caller holds there.
-    NodeRoleCreate: POST "/nodes/{id}/roles", Rule("holding that role there or a higher one, and being an owner of the place or a manager of its page (access.manage), or the place letting holders share"), none, json RoleCreateBody, json RoleHeld, 200;
+    NodeRoleCreate: POST "/nodes/{id}/roles", Rule("holding that role there or a higher one, and being an owner of the place or a manager of its page (access.manage), or the place letting holders share"), none, json RoleCreateBody, json RoleWriteResponse, 200,
+        operation Op::receipt(&Op::facets(ROLE_WRITE_FACETS));
     /// Changes a role that was given, by whoever manages the place's page or by whoever gave it.
-    RoleUpdate: PATCH "/roles/{id}", Rule("access.manage on the place the role is held in; or having given it, for a change that gives no more than the caller may give now"), none, json RoleUpdateBody, json RoleHeld, 200;
+    RoleUpdate: PATCH "/roles/{id}", Rule("access.manage on the place the role is held in; or having given it, for a change that gives no more than the caller may give now"), none, json RoleUpdateBody, json RoleWriteResponse, 200,
+        operation Op::receipt(&Op::facets(ROLE_WRITE_FACETS));
     /// Takes a role away, by whoever manages the place's page or by whoever gave it.
-    RoleDelete: DELETE "/roles/{id}", Rule("access.manage on the place the role is held in; or having given it"), none, none, none, 204;
+    RoleDelete: DELETE "/roles/{id}", Rule("access.manage on the place the role is held in; or having given it"), none, none, none, 204,
+        operation Op::single(
+            Manage,
+            &[
+                Object(K::Org),
+                Object(K::Project),
+                Object(K::Topic),
+                Object(K::Thread),
+            ],
+            Target::Resolved("role_place"),
+        );
     /// Reads a permission page: every row, what it inherits, whom it names and what the caller may change.
-    PermissionPageGet: GET "/{object}/{id}/permissions", Rule("View on a node or document, or access.manage to inspect its permission page without content; any permission on a resource"), none, none, json PermissionPage, 200;
+    PermissionPageGet: GET "/{object}/{id}/permissions", Rule("View on a node or document, or access.manage to inspect its permission page without content; any permission on a resource"), none, none, json PermissionPage, 200,
+        operation Op::variants(&[
+            Variant {
+                name: "view",
+                selector: "ordinary current viewing authority",
+                facets: inspection_facets!(Facet::required(
+                    Read,
+                    &[
+                        Object(K::Org),
+                        Object(K::Project),
+                        Object(K::Topic),
+                        Object(K::Thread),
+                        Object(K::Document),
+                        Object(K::DocumentContainer),
+                        Object(K::Provider),
+                        Object(K::Agent),
+                        Object(K::Environment),
+                        Object(K::Host),
+                        Object(K::Machine),
+                        Object(K::Template),
+                        Object(K::McpServer),
+                        Object(K::Mount),
+                        Object(K::Skill),
+                    ],
+                    Target::Resolved("page"),
+                )),
+            },
+            Variant {
+                name: "inspect",
+                selector: "current access.manage inspection without content authority",
+                facets: inspection_facets!(Facet::required(
+                    Manage,
+                    &[
+                        Object(K::Org),
+                        Object(K::Project),
+                        Object(K::Topic),
+                        Object(K::Thread),
+                        Object(K::Document),
+                        Object(K::DocumentContainer),
+                        Object(K::Provider),
+                        Object(K::Agent),
+                        Object(K::Environment),
+                        Object(K::Host),
+                        Object(K::Machine),
+                        Object(K::Template),
+                        Object(K::McpServer),
+                        Object(K::Mount),
+                        Object(K::Skill),
+                    ],
+                    Target::Resolved("page"),
+                )),
+            },
+        ]);
     /// Changes a permission page, as a whole or not at all.
-    PermissionPageUpdate: PATCH "/{object}/{id}/permissions", Rule("for a change that only names holders and takes back entries the caller gave: holding what it gives oneself, and being an owner or a manager of the page, or the place letting holders share; for anything else in it: access.manage, and for what it gives, holding it oneself"), none, json PageChange, json PermissionPage, 200;
+    PermissionPageUpdate: PATCH "/{object}/{id}/permissions", Rule("for a change that only names holders and takes back entries the caller gave: holding what it gives oneself, and being an owner or a manager of the page, or the place letting holders share; for anything else in it: access.manage, and for what it gives, holding it oneself"), none, json PageChange, json PermissionPage, 200,
+        operation Op::variants(&[
+            Variant {
+                name: "holders",
+                selector: "no owner change; only holder additions or withdrawals",
+                facets: &[
+                    Facet::required(
+                        Manage,
+                        &[
+                            Object(K::Org),
+                            Object(K::Project),
+                            Object(K::Topic),
+                            Object(K::Thread),
+                            Object(K::Document),
+                            Object(K::DocumentContainer),
+                            Object(K::Provider),
+                            Object(K::Agent),
+                            Object(K::Environment),
+                            Object(K::Host),
+                            Object(K::Machine),
+                            Object(K::Template),
+                            Object(K::McpServer),
+                            Object(K::Mount),
+                            Object(K::Skill),
+                        ],
+                        Target::Resolved("page"),
+                    ),
+                    Facet::response_content(
+                        &[
+                            Object(K::Org),
+                            Object(K::Project),
+                            Object(K::Topic),
+                            Object(K::Thread),
+                            Object(K::Document),
+                            Object(K::DocumentContainer),
+                            Object(K::Provider),
+                            Object(K::Agent),
+                            Object(K::Environment),
+                            Object(K::Host),
+                            Object(K::Machine),
+                            Object(K::Template),
+                            Object(K::McpServer),
+                            Object(K::Mount),
+                            Object(K::Skill),
+                        ],
+                        Target::Resolved("page"),
+                    ),
+                ],
+            },
+            Variant {
+                name: "page",
+                selector: "no owner change; changes other page rows, private state, reset or overrides",
+                facets: &[
+                    Facet::required(
+                        Manage,
+                        &[
+                            Object(K::Org),
+                            Object(K::Project),
+                            Object(K::Topic),
+                            Object(K::Thread),
+                            Object(K::Document),
+                            Object(K::DocumentContainer),
+                            Object(K::Provider),
+                            Object(K::Agent),
+                            Object(K::Environment),
+                            Object(K::Host),
+                            Object(K::Machine),
+                            Object(K::Template),
+                            Object(K::McpServer),
+                            Object(K::Mount),
+                            Object(K::Skill),
+                        ],
+                        Target::Resolved("page"),
+                    ),
+                    Facet::response_content(
+                        &[
+                            Object(K::Org),
+                            Object(K::Project),
+                            Object(K::Topic),
+                            Object(K::Thread),
+                            Object(K::Document),
+                            Object(K::DocumentContainer),
+                            Object(K::Provider),
+                            Object(K::Agent),
+                            Object(K::Environment),
+                            Object(K::Host),
+                            Object(K::Machine),
+                            Object(K::Template),
+                            Object(K::McpServer),
+                            Object(K::Mount),
+                            Object(K::Skill),
+                        ],
+                        Target::Resolved("page"),
+                    ),
+                ],
+            },
+            Variant {
+                name: "owners",
+                selector: "contains owner changes, including mixed page changes",
+                facets: &[
+                    Facet::required(
+                        Manage,
+                        &[
+                            Object(K::Org),
+                            Object(K::Project),
+                            Object(K::Topic),
+                            Object(K::Thread),
+                            Object(K::Document),
+                            Object(K::DocumentContainer),
+                            Object(K::Provider),
+                            Object(K::Agent),
+                            Object(K::Environment),
+                            Object(K::Host),
+                            Object(K::Machine),
+                            Object(K::Template),
+                            Object(K::McpServer),
+                            Object(K::Mount),
+                            Object(K::Skill),
+                        ],
+                        Target::Resolved("page"),
+                    ),
+                    Facet::response_content(
+                        &[
+                            Object(K::Org),
+                            Object(K::Project),
+                            Object(K::Topic),
+                            Object(K::Thread),
+                            Object(K::Document),
+                            Object(K::DocumentContainer),
+                            Object(K::Provider),
+                            Object(K::Agent),
+                            Object(K::Environment),
+                            Object(K::Host),
+                            Object(K::Machine),
+                            Object(K::Template),
+                            Object(K::McpServer),
+                            Object(K::Mount),
+                            Object(K::Skill),
+                        ],
+                        Target::Resolved("page"),
+                    ),
+                ],
+            },
+        ]);
     /// Shows what a change to a page would do, with nothing changed.
     PermissionPagePreview: POST "/{object}/{id}/permissions/preview", Permission("access.manage"), none, json PageChange, json PagePreview, 200;
     /// Previews an ordinary holder, role or agent share for a current sharer, without keeping any change.
-    SharePreviewCreate: POST "/{object}/{id}/share/preview", Rule("being able to read and share this thing; the exact write is checked by its ordinary producer"), none, json SharePreviewBody, json SharePreview, 200;
+    SharePreviewCreate: POST "/{object}/{id}/share/preview", Rule("being able to read and share this thing; the exact write is checked by its ordinary producer"), none, json SharePreviewBody, json SharePreview, 200,
+        operation Op::facets(&[
+            Facet::required(Read, &[Object(K::Org), Object(K::Project), Object(K::Topic), Object(K::Thread), Object(K::Document), Object(K::DocumentContainer), Object(K::Provider), Object(K::Agent), Object(K::Environment), Object(K::Host), Object(K::Machine), Object(K::Template), Object(K::McpServer), Object(K::Mount), Object(K::Skill), Identity(I::Chat)], Target::Resolved("preview_source")),
+            Facet::required(Manage, &[Object(K::Org), Object(K::Project), Object(K::Topic), Object(K::Thread), Object(K::Document), Object(K::DocumentContainer), Object(K::Provider), Object(K::Agent), Object(K::Environment), Object(K::Host), Object(K::Machine), Object(K::Template), Object(K::McpServer), Object(K::Mount), Object(K::Skill), Identity(I::Chat)], Target::ResolvedCollection("preview_source_manage")),
+            Facet::required(Read, &[Object(K::Org)], Target::ResolvedCollection("share_recipient_orgs")),
+            Facet::required(Read, &[Object(K::Project)], Target::ResolvedCollection("share_recipient_projects")),
+            Facet::required(Read, &[Object(K::Topic)], Target::ResolvedCollection("share_recipient_topics")),
+            Facet::required(Read, &[Object(K::Thread)], Target::ResolvedCollection("share_recipient_threads")),
+            Facet::required(Write, &[Object(K::Org)], Target::ResolvedCollection("share_control_orgs")),
+            Facet::required(Write, &[Object(K::Project)], Target::ResolvedCollection("share_control_projects")),
+            Facet::required(Write, &[Object(K::Topic)], Target::ResolvedCollection("share_control_topics")),
+            Facet::required(Write, &[Object(K::Thread)], Target::ResolvedCollection("share_control_threads")),
+            Facet::required(Read, &[Object(K::Org)], Target::ResolvedCollection("preview_holder_orgs")),
+            Facet::required(Read, &[Object(K::Project)], Target::ResolvedCollection("preview_holder_projects")),
+            Facet::required(Read, &[Object(K::Topic)], Target::ResolvedCollection("preview_holder_topics")),
+            Facet::required(Read, &[Object(K::Thread)], Target::ResolvedCollection("preview_holder_threads")),
+            Facet::required(Read, &[Object(K::Org)], Target::ResolvedCollection("preview_name_orgs")),
+            Facet::required(Read, &[Object(K::Project)], Target::ResolvedCollection("preview_name_projects")),
+            Facet::required(Read, &[Object(K::Topic)], Target::ResolvedCollection("preview_name_topics")),
+            Facet::required(Read, &[Object(K::Thread)], Target::ResolvedCollection("preview_name_threads")),
+            Facet::required(Read, &[Object(K::Org)], Target::ResolvedCollection("share_name_orgs")),
+            Facet::required(Read, &[Object(K::Project)], Target::ResolvedCollection("share_name_projects")),
+            Facet::required(Read, &[Object(K::Topic)], Target::ResolvedCollection("share_name_topics")),
+            Facet::required(Read, &[Object(K::Thread)], Target::ResolvedCollection("share_name_threads")),
+            Facet::required(Read, &[Identity(I::Group)], Target::ResolvedCollection("preview_groups")),
+            Facet::required(Manage, &[Object(K::Document)], Target::ResolvedCollection("viewer_grant_sources")),
+            Facet::required(Write, &[Object(K::Thread)], Target::ResolvedCollection("snapshot_recipient_threads")),
+            Facet::required(Read, &[Object(K::Org)], Target::ResolvedCollection("snapshot_source_orgs")),
+            Facet::required(Read, &[Object(K::Project)], Target::ResolvedCollection("snapshot_source_projects")),
+            Facet::required(Read, &[Object(K::Topic)], Target::ResolvedCollection("snapshot_source_topics")),
+            Facet::required(Read, &[Object(K::Thread)], Target::ResolvedCollection("snapshot_source_threads")),
+            Facet::required(Read, &[Object(K::Document)], Target::ResolvedCollection("snapshot_source_documents")),
+            Facet::required(Read, &[Object(K::DocumentContainer)], Target::ResolvedCollection("snapshot_source_document_containers")),
+                Facet::required(Read, &[Object(K::Environment)], Target::ResolvedCollection("snapshot_source_environments")),
+            Facet::required(Read, &[Identity(I::Chat)], Target::ResolvedCollection("snapshot_source_chats")),
+        ]);
     /// Reads what one person holds on an object and what gives it to them.
-    EffectiveAccessGet: GET "/{object}/{id}/permissions/effective", Rule("access.manage on the object, or the person themself"), query EffectiveAccessGetQuery, none, json EffectiveAccess, 200;
+    EffectiveAccessGet: GET "/{object}/{id}/permissions/effective", Rule("access.manage on the object, or the person themself"), query EffectiveAccessGetQuery, none, json EffectiveAccess, 200,
+        operation Op::variants(&[
+            Variant {
+                name: "self",
+                selector: "subject is the caller",
+                facets: inspection_facets!(Facet::required(
+                    Read,
+                    &[
+                        Object(K::Org),
+                        Object(K::Project),
+                        Object(K::Topic),
+                        Object(K::Thread),
+                        Object(K::Document),
+                        Object(K::DocumentContainer),
+                        Object(K::Provider),
+                        Object(K::Agent),
+                        Object(K::Environment),
+                        Object(K::Host),
+                        Object(K::Machine),
+                        Object(K::Template),
+                        Object(K::McpServer),
+                        Object(K::Mount),
+                        Object(K::Skill),
+                    ],
+                    Target::Resolved("page"),
+                )),
+            },
+            Variant {
+                name: "inspect",
+                selector: "subject is another account",
+                facets: inspection_facets!(Facet::required(
+                    Manage,
+                    &[
+                        Object(K::Org),
+                        Object(K::Project),
+                        Object(K::Topic),
+                        Object(K::Thread),
+                        Object(K::Document),
+                        Object(K::DocumentContainer),
+                        Object(K::Provider),
+                        Object(K::Agent),
+                        Object(K::Environment),
+                        Object(K::Host),
+                        Object(K::Machine),
+                        Object(K::Template),
+                        Object(K::McpServer),
+                        Object(K::Mount),
+                        Object(K::Skill),
+                    ],
+                    Target::Resolved("page"),
+                )),
+            },
+        ]);
     /// Lists the people behind one holder of a page.
-    PermissionPeopleList: GET "/{object}/{id}/permissions/people", Rule("the same as reading the page"), query PermissionPeopleListQuery, none, json PermissionPeopleListReply, 200;
+    PermissionPeopleList: GET "/{object}/{id}/permissions/people", Rule("the same as reading the page"), query PermissionPeopleListQuery, none, json PermissionPeopleListReply, 200,
+        operation Op::variants(&[
+            Variant {
+                name: "view",
+                selector: "ordinary current viewing authority",
+                facets: &[Facet::required(
+                    Read,
+                    &[
+                        Object(K::Org),
+                        Object(K::Project),
+                        Object(K::Topic),
+                        Object(K::Thread),
+                        Object(K::Document),
+                        Object(K::DocumentContainer),
+                        Object(K::Provider),
+                        Object(K::Agent),
+                        Object(K::Environment),
+                        Object(K::Host),
+                        Object(K::Machine),
+                        Object(K::Template),
+                        Object(K::McpServer),
+                        Object(K::Mount),
+                        Object(K::Skill),
+                    ],
+                    Target::Resolved("page"),
+                )],
+            },
+            Variant {
+                name: "inspect",
+                selector: "current access.manage inspection without content authority",
+                facets: &[Facet::required(
+                    Manage,
+                    &[
+                        Object(K::Org),
+                        Object(K::Project),
+                        Object(K::Topic),
+                        Object(K::Thread),
+                        Object(K::Document),
+                        Object(K::DocumentContainer),
+                        Object(K::Provider),
+                        Object(K::Agent),
+                        Object(K::Environment),
+                        Object(K::Host),
+                        Object(K::Machine),
+                        Object(K::Template),
+                        Object(K::McpServer),
+                        Object(K::Mount),
+                        Object(K::Skill),
+                    ],
+                    Target::Resolved("page"),
+                )],
+            },
+        ]);
     /// Lists what was done to a thing and by whom, newest first.
-    HistoryList: GET "/{object}/{id}/history", Rule("node.view on a node, or any permission on the resource"), query HistoryListQuery, none, json Page<HistoryLine>, 200;
+    HistoryList: GET "/{object}/{id}/history", Rule("node.view on a node, or any permission on the resource"), query HistoryListQuery, none, json Page<HistoryLine>, 200,
+        operation Op::single(
+            Read,
+            &[
+                Object(K::Org),
+                Object(K::Project),
+                Object(K::Topic),
+                Object(K::Thread),
+                Object(K::Document),
+                Object(K::DocumentContainer),
+                Object(K::Provider),
+                Object(K::Agent),
+                Object(K::Environment),
+                Object(K::Host),
+                Object(K::Machine),
+                Object(K::Template),
+                Object(K::McpServer),
+                Object(K::Mount),
+                Object(K::Skill),
+            ],
+            Target::Resolved("page"),
+        );
     /// Reads what a place gives to what is made inside it.
-    NodeDefaultsGet: GET "/nodes/{id}/defaults", Permission("node.view"), none, none, json PermissionPage, 200;
+    NodeDefaultsGet: GET "/nodes/{id}/defaults", Permission("node.view"), none, none, json PermissionPage, 200,
+        operation Op::facets(inspection_facets!(Facet::required(Read,&[Object(K::Org),Object(K::Project),Object(K::Topic),Object(K::Thread)],Target::Resolved("page"))));
     /// Changes what a place gives to what is made inside it.
-    NodeDefaultsUpdate: PATCH "/nodes/{id}/defaults", Permission("access.manage"), none, json PageChange, json PermissionPage, 200;
+    NodeDefaultsUpdate: PATCH "/nodes/{id}/defaults", Permission("access.manage"), none, json PageChange, json PermissionPage, 200,
+        operation Op::returning(
+            Manage,
+            &[
+                Object(K::Org),
+                Object(K::Project),
+                Object(K::Topic),
+                Object(K::Thread),
+            ],
+            Target::PermissionObject,
+        );
     /// Shows how many pages follow the rows a change touches and who gains or loses what on them.
     NodeDefaultsPreview: POST "/nodes/{id}/defaults/preview", Permission("access.manage"), none, json PageChange, json PagePreview, 200;
     /// Asks the owners of up to eight things for access in one batch.
-    AccessRequestCreate: POST "/access-requests", User, none, json AccessRequestCreateBody, json AccessRequestCreateReply, 200;
+    AccessRequestCreate: POST "/access-requests", User, none, json AccessRequestCreateBody, json AccessRequestCreateReply, 200,
+        operation Op::single(
+            Write,
+            &[
+                Object(K::Org),
+                Object(K::Project),
+                Object(K::Topic),
+                Object(K::Thread),
+                Object(K::Document),
+                Object(K::DocumentContainer),
+                Object(K::Provider),
+                Object(K::Agent),
+                Object(K::Environment),
+                Object(K::Host),
+                Object(K::Machine),
+                Object(K::Template),
+                Object(K::McpServer),
+                Object(K::Mount),
+                Object(K::Skill),
+            ],
+            Target::Resolved("requested_objects"),
+        );
     /// Reads where a batch of access requests stands.
-    AccessRequestGet: GET "/access-requests/{batch_id}", Rule("the person who asked"), none, none, json AccessRequestGetReply, 200;
+    AccessRequestGet: GET "/access-requests/{batch_id}", Rule("the person who asked"), none, none, json AccessRequestGetReply, 200,
+        operation Op::single(
+            Read,
+            &[Identity(I::Approval)],
+            Target::Resolved("request_batch"),
+        );
 }
 
 #[cfg(test)]

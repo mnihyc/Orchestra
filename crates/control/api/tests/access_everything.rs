@@ -66,6 +66,8 @@ async fn office() -> Office {
         .send()
         .await
         .ok()
+        .into_full()
+        .unwrap()
         .provider
         .base
         .id;

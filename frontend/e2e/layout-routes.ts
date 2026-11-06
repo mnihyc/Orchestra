@@ -15,7 +15,7 @@ export const ORG_SECTIONS = ['general', 'departments', 'members', 'groups', 'rol
 export const ADMIN_SECTIONS = ['overview', 'users', 'orgs', 'everything', 'sign-in', 'email', 'hosts', 'runtimes', 'templates', 'mcp', 'capabilities', 'harnesses', 'agents', 'plugins', 'defaults', 'rates', 'settings', 'storage', 'semantic-search', 'system', 'pki', 'audit'];
 
 export const SIGNED_IN_ROUTES: LayoutRoute[] = [
-  route('/'), route('/admin'), route('/resources'), route('/settings'), route('/workbench'),
+  route('/'), route('/admin'), route('/resources'), route('/settings'), route('/workbench'), route('/storage'),
   route('/org/$slug', '/org/acme'), route('/org/$slug', '/org/acme.research'), route('/org/$slug', '/org/ada'),
   route('/org/$slug/messages', '/org/acme/messages'),
   route('/chat/$chatId', `/chat/${id(9, 1)}`), route('/place-chat/$nodeId', `/place-chat/${ACME.org}`),
@@ -32,7 +32,7 @@ export const SIGNED_IN_ROUTES: LayoutRoute[] = [
   route('/trace/$nodeId', `/trace/${ACME.mainThread}`), route('/u/$username', '/u/ada'),
   ...['/inbox', '/approvals', '/everything', '/search', '/shared', '/usage', '/help'].map((path) => route(path)),
   route('/help/$article', '/help/finding-things'),
-  ...['profile', 'security', 'tokens', 'notifications', 'interface', 'exports', 'usage', 'your-page'].map((section) => route(`/settings/${section}`)),
+  ...['profile', 'security', 'tokens', 'notifications', 'interface', 'imports', 'exports', 'usage', 'your-page'].map((section) => route(`/settings/${section}`)),
   ...['providers', 'agents', 'environments', 'hosts', 'machines', 'templates', 'mcp', 'mounts', 'skills'].map((kind) => route(`/resources/${kind}`)),
   ...tabs('providers', RUNS_ON.openAiKey, ['overview', 'models', 'key', 'usage', 'settings', 'activity']),
   ...tabs('agents', RUNS_ON.codex, ['overview', 'parameters', 'profile', 'access']),

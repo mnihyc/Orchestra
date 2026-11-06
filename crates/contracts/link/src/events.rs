@@ -883,6 +883,9 @@ pub struct LeaseUsage {
     pub usage: foreign::TokenUsage,
     /// The model service's own name for the request, where it gave one.
     pub request_ref: Option<String>,
+    /// Actual upstream request/report facts, where the forwarder records them. Absent is legacy.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub timing: Option<orch_api_contract::usage::RequestTiming>,
 }
 
 // ---------------------------------------------------------------- environments

@@ -11,6 +11,7 @@ use async_trait::async_trait;
 use orch_api_contract::environment::{MachineEnvironmentCreate, MachineEnvironmentCreateBody};
 use orch_api_contract::nodes::{OrgCreate, OrgCreateBody, ProjectCreate, ProjectCreateBody};
 use orch_api_contract::ports::*;
+use orch_api_contract::surface::HttpSurface;
 use orch_api_core::backplane::{ApplyError, EventApplier};
 use orch_api_core::registry::Registry;
 use orch_api_core::testing::TestApp;
@@ -257,6 +258,8 @@ async fn rules_2_3_6_a_manager_admits_a_colleague_the_connector_stops_starts_and
         .send()
         .await
         .ok()
+        .into_full()
+        .expect("this control expects the ordinary full project response")
         .base
         .id;
     {
@@ -493,7 +496,7 @@ async fn rules_2_3_6_a_manager_admits_a_colleague_the_connector_stops_starts_and
     let mut channel = app
         .cache
         .ports()
-        .open_channel(usage.id, &usage.ticket, outside)
+        .open_channel(usage.id, &usage.ticket, outside, HttpSurface::Browser)
         .await
         .unwrap();
     let inside = channel.inside_peer().unwrap();
@@ -602,7 +605,7 @@ async fn rules_2_3_6_a_manager_admits_a_colleague_the_connector_stops_starts_and
     let mut own_channel = app
         .cache
         .ports()
-        .open_channel(own.id, &own.ticket, manager_peer)
+        .open_channel(own.id, &own.ticket, manager_peer, HttpSurface::Browser)
         .await
         .unwrap();
     let own_closer = own_channel.closer();
@@ -705,7 +708,7 @@ async fn rules_2_3_6_a_manager_admits_a_colleague_the_connector_stops_starts_and
     let udp_channel = app
         .cache
         .ports()
-        .open_channel(udp_use.id, &udp_use.ticket, peer)
+        .open_channel(udp_use.id, &udp_use.ticket, peer, HttpSurface::Browser)
         .await
         .unwrap();
     assert!(
@@ -813,7 +816,7 @@ async fn rules_2_3_6_a_manager_admits_a_colleague_the_connector_stops_starts_and
     let mut after = app
         .cache
         .ports()
-        .open_channel(usage.id, &usage.ticket, after_peer)
+        .open_channel(usage.id, &usage.ticket, after_peer, HttpSurface::Browser)
         .await
         .unwrap();
     let after_closer = after.closer();
@@ -840,7 +843,9 @@ async fn rules_2_3_6_a_manager_admits_a_colleague_the_connector_stops_starts_and
         })
         .send()
         .await
-        .ok();
+        .ok()
+        .into_full()
+        .unwrap();
     assert_eq!(closed.state, PortOpeningState::Closed);
     assert!(after_closer.is_closed());
     ports_support::eventually("a closed peer is no longer an inside identity", || async {

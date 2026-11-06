@@ -533,11 +533,9 @@ async fn every_resource_view_nests_owned_managed_use_and_view_rows_before_pagina
     let world = World::new().await;
     let reader = person(&world, "library-reader").await;
     let giver = person(&world, "library-giver").await;
-    let root = make_org(&world, &reader, "Library", "library")
-        .await
-        .base
-        .id;
-    join(&world, root, root, &giver, "viewer", &reader).await;
+    // The reader must not inherit Interactor from owning this resource home.
+    let root = make_org(&world, &giver, "Library", "library").await.base.id;
+    join(&world, root, root, &reader, "viewer", &giver).await;
     for kind in [
         "provider",
         "agent",
@@ -552,17 +550,11 @@ async fn every_resource_view_nests_owned_managed_use_and_view_rows_before_pagina
         let managed = resource(&world, &giver, root, kind, &format!("managed-{kind}")).await;
         let view = resource(&world, &giver, root, kind, &format!("view-{kind}")).await;
         let prefix = if kind == "mcp_server" { "mcp" } else { kind };
-        let use_row = if kind == "environment" {
-            None
-        } else {
-            Some(resource(&world, &giver, root, kind, &format!("use-{kind}")).await)
-        };
+        // Use is distinct from View for every kind, including environments.
+        let used = resource(&world, &giver, root, kind, &format!("use-{kind}")).await;
         {
             let mut conn = world.conn().await;
-            for (id, level) in [(managed, "manage"), (view, "view")]
-                .into_iter()
-                .chain(use_row.map(|id| (id, "use")))
-            {
+            for (id, level) in [(managed, "manage"), (view, "view"), (used, "use")] {
                 orch_db::queries::access::testing::add_entry(
                     &mut conn,
                     &orch_db::queries::access::PageKey::new(kind, id, "live"),
@@ -579,10 +571,8 @@ async fn every_resource_view_nests_owned_managed_use_and_view_rows_before_pagina
         for (scope, expected) in [
             (ProviderListScope::Mine, vec![own]),
             (ProviderListScope::Managed, vec![own, managed]),
-            (
-                ProviderListScope::Viewable,
-                [vec![own, managed, view], use_row.into_iter().collect()].concat(),
-            ),
+            (ProviderListScope::Viewable, vec![own, managed, used, view]),
+            (ProviderListScope::Usable, vec![own, managed, used]),
         ] {
             let page = read(
                 &world,
@@ -594,26 +584,28 @@ async fn every_resource_view_nests_owned_managed_use_and_view_rows_before_pagina
                 },
             )
             .await;
+            if kind == "environment" && scope == ProviderListScope::Viewable {
+                let view_id = view.to_string();
+                let row = page.items.iter().find(|row| row.id == view_id).unwrap();
+                let Some(EverythingResource::Environment(environment)) = row.resource.as_ref()
+                else {
+                    panic!("the View-only environment has its readable resource projection");
+                };
+                let permissions = &environment.access.permissions;
+                assert!(permissions.iter().any(|p| p == "environment.view"));
+                assert!(
+                    !permissions
+                        .iter()
+                        .any(|p| p == "environment.use" || p == "environment.manage"),
+                    "View-only fixture must not inherit Use or Manage: {permissions:?}"
+                );
+            }
             let got: std::collections::HashSet<_> = page.items.into_iter().map(|r| r.id).collect();
             assert_eq!(
                 got,
                 expected.into_iter().map(|id| id.to_string()).collect(),
                 "{kind} {scope:?}"
             );
-        }
-        if let Some(used) = use_row {
-            let page = read(
-                &world,
-                &reader,
-                &EverythingListQuery {
-                    resource_view: Some(ProviderListScope::Usable),
-                    limit: Some(50),
-                    ..query(kind)
-                },
-            )
-            .await;
-            assert_eq!(page.items.len(), 3, "{kind}: mine, managed and use");
-            assert!(page.items.iter().any(|r| r.id == used.to_string()));
         }
     }
 }

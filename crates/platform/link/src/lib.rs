@@ -44,6 +44,10 @@
 pub mod commands;
 pub mod content;
 pub mod controller;
+#[cfg_attr(
+    not(feature = "test-observers"),
+    doc = "Normal builds omit the observer module:\n```compile_fail\nuse orch_link::test_observers::Recording;\n```"
+)]
 pub mod framing;
 pub mod journal;
 pub mod machine;
@@ -53,5 +57,7 @@ pub mod reconnect;
 pub mod session;
 pub mod spool;
 pub mod streams;
+#[cfg(feature = "test-observers")]
+pub mod test_observers;
 pub mod tunnels;
 pub mod websocket;

@@ -59,6 +59,9 @@ struct Call {
     provider_id: Id,
     person_id: Option<Id>,
     model_name: String,
+    /// Transient original request fact; recovery reads it from the retained command.
+    #[sqlx(default)]
+    protocol: Option<String>,
     created_at: chrono::DateTime<chrono::Utc>,
 }
 
@@ -69,12 +72,34 @@ async fn counted(
     answer: &ProviderCompleteResult,
 ) -> Result<(), EngineError> {
     let tokens: TokenUsage = answer.usage;
+    let mut timing = answer.timing.clone();
+    let mut protocol = call.protocol.clone();
+    if (timing.requested_service_tier.is_none() || protocol.is_none())
+        && let Some(retained) = orch_db::queries::link::command(conn, call.id).await?
+    {
+        if retained.kind != "provider.complete" {
+            return Err(EngineError::unreadable("a summary command changed kind"));
+        }
+        let request: ProviderComplete = serde_json::from_value(retained.body)
+            .map_err(|_| EngineError::unreadable("a summary command body is unreadable"))?;
+        if request.provider_id != call.provider_id || request.model_name != call.model_name {
+            return Err(EngineError::unreadable(
+                "a summary command changed its model source",
+            ));
+        }
+        if timing.requested_service_tier.is_none() {
+            timing.requested_service_tier = request.params.as_ref().and_then(|params| {
+                orch_model_contract::parameters::requested_service_tier(&request.protocol, params)
+            });
+        }
+        protocol = Some(request.protocol);
+    }
     engine
         .count_own_use(
             conn,
             &OwnUse {
                 purpose: crate::turns::OwnPurpose::Summary,
-                timing: Some(&answer.timing),
+                timing: Some(&timing),
                 id: call.id,
                 at: answer.timing.end.map_or(call.created_at, |at| at.get()),
                 topic: call.topic_id,
@@ -83,6 +108,7 @@ async fn counted(
                 entry: None,
                 person: call.person_id,
                 model: &call.model_name,
+                protocol: protocol.as_deref(),
                 tokens: orch_db::usage::ledger::Tokens {
                     input: tokens.input_tokens,
                     cached_input: tokens.cached_input_tokens,
@@ -120,6 +146,21 @@ async fn count_failed(
     let request: orch_agent_contract::requests::UsageRequest = serde_json::from_value(raw.clone())
         .map_err(|error| EngineError::unreadable(error.to_string()))?;
     request.check().map_err(EngineError::unreadable)?;
+    let mut timing = request.measured();
+    timing.requested_service_tier = raw
+        .get("requested_service_tier")
+        .and_then(Json::as_str)
+        .map(str::to_owned);
+    if let Some(value) = raw.get("reported_service_tier") {
+        timing.reported_service_tier =
+            value
+                .as_str()
+                .map_or(orch_api_contract::usage::UsageMeasurement::Empty, |value| {
+                    orch_api_contract::usage::UsageMeasurement::Told {
+                        value: value.to_owned(),
+                    }
+                });
+    }
     counted(
         engine,
         conn,
@@ -128,7 +169,7 @@ async fn count_failed(
             text: String::new(),
             usage: request.tokens.clone().usage(),
             request_ref: None,
-            timing: request.measured(),
+            timing,
         },
     )
     .await
@@ -301,6 +342,7 @@ impl Host {
                 ));
             }
             request.protocol = original.protocol;
+            request.params = original.params;
         }
         let mut tx = self.engine.db().begin().await.map_err(internal)?;
         // A revocation committed while this runs refuses its commit; no epoch row is held meanwhile.
@@ -370,13 +412,43 @@ impl Host {
             .filter(|provider| {
                 !provider.protocols.is_empty()
                     && provider.deleted_at.is_none()
-                    && provider.status == "ready"
+                    && crate::providers::request_status_available(&provider.status)
             })
             .ok_or_else(|| {
                 SummarizeError::Skipped(
-                    "the summarizer needs a ready provider with forwarded access".to_owned(),
+                    "the summarizer needs an available provider with forwarded access".to_owned(),
                 )
             })?;
+        if request.protocol.is_empty() {
+            request.protocol = provider.protocols.first().cloned().ok_or_else(|| {
+                SummarizeError::Skipped("the API provider offers no protocol".to_owned())
+            })?;
+        }
+        let model = resources::model(&mut tx, provider.id, &request.model_name)
+            .await
+            .map_err(internal)?
+            .filter(|model| model.enabled)
+            .ok_or_else(|| {
+                SummarizeError::Skipped("the selected model is not offered".to_owned())
+            })?;
+        if !already_issued {
+            let parameters: orch_provider_contract::models::ModelParameters =
+                serde_json::from_value(model.parameters.clone()).map_err(internal)?;
+            // Internal request configuration, not response content or a new provider-read door.
+            let endpoint =
+                resources::provider_request_defaults(&mut tx, provider.id, &request.protocol)
+                    .await
+                    .map_err(internal)?;
+            let selected = request.params.clone().unwrap_or_else(|| json!({}));
+            let params = orch_model_contract::parameters::resolve(
+                &request.protocol,
+                &parameters,
+                &endpoint,
+                &selected,
+            )
+            .map_err(|reason| SummarizeError::Skipped(reason.to_owned()))?;
+            request.params = Some(params);
+        }
         let allowed = self
             .engine
             .inner
@@ -412,13 +484,6 @@ impl Host {
                 "the setting writer may not use this provider or model here".to_owned(),
             ));
         }
-        let model = resources::model(&mut tx, provider.id, &request.model_name)
-            .await
-            .map_err(internal)?
-            .filter(|model| model.enabled)
-            .ok_or_else(|| {
-                SummarizeError::Skipped("the selected model is not offered".to_owned())
-            })?;
         if request
             .params
             .as_ref()
@@ -438,21 +503,25 @@ impl Host {
                 "the selected model is not allowed here".to_owned(),
             ));
         }
+        let requested_tier = request.params.as_ref().and_then(|params| {
+            orch_model_contract::parameters::requested_tier_for_caps(&request.protocol, params)
+        });
         if !already_issued
             && !self
                 .engine
-                .room_for_summary(&mut tx, node, provider.id, &request.model_name)
+                .room_for_summary_with_tier(
+                    &mut tx,
+                    node,
+                    provider.id,
+                    &request.model_name,
+                    requested_tier.as_deref(),
+                )
                 .await
                 .map_err(internal)?
         {
             return Err(SummarizeError::Skipped(
                 "a shared usage cap has no room for summaries".to_owned(),
             ));
-        }
-        if request.protocol.is_empty() {
-            request.protocol = provider.protocols.first().cloned().ok_or_else(|| {
-                SummarizeError::Skipped("the API provider offers no protocol".to_owned())
-            })?;
         }
         let machine = provider.key_machine_id.ok_or_else(|| {
             SummarizeError::Skipped(
@@ -519,6 +588,7 @@ impl Host {
             provider_id: provider.id,
             person_id: Some(writer),
             model_name: request.model_name.clone(),
+            protocol: Some(request.protocol.clone()),
             created_at: self.engine.inner.clock.now(),
         };
         sqlx::query("INSERT INTO summary_calls (id,node_id,topic_id,thread_id,provider_id,person_id,model_name,created_at,agent_id,environment_id) VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10) ON CONFLICT(id) DO NOTHING")
@@ -855,7 +925,7 @@ impl Complete for Host {
             {
                 Some("candidate_parameters")
             } else if target.as_ref().is_none_or(|target| {
-                target.status != "ready"
+                !crate::providers::request_status_available(&target.status)
                     || target.deleted_at.is_some()
                     || target.protocols.is_empty()
             }) || model.is_none()

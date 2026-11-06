@@ -185,7 +185,7 @@ pub struct NewEvent<'a> {
 /// Writes a use. The answer is whether this call wrote it: a use whose identifier is in the ledger is left as
 /// it is.
 pub async fn record(conn: &mut Conn, event: &NewEvent<'_>) -> Result<bool, DbError> {
-    record_as(conn, event, purpose::TURN, None, None).await
+    record_as(conn, event, purpose::TURN, None, None, None).await
 }
 
 /// Records a measured request, or keeps its provisional running observation until completion.
@@ -194,7 +194,7 @@ pub async fn record_measured(
     event: &NewEvent<'_>,
     timing: &orch_api_contract::usage::RequestTiming,
 ) -> Result<bool, DbError> {
-    record_as(conn, event, purpose::TURN, Some(timing), None).await
+    record_as(conn, event, purpose::TURN, Some(timing), None, None).await
 }
 
 /// The engine resolves programme roles from any adapter's parameter declarations.
@@ -204,12 +204,97 @@ pub async fn record_program(
     timing: Option<&orch_api_contract::usage::RequestTiming>,
     program: Option<&str>,
 ) -> Result<bool, DbError> {
-    record_as(conn, event, purpose::TURN, timing, program).await
+    record_as(conn, event, purpose::TURN, timing, program, None).await
+}
+
+/// Records forwarder usage only after the engine has verified the lease's provider and attribution.
+/// The linkage lives privately in the existing envelope, never in the public timing projection.
+pub async fn record_lease_program(
+    conn: &mut Conn,
+    event: &NewEvent<'_>,
+    timing: Option<&orch_api_contract::usage::RequestTiming>,
+    program: Option<&str>,
+    lease: Id,
+) -> Result<bool, DbError> {
+    record_as(conn, event, purpose::TURN, timing, program, Some(lease)).await
+}
+
+/// Retains only the received factual close aggregates beside the canonical cut.
+/// This runs in the cut's transaction; replay cannot replace the first snapshot.
+/// Public RequestTiming decoding deliberately ignores the private member.
+pub async fn retain_lease_close_snapshot(
+    conn: &mut Conn,
+    event: Id,
+    lease: Id,
+    usage: Option<&orch_link_contract::foreign::TokenUsage>,
+    groups: &[orch_link_contract::commands::LeaseUsageGroup],
+) -> Result<bool, DbError> {
+    #[derive(serde::Serialize)]
+    struct Facts<'a> {
+        wire_protocol: Option<&'a str>,
+        requested_service_tier: Option<&'a str>,
+        reported_service_tier: &'a orch_api_contract::usage::UsageMeasurement<String>,
+    }
+    #[derive(serde::Serialize)]
+    struct Group<'a> {
+        model: &'a str,
+        usage: &'a orch_link_contract::foreign::TokenUsage,
+        requests: i64,
+        min_context_tokens: i64,
+        max_context_tokens: i64,
+        timing: Facts<'a>,
+    }
+    #[derive(serde::Serialize)]
+    struct Snapshot<'a> {
+        usage: Option<&'a orch_link_contract::foreign::TokenUsage>,
+        usage_groups: Vec<Group<'a>>,
+    }
+    let mut ordered = groups
+        .iter()
+        .map(|group| {
+            serde_json::to_string(&group.key())
+                .map(|key| (key, group))
+                .map_err(|error| DbError::from(sqlx::Error::Decode(Box::new(error))))
+        })
+        .collect::<Result<Vec<_>, _>>()?;
+    ordered.sort_by(|a, b| a.0.cmp(&b.0));
+    let snapshot = Snapshot {
+        usage,
+        usage_groups: ordered
+            .into_iter()
+            .map(|(_, group)| Group {
+                model: &group.model,
+                usage: &group.usage,
+                requests: group.requests,
+                min_context_tokens: group.min_context_tokens,
+                max_context_tokens: group.max_context_tokens,
+                timing: Facts {
+                    wire_protocol: group.timing.wire_protocol.as_deref(),
+                    requested_service_tier: group.timing.requested_service_tier.as_deref(),
+                    reported_service_tier: &group.timing.reported_service_tier,
+                },
+            })
+            .collect(),
+    };
+    let snapshot = serde_json::to_value(snapshot)
+        .map_err(|error| DbError::from(sqlx::Error::Decode(Box::new(error))))?;
+    let done = sqlx::query(
+        "UPDATE usage_events SET measurement_states=measurement_states || jsonb_build_object('_lease_close_snapshot',$3::jsonb)
+          WHERE id=$1 AND measurement_states->>'_lease_id'=$2
+            AND origin='forwarder' AND purpose='turn' AND scope='request' AND counted
+            AND request_ref='lease.close' AND NOT (measurement_states ? '_lease_close_snapshot')",
+    )
+    .bind(event)
+    .bind(lease.to_string())
+    .bind(snapshot)
+    .execute(conn)
+    .await?;
+    Ok(done.rows_affected() == 1)
 }
 
 /// Records native permission-review use with its own model, without changing the turn's model total.
 pub async fn record_review(conn: &mut Conn, event: &NewEvent<'_>) -> Result<bool, DbError> {
-    record_as(conn, event, purpose::REVIEW, None, None).await
+    record_as(conn, event, purpose::REVIEW, None, None, None).await
 }
 
 async fn record_as(
@@ -218,6 +303,7 @@ async fn record_as(
     purpose: &str,
     timing: Option<&orch_api_contract::usage::RequestTiming>,
     program: Option<&str>,
+    lease: Option<Id>,
 ) -> Result<bool, DbError> {
     let attribution = event.attribution;
     let running = timing.is_some_and(|t| {
@@ -240,6 +326,10 @@ async fn record_as(
     } else {
         "DO NOTHING"
     };
+    let mut states = serde_json::to_value(timing.cloned().unwrap_or_default()).unwrap_or_default();
+    if let (Some(lease), Some(states)) = (lease, states.as_object_mut()) {
+        states.insert("_lease_id".to_owned(), Json::String(lease.to_string()));
+    }
     let done = sqlx::query(sqlx::AssertSqlSafe(format!(
         "INSERT INTO {table} (id, at, origin, purpose, scope, counted, org_id, project_id, topic_id,
                 thread_id, segment_id, turn_id, provider_id, entry_id, user_id, agent_id, harness_kind,
@@ -291,7 +381,7 @@ async fn record_as(
     .bind(timing.and_then(|t| t.request_ms.value()).copied().filter(|n| *n >= 0))
     .bind(timing.and_then(|t| t.outcome.value()).map(String::as_str))
     .bind(program)
-    .bind(serde_json::to_value(timing.cloned().unwrap_or_default()).unwrap_or_default())
+    .bind(states)
     .bind(timing.and_then(|t| t.streamed_tokens.value()).copied())
     .bind(timing.and_then(|t| t.speed_milli.value()).copied())
     .execute(&mut *conn)
@@ -546,6 +636,126 @@ pub async fn counted_request_totals(conn: &mut Conn, turn: Id) -> Result<Tokens,
     counted_request_sum(conn, turn).await
 }
 
+/// Already counted forwarder usage whose lease the engine verified when recording it.
+/// Grouping happens in the database; no completed-request history is retained by a lease.
+#[derive(Debug, Default)]
+pub struct CountedLeaseUsage {
+    /// Inclusive totals, including rows without actual tier facts.
+    pub totals: Tokens,
+    /// Totals with the same factual identity as a connector close group.
+    pub groups: std::collections::HashMap<orch_link_contract::commands::LeaseUsageGroupKey, Tokens>,
+    /// Verified-lease usage without comparable actual request/report facts.
+    pub unassigned: Tokens,
+    /// Old same-provider/model forwarder totals whose sole forwarded lease can still be proved.
+    /// These prove aggregate ownership, never membership in a factual close group.
+    pub legacy: Tokens,
+    /// Unlinked legacy rows whose lease cannot be proved from retained history.
+    pub legacy_ambiguous: bool,
+}
+
+/// Reads only this verified lease's counted request groups, bounded by the existing turn index.
+/// Historical rows without the private linkage are not assigned to an inferred lease.
+pub async fn counted_lease_usage(
+    conn: &mut Conn,
+    turn: Id,
+    lease: Id,
+    provider: Id,
+    model: &str,
+) -> Result<CountedLeaseUsage, DbError> {
+    #[derive(sqlx::FromRow)]
+    struct Group {
+        model: String,
+        timing: Json,
+        #[sqlx(flatten)]
+        tokens: Tokens,
+    }
+    let rows: Vec<Group> = sqlx::query_as(
+        "SELECT model,
+                jsonb_build_object('wire_protocol',measurement_states->'wire_protocol',
+                    'requested_service_tier',measurement_states->'requested_service_tier',
+                    'reported_service_tier',COALESCE(measurement_states->'reported_service_tier','{\"state\":\"unsupported\"}'::jsonb)) AS timing,
+                sum(input_tokens)::bigint AS input, sum(cached_input_tokens)::bigint AS cached_input,
+                sum(cache_write_tokens)::bigint AS cache_write, sum(output_tokens)::bigint AS output,
+                sum(reasoning_tokens)::bigint AS reasoning, sum(total_tokens)::bigint AS total
+           FROM usage_events
+          WHERE turn_id=$1 AND measurement_states->>'_lease_id'=$2
+            AND origin='forwarder' AND scope='request' AND counted AND purpose='turn'
+          GROUP BY model,measurement_states->'wire_protocol',measurement_states->'requested_service_tier',
+                   measurement_states->'reported_service_tier'",
+    )
+    .bind(turn)
+    .bind(lease.to_string())
+    .fetch_all(&mut *conn)
+    .await?;
+    let mut counted = CountedLeaseUsage::default();
+    for row in rows {
+        let timing: orch_api_contract::usage::RequestTiming = serde_json::from_value(row.timing)
+            .map_err(|error| DbError::from(sqlx::Error::Decode(Box::new(error))))?;
+        let key = orch_link_contract::commands::LeaseUsageGroupKey::of(&row.model, &timing);
+        let add = |sum: &mut Tokens| {
+            sum.input += row.tokens.input;
+            sum.cached_input += row.tokens.cached_input;
+            sum.cache_write += row.tokens.cache_write;
+            sum.output += row.tokens.output;
+            sum.reasoning += row.tokens.reasoning;
+            sum.total += row.tokens.total;
+        };
+        add(&mut counted.totals);
+        if key.wire_protocol.is_some()
+            || key.requested_service_tier.is_some()
+            || key.reported_service_tier != orch_api_contract::usage::UsageMeasurement::Unsupported
+        {
+            add(counted.groups.entry(key).or_default());
+        } else {
+            add(&mut counted.unassigned);
+        }
+    }
+    // Forwarded leases have no recipient (the leases_forwarded_recipient constraint).
+    // Their only deletion paths collect their thread or provider as well; unlike shared
+    // leases, machine collection cannot prune them. A present current forwarded lease,
+    // provider and thread therefore retain the relevant same-provider forwarded history.
+    let sole_forwarded: bool = sqlx::query_scalar(
+        "SELECT EXISTS(SELECT 1 FROM leases l JOIN providers p ON p.id=l.provider_id
+                       JOIN threads th ON th.node_id=l.thread_id
+                       WHERE l.id=$2 AND l.turn_id=$1 AND l.provider_id=$3 AND l.mode='forwarded'
+                         AND NOT EXISTS(SELECT 1 FROM leases sibling
+                             WHERE sibling.turn_id=$1 AND sibling.provider_id=$3
+                               AND sibling.mode='forwarded' AND sibling.id<>l.id))",
+    )
+    .bind(turn)
+    .bind(lease)
+    .bind(provider)
+    .fetch_one(&mut *conn)
+    .await?;
+    #[derive(sqlx::FromRow)]
+    struct Legacy {
+        provider_id: Id,
+        model: String,
+        #[sqlx(flatten)]
+        tokens: Tokens,
+    }
+    let legacy: Vec<Legacy> = sqlx::query_as(
+        "SELECT provider_id,model,sum(input_tokens)::bigint AS input,
+                sum(cached_input_tokens)::bigint AS cached_input,sum(cache_write_tokens)::bigint AS cache_write,
+                sum(output_tokens)::bigint AS output,sum(reasoning_tokens)::bigint AS reasoning,
+                sum(total_tokens)::bigint AS total
+           FROM usage_events WHERE turn_id=$1 AND NOT (measurement_states ? '_lease_id')
+             AND origin='forwarder' AND scope='request' AND counted AND purpose='turn'
+          GROUP BY provider_id,model",
+    )
+    .bind(turn)
+    .fetch_all(conn)
+    .await?;
+    for row in legacy {
+        if sole_forwarded && row.provider_id == provider && row.model == model {
+            counted.legacy = row.tokens;
+        } else if row.tokens != Tokens::default() {
+            counted.legacy_ambiguous = true;
+        }
+    }
+    Ok(counted)
+}
+
 /// Whether the ledger has the row `id`.
 pub async fn event_exists(conn: &mut Conn, id: Id) -> Result<bool, DbError> {
     Ok(
@@ -734,6 +944,7 @@ async fn list_live_inner(
         query.push(" AND d.running");
     }
     rollup::push_filter(&mut query, &filter);
+    rollup::push_tier_filter(&mut query, &filter, false);
     if requests_only {
         // Forwarder rows remain the token ledger, while adapter rows alone define
         // request performance for every provider kind. Legacy turns remain visible.

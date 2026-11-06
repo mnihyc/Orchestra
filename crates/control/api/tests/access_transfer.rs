@@ -72,6 +72,8 @@ async fn provider_of(firm: &Firm, by: &Who) -> Id {
         .send()
         .await
         .ok()
+        .into_full()
+        .unwrap()
         .provider
         .base
         .id

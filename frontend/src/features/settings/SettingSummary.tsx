@@ -20,6 +20,7 @@ import { useHarnessNames } from '@/features/resources/harnesses';
 import { CurrentDetailPage } from '@/features/resources/CurrentDetailPage';
 import { ErrorState } from '@/ui/ErrorState';
 import { StateLine } from '@/ui/StateLine';
+import { AGENT_ACCESS_SETTING, AgentAccessSummary, agentAccessValue } from '@/features/access/AgentAccessChoice';
 
 export function emptySettingValue(value: unknown): boolean {
   return value === null || value === undefined || value === '' || (typeof value === 'object' && Object.keys(value).length === 0);
@@ -57,6 +58,10 @@ export function SettingSummary({ value, def, inControl = false, example = false 
   const locale=i18n.resolvedLanguage??'en';
   const display=numericSettingDisplay(def);
   const number=(value:number)=>display===null ? formatNumber(value,locale) : numericSettingText(value,display,locale,t);
+  if (def.key === AGENT_ACCESS_SETTING) {
+    const choice = agentAccessValue(value);
+    if (choice !== null) return <AgentAccessSummary value={choice} />;
+  }
   if (def.key === PROGRAM_VERSIONS_KEY && typeof value === 'object' && value !== null && !Array.isArray(value)) {
     return <ProgramPolicySummary value={value} />;
   }

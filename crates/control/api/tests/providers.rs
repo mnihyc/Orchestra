@@ -82,6 +82,8 @@ async fn a_key_can_be_added_after_creation_without_treating_an_absent_key_as_no_
         .send()
         .await
         .ok()
+        .into_full()
+        .unwrap()
         .provider;
     let shown = serde_json::to_value(&made).unwrap();
     assert_eq!(shown["status"], "needs_setup");
@@ -393,6 +395,8 @@ async fn a_runtime_home_uses_the_physical_machines_roots_and_the_provider_manage
         .send()
         .await
         .ok()
+        .into_full()
+        .expect("a full provider reply")
         .provider;
     assert_eq!(changed.runtime_config["runtime.home"], chosen);
     let support = changed.runtime_support.unwrap();
@@ -473,7 +477,7 @@ async fn provider_managers_can_keep_commands_but_only_owners_can_add_replace_or_
     assert_eq!(refused.extra["required"], "owner");
     let owned=world.app.call(ProviderUpdate,&[&id]).token(&c.boss.token)
         .body(&body(made.revision,json!({"runtime.after_up":commands.clone(),"runtime.storage":{"state":"fast"},"runtime.needs":{"memory_mb":512}})))
-        .send().await.ok().provider;
+        .send().await.ok().into_full().expect("a full provider reply").provider;
     assert_eq!(owned.runtime_config["runtime.after_up"], commands);
     for config in [
         json!({}),
@@ -502,6 +506,8 @@ async fn provider_managers_can_keep_commands_but_only_owners_can_add_replace_or_
         .send()
         .await
         .ok()
+        .into_full()
+        .expect("a full provider reply")
         .provider;
     assert_eq!(
         managed.runtime_config["runtime.resources"]["memory_mb"],
@@ -515,6 +521,8 @@ async fn provider_managers_can_keep_commands_but_only_owners_can_add_replace_or_
         .send()
         .await
         .ok()
+        .into_full()
+        .expect("a full provider reply")
         .provider;
     assert!(cleared.runtime_config.get("runtime.after_up").is_none());
 }
@@ -618,7 +626,94 @@ async fn make(world: &World, by: &Who, body: &CreateProvider) -> Provider {
         .send()
         .await
         .ok()
+        .into_full()
+        .unwrap()
         .provider
+}
+
+#[tokio::test]
+async fn legacy_manage_only_reads_provider_metadata_without_gaining_view_or_secret_values() {
+    use orch_access_contract::permissions::Permission;
+    use orch_api_core::middleware::authentication::{API_TOKEN_PREFIX, new_token, token_hash};
+    use orch_db::queries::identity::{NewApiToken, create_api_token};
+    const FACT: &str = "provider-view-only-private-fact";
+    let world = world().await;
+    let c = company(&world).await;
+    let provider = make(&world, &c.boss, &api_body("Legacy metadata reader", c.acme)).await;
+    let facts = orch_api_contract::resources::ProviderFacts {
+        identity: Some(FACT.into()),
+        plan: Some(FACT.into()),
+        ..Default::default()
+    };
+    sqlx::query("UPDATE providers SET facts=$2 WHERE id=$1")
+        .bind(provider.base.id)
+        .bind(serde_json::to_value(facts).unwrap())
+        .execute(&world.db.pool)
+        .await
+        .unwrap();
+    let browser = world
+        .app
+        .call(ProviderGet, &[&provider.base.id])
+        .token(&c.boss.token)
+        .send_bytes()
+        .await;
+    assert_eq!(
+        browser.status.as_u16(),
+        200,
+        "{}",
+        String::from_utf8_lossy(&browser.raw)
+    );
+    assert!(
+        String::from_utf8_lossy(&browser.raw).contains(FACT),
+        "ordinary View can really read the seeded facts"
+    );
+    let scopes = vec!["provider.manage".to_owned()];
+    let grant = orch_authz::TokenGrant::from_stored(&scopes, None).unwrap();
+    assert!(grant.carries(Permission::ProviderManage));
+    assert!(
+        !grant.carries(Permission::ProviderView),
+        "the fixture delegates no View permission"
+    );
+    let token = new_token(API_TOKEN_PREFIX);
+    create_api_token(
+        &mut *world.conn().await,
+        &NewApiToken {
+            id: orch_types::new_id(),
+            user_id: c.boss.id(),
+            name: "Legacy metadata management",
+            token_hash: &token_hash(&token),
+            scopes: &scopes,
+            node_id: None,
+            at: world.now(),
+            expires_at: None,
+        },
+    )
+    .await
+    .unwrap();
+    let reply = world
+        .app
+        .call(ProviderGet, &[&provider.base.id])
+        .token(&token)
+        .send_bytes()
+        .await;
+    assert_eq!(
+        reply.status.as_u16(),
+        200,
+        "legacy any-held metadata contract: {}",
+        String::from_utf8_lossy(&reply.raw)
+    );
+    let data: Json = serde_json::from_slice(&reply.raw).unwrap();
+    assert_eq!(data["id"], json!(provider.base.id));
+    assert_eq!(data["name"], "Legacy metadata reader");
+    let permissions = data["access"]["permissions"].as_array().unwrap();
+    assert!(permissions.contains(&json!("provider.manage")));
+    assert!(!permissions.contains(&json!("provider.view")));
+    assert!(data["facts"]["identity"].is_null());
+    assert!(data["facts"]["plan"].is_null());
+    let raw = String::from_utf8_lossy(&reply.raw);
+    assert!(!raw.contains(FACT));
+    assert!(!raw.contains(KEY));
+    assert!(!raw.contains(GATEWAY_SECRET));
 }
 
 async fn names(world: &World, by: &Who, scope: Option<ProviderListScope>) -> Vec<String> {
@@ -687,7 +782,7 @@ async fn runtime_variables_and_secret_names_are_editable_but_the_sealed_value_is
         let updated = world.app.call(ProviderUpdate, &[&made.base.id]).token(&c.boss.token)
         .body(&ProviderUpdateBody { name:None,upstreams:None,config:None,arrangements:None,expected_revision:made.revision,
             runtime_config:Some(json!({"runtime.variables":{"REGION":"east"},"runtime.secret_names":["SERVICE_TOKEN"]})) })
-        .send().await.ok().provider;
+        .send().await.ok().into_full().expect("a full provider reply").provider;
         assert_eq!(
             updated.runtime_config["runtime.variables"]["REGION"],
             "east"
@@ -755,7 +850,7 @@ async fn a_member_makes_a_provider_on_a_key_that_is_sealed_and_theirs_alone() {
         .send()
         .await;
     let raw = String::from_utf8_lossy(&reply.raw).into_owned();
-    let made = reply.ok();
+    let made = reply.ok().into_full().unwrap();
     assert!(!raw.contains(KEY) && !raw.contains(GATEWAY_SECRET), "{raw}");
     let provider = made.provider;
     assert_eq!(provider.base.name, "Team key");
@@ -1286,7 +1381,9 @@ async fn http_is_taken_where_the_policy_says_so_and_the_reply_warns_that_the_key
         .body(&body)
         .send()
         .await
-        .ok();
+        .ok()
+        .into_full()
+        .unwrap();
     assert!(made.warning.unwrap().contains("clear"));
 }
 
@@ -1576,7 +1673,9 @@ async fn a_provider_is_changed_by_whoever_manages_it_and_a_change_against_an_old
         .body(&change(1))
         .send()
         .await
-        .ok();
+        .ok()
+        .into_full()
+        .expect("a full provider reply");
     assert_eq!(changed.provider.base.name, "Renamed");
     assert_eq!(
         changed.provider.protocols,
@@ -1661,7 +1760,9 @@ async fn the_secret_header_of_an_endpoint_that_goes_is_forgotten_with_it() {
         })
         .send()
         .await
-        .ok();
+        .ok()
+        .into_full()
+        .expect("a full provider reply");
     assert!(changed.provider.secrets_set.is_empty());
     assert!(changed.provider.key_set, "the key stays");
     let left: Vec<String> = sqlx::query_scalar(

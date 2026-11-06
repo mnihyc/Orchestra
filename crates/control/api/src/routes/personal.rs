@@ -322,7 +322,8 @@ pub(crate) async fn subscriptions_for(
 /// What the caller's interface remembers for them.
 async fn state_get(ctx: Ctx, (): (), (): ()) -> ApiResult<PersonalState> {
     let mut conn = ctx.app.db.acquire().await?;
-    Ok(identity::interface_state(&mut conn, ctx.user()?.id())
+    let principal = ctx.operation_principal(&mut conn).await?;
+    Ok(identity::interface_state(&mut conn, principal.user())
         .await?
         .into_iter()
         .collect())
@@ -434,9 +435,9 @@ async fn project_view_set(ctx: Ctx, (): (), body: ProjectView) -> ApiResult<()> 
 /// for a place one can no longer see is one's own to clear.
 async fn project_view_delete(ctx: Ctx, (): (), (): ()) -> ApiResult<()> {
     let project = ctx.id("project_id")?;
-    let mut conn = ctx.app.db.begin().await?;
-    let user = ctx.user()?.id();
-    identity::delete_project_view(&mut conn, user, project, ctx.now).await?;
+    let (mut conn, guard) = transaction_guard::begin(&ctx).await?;
+    let user = guard.principal().user();
+    identity::delete_project_view(&mut conn, user, project, guard.now().get()).await?;
     orch_db::sequences::notify_user_event(
         &mut conn,
         &[user],

@@ -8,6 +8,7 @@
 mod desk;
 mod places;
 mod support;
+use support::FullApprovalReply;
 
 use chrono::Duration;
 use desk::Desk;
@@ -186,6 +187,7 @@ async fn decide(
         .body(&ApprovalDecision::Access(decision))
         .send()
         .await
+        .full_approval()
 }
 
 async fn waiting_for(firm: &Firm, by: &Who, all: bool) -> Vec<Id> {
@@ -713,6 +715,8 @@ async fn an_approver_may_give_fewer_permissions_narrower_options_and_an_end() {
         .send()
         .await
         .ok()
+        .into_full()
+        .unwrap()
         .provider
         .base
         .id;
@@ -1082,6 +1086,7 @@ async fn a_person_may_have_only_so_many_batches_waiting_and_a_batch_counts_once(
         .token(&firm.rae.token)
         .send()
         .await
+        .full_approval()
         .ok();
     let still = ask(
         &firm,
@@ -1102,6 +1107,7 @@ async fn a_person_may_have_only_so_many_batches_waiting_and_a_batch_counts_once(
         .token(&firm.rae.token)
         .send()
         .await
+        .full_approval()
         .ok();
     ask(
         &firm,
@@ -1310,6 +1316,7 @@ async fn nobody_decides_their_own_request_and_the_work_in_a_place_is_asked_for_o
         .token(&firm.rae.token)
         .send()
         .await
+        .full_approval()
         .ok();
     assert_eq!(withdrawn.state, ApprovalState::Cancelled);
     let mut work = item("project", firm.project, &["project.interact"]);
@@ -1361,6 +1368,7 @@ async fn a_request_taken_back_is_read_by_those_it_was_sent_to_and_cannot_be_deci
         .token(&firm.rae.token)
         .send()
         .await
+        .full_approval()
         .ok();
     assert_eq!(back.state, ApprovalState::Cancelled);
     let late = decide(&firm, &firm.pam, approval.id, approve())
@@ -1501,6 +1509,7 @@ async fn nobody_who_is_not_signed_in_asks_reads_or_decides() {
         .body(&ApprovalDecision::Access(approve()))
         .send()
         .await
+        .full_approval()
         .problem();
     assert_eq!(decided.code, ErrorCode::AuthRequired);
 }

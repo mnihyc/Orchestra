@@ -659,6 +659,8 @@ impl World {
         )
         .unwrap();
         let dialer = TlsDialer::new(Some(self.pinned_config(enrolled)), Some(public));
+        #[cfg(feature = "test-observers")]
+        let observed_buffers = Arc::new(orch_link::tunnels::flow::Gauge::new());
         let link = MachineLink::start(
             MachineConfig {
                 hosted_endpoints: None,
@@ -684,7 +686,16 @@ impl World {
                 journal_keep: Duration::from_secs(24 * 3_600),
                 connected: true,
                 tunnels: TunnelOptions::default(),
-                tunnel_gauge: None,
+                tunnel_gauge: {
+                    #[cfg(feature = "test-observers")]
+                    {
+                        Some(Arc::clone(&observed_buffers))
+                    }
+                    #[cfg(not(feature = "test-observers"))]
+                    {
+                        None
+                    }
+                },
             },
             Arc::new(dialer),
             Arc::clone(&self.clock),
@@ -696,6 +707,8 @@ impl World {
             id: enrolled.identity.machine_id,
             link,
             handler,
+            #[cfg(feature = "test-observers")]
+            observed_buffers,
         }
     }
 
@@ -735,6 +748,8 @@ pub struct Machine {
     pub id: Id,
     pub link: MachineLink,
     pub handler: Arc<ScriptedHandler>,
+    #[cfg(feature = "test-observers")]
+    pub observed_buffers: Arc<orch_link::tunnels::flow::Gauge>,
 }
 
 /// A port that nothing holds right now: found by binding and letting go.
