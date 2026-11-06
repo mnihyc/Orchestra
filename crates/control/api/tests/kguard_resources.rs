@@ -892,6 +892,8 @@ async fn a_providers_model_is_removed_only_with_manage_as_it_stands_after_waitin
             .send()
             .await
             .ok()
+            .into_full()
+            .expect("a full model reply")
             .id;
         scene
             .grant("provider", id, "provider.manage", authority)

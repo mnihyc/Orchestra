@@ -235,6 +235,20 @@ fn directory_parent(path: &Path) -> Option<&Path> {
         .filter(|parent| *parent != path)
 }
 
+fn existing_store_ancestor(root: &Path) -> Result<PathBuf> {
+    let mut ancestor = root;
+    loop {
+        match std::fs::canonicalize(ancestor) {
+            Ok(path) => return Ok(path),
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
+                ancestor = directory_parent(ancestor)
+                    .ok_or_else(|| HostError::io("locating the file-state store", error))?;
+            }
+            Err(error) => return Err(HostError::io("locating the file-state store", error)),
+        }
+    }
+}
+
 impl DirectoryDurability {
     fn sync(&self, path: &Path) -> Result<()> {
         #[cfg(test)]
@@ -382,7 +396,9 @@ impl ObjectStore {
     fn open_with(root: &Path, workspace: &Path, durability: DirectoryDurability) -> Result<Self> {
         let workspace = std::fs::canonicalize(workspace)
             .map_err(|error| HostError::io("locating the workspace", error))?;
-        if root.starts_with(&workspace) {
+        // Resolve the existing ancestor before creating anything. A lexical
+        // root can use another spelling of the canonical workspace on a host.
+        if existing_store_ancestor(root)?.starts_with(&workspace) {
             return Err(HostError::Unsupported(
                 "the file-state store must be outside the workspace".to_owned(),
             ));
@@ -1594,6 +1610,13 @@ mod tests {
         std::fs::create_dir(&workspace).unwrap();
         assert!(ObjectStore::open(&workspace.join("states"), &workspace).is_err());
         assert!(!workspace.join("states").exists());
+        #[cfg(unix)]
+        {
+            let alias = root.path().join("workspace-alias");
+            std::os::unix::fs::symlink(&workspace, &alias).unwrap();
+            assert!(ObjectStore::open(&alias.join("states"), &workspace).is_err());
+            assert!(!workspace.join("states").exists());
+        }
         let store = ObjectStore::open(&root.path().join("kept"), &workspace).unwrap();
         assert!(store.object_path("../../outside").is_err());
     }

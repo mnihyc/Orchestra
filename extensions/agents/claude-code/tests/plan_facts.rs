@@ -165,7 +165,7 @@ async fn the_native_control_answer_tells_the_same_windows_families_and_extra_spe
     assert!(!extra.enabled);
     assert_eq!(
         (extra.limit, extra.used, extra.decimal_places),
-        (Some(5000.0), Some(123.0), None)
+        (Some("5000.0".to_owned()), Some("123.0".to_owned()), None)
     );
     assert_eq!(extra.unit.as_deref(), Some("USD"));
     assert_eq!(facts.plan.as_deref(), Some("max"));
@@ -306,7 +306,7 @@ fn a_changed_experimental_member_does_not_invent_zeroes_or_hide_other_told_membe
     assert_eq!(facts.windows.len(), 2);
     assert_eq!(facts.windows[0].id, "secondary");
     assert!(!facts.field_times.contains_key("windows.primary"));
-    assert_eq!(facts.extra_usage.unwrap().used, Some(123.0));
+    assert_eq!(facts.extra_usage.unwrap().used, Some("123.0".to_owned()));
     assert!(provider::usage_answer(&json!({"session":{"total_cost_usd":999},"rate_limits_available":false,"rate_limits":null}), now()).is_none());
 }
 
@@ -455,7 +455,10 @@ async fn turn_lines_update_the_native_read_without_losing_its_plan_family_or_cre
     assert_eq!(facts.field_times["windows.secondary"], later);
     assert_eq!(facts.field_times["windows.secondary:fable"], now());
     let extra = facts.extra_usage.unwrap();
-    assert_eq!((extra.limit, extra.used), (Some(5000.0), Some(123.0)));
+    assert_eq!(
+        (extra.limit, extra.used),
+        (Some("5000.0".to_owned()), Some("123.0".to_owned()))
+    );
     assert_eq!(extra.disabled_reason.as_deref(), Some("org_level_disabled"));
     assert_eq!(facts.field_times["extra_usage"], now());
     assert_eq!(facts.field_times["extra_usage.disabled_reason"], later);
@@ -604,4 +607,33 @@ async fn the_pinned_limit_lines_keep_the_vendors_decision_and_reset_even_when_it
             "an admission-only frame leaves untold windows alone"
         );
     }
+}
+
+#[tokio::test]
+async fn the_actual_control_read_preserves_raw_paid_amount_precision() {
+    let harness = Harness::new("raw_amounts");
+    std::fs::write(harness.directory.path().join("answer.json"), r#"{"response":{"subtype":"success","request_id":"usage","response":{"rate_limits_available":true,"rate_limits":{"extra_usage":{"is_enabled":true,"used_credits":9007199254740993.1250,"monthly_limit":1.234567890123456789e20,"currency":"USD","decimal_places":2}}}}}"#).unwrap();
+    let facts = provider::native_usage(&harness, &harness.setup(), Some("synthetic-access"), now())
+        .await
+        .unwrap();
+    let extra = serde_json::to_value(facts.extra_usage.unwrap()).unwrap();
+    assert_eq!(extra["used"], json!("9007199254740993.1250"));
+    assert_eq!(extra["limit"], json!("123456789012345678900"));
+    assert_eq!(extra["decimal_places"], json!(2));
+    assert_eq!(
+        harness
+            .requests()
+            .iter()
+            .filter(|frame| frame["request"]["subtype"] == "get_usage")
+            .count(),
+        1
+    );
+}
+
+#[test]
+fn legacy_numeric_paid_amounts_remain_readable_as_canonical_decimal_text() {
+    let extra: orch_agent_contract::facts::ExtraUsage = serde_json::from_value(json!({"enabled":true,"used":0,"limit":123.25,"used_percent":0,"unit":"USD","decimal_places":2,"disabled_reason":null,"limit_reached":false})).unwrap();
+    let written = serde_json::to_value(extra).unwrap();
+    assert_eq!(written["used"], json!("0"));
+    assert_eq!(written["limit"], json!("123.25"));
 }

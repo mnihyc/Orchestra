@@ -7,6 +7,11 @@
 //! amounts to for the thread: where the harness runs, what carries out its
 //! tool calls, who holds the credential, and who counts its usage.
 
+use crate::operations::{FacetSpec as Facet, OperationSpec as Op, TargetResolver as Target};
+use orch_access_contract::key_scope::KeyAction::{Manage, Read, Write};
+use orch_access_contract::key_scope::KeyTargetKind::Object;
+use orch_access_contract::permissions::ObjectKind as K;
+
 use orch_types::{Id, Json};
 use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
@@ -373,6 +378,10 @@ pub struct BindingOptions {
     pub source: BindingSource,
     /// The permission page that a thread created here would begin with.
     pub access: BindingAccess,
+    /// Agent privilege choices for this creation context. Rebinding an existing holder
+    /// does not create another contribution and leaves this field absent.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub agent_access: Option<crate::nodes::AgentAccessAvailability>,
     /// Who would be able to see, and who to manage, an environment made now for this topic.
     pub new_environment: AccessSummary,
     /// Whether the caller may make a new environment.
@@ -515,10 +524,49 @@ pub struct ThreadEnvironmentSetBody {
     pub directory: Option<String>,
 }
 
+/// The accepted placement outcome, without existing thread or environment content.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+pub struct ThreadPlacementReceipt {
+    pub projection: crate::common::ReceiptProjection,
+    pub thread_id: Id,
+    pub environment_id: Id,
+    pub seq: orch_types::Seq,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+#[serde(untagged)]
+pub enum ThreadPlacementResponse {
+    Receipt(ThreadPlacementReceipt),
+    Full(Box<Thread>),
+}
+impl ThreadPlacementResponse {
+    /// Explicit full-content expectation for ordinary native consumers.
+    pub fn into_full(self) -> Result<Thread, ThreadPlacementReceipt> {
+        match self {
+            Self::Full(value) => Ok(*value),
+            Self::Receipt(receipt) => Err(receipt),
+        }
+    }
+}
+
 /// The environment used to judge a binding before a thread exists.
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
 #[serde(deny_unknown_fields)]
 pub struct NodeBindingOptionsGetQuery {
+    /// The new topic's page when called on a project; omitted means ordinary defaults.
+    /// This is separate from the first thread's page and is refused on an existing topic.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub topic_access: Option<crate::nodes::NewNodeAccess>,
+    /// JSON encoding of the exact ThreadAccess used at creation, including a custom PageChange.
+    /// The query remains a scalar form field; omission uses ordinary defaults.
+    #[serde(
+        default,
+        skip_serializing_if = "Option::is_none",
+        serialize_with = "creation_access_query::serialize",
+        deserialize_with = "creation_access_query::deserialize"
+    )]
+    #[schemars(with = "Option<String>")]
+    pub thread_access: Option<crate::access::ThreadAccess>,
     /// An existing environment the caller manages. When omitted, use the topic's shared default
     /// if the caller manages it, otherwise the resolved template's declaration for a new one.
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -528,15 +576,77 @@ pub struct NodeBindingOptionsGetQuery {
     pub environment_new: bool,
 }
 
+// Form queries carry strings. Keep this one structured preview input typed in Rust,
+// using JSON only at the field boundary rather than changing query parsing for other routes.
+mod creation_access_query {
+    use serde::{Deserialize, Deserializer, Serialize, Serializer};
+
+    pub fn serialize<S: Serializer>(
+        value: &Option<crate::access::ThreadAccess>,
+        serializer: S,
+    ) -> Result<S::Ok, S::Error> {
+        value
+            .as_ref()
+            .map(serde_json::to_string)
+            .transpose()
+            .map_err(serde::ser::Error::custom)?
+            .serialize(serializer)
+    }
+
+    pub fn deserialize<'de, D: Deserializer<'de>>(
+        deserializer: D,
+    ) -> Result<Option<crate::access::ThreadAccess>, D::Error> {
+        match serde_json::Value::deserialize(deserializer)? {
+            serde_json::Value::Null => Ok(None),
+            serde_json::Value::String(text) => {
+                serde_json::from_str(&text).map_err(serde::de::Error::custom)
+            }
+            _ => Err(serde::de::Error::custom(
+                "thread_access is a JSON-encoded form field",
+            )),
+        }
+    }
+}
+
 crate::endpoints! {
     /// Lists what the caller could choose before starting a thread in a topic, project or folder.
-    NodeBindingOptionsGet: GET "/nodes/{id}/binding/options", Rule("topic.start_threads on a topic or project.create_topics on a project or folder, and environment.use on an environment named"), query NodeBindingOptionsGetQuery, none, json BindingOptions, 200;
+    NodeBindingOptionsGet: GET "/nodes/{id}/binding/options", Rule("topic.start_threads on a topic or project.create_topics on a project or folder, and environment.use on an environment named"), query NodeBindingOptionsGetQuery, none, json BindingOptions, 200,
+        operation Op::single(
+            Read,
+            &[
+                Object(K::Topic),
+                Object(K::Project),
+                Object(K::Agent),
+                Object(K::Provider),
+                Object(K::Environment),
+            ],
+            Target::Resolved("binding_choices"),
+        );
     /// Lists what the caller could choose when binding a thread: providers, agents, models, efforts and environments.
     ThreadBindingOptionsGet: GET "/threads/{id}/binding/options", Permission("thread.manage"), none, none, json BindingOptions, 200;
     /// Binds a thread that has no execution history to an agent profile and provider.
-    ThreadBindingSet: PUT "/threads/{id}/binding", Rule("thread.manage on the thread, and the caller's own use of the agent profile and provider with the model and effort"), none, json ThreadBindingSetBody, json Thread, 200;
+    ThreadBindingSet: PUT "/threads/{id}/binding", Rule("thread.manage on the thread, and the caller's own use of the agent profile and provider with the model and effort"), none, json ThreadBindingSetBody, json Thread, 200,
+        operation Op::facets(&[
+            Facet::required(Manage, &[Object(K::Thread)], Target::Path("id")),
+            Facet::required(
+                Write,
+                &[Object(K::Agent), Object(K::Provider)],
+                Target::Resolved("chosen_binding"),
+            ),
+            Facet::response_content(&[Object(K::Thread)], Target::Path("id")),
+        ]);
     /// Puts a thread that has no execution history into an environment, an existing one or a new one.
-    ThreadEnvironmentSet: PUT "/threads/{id}/environment", Rule("thread.manage on the thread, and environment.manage on the environment chosen or what making one needs"), none, json ThreadEnvironmentSetBody, json Thread, 200;
+    ThreadEnvironmentSet: PUT "/threads/{id}/environment", Rule("thread.manage on the thread, and environment.manage on the environment chosen or what making one needs"), none, json ThreadEnvironmentSetBody, json ThreadPlacementResponse, 200,
+        operation Op::receipt(&Op::facets(&[
+            Facet::required(Manage, &[Object(K::Thread)], Target::Path("id")),
+            Facet::required(
+                Manage,
+                &[Object(K::Environment)],
+                Target::ResolvedCollection("placement_environments"),
+            ),
+            Facet::response_content(&[Object(K::Thread)], Target::Path("id")),
+            Facet::response_content(&[Object(K::Org), Object(K::Project), Object(K::Topic), Object(K::Thread), Object(K::Document), Object(K::Environment), Object(K::Agent), Object(K::Provider), Object(K::Machine)], Target::ResolvedCollection("placed_thread_content")),
+        ]));
 }
 
 #[cfg(test)]

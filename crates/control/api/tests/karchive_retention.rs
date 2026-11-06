@@ -60,6 +60,9 @@ async fn topic(s: &Scene, name: &str, private: bool) -> Id {
     match reply {
         TopicCreateReply::Topic(topic) => topic.base.id,
         TopicCreateReply::WithThread(_) => panic!("no first thread requested"),
+        TopicCreateReply::Receipt(_) | TopicCreateReply::ThreadReceipt(_) => {
+            panic!("this browser control expects the full topic response")
+        }
     }
 }
 

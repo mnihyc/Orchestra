@@ -32,7 +32,11 @@ struct AdmissionGap {
 
 #[async_trait::async_trait]
 impl Commands for AdmissionGap {
-    async fn issue(&self, command: Outgoing) -> Result<(), CommandsError> {
+    async fn issue_prepared(
+        &self,
+        command: Outgoing,
+        before: Option<orch_engine::commands::BeforeCommand<'_>>,
+    ) -> Result<(), CommandsError> {
         if matches!(
             command.kind,
             CommandKind::TurnStart | CommandKind::TurnStartFenced
@@ -41,7 +45,7 @@ impl Commands for AdmissionGap {
             self.attempts.fetch_add(1, Ordering::SeqCst);
             return Err(CommandsError::Stopping);
         }
-        self.inner.issue(command).await
+        self.inner.issue_prepared(command, before).await
     }
 
     async fn status(&self, id: Id) -> Result<Option<Info>, CommandsError> {
@@ -115,8 +119,7 @@ async fn turns_of(world: &World, thread: Id) -> Vec<(i32, String)> {
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
-async fn an_unexpected_session_exit_interrupts_the_running_turn_and_retains_its_reason_after_restart()
- {
+async fn an_unexpected_session_exit_fails_the_running_turn_and_retains_its_reason_after_restart() {
     let world = World::new().await;
     let thread = world.thread("Server exit").await;
     let input = world
@@ -139,10 +142,7 @@ async fn an_unexpected_session_exit_interrupts_the_running_turn_and_retains_its_
         )
         .await;
     world.wait_state(thread, "idle").await;
-    assert_eq!(
-        turns_of(&world, thread).await,
-        [(1, "interrupted".to_owned())]
-    );
+    assert_eq!(turns_of(&world, thread).await, [(1, "failed".to_owned())]);
     assert_eq!(world.input_state(input.input.id).await.0, "delivered");
     let message: String = world
         .scalar(
@@ -533,21 +533,45 @@ async fn stopping_an_admitted_but_unissued_start_cancels_it_before_recovery() {
             })
         })
         .await;
-    meanwhile(Duration::from_millis(300)).await;
-    assert_eq!(world.commands.issued_of("turn.start"), 0);
     let queue = world.sync(thread).await.thread.queue;
-    assert!(queue.held);
-    world
-        .engine()
-        .resume_queue(&caller, thread, queue.revision)
-        .await
-        .unwrap();
+    assert!(!queue.held, "Stop held no pending input at admission");
+    let input_held: bool = world
+        .scalar(
+            "SELECT queue_held FROM thread_inputs WHERE id=$1",
+            submitted.input.id,
+        )
+        .await;
+    assert!(!input_held, "the delivering input remains eligible");
+    // The original unheld input resumes automatically, including after restart.
     let next = world.turn_start(thread, 0).await;
     assert_ne!(next.turn_id, old);
-    assert_ne!(
-        world.commands.issued_commands("turn.start")[0].1.id,
-        old_command
+    assert!(next.text.contains("Original work"), "{}", next.text);
+    let input: (Id, Option<Id>, serde_json::Value) = sqlx::query_as(
+        "SELECT i.id,i.author_id,i.content FROM turns t JOIN thread_inputs i ON i.id=t.input_id WHERE t.id=$1",
+    )
+    .bind(next.turn_id)
+    .fetch_one(world.pool.pool())
+    .await
+    .unwrap();
+    assert_eq!(
+        input,
+        (
+            submitted.input.id,
+            Some(world.ada),
+            serde_json::json!([{"type":"text","text":"Original work"}]),
+        ),
+        "automatic recovery preserves the accepted input and its author"
     );
+    let issued = world.commands.issued_commands("turn.start");
+    assert_eq!(issued.len(), 1, "only the replacement start is issued");
+    assert_ne!(issued[0].1.id, old_command);
+    assert_eq!(issued[0].1.body["turn_id"], serde_json::json!(next.turn_id));
+    let state: String = sqlx::query_scalar("SELECT state FROM commands WHERE id=$1")
+        .bind(old_command)
+        .fetch_one(world.pool.pool())
+        .await
+        .unwrap();
+    assert_eq!(state, "cancelled", "restart never revives the old start");
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]

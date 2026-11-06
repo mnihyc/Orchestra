@@ -99,7 +99,7 @@ it('opens a choice card from its own control without choosing', async () => {
 it('keeps the next option reachable when a phone picker has no room beside it', async () => {
   const previousFont = document.documentElement.style.fontSize;
   const previousWidth = window.innerWidth;
-  const original = Reflect.get(HTMLElement.prototype, 'getBoundingClientRect') as HTMLElement['getBoundingClientRect'];
+  const original = Reflect.get<HTMLElement, 'getBoundingClientRect'>(HTMLElement.prototype, 'getBoundingClientRect');
   const boxes = vi.spyOn(HTMLElement.prototype, 'getBoundingClientRect');
   try {
     document.documentElement.style.fontSize = '16px';

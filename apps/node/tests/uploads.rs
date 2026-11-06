@@ -1,4 +1,6 @@
 //! A Files upload cancelled after real native writes waits for the connector's stopped result and preserves the original target.
+// The engine's futures this fixture awaits are deep; the default query depth does not lay them out.
+#![recursion_limit = "256"]
 #![allow(
     clippy::unwrap_used,
     clippy::expect_used,

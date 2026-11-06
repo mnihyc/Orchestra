@@ -9,6 +9,14 @@
 //! from a [`Notifier`], a kind of channel or of destination that the system
 //! has, whose fields say what its `config` and `secrets` hold.
 
+use crate::operations::{
+    FacetSpec as Facet, OperationSpec as Op, TargetResolver as Target, VariantSpec as Variant,
+};
+use orch_access_contract::key_scope::KeyAction::{Manage, Read, Write};
+use orch_access_contract::key_scope::KeyIdentityKind as I;
+use orch_access_contract::key_scope::KeyTargetKind::{Identity, Object};
+use orch_access_contract::permissions::ObjectKind as K;
+
 use std::collections::BTreeMap;
 
 use orch_types::{Field, Id, Json, Seq, Time};
@@ -828,6 +836,10 @@ pub struct NotificationChannelListQuery {
     /// For whoever holds `settings.manage` on that root org: that org's channels, to look after.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub org_id: Option<Id>,
+    /// Inspect only the system's channels as their ordinary administrator. Mutually exclusive
+    /// with `org_id`; the default remains the channels that can reach the caller.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub system: Option<bool>,
 }
 
 /// Sets up a channel of the system or of a root org. Its `config` is checked against its
@@ -906,6 +918,26 @@ pub struct NotificationChannelUpdateBody {
     pub enabled: Option<bool>,
 }
 
+/// The accepted channel change without stored configuration, secrets or route information.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+pub struct NotificationChannelUpdateReceipt {
+    /// Restricted response marker.
+    pub projection: crate::common::ReceiptProjection,
+    /// The actual stored channel whose change completed.
+    pub channel_id: Id,
+}
+
+crate::common::full_or_receipt! {
+    /// The native updated channel or its truthful accepted acknowledgement.
+    #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+    pub enum NotificationChannelUpdateResponse {
+        /// Existing channel content admitted by this operation's own Read.
+        Full(NotificationChannel),
+        /// No stored channel or recipient content.
+        Receipt(NotificationChannelUpdateReceipt),
+    }
+}
+
 /// Sends one sample message through a channel.
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
 #[serde(deny_unknown_fields)]
@@ -916,6 +948,28 @@ pub struct NotificationChannelTestBody {
     /// For push, one browser of the caller's own to send to; every browser of theirs otherwise.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub device_id: Option<Id>,
+}
+
+/// The accepted destination change without its existing public configuration or secret names.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+pub struct DestinationUpdateReceipt {
+    /// Restricted response marker.
+    pub projection: crate::common::ReceiptProjection,
+    /// The destination whose action completed.
+    pub destination_id: Id,
+    /// Its actual node at the guarded action.
+    pub node_id: Id,
+}
+
+crate::common::full_or_receipt! {
+    /// The native complete destination or its accepted restricted acknowledgement.
+    #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+    pub enum DestinationUpdateResponse {
+        /// Existing complete destination projection.
+        Full(Destination),
+        /// Safe accepted acknowledgement without existing destination fields.
+        Receipt(DestinationUpdateReceipt),
+    }
 }
 
 /// What came of a sample delivery.
@@ -1051,71 +1105,205 @@ pub struct NotificationExceptionChanged {
 
 crate::endpoints! {
     /// Give one person the offered access to this chat, optionally notifying them atomically.
-    ChatPersonGrant: POST "/chats/{id}/permissions/people/{user_id}", Rule("the caller may grant the chat access"), none, json ChatPersonGrantBody, none, 204;
+    ChatPersonGrant: POST "/chats/{id}/permissions/people/{user_id}", Rule("the caller may grant the chat access"), none, json ChatPersonGrantBody, none, 204,
+        operation Op::single(Manage, &[Identity(I::Chat)], Target::Path("id"));
     /// The caller's active document-notification work, with bounded pages and ordinary job progress.
-    DocumentNoticeJobList: GET "/documents/{id}/notification-jobs", Rule("the caller may read the document; only their own jobs are listed"), query PageQuery, none, json Page<crate::workspace::Job>, 200;
+    DocumentNoticeJobList: GET "/documents/{id}/notification-jobs", Rule("the caller may read the document; only their own jobs are listed"), query PageQuery, none, json Page<crate::workspace::Job>, 200,
+        operation Op::facets(&[
+            Facet::required(Read, &[Object(K::Document)], Target::TypedPath { parameter: "id", kind: Object(K::Document) }),
+            Facet::response_content(&[Object(K::Machine)], Target::ResolvedCollection("notice_job_machines")),
+        ]);
     /// Tells the named current readers about this thing once each for this act.
-    PersonNotifyCreate: POST "/{object}/{id}/notify", Rule("the sender and each recipient may read the thing"), none, json PersonNotifyBody, none, 204;
+    PersonNotifyCreate: POST "/{object}/{id}/notify", Rule("the sender and each recipient may read the thing"), none, json PersonNotifyBody, none, 204,
+        operation Op::facets(&[
+            Facet::required(
+                Read,
+                crate::notification_sources::SUBJECT_KINDS,
+                Target::Resolved("subject"),
+            ),
+            Facet::required(
+                Write,
+                crate::notification_sources::SUBJECT_KINDS,
+                Target::Resolved("subject"),
+            ),
+        ]);
     /// Reads the actions available for one person beside this thing.
-    PersonNotifyContextGet: GET "/{object}/{id}/notify/people/{user_id}", Rule("the caller may read the thing"), none, none, json PersonNotifyContext, 200;
+    PersonNotifyContextGet: GET "/{object}/{id}/notify/people/{user_id}", Rule("the caller may read the thing"), none, none, json PersonNotifyContext, 200,
+        operation Op::single(
+            Read,
+            crate::notification_sources::SUBJECT_KINDS,
+            Target::Resolved("subject"),
+        );
     /// The caller's manual notification exceptions, by node id, checked against current View.
-    MeNotificationExceptionList: GET "/me/notification-exceptions", User, query PageQuery, none, json Page<NotificationException>, 200;
+    MeNotificationExceptionList: GET "/me/notification-exceptions", User, query PageQuery, none, json Page<NotificationException>, 200,
+        operation Op::facets(&[
+            Facet::required(Read, &[Object(K::Org),Object(K::Project),Object(K::Topic),Object(K::Thread)], Target::ResolvedCollection("exception_nodes")),
+            Facet::required(Read, &[Object(K::Org),Object(K::Project),Object(K::Topic),Object(K::Thread)], Target::ResolvedCollection("exception_defaults")),
+            Facet::response_content(&[Object(K::Org)], Target::ResolvedCollection("exception_names_orgs")),
+            Facet::response_content(&[Object(K::Project)], Target::ResolvedCollection("exception_names_projects")),
+            Facet::response_content(&[Object(K::Topic)], Target::ResolvedCollection("exception_names_topics")),
+            Facet::response_content(&[Object(K::Thread)], Target::ResolvedCollection("exception_names_threads")),
+        ]);
     /// Changes the caller's ordinary node subscription and returns the current exceptions page.
-    MeNotificationExceptionSet: PUT "/me/notification-exceptions/{id}", Permission("node.view"), query PageQuery, json NotificationExceptionSetBody, json NotificationExceptionChanged, 200;
+    MeNotificationExceptionSet: PUT "/me/notification-exceptions/{id}", Permission("node.view"), query PageQuery, json NotificationExceptionSetBody, json NotificationExceptionChanged, 200,
+        operation Op::returning(
+            Write,
+            &[
+                Object(K::Org),
+                Object(K::Project),
+                Object(K::Topic),
+                Object(K::Thread),
+            ],
+            Target::PermissionObject,
+        );
     /// Lists the caller's Inbox, newest first.
-    NotificationList: GET "/notifications", User, query NotificationListQuery, none, json Page<Notification>, 200;
+    NotificationList: GET "/notifications", User, query NotificationListQuery, none, json Page<Notification>, 200,
+        operation Op::single(Read, &[Identity(I::Notification)], Target::CurrentAccount);
     /// Counts what waits for the caller, for the badge, with their pause and their ways out in a scope.
-    NotificationSummaryGet: GET "/notifications/summary", User, query NotificationSummaryGetQuery, none, json NotificationSummaryGetReply, 200;
+    NotificationSummaryGet: GET "/notifications/summary", User, query NotificationSummaryGetQuery, none, json NotificationSummaryGetReply, 200,
+        operation Op::single(Read, &[Identity(I::Notification)], Target::CurrentAccount);
     /// Marks notifications of the caller's Inbox read.
-    NotificationRead: POST "/notifications/read", User, none, json NotificationReadBody, json NotificationReadReply, 200;
+    NotificationRead: POST "/notifications/read", User, none, json NotificationReadBody, json NotificationReadReply, 200,
+        operation Op::single(Write, &[Identity(I::Notification)], Target::CurrentAccount);
     /// Reads what the caller chose about being notified.
-    MeNotificationPrefsGet: GET "/me/notification-prefs", User, none, none, json NotificationPrefs, 200;
+    MeNotificationPrefsGet: GET "/me/notification-prefs", User, none, none, json NotificationPrefs, 200,
+        operation Op::single(Read, &[Identity(I::Account)], Target::CurrentAccount);
     /// Changes what the caller chose about being notified.
-    MeNotificationPrefsSet: PUT "/me/notification-prefs", User, none, json MeNotificationPrefsSetBody, json NotificationPrefs, 200;
+    MeNotificationPrefsSet: PUT "/me/notification-prefs", User, none, json MeNotificationPrefsSetBody, json NotificationPrefs, 200,
+        operation Op::single(Manage, &[Identity(I::Account)], Target::CurrentAccount);
     /// Subscribes a browser of the caller's to push; the route of the push channel is what switches push on.
-    MePushSubscriptionCreate: POST "/me/push-subscriptions", User, none, json MePushSubscriptionCreateBody, none, 204;
+    MePushSubscriptionCreate: POST "/me/push-subscriptions", User, none, json MePushSubscriptionCreateBody, none, 204,
+        operation Op::single(Manage, &[Identity(I::Account)], Target::CurrentAccount);
     /// Takes a browser out of the caller's push subscriptions.
-    MePushSubscriptionDelete: DELETE "/me/push-subscriptions", User, none, json MePushSubscriptionDeleteBody, none, 204;
+    MePushSubscriptionDelete: DELETE "/me/push-subscriptions", User, none, json MePushSubscriptionDeleteBody, none, 204,
+        operation Op::single(Manage, &[Identity(I::Account)], Target::CurrentAccount);
     /// Lists the caller's own browsers that took push, without their endpoints or keys.
-    MePushSubscriptionList: GET "/me/push-subscriptions", User, none, none, json Vec<PushDevice>, 200;
+    MePushSubscriptionList: GET "/me/push-subscriptions", User, none, none, json Vec<PushDevice>, 200,
+        operation Op::single(Read, &[Identity(I::Account)], Target::CurrentAccount);
     /// Takes one of the caller's own browsers out of push; the others stay.
-    MePushSubscriptionRemove: DELETE "/me/push-subscriptions/{id}", User, none, none, none, 204;
+    MePushSubscriptionRemove: DELETE "/me/push-subscriptions/{id}", User, none, none, none, 204,
+        operation Op::single(Manage, &[Identity(I::Account)], Target::CurrentAccount);
     /// Lists the caller's own routes, with those whose channel was removed until they remove them.
-    MeNotificationRouteList: GET "/me/notification-routes", User, none, none, json Vec<NotificationRoute>, 200;
+    MeNotificationRouteList: GET "/me/notification-routes", User, none, none, json Vec<NotificationRoute>, 200,
+        operation Op::single(Read, &[Identity(I::Account)], Target::CurrentAccount);
     /// Removes one of the caller's own routes by its identifier: one that is off, or kept after its channel was removed.
-    MeNotificationRouteRemove: DELETE "/me/notification-routes/by-id/{route_id}", User, none, none, none, 204;
+    MeNotificationRouteRemove: DELETE "/me/notification-routes/by-id/{route_id}", User, none, none, none, 204,
+        operation Op::single(Manage, &[Identity(I::Account)], Target::CurrentAccount);
     /// Lists the kinds of channel and of destination this system has: the built-in ones and each notifier that was installed.
-    NotifierList: GET "/notifiers", User, none, none, json Vec<Notifier>, 200;
+    NotifierList: GET "/notifiers", User, none, none, json Vec<Notifier>, 200,
+        operation Op::single(Read, &[Identity(I::System)], Target::System);
     /// Lists the ways out that can reach the caller, each with their own route: the system's, those of the root orgs they belong to and their own.
-    NotificationChannelList: GET "/notification-channels", Rule("any signed-in caller; with org_id, settings.manage on that root org, to look after its channels; a system admin also gets the system's with their fields"), query NotificationChannelListQuery, none, json Vec<NotificationChannel>, 200;
+    NotificationChannelList: GET "/notification-channels", Rule("any signed-in caller; with org_id, settings.manage on that root org, to look after its channels; a system admin also gets the system's with their fields"), query NotificationChannelListQuery, none, json Vec<NotificationChannel>, 200,
+        operation Op::variants(&[
+            Variant {
+                name: "available",
+                selector: "channels reaching the caller, with configuration only under the native editor gate",
+                facets: &[
+                    Facet::required(
+                        Read,
+                        &[Identity(I::Account), Object(K::Org), Identity(I::System)],
+                        Target::ResolvedCollection("available_channels"),
+                    ),
+                    Facet::response_content(
+                        &[Identity(I::Account)],
+                        Target::ResolvedCollection("channel_caller_routes"),
+                    ),
+                ],
+            },
+            Variant {
+                name: "manage",
+                selector: "organization or system configuration inspection",
+                facets: &[
+                    Facet::required(
+                        Manage,
+                        &[Object(K::Org), Identity(I::System)],
+                        Target::Resolved("channel_owner"),
+                    ),
+                    Facet::response_content(
+                        &[Identity(I::Account)],
+                        Target::ResolvedCollection("channel_caller_routes"),
+                    ),
+                ],
+            },
+        ]);
     /// Sets up a channel of the system: its mail server, its bot, a webhook, push. A system admin.
-    AdminNotificationChannelCreate: POST "/admin/notification-channels", Session, none, json NotificationChannelCreateBody, json NotificationChannel, 200;
+    AdminNotificationChannelCreate: POST "/admin/notification-channels", Session, none, json NotificationChannelCreateBody, json NotificationChannel, 200,
+        operation Op::returning(Manage, &[Identity(I::System)], Target::System);
     /// Sets up a channel of a root org, for its members; a second mail server or bot is refused.
     OrgNotificationChannelCreate: POST "/orgs/{id}/notification-channels", Permission("settings.manage"), none, json NotificationChannelCreateBody, json NotificationChannel, 200;
     /// Sets up a webhook of the caller's own.
-    MeNotificationChannelCreate: POST "/me/notification-channels", User, none, json MeNotificationChannelCreateBody, json NotificationChannel, 200;
+    MeNotificationChannelCreate: POST "/me/notification-channels", User, none, json MeNotificationChannelCreateBody, json NotificationChannel, 200,
+        operation Op::returning(Manage, &[Identity(I::Account)], Target::CurrentAccount);
     /// Changes a channel.
-    NotificationChannelUpdate: PATCH "/notification-channels/{id}", Rule("whoever may set that channel up: a system admin for the system's, settings.manage on the root org for an org's, its person for their own"), none, json NotificationChannelUpdateBody, json NotificationChannel, 200;
+    NotificationChannelUpdate: PATCH "/notification-channels/{id}", Rule("whoever may set that channel up: a system admin for the system's, settings.manage on the root org for an org's, its person for their own"), none, json NotificationChannelUpdateBody, json NotificationChannelUpdateResponse, 200,
+        operation Op::receipt(&Op::facets(&[
+            Facet::required(Manage, &[Identity(I::Account), Object(K::Org), Identity(I::System)], Target::Resolved("channel_owner")),
+            Facet::response_content(&[Identity(I::Account), Object(K::Org), Identity(I::System)], Target::Resolved("channel_owner")),
+            Facet::response_content(&[Identity(I::Account)], Target::ResolvedCollection("channel_caller_routes")),
+        ]));
     /// Deletes a channel, which ends every route through it.
-    NotificationChannelDelete: DELETE "/notification-channels/{id}", Rule("whoever may set that channel up: a system admin for the system's, settings.manage on the root org for an org's, its person for their own"), none, none, none, 204;
+    NotificationChannelDelete: DELETE "/notification-channels/{id}", Rule("whoever may set that channel up: a system admin for the system's, settings.manage on the root org for an org's, its person for their own"), none, none, none, 204,
+        operation Op::single(
+            Manage,
+            &[Identity(I::Account), Object(K::Org), Identity(I::System)],
+            Target::Resolved("channel_owner"),
+        );
     /// Sends one sample message through a channel, to the caller as their route reaches them or, for a mail server, to the address given.
-    NotificationChannelTest: POST "/notification-channels/{id}/test", Rule("whoever may change the channel, and anybody for a channel their route is linked on"), none, json NotificationChannelTestBody, json NotificationTestReply, 200;
+    NotificationChannelTest: POST "/notification-channels/{id}/test", Rule("whoever may change the channel, and anybody for a channel their route is linked on"), none, json NotificationChannelTestBody, json NotificationTestReply, 200,
+        operation Op::single(
+            Manage,
+            &[Identity(I::Account), Object(K::Org), Identity(I::System)],
+            Target::Resolved("channel_owner"),
+        );
     /// Changes the caller's own switch for a channel.
-    MeNotificationRouteSet: PUT "/me/notification-routes/{channel_id}", User, none, json MeNotificationRouteSetBody, json NotificationRoute, 200;
+    MeNotificationRouteSet: PUT "/me/notification-routes/{channel_id}", User, none, json MeNotificationRouteSetBody, json NotificationRoute, 200,
+        operation Op::single(Manage, &[Identity(I::Account)], Target::CurrentAccount);
     /// Makes the link that opens a bot with a code, good for ten minutes, for a channel whose notifier links.
-    MeNotificationRouteLinkCreate: POST "/me/notification-routes/{channel_id}/link", User, none, none, json NotificationRouteLink, 200;
+    MeNotificationRouteLinkCreate: POST "/me/notification-routes/{channel_id}/link", User, none, none, json NotificationRouteLink, 200,
+        operation Op::single(Manage, &[Identity(I::Account)], Target::CurrentAccount);
     /// Switches the caller's route off and unlinks it.
-    MeNotificationRouteDelete: DELETE "/me/notification-routes/{channel_id}", User, none, none, none, 204;
+    MeNotificationRouteDelete: DELETE "/me/notification-routes/{channel_id}", User, none, none, none, 204,
+        operation Op::single(Manage, &[Identity(I::Account)], Target::CurrentAccount);
     /// Lists the destinations of a node.
     NodeDestinationList: GET "/nodes/{id}/destinations", Permission("settings.manage"), none, none, json Vec<Destination>, 200;
     /// Sets up a destination at a node, which is an org at any level, a project or a topic.
     NodeDestinationCreate: POST "/nodes/{id}/destinations", Permission("settings.manage"), none, json NodeDestinationCreateBody, json Destination, 200;
     /// Changes a destination.
-    DestinationUpdate: PATCH "/destinations/{id}", Rule("settings.manage on its node"), none, json DestinationUpdateBody, json Destination, 200;
+    DestinationUpdate: PATCH "/destinations/{id}", Rule("settings.manage on its node"), none, json DestinationUpdateBody, json DestinationUpdateResponse, 200,
+        operation Op::receipt(&Op::returning(
+            Manage,
+            &[
+                Object(K::Org),
+                Object(K::Project),
+                Object(K::Topic),
+                Object(K::Thread),
+            ],
+            Target::Resolved("destination_node"),
+        ));
     /// Deletes a destination.
-    DestinationDelete: DELETE "/destinations/{id}", Rule("settings.manage on its node"), none, none, none, 204;
+    DestinationDelete: DELETE "/destinations/{id}", Rule("settings.manage on its node"), none, none, none, 204,
+        operation Op::single(
+            Manage,
+            &[
+                Object(K::Org),
+                Object(K::Project),
+                Object(K::Topic),
+                Object(K::Thread),
+            ],
+            Target::Resolved("destination_node"),
+        );
     /// Delivers one sample notification to a destination now, and says what came back.
-    DestinationTest: POST "/destinations/{id}/test", Rule("settings.manage on its node"), none, none, json NotificationTestReply, 200;
+    DestinationTest: POST "/destinations/{id}/test", Rule("settings.manage on its node"), none, none, json NotificationTestReply, 200,
+        operation Op::single(
+            Manage,
+            &[
+                Object(K::Org),
+                Object(K::Project),
+                Object(K::Topic),
+                Object(K::Thread),
+            ],
+            Target::Resolved("destination_node"),
+        );
 }
 
 #[cfg(test)]

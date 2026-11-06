@@ -21,6 +21,7 @@ import { placeSettingsSections } from '@/features/settings/navigation';
 import { sectionLabel } from '@/features/settings/sectionLabels';
 import { useSettingsTabTitle } from '@/features/workbench/settingsTabTitle';
 import { SettingsEditor } from '@/features/settings/Editor';
+import { useDefaultsOpening } from '@/features/settings/defaultsOpening';
 import { General } from '@/features/settings/org/General';
 import { Tags } from '@/features/settings/org/Tags';
 import type { RowPlace } from '@/features/settings/SettingRow';
@@ -79,7 +80,8 @@ export interface ProjectSettingsProps {
 export function ProjectSettings({ projectId, section }: ProjectSettingsProps) {
   const { t } = useTranslation();
   const userId = useStore(client.session, (state) => state.userId);
-  const query = useQuery(projectQuery(projectId));
+  const opening = useDefaultsOpening(projectId);
+  const query = useQuery({ ...projectQuery(projectId), enabled: !opening.waiting });
   const project = query.data;
   const readable = query.isError ? undefined : project;
   const tabTitle = useSettingsTabTitle(sectionLabel(section, t), readable);

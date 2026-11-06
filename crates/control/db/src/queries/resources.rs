@@ -753,6 +753,27 @@ pub mod thread_engine {
         .await?)
     }
 
+    /// The actual endpoint's body defaults, read once when issuing a frozen model request.
+    pub async fn provider_request_defaults(
+        conn: &mut Conn,
+        id: Id,
+        protocol: &str,
+    ) -> Result<Json, DbError> {
+        let upstreams: Json = sqlx::query_scalar("SELECT upstreams FROM providers WHERE id=$1")
+            .bind(id)
+            .fetch_one(conn)
+            .await?;
+        Ok(upstreams
+            .as_array()
+            .and_then(|rows| {
+                rows.iter()
+                    .find(|row| row["protocol"].as_str() == Some(protocol))
+            })
+            .and_then(|row| row.pointer("/options/params"))
+            .cloned()
+            .unwrap_or_else(|| serde_json::json!({})))
+    }
+
     /// A model of a provider.
     #[derive(Debug, Clone, PartialEq, sqlx::FromRow)]
     pub struct ModelRow {
@@ -872,6 +893,24 @@ pub mod thread_engine {
         .bind(machine)
         .fetch_optional(conn)
         .await?)
+    }
+
+    /// Reported versions for exact zipped provider/profile/runtime-host keys, never their cross product.
+    pub async fn harness_versions_by_key(
+        conn: &mut Conn,
+        keys: &[(Id, Id, Id)],
+    ) -> Result<Vec<(Id, Id, Id, Option<String>)>, DbError> {
+        if keys.is_empty() {
+            return Ok(Vec::new());
+        }
+        let providers: Vec<_> = keys.iter().map(|(provider, _, _)| *provider).collect();
+        let agents: Vec<_> = keys.iter().map(|(_, agent, _)| *agent).collect();
+        let machines: Vec<_> = keys.iter().map(|(_, _, machine)| *machine).collect();
+        Ok(sqlx::query_as(
+            "SELECT h.provider_id,h.agent_id,h.machine_id,h.harness_version
+             FROM unnest($1::uuid[],$2::uuid[],$3::uuid[]) AS wanted(provider_id,agent_id,machine_id)
+             JOIN harnesses h USING(provider_id,agent_id,machine_id)"
+        ).bind(&providers).bind(&agents).bind(&machines).fetch_all(conn).await?)
     }
 
     /// What a harness process says of itself.
@@ -2901,6 +2940,16 @@ pub mod routes {
         pub placement: String,
     }
 
+    /// Live physical reference identities, before any machine payload is projected.
+    pub async fn live_machine_ids(conn: &mut Conn, ids: &[Id]) -> Result<Vec<Id>, DbError> {
+        Ok(
+            sqlx::query_scalar("SELECT id FROM machines WHERE id=ANY($1) AND deleted_at IS NULL")
+                .bind(ids)
+                .fetch_all(conn)
+                .await?,
+        )
+    }
+
     /// The machines `ids` that are not deleted, in one statement.
     pub async fn machine_names(
         conn: &mut Conn,
@@ -3074,6 +3123,19 @@ pub mod routes {
         .bind(ids)
         .fetch_all(conn)
         .await?)
+    }
+
+    /// Actual provider associations of these profiles: direct subscriptions and live thread
+    /// bindings, deduplicated by the same UNION used by their ordinary bulk projection.
+    pub async fn agent_provider_associations(
+        conn: &mut Conn,
+        ids: &[Id],
+    ) -> Result<Vec<(Id, Id)>, DbError> {
+        Ok(sqlx::query_as(
+            "SELECT agent_id,id FROM providers WHERE agent_id=ANY($1) AND deleted_at IS NULL
+             UNION SELECT DISTINCT t.agent_id,t.provider_id FROM threads t JOIN nodes n ON n.id=t.node_id
+             WHERE t.agent_id=ANY($1) AND t.provider_id IS NOT NULL AND n.deleted_at IS NULL",
+        ).bind(ids).fetch_all(conn).await?)
     }
 
     /// A profile to make.
@@ -3448,7 +3510,7 @@ pub mod routes {
         at: DateTime<Utc>,
     ) -> Result<(), DbError> {
         sqlx::query(
-            "UPDATE providers SET deleted_at = $2, status = 'disabled', login_pending=NULL, login_pending_at=NULL, login_state=NULL, revision = revision + 1, updated_at = $2
+            "UPDATE providers SET deleted_at = $2, status = 'disabled', login_pending=NULL, login_pending_at=NULL, login_authority=NULL, login_state=NULL, revision = revision + 1, updated_at = $2
               WHERE id = $1 AND deleted_at IS NULL",
         )
         .bind(id)
@@ -3774,6 +3836,16 @@ pub mod routes {
         /// How many units were made from it and still stand: environments for a template of
         /// environments, the runtimes of providers that are not retired for one of providers.
         pub units: i64,
+    }
+
+    /// Factual kind selectors only; candidate filtering must not load specs or unit counts.
+    pub async fn template_kinds(conn: &mut Conn, ids: &[Id]) -> Result<Vec<(Id, String)>, DbError> {
+        Ok(sqlx::query_as(
+            "SELECT id, kind FROM env_templates WHERE id=ANY($1) AND deleted_at IS NULL",
+        )
+        .bind(ids)
+        .fetch_all(conn)
+        .await?)
     }
 
     /// The templates `ids` that are not deleted, in the order they were made.
@@ -4198,6 +4270,7 @@ pub mod keeper {
         facts_at: Option<DateTime<Utc>>,
         home_id: Id,
         org_id: Id,
+        credit_source_revision: i64,
     }
 
     /// Stores what the machine that keeps a provider reports of it. Nothing is written when it says what is
@@ -4212,7 +4285,7 @@ pub mod keeper {
         // A savepoint inside an existing transaction keeps the reading, its samples and its audit atomic.
         let mut tx = conn.begin().await?;
         let previous: Option<PreviousProviderFacts> = sqlx::query_as(
-            "SELECT facts,facts_overrides,facts_at,home_id,org_id FROM providers WHERE id=$1 AND deleted_at IS NULL FOR UPDATE",
+            "SELECT facts,facts_overrides,facts_at,home_id,org_id,credit_source_revision FROM providers WHERE id=$1 AND deleted_at IS NULL FOR UPDATE",
         ).bind(provider).fetch_optional(&mut *tx).await?;
         let Some(PreviousProviderFacts {
             facts: before,
@@ -4220,6 +4293,7 @@ pub mod keeper {
             facts_at: previous_at,
             home_id: home,
             org_id: org,
+            credit_source_revision,
         }) = previous
         else {
             tx.commit().await?;
@@ -4236,6 +4310,14 @@ pub mod keeper {
         .await?;
         let changed = done.rows_affected() == 1;
         if changed {
+            crate::queries::provider_credits::record(
+                &mut tx,
+                provider,
+                credit_source_revision,
+                &before,
+                facts,
+            )
+            .await?;
             crate::queries::provider_plan::record(
                 &mut tx,
                 provider,
@@ -4285,7 +4367,8 @@ pub mod keeper {
 
     /// Puts the providers on a key whose machine (the one that keeps the key, else the one its runtime is on
     /// when that is a person's machine) is away into `offline`, and brings back the ones whose machine is there
-    /// again. A provider that is in another state is not touched, and neither is a subscription: its sign-in is
+    /// again. Observational quota exhaustion does not hide an offline machine. Other lifecycle
+    /// states and subscriptions are not touched: a subscription's sign-in is
     /// a harness's, and what its machine's absence means for a turn is told by the check of the place the
     /// harness runs.
     pub async fn sync_presence(
@@ -4296,7 +4379,7 @@ pub mod keeper {
             "UPDATE providers p SET status = 'offline', status_detail = $1, revision = p.revision + 1,
                     updated_at = $2
                FROM machines m
-              WHERE p.kind = 'api' AND p.status = 'ready' AND p.deleted_at IS NULL
+              WHERE p.kind = 'api' AND p.status IN ('ready','exhausted') AND p.deleted_at IS NULL
                 AND m.id = p.key_machine_id AND m.placement = 'connected'
                 AND NOT m.online
              RETURNING p.id",
@@ -5549,15 +5632,28 @@ pub mod management {
         build: &Json,
         at: DateTime<Utc>,
     ) -> Result<bool, DbError> {
+        put_channel_build_before(conn, key, build, at, || Ok::<_, DbError>(())).await
+    }
+
+    /// Same native first insert, with a cut after the existing presence read.
+    pub async fn put_channel_build_before<E: From<DbError>>(
+        conn: &mut Conn,
+        key: &str,
+        build: &Json,
+        at: DateTime<Utc>,
+        before: impl FnOnce() -> Result<(), E>,
+    ) -> Result<bool, E> {
         let known: bool = sqlx::query_scalar(
             "SELECT EXISTS(SELECT 1 FROM settings WHERE node_id IS NULL AND key = $1)",
         )
         .bind(key)
         .fetch_one(&mut *conn)
-        .await?;
+        .await
+        .map_err(DbError::from)?;
         if known {
             return Ok(false);
         }
+        before()?;
         sqlx::query(
             "INSERT INTO settings (node_id, key, value, locked, revision, updated_by, updated_at)
              VALUES (NULL, $1, $2, false, 1, NULL, $3)",
@@ -5566,7 +5662,8 @@ pub mod management {
         .bind(build)
         .bind(at)
         .execute(conn)
-        .await?;
+        .await
+        .map_err(DbError::from)?;
         Ok(true)
     }
 
@@ -5955,12 +6052,39 @@ pub mod provider_runtime {
         pending: &[u8],
         at: DateTime<Utc>,
     ) -> Result<(), DbError> {
-        sqlx::query("UPDATE providers SET login_pending = $2, login_pending_at = $3 WHERE id = $1")
+        sqlx::query("UPDATE providers SET login_pending = $2, login_pending_at = $3, login_authority = NULL WHERE id = $1")
             .bind(provider)
             .bind(pending)
             .bind(at)
             .execute(conn)
             .await?;
+        Ok(())
+    }
+
+    /// Reads private continuation evidence separately from public/resource state projections.
+    pub async fn login_authority(conn: &mut Conn, provider: Id) -> Result<Option<Json>, DbError> {
+        Ok(sqlx::query_scalar::<_, Option<Json>>(
+            "SELECT login_authority FROM providers WHERE id = $1 AND deleted_at IS NULL",
+        )
+        .bind(provider)
+        .fetch_optional(conn)
+        .await?
+        .flatten())
+    }
+
+    /// Keeps only the private credential origin, independently of consumed secret references.
+    pub async fn keep_login_authority(
+        conn: &mut Conn,
+        provider: Id,
+        authority: Option<&Json>,
+    ) -> Result<(), DbError> {
+        sqlx::query(
+            "UPDATE providers SET login_authority = $2 WHERE id = $1 AND deleted_at IS NULL",
+        )
+        .bind(provider)
+        .bind(authority)
+        .execute(conn)
+        .await?;
         Ok(())
     }
 
@@ -6003,6 +6127,17 @@ pub mod provider_runtime {
         .bind(limit)
         .fetch_all(conn)
         .await?)
+    }
+
+    /// Consumes only the actual secret references sent by this answer, preserving later answers.
+    pub async fn delete_login_secret_refs(
+        conn: &mut Conn,
+        provider: Id,
+        ids: &[Id],
+    ) -> Result<(), DbError> {
+        sqlx::query("DELETE FROM secrets WHERE owner_kind = 'provider' AND owner_id = $1 AND id = ANY($2) AND starts_with(name, 'login:')")
+            .bind(provider).bind(ids).execute(conn).await?;
+        Ok(())
     }
 
     /// Takes away the secrets a sign-in left for the runtime to take, by name prefix.
@@ -6512,6 +6647,35 @@ pub mod provider_runtime {
         .bind(provider)
         .bind(environment)
         .bind(at)
+        .execute(conn)
+        .await?
+        .rows_affected()
+            == 1)
+    }
+
+    /// Reconcile only the custody incarnation whose native return actually completed.
+    pub async fn release_credential_incarnation(
+        conn: &mut Conn,
+        provider: Id,
+        environment: Id,
+        since: DateTime<Utc>,
+        generation: Option<i32>,
+        machine: Option<Id>,
+        at: DateTime<Utc>,
+    ) -> Result<bool, DbError> {
+        Ok(sqlx::query(
+            "UPDATE providers SET held_by_environment_id=NULL, held_since=NULL,
+                    revision=revision+1, updated_at=$4
+              WHERE id=$1 AND held_by_environment_id=$2 AND held_since=$3 AND deleted_at IS NULL
+                AND ($5::integer IS NULL OR EXISTS(SELECT 1 FROM environments e
+                    WHERE e.id=$2 AND e.generation=$5 AND e.machine_id IS NOT DISTINCT FROM $6))",
+        )
+        .bind(provider)
+        .bind(environment)
+        .bind(since)
+        .bind(at)
+        .bind(generation)
+        .bind(machine)
         .execute(conn)
         .await?
         .rows_affected()

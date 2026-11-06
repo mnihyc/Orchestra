@@ -38,8 +38,10 @@ pub mod approvals;
 pub mod archive;
 mod audit_facts;
 pub mod background;
+pub mod background_wake;
 pub mod binding;
 pub mod browsers;
+pub mod build_checks;
 mod cache_cleanup;
 pub mod calls;
 pub mod capabilities;
@@ -96,6 +98,7 @@ pub mod native_actions;
 pub mod network;
 pub mod notifications;
 pub mod operation_access;
+pub mod operation_scope;
 pub mod parcels;
 pub mod paste;
 pub mod places;
@@ -158,3 +161,10 @@ pub use error::EngineError;
 #[cfg(test)]
 #[path = "../tests/common/mod.rs"]
 mod test_common;
+
+// The unchanged hosting test fixture uses the integration fixture's canonical root name.
+#[cfg(test)]
+use test_common as common;
+#[cfg(test)]
+#[path = "approvals/live_controls.rs"]
+mod approval_live_controls;

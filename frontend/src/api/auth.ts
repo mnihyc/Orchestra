@@ -38,15 +38,17 @@ export const USERNAME_PATTERN = /^[a-z0-9][a-z0-9_-]{2,31}$/;
 export const metaKey = ['meta'] as const;
 export const meKey = ['me'] as const;
 
+/** Native Meta repair remains independent of startup aggregate ownership. */
+export async function fetchMeta(signal?: AbortSignal): Promise<Meta> {
+  const reader = client.session.getState().readerVersion;
+  const meta = await ok(api.GET('/meta', { ...(signal === undefined ? {} : { signal }) }));
+  return client.session.getState().readerVersion === reader ? meta : { ...meta, may_create_org: false };
+}
+
 /** What the system says of itself to anybody: its name, who may register, the ways of signing in. */
 export const metaQuery = queryOptions({
   queryKey: metaKey,
-  queryFn: async ({ signal }): Promise<Meta> => {
-    const reader = client.session.getState().readerVersion;
-    const meta = await ok(api.GET('/meta', { signal }));
-    // All other Meta facts are public; this permission belongs to the caller.
-    return client.session.getState().readerVersion === reader ? meta : { ...meta, may_create_org: false };
-  },
+  queryFn: ({ signal }): Promise<Meta> => fetchMeta(signal),
   staleTime: META_FRESH_FOR_MS,
 });
 

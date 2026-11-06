@@ -3,11 +3,8 @@
 use crate::middleware::authorization::refusals;
 use crate::middleware::requests::{ApiError, ApiResult};
 use crate::registry::{Ctx, Registry};
-use crate::routes::nodes::{invalid, placed, policy_at, view as node_view};
+use crate::routes::nodes::{invalid, placed, policy_at};
 use crate::routes::resources::providers::{home_policies, refused_making};
-use crate::routes::resources::view::{
-    Holding, accesses, addresses, environment_refs, machine_refs,
-};
 use crate::routes::resources::{Home, begin_mutation, record, require, sealing};
 use orch_access_contract::audit::AuditAction;
 use orch_access_contract::decisions::ObjectRef;
@@ -18,7 +15,7 @@ use orch_api_contract::common::ErrorCode;
 use orch_api_contract::nodes::NodeKind;
 use orch_api_contract::resources::{self as api, McpServer};
 use orch_authz::ownership::{self, Making, NewAccess};
-use orch_authz::{Policy, Principal, resources};
+use orch_authz::{Policy, Principal};
 use orch_db::queries::resources::mcp::{self as rows, McpRow};
 use orch_db::{Conn, DbError};
 use orch_link_contract::commands::{McpForget, SerialKey};
@@ -31,6 +28,8 @@ const NAME_MIN: usize = 2;
 const NAME_MAX: usize = 32;
 /// The start command has a sixty-second deadline, so a definition's startup wait cannot exceed it.
 const STARTUP_MAX_SECS: u32 = 60;
+
+pub(crate) mod projection;
 
 /// Binds the preset's resource requests and reimport.
 pub fn mount(registry: &mut Registry) {
@@ -195,7 +194,18 @@ pub(crate) async fn require_row(
     row: &McpRow,
     manages: bool,
 ) -> ApiResult<()> {
-    if let Some(environment) = row.environment_id {
+    require_subject(conn, principal, row.id, row.environment_id, manages).await
+}
+
+/// The original guard on the stored subject, before reading a selected server's full spec.
+pub(crate) async fn require_subject(
+    conn: &mut Conn,
+    principal: &Principal,
+    id: Id,
+    environment: Option<Id>,
+    manages: bool,
+) -> ApiResult<()> {
+    if let Some(environment) = environment {
         if !manages
             && super::super::environments::reading::decide(conn, principal, environment).await?
                 == super::super::environments::reading::Reading::Whole
@@ -219,7 +229,7 @@ pub(crate) async fn require_row(
             conn,
             principal,
             ResourceKind::McpServer,
-            row.id,
+            id,
             if manages {
                 Permission::McpManage
             } else {
@@ -237,269 +247,12 @@ pub(crate) async fn show(
     principal: &Principal,
     id: Id,
 ) -> ApiResult<McpServer> {
-    let row = rows::servers(conn, &[id])
+    let prepared =
+        projection::prepare(conn, principal, &[id], None, projection::Style::Individual).await?;
+    projection::render(ctx, conn, principal, &prepared, None)
         .await?
         .pop()
-        .ok_or_else(ApiError::not_found)?;
-    let people = row
-        .owner_id
-        .into_iter()
-        .chain(
-            row.spec
-                .pointer("/imported/by")
-                .and_then(Json::as_str)
-                .and_then(|id| id.parse().ok()),
-        )
-        .collect::<Vec<_>>();
-    let people = refusals::user_refs(conn, &people).await?;
-    let homes = node_view::refs(
-        conn,
-        principal,
-        &row.home_id.into_iter().collect::<Vec<_>>(),
-        Policy::default(),
-    )
-    .await?;
-    let addresses = if row.environment_id.is_none() {
-        addresses(conn, &[id]).await?
-    } else {
-        Default::default()
-    };
-    let environment = if let Some(environment) = row.environment_id {
-        environment_refs(conn, &[environment], &[], Time::new(ctx.now))
-            .await?
-            .into_iter()
-            .next()
-            .map(|(_, reference)| reference)
-    } else {
-        None
-    };
-    let current_offerings = rows::offerings(conn, &[id]).await?;
-    let offering_machines = machine_refs(
-        &ctx.app,
-        conn,
-        &current_offerings
-            .iter()
-            .map(|offering| offering.machine_id)
-            .collect::<Vec<_>>(),
-    )
-    .await?;
-    // An environment's own servers inherit its page and have no native offerings.
-    let can_manage = !current_offerings.is_empty()
-        && row.environment_id.is_none()
-        && resources::check(
-            conn,
-            principal,
-            ObjectRef {
-                kind: ResourceKind::McpServer.into(),
-                id,
-            },
-            Permission::McpManage,
-            Policy::default(),
-        )
-        .await
-        .map_err(ApiError::internal)?
-        .is_allowed();
-    let mut can_use = BTreeMap::new();
-    for offering in &current_offerings {
-        let allowed = if can_manage && (offering.state == "found" || offering.proposal.is_some()) {
-            if let Some(environment) = offering
-                .proposal
-                .as_ref()
-                .and_then(|proposal| proposal["environment"].as_str())
-                .and_then(|id| id.parse::<Id>().ok())
-                .or(offering.environment_id)
-            {
-                super::super::environments::mcp::may_import(conn, principal, environment).await?
-            } else {
-                false
-            }
-        } else {
-            false
-        };
-        can_use.insert(offering.machine_id, allowed);
-    }
-    let offerings = current_offerings
-        .iter()
-        .filter_map(|offering| {
-            offering_machines
-                .get(&offering.machine_id)
-                .cloned()
-                .map(|machine| api::McpServerOffering {
-                    different_definition: offering.proposal.is_some()
-                        || offering.reason.as_deref() == Some("different_definition"),
-
-                    definition_fingerprint: offering
-                        .proposal
-                        .as_ref()
-                        .map(|proposal| &proposal["source"])
-                        .unwrap_or(&offering.source)
-                        .get("definition_fingerprint")
-                        .cloned()
-                        .and_then(|value| serde_json::from_value(value).ok()),
-                    can_use_definition: can_use.get(&offering.machine_id).copied().unwrap_or(false),
-                    machine,
-                    state: match offering.state.as_str() {
-                        "found" => api::McpOfferingState::Found,
-                        "ready" => api::McpOfferingState::Ready,
-                        "pending" => api::McpOfferingState::Pending,
-                        _ => api::McpOfferingState::Failed,
-                    },
-                    offered_at: offering.offered_at.map(Time::new),
-                    seen_at: Time::new(offering.seen_at),
-                    reason: offering
-                        .proposal
-                        .as_ref()
-                        .and_then(|proposal| proposal["reason"].as_str())
-                        .map(str::to_owned)
-                        .or_else(|| offering.reason.clone()),
-                })
-        })
-        .collect();
-    let machine = if let Some(machine) = row.machine_id {
-        machine_refs(&ctx.app, conn, &[machine])
-            .await?
-            .remove(&machine)
-    } else {
-        None
-    };
-    let access = if let Some(environment) = row.environment_id {
-        let held = resources::effective(
-            conn,
-            principal,
-            ObjectRef {
-                kind: ResourceKind::Environment.into(),
-                id: environment,
-            },
-            Policy::default(),
-        )
-        .await
-        .map_err(ApiError::internal)?;
-        accesses(
-            conn,
-            principal,
-            &[Holding {
-                admin_only: &held.admin_only,
-                admin_access: held.admin_access,
-                admin_place: held.admin_place,
-                participating: held.participating,
-                id: environment,
-                owner: held.owner,
-                administers: held.administers,
-                held: &held.held,
-            }],
-        )
-        .await?
-        .remove(&environment)
-    } else {
-        let held = resources::effective(
-            conn,
-            principal,
-            ObjectRef {
-                kind: ResourceKind::McpServer.into(),
-                id,
-            },
-            Policy::default(),
-        )
-        .await
-        .map_err(ApiError::internal)?;
-        accesses(
-            conn,
-            principal,
-            &[Holding {
-                admin_only: &held.admin_only,
-                admin_access: held.admin_access,
-                admin_place: held.admin_place,
-                participating: held.participating,
-                id,
-                owner: held.owner,
-                administers: held.administers,
-                held: &held.held,
-            }],
-        )
-        .await?
-        .remove(&id)
-    }
-    .ok_or_else(|| ApiError::internal("the server's access was not read"))?;
-    let imported = if let Some(imported) = row.spec.get("imported") {
-        let by: Id = serde_json::from_value(imported["by"].clone()).map_err(ApiError::internal)?;
-        Some(api::McpServerImported {
-            source: imported["source"].as_str().unwrap_or_default().to_owned(),
-            scope: serde_json::from_value(imported["scope"].clone()).map_err(ApiError::internal)?,
-            directory: imported["directory"].as_str().map(str::to_owned),
-            name: imported["name"].as_str().unwrap_or_default().to_owned(),
-            at: serde_json::from_value(imported["at"].clone()).map_err(ApiError::internal)?,
-            by: people.get(&by).cloned().ok_or_else(ApiError::not_found)?,
-            stale: import_is_stale(conn, &row).await?,
-        })
-    } else {
-        None
-    };
-    let address = addresses
-        .get(&id)
-        .cloned()
-        .or_else(|| {
-            environment
-                .as_ref()
-                .map(|environment| format!("{}.{}", environment.address, row.name))
-        })
-        .unwrap_or_default();
-    let enabled_places: i64 = if !row.enabled {
-        0
-    } else if row.environment_id.is_some() {
-        1
-    } else {
-        sqlx::query_scalar("SELECT
-          (SELECT count(*) FROM settings s JOIN nodes n ON n.id=s.node_id AND n.deleted_at IS NULL WHERE s.key='mcp.enabled' AND s.value->>$1::uuid::text='true') +
-          (SELECT count(*) FROM environments WHERE deleted_at IS NULL AND config->'mcp.enabled'->>$1::uuid::text='true')")
-            .bind(id).fetch_one(&mut *conn).await.map_err(DbError::from)?
-    };
-    Ok(McpServer {
-        offerings,
-        enabled_places: Some(enabled_places),
-        id,
-        name: row.name,
-        description: row.description,
-        org_id: row.org_id,
-        owner: row.owner_id.and_then(|owner| people.get(&owner).cloned()),
-        home: row.home_id.and_then(|home| homes.get(&home).cloned()),
-        address,
-        machine,
-        environment,
-        imported,
-        spec: if row.imported {
-            json!({"transport":row.spec["transport"]})
-        } else {
-            row.spec
-        },
-        enabled: row.enabled,
-        revision: row.revision,
-        access,
-    })
-}
-
-async fn import_is_stale(conn: &mut Conn, row: &McpRow) -> ApiResult<bool> {
-    let offerings = rows::offerings(conn, &[row.id]).await?;
-    for offering in offerings
-        .into_iter()
-        .filter(|offering| offering.state == "ready")
-    {
-        let origin = &offering.source;
-        if rows::found_on_machine(conn, offering.machine_id)
-            .await?
-            .iter()
-            .any(|found| {
-                found["source"] == origin["source"]
-                    && (found["scope"] == origin["scope"]
-                        || (found["scope"] == "directory" && origin["scope"] == "project"))
-                    && found["name"] == origin["name"]
-                    && found["directory"] == origin["directory"]
-                    && found["digest"] != origin["digest"]
-            })
-        {
-            return Ok(true);
-        }
-    }
-    Ok(false)
+        .ok_or_else(ApiError::not_found)
 }
 
 async fn create(ctx: Ctx, (): (), body: api::McpServerCreateBody) -> ApiResult<McpServer> {

@@ -329,6 +329,25 @@ pub async fn unpin_blobs(
     Ok(unpinned)
 }
 
+/// Locks the native unpin writer's exact existing rows before its caller's first-effect check.
+/// Zero-count rows stay locked too, so another pin cannot appear between this preparation and the update.
+pub async fn prepare_unpin_blobs(conn: &mut Conn, hashes: &[Hash]) -> Result<bool, DbError> {
+    let mut changes = false;
+    let mut ordered = hashes.to_vec();
+    ordered.sort_unstable_by(|a, b| a.as_bytes().cmp(b.as_bytes()));
+    ordered.dedup();
+    for batch in ordered.chunks(PIN_BATCH) {
+        let counts: Vec<i64> = sqlx::query_scalar(
+            "SELECT pin_count FROM blobs WHERE hash=ANY($1) ORDER BY hash FOR UPDATE",
+        )
+        .bind(raw_hashes(batch))
+        .fetch_all(&mut *conn)
+        .await?;
+        changes |= counts.iter().any(|count| *count > 0);
+    }
+    Ok(changes)
+}
+
 /// Blobs that nothing points at, no cached version of a file names, and nobody asked for since
 /// `idle_since`: the ones the grace has run out for, oldest first.
 pub async fn unreferenced(
@@ -640,6 +659,16 @@ pub async fn begin_session(conn: &mut Conn, session: &SessionRow) -> Result<(), 
     .execute(conn)
     .await?;
     Ok(())
+}
+
+/// The unfinished session's native identity and progress, without taking its writer lock.
+pub async fn session(conn: &mut Conn, id: Id) -> Result<Option<SessionRow>, DbError> {
+    Ok(sqlx::query_as(sqlx::AssertSqlSafe(format!(
+        "SELECT {SESSION_COLUMNS} FROM upload_sessions WHERE id = $1 AND cancelled_at IS NULL AND completed_at IS NULL"
+    )))
+    .bind(id)
+    .fetch_optional(conn)
+    .await?)
 }
 
 /// The session `id`, locked until the transaction ends.

@@ -5,6 +5,8 @@
     reason = "a test fails by panicking"
 )]
 
+#[path = "kmounts_mcp/create_scopes.rs"]
+mod create_scopes;
 mod places;
 mod resources;
 mod support;
@@ -478,7 +480,9 @@ async fn only_an_environment_manager_can_queue_one_server_restart_and_the_list_s
         })
         .send()
         .await
-        .ok();
+        .ok()
+        .into_full()
+        .unwrap();
     sqlx::query("UPDATE environments SET status='running',facts=jsonb_set(facts,'{mcp_servers}',$2) WHERE id=$1").bind(env).bind(json!([{"name":"flaky","state":"failed","reason":"The server ended (exit status: 7): [masked]","revision":3}])).execute(&world.db.pool).await.unwrap();
     sqlx::query("UPDATE machines SET online=true WHERE id=$1")
         .bind(machine)
@@ -602,7 +606,9 @@ async fn an_environment_server_takes_local_policy_and_never_returns_a_secret() {
         .body(&body)
         .send()
         .await
-        .ok();
+        .ok()
+        .into_full()
+        .unwrap();
     assert_eq!(made.environment.as_ref().unwrap().id, env);
     assert!(
         !serde_json::to_string(&made)

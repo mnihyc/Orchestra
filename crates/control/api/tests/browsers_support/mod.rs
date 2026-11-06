@@ -11,7 +11,6 @@
 
 use crate::places::Who;
 use crate::rig::Scene;
-use futures::{SinkExt, StreamExt};
 use orch_api_contract::browsers::*;
 use orch_api_core::registry::Registry;
 use orch_api_core::state::App;
@@ -24,12 +23,12 @@ use std::path::PathBuf;
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
 use tokio::io::AsyncWriteExt;
-use tokio_tungstenite::tungstenite::{Message, client::IntoClientRequest};
+use tokio_tungstenite::tungstenite::client::IntoClientRequest;
 
 pub mod fake;
 
-/// Browser setup and the shared machine get generous bounded waits.
-pub const WAIT: Duration = Duration::from_secs(60);
+mod screen;
+pub use screen::{Screen, WAIT};
 
 /// A private environment peer in a disposable shipped-image unit.
 pub struct Peer {
@@ -322,14 +321,11 @@ impl Floor {
     /// Attaches a real WebSocket client with its single-use ticket.
     pub async fn screen(&self, browser: Id, ticket: &str) -> Screen {
         let addr = self.serve().await;
-        let mut request = format!("ws://{addr}/api/v1/ws/browsers/{browser}?ticket={ticket}")
-            .into_client_request()
-            .unwrap();
-        request
-            .headers_mut()
-            .insert("sec-websocket-protocol", "orch.browser.v1".parse().unwrap());
-        let (socket, _) = tokio_tungstenite::connect_async(request).await.unwrap();
-        Screen { socket }
+        Screen::connect_at(
+            addr,
+            &format!("/api/v1/ws/browsers/{browser}?ticket={ticket}"),
+        )
+        .await
     }
     /// Verifies a reused ticket is rejected before an upgrade.
     pub async fn a_spent_ticket_is_refused(&self, browser: Id, ticket: &str) {
@@ -386,67 +382,5 @@ impl Drop for Floor {
         let _ = std::process::Command::new("docker")
             .args(["rm", "-f", &self.peer.name])
             .output();
-    }
-}
-
-/// A real client whose picture acknowledgements are explicit.
-pub struct Screen {
-    socket: tokio_tungstenite::WebSocketStream<
-        tokio_tungstenite::MaybeTlsStream<tokio::net::TcpStream>,
-    >,
-}
-impl Screen {
-    /// Sends one frame exactly as a browser client would.
-    pub async fn send(&mut self, value: Json) {
-        self.socket
-            .send(Message::Text(value.to_string().into()))
-            .await
-            .unwrap();
-    }
-    /// Takes the requested metadata while acknowledging intervening pictures.
-    pub async fn text(&mut self, op: &str) -> Json {
-        tokio::time::timeout(WAIT, async {
-            loop {
-                match self.socket.next().await.unwrap().unwrap() {
-                    Message::Text(text) => {
-                        let value: Json = serde_json::from_str(&text).unwrap();
-                        if value["op"] == "error" && op != "error" {
-                            panic!("unexpected browser refusal: {value}");
-                        }
-                        if value["op"] == op {
-                            return value;
-                        }
-                    }
-                    Message::Binary(bytes) => {
-                        let n = orch_realtime_contract::browser::PictureHeader::decode(&bytes)
-                            .unwrap()
-                            .n;
-                        self.send(json!({"op":"ack","n":n})).await;
-                    }
-                    _ => {}
-                }
-            }
-        })
-        .await
-        .unwrap()
-    }
-    /// Takes one picture without acknowledging it, allowing tests to emulate a slow viewer.
-    pub async fn picture(&mut self) -> bytes::Bytes {
-        tokio::time::timeout(WAIT, async {
-            loop {
-                if let Message::Binary(bytes) = self.socket.next().await.unwrap().unwrap() {
-                    return bytes;
-                }
-            }
-        })
-        .await
-        .unwrap()
-    }
-    /// Acknowledges the supplied picture as drawn.
-    pub async fn drawn(&mut self, bytes: &[u8]) {
-        let n = orch_realtime_contract::browser::PictureHeader::decode(bytes)
-            .unwrap()
-            .n;
-        self.send(json!({"op":"ack","n":n})).await;
     }
 }

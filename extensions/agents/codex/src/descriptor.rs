@@ -89,6 +89,7 @@ pub fn capabilities() -> Capabilities {
         steer: true,
         interrupt: true,
         background_commands: true,
+        turn_changes_require_restart: false,
         approvals: vec![
             HarnessRequestKind::Command,
             HarnessRequestKind::FileChange,
@@ -145,6 +146,15 @@ pub fn capabilities() -> Capabilities {
             ProviderFactKind::AvailableResets,
             ProviderFactKind::CredentialVerification,
         ],
+        provider_fact_fields: orch_provider_contract::credit_fields::normalize_reports(
+            [(
+                "balances.plan".to_owned(),
+                ["remaining", "unlimited", "unit"]
+                    .map(str::to_owned)
+                    .to_vec(),
+            )]
+            .into(),
+        ),
         model_discovery: true,
         title: false,
         auxiliary_models: AuxiliaryModels::Uncontrolled,
@@ -348,6 +358,11 @@ fn text() -> std::collections::BTreeMap<String, std::collections::BTreeMap<Strin
         (
             "parameters.service_tier.description",
             "模型的更快模式，会更快用完套餐。只提供提供方的管理者为该模型启用的速度。",
+        ),
+        ("parameters.web_search.title", "网络搜索"),
+        (
+            "parameters.web_search.description",
+            "让模型在提供方启用的模式范围内搜索公开网络。搜索可能另行计费。",
         ),
         ("parameters.context.title", "上下文"),
         (

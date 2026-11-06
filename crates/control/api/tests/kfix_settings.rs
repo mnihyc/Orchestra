@@ -8,6 +8,7 @@
 mod places;
 mod rig;
 mod support;
+use support::FullTokenReply as _;
 
 use orch_api_contract::auth::{ApiTokenCreateBody, MeTokenCreate};
 use orch_api_contract::common::ErrorCode;
@@ -180,17 +181,19 @@ async fn a_policy_is_written_with_settings_manage_alone_and_where_a_thread_start
         .call(MeTokenCreate, &[])
         .token(&s.ada.token)
         .body(&ApiTokenCreateBody {
+            rules: None,
             name: "Rules only".to_owned(),
             scopes: Some(vec!["settings.manage".to_owned()]),
             node_id: Some(org),
             expires_at: None,
-            proof: orch_api_contract::auth::SensitiveProof {
+            proof: Some(orch_api_contract::auth::SensitiveProof {
                 password: Some(support::PASSWORD.to_owned()),
                 ..Default::default()
-            },
+            }),
         })
         .send()
         .await
+        .full_token()
         .ok()
         .token
         .expect("the first answer carries the secret");

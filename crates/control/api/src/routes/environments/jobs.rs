@@ -19,6 +19,7 @@ use orch_db::Conn;
 use orch_db::queries::jobs::{self as rows, JobRow, kind};
 use orch_engine::jobs::runner::read_progress;
 use orch_types::{Id, Time};
+use std::collections::HashMap;
 
 /// Binds this module's requests.
 pub fn mount(registry: &mut Registry) {
@@ -39,16 +40,46 @@ fn state_of(word: &str) -> JobState {
 
 /// The job as the API shows it.
 pub(crate) async fn view(conn: &mut Conn, row: &JobRow) -> ApiResult<Job> {
-    let (mut progress, log) = read_progress(row);
-    let waiting_for = match row
-        .plan
+    view_with_machine_sources(conn, row, None).await
+}
+
+pub(crate) fn waiting_machine(row: &JobRow) -> Option<Id> {
+    row.plan
         .pointer("/active_command/machine")
         .and_then(orch_types::Json::as_str)
-        .and_then(|value| value.parse::<Id>().ok())
-    {
-        Some(machine) => orch_db::queries::resources::machine(conn, machine)
+        .and_then(|value| value.parse().ok())
+}
+
+/// Actual native waiting-name sources, before any job DTO is produced.
+pub(crate) async fn machine_name_sources(
+    conn: &mut Conn,
+    rows: &[JobRow],
+) -> ApiResult<HashMap<Id, String>> {
+    let ids = rows.iter().filter_map(waiting_machine).collect::<Vec<_>>();
+    Ok(
+        orch_db::queries::resources::routes::machine_names(conn, &ids)
             .await?
-            .map(|machine| machine.name),
+            .into_iter()
+            .map(|row| (row.id, row.name))
+            .collect(),
+    )
+}
+
+/// The same native projection, with an optional trusted bound on emitted machine names.
+/// Ordinary callers retain their original current/historical progress presentation.
+pub(crate) async fn view_with_machine_sources(
+    conn: &mut Conn,
+    row: &JobRow,
+    names: Option<&HashMap<Id, String>>,
+) -> ApiResult<Job> {
+    let (mut progress, log) = read_progress(row);
+    let waiting_for = match waiting_machine(row) {
+        Some(machine) => match names {
+            Some(names) => names.get(&machine).cloned(),
+            None => orch_db::queries::resources::machine(conn, machine)
+                .await?
+                .map(|machine| machine.name),
+        },
         None => None,
     };
     let stall_after_seconds = orch_settings::get::<i64>(
@@ -66,6 +97,15 @@ pub(crate) async fn view(conn: &mut Conn, row: &JobRow) -> ApiResult<Job> {
         directories_done: None,
         stopping: false,
     });
+    if names.is_some()
+        && matches!(
+            activity.waiting_for.as_ref(),
+            Some(api::JobWaiting::Machine { .. })
+        )
+    {
+        // An old cached label is not evidence for the currently selected source.
+        activity.waiting_for = None;
+    }
     activity.stall_after_seconds = stall_after_seconds;
     activity.stopping = row.is_open() && row.cancel_requested();
     if activity.stopping {
@@ -467,30 +507,99 @@ async fn get(ctx: Ctx, (): (), (): ()) -> ApiResult<Job> {
 
 /// The exact job read and progress-only cut, shared by HTTP and live delivery.
 pub(crate) async fn read_for(conn: &mut Conn, principal: &Principal, id: Id) -> ApiResult<Job> {
+    prepare_read_for(conn, principal, id)
+        .await?
+        .render(conn, None)
+        .await
+}
+
+/// The exact native job row and its ordinary progress-only cut, before public formatting.
+pub(crate) struct PreparedRead {
+    row: JobRow,
+    cut: bool,
+}
+
+impl PreparedRead {
+    pub(crate) fn row(&self) -> &JobRow {
+        &self.row
+    }
+    pub(crate) fn progress_only(&self) -> bool {
+        self.cut
+    }
+    pub(crate) fn machine_source(&self) -> Option<Id> {
+        waiting_machine(&self.row)
+    }
+
+    /// Native identity and field authority, without comparing changing progress content.
+    pub(crate) fn preserves(&self, fresh: &Self) -> bool {
+        self.row.id == fresh.row.id
+            && self.row.kind == fresh.row.kind
+            && self.row.environment_id == fresh.row.environment_id
+            && self.row.node_id == fresh.row.node_id
+            && self.row.provider_id == fresh.row.provider_id
+            && self.row.batch_id == fresh.row.batch_id
+            && self.row.created_at == fresh.row.created_at
+            && self.row.created_by == fresh.row.created_by
+            && (self.cut || !fresh.cut)
+    }
+
+    pub(crate) async fn require_current(
+        &self,
+        conn: &mut Conn,
+        principal: &Principal,
+    ) -> ApiResult<()> {
+        let cut = may_see(conn, principal, &self.row).await?;
+        if !self.cut && cut {
+            return Err(ApiError::not_found());
+        }
+        Ok(())
+    }
+
+    /// The original native DTO and its unchanged explicit progress cut. A source bound
+    /// only restricts the existing named machine field, never stored JSON by inspection.
+    pub(crate) async fn render(
+        &self,
+        conn: &mut Conn,
+        names: Option<&HashMap<Id, String>>,
+    ) -> ApiResult<Job> {
+        let mut shown = view_with_machine_sources(conn, &self.row, names).await?;
+        if self.cut {
+            progress_only(&mut shown);
+        }
+        Ok(shown)
+    }
+}
+
+/// The same ordinary job reader's selection and gate, reusable by stored native composites.
+pub(crate) async fn prepare_read_for(
+    conn: &mut Conn,
+    principal: &Principal,
+    id: Id,
+) -> ApiResult<PreparedRead> {
     let row = row_of(conn, id).await?;
     let cut = may_see(conn, principal, &row).await?;
-    let mut shown = view(conn, &row).await?;
-    if cut {
-        shown.node_id = None;
-        shown.provider_id = None;
-        shown.batch_id = None;
-        shown.result = None;
-        shown.error = None;
-        shown.log = None;
-        shown.created_by = None;
-        shown.started_at = None;
-        shown.finished_at = None;
-        shown.progress.phases.clear();
-        shown.progress.files_done = 0;
-        shown.progress.files_total = None;
-        shown.progress.bytes_done = 0;
-        shown.progress.bytes_total = None;
-        shown.progress.rate_bps = None;
-        shown.progress.eta_seconds = None;
-        shown.progress.message = None;
-        shown.progress.activity = None;
-    }
-    Ok(shown)
+    Ok(PreparedRead { row, cut })
+}
+
+fn progress_only(shown: &mut Job) {
+    shown.node_id = None;
+    shown.provider_id = None;
+    shown.batch_id = None;
+    shown.result = None;
+    shown.error = None;
+    shown.log = None;
+    shown.created_by = None;
+    shown.started_at = None;
+    shown.finished_at = None;
+    shown.progress.phases.clear();
+    shown.progress.files_done = 0;
+    shown.progress.files_total = None;
+    shown.progress.bytes_done = 0;
+    shown.progress.bytes_total = None;
+    shown.progress.rate_bps = None;
+    shown.progress.eta_seconds = None;
+    shown.progress.message = None;
+    shown.progress.activity = None;
 }
 
 async fn measurement_access(

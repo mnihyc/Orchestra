@@ -266,6 +266,26 @@ fn roots_of(policy: &LocalPolicy, data_dir: &std::path::Path) -> Vec<PathBuf> {
         .collect()
 }
 
+/// Only the first existing program selected for each kind enters an executor's context.
+fn local_programs_of(
+    policy: &LocalPolicy,
+    known: &crate::local_harnesses::Discovery,
+) -> BTreeMap<String, String> {
+    let path = std::env::var_os("PATH");
+    let mut programs = BTreeMap::new();
+    let mut selected = std::collections::BTreeSet::new();
+    for harness in &policy.agent_harnesses {
+        if known.supports(&harness.kind)
+            && selected.insert(&harness.kind)
+            && let Some(program) =
+                crate::local_harnesses::resolve_named(&harness.path, path.as_deref())
+        {
+            programs.insert(harness.kind.clone(), program.to_string_lossy().into_owned());
+        }
+    }
+    programs
+}
+
 /// What the host starts with: the policy of the machine if a person connected it, the places a driver
 /// gave if the system made it, and the tunables of the connector's configuration.
 fn settings_of(services: &Services, parts: &EnvironmentParts) -> HostSettings {
@@ -298,6 +318,9 @@ fn settings_of(services: &Services, parts: &EnvironmentParts) -> HostSettings {
         }
     };
     settings.process_controls = services.process_controls;
+    if let Some(policy) = services.policy.policy() {
+        settings.local_programs = local_programs_of(&policy, &services.local_harnesses);
+    }
     // The builds the system put in a runtime it made are the tools the environment was made with.
     settings.tools = services
         .installed
@@ -1663,34 +1686,40 @@ fn server_changed(
 /// Gives the host the limits of the machine again whenever its owner, or the system for the keys handed
 /// over, changes them. A shell that the policy no longer allows is closed.
 async fn follow_policy(role: Weak<EnvironmentRole>, stop: CancellationToken) {
-    let Some(mut changes) = role.upgrade().map(|role| role.services.policy.changes()) else {
+    let Some((mut changes, mut programs)) = role.upgrade().map(|role| {
+        (
+            role.services.policy.changes(),
+            role.services.local_harnesses.changes(),
+        )
+    }) else {
         return;
     };
     loop {
-        tokio::select! {
-            () = stop.cancelled() => return,
-            changed = changes.changed() => {
-                if changed.is_err() {
-                    return;
-                }
-            }
-        }
         let Some(role) = role.upgrade() else {
             return;
         };
-        let Some(policy) = role.services.policy.policy() else {
-            continue;
-        };
-        role.host.set_policy(
-            gates_of(&policy),
-            Some(roots_of(&policy, &role.services.data_dir)),
-            Some(policy.exec_offers.clone()),
-            mcp_gates_of(&policy),
-        );
-        if !policy.environment_terminal {
-            for environment in role.host.environments() {
-                let _ = environment.terminals().close_all().await;
-            }
+        if let Some(policy) = role.services.policy.policy() {
+            role.host.set_policy(
+                gates_of(&policy),
+                Some(roots_of(&policy, &role.services.data_dir)),
+                Some(policy.exec_offers.clone()),
+                mcp_gates_of(&policy),
+            );
+            let programs = local_programs_of(&policy, &role.services.local_harnesses);
+            let close_terminals = async {
+                if !policy.environment_terminal {
+                    for environment in role.host.environments() {
+                        let _ = environment.terminals().close_all().await;
+                    }
+                }
+            };
+            tokio::join!(role.host.set_local_programs(programs), close_terminals);
+        }
+        drop(role);
+        tokio::select! {
+            () = stop.cancelled() => return,
+            changed = changes.changed() => if changed.is_err() { return; },
+            changed = programs.changed() => if changed.is_err() { return; },
         }
     }
 }

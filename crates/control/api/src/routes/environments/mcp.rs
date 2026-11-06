@@ -4,7 +4,7 @@ use crate::middleware::authorization;
 use crate::middleware::requests::{ApiError, ApiResult};
 use crate::registry::{Ctx, Registry};
 use crate::routes::nodes::{invalid, view as node_view};
-use crate::routes::resources::view::{addresses, machine_refs};
+use crate::routes::resources::view::{addresses, machine_refs_from_rows};
 use crate::routes::resources::{Home, begin_mutation, mcp as resources, record, require};
 use orch_access_contract::audit::AuditAction;
 use orch_access_contract::decisions::ObjectRef;
@@ -24,14 +24,26 @@ use orch_link_contract::commands::{McpForget, McpImport, McpImportResult, Serial
 use orch_link_contract::policy::{LocalPolicy, PolicyKey};
 use orch_types::{Id, Json, Time};
 use serde_json::json;
+use std::collections::{BTreeSet, HashMap};
+
+mod create_sources;
+mod read_sources;
 
 /// Binds the environment's enabled set, import and own-server requests.
 pub fn mount(registry: &mut Registry) {
     registry
-        .on(api::EnvironmentMcpGet, get)
+        .on_snapshot_read_with_optional_operation(
+            api::EnvironmentMcpGet,
+            crate::key_operations::native::selected::<read_sources::Servers>,
+            crate::key_operations::native::selected_read::<read_sources::Servers>,
+        )
         .on(api::EnvironmentMcpServerRestart, restart)
         .on(api::EnvironmentMcpImportCreate, import)
-        .on(api::EnvironmentMcpServerCreate, create);
+        .on_with_operation(
+            api::EnvironmentMcpServerCreate,
+            crate::key_operations::native::effects::prepare::<create_sources::OwnServers>,
+            create,
+        );
 }
 
 /// Maps the connector's directory scope into the API's project scope without exposing a definition.
@@ -125,144 +137,121 @@ pub(crate) async fn may_import(
     ))
 }
 
-async fn get(ctx: Ctx, (): (), (): ()) -> ApiResult<EnvironmentMcp> {
-    let id = ctx.id("id")?;
-    let mut conn = ctx.app.db.acquire().await?;
-    let principal = authorization::principal(&ctx, &mut conn).await?;
-    if super::reading::decide(&mut conn, &principal, id).await? != super::reading::Reading::Whole {
+/// The same native whole-Environment reading door as the original server view.
+async fn require_get(conn: &mut Conn, principal: &Principal, id: Id) -> ApiResult<()> {
+    if super::reading::decide(conn, principal, id).await? != super::reading::Reading::Whole {
         require(
-            &mut conn,
-            &principal,
+            conn,
+            principal,
             ResourceKind::Environment,
             id,
             Permission::EnvironmentView,
         )
         .await?;
     }
-    let resolved = orch_engine::mcp::resolve(&mut conn, id, Time::new(ctx.now))
-        .await
-        .map_err(ApiError::internal)?;
+    Ok(())
+}
+
+/// Selected native definitions and observations, before public references are constructed.
+pub(super) struct PreparedGet {
+    environment: Id,
+    resolved: Vec<orch_engine::mcp::ResolvedServer>,
+    addresses: HashMap<Id, String>,
+    machines: Vec<orch_db::queries::resources::routes::MachineNameRow>,
+    node_ids: BTreeSet<Id>,
+    node_disclosure: node_view::ReferenceDisclosure,
+    states: Vec<(String, String)>,
+    runtime_states: Vec<orch_link_contract::events::EnvironmentFactsMcpServer>,
+    status: String,
+    applies: api::McpApplies,
+    library: Vec<orch_engine::resource_facts::RawFacts>,
+    library_subjects: BTreeSet<Id>,
+    library_visibility: orch_engine::resource_facts::PreparedVisibility,
+    import_allowed: bool,
+    import_permitted: bool,
+    found: Vec<api::McpFound>,
+}
+
+async fn prepare_get(
+    ctx: &Ctx,
+    conn: &mut Conn,
+    principal: &Principal,
+    environment: Id,
+    resolved: Vec<orch_engine::mcp::ResolvedServer>,
+) -> ApiResult<PreparedGet> {
     let server_ids: Vec<Id> = resolved
         .iter()
         .filter(|server| server.row.environment_id.is_none())
         .map(|server| server.row.id)
         .collect();
-    let addresses = addresses(&mut conn, &server_ids).await?;
+    let addresses = addresses(conn, &server_ids).await?;
     let machine_ids: Vec<Id> = resolved
         .iter()
         .filter_map(|server| server.row.machine_id)
         .collect();
-    let machines = machine_refs(&ctx.app, &mut conn, &machine_ids).await?;
-    let nodes: Vec<Id> = resolved
+    let machines = orch_db::queries::resources::routes::machine_names(conn, &machine_ids).await?;
+    let node_ids: BTreeSet<_> = resolved
         .iter()
         .filter_map(|server| match &server.from {
             Some(McpFrom::Node(node)) => Some(node.id),
             _ => None,
         })
         .collect();
-    let nodes = node_view::refs(&mut conn, &principal, &nodes, Policy::default()).await?;
-    let states = rows::states(&mut conn, id).await?;
-    let (env, _, policy) = machine_policy(&mut conn, id).await?;
-    let runtime_states: Vec<orch_link_contract::events::EnvironmentFactsMcpServer> =
+    let node_disclosure = node_view::reference_disclosure(
+        conn,
+        principal,
+        &node_ids.iter().copied().collect::<Vec<_>>(),
+        Policy::default(),
+    )
+    .await?;
+    let states = rows::states(conn, environment).await?;
+    let (env, _, policy) = machine_policy(conn, environment).await?;
+    let runtime_states =
         serde_json::from_value(env.facts.get("mcp_servers").cloned().unwrap_or(json!([])))
             .unwrap_or_default();
-    let applies = if rows::reload_available(&mut conn, id).await? {
+    let applies = if rows::reload_available(conn, environment).await? {
         api::McpApplies::Immediately
     } else {
         api::McpApplies::NextTurn
     };
     let objects: Vec<_> = resolved
         .iter()
-        .map(|server| orch_access_contract::decisions::ObjectRef {
+        .map(|server| ObjectRef {
             kind: orch_access_contract::permissions::ObjectKind::McpServer,
             id: server.row.id,
         })
         .collect();
-    let readable =
-        crate::routes::resources::library::readable(&mut conn, &principal, &objects).await?;
+    let readable = crate::routes::resources::library::readable(conn, principal, &objects).await?;
     let subjects: Vec<_> = objects
         .into_iter()
         .filter(|object| readable.contains(object))
         .map(|object| orch_api_contract::resource_facts::FactSubject::Resource { object })
         .collect();
-    let raw = orch_engine::resource_facts::read_with(
-        &mut conn,
+    let library_subjects = subjects
+        .iter()
+        .filter_map(|subject| match subject {
+            orch_api_contract::resource_facts::FactSubject::Resource { object } => Some(object.id),
+            _ => None,
+        })
+        .collect();
+    let mut library = orch_engine::resource_facts::read_with(
+        conn,
         &subjects,
         Time::new(ctx.now),
         Some(&orch_engine::resource_facts::library::RecordedUses),
     )
     .await
     .map_err(ApiError::internal)?;
-    let projected = crate::routes::everything::library::project(&mut conn, &principal, raw).await?;
-    let mut library: std::collections::HashMap<_, _> = projected
-        .into_iter()
-        .filter_map(|facts| match &facts.subject {
-            orch_api_contract::resource_facts::FactSubject::Resource { object } => {
-                Some((object.id, facts))
-            }
-            _ => None,
-        })
-        .collect();
-    let mut servers = Vec::new();
-    for server in resolved {
-        let hosted = runtime_states
-            .iter()
-            .find(|state| state.name == server.row.name);
-        let state = if server.reason.is_some() {
-            McpState::Unavailable
-        } else if env.status != "running" {
-            McpState::Stopped
-        } else if let Some(hosted) = hosted {
-            match hosted.state.as_str() {
-                "starting" => McpState::Starting,
-                "running" => McpState::Running,
-                "failed" => McpState::Failed,
-                _ => McpState::Stopped,
-            }
-        } else {
-            match states
-                .iter()
-                .find(|(name, _)| *name == server.row.name)
-                .map(|(_, state)| state.as_str())
-            {
-                Some("succeeded") => McpState::Running,
-                Some("failed" | "expired" | "cancelled") => McpState::Failed,
-                _ => McpState::Stopped,
-            }
-        };
-        let from = match server.from {
-            Some(McpFrom::Node(node)) => nodes.get(&node.id).cloned().map(McpFrom::Node),
-            other => other,
-        };
-        servers.push(api::EnvironmentMcpServer {
-            library: library.remove(&server.row.id),
-            server: api::EnvironmentMcpServerRef {
-                id: server.row.id,
-                name: server.row.name.clone(),
-                address: addresses.get(&server.row.id).cloned().unwrap_or_default(),
-                machine: server
-                    .row
-                    .machine_id
-                    .and_then(|machine| machines.get(&machine).cloned()),
-                own: server.row.environment_id == Some(id),
-            },
-            from,
-            state,
-            reason: server.reason.or_else(|| {
-                (state == McpState::Failed).then(|| {
-                    hosted
-                        .and_then(|hosted| hosted.reason.clone())
-                        .unwrap_or_else(|| "the last start attempt failed".to_owned())
-                })
-            }),
-            tools: server
-                .row
-                .spec
-                .pointer("/imported/tools")
-                .and_then(Json::as_i64),
-        });
-    }
-    let allowed = may_import(&mut conn, &principal, id).await?;
+    crate::routes::everything::library::select_relations(&mut library);
+    let library_visibility = orch_engine::resource_facts::prepare_projection(
+        conn,
+        principal,
+        Policy::default(),
+        &library,
+    )
+    .await
+    .map_err(ApiError::internal)?;
+    let import_allowed = may_import(conn, principal, environment).await?;
     let found = policy
         .mcp_import
         .then_some(&env.facts)
@@ -272,21 +261,133 @@ async fn get(ctx: Ctx, (): (), (): ()) -> ApiResult<EnvironmentMcp> {
         .flatten()
         .filter_map(found_view)
         .collect();
-    Ok(EnvironmentMcp {
-        servers,
+    Ok(PreparedGet {
+        environment,
+        resolved,
+        addresses,
+        machines,
+        node_ids,
+        node_disclosure,
+        states,
+        runtime_states,
+        status: env.status,
         applies,
+        library,
+        library_subjects,
+        library_visibility,
+        import_allowed,
+        import_permitted: policy.mcp_import,
         found,
-        import: McpImportRight {
-            allowed,
-            reason: if allowed {
-                None
-            } else if !policy.mcp_import {
-                Some(McpImportReason::Policy)
-            } else {
-                Some(McpImportReason::NotOwner)
-            },
-        },
     })
+}
+
+impl PreparedGet {
+    async fn render(
+        &self,
+        ctx: &Ctx,
+        conn: &mut Conn,
+        principal: &Principal,
+    ) -> ApiResult<EnvironmentMcp> {
+        let machines = machine_refs_from_rows(&ctx.app, self.machines.clone())?;
+        let nodes = node_view::refs(
+            conn,
+            principal,
+            &self.node_ids.iter().copied().collect::<Vec<_>>(),
+            Policy::default(),
+        )
+        .await?;
+        let mut library: HashMap<_, _> = self
+            .library_visibility
+            .project(&self.library)
+            .into_iter()
+            .filter_map(|facts| match &facts.subject {
+                orch_api_contract::resource_facts::FactSubject::Resource { object } => {
+                    Some((object.id, facts))
+                }
+                _ => None,
+            })
+            .collect();
+        let mut servers = Vec::new();
+        for server in &self.resolved {
+            let hosted = self
+                .runtime_states
+                .iter()
+                .find(|state| state.name == server.row.name);
+            let state = if server.reason.is_some() {
+                McpState::Unavailable
+            } else if self.status != "running" {
+                McpState::Stopped
+            } else if let Some(hosted) = hosted {
+                match hosted.state.as_str() {
+                    "starting" => McpState::Starting,
+                    "running" => McpState::Running,
+                    "failed" => McpState::Failed,
+                    _ => McpState::Stopped,
+                }
+            } else {
+                match self
+                    .states
+                    .iter()
+                    .find(|(name, _)| *name == server.row.name)
+                    .map(|(_, state)| state.as_str())
+                {
+                    Some("succeeded") => McpState::Running,
+                    Some("failed" | "expired" | "cancelled") => McpState::Failed,
+                    _ => McpState::Stopped,
+                }
+            };
+            let from = match server.from.clone() {
+                Some(McpFrom::Node(node)) => nodes.get(&node.id).cloned().map(McpFrom::Node),
+                other => other,
+            };
+            servers.push(api::EnvironmentMcpServer {
+                library: library.remove(&server.row.id),
+                server: api::EnvironmentMcpServerRef {
+                    id: server.row.id,
+                    name: server.row.name.clone(),
+                    address: self
+                        .addresses
+                        .get(&server.row.id)
+                        .cloned()
+                        .unwrap_or_default(),
+                    machine: server
+                        .row
+                        .machine_id
+                        .and_then(|machine| machines.get(&machine).cloned()),
+                    own: server.row.environment_id == Some(self.environment),
+                },
+                from,
+                state,
+                reason: server.reason.clone().or_else(|| {
+                    (state == McpState::Failed).then(|| {
+                        hosted
+                            .and_then(|hosted| hosted.reason.clone())
+                            .unwrap_or_else(|| "the last start attempt failed".to_owned())
+                    })
+                }),
+                tools: server
+                    .row
+                    .spec
+                    .pointer("/imported/tools")
+                    .and_then(Json::as_i64),
+            });
+        }
+        Ok(EnvironmentMcp {
+            servers,
+            applies: self.applies,
+            found: self.found.clone(),
+            import: McpImportRight {
+                allowed: self.import_allowed,
+                reason: if self.import_allowed {
+                    None
+                } else if !self.import_permitted {
+                    Some(McpImportReason::Policy)
+                } else {
+                    Some(McpImportReason::NotOwner)
+                },
+            },
+        })
+    }
 }
 
 async fn check_import(conn: &mut Conn, principal: &Principal, environment: Id) -> ApiResult<()> {
@@ -671,76 +772,32 @@ async fn restart(ctx: Ctx, (): (), (): ()) -> ApiResult<orch_api_contract::works
 async fn create(
     ctx: Ctx,
     (): (),
-    body: api::EnvironmentMcpServerCreateBody,
-) -> ApiResult<McpServer> {
-    let environment = ctx.id("id")?;
-    let name = resources::name(&body.name)?;
-    let spec = resources::spec(&body.spec)?;
-    let typed: orch_agent_contract::discovery::McpServerSpec =
-        serde_json::from_value(spec.clone()).map_err(ApiError::internal)?;
-    let secrets = body.secrets.unwrap_or_default();
-    if secrets.keys().any(|name| !typed.secret_env.contains(name)) {
-        return Err(invalid(
-            "secrets",
-            "only names declared in secret_env are supplied here",
-        ));
-    }
-    let (ctx, mut tx, principal) = begin_mutation(&ctx).await?;
-    require(
-        &mut tx,
-        &principal,
-        ResourceKind::Environment,
-        environment,
-        Permission::EnvironmentManage,
-    )
-    .await?;
-    let (env, _, policy) = machine_policy(&mut tx, environment).await?;
-    if !policy.mcp_add {
-        return Err(ApiError::new(
-            ErrorCode::PolicyMcpAddDisabled,
-            "the machine accepts no tool server written from here",
-        ));
-    }
-    let row = McpRow {
-        imported: false,
-        id: orch_types::new_id(),
-        name,
-        description: body.description.unwrap_or_default().trim().to_owned(),
-        org_id: Some(env.org_id),
-        home_id: Some(env.org_id),
-        owner_id: Some(principal.user()),
-        machine_id: None,
-        environment_id: Some(environment),
-        spec,
-        enabled: true,
-        revision: 1,
-    };
-    rows::insert(&mut tx, &row, ctx.now).await?;
-    for (name, value) in secrets {
-        resources::put_secret(&ctx, &mut tx, row.id, &name, &value).await?;
-    }
-    rows::enable(
-        &mut tx,
-        environment,
-        row.id,
-        body.enable.unwrap_or(true),
-        ctx.now,
-    )
-    .await?;
-    record(
-        &ctx,
-        &mut tx,
-        AuditAction::McpCreated,
-        row.id,
-        Home {
-            node: row.home_id,
-            org: row.org_id,
-        },
-        "Added an environment MCP server",
-        json!({"server":row.id,"environment":environment,"name":row.name}),
-    )
-    .await?;
-    let result = resources::show(&ctx, &mut tx, &principal, row.id).await?;
+    _body: api::EnvironmentMcpServerCreateBody,
+) -> ApiResult<api::EnvironmentMcpCreateResponse> {
+    let (mut tx, _) = crate::middleware::transaction_guard::begin(&ctx).await?;
+    let done =
+        crate::key_operations::native::effects::apply::<create_sources::OwnServers>(&ctx, &mut tx)
+            .await?;
     tx.commit().await.map_err(DbError::from)?;
-    Ok(result)
+    let receipt = api::EnvironmentMcpCreateReceipt {
+        projection: orch_api_contract::common::ReceiptProjection::Receipt,
+        server_id: done.output.server,
+        environment_id: done.output.environment,
+    };
+    crate::key_operations::publication::receipt(&done.ctx, &receipt)?;
+    match crate::key_operations::native::resource_reply::with_input::<create_sources::OwnServers>(
+        &done.ctx,
+        &done.accepted,
+        done.output,
+    )
+    .await?
+    {
+        Some(orch_api_contract::resources::Resource::McpServer(server)) => {
+            Ok(api::EnvironmentMcpCreateResponse::Full(Box::new(server)))
+        }
+        Some(_) => Err(ApiError::internal(
+            "the created native MCP projection changed resource kind",
+        )),
+        None => Ok(api::EnvironmentMcpCreateResponse::Receipt(receipt)),
+    }
 }

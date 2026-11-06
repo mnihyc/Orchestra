@@ -11,6 +11,7 @@ mod places;
 mod search_world;
 mod support;
 
+use crate::support::FullPermissionPageReply;
 use orch_api_contract::access::{
     AccessChoice, HolderInput, PageChange, PageChangeName, PageChangeRow, PermissionPageUpdate,
 };
@@ -895,6 +896,7 @@ async fn give_folder_read(
         })
         .send()
         .await
+        .full_permission_page()
         .ok();
 }
 
@@ -965,6 +967,7 @@ async fn a_folder_only_reader_can_visit_star_list_and_unstar_without_gaining_its
         .raw_body(&json!({"whole":"private"}))
         .send()
         .await
+        .full_permission_page()
         .ok();
     give_folder_read(&desk, folder, &reader, None).await;
     let native = folder_read(&desk, &reader, folder).await;
@@ -1102,6 +1105,7 @@ async fn revoked_expired_private_or_deleted_folders_never_leak_from_names_recent
                     })
                     .send()
                     .await
+                    .full_permission_page()
                     .ok();
             }
             "expired" => desk.world.advance(chrono::Duration::seconds(2)),
@@ -1113,6 +1117,7 @@ async fn revoked_expired_private_or_deleted_folders_never_leak_from_names_recent
                     .raw_body(&json!({"whole":"private"}))
                     .send()
                     .await
+                    .full_permission_page()
                     .ok();
             }
             "deleted" => {
@@ -1309,6 +1314,7 @@ async fn folder_personal_state_uses_actual_admin_read_and_loses_visibility_when_
         .raw_body(&json!({"whole":"private"}))
         .send()
         .await
+        .full_permission_page()
         .ok();
     let native = folder_read(&desk, &admin, folder).await;
     assert!(

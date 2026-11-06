@@ -2,6 +2,7 @@
 import { useQueries } from '@tanstack/react-query';
 import { useMemo, useState } from 'react';
 import { useTranslation } from 'react-i18next';
+import { ReceiptAcknowledged } from '@/api/client';
 import { previewArchive, previewDelete, previewMove, readNode } from '@/api/nodes';
 import { useNodeLabel, usePlaceLabels } from '@/features/navigation/placeLabels';
 import { ArchiveConsequences, DeleteConsequences, MoveConsequences } from '@/features/project/ReviewConsequences';
@@ -70,7 +71,12 @@ export function PlaceReview({ rows, action, onClose, onApplied }: { rows: readon
   };
   const confirm = async () => {
     setBusy(true); setResults(plans.map((review) => ({ review, state: 'queued' })));
-    try { setResults(await applyRows(plans, keys, update)); onApplied(); }
+    try {
+      const applied = await applyRows(plans, keys, update);
+      setResults(applied);
+      // A Full result keeps its normal refresh; a receipt alone needs no extra Read.
+      if (!applied.some((row) => row.error instanceof ReceiptAcknowledged) || applied.some((row) => row.receipt !== undefined)) onApplied();
+    }
     finally { setBusy(false); }
   };
   const undo = async () => {
@@ -78,7 +84,10 @@ export function PlaceReview({ rows, action, onClose, onApplied }: { rows: readon
     const output: { id: string; error?: unknown }[] = [];
     try { for (const result of combined.filter(canUndo)) {
       try { await undoPlace(result, t('placeReview.undoChanged')); output.push({ id: result.review.before.id }); update({ ...result, undone: true }); }
-      catch (error) { output.push({ id: result.review.before.id, error }); }
+      catch (error) {
+        if (error instanceof ReceiptAcknowledged) update({ ...result, undone: true });
+        output.push({ id: result.review.before.id, error });
+      }
       setInverses([...output]);
     } } finally { setBusy(false); }
   };
@@ -108,7 +117,7 @@ export function PlaceReview({ rows, action, onClose, onApplied }: { rows: readon
       {(unplanned.length > 0 || combined.some((row) => row.state !== 'succeeded')) && <InlineAlert tone="warning">{t('placeReview.partial')}</InlineAlert>}
       {readError !== null && <ErrorAlert error={readError} />}
       <ul className="flex flex-col gap-3">{unplanned.map((row) => <li key={row.id} className="rounded-md border border-border p-3"><h3>{labels.get(row.id) ?? row.name}</h3><p>{t('placeReview.skipped')}</p>{query[active.indexOf(row)]?.error !== null && <ErrorAlert error={query[active.indexOf(row)]?.error} />}</li>)}{combined.map((row) => <li key={row.review.before.id} className="flex flex-col gap-2 rounded-md border border-border p-3"><h3 className="font-medium wrap-anywhere">{labels.get(row.review.before.id) ?? row.review.before.name}</h3><p>{t(`placeReview.${row.state}`)}</p>{row.undone === true && <p>{t('placeReview.undone')}</p>}{row.state === 'skipped' && <PlanBody review={row.review} />}{row.error !== undefined && <ErrorAlert error={row.error} />}{row.state === 'uncertain' && <InlineAlert tone="warning">{t('placeReview.uncertainAbout')}</InlineAlert>}{(row.state === 'uncertain' || row.state === 'refused' || row.state === 'observed') && <Button size="sm" pending={reading === row.review.before.id} onClick={() => void reconcile(row)}>{t('placeReview.readAgain')}</Button>}<Observation result={row} /></li>)}</ul>
-      {inverses !== null && <section aria-label={t('placeReview.undoTitle')}><h3>{t('placeReview.undoTitle')}</h3><ul className="flex flex-col gap-2">{inverses.map((result) => <li key={result.id}><p>{labels.get(result.id) ?? result.id}</p>{result.error === undefined ? <p>{t('placeReview.succeeded')}</p> : <><ErrorAlert error={result.error} /><Button size="sm" pending={reading === result.id} onClick={() => { const row = combined.find((row) => row.review.before.id === result.id); if (row !== undefined) void reconcile(row); }}>{t('placeReview.readAgain')}</Button></>}</li>)}</ul></section>}
+      {inverses !== null && <section aria-label={t('placeReview.undoTitle')}><h3>{t('placeReview.undoTitle')}</h3><ul className="flex flex-col gap-2">{inverses.map((result) => <li key={result.id}><p>{labels.get(result.id) ?? result.id}</p>{result.error === undefined ? <p>{t('placeReview.succeeded')}</p> : <><ErrorAlert error={result.error} />{!(result.error instanceof ReceiptAcknowledged) && <Button size="sm" pending={reading === result.id} onClick={() => { const row = combined.find((row) => row.review.before.id === result.id); if (row !== undefined) void reconcile(row); }}>{t('placeReview.readAgain')}</Button>}</>}</li>)}</ul></section>}
     </div>}
   </Dialog>;
 }

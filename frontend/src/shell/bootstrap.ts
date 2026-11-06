@@ -1,16 +1,23 @@
 /** One shell read primes the existing caches before any of its descendants can request them. */
-import { type QueryClient, useQuery, useQueryClient } from '@tanstack/react-query';
+import { CancelledError, type QueryClient, useQuery, useQueryClient } from '@tanstack/react-query';
 
 import { adminModeKey } from '@/api/adminMode';
 import { meKey, metaKey } from '@/api/auth';
 import { outsideQuery } from '@/api/away';
 import { chatStatesKey } from '@/api/chats';
+import { applyChanges } from '@/api/acts';
 import { api, client, ok } from '@/api/client';
+import { capturePeopleHint, repairPeople } from '@/api/peopleChanges';
+import { scheduledReads } from '@/api/readScheduler';
+import { ensurePersonalSource } from '@/realtime/live';
+import { holdPersonalEvents, personalBaselineReader } from '@/realtime/personalSource';
+import { queryClient } from '@/api/query';
 import { nodeKey, orgBySlugKey, orgsKey } from '@/api/nodes';
 import { favoritesKey, meStateKey } from '@/api/personal';
 import type { MeBootstrapReply } from '@/generated/api-types';
 import { statesWriter } from '@/realtime/stores/chat';
-import { userWriter } from '@/realtime/stores/user';
+import { useUserStore, userWriter } from '@/realtime/stores/user';
+import { landingOrg, savedOrg } from '@/features/onboarding/state';
 import { rememberedOrg, useSelectedOrg } from '@/shell/org';
 import { attentionWriter } from '@/features/navigation/attention';
 
@@ -29,7 +36,8 @@ export function hydrateShell(cache: QueryClient, data: MeBootstrapReply): void {
   cache.setQueryData(adminModeKey, data.admin_mode);
   cache.setQueryData(favoritesKey, data.favorites);
   cache.setQueryData(chatStatesKey, data.chat_states);
-  cache.setQueryData(outsideQuery().queryKey, data.notification_summary);
+  const heldSummary = cache.getQueryData(outsideQuery().queryKey);
+  cache.setQueryData(outsideQuery().queryKey, heldSummary !== undefined && heldSummary.seq > data.notification_summary.seq ? heldSummary : data.notification_summary);
   for (const org of data.orgs) {
     cache.setQueryData(orgBySlugKey(org.address), org);
     cache.setQueryData(nodeKey(org.id), org);
@@ -37,26 +45,58 @@ export function hydrateShell(cache: QueryClient, data: MeBootstrapReply): void {
   statesWriter.loaded(data.chat_states);
   attentionWriter.loadedAll(data.read_states, data.subscriptions);
   // A summary is not an empty, fully loaded Inbox. Preserve its paging state and rows.
-  userWriter.apply([], { unread: data.notification_summary.unread, approvalsPending: data.notification_summary.approvals_pending }, data.notification_summary.seq);
+  userWriter.apply([], data.notification_summary.seq < useUserStore.getState().lastSeq ? null : { unread: data.notification_summary.unread, approvalsPending: data.notification_summary.approvals_pending }, data.notification_summary.seq);
   const selected = useSelectedOrg.getState().orgId;
   const remembered = rememberedOrg(data.person.id);
-  const saved = data.state.sidebar;
-  const remote = typeof saved === 'object' && saved !== null && 'last_org_id' in saved ? saved.last_org_id : null;
-  const org = data.orgs.find((org) => org.id === selected) ?? data.orgs.find((org) => org.id === remembered)
-    ?? data.orgs.find((org) => org.id === remote) ?? data.orgs.find((org) => org.id === data.person.personal_org_id) ?? data.orgs[0];
+  const org = data.orgs.find((org) => org.id === selected && org.access.permissions.includes('org.view'))
+    ?? landingOrg(data.orgs, data.person.personal_org_id, savedOrg(data.state) ?? remembered);
   useSelectedOrg.setState({ orgId: org?.id ?? null });
+  scheduledReads.supply(shellBootstrapKey(data.person.id), data.orgs.flatMap((org) => [orgBySlugKey(org.address), nodeKey(org.id)]));
 }
+
+/** Imperative loaders and React observers share this same admitted read owner. */
+export function shellBootstrapQuery(cache: QueryClient, userId: string) {
+  return { queryKey: shellBootstrapKey(userId), staleTime: Infinity, retry: false as const, retryOnMount: false,
+    queryFn: async (): Promise<MeBootstrapReply> => {
+      const readerVersion = client.session.getState().readerVersion;
+      for (;;) {
+        await ensurePersonalSource(true);
+        const data = await scheduledReads.run(shellBootstrapKey(userId), async (current) => {
+          const release = holdPersonalEvents();
+          try {
+            const data = await ok(api.GET('/me/bootstrap'));
+            if (data.person.id !== userId || client.session.getState().userId !== userId || client.session.getState().readerVersion !== readerVersion) throw new CancelledError({ silent: true });
+            if (!current()) return null;
+            hydrateShell(cache, data);
+            return data;
+          } finally { release(); }
+        });
+        if (data !== null) return data;
+      }
+    },
+  };
+}
+
+export function ensureShellBootstrap(cache: QueryClient, userId: string): Promise<MeBootstrapReply> {
+  return cache.query(shellBootstrapQuery(cache, userId));
+}
+
+personalBaselineReader(async () => {
+  const userId = client.session.getState().userId;
+  if (userId === null) return;
+  const cut = capturePeopleHint(queryClient);
+  const before = queryClient.getQueryData<MeBootstrapReply>(shellBootstrapKey(userId));
+  await queryClient.cancelQueries({ queryKey: shellBootstrapKey(userId), exact: true });
+  const data = await queryClient.query({ ...shellBootstrapQuery(queryClient, userId), staleTime: 0 });
+  if (before !== undefined && (before.person.is_system_admin !== data.person.is_system_admin || before.admin_mode.as_admin !== data.admin_mode.as_admin || before.admin_mode.available !== data.admin_mode.available)) {
+    await applyChanges([{ session: true, person: data.person, mode: data.admin_mode }]);
+    return;
+  }
+  await repairPeople(queryClient, [meKey, metaKey, meStateKey, orgsKey, adminModeKey, favoritesKey, chatStatesKey,
+    ...data.orgs.flatMap((org) => [orgBySlugKey(org.address), nodeKey(org.id)])], cut);
+});
 
 export function useShellBootstrap(userId: string | null) {
   const cache = useQueryClient();
-  return useQuery({ queryKey: shellBootstrapKey(userId ?? ''), enabled: userId !== null, staleTime: Infinity, retry: false,
-    queryFn: async (): Promise<MeBootstrapReply> => {
-      const readerVersion = client.session.getState().readerVersion;
-      // This one session aggregate belongs to the cache, not a StrictMode mount's abort signal.
-      // Removing the session's query still detaches its result; the reader check fences hydration.
-      const data = await ok(api.GET('/me/bootstrap'));
-      if (data.person.id === userId && client.session.getState().userId === userId && client.session.getState().readerVersion === readerVersion) hydrateShell(cache, data);
-      return data;
-    },
-  });
+  return useQuery({ ...shellBootstrapQuery(cache, userId ?? ''), enabled: userId !== null });
 }

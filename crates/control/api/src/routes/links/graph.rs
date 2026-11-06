@@ -60,11 +60,10 @@ pub(super) async fn get(ctx: Ctx, query: DocumentGraphGetQuery, (): ()) -> ApiRe
             return Err(ApiError::not_found());
         }
     }
-    let scopes =
-        orch_authz::everything::project_search(&mut tx, &principal, None, &[document.id], &[], &[])
-            .await
-            .map_err(ApiError::internal)?
-            .search_candidates(&principal);
+    let scopes = orch_authz::everything::project_related(&mut tx, &principal, document.id)
+        .await
+        .map_err(ApiError::internal)?
+        .search_candidates(&principal);
     let kind_words: Vec<&str> = kinds.iter().map(|kind| store_kind(*kind)).collect();
     let mut drawn = orch_engine::links::graph(
         &mut tx,

@@ -69,6 +69,8 @@ use serde::de::DeserializeOwned;
 use std::collections::HashMap;
 use std::time::Instant;
 
+pub(crate) mod creation;
+mod placement;
 mod start;
 
 /// The reason a provider or a profile is not offered because the caller's pages give them no use
@@ -118,7 +120,11 @@ pub fn mount(registry: &mut Registry) {
     registry
         .on(ThreadBindingOptionsGet, options)
         .on(ThreadBindingSet, bind)
-        .on(ThreadEnvironmentSet, place);
+        .on_with_operation(
+            ThreadEnvironmentSet,
+            crate::key_operations::native::effects::prepare::<placement::PlaceThread>,
+            placement::run,
+        );
 }
 
 /// A word of one contract as the same word of another.
@@ -253,40 +259,6 @@ async fn bind(ctx: Ctx, (): (), body: ThreadBindingSetBody) -> ApiResult<Thread>
     };
     let mut conn = ctx.app.db.acquire().await?;
     if let Err(error) = bound {
-        return Err(rebind_failed(&mut conn, thread, error).await);
-    }
-    one(&ctx, &mut conn, thread).await
-}
-
-/// Puts a thread that has no history into an environment, and into a directory of it. A new
-/// environment is made by the requests that make environments, and named here with `use`.
-async fn place(ctx: Ctx, (): (), body: ThreadEnvironmentSetBody) -> ApiResult<Thread> {
-    let thread = ctx.id("id")?;
-    let environment = match body.choice {
-        EnvironmentChoice::Use(environment) => environment,
-        EnvironmentChoice::New(_) => {
-            return Err(invalid(
-                "new",
-                "an environment is made by its own request, and named here with `use`",
-            ));
-        }
-    };
-    let (tx, guard) = transaction_guard::begin(&ctx).await?;
-    let placed = ctx
-        .app
-        .engine
-        .place_thread_guarded(
-            tx,
-            guard.into_principal(),
-            thread,
-            Replace {
-                environment,
-                directory: body.directory,
-            },
-        )
-        .await;
-    let mut conn = ctx.app.db.acquire().await?;
-    if let Err(error) = placed {
         return Err(rebind_failed(&mut conn, thread, error).await);
     }
     one(&ctx, &mut conn, thread).await
@@ -503,6 +475,8 @@ fn model_options(
             } else {
                 None
             };
+            let parameters: ModelParameters =
+                serde_json::from_value(row.parameters.clone()).unwrap_or_default();
             ModelOption {
                 token_estimate: orch_engine::token_density::of(&row.model_name),
                 groups: row.groups.clone(),
@@ -511,8 +485,10 @@ fn model_options(
                 } else {
                     row.display_name.clone()
                 },
-                parameters: serde_json::from_value::<ModelParameters>(row.parameters)
-                    .unwrap_or_default(),
+                option_constraints: orch_model_contract::parameters::constraint_catalogue(
+                    &parameters,
+                ),
+                parameters,
                 model_name: row.model_name,
                 allowed: reason.is_none(),
                 reason,
@@ -625,6 +601,30 @@ async fn providers_of(
             agent_rows.push((row, descriptor));
         }
     }
+    // Reuse the same provider rows throughout this projection and batch only the new program builds.
+    let mut provider_rows = HashMap::new();
+    for id in &provider_ids {
+        if let Some(row) = engine_rows::provider(conn, *id)
+            .await?
+            .filter(|row| row.deleted_at.is_none())
+        {
+            provider_rows.insert(*id, row);
+        }
+    }
+    let program_facts = if let Some(environment) = ground.environment {
+        let providers: Vec<_> = provider_rows.values().collect();
+        let agents: Vec<_> = agent_rows
+            .iter()
+            .filter_map(|(agent, descriptor)| {
+                descriptor.as_ref().map(|descriptor| (agent, descriptor))
+            })
+            .collect();
+        binding::prepare_machine_programs(conn, environment, &providers, &agents)
+            .await
+            .map_err(ApiError::internal)?
+    } else {
+        None
+    };
 
     let policy_def = orch_settings_contract::registry::get(keys::PROVIDERS_ALLOWED)
         .ok_or_else(|| ApiError::internal("the provider policy is not registered"))?;
@@ -645,10 +645,7 @@ async fn providers_of(
     let mut listed = Vec::new();
     for each in &seen.items {
         let id = each.resource.id;
-        let Some(row) = engine_rows::provider(conn, id)
-            .await?
-            .filter(|row| row.deleted_at.is_none())
-        else {
+        let Some(row) = provider_rows.get(&id).cloned() else {
             continue;
         };
         let Some(name) = provider_names.get(&id).cloned() else {
@@ -738,9 +735,15 @@ async fn providers_of(
                         settings: ground.settings,
                         entry: entry_types.clone(),
                         colocated: offers.colocated.clone(),
-                        runtime: binding::runtime_facts(conn, agent, &row, environment)
-                            .await
-                            .map_err(ApiError::internal)?,
+                        runtime: binding::runtime_facts_prepared(
+                            conn,
+                            agent,
+                            &row,
+                            environment,
+                            program_facts.as_ref(),
+                        )
+                        .await
+                        .map_err(ApiError::internal)?,
                     };
                     let orch_tools = ground.orch_tools.of(descriptor);
                     let place = binding::initial_place(conn, &facts)
@@ -1347,6 +1350,7 @@ async fn options(ctx: Ctx, (): (), (): ()) -> ApiResult<BindingOptions> {
         environment_default,
         source,
         access,
+        agent_access: None,
         new_environment,
         can_create,
         hosts,

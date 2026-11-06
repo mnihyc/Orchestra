@@ -151,8 +151,6 @@ pub const FILES_NOT_DELIVERED: &str = "the file was not written into the workspa
 /// What the preamble says of where the agent is.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Place<'a> {
-    /// Current implicit public-document policy, separate from offered tools and explicit shares.
-    pub documents_policy: orch_authz::reach::DocumentPolicy,
     /// Current material hints; never document bodies.
     pub read_first: &'a [orch_api_contract::share::ReadFirstPath],
     /// The thread's directory in its environment, absolute.
@@ -245,16 +243,6 @@ fn capitalized(sentence: &str) -> String {
 /// a tool it was not given. None where it has none.
 #[must_use]
 pub fn tools_guide(tools: &[OrchTool], rates: ToolRates) -> Option<String> {
-    tools_guide_for_documents(tools, rates, orch_authz::reach::DocumentPolicy::Write)
-}
-
-/// T2's topic-document clause uses the current policy, narrowed by the tools actually offered.
-#[must_use]
-pub fn tools_guide_for_documents(
-    tools: &[OrchTool],
-    rates: ToolRates,
-    policy: orch_authz::reach::DocumentPolicy,
-) -> Option<String> {
     if tools.is_empty() {
         return None;
     }
@@ -282,7 +270,7 @@ pub fn tools_guide_for_documents(
     // The first line works alone.
     let mut what: Vec<&str> = Vec::new();
     if reads {
-        what.push("read what your topic permits and the team shared with you (documents, chats, other agents' conversations)");
+        what.push("read your own conversation and what the team currently shares with you (documents, chats, other agents' conversations)");
     }
     if !writers.is_empty() {
         what.push("write documents and messages back");
@@ -297,15 +285,10 @@ pub fn tools_guide_for_documents(
         paragraphs.push(format!("Orch's tools: {}.", series(&what)));
     }
     // The one tree of what is in reach.
-    let documents =
-        if policy == orch_authz::reach::DocumentPolicy::Write && has(OrchTool::EditDocument) {
-            "read and write, and make new ones"
-        } else if policy != orch_authz::reach::DocumentPolicy::None && reads {
-            "read"
-        } else {
-            "none"
-        };
-    let mut tree = vec![format!("Your topic's documents: {documents}.")];
+    let mut tree = vec![
+        "Document access comes from current shares; each action also needs its offered tool."
+            .to_owned(),
+    ];
     if reads {
         tree.push("Everything in your reach is one tree of paths, like files.".to_owned());
         if has(OrchTool::ListShared) {
@@ -344,10 +327,10 @@ pub fn tools_guide_for_documents(
         acts.push(format!("{opening}: {}.", writers.join(", ")));
     }
     if has(OrchTool::Announce) {
-        acts.push("announce tells every thread of your topic something they need in order to act (a root cause, a changed interface, a blocker), or marks a milestone for the people following you: use it rarely.".to_owned());
+        acts.push("announce tells the threads you may message in your topic something they need in order to act (a root cause, a changed interface, a blocker), or marks a milestone for the people following you: use it rarely.".to_owned());
     }
     if has(OrchTool::ManageShared) {
-        acts.push("manage_shared creates document folders, copies, moves, deletes and restores documents or folders. paths names the selection; create_folder takes one new folder path with an existing parent. copy and move take an existing directory in to; name may rename one source. Only delete previews first and requires a confirmation token; the other commands act directly. Every descendant must be permitted, up to fifty documents and folders, or none is changed. Parents are never implicit; overlapping selections, overwrite, automatic renaming and self-descendant destinations are refused. Making or copying never grants the calling agent Manage.".to_owned());
+        acts.push("manage_shared creates document folders, copies, moves, deletes and restores documents or folders. paths names the selection; create_folder takes one new folder path with an existing parent. copy and move take an existing directory in to; name may rename one source. For documents, only delete previews first and requires a confirmation token; create_folder, copy, move and restore act directly without confirm. Thread and chat management acts require a two-call preview and confirmation. Every descendant must be permitted, up to fifty documents and folders, or none is changed. Parents are never implicit; overlapping selections, overwrite, automatic renaming and self-descendant destinations are refused. Making or copying never grants the calling agent Manage.".to_owned());
     }
     if has(OrchTool::EditDocument) {
         acts.push("edit_document creates or edits text documents, not folders; a new document's parent directory must already exist.".to_owned());
@@ -778,12 +761,7 @@ pub fn context_lines(place: &Place<'_>) -> Vec<(&'static str, String)> {
     if let Some(isolation) = place.isolation {
         lines.push(("runtime", crate::isolation::agent_line(isolation)));
     }
-    let document_reach = match place.documents_policy {
-        orch_authz::reach::DocumentPolicy::None => "none by topic policy",
-        orch_authz::reach::DocumentPolicy::Read => "read public documents",
-        orch_authz::reach::DocumentPolicy::Write => "read, edit and create public documents",
-    };
-    lines.push(("documents", format!("- Topic documents: {document_reach}. Private documents and restricted or side threads stay outside this policy. Explicit shares remain separate; it gives no management, Export, chat or conversation right. Actions still need their offered tools.")));
+    lines.push(("documents", "- Document access comes from current shares. Private and restricted sources require their own grants; actions also need their offered tools.".to_owned()));
     // The specification fixes five context paths; the ordinary shared tree holds the full list.
     const FIRST_PATHS_IN_CONTEXT: usize = 5;
     let paths: Vec<_> = place
@@ -925,8 +903,7 @@ pub fn session_blocks(
     messages: &BTreeMap<String, String>,
 ) -> Vec<(&'static str, String)> {
     let mut blocks = vec![(PREAMBLE_KEY, preamble(messages))];
-    if let Some(guide) = tools_guide_for_documents(place.tools, place.rates, place.documents_policy)
-    {
+    if let Some(guide) = tools_guide(place.tools, place.rates) {
         // Replacements are prose, not a second tool catalogue or an inferred set of permissions.
         // The stock template selects clauses from the offered set; a place's own body replaces it.
         let guide = messages
@@ -1364,7 +1341,6 @@ mod tests {
 
     fn place<'a>(neighbours: &'a [String], notes: Option<NoteKeeper>) -> Place<'a> {
         Place {
-            documents_policy: orch_authz::reach::DocumentPolicy::Write,
             read_first: &[],
             directory: "/workspace/web",
             cwd: "/workspace/web/api",
@@ -1417,7 +1393,7 @@ mod tests {
         };
         assert_eq!(tools_guide(&[], rates), None);
         let all = tools_guide(OrchTool::ALL, rates).unwrap();
-        assert!(all.starts_with("Orch's tools: read what your topic permits and the team shared with you (documents, chats, other agents' conversations), write documents and messages back, tell the other agents on your topic, and ask for more from your environment.\n\nYour topic's documents: read and write, and make new ones. Everything in your reach"), "{all}");
+        assert!(all.starts_with("Orch's tools: read your own conversation and what the team currently shares with you (documents, chats, other agents' conversations), write documents and messages back, tell the other agents on your topic, and ask for more from your environment.\n\nDocument access comes from current shares; each action also needs its offered tool. Everything in your reach"), "{all}");
         for tool in OrchTool::ALL {
             assert!(all.contains(tool.name()), "{}", tool.name());
         }
@@ -1426,8 +1402,8 @@ mod tests {
         ));
         // A reading set names no writing, telling or asking, and no tool it lacks.
         let reading = tools_guide(&[OrchTool::ListShared, OrchTool::ReadShared], rates).unwrap();
-        assert!(reading.starts_with("Orch's tools: read what your topic permits"));
-        assert!(reading.contains("Your topic's documents: read. "));
+        assert!(reading.starts_with("Orch's tools: read your own conversation"));
+        assert!(reading.contains("Document access comes from current shares; "));
         assert!(
             reading.contains(
                 " Read with read_shared (begin with detail \"brief\" on anything long). "
@@ -1735,17 +1711,11 @@ mod tests {
         assert!(!text.contains("material-5.md"));
         assert!(text.contains("list_shared shows the rest"));
         here.read_first = &[];
-        here.documents_policy = orch_authz::reach::DocumentPolicy::None;
         let changed = context_changes(&context_lines(&here), &context_record(&before)).unwrap();
         assert!(changed.contains("Read first: no current material is marked"));
-        assert!(changed.contains("none by topic policy"));
-        let guide = tools_guide_for_documents(
-            &[OrchTool::EditDocument],
-            ToolRates::default(),
-            here.documents_policy,
-        )
-        .unwrap();
-        assert!(guide.contains("Your topic's documents: none."));
+        let guide = tools_guide(&[OrchTool::EditDocument], ToolRates::default()).unwrap();
+        assert!(guide.contains("Document access comes from current shares"));
+        assert!(!guide.contains("Your topic's documents"));
     }
 
     #[test]

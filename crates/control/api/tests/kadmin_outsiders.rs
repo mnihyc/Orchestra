@@ -6,6 +6,8 @@
 )]
 
 mod places;
+#[path = "kadmin_outsiders/scoped_plan.rs"]
+mod scoped_plan;
 mod support;
 
 use orch_api_contract::common::{ErrorCode, Page};

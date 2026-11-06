@@ -17,7 +17,8 @@ meets at a limit is `../../ui/LimitPrompt.tsx`.
 - `outcomes.ts`: Typed contract outcome selectors shared by addresses, controls and request filtering.
 - `requests.ts`: Pause and resume of the live request log, with stable rows while arrivals wait.
 - `Chart.tsx`: The series over the span, by the hour, day, week or month: the measure and split; dragging sets the span. Its readable data uses the shared Table and ordinary disclosure button, with a content-sized empty state.
-- `Plan.tsx`: Provider plan windows, ordered by the binding window and duration, with independent current-window and bucketed-history views.
+- `Plan.tsx`: One provider usage panel with current facts, shared refresh and period, and Subscription or Credits / paid usage history. Subscription windows retain their current-window and bucketed-history views.
+- `CreditChart.tsx`: Actual provider balance, paid-use and spending-limit observations; exact decimal labels, source/unit groups and real missing-data gaps. It never infers charges from balance changes.
 - `PlanChart.tsx`: A fixed percentage axis, measured values, a dashed projection, limit and now rules, bucketed usage and audit-linked early resets.
 - `ForecastLine.tsx`: The same observed-pace sentence below every plan meter and period cap, with stale and insufficient-reading states.
 - `choices.ts`: Separate device choices for the usage screen and provider Usage, retaining each chart while explicit addresses take precedence.
@@ -68,3 +69,5 @@ HTTP request. Requests mounts no hidden figures query; history loads once and na
 only demonstrated cursor gaps. Date ranges stay the explicitly opened report's snapshot until changed.
 
 - `ReportFrame.tsx`: Shared report heading, scope/filter bar and body slots; the usage report uses this same frame.
+
+Provider history belongs to the provider resource and uses the existing ProviderPlanGet read authority. Selected-source, unit and scale changes separate credit series; ordinary credential renewals do not invent account identities. Current manual overrides are marked and remain separate from source-observed history. Explicitly unsupported fields and history quantities are hidden, while supported missing amounts remain unknown.

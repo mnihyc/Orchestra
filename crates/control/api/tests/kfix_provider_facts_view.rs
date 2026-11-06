@@ -8,6 +8,7 @@
 mod places;
 mod resources;
 mod support;
+use support::FullTokenReply as _;
 
 use orch_api_contract::auth::{ApiTokenCreateBody, MeTokenCreate};
 use orch_api_contract::resources::{
@@ -22,17 +23,19 @@ async fn credential(world: &World, owner: &places::Who, scope: &str) -> String {
         .call(MeTokenCreate, &[])
         .token(&owner.token)
         .body(&ApiTokenCreateBody {
+            rules: None,
             name: "Provider projection".to_owned(),
             scopes: Some(vec![scope.to_owned()]),
             node_id: None,
             expires_at: None,
-            proof: orch_api_contract::auth::SensitiveProof {
+            proof: Some(orch_api_contract::auth::SensitiveProof {
                 password: Some(support::PASSWORD.to_owned()),
                 ..Default::default()
-            },
+            }),
         })
         .send()
         .await
+        .full_token()
         .ok()
         .token
         .expect("the first answer carries the secret")
@@ -69,6 +72,8 @@ async fn page_administration_and_resource_management_do_not_expose_vendor_facts_
         .send()
         .await
         .ok()
+        .into_full()
+        .unwrap()
         .provider
         .base
         .id;
