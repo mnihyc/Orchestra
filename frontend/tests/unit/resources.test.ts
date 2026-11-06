@@ -151,6 +151,22 @@ describe('the endpoints of a provider', () => {
     ],
   } as unknown as ProviderSetupProtocol;
 
+  it('preserves nested vendor JSON and leaves absent optional request defaults absent', () => {
+    const declared: ProviderSetupProtocol = {
+      ...protocol,
+      endpoint_options: [...protocol.endpoint_options, { name: 'params', label: 'Request defaults', type: 'json', required: false, default: {}, choices: null, help: null, max_bytes: null }],
+    };
+    const params = { extra_body: { google: { thinking_config: { include_thoughts: true }, levels: [1, null, false] } } };
+    const saved = { protocol: 'openai', base_url: 'https://api.example.test/v1', options: { params } };
+    const draft = draftOf(saved, declared);
+    expect(JSON.parse(draft.options.params as string)).toEqual(params);
+    expect(upstreamOf(draft, declared).upstream).toEqual(saved);
+    draft.options.params = JSON.stringify({ ...params, future_vendor_option: { enabled: false } });
+    expect(upstreamOf(draft, declared).upstream.options).toEqual({ params: { ...params, future_vendor_option: { enabled: false } } });
+    const empty = draftOf({ protocol: 'openai', base_url: saved.base_url, options: {} }, declared);
+    expect(upstreamOf(empty, declared).upstream.options).toEqual({});
+  });
+
   it('keep a secret header under its name and send its value beside the endpoint, never in it', () => {
     const draft = draftOf({ protocol: 'openai', base_url: 'https://api.example.test/v1', options: { organization: 'acme', headers: ['x-key'], labels: { team: 'ml' } } }, protocol);
     // What is held has no value to show for a secret; the name stays.

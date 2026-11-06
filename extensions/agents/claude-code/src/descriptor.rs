@@ -193,6 +193,22 @@ pub fn capabilities() -> Capabilities {
         // Compaction is announced when it begins and when it ends.
         phases: true,
         provider_facts: crate::provider::fact_kinds(),
+        provider_fact_fields: [(
+            "extra_usage".to_owned(),
+            [
+                "enabled",
+                "used",
+                "limit",
+                "used_percent",
+                "unit",
+                "decimal_places",
+                "disabled_reason",
+                "limit_reached",
+            ]
+            .map(str::to_owned)
+            .to_vec(),
+        )]
+        .into(),
         model_discovery: true,
         // In this mode the harness reports no title of its own.
         title: false,

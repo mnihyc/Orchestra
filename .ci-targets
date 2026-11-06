@@ -1,0 +1,37 @@
+# batch-2b: batch-2 3 files fixed for the merge interactions, runner installs npm before contracts (2026-11-06 10:20Z)
+fmt
+clippy
+doc
+contracts
+# ci-triage-b: engine and rest shards
+test -p orch-engine --test credentials --test folders --test forks --test input_operation_authority --test mcp_resolution --test operation_scope --test orch_tools --test preflight --test shared_attachment_download --test shared_references --test shared_tree --test shared_write --test sharing --test sharing_manage --test sharing_place --test document_folders --test turns
+test -p orch-engine --lib jobs::provider_provision::creator_authority::tests
+test -p orch-engine --lib jobs::source::attempt_tests::native
+test -p orch-engine --lib jobs::continuation::tests::an_actual_recovered_started_journal_refusal_never_authorizes_another_prefix_creation
+test -p orch-engine --lib tools::source::tests
+test -p orch-engine --lib history_pages::tests
+test -p orch-authz --test reach
+test -p orch-worker-core --test usage_jobs
+test -p orch-api-core --test provider_managed handover_operation_scopes
+test -p orch-api-core --lib backplane::command_admission_tests::provider_login::provider_handover
+# ci-triage since batch-1
+test -p orch-api-core --test agent_list_scopes --test real_connector --test browsers
+# held-page-request: INV-03, INV-01 part
+test -p orch-api-core --test request_intent_scopes --test page_transfer_operation_scopes --test refaccess --test group_join_requests --test kguard_rest --test approval_operation_scopes --test resource_pages --test removal --test members --test access_previews --test kguard_nodes
+test -p orch-api-core --lib routes::access::page_operations::tests
+test -p orch-authz --test pages --test creation_agent_access --test agent_giver_bounds --test thread_viewer_shares
+test -p orch-engine --test sharing_export --test approvals
+# held-plan-ws: INV-02, INV-04
+test -p orch-api-core --lib realtime::
+test -p orch-api-core --test realtime_socket --test threads_drive --test model_request_audience
+# ladder-ext
+test -p orch-access-contract --lib
+test -p orch-settings-contract --lib
+test -p orch-authz --test manage_reach
+test -p orch-engine --test manage_shared_sessions --test manage_shared
+test -p orch-engine --lib tools::manage::tests
+test -p orch-api-core --test karchive_delete --test chats_node --test delete_plan
+web typecheck
+web lint
+web test -- tests/unit/give.test.ts tests/component/agent-management-ladders.test.tsx tests/component/agent-share-choice.test.tsx tests/component/agent-contribution-view.test.tsx tests/component/agent-access-creation.test.tsx tests/component/agent-access-setting.test.tsx tests/unit/client.test.ts tests/unit/request-receipt-helpers.test.ts tests/component/request-errors.test.tsx tests/component/access-request-recovery.test.tsx tests/component/access-request-duration.test.tsx
+test -p orch-xtask names::tests::

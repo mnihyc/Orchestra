@@ -62,6 +62,9 @@ pub fn request_timing(request: &RequestSample) -> RequestTiming {
         _ => UsageMeasurement::Unsupported,
     };
     RequestTiming {
+        wire_protocol: None,
+        requested_service_tier: None,
+        reported_service_tier: UsageMeasurement::Unsupported,
         subagent: request.subagent,
         asked: request.asked,
         first_output: request.first_output,

@@ -14,6 +14,7 @@ import { isResourceSetting, ResourceSettingChoice } from '@/features/settings/Re
 import { SKILLS_SETTING, SkillsSettingChoice } from '@/features/settings/SkillsChoice';
 import { HarnessVersionsChoice, PROGRAM_VERSIONS_KEY } from '@/features/settings/HarnessVersionsChoice';
 import { CallsRules } from '@/features/settings/CallsRules';
+import { AGENT_ACCESS_SETTING, AgentAccessSetting } from '@/features/access/AgentAccessChoice';
 
 function OrgSource({ id, name }: { id: string; name: string }) {
   const node = useQuery(nodeQuery(id));
@@ -43,6 +44,7 @@ export interface SettingValueProps extends ValueControlProps {
 export function SettingValue({ def, setting, target, ignored = false, onApply, ...control }: SettingValueProps) {
   return <SettingChoiceContext.Provider value={def.key ?? null}>
     {ignored ? <SettingSummary def={{ ...def, display: control.display }} value={setting.value} />
+      : def.key === AGENT_ACCESS_SETTING ? <AgentAccessSetting {...control} hideLabel />
       : def.key === 'agent.default_provider_id' ? <ProviderDefaultChoice {...control} hideLabel />
         : def.key === EMBEDDINGS_SETTING ? <EmbeddingsChoice {...control} hideLabel />
         : def.key === SEMANTIC_TUNING_SETTING || def.key === WORD_TUNING_SETTING ? <SemanticTuning {...control} hideLabel />

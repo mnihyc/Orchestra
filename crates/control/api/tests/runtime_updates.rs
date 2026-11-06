@@ -6,6 +6,10 @@
 )]
 
 mod places;
+#[path = "runtime_updates/provider_batch_scopes.rs"]
+mod provider_batch_scopes;
+#[path = "runtime_updates/provider_owner_host_use.rs"]
+mod provider_owner_host_use;
 mod resources;
 mod support;
 
@@ -606,7 +610,13 @@ async fn the_plan_carries_the_check_of_the_exact_selected_artifact_instead_of_an
         .into_iter()
         .find(|program| program.kind == "codex")
         .unwrap();
-    assert_eq!(target.build, Some(selected));
+    assert_eq!(
+        target.build,
+        Some(HarnessBuild {
+            carry: Some(orch_api_contract::programs::CarryFallback::Handoff),
+            ..selected
+        })
+    );
     assert!(
         plan.blockers.is_empty(),
         "a completed failed check is a warning rather than a block"
@@ -750,7 +760,9 @@ async fn provider_batches_recheck_permissions_and_group_their_jobs() {
         })
         .send()
         .await
-        .ok();
+        .ok()
+        .into_full()
+        .unwrap();
     assert_eq!(hidden.executable, 0);
     assert!(hidden.plans.is_empty());
     let plan = world
@@ -762,7 +774,9 @@ async fn provider_batches_recheck_permissions_and_group_their_jobs() {
         })
         .send()
         .await
-        .ok();
+        .ok()
+        .into_full()
+        .unwrap();
     assert_eq!(plan.executable, 1);
     let body = ForkCreateBody {
         notify: None,
@@ -784,7 +798,9 @@ async fn provider_batches_recheck_permissions_and_group_their_jobs() {
         .body(&body)
         .send()
         .await
-        .ok();
+        .ok()
+        .into_full()
+        .unwrap();
     assert_eq!(batch.jobs.len(), 1);
     assert_eq!(batch.jobs[0].job.batch_id, Some(batch.batch_id));
 }

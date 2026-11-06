@@ -1112,7 +1112,9 @@ impl Cluster {
             })
             .send()
             .await
-            .ok();
+            .ok()
+            .into_full()
+            .unwrap();
         let id = thread.base.id;
         assert_eq!(thread.state, ThreadState::Idle);
         let sent = self
@@ -1384,6 +1386,8 @@ impl Cluster {
                     os_version: "scripted Linux".to_owned(),
                     cpus: 1,
                     memory_bytes: 0,
+                    discovered_harnesses: None,
+                    searched_harness_kinds: None,
                     harnesses: vec![MachineFactsHarness {
                         kind: "fake".to_owned(),
                         path: handler_program.clone(),
@@ -2344,12 +2348,17 @@ async fn an_agent_on_a_real_connector_announces_and_another_thread_of_its_topic_
     let cluster = Cluster::new().await;
     let tree = cluster.tree().await;
     let on = cluster.everything_on_the_connector(&tree).await;
-    // Announcements wake idle threads. Port exposure is explicitly off in this fixture.
+    // New agents receive an explicit topic timeline gift; idle recipients may wake.
     {
         let mut conn = cluster.db.acquire().await.unwrap();
         for (target, key, value) in [
-            (tree.topic, "broadcast.wake_idle", true),
-            (tree.org, "ports.enabled", false),
+            (
+                tree.topic,
+                "threads.agent_access",
+                json!({"where":"topic","parts":{"documents":"edit","timeline":"write"}}),
+            ),
+            (tree.topic, "broadcast.wake_idle", json!(true)),
+            (tree.org, "ports.enabled", json!(false)),
         ] {
             orch_settings::write::write(
                 &mut conn,
@@ -2357,7 +2366,7 @@ async fn an_agent_on_a_real_connector_announces_and_another_thread_of_its_topic_
                     actor: orch_db::audit::Actor::User(tree.owner.id()),
                     target: orch_settings::Target::Node(target),
                     key,
-                    value: json!(value),
+                    value,
                     locked: None,
                     expected_revision: None,
                     may_lock: true,
@@ -2391,6 +2400,8 @@ async fn an_agent_on_a_real_connector_announces_and_another_thread_of_its_topic_
         .send()
         .await
         .ok()
+        .into_full()
+        .unwrap()
         .base
         .id;
 
@@ -2554,6 +2565,7 @@ async fn an_agent_on_a_real_connector_deletes_a_document_it_was_shared_to_manage
         .call(ShareAgentCreate, &[])
         .token(&tree.owner.token)
         .body(&ShareWithAgents {
+            viewers_read: None,
             read_first: None,
             what: ShareWhat::Document(ShareWhatDocument {
                 document_id: document,

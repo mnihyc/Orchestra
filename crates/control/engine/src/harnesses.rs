@@ -68,6 +68,8 @@ pub struct SessionConfiguration {
     pub cwd: String,
     /// The resolved notes directory/keeper, or disabled native and agent notes.
     pub memory: Option<orch_link_contract::commands::SessionOpenMemory>,
+    /// The native executor build named by the accepted tool ticket.
+    pub executor_version: Option<String>,
 }
 
 impl From<&orch_link_contract::commands::SessionOpen> for SessionConfiguration {
@@ -75,6 +77,19 @@ impl From<&orch_link_contract::commands::SessionOpen> for SessionConfiguration {
         Self {
             cwd: open.cwd.clone(),
             memory: open.memory.clone(),
+            executor_version: open.exec.ticket.as_ref().and_then(|ticket| match ticket {
+                orch_link_contract::commands::TicketSlot::Asked(asked)
+                    if asked.ticket.kind == orch_link_contract::tunnels::TunnelKind::Exec =>
+                {
+                    asked
+                        .ticket
+                        .more
+                        .get("executor_version")
+                        .and_then(Json::as_str)
+                        .map(str::to_owned)
+                }
+                _ => None,
+            }),
         }
     }
 }
@@ -1305,6 +1320,7 @@ mod tests {
         let configuration = SessionConfiguration {
             cwd: "/workspace/child".into(),
             memory: None,
+            executor_version: None,
         };
         let mut sessions = OpenSessions::default();
         sessions.opened(segment, thread, process);

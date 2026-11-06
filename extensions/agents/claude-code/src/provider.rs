@@ -511,7 +511,7 @@ pub async fn native_usage(
                     } else if id == "usage" && initialized {
                         return match outcome {
                             crate::stream::ControlOutcome::Success(body) => {
-                                usage_answer(&body, now)
+                                usage_answer_with_raw_amounts(&body, &line, now)
                             }
                             crate::stream::ControlOutcome::Error(_) => None,
                         };
@@ -566,6 +566,69 @@ pub fn usage_answer(body: &Json, now: Time) -> Option<ProviderFacts> {
         facts.field_times.insert("plan".to_owned(), now);
     }
     (!facts.field_times.is_empty()).then_some(facts)
+}
+
+/// Retains the amount tokens of the already-correlated native usage reply. The generic frame
+/// parser and every unrelated event keep their existing representation.
+#[must_use]
+pub fn usage_answer_with_raw_amounts(body: &Json, line: &str, now: Time) -> Option<ProviderFacts> {
+    let mut facts = usage_answer(body, now)?;
+    if let Some(extra) = facts.extra_usage.as_mut() {
+        let raw = raw_path(
+            line,
+            &["response", "response", "rate_limits", "extra_usage"],
+        );
+        extra.used = raw
+            .and_then(|raw| raw_path(raw.get(), &["used_credits"]))
+            .and_then(raw_amount);
+        extra.limit = raw
+            .and_then(|raw| raw_path(raw.get(), &["monthly_limit"]))
+            .and_then(raw_amount);
+    }
+    Some(facts)
+}
+
+fn raw_path<'a>(text: &'a str, path: &[&str]) -> Option<&'a serde_json::value::RawValue> {
+    let (first, rest) = path.split_first()?;
+    let mut object: std::collections::BTreeMap<String, &'a serde_json::value::RawValue> =
+        serde_json::from_str(text).ok()?;
+    let raw = object.remove(*first)?;
+    if rest.is_empty() {
+        Some(raw)
+    } else {
+        raw_path(raw.get(), rest)
+    }
+}
+
+fn nonnegative_amount(text: String) -> Option<String> {
+    (!(text.starts_with('-')
+        && text
+            .bytes()
+            .any(|byte| byte.is_ascii_digit() && byte != b'0')))
+    .then_some(text)
+}
+
+fn raw_amount(raw: &serde_json::value::RawValue) -> Option<String> {
+    let text = if raw.get().starts_with('"') {
+        let text: String = serde_json::from_str(raw.get()).ok()?;
+        orch_provider_contract::limits::is_decimal(&text).then_some(text)?
+    } else {
+        orch_provider_contract::limits::decimal_number(raw.get())?
+    };
+    nonnegative_amount(text)
+}
+
+fn amount(value: Option<&Json>) -> Option<String> {
+    let text = match value? {
+        Json::String(text) => {
+            orch_provider_contract::limits::is_decimal(text).then(|| text.clone())?
+        }
+        Json::Number(number) => {
+            orch_provider_contract::limits::decimal_number(&number.to_string())?
+        }
+        _ => return None,
+    };
+    nonnegative_amount(text)
 }
 
 fn reset_time(value: Option<&Json>) -> Option<Time> {
@@ -738,8 +801,8 @@ pub fn usage_from(value: &Json) -> Option<ProviderFacts> {
         .and_then(|extra| {
             Some(ExtraUsage {
                 enabled: extra.get("is_enabled")?.as_bool()?,
-                limit: percent(extra.get("monthly_limit")),
-                used: percent(extra.get("used_credits")),
+                limit: amount(extra.get("monthly_limit")),
+                used: amount(extra.get("used_credits")),
                 used_percent: percent(extra.get("utilization")),
                 unit: extra
                     .get("currency")

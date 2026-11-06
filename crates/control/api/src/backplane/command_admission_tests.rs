@@ -10,13 +10,24 @@ use std::{
 };
 use tokio::sync::oneshot;
 
+mod input_deliveries;
+mod provider_login;
+mod publication;
+mod quota;
 mod selection;
+mod snapshot_reads;
+mod terminal_close;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 enum Phase {
     Adoption,
     Wire,
     Entry,
+    NativeInput,
+    NativeLogin,
+    NativeHandover,
+    MirrorAccepted,
+    LocalRefusal,
 }
 struct Gate {
     reached: oneshot::Sender<()>,
@@ -40,12 +51,21 @@ async fn pause(id: Id, phase: Phase) {
 pub(crate) async fn adoption_read(link: &super::Link, id: Id) {
     pause(id, Phase::Adoption).await;
     selection::adoption_read(link, id).await;
+    input_deliveries::adoption_read(link, id).await;
 }
 pub(crate) async fn wire_checked(id: Id) {
     pause(id, Phase::Wire).await;
 }
 pub(crate) async fn entry_loaded(machine: Id) {
     pause(machine, Phase::Entry).await;
+}
+pub(crate) async fn before_mirror_progress(id: Id, progress: &orch_link::commands::Progress) {
+    if *progress == orch_link::commands::Progress::Accepted {
+        pause(id, Phase::MirrorAccepted).await;
+    }
+}
+pub(crate) async fn local_refused(id: Id) {
+    pause(id, Phase::LocalRefusal).await;
 }
 
 use super::{
@@ -85,6 +105,19 @@ use tokio_util::sync::CancellationToken;
 type Proof<T = ()> = Result<T, Box<dyn std::error::Error + Send + Sync>>;
 // The existing backplane source proofs use this same native acknowledgement watchdog.
 const WAIT: Duration = Duration::from_secs(30);
+// Explicit synthetic output of this component peer, never a vendor credential.
+const HANDOVER_RETURN_FORM: &str = "login";
+const HANDOVER_RETURN_CIPHER: &str = "b3duZWQtc3ludGhldGljLWhhbmRvdmVy";
+
+fn handover_returned() -> orch_link_contract::commands::SealedCredential {
+    orch_link_contract::commands::SealedCredential {
+        form: HANDOVER_RETURN_FORM.into(),
+        credential: orch_link_contract::commands::Sealed {
+            value: HANDOVER_RETURN_CIPHER.into(),
+        },
+        expires_at: None,
+    }
+}
 
 fn gate(id: Id, phase: Phase) -> (oneshot::Receiver<()>, oneshot::Sender<()>) {
     let (reached, waiting) = oneshot::channel();
@@ -153,7 +186,18 @@ impl CommandHandler for Native {
             Command::SessionContext(_)
                 | Command::FsStat(_)
                 | Command::FsRecord(_)
+                | Command::FsRecordRead(_)
                 | Command::TurnStart(_)
+                | Command::TurnStartFenced(_)
+                | Command::TurnSteer(_)
+                | Command::ProviderLoginStart(_)
+                | Command::ProviderLoginInput(_)
+                | Command::ProviderLoginCancel(_)
+                | Command::AgentCredentialReturn(_)
+                | Command::ProviderCredentialAccept(_)
+                | Command::PtyClose(_)
+                | Command::ProviderComplete(_)
+                | Command::ProviderEmbed(_)
         ) && context.key.as_deref() != Some(self.environment.to_string().as_str())
         {
             return Err(CommandError::new(
@@ -162,6 +206,10 @@ impl CommandHandler for Native {
             ));
         }
         match command {
+            Command::PtyClose(body) => terminal_close::reply(self, context, body).await,
+            command @ (Command::ProviderComplete(_) | Command::ProviderEmbed(_)) => {
+                quota::reply(context, command)
+            }
             Command::FsWrite(body) => {
                 if body.environment_id != self.environment
                     || body.path != self.expected_path
@@ -244,6 +292,77 @@ impl CommandHandler for Native {
                     },
                 ))
             }
+            Command::ProviderLoginStart(body) => {
+                pause(context.id, Phase::NativeLogin).await;
+                let expected = SerialKey::Harness {
+                    provider_id: body.provider_id,
+                    agent_id: body.agent_id,
+                }
+                .wire();
+                if context.key != expected {
+                    return Err(CommandError::new(
+                        ErrorCode::Conflict,
+                        "another native login queue",
+                    ));
+                }
+                Ok(CommandResult::ProviderLoginStart(Empty {}))
+            }
+            Command::ProviderLoginInput(body) => {
+                let expected = SerialKey::Harness {
+                    provider_id: body.provider_id,
+                    agent_id: body.agent_id,
+                }
+                .wire();
+                if context.key != expected {
+                    return Err(CommandError::new(
+                        ErrorCode::Conflict,
+                        "another native login queue",
+                    ));
+                }
+                Ok(CommandResult::ProviderLoginInput(Empty {}))
+            }
+            Command::ProviderLoginCancel(body) => {
+                let expected = SerialKey::Harness {
+                    provider_id: body.provider_id,
+                    agent_id: body.agent_id,
+                }
+                .wire();
+                if context.key != expected {
+                    return Err(CommandError::new(
+                        ErrorCode::Conflict,
+                        "another native login queue",
+                    ));
+                }
+                Ok(CommandResult::ProviderLoginCancel(Empty {}))
+            }
+            Command::AgentCredentialReturn(body) => {
+                let expected = SerialKey::Harness {
+                    provider_id: body.provider_id,
+                    agent_id: body.agent_id,
+                }
+                .wire();
+                if context.key != expected {
+                    return Err(CommandError::new(
+                        ErrorCode::Conflict,
+                        "another native credential-return queue",
+                    ));
+                }
+                pause(context.id, Phase::NativeHandover).await;
+                Ok(CommandResult::AgentCredentialReturn(handover_returned()))
+            }
+            Command::ProviderCredentialAccept(body) => {
+                if context.key != SerialKey::Provider(body.provider_id).wire()
+                    || body.form != HANDOVER_RETURN_FORM
+                    || body.credential.value != HANDOVER_RETURN_CIPHER
+                {
+                    return Err(CommandError::new(
+                        ErrorCode::Conflict,
+                        "another native credential-accept source",
+                    ));
+                }
+                pause(context.id, Phase::NativeHandover).await;
+                Ok(CommandResult::ProviderCredentialAccept(Empty {}))
+            }
             Command::MachineProbe(_) => {
                 self.probes.fetch_add(1, Ordering::SeqCst);
                 let facts:MachineFacts=serde_json::from_value(json!({"hostname":"owned-admission-peer","os_version":"synthetic",
@@ -260,7 +379,30 @@ impl CommandHandler for Native {
                     ));
                 }
                 self.starts.fetch_add(1, Ordering::SeqCst);
+                pause(context.id, Phase::NativeInput).await;
                 Ok(CommandResult::TurnStart(Empty {}))
+            }
+            Command::TurnStartFenced(body) => {
+                if context.key.as_deref() != Some(body.thread_id.to_string().as_str())
+                    || body.turn.thread_id != body.thread_id
+                {
+                    return Err(CommandError::new(
+                        ErrorCode::Conflict,
+                        "another native fenced thread queue",
+                    ));
+                }
+                pause(context.id, Phase::NativeInput).await;
+                Ok(CommandResult::TurnStartFenced(Empty {}))
+            }
+            Command::TurnSteer(body) => {
+                if context.key.as_deref() != Some(body.thread_id.to_string().as_str()) {
+                    return Err(CommandError::new(
+                        ErrorCode::Conflict,
+                        "another native steer queue",
+                    ));
+                }
+                pause(context.id, Phase::NativeInput).await;
+                Ok(CommandResult::TurnSteer(Empty {}))
             }
             Command::SessionContext(body) => {
                 if context.key.as_deref() != Some(body.thread_id.to_string().as_str()) {
@@ -333,6 +475,7 @@ impl CommandHandler for Native {
                     },
                 ))
             }
+            Command::FsRecordRead(body) => snapshot_reads::reply(context, body),
             _ => Err(CommandError::new(
                 ErrorCode::Unsupported,
                 "no other native command is declared by this peer",
@@ -385,6 +528,8 @@ fn peer(
             closed: CancellationToken::new(),
             stats: Mutex::new(None),
             started_at: link.inner.clock.time(),
+            #[cfg(feature = "test-observers")]
+            observed: orch_link::test_observers::QueueGauge::new("api.backplane.fixture"),
         });
         let session = new_id();
         link.attach(&gateway, machine, session, None).await;
@@ -422,7 +567,7 @@ fn peer(
                             loop {
                                 if let Some(entry) = server.entry(id) {
                                     if !accepted {
-                                        link.up(
+                                        link.route_up(
                                             &gateway,
                                             machine,
                                             session,
@@ -432,7 +577,7 @@ fn peer(
                                         accepted = true;
                                     }
                                     if let Step::Done { result } = entry.step {
-                                        link.up(
+                                        link.route_up(
                                             &gateway,
                                             machine,
                                             session,
@@ -518,10 +663,12 @@ impl Fixture {
             "connected",
         )
         .await?;
-        sqlx::query("UPDATE machines SET roles=ARRAY['environment','agent'] WHERE id=$1")
-            .bind(machine)
-            .execute(&test.pool)
-            .await?;
+        sqlx::query(
+            "UPDATE machines SET roles=ARRAY['environment','agent','provider'] WHERE id=$1",
+        )
+        .bind(machine)
+        .execute(&test.pool)
+        .await?;
         let directory = Arc::new(tempfile::tempdir()?);
         let payload = directory.path().join("payload.bin");
         tokio::fs::write(&payload, b"original owned input\0\xff").await?;
@@ -561,7 +708,7 @@ impl Fixture {
             journal,
             Arc::new(clock.clone()),
             ServerOptions {
-                roles: vec![Role::Environment, Role::Agent],
+                roles: vec![Role::Environment, Role::Agent, Role::Provider],
                 connected: true,
             },
         );
@@ -625,6 +772,7 @@ impl Fixture {
             .await?
         );
         Ok(StoredCommand {
+            authority: None,
             id: Some(id),
             machine: self.machine,
             kind: CommandKind::FsWrite.as_str().into(),
@@ -738,6 +886,7 @@ async fn an_already_connected_dispatcher_adopts_a_retained_turn_start_only_when_
         plan: false,
     })?;
     let original = StoredCommand {
+        authority: None,
         id: Some(id),
         machine: fixture.machine,
         kind: CommandKind::TurnStart.as_str().into(),

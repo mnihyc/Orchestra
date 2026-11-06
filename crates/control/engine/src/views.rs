@@ -1988,13 +1988,27 @@ impl Engine {
         revision: Option<i64>,
     ) -> Result<OutputPage, ReadError> {
         let mut tx = orch_db::queries::feeds::begin_reading(&self.inner.db).await?;
+        let row =
+            Self::command_output_item_in(&mut tx, thread, item, continuation, revision).await?;
+        tx.commit().await.map_err(orch_db::DbError::from)?;
+        self.command_output_from_item(row, offset, limit).await
+    }
+
+    /// Existing output membership/projection selection on the caller's authorized snapshot.
+    pub async fn command_output_item_in(
+        conn: &mut Conn,
+        thread: Id,
+        item: Id,
+        continuation: Option<Id>,
+        revision: Option<i64>,
+    ) -> Result<ItemRow, ReadError> {
         let owner = match continuation {
             Some(owner) => owner,
-            None => history_rows::item_owner(&mut tx, thread, item)
+            None => history_rows::item_owner(conn, thread, item)
                 .await?
                 .ok_or(ReadError::NotFound)?,
         };
-        let projection = continuation_rows::projection(&mut tx, thread, Some(owner))
+        let projection = continuation_rows::projection(conn, thread, Some(owner))
             .await?
             .ok_or(ReadError::NotFound)?;
         if !projection.accepts_cursor(false, revision) {
@@ -2002,10 +2016,19 @@ impl Engine {
                 crate::continuations::projection::scope(&projection),
             ));
         }
-        let row = history_rows::item(&mut tx, thread, owner, item)
+        let row = history_rows::item(conn, thread, owner, item)
             .await?
             .ok_or(ReadError::NotFound)?;
-        tx.commit().await.map_err(orch_db::DbError::from)?;
+        Ok(row)
+    }
+
+    /// Projects the already selected item after releasing its database snapshot.
+    pub async fn command_output_from_item(
+        &self,
+        row: ItemRow,
+        offset: i64,
+        limit: i64,
+    ) -> Result<OutputPage, ReadError> {
         let tool = row.payload.get("tool");
         if row.kind != "tool_call"
             || tool

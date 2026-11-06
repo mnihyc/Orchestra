@@ -228,7 +228,7 @@ pub struct Params {
 pub fn start(params: Params) -> ConversationHandle {
     let (sender, receiver) = flow::channel(command_weight);
     let (process_tx, process_rx) = crate::process::event_channel();
-    let mapper = EventMapper::new(
+    let mut mapper = EventMapper::new(
         MapperSettings {
             directory: params.spec.settings.directory.clone(),
             cwd: params.spec.settings.cwd.clone(),
@@ -236,6 +236,7 @@ pub fn start(params: Params) -> ConversationHandle {
         },
         Arc::clone(&params.clock),
     );
+    mapper.set_native_session(&params.session_id);
     let first_origin = params.origin.clone();
     let conversation = Conversation {
         params,
@@ -250,6 +251,7 @@ pub fn start(params: Params) -> ConversationHandle {
         turn: None,
         last_turn_id: None,
         live: None,
+        live_reviewer: None,
         needs_restart: false,
         requests: HashMap::new(),
         context_asks: HashMap::new(),
@@ -310,6 +312,8 @@ struct Conversation {
     turn: Option<ActiveTurn>,
     last_turn_id: Option<TurnId>,
     live: Option<TurnSettings>,
+    /// Declaration for the process that actually emitted native review facts.
+    live_reviewer: Option<orch_agent_contract::review::ApprovalReviewer>,
     needs_restart: bool,
     /// The tool use of a plan a person proceeded with, until its result shows that plan mode was left.
     plan_proceeded: Option<String>,
@@ -548,6 +552,9 @@ impl Conversation {
     fn reconfigure(&mut self, spec: SessionSpec) {
         let changed = spec.mcp != self.params.spec.mcp
             || spec.settings.subagent_limits != self.params.spec.settings.subagent_limits
+            || ((spec.settings.approval_mode == ApprovalMode::Auto
+                || self.params.spec.settings.approval_mode == ApprovalMode::Auto)
+                && spec.settings.available_models != self.params.spec.settings.available_models)
             || spec.settings.instructions != self.params.spec.settings.instructions
             || spec.settings.memory != self.params.spec.settings.memory
             || spec.settings.orch_tools != self.params.spec.settings.orch_tools
@@ -566,6 +573,7 @@ impl Conversation {
             },
             Arc::clone(&self.params.clock),
         );
+        self.mapper.set_native_session(&self.params.session_id);
         self.params.spec = spec;
         if changed && self.process.is_some() {
             self.needs_restart = true;
@@ -605,6 +613,8 @@ impl Conversation {
             self.needs_restart = true;
         }
         let settings = Self::turn_settings(&turn);
+        let reviewer =
+            crate::sessions::approval_reviewer(&self.params.setup, &self.params.spec, &settings)?;
         if settings.approval_mode == orch_agent_contract::descriptor::ApprovalMode::Auto {
             if !crate::descriptor::auto_proven() {
                 return Err(AdapterError::Unsupported(
@@ -618,6 +628,7 @@ impl Conversation {
         self.params.spec.settings.approval_mode = settings.approval_mode;
         self.bring_up_to_date(&settings).await?;
         self.ensure_process(&settings).await?;
+        self.live_reviewer = reviewer;
         self.idle_since = None;
         self.heard_at = Instant::now();
         self.retrying_since = None;
@@ -768,6 +779,8 @@ impl Conversation {
                     })?;
             }
         }
+        let reviewer =
+            crate::sessions::approval_reviewer(&self.params.setup, &self.params.spec, settings)?;
         let spec = launch(&Launch {
             setup: &self.params.setup,
             spec: &self.params.spec,
@@ -802,6 +815,7 @@ impl Conversation {
         match self.handshake().await {
             Ok(()) => {
                 self.live = Some(settings.clone());
+                self.live_reviewer = reviewer;
                 Ok(())
             }
             Err(error) => {
@@ -832,9 +846,9 @@ impl Conversation {
             tokio::select! {
                 outcome = &mut answer => {
                     return match outcome {
-                        Ok(ControlOutcome::Success(_)) => {
+                        Ok(ControlOutcome::Success(result)) => {
                             if self.params.spec.settings.approval_mode == orch_agent_contract::descriptor::ApprovalMode::Auto {
-                                crate::review::confirmed(self.reported_permission_mode.as_deref(), None)
+                                crate::review::confirmed(result.get("current_permission_mode").and_then(Json::as_str).or(self.reported_permission_mode.as_deref()), None)
                             } else { Ok(()) }
                         },
                         Ok(ControlOutcome::Error(error)) => Err(AdapterError::HarnessError(error)),
@@ -977,6 +991,7 @@ impl Conversation {
             });
         }
         self.live = None;
+        self.live_reviewer = None;
         self.idle_since = None;
     }
 
@@ -1225,9 +1240,9 @@ impl Conversation {
             && request.get("callback_id").and_then(Json::as_str) == Some("orch-permission-review")
         {
             if let Some(input) = request.get("input") {
-                let events = crate::review::denial(
+                let events = crate::review::denial_for_reviewer(
                     input,
-                    &self.params.spec.settings,
+                    self.live_reviewer.as_ref(),
                     self.turn
                         .as_ref()
                         .map(|turn| turn.turn_id)
@@ -1386,6 +1401,7 @@ impl Conversation {
             process.kill();
         }
         self.live = None;
+        self.live_reviewer = None;
         let message = if shared {
             "The provider refused the copy of the credential this session was given; a new copy is needed."
         } else {
@@ -1428,6 +1444,7 @@ impl Conversation {
             process.kill();
         }
         self.live = None;
+        self.live_reviewer = None;
         self.retrying_since = None;
         let events = self.mapper.fail_turn_with(error);
         self.emit_all(events).await;
@@ -1497,6 +1514,7 @@ impl Conversation {
     async fn lose_session(&mut self, why: &str) {
         self.process = None;
         self.live = None;
+        self.live_reviewer = None;
         let open: Vec<_> = self.asks.drain().collect();
         for (request_ref, _) in open {
             self.emit(SessionEvent::ApprovalClosed(ApprovalClosed { request_ref }))

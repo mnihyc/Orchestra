@@ -8,6 +8,8 @@
 mod places;
 mod support;
 
+use crate::support::FullTransferReply;
+
 use chrono::Duration;
 use orch_api_contract::common::ErrorCode;
 use orch_api_contract::common::PageQuery;
@@ -339,14 +341,20 @@ async fn the_first_place_among_the_owners_is_handed_on_and_the_previous_stays_un
             })
             .send()
     };
-    let handed = transfer(&s.boss, s.web, s.dan.id(), None).await.ok();
+    let handed = transfer(&s.boss, s.web, s.dan.id(), None)
+        .await
+        .full_transfer()
+        .ok();
     let Node::Project(handed) = handed else {
         panic!("a project stays one");
     };
     assert_eq!(handed.base.owner.username, "dan");
     assert_eq!(handed.base.owners, 2, "the previous owner stays");
     // Dan, now an owner, hands it on and takes the previous out.
-    let again = transfer(&s.dan, s.web, s.boss.id(), Some(false)).await.ok();
+    let again = transfer(&s.dan, s.web, s.boss.id(), Some(false))
+        .await
+        .full_transfer()
+        .ok();
     let Node::Project(again) = again else {
         panic!("a project stays one");
     };

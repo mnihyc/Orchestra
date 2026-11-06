@@ -7,6 +7,7 @@
 //! nothing says where below it the use was.
 
 use crate::middleware::requests::ApiResult;
+use crate::routes::access::page::NameBounds;
 use crate::routes::nodes::view as node_view;
 use crate::routes::resources::view as resource_view;
 use orch_api_contract::nodes::{NodeKind, NodeRef};
@@ -56,8 +57,36 @@ impl Names {
         providers: &[Id],
         nodes: &[Id],
     ) -> ApiResult<Self> {
+        Self::load_bounded(conn, principal, users, providers, nodes, None).await
+    }
+
+    /// The same names within an already admitted operation's optional node-name bound.
+    /// Public user identities and intrinsic provider references keep their original projection.
+    pub(crate) async fn load_bounded(
+        conn: &mut Conn,
+        principal: &Principal,
+        users: &[Id],
+        providers: &[Id],
+        nodes: &[Id],
+        bounds: Option<&NameBounds>,
+    ) -> ApiResult<Self> {
+        let bounds = bounds.filter(|bounds| bounds.limited);
         let mut names = Self {
-            users: crate::routes::access::page::user_refs_at(conn, principal, None, users).await?,
+            users: match bounds {
+                Some(bounds) => {
+                    crate::routes::access::page::user_refs_at_bounded(
+                        conn,
+                        principal,
+                        None,
+                        users,
+                        Some(bounds),
+                    )
+                    .await?
+                }
+                None => {
+                    crate::routes::access::page::user_refs_at(conn, principal, None, users).await?
+                }
+            },
             ..Self::default()
         };
         if !providers.is_empty() {
@@ -70,7 +99,10 @@ impl Names {
         if !nodes.is_empty() {
             // The screen already supplies scope, and records have separate place columns.
             // Keep the familiar name first rather than repeating the entire path in every cell.
-            names.nodes = node_view::refs(conn, principal, nodes, Policy::default()).await?;
+            names.nodes = match bounds {
+                Some(bounds) => bounds.refs(conn, principal, nodes).await?,
+                None => node_view::refs(conn, principal, nodes, Policy::default()).await?,
+            };
         }
         Ok(names)
     }
@@ -154,7 +186,12 @@ impl Names {
 
     /// The key a member of a dimension is shown as.
     #[must_use]
-    pub fn key(&self, dimension: UsageDimension, value: Option<&str>) -> UsageKey {
+    pub fn key(
+        &self,
+        dimension: UsageDimension,
+        value: Option<&str>,
+        tier_unknown: bool,
+    ) -> UsageKey {
         let id = value.and_then(|text| text.parse::<Id>().ok());
         let mut key = UsageKey::default();
         match dimension {
@@ -184,7 +221,10 @@ impl Names {
                 }));
             }
             UsageDimension::Effort => key.effort = Some(value.map(str::to_owned)),
-            UsageDimension::Tier => key.tier = Some(value.map(str::to_owned)),
+            UsageDimension::Tier => {
+                key.tier = Some(value.map(str::to_owned));
+                key.tier_unknown = tier_unknown;
+            }
             UsageDimension::Program => key.program = Some(value.map(str::to_owned)),
             UsageDimension::Org => key.org = Some(id.map(|id| self.node(id, NodeKind::Org))),
             UsageDimension::Project => {

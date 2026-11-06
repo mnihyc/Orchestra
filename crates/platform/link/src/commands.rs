@@ -1241,6 +1241,32 @@ impl CommandIssuer {
         }
     }
 
+    /// Refuses a local transmission only while the machine has not acknowledged it.
+    /// The same state lock serializes this decision with CmdAck and native results; an
+    /// earlier acknowledgement cannot be overwritten by a delayed sealing/admission error.
+    /// This is not a native answer and never establishes handler completion.
+    pub fn refuse_unaccepted(&self, id: Id, error: &CommandError) -> bool {
+        let mut state = lock(&self.state);
+        let Some(issued) = state.commands.get_mut(&id) else {
+            return false;
+        };
+        let refused = issued.tx.send_if_modified(|progress| {
+            if matches!(*progress, Progress::Queued | Progress::Sent) {
+                *progress = Progress::Failed(error.clone());
+                true
+            } else {
+                false
+            }
+        });
+        // A suppressed duplicate cannot receive a new ACK. Retire that resend's
+        // ACK timer just as the acknowledgement already observed by this issuer did.
+        let accepted = matches!(*issued.tx.borrow(), Progress::Accepted);
+        if refused || accepted {
+            issued.sent_at = None;
+        }
+        refused
+    }
+
     /// Whether the machine has returned from this command's handler, even after a cancellation request.
     #[must_use]
     pub fn answered(&self, id: Id) -> bool {

@@ -330,6 +330,36 @@ struct Scene {
 }
 
 impl Scene {
+    async fn lend_document(
+        &self,
+        conn: &mut orch_db::Conn,
+        document: Id,
+        permission: &str,
+    ) -> Proof<Id> {
+        use orch_db::queries::access::{self, NewEntry, PageKey};
+        let id = new_id();
+        access::insert_entry(
+            conn,
+            &NewEntry {
+                id,
+                page: &PageKey::new("document", document, "live"),
+                profile: "any",
+                permission,
+                holder_kind: "agents",
+                holder_id: Some(self.thread),
+                holder_role: None,
+                options: &json!({}),
+                expires_at: None,
+                note: "",
+                source: "page",
+                created_by: Some(self.world.ada),
+                at: self.world.clock.now(),
+            },
+        )
+        .await?;
+        Ok(id)
+    }
+
     async fn new() -> Proof<Self> {
         Self::configured(false).await
     }
@@ -645,7 +675,6 @@ impl Scene {
     /// A person's actual creation, rather than this agent's intrinsically exportable document.
     async fn shared_download_target(&mut self) -> Proof {
         use crate::document_tree::{self, Actor, Directory};
-        use orch_db::queries::access::{PageKey, testing as grants};
         let id = new_id();
         let mut tx = self.world.pool.begin().await?;
         let principal = Principal::load(
@@ -668,16 +697,7 @@ impl Scene {
         assert_eq!(created.document.created_by, Some(self.world.ada));
         assert_eq!(created.document.created_by_thread, None);
         for permission in ["doc.view", "doc.edit"] {
-            grants::add_entry(
-                &mut tx,
-                &PageKey::new("document", id, "live"),
-                "any",
-                permission,
-                ("agents", Some(self.thread), None),
-                None,
-                self.world.clock.now(),
-            )
-            .await?;
+            self.lend_document(&mut tx, id, permission).await?;
         }
         orch_db::queries::access::bump_epoch(&mut tx).await?;
         tx.commit().await?;
@@ -1382,7 +1402,6 @@ async fn download_peer(
     scene: &Scene,
     hold: bool,
 ) -> Proof<(Arc<UnjoinedWrite>, std::path::PathBuf, Id)> {
-    use orch_db::queries::access::{PageKey, testing as access};
     use orch_link_contract::commands::ExpectedHash;
     use std::io::Write;
     let native_bytes = Arc::new(Mutex::new(None::<(Hash, Bytes)>));
@@ -1395,16 +1414,13 @@ async fn download_peer(
         release: Semaphore::new(0),
     });
     scene.world.machine.link.serve(native.clone());
-    let export = access::add_entry(
-        &mut *scene.world.pool.acquire().await?,
-        &PageKey::new("document", scene.document, "live"),
-        "any",
-        "doc.export",
-        ("agents", Some(scene.thread), None),
-        None,
-        scene.world.clock.now(),
-    )
-    .await?;
+    let export = scene
+        .lend_document(
+            &mut *scene.world.pool.acquire().await?,
+            scene.document,
+            "doc.export",
+        )
+        .await?;
     scene
         .world
         .engine()

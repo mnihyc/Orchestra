@@ -1,6 +1,7 @@
 /** The same live native list on a desktop dialog and a phone sheet, with reviewed exact End and actual outcomes. */
 import { useMutation, useQuery } from '@tanstack/react-query';
 import { Link } from '@tanstack/react-router';
+import { SquareTerminal } from 'lucide-react';
 import { useCallback, useEffect, useRef, useState } from 'react';
 import { useTranslation } from 'react-i18next';
 import { EmptyState } from '@/ui/EmptyState';
@@ -8,7 +9,7 @@ import { endBackground } from '@/api/background';
 import { jobQuery, isOver } from '@/api/forks';
 import type { BackgroundCommand, BackgroundEndRequest, BackgroundEndResult, ThreadBackground } from '@/generated/api-types';
 import { useFormatContext } from '@/lib/appearance';
-import { formatBytes, formatPercent } from '@/lib/format';
+import { formatBytes, formatNumber, formatPercent } from '@/lib/format';
 import { newActKey } from '@/lib/requests';
 import { socket } from '@/realtime/live';
 import { Button } from '@/ui/Button';
@@ -17,8 +18,9 @@ import { ConfirmDialog } from '@/ui/ConfirmDialog';
 import { Dialog } from '@/ui/Dialog';
 import { Drawer } from '@/ui/Drawer';
 import { ErrorAlert } from '@/ui/ErrorState';
+import { IconButton } from '@/ui/IconButton';
 import { RelativeTime } from '@/ui/RelativeTime';
-import { useRunning } from './live';
+import { Tooltip } from '@/ui/Tooltip';
 import { canEndAll, endResults, loadReview, reviewedRequest } from './review';
 
 /** The phone boundary matches the application's md layout breakpoint. */
@@ -114,9 +116,13 @@ export function RunningDialog({ thread, close }: { thread: string; close: () => 
   </>;
 }
 
-export function RunningControl({ threadId }: { threadId: string }) {
-  const { t } = useTranslation(); const { roster, closed } = useRunning(threadId); const [open, setOpen] = useState(false);
-  if (closed || (!open && roster?.supported === true && roster.state === 'live' && roster.total === 0)) return null;
-  const label = roster?.state === 'live' && roster.total !== null ? t('running.count', { count: roster.total }) : t('running.title');
-  return <><Button size="sm" variant="ghost" onClick={() => setOpen(true)}>{label}</Button>{open && <RunningDialog key={threadId} thread={threadId} close={() => setOpen(false)} />}</>;
+export function RunningControl({ roster, closed, opened, onOpen }: { roster: ThreadBackground | null; closed: boolean; opened: boolean; onOpen: () => void }) {
+  const { t } = useTranslation();
+  const { locale } = useFormatContext();
+  const total = roster?.supported === true && roster.state === 'live' ? roster.total : null;
+  if (closed || (!opened && total === 0)) return null;
+  const label = total === null ? t('running.title') : t('running.count', { count: total, replace: { count: formatNumber(total, locale) } });
+  const firstLine = { marginBlockStart: 'calc((var(--text-lg--line-height) - var(--control-sm)) / 2)' };
+  return total === null ? <IconButton size="sm" style={firstLine} label={t('running.title')} icon={<SquareTerminal aria-hidden />} aria-haspopup="dialog" aria-expanded={opened} onClick={onOpen} />
+    : <Tooltip content={t('running.title')}><Button size="sm" variant="ghost" style={firstLine} aria-haspopup="dialog" aria-expanded={opened} onClick={onOpen}>{label}</Button></Tooltip>;
 }

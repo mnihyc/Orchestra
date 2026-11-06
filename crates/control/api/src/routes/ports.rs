@@ -18,6 +18,8 @@ use orch_engine::ports::{self as core, Requester};
 use orch_types::{Id, Json, Time, new_id};
 use std::collections::BTreeSet;
 
+mod opening_operation;
+
 /// Binds the target, policy and admission core; entry and agent decisions join separately.
 pub fn mount(registry: &mut Registry) {
     registry
@@ -26,9 +28,17 @@ pub fn mount(registry: &mut Registry) {
         .on(api::EnvironmentPortProgramUpdate, program)
         .on(api::EnvironmentPortOpeningPreflight, preflight)
         .on(api::EnvironmentPortOpeningCreate, create)
-        .on(api::PortOpeningGet, opening)
-        .on(api::PortOpeningUpdate, update)
-        .on(api::PortOpeningDelete, close)
+        .on_with_operation(api::PortOpeningGet, opening_operation::prepare_get, opening)
+        .on_with_operation(
+            api::PortOpeningUpdate,
+            opening_operation::prepare_write,
+            update,
+        )
+        .on_with_operation(
+            api::PortOpeningDelete,
+            opening_operation::prepare_write,
+            close,
+        )
         .on(api::EnvironmentPortConnectionList, connections)
         .on(api::NodePortOpeningList, outside)
         .on(api::EnvironmentPortCapabilityGrant, capability_grant)
@@ -226,21 +236,33 @@ pub(crate) async fn opening_view(
     env: &EnvironmentFull,
     audience_only: bool,
 ) -> ApiResult<PortOpening> {
+    opening_view_with_names(ctx, conn, principal, row, env, audience_only, None).await
+}
+
+/// The same port projection, with only optional protected names restricted by this operation.
+pub(crate) async fn opening_view_with_names(
+    ctx: &Ctx,
+    conn: &mut Conn,
+    principal: &Principal,
+    row: &rows::Opening,
+    env: &EnvironmentFull,
+    audience_only: bool,
+    names: Option<&crate::routes::access::page::NameBounds>,
+) -> ApiResult<PortOpening> {
     let people = [row.requested_by, row.allowed_by]
         .into_iter()
         .flatten()
         .collect::<Vec<_>>();
     let users = refusals::user_refs(conn, &people).await?;
-    let refs = crate::routes::nodes::view::refs(
-        conn,
-        principal,
-        &[row.place_id, row.requested_by_thread]
-            .into_iter()
-            .flatten()
-            .collect::<Vec<_>>(),
-        Policy::default(),
-    )
-    .await?;
+    let ids = [row.place_id, row.requested_by_thread]
+        .into_iter()
+        .flatten()
+        .collect::<Vec<_>>();
+    let refs = if let Some(names) = names {
+        names.refs(conn, principal, &ids).await?
+    } else {
+        crate::routes::nodes::view::refs(conn, principal, &ids, Policy::default()).await?
+    };
     let port = u16::try_from(row.port).map_err(ApiError::internal)?;
     let (program, _) = rows::program(conn, env.id, port).await?;
     let kind = parse(&row.kind)?;
@@ -321,7 +343,7 @@ pub(crate) async fn opening_view(
                     false
                 }));
     let admission = match &row.admission {
-        Some(admission) => admission_view(conn, principal, admission).await?,
+        Some(admission) => admission_view_with_names(conn, principal, admission, names).await?,
         None => None,
     };
     Ok(PortOpening {
@@ -1377,38 +1399,32 @@ async fn create(
     Ok(answer)
 }
 
-async fn opening(ctx: Ctx, (): (), (): ()) -> ApiResult<PortOpening> {
-    let mut conn = ctx.app.db.acquire().await?;
-    let principal = authorization::principal(&ctx, &mut conn).await?;
-    let row = rows::opening(&mut conn, ctx.id("opening_id")?)
+/// The existing opening read door and native projection, reused within the approval's
+/// own snapshot/operation. It never borrows the PortOpeningGet operation's scope.
+pub(crate) async fn read_opening_in(
+    ctx: &Ctx,
+    conn: &mut Conn,
+    principal: &Principal,
+    id: Id,
+) -> ApiResult<PortOpening> {
+    let row = rows::opening(conn, id)
         .await?
         .ok_or_else(ApiError::not_found)?;
-    let env = environment(&mut conn, row.environment_id).await?;
-    let door = core::holds(&mut conn, &principal, env.id, Permission::PortsView)
-        .await
-        .map_err(ApiError::internal)?;
-    if !door
-        && !(row.kind == "place"
-            && row.place_id.is_some()
-            && core::place_view(
-                &mut conn,
-                &principal,
-                row.place_id.ok_or_else(ApiError::not_found)?,
-            )
-            .await
-            .unwrap_or(false))
-    {
-        return Err(ApiError::not_found());
-    }
-    opening_view(&ctx, &mut conn, &principal, &row, &env, !door).await
+    let env = environment(conn, row.environment_id).await?;
+    let audience_only = opening_operation::read_door(conn, principal, &row).await?;
+    opening_view(ctx, conn, principal, &row, &env, audience_only).await
 }
-async fn close(ctx: Ctx, (): (), body: PortRevisionBody) -> ApiResult<PortOpening> {
+
+async fn opening(ctx: Ctx, (): (), (): ()) -> ApiResult<PortOpening> {
+    crate::key_operations::snapshot_read::run(ctx, opening_operation::get).await
+}
+async fn close(ctx: Ctx, (): (), body: PortRevisionBody) -> ApiResult<PortOpeningWriteResponse> {
     let (mut tx, guard) = transaction_guard::begin(&ctx).await?;
     let row = rows::opening(&mut tx, ctx.id("opening_id")?)
         .await?
         .ok_or_else(ApiError::not_found)?;
     let env = environment(&mut tx, row.environment_id).await?;
-    require(&mut tx, guard.principal(), env.id, Permission::PortsManage).await?;
+    opening_operation::require_manage(&ctx, &mut tx, guard.principal(), env.id).await?;
     rows::lock_environment(&mut tx, env.id).await?;
     rows::lock_target(&mut tx, env.id, row.port as u16).await?;
     let current = rows::opening(&mut tx, row.id)
@@ -1436,20 +1452,25 @@ async fn close(ctx: Ctx, (): (), body: PortRevisionBody) -> ApiResult<PortOpenin
     let current = rows::opening(&mut tx, row.id)
         .await?
         .ok_or_else(ApiError::not_found)?;
-    let result = opening_view(&ctx, &mut tx, guard.principal(), &current, &env, false).await?;
+    let revision = current.revision;
+    let accepted = guard.principal().caller().clone();
     tx.commit().await.map_err(orch_db::DbError::from)?;
     ctx.app.cache.ports().close_opening(row.id);
     ctx.app.link.terminals().close_port_opening(row.id);
     crate::host_ports::unpublish_in_background(&ctx.app, &[row.id]);
-    Ok(result)
+    opening_operation::reply(&ctx, &accepted, row.id, env.id, revision).await
 }
-async fn update(ctx: Ctx, (): (), body: PortOpeningUpdateBody) -> ApiResult<PortOpening> {
+async fn update(
+    ctx: Ctx,
+    (): (),
+    body: PortOpeningUpdateBody,
+) -> ApiResult<PortOpeningWriteResponse> {
     let (mut tx, guard) = transaction_guard::begin(&ctx).await?;
     let row = rows::opening(&mut tx, ctx.id("opening_id")?)
         .await?
         .ok_or_else(ApiError::not_found)?;
     let env = environment(&mut tx, row.environment_id).await?;
-    require(&mut tx, guard.principal(), env.id, Permission::PortsManage).await?;
+    opening_operation::require_manage(&ctx, &mut tx, guard.principal(), env.id).await?;
     rows::lock_environment(&mut tx, env.id).await?;
     let until = body
         .until
@@ -1493,9 +1514,10 @@ async fn update(ctx: Ctx, (): (), body: PortOpeningUpdateBody) -> ApiResult<Port
     )
     .await
     .map_err(ApiError::internal)?;
-    let result = opening_view(&ctx, &mut tx, guard.principal(), &current, &env, false).await?;
+    let revision = current.revision;
+    let accepted = guard.principal().caller().clone();
     tx.commit().await.map_err(orch_db::DbError::from)?;
-    Ok(result)
+    opening_operation::reply(&ctx, &accepted, row.id, env.id, revision).await
 }
 
 /// Current own-use or named-place admission for exactly one port and transport.
@@ -1887,6 +1909,15 @@ pub(crate) async fn admission_view(
     principal: &Principal,
     stored: &Json,
 ) -> ApiResult<Option<PortOpeningAdmission>> {
+    admission_view_with_names(conn, principal, stored, None).await
+}
+
+async fn admission_view_with_names(
+    conn: &mut Conn,
+    principal: &Principal,
+    stored: &Json,
+    names: Option<&crate::routes::access::page::NameBounds>,
+) -> ApiResult<Option<PortOpeningAdmission>> {
     let Some(capability) = stored.get("capability").and_then(Json::as_str) else {
         return Ok(None);
     };
@@ -1903,10 +1934,15 @@ pub(crate) async fn admission_view(
             .and_then(|id| id.parse::<Id>().ok())
     };
     let scope = match id_of("node_id") {
-        Some(node) => crate::routes::nodes::view::refs(conn, principal, &[node], Policy::default())
-            .await?
-            .remove(&node)
-            .filter(|node| !node.redacted),
+        Some(node) => {
+            let mut refs = if let Some(names) = names {
+                names.refs(conn, principal, &[node]).await?
+            } else {
+                crate::routes::nodes::view::refs(conn, principal, &[node], Policy::default())
+                    .await?
+            };
+            refs.remove(&node).filter(|node| !node.redacted)
+        }
         None => None,
     };
     let by = match id_of("by_user_id") {

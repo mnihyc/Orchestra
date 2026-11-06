@@ -942,6 +942,37 @@ pub async fn revoke_session(
     Ok(done.rows_affected() == 1)
 }
 
+/// Actual subjects of the existing bulk-revocation operation. Expired but
+/// unrevoked sessions remain candidates, as in the ordinary revoke writer.
+/// The caller's personal identity lock serializes normal session creation.
+pub async fn unrevoked_session_subjects(
+    conn: &mut Conn,
+    user: Id,
+) -> Result<Vec<(Id, Id)>, DbError> {
+    Ok(sqlx::query_as(
+        "SELECT id,user_id FROM sessions WHERE user_id=$1 AND revoked_at IS NULL ORDER BY id",
+    )
+    .bind(user)
+    .fetch_all(conn)
+    .await?)
+}
+
+/// An actual retained subject for the single-session revoke operation. Its
+/// user is read from the row; an expired session can still be revoked.
+pub async fn unrevoked_session_subject(
+    conn: &mut Conn,
+    session: Id,
+    user: Id,
+) -> Result<Option<(Id, Id)>, DbError> {
+    Ok(sqlx::query_as(
+        "SELECT id,user_id FROM sessions WHERE id=$1 AND user_id=$2 AND revoked_at IS NULL",
+    )
+    .bind(session)
+    .bind(user)
+    .fetch_optional(conn)
+    .await?)
+}
+
 /// Ends every live session of `user` but `keep`, and drops their access
 /// tokens. The answer says how many were ended.
 pub async fn revoke_sessions_of(
@@ -950,14 +981,37 @@ pub async fn revoke_sessions_of(
     keep: Option<Id>,
     now: DateTime<Utc>,
 ) -> Result<u64, DbError> {
+    revoke_sessions_selected(conn, user, keep, now, None).await
+}
+
+/// Applies the same revoke operation to exactly the guarded materialized subjects.
+/// An empty set stays empty; it cannot expand to newly created or unselected rows.
+pub async fn revoke_session_set(
+    conn: &mut Conn,
+    user: Id,
+    selected: &[Id],
+    now: DateTime<Utc>,
+) -> Result<u64, DbError> {
+    revoke_sessions_selected(conn, user, None, now, Some(selected)).await
+}
+
+async fn revoke_sessions_selected(
+    conn: &mut Conn,
+    user: Id,
+    keep: Option<Id>,
+    now: DateTime<Utc>,
+    selected: Option<&[Id]>,
+) -> Result<u64, DbError> {
     let ended: Vec<Id> = sqlx::query_scalar(
         "UPDATE sessions SET revoked_at = $3
           WHERE user_id = $1 AND revoked_at IS NULL AND ($2::uuid IS NULL OR id <> $2)
+            AND ($4::uuid[] IS NULL OR id=ANY($4))
       RETURNING id",
     )
     .bind(user)
     .bind(keep)
     .bind(now)
+    .bind(selected)
     .fetch_all(&mut *conn)
     .await?;
     sqlx::query("DELETE FROM access_tokens WHERE session_id = ANY($1)")
@@ -1009,8 +1063,12 @@ pub struct ApiTokenRow {
     pub user_id: Id,
     /// The permissions it may exercise; `*` is all its user holds.
     pub scopes: Vec<String>,
+    /// Bound operation rules and retained issuance ceilings; None is legacy mode.
+    pub operation_scope: Option<Json>,
     /// The node it is confined to, with everything below.
     pub node_id: Option<Id>,
+    /// Current deadline, retained by accepted-work boundaries as well as authentication.
+    pub expires_at: Option<DateTime<Utc>>,
 }
 
 /// The API token whose hash is `token_hash`, where it is neither revoked
@@ -1031,11 +1089,11 @@ pub async fn api_token_by_hash(
                 WHERE token_hash = $1 AND revoked_at IS NULL
                   AND (expires_at IS NULL OR expires_at > $2)
                 FOR NO KEY UPDATE SKIP LOCKED
-            ) RETURNING id, user_id, scopes, node_id
+            ) RETURNING id, user_id, scopes, operation_scope, node_id, expires_at
          )
          SELECT * FROM touched
          UNION ALL
-         SELECT id, user_id, scopes, node_id FROM api_tokens
+         SELECT id, user_id, scopes, operation_scope, node_id, expires_at FROM api_tokens
          WHERE token_hash = $1 AND revoked_at IS NULL
            AND (expires_at IS NULL OR expires_at > $2)
            AND NOT EXISTS (SELECT 1 FROM touched)",
@@ -1046,15 +1104,35 @@ pub async fn api_token_by_hash(
     .await?)
 }
 
+/// The stored scope mode of the exact token owner, without reconstructing its authority.
+/// Current credential restoration separately checks revocation and expiration.
+pub async fn api_token_is_operation_scoped(
+    conn: &mut Conn,
+    token: Id,
+    user: Id,
+) -> Result<Option<bool>, DbError> {
+    Ok(sqlx::query_scalar(
+        "SELECT operation_scope IS NOT NULL FROM api_tokens WHERE id=$1 AND user_id=$2",
+    )
+    .bind(token)
+    .bind(user)
+    .fetch_optional(conn)
+    .await?)
+}
+
 /// An API token as its person lists it, with the node it is kept to.
 #[derive(Debug, Clone, PartialEq, Eq, sqlx::FromRow)]
 pub struct ApiTokenListed {
     /// Its identifier.
     pub id: Id,
+    /// The actual owning account, retained for typed credential target facts.
+    pub user_id: Id,
     /// The name its maker gave it.
     pub name: String,
     /// What it may do.
     pub scopes: Vec<String>,
+    /// The key's explicit operation policy; None is legacy mode.
+    pub operation_scope: Option<Json>,
     /// The node it is kept to.
     pub node_id: Option<Id>,
     /// The kind of that node.
@@ -1070,7 +1148,7 @@ pub struct ApiTokenListed {
 }
 
 const API_TOKEN_COLUMNS: &str =
-    "t.id, t.name, t.scopes, t.node_id, n.kind AS node_kind, n.name AS node_name,
+    "t.id, t.user_id, t.name, t.scopes, t.operation_scope, t.node_id, n.kind AS node_kind, n.name AS node_name,
                                   t.created_at, t.last_used_at, t.expires_at";
 
 /// An API token to make.
@@ -1096,9 +1174,19 @@ pub struct NewApiToken<'a> {
 
 /// Stores an API token, by the hash of its secret.
 pub async fn create_api_token(conn: &mut Conn, new: &NewApiToken<'_>) -> Result<(), DbError> {
+    create_api_token_scoped(conn, new, None).await
+}
+
+/// The same token writer with an explicit operation policy. The existing row constraint keeps
+/// rule mode separate from permissive legacy fallbacks; the shared producer validates the policy.
+pub async fn create_api_token_scoped(
+    conn: &mut Conn,
+    new: &NewApiToken<'_>,
+    operation_scope: Option<&Json>,
+) -> Result<(), DbError> {
     sqlx::query(
-        "INSERT INTO api_tokens (id, user_id, name, token_hash, scopes, node_id, created_at, expires_at)
-         VALUES ($1, $2, $3, $4, $5, $6, $7, $8)",
+        "INSERT INTO api_tokens (id, user_id, name, token_hash, scopes, node_id, created_at, expires_at, operation_scope)
+         VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9)",
     )
     .bind(new.id)
     .bind(new.user_id)
@@ -1108,6 +1196,7 @@ pub async fn create_api_token(conn: &mut Conn, new: &NewApiToken<'_>) -> Result<
     .bind(new.node_id)
     .bind(new.at)
     .bind(new.expires_at)
+    .bind(operation_scope)
     .execute(conn)
     .await?;
     Ok(())
@@ -2141,6 +2230,8 @@ pub struct InvitationRow {
     pub created_by: Id,
     /// The issuer's explicit authority mode at creation; None on a legacy offer.
     pub created_as_admin: Option<bool>,
+    /// Private accepted key-operation boundary; None on pre-origin/browser offers.
+    pub issuer_origin: Option<Json>,
     /// When.
     pub created_at: DateTime<Utc>,
 }
@@ -2148,7 +2239,7 @@ pub struct InvitationRow {
 macro_rules! invitation_columns {
     () => {
         "id, kind, org_id, node_id, chat_id, role, permissions, email, max_uses, uses, note,
-         expires_at, revoked_at, created_by, created_at, created_as_admin"
+         expires_at, revoked_at, created_by, created_at, created_as_admin, issuer_origin"
     };
 }
 
@@ -2183,6 +2274,8 @@ pub struct NewInvitation<'a> {
     pub by: Id,
     /// Whether the issuer explicitly acted in administrator mode for this offer.
     pub as_admin: bool,
+    /// Exact accepted key origin, kept on this offer rather than exposed in its projection.
+    pub issuer_origin: Option<&'a Json>,
     /// When.
     pub at: DateTime<Utc>,
 }
@@ -2191,8 +2284,8 @@ pub struct NewInvitation<'a> {
 pub async fn create_invitation(conn: &mut Conn, new: &NewInvitation<'_>) -> Result<(), DbError> {
     sqlx::query(
         "INSERT INTO invitations (id, token_hash, kind, org_id, node_id, role, permissions, email,
-                                  max_uses, note, expires_at, created_by, created_at, chat_id, created_as_admin)
-         VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15)",
+                                  max_uses, note, expires_at, created_by, created_at, chat_id, created_as_admin, issuer_origin)
+         VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16)",
     )
     .bind(new.id)
     .bind(new.token_hash)
@@ -2209,6 +2302,7 @@ pub async fn create_invitation(conn: &mut Conn, new: &NewInvitation<'_>) -> Resu
     .bind(new.at)
     .bind(new.chat)
     .bind(new.as_admin)
+    .bind(new.issuer_origin)
     .execute(conn)
     .await?;
     Ok(())
@@ -2239,6 +2333,17 @@ pub async fn invitation_by_id(conn: &mut Conn, id: Id) -> Result<Option<Invitati
     .bind(id)
     .fetch_optional(conn)
     .await?)
+}
+
+/// Locks this offer before its governing target, matching ordinary redemption order.
+pub async fn lock_invitation(conn: &mut Conn, id: Id) -> Result<bool, DbError> {
+    Ok(
+        sqlx::query_scalar::<_, Id>("SELECT id FROM invitations WHERE id=$1 FOR UPDATE")
+            .bind(id)
+            .fetch_optional(conn)
+            .await?
+            .is_some(),
+    )
 }
 
 /// The invitations into the org `org` when it is given; else the system's
@@ -3004,6 +3109,8 @@ pub struct SignInState {
     pub redirect_path: String,
     /// The signed-in user an identity is linked to; none otherwise.
     pub link_user_id: Option<Id>,
+    /// The accepted linking caller and exact operation, never bearer secrets or resolved paths.
+    pub link_authority: Option<Json>,
     /// The invitation a sign-in came with, as it was given.
     pub invitation: Option<String>,
     /// Whether the person explicitly composed acceptance with this sign-in.
@@ -3027,8 +3134,8 @@ pub async fn begin_sign_in(conn: &mut Conn, row: &SignInState) -> Result<(), DbE
     sqlx::query(
         "INSERT INTO oidc_states (state, identity_provider_id, nonce, pkce_verifier, redirect_path,
                                   link_user_id, invitation, session_id, sensitive_purpose,
-                                  service_account_id, browser_hash, started_at, expires_at, accept_invitation)
-         VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14)",
+                                  service_account_id, browser_hash, started_at, expires_at, accept_invitation, link_authority)
+         VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15)",
     )
     .bind(&row.state)
     .bind(row.identity_provider_id)
@@ -3044,6 +3151,7 @@ pub async fn begin_sign_in(conn: &mut Conn, row: &SignInState) -> Result<(), DbE
     .bind(row.started_at)
     .bind(row.expires_at)
     .bind(row.accept_invitation)
+    .bind(&row.link_authority)
     .execute(conn)
     .await?;
     Ok(())
@@ -3056,7 +3164,7 @@ pub async fn take_sign_in(conn: &mut Conn, state: &str) -> Result<Option<SignInS
         "DELETE FROM oidc_states WHERE state = $1
          RETURNING state, identity_provider_id, nonce, pkce_verifier, redirect_path, link_user_id,
                    invitation, session_id, sensitive_purpose, service_account_id, browser_hash,
-                   started_at, expires_at, accept_invitation",
+                   started_at, expires_at, accept_invitation, link_authority",
     )
     .bind(state)
     .fetch_optional(conn)

@@ -79,6 +79,7 @@ pub async fn list(ctx: Ctx, query: UsageEventListQuery, _body: Body) -> ApiResul
     let mut filter = scope::filter(&mut conn, &principal, &opened, &wanted, true).await?;
     filter.effort = query.effort.clone();
     filter.tier = query.tier.clone();
+    filter.tier_unknown = query.tier_unknown;
     filter.program = query.program.clone();
     filter.outcome = query.outcome;
     filter.org = query.org_id;
@@ -257,6 +258,10 @@ pub(crate) async fn events(
                     .unwrap_or_default(),
                 effort: row.effort.clone(),
                 tier: row.tier.clone(),
+                tier_unknown: orch_db::usage::rollup::tier_unknown(
+                    row.tier.as_deref(),
+                    &row.measurement_states,
+                ),
                 tokens: TokenUsage {
                     input_tokens: row.input_tokens,
                     cached_input_tokens: row.cached_input_tokens,
@@ -299,6 +304,7 @@ fn events_csv(events: &[UsageEvent]) -> String {
         "model_display",
         "effort",
         "tier",
+        "tier_unknown",
         "input_tokens",
         "cached_input_tokens",
         "output_tokens",
@@ -367,6 +373,7 @@ fn events_csv(events: &[UsageEvent]) -> String {
             each.model_display.clone(),
             each.effort.clone().unwrap_or_default(),
             each.tier.clone().unwrap_or_default(),
+            each.tier_unknown.to_string(),
             count(
                 reported.and_then(|tokens| tokens.input_tokens),
                 each.tokens.input_tokens,

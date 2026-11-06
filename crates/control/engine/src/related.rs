@@ -459,9 +459,7 @@ impl Engine {
         {
             return Ok(None);
         }
-        let projection =
-            orch_authz::everything::project_search(conn, principal, None, &[document], &[], &[])
-                .await?;
+        let projection = orch_authz::everything::project_related(conn, principal, document).await?;
         let candidates = self
             .related_candidates(conn, &source, &projection.search_candidates(principal))
             .await?;

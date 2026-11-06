@@ -47,13 +47,16 @@
 //! is left out. Held inputs are looked at again each time and released when room
 //! is made, in their order.
 
-use crate::access::{Answer, Limit, ProviderUse};
+use crate::access::{Answer, ProviderUse};
 use crate::binding::{self, Facts};
 use crate::caps::{self, Ask, CapCheck, Verdict};
 use crate::engine::Engine;
 use crate::error::EngineError;
 use crate::harnesses;
-use crate::inputs::{InputAuthority, authority_caller, input_authority, saved_authority};
+use crate::inputs::{
+    InputAuthority, input_authority, input_authority_callers, input_preparation_callers,
+    saved_authority,
+};
 use crate::leases;
 use crate::resolved::{self, Resolved};
 use crate::sessions;
@@ -194,8 +197,6 @@ struct Plan {
     path: CredentialPath,
     /// Who reports what the turn uses.
     metering: Metering,
-    /// Who let the input past the provider's own limit, where it is reached.
-    provider_limit_by: Option<Id>,
     /// What the lease carries of the room the caps leave.
     allowance: Option<Json>,
     /// The limits the input is let past, and by whom.
@@ -380,7 +381,7 @@ impl Engine {
         ))
         .await?
         .unwrap_or_else(|| WITHOUT_MODEL_HELD.to_owned());
-        let mut verdicts: Vec<(Option<Id>, Option<InputAuthority>, Person)> = Vec::new();
+        let mut verdicts: Vec<(Option<Id>, Option<InputAuthority>, Id, i64, Person)> = Vec::new();
         for input in threads::pending_inputs(&mut *unit.conn, thread_id).await? {
             let person = if input.author_id.is_none() && !input.is_authorless() {
                 Person::Lost
@@ -388,6 +389,7 @@ impl Engine {
                 Box::pin(self.person_of(
                     unit,
                     &thread,
+                    &input,
                     input.author_id,
                     input.submission_authority.as_ref(),
                     &settings,
@@ -553,7 +555,14 @@ impl Engine {
                 return Ok(Outcome::Blocked(blocked));
             };
 
-            if crate::native_actions::hold_invalid(unit, thread_id, &input).await? {
+            if crate::native_actions::hold_invalid(
+                unit,
+                thread_id,
+                &input,
+                self.inner.clock.as_ref(),
+            )
+            .await?
+            {
                 if let Some(row) = pending.iter_mut().find(|row| row.id == input.id) {
                     row.state_detail = Some("native_action.unavailable".to_owned());
                 }
@@ -766,6 +775,7 @@ impl Engine {
         &self,
         unit: &mut Unit<'_>,
         thread: &ThreadRow,
+        input: &InputRow,
         author: Option<Id>,
         authority: Option<&InputAuthority>,
         settings: &Resolved,
@@ -795,44 +805,77 @@ impl Engine {
                 Person::Held
             });
         };
-        let caller = match authority {
+        let callers = match authority {
             Some(authority) => {
-                match authority_caller(unit.conn, author, thread.node_id, now, authority).await? {
-                    Some(caller) => caller,
+                match input_preparation_callers(
+                    unit,
+                    thread,
+                    input,
+                    author,
+                    authority,
+                    self.inner.clock.as_ref(),
+                )
+                .await?
+                {
+                    Some(callers) => callers,
                     None => return Ok(Person::Lost),
                 }
             }
-            // Accepted older work may still be attributed, but its lost credential provenance cannot grant model use.
-            None => Caller::session(author).with_admin_mode(false),
+            // Unknown historical provenance still grants no model use.
+            None => vec![Caller::session(author).with_admin_mode(false)],
         };
-        let principal = match Principal::load(&mut *unit.conn, caller.clone(), now).await {
-            Ok(principal) => principal,
-            Err(orch_authz::Error::NoSuchUser(_)) => return Ok(Person::Lost),
-            Err(error) => return Err(error.into()),
-        };
-        let decision = nodes::check(
-            &mut *unit.conn,
-            &principal,
-            thread.node_id,
-            Permission::ThreadInteract,
-            Act::Use,
-            orch_authz::Policy::default(),
-        )
-        .await;
-        match decision {
-            Ok(Decision::Allowed { .. }) => {}
-            Ok(Decision::Refused(_)) | Err(orch_authz::Error::Suspended { .. }) => {
-                return Ok(Person::Lost);
+        for caller in &callers {
+            let principal = match Principal::load(&mut *unit.conn, caller.clone(), now).await {
+                Ok(principal) => principal,
+                Err(orch_authz::Error::NoSuchUser(_)) => return Ok(Person::Lost),
+                Err(error) => return Err(error.into()),
+            };
+            let decision = nodes::check(
+                &mut *unit.conn,
+                &principal,
+                thread.node_id,
+                Permission::ThreadInteract,
+                Act::Use,
+                orch_authz::Policy::default(),
+            )
+            .await;
+            match decision {
+                Ok(Decision::Allowed { .. }) => {}
+                Ok(Decision::Refused(_)) | Err(orch_authz::Error::Suspended { .. }) => {
+                    return Ok(Person::Lost);
+                }
+                Err(orch_authz::Error::Archived { .. }) => return Ok(Person::Dormant),
+                Err(error) => return Err(error.into()),
             }
-            Err(orch_authz::Error::Archived { .. }) => return Ok(Person::Dormant),
-            Err(error) => return Err(error.into()),
         }
         // The team org the thread lies in may require a second step of the author: while none is set up their
         // work there waits, as a request of theirs there would; nothing is taken from them for it.
         if second_step_missing(&mut *unit.conn, author, thread.node_id).await? {
             return Ok(Person::Setup);
         }
-        if authority.is_none() || !caller.permits(Permission::ProviderUse) {
+        if let Some(authority) = authority
+            && input.native_action.is_none()
+            && input_authority_callers(
+                unit,
+                thread,
+                input,
+                author,
+                authority,
+                self.inner.clock.as_ref(),
+            )
+            .await?
+            .is_none()
+        {
+            return Ok(Person::Lost);
+        }
+        // A native selection's complete scope and ordinary command permission are checked by
+        // hold_invalid before execution. A missing Manage facet holds its words/arguments for
+        // correction; it must not become an unrelated loss-of-authorship cancellation here.
+        if authority.is_none()
+            || callers
+                .iter()
+                .any(|caller| !caller.permits(Permission::ProviderUse))
+        {
             return Ok(Person::NeedsModel);
         }
         if thread.provider_id.is_none() {
@@ -855,22 +898,27 @@ impl Engine {
         &self,
         unit: &mut Unit<'_>,
         thread: &ThreadRow,
+        input: &InputRow,
         person: Option<Id>,
         authority: Option<&Json>,
         settings: &Resolved,
-        verdicts: &mut Vec<(Option<Id>, Option<InputAuthority>, Person)>,
+        verdicts: &mut Vec<(Option<Id>, Option<InputAuthority>, Id, i64, Person)>,
     ) -> Result<Person, EngineError> {
         let authority = saved_authority(authority)?;
-        if let Some((_, _, known)) = verdicts
-            .iter()
-            .find(|(asked, saved, _)| *asked == person && *saved == authority)
+        if let Some((_, _, _, _, known)) =
+            verdicts.iter().find(|(asked, saved, row, revision, _)| {
+                *asked == person
+                    && *saved == authority
+                    && *row == input.id
+                    && *revision == input.seq_updated
+            })
         {
             return Ok(*known);
         }
         let verdict = self
-            .check_person(unit, thread, person, authority.as_ref(), settings)
+            .check_person(unit, thread, input, person, authority.as_ref(), settings)
             .await?;
-        verdicts.push((person, authority, verdict));
+        verdicts.push((person, authority, input.id, input.seq_updated, verdict));
         Ok(verdict)
     }
 
@@ -884,7 +932,7 @@ impl Engine {
         input: &InputRow,
         policy: &str,
         settings: &Resolved,
-        verdicts: &mut Vec<(Option<Id>, Option<InputAuthority>, Person)>,
+        verdicts: &mut Vec<(Option<Id>, Option<InputAuthority>, Id, i64, Person)>,
     ) -> Result<(), EngineError> {
         let thread_id = thread.node_id;
         let owner_authority =
@@ -897,8 +945,16 @@ impl Engine {
             None => None,
         };
         if let Some((runner, authority)) = runner {
-            if Box::pin(self.person_of(unit, thread, Some(runner), authority, settings, verdicts))
-                .await?
+            if Box::pin(self.person_of(
+                unit,
+                thread,
+                input,
+                Some(runner),
+                authority,
+                settings,
+                verdicts,
+            ))
+            .await?
                 == Person::Fine
             {
                 if input.run_as != Some(runner)
@@ -967,7 +1023,6 @@ impl Engine {
         input: Option<&InputRow>,
         settings: &Resolved,
     ) -> Result<Result<Plan, Blocked>, EngineError> {
-        let now = unit.now();
         let conn = &mut *unit.conn;
         // 2
         let (Some(agent_id), Some(provider_id)) = (thread.agent_id, thread.provider_id) else {
@@ -1004,7 +1059,7 @@ impl Engine {
             }));
         }
         // 4
-        let Some(mut provider) = resources::provider(conn, provider_id)
+        let Some(provider) = resources::provider(conn, provider_id)
             .await?
             .filter(|p| p.deleted_at.is_none())
         else {
@@ -1032,11 +1087,8 @@ impl Engine {
                 note.map_or_else(|| "disabled".into(), |note| format!("disabled · {note}")),
             )));
         }
-        // 5. A provider that a limit with a time closed looks at the vendor again when the time has passed.
-        if let Some(opened) = crate::providers::release_if_ended(conn, &provider, now).await? {
-            provider = opened;
-        }
-        let mut provider_limit_by = None;
+        // 5. Cached vendor quota is observational. Credential/lifecycle refusals
+        // retain their normal gate and exact recovery-trial rules.
         // A refused provider admits the one recovery trial its manager reserved for an input; nothing else.
         let trial = match input {
             Some(input) if provider.status == "error" => {
@@ -1049,18 +1101,7 @@ impl Engine {
             }
             _ => false,
         };
-        if provider.status == "exhausted" {
-            provider_limit_by = match input {
-                Some(input) => self.limit_is_passed(unit, input, &provider).await?,
-                None => None,
-            };
-            if provider_limit_by.is_none() {
-                return Ok(Err(Blocked {
-                    reason: "provider_exhausted",
-                    detail: provider.status_detail.clone(),
-                }));
-            }
-        } else if provider.status != "ready" && !trial {
+        if !crate::providers::request_status_available(&provider.status) && !trial {
             return Ok(Err(Blocked::new(
                 "provider_unavailable",
                 crate::providers::unavailable_detail(&provider),
@@ -1112,24 +1153,21 @@ impl Engine {
             )));
         }
         let effort = parameters.effort_for(settings.effort.as_deref());
-        // A family of models whose limit stopped this thread's last turn stays closed to it until the vendor's time
-        // passes: another model of the plan is what is offered, never the same family again.
-        if let Some(blocked) = family_at_its_limit(conn, thread.node_id, &model, now).await? {
-            return Ok(Err(blocked));
-        }
+        // A previous vendor family/spending refusal describes that failed turn;
+        // it cannot decide whether the vendor admits this new request.
         // 8, 9, 10, 11 need the environment and the descriptor.
         let descriptor = harnesses::descriptor_of(&agent)?;
         if let Some(descriptor) = &descriptor {
             if !settings.allowed_modes.contains(&settings.approval_mode) {
                 return Ok(Err(Blocked::new(
                     "binding_invalid",
-                    crate::sessions::APPROVAL_NOT_ALLOWED,
+                    crate::sessions::disallowed_approval_detail(settings.approval_mode),
                 )));
             }
             if !descriptor.approval_modes.contains(&settings.approval_mode) {
                 return Ok(Err(Blocked::new(
                     "binding_invalid",
-                    crate::sessions::APPROVAL_UNSUPPORTED,
+                    crate::sessions::unsupported_approval_detail(settings.approval_mode),
                 )));
             }
         }
@@ -1296,7 +1334,8 @@ impl Engine {
                 }
                 return Ok(Err(Blocked::new(
                     "binding_invalid",
-                    binding::describe(&why),
+                    binding::machine_program_mismatch(&facts, &why)
+                        .unwrap_or_else(|| binding::describe(&why)),
                 )));
             }
         };
@@ -1386,7 +1425,6 @@ impl Engine {
             arrangement,
             path,
             metering,
-            provider_limit_by,
             allowance: None,
             passed: Vec::new(),
             bypass: None,
@@ -1421,54 +1459,6 @@ impl Engine {
             Answer::Allowed { arrangements } => arrangements,
             Answer::Refused(_) => None,
         })
-    }
-
-    /// Who let the input past the provider's own limit and holds the right to
-    /// now; none where nobody does.
-    async fn limit_is_passed(
-        &self,
-        unit: &mut Unit<'_>,
-        input: &InputRow,
-        provider: &ProviderRow,
-    ) -> Result<Option<Id>, EngineError> {
-        let entries = input
-            .limit_bypass
-            .as_ref()
-            .and_then(Json::as_array)
-            .cloned()
-            .unwrap_or_default();
-        for entry in entries {
-            let passes = entry
-                .get("provider_limit")
-                .and_then(Json::as_bool)
-                .unwrap_or(false);
-            let by: Option<Id> = entry
-                .get("by")
-                .and_then(Json::as_str)
-                .and_then(|id| id.parse().ok());
-            let as_admin = entry
-                .get("as_admin")
-                .and_then(Json::as_bool)
-                .unwrap_or(false);
-            if let (true, Some(by)) = (passes, by) {
-                let holds = self
-                    .inner
-                    .access
-                    .may_pass(
-                        &mut *unit.conn,
-                        by,
-                        as_admin,
-                        &Limit::ProviderLimit {
-                            provider: provider.id,
-                        },
-                    )
-                    .await?;
-                if holds {
-                    return Ok(Some(by));
-                }
-            }
-        }
-        Ok(None)
     }
 
     /// The success path: everything a started turn is made of, in the
@@ -1575,25 +1565,6 @@ impl Engine {
             )
             .await?;
         }
-        if let Some(by) = plan.provider_limit_by {
-            self.record_passed_provider(
-                unit,
-                &crate::caps::ProviderPass {
-                    thread: thread.node_id,
-                    segment: segment.id,
-                    turn: turn.id,
-                    author: input.author_id,
-                    provider: plan.provider.id,
-                    by,
-                    detail: plan
-                        .provider
-                        .status_detail
-                        .as_deref()
-                        .unwrap_or("the plan's limit was reached"),
-                },
-            )
-            .await?;
-        }
         let moved = threads::change_input(
             &mut *unit.conn,
             input.id,
@@ -1693,56 +1664,6 @@ pub(crate) fn environment_state_sentence(status: &str, detail: Option<&str>) -> 
         (None, "disabled") => "disabled".into(),
         _ => format!("the environment is {status}"),
     }
-}
-
-/// Whether the limit of one family of models stopped the thread's last turn and still holds `model`: until the time
-/// the vendor named, every model of that family (by the family the adapter read from the vendor's fields), or the
-/// same model where no family was named. The thread waits as one whose provider is at its limit, and what is offered
-/// is another model of the plan.
-async fn family_at_its_limit(
-    conn: &mut orch_db::Conn,
-    thread: Id,
-    model: &str,
-    now: chrono::DateTime<chrono::Utc>,
-) -> Result<Option<Blocked>, EngineError> {
-    let Some(last) = threads::latest_turn(conn, thread).await? else {
-        return Ok(None);
-    };
-    let Some(error) = last
-        .error
-        .as_ref()
-        .filter(|_| last.state == threads::turn_state::FAILED)
-    else {
-        return Ok(None);
-    };
-    if error["code"] != "provider_exhausted" || error["limit"]["scope"] != "model_family" {
-        return Ok(None);
-    }
-    let until = error["resets_at"]
-        .as_str()
-        .and_then(|text| chrono::DateTime::parse_from_rfc3339(text).ok())
-        .map(|at| at.with_timezone(&chrono::Utc));
-    if until.is_some_and(|until| until <= now) {
-        return Ok(None);
-    }
-    let family = error["limit"]["model_family"].as_str();
-    let holds = match family {
-        Some(family) => model.to_lowercase().contains(&family.to_lowercase()),
-        None => model == last.model,
-    };
-    if !holds {
-        return Ok(None);
-    }
-    let ends = until.map_or_else(String::new, |until| {
-        format!(" until {}", until.format("%Y-%m-%d %H:%M UTC"))
-    });
-    let sentence = match family {
-        Some(family) => {
-            format!("the plan's {family} models are at their limit{ends}; choose another model")
-        }
-        None => format!("the plan's {model} is at its limit{ends}; choose another model"),
-    };
-    Ok(Some(Blocked::new("provider_exhausted", sentence)))
 }
 
 /// Check 9 on its own: is the environment one a turn can run in now?

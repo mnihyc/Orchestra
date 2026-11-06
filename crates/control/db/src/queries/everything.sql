@@ -42,9 +42,13 @@ WITH reader_projection AS MATERIALIZED (SELECT $4::jsonb AS grants), __NODE_VISI
      AND NOT EXISTS (SELECT 1 FROM nodes gone WHERE gone.id = ANY(n.path) AND gone.deleted_at IS NOT NULL)
   UNION ALL
   -- Keep node paths plain and the shared parent expression intact, so both existing indexes remain usable.
-  SELECT 'chat', c.id::text, COALESCE(c.name, n.name), COALESCE(c.node_id, c.org_id)::text, n.path, c.org_id,
+  SELECT 'chat', c.id::text,
+         COALESCE(c.name, CASE WHEN COALESCE((n."grant"->'chat'->>'scope_name_fallback')::boolean,true) THEN n.name ELSE '' END),
+         COALESCE(c.node_id, c.org_id)::text, n.path, c.org_id,
          c.created_by, NULL, c.created_at, c.last_message_at, NULL, NULL, NULL,
-         COALESCE(n."grant"->'chat', '{}'::jsonb)
+         CASE WHEN COALESCE((n."grant"->'chat'->>'scope_name_fallback')::boolean,true) OR c.name IS NOT NULL
+           THEN COALESCE(n."grant"->'chat', '{}'::jsonb)
+           ELSE jsonb_set(COALESCE(n."grant"->'chat', '{}'::jsonb),'{named}','false'::jsonb) END
     FROM chats c JOIN nodes root ON root.id = c.org_id JOIN node_rows n ON n.uuid_key = c.node_id
    WHERE c.node_id IS NOT NULL
      AND NOT EXISTS (SELECT 1 FROM nodes gone WHERE gone.id = ANY(n.path) AND gone.deleted_at IS NOT NULL)
@@ -66,7 +70,9 @@ WITH reader_projection AS MATERIALIZED (SELECT $4::jsonb AS grants), __NODE_VISI
   UNION ALL
   SELECT 'machine', m.id::text, m.name, 'resources', COALESCE(n.path,'{}'::uuid[]), CASE WHEN h.id IS NULL THEN m.org_id ELSE h.org_id END,
          NULL, m.owner_id, m.created_at, m.last_seen_at, CASE WHEN m.status = 'revoked' THEN 'revoked' WHEN m.online THEN 'online' ELSE 'offline' END, NULL, NULL,
-         COALESCE(__GRANTS__->'objects'->COALESCE(h.id,m.id)::text,'{}'::jsonb)
+         CASE WHEN __GRANTS__ ? 'inventory_machines'
+           THEN COALESCE(__GRANTS__->'inventory_machines'->m.id::text,'{}'::jsonb)
+           ELSE COALESCE(__GRANTS__->'objects'->COALESCE(h.id,m.id)::text,'{}'::jsonb) END
     FROM machines m LEFT JOIN hosts h ON h.machine_id=m.id
     LEFT JOIN nodes n ON n.id=CASE WHEN h.id IS NULL THEN m.home_id ELSE h.home_id END
    WHERE m.runtime_id IS NULL AND m.deleted_at IS NULL

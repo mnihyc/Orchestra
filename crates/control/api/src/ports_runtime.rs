@@ -321,6 +321,25 @@ impl PortRuntime {
             ticket_expires_at: expires,
         })
     }
+    fn take_use(
+        &self,
+        id: Id,
+        proof: &str,
+        surface: orch_api_contract::surface::HttpSurface,
+    ) -> ApiResult<Use> {
+        let mut uses = lock(&self.uses);
+        if uses
+            .get(&id)
+            .is_none_or(|usage| usage.proof != proof || usage.ctx.surface != Some(surface))
+        {
+            return Err(ApiError::new(
+                ErrorCode::PortsNotAllowed,
+                "the use is unknown or consumed",
+            ));
+        }
+        uses.remove(&id).ok_or_else(ApiError::not_found)
+    }
+
     /// Opens a channel once after the entry owner observes its actual outside peer.
     /// The peer comes from the transport, never a client-selected address.
     pub async fn open_channel(
@@ -328,17 +347,9 @@ impl PortRuntime {
         id: Id,
         proof: &str,
         outside: SocketAddr,
+        surface: orch_api_contract::surface::HttpSurface,
     ) -> ApiResult<Tunnel> {
-        let usage = {
-            let mut uses = lock(&self.uses);
-            if uses.get(&id).is_none_or(|u| u.proof != proof) {
-                return Err(ApiError::new(
-                    ErrorCode::PortsNotAllowed,
-                    "the use is unknown or consumed",
-                ));
-            }
-            uses.remove(&id).ok_or_else(ApiError::not_found)?
-        };
+        let usage = self.take_use(id, proof, surface)?;
         if usage.expires <= Time::new(usage.ctx.app.clock.now()) {
             return Err(ApiError::new(
                 ErrorCode::PortsNotAllowed,
@@ -1012,4 +1023,61 @@ pub fn start(
         }
         app.cache.ports().clear();
     })
+}
+
+#[cfg(test)]
+mod surface_tests {
+    use super::*;
+    use orch_api_contract::routes::Endpoint;
+    use orch_api_contract::surface::HttpSurface;
+
+    #[tokio::test]
+    async fn surface_port_use_refusal_preserves_the_same_proof_and_origin() {
+        let db = orch_testkit::database::TestDb::fresh().await;
+        let app = crate::testing::TestApp::new(
+            orch_db::Db::from_pool(db.pool.clone()),
+            orch_testkit::clock::manual(),
+            crate::registry::Registry::new(),
+        );
+        for surface in [HttpSurface::Browser, HttpSurface::Key] {
+            let runtime = PortRuntime::default();
+            let id = orch_types::new_id();
+            let mut ctx = Ctx::for_tool(
+                app.app.clone(),
+                crate::middleware::authentication::Caller::Anonymous,
+                PortLinkUseCreate::ROUTE,
+                id,
+            );
+            // Test only the stored protocol origin/removal. No account or business authority is claimed.
+            ctx.surface = Some(surface);
+            let now = Time::new(ctx.now);
+            lock(&runtime.uses).insert(
+                id,
+                Use {
+                    ctx,
+                    environment: orch_types::new_id(),
+                    generation: 1,
+                    port: 8080,
+                    transport: PortTransport::Tcp,
+                    opening: None,
+                    by_link: true,
+                    expires: now,
+                    proof: "synthetic-proof".into(),
+                },
+            );
+            let foreign = if surface == HttpSurface::Browser {
+                HttpSurface::Key
+            } else {
+                HttpSurface::Browser
+            };
+            assert!(runtime.take_use(id, "synthetic-proof", foreign).is_err());
+            assert!(runtime.take_use(id, "wrong-proof", surface).is_err());
+            let kept = runtime
+                .take_use(id, "synthetic-proof", surface)
+                .expect("foreign attempt must not remove the original admission");
+            assert_eq!(kept.ctx.surface, Some(surface));
+            assert_eq!(kept.proof, "synthetic-proof");
+            assert!(runtime.take_use(id, "synthetic-proof", surface).is_err());
+        }
+    }
 }

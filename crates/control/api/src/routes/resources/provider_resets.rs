@@ -1,17 +1,20 @@
-//! Browser-only confirmed provider resets, current authority, durable receipts and audit attribution.
+//! Explicitly confirmed provider resets, current authority, restricted receipts and audit attribution.
 
+use crate::key_operations::{admission::Prepared, targets};
 use crate::middleware::requests::{ApiError, ApiResult};
 use crate::middleware::{authorization, transaction_guard};
-use crate::registry::{Ctx, Registry};
+use crate::registry::{Ctx, OperationFuture, Registry};
 use crate::routes::resources::providers::show;
 use crate::routes::resources::{Home, record};
 use orch_access_contract::audit::AuditAction;
-use orch_access_contract::permissions::{Permission, ResourceKind};
-use orch_api_contract::common::ErrorCode;
+use orch_access_contract::decisions::ObjectRef;
+use orch_access_contract::permissions::{ObjectKind, Permission, ResourceKind};
+use orch_api_contract::common::{ErrorCode, ReceiptProjection};
 use orch_api_contract::resources::{
-    self as api, ProviderLastReset, ProviderResetConsumeBody, ProviderResetConsumeReply,
+    self as api, Provider, ProviderLastReset, ProviderResetConsumeBody,
+    ProviderResetConsumeReceipt, ProviderResetConsumeReply, ProviderResetConsumeResponse,
 };
-use orch_authz::Policy;
+use orch_authz::{Caller, Policy, Principal};
 use orch_db::queries::provider_facts as rows;
 use orch_db::queries::resources::thread_engine as resources;
 use orch_db::{Conn, DbError};
@@ -21,17 +24,183 @@ use std::collections::HashMap;
 
 /// Binds the one confirmed reset action.
 pub fn mount(registry: &mut Registry) {
-    registry.on(api::ProviderResetConsume, consume);
+    registry.on_with_operation(api::ProviderResetConsume, operation, consume);
 }
 
-async fn stale(ctx: &Ctx, conn: &mut Conn, principal: &orch_authz::Principal, id: Id) -> ApiError {
-    match show(ctx, conn, principal, id).await {
-        Ok(provider) => ApiError::new(
+fn legacy_refusal() -> ApiError {
+    ApiError::new(
+        ErrorCode::AuthSessionRequired,
+        "this legacy key cannot confirm a provider reset",
+    )
+}
+
+fn check_legacy(caller: &Caller) -> ApiResult<()> {
+    if caller
+        .grant()
+        .is_some_and(|grant| grant.requires_legacy_compatibility())
+    {
+        return Err(legacy_refusal());
+    }
+    Ok(())
+}
+
+// Op::returning declares the required effect first and the optional Read second.
+const EFFECT_FACET: usize = 0;
+const RESPONSE_FACET: usize = 1;
+
+/// The same stored Provider site supplies both effect and optional response Read facts.
+async fn response_plan(ctx: &Ctx, conn: &mut Conn, id: Id) -> ApiResult<Prepared> {
+    let target = targets::page_object(
+        conn,
+        ObjectRef {
+            kind: ObjectKind::Provider,
+            id,
+        },
+    )
+    .await?;
+    let mut plan = Prepared::new(ctx.route, ctx.route.name)?;
+    plan.bind(RESPONSE_FACET, target.object.kind, &[target])?;
+    Ok(plan)
+}
+
+fn operation<'a>(
+    ctx: &'a Ctx,
+    conn: &'a mut Conn,
+    caller: &'a Caller,
+    (): (),
+    _body: ProviderResetConsumeBody,
+) -> OperationFuture<'a> {
+    Box::pin(async move {
+        // Preserve the historical refusal before the shared compatibility check.
+        check_legacy(caller)?;
+        let target = targets::page_object(
+            conn,
+            ObjectRef {
+                kind: ObjectKind::Provider,
+                id: ctx.id("id")?,
+            },
+        )
+        .await?;
+        let mut plan = Prepared::new(ctx.route, ctx.route.name)?;
+        plan.bind(
+            EFFECT_FACET,
+            target.object.kind,
+            std::slice::from_ref(&target),
+        )?;
+        plan.bind(RESPONSE_FACET, target.object.kind, &[target])?;
+        Ok(plan)
+    })
+}
+
+async fn current_provider(
+    ctx: &Ctx,
+    conn: &mut Conn,
+    principal: &Principal,
+    id: Id,
+) -> ApiResult<Option<Provider>> {
+    if ctx.key_receipt_required() {
+        return Ok(None);
+    }
+    let plan = match response_plan(ctx, conn, id).await {
+        Ok(plan) => plan,
+        Err(error) if matches!(error.problem.status, 403 | 404 | 410) => {
+            ctx.complete_disclosure(crate::key_operations::resolver::Disclosure::Denied);
+            return Ok(None);
+        }
+        Err(error) => return Err(error),
+    };
+    let projection_ctx = ctx.clone();
+    match plan
+        .read_response(ctx, conn, principal.caller(), move |conn, reader| {
+            Box::pin(async move {
+                authorization::require_resource(
+                    conn,
+                    reader,
+                    ResourceKind::Provider,
+                    id,
+                    Permission::ProviderView,
+                    Policy::default(),
+                )
+                .await?;
+                show(&projection_ctx, conn, reader, id).await
+            })
+        })
+        .await
+    {
+        Ok(provider) => Ok(provider),
+        Err(error) if matches!(error.problem.status, 403 | 404 | 410) => {
+            ctx.complete_disclosure(crate::key_operations::resolver::Disclosure::Denied);
+            Ok(None)
+        }
+        Err(error) => Err(error),
+    }
+}
+
+/// Never construct a current-provider error payload without this same operation's Read.
+async fn with_current(
+    ctx: &Ctx,
+    conn: &mut Conn,
+    principal: &Principal,
+    id: Id,
+    problem: ApiError,
+) -> ApiError {
+    match current_provider(ctx, conn, principal, id).await {
+        Ok(Some(provider)) => problem.with("current", provider),
+        Ok(None) => problem,
+        Err(error) => error,
+    }
+}
+
+async fn stale(ctx: &Ctx, conn: &mut Conn, principal: &Principal, id: Id) -> ApiError {
+    with_current(
+        ctx,
+        conn,
+        principal,
+        id,
+        ApiError::new(
             ErrorCode::ProviderResetStale,
             "The reset or the number available changed. Read the current facts and confirm again.",
-        )
-        .with("current", provider),
-        Err(error) => error,
+        ),
+    )
+    .await
+}
+
+struct ResetProjection {
+    full: Option<ProviderResetConsumeReply>,
+    receipt: ProviderResetConsumeReceipt,
+}
+
+impl ResetProjection {
+    async fn load(
+        ctx: &Ctx,
+        conn: &mut Conn,
+        principal: &Principal,
+        id: Id,
+        request: Id,
+        outcome: String,
+    ) -> ApiResult<Self> {
+        let full = current_provider(ctx, conn, principal, id)
+            .await?
+            .map(|provider| ProviderResetConsumeReply {
+                outcome: outcome.clone(),
+                provider,
+            });
+        Ok(Self {
+            full,
+            receipt: ProviderResetConsumeReceipt {
+                projection: ReceiptProjection::Receipt,
+                provider_id: id,
+                request_id: request,
+                outcome,
+            },
+        })
+    }
+
+    fn finish(self, ctx: &Ctx) -> ProviderResetConsumeResponse {
+        match (self.full, ctx.key_receipt_required()) {
+            (Some(full), false) => ProviderResetConsumeResponse::Full(full),
+            _ => ProviderResetConsumeResponse::Receipt(self.receipt),
+        }
     }
 }
 
@@ -39,14 +208,12 @@ async fn consume(
     mut ctx: Ctx,
     (): (),
     body: ProviderResetConsumeBody,
-) -> ApiResult<ProviderResetConsumeReply> {
+) -> ApiResult<ProviderResetConsumeResponse> {
     let id = ctx.id("id")?;
     let (mut tx, guard) = transaction_guard::begin(&ctx).await?;
-    if !guard.user().is_session() || guard.user().user.kind != "human" {
-        return Err(ApiError::new(
-            ErrorCode::AuthSessionRequired,
-            "Only a person signed in at a browser can confirm a reset.",
-        ));
+    check_legacy(guard.principal().caller())?;
+    if guard.user().is_session() && guard.user().user.kind != "human" {
+        return Err(legacy_refusal());
     }
     let principal = guard.principal();
     authorization::require_resource(
@@ -78,12 +245,11 @@ async fn consume(
             .and_then(Json::as_str)
             .ok_or_else(|| ApiError::internal("a reset receipt has no outcome"))?
             .to_owned();
-        let shown = show(&ctx, &mut tx, principal, id).await?;
+        crate::key_operations::activity::replayed();
+        let projection =
+            ResetProjection::load(&ctx, &mut tx, principal, id, body.request_id, outcome).await?;
         tx.commit().await.map_err(DbError::from)?;
-        return Ok(ProviderResetConsumeReply {
-            outcome,
-            provider: shown,
-        });
+        return Ok(projection.finish(&ctx));
     }
     if provider.status == "disabled" {
         return Err(ApiError::new(
@@ -170,11 +336,17 @@ async fn consume(
         .await
         .map_err(ApiError::internal)?;
     let Some(facts) = fresh.facts.clone() else {
-        let unavailable = ApiError::new(
-            ErrorCode::ProviderResetUnavailable,
-            "The source did not report its current reset credits.",
+        let unavailable = with_current(
+            &ctx,
+            &mut tx,
+            principal,
+            id,
+            ApiError::new(
+                ErrorCode::ProviderResetUnavailable,
+                "The source did not report its current reset credits.",
+            ),
         )
-        .with("current", show(&ctx, &mut tx, principal, id).await?);
+        .await;
         tx.commit().await.map_err(DbError::from)?;
         if recovered {
             ctx.app
@@ -203,11 +375,17 @@ async fn consume(
             || current.is_none()
             || reset_read_at.is_none_or(|at| *at < read_started))
     {
-        let unavailable = ApiError::new(
-            ErrorCode::ProviderResetUnavailable,
-            "This read did not confirm the provider's current reset availability.",
+        let unavailable = with_current(
+            &ctx,
+            &mut tx,
+            principal,
+            id,
+            ApiError::new(
+                ErrorCode::ProviderResetUnavailable,
+                "This read did not confirm the provider's current reset availability.",
+            ),
         )
-        .with("current", show(&ctx, &mut tx, principal, id).await?);
+        .await;
         tx.commit().await.map_err(DbError::from)?;
         if recovered {
             ctx.app
@@ -293,7 +471,7 @@ async fn consume(
         .map_err(ApiError::internal)?;
     if failed {
         ctx.now = now;
-        let unavailable=ApiError::new(ErrorCode::ProviderResetUnavailable,"The source could not confirm this reset attempt. Retry the same request when it is available.").with("current",show(&ctx,&mut tx,principal,id).await?);
+        let unavailable = with_current(&ctx, &mut tx, principal, id, ApiError::new(ErrorCode::ProviderResetUnavailable,"The source could not confirm this reset attempt. Retry the same request when it is available.")).await;
         tx.commit().await.map_err(DbError::from)?;
         if recovered {
             ctx.app
@@ -316,7 +494,15 @@ async fn consume(
         Policy::default(),
     )
     .await?;
-    let shown = show(&ctx, &mut reply_tx, reply_guard.principal(), id).await?;
+    let projection = ResetProjection::load(
+        &ctx,
+        &mut reply_tx,
+        reply_guard.principal(),
+        id,
+        body.request_id,
+        result.outcome,
+    )
+    .await?;
     reply_tx.commit().await.map_err(DbError::from)?;
     if recovered {
         ctx.app
@@ -325,10 +511,7 @@ async fn consume(
             .await
             .map_err(ApiError::internal)?;
     }
-    Ok(ProviderResetConsumeReply {
-        outcome: result.outcome,
-        provider: shown,
-    })
+    Ok(projection.finish(&ctx))
 }
 
 /// Safe attribution for the last reset of each visible provider, until its resulting windows begin again.

@@ -5,8 +5,8 @@ use orch_api_contract::machine_programs::{MachinePrograms, MachineProgramsComman
 
 pub(super) fn register(registry: &mut Registry) {
     registry
-        .on(api::MachineExecutorList, executors)
-        .on(api::MachineProgramsGet, get)
+        .on_with_operation(api::MachineExecutorList, read_operation::prepare, executors)
+        .on_with_operation(api::MachineProgramsGet, read_operation::prepare, get)
         .on(api::MachineProgramsChange, change);
 }
 
@@ -36,10 +36,16 @@ async fn projection(
 }
 
 async fn get(ctx: Ctx, (): (), (): ()) -> ApiResult<MachinePrograms> {
-    let mut conn = ctx.app.db.acquire().await?;
-    let row = own_machine(&ctx, &mut conn, ctx.id("id")?).await?;
-    let principal = authorization::principal(&ctx, &mut conn).await?;
-    projection(&mut conn, &principal, &row).await
+    crate::key_operations::snapshot_read::run(ctx, programs_snapshot).await
+}
+
+async fn programs_snapshot(ctx: Ctx) -> ApiResult<MachinePrograms> {
+    let mut tx = ctx.app.db.begin_snapshot().await?;
+    let principal = ctx.operation_principal(&mut tx).await?;
+    let row = own_machine_on(&mut tx, &principal, ctx.id("id")?).await?;
+    let shown = projection(&mut tx, &principal, &row).await?;
+    tx.commit().await.map_err(DbError::from)?;
+    Ok(shown)
 }
 
 /// The executors the machine can offer: those of the registry, which a connector release carries, and the executor
@@ -49,12 +55,36 @@ async fn executors(
     (): (),
     (): (),
 ) -> ApiResult<Vec<orch_api_contract::programs::MachineExecutor>> {
-    let mut conn = ctx.app.db.acquire().await?;
-    let row = own_machine(&ctx, &mut conn, ctx.id("id")?).await?;
-    Ok(crate::programs::machine_executors(
+    crate::key_operations::snapshot_read::run(ctx, executors_snapshot).await
+}
+
+async fn executors_snapshot(
+    ctx: Ctx,
+) -> ApiResult<Vec<orch_api_contract::programs::MachineExecutor>> {
+    let mut tx = ctx.app.db.begin_snapshot().await?;
+    let principal = ctx.operation_principal(&mut tx).await?;
+    let row = own_machine_on(&mut tx, &principal, ctx.id("id")?).await?;
+    let shown = crate::programs::machine_executors(
         orch_agent_programs::Programs::builtin(),
         &shown_facts(&row.facts),
-    ))
+    );
+    tx.commit().await.map_err(DbError::from)?;
+    Ok(shown)
+}
+
+fn harness_version(facts: &Json, kind: &str, path: &str) -> String {
+    facts
+        .get("harnesses")
+        .and_then(Json::as_array)
+        .and_then(|entries| {
+            entries
+                .iter()
+                .find(|entry| entry["kind"] == kind && entry["path"] == path)
+        })
+        .and_then(|entry| entry.get("version"))
+        .and_then(Json::as_str)
+        .unwrap_or("unknown")
+        .to_owned()
 }
 
 async fn change(ctx: Ctx, (): (), body: MachineProgramsCommand) -> ApiResult<MachinePrograms> {
@@ -63,17 +93,38 @@ async fn change(ctx: Ctx, (): (), body: MachineProgramsCommand) -> ApiResult<Mac
     let row = own_machine(&ctx, &mut conn, id).await?;
     require_machine(&mut conn, &principal, id, Permission::MachineManage).await?;
     require_online(&ctx, &row)?;
-    let (operation, name, kind) = match &body {
-        MachineProgramsCommand::Register(entry) => {
-            ("registered", Some(entry.name.clone()), Some(entry.kind))
-        }
-        MachineProgramsCommand::Test(entry) => {
-            ("tested", Some(entry.name.clone()), Some(entry.kind))
-        }
-        MachineProgramsCommand::Remove(entry) => {
-            ("removed", Some(entry.name.clone()), Some(entry.kind))
-        }
-        MachineProgramsCommand::Reload => ("reloaded", None, None),
+    let (operation, name, kind, harness) = match &body {
+        MachineProgramsCommand::Register(entry) => (
+            "registered",
+            Some(entry.name.clone()),
+            Some(json!(entry.kind)),
+            None,
+        ),
+        MachineProgramsCommand::Test(entry) => (
+            "tested",
+            Some(entry.name.clone()),
+            Some(json!(entry.kind)),
+            None,
+        ),
+        MachineProgramsCommand::Remove(entry) => (
+            "removed",
+            Some(entry.name.clone()),
+            Some(json!(entry.kind)),
+            None,
+        ),
+        MachineProgramsCommand::ConfirmHarness { kind, path } => (
+            "confirmed",
+            None,
+            Some(json!(kind)),
+            Some((kind.as_str(), path.as_str(), true)),
+        ),
+        MachineProgramsCommand::RemoveHarness { kind, path } => (
+            "unconfirmed",
+            None,
+            Some(json!(kind)),
+            Some((kind.as_str(), path.as_str(), false)),
+        ),
+        MachineProgramsCommand::Reload => ("reloaded", None, None, None),
     };
     // The same credential/authority decision as other native machine mutations, committed first.
     conn.commit().await.map_err(DbError::from)?;
@@ -84,6 +135,23 @@ async fn change(ctx: Ctx, (): (), body: MachineProgramsCommand) -> ApiResult<Mac
         .run(id, &SerialKey::Machine, &body)
         .await
         .map_err(|failure| match failure {
+            RunError::Command(CommandFailure::Failed(refusal))
+                if harness.is_some() && refusal.code == "conflict" =>
+            {
+                ApiError::new(ErrorCode::ConflictStaleRevision, &refusal.detail)
+            }
+            RunError::Command(CommandFailure::Failed(refusal))
+                if harness.is_some()
+                    && refusal
+                        .details
+                        .as_ref()
+                        .and_then(|details| details.get("policy_key"))
+                        .and_then(Json::as_str)
+                        == Some("agent.harnesses") =>
+            {
+                ApiError::new(ErrorCode::PolicyNotDelegated, &refusal.detail)
+                    .with("keys", vec!["agent.harnesses"])
+            }
             RunError::Command(CommandFailure::Failed(refusal)) => {
                 ApiError::invalid("program", &refusal.detail)
             }
@@ -94,13 +162,22 @@ async fn change(ctx: Ctx, (): (), body: MachineProgramsCommand) -> ApiResult<Mac
     require_machine(&mut tx, guard.principal(), id, Permission::MachineManage).await?;
     queries_set_facts(&mut tx, id, &written, &facts, ctx.app.clock.now()).await?;
     let who = actor_name(&ctx)?;
+    let mut details = json!({"operation":operation,"name":name,"kind":kind});
+    if let Some((kind, path, confirm)) = harness {
+        details["path"] = json!(path);
+        details["version"] = json!(harness_version(
+            if confirm { &written } else { &row.facts },
+            kind,
+            path
+        ));
+    }
     audit_machine(
         &ctx,
         &mut tx,
         orch_db::audit::action!(AuditAction::MachineProgramsChanged),
         id,
         &format!("{who} {operation} programs on {}", row.name),
-        json!({"operation":operation,"name":name,"kind":kind}),
+        details,
     )
     .await?;
     let current = rows::machine(&mut tx, id)

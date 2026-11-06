@@ -12,6 +12,7 @@
 use crate::{Conn, DbError};
 use chrono::{DateTime, Utc};
 use orch_types::{Id, Json};
+use std::collections::HashMap;
 
 /// The nil identifier, with which the pages of the system are kept: the
 /// system is no row of any table.
@@ -298,6 +299,8 @@ pub struct EntryRow {
     pub created_by: Option<Id>,
     /// When it was written.
     pub created_at: DateTime<Utc>,
+    /// Server time of the last explicit expiry value change.
+    pub renewed_at: Option<DateTime<Utc>>,
     /// When it was removed.
     pub removed_at: Option<DateTime<Utc>>,
     /// Who removed it.
@@ -309,8 +312,18 @@ pub struct EntryRow {
 macro_rules! entry_columns {
     () => {
         "e.id, e.object_kind, e.object_id, e.page, e.profile, e.permission, e.holder_kind, e.holder_id, e.holder_role,
-         e.options, e.expires_at, e.note, e.source, e.created_by, e.created_at, e.removed_at, e.removed_by, e.revision"
+         e.options, e.expires_at, e.note, e.source, e.created_by, e.created_at, e.renewed_at, e.removed_at, e.removed_by, e.revision"
     };
+}
+
+/// The current active givers among a whole prepared set of contributions.
+pub async fn active_givers(conn: &mut Conn, ids: &[Id]) -> Result<Vec<Id>, DbError> {
+    Ok(
+        sqlx::query_scalar("SELECT id FROM users WHERE id=ANY($1) AND status='active'")
+            .bind(ids)
+            .fetch_all(conn)
+            .await?,
+    )
 }
 
 /// A page of an object: where rows and entries are kept.
@@ -686,6 +699,57 @@ pub async fn find_entry_for_share(
     holder_role: Option<&str>,
     share_inside: Option<bool>,
 ) -> Result<Option<EntryRow>, DbError> {
+    find_entry_for_share_selected(
+        conn,
+        page,
+        profile,
+        permission,
+        holder_kind,
+        holder_id,
+        holder_role,
+        share_inside,
+        None,
+    )
+    .await
+}
+
+/// The independently retained contribution of this giver. Human entries keep their ordinary identity.
+pub async fn find_entry_for_share_by(
+    conn: &mut Conn,
+    page: &PageKey,
+    profile: &str,
+    permission: &str,
+    holder_kind: &str,
+    holder_id: Option<Id>,
+    holder_role: Option<&str>,
+    share_inside: Option<bool>,
+    by: Option<Id>,
+) -> Result<Option<EntryRow>, DbError> {
+    find_entry_for_share_selected(
+        conn,
+        page,
+        profile,
+        permission,
+        holder_kind,
+        holder_id,
+        holder_role,
+        share_inside,
+        Some(by),
+    )
+    .await
+}
+
+async fn find_entry_for_share_selected(
+    conn: &mut Conn,
+    page: &PageKey,
+    profile: &str,
+    permission: &str,
+    holder_kind: &str,
+    holder_id: Option<Id>,
+    holder_role: Option<&str>,
+    share_inside: Option<bool>,
+    by: Option<Option<Id>>,
+) -> Result<Option<EntryRow>, DbError> {
     Ok(sqlx::query_as(concat!(
         "SELECT ",
         entry_columns!(),
@@ -693,6 +757,7 @@ pub async fn find_entry_for_share(
           WHERE e.object_kind = $1 AND e.object_id = $2 AND e.page = $3 AND e.profile = $4 AND e.permission = $5
             AND e.holder_kind = $6 AND e.holder_id IS NOT DISTINCT FROM $7 AND e.holder_role IS NOT DISTINCT FROM $8
             AND e.share_inside IS NOT DISTINCT FROM $9
+            AND (NOT $10 OR e.holder_kind <> 'agents' OR e.created_by IS NOT DISTINCT FROM $11)
             AND e.removed_at IS NULL"
     ))
     .bind(&page.object_kind)
@@ -704,27 +769,35 @@ pub async fn find_entry_for_share(
     .bind(holder_id)
     .bind(holder_role)
     .bind(share_inside)
+    .bind(by.is_some())
+    .bind(by.flatten())
     .fetch_optional(conn)
     .await?)
 }
 
 /// Changes an entry that was not removed to what it is now to be, and
-/// counts the change. The answer says whether there was such an entry.
+/// counts the change. A trusted renewal time is supplied only for a semantic expiry change;
+/// storage also checks the raw value. Other rewrites retain the anchor.
+/// The answer says whether there was such an entry.
 pub async fn rewrite_entry(
     conn: &mut Conn,
     id: Id,
     options: &Json,
     expires_at: Option<DateTime<Utc>>,
     note: &str,
+    renewed_at: Option<DateTime<Utc>>,
 ) -> Result<bool, DbError> {
     let done = sqlx::query(
-        "UPDATE permission_entries SET options = $2, expires_at = $3, note = $4, revision = revision + 1
+        "UPDATE permission_entries SET options = $2, expires_at = $3, note = $4,
+                renewed_at = CASE WHEN expires_at IS DISTINCT FROM $3 THEN COALESCE($5, renewed_at) ELSE renewed_at END,
+                revision = revision + 1
           WHERE id = $1 AND removed_at IS NULL",
     )
     .bind(id)
     .bind(options)
     .bind(expires_at)
     .bind(note)
+    .bind(renewed_at)
     .execute(conn)
     .await?;
     Ok(done.rows_affected() == 1)
@@ -1002,6 +1075,36 @@ pub struct GroupHolderRow {
 pub async fn group_holders(conn: &mut Conn, group: Id) -> Result<Vec<GroupHolderRow>, DbError> {
     Ok(sqlx::query_as("SELECT user_id, member_group_id, member_node_id, member_org_id, member_role FROM group_members WHERE group_id = $1 ORDER BY added_at, id")
         .bind(group).fetch_all(conn).await?)
+}
+
+/// Direct membership edges for only the groups referenced by a prepared authorization frame.
+/// Only `person`'s direct membership is read; None reads structural edges only. Nested groups
+/// are returned as edges, so callers expand the next distinct frontier without listing rosters.
+pub async fn group_holders_many(
+    conn: &mut Conn,
+    groups: &[Id],
+    person: Option<Id>,
+) -> Result<HashMap<Id, Vec<GroupHolderRow>>, DbError> {
+    #[derive(sqlx::FromRow)]
+    struct Found {
+        group_id: Id,
+        #[sqlx(flatten)]
+        holder: GroupHolderRow,
+    }
+    let rows: Vec<Found> = sqlx::query_as(
+        "SELECT group_id, user_id, member_group_id, member_node_id, member_org_id, member_role
+         FROM group_members WHERE group_id=ANY($1) AND (user_id IS NULL OR user_id=$2)
+         ORDER BY group_id,added_at,id",
+    )
+    .bind(groups)
+    .bind(person)
+    .fetch_all(conn)
+    .await?;
+    let mut found: HashMap<Id, Vec<GroupHolderRow>> = HashMap::new();
+    for row in rows {
+        found.entry(row.group_id).or_default().push(row.holder);
+    }
+    Ok(found)
 }
 
 /// Checks the entire nesting path affected by a new edge, under the authority write gate.
@@ -4600,9 +4703,16 @@ mod tests {
         let options = serde_json::json!({"models": ["m"]});
         let until = now + Duration::days(7);
         assert!(
-            rewrite_entry(&mut conn, id, &options, Some(until), "for a week")
-                .await
-                .unwrap()
+            rewrite_entry(
+                &mut conn,
+                id,
+                &options,
+                Some(until),
+                "for a week",
+                Some(now)
+            )
+            .await
+            .unwrap()
         );
         let found = find_entry(
             &mut conn,
@@ -4616,13 +4726,68 @@ mod tests {
         .await
         .unwrap()
         .unwrap();
+        assert_eq!(found.created_at, now);
+        assert_eq!(found.renewed_at, Some(now));
         assert_eq!(
             (found.options, found.expires_at, found.note, found.revision),
             (options, Some(until), "for a week".to_owned(), 2)
         );
+        let edited = now + Duration::days(2);
+        rewrite_entry(
+            &mut conn,
+            id,
+            &serde_json::json!({"models":["n"]}),
+            Some(until),
+            "changed options",
+            Some(edited),
+        )
+        .await
+        .unwrap();
+        let kept = find_entry(
+            &mut conn,
+            &page,
+            "any",
+            "project.view",
+            "user",
+            Some(w.bo),
+            None,
+        )
+        .await
+        .unwrap()
+        .unwrap();
+        assert_eq!(
+            (kept.id, kept.created_at, kept.renewed_at),
+            (id, now, Some(now))
+        );
+        rewrite_entry(
+            &mut conn,
+            id,
+            &kept.options,
+            Some(now + Duration::days(4)),
+            &kept.note,
+            Some(edited),
+        )
+        .await
+        .unwrap();
+        let renewed = find_entry(
+            &mut conn,
+            &page,
+            "any",
+            "project.view",
+            "user",
+            Some(w.bo),
+            None,
+        )
+        .await
+        .unwrap()
+        .unwrap();
+        assert_eq!(
+            (renewed.id, renewed.created_at, renewed.renewed_at),
+            (id, now, Some(edited))
+        );
         remove_entry(&mut conn, id, w.ada, now).await.unwrap();
         assert!(
-            !rewrite_entry(&mut conn, id, &serde_json::json!({}), None, "")
+            !rewrite_entry(&mut conn, id, &serde_json::json!({}), None, "", Some(now))
                 .await
                 .unwrap()
         );

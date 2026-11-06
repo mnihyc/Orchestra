@@ -2352,7 +2352,7 @@ pub struct ProviderComplete {
     pub protocol: String,
     /// The model, by the name that is sent.
     pub model_name: String,
-    /// Additional model parameters selected by an explicit recovery candidate.
+    /// Final endpoint-format options resolved by the issuer from defaults and this use's choices.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub params: Option<Json>,
     /// The instruction.
@@ -2387,6 +2387,9 @@ pub struct ProviderEmbed {
     pub protocol: String,
     /// The model, by the name that is sent.
     pub model_name: String,
+    /// Final endpoint-format options frozen by the issuer; legacy commands omit them.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub params: Option<Json>,
     /// The texts, each with whatever its model wants put before it already in place.
     pub inputs: Vec<String>,
     /// The length of vector asked of a model that can shorten its vectors; absent for its own length.
@@ -2599,6 +2602,62 @@ pub struct LeaseCloseResult {
     pub requests: i64,
     /// What they used together; `null` where that could not be read.
     pub usage: Option<foreign::TokenUsage>,
+    /// Actual factual groups already metered at this cut. Absent preserves the legacy aggregate.
+    /// An aware empty list with unknown aggregate usage does not establish measured zero.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub usage_groups: Option<Vec<LeaseUsageGroup>>,
+}
+
+/// Factual identity shared by the connector's aggregate and the host's stable ledger rows.
+/// Request identifiers, latency and performance state do not split an actual-tier group.
+#[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize, JsonSchema)]
+pub struct LeaseUsageGroupKey {
+    /// The admitted routing model.
+    pub model: String,
+    /// The actual upstream wire protocol, not the caller-facing translated format.
+    pub wire_protocol: Option<String>,
+    /// The tier in the final actual upstream request, where present.
+    pub requested_service_tier: Option<String>,
+    /// The actual upstream report, including explicit absence or unavailable capability.
+    pub reported_service_tier: orch_api_contract::usage::UsageMeasurement<String>,
+}
+
+impl LeaseUsageGroupKey {
+    /// The same actual factual key for both counter and host accounting.
+    #[must_use]
+    pub fn of(model: &str, timing: &orch_api_contract::usage::RequestTiming) -> Self {
+        Self {
+            model: model.to_owned(),
+            wire_protocol: timing.wire_protocol.clone(),
+            requested_service_tier: timing.requested_service_tier.clone(),
+            reported_service_tier: timing.reported_service_tier.clone(),
+        }
+    }
+}
+
+/// Aggregate usage with one actual request/report state, never a requested-tier substitute.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+pub struct LeaseUsageGroup {
+    /// The admitted routing model.
+    pub model: String,
+    /// Exact inclusive token totals for this group.
+    pub usage: foreign::TokenUsage,
+    /// Requests which reported usage in this group.
+    pub requests: i64,
+    /// Conservative observed prompt-size bounds, retained when reports refine their state.
+    pub min_context_tokens: i64,
+    /// Conservative observed prompt-size bounds, retained when reports refine their state.
+    pub max_context_tokens: i64,
+    /// Actual factual request/report metadata; no performance value is inferred from tokens.
+    pub timing: orch_api_contract::usage::RequestTiming,
+}
+
+impl LeaseUsageGroup {
+    /// The shared factual identity, excluding totals, context bounds and performance.
+    #[must_use]
+    pub fn key(&self) -> LeaseUsageGroupKey {
+        LeaseUsageGroupKey::of(&self.model, &self.timing)
+    }
 }
 
 // ---------------------------------------------------------------- bodies: environments

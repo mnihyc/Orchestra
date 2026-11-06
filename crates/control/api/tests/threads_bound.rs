@@ -9,7 +9,7 @@ use orch_api_core::registry::Registry;
 use std::collections::BTreeSet;
 
 /// The requests of the threads part that this part serves, by the step of the work they came in.
-const SERVED: [&str; 61] = [
+const SERVED: [&str; 65] = [
     "ThreadCreate",
     "ThreadSyncGet",
     "ThreadOpeningGet",
@@ -36,6 +36,7 @@ const SERVED: [&str; 61] = [
     "ThreadLimitsGet",
     "ThreadInputBypass",
     "ThreadInputRun",
+    "ThreadPlanDecide",
     "ThreadTurnRetry",
     "ApprovalList",
     "ApprovalGet",
@@ -55,6 +56,9 @@ const SERVED: [&str; 61] = [
     "UploadSessionCreate",
     "UploadSessionPut",
     "UploadSessionComplete",
+    "UploadSessionDelete",
+    "UploadBlobGet",
+    "UploadBlobDelete",
     "ThreadSideCreate",
     "ThreadSideList",
     "ThreadForkPreflight",

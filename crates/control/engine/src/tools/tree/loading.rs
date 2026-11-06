@@ -1,6 +1,6 @@
 //! Reach-shaped candidates for an agent's tree, with ancestors kept as paths rather than content scopes.
 
-use super::{Agent, AgentReach, EngineError, Id, NODES_MAX, PlaceRow, Scope, rows};
+use super::{Agent, EngineError, Id, NODES_MAX, PlaceRow, Scope, rows};
 use orch_access_contract::pages::StoredKind;
 use orch_authz::reach::Grant;
 use orch_db::{Conn, queries::documents};
@@ -14,19 +14,14 @@ pub(super) struct Loaded {
     pub capped: bool,
 }
 
-/// Candidate scopes come only from the implicit topic/project and current agent grants. Reach still decides each row.
+/// Candidates come from current agent grants and its topic metadata. Reach still decides each row.
 pub(super) async fn load(
     conn: &mut Conn,
     agent: &Agent,
-    policy: AgentReach,
     scope: Scope,
     grants: &[Grant],
 ) -> Result<Loaded, EngineError> {
-    let mut seeds = BTreeSet::from([if policy == AgentReach::Project {
-        agent.project.unwrap_or(agent.topic)
-    } else {
-        agent.topic
-    }]);
+    let mut seeds = BTreeSet::from([agent.topic]);
     let mut document_ids = BTreeSet::new();
     let mut container_ids = BTreeSet::new();
     let mut chat_ids = BTreeSet::new();

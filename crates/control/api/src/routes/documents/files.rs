@@ -49,13 +49,23 @@ use orch_types::{Hash, Id, Time, new_id};
 /// else it offers as a download.
 const SHOWN_INLINE: [&str; 3] = ["image", "video", "audio"];
 
+mod read_operation;
+
 /// Binds this module's requests.
 pub(super) fn mount(registry: &mut Registry) {
     registry
         .on_raw(DocumentFileCreate, create)
-        .on_raw(DocumentFileGet, get)
-        .on(DocumentFileArchiveList, archive_list)
-        .on_raw(DocumentFileArchiveEntryGet, archive_entry);
+        .on_raw_read_with_operation(DocumentFileGet, read_operation::prepare, get)
+        .on_with_operation(
+            DocumentFileArchiveList,
+            read_operation::prepare,
+            archive_list,
+        )
+        .on_raw_read_with_operation(
+            DocumentFileArchiveEntryGet,
+            read_operation::prepare,
+            archive_entry,
+        );
 }
 
 /// How a request that names a finished upload is read.
@@ -67,6 +77,7 @@ fn reference(bytes: &[u8]) -> Option<(Hash, String)> {
 
 /// The file `file` of the document `document`, if the document holds it.
 async fn held(ctx: &Ctx, document: Id, file: Id) -> ApiResult<HeldFile> {
+    read_operation::current(ctx).await?;
     let mut conn = ctx.app.db.acquire().await?;
     live(&mut conn, document).await?;
     rows::file(&mut conn, document, file)
@@ -199,25 +210,35 @@ async fn create(mut ctx: Ctx, query: DocumentFileCreateQuery, body: Body) -> Api
 /// Serves a file of a document: pictures, films and sounds inline, with ranges, and anything else
 /// as a download, under the type it was kept with.
 async fn get(ctx: Ctx, query: DocumentFileGetQuery, _: Body) -> ApiResult<Response> {
-    let (id, file) = (ctx.id("id")?, ctx.id("file_id")?);
-    let held = held(&ctx, id, file).await?;
-    {
-        let mut conn = ctx.app.db.acquire().await?;
-        storage::touch_blob(&mut conn, &held.blob, ctx.now).await?;
-    }
-    if query.preview == Some(true) {
-        return crate::previews::serve(&ctx, &held.blob, &held.file.name, &held.file.media_type)
+    let result = async {
+        let (id, file) = (ctx.id("id")?, ctx.id("file_id")?);
+        let held = held(&ctx, id, file).await?;
+        {
+            let mut conn = ctx.app.db.acquire().await?;
+            storage::touch_blob(&mut conn, &held.blob, ctx.now).await?;
+        }
+        read_operation::current(&ctx).await?;
+        if query.preview == Some(true) {
+            return crate::previews::serve(
+                &ctx,
+                &held.blob,
+                &held.file.name,
+                &held.file.media_type,
+            )
             .await;
+        }
+        attachments::serve_kept(
+            &ctx,
+            &held.blob,
+            &held.file.name,
+            &held.file.media_type,
+            &SHOWN_INLINE,
+            query.download.unwrap_or(false),
+        )
+        .await
     }
-    attachments::serve_kept(
-        &ctx,
-        &held.blob,
-        &held.file.name,
-        &held.file.media_type,
-        &SHOWN_INLINE,
-        query.download.unwrap_or(false),
-    )
-    .await
+    .await;
+    read_operation::response(ctx, result).await
 }
 
 // ---------------------------------------------------------------- archives
@@ -254,27 +275,33 @@ async fn archive_list(
     query: DocumentFileArchiveListQuery,
     (): (),
 ) -> ApiResult<ArchiveListing> {
-    let (id, file) = (ctx.id("id")?, ctx.id("file_id")?);
-    let held = held(&ctx, id, file).await?;
-    let limit = match query.limit {
-        None => ARCHIVE_LIST_LIMIT_DEFAULT,
-        Some(0) => return Err(ApiError::invalid("limit", "must be at least 1")),
-        Some(limit) => limit.min(ARCHIVE_LIST_LIMIT_MAX),
-    };
-    let inside = query
-        .inside
-        .as_deref()
-        .map(|inside| inside.trim_matches('/'))
-        .filter(|inside| !inside.is_empty());
-    archives::list(
-        &ctx.app.blobs,
-        meta_of(&held),
-        inside,
-        usize::try_from(limit).unwrap_or(usize::MAX),
-        archives::READ_TIME,
-    )
-    .await
-    .map_err(archive_problem)
+    let result = async {
+        let (id, file) = (ctx.id("id")?, ctx.id("file_id")?);
+        let held = held(&ctx, id, file).await?;
+        let limit = match query.limit {
+            None => ARCHIVE_LIST_LIMIT_DEFAULT,
+            Some(0) => return Err(ApiError::invalid("limit", "must be at least 1")),
+            Some(limit) => limit.min(ARCHIVE_LIST_LIMIT_MAX),
+        };
+        let inside = query
+            .inside
+            .as_deref()
+            .map(|inside| inside.trim_matches('/'))
+            .filter(|inside| !inside.is_empty());
+        read_operation::current(&ctx).await?;
+        archives::list(
+            &ctx.app.blobs,
+            meta_of(&held),
+            inside,
+            usize::try_from(limit).unwrap_or(usize::MAX),
+            archives::READ_TIME,
+        )
+        .await
+        .map_err(archive_problem)
+    }
+    .await;
+    read_operation::current(&ctx).await?;
+    result
 }
 
 /// One entry of an archive that the document holds, for a viewer: at most as much as a preview shows.
@@ -283,42 +310,47 @@ async fn archive_entry(
     query: DocumentFileArchiveEntryGetQuery,
     _: Body,
 ) -> ApiResult<Response> {
-    let (id, file) = (ctx.id("id")?, ctx.id("file_id")?);
-    let entry = query.entry.trim_matches('/').to_owned();
-    if entry.is_empty() || entry.split('/').any(|part| part == ".." || part.is_empty()) {
-        return Err(ApiError::invalid(
-            "entry",
-            "this is the name of a file inside the archive",
-        ));
+    let result = async {
+        let (id, file) = (ctx.id("id")?, ctx.id("file_id")?);
+        let entry = query.entry.trim_matches('/').to_owned();
+        if entry.is_empty() || entry.split('/').any(|part| part == ".." || part.is_empty()) {
+            return Err(ApiError::invalid(
+                "entry",
+                "this is the name of a file inside the archive",
+            ));
+        }
+        let held = held(&ctx, id, file).await?;
+        read_operation::current(&ctx).await?;
+        let bytes = archives::read_entry(
+            &ctx.app.blobs,
+            meta_of(&held),
+            &entry,
+            ctx.app.config.limits.preview_bytes,
+            archives::READ_TIME,
+        )
+        .await
+        .map_err(archive_problem)?;
+        let name = entry.rsplit('/').next().unwrap_or(&entry);
+        let head = &bytes[..bytes.len().min(crate::media::SNIFF_BYTES)];
+        let media = crate::media::media_type(name, head);
+        let hash = Hash::of(&bytes);
+        let size = i64::try_from(bytes.len()).unwrap_or(i64::MAX);
+        let read = BlobRead {
+            meta: BlobMeta { hash, size },
+            range: ResolvedRange::whole(size),
+            body: stream_of(vec![bytes::Bytes::from(bytes)]),
+        };
+        // The entry is a few bytes that were unpacked for this answer alone: it is served whole.
+        Ok(workspace_files::serve(
+            read,
+            false,
+            &ctx.headers,
+            &hash,
+            name,
+            media,
+            false,
+        ))
     }
-    let held = held(&ctx, id, file).await?;
-    let bytes = archives::read_entry(
-        &ctx.app.blobs,
-        meta_of(&held),
-        &entry,
-        ctx.app.config.limits.preview_bytes,
-        archives::READ_TIME,
-    )
-    .await
-    .map_err(archive_problem)?;
-    let name = entry.rsplit('/').next().unwrap_or(&entry);
-    let head = &bytes[..bytes.len().min(crate::media::SNIFF_BYTES)];
-    let media = crate::media::media_type(name, head);
-    let hash = Hash::of(&bytes);
-    let size = i64::try_from(bytes.len()).unwrap_or(i64::MAX);
-    let read = BlobRead {
-        meta: BlobMeta { hash, size },
-        range: ResolvedRange::whole(size),
-        body: stream_of(vec![bytes::Bytes::from(bytes)]),
-    };
-    // The entry is a few bytes that were unpacked for this answer alone: it is served whole.
-    Ok(workspace_files::serve(
-        read,
-        false,
-        &ctx.headers,
-        &hash,
-        name,
-        media,
-        false,
-    ))
+    .await;
+    read_operation::response(ctx, result).await
 }

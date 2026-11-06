@@ -7,6 +7,7 @@
 
 mod places;
 mod support;
+use support::FullTokenReply as _;
 
 use orch_api_contract::auth::{ApiTokenCreateBody, MeTokenCreate};
 use orch_api_contract::common::ErrorCode;
@@ -18,14 +19,15 @@ use support::World;
 
 fn named(name: &str) -> ApiTokenCreateBody {
     ApiTokenCreateBody {
+        rules: None,
         name: name.to_owned(),
         scopes: Some(vec!["*".to_owned()]),
         node_id: None,
         expires_at: None,
-        proof: orch_api_contract::auth::SensitiveProof {
+        proof: Some(orch_api_contract::auth::SensitiveProof {
             password: Some(support::PASSWORD.to_owned()),
             ..Default::default()
-        },
+        }),
     }
 }
 
@@ -52,6 +54,7 @@ async fn a_token_cannot_create_a_token_for_a_service_identity() {
         .body(&named("From the browser"))
         .send()
         .await
+        .full_token()
         .ok();
     assert_eq!(browser.info.name, "From the browser");
     let caller_token = world
@@ -64,6 +67,7 @@ async fn a_token_cannot_create_a_token_for_a_service_identity() {
         })
         .send()
         .await
+        .full_token()
         .ok()
         .token
         .expect("the first answer carries the secret");
@@ -73,7 +77,8 @@ async fn a_token_cannot_create_a_token_for_a_service_identity() {
         .token(&caller_token)
         .body(&named("From a token"))
         .send()
-        .await;
+        .await
+        .full_token();
     assert_eq!(reply.status, 403, "a token cannot create another token");
     assert_eq!(reply.problem().code, ErrorCode::AuthSessionRequired);
 }

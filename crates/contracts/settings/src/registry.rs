@@ -967,8 +967,10 @@ impl SettingDef {
     #[must_use]
     pub fn lockable_at(&self, scope: Scope) -> bool {
         // Orgs lie inside orgs, so an org always has a scope below it.
-        let below =
-            self.scopes.iter().any(|other| rank(*other) > rank(scope)) || scope == Scope::Org;
+        // A document's Links choice also lies below its topic policy without adding a settings scope.
+        let below = self.scopes.iter().any(|other| rank(*other) > rank(scope))
+            || scope == Scope::Org
+            || (self.key == keys::DOCUMENTS_LINKS_SHOWN && scope == Scope::Topic);
         self.set_at(scope) && scope.has_rows() && below && self.merge.honours_locks()
     }
 
@@ -1593,6 +1595,15 @@ const MOUNT_MODE: Schema = Schema::OneOf {
     ],
     says: "must be true, false, \"read_only\" or \"private\"",
 };
+const EXEC_VERSION_OVERRIDE: Schema = Schema::Object {
+    members: &[
+        required("path", TEXT),
+        required("version", TEXT),
+        required("by", ID),
+        required("at", Schema::Time),
+    ],
+    open: false,
+};
 const STORAGE: Schema = Schema::Object {
     members: &[
         optional("workspace", TEXT),
@@ -1677,6 +1688,60 @@ const UPSTREAM: Schema = Schema::Object {
         optional("options", ANY),
     ],
     open: false,
+};
+// Each reach admits only the areas the creation flow can actually grant.
+const AGENT_ACCESS: Schema = Schema::OneOf {
+    any: &[
+        Schema::Object {
+            members: &[
+                required("where", choice(&["nothing"])),
+                required(
+                    "parts",
+                    Schema::Object {
+                        members: &[],
+                        open: false,
+                    },
+                ),
+            ],
+            open: false,
+        },
+        Schema::Object {
+            members: &[
+                required("where", choice(&["thread"])),
+                required(
+                    "parts",
+                    Schema::Object {
+                        members: &[
+                            optional("chat", choice(&["read", "write", "manage"])),
+                            optional("documents", choice(&["read", "edit", "manage"])),
+                        ],
+                        open: false,
+                    },
+                ),
+            ],
+            open: false,
+        },
+        Schema::Object {
+            members: &[
+                required("where", choice(&["topic", "project"])),
+                required(
+                    "parts",
+                    Schema::Object {
+                        members: &[
+                            optional("timeline", choice(&["read", "write", "manage"])),
+                            optional("thread_fork", BOOL),
+                            optional("thread_archive", BOOL),
+                            optional("chat", choice(&["read", "write", "manage"])),
+                            optional("documents", choice(&["read", "edit", "manage"])),
+                        ],
+                        open: false,
+                    },
+                ),
+            ],
+            open: false,
+        },
+    ],
+    says: "a creation reach with compatible Share areas",
 };
 const PRESET: Schema = Schema::Object {
     members: &[
@@ -2034,6 +2099,8 @@ registry! {
         "Allowed hosts", "Exact other host names a restricted unit may reach; lists intersect and an empty list allows only Orch's own transport.";
     MCP_ENABLED = "mcp.enabled", Environment, Parameter, ORG_TO_TOPIC_ENV, Map, EMPTY_MAP, by_id(&BOOL),
         "MCP servers", "Which MCP servers are switched on, by server; a lower scope may switch an inherited one off.";
+    EXEC_VERSION_OVERRIDES = "exec.version_overrides", Environment, Parameter, ENVIRONMENT, Replace, EMPTY_MAP, map(&EXEC_VERSION_OVERRIDE),
+        "Any agent version", "Machine program versions that an environment manager allows with any agent version.";
     EXEC_OFFERS = "exec.offers", Environment, Parameter, ENVIRONMENT, Replace, FROM_ENVIRONMENT, list(&TEXT),
         "Exec offers", "What an environment's exec node offers a harness that runs with its provider, in the order in which it is tried.";
     EXEC_ORCH_TOOLS = "exec.orch_tools", Environment, Parameter, ENVIRONMENT, Replace, FROM_ENVIRONMENT, BOOL,
@@ -2043,10 +2110,8 @@ registry! {
         "Orch tools", "Which of Orch's own tools an agent is offered.";
     ORCH_TOOLS_CALLS_PER_MINUTE = "orch_tools.calls_per_minute", Agent, Policy, SYSTEM_TO_TOPIC, Replace, value("120"), int(1, Unit::Count),
         "Tool calls a minute", "How many calls of Orch's tools one thread's agent may make in a minute.";
-    SHARING_AGENT_REACH = "sharing.agent_reach", Agent, Policy, SYSTEM_TO_TOPIC, Replace, value("\"none\""), choice(&["none", "topic", "project"]),
-        "Agents' reach", "Which other threads the agents here may read without anybody sharing them: none, those of their topic, or those of their project.";
-    SHARING_AGENT_DOCUMENTS = "sharing.agent_documents", Agent, Policy, SYSTEM_TO_TOPIC, Replace, value("\"write\""), choice(&["none", "read", "write"]),
-        "Topic documents", "Whether agents may read or also edit and create public documents beside their topic and its main threads; private documents, conversations, chats, management and Export keep their own rules.";
+    THREADS_AGENT_ACCESS = "threads.agent_access", Agent, Parameter, SYSTEM_TO_TOPIC, Replace, value("{\"where\":\"topic\",\"parts\":{\"documents\":\"edit\"}}"), AGENT_ACCESS,
+        "Agent access", "The initial access shown when creating a thread: reach and levels for documents, chats and other threads. The creator confirms what they may give. Changes apply to new threads, not existing grants.";
     BROADCAST_CHAT_MESSAGES_PER_HOUR = "broadcast.chat_messages_per_hour", Collaboration, Policy, SYSTEM_TO_THREAD, Replace, value("60"), int(0, Unit::Count),
         "Agent chat messages per hour", "Successful posts across all chats from one origin in a rolling hour; zero forbids posting.";
     SHARING_SNAPSHOT_MAX_BYTES = "sharing.snapshot_max_bytes", Collaboration, Policy, SYSTEM_TO_PROJECT, Replace, value("67108864"), BYTES,
@@ -2181,8 +2246,6 @@ registry! {
         "Operation notices", "Whether Notify starts ticked in an operation: when work is blocked, always, or never. The person confirms the choice; recipients keep their own notification choices.";
     BROADCAST_RATE_PER_HOUR = "broadcast.rate_per_hour", Collaboration, Policy, SYSTEM_TO_TOPIC, Replace, value("6"), int(0, Unit::Count),
         "Announcements an hour", "How many announcements one thread's agent may send in a rolling hour; 0 allows none.";
-    BROADCAST_AGENT_SCOPE = "broadcast.agent_scope", Collaboration, Policy, SYSTEM_TO_TOPIC, Replace, value("\"topic\""), choice(&["topic", "project", "org"]),
-        "Announcement reach", "How far an agent's announcement may reach: its topic, its project or its nearest org.";
     CAPABILITY_RECREATE_GRACE_SECS = "capability.recreate_grace_secs", Confinement, Parameter, SYSTEM_TO_TOPIC_ENV, Replace, value("120"), int(0, Unit::Seconds),
         "Recreate grace", "How many seconds running turns may finish before a recreate interrupts them; 0 interrupts them immediately.";
     ACCESS_REQUEST_EXPIRY_DAYS = "access.request_expiry_days", Access, Policy, SYSTEM, Replace, value("14"), int(1, Unit::Days),
@@ -2604,6 +2667,36 @@ mod tests {
                 faults.into_iter().map(|fault| fault.path).collect()
             }
             other => panic!("expected a value that does not fit, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn agent_access_is_a_creation_preset_with_existing_share_levels() {
+        let preset = get(keys::THREADS_AGENT_ACCESS).unwrap();
+        assert_eq!(
+            preset.default_value(),
+            Some(json!({"where":"topic","parts":{"documents":"edit"}}))
+        );
+        assert_eq!(preset.scopes, SYSTEM_TO_TOPIC);
+        for value in [
+            json!({"where":"nothing","parts":{}}),
+            json!({"where":"thread","parts":{"chat":"read"}}),
+            json!({"where":"project","parts":{"timeline":"write","documents":"manage"}}),
+            json!({"where":"topic","parts":{"timeline":"manage","chat":"manage"}}),
+            json!({"where":"project","parts":{"thread_fork":true,"thread_archive":true}}),
+        ] {
+            assert!(preset.faults(&value).is_empty(), "{value}");
+        }
+        for value in [
+            json!({"where":"org","parts":{}}),
+            json!({"where":"nothing","parts":{"documents":"read"}}),
+            json!({"where":"thread","parts":{"timeline":"read"}}),
+            json!({"where":"topic","parts":{"documents":"write"}}),
+            json!({"where":"thread","parts":{"thread_fork":true}}),
+            json!({"where":"topic","parts":{"files":"write"}}),
+            json!({"where":"topic","parts":{},"owner_as_admin":true}),
+        ] {
+            assert!(!preset.faults(&value).is_empty(), "{value}");
         }
     }
 
@@ -3339,6 +3432,22 @@ mod tests {
         assert!(
             get(keys::CHAT_DIRECT).unwrap().lockable_at(Scope::Org),
             "orgs lie inside orgs"
+        );
+    }
+
+    #[test]
+    fn a_topic_lock_can_decide_a_documents_own_links_choice() {
+        let tabs = get(keys::DOCUMENTS_LINKS_SHOWN).unwrap();
+        assert!(
+            tabs.lockable_at(Scope::Topic),
+            "a document's own tab choice lies below its topic policy"
+        );
+        assert!(!tabs.set_at(Scope::Thread), "no settings scope is added");
+        assert!(
+            !get(keys::DOCUMENTS_LINKS_PAGE_SIZE)
+                .unwrap()
+                .lockable_at(Scope::Topic),
+            "an unrelated terminal default has no per-document override"
         );
     }
 

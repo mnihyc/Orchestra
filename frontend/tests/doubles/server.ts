@@ -295,7 +295,7 @@ async function control(request: IncomingMessage, path: string): Promise<Answer> 
     case '/model/entry': {
       // A manager of the provider writes a model's entry anew: what it offers, what it opens to threads, what a thread starts with.
       const modelName = typeof body.model_name === 'string' ? body.model_name : '';
-      world.threads.setEntry(modelName, typeof body.display_name === 'string' ? body.display_name : '', body.parameters ?? {}, Array.isArray(body.groups) ? body.groups.map(String) : undefined);
+      world.threads.setEntry(modelName, typeof body.display_name === 'string' ? body.display_name : '', body.parameters ?? {}, Array.isArray(body.groups) ? body.groups.map(String) : undefined, typeof body.provider_id === 'string' ? body.provider_id : undefined);
       return { status: 204 };
     }
     case '/model/feature': {

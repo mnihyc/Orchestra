@@ -258,6 +258,11 @@ impl AgentAdapter for ClaudeCodeAdapter {
     fn native_check(&self) -> orch_agent_contract::conformance::NativeCheck {
         use orch_agent_contract::conformance::{ModelPaths, NativeCheck};
         NativeCheck {
+            auto_review: Some(
+                orch_agent_contract::conformance::NativeAutoReview::Classifier(
+                    crate::native_review::recipe(),
+                ),
+            ),
             approval_mode: orch_agent_contract::descriptor::ApprovalMode::Ask,
             // A failing case ends soon: the harness retries its model request once.
             profile_env: std::collections::BTreeMap::from([(
@@ -274,6 +279,13 @@ impl AgentAdapter for ClaudeCodeAdapter {
                 exact: vec!["/api/oauth/usage".to_owned()],
             },
         }
+    }
+
+    fn verify_native_classifier(
+        &self,
+        evidence: &orch_agent_contract::conformance::NativeClassifierEvidence<'_>,
+    ) -> Result<(), String> {
+        crate::native_review::verify(evidence)
     }
 
     fn verify_quiet_start(

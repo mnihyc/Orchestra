@@ -11,10 +11,10 @@ mod support;
 
 use orch_api_contract::common::ErrorCode;
 use orch_api_contract::resources::{
-    CreateProvider, ModelParameters, ModelSource, Provider, ProviderCreate, ProviderModel,
-    ProviderModelCreate, ProviderModelCreateBody, ProviderModelList, ProviderModelSuggestionAccept,
-    ProviderModelSuggestionAcceptBody, ProviderModelUpdate, ProviderModelUpdateBody, ServiceTier,
-    Upstream,
+    CreateProvider, ModelParameters, ModelSource, Provider, ProviderCreate, ProviderModelCreate,
+    ProviderModelCreateBody, ProviderModelList, ProviderModelSuggestionAccept,
+    ProviderModelSuggestionAcceptBody, ProviderModelUpdate, ProviderModelUpdateBody,
+    ProviderModelWriteResponse, ServiceTier, Upstream,
 };
 use orch_api_core::routes::resources::sealing::install_master_key;
 use orch_db::secrets::MasterKey;
@@ -54,6 +54,8 @@ async fn provider(world: &World, by: &Who, home: Id, key_machine: Option<Id>) ->
         .send()
         .await
         .ok()
+        .into_full()
+        .unwrap()
         .provider
 }
 
@@ -92,7 +94,7 @@ async fn create(
     name: &str,
     parameters: Option<ModelParameters>,
     groups: Option<Vec<String>>,
-) -> orch_api_core::testing::Reply<ProviderModel> {
+) -> orch_api_core::testing::Reply<ProviderModelWriteResponse> {
     world
         .app
         .call(ProviderModelCreate, &[&provider])
@@ -122,7 +124,9 @@ async fn an_entry_is_written_with_what_the_model_can_be_run_with_and_the_groups_
         Some(words(&["frontier", "vision", "frontier"])),
     )
     .await
-    .ok();
+    .ok()
+    .into_full()
+    .expect("the ordinary caller receives the full model");
     assert_eq!(made.parameters, everything());
     assert_eq!(made.groups, ["frontier", "vision"], "each group once");
     assert_eq!(made.source, ModelSource::Manual);
@@ -147,7 +151,9 @@ async fn an_entry_is_written_with_what_the_model_can_be_run_with_and_the_groups_
         })
         .send()
         .await
-        .ok();
+        .ok()
+        .into_full()
+        .expect("the ordinary caller receives the full model");
     assert_eq!(regrouped.groups, ["small"]);
     assert_eq!(regrouped.parameters, everything());
     let narrowed = ModelParameters {
@@ -165,7 +171,9 @@ async fn an_entry_is_written_with_what_the_model_can_be_run_with_and_the_groups_
         })
         .send()
         .await
-        .ok();
+        .ok()
+        .into_full()
+        .expect("the ordinary caller receives the full model");
     assert_eq!(rewritten.parameters, narrowed);
     assert_eq!(rewritten.groups, ["small"], "left as they were");
     let emptied = world
@@ -178,7 +186,9 @@ async fn an_entry_is_written_with_what_the_model_can_be_run_with_and_the_groups_
         })
         .send()
         .await
-        .ok();
+        .ok()
+        .into_full()
+        .expect("the ordinary caller receives the full model");
     assert!(emptied.groups.is_empty());
 
     // Only a manager writes them.
@@ -303,7 +313,9 @@ async fn an_entry_that_does_not_hold_together_is_refused_at_the_member_and_nothi
     // The same refusals when an entry is changed, and the entry stays as it was.
     let made = create(&world, &c.boss, id, "gpt-6-sol", Some(everything()), None)
         .await
-        .ok();
+        .ok()
+        .into_full()
+        .expect("the ordinary caller receives the full model");
     let change = |parameters: Option<ModelParameters>, groups: Option<Vec<String>>| {
         world
             .app
@@ -348,7 +360,9 @@ async fn an_entry_that_does_not_hold_together_is_refused_at_the_member_and_nothi
     )
     .send()
     .await
-    .ok();
+    .ok()
+    .into_full()
+    .expect("the ordinary caller receives the full model");
     assert_eq!(ok.parameters.service_tiers, Some(vec![tier("flex")]));
 }
 
@@ -390,7 +404,9 @@ async fn accepting_a_suggestion_puts_a_larger_context_a_speed_and_a_program_on_o
         })
         .send()
         .await
-        .ok();
+        .ok()
+        .into_full()
+        .expect("the ordinary caller receives the full suggestion acceptance");
     machine_says.await.unwrap();
     assert_eq!(added.provider.models.len(), 3);
     let added = added.added;
@@ -453,7 +469,9 @@ async fn accepting_a_suggestion_puts_a_larger_context_a_speed_and_a_program_on_o
         })
         .send()
         .await
-        .ok();
+        .ok()
+        .into_full()
+        .expect("the ordinary caller receives the full model");
     assert_eq!(opened.parameters.context_max, Some(1_000_000));
     assert_eq!(
         opened.parameters.default_service_tier.as_deref(),

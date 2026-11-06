@@ -43,13 +43,18 @@ pub mod documents;
 pub mod environment_watches;
 pub mod environments;
 pub mod ephemeral;
+mod key_reads;
+
 #[cfg(test)]
 mod epoch_handoff_tests;
 #[cfg(test)]
 pub(crate) mod history_read_tests;
 mod machine_views;
+#[cfg(test)]
+mod origin_read_tests;
 mod personal_changes;
 pub mod presence;
+mod publication;
 pub mod raw_traffic;
 pub mod resource_changes;
 mod resource_health;
@@ -61,6 +66,9 @@ pub mod subscriptions;
 pub mod sync;
 pub mod terminals;
 pub mod threads;
+mod ticket_origin;
+#[cfg(test)]
+mod ticket_scope_tests;
 pub mod topics;
 pub mod tree;
 pub mod usage;

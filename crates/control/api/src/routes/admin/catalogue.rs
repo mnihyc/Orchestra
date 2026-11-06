@@ -163,7 +163,7 @@ async fn capability_set(mut ctx: Ctx, (): (), body: CapabilityDef) -> ApiResult<
         .and_then(|word| word.as_str().map(str::to_owned))
         .ok_or_else(|| ApiError::internal("an approver scope is not a word"))?;
     let patches = Json::Object(body.driver_patch.clone().into_iter().collect());
-    let (mut tx, guard) = transaction_guard::begin(&ctx).await?;
+    let (mut tx, guard) = super::action(&ctx).await?;
     ctx.now = guard.now().get();
     let admin = guard.user().id();
     let put = management::put_capability(
@@ -211,7 +211,7 @@ async fn capability_set(mut ctx: Ctx, (): (), body: CapabilityDef) -> ApiResult<
 async fn capability_delete(mut ctx: Ctx, (): (), (): ()) -> ApiResult<CapabilityDef> {
     admin_of(&ctx)?;
     let key = ctx.param("key")?.to_owned();
-    let (mut tx, guard) = transaction_guard::begin(&ctx).await?;
+    let (mut tx, guard) = super::action(&ctx).await?;
     ctx.now = guard.now().get();
     let admin = guard.user().id();
     let existing = management::capability(&mut tx, &key)
@@ -453,7 +453,7 @@ async fn authorize_fetch(
         (None, None) => {
             return Err(ApiError::new(
                 ErrorCode::AuthzDenied,
-                "a system administrator browser session is required without a settings scope",
+                "current system administration is required without a settings scope",
             ));
         }
         _ => return Err(invalid("environment_id", "name one settings scope")),
@@ -487,7 +487,13 @@ pub(super) async fn fetch_exact(
     }
     let mut conn = ctx.app.db.acquire().await?;
     let principal = authorization::principal(&ctx, &mut conn).await?;
-    authorize_fetch(&mut conn, &principal, &body, ctx.user()?.is_system_admin()).await?;
+    authorize_fetch(
+        &mut conn,
+        &principal,
+        &body,
+        ctx.ordinary_system_admin().is_ok(),
+    )
+    .await?;
     let known = super::programs::exact_builds(&ctx, &mut conn, &kind, &version).await?;
     let programs = orch_db::programs::registry(&mut conn).await?;
     let fetch = !known
@@ -530,7 +536,8 @@ pub(super) async fn fetch_exact(
         &mut tx,
         guard.principal(),
         &body,
-        guard.user().is_system_admin(),
+        ctx.ordinary_system_admin_with(guard.user(), guard.principal().caller())
+            .is_ok(),
     )
     .await?;
     if let Some(builds) = fetched {
@@ -550,7 +557,10 @@ pub(super) async fn fetch_exact(
     for build in known.into_iter().filter(|build| {
         build.kind == kind
             && build.version == version
-            && build.source == HarnessBuildSource::Channel
+            && matches!(
+                build.source,
+                HarnessBuildSource::Channel | HarnessBuildSource::Mirror
+            )
             && build.status == HarnessBuildStatus::Untested
             && build.check.is_none()
     }) {
@@ -753,29 +763,48 @@ async fn environment_builds(ctx: Ctx, (): (), (): ()) -> ApiResult<Vec<RunningHa
     let mut conn = ctx.app.db.acquire().await?;
     let principal = crate::middleware::authorization::principal(&ctx, &mut conn).await?;
     let id = ctx.id("id")?;
-    crate::routes::environments::show(&ctx, &mut conn, &principal, id).await?;
+    let current = crate::routes::environments::show(&ctx, &mut conn, &principal, id).await?;
     let mut held: Vec<_> = held_builds(&ctx, &mut conn, &[id], &[])
         .await?
         .into_iter()
         .flat_map(|(_, programs)| programs)
         .collect();
-    if !held.is_empty() {
-        name_running_programs(&mut conn, &mut held).await?;
-        return Ok(held);
-    }
-    let reported: Vec<(String,String)> = sqlx::query_as("SELECT DISTINCT a.harness_kind,h.harness_version FROM threads t JOIN environments e ON e.id=t.environment_id JOIN agents a ON a.id=t.agent_id JOIN harnesses h ON h.provider_id=t.provider_id AND h.agent_id=t.agent_id AND h.machine_id=e.machine_id WHERE e.id=$1 AND h.harness_version IS NOT NULL")
-        .bind(id).fetch_all(&mut *conn).await.map_err(DbError::from)?;
-    let mut programs: Vec<_> = reported
-        .into_iter()
-        .map(|(kind, version)| RunningHarnessBuild {
-            kind,
-            harness: None,
-            version,
-            build: None,
-        })
+    let mut seen: std::collections::BTreeSet<_> = held
+        .iter()
+        .map(|program| (program.kind.clone(), program.version.clone()))
         .collect();
-    name_running_programs(&mut conn, &mut programs).await?;
-    Ok(programs)
+    let mut reported = std::collections::BTreeSet::new();
+    if current.base.placement == orch_api_contract::environment::Placement::Connected
+        && current.template.is_none()
+        && let Some(machine) = current.machine
+    {
+        let facts =
+            orch_db::queries::environments::routes::machine_program_facts(&mut conn, &[machine.id])
+                .await?;
+        if let Some((_, facts)) = facts.first() {
+            reported.extend(
+                crate::routes::environments::confirmed_machine_programs(facts)
+                    .into_iter()
+                    .map(|program| (program.kind, program.version)),
+            );
+        }
+    }
+    let used: Vec<(String,String)> = sqlx::query_as("SELECT DISTINCT a.harness_kind,h.harness_version FROM threads t JOIN environments e ON e.id=t.environment_id JOIN agents a ON a.id=t.agent_id JOIN harnesses h ON h.provider_id=t.provider_id AND h.agent_id=t.agent_id AND h.machine_id=e.machine_id WHERE e.id=$1 AND h.harness_version IS NOT NULL")
+        .bind(id).fetch_all(&mut *conn).await.map_err(DbError::from)?;
+    reported.extend(used);
+    held.extend(
+        reported
+            .into_iter()
+            .filter(|program| seen.insert(program.clone()))
+            .map(|(kind, version)| RunningHarnessBuild {
+                kind,
+                harness: None,
+                version,
+                build: None,
+            }),
+    );
+    name_running_programs(&mut conn, &mut held).await?;
+    Ok(held)
 }
 
 async fn build_usage(ctx: Ctx, (): (), (): ()) -> ApiResult<Vec<HarnessBuildUsage>> {
@@ -926,7 +955,7 @@ pub(super) async fn set_build(mut ctx: Ctx, body: HarnessBuild) -> ApiResult<Har
         check: None,
         ..body
     };
-    let (mut tx, guard) = transaction_guard::begin(&ctx).await?;
+    let (mut tx, guard) = super::action(&ctx).await?;
     ctx.now = guard.now().get();
     let admin = guard.user().id();
     if channel_choice {
@@ -1036,7 +1065,7 @@ async fn harness_checksums_import(
         value["checksum_origin"] = Json::from("vendor");
         anchored.push((key, value));
     }
-    let (mut tx, guard) = transaction_guard::begin(&ctx).await?;
+    let (mut tx, guard) = super::action(&ctx).await?;
     ctx.now = guard.now().get();
     management::put_imported_harness_builds(&mut tx, &anchored, guard.user().id(), ctx.now).await?;
     record(
@@ -1121,7 +1150,7 @@ pub(super) async fn read_channels(ctx: Ctx, kind: Option<String>) -> ApiResult<u
     };
     let unavailable = builds.is_empty() && !failures.is_empty();
     // What was read is kept in the transaction that checks the caller's authority again, never during the reads.
-    let (mut tx, guard) = transaction_guard::begin(&ctx).await?;
+    let (mut tx, guard) = super::action(&ctx).await?;
     crate::harness_channels::record_read(&mut tx, guard.now().get(), !unavailable).await?;
     if unavailable {
         tx.commit().await.map_err(DbError::from)?;
@@ -1168,7 +1197,7 @@ pub(super) async fn queue_check(ctx: Ctx) -> ApiResult<u32> {
     let version = ctx.param("version")?;
     // The builds are marked as being checked in the transaction that checks the caller's authority again; their
     // checks run once it is committed.
-    let (mut tx, guard) = transaction_guard::begin(&ctx).await?;
+    let (mut tx, guard) = super::action(&ctx).await?;
     let kept = crate::harness_checks::kept(&mut tx, kind, version).await?;
     if kept.is_empty() {
         return Err(ApiError::not_found());
@@ -1240,7 +1269,7 @@ async fn agent_create(mut ctx: Ctx, (): (), body: OrgAgentCreateBody) -> ApiResu
     let harness_kind = clean_harness_kind(&body.harness_kind)?;
     let profile = clean_profile(&body.profile)?;
     let id = orch_types::new_id();
-    let (mut tx, guard) = transaction_guard::begin(&ctx).await?;
+    let (mut tx, guard) = super::action(&ctx).await?;
     ctx.now = guard.now().get();
     let principal = guard.principal();
     management::insert_system_agent(&mut tx, id, &name, &harness_kind, &profile, ctx.now).await?;

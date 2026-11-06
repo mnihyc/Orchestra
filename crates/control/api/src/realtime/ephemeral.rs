@@ -549,10 +549,19 @@ impl Feeds {
                 return Ok(offline);
             }
             if let Feed::ThreadBackground(thread) = sub.feed() {
-                let visible =
+                let decision = sub.connection().decision_identity();
+                if let Some(visible) =
                     super::background_watches::project(inner, sub.connection(), *thread, &data)
-                        .await?;
-                send(sub, &visible)?;
+                        .await?
+                {
+                    let current = super::sync::read_epoch(inner).await?;
+                    if inner.recheck(sub, st, current).await?
+                        && current == epoch
+                        && sub.connection().decision_identity() == decision
+                    {
+                        send(sub, &visible)?;
+                    }
+                }
             } else if matches!(sub.feed(), Feed::Job(_) | Feed::Fork(_)) {
                 match super::machine_views::progress(inner, sub.connection(), sub.feed()).await? {
                     Ok(visible) => {
@@ -656,7 +665,7 @@ async fn send_machine(
         }
         let cut = (
             sub.decided(),
-            sub.connection().session(),
+            sub.connection().decision_identity(),
             sub.connection().as_admin(),
         );
         let projected =
@@ -668,7 +677,7 @@ async fn send_machine(
         }
         if latest != epoch
             || expired
-            || sub.connection().session() != cut.1
+            || sub.connection().decision_identity() != cut.1
             || sub.connection().as_admin() != cut.2
         {
             continue;
@@ -715,7 +724,7 @@ async fn send_resource(
         }
         let cut = (
             sub.decided(),
-            sub.connection().session(),
+            sub.connection().decision_identity(),
             sub.connection().as_admin(),
         );
         let visible =
@@ -730,7 +739,7 @@ async fn send_resource(
         }
         if latest != epoch
             || expired
-            || sub.connection().session() != cut.1
+            || sub.connection().decision_identity() != cut.1
             || sub.connection().as_admin() != cut.2
         {
             // Reproject a changed cut; a new View decision cannot validate an old
@@ -981,7 +990,7 @@ pub(crate) fn merge_directory(held: &mut Json, new: Json) {
         "observed_from":new["observed_from"]});
 }
 
-async fn deliver(
+pub(super) async fn deliver(
     inner: &Arc<Inner>,
     feed: &Feed,
     data: &Json,
@@ -1045,9 +1054,18 @@ async fn deliver(
                 }
             }
         } else if let Feed::ThreadBackground(thread) = feed {
-            let visible =
-                super::background_watches::project(inner, sub.connection(), *thread, data).await?;
-            send(&sub, &visible)?;
+            let decision = sub.connection().decision_identity();
+            if let Some(visible) =
+                super::background_watches::project(inner, sub.connection(), *thread, data).await?
+            {
+                let current = super::sync::read_epoch(inner).await?;
+                if inner.recheck(&sub, &mut st, current).await?
+                    && current == epoch
+                    && sub.connection().decision_identity() == decision
+                {
+                    send(&sub, &visible)?;
+                }
+            }
         } else if matches!(feed, Feed::Job(_) | Feed::Fork(_)) {
             match super::machine_views::progress(inner, sub.connection(), feed).await? {
                 Ok(visible) => {

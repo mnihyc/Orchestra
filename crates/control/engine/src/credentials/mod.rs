@@ -15,6 +15,7 @@
 //! return and a declaration that a credential is lost never run together).
 
 pub mod handover;
+pub mod handover_authority;
 pub mod sharing;
 
 use orch_agent_contract::credentials::{CredentialPath, may_issue};
@@ -48,6 +49,8 @@ pub struct Unfinished {
     pub attempt: u32,
     /// What the environment gave back, still sealed.
     pub sealed: Option<SealedCredential>,
+    /// The actual custody, native source and encrypted recipient of a retained return.
+    pub source: Option<handover_authority::ReturnSource>,
 }
 
 /// What the engine remembers of the credentials that left their providers.
@@ -142,6 +145,18 @@ impl Issuing {
         if sealed.is_some() {
             kept.sealed = sealed;
         }
+    }
+
+    /// Keep a returned ciphertext with its actual source; no original actor is made a future ACL.
+    pub(crate) fn keep_return(
+        &mut self,
+        provider: Id,
+        sealed: SealedCredential,
+        source: handover_authority::ReturnSource,
+    ) {
+        let kept = self.unfinished.entry(provider).or_default();
+        kept.sealed = Some(sealed);
+        kept.source = Some(source);
     }
 
     /// The credential is home, or given up: nothing of the attempts is kept.

@@ -10,6 +10,7 @@
 mod places;
 mod support;
 
+use crate::support::FullArchiveReply as _;
 use orch_api_contract::common::ErrorCode;
 use orch_api_contract::nodes::{Node, NodeArchive};
 use orch_api_contract::ownership::{
@@ -54,6 +55,7 @@ async fn undoing_a_deletion_brings_back_what_was_open_open_and_what_was_archived
         .body(&places::archive_body(&world, &boss.token, shelved.base.id, true).await)
         .send()
         .await
+        .full_archive()
         .ok();
 
     let group = delete(&world, &boss, web.base.id)

@@ -277,12 +277,23 @@ impl Engine {
         provider: Id,
         by: Option<Id>,
     ) -> Result<RuntimeStart, RuntimeError> {
-        self.queue_provider_runtime(provider, by, false).await
+        self.queue_provider_runtime(provider, by, false, None).await
+    }
+
+    pub(crate) async fn start_provider_runtime_for_return(
+        &self,
+        provider: Id,
+        by: Option<Id>,
+        authority: Option<&crate::credentials::handover_authority::HandoverAuthority>,
+    ) -> Result<RuntimeStart, RuntimeError> {
+        self.queue_provider_runtime(provider, by, false, authority)
+            .await
     }
 
     /// Renews the native sign-in in its running runtime, or starts the same stopped runtime first.
     pub async fn renew_provider_runtime(&self, provider: Id) -> Result<RuntimeStart, RuntimeError> {
-        self.queue_provider_runtime(provider, None, true).await
+        self.queue_provider_runtime(provider, None, true, None)
+            .await
     }
 
     async fn queue_provider_runtime(
@@ -290,12 +301,40 @@ impl Engine {
         provider: Id,
         by: Option<Id>,
         renew: bool,
+        authority: Option<&crate::credentials::handover_authority::HandoverAuthority>,
     ) -> Result<RuntimeStart, RuntimeError> {
         let mut tx = self.inner.db.begin().await?;
+        if let Some(authority) = authority {
+            orch_db::queries::transaction_guard::lock_action(&mut tx).await?;
+            authority
+                .require(&mut tx, self.inner.clock.time())
+                .await
+                .map_err(|error| match error {
+                    crate::credentials::handover::ReturnError::Internal(error) => {
+                        RuntimeError::Internal(error)
+                    }
+                    _ => RuntimeError::Unavailable(
+                        "the accepted return is no longer authorized".into(),
+                    ),
+                })?;
+        }
         let now = self.inner.clock.now();
         let state = rows::lock(&mut tx, provider)
             .await?
             .ok_or(RuntimeError::NotFound)?;
+        if let Some(authority) = authority {
+            authority
+                .require(&mut tx, self.inner.clock.time())
+                .await
+                .map_err(|error| match error {
+                    crate::credentials::handover::ReturnError::Internal(error) => {
+                        RuntimeError::Internal(error)
+                    }
+                    _ => RuntimeError::Unavailable(
+                        "the accepted return is no longer authorized".into(),
+                    ),
+                })?;
+        }
         if state.deleted_at.is_some() {
             return Err(RuntimeError::Unavailable("deleted".to_owned()));
         }
@@ -714,7 +753,7 @@ impl Engine {
             }
             // The next turn must make a unit, never restart this retired unit. A different
             // current runtime is untouched when a manager removes an older kept one.
-            self.unit_is_gone(&mut tx, provider, row.machine_id, now)
+            self.unit_is_gone(&mut tx, provider, runtime, row.machine_id, now)
                 .await?;
         }
         env_rows::retire_runtime(&mut tx, runtime, Some("removed by the host's manager"), now)
@@ -935,7 +974,7 @@ impl Engine {
                     .await?
                     .is_some_and(|current| current.id == runtime)
                 {
-                    self.unit_is_gone(&mut tx, provider, row.machine_id, now)
+                    self.unit_is_gone(&mut tx, provider, runtime, row.machine_id, now)
                         .await?;
                 }
                 tx.commit().await.map_err(DbError::from)?;
@@ -966,19 +1005,39 @@ impl Engine {
         }
     }
 
-    /// What is so once the unit of a provider's runtime is not up: the provider has no machine, the
-    /// harnesses it held there are not online, and the sessions the engine thought open there are not.
+    /// Detaches a gone current unit and clears its connector's harnesses and sessions.
+    /// A noncurrent candidate cannot detach or invalidate another unit's connector.
     async fn unit_is_gone(
         &self,
         conn: &mut orch_db::Conn,
         provider: Id,
+        runtime: Id,
         machine: Option<Id>,
         now: DateTime<Utc>,
     ) -> Result<(), EngineError> {
-        rows::set_machine(conn, provider, None, now).await?;
+        // A creating successor initially inherits the old machine. Publication is the
+        // existing current runtime identity, checked while the provider row is locked.
+        // Every caller keeps this lock in its action transaction through cleanup.
+        let state = rows::lock(conn, provider).await?;
+        let current = rows::live_runtime(conn, provider).await?;
+        let is_current = current.as_ref().is_some_and(|row| row.id == runtime);
+        if is_current {
+            rows::set_machine(conn, provider, None, now).await?;
+        }
         if let Some(machine) = machine {
-            machine_rows::set_machine_harnesses_offline(conn, machine, now).await?;
-            lock(&self.inner.sessions).machine_lost(machine);
+            // A failed candidate cannot take the other current unit's inherited connector
+            // offline. Keep a still-attached association even if no live row was found.
+            let attached_elsewhere = !is_current
+                && (state
+                    .as_ref()
+                    .is_some_and(|row| row.machine_id == Some(machine))
+                    || current
+                        .as_ref()
+                        .is_some_and(|row| row.machine_id == Some(machine)));
+            if !attached_elsewhere {
+                machine_rows::set_machine_harnesses_offline(conn, machine, now).await?;
+                lock(&self.inner.sessions).machine_lost(machine);
+            }
         }
         Ok(())
     }
@@ -1115,11 +1174,11 @@ impl Engine {
                 .map(|pending| pending.method);
             rows::delete_login_secrets(&mut tx, provider, rows::LOGIN_SECRET_PREFIX).await?;
             rows::clear_pending(&mut tx, provider).await?;
-            if matches!(state.status.as_str(), "needs_setup" | "ready") {
+            if matches!(state.status.as_str(), "needs_setup" | "ready" | "exhausted") {
                 orch_db::queries::resources::keeper::move_status(
                     &mut tx,
                     provider,
-                    &["needs_setup", "ready"],
+                    &["needs_setup", "ready", "exhausted"],
                     "needs_setup",
                     Some(detail),
                     now,
@@ -1373,15 +1432,17 @@ impl Engine {
         }
     }
 
-    /// The unit of a provider's runtime was found failed by its host: the provider has no machine, its
-    /// harnesses there are not online, and the sessions the engine thought open there are not.
+    /// Applies the failed unit's cleanup by its actual runtime identity, preserving another
+    /// current unit even while a successor still shares its connector.
     pub(crate) async fn provider_unit_failed(
         &self,
         conn: &mut orch_db::Conn,
         provider: Id,
+        runtime: Id,
         machine: Option<Id>,
         now: DateTime<Utc>,
     ) -> Result<(), EngineError> {
-        self.unit_is_gone(conn, provider, machine, now).await
+        self.unit_is_gone(conn, provider, runtime, machine, now)
+            .await
     }
 }

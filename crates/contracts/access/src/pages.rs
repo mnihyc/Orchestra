@@ -259,6 +259,9 @@ pub struct Entry {
     pub created_by: Option<Id>,
     /// When it was written.
     pub created_at: Time,
+    /// The server time of the last explicit expiry change, kept outside the wire.
+    #[serde(skip)]
+    pub renewed_at: Option<Time>,
     /// When it was removed. It is kept for the record and counts for nothing
     /// from then on.
     pub removed_at: Option<Time>,
@@ -267,6 +270,12 @@ pub struct Entry {
 }
 
 impl Entry {
+    /// The grant time against which a current outside-lifetime policy is checked.
+    #[must_use]
+    pub fn lifetime_anchor(&self) -> Time {
+        self.renewed_at.unwrap_or(self.created_at)
+    }
+
     /// Whether it counts at `now`: it was not removed and has not ended.
     #[must_use]
     pub fn counts(&self, now: Time) -> bool {
@@ -562,6 +571,7 @@ impl Owners {
             source: EntrySource::Creation,
             created_by: Some(maker),
             created_at: now,
+            renewed_at: None,
             removed_at: None,
             revision: 1,
         };
@@ -1356,9 +1366,26 @@ mod tests {
             source: EntrySource::Page,
             created_by: Some(new_id()),
             created_at: at("2026-10-01T00:00:00Z"),
+            renewed_at: None,
             removed_at: None,
             revision: 1,
         }
+    }
+
+    #[test]
+    fn an_entries_renewal_anchor_is_server_metadata_not_a_wire_field() {
+        let mut original = entry(Holder::Everyone);
+        original.renewed_at = Some(at("2026-10-09T00:00:00Z"));
+        let mut wire = serde_json::to_value(&original).unwrap();
+        assert!(wire.get("created_at").is_some());
+        assert!(wire.get("renewed_at").is_none());
+        let schema = schemars::schema_for!(Entry).to_value();
+        assert!(schema["properties"].get("created_at").is_some());
+        assert!(schema["properties"].get("renewed_at").is_none());
+        wire["renewed_at"] = serde_json::json!("2099-01-01T00:00:00Z");
+        let restored: Entry = serde_json::from_value(wire).unwrap();
+        assert_eq!(restored.renewed_at, None);
+        assert_eq!(restored.lifetime_anchor(), original.created_at);
     }
 
     fn role(role: Role) -> Holder {
@@ -2408,6 +2435,7 @@ mod tests {
             .iter()
             .map(|(id, since)| Entry {
                 created_at: at(since),
+                renewed_at: None,
                 ..entry(Holder::User { id: *id })
             })
             .collect();
@@ -2553,7 +2581,7 @@ mod tests {
         assert!(check(&adding("chat.view", agents), PageOf::Chat).is_ok());
         assert!(check(&adding("chat.interact", agents), PageOf::Chat).is_ok());
         assert!(check(&adding("chat.view", role(Role::Viewer)), PageOf::Chat).is_err());
-        assert!(check(&adding("chat.manage", agents), PageOf::Chat).is_err());
+        assert!(check(&adding("chat.manage", agents), PageOf::Chat).is_ok());
         let private = PageChange {
             whole: Some(Whole::Private),
             ..PageChange::default()

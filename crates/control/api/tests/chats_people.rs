@@ -682,9 +682,9 @@ async fn any_member_adds_another_member_a_member_may_leave_and_the_maker_removes
         async move { call.send().await }
     };
     // Cai, who did not make it, adds Gus.
-    let added = add(&room.cai, &room.gus).await.ok();
+    let added = add(&room.cai, &room.gus).await.ok().into_full().unwrap();
     assert_eq!(added.members.as_ref().unwrap().len(), 3);
-    let again = add(&room.cai, &room.gus).await.ok();
+    let again = add(&room.cai, &room.gus).await.ok().into_full().unwrap();
     assert_eq!(
         again.seq, added.seq,
         "adding somebody who is in changes nothing"
@@ -742,7 +742,14 @@ async fn any_member_adds_another_member_a_member_may_leave_and_the_maker_removes
         ["bea"]
     );
     assert_eq!(
-        add(&room.bea, &room.cai).await.ok().members.unwrap().len(),
+        add(&room.bea, &room.cai)
+            .await
+            .ok()
+            .into_full()
+            .unwrap()
+            .members
+            .unwrap()
+            .len(),
         2
     );
     let actions = room.audit_of(group).await;
@@ -788,9 +795,13 @@ async fn a_group_is_renamed_by_a_member_and_null_names_it_after_its_members_agai
             });
         async move { call.send().await }
     };
-    let renamed = rename(&room.cai, Some("Launch")).await.ok();
+    let renamed = rename(&room.cai, Some("Launch"))
+        .await
+        .ok()
+        .into_full()
+        .unwrap();
     assert_eq!(renamed.base.name.as_deref(), Some("Launch"));
-    let cleared = rename(&room.bea, None).await.ok();
+    let cleared = rename(&room.bea, None).await.ok().into_full().unwrap();
     assert!(cleared.base.name.is_none());
     assert_eq!(
         rename(&room.dee, Some("Mine")).await.problem().code,
@@ -844,7 +855,7 @@ async fn somebody_from_outside_joins_a_group_as_a_guest_only_when_the_one_who_br
         async move { call.send().await }
     };
     // A developer holds access.external as shipped.
-    let with_guest = add(&room.cai, &room.eve).await.ok();
+    let with_guest = add(&room.cai, &room.eve).await.ok().into_full().unwrap();
     assert_eq!(with_guest.guests, [room.eve.id()]);
     assert_eq!(with_guest.members.as_ref().unwrap().len(), 3);
 
@@ -916,7 +927,9 @@ async fn somebody_from_outside_joins_a_group_as_a_guest_only_when_the_one_who_br
         .token(&room.bea.token)
         .send()
         .await
-        .ok();
+        .ok()
+        .into_full()
+        .unwrap();
     assert_eq!(by_maker.guests, [room.fay.id()]);
     room.world
         .set_at(

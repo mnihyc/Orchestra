@@ -418,6 +418,8 @@ async fn subscription_option_schemas_validate_nested_values_without_partially_ch
         .send()
         .await
         .ok()
+        .into_full()
+        .expect("a full provider reply")
         .provider;
     for config in [
         json!({"routing":{"region":false}}),

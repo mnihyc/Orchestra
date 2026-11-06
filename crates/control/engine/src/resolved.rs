@@ -112,7 +112,6 @@ pub struct Resolved {
     /// How many times in an hour the agent may send to other threads, as the guide to the tools says.
     pub sends_per_hour: Option<i64>,
     /// What announcement choices the current place permits advertising in its schema.
-    pub broadcast_agent_scope: String,
     pub broadcast_agent_options: Vec<String>,
 }
 
@@ -201,7 +200,6 @@ pub async fn load(conn: &mut Conn, thread: Id) -> Result<Resolved, EngineError> 
         keys::BINDING_ALLOWED,
         keys::ORCH_TOOLS_CALLS_PER_MINUTE,
         keys::BROADCAST_RATE_PER_HOUR,
-        keys::BROADCAST_AGENT_SCOPE,
         keys::BROADCAST_AGENT_OPTIONS,
     ]
     .into_iter()
@@ -246,8 +244,6 @@ pub async fn load(conn: &mut Conn, thread: Id) -> Result<Resolved, EngineError> 
         binding_allowed: types(&snapshot, keys::BINDING_ALLOWED)?,
         tool_calls_per_minute: value(&snapshot, keys::ORCH_TOOLS_CALLS_PER_MINUTE)?,
         sends_per_hour: value(&snapshot, keys::BROADCAST_RATE_PER_HOUR)?,
-        broadcast_agent_scope: value(&snapshot, keys::BROADCAST_AGENT_SCOPE)?
-            .unwrap_or_else(|| "topic".to_owned()),
         broadcast_agent_options: value(&snapshot, keys::BROADCAST_AGENT_OPTIONS)?
             .unwrap_or_default(),
     };

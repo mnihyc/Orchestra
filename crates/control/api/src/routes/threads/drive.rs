@@ -8,63 +8,95 @@
 //! their own inputs and other people's; the words of an input stay its
 //! author's.
 
-use super::{input_failed, read_failed};
+use super::read_failed;
 use crate::middleware::authorization::{self, refusals};
 use crate::middleware::requests::{ApiError, ApiResult};
 use crate::middleware::transaction_guard;
 use crate::registry::{Answer, Ctx, Registry};
-use crate::thread_access::AuthzAccess;
 use http::StatusCode;
-use orch_access_contract::decisions::{Decision, ObjectRef};
-use orch_access_contract::permissions::{ObjectKind, Permission};
-use orch_agent_contract::facts::ProviderFacts;
 use orch_api_contract::common::ErrorCode;
 use orch_api_contract::personal::Draft;
 use orch_api_contract::threads::{
-    ContentPart, Delivery, Item, LimitBypass, LimitBypassRequest, LimitReached, ProviderLimit,
-    ThreadDraftDelete, ThreadDraftGet, ThreadDraftSet, ThreadDraftSetBody, ThreadInput,
-    ThreadInputBypass, ThreadInputCancel, ThreadInputCreate, ThreadInputCreateBody,
-    ThreadInputCreateReply, ThreadInputRetry, ThreadInputRun, ThreadInputUpdate,
-    ThreadInputUpdateBody, ThreadInputUpdateReply, ThreadInterrupt, ThreadInterruptBody,
-    ThreadItemPin, ThreadItemUnpin, ThreadLimits, ThreadLimitsGet, ThreadLimitsGetQuery,
-    ThreadQueue, ThreadQueueResume, ThreadQueueResumeBody, ThreadTurnRetry, ThreadTurnRetryBody,
-    Turn, TurnState,
+    Delivery, Item, LimitBypass, LimitBypassRequest, LimitReached, ThreadDraftDelete,
+    ThreadDraftGet, ThreadDraftSet, ThreadDraftSetBody, ThreadInput, ThreadInputBypass,
+    ThreadInputCancel, ThreadInputCreate, ThreadInputCreateBody, ThreadInputCreateReply,
+    ThreadInputCreateResponse, ThreadInputReceipt, ThreadInputRetry, ThreadInputRun,
+    ThreadInputUpdate, ThreadInputUpdateBody, ThreadInputUpdateReply, ThreadInterrupt,
+    ThreadInterruptBody, ThreadItemPin, ThreadItemUnpin, ThreadLimits, ThreadLimitsGet,
+    ThreadLimitsGetQuery, ThreadQueue, ThreadQueueResume, ThreadQueueResumeBody, ThreadTurnRetry,
+    ThreadTurnRetryBody, Turn,
 };
-use orch_authz::resources;
-use orch_db::queries::resources::thread_engine as resource_rows;
+use orch_authz::Caller;
 use orch_db::queries::threads as rows;
-use orch_engine::access::{Limit, ResourceAccess};
 use orch_engine::inputs::{InputError, InputRequest};
 use orch_engine::turns::InterruptError;
 use orch_types::{Id, Time};
-use std::sync::Arc;
 
 /// Binds this module's requests.
 pub fn mount(registry: &mut Registry) {
     registry
-        .on(ThreadInputCreate, input_create)
-        .on(ThreadInputUpdate, input_update)
+        .on_with_initial_operation(
+            ThreadInputCreate,
+            super::operation::initial,
+            super::operation::prepare,
+            input_create,
+        )
+        .on_with_initial_operation(
+            ThreadInputUpdate,
+            super::operation::initial_update,
+            super::operation::prepare_update,
+            input_update,
+        )
         .on(ThreadInputCancel, input_cancel)
-        .on(ThreadInputRetry, input_retry)
+        .on_with_initial_operation(
+            ThreadInputRetry,
+            super::operation::initial_retained,
+            super::operation::prepare_retained,
+            input_retry,
+        )
         .on(ThreadInterrupt, interrupt)
         .on(ThreadQueueResume, queue_resume)
-        .on(ThreadInputBypass, input_bypass)
-        .on(ThreadInputRun, input_run)
-        .on(orch_api_contract::threads::ThreadPlanDecide, plan_decide)
+        .on_with_operation(
+            ThreadInputBypass,
+            super::operation::prepare_bypass,
+            input_bypass,
+        )
+        .on_with_initial_operation(
+            ThreadInputRun,
+            super::operation::initial_retained,
+            super::operation::prepare_retained,
+            input_run,
+        )
+        .on_with_operation(
+            orch_api_contract::threads::ThreadPlanDecide,
+            super::operation::prepare_plan,
+            plan_decide,
+        )
         .on(ThreadLimitsGet, limits_get)
-        .on(ThreadTurnRetry, turn_retry)
+        .on_with_operation(
+            ThreadTurnRetry,
+            super::operation::prepare_turn_retry,
+            turn_retry,
+        )
         .on(ThreadItemPin, item_pin)
         .on(ThreadItemUnpin, item_unpin)
         .on(ThreadDraftGet, draft_get)
         .on(ThreadDraftSet, draft_set)
-        .on(ThreadDraftDelete, draft_delete);
+        .on_with_operation(
+            ThreadDraftDelete,
+            crate::key_operations::direct::declared,
+            draft_delete,
+        );
 }
 
 /// An error of the engine about an input, told with the database the engine
 /// does not hold.
 async fn input_error(ctx: &Ctx, thread: Id, error: InputError) -> ApiError {
     match ctx.app.db.acquire().await {
-        Ok(mut conn) => input_failed(&mut conn, thread, error).await,
+        Ok(mut conn) => {
+            super::input_failed_projected(&mut conn, thread, error, ctx.key_receipt_required())
+                .await
+        }
         Err(error) => error.into(),
     }
 }
@@ -76,16 +108,14 @@ async fn input_create(
     ctx: Ctx,
     (): (),
     body: ThreadInputCreateBody,
-) -> ApiResult<Answer<ThreadInputCreateReply>> {
+) -> ApiResult<Answer<ThreadInputCreateResponse>> {
     let thread = ctx.id("id")?;
-    if body.native_action.is_some() {
-        super::native::refresh_for_input(&ctx, thread).await?;
-    }
     let (tx, guard) = transaction_guard::begin(&ctx).await?;
+    let operands = guard.operation_data::<orch_engine::inputs::InputSourceOperands>()?;
     let submitted = ctx
         .app
         .engine
-        .submit_selected_input_guarded(
+        .submit_selected_input_projected_guarded(
             tx,
             guard.into_principal(),
             thread,
@@ -97,14 +127,25 @@ async fn input_create(
                 bypass: body.bypass,
             },
             body.native_action,
+            ctx.key_receipt_required(),
+            Some(operands.as_ref()),
         )
         .await;
     match submitted {
         Ok(submitted) => {
-            let answer = Answer::from(ThreadInputCreateReply {
-                input: submitted.input,
-                seq: submitted.seq,
-            });
+            let response = match (submitted.input, ctx.key_receipt_required()) {
+                (Some(input), false) => ThreadInputCreateResponse::Full(ThreadInputCreateReply {
+                    input,
+                    seq: submitted.seq,
+                }),
+                _ => ThreadInputCreateResponse::Receipt(ThreadInputReceipt {
+                    projection: orch_api_contract::common::ReceiptProjection::Receipt,
+                    thread_id: submitted.thread_id,
+                    input_id: submitted.input_id,
+                    seq: submitted.seq,
+                }),
+            };
+            let answer = Answer::from(response);
             Ok(if submitted.created {
                 answer
             } else {
@@ -123,9 +164,6 @@ async fn input_update(
     body: ThreadInputUpdateBody,
 ) -> ApiResult<ThreadInputUpdateReply> {
     let thread = ctx.id("id")?;
-    if body.native_action.as_ref().is_some_and(Option::is_some) {
-        super::native::refresh_for_input(&ctx, thread).await?;
-    }
     let input = ctx.id("input_id")?;
     let (tx, guard) = transaction_guard::begin(&ctx).await?;
     let changed = ctx
@@ -393,34 +431,86 @@ async fn pin(ctx: &Ctx, pinned: bool) -> ApiResult<Item> {
 /// Lets a waiting input go past the limits named, in the caller's name. The
 /// bypass row of each limit is asked of the access engine inside the
 /// engine's transaction, and so is driving the thread.
-async fn input_bypass(ctx: Ctx, (): (), body: LimitBypassRequest) -> ApiResult<ThreadInput> {
+async fn input_bypass(
+    ctx: Ctx,
+    (): (),
+    body: LimitBypassRequest,
+) -> ApiResult<orch_api_contract::threads::ThreadInputMutationResponse> {
     let thread = ctx.id("id")?;
     let input = ctx.id("input_id")?;
-    let (tx, guard) = transaction_guard::begin(&ctx).await?;
-    match ctx
+    let (mut tx, _initial_guard) = transaction_guard::begin(&ctx).await?;
+    ctx.app
+        .engine
+        .lock_source_control(
+            &mut tx,
+            thread,
+            orch_db::queries::notifications::inbox::RequestSource::Input(input),
+            false,
+        )
+        .await
+        .map_err(ApiError::engine)?
+        .ok_or_else(ApiError::not_found)?;
+    let (ctx, guard) = transaction_guard::after_wait(&ctx, &mut tx).await?;
+    let homes = guard.operation_data::<Vec<orch_authz::caps::Home>>()?;
+    let caller = guard.principal().caller().clone();
+    guard.check_deadline(&ctx)?;
+    let result = ctx
         .app
         .engine
-        .bypass_input_guarded(tx, guard.into_principal(), thread, input, &body)
-        .await
-    {
-        Ok(input) => Ok(input),
+        .bypass_input_projected_guarded(
+            tx,
+            guard.principal().clone(),
+            thread,
+            input,
+            &body,
+            ctx.key_receipt_required(),
+            homes.as_ref(),
+            || guard.before_effect(&ctx),
+        )
+        .await;
+    match result {
+        Ok(projected) => input_mutation_response(&ctx, &caller, projected).await,
         Err(error) => Err(input_error(&ctx, thread, error).await),
     }
 }
 
-/// Runs a message that waits for somebody who may use the thread's model on the caller's own access. Driving
-/// the thread and the caller's own use of the model are asked inside the engine's transaction.
-async fn input_run(ctx: Ctx, (): (), (): ()) -> ApiResult<ThreadInput> {
+/// Runs the same actual held input on this caller's current model access.
+async fn input_run(
+    ctx: Ctx,
+    (): (),
+    (): (),
+) -> ApiResult<orch_api_contract::threads::ThreadInputMutationResponse> {
     let thread = ctx.id("id")?;
     let input = ctx.id("input_id")?;
-    let (tx, guard) = transaction_guard::begin(&ctx).await?;
+    let (mut tx, _initial_guard) = transaction_guard::begin(&ctx).await?;
+    ctx.app
+        .engine
+        .lock_source_control(
+            &mut tx,
+            thread,
+            orch_db::queries::notifications::inbox::RequestSource::Input(input),
+            true,
+        )
+        .await
+        .map_err(ApiError::engine)?
+        .ok_or_else(ApiError::not_found)?;
+    let (ctx, guard) = transaction_guard::after_wait(&ctx, &mut tx).await?;
+    let caller = guard.principal().caller().clone();
+    guard.check_deadline(&ctx)?;
     match ctx
         .app
         .engine
-        .run_input_guarded(tx, guard.into_principal(), thread, input)
+        .run_input_projected_guarded(
+            tx,
+            guard.principal().clone(),
+            thread,
+            input,
+            ctx.key_receipt_required(),
+            || guard.before_effect(&ctx),
+        )
         .await
     {
-        Ok(input) => Ok(input),
+        Ok(projected) => input_mutation_response(&ctx, &caller, projected).await,
         Err(error) => Err(input_error(&ctx, thread, error).await),
     }
 }
@@ -429,23 +519,127 @@ async fn plan_decide(
     ctx: Ctx,
     (): (),
     body: orch_api_contract::threads::ThreadPlanDecideBody,
-) -> ApiResult<orch_api_contract::threads::ThreadPlanDecideReply> {
+) -> ApiResult<orch_api_contract::threads::ThreadPlanDecideResponse> {
     let thread = ctx.id("id")?;
     let item = ctx.id("item_id")?;
-    let (tx, guard) = transaction_guard::begin(&ctx).await?;
+    let (mut tx, _initial_guard) = transaction_guard::begin(&ctx).await?;
+    ctx.app
+        .engine
+        .lock_source_control(
+            &mut tx,
+            thread,
+            orch_db::queries::notifications::inbox::RequestSource::Plan(item),
+            true,
+        )
+        .await
+        .map_err(ApiError::engine)?
+        .ok_or_else(ApiError::not_found)?;
+    let (ctx, guard) = transaction_guard::after_wait(&ctx, &mut tx).await?;
+    let caller = guard.principal().caller().clone();
+    guard.check_deadline(&ctx)?;
     match ctx
         .app
         .engine
-        .decide_plan_guarded(tx, guard.into_principal(), thread, item, &body)
+        .decide_plan_projected_guarded(
+            tx,
+            guard.principal().clone(),
+            thread,
+            item,
+            &body,
+            ctx.key_receipt_required(),
+            || guard.before_effect(&ctx),
+        )
         .await
     {
-        Ok(reply) => Ok(reply),
+        Ok((projected, decision)) => {
+            let receipt = input_receipt(&projected);
+            match projected.input {
+                Some(input) if control_content(&ctx, &caller, thread).await? => {
+                    Ok(orch_api_contract::threads::ThreadPlanDecideResponse::Full(
+                        orch_api_contract::threads::ThreadPlanDecideReply { input, decision },
+                    ))
+                }
+                _ => Ok(orch_api_contract::threads::ThreadPlanDecideResponse::Receipt(receipt)),
+            }
+        }
         Err(error) => Err(input_error(&ctx, thread, error).await),
+    }
+}
+
+fn input_receipt(projected: &orch_engine::inputs::SubmittedProjection) -> ThreadInputReceipt {
+    ThreadInputReceipt {
+        projection: orch_api_contract::common::ReceiptProjection::Receipt,
+        thread_id: projected.thread_id,
+        input_id: projected.input_id,
+        seq: projected.seq,
+    }
+}
+async fn input_mutation_response(
+    ctx: &Ctx,
+    caller: &Caller,
+    projected: orch_engine::inputs::SubmittedProjection,
+) -> ApiResult<orch_api_contract::threads::ThreadInputMutationResponse> {
+    let receipt = input_receipt(&projected);
+    match projected.input {
+        Some(input) if control_content(ctx, caller, projected.thread_id).await? => {
+            Ok(orch_api_contract::threads::ThreadInputMutationResponse::Full(input))
+        }
+        _ => Ok(orch_api_contract::threads::ThreadInputMutationResponse::Receipt(receipt)),
+    }
+}
+
+/// Only optional response Read is revisited after commit; no effect or native writer is replayed.
+async fn control_content(ctx: &Ctx, caller: &Caller, thread: Id) -> ApiResult<bool> {
+    use crate::key_operations::{admission::Prepared, resolver::Disclosure, targets};
+    use orch_access_contract::permissions::Permission;
+    use orch_authz::{Act, Policy};
+    if ctx.key_receipt_required() {
+        return Ok(false);
+    }
+    let content = crate::key_operations::completed_projection::run(ctx, async {
+        let mut tx = ctx.app.db.begin_snapshot().await?;
+        let target = targets::node_identity(&mut tx, thread).await?;
+        let selection = caller.admitted_operation().unwrap_or(ctx.route.name);
+        let mut plan = Prepared::new(ctx.route, selection)?;
+        orch_engine::inputs::operation::bind_thread(plan.shared_mut(), &target)
+            .map_err(crate::key_operations::admission::binding_error)?;
+        let read = plan
+            .read_response(ctx, &mut tx, caller, move |conn, reader| {
+                Box::pin(async move {
+                    authorization::require(
+                        conn,
+                        reader,
+                        thread,
+                        authorization::exact(Permission::ThreadView),
+                        Act::Use,
+                        Policy::default(),
+                    )
+                    .await
+                })
+            })
+            .await?;
+        tx.commit().await.map_err(orch_db::DbError::from)?;
+        Ok(read)
+    })
+    .await;
+    match content {
+        Ok(content) => Ok(content.is_some()),
+        // This is only the completed operation's ordinary optional Read stage.
+        // Required effect failures keep their original status through input_error.
+        Err(error) if matches!(error.problem.status, 401 | 403 | 404 | 410) => {
+            ctx.complete_disclosure(Disclosure::Denied);
+            Ok(false)
+        }
+        Err(error) => Err(error),
     }
 }
 
 /// The people a record of bypasses names, as others see them, each with whether they acted with As
 /// admin on when they let it past.
+#[expect(
+    dead_code,
+    reason = "retained native bypass projection during shared reader integration"
+)]
 async fn bypassed_by(
     conn: &mut orch_db::Conn,
     stored: Option<&serde_json::Value>,
@@ -497,7 +691,7 @@ pub(super) async fn limits_get(
 ) -> ApiResult<ThreadLimits> {
     let thread = ctx.id("id")?;
     let mut conn = ctx.app.db.acquire().await?;
-    let row = rows::thread(&mut conn, thread)
+    let _row = rows::thread(&mut conn, thread)
         .await?
         .ok_or_else(ApiError::not_found)?;
     let input = match query.input_id {
@@ -510,7 +704,7 @@ pub(super) async fn limits_get(
         None => None,
     };
     let principal = authorization::principal(&ctx, &mut conn).await?;
-    let mut reached = crate::routes::usage::caps::reached_for_thread(
+    let reached = crate::routes::usage::caps::reached_for_thread(
         &ctx,
         &mut conn,
         &principal,
@@ -526,118 +720,8 @@ pub(super) async fn limits_get(
                 .all(|limit| limit.can_bypass),
         reached,
     };
-    let Some(provider) = row.provider_id else {
-        return Ok(finish(reached));
-    };
-    let Some(provider) = resource_rows::provider(&mut conn, provider).await? else {
-        return Ok(finish(reached));
-    };
-    if provider.status != "exhausted" {
-        return Ok(finish(reached));
-    }
-    let acting = ctx.user()?;
-    let (person, as_admin) = (acting.id(), acting.as_admin && acting.is_session());
-    let access = AuthzAccess::new(Arc::clone(&ctx.app.clock));
-    let can_bypass = access
-        .may_pass(
-            &mut conn,
-            person,
-            as_admin,
-            &Limit::ProviderLimit {
-                provider: provider.id,
-            },
-        )
-        .await
-        .map_err(ApiError::internal)?;
-    let facts: ProviderFacts = serde_json::from_value(provider.facts.clone()).unwrap_or_default();
-    let (window, resets_at) = facts.limit_reached.as_ref().map_or_else(
-        || {
-            facts
-                .windows
-                .iter()
-                .find(|window| window.used_percent >= 100.0)
-                .map_or_else(
-                    || ("unknown".to_owned(), None),
-                    |window| (window.label.clone(), window.resets_at),
-                )
-        },
-        |limit| (limit.kind.clone(), limit.resets_at),
-    );
-    let provider_ref = serde_json::from_value(
-        orch_engine::views::provider_ref_json(&mut conn, &provider)
-            .await
-            .map_err(ApiError::internal)?,
-    )
-    .map_err(ApiError::internal)?;
-    let entries = bypassed_by(
-        &mut conn,
-        input.as_ref().and_then(|input| input.limit_bypass.as_ref()),
-    )
-    .await?;
-    let mut passed = None;
-    for (entry, as_admin) in entries
-        .into_iter()
-        .filter(|(entry, _)| entry.provider_limit)
-    {
-        if access
-            .may_pass(
-                &mut conn,
-                entry.by.id,
-                as_admin,
-                &Limit::ProviderLimit {
-                    provider: provider.id,
-                },
-            )
-            .await
-            .map_err(ApiError::internal)?
-        {
-            passed = Some(entry.by);
-            break;
-        }
-    }
-    let (ask, ask_more) = if can_bypass {
-        (Vec::new(), 0)
-    } else {
-        let principal = authorization::principal(&ctx, &mut conn).await?;
-        let policies = AuthzAccess::policies(&mut conn, provider.id)
-            .await
-            .map_err(ApiError::internal)?;
-        match resources::check(
-            &mut conn,
-            &principal,
-            ObjectRef {
-                kind: ObjectKind::Provider,
-                id: provider.id,
-            },
-            Permission::ProviderBypass,
-            policies.at(Some(provider.home_id)).node_policy(),
-        )
-        .await
-        .map_err(ApiError::internal)?
-        {
-            Decision::Refused(refusal) => {
-                let missing = refusals::missing_access(&mut conn, &refusal.missing).await?;
-                missing
-                    .into_iter()
-                    .next()
-                    .map_or((Vec::new(), 0), |first| (first.ask, first.ask_more))
-            }
-            Decision::Allowed { .. } => (Vec::new(), 0),
-        }
-    };
-    reached.push(LimitReached {
-        cap: None,
-        provider_limit: Some(ProviderLimit {
-            provider: provider_ref,
-            window,
-            resets_at,
-            as_of: Time::new(ctx.now),
-        }),
-        can_bypass,
-        passed_by: passed,
-        ask,
-        ask_more,
-    });
+    // Only configured Orch caps belong in the bypass prompt. Vendor reports
+    // remain on the provider's observational view and require no override.
     Ok(finish(reached))
 }
 
@@ -649,48 +733,33 @@ async fn turn_retry(
     body: ThreadTurnRetryBody,
 ) -> ApiResult<Answer<ThreadInputCreateReply>> {
     let thread = ctx.id("id")?;
-    let turn = ctx.id("turn_id")?;
-    let (mut tx, guard) = transaction_guard::begin(&ctx).await?;
-    let content: Vec<ContentPart> = {
-        let conn = &mut *tx;
-        let row = rows::turn(conn, turn)
-            .await?
-            .filter(|row| row.thread_id == thread)
-            .ok_or_else(ApiError::not_found)?;
-        if !matches!(
-            serde_json::from_value(serde_json::Value::String(row.state.clone())),
-            Ok(TurnState::Failed | TurnState::Interrupted)
-        ) {
-            return Err(ApiError::invalid(
-                "turn_id",
-                "only a turn that failed or was stopped is tried again",
-            ));
-        }
-        let input = rows::input(conn, row.input_id)
-            .await?
-            .ok_or_else(ApiError::not_found)?;
-        serde_json::from_value(input.content).map_err(ApiError::internal)?
-    };
+    let (tx, guard) = transaction_guard::begin(&ctx).await?;
+    let operands = guard.operation_data::<super::operation::TurnRetryOperands>()?;
     let submitted = ctx
         .app
         .engine
-        .submit_input_guarded(
+        .submit_selected_input_projected_guarded(
             tx,
             guard.into_principal(),
             thread,
             InputRequest {
                 plan: false,
-                content,
+                content: operands.content.clone(),
                 delivery: orch_api_contract::threads::Delivery::Queue,
                 client_id: body.client_id,
                 bypass: body.bypass,
             },
+            None,
+            false,
+            Some(&operands.sources),
         )
         .await;
     match submitted {
         Ok(submitted) => {
             let answer = Answer::from(ThreadInputCreateReply {
-                input: submitted.input,
+                input: submitted.input.ok_or_else(|| {
+                    ApiError::internal("the full retry projection is unavailable")
+                })?,
                 seq: submitted.seq,
             });
             Ok(if submitted.created {

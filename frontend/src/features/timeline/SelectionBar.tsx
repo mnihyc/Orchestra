@@ -20,7 +20,7 @@ import { composerWriter } from '@/features/composer/Draft';
 import { ForwardDialog, type ForwardSource } from '@/features/forward/ForwardDialog';
 import { SelectionBar } from '@/features/forward/Selection';
 import { openSideAsk } from '@/features/side-threads/ask';
-import { useForkNow } from '@/features/thread/forkNow';
+import { useImmediateFork } from '@/features/thread/ImmediateFork';
 import { itemsLink, itemText } from '@/features/timeline/ItemActions';
 import type { Item } from '@/generated/api-types';
 import { useThreadReadRef } from '@/realtime/threadReadContext';
@@ -78,7 +78,7 @@ export function TimelineSelectionBar({ threadId, ids, canQuote, onCancel }: Time
   const thread = view.thread;
   const items = ids.flatMap((id) => view.items.get(id) ?? []);
   const words = items.map(itemText).filter((one) => one.trim() !== '').join('\n\n');
-  const quickFork = useForkNow(threadId);
+  const quickFork = useImmediateFork(thread);
 
   // The forks start from the last item picked: through its turn, or through the turn before a person's message, whose
   // words then stand in the new composer.
@@ -207,6 +207,7 @@ export function TimelineSelectionBar({ threadId, ids, canQuote, onCancel }: Time
           </>
         }
       />
+      {quickFork.confirmation}
       <ForwardDialog
         source={forwarding}
         onClose={() => setForwarding(null)}

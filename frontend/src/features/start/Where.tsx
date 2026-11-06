@@ -218,7 +218,7 @@ export function Where({ compact = false, place, options, value, onChange, machin
           value={currentRequest?.environment.id ?? value ?? ''}
           onValueChange={(id) => {
             const row = options.environments.find((each) => each.environment.id === id);
-            if (row !== undefined && row.reason === USE_REQUIRED) {
+            if (row?.reason === USE_REQUIRED) {
               onRequestingChange(row);
               return;
             }

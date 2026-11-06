@@ -1,6 +1,53 @@
 /** Screen transports reuse native fixture projections and preserve each caller's admission. */
-import type { ChatOpening, Node, NodeChatOpening, NodeDocumentPage, NodeKind, NodeRef, Problem } from '../../src/generated/api-types.ts';
-import { Refusal, type Person, type World } from './world.ts';
+import type { ChatOpening, Node, NodeChatOpening, NodeDefaultsOpening, NodeDocumentPage, NodeKind, NodeRef, Problem, ResolvedSetting } from '../../src/generated/api-types.ts';
+import { Refusal, type Answer, type Person, type World } from './world.ts';
+
+type NativePart<T> = readonly [T | null, Problem | null, number | null];
+function splitPart<T>(reply: Answer): NativePart<T> {
+  if (reply.status < 400) return [reply.body as T, null, null];
+  const raw = Object.entries(reply.headers ?? {}).find(([key]) => key.toLowerCase() === 'retry-after')?.[1];
+  const seconds = raw !== undefined && /^\d+$/.test(raw) ? Number(raw) : null;
+  return [null, reply.body as Problem, seconds !== null && Number.isSafeInteger(seconds) ? seconds : null];
+}
+
+/** The same native GET and current browser principal own every member and its original refusal. */
+async function nativePart<T>(world: World, person: Person, path: string): Promise<NativePart<T>> {
+  try { return splitPart<T>(await world.requestFeeds.read(person, path)); }
+  catch (error) { if (error instanceof Refusal) return splitPart<T>(error.answer); throw error; }
+}
+
+const record = (value: unknown): value is Record<string, unknown> => typeof value === 'object' && value !== null && !Array.isArray(value);
+function selectedProvider(rows: ResolvedSetting[] | null, key: string, member?: string): string | null {
+  const resolved = rows?.find((row) => row.key === key)?.value;
+  const value = member === undefined ? resolved : record(resolved) ? resolved[member] : null;
+  return typeof value === 'string' && /^[0-9a-f]{8}-(?:[0-9a-f]{4}-){3}[0-9a-f]{12}$/i.test(value) ? value : null;
+}
+
+async function defaultsOpening(world: World, person: Person, node: Node, query: URLSearchParams): Promise<NodeDefaultsOpening> {
+  const [registry, registry_problem, registry_retry_after] = await nativePart<NonNullable<NodeDefaultsOpening['registry']>>(world, person, '/settings/registry');
+  const [settings, settings_problem, settings_retry_after] = await nativePart<NonNullable<NodeDefaultsOpening['settings']>>(world, person, `/nodes/${node.id}/settings`);
+  const [secrets, secrets_problem, secrets_retry_after]: NativePart<NonNullable<NodeDefaultsOpening['secrets']>> = query.get('secret_names') === 'true'
+    ? await nativePart<NonNullable<NodeDefaultsOpening['secrets']>>(world, person, `/nodes/${node.id}/secrets`) : [null, null, null];
+  const wanted: { setting: string; id: string }[] = [];
+  if (query.get('default_provider_name') === 'true') {
+    const id = selectedProvider(settings, 'agent.default_provider_id');
+    if (id !== null) wanted.push({ setting: 'agent.default_provider_id', id });
+  }
+  if (query.get('embeddings_provider_name') === 'true' && node.kind === 'org') {
+    const id = selectedProvider(settings, 'search.semantic.embeddings', 'provider_id');
+    if (id !== null) wanted.push({ setting: 'search.semantic.embeddings', id });
+  }
+  const providers: NodeDefaultsOpening['providers'] = [];
+  for (const { setting, id } of wanted) {
+    const held = providers.find((entry) => entry.id === id);
+    const [provider, problem, retry_after]: NativePart<NonNullable<NodeDefaultsOpening['providers'][number]['provider']>> = held === undefined
+      ? await nativePart<NonNullable<NodeDefaultsOpening['providers'][number]['provider']>>(world, person, `/providers/${id}`)
+      : [held.provider, held.problem, held.retry_after];
+    providers.push({ setting, id, provider, problem, retry_after });
+  }
+  return { node, registry, registry_problem, registry_retry_after, settings, settings_problem, settings_retry_after,
+    secrets, secrets_problem, secrets_retry_after, providers };
+}
 
 export async function chatOpening(world: World, person: Person, id: string, query: URLSearchParams): Promise<ChatOpening> {
   if (query.has('since')) throw new Refusal(400, 'request.invalid', 'an opening starts without a position');
@@ -28,7 +75,8 @@ export async function nodeChatOpening(world: World, person: Person, id: string, 
   const chosen = scopes.find((scope) => scope.chat.id === query.get('chat_id'))
     ?? scopes.find((scope) => scope.node.kind === query.get('scope')) ?? scopes[0];
   const paging = new URLSearchParams(); if (query.has('limit')) paging.set('limit', query.get('limit') ?? '');
-  return { scopes, opening: chosen === undefined ? null : await chatOpening(world, person, chosen.chat.id, paging) };
+  return { scopes, opening: chosen === undefined ? null : await chatOpening(world, person, chosen.chat.id, paging),
+    ...(query.get('defaults') === 'true' ? { defaults: await defaultsOpening(world, person, own, query) } : {}) };
 }
 
 export async function documentPages(world: World, person: Person, id: string, query: URLSearchParams): Promise<NodeDocumentPage[]> {

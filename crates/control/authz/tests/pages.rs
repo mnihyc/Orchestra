@@ -16,6 +16,140 @@ use serde_json::json;
 use support::{World, group_holder, user_holder};
 
 #[tokio::test]
+async fn pure_agent_gifts_require_recipient_visibility_without_control() {
+    let w = World::new().await;
+    let recipient = w
+        .node_owned_by("thread", w.topic, "Visible recipient", w.boss)
+        .await;
+    assert!(w.can(w.maker, recipient, P::ThreadView).await);
+    assert!(!w.can(w.maker, recipient, P::ThreadInteract).await);
+    let gift = |id| json!({ "rows": [{ "permission": "doc.manage", "add": [{ "holder": { "kind": "agents", "id": id } }] }] });
+    let outcome = w
+        .change(w.maker, Target::Live(w.thread), gift(recipient))
+        .await
+        .unwrap();
+    assert!(outcome.changed);
+    assert!(!w.can(w.maker, recipient, P::ThreadInteract).await);
+    let page = w.read(w.maker, Target::Live(w.thread)).await;
+    assert!(page.rows.iter().any(|row| {
+        row.permission == P::DocManage
+            && row.entries.iter().any(|entry| {
+                entry.holder == orch_access_contract::pages::Holder::Agents { id: recipient }
+            })
+    }));
+
+    let hidden = w
+        .node_owned_by("thread", w.topic, "Hidden recipient", w.boss)
+        .await;
+    w.change(w.boss, Target::Live(hidden), json!({ "whole": "private" }))
+        .await
+        .unwrap();
+    assert!(!w.can(w.maker, hidden, P::ThreadView).await);
+    let epoch = w.epoch().await;
+    let refused = w
+        .change(w.maker, Target::Live(w.thread), gift(hidden))
+        .await;
+    assert!(matches!(refused, Err(ChangeError::Denied(_))));
+    assert_eq!(w.epoch().await, epoch);
+}
+
+#[tokio::test]
+async fn native_page_boundary_runs_once_for_a_whole_change_and_skips_noops() {
+    let w = World::new().await;
+    let reader = w.member("reader").await;
+    let principal = w.principal(Caller::session(w.maker)).await;
+    let change = serde_json::from_value(
+        json!({ "name": [{ "holders": [user_holder(reader)], "choice": "full_interact" }] }),
+    )
+    .unwrap();
+    let mut calls = 0;
+    let mut tx = w.db.pool.begin().await.unwrap();
+    let changed = orch_authz::pages::change_fenced(
+        &mut tx,
+        &principal,
+        Target::Live(w.thread),
+        &change,
+        orch_authz::Policy::default(),
+        &orch_db::audit::Origin::default(),
+        || {
+            calls += 1;
+            Ok::<(), &'static str>(())
+        },
+    )
+    .await
+    .unwrap();
+    assert!(changed.changed);
+    assert_eq!(calls, 1);
+    tx.commit().await.unwrap();
+    assert!(w.can(reader, w.thread, P::ThreadInteract).await);
+    assert_eq!(w.audit().await.len(), 6, "all native audit tails completed");
+
+    let mut tx = w.db.pool.begin().await.unwrap();
+    let unchanged = orch_authz::pages::change_fenced(
+        &mut tx,
+        &principal,
+        Target::Live(w.thread),
+        &change,
+        orch_authz::Policy::default(),
+        &orch_db::audit::Origin::default(),
+        || Err("a no-op must not reach the first-effect boundary"),
+    )
+    .await
+    .unwrap();
+    assert!(!unchanged.changed);
+    assert_eq!(unchanged.revision, changed.revision);
+    assert_eq!(unchanged.epoch, changed.epoch);
+    tx.rollback().await.unwrap();
+}
+
+#[tokio::test]
+async fn native_page_boundary_refusal_keeps_its_cause_and_precedes_mutation() {
+    let w = World::new().await;
+    let reader = w.member("reader").await;
+    let principal = w.principal(Caller::session(w.maker)).await;
+    let change = serde_json::from_value(
+        json!({ "name": [{ "holders": [user_holder(reader)], "choice": "full_interact" }] }),
+    )
+    .unwrap();
+    let before = w.read(w.maker, Target::Live(w.thread)).await;
+    let epoch = w.epoch().await;
+    let mut tx = w.db.pool.begin().await.unwrap();
+    let refused = orch_authz::pages::change_fenced(
+        &mut tx,
+        &principal,
+        Target::Live(w.thread),
+        &change,
+        orch_authz::Policy::default(),
+        &orch_db::audit::Origin::default(),
+        || Err("the exact caller boundary cause"),
+    )
+    .await;
+    assert!(matches!(
+        refused,
+        Err(orch_authz::pages::ChangeFailure::BeforeEffect(
+            "the exact caller boundary cause"
+        ))
+    ));
+    // Inspect inside the still-open transaction: rollback cannot hide an early write.
+    let after = orch_authz::pages::read(
+        &mut tx,
+        &principal,
+        Target::Live(w.thread),
+        orch_authz::Policy::default(),
+    )
+    .await
+    .unwrap();
+    assert_eq!(after.revision, before.revision);
+    assert!(after.rows.iter().all(|row| row.entries.is_empty()));
+    assert_eq!(
+        orch_db::queries::access::epoch(&mut tx).await.unwrap(),
+        epoch
+    );
+    tx.rollback().await.unwrap();
+    assert!(w.audit().await.is_empty());
+}
+
+#[tokio::test]
 async fn a_new_things_page_is_its_owners_and_follows_the_defaults_throughout() {
     let w = World::new().await;
     let page = w.read(w.maker, Target::Live(w.thread)).await;

@@ -9,6 +9,9 @@ mod places;
 mod resources;
 mod support;
 
+#[path = "agent_reach/scopes.rs"]
+mod scopes;
+
 use orch_api_contract::binding::NewEnvironmentAccess;
 use orch_api_contract::environment::{
     AgentReachOverview, Environment, EnvironmentAgentReachGet, MachineEnvironmentCreate,

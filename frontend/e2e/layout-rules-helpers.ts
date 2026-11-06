@@ -232,7 +232,11 @@ export async function auditOpenMenus(page: Page, selectors: string[]): Promise<L
   for (const selector of selectors) {
     const trigger = page.locator(selector);
     if (!await dismissTooltips(page, selector)) continue;
-    await trigger.click();
+    // A tab's click selects it; its announced context menu has a separate keyboard entrance.
+    if (await trigger.getAttribute('role') === 'tab') {
+      await trigger.focus();
+      await trigger.press('Shift+F10');
+    } else await trigger.click();
     await expect(page.locator('[role="menu"]:visible,[role="listbox"]:visible').first()).toBeVisible();
     faults.push(...(await auditPage(page)).faults);
     faults.push(...await auditHighlightedOptions(page));

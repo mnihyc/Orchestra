@@ -77,6 +77,7 @@ fn terminal_end(turn: &TurnRow) -> Result<TurnEnd, EngineError> {
 fn failure_class(error: &EngineError) -> (&'static str, Option<String>) {
     use orch_db::DbError;
     match error {
+        EngineError::BeforeEffect(_) => ("before_effect", None),
         EngineError::Db(DbError::Unique { .. }) => ("db_unique", Some("23505".into())),
         EngineError::Db(DbError::Reference { .. }) => ("db_reference", Some("23503".into())),
         EngineError::Db(DbError::Check { .. }) => ("db_check", Some("23514".into())),
