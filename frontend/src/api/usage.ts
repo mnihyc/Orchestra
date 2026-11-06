@@ -40,6 +40,7 @@ import type {
 export interface UsageFilters {
   effort?: string;
   tier?: string;
+  tier_unknown?: boolean;
   program?: string;
   outcome?: UsageOutcomeFilter;
   org_id?: string;

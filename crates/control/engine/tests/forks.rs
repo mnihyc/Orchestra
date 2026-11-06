@@ -5,6 +5,8 @@
     reason = "a test fails by panicking"
 )]
 
+#[path = "forks/agent_access.rs"]
+mod agent_access;
 #[path = "forks/approval_mode.rs"]
 mod approval_mode;
 #[path = "forks/call_recovery.rs"]
@@ -19,6 +21,8 @@ mod history_size;
 mod hosting;
 #[path = "forks/native_transfer.rs"]
 mod native_transfer;
+#[path = "shared/mod.rs"]
+mod shared;
 #[path = "forks/snapshot.rs"]
 mod snapshot;
 
@@ -293,6 +297,7 @@ impl Rig {
             topic_id: None,
             name: None,
             access: None,
+            agent_access: None,
             history: None,
             to: Some(ForkTo {
                 provider_id: Some(self.other_provider),
@@ -1223,6 +1228,7 @@ impl Rig {
             topic_id: None,
             name: Some("Trial".to_owned()),
             access: None,
+            agent_access: None,
             history: None,
             to: None,
             environment: None,

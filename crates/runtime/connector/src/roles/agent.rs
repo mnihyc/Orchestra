@@ -516,6 +516,7 @@ impl AgentRole {
             process.keep_for_turn(body.turn_id, call.context.id);
         }
         let turn = AdapterTurn {
+            native_wake: body.native_wake,
             thread_id: body.thread_id,
             turn_id: body.turn_id,
             text: body.text,
@@ -615,6 +616,7 @@ fn typed(name: &str, kind: Option<FieldType>, text: String) -> Result<Json, Comm
         )
     };
     match kind {
+        Some(FieldType::Json) => serde_json::from_str(&text).map_err(|_| unfit("valid JSON")),
         Some(FieldType::Boolean) => match text.as_str() {
             "true" => Ok(Json::Bool(true)),
             "false" => Ok(Json::Bool(false)),

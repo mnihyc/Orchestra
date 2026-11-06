@@ -22,8 +22,10 @@ fn every_request_of_signing_in_is_bound_single_sign_on_and_its_test_included() {
     for route in orch_api_contract::auth::ROUTES {
         assert!(bound.contains(route.name), "{}", route.name);
     }
-    // The contract's requests of signing in, the session's As admin switch and its openings among them.
-    assert_eq!(orch_api_contract::auth::ROUTES.len(), 42);
+    // Sign-in, current-session authority, admin openings and both recent key activity reads.
+    assert_eq!(orch_api_contract::auth::ROUTES.len(), 45);
+    assert!(bound.contains("MeTokenActivityList"));
+    assert!(bound.contains("OrgTokenActivityList"));
     assert!(bound.contains("AdminIdentityProviderTest"));
 }
 

@@ -7,6 +7,7 @@
 
 mod realtime_support;
 
+use crate::support::FullPermissionPageReply;
 use orch_api_contract::access::{PageChange, PageChangeWhole, PermissionPageUpdate};
 use orch_api_contract::documents::{
     DocumentDelete, DocumentMove, DocumentMoveBody, DocumentRestore, NodeDocumentCreate,
@@ -190,6 +191,7 @@ async fn a_document_created_deleted_restored_moved_and_made_private_reaches_both
         })
         .send()
         .await
+        .full_permission_page()
         .ok();
     for reader in [&mut ada, &mut bea] {
         counts(reader, &[(rig.project, 0)]).await;

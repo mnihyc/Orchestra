@@ -4,6 +4,7 @@ mod desk;
 mod places;
 mod support;
 
+use crate::support::{FullArchiveReply as _, FullCommentMutationReply as _};
 use chrono::Duration;
 use desk::{Desk, text};
 use orch_api_contract::common::ErrorCode;
@@ -96,6 +97,7 @@ async fn edit(
         .body(body)
         .send()
         .await
+        .full_comment_mutation()
 }
 
 fn said(comment: &DocumentComment) -> String {
@@ -482,6 +484,7 @@ async fn an_archived_place_cannot_return_a_retained_edit_as_an_allowed_mutation(
         .body(&places::archive_body(&desk.world, &desk.ada.token, desk.topic, true).await)
         .send()
         .await
+        .full_archive()
         .ok();
     let kept = state(&desk, document, comment.id).await?;
     assert_eq!(

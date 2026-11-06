@@ -145,6 +145,11 @@ pub struct FakeShell {
     /// A deliberate pause inside replay proves that its boundary is independent of timing.
     pub replay_pause: Mutex<Option<Duration>>,
     pub live_after_replay: Mutex<Vec<u8>>,
+    /// The single native attachment used by a control has finished consuming its accepted input.
+    pub input_ended: AtomicBool,
+    input_paused: AtomicBool,
+    input_wake: tokio::sync::Notify,
+    input_pause_ack: Mutex<Option<tokio::sync::oneshot::Sender<()>>>,
 }
 
 impl FakeShell {
@@ -162,7 +167,26 @@ impl FakeShell {
             busy: AtomicBool::new(false),
             replay_pause: Mutex::new(None),
             live_after_replay: Mutex::new(Vec::new()),
+            input_ended: AtomicBool::new(false),
+            input_paused: AtomicBool::new(false),
+            input_wake: tokio::sync::Notify::new(),
+            input_pause_ack: Mutex::new(None),
         })
+    }
+
+    /// Stops the actual native reader before it consumes further input/returns tunnel credit.
+    /// The acknowledgement witnesses its real loop, not a sleep or a guessed buffer state.
+    pub async fn pause_input(&self) {
+        let (send, wait) = tokio::sync::oneshot::channel();
+        *lock(&self.input_pause_ack) = Some(send);
+        self.input_paused.store(true, Ordering::SeqCst);
+        self.input_wake.notify_one();
+        tokio::time::timeout(PATIENCE, wait).await.unwrap().unwrap();
+    }
+
+    pub fn resume_input(&self) {
+        self.input_paused.store(false, Ordering::SeqCst);
+        self.input_wake.notify_one();
     }
 
     /// What the shell remembers of what it printed.
@@ -216,6 +240,14 @@ impl FakeShell {
 
     /// Serves one attachment until it ends.
     async fn serve(self: Arc<Self>, mut tunnel: Tunnel) {
+        struct End<'a>(&'a AtomicBool);
+        impl Drop for End<'_> {
+            fn drop(&mut self) {
+                self.0.store(true, Ordering::SeqCst);
+            }
+        }
+        self.input_ended.store(false, Ordering::SeqCst);
+        let _ended = End(&self.input_ended);
         let (signals, mut told) = mpsc::unbounded_channel();
         // One screen at a time: a second tunnel ends the first, and says why.
         let before = lock(&self.attachment).replace(signals);
@@ -255,7 +287,13 @@ impl FakeShell {
         let mut line = String::new();
         let mut buffer = vec![0_u8; 16 * 1024];
         loop {
+            if self.input_paused.load(Ordering::SeqCst) {
+                if let Some(ack) = lock(&self.input_pause_ack).take() {
+                    let _ = ack.send(());
+                }
+            }
             tokio::select! {
+                () = self.input_wake.notified() => {},
                 signal = told.recv() => {
                     match signal {
                         Some(Signal::Taken) => tunnel.fail("another screen took this shell"),
@@ -271,7 +309,7 @@ impl FakeShell {
                         *lock(&self.size) = (cols, rows);
                     }
                 }
-                read = tunnel.read(&mut buffer) => {
+                read = tunnel.read(&mut buffer), if !self.input_paused.load(Ordering::SeqCst) => {
                     let Ok(count) = read else { break };
                     if count == 0 {
                         break;

@@ -38,6 +38,27 @@ pub const NOTICE_MESSAGE: &str = "chat.message";
 /// The kind of notification that tells a person they were named.
 pub const NOTICE_MENTION: &str = "mention";
 
+/// The one native mention-preview trial, inside its existing guarded transaction.
+/// Its fixed private name is never a caller operand; no commit or writer escapes.
+pub async fn begin_mention_preview(conn: &mut Conn) -> Result<(), DbError> {
+    sqlx::query("SAVEPOINT orch_chat_mention_preview")
+        .execute(conn)
+        .await?;
+    Ok(())
+}
+
+/// Remove every trial post/input/custody/outbox change before the final current Read.
+/// The outer transaction keeps only its earlier locks and authority/read bookkeeping.
+pub async fn discard_mention_preview(conn: &mut Conn) -> Result<(), DbError> {
+    sqlx::query("ROLLBACK TO SAVEPOINT orch_chat_mention_preview")
+        .execute(&mut *conn)
+        .await?;
+    sqlx::query("RELEASE SAVEPOINT orch_chat_mention_preview")
+        .execute(conn)
+        .await?;
+    Ok(())
+}
+
 // ------------------------------------------------------------------ chats
 
 macro_rules! chat_columns {
@@ -122,6 +143,18 @@ pub async fn chat_of_node(conn: &mut Conn, node: Id) -> Result<Option<ChatRow>, 
     ))
     .bind(node)
     .fetch_optional(conn)
+    .await?)
+}
+
+/// Stored node-chat identities in one native read, without message contents.
+pub async fn chats_of_nodes(conn: &mut Conn, nodes: &[Id]) -> Result<Vec<ChatRow>, DbError> {
+    Ok(sqlx::query_as(concat!(
+        "SELECT ",
+        chat_columns!(),
+        " FROM chats WHERE node_id = ANY($1)"
+    ))
+    .bind(nodes)
+    .fetch_all(conn)
     .await?)
 }
 
@@ -701,6 +734,35 @@ pub async fn message(conn: &mut Conn, chat: Id, id: Id) -> Result<Option<Message
     .await?)
 }
 
+/// Retained identity/recipient association for accepted work; never reloads snapshot message content.
+#[derive(Debug, Clone, sqlx::FromRow)]
+pub struct MessageOriginRow {
+    /// The retained message identity.
+    pub id: Id,
+    /// Its actual chat.
+    pub chat_id: Id,
+    /// Ordinary message or system event.
+    pub kind: String,
+    /// The original person, when retained.
+    pub author_id: Option<Id>,
+    /// An agent author, which cannot become a human agent ask.
+    pub author_thread_id: Option<Id>,
+    /// Actual accepted recipient/input pairs.
+    pub asked_agents: Json,
+    /// Snapshot contents may be removed without undoing accepted work.
+    pub deleted_at: Option<DateTime<Utc>>,
+}
+
+/// Read only retained identity/association evidence for a message, including a deleted row.
+pub async fn message_origin(
+    conn: &mut Conn,
+    chat: Id,
+    id: Id,
+) -> Result<Option<MessageOriginRow>, DbError> {
+    Ok(sqlx::query_as("SELECT id,chat_id,kind,author_id,author_thread_id,asked_agents,deleted_at FROM chat_messages WHERE chat_id=$1 AND id=$2")
+        .bind(chat).bind(id).fetch_optional(conn).await?)
+}
+
 /// The newest ordinary message of each already authorized chat, in one query.
 /// Deleted messages stay the newest; their projection carries an empty excerpt.
 pub async fn last_messages(conn: &mut Conn, chats: &[Id]) -> Result<Vec<MessageRow>, DbError> {
@@ -798,6 +860,17 @@ pub async fn delete_message(
     conn: &mut Conn,
     id: Id,
     by: Id,
+    seq: Seq,
+    at: DateTime<Utc>,
+) -> Result<MessageRow, DbError> {
+    delete_message_by(conn, id, Some(by), seq, at).await
+}
+
+/// The same tombstone with an explicit non-person actor. Agent identity lives in the audit row.
+pub async fn delete_message_by(
+    conn: &mut Conn,
+    id: Id,
+    by: Option<Id>,
     seq: Seq,
     at: DateTime<Utc>,
 ) -> Result<MessageRow, DbError> {

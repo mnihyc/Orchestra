@@ -74,6 +74,7 @@ async fn shipped_catalogue(world: &World, doc: &Value) {
 
 fn rate(input: &str) -> Rate {
     Rate {
+        web_search_per_call: None,
         input_per_mtok: input.to_owned(),
         cached_input_per_mtok: "0.1".to_owned(),
         output_per_mtok: "10".to_owned(),

@@ -1,5 +1,11 @@
 //! Observed first steps in a readable org and the caller's portable setup choices.
 
+use crate::operations::{OperationSpec as Op, TargetResolver as Target};
+use orch_access_contract::key_scope::KeyAction::{Read, Write};
+use orch_access_contract::key_scope::KeyIdentityKind as I;
+use orch_access_contract::key_scope::KeyTargetKind::{Identity, Object};
+use orch_access_contract::permissions::ObjectKind as K;
+
 use crate::documents::DocumentRef;
 use crate::nodes::NodeRef;
 use crate::personal::PersonalState;
@@ -165,7 +171,13 @@ pub struct FirstSteps {
 
 crate::endpoints! {
     /// Reads actual setup facts of a currently readable org.
-    MeFirstStepsGet: GET "/me/first-steps", Rule("user; org View before setup facts"), query FirstStepsGetQuery, none, json FirstSteps, 200;
+    MeFirstStepsGet: GET "/me/first-steps", Rule("user; org View before setup facts"), query FirstStepsGetQuery, none, json FirstSteps, 200,
+        operation Op::single(
+            Read,
+            &[Identity(I::Account), Object(K::Org)],
+            Target::Resolved("current_account_and_organization"),
+        );
     /// Saves this person's choice and dismissal, preserving unrelated interface state.
-    MeFirstStepsSet: PUT "/me/first-steps", User, none, json FirstStepsChoice, json PersonalState, 200;
+    MeFirstStepsSet: PUT "/me/first-steps", User, none, json FirstStepsChoice, json PersonalState, 200,
+        operation Op::returning(Write, &[Identity(I::Account)], Target::CurrentAccount);
 }

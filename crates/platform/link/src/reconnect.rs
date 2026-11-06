@@ -49,6 +49,17 @@ pub enum DialError {
 pub trait Dialer: Send + Sync {
     /// Connects to an endpoint, under the trust path it names.
     async fn dial(&self, endpoint: &Endpoint) -> Result<Connection, DialError>;
+
+    /// A non-admitting entrance probe; older in-memory transports have no probe service.
+    async fn probe(
+        &self,
+        endpoint: &Endpoint,
+    ) -> Result<orch_link_contract::gateways::GatewayMeasurement, DialError> {
+        Err(DialError::Connect(format!(
+            "round-trip probing is unavailable for {}",
+            endpoint.url
+        )))
+    }
 }
 
 /// The endpoints of a machine and which of them worked last.
@@ -92,6 +103,18 @@ impl Endpoints {
     #[must_use]
     pub fn is_empty(&self) -> bool {
         self.list.is_empty()
+    }
+
+    /// The configured candidates before last-success preference is applied.
+    #[must_use]
+    pub fn list(&self) -> &[Endpoint] {
+        &self.list
+    }
+
+    /// Tie breaker only; measured Automatic order takes precedence over it.
+    #[must_use]
+    pub fn last_worked(&self) -> Option<&str> {
+        self.last_worked.as_deref()
     }
 }
 

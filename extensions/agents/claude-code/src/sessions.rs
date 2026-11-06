@@ -459,6 +459,12 @@ pub fn settings_json(setup: &HarnessSetup, spec: &SessionSpec, turn: &TurnSettin
     if setup.managed_home {
         settings.extend(managed_settings(keeps_memory(spec)));
     }
+    if setup.managed_home {
+        if let Some(env) = settings.get_mut("env").and_then(Json::as_object_mut) {
+            env.insert("CLAUDE_CODE_DISABLE_BACKGROUND_TASKS".to_owned(), json!(if spec.settings.background_wake { "0" } else { "1" }));
+            env.insert("CLAUDE_CODE_PRINT_BG_WAIT_CEILING_MS".to_owned(), json!("0"));
+        }
+    }
     let own_tools = !through_executor(spec);
     if own_tools {
         settings.insert(
@@ -521,7 +527,7 @@ pub fn settings_json(setup: &HarnessSetup, spec: &SessionSpec, turn: &TurnSettin
         Preflight::Off => true,
         Preflight::Auto => matches!(spec.provider, ProviderAccess::Forwarded { .. }),
     };
-    if own_tools && skip_preflight {
+    if skip_preflight {
         settings.insert("skipWebFetchPreflight".to_owned(), json!(true));
     }
     // A plan the harness writes goes into the thread's directory, never into the provider's home that other
@@ -704,6 +710,8 @@ pub fn environment(launch: &Launch<'_>) -> BTreeMap<String, String> {
     if setup.managed_home {
         env.extend(managed_environment(keeps_memory(spec)));
     }
+    env.insert("CLAUDE_CODE_DISABLE_BACKGROUND_TASKS".to_owned(), if spec.settings.background_wake { "0" } else { "1" }.to_owned());
+    env.insert("CLAUDE_CODE_PRINT_BG_WAIT_CEILING_MS".to_owned(), "0".to_owned());
     // This native switch is read at process start and must follow the turn's approval mode.
     if turn.approval_mode == ApprovalMode::Bypass {
         env.insert(BYPASS_ENV.to_owned(), "1".to_owned());
@@ -722,6 +730,31 @@ pub fn environment(launch: &Launch<'_>) -> BTreeMap<String, String> {
         spec.settings.subagent_limits.depth.to_string(),
     );
     env
+}
+
+/// The reviewer's declared model is resolved from the same fully composed environment that the
+/// native process receives. Session IDs, origin and credentials do not alter model environment.
+pub fn approval_reviewer(
+    setup: &HarnessSetup,
+    spec: &SessionSpec,
+    turn: &TurnSettings,
+) -> Result<
+    Option<orch_agent_contract::review::ApprovalReviewer>,
+    orch_agent_contract::adapter::AdapterError,
+> {
+    let mut settings = spec.settings.clone();
+    settings.model = turn.model.clone();
+    settings.approval_mode = turn.approval_mode;
+    settings.params = turn.params.clone();
+    let env = environment(&Launch {
+        setup,
+        spec,
+        session_id: "",
+        origin: &Origin::New,
+        turn,
+        oauth_token: None,
+    });
+    crate::review::reviewer_in_environment(&settings, &env)
 }
 
 /// The arguments of a session's process.
@@ -811,7 +844,10 @@ pub fn arguments(launch: &Launch<'_>) -> Vec<String> {
     }
     args.push("--system-prompt-snapshot".to_owned());
     args.push("off".to_owned());
-    args.extend(tool_arguments(through_executor(spec)));
+    args.extend(tool_arguments(
+        through_executor(spec),
+        turn.params.get("web_search").and_then(Json::as_str) == Some("live"),
+    ));
     if !through_executor(spec) {
         let directory = spec.settings.directory.trim_end_matches('/');
         if spec.settings.cwd.trim_end_matches('/') != directory {
@@ -900,6 +936,7 @@ mod tests {
                 instructions: "You are working inside Orch.".into(),
                 available_models: vec!["gpt-x".to_owned()],
                 subagent_limits: Default::default(),
+                background_wake: true,
                 memory: Some(SessionMemory {
                     directory: "/workspace/web/.orch/memory".into(),
                     kept_by: NoteKeeper::Harness,
@@ -1508,29 +1545,23 @@ mod tests {
     }
 
     #[test]
-    fn nothing_that_starts_a_turn_by_itself_is_left_on() {
-        let launch = built(&setup(), &spec(), &turn(), &Origin::New);
-        assert_eq!(
-            launch
-                .env
-                .get("CLAUDE_CODE_DISABLE_BACKGROUND_TASKS")
-                .map(String::as_str),
-            Some("1")
-        );
-        assert!(launch.args.contains(&"--disallowed-tools".to_owned()));
-        let mut on = setup();
-        on.config.background_tasks = true;
-        assert_eq!(
-            built(&on, &spec(), &turn(), &Origin::New).env["CLAUDE_CODE_DISABLE_BACKGROUND_TASKS"],
-            "1"
-        );
-        // A person's own profile keeps its previous explicit opt-in.
-        on.managed_home = false;
-        assert!(
-            !built(&on, &spec(), &turn(), &Origin::New)
-                .env
-                .contains_key("CLAUDE_CODE_DISABLE_BACKGROUND_TASKS")
-        );
+    fn background_wake_controls_only_owned_tasks_and_keeps_other_autonomous_work_disabled() {
+        let setup = setup();
+        for enabled in [false, true] {
+            let mut session = spec();
+            session.settings.background_wake = enabled;
+            let launch = built(&setup, &session, &turn(), &Origin::New);
+            let expected = if enabled { "0" } else { "1" };
+            assert_eq!(launch.env["CLAUDE_CODE_DISABLE_BACKGROUND_TASKS"], expected);
+            assert_eq!(launch.env["CLAUDE_CODE_PRINT_BG_WAIT_CEILING_MS"], "0");
+            assert_eq!(launch.env["CLAUDE_CODE_DISABLE_WORKFLOWS"], "1");
+            assert_eq!(launch.env["CLAUDE_CODE_DISABLE_AGENT_VIEW"], "1");
+            let settings: Json = serde_json::from_str(&after(&launch.args, "--settings").unwrap()).unwrap();
+            assert_eq!(settings["env"]["CLAUDE_CODE_DISABLE_BACKGROUND_TASKS"], expected);
+            assert_eq!(settings["disableRemoteControl"], true);
+            assert_eq!(settings["disableAllHooks"], true);
+        }
+        assert_eq!(managed_environment(false)["CLAUDE_CODE_DISABLE_BACKGROUND_TASKS"], "1");
     }
 
     #[test]
@@ -1753,5 +1784,98 @@ mod tests {
         };
         turn.params = json!({});
         assert!(settings(&turn, &own).get("skipWebFetchPreflight").is_none());
+    }
+    #[test]
+    fn auto_reviewer_uses_the_actual_profile_alias_and_current_allowed_models_without_rewriting_env()
+     {
+        let mut setup = setup();
+        let mut session = spec();
+        session.settings.model = "claude-opus-5".into();
+        session.settings.approval_mode = ApprovalMode::Auto;
+        session.settings.available_models = vec!["claude-opus-5".into(), "claude-sonnet-5".into()];
+        let mut wanted = turn();
+        wanted.model = session.settings.model.clone();
+        wanted.approval_mode = ApprovalMode::Auto;
+        assert_eq!(
+            approval_reviewer(&setup, &session, &wanted)
+                .unwrap()
+                .unwrap()
+                .model,
+            "claude-opus-5"
+        );
+        setup.profile_env.insert(
+            "ANTHROPIC_DEFAULT_SONNET_MODEL".into(),
+            "claude-sonnet-5".into(),
+        );
+        assert_eq!(
+            approval_reviewer(&setup, &session, &wanted)
+                .unwrap()
+                .unwrap()
+                .model,
+            "claude-sonnet-5"
+        );
+        session.settings.available_models = vec!["claude-opus-5".into()];
+        assert_eq!(
+            approval_reviewer(&setup, &session, &wanted)
+                .unwrap()
+                .unwrap()
+                .model,
+            "claude-opus-5"
+        );
+        let process = built(&setup, &session, &wanted, &Origin::New);
+        assert_eq!(
+            process.env["ANTHROPIC_DEFAULT_SONNET_MODEL"],
+            "claude-sonnet-5"
+        );
+        assert_eq!(process.env["ANTHROPIC_MODEL"], "claude-opus-5");
+        assert_eq!(process.env["CLAUDE_CODE_SUBAGENT_MODEL"], "claude-opus-5");
+        session.settings.available_models.clear();
+        assert!(approval_reviewer(&setup, &session, &wanted).is_err());
+        wanted.approval_mode = ApprovalMode::OnRequest;
+        assert!(
+            approval_reviewer(&setup, &session, &wanted)
+                .unwrap()
+                .is_none()
+        );
+    }
+
+    #[test]
+    fn a_next_turn_reviewer_uses_that_turns_model_and_checks_its_existing_allowlist() {
+        let setup = setup();
+        let mut session = spec();
+        session.settings.model = "claude-opus-5".into();
+        session.settings.approval_mode = ApprovalMode::Auto;
+        session.settings.available_models = vec!["claude-opus-5".into(), "claude-sonnet-5".into()];
+        let mut wanted = turn();
+        wanted.model = "claude-sonnet-5".into();
+        wanted.approval_mode = ApprovalMode::Auto;
+        assert_eq!(
+            approval_reviewer(&setup, &session, &wanted)
+                .unwrap()
+                .unwrap()
+                .model,
+            "claude-sonnet-5"
+        );
+        session.settings.available_models = vec!["claude-opus-5".into()];
+        assert!(approval_reviewer(&setup, &session, &wanted).is_err());
+        assert_eq!(session.settings.model, "claude-opus-5");
+    }
+    #[test]
+    fn separated_sessions_keep_web_fetch_and_enable_search_only_when_selected() {
+        let mut session = spec();
+        session.exec.executor = Some("orch-exec".into());
+        session.exec.tool_set = Some("claude-code".into());
+        let mut wanted = turn();
+        for mode in ["disabled", "live"] {
+            wanted.params = json!({"web_search":mode});
+            let launch = built(&setup(), &session, &wanted, &Origin::New);
+            let tools = after(&launch.args, "--tools").unwrap();
+            let tools: Vec<_> = tools.split(',').collect();
+            assert!(tools.contains(&"WebFetch"));
+            assert_eq!(tools.contains(&"WebSearch"), mode == "live");
+            assert!(
+                !tools.contains(&"Bash") && !tools.contains(&"Read") && !tools.contains(&"Write")
+            );
+        }
     }
 }

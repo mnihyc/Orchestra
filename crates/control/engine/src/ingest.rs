@@ -444,7 +444,7 @@ fn subagent_state_only(kind: &str, payload: &Json, patch: &Json) -> bool {
             .get("tool")
             .and_then(Json::as_object)
             .is_some_and(|tool| {
-                !tool.is_empty() && tool.keys().all(|key| key == "state" || key == "model")
+                !tool.is_empty() && tool.keys().all(|key| matches!(key.as_str(), "state" | "model" | "name" | "role"))
             })
 }
 
@@ -719,6 +719,12 @@ impl Engine {
             }
             Event::SessionTitle(title) => self.on_session_title(unit, batch, &title).await,
             Event::SessionLost(lost) => self.on_session_lost(unit, batch, &lost).await,
+            Event::BackgroundTasks(report) => {
+                if let Some(thread) = threads::thread(unit.conn, batch.thread_id).await? {
+                    self.observe_background_tasks(unit, &thread, &batch.segment, &report).await?;
+                }
+                Ok(())
+            }
             Event::TurnStarted(started) => self.on_turn_started(unit, batch, &started).await,
             Event::ItemStarted(started) => self.on_item_started(unit, batch, &started).await,
             Event::ItemDelta(delta) => self.on_item_delta(unit, batch, &delta).await,
@@ -950,11 +956,7 @@ impl Engine {
             &thread,
             &turn,
             TurnEnd {
-                state: if turn.state == turn_state::RUNNING {
-                    turn_state::INTERRUPTED
-                } else {
-                    turn_state::FAILED
-                },
+                state: turn_state::FAILED,
                 error: Some(error_json("session_lost", &message, true)),
                 // With no confirmation that the turn began, its input still needs
                 // a decision. Keep it in the queue and wait for a person before
@@ -964,7 +966,7 @@ impl Engine {
                 } else {
                     InputAfter::Keep
                 },
-                then_block: (turn.state == turn_state::STARTING).then(|| Blocked {
+                then_block: (turn.state == turn_state::STARTING).then_some(Blocked {
                     reason: "error",
                     detail: Some(message),
                 }),
@@ -1279,11 +1281,32 @@ impl Engine {
             batch.segment.agent_id,
         )
         .await?;
-        let descriptor = agent
-            .as_ref()
-            .map(crate::harnesses::descriptor_of)
-            .transpose()?
-            .flatten();
+        let descriptor = if let Some(mut agent) = agent {
+            // Native observations depend only on their reporting declaration. An unrelated
+            // legacy display override must not prevent a later usage report from committing;
+            // terminal accounting still validates the complete profile in its retained work.
+            let reporting = agent.descriptor_overrides.get("capabilities").map(|value| {
+                value.as_object().map_or_else(
+                    || value.clone(),
+                    |members| {
+                        let fields: serde_json::Map<_, _> = ["usage_tokens", "usage_context"]
+                            .into_iter()
+                            .filter_map(|name| {
+                                members
+                                    .get(name)
+                                    .map(|value| (name.to_owned(), value.clone()))
+                            })
+                            .collect();
+                        Json::Object(fields)
+                    },
+                )
+            });
+            agent.descriptor_overrides =
+                reporting.map_or_else(|| json!({}), |value| json!({"capabilities": value}));
+            crate::harnesses::descriptor_of(&agent)?
+        } else {
+            None
+        };
         Ok(descriptor.map_or((true, true), |descriptor| {
             (
                 descriptor.capabilities.usage_tokens,
@@ -1366,12 +1389,12 @@ impl Engine {
             && completed.status == TurnOutcome::Failed
         {
             // What passes (`provider_busy`, `provider_unreachable`) and every failure that no row knows leave
-            // the provider as it was. A limit of the plan closes it until the time the vendor names; a refused
-            // credential puts it in `error`; a limit that covers one family of models or the spending, which
-            // another model may get round, closes nothing.
+            // the provider as it was. Vendor quota remains an observation attached to this
+            // actual failure, never a gate on later requests. A refused credential still
+            // puts the provider in `error` under its existing recovery rules.
             match failure.code.as_str() {
                 "provider_exhausted" if !failure.retryable => {
-                    self.close_provider_by_limit(unit, batch.segment.provider_id, failure)
+                    self.record_provider_limit(unit, batch.segment.provider_id, failure)
                         .await?;
                 }
                 "provider_unauthorized" => {
@@ -1751,6 +1774,9 @@ impl Engine {
             return Ok(());
         };
         let mut payload = normalized(&kind, &complete_payload);
+        if let Some(tasks) = existing.as_ref().and_then(|item| item.payload.get("background_tasks")) {
+            payload["background_tasks"] = tasks.clone();
+        }
         if kind == "plan" {
             if let Some(object) = payload.as_object_mut() {
                 object.remove("decision");

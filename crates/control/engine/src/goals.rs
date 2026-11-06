@@ -9,14 +9,14 @@
 //! also takes their own use of the thread's model, since the continuations run on their access. Every act is named in
 //! the thread's history and audited.
 //!
-//! **The loop** ([`drive`]) runs from the engine's look at a thread, after the end of a turn has been accounted. It
+//! **The loop** (`drive`) runs from the engine's look at a thread, after the end of a turn has been accounted. It
 //! counts the turns that ended into the goal's figures, acts on what the agent reported with its `goal` tool, stops the
 //! goal at a limit that is set, and otherwise queues one continuation. It waits while a question, an approval or a
 //! plan asks a person, while the queue is held or holds inputs, while the thread is blocked and while call recovery
 //! has work in hand.
 //!
 //! **"Met"** is the agent's report, checked by the place's helper model against the condition where there is one
-//! ([`check`]); a "not yet" starts the next turn with its reason. Without a helper model the report decides, and the
+//! (`check`); a "not yet" starts the next turn with its reason. Without a helper model the report decides, and the
 //! goal's line says so.
 //!
 //! **Limits** (`thread.goal.max_turns`, `thread.goal.max_minutes` and `thread.goal.max_credits`) default to none. A
@@ -688,8 +688,7 @@ impl Engine {
             )
             .await?;
             // The first turn begins at once where nothing else is in the way; otherwise the loop finds its time.
-            self.continue_goal_in(&mut unit, &thread, &goal, Some(&caller))
-                .await?;
+            self.continue_goal_in(&mut unit, &thread, &goal).await?;
             publish(&mut unit, thread_id).await?;
             unit.wake(thread_id);
             let thread = threads::thread(&mut *unit.conn, thread_id)
@@ -981,15 +980,24 @@ impl Engine {
         unit: &mut Unit<'_>,
         thread: &ThreadRow,
         goal: &GoalRow,
-    ) -> Result<Option<Caller>, EngineError> {
+        request: &inputs::InputRequest,
+    ) -> Result<Option<inputs::InputCallers>, EngineError> {
         let Some(person) = goal.set_by else {
             return Ok(None);
         };
         let Some(authority) = inputs::saved_authority(goal.set_authority.as_ref())? else {
             return Ok(None);
         };
-        let now = Time::new(unit.now());
-        inputs::authority_caller(unit.conn, person, thread.node_id, now, &authority).await
+        inputs::input_authority_for_request(
+            unit,
+            thread,
+            request,
+            None,
+            person,
+            &authority,
+            self.inner.clock.as_ref(),
+        )
+        .await
     }
 
     /// Takes a person's cancellation of a goal's queued continuation as a pause: the loop would only queue it again.

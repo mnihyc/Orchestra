@@ -14,6 +14,9 @@ use orch_db::DbError;
 /// A part the engine stands on failed, or what it stores does not read.
 #[derive(Debug, thiserror::Error)]
 pub enum EngineError {
+    /// An entry point refused its first effect. Preserve the opaque original error for that caller.
+    #[error(transparent)]
+    BeforeEffect(Box<dyn std::error::Error + Send + Sync>),
     /// A requested informational mount comparison could not read one of its locations.
     #[error("{0}")]
     MountFingerprint(String),

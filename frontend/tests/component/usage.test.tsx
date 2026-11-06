@@ -149,14 +149,26 @@ describe('the limit prompt', () => {
     expect(onSend).toHaveBeenCalledWith(undefined);
   });
 
-  it('says that a provider has reported its own limit as reached, how long ago, and offers to try anyway', async () => {
-    const user = userEvent.setup();
-    const reported = new Date(Date.now() - 12 * 60_000).toISOString();
-    const { onSend, dialog } = prompt({ bypass_all: true, reached: [limit({ cap: null, provider_limit: { as_of: reported, provider: PROVIDER, resets_at: null, window: '5-hour' }, can_bypass: true })] });
-    expect(within(dialog).getByText('The plan limit of Team Pro')).toBeInTheDocument();
-    expect(within(dialog).getByText('Team Pro reported its 5-hour limit as reached, 12 min. ago. It may refuse this turn.')).toBeInTheDocument();
-    await user.click(within(dialog).getByRole('button', { name: 'Try anyway' }));
-    expect(onSend).toHaveBeenCalledWith({ provider_limit: true });
+  it('dismisses a cached vendor-only prompt without sending or authorizing a bypass', () => {
+    const onSend = vi.fn(), onOpenChange = vi.fn();
+    show(<LimitPrompt open onOpenChange={onOpenChange} limits={{ bypass_all: true, reached: [limit({ cap: null, provider_limit: { as_of: '2026-10-12T10:00:00Z', provider: PROVIDER, resets_at: null, window: '5-hour' }, can_bypass: true })] }} onSend={onSend} pending={false} />);
+    expect(screen.queryByRole('dialog')).not.toBeInTheDocument();
+    expect(onOpenChange).toHaveBeenCalledWith(false);
+    expect(onSend).not.toHaveBeenCalled();
+  });
+
+  it('keeps a configured cap actionable when an old vendor record alone made bypass_all false', async () => {
+    const vendor = limit({ cap: null, provider_limit: { as_of: '2026-10-12T10:00:00Z', provider: PROVIDER, resets_at: null, window: 'weekly' } });
+    const { onSend, dialog } = prompt({ bypass_all: false, reached: [vendor, limit({ can_bypass: true })] });
+    expect(dialog).not.toHaveTextContent('weekly');
+    await userEvent.setup().click(within(dialog).getByRole('button', { name: 'Proceed anyway' }));
+    expect(onSend).toHaveBeenCalledExactlyOnceWith({ caps: [ID] });
+  });
+
+  it('does not discard an opaque limit without a provider observation', () => {
+    const { dialog, onSend } = prompt({ bypass_all: false, reached: [limit({ cap: null, provider_limit: null })] });
+    expect(within(dialog).getByRole('button', { name: 'Send and wait' })).toBeVisible();
+    expect(onSend).not.toHaveBeenCalled();
   });
 
   it('shows a colleague\'s waiting message with what is passed already and by whom, and passes only what is left', async () => {
@@ -183,12 +195,12 @@ describe('the limit prompt', () => {
 });
 
 describe('what a person lets past', () => {
-  it('is the caps they hold the row for that nobody has let past, and the provider\'s limit where they may', () => {
+  it('is only configured caps they hold the row for that nobody has let past', () => {
     expect(bypassOf({ bypass_all: false, reached: [] })).toBeUndefined();
     expect(bypassOf({ bypass_all: false, reached: [limit()] })).toBeUndefined();
     expect(bypassOf({ bypass_all: true, reached: [limit({ can_bypass: true })] })).toEqual({ caps: [ID] });
     expect(bypassOf({ bypass_all: true, reached: [limit({ can_bypass: true, passed_by: person('Dana', 1) })] })).toBeUndefined();
-    expect(bypassOf({ bypass_all: true, reached: [limit({ cap: null, can_bypass: true, provider_limit: { as_of: '2026-10-12T10:00:00.000Z', provider: PROVIDER, resets_at: null, window: 'weekly' } })] })).toEqual({ provider_limit: true });
+    expect(bypassOf({ bypass_all: true, reached: [limit({ cap: null, can_bypass: true, provider_limit: { as_of: '2026-10-12T10:00:00.000Z', provider: PROVIDER, resets_at: null, window: 'weekly' } })] })).toBeUndefined();
   });
 
   it('is named by the kind of limit in the way: all on turns at once, the provider\'s own, or a mixture', () => {

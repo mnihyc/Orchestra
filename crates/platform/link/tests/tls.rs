@@ -57,6 +57,7 @@ struct Registry {
 impl SessionAuthority for Registry {
     async fn authorize(&self, query: AuthQuery) -> AuthReply {
         let refuse = |code| AuthReply {
+            gateways: Vec::new(),
             endpoints: None,
             update_permit: None,
             n: query.n,
@@ -71,6 +72,7 @@ impl SessionAuthority for Registry {
                 refuse(RejectCode::Revoked)
             }
             Some(_) => AuthReply {
+                gateways: Vec::new(),
                 endpoints: None,
                 update_permit: None,
                 n: query.n,
@@ -223,6 +225,7 @@ impl World {
 
     fn machine(&self) -> ClientIdentity {
         ClientIdentity {
+            gateway_id: None,
             hosted_endpoints: None,
             endpoints: None,
             machine_id: self.machine_id,

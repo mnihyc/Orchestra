@@ -7,6 +7,13 @@
 //! lasts [`TERMINAL_TICKET_SECONDS`]. Where the stream itself is described is
 //! the realtime contract, not here.
 
+use crate::operations::{
+    FacetSpec as Facet, OperationSpec as Op, TargetResolver as Target, VariantSpec as Variant,
+};
+use orch_access_contract::key_scope::KeyAction::{Manage, Read};
+use orch_access_contract::key_scope::KeyTargetKind::Object;
+use orch_access_contract::permissions::ObjectKind as K;
+
 use orch_types::{Id, Time};
 use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
@@ -184,19 +191,74 @@ crate::endpoints! {
     /// Lists the caller's own shells in an environment, attached or not, newest first; whoever manages the environment sees everyone's.
     EnvironmentTerminalList: GET "/environments/{id}/terminals", Permission("terminal.manage"), query EnvironmentTerminalListQuery, none, json Page<TerminalSession>, 200;
     /// Opens a shell in an environment, closing some of the caller's own first when they are at the limit, and gives the ticket to attach to it.
-    EnvironmentTerminalCreate: POST "/environments/{id}/terminals", Rule("terminal.manage on the environment; and the conditions the settings, the environment and its machine set for a shell"), query ThroughThreadQuery, json EnvironmentTerminalCreateBody, json EnvironmentTerminalCreateReply, 201;
+    EnvironmentTerminalCreate: POST "/environments/{id}/terminals", Rule("terminal.manage on the environment; and the conditions the settings, the environment and its machine set for a shell"), query ThroughThreadQuery, json EnvironmentTerminalCreateBody, json EnvironmentTerminalCreateReply, 201,
+        operation Op::facets(&[
+            Facet::required(Read, &[Object(K::Environment)], Target::Path("id")),
+            Facet::required(Manage, &[Object(K::Environment)], Target::Path("id")),
+        ]);
     /// Attaches a WebSocket to a shell; a shell has one screen at a time, so an attachment elsewhere is ended and told so.
-    TerminalAttach: GET "/ws/terminals/{terminal_id}", Public, query TerminalAttachQuery, none, raw, 101;
+    TerminalAttach: GET "/ws/terminals/{terminal_id}", Public, query TerminalAttachQuery, none, raw, 101,
+        operation Op::protocol();
     /// Gives a new ticket to attach to a shell again, from this browser or another.
-    TerminalTicketCreate: POST "/terminals/{terminal_id}/ticket", Rule("the opener, who still passes the gates it was opened under"), none, none, json TerminalTicket, 200;
+    TerminalTicketCreate: POST "/terminals/{terminal_id}/ticket", Rule("the opener, who still passes the gates it was opened under"), none, none, json TerminalTicket, 200,
+        operation Op::facets(&[
+            Facet::required(
+                Read,
+                &[Object(K::Environment)],
+                Target::Resolved("terminal_environment"),
+            ),
+            Facet::required(
+                Manage,
+                &[Object(K::Environment)],
+                Target::Resolved("terminal_environment"),
+            ),
+        ]);
     /// Closes a shell.
-    TerminalClose: DELETE "/terminals/{terminal_id}", Rule("the opener, or environment.manage"), none, none, json TerminalSession, 200;
+    TerminalClose: DELETE "/terminals/{terminal_id}", Rule("the opener, or environment.manage"), none, none, json TerminalSession, 200,
+        operation Op::returning(
+            Manage,
+            &[Object(K::Environment)],
+            Target::Resolved("terminal_environment"),
+        );
     /// Gives a ticket for the agent's own terminal of a thread, for watching it or, with control, typing into it.
-    AgentTerminalTicketCreate: POST "/threads/{id}/agent-terminal/ticket", Rule("terminal.view on the thread's environment; a ticket with control needs terminal.manage there"), none, json AgentTerminalTicketCreateBody, json TerminalTicket, 200;
+    AgentTerminalTicketCreate: POST "/threads/{id}/agent-terminal/ticket", Rule("terminal.view on the thread's environment; a ticket with control needs terminal.manage there"), none, json AgentTerminalTicketCreateBody, json TerminalTicket, 200,
+        operation Op::variants(&[
+            Variant {
+                name: "view",
+                selector: "control=false",
+                facets: &[Facet::required(
+                    Read,
+                    &[Object(K::Environment)],
+                    Target::Resolved("thread_environment"),
+                )],
+            },
+            Variant {
+                name: "control",
+                selector: "control=true",
+                facets: &[
+                    Facet::required(
+                        Read,
+                        &[Object(K::Environment)],
+                        Target::Resolved("thread_environment"),
+                    ),
+                    Facet::required(
+                        Manage,
+                        &[Object(K::Environment)],
+                        Target::Resolved("thread_environment"),
+                    ),
+                ],
+            },
+        ]);
     /// Attaches a WebSocket to the agent's own terminal of a thread; input is accepted only on a ticket with control.
-    AgentTerminalAttach: GET "/ws/agent-terminals/{thread_id}", Public, query TerminalAttachQuery, none, raw, 101;
+    AgentTerminalAttach: GET "/ws/agent-terminals/{thread_id}", Public, query TerminalAttachQuery, none, raw, 101,
+        operation Op::protocol();
     /// Reads what a shell last printed, as it was kept when it closed.
-    TerminalRecordingGet: GET "/terminals/{terminal_id}/recording", Rule("the opener, environment.manage, or audit.view on the thread it was opened from"), none, none, raw, 200;
+    TerminalRecordingGet: GET "/terminals/{terminal_id}/recording", Rule("the opener, environment.manage, or audit.view on the thread it was opened from"), none, none, raw, 200,
+        operation Op::single(
+            Read,
+            &[Object(K::Environment)],
+            Target::Resolved("terminal_environment"),
+        );
 }
 
 #[cfg(test)]

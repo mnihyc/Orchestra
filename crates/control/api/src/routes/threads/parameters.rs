@@ -130,6 +130,8 @@ pub(super) async fn parameters(ctx: Ctx, (): (), (): ()) -> ApiResult<ThreadPara
             } else {
                 None
             };
+            let parameters: ModelParameters =
+                serde_json::from_value(row.parameters.clone()).unwrap_or_default();
             options.push(ModelOption {
                 token_estimate: orch_engine::token_density::of(&row.model_name),
                 groups: row.groups,
@@ -139,8 +141,10 @@ pub(super) async fn parameters(ctx: Ctx, (): (), (): ()) -> ApiResult<ThreadPara
                     row.display_name.clone()
                 },
                 model_name: row.model_name,
-                parameters: serde_json::from_value::<ModelParameters>(row.parameters)
-                    .unwrap_or_default(),
+                option_constraints: orch_model_contract::parameters::constraint_catalogue(
+                    &parameters,
+                ),
+                parameters,
                 allowed: reason.is_none(),
                 reason,
             });
@@ -245,24 +249,40 @@ pub(super) async fn parameters(ctx: Ctx, (): (), (): ()) -> ApiResult<ThreadPara
     let values = params.value.clone().unwrap_or(Value::Null);
     let parameters = declared
         .into_iter()
-        .map(|def| ParameterView {
-            value: values.get(&def.key).cloned(),
-            key: def.key.clone(),
-            apply: match def.apply {
-                orch_agent_contract::parameters::ParameterApply::NextTurn => {
-                    ParameterApply::NextTurn
-                }
-                orch_agent_contract::parameters::ParameterApply::NewSession => {
-                    ParameterApply::NewSession
-                }
-                orch_agent_contract::parameters::ParameterApply::RecreateEnvironment => {
-                    ParameterApply::RecreateEnvironment
-                }
-            },
-            source: member_source(&params, &def.key),
-            def: serde_json::to_value(&def).unwrap_or(Value::Null),
-            locked_by: params.locked_by.clone(),
-            writable: params.writable,
+        .map(|def| {
+            let model = eligibility.as_ref().map(|ctx| &ctx.model);
+            let fixed = model
+                .and_then(|model| model.option_rule("native", &def.key))
+                .is_some_and(|rule| rule.get("const").is_some());
+            ParameterView {
+                value: if fixed {
+                    model
+                        .and_then(|model| model.option_rule("native", &def.key))
+                        .and_then(|rule| rule.get("const"))
+                        .cloned()
+                } else {
+                    values.get(&def.key).cloned()
+                },
+                key: def.key.clone(),
+                apply: match def.apply {
+                    orch_agent_contract::parameters::ParameterApply::NextTurn => {
+                        ParameterApply::NextTurn
+                    }
+                    orch_agent_contract::parameters::ParameterApply::NewSession => {
+                        ParameterApply::NewSession
+                    }
+                    orch_agent_contract::parameters::ParameterApply::RecreateEnvironment => {
+                        ParameterApply::RecreateEnvironment
+                    }
+                },
+                source: member_source(&params, &def.key),
+                def: model.map_or_else(
+                    || serde_json::to_value(&def).unwrap_or(Value::Null),
+                    |model| def.projection(model),
+                ),
+                locked_by: params.locked_by.clone(),
+                writable: params.writable && !fixed,
+            }
         })
         .collect();
     let provider = match &parts.binding {

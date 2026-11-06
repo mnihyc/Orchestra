@@ -8,6 +8,7 @@
 mod places;
 mod support;
 
+use crate::support::FullPermissionPageReply;
 use orch_api_contract::access::{
     AccessChoice, HolderInput, PageChange, PageChangeName, PermissionPageUpdate, Role,
 };
@@ -119,7 +120,9 @@ async fn a_group_is_made_listed_described_anew_and_deleted_by_whoever_manages_th
         })
         .send()
         .await
-        .ok();
+        .ok()
+        .into_full()
+        .expect("this browser control expects the ordinary full group response");
     assert_eq!(renamed.name, "Crew A");
     assert_eq!(renamed.description, "the people");
     let refused = world
@@ -232,7 +235,8 @@ async fn a_member_of_the_root_org_is_put_into_a_group_and_taken_out_and_access_f
             ..PageChange::default()
         })
         .send()
-        .await;
+        .await
+        .full_permission_page();
     assert!(private.status.is_success(), "{:?}", private.status);
     assert!(matches!(read(&world, &eve, s.web).await, Node::Project(_)));
     // Out of the group, out of the project, at the next request.
@@ -433,6 +437,9 @@ async fn a_suspended_member_is_shut_out_of_the_org_until_it_is_lifted() {
     let held = suspend(&s.boss, s.dan.id(), Some("left the building"))
         .await
         .ok();
+    let held = held
+        .into_full()
+        .expect("ordinary suspension retains its full response");
     assert_eq!(held.user.username, "dan");
     assert_eq!(held.reason, "left the building");
     assert_eq!(held.by.username, "boss");

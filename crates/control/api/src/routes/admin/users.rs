@@ -10,7 +10,6 @@
 use super::{admin_of, invalid, page_size, read_ahead, record};
 use crate::middleware::authorization::refusals;
 use crate::middleware::requests::{ApiError, ApiResult};
-use crate::middleware::transaction_guard;
 use crate::registry::{Answer, Ctx, Registry};
 use crate::sign_in::accounts::{email_fits, taken};
 use crate::sign_in::reset_links;
@@ -23,7 +22,8 @@ use orch_api_contract::admin::{
     AdminUser, AdminUserCreate, AdminUserCreateBody, AdminUserCreateReply, AdminUserList,
     AdminUserListQuery, AdminUserLock, AdminUserOrgInvitationGive, AdminUserOrgInvitationTakeBack,
     AdminUserResetLinkCreate, AdminUserResetLinkCreateBody, AdminUserResetLinkCreateReply,
-    AdminUserStatus, AdminUserUpdate, AdminUserUpdateBody,
+    AdminUserStatus, AdminUserUpdate, AdminUserUpdateBody, AdminUserUpdateReceipt,
+    AdminUserUpdateResponse,
 };
 use orch_api_contract::auth::SignInProof;
 use orch_api_contract::common::{ErrorCode, Page};
@@ -56,10 +56,26 @@ pub fn mount(registry: &mut Registry) {
     registry
         .on(AdminUserList, list)
         .on(AdminUserCreate, create)
-        .on(AdminUserUpdate, update)
-        .on(AdminUserResetLinkCreate, reset_link)
-        .on(AdminUserOrgInvitationGive, org_invitation_give)
-        .on(AdminUserOrgInvitationTakeBack, org_invitation_take_back);
+        .on_with_operation(
+            AdminUserUpdate,
+            crate::key_operations::direct::declared,
+            update,
+        )
+        .on_with_operation(
+            AdminUserResetLinkCreate,
+            crate::key_operations::direct::declared,
+            reset_link,
+        )
+        .on_with_operation(
+            AdminUserOrgInvitationGive,
+            crate::key_operations::direct::declared,
+            org_invitation_give,
+        )
+        .on_with_operation(
+            AdminUserOrgInvitationTakeBack,
+            crate::key_operations::direct::declared,
+            org_invitation_take_back,
+        );
 }
 
 fn status_word(status: AdminUserStatus) -> &'static str {
@@ -251,7 +267,7 @@ async fn create(
         return Err(invalid("email", "is not an address"));
     }
     let makes_admin = body.is_system_admin == Some(true);
-    let (mut tx, guard) = transaction_guard::begin(&ctx).await?;
+    let (mut tx, guard) = super::action(&ctx).await?;
     ctx.now = guard.now().get();
     let admin = guard.user().id();
     let personal_org =
@@ -344,10 +360,14 @@ fn refused(error: Refused) -> ApiError {
 }
 
 /// Suspends a person or lets them in again, and makes them a system admin or an ordinary person.
-async fn update(mut ctx: Ctx, (): (), body: AdminUserUpdateBody) -> ApiResult<AdminUser> {
+async fn update(
+    mut ctx: Ctx,
+    (): (),
+    body: AdminUserUpdateBody,
+) -> ApiResult<AdminUserUpdateResponse> {
     admin_of(&ctx)?;
     let id = ctx.id("id")?;
-    let (mut tx, guard) = transaction_guard::begin(&ctx).await?;
+    let (mut tx, guard) = super::action(&ctx).await?;
     ctx.now = guard.now().get();
     let admin = guard.user().id();
     let before = person(&mut tx, id).await?;
@@ -391,9 +411,59 @@ async fn update(mut ctx: Ctx, (): (), body: AdminUserUpdateBody) -> ApiResult<Ad
             .await
             .map_err(refused)?;
     }
-    let after = read_one(&ctx, &mut tx, id).await?;
+    let after = updated_user(&ctx, &mut tx, guard.principal(), id).await?;
     tx.commit().await.map_err(DbError::from)?;
-    Ok(after)
+    Ok(match after {
+        Some(user) => AdminUserUpdateResponse::full(user),
+        None => AdminUserUpdateResponse::Receipt(AdminUserUpdateReceipt {
+            projection: orch_api_contract::common::ReceiptProjection::Receipt,
+            account_id: id,
+        }),
+    })
+}
+
+/// The accepted change does not depend on regaining its effects. Only this operation's
+/// current Read may materialize existing account content for a key.
+async fn updated_user(
+    ctx: &Ctx,
+    conn: &mut Conn,
+    principal: &orch_authz::Principal,
+    id: Id,
+) -> ApiResult<Option<AdminUser>> {
+    // Browser mutations keep their established projection in the same authorized
+    // transaction, including a person's own accepted demotion or suspension.
+    if principal.caller().grant().is_none() {
+        return read_one(ctx, conn, id).await.map(Some);
+    }
+    if ctx.key_receipt_required() {
+        return Ok(None);
+    }
+    // Reuse the exact typed declaration and neutral account subject for the response;
+    // no separate path resolver or parallel credential/permission check is introduced.
+    let plan =
+        crate::key_operations::direct::declared(ctx, conn, principal.caller(), (), ()).await?;
+    let projection = ctx.clone();
+    match plan
+        .read_response(ctx, conn, principal.caller(), move |conn, reader| {
+            Box::pin(async move {
+                if !reader.has_system_admin_standing() {
+                    return Err(refusals::system_admin_only(
+                        "current system administration is required to read account content",
+                    ));
+                }
+                read_one(&projection, conn, id).await
+            })
+        })
+        .await
+    {
+        // The standing writer may itself end this key's current authentication or
+        // ordinary administration. Keep its accepted result without private content.
+        Err(error) if matches!(error.problem.status, 401 | 403 | 404 | 410) => {
+            ctx.complete_disclosure(crate::key_operations::resolver::Disclosure::Denied);
+            Ok(None)
+        }
+        other => other,
+    }
 }
 
 /// Makes a link with which a person sets a new password.
@@ -404,7 +474,7 @@ async fn reset_link(
 ) -> ApiResult<Answer<AdminUserResetLinkCreateReply>> {
     admin_of(&ctx)?;
     let id = ctx.id("id")?;
-    let (mut tx, guard) = transaction_guard::begin(&ctx).await?;
+    let (mut tx, guard) = super::action(&ctx).await?;
     ctx.now = guard.now().get();
     let admin = guard.user().id();
     let who = person(&mut tx, id).await?;
@@ -441,7 +511,7 @@ async fn tell_org_creation(conn: &mut Conn, person: Id) -> ApiResult<()> {
 async fn org_invitation_give(mut ctx: Ctx, (): (), (): ()) -> ApiResult<()> {
     admin_of(&ctx)?;
     let id = ctx.id("id")?;
-    let (mut tx, guard) = transaction_guard::begin(&ctx).await?;
+    let (mut tx, guard) = super::action(&ctx).await?;
     ctx.now = guard.now().get();
     let admin = guard.user().id();
     let who = person(&mut tx, id).await?;
@@ -471,7 +541,7 @@ async fn org_invitation_give(mut ctx: Ctx, (): (), (): ()) -> ApiResult<()> {
 async fn org_invitation_take_back(mut ctx: Ctx, (): (), (): ()) -> ApiResult<()> {
     admin_of(&ctx)?;
     let id = ctx.id("id")?;
-    let (mut tx, guard) = transaction_guard::begin(&ctx).await?;
+    let (mut tx, guard) = super::action(&ctx).await?;
     ctx.now = guard.now().get();
     let admin = guard.user().id();
     let who = person(&mut tx, id).await?;

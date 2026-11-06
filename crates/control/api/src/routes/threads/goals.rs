@@ -5,6 +5,7 @@
 //! there. The goal itself rides on the thread, so the thread's readers see every change as it is made.
 
 use super::input_failed;
+use crate::middleware::authorization;
 use crate::middleware::requests::{ApiError, ApiResult};
 use crate::middleware::transaction_guard;
 use crate::registry::{Ctx, Registry};
@@ -20,7 +21,7 @@ use orch_types::Id;
 /// Binds this module's requests.
 pub fn mount(registry: &mut Registry) {
     registry
-        .on(ThreadGoalGet, get)
+        .on_with_operation(ThreadGoalGet, crate::key_operations::direct::declared, get)
         .on(ThreadGoalCreate, create)
         .on(ThreadGoalUpdate, update)
         .on(ThreadGoalClear, clear);
@@ -56,9 +57,10 @@ async fn goal_failed(ctx: &Ctx, thread: Id, error: GoalError) -> ApiError {
 /// The thread's goal as it stands.
 async fn get(ctx: Ctx, (): (), (): ()) -> ApiResult<Option<ThreadGoal>> {
     let thread = ctx.id("id")?;
-    ctx.app
-        .engine
-        .goal_of(thread)
+    let mut conn = ctx.app.db.acquire().await?;
+    let principal = ctx.operation_principal(&mut conn).await?;
+    authorization::require_on_path_in(&ctx, &mut conn, &principal, "thread.view").await?;
+    orch_engine::goals::view(&mut conn, thread, principal.now().get())
         .await
         .map_err(ApiError::engine)
 }

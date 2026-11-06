@@ -574,6 +574,7 @@ struct HubAuthority {
 impl SessionAuthority for HubAuthority {
     async fn authorize(&self, query: AuthQuery) -> AuthReply {
         let refuse = |code| AuthReply {
+            gateways: Vec::new(),
             endpoints: None,
             update_permit: None,
             n: query.n,
@@ -601,6 +602,7 @@ impl SessionAuthority for HubAuthority {
             return refuse(RejectCode::Revoked);
         }
         AuthReply {
+            gateways: Vec::new(),
             endpoints: lock(&self.hub.advertised).clone(),
             update_permit: None,
             n: query.n,
@@ -721,7 +723,7 @@ impl Hub {
     ) -> (ControllerLink, mpsc::UnboundedReceiver<Notice>) {
         let (controller, outputs) =
             ControllerLink::new(machine_id, roles, cursors, Arc::clone(&self.inner.clock));
-        let ControllerOutputs { down, notices } = outputs;
+        let ControllerOutputs { down, notices, .. } = outputs;
         let previous = lock(&self.inner.machines).insert(
             machine_id,
             Slot {

@@ -115,6 +115,10 @@ pub enum MachineProgramsCommand {
     Test(MachineProgramKey),
     /// Remove an Orch-owned registration after active turns have finished.
     Remove(MachineProgramKey),
+    /// Confirm the program of a startup-known harness kind under delegated local policy.
+    ConfirmHarness { kind: String, path: String },
+    /// Unconfirm the currently selected path without changing any other harness kind.
+    RemoveHarness { kind: String, path: String },
     /// Reload operator configuration and the connector's persisted registrations.
     Reload,
 }

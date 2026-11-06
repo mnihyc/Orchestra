@@ -200,8 +200,9 @@ async fn the_owner_and_a_person_named_in_the_use_row_run_a_turn_and_a_stranger_i
         [
             (ObjectKind::Thread, vec![Permission::ThreadInteract]),
             (ObjectKind::Provider, vec![Permission::ProviderUse]),
+            (ObjectKind::Environment, vec![Permission::EnvironmentUse]),
         ],
-        "both things, not only the first"
+        "every missing permission, not only the first"
     );
     assert!(
         missing.iter().all(|each| each.object.name.is_none()),

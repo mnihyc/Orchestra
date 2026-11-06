@@ -5,7 +5,7 @@
 //! came back: the body, byte for byte, on standard output, whatever the
 //! status. Anything the API offers can be asked this way, with the path as
 //! the API's list of requests writes it (`/admin/users`); the base path
-//! `/api/v1` is put in front of it.
+//! `/openapi/v1` is put in front of it. An explicitly qualified browser path is kept as written.
 //!
 //! The status the program leaves says how it went: 0 for an answer in the
 //! 200s, otherwise the first digit of the status the API answered (3, 4 or
@@ -18,7 +18,7 @@
 use super::console::{note, refuse};
 use super::host;
 use clap::Args;
-use orch_api_contract::common::BASE_PATH;
+use orch_api_contract::common::KEY_BASE_PATH;
 use reqwest::header::{AUTHORIZATION, CONTENT_TYPE, HeaderValue};
 use reqwest::{Method, Url};
 use std::io::{self, IsTerminal, Read, Write};
@@ -178,7 +178,7 @@ fn is_this_machine(url: &Url) -> bool {
 }
 
 /// The address a path is requested at: the system's address, the base path of
-/// the API unless the path already begins with `/api/`, and the path.
+/// the API unless the path already begins with `/api/` or `/openapi/`, and the path.
 fn endpoint(base: &Url, path: &str) -> Result<Url, ApiError> {
     let path = path.trim();
     if path.is_empty() {
@@ -189,10 +189,10 @@ fn endpoint(base: &Url, path: &str) -> Result<Url, ApiError> {
     } else {
         format!("/{path}")
     };
-    let full = if rooted.starts_with("/api/") {
+    let full = if rooted.starts_with("/api/") || rooted.starts_with("/openapi/") {
         rooted
     } else {
-        format!("{BASE_PATH}{rooted}")
+        format!("{KEY_BASE_PATH}{rooted}")
     };
     let prefix = base.as_str().trim_end_matches('/');
     Url::parse(&format!("{prefix}{full}")).map_err(|error| ApiError::BadPath(error.to_string()))

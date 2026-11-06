@@ -11,12 +11,21 @@
 //! manage, adds deleting, moving and bringing back. [`SharedEntry`] is one entry of
 //! an agent's reach as its own tools list it.
 
+use crate::operations::{
+    FacetSpec as Facet, OperationSpec as Op, TargetResolver as Target, VariantSpec as Variant,
+};
+use orch_access_contract::key_scope::KeyAction::{Manage, Read, Write};
+use orch_access_contract::key_scope::KeyIdentityKind as I;
+use orch_access_contract::key_scope::KeyTargetKind::{Identity, Object};
+use orch_access_contract::permissions::ObjectKind as K;
+
 use orch_types::{Id, Time};
 use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
 
 use crate::access::Entry;
 use crate::chats::ChatRef;
+use crate::common::ReceiptProjection;
 use crate::documents::DocumentRef;
 use crate::nodes::NodeRef;
 use crate::routes::Access::{Permission, Rule};
@@ -40,6 +49,8 @@ pub enum ShareLevel {
     Read,
     /// They also write: send to those threads, or post in those chats.
     Write,
+    /// They also manage: archive, fork and delete threads, or delete anybody's chat message.
+    Manage,
 }
 
 /// How far documents are shared.
@@ -53,9 +64,9 @@ pub enum ShareDocumentsLevel {
     /// make a file in it.
     Edit,
     /// What `edit` gives, and the documents themselves: they delete them, move them to another
-    /// place, bring a deleted one back and put an earlier version back. The act is the agent's one
-    /// tool for it, which first says what would happen and does it only when it is asked again.
-    /// It adds nothing for conversations and chats: no agent removes a thread, a chat or a place.
+    /// place, bring a deleted one back and put an earlier version back through manage_shared.
+    /// Moves and restores execute directly. Only document deletion requires a preview followed
+    /// by its confirmation token.
     Manage,
 }
 
@@ -71,6 +82,12 @@ pub struct ShareParts {
     /// Documents, with their files and versions.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub documents: Option<ShareDocumentsLevel>,
+    /// Independently allow forking the shared threads, without giving Manage.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub thread_fork: Option<bool>,
+    /// Independently allow archiving and unarchiving the shared threads.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub thread_archive: Option<bool>,
 }
 
 /// A place, which is an org, a project, a topic or a thread.
@@ -142,6 +159,11 @@ pub enum ShareTo {
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
 #[serde(deny_unknown_fields)]
 pub struct ShareWithAgents {
+    /// Separately give ordinary document Read to each recipient thread's current and future
+    /// viewers. Unticked unless requested, only for live document material sent to individual
+    /// threads. This human grant is independent of the agent's current-giver loan.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub viewers_read: Option<bool>,
     /// Marks included document material for first reading; never grants additional access.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub read_first: Option<bool>,
@@ -219,9 +241,57 @@ pub struct AgentShareSnapshot {
     pub state: AgentShareSnapshotState,
 }
 
+/// Whether one contribution currently supplies its requested rights on the assessed object.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+#[serde(rename_all = "snake_case")]
+pub enum AgentShareCurrentState {
+    /// All requested area rights count on this exact source object for this recipient.
+    Active,
+    /// Some requested area rights count on this exact source object for this recipient.
+    Reduced,
+    /// This contribution supplies no rights in the assessed context.
+    Inactive,
+    /// A per-object or per-recipient check is needed; this is not an inactive grant.
+    Unassessed,
+}
+
+/// A safe explanation of a contribution's current assessment, without revealing other grants.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+#[serde(rename_all = "snake_case")]
+pub enum AgentShareCurrentReason {
+    /// The recorded giver is missing or is no longer an active user.
+    GiverUnavailable,
+    /// Current giver authority, sharing rules, entry reach or recipient restrictions limit it.
+    CurrentLimits,
+    /// A place or document tree needs a separate check at each reached object.
+    PerTarget,
+    /// A real recipient thread is needed to assess this holder's effective rights.
+    RecipientContextRequired,
+    /// The exact source could not be loaded for this assessment.
+    SourceUnavailable,
+}
+
+/// Current rights from only this contribution, never the union of other givers' contributions.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+pub struct AgentShareCurrent {
+    /// The actual recipient thread assessed, when one is available.
+    pub recipient: Option<Id>,
+    /// Rights on the exact document or chat in `what`, for `recipient`. Null means no aggregate
+    /// rights were computed. In particular, a place's root never stands for its descendants.
+    pub parts: Option<ShareParts>,
+    /// The result, scoped to the exact object and recipient above.
+    pub state: AgentShareCurrentState,
+    /// Why rights are reduced, inactive or not assessed; null when all requested rights count.
+    pub reason: Option<AgentShareCurrentReason>,
+}
+
 /// A copy or a live share of something with the agent of a thread or of a place.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
 pub struct AgentShare {
+    /// Independent ordinary `doc.view` entries naming this recipient thread's viewers.
+    /// Taking back the agent loan leaves these standing human grants unchanged.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub viewer_entries: Vec<Entry>,
     /// Current first-reading intent carried by the share's document material.
     #[serde(default)]
     pub read_first: bool,
@@ -236,19 +306,22 @@ pub struct AgentShare {
     /// For a live share of a place: whether it reaches what lies inside it. `false` for one thing,
     /// for a copy and for a place shared by itself.
     pub inside: bool,
-    /// Whether the agents may copy what is shared into their workspace: they are named in the Export rows
-    /// of the areas it covers.
+    /// Whether the share requests Export through its recorded entries (or is already a copy).
+    /// Current export authority is checked separately at each act.
     pub download: bool,
-    /// The areas.
+    /// The requested areas and maximum levels, retained even when the giver loses authority.
     pub parts: ShareParts,
+    /// A live contribution's current assessment. Absent for copies.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub current: Option<AgentShareCurrent>,
     /// For a live share: the entries on the page that carry it.
     pub entries: Vec<Entry>,
     /// For a copy: what was written.
     pub snapshot: Option<AgentShareSnapshot>,
     /// For a copy with a comment: the input that was queued.
     pub input: Option<ThreadInput>,
-    /// Who shared it.
-    pub by: UserRef,
+    /// Who shared it; null when the recorded giver can no longer be resolved.
+    pub by: Option<UserRef>,
     /// When.
     pub at: Time,
 }
@@ -297,8 +370,6 @@ pub enum SharedEntryUnit {
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize, JsonSchema)]
 #[serde(rename_all = "snake_case")]
 pub enum SharedEntryVia {
-    /// The policy of its topic or project lets it.
-    Policy,
     /// A share names it.
     Share,
     /// It lies in the agent's own topic.
@@ -379,41 +450,57 @@ pub struct ShareAgentCreateReply {
     pub shares: Vec<AgentShare>,
 }
 
-/// How far the agent of a thread reaches beyond its own thread.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize, JsonSchema)]
-#[serde(rename_all = "snake_case")]
-pub enum ThreadSharedPolicy {
-    /// Nothing but its own thread.
-    None,
-    /// Its topic.
-    Topic,
-    /// Its project.
-    Project,
+/// Actual accepted recipient identity, without its existing name or conversation.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+pub struct ShareReceiptRecipient {
+    /// The actual stored recipient kind.
+    pub kind: crate::nodes::NodeKind,
+    /// The actual stored recipient identifier.
+    pub id: Id,
+}
+
+/// Safe acknowledgement of one accepted live contribution or copy.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+pub struct AgentShareReceipt {
+    /// The actual share or copy identifier, usable by the existing management operations.
+    pub id: Id,
+    /// The actual recipient.
+    pub to: ShareReceiptRecipient,
+    /// Live contribution or completed copy.
+    pub mode: ShareMode,
+    /// Whether this request changed or created the accepted result.
+    pub created: bool,
+    /// The accepted accompanying input, if one exists; no input content is returned.
+    pub input_id: Option<Id>,
+}
+
+/// Committed sharing acknowledgement without existing-content projection.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+pub struct ShareAgentCreateReceipt {
+    /// Distinguishes the acknowledgement from the ordinary full response.
+    pub projection: ReceiptProjection,
+    /// The actual accepted results in ordinary destination order.
+    pub shares: Vec<AgentShareReceipt>,
+}
+
+crate::common::full_or_receipt! {
+    /// The existing full reply or a truthful committed receipt.
+    #[derive(Debug, Clone, PartialEq, Serialize, Deserialize, JsonSchema)]
+    pub enum ShareAgentCreateResponse {
+        /// The caller can read the complete ordinary projection.
+        Full(ShareAgentCreateReply),
+        /// The share committed without permission to disclose that projection.
+        Receipt(ShareAgentCreateReceipt),
+    }
 }
 
 /// What a thread's agent may read beyond its own thread, and the copies it was given.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
 pub struct ThreadSharedGetReply {
-    /// The independent public topic-document policy.
-    pub documents_policy: ThreadDocumentPolicy,
     /// Current first-reading paths, with no document bodies.
     pub read_first_paths: Vec<ReadFirstPath>,
-    /// How far it reaches by policy.
-    pub policy: ThreadSharedPolicy,
     /// The shares that name it.
     pub shares: Vec<AgentShare>,
-}
-
-/// Public topic/main-thread document reach, independently of conversation sharing.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
-#[serde(rename_all = "snake_case")]
-pub enum ThreadDocumentPolicy {
-    /// No implicit document access.
-    None,
-    /// Read public material.
-    Read,
-    /// Also edit and create public material.
-    Write,
 }
 
 /// Material resolved from stable source and recipient identities at the current moment.
@@ -466,17 +553,241 @@ pub struct ShareAgentUpdateBody {
 
 crate::endpoints! {
     /// Shares a thing with agents, as a copy or as a live share, all or nothing over the threads or places named.
-    ShareAgentCreate: POST "/share/agents", Rule("for a copy, read access to everything included and thread.interact on each thread named; for a live share, holding oneself what each area is shared for and being an owner of what is shared or a manager of its page, or the place letting holders share, or being in the chat, and thread.interact on each thread named or node.interact on the place named"), none, json ShareWithAgents, json ShareAgentCreateReply, 201;
+    ShareAgentCreate: POST "/share/agents", Rule("for a pure live gift, ordinary current authority to give each area on the source and View on each recipient thread or place; optional viewer Read uses the normal human document-sharing authority; the gift creates no input, model notice, wake or file delivery; a copy and an explicit first-reading change additionally require Interact on each recipient, and a copy requires read/export access to everything included"), none, json ShareWithAgents, json ShareAgentCreateResponse, 201,
+        operation Op::receipt(&Op::variants(&[
+            Variant { name: "live", selector: "mode=live; no effective first-reading change; viewers_read is false or absent", facets: &[
+                Facet::required(Manage, &[Object(K::Org), Object(K::Project), Object(K::Topic), Object(K::Thread), Object(K::Document), Identity(I::Chat)], Target::Resolved("source")),
+                Facet::required(Read, &[Object(K::Org)], Target::ResolvedCollection("share_recipient_orgs")),
+                Facet::required(Read, &[Object(K::Project)], Target::ResolvedCollection("share_recipient_projects")),
+                Facet::required(Read, &[Object(K::Topic)], Target::ResolvedCollection("share_recipient_topics")),
+                Facet::required(Read, &[Object(K::Thread)], Target::ResolvedCollection("share_recipient_threads")),
+                Facet::response_content(&[Object(K::Org), Object(K::Project), Object(K::Topic), Object(K::Thread), Object(K::Document), Identity(I::Chat)], Target::Resolved("response_source")),
+                Facet::response_content(&[Object(K::Org)], Target::ResolvedCollection("response_recipient_orgs")),
+                Facet::response_content(&[Object(K::Project)], Target::ResolvedCollection("response_recipient_projects")),
+                Facet::response_content(&[Object(K::Topic)], Target::ResolvedCollection("response_recipient_topics")),
+                Facet::response_content(&[Object(K::Thread)], Target::ResolvedCollection("response_recipient_threads")),
+                Facet::required(Read, &[Object(K::Org)], Target::ResolvedCollection("share_name_orgs")),
+                Facet::required(Read, &[Object(K::Project)], Target::ResolvedCollection("share_name_projects")),
+                Facet::required(Read, &[Object(K::Topic)], Target::ResolvedCollection("share_name_topics")),
+                Facet::required(Read, &[Object(K::Thread)], Target::ResolvedCollection("share_name_threads"))
+            ] },
+            Variant { name: "live_viewers_read", selector: "mode=live; no effective first-reading change; viewers_read=true", facets: &[
+                Facet::required(Manage, &[Object(K::Org), Object(K::Project), Object(K::Topic), Object(K::Thread), Object(K::Document), Identity(I::Chat)], Target::Resolved("source")),
+                Facet::required(Read, &[Object(K::Org)], Target::ResolvedCollection("share_recipient_orgs")),
+                Facet::required(Read, &[Object(K::Project)], Target::ResolvedCollection("share_recipient_projects")),
+                Facet::required(Read, &[Object(K::Topic)], Target::ResolvedCollection("share_recipient_topics")),
+                Facet::required(Read, &[Object(K::Thread)], Target::ResolvedCollection("share_recipient_threads")),
+                Facet::required(Manage, &[Object(K::Document)], Target::ResolvedCollection("viewer_grant_sources")),
+                Facet::response_content(&[Object(K::Org), Object(K::Project), Object(K::Topic), Object(K::Thread), Object(K::Document), Identity(I::Chat)], Target::Resolved("response_source")),
+                Facet::response_content(&[Object(K::Org)], Target::ResolvedCollection("response_recipient_orgs")),
+                Facet::response_content(&[Object(K::Project)], Target::ResolvedCollection("response_recipient_projects")),
+                Facet::response_content(&[Object(K::Topic)], Target::ResolvedCollection("response_recipient_topics")),
+                Facet::response_content(&[Object(K::Thread)], Target::ResolvedCollection("response_recipient_threads")),
+                Facet::required(Read, &[Object(K::Org)], Target::ResolvedCollection("share_name_orgs")),
+                Facet::required(Read, &[Object(K::Project)], Target::ResolvedCollection("share_name_projects")),
+                Facet::required(Read, &[Object(K::Topic)], Target::ResolvedCollection("share_name_topics")),
+                Facet::required(Read, &[Object(K::Thread)], Target::ResolvedCollection("share_name_threads"))
+            ] },
+            Variant { name: "live_read_first", selector: "mode=live; first-reading is enabled or clears stored true; viewers_read is false or absent", facets: &[
+                Facet::required(Manage, &[Object(K::Org), Object(K::Project), Object(K::Topic), Object(K::Thread), Object(K::Document), Identity(I::Chat)], Target::Resolved("source")),
+                Facet::required(Read, &[Object(K::Org)], Target::ResolvedCollection("share_recipient_orgs")),
+                Facet::required(Read, &[Object(K::Project)], Target::ResolvedCollection("share_recipient_projects")),
+                Facet::required(Read, &[Object(K::Topic)], Target::ResolvedCollection("share_recipient_topics")),
+                Facet::required(Read, &[Object(K::Thread)], Target::ResolvedCollection("share_recipient_threads")),
+                Facet::required(Read, &[Object(K::Org), Object(K::Project), Object(K::Topic), Object(K::Thread), Object(K::Document), Identity(I::Chat)], Target::Resolved("source")),
+                Facet::required(Write, &[Object(K::Org)], Target::ResolvedCollection("share_control_orgs")),
+                Facet::required(Write, &[Object(K::Project)], Target::ResolvedCollection("share_control_projects")),
+                Facet::required(Write, &[Object(K::Topic)], Target::ResolvedCollection("share_control_topics")),
+                Facet::required(Write, &[Object(K::Thread)], Target::ResolvedCollection("share_control_threads")),
+                Facet::response_content(&[Object(K::Org), Object(K::Project), Object(K::Topic), Object(K::Thread), Object(K::Document), Identity(I::Chat)], Target::Resolved("response_source")),
+                Facet::response_content(&[Object(K::Org)], Target::ResolvedCollection("response_recipient_orgs")),
+                Facet::response_content(&[Object(K::Project)], Target::ResolvedCollection("response_recipient_projects")),
+                Facet::response_content(&[Object(K::Topic)], Target::ResolvedCollection("response_recipient_topics")),
+                Facet::response_content(&[Object(K::Thread)], Target::ResolvedCollection("response_recipient_threads")),
+                Facet::required(Read, &[Object(K::Org)], Target::ResolvedCollection("share_name_orgs")),
+                Facet::required(Read, &[Object(K::Project)], Target::ResolvedCollection("share_name_projects")),
+                Facet::required(Read, &[Object(K::Topic)], Target::ResolvedCollection("share_name_topics")),
+                Facet::required(Read, &[Object(K::Thread)], Target::ResolvedCollection("share_name_threads"))
+            ] },
+            Variant { name: "live_read_first_viewers_read", selector: "mode=live; first-reading is enabled or clears stored true; viewers_read=true", facets: &[
+                Facet::required(Manage, &[Object(K::Org), Object(K::Project), Object(K::Topic), Object(K::Thread), Object(K::Document), Identity(I::Chat)], Target::Resolved("source")),
+                Facet::required(Read, &[Object(K::Org)], Target::ResolvedCollection("share_recipient_orgs")),
+                Facet::required(Read, &[Object(K::Project)], Target::ResolvedCollection("share_recipient_projects")),
+                Facet::required(Read, &[Object(K::Topic)], Target::ResolvedCollection("share_recipient_topics")),
+                Facet::required(Read, &[Object(K::Thread)], Target::ResolvedCollection("share_recipient_threads")),
+                Facet::required(Read, &[Object(K::Org), Object(K::Project), Object(K::Topic), Object(K::Thread), Object(K::Document), Identity(I::Chat)], Target::Resolved("source")),
+                Facet::required(Write, &[Object(K::Org)], Target::ResolvedCollection("share_control_orgs")),
+                Facet::required(Write, &[Object(K::Project)], Target::ResolvedCollection("share_control_projects")),
+                Facet::required(Write, &[Object(K::Topic)], Target::ResolvedCollection("share_control_topics")),
+                Facet::required(Write, &[Object(K::Thread)], Target::ResolvedCollection("share_control_threads")),
+                Facet::required(Manage, &[Object(K::Document)], Target::ResolvedCollection("viewer_grant_sources")),
+                Facet::response_content(&[Object(K::Org), Object(K::Project), Object(K::Topic), Object(K::Thread), Object(K::Document), Identity(I::Chat)], Target::Resolved("response_source")),
+                Facet::response_content(&[Object(K::Org)], Target::ResolvedCollection("response_recipient_orgs")),
+                Facet::response_content(&[Object(K::Project)], Target::ResolvedCollection("response_recipient_projects")),
+                Facet::response_content(&[Object(K::Topic)], Target::ResolvedCollection("response_recipient_topics")),
+                Facet::response_content(&[Object(K::Thread)], Target::ResolvedCollection("response_recipient_threads")),
+                Facet::required(Read, &[Object(K::Org)], Target::ResolvedCollection("share_name_orgs")),
+                Facet::required(Read, &[Object(K::Project)], Target::ResolvedCollection("share_name_projects")),
+                Facet::required(Read, &[Object(K::Topic)], Target::ResolvedCollection("share_name_topics")),
+                Facet::required(Read, &[Object(K::Thread)], Target::ResolvedCollection("share_name_threads"))
+            ] },
+            Variant { name: "snapshot", selector: "mode=snapshot; comment is absent or blank", facets: &[
+                Facet::required(Read, &[Object(K::Org)], Target::ResolvedCollection("snapshot_source_orgs")),
+                Facet::required(Read, &[Object(K::Project)], Target::ResolvedCollection("snapshot_source_projects")),
+                Facet::required(Read, &[Object(K::Topic)], Target::ResolvedCollection("snapshot_source_topics")),
+                Facet::required(Read, &[Object(K::Thread)], Target::ResolvedCollection("snapshot_source_threads")),
+                Facet::required(Read, &[Object(K::Document)], Target::ResolvedCollection("snapshot_source_documents")),
+                Facet::required(Read, &[Object(K::DocumentContainer)], Target::ResolvedCollection("snapshot_source_document_containers")),
+                Facet::required(Read, &[Object(K::Environment)], Target::ResolvedCollection("snapshot_source_environments")),
+                Facet::required(Read, &[Identity(I::Chat)], Target::ResolvedCollection("snapshot_source_chats")),
+                Facet::required(Write, &[Object(K::Thread)], Target::ResolvedCollection("snapshot_recipient_threads")),
+                Facet::response_content(&[Object(K::Thread)], Target::ResolvedCollection("response_recipient_threads")),
+                Facet::required(Read, &[Object(K::Org)], Target::ResolvedCollection("share_name_orgs")),
+                Facet::required(Read, &[Object(K::Project)], Target::ResolvedCollection("share_name_projects")),
+                Facet::required(Read, &[Object(K::Topic)], Target::ResolvedCollection("share_name_topics")),
+                Facet::required(Read, &[Object(K::Thread)], Target::ResolvedCollection("share_name_threads"))
+            ] },
+            Variant { name: "snapshot_comment", selector: "mode=snapshot; nonblank comment is supplied", facets: &[
+                Facet::required(Read, &[Object(K::Org)], Target::ResolvedCollection("snapshot_source_orgs")),
+                Facet::required(Read, &[Object(K::Project)], Target::ResolvedCollection("snapshot_source_projects")),
+                Facet::required(Read, &[Object(K::Topic)], Target::ResolvedCollection("snapshot_source_topics")),
+                Facet::required(Read, &[Object(K::Thread)], Target::ResolvedCollection("snapshot_source_threads")),
+                Facet::required(Read, &[Object(K::Document)], Target::ResolvedCollection("snapshot_source_documents")),
+                Facet::required(Read, &[Object(K::DocumentContainer)], Target::ResolvedCollection("snapshot_source_document_containers")),
+                Facet::required(Read, &[Object(K::Environment)], Target::ResolvedCollection("snapshot_source_environments")),
+                Facet::required(Read, &[Identity(I::Chat)], Target::ResolvedCollection("snapshot_source_chats")),
+                Facet::required(Write, &[Object(K::Thread)], Target::ResolvedCollection("snapshot_recipient_threads")),
+                Facet::response_content(&[Object(K::Thread)], Target::ResolvedCollection("response_recipient_threads")),
+                Facet::required(Read, &[Object(K::Org)], Target::ResolvedCollection("share_name_orgs")),
+                Facet::required(Read, &[Object(K::Project)], Target::ResolvedCollection("share_name_projects")),
+                Facet::required(Read, &[Object(K::Topic)], Target::ResolvedCollection("share_name_topics")),
+                Facet::required(Read, &[Object(K::Thread)], Target::ResolvedCollection("share_name_threads"))
+,
+                Facet::required(Read,&[Identity(I::Chat)],Target::ResolvedCollection("message_source_chats")),
+                Facet::required(Read,&[Object(K::Thread)],Target::ResolvedCollection("message_source_threads")),
+                Facet::required(Read,&[Object(K::Document)],Target::ResolvedCollection("message_source_documents")),
+                Facet::required(Read,&[Object(K::Environment)],Target::ResolvedCollection("message_source_environments")),
+                Facet::required(Read,&[Identity(I::Upload)],Target::ResolvedCollection("message_retained_uploads")),
+            ] }
+        ]));
     /// Lists the live shares and the copies of a node, a document or a chat, or what was shared with the agents of a place.
-    AgentShareList: GET "/{object}/{id}/agent-shares", Rule("node.view on a node, doc.view on a document, or being in the chat"), query AgentShareListQuery, none, json Vec<AgentShare>, 200;
+    AgentShareList: GET "/{object}/{id}/agent-shares", Rule("node.view on a node, doc.view on a document, or being in the chat"), query AgentShareListQuery, none, json Vec<AgentShare>, 200,
+        operation Op::single(
+            Read,
+            &[
+                Object(K::Org),
+                Object(K::Project),
+                Object(K::Topic),
+                Object(K::Thread),
+                Object(K::Document),
+                Object(K::DocumentContainer),
+                Identity(I::Chat),
+            ],
+            Target::Resolved("source_or_recipient"),
+        );
     /// Says what a thread's agent may read beyond its own thread, and the copies it was given.
     ThreadSharedGet: GET "/threads/{id}/shared", Permission("thread.view"), none, none, json ThreadSharedGetReply, 200;
     /// Lists an agent's reach as the tree its own tools list, so that a person sees exactly what the agent can read and write.
     ThreadSharedTreeGet: GET "/threads/{id}/shared/tree", Permission("thread.view"), query ThreadSharedTreeGetQuery, none, json ThreadSharedTreeGetReply, 200;
     /// Changes the areas or the end of a live share.
-    ShareAgentUpdate: PATCH "/share/agents/{share_id}", Rule("as for creating it"), none, json ShareAgentUpdateBody, json AgentShare, 200;
+    ShareAgentUpdate: PATCH "/share/agents/{share_id}", Rule("as for creating it"), none, json ShareAgentUpdateBody, json AgentShare, 200,
+        operation Op::variants(&[
+            Variant {
+                name: "grant",
+                selector: "read_first omitted or has no effective change",
+                facets: &[
+                    Facet::required(
+                        Manage,
+                        &[
+                            Object(K::Org),
+                            Object(K::Project),
+                            Object(K::Topic),
+                            Object(K::Thread),
+                            Object(K::Document),
+                            Identity(I::Chat),
+                        ],
+                        Target::Resolved("shared_source"),
+                    ),
+                    Facet::response_content(
+                        &[
+                            Object(K::Org),
+                            Object(K::Project),
+                            Object(K::Topic),
+                            Object(K::Thread),
+                            Object(K::Document),
+                            Identity(I::Chat),
+                        ],
+                        Target::Resolved("shared_source"),
+                    ),
+                ],
+            },
+            Variant {
+                name: "read_first",
+                selector: "read_first changes the stored first-reading state",
+                facets: &[
+                    Facet::required(
+                        Manage,
+                        &[
+                            Object(K::Org),
+                            Object(K::Project),
+                            Object(K::Topic),
+                            Object(K::Thread),
+                            Object(K::Document),
+                            Identity(I::Chat),
+                        ],
+                        Target::Resolved("shared_source"),
+                    ),
+                    Facet::required(
+                        Read,
+                        &[
+                            Object(K::Org),
+                            Object(K::Project),
+                            Object(K::Topic),
+                            Object(K::Thread),
+                            Object(K::Document),
+                            Identity(I::Chat),
+                        ],
+                        Target::Resolved("shared_source"),
+                    ),
+                    Facet::required(
+                        Write,
+                        &[
+                            Object(K::Org),
+                            Object(K::Project),
+                            Object(K::Topic),
+                            Object(K::Thread),
+                        ],
+                        Target::Resolved("recipients"),
+                    ),
+                    Facet::response_content(
+                        &[
+                            Object(K::Org),
+                            Object(K::Project),
+                            Object(K::Topic),
+                            Object(K::Thread),
+                            Object(K::Document),
+                            Identity(I::Chat),
+                        ],
+                        Target::Resolved("shared_source"),
+                    ),
+                ],
+            },
+        ]);
     /// Takes a share back: a live share ends at the agent's next call, a copy not yet delivered is cancelled and one delivered is removed from the workspace.
-    ShareAgentDelete: DELETE "/share/agents/{share_id}", Rule("whoever shared it, or whoever could share the same thing now"), none, none, none, 204;
+    ShareAgentDelete: DELETE "/share/agents/{share_id}", Rule("whoever shared it, or whoever could share the same thing now"), none, none, none, 204,
+        operation Op::single(
+            Manage,
+            &[
+                Object(K::Org),
+                Object(K::Project),
+                Object(K::Topic),
+                Object(K::Thread),
+                Object(K::Document),
+                Object(K::DocumentContainer),
+                Identity(I::Chat),
+            ],
+            Target::Resolved("shared_source"),
+        );
 }
 
 #[cfg(test)]
@@ -510,7 +821,8 @@ mod tests {
             Some(ShareParts {
                 timeline: Some(ShareLevel::Read),
                 chat: None,
-                documents: Some(ShareDocumentsLevel::Edit)
+                documents: Some(ShareDocumentsLevel::Edit),
+                ..ShareParts::default()
             })
         );
     }

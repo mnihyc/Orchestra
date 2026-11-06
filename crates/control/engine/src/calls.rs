@@ -636,6 +636,23 @@ fn step(row: &Recovery) -> Option<Step> {
     serde_json::from_value(row.action.as_ref()?.get("step")?.clone()).ok()
 }
 
+/// A fresh explicit input supersedes attention stops and a vendor-quota-reset
+/// wait. Other configured retry/backoff/switching work keeps its existing order.
+/// Completing this slot never changes or resubmits the failed turn/input.
+pub(crate) async fn supersede_for_input(conn: &mut Conn, thread: Id) -> Result<(), EngineError> {
+    // Compare the exact serialization of the typed step, not an error message or
+    // a reset-looking substring. One conditional write classifies the current row
+    // atomically and preserves any concurrent non-quota retry/backoff replacement.
+    let quota_wait = serde_json::to_value(Step::Wait {
+        until: Until::Reset,
+    })?;
+    sqlx::query("UPDATE model_call_recovery SET state='completed',due_at=NULL,context=context-'manual_stop'-'manual_request'
+        WHERE node_id=$1 AND purpose='agent' AND (state IN ('waiting','stopped')
+            OR (state='scheduled' AND failure->>'code'='provider_exhausted' AND action->'step'=$2::jsonb))")
+        .bind(thread).bind(quota_wait).execute(conn).await.map_err(DbError::from)?;
+    Ok(())
+}
+
 fn id(context: &Json, key: &str) -> Option<Id> {
     context[key].as_str()?.parse().ok()
 }
@@ -800,7 +817,10 @@ async fn original_ready(conn: &mut Conn, original: &Json) -> Result<bool, Engine
     };
     let Some(provider) = resources::provider(conn, provider)
         .await?
-        .filter(|provider| provider.status == "ready" && provider.deleted_at.is_none())
+        .filter(|provider| {
+            crate::providers::request_status_available(&provider.status)
+                && provider.deleted_at.is_none()
+        })
     else {
         return Ok(false);
     };
@@ -1214,16 +1234,24 @@ impl Engine {
                 "the original input or its author is unavailable",
             ));
         }
-        self.check_input_author_driving(unit, thread, origin)
+        let content = json!([{"type":"text","text":"Continue"}]);
+        let client = format!("recovery:{reference}");
+        let mut planned = origin.clone();
+        planned.content = content.clone();
+        planned.native_action = None;
+        planned.limit_bypass = None;
+        planned.delivery = "queue".into();
+        self.check_input_author_driving(unit, thread, &planned)
             .await
             .map_err(EngineError::unreadable)?;
-        let serving = crate::inputs::input_caller(unit, thread, origin)
-            .await?
-            .ok_or_else(|| {
-                EngineError::unreadable("the original submission's authority is unavailable")
-            })?;
+        let serving =
+            crate::inputs::input_caller(unit, thread, &planned, self.inner.clock.as_ref())
+                .await?
+                .ok_or_else(|| {
+                    EngineError::unreadable("the original submission's authority is unavailable")
+                })?;
         let allowed = if let Some(candidate) = candidate {
-            self.candidate_allowed(
+            self.input_candidate_allowed(
                 unit.conn,
                 thread.node_id,
                 &serving,
@@ -1232,7 +1260,7 @@ impl Engine {
             )
             .await?
         } else {
-            self.check_sender(unit, &serving, thread, true)
+            self.check_recovery_sender(unit, &serving, thread, true)
                 .await
                 .is_ok()
         };
@@ -1242,8 +1270,7 @@ impl Engine {
             ));
         }
         let provenance = crate::inputs::derived_input_provenance(origin, None)?;
-        let content = json!([{"type":"text","text":"Continue"}]);
-        let client = format!("recovery:{reference}");
+
         let seq = unit.stamp(thread.node_id).await?;
         let at = unit.now();
         let next = threads::insert_input_in(
@@ -1588,8 +1615,12 @@ impl Engine {
             self.commit(tx, finished).await?;
             return Ok(());
         }
-        let driving = crate::inputs::input_author_caller(&mut unit, node, &input).await?;
-        let serving = crate::inputs::input_caller(&mut unit, &thread, &input).await?;
+        let driving =
+            crate::inputs::input_author_caller(&mut unit, node, &input, self.inner.clock.as_ref())
+                .await?;
+        let serving =
+            crate::inputs::input_caller(&mut unit, &thread, &input, self.inner.clock.as_ref())
+                .await?;
         let Some((caller, serving)) = driving.zip(serving) else {
             self.stop_recovery_in(&mut unit, &thread, &row, "origin_authority")
                 .await?;
@@ -1603,7 +1634,7 @@ impl Engine {
             ));
         }
         if self
-            .check_sender(&mut unit, &caller, &thread, false)
+            .check_recovery_sender(&mut unit, &caller, &thread, false)
             .await
             .is_err()
         {
@@ -1611,7 +1642,13 @@ impl Engine {
                 .await?;
         } else if let Some(Step::Failover { candidate }) = step(&row) {
             if !self
-                .candidate_allowed(&mut *unit.conn, node, &serving, &candidate, Purpose::Agent)
+                .input_candidate_allowed(
+                    &mut *unit.conn,
+                    node,
+                    &serving,
+                    &candidate,
+                    Purpose::Agent,
+                )
                 .await
                 .unwrap_or(false)
             {
@@ -1658,7 +1695,7 @@ impl Engine {
                 self.queue_recovery_in(&mut unit, &thread, &row).await?;
             }
         } else if self
-            .check_sender(&mut unit, &serving, &thread, true)
+            .check_recovery_sender(&mut unit, &serving, &thread, true)
             .await
             .is_err()
         {
@@ -1672,6 +1709,39 @@ impl Engine {
         let finished = unit.finish().await?;
         self.commit(tx, finished).await?;
         Ok(())
+    }
+
+    async fn check_recovery_sender(
+        &self,
+        unit: &mut Unit<'_>,
+        authority: &crate::inputs::InputCallers,
+        thread: &ThreadRow,
+        need_provider: bool,
+    ) -> Result<(), crate::inputs::InputError> {
+        for caller in authority.callers() {
+            self.check_sender(unit, caller, thread, need_provider)
+                .await?;
+        }
+        Ok(())
+    }
+
+    async fn input_candidate_allowed(
+        &self,
+        conn: &mut Conn,
+        node: Id,
+        authority: &crate::inputs::InputCallers,
+        candidate: &Candidate,
+        purpose: Purpose,
+    ) -> Result<bool, EngineError> {
+        for caller in authority.callers() {
+            if !self
+                .candidate_allowed(conn, node, caller, candidate, purpose)
+                .await?
+            {
+                return Ok(false);
+            }
+        }
+        Ok(true)
     }
 
     /// Checks current provider, model and optional profile authority for the original caller.
@@ -1832,8 +1902,16 @@ impl Engine {
             }
             return Ok(());
         }
+        let effect = row.context["effects"].as_bool().unwrap_or(true);
+        let mut planned = input.clone();
+        if effect {
+            planned.content = json!([{"type":"text","text":"Continue"}]);
+            planned.native_action = None;
+            planned.limit_bypass = None;
+            planned.delivery = "queue".into();
+        }
         if self
-            .check_input_author_driving(unit, thread, &input)
+            .check_input_author_driving(unit, thread, &planned)
             .await
             .is_err()
         {
@@ -1841,7 +1919,9 @@ impl Engine {
                 .await?;
             return Ok(());
         }
-        let Some(serving) = crate::inputs::input_caller(unit, thread, &input).await? else {
+        let Some(serving) =
+            crate::inputs::input_caller(unit, thread, &planned, self.inner.clock.as_ref()).await?
+        else {
             self.stop_recovery_in(unit, thread, row, "origin_authority")
                 .await?;
             return Ok(());
@@ -1849,7 +1929,7 @@ impl Engine {
         // A newly selected overlay is not active until this input is queued. Check its real destination here.
         let allowed = if let Some(candidate) = row.context.get("candidate") {
             let candidate: Candidate = serde_json::from_value(candidate.clone())?;
-            self.candidate_allowed(
+            self.input_candidate_allowed(
                 unit.conn,
                 thread.node_id,
                 &serving,
@@ -1858,7 +1938,7 @@ impl Engine {
             )
             .await?
         } else {
-            self.check_sender(unit, &serving, thread, true)
+            self.check_recovery_sender(unit, &serving, thread, true)
                 .await
                 .is_ok()
         };
@@ -1867,7 +1947,7 @@ impl Engine {
                 .await?;
             return Ok(());
         }
-        let effect = row.context["effects"].as_bool().unwrap_or(true);
+
         let actual = if effect { "continue" } else { "retry" };
         let mut recovered_input = input.id;
         if effect {
@@ -1943,10 +2023,15 @@ impl Engine {
     async fn recovery_switch(
         &self,
         node: Id,
-        caller: Caller,
+        authority: crate::inputs::InputCallers,
         row: &Recovery,
         candidate: &Candidate,
     ) -> Result<(), EngineError> {
+        let actor = authority.user();
+        let captured = authority.captured().clone();
+        // This method crosses the earlier admission transaction. Carry only immutable
+        // origin boundaries across it, then restore and bind them again under this lock.
+        drop(authority);
         let request: orch_api_contract::forks::ForkRequest = serde_json::from_value(
             json!({"result":"replace","to":{"provider_id":candidate.provider_id,"agent_id":candidate.agent_id,"model":candidate.model,"effort":candidate.params.get("effort")},"history":{"mode":"all"}}),
         )?;
@@ -1964,28 +2049,73 @@ impl Engine {
             return Ok(());
         }
         let result = async {
-            let draft = self
-                .draft_in(
-                    &mut tx,
-                    &caller,
-                    node,
-                    &request,
-                    crate::fork_plan::Reach::Seen,
-                    None,
+            let input_id = id(&row.context, "input_id")
+                .ok_or_else(|| EngineError::unreadable("the recovery origin is unavailable"))?;
+            let input = threads::input(&mut tx, input_id)
+                .await?
+                .filter(|input| input.thread_id == node && input.author_id == Some(actor))
+                .ok_or_else(|| EngineError::unreadable("the recovery origin is unavailable"))?;
+            let current_authority = crate::inputs::saved_authority(
+                input.submission_authority.as_ref(),
+            )?
+            .ok_or_else(|| {
+                EngineError::unreadable("the recovery input's current authority is unavailable")
+            })?;
+            let captured = captured.retaining_current(actor, &current_authority)?;
+            let authority = {
+                let mut unit = Unit::new(&mut tx, self.inner.clock.now());
+                crate::inputs::input_authority_callers(
+                    &mut unit,
+                    &thread,
+                    &input,
+                    actor,
+                    &captured,
+                    self.inner.clock.as_ref(),
                 )
-                .await
-                .map_err(EngineError::unreadable)?;
-            if !draft.is_clear() {
-                return Err(EngineError::unreadable(
-                    "The configured switch has blockers",
-                ));
+                .await?
+                .ok_or_else(|| {
+                    EngineError::unreadable("the recovery origin's authority is unavailable")
+                })?
+            };
+            let mut agreed: Option<crate::fork_plan::Draft> = None;
+            for caller in authority.callers() {
+                let mut draft = self
+                    .draft_in(
+                        &mut tx,
+                        caller,
+                        node,
+                        &request,
+                        crate::fork_plan::Reach::Seen,
+                        None,
+                        None,
+                    )
+                    .await
+                    .map_err(EngineError::unreadable)?;
+                if !draft.is_clear() {
+                    return Err(EngineError::unreadable(
+                        "The configured switch has blockers",
+                    ));
+                }
+                if let Some(previous) = &agreed {
+                    // Preview expiry is a clock observation, not a materialized business effect.
+                    draft.plan.expires_at = previous.plan.expires_at;
+                    if &draft != previous {
+                        return Err(EngineError::unreadable(
+                            "The accepted origins disagree on the configured switch",
+                        ));
+                    }
+                } else {
+                    agreed = Some(draft);
+                }
             }
-            self.start_fork_job(
+            let draft = agreed
+                .ok_or_else(|| EngineError::unreadable("the recovery has no accepted origin"))?;
+            self.start_recovery_fork_job(
                 &mut tx,
-                &caller,
+                &authority,
+                input_id,
                 &thread,
                 draft,
-                None,
                 crate::ids::derived("call.switch", &[row.reference.as_bytes()]),
             )
             .await

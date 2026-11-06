@@ -44,7 +44,7 @@ async fn disk_room() -> (Room, TempDir) {
     let mut room = Room::new().await;
     let target = std::env::var_os("CARGO_TARGET_DIR")
         .map(PathBuf::from)
-        .unwrap_or_else(|| PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../../../target"));
+        .unwrap_or_else(|| PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../../target"));
     let directory = tempfile::Builder::new()
         .prefix("kfix-upload-")
         .tempdir_in(target)
@@ -644,7 +644,9 @@ async fn readable_sources_can_be_copied_and_a_revoked_source_cannot_be_used_by_h
         .body(&forward(destination))
         .send()
         .await
-        .ok();
+        .ok()
+        .into_full()
+        .expect("the ordinary forward returns its full projection");
     assert_eq!(forwarded.chats.len(), 1);
     room.world
         .app

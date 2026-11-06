@@ -702,7 +702,7 @@ impl Engine {
         thread: &ThreadRow,
         arguments: &Arguments,
         call: &CallContext,
-        mut source: Option<Imported>,
+        source: Option<Imported>,
     ) -> Result<Result<(Done, String), Refusal>, EngineError> {
         if let Some(source) = &arguments.from {
             return Ok(Box::pin(self.copy_document_for_edit(
@@ -724,6 +724,17 @@ impl Engine {
                 )
             }));
         }
+        Box::pin(self.create_text_document(thread, arguments, call, source)).await
+    }
+
+    /// Keeps ordinary text creation state separate from the compatibility copy path.
+    async fn create_text_document(
+        &self,
+        thread: &ThreadRow,
+        arguments: &Arguments,
+        call: &CallContext,
+        mut source: Option<Imported>,
+    ) -> Result<Result<(Done, String), Refusal>, EngineError> {
         let asked = arguments.path.trim().trim_end_matches('/');
         let Some((directory, last)) = asked.rsplit_once('/') else {
             return Ok(Err(Refusal::invalid(

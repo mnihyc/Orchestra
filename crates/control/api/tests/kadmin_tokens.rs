@@ -6,6 +6,7 @@
 )]
 
 mod support;
+use support::FullTokenReply as _;
 
 use chrono::Duration;
 use orch_api_contract::auth::{
@@ -22,14 +23,15 @@ use support::{PASSWORD, Signed, World, step};
 
 fn body(scopes: Option<&[&str]>, ends_in_days: Option<i64>, world: &World) -> ApiTokenCreateBody {
     ApiTokenCreateBody {
+        rules: None,
         name: "automation".to_owned(),
         scopes: scopes.map(|scopes| scopes.iter().map(|scope| (*scope).to_owned()).collect()),
         node_id: None,
         expires_at: ends_in_days.map(|days| Time::new(world.now() + Duration::days(days))),
-        proof: SensitiveProof {
+        proof: Some(SensitiveProof {
             password: Some(PASSWORD.to_owned()),
             ..SensitiveProof::default()
-        },
+        }),
     }
 }
 
@@ -44,7 +46,7 @@ async fn make(
         Some(key) => call.header(IDEMPOTENCY_HEADER, key),
         None => call,
     };
-    call.body(body).send().await
+    call.body(body).send().await.full_token()
 }
 
 async fn read_org(
@@ -89,22 +91,22 @@ async fn a_token_is_made_only_with_a_fresh_password_and_the_second_step_in_the_s
     let ada = world.person("ada").await;
     let signed = world.sign_in(&ada).await;
     let mut without = body(Some(&["*"]), None, &world);
-    without.proof = SensitiveProof::default();
+    without.proof = Some(SensitiveProof::default());
     let missing = make(&world, &signed, &without, None).await.problem();
     assert_eq!(
         (missing.status, missing.code),
         (403, ErrorCode::AuthReauthenticationRequired)
     );
     let mut wrong = body(Some(&["*"]), None, &world);
-    wrong.proof.password = Some("not my password at all".to_owned());
+    wrong.proof.as_mut().unwrap().password = Some("not my password at all".to_owned());
     let refused = make(&world, &signed, &wrong, None).await.problem();
     assert_eq!(refused.code, ErrorCode::AuthInvalidCredentials);
     // An identity provider's proof does not stand for a password the person has.
     let mut instead = body(Some(&["*"]), None, &world);
-    instead.proof = SensitiveProof {
+    instead.proof = Some(SensitiveProof {
         identity_proof: Some("whatever".to_owned()),
         ..SensitiveProof::default()
-    };
+    });
     let replaced = make(&world, &signed, &instead, None).await.problem();
     assert_eq!(replaced.code, ErrorCode::AuthReauthenticationRequired);
     let listed = world
@@ -125,13 +127,13 @@ async fn a_token_is_made_only_with_a_fresh_password_and_the_second_step_in_the_s
     assert_eq!(asked.code, ErrorCode::AuthSecondStepRequired);
     assert_eq!(asked.extra["methods"], json!(["totp", "recovery_code"]));
     let mut bad_code = body(Some(&["*"]), None, &world);
-    bad_code.proof.totp = Some("000000".to_owned());
+    bad_code.proof.as_mut().unwrap().totp = Some("000000".to_owned());
     assert_eq!(
         make(&world, &signed, &bad_code, None).await.problem().code,
         ErrorCode::AuthSecondStepInvalid
     );
     let mut with_code = body(Some(&["*"]), None, &world);
-    with_code.proof.totp = Some(world.totp_code(&secret));
+    with_code.proof.as_mut().unwrap().totp = Some(world.totp_code(&secret));
     let made = make(&world, &signed, &with_code, None).await.ok();
     assert!(made.token.is_some() && !made.already_created);
     // The same code is spent: it does not make a second token.
@@ -158,7 +160,7 @@ async fn the_same_creation_asked_again_by_its_key_answers_what_was_made_without_
     assert!(first.token.is_some() && !first.already_created);
     // Asked again, even with a proof that would now be wrong: what was made, and no secret.
     let mut again = body(Some(&["*"]), None, &world);
-    again.proof.password = Some("not my password at all".to_owned());
+    again.proof.as_mut().unwrap().password = Some("not my password at all".to_owned());
     let repeat = make(&world, &signed, &again, Some(key)).await.ok();
     assert_eq!(repeat.token, None);
     assert!(repeat.already_created);

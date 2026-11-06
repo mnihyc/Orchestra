@@ -114,7 +114,7 @@ for (const locale of ['en', 'zh-CN'] as const) it(`uses the reported name in pro
   const named = { harness: { kind: 'research-agent', name: 'Research assistant', names: { 'zh-CN': '研究助理' } } };
   const program = { kind: 'research-agent', version: failed.version, build: failed, ...named };
   show(<ProgramBuild program={program} />);
-  expect(screen.getByText(name, { exact: true })).toBeVisible();
+  expect(screen.getByText(`${name} 1.2.3`, { exact: true })).toBeVisible();
   expect(screen.getByText(i18n.t('programVersions.featureOff', { feature: i18n.t('programVersions.disabledFeatures.questions'), name, version: failed.version }))).toBeVisible();
   await userEvent.click(screen.getByRole('button', { name: i18n.t('programVersions.offInBuild', { feature: i18n.t('programVersions.disabledFeatures.questions') }) }));
   expect(screen.getByRole('dialog', { name: i18n.t('admin.harnesses.checkResults') })).toHaveTextContent(`${name} 1.2.3`);
@@ -127,7 +127,7 @@ for (const locale of ['en', 'zh-CN'] as const) it(`names a running program even 
   const program = { kind: 'named-external', version: '1.2.3', build: null,
     harness: { kind: 'named-external', name: 'Research assistant', names: { 'zh-CN': '研究助理' } } };
   show(<ProgramBuild program={program} />);
-  expect(screen.getByText(name, { exact: true })).toBeVisible();
+  expect(screen.getByText(`${name} 1.2.3`, { exact: true })).toBeVisible();
   expect(screen.getByText(i18n.t('programVersions.unknownCheck'))).toBeVisible();
   expect(document.body).not.toHaveTextContent(i18n.t('resources.harnessNameUnknown'));
   expect(document.body).not.toHaveTextContent('named-external');

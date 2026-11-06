@@ -9,6 +9,9 @@ mod places;
 mod rig;
 mod support;
 
+#[path = "provider_managed/handover_operation_scopes.rs"]
+mod handover_operation_scopes;
+
 use orch_access_contract::decisions::ObjectRef;
 use orch_access_contract::permissions::ResourceKind;
 use orch_api_contract::access::NewResourceAccess;
@@ -633,6 +636,8 @@ async fn a_person_adds_a_subscription_and_is_given_the_job_that_makes_its_runtim
         .send()
         .await
         .ok()
+        .into_full()
+        .unwrap()
         .provider;
     assert_eq!(made.base.name, "Team Codex");
     assert_eq!(made.base.harness_kind.as_deref(), Some("fake"));
@@ -704,6 +709,8 @@ async fn a_person_adds_a_subscription_and_is_given_the_job_that_makes_its_runtim
         .send()
         .await
         .ok()
+        .into_full()
+        .unwrap()
         .provider;
     let runtime = api.runtime.expect("a provider on a key has a runtime too");
     assert_eq!(
@@ -729,6 +736,8 @@ async fn a_creation_reply_keeps_its_runtime_job_even_when_the_engine_fails_befor
         .send()
         .await
         .ok()
+        .into_full()
+        .unwrap()
         .provider;
     let runtime = made
         .runtime
@@ -1282,6 +1291,8 @@ async fn a_provider_is_signed_out_by_asking_its_harness_and_a_provider_on_a_key_
         .send()
         .await
         .ok()
+        .into_full()
+        .unwrap()
         .provider;
     let refused = sign_in(&s, api.base.id, &s.ada.token, &by("setup_token", &[]))
         .await
@@ -1296,12 +1307,21 @@ async fn the_page_of_a_managed_provider_shows_its_runtime_and_when_it_stops_or_r
     let s = scene().await;
     let provider = managed_and_up(&s).await;
     let page = get(&s, provider).await;
+    assert_eq!(page.base.address, "acme.ada.Fake subscription");
+    assert_eq!(
+        page.agent.as_ref().map(|agent| agent.address.as_str()),
+        Some("acme.ada.Fake agent")
+    );
     let runtime = page.runtime.expect("a managed provider shows its runtime");
     assert_eq!(runtime.state, "running");
     assert_eq!(runtime.driver, "docker");
     assert_eq!(
         runtime.host.as_ref().map(|host| host.name.as_str()),
         Some("Build box")
+    );
+    assert_eq!(
+        runtime.host.as_ref().map(|host| host.address.as_str()),
+        Some("acme.ada.Build box")
     );
     assert_eq!(runtime.template.name, "Provider runtime");
     assert_eq!(runtime.generation, 1);
@@ -1422,7 +1442,9 @@ async fn a_runtime_is_not_stopped_by_hand_while_a_turn_runs_on_it_unless_the_req
         })
         .send()
         .await
-        .ok();
+        .ok()
+        .into_full()
+        .unwrap();
     let sent = s
         .say(&s.ada, thread.base.id, "Hello", Delivery::Queue, "busy-1")
         .await;
@@ -1564,7 +1586,12 @@ async fn a_credential_handed_over_is_brought_home_by_whoever_manages_the_provide
     );
     assert!(get(&s, provider).await.held_by.is_some());
     // Tried again, it comes home: the environment gives it back sealed and the runtime is handed it as it came.
-    let home = bring(&s.eve.token, None, None).await.ok();
+    let home = bring(&s.eve.token, None, None)
+        .await
+        .ok()
+        .into_full()
+        .expect("the ordinary holder receives its provider projection")
+        .provider;
     assert!(home.held_by.is_none());
     let accepted = asked(&heard, K::ProviderCredentialAccept);
     assert_eq!(accepted.len(), 1);
@@ -1586,7 +1613,12 @@ async fn a_credential_handed_over_is_brought_home_by_whoever_manages_the_provide
     );
     // Taken away again and given up instead, by whoever manages the provider: it has to be signed in.
     handed_over(&s, provider).await;
-    let given_up = bring(&s.ada.token, None, Some(true)).await.ok();
+    let given_up = bring(&s.ada.token, None, Some(true))
+        .await
+        .ok()
+        .into_full()
+        .expect("the ordinary provider manager receives its provider projection")
+        .provider;
     assert!(given_up.held_by.is_none());
     assert_eq!(given_up.base.status, ProviderStatus::NeedsSetup);
     let lost_rows: i64 = sqlx::query_scalar(
@@ -1608,6 +1640,64 @@ async fn a_deleted_provider_is_signed_out_first_and_its_runtime_is_retired() {
     let s = scene().await;
     let provider = managed_and_up(&s).await;
     let heard = the_harness_answers(&s, provider);
+    let delivered = Arc::new(Mutex::new(Vec::<Command>::new()));
+    for kind in [K::AgentStop, K::ProviderStop] {
+        let delivered = Arc::clone(&delivered);
+        let agent = s.on.agent;
+        s.rig.machine.handler.on(kind, move |command| {
+            let result = match command {
+                Command::AgentStop(body)
+                    if body.provider_id == provider && body.agent_id == agent =>
+                {
+                    CommandResult::AgentStop(Empty {})
+                }
+                Command::ProviderStop(body) if body.provider_id == provider => {
+                    CommandResult::ProviderStop(Empty {})
+                }
+                _ => {
+                    return Err(CommandError::new(
+                        Wire::NotFound,
+                        "another provider or harness",
+                    ));
+                }
+            };
+            lock(&delivered).push(command.clone());
+            Ok(result)
+        });
+    }
+    // Signing in starts the selected harness through the same public provider producer.
+    let signed_in = sign_in(
+        &s,
+        provider,
+        &s.ada.token,
+        &by("setup_token", &[("token", TOKEN)]),
+    )
+    .await
+    .ok();
+    assert_eq!(signed_in.state, LoginProgress::Completed);
+    assert_eq!(asked(&heard, K::ProviderLoginStart).len(), 1);
+    let harnesses: Vec<(Id, Id, Id, String)> = sqlx::query_as(
+        "SELECT provider_id,agent_id,machine_id,status FROM harnesses WHERE provider_id=$1 ORDER BY agent_id,machine_id"
+    ).bind(provider).fetch_all(s.rig.db.pool()).await.unwrap();
+    assert_eq!(
+        harnesses,
+        [(provider, s.on.agent, s.rig.machine_id, "online".to_owned())]
+    );
+    let before: (Id, String, Json) =
+        sqlx::query_as("SELECT id,state,volumes FROM runtimes WHERE provider_id=$1")
+            .bind(provider)
+            .fetch_one(s.rig.db.pool())
+            .await
+            .unwrap();
+    assert_eq!(before.1, "running");
+    type ThreadBindingRow = (Id, Option<Id>, Option<Id>, Option<Id>);
+    let bindings: Vec<ThreadBindingRow> = sqlx::query_as(
+        "SELECT node_id,provider_id,agent_id,environment_id FROM threads WHERE provider_id=$1 ORDER BY node_id"
+    ).bind(provider).fetch_all(s.rig.db.pool()).await.unwrap();
+    let observe = std::env::var_os("ORCH_TEST_SQL_TIMINGS").is_some();
+    let stop_counts =
+        || [K::AgentStop, K::ProviderStop].map(|kind| s.rig.commands.issued_of(kind.as_str()));
+    let before_stops = stop_counts();
     let refused = s
         .rig
         .world
@@ -1619,6 +1709,38 @@ async fn a_deleted_provider_is_signed_out_first_and_its_runtime_is_retired() {
         .problem();
     assert_eq!(refused.code, ErrorCode::AuthzDenied);
     assert!(asked(&heard, K::ProviderLogout).is_empty());
+    assert_eq!(
+        stop_counts(),
+        before_stops,
+        "an unauthorized delete issues no stop or purge"
+    );
+    assert!(lock(&delivered).is_empty());
+    let after_denied: (Id, String, Json) =
+        sqlx::query_as("SELECT id,state,volumes FROM runtimes WHERE provider_id=$1")
+            .bind(provider)
+            .fetch_one(s.rig.db.pool())
+            .await
+            .unwrap();
+    assert_eq!(
+        after_denied, before,
+        "a denied delete changes no runtime or volume"
+    );
+    let still_here: (bool, String, Option<Id>) =
+        sqlx::query_as("SELECT deleted_at IS NULL,status,machine_id FROM providers WHERE id=$1")
+            .bind(provider)
+            .fetch_one(s.rig.db.pool())
+            .await
+            .unwrap();
+    assert_eq!(still_here, (true, "ready".into(), Some(s.rig.machine_id)));
+    if observe {
+        eprintln!(
+            "provider delete denied: issued agent/keeper stops before={before_stops:?} after={:?}",
+            stop_counts()
+        );
+    }
+    // The deleted/stopped transaction commits before best-effort native cleanup can answer.
+    s.rig.machine.handler.hold(K::AgentStop);
+    s.rig.machine.handler.hold(K::ProviderStop);
     let reply = s
         .rig
         .world
@@ -1628,11 +1750,102 @@ async fn a_deleted_provider_is_signed_out_first_and_its_runtime_is_retired() {
         .send()
         .await;
     assert!(reply.status.is_success(), "{:?}", reply.body);
-    assert_eq!(
-        asked(&heard, K::ProviderLogout).len(),
-        1,
-        "its harness signs out first"
+    let stopped: (bool, String, bool, bool) = sqlx::query_as(
+        "SELECT deleted_at IS NOT NULL,status,login_pending IS NULL,login_state IS NULL FROM providers WHERE id=$1"
+    ).bind(provider).fetch_one(s.rig.db.pool()).await.unwrap();
+    assert_eq!(stopped, (true, "disabled".into(), true, true));
+    assert!(
+        lock(&delivered).is_empty(),
+        "stopped state does not wait for native answers"
     );
+    let secrets: i64 = sqlx::query_scalar(
+        "SELECT count(*) FROM secrets WHERE owner_kind='provider' AND owner_id=$1",
+    )
+    .bind(provider)
+    .fetch_one(s.rig.db.pool())
+    .await
+    .unwrap();
+    assert_eq!(secrets, 0, "no provider secrets remain");
+    s.rig.machine.handler.release();
+    eventually("the admitted sign-out, keeper purge and runtime retirement to finish", || async {
+        let answered = {
+            let commands = lock(&delivered);
+            commands.iter().any(|command| matches!(command, Command::AgentStop(body)
+                if body.provider_id==provider && body.agent_id==s.on.agent && body.logout==Some(true)))
+                && commands.iter().any(|command| matches!(command, Command::ProviderStop(body)
+                if body.provider_id==provider && body.purge==Some(true)))
+        };
+        let retired = sqlx::query_as::<_,(String,Option<Id>)>(
+            "SELECT r.state,p.machine_id FROM runtimes r JOIN providers p ON p.id=r.provider_id WHERE r.id=$1"
+        ).bind(before.0).fetch_optional(s.rig.db.pool()).await.ok().flatten();
+        answered && retired.is_some_and(|(state,machine)| matches!(state.as_str(),"retired"|"removed") && machine.is_none())
+    }).await;
+    let commands = lock(&delivered).clone();
+    // The supervisor may also close provider admission with a non-purging stop.
+    // Native sign-out must precede the separate destructive keeper cleanup.
+    assert_eq!(
+        commands
+            .iter()
+            .filter_map(|command| match command {
+                Command::AgentStop(body)
+                    if body.provider_id == provider
+                        && body.agent_id == s.on.agent
+                        && body.logout == Some(true) =>
+                    Some(K::AgentStop),
+                Command::ProviderStop(body)
+                    if body.provider_id == provider && body.purge == Some(true) =>
+                    Some(K::ProviderStop),
+                _ => None,
+            })
+            .collect::<Vec<_>>(),
+        [K::AgentStop, K::ProviderStop],
+        "the active harness signs out before the keeper is purged"
+    );
+    let logouts: Vec<_> = commands
+        .iter()
+        .filter_map(|command| match command {
+            Command::AgentStop(body) if body.provider_id == provider => {
+                Some((body.agent_id, body.logout))
+            }
+            _ => None,
+        })
+        .collect();
+    let purges: Vec<_> = commands
+        .iter()
+        .filter_map(|command| match command {
+            Command::ProviderStop(body)
+                if body.provider_id == provider && body.purge == Some(true) =>
+            {
+                Some(body.purge)
+            }
+            _ => None,
+        })
+        .collect();
+    assert_eq!(
+        logouts,
+        [(s.on.agent, Some(true))],
+        "the active harness receives actual native sign-out as part of stopping"
+    );
+    assert_eq!(
+        purges,
+        [Some(true)],
+        "the selected keeper purges its provider state"
+    );
+    assert!(
+        asked(&heard, K::ProviderLogout).is_empty(),
+        "deletion uses its harness stop protocol"
+    );
+    if observe {
+        let recipe = sqlx::query_as::<_, (i32, i32, bool)>(
+            "SELECT jsonb_array_length(plan->'quiesce'->'harnesses'),jsonb_array_length(plan->'quiesce'->'keepers'),
+                    (plan->'quiesce'->>'logout')::boolean FROM jobs WHERE kind=$1 AND plan#>>'{quiesce,target,object,id}'=$2
+               ORDER BY created_at DESC,id DESC LIMIT 1"
+        ).bind(orch_engine::resource_pause::KIND).bind(provider.to_string()).fetch_optional(s.rig.db.pool()).await;
+        eprintln!(
+            "provider delete accepted: issued agent/keeper stops before={before_stops:?} after={:?} delivered logout={logouts:?} purge={purges:?} recipe harnesses/keepers/logout={recipe:?}",
+            stop_counts()
+        );
+    }
     let state: String = sqlx::query_scalar("SELECT state FROM runtimes WHERE provider_id = $1")
         .bind(provider)
         .fetch_one(s.rig.db.pool())
@@ -1648,4 +1861,568 @@ async fn a_deleted_provider_is_signed_out_first_and_its_runtime_is_retired() {
         .await
         .unwrap();
     assert!(machine.is_none(), "a deleted provider has no machine");
+    let retired_volume: Json = sqlx::query_scalar("SELECT volumes FROM runtimes WHERE id=$1")
+        .bind(before.0)
+        .fetch_one(s.rig.db.pool())
+        .await
+        .unwrap();
+    assert_eq!(
+        retired_volume, before.2,
+        "the retired runtime keeps the original volume cleanup metadata"
+    );
+    let bindings_after: Vec<ThreadBindingRow> = sqlx::query_as(
+        "SELECT node_id,provider_id,agent_id,environment_id FROM threads WHERE provider_id=$1 ORDER BY node_id"
+    ).bind(provider).fetch_all(s.rig.db.pool()).await.unwrap();
+    assert_eq!(
+        bindings_after, bindings,
+        "the existing thread binding inventory is unchanged"
+    );
+}
+
+#[tokio::test]
+async fn creating_units_keep_retained_facts_without_idle_or_renewal_schedules() {
+    let s = scene().await;
+    s.rig.engine.stop();
+    let provider = managed_and_up(&s).await;
+    let now = s.rig.world.now();
+    let last_active = now - chrono::Duration::hours(2);
+    let renewed = now - chrono::Duration::days(3);
+    let expired = now - chrono::Duration::days(1);
+    let mut conn = s.rig.db.acquire().await.unwrap();
+    let updated = sqlx::query("UPDATE runtimes SET last_active_at=$2 WHERE provider_id=$1 AND successor_of IS NULL AND state NOT IN ('retired','removed')")
+        .bind(provider).bind(last_active).execute(&mut *conn).await.unwrap();
+    assert_eq!(updated.rows_affected(), 1);
+    sqlx::query("UPDATE providers SET credential_renewed_at=$2,facts=jsonb_set(facts,'{credential}',$3),runtime_config=runtime_config||$4 WHERE id=$1")
+        .bind(provider).bind(renewed)
+        .bind(json!({"yields":"login","expires_at":orch_types::Time::new(expired)}))
+        .bind(json!({"runtime.idle_stop_minutes":60,"runtime.renew_days":5}))
+        .execute(&mut *conn).await.unwrap();
+    drop(conn);
+    let before = s.rig.commands.issued_total();
+    let running = get(&s, provider).await.runtime.unwrap();
+    assert_eq!(running.state, "running");
+    assert_eq!(
+        running.last_active_at,
+        Some(orch_types::Time::new(last_active))
+    );
+    assert!(running.idle_stop_at.is_some());
+    assert_eq!(
+        running.renew_at,
+        Some(orch_types::Time::new(expired - chrono::Duration::days(5)))
+    );
+    sqlx::query("UPDATE runtimes SET state='creating' WHERE provider_id=$1")
+        .bind(provider)
+        .execute(s.rig.db.pool())
+        .await
+        .unwrap();
+    let creating = get(&s, provider).await.runtime.unwrap();
+    assert_eq!(creating.state, "creating");
+    assert_eq!(creating.last_active_at, running.last_active_at);
+    assert!(creating.idle_stop_at.is_none() && creating.renew_at.is_none());
+    assert_eq!(creating.driver, running.driver);
+    assert_eq!(creating.generation, running.generation);
+    assert_eq!(
+        serde_json::to_value(&creating.template).unwrap(),
+        serde_json::to_value(&running.template).unwrap()
+    );
+    assert_eq!(
+        serde_json::to_value(&creating.host).unwrap(),
+        serde_json::to_value(&running.host).unwrap()
+    );
+    assert_eq!(
+        serde_json::to_value(&creating.network).unwrap(),
+        serde_json::to_value(&running.network).unwrap()
+    );
+    stopped(&s, provider).await;
+    let stopped_runtime = get(&s, provider).await.runtime.unwrap();
+    assert_eq!(stopped_runtime.state, "stopped");
+    assert_eq!(stopped_runtime.last_active_at, running.last_active_at);
+    assert!(stopped_runtime.idle_stop_at.is_none());
+    assert_eq!(stopped_runtime.renew_at, running.renew_at);
+    // A stopped unit still uses its successful-renewal stamp when no expiry was reported.
+    sqlx::query("UPDATE providers SET facts=facts#-'{credential,expires_at}' WHERE id=$1")
+        .bind(provider)
+        .execute(s.rig.db.pool())
+        .await
+        .unwrap();
+    let fallback = get(&s, provider).await.runtime.unwrap();
+    let fallback_due = Some(orch_types::Time::new(renewed + chrono::Duration::days(5)));
+    assert_eq!(fallback.renew_at, fallback_due);
+    sqlx::query("UPDATE runtimes SET state='creating' WHERE provider_id=$1")
+        .bind(provider)
+        .execute(s.rig.db.pool())
+        .await
+        .unwrap();
+    let retained_creating = get(&s, provider).await.runtime.unwrap();
+    assert_eq!(retained_creating.last_active_at, running.last_active_at);
+    assert!(retained_creating.idle_stop_at.is_none() && retained_creating.renew_at.is_none());
+    sqlx::query("UPDATE runtimes SET state='running' WHERE provider_id=$1")
+        .bind(provider)
+        .execute(s.rig.db.pool())
+        .await
+        .unwrap();
+    let resumed = get(&s, provider).await.runtime.unwrap();
+    assert_eq!(resumed.state, "running");
+    assert_eq!(resumed.last_active_at, running.last_active_at);
+    assert!(resumed.idle_stop_at.is_some());
+    assert_eq!(resumed.renew_at, fallback_due);
+    assert_eq!(
+        s.rig.commands.issued_total(),
+        before,
+        "stored schedule projection issues no native command"
+    );
+}
+
+// Actual stored operation-scoped credentials use the ordinary login HTTP/command producer.
+async fn login_key(
+    s: &Scene,
+    owner: Id,
+    provider: Id,
+    operations: &[&str],
+) -> (String, Id, orch_access_contract::key_scope::KeyScope) {
+    use orch_api_core::middleware::authentication::{API_TOKEN_PREFIX, new_token, token_hash};
+    use orch_db::queries::identity::{NewApiToken, create_api_token_scoped};
+    let scope = serde_json::from_value(json!({"rules":[{
+        "target":{"kind":"provider","id":provider,"reach":"self"},
+        "allow":operations.iter().map(|operation| json!({"operation":operation,"actions":["manage"]})).collect::<Vec<_>>()
+    }]})).unwrap();
+    let token = new_token(API_TOKEN_PREFIX);
+    let id = new_id();
+    create_api_token_scoped(
+        &mut *s.rig.world.conn().await,
+        &NewApiToken {
+            id,
+            user_id: owner,
+            name: "Provider authorization control",
+            token_hash: &token_hash(&token),
+            scopes: &[],
+            node_id: None,
+            at: s.rig.world.now(),
+            expires_at: None,
+        },
+        Some(&serde_json::to_value(&scope).unwrap()),
+    )
+    .await
+    .unwrap();
+    (token, id, scope)
+}
+
+async fn login_input_origin(
+    s: &Scene,
+    provider: Id,
+    owner: Id,
+    token: Id,
+    scope: orch_access_contract::key_scope::KeyScope,
+) -> orch_authz::CapturedOperation {
+    let caller = orch_authz::Caller::token(
+        owner,
+        orch_authz::TokenGrant::from_stored_scope(&[], None, Some(scope), None)
+            .unwrap()
+            .for_token(token),
+    );
+    let plan = orch_engine::provider_setup::login_operation(
+        &mut *s.rig.world.conn().await,
+        provider,
+        "ProviderLoginInput",
+    )
+    .await
+    .unwrap();
+    orch_authz::CapturedOperation::capture(&plan.admit(&caller, false).unwrap()).unwrap()
+}
+
+#[tokio::test]
+async fn scoped_provider_interactive_authorization_uses_the_same_declared_method_and_third_party_answer()
+ {
+    let s = scene().await;
+    let provider = managed_and_up(&s).await;
+    let heard = the_harness_answers(&s, provider);
+    let (starter, _, _) = login_key(
+        &s,
+        s.ada.id(),
+        provider,
+        &["ProviderLoginStart.interactive"],
+    )
+    .await;
+    let started = sign_in(&s, provider, &starter, &by("device_code", &[]))
+        .await
+        .ok();
+    assert_eq!(started.state, LoginProgress::AwaitingUser);
+    assert_eq!(started.shows[1].value, "ABCD-1234");
+    assert_eq!(asked(&heard, K::ProviderLoginStart).len(), 1);
+    // An operation name is not a grant for the separate polling or answer operation.
+    assert_eq!(
+        s.rig
+            .world
+            .app
+            .call(ProviderLoginGet, &[&provider])
+            .token(&starter)
+            .send()
+            .await
+            .problem()
+            .code,
+        ErrorCode::AuthzDenied
+    );
+    let (answerer, _, _) = login_key(
+        &s,
+        s.ada.id(),
+        provider,
+        &["ProviderLoginInput", "ProviderLoginGet"],
+    )
+    .await;
+    let state = s
+        .rig
+        .world
+        .app
+        .call(ProviderLoginGet, &[&provider])
+        .token(&answerer)
+        .send()
+        .await
+        .ok();
+    assert_eq!(state.state, LoginProgress::AwaitingUser);
+    let done = s
+        .rig
+        .world
+        .app
+        .call(ProviderLoginInput, &[&provider])
+        .token(&answerer)
+        .body(&ProviderLoginInputBody {
+            values: BTreeMap::from([("answer".into(), "actual third-party proof".into())]),
+        })
+        .send()
+        .await
+        .ok();
+    assert_eq!(done.state, LoginProgress::Completed);
+    assert_eq!(
+        asked(&heard, K::ProviderLoginInput)[0]["values"]["answer"],
+        "actual third-party proof"
+    );
+    let stored: Json = sqlx::query_scalar("SELECT login_authority FROM providers WHERE id=$1")
+        .bind(provider)
+        .fetch_one(s.rig.db.pool())
+        .await
+        .unwrap();
+    assert_eq!(
+        stored["origin"]["operation"],
+        "ProviderLoginStart.interactive"
+    );
+    assert!(!stored.to_string().contains("node_ancestors"));
+    let public = serde_json::to_string(&get(&s, provider).await).unwrap();
+    assert!(!public.contains("login_authority") && !public.contains("token_ids"));
+}
+
+#[tokio::test]
+async fn scoped_provider_start_requires_the_actual_variant_target_and_current_manager() {
+    let s = scene().await;
+    let provider = managed_and_up(&s).await;
+    let other_provider = {
+        let mut conn = s.rig.world.conn().await;
+        let id = fixtures::insert_resource(
+            &mut conn,
+            "provider",
+            Some(s.ada.id()),
+            Some(s.tree.org.base.id),
+            "Other actual provider",
+        )
+        .await
+        .unwrap();
+        start_resource(
+            &mut conn,
+            ObjectRef {
+                kind: ResourceKind::Provider.into(),
+                id,
+            },
+            s.ada.id(),
+            NewAccess::Defaults,
+            Time::new(s.rig.world.now()),
+        )
+        .await
+        .unwrap();
+        id
+    };
+    assert_ne!(
+        other_provider, provider,
+        "the scope control names another real provider"
+    );
+    let heard = the_harness_answers(&s, provider);
+    for (case, owner, target, operation) in [
+        (
+            "wrong variant",
+            s.ada.id(),
+            provider,
+            "ProviderLoginStart.import",
+        ),
+        (
+            "wrong target",
+            s.ada.id(),
+            other_provider,
+            "ProviderLoginStart.interactive",
+        ),
+        (
+            "ordinary manager",
+            s.eve.id(),
+            provider,
+            "ProviderLoginStart.interactive",
+        ),
+    ] {
+        let (token, _, _) = login_key(&s, owner, target, &[operation]).await;
+        let reply = sign_in(&s, provider, &token, &by("device_code", &[])).await;
+        assert_eq!(
+            reply.status,
+            http::StatusCode::FORBIDDEN,
+            "{case}: {:?}",
+            reply.body
+        );
+        assert_eq!(reply.problem().code, ErrorCode::AuthzDenied, "{case}");
+    }
+    assert!(asked(&heard, K::ProviderLoginStart).is_empty());
+    assert!(!waits(&s, provider).await);
+}
+
+#[tokio::test]
+async fn scoped_provider_original_start_bounds_survive_input_and_cancel_remains_independent() {
+    for change in ["revoke", "expire", "narrow"] {
+        let s = scene().await;
+        let provider = managed_and_up(&s).await;
+        let heard = the_harness_answers(&s, provider);
+        let (starter, start_id, _) = login_key(
+            &s,
+            s.ada.id(),
+            provider,
+            &["ProviderLoginStart.interactive"],
+        )
+        .await;
+        assert_eq!(
+            sign_in(&s, provider, &starter, &by("device_code", &[]))
+                .await
+                .ok()
+                .state,
+            LoginProgress::AwaitingUser
+        );
+        match change {
+            "revoke" => {
+                sqlx::query("UPDATE api_tokens SET revoked_at=$2 WHERE id=$1")
+                    .bind(start_id)
+                    .bind(s.rig.world.now())
+                    .execute(s.rig.db.pool())
+                    .await
+                    .unwrap();
+            }
+            "expire" => {
+                sqlx::query("UPDATE api_tokens SET expires_at=$2 WHERE id=$1")
+                    .bind(start_id)
+                    .bind(s.rig.world.now() - chrono::Duration::seconds(1))
+                    .execute(s.rig.db.pool())
+                    .await
+                    .unwrap();
+            }
+            _ => {
+                sqlx::query("UPDATE api_tokens SET operation_scope=$2 WHERE id=$1")
+                    .bind(start_id)
+                    .bind(json!({"rules":[]}))
+                    .execute(s.rig.db.pool())
+                    .await
+                    .unwrap();
+            }
+        }
+        let (controller, _, _) = login_key(
+            &s,
+            s.ada.id(),
+            provider,
+            &["ProviderLoginInput", "ProviderLoginCancel"],
+        )
+        .await;
+        assert_eq!(
+            s.rig
+                .world
+                .app
+                .call(ProviderLoginInput, &[&provider])
+                .token(&controller)
+                .body(&ProviderLoginInputBody {
+                    values: BTreeMap::from([("answer".into(), "proof".into())])
+                })
+                .send()
+                .await
+                .problem()
+                .code,
+            ErrorCode::AuthzDenied,
+            "{change}"
+        );
+        assert!(asked(&heard, K::ProviderLoginInput).is_empty(), "{change}");
+        s.rig
+            .world
+            .app
+            .call(ProviderLoginCancel, &[&provider])
+            .token(&controller)
+            .send()
+            .await
+            .ok();
+        assert_eq!(asked(&heard, K::ProviderLoginCancel).len(), 1);
+        let active: Option<Json> =
+            sqlx::query_scalar("SELECT login_authority FROM providers WHERE id=$1")
+                .bind(provider)
+                .fetch_one(s.rig.db.pool())
+                .await
+                .unwrap();
+        assert!(active.is_none());
+    }
+}
+
+#[tokio::test]
+async fn scoped_provider_later_input_keeps_its_own_accepted_and_current_credential_at_dispatch() {
+    use orch_engine::provider_setup::{Asked, LoginAuthority, SignInValue};
+    let s = scene().await;
+    let provider = managed_and_up(&s).await;
+    let heard = the_harness_answers(&s, provider);
+    let (starter, _, _) = login_key(
+        &s,
+        s.ada.id(),
+        provider,
+        &["ProviderLoginStart.interactive"],
+    )
+    .await;
+    sign_in(&s, provider, &starter, &by("device_code", &[]))
+        .await
+        .ok();
+    let (_, input_id, scope) = login_key(&s, s.ada.id(), provider, &["ProviderLoginInput"]).await;
+    let origin = login_input_origin(&s, provider, s.ada.id(), input_id, scope).await;
+    let active = LoginAuthority::load(&mut *s.rig.world.conn().await, provider)
+        .await
+        .unwrap();
+    sqlx::query("UPDATE api_tokens SET revoked_at=$2 WHERE id=$1")
+        .bind(input_id)
+        .bind(s.rig.world.now())
+        .execute(s.rig.db.pool())
+        .await
+        .unwrap();
+    let result = s
+        .rig
+        .world
+        .app
+        .app
+        .engine
+        .send_login_input_authorized(
+            provider,
+            &BTreeMap::from([("answer".into(), SignInValue::Text("accepted answer".into()))]),
+            origin,
+            active,
+        )
+        .await
+        .unwrap();
+    assert!(matches!(result, Asked::Refused(_)), "{result:?}");
+    assert!(asked(&heard, K::ProviderLoginInput).is_empty());
+}
+
+#[tokio::test]
+async fn scoped_provider_stale_input_attempt_cannot_send_into_or_clear_a_replacement_login() {
+    use orch_engine::provider_setup::{Asked, LoginAuthority, SignInValue};
+    let s = scene().await;
+    let provider = managed_and_up(&s).await;
+    let heard = the_harness_answers(&s, provider);
+    let (starter, _, _) = login_key(
+        &s,
+        s.ada.id(),
+        provider,
+        &["ProviderLoginStart.interactive"],
+    )
+    .await;
+    sign_in(&s, provider, &starter, &by("device_code", &[]))
+        .await
+        .ok();
+    let old = LoginAuthority::load(&mut *s.rig.world.conn().await, provider)
+        .await
+        .unwrap();
+    let (_, input_id, scope) = login_key(&s, s.ada.id(), provider, &["ProviderLoginInput"]).await;
+    let origin = login_input_origin(&s, provider, s.ada.id(), input_id, scope).await;
+    sign_in(&s, provider, &starter, &by("device_code", &[]))
+        .await
+        .ok();
+    let current = LoginAuthority::load(&mut *s.rig.world.conn().await, provider)
+        .await
+        .unwrap();
+    assert_ne!(old, current);
+    let result = s
+        .rig
+        .world
+        .app
+        .app
+        .engine
+        .send_login_input_authorized(
+            provider,
+            &BTreeMap::from([("answer".into(), SignInValue::Text("stale answer".into()))]),
+            origin,
+            old,
+        )
+        .await
+        .unwrap();
+    assert!(matches!(result, Asked::Refused(_)));
+    assert!(asked(&heard, K::ProviderLoginInput).is_empty());
+    assert_eq!(
+        LoginAuthority::load(&mut *s.rig.world.conn().await, provider)
+            .await
+            .unwrap(),
+        current
+    );
+}
+
+#[tokio::test]
+async fn scoped_provider_queued_start_rechecks_its_original_key_before_any_native_dispatch() {
+    use orch_authz::{Caller, TokenGrant};
+    use orch_engine::provider_setup::{Delivered, Pending, login_operation};
+    let s = scene().await;
+    let provider = managed_and_up(&s).await;
+    let heard = the_harness_answers(&s, provider);
+    let (_, token, scope) = login_key(
+        &s,
+        s.ada.id(),
+        provider,
+        &["ProviderLoginStart.interactive"],
+    )
+    .await;
+    let mut conn = s.rig.world.conn().await;
+    let caller = Caller::token(
+        s.ada.id(),
+        TokenGrant::from_stored_scope(&[], None, Some(scope), None)
+            .unwrap()
+            .for_token(token),
+    );
+    let plan = login_operation(&mut conn, provider, "ProviderLoginStart.interactive")
+        .await
+        .unwrap();
+    let pending = Pending::new("device_code", &BTreeMap::new(), s.ada.id())
+        .with_authority(&plan.admit(&caller, false).unwrap())
+        .unwrap();
+    runtime_rows::keep_pending(
+        &mut conn,
+        provider,
+        &pending.to_bytes().unwrap(),
+        s.rig.world.now(),
+    )
+    .await
+    .unwrap();
+    runtime_rows::keep_login_authority(
+        &mut conn,
+        provider,
+        pending.authority_state().unwrap().as_ref(),
+    )
+    .await
+    .unwrap();
+    sqlx::query("UPDATE api_tokens SET revoked_at=$2 WHERE id=$1")
+        .bind(token)
+        .bind(s.rig.world.now())
+        .execute(&mut *conn)
+        .await
+        .unwrap();
+    drop(conn);
+    let result = s
+        .rig
+        .world
+        .app
+        .app
+        .engine
+        .deliver_sign_in(provider)
+        .await
+        .unwrap();
+    assert!(matches!(result, Delivered::Refused(_)), "{result:?}");
+    assert!(asked(&heard, K::ProviderLoginStart).is_empty());
+    assert!(!waits(&s, provider).await);
 }

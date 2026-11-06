@@ -47,6 +47,7 @@ impl SessionAuthority for BackplaneAuthority {
         match self.backplane.ask(query).await {
             Some(reply) => AuthReply { n, ..reply },
             None => AuthReply {
+                gateways: Vec::new(),
                 endpoints: None,
                 update_permit: None,
                 n,

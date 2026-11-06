@@ -11,9 +11,19 @@
 //! never to add to it.
 
 use orch_access_contract::decisions::{Scopes, token_reaches};
+use orch_access_contract::key_scope::KeyScope;
 use orch_access_contract::permissions::Permission;
 use orch_access_contract::roles::{Credential, UnknownName};
-use orch_types::Id;
+use orch_types::{Id, Time};
+use serde::{Deserialize, Serialize};
+
+mod captured;
+mod captured_operation;
+mod operation_scope;
+
+pub use captured::CapturedCaller;
+pub use captured_operation::CapturedOperation;
+pub use operation_scope::{AdmittedOperation, KeyScopeRefusal};
 
 /// What an API token narrows its user to.
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
@@ -22,10 +32,20 @@ pub struct TokenGrant {
     subtree: Option<Id>,
     token: Option<Id>,
     kept_out: Vec<KeptOut>,
+    /// Explicit shared-operation mode. Legacy permission readers must fail closed for this mode.
+    operation_scope: Option<KeyScope>,
+    /// Earlier legacy permission ceilings retained by an accepted/current intersection.
+    legacy_ceiling: Option<Scopes>,
+    /// Conjunctive node bounds which cannot be flattened to one anchor without losing moves.
+    other_subtrees: Vec<Id>,
+    /// Every actual credential retained by an accepted/current intersection.
+    other_tokens: Vec<Id>,
+    expires_at: Option<Time>,
 }
 
 /// A place a token is kept out of besides what its subtree leaves out.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[serde(tag = "kind", rename_all = "snake_case", deny_unknown_fields)]
 pub enum KeptOut {
     /// The org refused it, there and in everything inside.
     Refused {
@@ -51,6 +71,11 @@ impl TokenGrant {
             subtree,
             token: None,
             kept_out: Vec::new(),
+            operation_scope: None,
+            legacy_ceiling: None,
+            other_subtrees: Vec::new(),
+            other_tokens: Vec::new(),
+            expires_at: None,
         }
     }
 
@@ -58,7 +83,14 @@ impl TokenGrant {
     /// when its principal is loaded.
     #[must_use]
     pub fn for_token(mut self, token: Id) -> Self {
+        if let Some(previous) = self.token
+            && previous != token
+            && !self.other_tokens.contains(&previous)
+        {
+            self.other_tokens.push(previous);
+        }
         self.token = Some(token);
+        self.other_tokens.retain(|other| *other != token);
         self
     }
 
@@ -71,7 +103,11 @@ impl TokenGrant {
     /// The same grant, kept out of these places as well.
     #[must_use]
     pub fn kept_out(mut self, places: Vec<KeptOut>) -> Self {
-        self.kept_out = places;
+        for place in places {
+            if !self.kept_out.contains(&place) {
+                self.kept_out.push(place);
+            }
+        }
         self
     }
 
@@ -111,7 +147,13 @@ impl TokenGrant {
     /// The node it is kept to, with everything below.
     #[must_use]
     pub fn subtree(&self) -> Option<Id> {
-        self.subtree
+        // An obsolete serializer must not widen a conjunction of different roots. New
+        // continuations use CapturedCaller, which preserves every root and rule layer.
+        if self.other_subtrees.is_empty() {
+            self.subtree
+        } else {
+            Some(Id::nil())
+        }
     }
 
     /// Whether the token carries `permission`, where its user holds it.
@@ -119,7 +161,8 @@ impl TokenGrant {
     /// a level does not put the levels below it into the scopes.
     #[must_use]
     pub fn carries(&self, permission: Permission) -> bool {
-        self.scopes.allow(permission)
+        // Operation-mode admission belongs to Caller, never to a reusable credential grant.
+        self.operation_scope.is_none() && self.scopes.allow(permission)
     }
 
     /// Whether the token reaches a request that acts on the node with the
@@ -127,7 +170,12 @@ impl TokenGrant {
     /// request about a resource that goes through no node.
     #[must_use]
     pub fn reaches(&self, path: Option<&[Id]>) -> bool {
-        token_reaches(self.subtree, path) && self.kept_out_of(path).is_none()
+        token_reaches(self.subtree, path)
+            && self
+                .other_subtrees
+                .iter()
+                .all(|root| token_reaches(Some(*root), path))
+            && self.kept_out_of(path).is_none()
     }
 }
 
@@ -137,6 +185,8 @@ pub struct Caller {
     user: Id,
     token: Option<TokenGrant>,
     as_admin: bool,
+    /// Ephemeral shared-operation evidence for either authentication transport.
+    admission: Option<operation_scope::Admission>,
 }
 
 impl Caller {
@@ -147,6 +197,7 @@ impl Caller {
             user,
             token: None,
             as_admin: orch_db::audit::current_origin().as_admin == Some(user),
+            admission: None,
         }
     }
 
@@ -157,6 +208,7 @@ impl Caller {
             user,
             token: Some(grant),
             as_admin: false,
+            admission: None,
         }
     }
 
@@ -186,6 +238,9 @@ impl Caller {
     #[must_use]
     pub fn with_kept_out(mut self, places: Vec<KeptOut>) -> Self {
         self.token = self.token.map(|grant| grant.kept_out(places));
+        if !self.admission_is_current() {
+            self.admission = None;
+        }
         self
     }
 
@@ -213,9 +268,17 @@ impl Caller {
     /// holds: a session may, a token only within its scopes.
     #[must_use]
     pub fn permits(&self, permission: Permission) -> bool {
-        self.token
-            .as_ref()
-            .is_none_or(|grant| grant.carries(permission))
+        self.token.as_ref().is_none_or(|grant| {
+            if grant.operation_scope.is_some() {
+                self.admission.is_some()
+                    && grant
+                        .legacy_ceiling
+                        .as_ref()
+                        .is_none_or(|scopes| scopes.allow(permission))
+            } else {
+                grant.carries(permission)
+            }
+        })
     }
 
     /// Whether this caller reaches a request that acts on the node with
