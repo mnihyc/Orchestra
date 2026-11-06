@@ -9,6 +9,8 @@
 //! above it in its path (it is then written by its identifier), so that nothing is learnt from the tree that the
 //! person could not learn from the place.
 
+pub(crate) mod operation;
+
 use crate::middleware::authorization::{self, refusals};
 use crate::middleware::requests::{ApiError, ApiResult};
 use crate::middleware::transaction_guard;
@@ -24,14 +26,14 @@ use orch_api_contract::chats::{ChatKind, ChatRef};
 use orch_api_contract::common::ErrorCode;
 use orch_api_contract::nodes::{NodeKind, NodeRef};
 use orch_api_contract::share::{
-    AgentShare, AgentShareList, AgentShareListQuery, AgentShareSide, AgentShareSnapshot,
-    AgentShareSnapshotState, AgentShareWhat, SHARED_TREE_DEPTH_MAX, SHARED_TREE_DEPTH_MIN,
-    SHARED_TREE_ROOT, ShareAgentCreate, ShareAgentCreateReply, ShareAgentDelete, ShareAgentUpdate,
-    ShareAgentUpdateBody, ShareWithAgents, SharedEntry, ThreadSharedGet, ThreadSharedGetReply,
-    ThreadSharedPolicy, ThreadSharedTreeGet, ThreadSharedTreeGetQuery, ThreadSharedTreeGetReply,
+    AgentShare, AgentShareList, AgentShareListQuery, AgentShareReceipt, AgentShareSide,
+    AgentShareSnapshot, AgentShareSnapshotState, AgentShareWhat, SHARED_TREE_DEPTH_MAX,
+    SHARED_TREE_DEPTH_MIN, SHARED_TREE_ROOT, ShareAgentCreate, ShareAgentCreateReceipt,
+    ShareAgentCreateReply, ShareAgentCreateResponse, ShareAgentDelete, ShareAgentUpdate,
+    ShareAgentUpdateBody, ShareReceiptRecipient, ShareWithAgents, SharedEntry, ThreadSharedGet,
+    ThreadSharedGetReply, ThreadSharedTreeGet, ThreadSharedTreeGetQuery, ThreadSharedTreeGetReply,
 };
 use orch_authz::Error as AuthError;
-use orch_authz::reach::AgentReach;
 use orch_authz::{Act, Policy, Principal, documents as document_access, nodes};
 use orch_db::Conn;
 use orch_db::queries::{chats as chat_rows, documents as document_rows, hierarchy, threads};
@@ -46,7 +48,7 @@ use std::collections::{HashMap, HashSet};
 /// Binds this module's requests.
 pub fn mount(registry: &mut Registry) {
     registry
-        .on(ShareAgentCreate, create)
+        .on_with_operation(ShareAgentCreate, operation::resolve, create)
         .on(AgentShareList, list)
         .on(ThreadSharedGet, thread_shared)
         .on(ThreadSharedTreeGet, tree)
@@ -60,6 +62,10 @@ pub fn mount(registry: &mut Registry) {
 pub(crate) async fn failed(conn: &mut Conn, error: ShareError) -> ApiError {
     match error {
         ShareError::NotFound => ApiError::not_found(),
+        ShareError::StalePrepared => ApiError::new(
+            ErrorCode::ConflictStaleRevision,
+            "the share changed during preparation",
+        ),
         ShareError::Denied(refusal) => match refusals::denied(conn, *refusal).await {
             Ok(problem) | Err(problem) => problem,
         },
@@ -121,6 +127,40 @@ pub(crate) async fn failed(conn: &mut Conn, error: ShareError) -> ApiError {
     }
 }
 
+/// A scoped failure retains its ordinary code without resolving additional protected names.
+pub(crate) async fn failed_projected(
+    conn: &mut Conn,
+    error: ShareError,
+    limited: bool,
+) -> ApiError {
+    if !limited {
+        return failed(conn, error).await;
+    }
+    match error {
+        ShareError::Unavailable { reason, .. } => ApiError::new(
+            ErrorCode::ShareUnavailable,
+            match reason {
+                "tools_off" => {
+                    "the topic of that thread does not enable the tools of the shared tree"
+                }
+                "no_tools" => "the harness of that thread cannot be given Orch's tools",
+                _ => "nothing was named that an agent could read",
+            },
+        )
+        .with("reason", reason),
+        ShareError::TooLarge { bytes, limit, .. } => ApiError::new(
+            ErrorCode::ShareTooLarge,
+            "the copy is larger than sharing.snapshot_max_bytes allows where it lies",
+        )
+        .with("bytes", bytes)
+        .with("limit", limit),
+        ShareError::Side { .. } => {
+            ApiError::new(ErrorCode::ThreadSide, "a side thread takes no share")
+        }
+        error => authorization::problem_without_content(failed(conn, error).await),
+    }
+}
+
 /// A node as a reference, as the caller may know it.
 async fn named_node(conn: &mut Conn, id: Id) -> ApiResult<NodeRef> {
     let rows = hierarchy::with_ancestors(conn, &[id]).await?;
@@ -176,6 +216,18 @@ async fn shares_view(
     conn: &mut Conn,
     principal: &Principal,
     records: &[Record],
+    recipient: Option<Id>,
+) -> ApiResult<Vec<AgentShare>> {
+    shares_view_bounded(ctx, conn, principal, records, recipient, None).await
+}
+
+async fn shares_view_bounded(
+    ctx: &Ctx,
+    conn: &mut Conn,
+    principal: &Principal,
+    records: &[Record],
+    recipient: Option<Id>,
+    bounds: Option<&crate::routes::access::page::NameBounds>,
 ) -> ApiResult<Vec<AgentShare>> {
     let mut node_ids: Vec<Id> = Vec::new();
     let mut user_ids: Vec<Id> = Vec::new();
@@ -208,7 +260,10 @@ async fn shares_view(
     node_ids.dedup();
     user_ids.sort_unstable();
     user_ids.dedup();
-    let refs = view::refs(conn, principal, &node_ids, Policy::default()).await?;
+    let refs = match bounds {
+        Some(bounds) => bounds.refs(conn, principal, &node_ids).await?,
+        None => view::refs(conn, principal, &node_ids, Policy::default()).await?,
+    };
     let users = refusals::user_refs(conn, &user_ids).await?;
     let orgs: HashMap<Id, Id> = if node_ids.is_empty() {
         HashMap::new()
@@ -232,12 +287,36 @@ async fn shares_view(
         })
         .collect();
     let now: DateTime<Utc> = ctx.now;
-    let doc_refs: HashMap<Id, _> =
-        document_views::refs(conn, principal, &entries, now, Policy::default())
+    let doc_refs: HashMap<Id, _> = match bounds.filter(|bounds| bounds.limited) {
+        Some(bounds) => {
+            let names: Vec<_> = bounds
+                .nodes
+                .iter()
+                .copied()
+                .map(document_views::WrittenLabelSource::Node)
+                .collect();
+            let mut refs = HashMap::new();
+            for (row, listed) in &entries {
+                let shown = document_views::ProjectedDocumentRef::capture_allowed(
+                    conn,
+                    principal,
+                    row,
+                    listed,
+                    now,
+                    Policy::default(),
+                    &names,
+                )
+                .await?;
+                refs.insert(shown.document.id, shown.document);
+            }
+            refs
+        }
+        None => document_views::refs(conn, principal, &entries, now, Policy::default())
             .await?
             .into_iter()
             .map(|each| (each.id, each))
-            .collect();
+            .collect(),
+    };
     let node = |id: Id| refs.get(&id).cloned().unwrap_or_else(|| redacted(id));
     let mut out = Vec::new();
     for record in records {
@@ -268,9 +347,7 @@ async fn shares_view(
                 )
             }
         };
-        let Some(by) = record.by.and_then(|by| users.get(&by).cloned()) else {
-            continue;
-        };
+        let by = record.by.and_then(|by| users.get(&by).cloned());
         let entries = record
             .grants
             .iter()
@@ -316,6 +393,10 @@ async fn shares_view(
             None => None,
         };
         out.push(AgentShare {
+            viewer_entries: match bounds {
+                Some(bounds) => viewer_entries_bounded(conn, principal, record, bounds).await?,
+                None => viewer_entries(conn, principal, record).await?,
+            },
             read_first: record.read_first,
             id: record.id,
             what,
@@ -324,6 +405,7 @@ async fn shares_view(
             inside: record.inside,
             download: downloads(record),
             parts: record.parts,
+            current: None,
             entries,
             snapshot,
             input,
@@ -331,10 +413,133 @@ async fn shares_view(
             at: Time::new(record.at),
         });
     }
+    // Keep source visibility and redaction ahead of assessment. Missing givers do not hide
+    // otherwise visible history, but a hidden source never acquires a new projection here.
+    let visible_ids: HashSet<_> = out.iter().map(|share| share.id).collect();
+    let visible: Vec<_> = records
+        .iter()
+        .filter(|record| visible_ids.contains(&record.id))
+        .cloned()
+        .collect();
+    let mut current =
+        match orch_engine::sharing::current::project(conn, &visible, recipient, Time::new(now))
+            .await
+        {
+            Ok(current) => current,
+            Err(error) => return Err(failed(conn, error).await),
+        };
+    for share in &mut out {
+        share.current = current.remove(&share.id);
+    }
     Ok(out)
 }
 
 // ---------------------------------------------------------------- whether the agents may take it away (the export of a place)
+
+/// The normal human page entries, not an additional agent permission or a live-giver loan.
+pub(crate) async fn viewer_entries(
+    conn: &mut Conn,
+    principal: &Principal,
+    record: &Record,
+) -> ApiResult<Vec<access_api::Entry>> {
+    viewer_entries_in(conn, principal, record, None).await
+}
+
+pub(crate) async fn viewer_entries_bounded(
+    conn: &mut Conn,
+    principal: &Principal,
+    record: &Record,
+    bounds: &crate::routes::access::page::NameBounds,
+) -> ApiResult<Vec<access_api::Entry>> {
+    viewer_entries_in(conn, principal, record, Some(bounds)).await
+}
+
+async fn viewer_entries_in(
+    conn: &mut Conn,
+    principal: &Principal,
+    record: &Record,
+    bounds: Option<&crate::routes::access::page::NameBounds>,
+) -> ApiResult<Vec<access_api::Entry>> {
+    if record.mode != orch_api_contract::threads::ShareMode::Live
+        || record.parts.documents.is_none()
+    {
+        return Ok(Vec::new());
+    }
+    if !hierarchy::with_ancestors(conn, &[record.to])
+        .await?
+        .iter()
+        .any(|node| node.id == record.to && node.kind == "thread")
+    {
+        return Ok(Vec::new());
+    }
+    let mut pages = Vec::new();
+    for grant in record.grants.iter().filter(|grant| {
+        matches!(
+            grant.permission.as_str(),
+            "doc.view" | "doc.edit" | "doc.manage"
+        )
+    }) {
+        let page = orch_db::queries::access::PageKey::new(
+            &grant.object_kind,
+            grant.object_id,
+            &grant.page,
+        );
+        if !pages.contains(&page) {
+            pages.push(page);
+        }
+    }
+    let mut entries = Vec::new();
+    for page in pages {
+        if let Some(row) = orch_db::queries::access::find_entry(
+            conn,
+            &page,
+            "any",
+            "doc.view",
+            "role",
+            Some(record.to),
+            Some("viewer"),
+        )
+        .await?
+        {
+            let entry = orch_authz::engine::entry_of(&row).map_err(ApiError::internal)?;
+            if entry.counts(principal.now()) {
+                entries.push(entry);
+            }
+        }
+    }
+    if entries.is_empty() {
+        return Ok(Vec::new());
+    }
+    let (root, place) = match record.subject {
+        Subject::Node(id) => {
+            let nodes = hierarchy::with_ancestors(conn, &[id]).await?;
+            let node = nodes
+                .iter()
+                .find(|node| node.id == id)
+                .ok_or_else(ApiError::not_found)?;
+            (Some(node.org_id), Some(id))
+        }
+        Subject::Document(id) => {
+            let row = document_rows::get(conn, id)
+                .await?
+                .ok_or_else(ApiError::not_found)?;
+            (Some(row.org_id), Some(row.node_id))
+        }
+        Subject::Chat(_) => return Ok(Vec::new()),
+    };
+    match bounds {
+        Some(bounds) => {
+            crate::routes::access::page::Names::entries_bounded(
+                conn, principal, root, place, &entries, bounds,
+            )
+            .await
+        }
+        None => {
+            crate::routes::access::page::Names::entries(conn, principal, root, place, &entries)
+                .await
+        }
+    }
+}
 
 /// Whether the agents of a share may copy what is shared into their workspace. A copy is that already; a
 /// live share names the agents in the Export row of each area it covers.
@@ -363,22 +568,79 @@ async fn create(
     mut ctx: Ctx,
     (): (),
     body: ShareWithAgents,
-) -> ApiResult<Answer<ShareAgentCreateReply>> {
+) -> ApiResult<Answer<ShareAgentCreateResponse>> {
     let (tx, guard) = transaction_guard::begin(&ctx).await?;
     ctx.now = guard.now().get();
+    let prepared = guard.operation_data::<operation::PreparedShare>()?;
     let principal = guard.into_principal();
     let made = ctx
         .app
         .engine
-        .share_with_agents_guarded(tx, principal.clone(), &origin(&ctx), &body)
+        .share_prepared_with_agents_guarded(
+            tx,
+            principal.clone(),
+            &origin(&ctx),
+            &body,
+            &prepared.share,
+        )
         .await;
     let mut conn = ctx.app.db.acquire().await?;
     let records = match made {
         Ok(records) => records,
-        Err(error) => return Err(failed(&mut conn, error).await),
+        Err(error) => {
+            return Err(failed_projected(
+                &mut conn,
+                error,
+                ctx.key_receipt_required()
+                    || principal
+                        .caller()
+                        .grant()
+                        .is_some_and(|grant| grant.operation_scope().is_some()),
+            )
+            .await);
+        }
     };
-    let shares = shares_view(&ctx, &mut conn, &principal, &records).await?;
-    let answer = Answer::from(ShareAgentCreateReply { shares });
+    let mut receipts = Vec::new();
+    for record in &records {
+        let kind = prepared
+            .share
+            .recipients
+            .iter()
+            .find(|(id, _)| *id == record.to)
+            .map(|(_, kind)| *kind)
+            .ok_or_else(|| ApiError::internal("an accepted share lost its actual recipient"))?;
+        let kind = match kind {
+            orch_access_contract::permissions::ObjectKind::Org => NodeKind::Org,
+            orch_access_contract::permissions::ObjectKind::Project => NodeKind::Project,
+            orch_access_contract::permissions::ObjectKind::Topic => NodeKind::Topic,
+            orch_access_contract::permissions::ObjectKind::Thread => NodeKind::Thread,
+            _ => {
+                return Err(ApiError::internal(
+                    "an accepted share has an invalid recipient kind",
+                ));
+            }
+        };
+        receipts.push(AgentShareReceipt {
+            id: record.id,
+            to: ShareReceiptRecipient {
+                id: record.to,
+                kind,
+            },
+            mode: record.mode,
+            created: record.fresh,
+            input_id: record.input,
+        });
+    }
+    let full = operation::read_response(&ctx, &mut conn, &principal, &prepared.selection, &records)
+        .await?;
+    let response = match (full, ctx.key_receipt_required()) {
+        (Some(shares), false) => ShareAgentCreateResponse::full(ShareAgentCreateReply { shares }),
+        _ => ShareAgentCreateResponse::Receipt(ShareAgentCreateReceipt {
+            projection: orch_api_contract::common::ReceiptProjection::Receipt,
+            shares: receipts,
+        }),
+    };
+    let answer = Answer::from(response);
     Ok(if records.iter().any(|record| record.fresh) {
         answer
     } else {
@@ -420,15 +682,14 @@ async fn list(ctx: Ctx, query: AgentShareListQuery, (): ()) -> ApiResult<Vec<Age
         Err(error) => return Err(failed(&mut conn, error).await),
     };
     let principal = authorization::principal(&ctx, &mut conn).await?;
-    shares_view(&ctx, &mut conn, &principal, &records).await
-}
-
-fn policy_word(policy: AgentReach) -> ThreadSharedPolicy {
-    match policy {
-        AgentReach::None => ThreadSharedPolicy::None,
-        AgentReach::Topic => ThreadSharedPolicy::Topic,
-        AgentReach::Project => ThreadSharedPolicy::Project,
-    }
+    shares_view(
+        &ctx,
+        &mut conn,
+        &principal,
+        &records,
+        matches!(side, AgentShareSide::To).then_some(id),
+    )
+    .await
 }
 
 /// What a thread's agent may read beyond its own thread, and the copies it was given.
@@ -446,7 +707,7 @@ async fn thread_shared(ctx: Ctx, (): (), (): ()) -> ApiResult<ThreadSharedGetRep
         Err(error) => return Err(failed(&mut conn, error).await),
     };
     let principal = authorization::principal(&ctx, &mut conn).await?;
-    let shares = shares_view(&ctx, &mut conn, &principal, &found.shares).await?;
+    let shares = shares_view(&ctx, &mut conn, &principal, &found.shares, Some(thread)).await?;
     let ids: Vec<Id> = found.material.paths.iter().map(|path| path.id).collect();
     let documents = document_rows::get_many(&mut conn, &ids).await?;
     let readable: HashSet<Id> = orch_authz::documents::listed(
@@ -513,19 +774,7 @@ async fn thread_shared(ctx: Ctx, (): (), (): ()) -> ApiResult<ThreadSharedGetRep
         .filter(|path| documents.contains(&path.id) || copies.contains(&path.id))
         .collect();
     Ok(ThreadSharedGetReply {
-        documents_policy: match found.material.policy {
-            orch_authz::reach::DocumentPolicy::None => {
-                orch_api_contract::share::ThreadDocumentPolicy::None
-            }
-            orch_authz::reach::DocumentPolicy::Read => {
-                orch_api_contract::share::ThreadDocumentPolicy::Read
-            }
-            orch_authz::reach::DocumentPolicy::Write => {
-                orch_api_contract::share::ThreadDocumentPolicy::Write
-            }
-        },
         read_first_paths,
-        policy: policy_word(found.policy),
         shares,
     })
 }
@@ -547,7 +796,7 @@ async fn update(mut ctx: Ctx, (): (), body: ShareAgentUpdateBody) -> ApiResult<A
         Ok(record) => record,
         Err(error) => return Err(failed(&mut conn, error).await),
     };
-    shares_view(&ctx, &mut conn, &principal, &[record])
+    shares_view(&ctx, &mut conn, &principal, &[record], None)
         .await?
         .into_iter()
         .next()

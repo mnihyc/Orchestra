@@ -73,6 +73,9 @@ fn rate(pricing: &Value) -> Option<Rate> {
     let input = price(pricing, "prompt")?;
     let output = price(pricing, "completion")?;
     Some(Rate {
+        web_search_per_call: pricing
+            .get("web_search")
+            .and_then(|price| decimal::plain(&price.to_string())),
         cached_input_per_mtok: price(pricing, "input_cache_read").unwrap_or_else(|| input.clone()),
         cache_write_per_mtok: price(pricing, "input_cache_write"),
         input_per_mtok: input,
@@ -95,6 +98,7 @@ fn suggestion(entry: &Value) -> Option<ModelSuggestion> {
     let mut suggestion = ModelSuggestion::named(id, display_name);
     // An endpoint states one number, its largest. It is on offer and nothing more: a manager opens it.
     suggestion.parameters.offered = size(entry.get("context_length")).map(|largest| Offered {
+        web_search: None,
         context_max: Some(largest),
         ..Offered::default()
     });

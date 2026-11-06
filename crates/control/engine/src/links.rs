@@ -499,9 +499,7 @@ async fn related_source(
     {
         return Ok(None);
     }
-    let projection =
-        orch_authz::everything::project_search(conn, principal, None, &[document], &[], &[])
-            .await?;
+    let projection = orch_authz::everything::project_related(conn, principal, document).await?;
     Ok(Some(RelatedSource {
         item,
         scopes: projection.search_candidates(principal),

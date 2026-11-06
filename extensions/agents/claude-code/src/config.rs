@@ -114,8 +114,8 @@ pub const RAW_FRAME_MAX_BYTES: usize = 256 * 1024;
 pub struct ProfileConfig {
     /// Seconds an idle process stays alive when the harness works through Orch's executor; `0` keeps it.
     pub idle_exit_secs: u64,
-    /// Whether a personal harness may run agents and commands in the background. Managed sessions always
-    /// disable this: a native wake-up has no Orch input or model lease.
+    /// Legacy profile preference; the resolved thread background-wake setting governs conversations.
+    /// Version and provider probes always keep autonomous background work disabled.
     pub background_tasks: bool,
     /// Whether the harness's own to-do tools are offered, which is what a plan is made of.
     pub todo_tools: bool,

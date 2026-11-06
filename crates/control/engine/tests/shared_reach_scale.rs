@@ -166,7 +166,7 @@ async fn granted_pages_keep_ancestors_and_subtrees_and_names_do_not_change_when_
 }
 
 #[tokio::test]
-async fn project_policy_expands_only_that_project_and_conversation_age_uses_maintained_thread_activity()
+async fn a_project_share_reaches_only_that_project_and_conversation_age_uses_maintained_thread_activity()
  {
     let world = a_world_whose_agent_takes_tools().await;
     let mine = world.thread("Reader").await;
@@ -175,9 +175,7 @@ async fn project_policy_expands_only_that_project_and_conversation_age_uses_main
     let far_project = world.project_in_root("Other project").await;
     let far_topic = world.topic_in(far_project, "Outside").await;
     let far = thread_in_topic(&world, far_topic, "Far peer").await;
-    world
-        .set(world.topic, "sharing.agent_reach", json!("project"))
-        .await;
+    share_threads_inside(&world, world.project, mine, false).await;
     let visible = ok(call(
         &world,
         mine,

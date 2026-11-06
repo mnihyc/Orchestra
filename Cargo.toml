@@ -246,6 +246,7 @@ liblzma = "0.4"                                            # looking into a tar.
 # Services.
 lettre = { version = "0.11", default-features = false, features = ["builder", "smtp-transport", "tokio1", "tokio1-rustls", "ring", "rustls-native-certs", "hostname"] }  # mail
 ece = "2.4"                                                # RFC 8291 browser push encryption, without a signing or HTTP stack
+openssl = { version = "0.10", features = ["vendored"] }      # ece's crypto backend on Windows, built without a host OpenSSL installation
 openidconnect = { version = "4", default-features = false }  # sign-in through an identity provider
 rmcp = "3"                                                 # Orch's tools as an MCP server
 

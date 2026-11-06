@@ -1,5 +1,10 @@
 //! Explicit permanent loss and independent recovery plans for environments and their machines.
 
+use crate::operations::{OperationSpec as Op, TargetResolver as Target};
+use orch_access_contract::key_scope::KeyAction::{Manage, Read};
+use orch_access_contract::key_scope::KeyTargetKind::Object;
+use orch_access_contract::permissions::ObjectKind as K;
+
 use orch_types::{Id, Time};
 use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
@@ -454,21 +459,64 @@ pub struct HostDeleteCreateBody {
 
 crate::endpoints! {
     /// Plans the selected cascades before removing a host.
-    HostDeletePreflight: POST "/hosts/{id}/delete/preflight", Rule("the host's managers"), none, json HostDeletePreflightBody, json HostDeletePlan, 200;
+    HostDeletePreflight: POST "/hosts/{id}/delete/preflight", Rule("the host's managers"), none, json HostDeletePreflightBody, json HostDeletePlan, 200,
+        operation Op::single(Manage, &[Object(K::Host)], Target::Path("id"));
     /// Runs the reviewed cascades and finally revokes and removes the host registration.
-    HostDeleteCreate: POST "/hosts/{id}/delete", Rule("the host's managers"), none, json HostDeleteCreateBody, json crate::workspace::Job, 202;
+    HostDeleteCreate: POST "/hosts/{id}/delete", Rule("the host's managers"), none, json HostDeleteCreateBody, json crate::workspace::Job, 202,
+        operation Op::single(Manage, &[Object(K::Host)], Target::Path("id"));
     /// Names visible to the caller in their own unexpired operation preview.
-    OperationRecipientsGet: GET "/operations/{id}/recipients", Rule("the operation preview's creator"), query crate::common::PageQuery, none, json OperationRecipients, 200;
+    OperationRecipientsGet: GET "/operations/{id}/recipients", Rule("the operation preview's creator"), query crate::common::PageQuery, none, json OperationRecipients, 200,
+        operation Op::single(
+            Read,
+            &[
+                Object(K::Host),
+                Object(K::Environment),
+                Object(K::Provider),
+                Object(K::Machine),
+                Object(K::Thread),
+            ],
+            Target::Resolved("operation_subjects"),
+        );
     /// Lists everything affected by declaring an unreachable resource lost.
-    LossPreflight: POST "/loss/preflight", Rule("host managers, environment managers, or the machine owner"), none, json LossPreflightBody, json LossPlan, 200;
+    LossPreflight: POST "/loss/preflight", Rule("host managers, environment managers, or the machine owner"), none, json LossPreflightBody, json LossPlan, 200,
+        operation Op::single(
+            Manage,
+            &[Object(K::Host), Object(K::Machine), Object(K::Environment)],
+            Target::Resolved("affected_resources"),
+        );
     /// Declares the reviewed resource permanently lost without contacting its machine.
-    LossDeclare: POST "/loss", Rule("host managers, environment managers, or the machine owner"), none, json LossDeclareBody, json LossPlan, 200;
+    LossDeclare: POST "/loss", Rule("host managers, environment managers, or the machine owner"), none, json LossDeclareBody, json LossPlan, 200,
+        operation Op::single(
+            Manage,
+            &[Object(K::Host), Object(K::Machine), Object(K::Environment)],
+            Target::Resolved("affected_resources"),
+        );
     /// Lists the caller's manageable environments on a living or lost resource.
-    LossRecoveryList: POST "/loss/recovery", Rule("host managers, environment managers, or the machine owner"), none, json LossPreflightBody, json RecoverySources, 200;
+    LossRecoveryList: POST "/loss/recovery", Rule("host managers, environment managers, or the machine owner"), none, json LossPreflightBody, json RecoverySources, 200,
+        operation Op::single(
+            Manage,
+            &[Object(K::Host), Object(K::Machine), Object(K::Environment)],
+            Target::Resolved("affected_resources"),
+        );
     /// Plans independent moves, re-creations and switches of selected environments.
-    EnvironmentRecoverPreflight: POST "/environments/recover/preflight", Rule("managers of each selected environment"), none, json EnvironmentRecoverPreflightBody, json EnvironmentRecoveryPlan, 200;
+    EnvironmentRecoverPreflight: POST "/environments/recover/preflight", Rule("managers of each selected environment"), none, json EnvironmentRecoverPreflightBody, json EnvironmentRecoveryPlan, 200,
+        operation Op::single(
+            Manage,
+            &[Object(K::Environment)],
+            Target::Resolved("affected_environments"),
+        );
     /// Executes the reviewed independent recovery plans under the common batch limit.
-    EnvironmentRecoverCreate: POST "/environments/recover", Rule("managers of each selected environment"), none, json crate::forks::ForkCreateBody, json crate::environment::EnvironmentBatch, 202;
+    EnvironmentRecoverCreate: POST "/environments/recover", Rule("managers of each selected environment"), none, json crate::forks::ForkCreateBody, json crate::environment::EnvironmentBatch, 202,
+        operation Op::single(
+            Manage,
+            &[Object(K::Environment)],
+            Target::Resolved("affected_environments"),
+        );
     /// Reads the currently visible members of an independent environment batch.
-    EnvironmentRecoverGet: GET "/environments/recover/{batch_id}", Rule("the batch creator or a reader of an affected environment"), none, none, json crate::environment::EnvironmentBatch, 200;
+    EnvironmentRecoverGet: GET "/environments/recover/{batch_id}", Rule("the batch creator or a reader of an affected environment"), none, none, json crate::environment::EnvironmentBatch, 200,
+        operation Op::single(
+            Read,
+            &[Object(K::Environment)],
+            Target::Resolved("batch_environments"),
+        );
 }

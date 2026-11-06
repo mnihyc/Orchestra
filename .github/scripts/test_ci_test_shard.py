@@ -7,6 +7,7 @@ import unittest
 from unittest.mock import patch
 
 import ci_test_shard
+import ci_fixtures
 
 
 def package(name, tests):
@@ -37,6 +38,19 @@ class ShardTests(unittest.TestCase):
             expected = ci_test_shard.integration_targets(next(p for p in metadata["packages"] if p["name"] == package_name))
             self.assertEqual(Counter(selected), Counter(expected))
 
+    def test_only_the_engine_unit_command_uses_its_database_fixture_capacity(self):
+        metadata = self.metadata()
+        shards = [f"{kind}-{index}" for kind, (_, count) in ci_test_shard.PARTS.items()
+                  for index in range(count)]
+        shards += [f"rest-{index}" for index in range(ci_test_shard.OTHER_SHARDS)]
+        limited = [(shard, command) for shard in shards
+                   for command in ci_test_shard.commands(metadata, shard)
+                   if any(argument.startswith("--test-threads") for argument in command)]
+        self.assertEqual(limited, [("engine-0", [
+            "cargo", "test", "--locked", "--no-fail-fast", "-p", "orch-engine",
+            "--lib", "--bins", "--examples", "--", f"--test-threads={97 // 32}",
+        ])])
+
     def test_other_packages_are_each_assigned_once(self):
         metadata = self.metadata()
         selected = []
@@ -46,6 +60,12 @@ class ShardTests(unittest.TestCase):
             selected += [command[i + 1] for i, part in enumerate(command) if part == "-p"]
         expected = [p["name"] for p in metadata["packages"] if p["name"].startswith("other-")]
         self.assertEqual(Counter(selected), Counter(expected))
+
+    def test_native_executor_loss_alone_prepares_the_pinned_harness(self):
+        ordinary = [["cargo", "test", "-p", "orch-engine", "--test", "failures"]]
+        native = [["cargo", "test", "-p", "orch-engine", "--test", "native_executor_loss"]]
+        self.assertEqual(ci_fixtures.fixture_plan(ordinary), ([], False))
+        self.assertEqual(ci_fixtures.fixture_plan(native), ([], True))
 
     def test_invalid_shards_are_refused(self):
         for shard in ("api-6", "engine-3", "rest-4", "other-0", "api-x"):

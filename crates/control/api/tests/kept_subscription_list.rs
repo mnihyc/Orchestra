@@ -9,6 +9,7 @@ mod places;
 mod resources;
 mod support;
 
+use crate::support::FullPermissionPageReply;
 use orch_access_contract::decisions::ObjectRef;
 use orch_access_contract::permissions::ObjectKind;
 use orch_api_contract::access::{HolderInput, PageChange, PageChangeOwners, PermissionPageUpdate};
@@ -72,6 +73,7 @@ async fn only_the_first_owner_sees_a_kept_subscription_in_the_usable_list() {
         })
         .send()
         .await
+        .full_permission_page()
         .ok();
     let query = ProviderListQuery {
         scope: Some(ProviderListScope::Usable),

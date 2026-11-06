@@ -418,6 +418,8 @@ pub struct HostSettings {
     pub managed: Option<ManagedPlaces>,
     /// The harness builds the environment has.
     pub tools: Vec<ToolRef>,
+    /// Current confirmed machine paths, never taken from an environment's configuration or variables.
+    pub local_programs: BTreeMap<String, String>,
     /// The most the unit may use, as its driver set it.
     pub unit_limits: Resources,
     /// The shell a person gets, when the machine's own is not wanted.
@@ -450,6 +452,7 @@ impl HostSettings {
             watch: WatchMode::Native,
             managed: None,
             tools: Vec::new(),
+            local_programs: BTreeMap::new(),
             unit_limits: Resources::default(),
             shell: None,
             generation: 0,
@@ -774,9 +777,10 @@ impl Environment {
     pub fn context(&self) -> EnvironmentContext {
         let facts = self.facts();
         let settings = self.host.upgrade().map(|host| host.settings());
-        let (tools, _unit_limits, tools_dir, data_dir) = match &settings {
+        let (tools, local_programs, _unit_limits, tools_dir, data_dir) = match &settings {
             Some(settings) => (
                 settings.tools.clone(),
+                settings.local_programs.clone(),
                 settings.unit_limits,
                 settings
                     .managed
@@ -790,7 +794,13 @@ impl Environment {
                     .to_string_lossy()
                     .into_owned(),
             ),
-            None => (Vec::new(), Resources::default(), None, String::new()),
+            None => (
+                Vec::new(),
+                BTreeMap::new(),
+                Resources::default(),
+                None,
+                String::new(),
+            ),
         };
         EnvironmentContext {
             process_launcher: self.processes.launcher(),
@@ -801,6 +811,7 @@ impl Environment {
             home: Some(facts.home.clone()).filter(|home| !home.is_empty()),
             tools_dir,
             tools,
+            local_programs,
             mounts: self.mounts.roots(),
             user: facts.user.clone(),
             shell: orch_agent_contract::facts::ShellInfo {
@@ -1412,6 +1423,33 @@ impl EnvHost {
             tokio::spawn(async move {
                 browsers.set_allowed(gates.browser).await;
             });
+        }
+    }
+
+    /// Updates only selections made by the machine's owner. Held tool caches keep their build.
+    pub async fn set_local_programs(&self, programs: BTreeMap<String, String>) {
+        {
+            let mut settings = self
+                .inner
+                .settings
+                .write()
+                .unwrap_or_else(PoisonError::into_inner);
+            settings.local_programs.clone_from(&programs);
+        }
+        let environments = self.environments();
+        // Retire every old endpoint before any fresh native capability probe can delay another one.
+        futures::future::join_all(environments.iter().map(|environment| {
+            let programs = &programs;
+            async move {
+                environment
+                    .executors
+                    .stop_changed_programs(programs, &environment.context())
+                    .await;
+            }
+        }))
+        .await;
+        for environment in environments {
+            environment.announce_facts().await;
         }
     }
 
@@ -3230,6 +3268,39 @@ impl EnvHost {
         environment
             .executors
             .ensure(kind, allowed.as_deref(), &context)
+            .await
+    }
+
+    /// Whether the current executor comes from this machine's confirmed policy selection.
+    pub async fn executor_uses_local_program(&self, environment_id: Id, kind: &str) -> bool {
+        let Ok(environment) = self.environment(environment_id) else {
+            return false;
+        };
+        environment
+            .executors
+            .uses_local_program(kind, &environment.context())
+            .await
+    }
+
+    /// Ensures one admitted build or restarts the exact endpoint a tool exchange had captured.
+    pub async fn executor_ensure_at_version(
+        &self,
+        environment_id: Id,
+        kind: &str,
+        version: Option<&str>,
+        registered: Option<&ExecutorEndpoint>,
+    ) -> Result<ExecutorEndpoint> {
+        let environment = self.environment(environment_id)?;
+        let allowed = self.inner.settings().exec_offers_allowed;
+        environment
+            .executors
+            .ensure_at_version(
+                kind,
+                allowed.as_deref(),
+                &environment.context(),
+                version,
+                registered,
+            )
             .await
     }
 

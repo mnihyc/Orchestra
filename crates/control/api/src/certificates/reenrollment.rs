@@ -90,6 +90,7 @@ pub(super) async fn finish(
     entry.details = serde_json::json!({"again": true, "serial": hex::encode(certificate.serial())});
     audit::append(conn, &entry, origin, now).await?;
     Ok(EnrollReply {
+        gateways: inner.settings.gateways.clone(),
         machine_id: machine,
         certificate_pem: certificate.pem(),
         ca_pem: inner.authority.certificate_pem(),

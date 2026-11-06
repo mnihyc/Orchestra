@@ -7,6 +7,11 @@
 //! environment reports what became of every mount it was given as an
 //! [`EnvMount`].
 
+use crate::operations::{FacetSpec as Facet, OperationSpec as Op, TargetResolver as Target};
+use orch_access_contract::key_scope::KeyAction::{Manage, Read, Write};
+use orch_access_contract::key_scope::KeyTargetKind::Object;
+use orch_access_contract::permissions::ObjectKind as K;
+
 use orch_types::{Id, Revision, Time};
 use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
@@ -496,29 +501,71 @@ pub struct MountUsesGetReply {
 
 crate::endpoints! {
     /// Mounts located on a readable host or the caller's own machine, and manageable add choices.
-    MachineMountList: GET "/machines/{id}/mounts", Rule("the machine's owner, or host.view on its host; each mount and attached environment is independently readable"), none, none, json MachineMounts, 200;
+    MachineMountList: GET "/machines/{id}/mounts", Rule("the machine's owner, or host.view on its host; each mount and attached environment is independently readable"), none, none, json MachineMounts, 200,
+        operation Op::facets(&[
+            Facet::required(Read, &[Object(K::Machine)], Target::Path("id")),
+            Facet::required(
+                Read,
+                &[Object(K::Mount), Object(K::Environment)],
+                Target::Resolved("results"),
+            ),
+        ]);
     /// Lists configured workspace roots and environment data on a machine.
-    MachineEnvironmentDataGet: GET "/machines/{id}/environment-data", Rule("the machine's owner or host.view/host.use on its host; only readable environment uses are named; roots are changed only through the machine's own environment.roots policy"), none, none, json MachineEnvironmentData, 200;
+    MachineEnvironmentDataGet: GET "/machines/{id}/environment-data", Rule("the machine's owner or host.view/host.use on its host; only readable environment uses are named; roots are changed only through the machine's own environment.roots policy"), none, none, json MachineEnvironmentData, 200,
+        operation Op::facets(&[
+            Facet::required(Read, &[Object(K::Machine)], Target::Path("id")),
+            Facet::required(Read, &[Object(K::Environment)], Target::Resolved("results")),
+        ]);
     /// Lists the mounts the caller may use or manage, of whatever org.
-    MountList: GET "/mounts", User, query MountListQuery, none, json Vec<crate::common::Listed<Mount>>, 200;
+    MountList: GET "/mounts", User, query MountListQuery, none, json Vec<crate::common::Listed<Mount>>, 200,
+        operation Op::facets(&crate::resource_reads::MOUNT.facets::<7>(Target::ResolvedCollection("results")));
     /// Makes a mount, the caller's own, without locations.
-    MountCreate: POST "/mounts", Rule("its home is the caller's domain or an org inside it and the members of that home may make mounts there; else settings.manage on that org; a system admin when it has no home"), none, json MountCreateBody, json Mount, 200;
+    MountCreate: POST "/mounts", Rule("its home is the caller's domain or an org inside it and the members of that home may make mounts there; else settings.manage on that org; a system admin when it has no home"), none, json MountCreateBody, json Mount, 200,
+        operation Op::facets(&[
+            Facet::required(Manage, &[Object(K::Mount)], Target::Resolved("home")),
+            Facet::response_content(&[Object(K::Mount)], Target::Resolved("created_mount")),
+        ]);
     /// Reads a mount.
-    MountGet: GET "/mounts/{id}", Rule("any permission on the mount"), none, none, json Mount, 200;
+    MountGet: GET "/mounts/{id}", Rule("any permission on the mount"), none, none, json Mount, 200,
+        operation Op::facets(&crate::resource_reads::MOUNT.facets::<7>(Target::TypedPath { parameter: "id", kind: Object(K::Mount) }));
     /// Changes a mount.
-    MountUpdate: PATCH "/mounts/{id}", Permission("mount.manage"), none, json MountUpdateBody, json Mount, 200;
+    MountUpdate: PATCH "/mounts/{id}", Permission("mount.manage"), none, json MountUpdateBody, json Mount, 200,
+        operation Op::returning(Manage, &[Object(K::Mount)], Target::PermissionObject);
     /// Deletes a mount that no scope enables.
     MountDelete: DELETE "/mounts/{id}", Permission("mount.manage"), none, none, none, 204;
     /// Sets where a mount is on a machine: a path, or a volume on a host's storage.
-    MountLocationSet: PUT "/mounts/{id}/locations/{machine_id}", Rule("management of the machine and mount.use; environment.roots bounds existing paths on every machine; owned data requires the machine's declared data-making support"), none, json MountLocationSetBody, json Mount, 200;
+    MountLocationSet: PUT "/mounts/{id}/locations/{machine_id}", Rule("management of the machine and mount.use; environment.roots bounds existing paths on every machine; owned data requires the machine's declared data-making support"), none, json MountLocationSetBody, json Mount, 200,
+        operation Op::facets(&[
+            Facet::required(Write, &[Object(K::Mount)], Target::Path("id")),
+            Facet::required(Manage, &[Object(K::Machine)], Target::Path("machine_id")),
+            Facet::response_content(&[Object(K::Mount)], Target::Path("id")),
+        ]);
     /// Says what the data of a mount's location on a machine is: a hint shown beside it, which decides nothing.
-    MountLocationUpdate: PATCH "/mounts/{id}/locations/{machine_id}", Permission("mount.manage"), none, json MountLocationUpdateBody, json Mount, 200;
+    MountLocationUpdate: PATCH "/mounts/{id}/locations/{machine_id}", Permission("mount.manage"), none, json MountLocationUpdateBody, json Mount, 200,
+        operation Op::returning(Manage, &[Object(K::Mount)], Target::PermissionObject);
     /// Purges data a copy displaced: a volume is removed with its data, a directory is only forgotten.
-    MountKeptPurge: DELETE "/mounts/{id}/kept/{kept_id}", Rule("whoever may remove that machine's location of the mount"), query MountLocationDeleteQuery, none, none, 204;
+    MountKeptPurge: DELETE "/mounts/{id}/kept/{kept_id}", Rule("whoever may remove that machine's location of the mount"), query MountLocationDeleteQuery, none, none, 204,
+        operation Op::facets(&[
+            Facet::required(Write, &[Object(K::Mount)], Target::Path("id")),
+            Facet::required(
+                Manage,
+                &[Object(K::Machine)],
+                Target::Resolved("location_machine"),
+            ),
+        ]);
     /// Removes the place a mount has on a machine; a volume's data goes with it.
-    MountLocationDelete: DELETE "/mounts/{id}/locations/{machine_id}", Rule("whoever may add that location"), query MountLocationDeleteQuery, none, none, 204;
+    MountLocationDelete: DELETE "/mounts/{id}/locations/{machine_id}", Rule("whoever may add that location"), query MountLocationDeleteQuery, none, none, 204,
+        operation Op::facets(&[
+            Facet::required(Write, &[Object(K::Mount)], Target::Path("id")),
+            Facet::required(
+                Manage,
+                &[Object(K::Machine)],
+                Target::Resolved("location_machine"),
+            ),
+        ]);
     /// Lists where a mount is enabled and attached, and where it is somebody's workspace.
-    MountUsesGet: GET "/mounts/{id}/uses", Rule("any permission on the mount"), none, none, json MountUsesGetReply, 200;
+    MountUsesGet: GET "/mounts/{id}/uses", Rule("any permission on the mount"), none, none, json MountUsesGetReply, 200,
+        operation Op::single(Read, &[Object(K::Mount)], Target::Path("id"));
 }
 
 #[cfg(test)]

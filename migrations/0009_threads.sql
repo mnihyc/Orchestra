@@ -8,6 +8,7 @@ CREATE TABLE input_schedules (
     target jsonb NOT NULL,
     content jsonb NOT NULL,
     native_action jsonb,
+    definition_authority jsonb,
     timing jsonb NOT NULL,
     state text NOT NULL,
     next_run_at timestamp with time zone,
@@ -991,10 +992,28 @@ CREATE TABLE thread_inputs (
     goal_id uuid,
     goal_facts jsonb,
     CONSTRAINT thread_inputs_delivery_check CHECK ((delivery = ANY (ARRAY['queue'::text, 'steer'::text, 'interrupt'::text]))),
-    CONSTRAINT thread_inputs_run_as_authority_check CHECK (((run_as_authority IS NULL) OR COALESCE(((jsonb_typeof(run_as_authority) = 'object'::text) AND (jsonb_typeof((run_as_authority -> 'credentials'::text)) = 'array'::text) AND (jsonb_array_length((run_as_authority -> 'credentials'::text)) > 0)), false))),
+    -- Historical credentials and current full boundaries/exact origins are one retained authority envelope.
+    CONSTRAINT thread_inputs_run_as_authority_check CHECK (run_as_authority IS NULL OR COALESCE(
+        jsonb_typeof(run_as_authority) = 'object'
+            AND (NOT (run_as_authority ? 'credentials') OR jsonb_typeof(run_as_authority->'credentials') = 'array')
+            AND (NOT (run_as_authority ? 'boundaries') OR jsonb_typeof(run_as_authority->'boundaries') = 'array')
+            AND (NOT (run_as_authority ? 'origins') OR jsonb_typeof(run_as_authority->'origins') = 'array')
+            AND (CASE WHEN jsonb_typeof(run_as_authority->'credentials') = 'array' THEN jsonb_array_length(run_as_authority->'credentials') ELSE 0 END
+                + CASE WHEN jsonb_typeof(run_as_authority->'boundaries') = 'array' THEN jsonb_array_length(run_as_authority->'boundaries') ELSE 0 END
+                + CASE WHEN jsonb_typeof(run_as_authority->'origins') = 'array' THEN jsonb_array_length(run_as_authority->'origins') ELSE 0 END) > 0,
+        false)),
     CONSTRAINT thread_inputs_source_check CHECK ((source = ANY (ARRAY['user'::text, 'announcement'::text, 'system'::text, 'goal'::text]))),
     CONSTRAINT thread_inputs_state_check CHECK ((state = ANY (ARRAY['pending'::text, 'delivering'::text, 'delivered'::text, 'cancelled'::text, 'failed'::text]))),
-    CONSTRAINT thread_inputs_submission_authority_check CHECK (((submission_authority IS NULL) OR COALESCE(((jsonb_typeof(submission_authority) = 'object'::text) AND (jsonb_typeof((submission_authority -> 'credentials'::text)) = 'array'::text) AND (jsonb_array_length((submission_authority -> 'credentials'::text)) > 0)), false))),
+    -- Historical credentials and current full boundaries/exact origins are one retained authority envelope.
+    CONSTRAINT thread_inputs_submission_authority_check CHECK (submission_authority IS NULL OR COALESCE(
+        jsonb_typeof(submission_authority) = 'object'
+            AND (NOT (submission_authority ? 'credentials') OR jsonb_typeof(submission_authority->'credentials') = 'array')
+            AND (NOT (submission_authority ? 'boundaries') OR jsonb_typeof(submission_authority->'boundaries') = 'array')
+            AND (NOT (submission_authority ? 'origins') OR jsonb_typeof(submission_authority->'origins') = 'array')
+            AND (CASE WHEN jsonb_typeof(submission_authority->'credentials') = 'array' THEN jsonb_array_length(submission_authority->'credentials') ELSE 0 END
+                + CASE WHEN jsonb_typeof(submission_authority->'boundaries') = 'array' THEN jsonb_array_length(submission_authority->'boundaries') ELSE 0 END
+                + CASE WHEN jsonb_typeof(submission_authority->'origins') = 'array' THEN jsonb_array_length(submission_authority->'origins') ELSE 0 END) > 0,
+        false)),
     CONSTRAINT thread_input_thread_identity UNIQUE (thread_id, id),
     CONSTRAINT thread_inputs_pkey PRIMARY KEY (id),
     CONSTRAINT thread_inputs_thread_id_author_id_client_id_key UNIQUE (thread_id, author_id, client_id),

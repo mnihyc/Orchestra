@@ -9,6 +9,7 @@ mod places;
 mod resources;
 mod support;
 
+use crate::support::FullPermissionPageReply;
 use orch_access_contract::decisions::ObjectRef;
 use orch_access_contract::permissions::ResourceKind;
 use orch_api_contract::access::NewResourceAccess;
@@ -2112,6 +2113,7 @@ async fn one_node_serves_two_orgs_through_its_one_hosts_access_page_without_shar
         .body(&share)
         .send()
         .await
+        .full_permission_page()
         .ok();
     assert_eq!(
         page.rows

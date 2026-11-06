@@ -192,6 +192,26 @@ fn outcome_of(progress: &Progress) -> Option<Outcome> {
 
 #[async_trait]
 impl Commands for ScriptedCommands {
+    async fn observe(&self, command: Outgoing) -> Result<Outcome, CommandsError> {
+        if command.kind != CommandKind::SessionBackground {
+            return Err(CommandsError::Other(
+                "live native observations are unavailable".to_owned(),
+            ));
+        }
+        // Use the real scripted link without retaining the volatile roster in issued rows.
+        let cmd = Cmd {
+            id: command.id,
+            kind: command.kind.as_str().to_owned(),
+            key: command.key.wire(),
+            deadline: Time::new(
+                self.clock.now() + Span::seconds(i64::from(command.kind.deadline_secs())),
+            ),
+            body: command.body,
+        };
+        let mut handle = self.link.commands().issue(cmd);
+        outcome_of(&handle.wait().await).ok_or(CommandsError::Stopping)
+    }
+
     async fn retained_body(&self, id: Id) -> Result<Option<orch_types::Json>, CommandsError> {
         Ok(lock(&self.issued)
             .get(&id)
@@ -205,6 +225,8 @@ impl Commands for ScriptedCommands {
             .get(&id)
             .map(|entry| orch_engine::commands::RetainedCommand {
                 machine: entry.machine,
+                kind: entry.cmd.kind.clone(),
+                key: entry.cmd.key.clone(),
                 body: entry.cmd.body.clone(),
             }))
     }
@@ -423,8 +445,26 @@ impl Drop for Server {
     }
 }
 
+fn assigned_listener(send_buffer: Option<u32>) -> tokio::net::TcpListener {
+    // The test host reserves exactly this range. Probe each candidate once without taking over a listener.
+    let first = rand::random_range(41_000u16..42_000);
+    for offset in 0..1_000u16 {
+        let port = 41_000 + (first - 41_000 + offset) % 1_000;
+        let socket = TcpSocket::new_v4().unwrap();
+        if let Some(size) = send_buffer {
+            socket.set_send_buffer_size(size).unwrap();
+        }
+        match socket.bind(SocketAddr::from(([127, 0, 0, 1], port))) {
+            Ok(()) => return socket.listen(128).unwrap(),
+            Err(error) if error.kind() == std::io::ErrorKind::AddrInUse => {}
+            Err(error) => panic!("the assigned test listener could not bind: {error}"),
+        }
+    }
+    panic!("no free port in the assigned 41000-41999 test range");
+}
+
 impl Server {
-    /// Serves `app` on a port the system assigns. With a send buffer, what the
+    /// Serves `app` on a free port in the assigned test range. With a send buffer, what the
     /// server writes to a client that does not read fills the line after a few
     /// kilobytes, as it does on a slow link.
     async fn serve(
@@ -440,12 +480,7 @@ impl Server {
         let mut registry = Registry::new();
         orch_api_core::routes::mount(&mut registry);
         let router = orch_api_core::server::router(app.clone(), registry);
-        let socket = TcpSocket::new_v4().unwrap();
-        if let Some(size) = send_buffer {
-            socket.set_send_buffer_size(size).unwrap();
-        }
-        socket.bind("127.0.0.1:0".parse().unwrap()).unwrap();
-        let listener = socket.listen(128).unwrap();
+        let listener = assigned_listener(send_buffer);
         let addr = listener.local_addr().unwrap();
         let shutdown = CancellationToken::new();
         let listener_shutdown = shutdown.child_token();
@@ -623,6 +658,11 @@ impl Rig {
     /// Native history/accounting constructors retain their original started engine and report behavior.
     pub async fn with_unstarted_engine() -> Self {
         Self::build_mode(None, false, false, |_| {}).await
+    }
+
+    /// As `with_unstarted_engine`, with the API clock held for deterministic observations.
+    pub async fn with_unstarted_engine_and_time_held() -> Self {
+        Self::build_mode(None, true, false, |_| {}).await
     }
 
     /// The already connected scripted machine's controller, for a target-local stored-command bridge.
@@ -1796,7 +1836,18 @@ impl Client {
 
     /// A connection that is authenticated.
     pub async fn signed_in(addr: SocketAddr, token: &str) -> Self {
-        let mut client = Self::connect(addr).await;
+        use orch_api_contract::surface::HttpSurface;
+        let surface = HttpSurface::for_token(token).unwrap_or(HttpSurface::Browser);
+        let mut selected = request(addr, &["orch.v1"]);
+        *selected.uri_mut() = format!("ws://{addr}{}/ws", surface.base_path())
+            .parse()
+            .unwrap();
+        let (socket, _) = tokio_tungstenite::connect_async(selected).await.unwrap();
+        let mut client = Self {
+            socket,
+            pings: 0,
+            pending: VecDeque::new(),
+        };
         client.auth(token).await;
         client
     }
@@ -2036,7 +2087,7 @@ impl SlowLine {
     /// A line to `target`: each way takes `one_way`, and the server reaches
     /// the client at `down` bytes a second at most.
     pub async fn shaped(target: SocketAddr, one_way: Duration, down: Option<u64>) -> Self {
-        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let listener = assigned_listener(None);
         let addr = listener.local_addr().unwrap();
         tokio::spawn(async move {
             while let Ok((client, _)) = listener.accept().await {

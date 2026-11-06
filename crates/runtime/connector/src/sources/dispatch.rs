@@ -916,7 +916,8 @@ impl Context {
     }
 }
 
-/// Only a present, unended limit or the vendor's explicit refusal of ordinary use exhausts a provider.
+/// Classifies reported vendor exhaustion for display; this observation must not
+/// prevent a later otherwise permitted request from reaching the vendor.
 #[must_use]
 pub fn exhausted(facts: &ProviderFacts, now: Time) -> bool {
     let ended = facts

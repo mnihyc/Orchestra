@@ -424,7 +424,9 @@ async fn a_thread_that_joins_an_environment_without_naming_a_directory_gets_the_
         })
         .send()
         .await
-        .ok();
+        .ok()
+        .into_full()
+        .unwrap();
     let put = place(&s, &s.ada, thread, EnvironmentChoice::Use(second), None)
         .await
         .ok();

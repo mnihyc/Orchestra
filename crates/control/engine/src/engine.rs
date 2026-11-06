@@ -653,4 +653,20 @@ impl Engine {
         }
         Ok(blocked.len())
     }
+
+    /// Current configuration or committed build facts can release only their waiting binding inputs.
+    pub async fn reevaluate_bindings(
+        &self,
+        machine: Option<Id>,
+        environment: Option<Id>,
+    ) -> Result<usize, EngineError> {
+        let blocked: Vec<Id> = {
+            let mut conn = self.inner.db.acquire().await?;
+            threads::invalid_bindings_of(&mut conn, machine, environment).await?
+        };
+        for thread in &blocked {
+            self.wake(*thread);
+        }
+        Ok(blocked.len())
+    }
 }

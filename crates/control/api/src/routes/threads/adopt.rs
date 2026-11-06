@@ -29,7 +29,11 @@ pub fn mount(registry: &mut Registry) {
     registry.on(ThreadAdopt, adopt);
     registry.on(ThreadAdoptPreview, preview);
     registry.on(ThreadAdoptRetryHistory, retry_history);
-    registry.on(ThreadAdoptHistoryGet, history_status);
+    registry.on_with_operation(
+        ThreadAdoptHistoryGet,
+        crate::key_operations::direct::declared,
+        history_status,
+    );
 }
 
 /// Why a session was not taken in, as the problem a client acts on.
@@ -88,6 +92,7 @@ fn adoption_of(ctx: &Ctx, body: ThreadAdoptBody) -> ApiResult<Adoption> {
         ));
     }
     Ok(Adoption {
+        agent_access: body.agent_access,
         topic,
         provider: body.provider_id,
         agent: body.agent_id,
@@ -100,10 +105,36 @@ fn adoption_of(ctx: &Ctx, body: ThreadAdoptBody) -> ApiResult<Adoption> {
 /// Says what taking a session in would do, before anything does.
 async fn preview(ctx: Ctx, (): (), body: ThreadAdoptBody) -> ApiResult<AdoptPlan> {
     let adoption = adoption_of(&ctx, body)?;
+    let topic = adoption.topic;
     let caller = authorization::caller_of(ctx.user()?)?;
     let planned = ctx.app.engine.adoption_plan(&caller, adoption).await;
     match planned {
-        Ok(plan) => Ok(plan),
+        Ok(mut plan) => {
+            if plan.adopted_thread_id.is_none()
+                && let Some(environment) = &plan.environment
+            {
+                let mut conn = ctx.app.db.acquire().await?;
+                let principal = authorization::principal(&ctx, &mut conn).await?;
+                let environment = orch_db::queries::environments::thread_engine::environment(
+                    &mut conn,
+                    environment.id,
+                )
+                .await?
+                .ok_or_else(ApiError::not_found)?;
+                plan.agent_access = Some(
+                    super::binding::creation::existing_topic(
+                        &mut conn,
+                        &principal,
+                        topic,
+                        None,
+                        None,
+                        Some(&environment),
+                    )
+                    .await?,
+                );
+            }
+            Ok(plan)
+        }
         Err(error) => {
             let mut conn = ctx.app.db.acquire().await?;
             Err(failed(&mut conn, error).await)
@@ -136,15 +167,13 @@ async fn retry_history(ctx: Ctx, (): (), (): ()) -> ApiResult<Thread> {
 
 async fn history_status(ctx: Ctx, (): (), (): ()) -> ApiResult<Option<AdoptHistoryStatus>> {
     let thread = ctx.id("id")?;
-    let mut status = ctx
-        .app
-        .engine
-        .adoption_history_status(thread)
+    let mut conn = ctx.app.db.acquire().await?;
+    let principal = ctx.operation_principal(&mut conn).await?;
+    authorization::require_on_path_in(&ctx, &mut conn, &principal, "thread.view").await?;
+    let mut status = orch_engine::adoption::history_status(&mut conn, thread)
         .await
         .map_err(ApiError::internal)?;
     if let Some(status) = &mut status {
-        let mut conn = ctx.app.db.acquire().await?;
-        let principal = authorization::principal(&ctx, &mut conn).await?;
         let allowed = orch_authz::nodes::check(
             &mut conn,
             &principal,

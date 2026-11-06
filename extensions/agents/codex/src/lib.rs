@@ -1141,6 +1141,29 @@ impl AgentAdapter for CodexAdapter {
                 allowed: vec!["/responses".to_owned(), "/models".to_owned()],
                 exact: Vec::new(),
             },
+            auto_review: Some(
+                orch_agent_contract::conformance::NativeAutoReview::Notifications(
+                    orch_agent_contract::conformance::NativeNotificationReview {
+                        // Real pinned 0.165.0 requests and native outcomes: auto-approval-trial/run-codex-01
+                        // and the explicit allow/deny/unavailable matrix. This does not activate Auto.
+                        model: crate::review::CODEX_REVIEW_MODEL.to_owned(),
+                        command_arguments: json!({"sandbox_permissions":"require_escalated",
+                    "justification":"Write only the native conformance disposable marker"}),
+                        allow_response: json!({"outcome":"allow","risk_level":"low","user_authorization":"high",
+                    "rationale":"Synthetic fixture allows only the disposable diagnostic marker."}),
+                        deny_response: json!({"outcome":"deny","risk_level":"high","user_authorization":"low",
+                    "rationale":"Synthetic fixture denies the disposable diagnostic marker."}),
+                        schema_pointer: "/text/format/schema".to_owned(),
+                        response_schema: json!({"type":"object","additionalProperties":false,"properties":{
+                    "risk_level":{"type":"string","enum":["low","medium","high","critical"]},
+                    "user_authorization":{"type":"string","enum":["unknown","low","medium","high"]},
+                    "outcome":{"type":"string","enum":["allow","deny"]},
+                    "rationale":{"type":"string"}},"required":["outcome"]}),
+                        started_method: "item/autoApprovalReview/started".to_owned(),
+                        completed_method: "item/autoApprovalReview/completed".to_owned(),
+                    },
+                ),
+            ),
         }
     }
 

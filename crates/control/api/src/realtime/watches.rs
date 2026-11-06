@@ -39,38 +39,18 @@ pub(crate) fn needs(feed: &Feed) -> Option<(Id, Permission)> {
 /// The cut is conservative across the person's pages and roles, since a feed can also show
 /// references and jobs whose visibility comes from another thing. Extra rechecks are safe;
 /// overlooking such a deadline could retain a private projection after its grant ended.
-pub(crate) async fn earliest_end(inner: &Inner, user: Id) -> Result<Option<Time>, Fail> {
+pub(crate) async fn earliest_end(
+    inner: &Inner,
+    connection: &crate::realtime::server::Connection,
+) -> Result<Option<Time>, Fail> {
+    let user = connection.user;
     let mut conn = inner.db.acquire().await?;
-    let Some(principal) = principal_of(inner, &mut conn, user).await? else {
+    let Some(principal) =
+        super::subscriptions::principal_for_connection(inner, &mut conn, connection).await?
+    else {
         return Ok(None);
     };
-    let now: chrono::DateTime<chrono::Utc> = principal.now().into();
-    let at: Option<chrono::DateTime<chrono::Utc>> = sqlx::query_scalar(
-        "WITH reaching_roles AS (
-             SELECT expires_at FROM node_roles
-              WHERE removed_at IS NULL AND (expires_at IS NULL OR expires_at > $4)
-                AND ((subject_kind = 'user' AND subject_id = $1)
-                  OR (subject_kind = 'group' AND subject_id = ANY($2))
-                  OR (subject_kind = 'members' AND subject_id = ANY($3)))
-         ), ends AS (
-             SELECT expires_at FROM permission_entries
-              WHERE removed_at IS NULL AND expires_at > $4
-                AND (holder_kind = 'everyone'
-                  OR (holder_kind = 'user' AND holder_id = $1)
-                  OR (holder_kind = 'group' AND holder_id = ANY($2))
-                  OR holder_kind = 'role')
-             UNION ALL SELECT expires_at FROM reaching_roles
-             UNION ALL SELECT expires_at FROM chat_members WHERE user_id=$1 AND left_at IS NULL AND expires_at>$4
-         ) SELECT min(expires_at) FROM ends",
-    )
-    .bind(user)
-    .bind(principal.groups())
-    .bind(principal.member_of())
-    .bind(now)
-    .fetch_one(&mut *conn)
-    .await
-    .map_err(orch_db::DbError::from)?;
-    Ok(at.map(Time::new))
+    principal.read_deadline(&mut conn).await.map_err(Fail::from)
 }
 
 /// Whether `user` may follow a feed of the environment that needs `permission` there.
@@ -119,112 +99,56 @@ pub(crate) async fn delivery_guard(
     inner: &Inner,
     connection: &crate::realtime::server::Connection,
 ) -> Result<Option<()>, Fail> {
-    use orch_db::queries::transaction_guard::{self as guard, Credential};
+    use orch_api_contract::common::ErrorCode;
     use orch_realtime_contract::version::CloseCode;
     if !connection.authenticated_at(inner.clock.time()) {
         return Ok(None);
     }
-    let (session, hash, _) = connection.credential();
+    let before = connection.credential();
+    let app = inner
+        .app()
+        .ok_or_else(|| Fail::other("the realtime application is unavailable"))?;
     let mut tx = inner.db.begin().await?;
-    let identity = guard::lock_identity(
-        &mut tx,
-        connection.user,
-        Credential::Session {
-            id: session,
-            hash: &hash,
-        },
-        false,
-    )
-    .await?;
-    let Some(identity) = identity else {
-        connection.close(CloseCode::Unauthenticated, "the session is no longer valid");
-        return Ok(None);
+    let identity = match super::server::current_identity(&app, &mut tx, &before).await {
+        Ok(identity) => identity,
+        Err(error)
+            if matches!(
+                error.code(),
+                ErrorCode::AuthInvalidToken | ErrorCode::AuthRequired | ErrorCode::AuthSuspended
+            ) =>
+        {
+            if connection.still_current(&before) {
+                let code = if error.code() == ErrorCode::AuthSuspended {
+                    CloseCode::Suspended
+                } else {
+                    CloseCode::Unauthenticated
+                };
+                connection.close(code, "the socket credential is no longer current");
+            }
+            return Ok(None);
+        }
+        Err(error) => return Err(Fail::other(error)),
     };
-    if identity
-        .expires_at
-        .is_some_and(|until| until <= inner.clock.now())
-    {
-        connection.close(
-            CloseCode::Unauthenticated,
-            "the access token or session ran out",
-        );
-        return Ok(None);
-    }
-    if identity.user.suspended() {
-        connection.close(CloseCode::Suspended, "this user is suspended");
-        return Ok(None);
-    }
-    if let Some(until) = identity.expires_at {
-        connection.update_expiry(session, &hash, until);
-    }
-    connection.update_admin_mode(session, &hash, identity.as_admin);
     tx.commit().await.map_err(orch_db::DbError::from)?;
+    if identity.check_deadline(&app).is_err() {
+        if connection.still_current(&before) {
+            connection.close(CloseCode::Unauthenticated, "the credential ran out");
+        }
+        return Ok(None);
+    }
+    if !connection.update_current(&before, &identity) {
+        // A real reauth replaced this origin while its rows were being read.
+        return Ok(None);
+    }
     Ok(Some(()))
 }
 
-/// Checks the socket's exact session token even when its cached page decision is unchanged.
+/// Rechecks the exact current session/key even if the page decision's epoch did not move.
 pub(crate) async fn credential_current(
     inner: &Inner,
     connection: &crate::realtime::server::Connection,
 ) -> Result<bool, Fail> {
-    use orch_realtime_contract::version::CloseCode;
-    if !connection.authenticated_at(inner.clock.time()) {
-        return Ok(false);
-    }
-    let (session, hash, _) = connection.credential();
-    let mut conn = inner.db.acquire().await?;
-    let identity: Option<(String, chrono::DateTime<chrono::Utc>, bool)> = sqlx::query_as(
-        "SELECT u.status, LEAST(a.expires_at, s.expires_at), s.as_admin
-           FROM users u JOIN sessions s ON s.user_id = u.id
-           JOIN access_tokens a ON a.session_id = s.id
-          WHERE u.id = $1 AND s.id = $2 AND a.token_hash = $3 AND s.revoked_at IS NULL",
-    )
-    .bind(connection.user)
-    .bind(session)
-    .bind(&hash)
-    .fetch_optional(&mut *conn)
-    .await
-    .map_err(orch_db::DbError::from)?;
-    match identity {
-        Some((status, _, _)) if status == "suspended" => {
-            connection.close(CloseCode::Suspended, "this user is suspended");
-            Ok(false)
-        }
-        Some((_, until, as_admin)) if until > inner.clock.now() => {
-            connection.update_expiry(session, &hash, until);
-            connection.update_admin_mode(session, &hash, as_admin);
-            Ok(true)
-        }
-        _ => {
-            connection.close(
-                CloseCode::Unauthenticated,
-                "the access token or session is no longer valid",
-            );
-            Ok(false)
-        }
-    }
-}
-
-/// The earliest end of the exact browser credential, including its session's own end.
-pub(crate) async fn session_until(
-    conn: &mut orch_db::Conn,
-    user: Id,
-    session: Id,
-    hash: &[u8],
-    now: chrono::DateTime<chrono::Utc>,
-) -> Result<Option<chrono::DateTime<chrono::Utc>>, orch_db::DbError> {
-    Ok(sqlx::query_scalar(
-        "SELECT LEAST(a.expires_at, s.expires_at)
-           FROM access_tokens a JOIN sessions s ON s.id = a.session_id
-          WHERE a.token_hash = $1 AND s.id = $2 AND s.user_id = $3
-            AND a.expires_at > $4 AND s.expires_at > $4 AND s.revoked_at IS NULL",
-    )
-    .bind(hash)
-    .bind(session)
-    .bind(user)
-    .bind(now)
-    .fetch_optional(conn)
-    .await?)
+    Ok(delivery_guard(inner, connection).await?.is_some())
 }
 
 /// Rechecks one recipient before a presence or typing frame is serialized, without keeping a transaction.
@@ -235,6 +159,12 @@ pub(crate) async fn reader_guard(
     let Some(identity) = delivery_guard(inner, sub.connection()).await? else {
         return Ok(None);
     };
+    // Presence/typing has no equivalent HTTP read yet. Until its shared logical catalogue
+    // binding is installed, a content-read key is not implicitly granted these extra events.
+    if sub.connection().credential().current.grant().is_some() {
+        return Ok(None);
+    }
+
     let epoch = super::sync::read_epoch(inner).await?;
     let mut st = sub.state.lock().await;
     if !inner.recheck(sub, &mut st, epoch).await? || !sub.is_live() {

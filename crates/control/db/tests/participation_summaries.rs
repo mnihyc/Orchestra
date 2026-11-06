@@ -90,6 +90,7 @@ async fn marks(conn: &mut Conn, f: &Fixture, focus: &Focus) -> BTreeSet<(String,
         &focus.closed,
         focus.subtree,
         &[f.root],
+        false,
     )
     .await
     .unwrap()
@@ -131,7 +132,7 @@ async fn descendant_assignments_keep_membership_group_time_closed_and_move_seman
     );
     let [group, grant] = std::array::from_fn(|_| new_id());
     sqlx::query("INSERT INTO permission_entries(id,object_kind,object_id,page,permission,holder_kind,holder_id,source,expires_at) VALUES($1,'document',$2,'live','doc.view','group',$3,'page',$4)")
-        .bind(grant).bind(f.document).bind(group).bind(f.at.get()+Duration::microseconds(1)).execute(&mut *conn).await.unwrap();
+        .bind(grant).bind(f.document).bind(group).bind(f.at.get()+Duration::milliseconds(1)).execute(&mut *conn).await.unwrap();
     let grouped = Focus {
         groups: vec![group],
         members: Some(vec![]),
@@ -143,7 +144,7 @@ async fn descendant_assignments_keep_membership_group_time_closed_and_move_seman
             &mut conn,
             &f,
             &Focus {
-                at: Some(Time::new(f.at.get() + Duration::microseconds(1))),
+                at: Some(Time::new(f.at.get() + Duration::milliseconds(1))),
                 groups: vec![group],
                 members: Some(vec![]),
                 ..Focus::default()
@@ -329,5 +330,166 @@ async fn legacy_match_pages_resolve_only_the_selected_document_at_two_inventory_
             "one document and its one home, independent of the unrelated inventory"
         );
         previous = size;
+    }
+}
+
+async fn provider_marks(
+    conn: &mut Conn,
+    f: &Fixture,
+    provider: Id,
+    focus: &Focus,
+    selected: bool,
+) -> BTreeSet<(String, Id)> {
+    let nodes = if selected {
+        Vec::new()
+    } else {
+        vec![f.root, f.branch, f.deep, f.destination]
+    };
+    let mut pages: Vec<_> = nodes
+        .iter()
+        .map(|id| PageKey::new("node", *id, "live"))
+        .collect();
+    pages.extend([
+        PageKey::new("provider", provider, "live"),
+        PageKey::new("provider", provider, "live"),
+    ]);
+    let found = access::participation::marks(
+        conn,
+        f.person,
+        &focus.groups,
+        &[f.root],
+        focus.at.unwrap_or(f.at),
+        &nodes,
+        &pages,
+        focus.members.as_deref().unwrap_or(&[f.root]),
+        &focus.closed,
+        focus.subtree,
+        &[f.root],
+        selected,
+    )
+    .await
+    .unwrap();
+    let found: Vec<_> = found
+        .into_iter()
+        .filter(|mark| mark.kind == "provider" && mark.id == provider)
+        .collect();
+    assert!(
+        found.len() <= 1,
+        "duplicate requested pages do not duplicate a resource mark"
+    );
+    found.into_iter().map(|mark| (mark.kind, mark.id)).collect()
+}
+
+#[tokio::test]
+async fn selected_provider_marks_match_full_owner_group_and_scope_boundaries() {
+    let db = TestDb::fresh().await;
+    let mut conn = db.pool.acquire().await.unwrap();
+    let f = fixture(&mut conn).await;
+    let provider = orch_db::queries::resources::access_fixtures::insert_resource(
+        &mut conn,
+        "provider",
+        Some(f.person),
+        Some(f.root),
+        "Selected provider",
+    )
+    .await
+    .unwrap();
+    let owner = new_id();
+    sqlx::query("INSERT INTO permission_entries(id,object_kind,object_id,page,permission,holder_kind,holder_id,source) VALUES($1,'provider',$2,'live','access.own','user',$3,'creation')")
+        .bind(owner).bind(provider).bind(f.person).execute(&mut *conn).await.unwrap();
+    let present = BTreeSet::from([("provider".to_owned(), provider)]);
+    for (focus, expected) in [
+        (Focus::default(), present.clone()),
+        (
+            Focus {
+                members: Some(vec![]),
+                ..Focus::default()
+            },
+            BTreeSet::new(),
+        ),
+        (
+            Focus {
+                closed: vec![f.root],
+                ..Focus::default()
+            },
+            BTreeSet::new(),
+        ),
+        (
+            Focus {
+                subtree: Some(f.root),
+                ..Focus::default()
+            },
+            present.clone(),
+        ),
+        (
+            Focus {
+                subtree: Some(f.deep),
+                ..Focus::default()
+            },
+            BTreeSet::new(),
+        ),
+    ] {
+        let full = provider_marks(&mut conn, &f, provider, &focus, false).await;
+        let selected = provider_marks(&mut conn, &f, provider, &focus, true).await;
+        assert_eq!(full, expected);
+        assert_eq!(selected, full);
+    }
+    sqlx::query("UPDATE permission_entries SET removed_at=$2 WHERE id=$1")
+        .bind(owner)
+        .bind(f.at.get())
+        .execute(&mut *conn)
+        .await
+        .unwrap();
+    let [group, grant] = std::array::from_fn(|_| new_id());
+    sqlx::query("INSERT INTO permission_entries(id,object_kind,object_id,page,permission,holder_kind,holder_id,source,expires_at) VALUES($1,'provider',$2,'live','provider.use','group',$3,'page',$4)")
+        .bind(grant).bind(provider).bind(group).bind(f.at.get()+Duration::milliseconds(1))
+        .execute(&mut *conn).await.unwrap();
+    for (focus, expected) in [
+        (
+            Focus {
+                groups: vec![group],
+                members: Some(vec![]),
+                ..Focus::default()
+            },
+            present.clone(),
+        ),
+        (Focus::default(), BTreeSet::new()),
+        (
+            Focus {
+                groups: vec![group],
+                at: Some(Time::new(f.at.get() + Duration::milliseconds(1))),
+                ..Focus::default()
+            },
+            BTreeSet::new(),
+        ),
+        (
+            Focus {
+                groups: vec![group],
+                closed: vec![f.root],
+                ..Focus::default()
+            },
+            BTreeSet::new(),
+        ),
+        (
+            Focus {
+                groups: vec![group],
+                subtree: Some(f.root),
+                ..Focus::default()
+            },
+            present.clone(),
+        ),
+        (
+            Focus {
+                groups: vec![group],
+                subtree: Some(f.deep),
+                ..Focus::default()
+            },
+            BTreeSet::new(),
+        ),
+    ] {
+        let full = provider_marks(&mut conn, &f, provider, &focus, false).await;
+        let selected = provider_marks(&mut conn, &f, provider, &focus, true).await;
+        assert_eq!(full, expected);
+        assert_eq!(selected, full);
     }
 }

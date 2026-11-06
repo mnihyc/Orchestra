@@ -53,6 +53,8 @@ export function draftOf(upstream: Upstream, protocol: ProviderSetupProtocol | un
       options[field.name] = Array.isArray(value) ? Object.fromEntries(value.filter((name): name is string => typeof name === 'string').map((name) => [name, ''])) : {};
     } else if (field.type === 'map') {
       options[field.name] = typeof value === 'object' && value !== null && !Array.isArray(value) ? Object.fromEntries(Object.entries(value).map(([name, text]) => [name, String(text)])) : {};
+    } else if (field.type === 'json' && value !== undefined) {
+      options[field.name] = JSON.stringify(value, null, 2);
     } else if (typeof value === 'string') {
       options[field.name] = value;
     }
@@ -67,7 +69,15 @@ export function upstreamOf(draft: EndpointDraft, protocol: ProviderSetupProtocol
   for (const field of protocol?.endpoint_options ?? []) {
     const value: FormValue | undefined = draft.options[field.name];
     if (value === undefined) continue;
-    if (field.type === 'secret_map' && typeof value === 'object') {
+    if (field.type === 'json' && typeof value === 'string') {
+      if (value.trim() !== '') {
+        try {
+          const parsed: unknown = JSON.parse(value);
+          const empty = parsed !== null && typeof parsed === 'object' && !Array.isArray(parsed) && Object.keys(parsed).length === 0;
+          if (field.required || !empty) options[field.name] = parsed;
+        } catch { options[field.name] = value; }
+      }
+    } else if (field.type === 'secret_map' && typeof value === 'object') {
       const names = Object.keys(value).filter((name) => name !== '');
       if (names.length > 0) options[field.name] = names;
       for (const [name, text] of Object.entries(value)) if (name !== '' && text !== '') secrets[name] = text;

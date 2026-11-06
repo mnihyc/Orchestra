@@ -188,6 +188,27 @@ pub async fn close_for_turn(
 }
 
 impl Engine {
+    /// Snapshot the same model entries used by native selection and structured option resolution.
+    pub(crate) async fn lease_model_parameters(
+        &self,
+        provider: Id,
+        allowed: &[String],
+    ) -> Result<
+        std::collections::BTreeMap<String, orch_provider_contract::models::ModelParameters>,
+        EngineError,
+    > {
+        let mut conn = self.inner.db.acquire().await?;
+        let mut parameters = std::collections::BTreeMap::new();
+        for name in allowed {
+            let row = orch_db::queries::resources::model(&mut conn, provider, name)
+                .await?
+                .filter(|row| row.enabled)
+                .ok_or_else(|| EngineError::unreadable("a lease model is no longer enabled"))?;
+            parameters.insert(name.clone(), serde_json::from_value(row.parameters)?);
+        }
+        Ok(parameters)
+    }
+
     /// Sends `lease.open` for a lease to where the credential is kept and
     /// waits for the answer. Asked again, the machine answers with what it
     /// answered.
@@ -207,6 +228,9 @@ impl Engine {
             _ => LeaseMode::Forwarded,
         };
         let body = LeaseOpen {
+            model_parameters: self
+                .lease_model_parameters(lease.provider_id, &lease.allowed_models)
+                .await?,
             lease_id: lease.id,
             provider_id: lease.provider_id,
             thread_id: lease.thread_id,

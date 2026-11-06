@@ -28,8 +28,8 @@
 //!
 //! **Its status and facts come from the machine that keeps it** (`provider.status`, `provider.facts` on the
 //! provider's stream), accepted only from that machine. A key the upstream refuses is `error`, and one that it
-//! takes again is `ready`; the turns that run under the provider's leases when it goes to `error` or
-//! `exhausted` end as failed with the reason, and the threads that were blocked for want of it are looked at
+//! takes again is `ready`; a credential `error` ends its forwarded turns. Vendor quota `exhausted`
+//! remains observational and does not end other work or gate later requests. Blocked threads are looked at
 //! again when it returns. Presence moves the status as well: an API provider whose keeping machine is away is
 //! `offline` and is `ready` again when the machine returns.
 //!
@@ -53,6 +53,7 @@ use crate::unit::Unit;
 use chrono::{DateTime, Utc};
 use orch_agent_contract::events::TokenUsage;
 use orch_agent_contract::parameters::{ModelList, ModelParameters, ParameterDef, ParameterOptions};
+use orch_api_contract::usage::{RequestTiming, UsageMeasurement};
 use orch_db::queries::resources::keeper::{self, SecretRef, StartRow};
 use orch_db::queries::resources::thread_engine::{self as resources, ProviderRow};
 use orch_db::queries::resources::{binding, provider_runtime as runtime_rows};
@@ -60,13 +61,21 @@ use orch_db::queries::threads::{self, LeaseRow, turn_state};
 use orch_db::usage::ledger::{self, Attribution, NewEvent, Tokens};
 use orch_link::streams::DeliveredEvent;
 use orch_link_contract::commands::{
-    ErrorCode, ProviderStart, ProviderStartUpstream, ProviderStop, Secret, SerialKey,
+    ErrorCode, LeaseUsageGroup, LeaseUsageGroupKey, ProviderStart, ProviderStartUpstream,
+    ProviderStop, Secret, SerialKey,
 };
 use orch_link_contract::events::{Event, LeaseDenied, LeaseUsage, ProviderStatus, TurnError};
 use orch_link_contract::streams::Stream;
 use orch_types::{Hash, Id, Json, Time};
 use serde_json::json;
 use std::collections::BTreeMap;
+
+/// Vendor quota is an observation, not a local admission rule. An external reset
+/// or available credits can admit the next request; independent lifecycle failures
+/// still prevent dispatch. Configured Orch usage caps are checked separately.
+pub(crate) fn request_status_available(status: &str) -> bool {
+    matches!(status, "ready" | "exhausted")
+}
 
 /// The name under which a provider's key is stored among its secrets.
 const API_KEY: &str = "api_key";
@@ -304,7 +313,11 @@ pub fn tokens_of(usage: &Json) -> Tokens {
 
 /// One request, or a lease's remainder, as the forwarder counted it.
 struct Forwarded<'a> {
-    timing: Option<&'a orch_api_contract::usage::RequestTiming>,
+    timing: Option<&'a RequestTiming>,
+    /// Only the engine-verified lease; adapter-only observations have none.
+    lease: Option<Id>,
+    /// Inclusive observed prompt-size bounds for a factual aggregate.
+    context: Option<(i64, i64)>,
     harness: bool,
     counted: bool,
     /// The row's identifier, the same however often it is reported.
@@ -336,6 +349,24 @@ pub fn shortfall(total: &Tokens, counted: &Tokens) -> Tokens {
         reasoning: beyond(total.reasoning, counted.reasoning).min(output),
         total: input + output,
     }
+}
+
+fn add_tokens(sum: &mut Tokens, tokens: &Tokens) {
+    sum.input += tokens.input;
+    sum.cached_input += tokens.cached_input;
+    sum.cache_write += tokens.cache_write;
+    sum.output += tokens.output;
+    sum.reasoning += tokens.reasoning;
+    sum.total += tokens.total;
+}
+
+fn tokens_fit(part: &Tokens, total: &Tokens) -> bool {
+    part.input <= total.input
+        && part.cached_input <= total.cached_input
+        && part.cache_write <= total.cache_write
+        && part.output <= total.output
+        && part.reasoning <= total.reasoning
+        && part.total <= total.total
 }
 
 /// The usage of a turn as the wire has it.
@@ -706,7 +737,7 @@ impl Engine {
 
     /// `provider.status`: the machine says where the provider stands. A key the upstream refuses is `error`,
     /// one it takes again is `ready`. The threads that were blocked for want of the provider are looked at
-    /// again, and the turns that run under its leases when it is not ready end as failed with the reason.
+    /// again. Only credential refusal ends other forwarded turns; vendor quota is observational.
     async fn on_provider_status(
         &self,
         unit: &mut Unit<'_>,
@@ -757,17 +788,15 @@ impl Engine {
         {
             unit.wake(thread);
         }
-        if to == "ready" {
+        if request_status_available(to) {
             return Ok(());
         }
-        let (code, fallback) = if to == "error" {
-            (
-                "provider_unauthorized",
-                "the upstream refused the provider's key",
-            )
-        } else {
-            ("provider_exhausted", "the provider's allowance is used up")
-        };
+        // The only remaining transition is a real credential refusal. A quota
+        // observation cannot terminate another request's accepted lease.
+        let (code, fallback) = (
+            "provider_unauthorized",
+            "the upstream refused the provider's key",
+        );
         let message = status.detail.clone().unwrap_or_else(|| fallback.to_owned());
         for lease in keeper::open_leases_of(&mut *unit.conn, provider.id).await? {
             if lease.mode != "forwarded" {
@@ -959,7 +988,9 @@ impl Engine {
             provider,
             &attribution,
             Forwarded {
-                timing: None,
+                timing: usage.timing.as_ref(),
+                lease: Some(lease.id),
+                context: None,
                 harness: false,
                 counted: true,
                 id,
@@ -983,6 +1014,8 @@ impl Engine {
     ) -> Result<(), EngineError> {
         let Forwarded {
             timing,
+            lease,
+            context,
             harness,
             counted,
             id,
@@ -1013,18 +1046,53 @@ impl Engine {
             ),
             _ => (None, None),
         };
-        let context_tokens = Some(tokens.input);
+        let context_tokens = context
+            .map(|(low, high)| (low == high).then_some(high))
+            .unwrap_or(Some(tokens.input));
         let book = RateBook::load(&mut *unit.conn, attribution.thread_id).await?;
-        let priced = book
-            .price(
+        // An old adapter may provide performance without actual request/report facts.
+        // Its timing alone must not change historical requested-tier accounting.
+        let (tier, mut priced) = if let Some(timing) = timing.filter(|timing| {
+            timing.wire_protocol.is_some()
+                || timing.requested_service_tier.is_some()
+                || timing.reported_service_tier != UsageMeasurement::Unsupported
+        }) {
+            book.price_observed(
                 &mut *unit.conn,
                 own.as_ref(),
                 model,
                 &tokens,
+                context.unwrap_or((tokens.input, tokens.input)),
+                timing,
+                None,
+            )
+            .await?
+        } else {
+            let priced = book
+                .price(
+                    &mut *unit.conn,
+                    own.as_ref(),
+                    model,
+                    &tokens,
+                    context_tokens,
+                    tier.as_deref(),
+                )
+                .await?;
+            (tier, priced)
+        };
+        if let Some(timing) =
+            timing.filter(|timing| timing.web_searches != UsageMeasurement::Unsupported)
+            && priced.credits.is_some()
+            && let Some(found) = &priced.found
+        {
+            priced.credits = crate::rates::credits_with_searches(
+                &found.rate,
+                &tokens,
                 context_tokens,
                 tier.as_deref(),
-            )
-            .await?;
+                &timing.web_searches,
+            );
+        }
         let rate_json = priced
             .found
             .as_ref()
@@ -1049,8 +1117,21 @@ impl Engine {
             rate_source: priced.found.as_ref().map(|found| found.source.word()),
             credits: priced.credits.as_deref(),
         };
-        let written =
-            ledger::record_program(&mut *unit.conn, &event, timing, program.as_deref()).await?;
+        let written = match lease {
+            Some(lease) => {
+                ledger::record_lease_program(
+                    &mut *unit.conn,
+                    &event,
+                    timing,
+                    program.as_deref(),
+                    lease,
+                )
+                .await?
+            }
+            None => {
+                ledger::record_program(&mut *unit.conn, &event, timing, program.as_deref()).await?
+            }
+        };
         if written {
             if let Some(timing) = timing {
                 record_model_metrics(model, attribution.harness_kind.as_deref(), timing);
@@ -1070,10 +1151,29 @@ impl Engine {
         provider: &ProviderRow,
         answer: &Json,
     ) -> Result<(), EngineError> {
-        let Some(closed) = answer.get("usage").filter(|usage| !usage.is_null()) else {
-            return Ok(());
+        let groups: Option<Vec<LeaseUsageGroup>> = answer
+            .get("usage_groups")
+            .filter(|groups| !groups.is_null())
+            .map(|groups| serde_json::from_value(groups.clone()))
+            .transpose()?;
+        let total = answer
+            .get("usage")
+            .filter(|usage| !usage.is_null())
+            .map(tokens_of);
+        let received_usage: Option<TokenUsage> = if groups.is_some() {
+            answer
+                .get("usage")
+                .filter(|usage| !usage.is_null())
+                .map(|usage| serde_json::from_value(usage.clone()))
+                .transpose()?
+        } else {
+            None
         };
-        let total = tokens_of(closed);
+        // An aware empty snapshot still establishes the permanent cut, even when
+        // no token aggregate could be read. Old null replies preserve their behavior.
+        if total.is_none() && groups.is_none() {
+            return Ok(());
+        }
         let mut tx = self.inner.db.begin().await?;
         let Some(held) = threads::lease(&mut tx, lease).await? else {
             return Ok(());
@@ -1089,31 +1189,260 @@ impl Engine {
         let finished = {
             let mut unit = Unit::new(&mut tx, self.inner.clock.now());
             if let Some(attribution) = ledger::attribution_of_lease(&mut *unit.conn, lease).await? {
-                let counted =
-                    ledger::counted_request_totals(&mut *unit.conn, attribution.turn_id).await?;
-                let short = shortfall(&total, &counted);
-                let at = unit.now();
-                let model = attribution.turn_model.clone();
-                self.count_forwarded(
-                    &mut unit,
-                    provider,
-                    &attribution,
-                    Forwarded {
-                        timing: None,
-                        harness: false,
-                        counted: true,
-                        id: ids::usage_close(lease),
-                        at,
-                        model: &model,
-                        tokens: short,
-                        request_ref: Some(CLOSE_REF),
-                    },
-                )
-                .await?;
+                if let Some(groups) = groups {
+                    self.reconcile_aware_close(
+                        &mut unit,
+                        provider,
+                        &attribution,
+                        lease,
+                        received_usage.as_ref(),
+                        &groups,
+                    )
+                    .await?;
+                } else if let Some(total) = total {
+                    let counted =
+                        ledger::counted_request_totals(&mut *unit.conn, attribution.turn_id)
+                            .await?;
+                    let short = shortfall(&total, &counted);
+                    let at = unit.now();
+                    let model = attribution.turn_model.clone();
+                    self.count_forwarded(
+                        &mut unit,
+                        provider,
+                        &attribution,
+                        Forwarded {
+                            timing: None,
+                            lease: Some(lease),
+                            context: None,
+                            harness: false,
+                            counted: true,
+                            id: ids::usage_close(lease),
+                            at,
+                            model: &model,
+                            tokens: short,
+                            request_ref: Some(CLOSE_REF),
+                        },
+                    )
+                    .await?;
+                }
             }
             unit.finish().await?
         };
         self.commit(tx, finished).await?;
+        Ok(())
+    }
+
+    /// Reconciles factual aggregates before publishing the same permanent cut as a legacy close.
+    /// No request identifier or performance measurement is reconstructed from grouped tokens.
+    async fn reconcile_aware_close(
+        &self,
+        unit: &mut Unit<'_>,
+        provider: &ProviderRow,
+        attribution: &Attribution,
+        lease: Id,
+        received_usage: Option<&TokenUsage>,
+        groups: &[LeaseUsageGroup],
+    ) -> Result<(), EngineError> {
+        let total = received_usage
+            .map(serde_json::to_value)
+            .transpose()?
+            .as_ref()
+            .map(tokens_of);
+        let counted = ledger::counted_lease_usage(
+            &mut *unit.conn,
+            attribution.turn_id,
+            lease,
+            provider.id,
+            &attribution.turn_model,
+        )
+        .await?;
+        // Fixed-field serialized keys give deterministic ordering and native residual IDs.
+        // Repeated keys in a close reply are one aggregate, not repeated subtractions.
+        struct Residual {
+            key: LeaseUsageGroupKey,
+            tokens: Tokens,
+            context: (i64, i64),
+            searches: Option<i64>,
+            search_aware: bool,
+        }
+        let mut residuals: BTreeMap<String, Residual> = BTreeMap::new();
+        let mut comparable_snapshot = true;
+        for group in groups {
+            let key = group.key();
+            comparable_snapshot &= key.wire_protocol.is_some()
+                || key.requested_service_tier.is_some()
+                || key.reported_service_tier != UsageMeasurement::Unsupported;
+            let canonical = serde_json::to_string(&key)?;
+            let tokens = tokens_of(&serde_json::to_value(group.usage)?);
+            let row = residuals.entry(canonical).or_insert_with(|| Residual {
+                key,
+                tokens: Tokens::default(),
+                context: (group.min_context_tokens, group.max_context_tokens),
+                searches: Some(0),
+                search_aware: false,
+            });
+            add_tokens(&mut row.tokens, &tokens);
+            row.context.0 = row.context.0.min(group.min_context_tokens);
+            row.context.1 = row.context.1.max(group.max_context_tokens);
+            row.search_aware |= group.search_usage.is_some();
+            row.searches = row
+                .searches
+                .zip(
+                    group
+                        .search_usage
+                        .as_ref()
+                        .filter(|search| search.known_requests == group.requests)
+                        .map(|search| search.searches),
+                )
+                .map(|(held, searches)| held.saturating_add(searches));
+        }
+        for residual in residuals.values_mut() {
+            residual.searches = residual
+                .searches
+                .zip(
+                    counted
+                        .group_searches
+                        .get(&residual.key)
+                        .copied()
+                        .unwrap_or(Some(0)),
+                )
+                .map(|(received, counted)| received.saturating_sub(counted).max(0));
+            residual.tokens = shortfall(
+                &residual.tokens,
+                counted
+                    .groups
+                    .get(&residual.key)
+                    .unwrap_or(&Tokens::default()),
+            );
+        }
+        residuals.retain(|_, residual| {
+            residual.tokens != Tokens::default()
+                || residual.searches.is_some_and(|searches| searches > 0)
+        });
+        let unmapped = counted.unassigned != Tokens::default()
+            || counted.legacy != Tokens::default()
+            || counted.legacy_ambiguous
+            || !comparable_snapshot;
+        if let Some(total) = total.as_ref() {
+            let already_counted = if counted.legacy_ambiguous {
+                // This is the historical aggregate cap, not a proof that old rows
+                // belong to this lease. No actual group is allocated in this branch.
+                ledger::counted_request_totals(&mut *unit.conn, attribution.turn_id).await?
+            } else {
+                let mut proved = counted.totals;
+                add_tokens(&mut proved, &counted.legacy);
+                proved
+            };
+            let remaining = shortfall(total, &already_counted);
+            let mut grouped = Tokens::default();
+            for residual in residuals.values() {
+                add_tokens(&mut grouped, &residual.tokens);
+            }
+            // Aggregate ownership does not prove which group already paid for old
+            // requests. Fitting within the remainder cannot establish that allocation,
+            // especially when a frame-budget prefix omitted other factual groups.
+            let inconsistent = !tokens_fit(&grouped, &remaining);
+            let unknown = if unmapped || inconsistent {
+                residuals.clear();
+                remaining
+            } else {
+                shortfall(&remaining, &grouped)
+            };
+            if unmapped || inconsistent {
+                tracing::warn!(%lease, ambiguous_history = counted.legacy_ambiguous, "close group allocation is unassignable; preserving the aggregate remainder without an actual-tier price");
+            }
+            if unknown != Tokens::default() {
+                let timing = RequestTiming {
+                    reported_service_tier: UsageMeasurement::Unread,
+                    ..RequestTiming::default()
+                };
+                let key = LeaseUsageGroupKey::of(&attribution.turn_model, &timing);
+                let canonical = serde_json::to_string(&key)?;
+                let row = residuals.entry(canonical).or_insert(Residual {
+                    key,
+                    tokens: Tokens::default(),
+                    context: (0, i64::MAX),
+                    searches: None,
+                    search_aware: false,
+                });
+                add_tokens(&mut row.tokens, &unknown);
+                row.context = (0, i64::MAX);
+            }
+        } else if unmapped {
+            // Without a readable aggregate, legacy overlap cannot establish even a
+            // remainder count. Preserve the cut without deriving tokens from groups.
+            residuals.clear();
+        }
+        if residuals.is_empty() {
+            let timing = RequestTiming {
+                reported_service_tier: UsageMeasurement::Unread,
+                ..RequestTiming::default()
+            };
+            let key = LeaseUsageGroupKey::of(&attribution.turn_model, &timing);
+            residuals.insert(
+                serde_json::to_string(&key)?,
+                Residual {
+                    key,
+                    tokens: Tokens::default(),
+                    context: (0, i64::MAX),
+                    searches: None,
+                    search_aware: false,
+                },
+            );
+        }
+        let at = unit.now();
+        for (index, (canonical, residual)) in residuals.into_iter().enumerate() {
+            let Residual {
+                key,
+                tokens,
+                context,
+                searches,
+                search_aware,
+            } = residual;
+            let timing = RequestTiming {
+                web_searches: if search_aware {
+                    searches.map_or(UsageMeasurement::Unread, |value| UsageMeasurement::Told {
+                        value,
+                    })
+                } else {
+                    UsageMeasurement::Unsupported
+                },
+                wire_protocol: key.wire_protocol,
+                requested_service_tier: key.requested_service_tier,
+                reported_service_tier: key.reported_service_tier,
+                ..RequestTiming::default()
+            };
+            self.count_forwarded(
+                unit,
+                provider,
+                attribution,
+                Forwarded {
+                    timing: Some(&timing),
+                    lease: Some(lease),
+                    context: Some(context),
+                    harness: false,
+                    counted: true,
+                    id: if index == 0 {
+                        ids::usage_close(lease)
+                    } else {
+                        ids::usage_close_group(lease, canonical.as_bytes())
+                    },
+                    at,
+                    model: &key.model,
+                    tokens,
+                    request_ref: Some(CLOSE_REF),
+                },
+            )
+            .await?;
+        }
+        ledger::retain_lease_close_snapshot(
+            &mut *unit.conn,
+            ids::usage_close(lease),
+            lease,
+            received_usage,
+            groups,
+        )
+        .await?;
         Ok(())
     }
 
@@ -1229,6 +1558,8 @@ impl Engine {
                     tokens: tokens_of(&serde_json::to_value(request.tokens.usage())?),
                     request_ref: Some(&request.id),
                     timing: Some(&timing),
+                    lease: None,
+                    context: None,
                     harness: true,
                     counted: turn.lease_id.is_none(),
                 },
@@ -1495,8 +1826,8 @@ impl Engine {
         }
     }
 
-    /// A provider closed by a limit of the plan whose time has passed is looked at again: it is `ready`, and the
-    /// threads that were blocked for want of it start where the vendor decides, which a turn finds out.
+    /// Refreshes the existing observational expiry state. Dispatch does not wait
+    /// for this sweep or for a reported reset time.
     async fn release_ended_limits(&self) -> Result<(), EngineError> {
         let now = self.inner.clock.now();
         let ended: Vec<Id> = {
@@ -1522,10 +1853,10 @@ impl Engine {
         Ok(())
     }
 
-    /// The provider a limit of the plan has closed, because the turn that ran on it ended with `failure`: it
-    /// is `exhausted` with the sentence that says which limit and until when, and its facts take the limit
-    /// with its time, which is what pre-flight, the sweep and the thread's limits read.
-    pub(crate) async fn close_provider_by_limit(
+    /// Records the vendor limit actually returned to one turn. Its `exhausted` status
+    /// and facts remain observations; later requests and unrelated work are not blocked.
+    /// Its original words and reported time remain available for diagnosis.
+    pub(crate) async fn record_provider_limit(
         &self,
         unit: &mut Unit<'_>,
         provider: Id,
@@ -1700,8 +2031,9 @@ fn keep_standing_limit(status: &str, stored: &Json, mut facts: Json, now: DateTi
     facts
 }
 
-/// Looks again at a provider that a limit with a time closed: when the time has passed it is `ready`, and its
-/// facts no longer name the limit. Gives the provider as it is then, or nothing when it stays as it was.
+/// Expires the existing recorded quota observation after its reported time.
+/// This housekeeping never decides admission; ready and exhausted both permit
+/// otherwise authorized requests.
 pub(crate) async fn release_if_ended(
     conn: &mut orch_db::Conn,
     row: &ProviderRow,

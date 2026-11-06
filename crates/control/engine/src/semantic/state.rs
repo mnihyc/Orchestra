@@ -254,14 +254,23 @@ impl Engine {
     /// An admin's choice to rebuild in place: the generations there are removed, so that a new one is made
     /// where they were; results by meaning cover what is done meanwhile.
     pub async fn semantic_rebuild_in_place(&self, org: Id) -> Result<(), EngineError> {
-        let mut conn = self.db().acquire().await?;
-        let generations = rows::generations(&mut conn, org).await?;
-        drop(conn);
-        for generation in generations {
-            self.drop_generation(generation.id).await?;
-        }
-        let mut conn = self.db().acquire().await?;
-        rows::reset_index(&mut conn, org, self.inner.clock.now()).await?;
+        let mut tx = self.db().begin().await?;
+        rebuild_in_place(&mut tx, org, self.inner.clock.now()).await?;
+        tx.commit().await.map_err(orch_db::DbError::from)?;
         Ok(())
     }
+}
+
+/// Removes the current generations and resets the index in the caller's action transaction.
+/// Request callers retain their existing authority guard on this transaction through commit.
+pub async fn rebuild_in_place(
+    tx: &mut orch_db::Tx,
+    org: Id,
+    at: chrono::DateTime<chrono::Utc>,
+) -> Result<(), EngineError> {
+    for generation in rows::generations(tx, org).await? {
+        rows::drop_generation(tx, generation.id).await?;
+    }
+    rows::reset_index(tx, org, at).await?;
+    Ok(())
 }

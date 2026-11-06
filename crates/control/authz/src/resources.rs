@@ -31,6 +31,14 @@ use crate::engine::{Frame, Graph, Site};
 use crate::nodes::{Page, archive_allows, every_permission};
 use crate::{Act, Error, Policy, Principal, missing};
 
+mod provider_owner;
+pub use provider_owner::provider_owner_host_use;
+
+mod provider_creation;
+pub use provider_creation::{
+    provider_creation_host_use, provider_creation_hosts, provider_creation_template_use,
+};
+
 /// How many candidates are looked at in one round when a list is filtered by what the caller may
 /// see: enough that a list of mostly visible resources takes one round, few enough to keep a
 /// frame small.
@@ -581,13 +589,14 @@ pub async fn effective(
 ) -> Result<Effective, Error> {
     let (graph, _, site) = site(conn, object).await?;
     let everything = every_permission([site.kind]);
-    let frame = Frame::load(
+    let frame = Frame::load_with_participation(
         conn,
         principal,
         policy,
         graph,
         std::slice::from_ref(&site),
         &everything,
+        std::slice::from_ref(&site),
     )
     .await?;
     Ok(Effective {
@@ -618,7 +627,9 @@ pub async fn effective_among(
         .filter_map(|resource| site_of(&graph, resource))
         .collect();
     let wanted = every_permission(sites.iter().map(|site| site.kind));
-    let frame = Frame::load(conn, principal, policy, graph, &sites, &wanted).await?;
+    let frame =
+        Frame::load_with_participation(conn, principal, policy, graph, &sites, &wanted, &sites)
+            .await?;
     Ok(sites
         .iter()
         .map(|site| {
@@ -696,9 +707,10 @@ pub fn use_permission(kind: ResourceKind) -> Option<Permission> {
     }
 }
 
-/// The candidates of a list of resources of a kind: those the caller might hold something on,
-/// paged by identifier.
-pub(crate) async fn candidates(
+/// Factual candidates of the ordinary resource list, paged by identifier. This is the same
+/// bounded Looker query used by `visible`; its identities establish no permission or projection.
+/// A scoped collection may use them to bind actual read targets before ordinary visibility.
+pub async fn candidates(
     conn: &mut Conn,
     principal: &Principal,
     kind: ResourceKind,
@@ -748,7 +760,16 @@ impl<'p> Batch<'p> {
             .collect();
         let sites: Vec<Site> = resources.iter().map(|(_, site)| site.clone()).collect();
         let everything = every_permission([ObjectKind::from(kind)]);
-        let frame = Frame::load(conn, principal, policy, graph, &sites, &everything).await?;
+        let frame = Frame::load_with_participation(
+            conn,
+            principal,
+            policy,
+            graph,
+            &sites,
+            &everything,
+            &sites,
+        )
+        .await?;
         Ok(Batch {
             frame,
             resources,

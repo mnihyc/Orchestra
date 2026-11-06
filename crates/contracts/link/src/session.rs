@@ -169,6 +169,9 @@ pub struct Auth {
 /// The gateway's word that the session stands.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
 pub struct Ready {
+    /// Current labelled gateway catalogue, independent of a local entrance override.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub gateways: Vec<crate::gateways::GatewayInstance>,
     /// Current system addresses; a machine's own configured list takes precedence.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub endpoints: Option<Vec<crate::enrollment::Endpoint>>,
@@ -403,8 +406,14 @@ pub struct MachineFacts {
     pub cpus: u32,
     /// How much memory it has.
     pub memory_bytes: i64,
-    /// The harnesses found on it.
+    /// The programs confirmed by the machine's local policy and present on disk.
     pub harnesses: Vec<MachineFactsHarness>,
+    /// Programs found without local confirmation; absent before the connector searched.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub discovered_harnesses: Option<Vec<MachineFactsHarness>>,
+    /// The searched kinds, including those with no program found; absent before a search.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub searched_harness_kinds: Option<Vec<String>>,
     /// The harness kinds its connector can drive.
     pub adapters: Vec<MachineFactsAdapter>,
     /// The implementations from outside registered on it.

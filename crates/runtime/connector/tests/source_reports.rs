@@ -151,3 +151,29 @@ fn a_report_keeps_the_contracts_list_bound_without_discarding_a_good_scalar() {
             .any(|note| note == "windows[64]: too_large")
     );
 }
+
+#[test]
+fn any_source_can_report_exact_paid_amounts_while_invalid_values_keep_the_existing_read_note() {
+    let extra = |amount: serde_json::Value| json!({"extra_usage":{"enabled":true,"used":amount,"limit":null,"used_percent":null,"unit":"points","decimal_places":2,"disabled_reason":null,"limit_reached":null}});
+    for (amount, exact) in [
+        (json!("9007199254740993.1250"), "9007199254740993.1250"),
+        (json!(0), "0"),
+    ] {
+        let read = reports::read(&extra(amount), at(), false, &[]).unwrap();
+        assert!(read.notes.is_empty());
+        assert_eq!(
+            reports::normalized(&read)
+                .unwrap()
+                .extra_usage
+                .unwrap()
+                .used
+                .as_deref(),
+            Some(exact)
+        );
+    }
+    for invalid in [json!("1e3"), json!("9".repeat(41)), json!(true)] {
+        let read = reports::read(&extra(invalid), at(), false, &[]).unwrap();
+        assert!(read.notes.iter().any(|note| note == "extra_usage"));
+        assert!(reports::normalized(&read).unwrap().extra_usage.is_none());
+    }
+}

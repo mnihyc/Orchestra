@@ -45,6 +45,7 @@ impl SessionAuthority for Registry {
             std::future::pending::<()>().await;
         }
         let refuse = |code| AuthReply {
+            gateways: Vec::new(),
             endpoints: None,
             update_permit: None,
             n: query.n,
@@ -60,6 +61,7 @@ impl SessionAuthority for Registry {
             return refuse(RejectCode::Revoked);
         }
         AuthReply {
+            gateways: Vec::new(),
             endpoints: None,
             update_permit: known
                 .update_idle
@@ -125,6 +127,7 @@ fn fixture(silent: bool) -> Fixture {
 impl Fixture {
     fn client(&self, version: &str, key: Option<LeafKey>) -> ClientIdentity {
         ClientIdentity {
+            gateway_id: None,
             hosted_endpoints: None,
             endpoints: None,
             machine_id: self.identity.machine_id,
@@ -216,6 +219,19 @@ async fn a_machine_known_by_its_certificate_gets_a_session_with_the_cursors_of_i
     assert_eq!(established.ready.limits, Limits::default());
     assert_eq!(accepted.fingerprint, f.identity.certificate.fingerprint());
     assert_eq!(accepted.remote_ip, Some("192.0.2.7".parse().unwrap()));
+}
+
+#[tokio::test]
+async fn a_selected_gateway_is_checked_before_machine_authentication() {
+    let f = fixture(false);
+    let mut client = f.client("0.1.0", None);
+    client.gateway_id = Some("another-gateway".into());
+    let (accepted, connected) = f.run(None, &client, &f.clock, (HOST, HOST)).await;
+    assert!(
+        accepted.is_err(),
+        "a different gateway must receive no machine authentication"
+    );
+    assert!(matches!(connected, Err(HandshakeError::Malformed(_))));
 }
 
 #[tokio::test]

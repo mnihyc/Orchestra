@@ -250,7 +250,9 @@ impl<'p> Setup<'p> {
     fn ways_to_change(&self) -> Vec<Through> {
         match &self.site {
             Some(site) => self.frame.ways(site, Permission::AccessManage),
-            None if self.frame.principal().is_system_admin() => vec![Through::SystemAdmin],
+            None if crate::system_administration::system_defaults(self.frame.principal()) => {
+                vec![Through::SystemAdmin]
+            }
             None => Vec::new(),
         }
     }
@@ -262,7 +264,7 @@ impl<'p> Setup<'p> {
     fn owns_or_administers(&self) -> bool {
         match &self.site {
             Some(site) => self.frame.owns(site) || self.frame.administers(site),
-            None => self.frame.principal().is_system_admin(),
+            None => crate::system_administration::system_defaults(self.frame.principal()),
         }
     }
 }
@@ -365,6 +367,21 @@ pub async fn read(
         }
         _ => None,
     };
+    let mut gives = giving.gives();
+    if principal.caller().as_admin() {
+        // Administration of human grants remains available; only agent loans exclude native reach.
+        let ordinary = principal.ordinary(conn).await?;
+        let source = Setup::load(conn, &ordinary, target, policy).await?;
+        let ordinary_gives = Giving::of(
+            &source.frame,
+            source.site.as_ref(),
+            source.page.page,
+            Acting::Ordinary,
+        )
+        .gives();
+        gives.agents = ordinary_gives.agents;
+        gives.agent_permissions = ordinary_gives.agent_permissions;
+    }
     Ok(PageView {
         target,
         name: setup
@@ -386,7 +403,7 @@ pub async fn read(
         followers,
         revision,
         writable,
-        gives: giving.gives(),
+        gives,
         role_place: setup.site.as_ref().and_then(|site| site.role_place),
         archived_node: setup.site.as_ref().and_then(|site| site.archived_node),
     })
@@ -592,8 +609,43 @@ fn row_path(index: usize, named: usize) -> String {
     }
 }
 
+/// A native page failure or the entry owner's opaque failure before the first effect.
+/// The original cause is retained verbatim; this type defines no new permission or HTTP mapping.
+#[derive(Debug)]
+pub enum EffectFailure<N, E> {
+    /// Existing native validation/authorization/database error, unchanged.
+    Native(N),
+    /// The exact caller-supplied pre-effect boundary error.
+    BeforeEffect(E),
+}
+/// Page form of the opaque native/pre-effect error carrier.
+pub type ChangeFailure<E> = EffectFailure<ChangeError, E>;
+
+impl<E> From<Error> for ChangeFailure<E> {
+    fn from(error: Error) -> Self {
+        Self::Native(error.into())
+    }
+}
+impl<E> From<orch_db::DbError> for ChangeFailure<E> {
+    fn from(error: orch_db::DbError) -> Self {
+        Self::Native(error.into())
+    }
+}
+impl<E> From<ChangeError> for ChangeFailure<E> {
+    fn from(error: ChangeError) -> Self {
+        Self::Native(error)
+    }
+}
+fn native_change_failure(error: ChangeFailure<std::convert::Infallible>) -> ChangeError {
+    match error {
+        ChangeFailure::Native(error) => error,
+        ChangeFailure::BeforeEffect(never) => match never {},
+    }
+}
+
 /// Makes the changes, one by one, and writes the line of history of each.
-struct Writer<'a> {
+struct Writer<'a, F> {
+    before_effect: Option<F>,
     conn: &'a mut Conn,
     page_key: PageKey,
     defaults: bool,
@@ -616,7 +668,16 @@ struct Writer<'a> {
     share_inside: Option<bool>,
 }
 
-impl Writer<'_> {
+impl<E, F> Writer<'_, F>
+where
+    F: FnOnce() -> Result<(), E>,
+{
+    fn before_write(&mut self) -> Result<(), ChangeFailure<E>> {
+        match self.before_effect.take() {
+            Some(check) => check().map_err(ChangeFailure::BeforeEffect),
+            None => Ok(()),
+        }
+    }
     async fn audit(
         &mut self,
         action: AuditAction,
@@ -624,7 +685,7 @@ impl Writer<'_> {
         r#override: bool,
         summary: String,
         details: Json,
-    ) -> Result<(), Error> {
+    ) -> Result<(), ChangeFailure<E>> {
         let summary = if self.defaults && action.as_str().starts_with("permission.") {
             let agents = details
                 .get("holder")
@@ -694,7 +755,7 @@ impl Writer<'_> {
         profile: Profile,
         inherit: Option<bool>,
         locked: Option<bool>,
-    ) -> Result<(), Error> {
+    ) -> Result<(), ChangeFailure<E>> {
         let (was_inherit, was_locked) = self
             .rows_now
             .get(&(permission, profile))
@@ -704,6 +765,7 @@ impl Writer<'_> {
         if (inherit, locked) == (was_inherit, was_locked) {
             return Ok(());
         }
+        self.before_write()?;
         access::write_row(
             self.conn,
             &RowWrite {
@@ -758,12 +820,12 @@ impl Writer<'_> {
         profile: Profile,
         entry: &pages::CheckedEntry,
         r#override: bool,
-    ) -> Result<(), Error> {
+    ) -> Result<(), ChangeFailure<E>> {
         let (kind, holder_id, holder_role) = entry.holder.stored();
         let options = entry.options.to_json();
         let given_options = !matches!(&options, Json::Object(members) if members.is_empty());
         let expires_at = entry.expires_at.map(Time::get);
-        let existing = access::find_entry_for_share(
+        let existing = access::find_entry_for_share_by(
             self.conn,
             &self.page_key,
             profile.as_str(),
@@ -772,6 +834,7 @@ impl Writer<'_> {
             holder_id,
             holder_role.map(Role::as_str),
             self.share_inside,
+            Some(self.by),
         )
         .await?;
         let who = self.names.holder(self.conn, &entry.holder).await?;
@@ -800,8 +863,17 @@ impl Writer<'_> {
             {
                 return Ok(());
             }
-            access::rewrite_entry(self.conn, existing.id, &now_options, now_expires, &now_note)
-                .await?;
+            self.before_write()?;
+            access::rewrite_entry(
+                self.conn,
+                existing.id,
+                &now_options,
+                now_expires,
+                &now_note,
+                (existing.expires_at.map(Time::new) != now_expires.map(Time::new))
+                    .then_some(self.now),
+            )
+            .await?;
             self.changed = true;
             let (action, word) = if ended {
                 self.overridden |= r#override;
@@ -842,6 +914,7 @@ impl Writer<'_> {
                 .await;
         }
         let id = orch_types::new_id();
+        self.before_write()?;
         access::insert_entry_for_share(
             self.conn,
             &NewEntry {
@@ -884,6 +957,7 @@ impl Writer<'_> {
                 source: self.source,
                 created_by: Some(self.by),
                 created_at: Time::new(self.now),
+                renewed_at: None,
                 removed_at: None,
                 revision: 1,
             },
@@ -911,7 +985,7 @@ impl Writer<'_> {
         permission: Permission,
         profile: Profile,
         update: &pages::CheckedUpdate,
-    ) -> Result<(), Error> {
+    ) -> Result<(), ChangeFailure<E>> {
         let Some(position) = self
             .entries_now
             .iter()
@@ -929,12 +1003,14 @@ impl Writer<'_> {
         if options == before.options && expires_at == before.expires_at && note == before.note {
             return Ok(());
         }
+        self.before_write()?;
         access::rewrite_entry(
             self.conn,
             before.id,
             &options,
             expires_at.map(Time::get),
             &note,
+            (expires_at != before.expires_at).then_some(self.now),
         )
         .await?;
         self.changed = true;
@@ -950,6 +1026,9 @@ impl Writer<'_> {
         let entry = &mut self.entries_now[position].entry;
         entry.options = options.clone();
         entry.expires_at = expires_at;
+        if expires_at != before.expires_at {
+            entry.renewed_at = Some(Time::new(self.now));
+        }
         entry.note = note;
         self.audit(
             AuditAction::PermissionUpdated,
@@ -974,7 +1053,7 @@ impl Writer<'_> {
         permission: Permission,
         profile: Profile,
         id: Id,
-    ) -> Result<(), Error> {
+    ) -> Result<(), ChangeFailure<E>> {
         let Some(position) = self
             .entries_now
             .iter()
@@ -983,6 +1062,7 @@ impl Writer<'_> {
             return Ok(());
         };
         let removed = self.entries_now.remove(position).entry;
+        self.before_write()?;
         if !access::remove_entry(self.conn, id, self.by, self.now).await? {
             return Ok(());
         }
@@ -1018,7 +1098,7 @@ impl Writer<'_> {
         &mut self,
         rows: &[(Permission, Profile)],
         locked_above: &HashMap<(Permission, Profile), PlaceRef>,
-    ) -> Result<Vec<(Permission, Profile, PlaceRef)>, Error> {
+    ) -> Result<Vec<(Permission, Profile, PlaceRef)>, ChangeFailure<E>> {
         let mut skipped = Vec::new();
         let mut cut = 0_usize;
         for (permission, profile) in rows {
@@ -1032,6 +1112,7 @@ impl Writer<'_> {
                 .copied()
                 .unwrap_or((true, false));
             if inherit {
+                self.before_write()?;
                 access::write_row(
                     self.conn,
                     &RowWrite {
@@ -1075,7 +1156,7 @@ impl Writer<'_> {
     async fn reset(
         &mut self,
         locked_above: &HashMap<(Permission, Profile), PlaceRef>,
-    ) -> Result<Vec<(Permission, Profile, PlaceRef)>, Error> {
+    ) -> Result<Vec<(Permission, Profile, PlaceRef)>, ChangeFailure<E>> {
         let mut skipped = Vec::new();
         let mut rows = 0_usize;
         let stored: Vec<((Permission, Profile), (bool, bool))> = self
@@ -1089,6 +1170,7 @@ impl Writer<'_> {
                 continue;
             }
             if !inherit || locked {
+                self.before_write()?;
                 access::write_row(
                     self.conn,
                     &RowWrite {
@@ -1115,6 +1197,7 @@ impl Writer<'_> {
             .collect();
         let entries = doomed.len();
         for (_, _, id) in &doomed {
+            self.before_write()?;
             access::remove_entry(self.conn, *id, self.by, self.now).await?;
         }
         self.entries_now
@@ -1147,11 +1230,12 @@ impl Writer<'_> {
         node: Id,
         first_before: Option<Id>,
         after: &pages::OwnersAfter,
-    ) -> Result<(), Error> {
+    ) -> Result<(), ChangeFailure<E>> {
         let options = Json::Object(serde_json::Map::new());
         for holder in &after.add {
             let (kind, holder_id, holder_role) = holder.stored();
             let id = orch_types::new_id();
+            self.before_write()?;
             access::insert_entry(
                 self.conn,
                 &NewEntry {
@@ -1195,6 +1279,7 @@ impl Writer<'_> {
                 .await?
                 .into_iter()
                 .find(|row| row.id == *id);
+            self.before_write()?;
             if !access::remove_entry(self.conn, *id, self.by, self.now).await? {
                 continue;
             }
@@ -1228,11 +1313,13 @@ impl Writer<'_> {
         if first_before != Some(after.first) {
             let action = match self.object {
                 Some(thing) if thing.kind == ObjectKind::Document => {
+                    self.before_write()?;
                     orch_db::queries::documents::set_owner(self.conn, thing.id, after.first)
                         .await?;
                     orch_db::audit::action!(AuditAction::DocumentTransferred)
                 }
                 Some(thing) if thing.kind == ObjectKind::DocumentContainer => {
+                    self.before_write()?;
                     orch_db::queries::documents::containers::set_owner(
                         self.conn,
                         thing.id,
@@ -1243,6 +1330,7 @@ impl Writer<'_> {
                     orch_db::audit::action!(AuditAction::DocumentTransferred)
                 }
                 Some(thing) => {
+                    self.before_write()?;
                     resource_rows::set_resource_owner(
                         self.conn,
                         thing.kind.as_str(),
@@ -1254,6 +1342,7 @@ impl Writer<'_> {
                     orch_db::audit::action!(AuditAction::ResourceTransferred)
                 }
                 None => {
+                    self.before_write()?;
                     hierarchy::set_first_owner(self.conn, node, after.first, self.now).await?;
                     orch_db::audit::action!(AuditAction::NodeTransferred)
                 }
@@ -1357,6 +1446,68 @@ pub async fn change(
         None,
         Acting::Ordinary,
         origin,
+    )
+    .await
+}
+
+/// The same native page change, with one opaque callback immediately before its first
+/// mutating SQL. No callback runs for a genuine no-op, and accepted tails are never vetoed.
+#[allow(
+    clippy::too_many_arguments,
+    reason = "the native page inputs and one opaque first-effect boundary"
+)]
+pub async fn change_fenced<E: Send, F: FnOnce() -> Result<(), E> + Send>(
+    conn: &mut Conn,
+    principal: &Principal,
+    target: Target,
+    change: &PageChange,
+    policy: Policy,
+    origin: &audit::Origin,
+    before_effect: F,
+) -> Result<Outcome, ChangeFailure<E>> {
+    change_with_fence(
+        conn,
+        principal,
+        target,
+        change,
+        policy,
+        None,
+        EntrySource::Page,
+        None,
+        Acting::Ordinary,
+        origin,
+        before_effect,
+    )
+    .await
+}
+
+/// Resource/document form of the same producer and opaque first-effect boundary.
+#[allow(
+    clippy::too_many_arguments,
+    reason = "the native resource-page inputs and one opaque first-effect boundary"
+)]
+pub async fn change_resource_under_fenced<E: Send, F: FnOnce() -> Result<(), E> + Send>(
+    conn: &mut Conn,
+    principal: &Principal,
+    object: ObjectRef,
+    change: &PageChange,
+    policy: Policy,
+    resources: &ResourcePolicy,
+    origin: &audit::Origin,
+    before_effect: F,
+) -> Result<Outcome, ChangeFailure<E>> {
+    change_with_fence(
+        conn,
+        principal,
+        Target::Resource(object),
+        change,
+        policy,
+        Some(resources),
+        EntrySource::Page,
+        None,
+        Acting::Ordinary,
+        origin,
+        before_effect,
     )
     .await
 }
@@ -1509,6 +1660,42 @@ pub async fn change_for_request(
     .await
 }
 
+/// Serialize exactly the target used by the ordinary page writer. This is no authority
+/// grant; callers still run that writer's current policy, giving and ownership checks.
+pub async fn lock_change_target(conn: &mut Conn, target: Target) -> Result<(), Error> {
+    match target {
+        Target::Live(node) | Target::Defaults(PlaceRef::Node(node)) => {
+            if !hierarchy::lock(conn, node).await? {
+                return Err(Error::NotFound(node));
+            }
+        }
+        Target::Resource(object) if object.kind == ObjectKind::DocumentContainer => {
+            let alive = orch_db::queries::documents::containers::lock(conn, object.id)
+                .await?
+                .is_some_and(|row| row.deleted_at.is_none());
+            if !alive {
+                return Err(Error::NotFound(object.id));
+            }
+        }
+        Target::Resource(object) if object.kind == ObjectKind::Document => {
+            orch_db::queries::documents::containers::lock_document_scope(conn, object.id).await?;
+            let alive = orch_db::queries::documents::lock(conn, object.id)
+                .await?
+                .is_some_and(|document| document.deleted_at.is_none());
+            if !alive {
+                return Err(Error::NotFound(object.id));
+            }
+        }
+        Target::Resource(object) => {
+            if !resource_rows::lock_resource(conn, object.kind.as_str(), object.id).await? {
+                return Err(Error::NotFound(object.id));
+            }
+        }
+        Target::Defaults(PlaceRef::System) => access::lock_system_defaults(conn).await?,
+    }
+    Ok(())
+}
+
 #[allow(
     clippy::too_many_arguments,
     reason = "the caller, the page and the change, the two policies, how entries come about, how the change is made, and where from"
@@ -1525,36 +1712,46 @@ async fn change_with(
     acting: Acting,
     origin: &audit::Origin,
 ) -> Result<Outcome, ChangeError> {
-    match target {
-        Target::Live(node) | Target::Defaults(PlaceRef::Node(node)) => {
-            if !hierarchy::lock(conn, node).await? {
-                return Err(Error::NotFound(node).into());
-            }
-        }
-        Target::Resource(object) if object.kind == ObjectKind::DocumentContainer => {
-            let alive = orch_db::queries::documents::containers::lock(conn, object.id)
-                .await?
-                .is_some_and(|row| row.deleted_at.is_none());
-            if !alive {
-                return Err(Error::NotFound(object.id).into());
-            }
-        }
-        Target::Resource(object) if object.kind == ObjectKind::Document => {
-            orch_db::queries::documents::containers::lock_document_scope(conn, object.id).await?;
-            let alive = orch_db::queries::documents::lock(conn, object.id)
-                .await?
-                .is_some_and(|document| document.deleted_at.is_none());
-            if !alive {
-                return Err(Error::NotFound(object.id).into());
-            }
-        }
-        Target::Resource(object) => {
-            if !resource_rows::lock_resource(conn, object.kind.as_str(), object.id).await? {
-                return Err(Error::NotFound(object.id).into());
-            }
-        }
-        Target::Defaults(PlaceRef::System) => access::lock_system_defaults(conn).await?,
-    }
+    change_with_fence(
+        conn,
+        principal,
+        target,
+        change,
+        policy,
+        resource_policy,
+        source,
+        share_inside,
+        acting,
+        origin,
+        || Ok::<(), std::convert::Infallible>(()),
+    )
+    .await
+    .map_err(native_change_failure)
+}
+
+#[allow(
+    clippy::too_many_arguments,
+    reason = "the same native page inputs plus the entry owner's one-shot boundary"
+)]
+async fn change_with_fence<E, F>(
+    conn: &mut Conn,
+    principal: &Principal,
+    target: Target,
+    change: &PageChange,
+    policy: Policy,
+    resource_policy: Option<&ResourcePolicy>,
+    source: EntrySource,
+    share_inside: Option<bool>,
+    acting: Acting,
+    origin: &audit::Origin,
+    before_effect: F,
+) -> Result<Outcome, ChangeFailure<E>>
+where
+    F: FnOnce() -> Result<(), E> + Send,
+    E: Send,
+{
+    let (setup, manages, checked, owners_after, locked_above, rows_now, entries_now, revision_before, page_key, by, now, actor) = async {
+    lock_change_target(conn, target).await?;
     let setup = Setup::load(conn, principal, target, policy).await?;
     let now = principal.now();
     let by = principal.user();
@@ -1675,7 +1872,7 @@ async fn change_with(
     if asks.admin {
         let admin = match &setup.site {
             Some(site) => setup.frame.administers(site),
-            None => principal.is_system_admin(),
+            None => crate::system_administration::system_defaults(principal),
         };
         if !admin {
             return Err(match &setup.site {
@@ -1715,6 +1912,94 @@ async fn change_with(
             stored.profile.parse::<Profile>(),
         ) {
             rows_now.insert((permission, profile), (stored.inherit, stored.locked));
+        }
+    }
+
+    if principal.caller().as_admin()
+        && checked.rows.iter().any(|row| {
+            row.add
+                .iter()
+                .any(|entry| matches!(entry.holder, Holder::Agents { .. }))
+                || row.update.iter().any(|update| {
+                    entries_now.iter().any(|stored| {
+                        stored.entry.id == update.entry
+                            && matches!(stored.entry.holder, Holder::Agents { .. })
+                            && crate::giving::entry_widens(&stored.entry, update)
+                    })
+                })
+        })
+    {
+        let ordinary = principal.ordinary(conn).await?;
+        let source = Setup::load(conn, &ordinary, target, policy).await?;
+        let lend = Giving::of(
+            &source.frame,
+            source.site.as_ref(),
+            source.page.page,
+            Acting::Share,
+        );
+        // Optional Export remains optional, even when an administrator can give it to people.
+        for row in checked.rows.iter_mut().filter(|row| row.optional) {
+            if !lend.can_give(row.permission, row.profile) {
+                row.add
+                    .retain(|entry| !matches!(entry.holder, Holder::Agents { .. }));
+            }
+        }
+        let asked: Vec<_> = checked
+            .rows
+            .iter()
+            .filter(|row| {
+                row.add
+                    .iter()
+                    .any(|entry| matches!(entry.holder, Holder::Agents { .. }))
+                    || row.update.iter().any(|update| {
+                        entries_now.iter().any(|stored| {
+                            stored.entry.id == update.entry
+                                && matches!(stored.entry.holder, Holder::Agents { .. })
+                                && crate::giving::entry_widens(&stored.entry, update)
+                        })
+                    })
+            })
+            .map(|row| (row.permission, row.profile))
+            .collect();
+        let strict_missing: Vec<_> = checked
+            .rows
+            .iter()
+            .filter(|row| {
+                !lend.can_give(row.permission, row.profile)
+                    && row.update.iter().any(|update| {
+                        entries_now.iter().any(|stored| {
+                            stored.entry.id == update.entry
+                                && matches!(stored.entry.holder, Holder::Agents { .. })
+                                && crate::giving::entry_widens(&stored.entry, update)
+                        })
+                    })
+            })
+            .map(|row| row.permission)
+            .collect();
+        let lacking = if !strict_missing.is_empty() {
+            strict_missing
+        } else if asked.is_empty() {
+            Vec::new()
+        } else {
+            match lend.judge(&asked) {
+                Judgement::Allowed { rows } => {
+                    for row in &mut checked.rows {
+                        if !rows.contains(&(row.permission, row.profile)) {
+                            row.add
+                                .retain(|entry| !matches!(entry.holder, Holder::Agents { .. }));
+                        }
+                    }
+                    Vec::new()
+                }
+                Judgement::KeptToOwners => vec![Permission::AccessManage],
+                Judgement::Lacks(lacking) => lacking,
+            }
+        };
+        if let Some(required) = lacking.first().copied() {
+            return Err(match &source.site {
+                Some(site) => refuse(conn, &source, site, required, &lacking).await?,
+                None => ChangeError::SystemAdminOnly,
+            });
         }
     }
 
@@ -1895,8 +2180,26 @@ async fn change_with(
         if named_holders.iter().any(|holder| matches!(holder, Holder::Members { id } if !nodes.iter().any(|node| node.id == *id && node.kind == "org"))) {
             faults.push(FieldError { path: "holder".into(), message: "members by domain belong to an org".into() });
         }
-        if named_holders.iter().any(|holder| matches!(holder, Holder::Role { at: Some(id), .. } if !nodes.iter().any(|node| node.id == *id && matches!(node.kind.as_str(), "org" | "project" | "topic")))) {
-            faults.push(FieldError { path: "holder".into(), message: "a role is held at an org, project or topic".into() });
+        if named_holders.iter().any(|holder| matches!(holder, Holder::Role { role, at: Some(id) } if !nodes.iter().any(|node| node.id == *id && (matches!(node.kind.as_str(), "org" | "project" | "topic") || (*role == Role::Viewer && node.kind == "thread"))))) {
+            faults.push(FieldError { path: "holder".into(), message: "a role is held at an org, project or topic; an explicit viewers audience may also name a thread".into() });
+        }
+    }
+
+    for row in &checked.rows {
+        for update in &row.update {
+            if let Some(before) = entries_now
+                .iter()
+                .find(|stored| stored.entry.id == update.entry)
+                && before.entry.holder.kind()
+                    == orch_access_contract::permissions::HolderKind::Agents
+                && before.entry.created_by != Some(by)
+                && crate::giving::entry_widens(&before.entry, update)
+            {
+                faults.push(FieldError {
+                    path: "rows.update".into(),
+                    message: "another giver's contribution may be narrowed or removed; add your own to give more".into(),
+                });
+            }
         }
     }
 
@@ -2066,8 +2369,8 @@ async fn change_with(
         return Err(ChangeError::Invalid(faults));
     }
 
-    // A new agents entry changes what the receiving agents may work with. The ordinary page
-    // request must ask that side too; a share already asked it before reaching this writer.
+    // A pure agent grant needs the recipient's ordinary visibility, not control of its work.
+    // The same named-recipient check remains; sharing itself submits no input or command.
     if acting == Acting::Ordinary {
         let recipients: std::collections::BTreeSet<Id> = checked
             .rows
@@ -2084,7 +2387,7 @@ async fn change_with(
                 principal,
                 recipient,
                 orch_access_contract::permissions::PermissionName::OfNode(
-                    orch_access_contract::permissions::NodePermission::Interact,
+                    orch_access_contract::permissions::NodePermission::View,
                 ),
                 crate::Act::Use,
                 Policy::default(),
@@ -2109,7 +2412,10 @@ async fn change_with(
         };
         names.user(conn, by).await?
     };
+    Ok::<_, ChangeError>((setup, manages, checked, owners_after, locked_above, rows_now, entries_now, revision_before, page_key, by, now, actor))
+    }.await.map_err(ChangeFailure::Native)?;
     let mut writer = Writer {
+        before_effect: Some(before_effect),
         page_key: page_key.clone(),
         defaults: setup.page.page == PageKind::Defaults,
         node: setup

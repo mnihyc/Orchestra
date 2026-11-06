@@ -13,8 +13,9 @@
  * makes nothing twice. A change to something with a revision carries the revision the person saw, and
  * a stale one comes back as `conflict.stale_revision`, which the screen shows and never retries alone.
  */
-import { infiniteQueryOptions, queryOptions } from '@tanstack/react-query';
+import { infiniteQueryOptions, queryOptions, type QueryClient } from '@tanstack/react-query';
 
+import { joinedDefaultsNode } from '@/api/defaultsOpening';
 import { api, client, ok, repeatable } from '@/api/client';
 import { type ResourceRows, resourceRows } from '@/api/listed';
 import { queryClient } from '@/api/query';
@@ -76,11 +77,15 @@ export const orgBySlugQuery = (slug: string) =>
       ok(api.GET('/orgs/by-slug/{slug}', { params: { path: { slug } }, signal })),
   });
 
+async function fetchNode(id: string, cache: QueryClient, signal: AbortSignal): Promise<Node> {
+  return await joinedDefaultsNode(cache, id, signal) ?? ok(api.GET('/nodes/{id}', { params: { path: { id } }, signal }));
+}
+
 /** Any node by its id, with what the caller holds on it. */
 export const nodeQuery = (id: string) =>
   queryOptions({
     queryKey: nodeKey(id),
-    queryFn: ({ signal }): Promise<Node> => ok(api.GET('/nodes/{id}', { params: { path: { id } }, signal })),
+    queryFn: ({ signal, client: cache }): Promise<Node> => fetchNode(id, cache, signal),
   });
 
 /** Explicitly reads current or retained facts to reconcile an uncertain write. */
@@ -92,8 +97,8 @@ export function readNode(id: string, inspectDeleted = false): Promise<Node> {
 export const projectQuery = (id: string) =>
   queryOptions({
     queryKey: nodeKey(id),
-    queryFn: ({ signal }): Promise<Project> =>
-      ok(api.GET('/nodes/{id}', { params: { path: { id } }, signal })).then((node) => {
+    queryFn: ({ signal, client: cache }): Promise<Project> =>
+      fetchNode(id, cache, signal).then((node) => {
         if (node.kind !== 'project') throw new WrongKind('project', node.kind);
         return node;
       }),
@@ -103,8 +108,8 @@ export const projectQuery = (id: string) =>
 export const topicQuery = (id: string) =>
   queryOptions({
     queryKey: nodeKey(id),
-    queryFn: ({ signal }): Promise<Topic> =>
-      ok(api.GET('/nodes/{id}', { params: { path: { id } }, signal })).then((node) => {
+    queryFn: ({ signal, client: cache }): Promise<Topic> =>
+      fetchNode(id, cache, signal).then((node) => {
         if (node.kind !== 'topic') throw new WrongKind('topic', node.kind);
         return node;
       }),

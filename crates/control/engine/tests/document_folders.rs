@@ -119,6 +119,23 @@ fn identifier(value: &Json, key: &str) -> TestResult<Id> {
     Ok(string(value, key)?.parse()?)
 }
 
+async fn version_snapshots(conn: &mut orch_db::Conn, document: Id) -> TestResult<Vec<Json>> {
+    let versions: Vec<i32> = sqlx::query_scalar(
+        "SELECT version FROM document_versions WHERE document_id=$1 ORDER BY version",
+    )
+    .bind(document)
+    .fetch_all(&mut *conn)
+    .await?;
+    let mut snapshots = Vec::with_capacity(versions.len());
+    for version in versions {
+        let blocks = documents::history::snapshot(conn, document, version)
+            .await?
+            .ok_or("a listed document version has no snapshot")?;
+        snapshots.push(serde_json::to_value(blocks)?);
+    }
+    Ok(snapshots)
+}
+
 #[tokio::test]
 async fn folder_creation_uses_existing_parents_and_gives_its_agent_no_management_grant()
 -> TestResult {
@@ -706,16 +723,8 @@ async fn recursive_copy_has_fresh_identity_and_history_remaps_internal_links_and
             .any(|details| details.to_string().contains(&first.to_string())),
         "copy audit retains its source identity"
     );
-    let source_versions: Vec<Json> =
-        sqlx::query_scalar("SELECT snapshot FROM document_versions WHERE document_id=$1")
-            .bind(first)
-            .fetch_all(&mut *conn)
-            .await?;
-    let copied_versions: Vec<Json> =
-        sqlx::query_scalar("SELECT snapshot FROM document_versions WHERE document_id=$1")
-            .bind(first_copy)
-            .fetch_all(&mut *conn)
-            .await?;
+    let source_versions = version_snapshots(&mut conn, first).await?;
+    let copied_versions = version_snapshots(&mut conn, first_copy).await?;
     assert!(source_versions.iter().any(|snapshot| {
         snapshot
             .to_string()

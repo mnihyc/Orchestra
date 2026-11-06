@@ -14,6 +14,7 @@ import { queryOptions } from '@tanstack/react-query';
 import { api, ApiError, ok, repeatable } from '@/api/client';
 import { liveValue } from '@/api/liveValue';
 import type {
+  AgentAccessChoice,
   ForkBatch,
   ForkBatchPlan,
   ForkBatchPreflightBody,
@@ -56,9 +57,9 @@ export function planFork(threadId: string, request: ForkRequest, signal?: AbortS
 }
 
 /** Forks a thread at once with nothing to choose: the same topic, environment, provider, profile and model, with all of the history. */
-export function forkNow(threadId: string, key: string, toTurn?: number): Promise<ForkNowReply> {
+export function forkNow(threadId: string, key: string, toTurn?: number, agentAccess?: AgentAccessChoice): Promise<ForkNowReply> {
   return ok(
-    api.POST('/threads/{id}/forks/now', { params: { path: { id: threadId } }, body: toTurn === undefined ? {} : { to_turn: toTurn }, ...repeatable(key) }),
+    api.POST('/threads/{id}/forks/now', { params: { path: { id: threadId } }, body: { ...(toTurn === undefined ? {} : { to_turn: toTurn }), ...(agentAccess === undefined ? {} : { agent_access: agentAccess }) }, ...repeatable(key) }),
   );
 }
 

@@ -611,6 +611,26 @@ pub async fn blocked_threads_of_machine(conn: &mut Conn, machine: Id) -> Result<
     .await?)
 }
 
+/// Bindings waiting for current environment or machine facts, without retrying other held work.
+pub async fn invalid_bindings_of(
+    conn: &mut Conn,
+    machine: Option<Id>,
+    environment: Option<Id>,
+) -> Result<Vec<Id>, DbError> {
+    Ok(sqlx::query_scalar(
+        "SELECT t.node_id FROM threads t JOIN nodes n ON n.id=t.node_id
+         LEFT JOIN environments e ON e.id=t.environment_id
+         LEFT JOIN providers p ON p.id=t.provider_id
+         WHERE t.state='blocked' AND t.blocked_reason='binding_invalid' AND n.deleted_at IS NULL
+           AND (t.environment_id=$2 OR e.machine_id=$1 OR p.machine_id=$1)
+         ORDER BY t.node_id",
+    )
+    .bind(machine)
+    .bind(environment)
+    .fetch_all(conn)
+    .await?)
+}
+
 /// The threads with a turn under way whose harness runs on `machine`: what
 /// going offline reaches.
 pub async fn active_threads_of_machine(conn: &mut Conn, machine: Id) -> Result<Vec<Id>, DbError> {
@@ -995,6 +1015,8 @@ impl InputRow {
                     self.state_detail.as_deref(),
                     Some(
                         HELD_CAP_REACHED
+                            | "background_wake_off"
+                            | "author_lost_access"
                             | HELD_OWNER_LACKS_ACCESS
                             | HELD_ATTACHMENTS
                             | HELD_SECOND_STEP
@@ -3798,6 +3820,22 @@ pub mod tools {
               ORDER BY n.created_at, t.node_id",
         )
         .bind(topic)
+        .fetch_all(conn)
+        .await?)
+    }
+
+    /// Eligible thread/topic pairs for a multi-topic announcement, before authorization.
+    pub async fn announcement_candidates(
+        conn: &mut Conn,
+        topics: &[Id],
+    ) -> Result<Vec<(Id, Id)>, DbError> {
+        Ok(sqlx::query_as(
+            "SELECT t.node_id, t.topic_id FROM threads t JOIN nodes n ON n.id=t.node_id
+              WHERE t.topic_id=ANY($1) AND t.side_of IS NULL
+                AND n.deleted_at IS NULL AND n.archived_at IS NULL
+              ORDER BY t.node_id",
+        )
+        .bind(topics)
         .fetch_all(conn)
         .await?)
     }

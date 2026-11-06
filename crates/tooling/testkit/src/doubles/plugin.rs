@@ -85,6 +85,7 @@ for line in sys.stdin:
                     "max_tokens":body.get("max_output_tokens", 120), "stream":body.get("stream", False)}
             if body.get("tools"):
                 sent["tools"] = [{"name":t["name"], "description":t.get("description", ""), "input_schema":t.get("parameters", {})} for t in body["tools"]]
+            sent.update(body.get("translated_options", {}))
             result = {"method":"POST", "path":"/v1/messages", "query":{}, "headers":{"content-type":"application/json"},
                       "body":json.dumps(sent), "authorized":False}
         elif name == "response_translator":
