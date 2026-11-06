@@ -21,6 +21,7 @@ test('the tree, a file in the code view, the search and the menu of a row', asyn
   await expect(editor(page)).toContainText("import { greet }");
   await expectAccessibleInBothThemes(page);
 
+  await filesPanel(page).getByRole('button', { name: 'Search the files', exact: true }).click();
   await filesPanel(page).getByRole('textbox', { name: 'Search the files' }).fill('util');
   await expect(page.getByTestId('search-results')).toBeVisible();
   await expectAccessibleInBothThemes(page);

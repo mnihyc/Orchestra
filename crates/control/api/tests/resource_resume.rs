@@ -9,6 +9,8 @@ mod places;
 mod rig;
 mod support;
 
+use futures::FutureExt;
+
 use orch_api_contract::environment::{EnvironmentDisable, EnvironmentEnable};
 use orch_api_contract::resource_facts::{ResourcePauseQuery, ResourceResumeQuery};
 use orch_api_contract::resources::{
@@ -28,14 +30,29 @@ type InputAuthority = (Option<Id>, Option<Json>, Option<Id>, Option<Json>);
 async fn each_resource_enable_continues_the_stopped_task_as_its_author_then_runs_the_unchanged_queue()
  {
     for kind in ["provider", "model", "agent", "environment"] {
-        let s = Scene::new().await;
+        let mut s = Scene::new().await;
+        let observe = std::env::var_os("ORCH_TEST_SQL_TIMINGS").is_some();
+        if observe {
+            eprintln!("resource resume kind={kind} stage=setup");
+        }
         s.rig.machine.handler.on(CommandKind::AgentStop, |_| {
             Ok(CommandResult::AgentStop(Empty {}))
         });
         s.rig.machine.handler.on(CommandKind::ProviderStop, |_| {
             Ok(CommandResult::ProviderStop(Empty {}))
         });
-        if kind != "environment" {
+        if kind == "environment" {
+            s.on.environment = rig::queue_environment(&s).await;
+            s.rig
+                .lets_use(
+                    "environment",
+                    s.on.environment,
+                    "environment.manage",
+                    &s.eve,
+                    json!({}),
+                )
+                .await;
+        } else {
             let (resource, id, permission) = if kind == "agent" {
                 ("agent", s.on.agent, "agent.manage")
             } else {
@@ -228,7 +245,34 @@ async fn each_resource_enable_continues_the_stopped_task_as_its_author_then_runs
                     .ok();
             }
         }
-        let continued = s.rig.turn_start(thread, 1).await;
+        let continued = if observe {
+            eprintln!("resource resume kind={kind} stage=waiting-for-continue");
+            match std::panic::AssertUnwindSafe(s.rig.turn_start(thread, 1))
+                .catch_unwind()
+                .await
+            {
+                Ok(start) => start,
+                Err(panic) => {
+                    let state = tokio::time::timeout(
+                        std::time::Duration::from_secs(2),
+                        sqlx::query_scalar::<_, Json>(
+                        "SELECT jsonb_build_object('thread_state',t.state,'blocked_reason',t.blocked_reason,
+                            'placement',e.placement,'environment_status',e.status,'disabled',e.status='disabled',
+                            'has_machine',e.machine_id IS NOT NULL,'active_runtimes',
+                            (SELECT count(*) FROM runtimes r WHERE r.environment_id=e.id AND r.state NOT IN ('retired','removed')))
+                         FROM threads t LEFT JOIN environments e ON e.id=t.environment_id WHERE t.node_id=$1",
+                        )
+                        .bind(thread)
+                        .fetch_optional(s.rig.db.pool()),
+                    )
+                    .await;
+                    eprintln!("resource resume kind={kind} stage=continue-timeout state={state:?}");
+                    std::panic::resume_unwind(panic);
+                }
+            }
+        } else {
+            s.rig.turn_start(thread, 1).await
+        };
         let (input,content):(Id,Json)=sqlx::query_as("SELECT i.id,i.content FROM turns t JOIN thread_inputs i ON i.id=t.input_id WHERE t.id=$1").bind(continued.turn_id).fetch_one(s.rig.db.pool()).await.unwrap();
         assert_ne!(input, origin);
         assert_ne!(input, pending);

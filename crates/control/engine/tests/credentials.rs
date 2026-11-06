@@ -946,6 +946,97 @@ async fn a_credential_is_brought_home_by_the_environment_giving_it_back_and_the_
 }
 
 #[tokio::test]
+async fn credential_returns_preserve_exact_custody_timestamps() {
+    use orch_access_contract::decisions::ObjectRef;
+    use orch_access_contract::permissions::ObjectKind;
+    use orch_engine::credentials::handover_authority::HandoverAuthority;
+    use orch_engine::operation_scope::{Prepared, targets};
+
+    let s = stand().await;
+    let thread = s
+        .thread(ArrangementType::HandedOver, "Precise custody")
+        .await;
+    s.say(thread, "hello").await;
+    let start = s.turn_start(thread, 0).await;
+    s.finish_turn(thread, &start).await;
+    let provider = s.world.provider;
+    let mut conn = s.world.pool.acquire().await.unwrap();
+    // Custody identity retains the database's microseconds, even within one public millisecond.
+    let since: chrono::DateTime<Utc> = sqlx::query_scalar(
+        "UPDATE providers SET held_since=date_trunc('milliseconds',held_since)+interval '1 microsecond'
+         WHERE id=$1 RETURNING held_since",
+    )
+    .bind(provider)
+    .fetch_one(&mut *conn)
+    .await
+    .unwrap();
+    let target = targets::page_object(
+        &mut conn,
+        ObjectRef {
+            kind: ObjectKind::Provider,
+            id: provider,
+        },
+    )
+    .await
+    .unwrap();
+    let mut plan = Prepared::for_selection("ProviderHandoverReturn.provider").unwrap();
+    plan.bind(0, target.object.kind, &[target]).unwrap();
+    let caller = plan.admit(&Caller::session(s.world.ada), false).unwrap();
+    let authority = HandoverAuthority::capture(
+        &mut conn,
+        &caller,
+        provider,
+        false,
+        false,
+        s.world.clock.time(),
+    )
+    .await
+    .unwrap();
+    let authority: HandoverAuthority =
+        serde_json::from_value(serde_json::to_value(authority).unwrap()).unwrap();
+    assert!(
+        authority
+            .authorized(&mut conn, s.world.clock.time())
+            .await
+            .unwrap()
+    );
+    sqlx::query("UPDATE providers SET held_since=$2 WHERE id=$1")
+        .bind(provider)
+        .bind(since + chrono::Duration::microseconds(1))
+        .execute(&mut *conn)
+        .await
+        .unwrap();
+    assert!(
+        !authority
+            .authorized(&mut conn, s.world.clock.time())
+            .await
+            .unwrap(),
+        "a different custody in the same millisecond cannot reuse the accepted return"
+    );
+    sqlx::query("UPDATE providers SET held_since=$2 WHERE id=$1")
+        .bind(provider)
+        .bind(since)
+        .execute(&mut *conn)
+        .await
+        .unwrap();
+    drop(conn);
+    s.world
+        .engine()
+        .return_credential(
+            provider,
+            ReturnWhy::Person {
+                by: s.world.ada,
+                interrupt: false,
+            },
+        )
+        .await
+        .unwrap();
+    assert_eq!(s.holder().await, None);
+    assert_eq!(s.bodies(K::AgentCredentialReturn).len(), 1);
+    assert_eq!(s.bodies(K::ProviderCredentialAccept).len(), 1);
+}
+
+#[tokio::test]
 async fn a_return_that_fails_leaves_the_credential_where_it_is_and_is_tried_again_or_given_up_never_both()
  {
     let s = stand().await;

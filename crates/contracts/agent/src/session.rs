@@ -257,6 +257,9 @@ pub struct SessionSettings {
     /// Limits over the harness's own sub-agents, resolved separately from model parameters.
     #[serde(default)]
     pub subagent_limits: SubagentLimits,
+    /// Whether completion of owned background work may continue the conversation.
+    #[serde(default = "background_wake_default")]
+    pub background_wake: bool,
     /// What the harness's own sandbox lets commands do.
     pub sandbox_mode: SandboxMode,
     /// The preamble, then the standing instructions. Nothing of the directory's instruction file: the agent
@@ -286,6 +289,12 @@ pub struct SessionSettings {
     /// when they change, the question is asked again. A directory that holds nothing is not a configuration.
     #[serde(default)]
     pub workspace_configuration: Option<WorkspaceConfiguration>,
+}
+
+/// The shipped background completion preference, also used for older session messages.
+#[must_use]
+pub const fn background_wake_default() -> bool {
+    true
 }
 
 /// The code of the refusal of a workspace that holds a configuration of the harness's own nobody has answered for.
@@ -812,6 +821,9 @@ pub struct ImageInput {
 /// A turn to start: the body of the command `turn.start`, and what the adapter is given.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize, JsonSchema)]
 pub struct TurnStart {
+    /// Adopt a native follow-up already waiting for this controller admission.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub native_wake: Option<String>,
     /// The thread.
     pub thread_id: ThreadId,
     /// The turn.
@@ -956,7 +968,7 @@ mod tests {
           "directory": "/workspace/web", "cwd": "/workspace/web/api",
           "mounts": [ { "name": "src", "path": "/data/src", "read_only": true } ],
           "model": "gpt-6-sol", "effort": "high", "params": {}, "approval_mode": "on_request", "sandbox_mode": "workspace",
-          "available_models": [], "subagent_limits": {"at_once":8,"depth":1}, "side_reading": null, "workspace_configuration": null,
+          "available_models": [], "subagent_limits": {"at_once":8,"depth":1}, "background_wake": true, "side_reading": null, "workspace_configuration": null,
           "instructions": "You are working inside Orch.",
           "memory": { "directory": "/workspace/web/.orch/memory", "kept_by": "harness" },
           "arrangement": "separated",

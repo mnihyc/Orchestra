@@ -74,7 +74,8 @@ pub struct ProviderUse<'a> {
 /// A limit that stands in the way of a turn, which somebody may let it past.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Limit {
-    /// The provider's own limit, as its vendor reported it.
+    /// Legacy provider bypass-permission query, retained for implementer compatibility.
+    /// Current inputs bypass only configured caps; vendor quota is not a gate.
     ProviderLimit {
         /// The provider.
         provider: Id,

@@ -1,5 +1,10 @@
 //! Reviewed reparenting of a main conversation while its owner, native history and workspace stay.
 
+use crate::operations::{FacetSpec as Facet, OperationSpec as Op, TargetResolver as Target};
+use orch_access_contract::key_scope::KeyAction::{Manage, Write};
+use orch_access_contract::key_scope::KeyTargetKind::Object;
+use orch_access_contract::permissions::ObjectKind as K;
+
 use crate::environment::EnvironmentRef;
 use crate::nodes::NodeMovePlan;
 use crate::routes::Access::Rule;
@@ -54,7 +59,17 @@ pub struct ThreadMoveBody {
 
 crate::endpoints! {
     /// Reviews moving this main thread to another topic without changing its workspace.
-    ThreadMovePreview: POST "/threads/{id}/move/preview", Rule("thread.manage at the source and topic.start_threads at the destination, within the same root tree"), none, json ThreadMovePreviewBody, json ThreadMovePlan, 200;
+    ThreadMovePreview: POST "/threads/{id}/move/preview", Rule("thread.manage at the source and topic.start_threads at the destination, within the same root tree"), none, json ThreadMovePreviewBody, json ThreadMovePlan, 200,
+        operation Op::facets(&[
+            Facet::required(Manage, &[Object(K::Thread)], Target::Path("id")),
+            Facet::required(Write, &[Object(K::Thread)], Target::Resolved("destination")),
+            Facet::response_content(&[Object(K::Thread)], Target::Path("id")),
+        ]);
     /// Moves the reviewed idle conversation with its side lanes and held queue.
-    ThreadMove: POST "/threads/{id}/move", Rule("the current source and destination rights and the actor's unchanged stored review"), none, json ThreadMoveBody, json Thread, 200;
+    ThreadMove: POST "/threads/{id}/move", Rule("the current source and destination rights and the actor's unchanged stored review"), none, json ThreadMoveBody, json Thread, 200,
+        operation Op::facets(&[
+            Facet::required(Manage, &[Object(K::Thread)], Target::Path("id")),
+            Facet::required(Write, &[Object(K::Thread)], Target::Resolved("destination")),
+            Facet::response_content(&[Object(K::Thread)], Target::Path("id")),
+        ]);
 }

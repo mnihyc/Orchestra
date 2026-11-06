@@ -249,6 +249,16 @@
           "description": "The members it can tell. A member it does not list is unsupported until it tells it; a name this\ncontract does not know is left out.",
           "default": []
         },
+        "field_reports": {
+          "type": "object",
+          "additionalProperties": {
+            "type": "array",
+            "items": {
+              "type": "string"
+            }
+          },
+          "description": "Optional closed field lists for normalized credit member/item paths. Omitted paths keep\nlegacy unknown capability; a present value still proves support independently of this list."
+        },
         "spends_resets": {
           "type": "boolean",
           "description": "Whether it spends the resets it lists in `available_resets` (`resets.spend`).",
@@ -461,6 +471,11 @@
           "type": "string",
           "const": "secret_map",
           "description": "Names with values that are never shown again."
+        },
+        {
+          "type": "string",
+          "const": "json",
+          "description": "A JSON value, retaining nested objects, arrays, numbers, booleans and null."
         }
       ],
       "description": "What kind of value a field takes."

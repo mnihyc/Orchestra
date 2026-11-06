@@ -25,6 +25,7 @@ import { TopicActivity } from '@/features/topic/Activity';
 import { TopicEnvironments } from '@/features/topic/Environments';
 import { TopicOverview } from '@/features/topic/Overview';
 import type { TopicSection } from '@/features/settings/ScopeSettings';
+import { useDefaultsOpening } from '@/features/settings/defaultsOpening';
 import { TopicSettings } from '@/features/topic/Settings';
 import { TagPicker } from '@/features/topic/TagPicker';
 import { PlaceAnnouncements } from '@/features/announcements/Composer';
@@ -81,7 +82,8 @@ export function Topic({ topicId, tab, onTab, section, onSection }: TopicProps) {
   const { t } = useTranslation();
   const focusedContent = useContentFocused();
   const userId = useStore(client.session, (state) => state.userId);
-  const query = useQuery(topicQuery(topicId));
+  const opening = useDefaultsOpening(topicId);
+  const query = useQuery({ ...topicQuery(topicId), enabled: !opening.waiting });
   const topic = query.data;
   const tree = useOrgTree(topic?.org_id ?? null);
 

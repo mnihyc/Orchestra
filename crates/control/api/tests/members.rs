@@ -9,6 +9,7 @@ mod places;
 mod resources;
 mod support;
 
+use crate::support::FullTransferReply;
 use orch_api_contract::access::{NodeRoleList, Role};
 use orch_api_contract::common::ErrorCode;
 use orch_api_contract::directory::{
@@ -221,6 +222,7 @@ async fn hand_to_eve(world: &World, s: &Setup, node: Id, keep_previous: bool) {
         })
         .send()
         .await
+        .full_transfer()
         .ok();
 }
 
@@ -1097,6 +1099,7 @@ async fn a_member_leaves_by_themself_and_the_last_owner_of_a_root_org_names_anot
         })
         .send()
         .await
+        .full_transfer()
         .ok();
     let left = remove(&world, &s.boss, s.acme, &"me").await;
     assert_eq!(left.status, 204);

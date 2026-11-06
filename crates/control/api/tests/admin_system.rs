@@ -552,8 +552,7 @@ async fn the_certificate_of_the_authority_is_public_and_is_the_one_the_system_is
 }
 
 #[tokio::test]
-async fn the_openapi_document_is_for_any_signed_in_person_and_lists_every_request_of_the_contract()
-{
+async fn the_public_openapi_document_is_key_only_and_lists_the_shared_business_contract() {
     let world = World::new().await;
     let c = cast(&world).await;
     let token = api_token(&world, &c.ada).await;
@@ -570,12 +569,17 @@ async fn the_openapi_document_is_for_any_signed_in_person_and_lists_every_reques
         .token(&token)
         .send_bytes()
         .await;
-    let nobody = world.app.call(OpenapiGet, &[]).send_bytes().await;
+    let nobody = world
+        .app
+        .call(OpenapiGet, &[])
+        .surface(orch_api_contract::surface::HttpSurface::Key)
+        .send_bytes()
+        .await;
 
-    assert_eq!(by_session.status, 200);
+    assert_eq!(by_session.status, 404, "no browser OpenAPI is published");
     assert_eq!(by_token.status, 200, "a token may read it");
     assert_eq!(nobody.problem().code, ErrorCode::AuthRequired);
-    let document: serde_json::Value = serde_json::from_slice(&by_session.raw).unwrap();
+    let document: serde_json::Value = serde_json::from_slice(&by_token.raw).unwrap();
     assert_eq!(document["openapi"], json!("3.1.0"));
     assert_eq!(document["info"]["version"], json!("0.0.0-test"));
     let operations: usize = document["paths"]
@@ -584,15 +588,36 @@ async fn the_openapi_document_is_for_any_signed_in_person_and_lists_every_reques
         .values()
         .map(|path| path.as_object().unwrap().len())
         .sum();
-    assert_eq!(operations, orch_api_contract::routes::all().len());
+    assert_eq!(
+        operations,
+        orch_api_contract::routes::all()
+            .iter()
+            .filter(|route| {
+                orch_api_contract::operations::for_route(route)
+                    .unwrap()
+                    .delegation
+                    == orch_api_contract::operations::Delegation::Business
+            })
+            .count()
+    );
+    assert_eq!(document["servers"][0]["url"], "/openapi/v1");
+    assert!(document["paths"].get("/auth/login").is_none());
+    assert!(document["paths"].get("/me/admin-mode").is_none());
     assert_eq!(
         document["paths"]["/admin/users"]["get"]["x-orch-access"],
         json!("session")
     );
     assert!(document["components"]["schemas"]["AdminUser"].is_object());
+    let foreign = world
+        .app
+        .call(OpenapiGet, &[])
+        .surface(orch_api_contract::surface::HttpSurface::Key)
+        .token(&c.ada.token)
+        .send_bytes()
+        .await;
     assert_eq!(
-        by_session.raw, by_token.raw,
-        "the same document for everybody"
+        foreign.status, 401,
+        "the key document cannot authenticate a session bearer"
     );
 }
 

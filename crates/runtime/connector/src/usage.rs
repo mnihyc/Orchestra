@@ -21,7 +21,8 @@
 use orch_agent_contract::events::TokenUsage;
 use orch_agent_contract::facts::{CredentialFacts, CredentialYield, ProviderFacts};
 use orch_agent_contract::parameters::Rate;
-use orch_link_contract::commands::LeaseOpenAllowance;
+use orch_api_contract::usage::RequestTiming;
+use orch_link_contract::commands::{LeaseOpenAllowance, LeaseUsageGroup};
 use orch_link_contract::events::{Event, LeaseDenied, LeaseUsage};
 use orch_model_contract::usage::ObservedUsage;
 use orch_types::Id;
@@ -210,6 +211,13 @@ impl Allowance {
                 let rate: Rate = credits.rate.clone();
                 // Every price must be one the arithmetic holds, so that a request is never uncounted.
                 Prices::of(&rate, 0).ok_or(AllowanceError::Price)?;
+                if rate
+                    .web_search_per_call
+                    .as_deref()
+                    .is_some_and(|price| parse_billionths(price).is_none())
+                {
+                    return Err(AllowanceError::Price);
+                }
                 for step in rate.above.iter().flatten() {
                     Prices::of(&rate, step.context_tokens.saturating_add(1))
                         .ok_or(AllowanceError::Price)?;
@@ -243,6 +251,18 @@ impl Allowance {
             .map_or(0, |prices| prices.accrue(usage))
     }
 
+    /// Native search fees use the same accrued currency scale, with no token or tier multiplier.
+    #[must_use]
+    pub fn accrue_searches(&self, searches: i64) -> i128 {
+        self.credits
+            .as_ref()
+            .and_then(|credits| credits.rate.web_search_per_call.as_deref())
+            .and_then(parse_billionths)
+            .unwrap_or(0)
+            .saturating_mul(i128::from(searches.max(0)))
+            .saturating_mul(TOKENS_PER_PRICE)
+    }
+
     /// Whether what has been used reaches a figure of the allowance: then the next request is refused.
     #[must_use]
     pub fn reached(&self, used: &Totals) -> bool {
@@ -256,7 +276,7 @@ impl Allowance {
 }
 
 /// What the requests of a lease have used so far.
-#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+#[derive(Debug, Clone, Default, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub struct Totals {
     /// How many requests ran.
     pub requests: i64,
@@ -266,6 +286,10 @@ pub struct Totals {
     pub known: bool,
     /// The charge accrued at the allowance's rate, where it has one.
     pub accrued: i128,
+    /// Factual aggregates measured by aware requests. Legacy usage can remain outside these groups.
+    /// `Some([])` establishes awareness, not that any response reported measured zero.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub usage_groups: Option<Vec<LeaseUsageGroup>>,
 }
 
 impl Totals {
@@ -279,6 +303,44 @@ impl Totals {
         self.usage = self.usage.plus(*usage);
         self.known = true;
         self.accrued += accrued;
+    }
+
+    /// Replaces only one active meter's prior contribution. The lease holds its existing mutex
+    /// across this replacement and its aggregate token/allowance update.
+    pub fn replace_group(&mut self, before: Option<&LeaseUsageGroup>, now: &LeaseUsageGroup) {
+        let groups = self.usage_groups.get_or_insert_with(Vec::new);
+        if let Some(before) = before
+            && let Some(index) = groups.iter().position(|group| group.key() == before.key())
+        {
+            let group = &mut groups[index];
+            group.usage = growth(&group.usage, &before.usage);
+            group.requests -= before.requests;
+            if let (Some(held), Some(before)) = (&mut group.search_usage, &before.search_usage) {
+                held.searches = held.searches.saturating_sub(before.searches);
+                held.known_requests = held.known_requests.saturating_sub(before.known_requests);
+            } else {
+                group.search_usage = None;
+            }
+            if group.requests == 0 {
+                groups.remove(index);
+            }
+            // Bounds on a surviving group remain conservative: shrinking them would require
+            // retaining the completed requests that supplied its former extremes.
+        }
+        if let Some(group) = groups.iter_mut().find(|group| group.key() == now.key()) {
+            group.usage = group.usage.plus(now.usage);
+            group.requests += now.requests;
+            if let (Some(held), Some(now)) = (&mut group.search_usage, &now.search_usage) {
+                held.searches = held.searches.saturating_add(now.searches);
+                held.known_requests = held.known_requests.saturating_add(now.known_requests);
+            } else {
+                group.search_usage = None;
+            }
+            group.min_context_tokens = group.min_context_tokens.min(now.min_context_tokens);
+            group.max_context_tokens = group.max_context_tokens.max(now.max_context_tokens);
+        } else {
+            groups.push(now.clone());
+        }
     }
 
     /// The usage as `lease.close` answers it: `None` where no request said what it used.
@@ -304,13 +366,19 @@ pub fn growth(now: &TokenUsage, before: &TokenUsage) -> TokenUsage {
 
 /// The `lease.usage` event of one request.
 #[must_use]
-pub fn lease_usage(lease_id: Id, model: &str, observed: &ObservedUsage) -> Option<Event> {
+pub fn lease_usage(
+    lease_id: Id,
+    model: &str,
+    observed: &ObservedUsage,
+    timing: RequestTiming,
+) -> Option<Event> {
     let usage = observed.tokens;
     Some(Event::LeaseUsage(LeaseUsage {
         lease_id,
         model: model.to_owned(),
         usage,
         request_ref: observed.request_ref.clone(),
+        timing: Some(timing),
     }))
 }
 

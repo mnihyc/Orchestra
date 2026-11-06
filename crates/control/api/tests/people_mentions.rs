@@ -9,6 +9,7 @@ mod chat_world;
 mod places;
 mod support;
 
+use crate::support::FullPermissionPageReply;
 use chat_world::{Room, text};
 use orch_api_contract::access::{PageChange, PermissionPageUpdate, Role};
 use orch_api_contract::chats::{
@@ -259,7 +260,9 @@ async fn overlapping_role_and_group_targets_freeze_once_and_an_edit_tells_only_n
         .body(&ChatMessageUpdateBody { parts })
         .send()
         .await
-        .ok();
+        .ok()
+        .into_full()
+        .unwrap();
     expected.push(room.gus.id());
     expected.sort_unstable();
     assert_eq!(ids(&edited), expected);
@@ -469,6 +472,7 @@ async fn a_deliberate_group_audience_is_not_cut_to_a_five_hundred_person_roster_
         .body(&change)
         .send()
         .await
+        .full_permission_page()
         .ok();
     let found = choices(&room, &room.ada, room.chat, Some("Large crew")).await;
     assert_eq!(found[0].count, 501);

@@ -94,8 +94,30 @@ async fn an_old_stream_cannot_rename_replace_context_reopen_running_or_attribute
         .exchange(thread, 0, "Original first", "Original first answer")
         .await;
     scene
-        .exchange(thread, 1, "Original second", "Original second answer")
+        .say(
+            &scene.ada,
+            thread,
+            "Original second",
+            Delivery::Queue,
+            "exchange-1",
+        )
+        .await
+        .ok();
+    let second = scene.rig.turn_start(thread, 1).await;
+    scene
+        .rig
+        .answer(thread, &second, "m1", "Original second answer")
         .await;
+    // This native producer reports a known positive measurement before its receipt is retained.
+    scene.rig.say(thread, usage(second.turn_id, 411)).await;
+    scene
+        .rig
+        .say(
+            thread,
+            rig::turn_ended(second.turn_id, TurnOutcome::Completed),
+        )
+        .await;
+    scene.rig.wait_turn(second.turn_id, "completed").await;
     rig::eventually(
         "real original terminal work is accounted before the reconstruction",
         || async {
@@ -139,6 +161,7 @@ async fn an_old_stream_cannot_rename_replace_context_reopen_running_or_attribute
         1,
         "the actual old native turn has one retained accounting receipt"
     );
+    assert_eq!(old_ledger[0]["total_tokens"], 411);
     sqlx::query("UPDATE agents SET descriptor=jsonb_set(descriptor,'{capabilities,native_input_prefix}','\"turn_start\"') WHERE id=$1")
         .bind(scene.on.agent).execute(scene.rig.db.pool()).await?;
     let descriptor: Json = sqlx::query_scalar("SELECT descriptor FROM agents WHERE id=$1")

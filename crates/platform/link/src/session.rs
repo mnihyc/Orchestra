@@ -210,13 +210,29 @@ impl SessionSender {
 #[derive(Debug)]
 pub struct SessionInbox {
     events: mpsc::UnboundedReceiver<SessionEvent>,
+    #[cfg(feature = "test-observers")]
+    observed: Arc<crate::test_observers::QueueGauge>,
+}
+
+#[cfg(feature = "test-observers")]
+impl Drop for SessionInbox {
+    fn drop(&mut self) {
+        drop(self.observed.receiver());
+    }
 }
 
 impl SessionInbox {
     /// The next event; `None` once the session is over and `Ended` was
     /// taken.
     pub async fn next(&mut self) -> Option<SessionEvent> {
-        self.events.recv().await
+        let event = self.events.recv().await;
+        #[cfg(feature = "test-observers")]
+        if let Some(event) = &event {
+            self.observed
+                .selected(crate::test_observers::session_event_bytes(event))
+                .complete();
+        }
+        event
     }
 }
 
@@ -257,6 +273,9 @@ fn start(
     let (out, queued) = queues();
     let (inbound_tx, inbound_rx) = mpsc::unbounded_channel();
     let (events_tx, events_rx) = mpsc::unbounded_channel();
+    #[cfg(feature = "test-observers")]
+    let observed =
+        ["session.inbound", "session.events"].map(crate::test_observers::QueueGauge::new);
     let ended = CancellationToken::new();
     let activity = Arc::new(Activity::new());
     let sender = SessionSender {
@@ -267,6 +286,8 @@ fn start(
     };
 
     let writer_failed = inbound_tx.clone();
+    #[cfg(feature = "test-observers")]
+    let failed_observed = Arc::clone(&observed[0]);
     let write_meter = Arc::clone(&meter);
     let write_activity = Arc::clone(&activity);
     let write_ended = ended.clone();
@@ -276,7 +297,12 @@ fn start(
             activity: write_activity,
         };
         if let Err(error) = write_loop(Box::new(counting), queued, write_meter, write_ended).await {
-            let _ = writer_failed.send(Inbound::Lost(Some(error)));
+            #[cfg(feature = "test-observers")]
+            failed_observed.enqueue(Some(0));
+            if writer_failed.send(Inbound::Lost(Some(error))).is_err() {
+                #[cfg(feature = "test-observers")]
+                failed_observed.failed_enqueue(Some(0));
+            }
         }
     });
     let read_activity = Arc::clone(&activity);
@@ -284,6 +310,8 @@ fn start(
         Box::new(ActivitySource {
             inner: source,
             activity: read_activity,
+            #[cfg(feature = "test-observers")]
+            observed: Arc::clone(&observed[0]),
         }),
         inbound_tx,
         limits.frame_bytes(),
@@ -291,9 +319,25 @@ fn start(
         Arc::clone(&meter),
     ));
     tokio::spawn(pump(
-        inbound_rx, events_tx, out, limits, timing, meter, activity, ended,
+        inbound_rx,
+        events_tx,
+        out,
+        limits,
+        timing,
+        meter,
+        activity,
+        ended,
+        #[cfg(feature = "test-observers")]
+        observed.clone(),
     ));
-    (sender, SessionInbox { events: events_rx })
+    (
+        sender,
+        SessionInbox {
+            events: events_rx,
+            #[cfg(feature = "test-observers")]
+            observed: Arc::clone(&observed[1]),
+        },
+    )
 }
 
 /// Notes in an [`Activity`] when something is sent.
@@ -325,10 +369,16 @@ impl MessageSink for ActivitySink {
 struct ActivitySource {
     inner: Box<dyn MessageSource>,
     activity: Arc<Activity>,
+    #[cfg(feature = "test-observers")]
+    observed: Arc<crate::test_observers::QueueGauge>,
 }
 
 #[async_trait]
 impl MessageSource for ActivitySource {
+    #[cfg(feature = "test-observers")]
+    fn inbound_observer(&self) -> Option<Arc<crate::test_observers::QueueGauge>> {
+        Some(Arc::clone(&self.observed))
+    }
     async fn recv(&mut self) -> Result<Option<crate::framing::Message>, TransportError> {
         let message = self.inner.recv().await?;
         self.activity
@@ -354,7 +404,22 @@ async fn pump(
     meter: Arc<LinkMeter>,
     activity: Arc<Activity>,
     ended: CancellationToken,
+    #[cfg(feature = "test-observers")] observed: [Arc<crate::test_observers::QueueGauge>; 2],
 ) {
+    #[cfg(feature = "test-observers")]
+    let _inbound_lifetime = observed[0].receiver();
+    let send = |item: SessionEvent| {
+        #[cfg(feature = "test-observers")]
+        let bytes = crate::test_observers::session_event_bytes(&item);
+        #[cfg(feature = "test-observers")]
+        observed[1].enqueue(bytes);
+        let result = events.send(item);
+        #[cfg(feature = "test-observers")]
+        if result.is_err() {
+            observed[1].failed_enqueue(bytes);
+        }
+        result
+    };
     let max = limits.frame_bytes();
     let mut next_ping: i64 = 1;
     let mut waiting_for: Option<(i64, Instant)> = None;
@@ -388,7 +453,10 @@ async fn pump(
         let wait = until_ping.min(until_dead).min(MAX_IDLE_LOOK);
         tokio::select! {
             () = ended.cancelled() => break EndReason::Local,
-            item = inbound.recv() => match item {
+            item = inbound.recv() => {
+                #[cfg(feature = "test-observers")]
+                if let Some(item) = &item { observed[0].selected(crate::test_observers::inbound_bytes(item)).complete(); }
+                match item {
                 None => break EndReason::PeerClosed,
                 Some(Inbound::Frame(frame)) => match frame.as_ref() {
                     Frame::Ping(Ping { n }) => {
@@ -405,19 +473,19 @@ async fn pump(
                     }
                     Frame::Bye(Bye { code }) => break EndReason::Bye(*code),
                     _ => {
-                        if events.send(SessionEvent::Frame(frame)).is_err() {
+                        if send(SessionEvent::Frame(frame)).is_err() {
                             break EndReason::Local;
                         }
                     }
                 },
                 Some(Inbound::Unknown(kind)) => tracing::debug!(kind, "a frame of an unknown type was passed over"),
                 Some(Inbound::Data(frame)) => {
-                    if events.send(SessionEvent::Data(frame)).is_err() {
+                    if send(SessionEvent::Data(frame)).is_err() {
                         break EndReason::Local;
                     }
                 }
                 Some(Inbound::Datagram(packet)) => {
-                    if events.send(SessionEvent::Datagram(packet)).is_err() {break EndReason::Local;}
+                    if send(SessionEvent::Datagram(packet)).is_err() {break EndReason::Local;}
                 }
                 Some(Inbound::Broken(error)) => {
                     let _ = out.control(&Bye { code: error.bye() }.into(), max);
@@ -425,12 +493,12 @@ async fn pump(
                 }
                 Some(Inbound::Lost(None)) => break EndReason::PeerClosed,
                 Some(Inbound::Lost(Some(error))) => break EndReason::Transport(error.to_string()),
-            },
+            }},
             () = tokio::time::sleep(wait) => {}
         }
     };
     ended.cancel();
-    let _ = events.send(SessionEvent::Ended(reason));
+    let _ = send(SessionEvent::Ended(reason));
 }
 
 // ---------------------------------------------------------------- the machine's side
@@ -438,6 +506,8 @@ async fn pump(
 /// Who a machine says it is, and what it proves it with.
 #[derive(Debug)]
 pub struct ClientIdentity {
+    /// A selected/measured gateway must identify itself before machine authentication.
+    pub gateway_id: Option<String>,
     /// Owner-selected addresses, when this machine overrides the system.
     pub endpoints: Option<Vec<Endpoint>>,
     /// A node's explicit addresses for hosted units.
@@ -491,6 +561,8 @@ pub enum HandshakeError {
 /// A session that was established.
 #[derive(Debug)]
 pub struct Established {
+    /// The logical gateway proved by the connection and its hello.
+    pub gateway_id: String,
     /// The gateway's word that the session stands.
     pub ready: Ready,
     /// The protocol version the two speak.
@@ -551,6 +623,16 @@ pub async fn connect(
             "the gateway did not begin with hello".to_owned(),
         ));
     };
+    if identity
+        .gateway_id
+        .as_ref()
+        .is_some_and(|expected| *expected != hello.gateway_id)
+    {
+        connection.sink.close().await;
+        return Err(HandshakeError::Malformed(
+            "this entrance does not reach the selected gateway".into(),
+        ));
+    }
     let protocol_version =
         hello
             .protocol
@@ -596,6 +678,7 @@ pub async fn connect(
             let offset = clock.time().unix_millis() - hello.server_time.unix_millis();
             let (sender, inbox) = start(connection, limits, timing, LinkMeter::new());
             Ok(Established {
+                gateway_id: hello.gateway_id,
                 ready,
                 protocol_version,
                 tls: hello.tls,
@@ -980,6 +1063,7 @@ pub async fn accept(
     let placement = reply.placement;
     let cursors = reply.cursors.unwrap_or_default();
     let ready = Ready {
+        gateways: reply.gateways,
         endpoints: reply.endpoints,
         session_id,
         session_token: session_token.clone(),

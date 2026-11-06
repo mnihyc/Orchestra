@@ -22,6 +22,20 @@ reaches it. Examples fill those same fields. Keys are added afterwards in
 answer; its page shows the saved setup while the live connection brings its
 observations.
 
+For an API endpoint, **Advanced → Request defaults** accepts additional body options as JSON.
+The request's explicit values win, and Orch keeps ownership of the model, prompt, tools,
+output budget and credentials. Fixed and secret headers and query parameters keep their
+existing fields. A custom option is configuration, not proof that the upstream supports it.
+
+A summarizer has the same kind of options in `auto.summarizer.params`. Its endpoint defaults
+apply first, its model's configured defaults next, and the summarizer's explicit options last.
+For OpenAI Responses, enable the model's speed as ID `priority`, label **Fast**, and choose
+that ID for its default, request options, rates and caps. Request ID `fast` is the documented
+alias; usage keeps the actual reported `priority` separately from what was requested.
+Anthropic Messages uses `speed: "fast"`, with any required beta header in the endpoint's
+headers. Compatible Gemini, DeepSeek and other endpoints use their documented fields;
+choosing a format does not grant a model a speed it does not offer.
+
 In a provider's Settings, open **Where its details come from**. Facts
 and Models have their own choices. **Default** explains the actual
 reader: the native adapter for a sign-in, the known OpenRouter or

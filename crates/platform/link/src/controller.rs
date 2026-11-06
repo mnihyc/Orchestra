@@ -47,6 +47,34 @@ pub enum Notice {
     },
 }
 
+#[cfg(feature = "test-observers")]
+impl Notice {
+    /// Logical payload bytes only; no payload is retained by the observer.
+    pub fn observed_bytes(&self) -> Option<usize> {
+        let bytes = match self {
+            Self::Deliver(delivery) => {
+                let events: Vec<_> = delivery
+                    .events
+                    .iter()
+                    .map(|event| (&event.seq, &event.at, &event.kind, &event.body))
+                    .collect();
+                serde_json::to_vec(&(delivery.stream.to_string(), &events, delivery.last_seq))
+            }
+            Self::Reset(notice) => serde_json::to_vec(&(
+                notice.stream.to_string(),
+                notice.from,
+                &notice.reason,
+                notice.resync,
+            )),
+            Self::Report(eph) => serde_json::to_vec(eph),
+            Self::Online { session_id } | Self::Offline { session_id } => {
+                serde_json::to_vec(session_id)
+            }
+        };
+        bytes.ok().map(|bytes| bytes.len())
+    }
+}
+
 struct State {
     receiver: StreamReceiver,
     session: Option<Id>,
@@ -58,6 +86,32 @@ struct Shared {
     down: mpsc::UnboundedSender<DownFrame>,
     notices: mpsc::UnboundedSender<Notice>,
     issuer: CommandIssuer,
+    #[cfg(feature = "test-observers")]
+    observed_down: Arc<crate::test_observers::QueueGauge>,
+    #[cfg(feature = "test-observers")]
+    observed_notices: Arc<crate::test_observers::QueueGauge>,
+}
+
+impl Shared {
+    fn send_down(&self, frame: DownFrame) {
+        #[cfg(feature = "test-observers")]
+        let bytes = orch_link_contract::frames::encode(&frame, usize::MAX)
+            .ok()
+            .map(|text| text.len());
+        #[cfg(feature = "test-observers")]
+        let _ = self.observed_down.send(&self.down, frame, bytes);
+        #[cfg(not(feature = "test-observers"))]
+        let _ = self.down.send(frame);
+    }
+
+    fn send_notice(&self, notice: Notice) {
+        #[cfg(feature = "test-observers")]
+        let bytes = notice.observed_bytes();
+        #[cfg(feature = "test-observers")]
+        let _ = self.observed_notices.send(&self.notices, notice, bytes);
+        #[cfg(not(feature = "test-observers"))]
+        let _ = self.notices.send(notice);
+    }
 }
 
 /// The system's end of one machine's link.
@@ -81,6 +135,12 @@ pub struct ControllerOutputs {
     pub down: mpsc::UnboundedReceiver<DownFrame>,
     /// What the caller is told.
     pub notices: mpsc::UnboundedReceiver<Notice>,
+    /// QA lifetime follows this exact receiver into its actual consumer.
+    #[cfg(feature = "test-observers")]
+    pub observed_down: crate::test_observers::ReceiverLifetime,
+    /// QA lifetime follows this exact receiver into its actual consumer.
+    #[cfg(feature = "test-observers")]
+    pub observed_notices: crate::test_observers::ReceiverLifetime,
 }
 
 impl ControllerLink {
@@ -96,6 +156,12 @@ impl ControllerLink {
         let (down_tx, down_rx) = mpsc::unbounded_channel();
         let (notices_tx, notices_rx) = mpsc::unbounded_channel();
         let issuer = CommandIssuer::new(down_tx.clone(), clock);
+        #[cfg(feature = "test-observers")]
+        let observed_down = crate::test_observers::QueueGauge::new("controller.down");
+        #[cfg(feature = "test-observers")]
+        let observed_notices = crate::test_observers::QueueGauge::new("controller.notices");
+        #[cfg(feature = "test-observers")]
+        let issuer = issuer.with_observer(Arc::clone(&observed_down));
         let shared = Arc::new(Shared {
             machine_id,
             state: Mutex::new(State {
@@ -105,12 +171,20 @@ impl ControllerLink {
             down: down_tx,
             notices: notices_tx,
             issuer,
+            #[cfg(feature = "test-observers")]
+            observed_down: Arc::clone(&observed_down),
+            #[cfg(feature = "test-observers")]
+            observed_notices: Arc::clone(&observed_notices),
         });
         (
             Self { shared },
             ControllerOutputs {
                 down: down_rx,
                 notices: notices_rx,
+                #[cfg(feature = "test-observers")]
+                observed_down: observed_down.receiver(),
+                #[cfg(feature = "test-observers")]
+                observed_notices: observed_notices.receiver(),
             },
         )
     }
@@ -144,7 +218,7 @@ impl ControllerLink {
     /// The machine has a session. Commands that have not ended are sent.
     pub fn session_up(&self, session_id: Id) {
         self.state().session = Some(session_id);
-        let _ = self.shared.notices.send(Notice::Online { session_id });
+        self.shared.send_notice(Notice::Online { session_id });
         self.shared.issuer.session_ready();
     }
 
@@ -160,7 +234,7 @@ impl ControllerLink {
             state.session = None;
         }
         self.shared.issuer.session_down();
-        let _ = self.shared.notices.send(Notice::Offline { session_id });
+        self.shared.send_notice(Notice::Offline { session_id });
     }
 
     /// A text frame that the machine sent on `session_id`.
@@ -179,7 +253,7 @@ impl ControllerLink {
                 UpFrame::Reset(reset) => {
                     match state.receiver.on_reset(&reset) {
                         Ok(notice) => {
-                            let _ = self.shared.notices.send(Notice::Reset(notice));
+                            self.shared.send_notice(Notice::Reset(notice));
                         }
                         Err(why) => {
                             tracing::warn!(machine = %self.shared.machine_id, why, "a reset was not taken")
@@ -190,7 +264,7 @@ impl ControllerLink {
                 UpFrame::Eph(eph) => {
                     match state.receiver.on_eph(eph) {
                         Ok(eph) => {
-                            let _ = self.shared.notices.send(Notice::Report(eph));
+                            self.shared.send_notice(Notice::Report(eph));
                         }
                         Err(why) => {
                             tracing::warn!(machine = %self.shared.machine_id, why, "a report was not taken")
@@ -216,11 +290,11 @@ impl ControllerLink {
     fn handle(&self, received: Received) {
         match received {
             Received::Apply(delivery) => {
-                let _ = self.shared.notices.send(Notice::Deliver(delivery));
+                self.shared.send_notice(Notice::Deliver(delivery));
             }
             Received::Answer(frame) => {
                 if let Ok(down) = into_down(*frame) {
-                    let _ = self.shared.down.send(down);
+                    self.shared.send_down(down);
                 }
             }
             Received::Queued => {}
@@ -236,7 +310,7 @@ impl ControllerLink {
     pub fn committed(&self, delivery: &Delivery) {
         let (answer, next) = self.state().receiver.committed(delivery);
         if let Ok(down) = into_down(answer) {
-            let _ = self.shared.down.send(down);
+            self.shared.send_down(down);
         }
         if let Some(next) = next {
             self.handle(next);
@@ -259,5 +333,71 @@ fn into_down(frame: orch_link_contract::frames::Frame) -> Result<DownFrame, ()> 
         Frame::Ack(ack) => Ok(DownFrame::Ack(ack)),
         Frame::Nak(nak) => Ok(DownFrame::Nak(nak)),
         _ => Err(()),
+    }
+}
+
+#[cfg(all(test, feature = "test-observers"))]
+#[allow(clippy::unwrap_used, reason = "observer controls fail by panicking")]
+mod observer_tests {
+    use super::*;
+    use orch_link_contract::commands::{Cmd, CmdCancel};
+    use orch_types::{Clock, ManualClock, Time, new_id};
+
+    #[tokio::test]
+    async fn actual_controller_and_command_issuer_share_their_exact_queue_observations() {
+        let clock = ManualClock::new(chrono::DateTime::from_timestamp(1_700_000_000, 0).unwrap());
+        let (controller, mut out) =
+            ControllerLink::new(new_id(), vec![], BTreeMap::new(), Arc::new(clock.clone()));
+        let session = new_id();
+        controller.session_up(session);
+        let notice = out.notices.recv().await.unwrap();
+        assert!(matches!(&notice, Notice::Online { session_id } if *session_id == session));
+        out.observed_notices
+            .selected(notice.observed_bytes())
+            .processed();
+        let id = new_id();
+        let _ = controller.commands().issue(Cmd {
+            id,
+            kind: "machine.probe".into(),
+            key: None,
+            deadline: Time::new(clock.now() + chrono::Duration::seconds(30)),
+            body: serde_json::json!({}),
+        });
+        let first = out.down.recv().await.unwrap();
+        assert!(matches!(&first, DownFrame::Cmd(command) if command.id == id));
+        out.observed_down
+            .selected(
+                orch_link_contract::frames::encode(&first, usize::MAX)
+                    .ok()
+                    .map(|bytes| bytes.len()),
+            )
+            .complete();
+        controller.commands().cancel(id);
+        let cancelled = out.down.recv().await.unwrap();
+        assert_eq!(cancelled, DownFrame::CmdCancel(CmdCancel { id }));
+        out.observed_down
+            .selected(
+                orch_link_contract::frames::encode(&cancelled, usize::MAX)
+                    .ok()
+                    .map(|bytes| bytes.len()),
+            )
+            .complete();
+        let down = controller.shared.observed_down.snapshot();
+        let notices = controller.shared.observed_notices.snapshot();
+        assert_eq!((down.enqueue_attempts, down.selected, down.sent), (2, 2, 2));
+        assert_eq!(
+            (notices.enqueue_attempts, notices.processed, notices.sent),
+            (1, 1, 0)
+        );
+        assert_eq!((down.queued_messages, down.in_flight_messages), (0, 0));
+        assert!(!down.receiver_closed && !down.inconsistent && down.peak_payload_bytes > 0);
+        drop(out.down);
+        controller.commands().cancel(new_id());
+        assert_eq!(
+            controller.shared.observed_down.snapshot().failed_enqueues,
+            1
+        );
+        drop(out.observed_down);
+        assert!(controller.shared.observed_down.snapshot().receiver_closed);
     }
 }

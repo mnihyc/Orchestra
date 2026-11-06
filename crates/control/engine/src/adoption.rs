@@ -69,6 +69,8 @@ const RECORD_READ_MAX_BYTES: usize = orch_agent_contract::discovery::RECORD_MAX_
 /// What a person asks when they take in a session.
 #[derive(Debug, Clone)]
 pub struct Adoption {
+    /// The confirmed agent contribution for the new holder; history retry does not apply it.
+    pub agent_access: Option<orch_api_contract::nodes::AgentAccessChoice>,
     /// The topic the thread is made in.
     pub topic: Id,
     /// The provider whose harness holds the session.
@@ -239,6 +241,58 @@ const fn status_word(status: orch_agent_contract::events::ItemStatus) -> &'stati
         orch_agent_contract::events::ItemStatus::Failed => "failed",
         orch_agent_contract::events::ItemStatus::Cancelled => "cancelled",
     }
+}
+
+/// The same stored adoption-history status used by the engine and HTTP reader.
+/// Availability reads current machine facts and queues no native work.
+pub async fn history_status(
+    conn: &mut Conn,
+    thread: Id,
+) -> Result<Option<orch_api_contract::threads::AdoptHistoryStatus>, EngineError> {
+    use orch_api_contract::threads::{AdoptHistoryState, AdoptHistoryStatus};
+    let original: Option<(orch_types::Json, Id, Id, String)> = sqlx::query_as(
+        "SELECT i.payload,s.provider_id,s.environment_id,s.arrangement FROM items i JOIN segments s ON s.id=i.segment_id
+         WHERE i.thread_id=$1 AND i.kind='marker' AND i.native_ref='adopted' ORDER BY i.seq_created LIMIT 1")
+        .bind(thread).fetch_optional(&mut *conn).await.map_err(orch_db::DbError::from)?;
+    let Some((payload, provider, environment, arrangement)) = original else {
+        return Ok(None);
+    };
+    let missing = payload["data"]["history_missing"].as_str();
+    let reason = payload["data"]["history_error"].as_str().map(str::to_owned);
+    let state = match missing {
+        None => AdoptHistoryState::Read,
+        Some("unsupported") => AdoptHistoryState::Unsupported,
+        Some(_) => {
+            let provider = resources::provider(conn, provider)
+                .await?
+                .filter(|row| row.deleted_at.is_none());
+            let environment = environments::environment(conn, environment)
+                .await?
+                .filter(|row| row.deleted_at.is_none());
+            let machine = provider
+                .zip(environment)
+                .and_then(|(provider, environment)| {
+                    crate::harnesses::machine_of(
+                        Some(&arrangement),
+                        &provider,
+                        environment.machine_id,
+                    )
+                });
+            match machine {
+                Some(machine) => match resources::machine_place(conn, machine).await? {
+                    Some(machine) if machine.online => AdoptHistoryState::Unreadable,
+                    Some(_) => AdoptHistoryState::Offline,
+                    None => AdoptHistoryState::Unavailable,
+                },
+                None => AdoptHistoryState::Unavailable,
+            }
+        }
+    };
+    Ok(Some(AdoptHistoryStatus {
+        state,
+        reason,
+        can_read_again: state == AdoptHistoryState::Unreadable,
+    }))
 }
 
 impl Engine {
@@ -717,6 +771,7 @@ impl Engine {
             )
             .await?;
         Ok(AdoptPlan {
+            agent_access: None,
             session: orch_api_contract::resources::NativeSession {
                 native_session_ref: session.native_session_ref.clone(),
                 title: session.title.clone(),
@@ -844,6 +899,7 @@ impl Engine {
                     effort: choice.effort.clone(),
                 },
                 Birth {
+                    agent_access: adoption.agent_access.into(),
                     prepare_source: Some(false),
                     // A name the session gave is the harness's to change as it goes on.
                     titled_by_automation: titled,
@@ -981,6 +1037,7 @@ impl Engine {
                 .map_err(orch_db::DbError::from)?;
         drop(conn);
         let adoption = Adoption {
+            agent_access: None,
             topic,
             provider,
             agent,
@@ -1123,51 +1180,8 @@ impl Engine {
         &self,
         thread: Id,
     ) -> Result<Option<orch_api_contract::threads::AdoptHistoryStatus>, EngineError> {
-        use orch_api_contract::threads::{AdoptHistoryState, AdoptHistoryStatus};
         let mut conn = self.inner.db.acquire().await?;
-        let original: Option<(orch_types::Json, Id, Id, String)> = sqlx::query_as(
-            "SELECT i.payload,s.provider_id,s.environment_id,s.arrangement FROM items i JOIN segments s ON s.id=i.segment_id
-             WHERE i.thread_id=$1 AND i.kind='marker' AND i.native_ref='adopted' ORDER BY i.seq_created LIMIT 1")
-            .bind(thread).fetch_optional(&mut *conn).await.map_err(orch_db::DbError::from)?;
-        let Some((payload, provider, environment, arrangement)) = original else {
-            return Ok(None);
-        };
-        let missing = payload["data"]["history_missing"].as_str();
-        let reason = payload["data"]["history_error"].as_str().map(str::to_owned);
-        let state = match missing {
-            None => AdoptHistoryState::Read,
-            Some("unsupported") => AdoptHistoryState::Unsupported,
-            Some(_) => {
-                let provider = resources::provider(&mut conn, provider)
-                    .await?
-                    .filter(|row| row.deleted_at.is_none());
-                let environment = environments::environment(&mut conn, environment)
-                    .await?
-                    .filter(|row| row.deleted_at.is_none());
-                let machine = provider
-                    .zip(environment)
-                    .and_then(|(provider, environment)| {
-                        crate::harnesses::machine_of(
-                            Some(&arrangement),
-                            &provider,
-                            environment.machine_id,
-                        )
-                    });
-                match machine {
-                    Some(machine) => match resources::machine_place(&mut conn, machine).await? {
-                        Some(machine) if machine.online => AdoptHistoryState::Unreadable,
-                        Some(_) => AdoptHistoryState::Offline,
-                        None => AdoptHistoryState::Unavailable,
-                    },
-                    None => AdoptHistoryState::Unavailable,
-                }
-            }
-        };
-        Ok(Some(AdoptHistoryStatus {
-            state,
-            reason,
-            can_read_again: state == AdoptHistoryState::Unreadable,
-        }))
+        history_status(&mut conn, thread).await
     }
 
     /// A failed read has a readable reason, and can never overwrite a successful concurrent import.

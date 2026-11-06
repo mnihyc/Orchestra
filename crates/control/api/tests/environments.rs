@@ -9,6 +9,7 @@ mod places;
 mod resources;
 mod support;
 
+use crate::support::FullPermissionPageReply;
 use orch_api_contract::binding::NewEnvironmentAccess;
 use orch_api_contract::common::ErrorCode;
 use orch_api_contract::environment::{
@@ -1508,6 +1509,7 @@ mod delegated_machine_registration {
             })
             .send()
             .await
+            .full_permission_page()
             .ok();
         let refused = s
             .world
@@ -1563,6 +1565,7 @@ mod delegated_machine_registration {
             })
             .send()
             .await
+            .full_permission_page()
             .ok();
         canonical_owner(&s, made.base.id, s.company.viewer.id()).await;
         let shown = s

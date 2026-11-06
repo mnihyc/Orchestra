@@ -745,6 +745,27 @@ pub fn marker_words(marker: &MarkerPayload) -> String {
         })
     };
     let words = match marker {
+        M::BackgroundWake(wake) => format!(
+            "{}: {}",
+            if wake.admitted {
+                "Woken by"
+            } else {
+                "Completion waiting"
+            },
+            wake.causes
+                .iter()
+                .map(|task| format!(
+                    "{} {}",
+                    task.label,
+                    if task.state == orch_api_contract::native::BackgroundTaskState::Failed {
+                        "failed"
+                    } else {
+                        "finished"
+                    }
+                ))
+                .collect::<Vec<_>>()
+                .join(", ")
+        ),
         M::ResourceResumed(m) => format!(
             "{} enabled {}: {}{}",
             human(&m.by),
@@ -863,7 +884,17 @@ pub fn marker_words(marker: &MarkerPayload) -> String {
             m.provider.name
         ),
         M::Switched(m) => format!("{} switched what it runs on", human(&m.by)),
+        M::ForkedFrom(m) if m.by_agent.is_some() => format!(
+            "An agent forked it from {} for {}",
+            node(&m.thread),
+            human(&m.by)
+        ),
         M::ForkedFrom(m) => format!("{} forked it from {}", human(&m.by), node(&m.thread)),
+        M::Forked(m) if m.by_agent.is_some() => format!(
+            "An agent forked {} from it for {}",
+            node(&m.into),
+            human(&m.by)
+        ),
         M::Forked(m) => format!("{} forked {} from it", human(&m.by), node(&m.into)),
         M::EnvironmentRecreated(m) => {
             format!("Its environment was made again from {}", m.template.name)
@@ -1948,8 +1979,52 @@ pub async fn read_chat_in(
         files,
         WrittenHead::Range,
         None,
+        None,
+        None,
     )
     .await
+}
+
+/// Live node-name candidates of the whole chat, using the same stored rows as its ordinary reader.
+/// No node names are looked up here; snapshots already stored in forwarded parts remain snapshots.
+pub(crate) async fn chat_name_sources(
+    conn: &mut orch_db::Conn,
+    chat: Id,
+) -> Result<Vec<Id>, crate::error::EngineError> {
+    let last = orch_db::queries::shares::chat_total(conn, chat).await?;
+    if last == 0 {
+        return Ok(Vec::new());
+    }
+    let rows = orch_db::queries::shares::chat_messages_numbered(conn, chat, 1, last).await?;
+    let refs: Vec<_> = rows.iter().map(|row| &row.row).collect();
+    Ok(orch_chat::views::threads_of(&refs))
+}
+
+/// The whole snapshot chat under a trusted source-name bound. The ordinary body renderer is
+/// unchanged; unallowed current node names never enter its lookup map.
+pub(crate) async fn read_copy_chat_with_names(
+    conn: &mut orch_db::Conn,
+    chat: Id,
+    title: &str,
+    files: Option<&str>,
+    allowed: &std::collections::HashSet<Id>,
+) -> Result<(Read, Vec<Id>), crate::error::EngineError> {
+    let mut used = Vec::new();
+    let read = read_chat_piece(
+        conn,
+        chat,
+        title,
+        (None, None),
+        Detail::Normal,
+        None,
+        files,
+        WrittenHead::Range,
+        None,
+        Some(allowed),
+        Some(&mut used),
+    )
+    .await?;
+    Ok((read, used))
 }
 
 /// The same for one reader: each reference the messages name is written as `writings` has it for that reader, and
@@ -1978,6 +2053,8 @@ pub(crate) async fn read_chat_for(
         files,
         WrittenHead::Range,
         writings,
+        None,
+        None,
     )
     .await
 }
@@ -2028,6 +2105,8 @@ pub(crate) async fn read_chat_window(
             WrittenHead::Export(first, to)
         }),
         None,
+        None,
+        None,
     )
     .await
 }
@@ -2046,6 +2125,8 @@ async fn read_chat_piece(
     files: Option<&str>,
     heading: WrittenHead,
     writings: Option<&HashMap<Typed, Writing>>,
+    allowed_node_names: Option<&std::collections::HashSet<Id>>,
+    mut used_node_names: Option<&mut Vec<Id>>,
 ) -> Result<Read, crate::error::EngineError> {
     use orch_chat::views::{Lookups, messages as message_views};
     use orch_chat::written::{Detail as ChatDetail, Written as ChatWritten, render, render_body};
@@ -2083,9 +2164,15 @@ async fn read_chat_piece(
     for person in threads::people(conn, &orch_chat::views::people_of(&refs)).await? {
         lookups.people.insert(person.id, user_ref(&person));
     }
-    let agent_threads = orch_chat::views::threads_of(&refs);
+    let agent_threads: Vec<_> = orch_chat::views::threads_of(&refs)
+        .into_iter()
+        .filter(|id| allowed_node_names.is_none_or(|allowed| allowed.contains(id)))
+        .collect();
     if !agent_threads.is_empty() {
         for place in rows::places(conn, &agent_threads).await? {
+            if let Some(used) = used_node_names.as_mut() {
+                used.push(place.id);
+            }
             lookups.nodes.insert(
                 place.id,
                 orch_api_contract::nodes::NodeRef {

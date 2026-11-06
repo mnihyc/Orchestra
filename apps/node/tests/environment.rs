@@ -412,7 +412,9 @@ async fn an_environment_made_over_http_is_a_container_whose_connector_enrolls_an
         })
         .send()
         .await
-        .ok();
+        .ok()
+        .into_full()
+        .expect("the creator's own full thread view");
     let thread = thread.base.id;
     let sent = app
         .call(ThreadInputCreate, &[&thread])

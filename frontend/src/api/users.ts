@@ -12,7 +12,10 @@ import { api, done, ok, repeatable } from '@/api/client';
 import { queryClient } from '@/api/query';
 import type {
   ApiTokenCreateBody,
-  TokenCreated,
+  ApiTokenActivityPage,
+  ApiTokenActivityQuery,
+  TokenCreateResponse,
+  Operation,
   ApiTokenInfo,
   Invitation,
   InvitationAcceptReply,
@@ -177,6 +180,21 @@ export function revokeOtherSessions(): Promise<SessionInfo[]> {
 
 export const tokensKey = ['tokens'] as const;
 
+/** One explicit page of this account's retained key activity; callers mount it only while shown. */
+export function tokenActivityQuery(id: string, query: ApiTokenActivityQuery) {
+  return queryOptions<ApiTokenActivityPage>({
+    queryKey: ['token-activity', 'personal', id, query.limit ?? null, query.cursor ?? null] as const,
+    queryFn: ({ signal }): Promise<ApiTokenActivityPage> => ok(api.GET('/me/tokens/{id}/activity', { params: { path: { id }, query }, signal })),
+    staleTime: 0, retry: false, refetchOnWindowFocus: false, refetchOnReconnect: false,
+  });
+}
+
+/** The shared operation catalogue; only an opened scoped-key editor reads it. */
+export const tokenOperationsQuery = queryOptions({
+  queryKey: ['token-operations'] as const,
+  queryFn: ({ signal }): Promise<Operation[]> => ok(api.GET('/me/token-operations', { signal })),
+});
+
 /** The API tokens the person has made, with what each may do. Their secrets were shown once and are not kept. */
 export const tokensQuery = queryOptions({
   queryKey: tokensKey,
@@ -184,8 +202,12 @@ export const tokensQuery = queryOptions({
 });
 
 /** Makes an API token. The answer holds its secret, which is never given again. */
-export function createToken(body: ApiTokenCreateBody, key: string): Promise<TokenCreated> {
-  return ok(api.POST('/me/tokens', { body, ...repeatable(key) }));
+export async function createToken(body: ApiTokenCreateBody, key: string): Promise<TokenCreateResponse> {
+  const answer = await api.POST('/me/tokens', { body, ...repeatable(key) });
+  // This dedicated one-time-secret consumer understands both genuine success projections.
+  // It never sends the secret through a generic acknowledged-error presentation.
+  if (answer.response.ok && answer.data !== undefined) return answer.data;
+  return ok(Promise.resolve(answer));
 }
 
 /** Ends a token for good. */

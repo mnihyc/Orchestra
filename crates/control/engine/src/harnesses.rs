@@ -66,15 +66,33 @@ impl OrchToolsRevision {
 pub struct SessionConfiguration {
     /// The resolved absolute start directory.
     pub cwd: String,
+    /// The background completion preference accepted when the session opened.
+    pub background_wake: bool,
     /// The resolved notes directory/keeper, or disabled native and agent notes.
     pub memory: Option<orch_link_contract::commands::SessionOpenMemory>,
+    /// The native executor build named by the accepted tool ticket.
+    pub executor_version: Option<String>,
 }
 
 impl From<&orch_link_contract::commands::SessionOpen> for SessionConfiguration {
     fn from(open: &orch_link_contract::commands::SessionOpen) -> Self {
         Self {
             cwd: open.cwd.clone(),
+            background_wake: open.background_wake,
             memory: open.memory.clone(),
+            executor_version: open.exec.ticket.as_ref().and_then(|ticket| match ticket {
+                orch_link_contract::commands::TicketSlot::Asked(asked)
+                    if asked.ticket.kind == orch_link_contract::tunnels::TunnelKind::Exec =>
+                {
+                    asked
+                        .ticket
+                        .more
+                        .get("executor_version")
+                        .and_then(Json::as_str)
+                        .map(str::to_owned)
+                }
+                _ => None,
+            }),
         }
     }
 }
@@ -1304,7 +1322,9 @@ mod tests {
         let thread = new_id();
         let configuration = SessionConfiguration {
             cwd: "/workspace/child".into(),
+            background_wake: true,
             memory: None,
+            executor_version: None,
         };
         let mut sessions = OpenSessions::default();
         sessions.opened(segment, thread, process);

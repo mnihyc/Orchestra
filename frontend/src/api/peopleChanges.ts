@@ -3,6 +3,7 @@
  */
 import type { Query, QueryClient, QueryKey } from '@tanstack/react-query';
 import { client } from '@/api/client';
+import { hasDefaultsOpeningOwner } from '@/api/defaultsOpening';
 import { queryFeed } from '@/realtime/queryFeeds';
 import { fetchShellAuthority, meQuery, metaKey } from '@/api/auth';
 import { adminModeQuery } from '@/api/adminMode';
@@ -51,6 +52,9 @@ export function beginPeopleRead(cache: QueryClient, queryKey: QueryKey): { accep
   };
 }
 
+/** Current native membership generation; attempt history remains with its own Query. */
+export function peopleHintCut(cache: QueryClient): number { return hintCuts.get(cache) ?? 0; }
+
 function checkedAfter(query: Query, cut: number | undefined): boolean {
   const read = nativeReads.get(query);
   return cut !== undefined && read !== undefined && read.cut >= cut && read.reader === client.session.getState().readerVersion
@@ -95,7 +99,17 @@ export async function repairPeople(cache: QueryClient, supplied: readonly QueryK
       reads.push(query.queryKey);
     }
   }
-  await Promise.all(reads.map((queryKey) => current() ? cache.refetchQueries({ queryKey, exact: true }) : Promise.resolve()));
+  // Start an already-active owned aggregate before its dependent Node, even when Node was cached first.
+  const aggregates = new Map(reads.flatMap((key) => key[0] === 'node-chat-opening' && typeof key[1] === 'string'
+    && hasDefaultsOpeningOwner(cache, key) ? [[key[1], key] as const] : []));
+  const pending = new Map<QueryKey, Promise<void>>();
+  const start = (key: QueryKey) => { if (!pending.has(key)) pending.set(key, current() ? cache.refetchQueries({ queryKey: key, exact: true }) : Promise.resolve()); };
+  for (const key of reads) {
+    const aggregate = key[0] === 'node' && typeof key[1] === 'string' ? aggregates.get(key[1]) : undefined;
+    if (aggregate !== undefined) start(aggregate);
+    start(key);
+  }
+  await Promise.all(pending.values());
 }
 
 interface AuthorityBaseline { person: Me; mode: AdminMode; changed: boolean; supplied: readonly QueryKey[] }

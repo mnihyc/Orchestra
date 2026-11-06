@@ -145,6 +145,13 @@ pub fn capabilities() -> Capabilities {
             ProviderFactKind::AvailableResets,
             ProviderFactKind::CredentialVerification,
         ],
+        provider_fact_fields: [(
+            "balances.plan".to_owned(),
+            ["remaining", "unlimited", "unit"]
+                .map(str::to_owned)
+                .to_vec(),
+        )]
+        .into(),
         model_discovery: true,
         title: false,
         auxiliary_models: AuxiliaryModels::Uncontrolled,

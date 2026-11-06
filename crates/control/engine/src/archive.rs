@@ -3,6 +3,9 @@
 //! Settlement and its native controls are committed together. The command journal carries an
 //! interrupt, lease return and session close through restart; terminal work is never revived.
 
+/// Existing Snapshot custody, operation facts and the origin of a recorded-store read.
+pub mod snapshot_authority;
+
 use crate::commands::{Outcome, Outgoing};
 use crate::engine::{Engine, lock};
 use crate::error::EngineError;
@@ -44,6 +47,21 @@ pub struct Settled {
     pub approvals: usize,
 }
 
+/// Native recoverable thread deletion, shared by the console and agent tools.
+#[derive(Debug)]
+pub struct ThreadRemoval {
+    /// Whether deletion first archived the thread.
+    pub archived_first: bool,
+    /// Work settled by the ordinary archive domain.
+    pub settled: Settled,
+    /// Environments whose ordinary cleanup was scheduled.
+    pub environments: Vec<Id>,
+    /// Nodes included in this deletion, including settled side lanes.
+    pub deleted_nodes: Vec<Id>,
+    /// Number of newly deleted nodes.
+    pub gone: i64,
+}
+
 /// Every state a lifecycle action may settle while holding the thread row.
 const THREAD_STATES: [&str; 5] = ["idle", "starting", "running", "waiting_approval", "blocked"];
 /// The serial-key member used by the shared command journal.
@@ -52,6 +70,72 @@ const COMMAND_KEY: &str = "$key";
 const SECONDS_PER_DAY: u64 = 86_400;
 
 impl Engine {
+    /// Applies the ordinary thread lifecycle under an already authorized transaction.
+    /// A non-person actor stays absent from human tombstone columns and is named in audit.
+    pub async fn delete_thread_in(
+        &self,
+        conn: &mut Conn,
+        node: Id,
+        by: Option<Id>,
+        now: Time,
+    ) -> Result<ThreadRemoval, RemovalScheduleError> {
+        let row = threads::thread(conn, node)
+            .await
+            .map_err(EngineError::from)?
+            .filter(|row| row.deleted_at.is_none())
+            .ok_or(RemovalScheduleError::Gone)?;
+        if row.side_of.is_some() {
+            return Err(EngineError::unreadable("side lanes use their close operation").into());
+        }
+        self.lock_home_in(conn, node).await?;
+        let deleted_nodes: Vec<Id> = std::iter::once(node)
+            .chain(
+                hierarchy::descendants(conn, node)
+                    .await
+                    .map_err(EngineError::from)?
+                    .into_iter()
+                    .map(|row| row.id),
+            )
+            .collect();
+        hierarchy::keep_archive_states(conn, node)
+            .await
+            .map_err(EngineError::from)?;
+        let archived_first = hierarchy::archive_by(conn, node, by, now.get())
+            .await
+            .map_err(EngineError::from)?;
+        orch_authz::epoch::bump(conn)
+            .await
+            .map_err(EngineError::from)?;
+        let settled = if archived_first
+            || lifecycle::archive_work_pending(conn, node)
+                .await
+                .map_err(EngineError::from)?
+        {
+            self.archive_as_in(conn, node, by, now).await?
+        } else {
+            Settled::default()
+        };
+        let environments = self.remove_home_as_in(conn, node, by, now, None).await?;
+        let gone = hierarchy::delete_subtree_by(conn, node, by, now.get())
+            .await
+            .map_err(EngineError::from)?
+            .saturating_add(
+                hierarchy::include_settled_in_deletion(conn, node, &deleted_nodes)
+                    .await
+                    .map_err(EngineError::from)?,
+            );
+        hierarchy::stamp_subtree(conn, node)
+            .await
+            .map_err(EngineError::from)?;
+        Ok(ThreadRemoval {
+            archived_first,
+            settled,
+            environments,
+            deleted_nodes,
+            gone,
+        })
+    }
+
     /// Takes thread locks before an archive or deletion writes hierarchy flags.
     pub async fn lock_archive_in(&self, conn: &mut Conn, node: Id) -> Result<(), EngineError> {
         lifecycle::lock_threads_under(conn, node).await?;
@@ -205,6 +289,7 @@ impl Engine {
                 }
                 Err(MakeError::NoEnvironment) => return Err(RemovalScheduleError::Gone),
                 Err(MakeError::Db(error)) => return Err(EngineError::from(error).into()),
+                Err(MakeError::Internal(error)) => return Err(error.into()),
             }
         }
         Ok(accepted)
@@ -657,6 +742,7 @@ impl Engine {
             self.inner
                 .commands
                 .issue(Outgoing {
+                    authority: None,
                     id: row.id,
                     machine: row.machine_id,
                     key,

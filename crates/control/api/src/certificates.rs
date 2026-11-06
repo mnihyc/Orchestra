@@ -21,7 +21,7 @@ use axum::Router;
 use axum::body::{Body, to_bytes};
 use axum::extract::{Extension, State};
 use axum::response::{IntoResponse, Response};
-use axum::routing::post;
+use axum::routing::{get, post};
 use base64::Engine;
 use base64::engine::general_purpose::URL_SAFE_NO_PAD;
 use chrono::{DateTime, Utc};
@@ -35,15 +35,15 @@ use orch_db::queries::resources::{self, NewHost, NewMachine, NextCertificate, To
 use orch_db::{Db, DbError};
 use orch_link_contract::enrollment::{
     Endpoint, EnrollRefusal, EnrollReply, EnrollReplySystem, EnrollRequest, EnrollmentToken,
-    RenewReply, RenewRequest, Trust,
+    RenewReply, RenewRequest,
 };
 use orch_link_contract::{enrollment_choices::EnrollmentChoices, session::Role};
 use orch_pki::PkiError;
 use orch_pki::ca::{CertificateAuthority, Holder};
 use orch_pki::certificates::{Certificate, CertificateRequest, Identity, ServiceName};
 use orch_pki::enrollment::{
-    EnrollError, TokenGrant, TokenLedger, TokenPurpose, enroll as pki_enroll, issue_token,
-    token_digest,
+    EnrollError, IssuedToken, TokenGrant, TokenLedger, TokenPurpose, enroll as pki_enroll,
+    issue_token, token_digest,
 };
 use orch_pki::renewal::{
     MachineRecord, RenewalError, RenewalPolicy, RenewalProof, RenewalProofFault,
@@ -93,6 +93,8 @@ const BOOTSTRAP_HINT: &str = "bundled node";
 /// What the certificates are made under.
 #[derive(Debug, Clone)]
 pub struct CertificateSettings {
+    /// The labelled gateway catalogue from operator configuration.
+    pub gateways: Vec<orch_link_contract::gateways::GatewayInstance>,
     /// How long a certificate is good for, in days.
     pub leaf_validity_days: u64,
     /// How long after it ran out a machine's certificate is still renewed,
@@ -115,23 +117,12 @@ impl CertificateSettings {
     #[must_use]
     pub fn from_config(config: &ServerConfig) -> Self {
         Self {
+            gateways: config.gateway.advertised_gateways(),
             leaf_validity_days: config.pki.leaf_validity_days,
             expired_renew_grace_days: config.pki.expired_renew_grace_days,
             service_dns_names: config.pki.service_dns_names.clone(),
             token_ttl: Duration::from_secs(config.pki.enrollment_token_ttl_secs),
-            endpoints: config
-                .gateway
-                .endpoints
-                .iter()
-                .map(|endpoint| Endpoint {
-                    url: endpoint.url.clone(),
-                    trust: if endpoint.trust == "public" {
-                        Trust::Public
-                    } else {
-                        Trust::Pinned
-                    },
-                })
-                .collect(),
+            endpoints: config.gateway.advertised_endpoints(),
             system_name: config.system.name.clone(),
             public_url: config.system.public_url.clone(),
         }
@@ -405,6 +396,52 @@ impl CertificateService {
         self.issue_token_choices(request, None, None).await
     }
 
+    /// Issues the same runtime enrollment token on the caller's connection, so its
+    /// authorization, sealed secret and private job checkpoint may commit together.
+    pub async fn issue_runtime_token_in(
+        &self,
+        conn: &mut orch_db::Conn,
+        request: &TokenRequest,
+    ) -> Result<NewToken, LinkFault> {
+        let TokenFor::Runtime { runtime } = request.purpose else {
+            return Err(LinkFault::invalid(
+                "this issuance requires a runtime target",
+            ));
+        };
+        let issued = self.fresh_token();
+        Self::store_runtime_token(conn, request, runtime, &issued).await
+    }
+
+    fn fresh_token(&self) -> IssuedToken {
+        issue_token(
+            &self.inner.authority,
+            self.inner.settings.token_ttl,
+            self.inner.clock.as_ref(),
+        )
+    }
+
+    async fn store_runtime_token(
+        conn: &mut orch_db::Conn,
+        request: &TokenRequest,
+        runtime: Id,
+        issued: &IssuedToken,
+    ) -> Result<NewToken, LinkFault> {
+        resources::hosting::insert_runtime_token(
+            conn,
+            &raw_hash(&issued.digest),
+            request.created_by,
+            request.name_hint.as_deref(),
+            runtime,
+            utc(issued.expires_at),
+        )
+        .await?;
+        Ok(NewToken {
+            token: issued.token.to_string(),
+            expires_at: issued.expires_at,
+            receipt: issued.digest.clone(),
+        })
+    }
+
     /// Issues a connector token bound to the roles and local handover its command names.
     pub async fn issue_machine_token(
         &self,
@@ -449,11 +486,7 @@ impl CertificateService {
         choices: Option<&EnrollmentChoices>,
         home: Option<Id>,
     ) -> Result<NewToken, LinkFault> {
-        let mut issued = issue_token(
-            &self.inner.authority,
-            self.inner.settings.token_ttl,
-            self.inner.clock.as_ref(),
-        );
+        let mut issued = self.fresh_token();
         if let Some(choices) = choices {
             issued.token = issued
                 .token
@@ -484,20 +517,7 @@ impl CertificateService {
             TokenFor::Host { home } => ("host", home),
             TokenFor::Runtime { runtime } => {
                 let mut conn = self.inner.db.acquire().await?;
-                resources::hosting::insert_runtime_token(
-                    &mut conn,
-                    &raw_hash(&issued.digest),
-                    request.created_by,
-                    request.name_hint.as_deref(),
-                    runtime,
-                    utc(issued.expires_at),
-                )
-                .await?;
-                return Ok(NewToken {
-                    token: issued.token.to_string(),
-                    expires_at: issued.expires_at,
-                    receipt: issued.digest.clone(),
-                });
+                return Self::store_runtime_token(&mut conn, request, runtime, &issued).await;
             }
         };
         let row = TokenRow {
@@ -880,6 +900,7 @@ impl CertificateService {
             endpoints_for_machine(&mut tx, enrolled.machine_id, &inner.settings.endpoints).await?;
         tx.commit().await.map_err(DbError::from)?;
         Ok(EnrollReply {
+            gateways: inner.settings.gateways.clone(),
             machine_id: enrolled.machine_id,
             certificate_pem: certificate.pem(),
             ca_pem: inner.authority.certificate_pem(),
@@ -1054,6 +1075,46 @@ impl CertificateService {
         self.inner.settings.endpoints.clone()
     }
 
+    /// The same logical gateways advertised at enrollment and every authenticated reconnect.
+    #[must_use]
+    pub fn advertised_gateways(&self) -> Vec<orch_link_contract::gateways::GatewayInstance> {
+        self.inner.settings.gateways.clone()
+    }
+
+    /// Public installation metadata; reading it neither issues nor spends a token.
+    #[must_use]
+    pub fn gateway_discovery(&self) -> orch_link_contract::gateways::GatewayDiscovery {
+        // Anonymous installation metadata carries addresses, never URL credentials or tokens.
+        // Authenticated legacy advertisements retain their existing address representation.
+        let mut gateways = self.advertised_gateways();
+        for gateway in &mut gateways {
+            gateway.endpoints.retain_mut(|endpoint| {
+                let Ok(mut address) = url::Url::parse(&endpoint.url) else {
+                    return false;
+                };
+                if !address.username().is_empty()
+                    || address.password().is_some()
+                    || address.query().is_some()
+                    || address.fragment().is_some()
+                    || !matches!(address.path(), "" | "/")
+                {
+                    if address.set_username("").is_err() || address.set_password(None).is_err() {
+                        return false;
+                    }
+                    address.set_query(None);
+                    address.set_fragment(None);
+                    address.set_path("");
+                    endpoint.url = address.to_string();
+                }
+                true
+            });
+        }
+        orch_link_contract::gateways::GatewayDiscovery {
+            ca_pem: self.inner.authority.certificate_pem(),
+            gateways,
+        }
+    }
+
     /// Makes the certificate of a service, with a key made here: for a
     /// service that is its own authority's neighbour.
     pub fn issue_service(
@@ -1186,6 +1247,19 @@ async fn enroll_request(
     Ok(json_reply(StatusCode::CREATED, &reply))
 }
 
+async fn gateways_request(
+    State(app): State<App>,
+    Extension(peer): Extension<Peer>,
+) -> Result<Response, LinkFault> {
+    peer.require(ServiceName::Gateway)
+        .map_err(|_| LinkFault::forbidden("only a gateway serves enrollment discovery"))?;
+    let mut response = json_reply(StatusCode::OK, &app.link.certificates().gateway_discovery());
+    response
+        .headers_mut()
+        .insert(header::CACHE_CONTROL, HeaderValue::from_static("no-store"));
+    Ok(response)
+}
+
 fn renew_caller(headers: &HeaderMap) -> Result<RenewCaller, LinkFault> {
     let decode = |name: &str| -> Result<Option<Vec<u8>>, LinkFault> {
         header_text(headers, name)
@@ -1265,6 +1339,7 @@ async fn service_renew_request(
 /// The routes of the internal listener that enroll and renew certificates.
 pub fn internal_routes() -> Router<App> {
     Router::new()
+        .route("/internal/link/gateways", get(gateways_request))
         .route("/internal/link/enroll", post(enroll_request))
         .route("/internal/link/renew", post(renew_request))
         .route("/internal/pki/renew", post(service_renew_request))

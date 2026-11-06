@@ -127,6 +127,7 @@ pub fn baseline(program: &AcpProgram, learned: &Learned) -> Capabilities {
         },
         phases: learned.has(Extra::Compaction),
         provider_facts: Vec::new(),
+        provider_fact_fields: Default::default(),
         model_discovery: false,
         title: false,
         auxiliary_models: AuxiliaryModels::Uncontrolled,

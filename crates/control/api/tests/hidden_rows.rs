@@ -12,6 +12,7 @@
 mod places;
 mod support;
 
+use crate::support::FullPermissionPageReply;
 use orch_api_contract::access::{
     HolderInput, PageChange, PageChangeAdd, PageChangeRow, PermissionPageUpdate,
 };
@@ -49,6 +50,8 @@ async fn private_project(world: &World, by: &Who, org: Id, name: &str) -> Projec
         .send()
         .await
         .ok()
+        .into_full()
+        .expect("this control expects the ordinary full project response")
 }
 
 #[tokio::test]
@@ -191,5 +194,6 @@ async fn manages_the_page(world: &World, by: &Who, node: Id, who: &Who) {
         })
         .send()
         .await
+        .full_permission_page()
         .ok();
 }

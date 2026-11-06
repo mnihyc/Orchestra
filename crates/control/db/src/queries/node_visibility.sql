@@ -12,8 +12,10 @@ reader_owned AS MATERIALIZED (
   SELECT n.*, t.state AS thread_state, t.last_activity_at AS thread_activity_at,
          CASE WHEN pn.id IS NULL AND pc.id IS NULL THEN page.value ELSE
            jsonb_set(jsonb_set(page.value,'{participating}',
-             to_jsonb(pn.id IS NOT NULL OR COALESCE((page.value->>'participating')::boolean,false))),
-             '{chat,participating}',to_jsonb(pc.id IS NOT NULL OR COALESCE((page.value->'chat'->>'participating')::boolean,false))) END AS "grant"
+             to_jsonb(COALESCE((page.value->>'scope_main')::boolean,true)
+               AND (pn.id IS NOT NULL OR COALESCE((page.value->>'participating')::boolean,false)))),
+             '{chat,participating}',to_jsonb(COALESCE((page.value->>'scope_chat')::boolean,true)
+               AND (pc.id IS NOT NULL OR COALESCE((page.value->'chat'->>'participating')::boolean,false)))) END AS "grant"
     -- node_id is unique. Keep this lookup parameterized when a parent probes its first visible child;
     -- flattening it lets the planner scan the whole thread table once per parent.
     FROM nodes n LEFT JOIN LATERAL (

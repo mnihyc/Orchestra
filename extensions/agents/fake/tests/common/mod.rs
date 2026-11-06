@@ -261,6 +261,7 @@ impl Fake {
                 instructions: "You are working inside Orch.".to_owned(),
                 available_models: vec!["fake-large".to_owned()],
                 subagent_limits: Default::default(),
+                background_wake: true,
                 memory: None,
                 arrangement: ArrangementType::Together,
                 orch_tools: vec![],
@@ -333,6 +334,7 @@ impl Fake {
     #[must_use]
     pub fn turn_of(&self, session: &Session, text: &str) -> TurnStart {
         TurnStart {
+            native_wake: None,
             plan: false,
             thread_id: session.thread,
             turn_id: new_id(),

@@ -222,6 +222,8 @@ async fn switching_auto_off_while_a_build_is_staged_discards_it_without_installi
     std::fs::write(
         data.identity_dir().join("enrollment.json"),
         serde_json::to_vec(&EnrollmentRecord {
+            gateways: Vec::new(),
+            gateway_measurements: Vec::new(),
             server_endpoints: Vec::new(),
             machine_id: rig.machine_id,
             name: "local".into(),

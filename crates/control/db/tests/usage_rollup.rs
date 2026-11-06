@@ -894,3 +894,292 @@ async fn use_at_two_speeds_is_two_rows_in_both_rollups_and_the_figures_by_speed_
     tx.commit().await.unwrap();
     assert_eq!(before, both(&mut conn).await);
 }
+
+/// Mixed retained measurement envelopes, independent of provider identity. The ledger
+/// still owns all consumption; only tier-specific grouping needs its reporting state.
+async fn tier_reporting_world() -> (TestDb, Db, chrono::NaiveDate, Id) {
+    let (test, db) = world().await;
+    let mut conn = db.acquire().await.unwrap();
+    let place = attribution(&Pool::new(), &mut Dice(3), new_id());
+    let noon = Utc.with_ymd_and_hms(2026, 10, 5, 12, 0, 0).unwrap();
+    let cases = [
+        (None, 1, json!({})),
+        (
+            None,
+            2,
+            json!({"requested_service_tier":"default","reported_service_tier":{"state":"told","value":"default"}}),
+        ),
+        (
+            None,
+            4,
+            json!({"requested_service_tier":"priority","reported_service_tier":{"state":"told","value":"standard"}}),
+        ),
+        (
+            Some("priority"),
+            8,
+            json!({"requested_service_tier":"priority","reported_service_tier":{"state":"told","value":"priority"}}),
+        ),
+        (
+            None,
+            16,
+            json!({"requested_service_tier":"auto","reported_service_tier":{"state":"empty"}}),
+        ),
+        (
+            None,
+            32,
+            json!({"requested_service_tier":"custom-choice","reported_service_tier":{"state":"empty"}}),
+        ),
+        (
+            None,
+            64,
+            json!({"requested_service_tier":"priority","reported_service_tier":{"state":"unsupported"}}),
+        ),
+        (
+            None,
+            128,
+            json!({"requested_service_tier":"auto","reported_service_tier":{"state":"unread"}}),
+        ),
+        (None, 256, json!({"requested_service_tier":"priority"})),
+    ];
+    for (tier, tokens, states) in cases {
+        let id = new_id();
+        record(&mut conn, &at_tier(id, noon, &place, tier, tokens))
+            .await
+            .unwrap();
+        // Existing immutable-envelope fixtures include states introduced after historical
+        // rows were recorded; raw reporting metadata never changes token attribution.
+        sqlx::query("UPDATE usage_events SET measurement_states=$2,outcome='done',speed_milli=1000,generation_ms=1000,streamed_output_tokens=1 WHERE id=$1")
+            .bind(id).bind(states).execute(&mut *conn).await.unwrap();
+    }
+    drop(conn);
+    let mut tx = db.begin().await.unwrap();
+    rollup::rebuild(&mut tx, None).await.unwrap();
+    tx.commit().await.unwrap();
+    (test, db, noon.date_naive(), place.provider_id)
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn actual_unreported_tier_is_separate_from_historical_ordinary_and_unavailable() {
+    let (_test, db, day, _) = tier_reporting_world().await;
+    let mut conn = db.acquire().await.unwrap();
+    let filter = Filter::default();
+    let read = |bucket, by| Read {
+        from: day,
+        to: day,
+        filter: &filter,
+        bucket,
+        by,
+        under: None,
+    };
+    let total = rollup::read(&mut conn, &read(None, None)).await.unwrap();
+    assert_eq!(
+        total[0].figures.total_tokens, 511,
+        "unavailable tier reporting never drops consumption totals"
+    );
+    for bucket in [None, Some(UsageBucket::Hour), Some(UsageBucket::Day)] {
+        let rows = rollup::read(&mut conn, &read(bucket, Some(UsageDimension::Tier)))
+            .await
+            .unwrap();
+        let mut got: Vec<_> = rows
+            .iter()
+            .map(|row| (row.key.clone(), row.figures.total_tokens))
+            .collect();
+        got.sort();
+        assert_eq!(
+            got,
+            vec![(None, 7), (None, 48), (Some("priority".into()), 8)],
+            "ordinary, actual-unreported and unavailable are distinct at every bucket granularity"
+        );
+    }
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn raw_unread_and_unsupported_tier_facts_never_create_tier_facets_or_zero_cut_buckets() {
+    let (_test, db) = world().await;
+    let mut conn = db.acquire().await.unwrap();
+    let place = attribution(&Pool::new(), &mut Dice(3), new_id());
+    let noon = Utc.with_ymd_and_hms(2026, 10, 5, 12, 0, 0).unwrap();
+    for (tier, tokens, states) in [
+        (None, 1, json!({})),
+        (
+            Some("priority"),
+            2,
+            json!({"reported_service_tier":{"state":"told","value":"priority"}}),
+        ),
+        (
+            Some("retained-old-tier"),
+            4,
+            json!({"reported_service_tier":{"state":"unread"}}),
+        ),
+        (
+            Some("retained-old-tier"),
+            8,
+            json!({"wire_protocol":"unsupported-wire","reported_service_tier":{"state":"unsupported"}}),
+        ),
+        (None, 0, json!({"reported_service_tier":{"state":"unread"}})),
+    ] {
+        let id = new_id();
+        record(&mut conn, &at_tier(id, noon, &place, tier, tokens))
+            .await
+            .unwrap();
+        sqlx::query("UPDATE usage_events SET measurement_states=$2 WHERE id=$1")
+            .bind(id)
+            .bind(states)
+            .execute(&mut *conn)
+            .await
+            .unwrap();
+    }
+    let day = noon.date_naive();
+    let filter = Filter::default();
+    for bucket in [None, Some(UsageBucket::Hour), Some(UsageBucket::Day)] {
+        let rows = rollup::read(
+            &mut conn,
+            &Read {
+                from: day,
+                to: day,
+                filter: &filter,
+                bucket,
+                by: Some(UsageDimension::Tier),
+                under: None,
+            },
+        )
+        .await
+        .unwrap();
+        let mut got: Vec<_> = rows
+            .iter()
+            .map(|row| (row.key.clone(), row.figures.total_tokens))
+            .collect();
+        got.sort();
+        assert_eq!(got, [(None, 1), (Some("priority".to_owned()), 2)]);
+    }
+    let totals = rollup::read(
+        &mut conn,
+        &Read {
+            from: day,
+            to: day,
+            filter: &filter,
+            bucket: Some(UsageBucket::Hour),
+            by: None,
+            under: None,
+        },
+    )
+    .await
+    .unwrap();
+    assert_eq!(
+        totals[0].figures.total_tokens, 15,
+        "unavailable facets still retain consumption"
+    );
+    for (tier, expected) in [("retained-old-tier", 0), ("priority", 2)] {
+        let filter = Filter {
+            tier: Some(tier.to_owned()),
+            ..Filter::default()
+        };
+        let selected = rollup::read(
+            &mut conn,
+            &Read {
+                from: day,
+                to: day,
+                filter: &filter,
+                bucket: None,
+                by: None,
+                under: None,
+            },
+        )
+        .await
+        .unwrap();
+        assert_eq!(
+            selected
+                .iter()
+                .map(|row| row.figures.total_tokens)
+                .sum::<i64>(),
+            expected,
+            "a named-tier drilldown uses the actual reporting capability too"
+        );
+    }
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn ordinary_tier_drilldown_never_selects_unreported_or_unsupported_requests() {
+    let (_test, db, day, _) = tier_reporting_world().await;
+    let mut conn = db.acquire().await.unwrap();
+    let filter = Filter {
+        tier: Some("none".into()),
+        ..Filter::default()
+    };
+    let rows = rollup::read(
+        &mut conn,
+        &Read {
+            from: day,
+            to: day,
+            filter: &filter,
+            bucket: None,
+            by: None,
+            under: None,
+        },
+    )
+    .await
+    .unwrap();
+    assert_eq!(
+        rows[0].figures.total_tokens, 7,
+        "ordinary NULL drilldown follows actual/default or historical ordinary facts only"
+    );
+    let events = ledger::list(
+        &mut conn,
+        &ledger::Listing {
+            from: Some(day.and_hms_opt(0, 0, 0).unwrap().and_utc()),
+            until: Some(
+                (day + Duration::days(1))
+                    .and_hms_opt(0, 0, 0)
+                    .unwrap()
+                    .and_utc(),
+            ),
+            filter: &filter,
+            counted: None,
+            newest_first: false,
+            after: None,
+            limit: 20,
+        },
+    )
+    .await
+    .unwrap();
+    assert_eq!(
+        events.iter().map(|row| row.total_tokens).sum::<i64>(),
+        7,
+        "the exact ledger drilldown and chart select the same records"
+    );
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn model_and_provider_performance_keep_the_same_actual_tier_reporting_groups() {
+    let (_test, db, day, provider) = tier_reporting_world().await;
+    let mut conn = db.acquire().await.unwrap();
+    let filter = Filter::default();
+    let rows = rollup::comparison(&mut conn, day, day, &filter)
+        .await
+        .unwrap();
+    let mut got: Vec<_> = rows
+        .iter()
+        .map(|row| (row.tier.clone(), row.performance.requests))
+        .collect();
+    got.sort();
+    assert_eq!(
+        got,
+        vec![(None, 2), (None, 3), (Some("priority".into()), 1)],
+        "unreported actual tiers cannot become the ordinary performance baseline; unsupported reporting has no tier comparison"
+    );
+    let rows = rollup::provider_comparisons(&mut conn, day, day, &[provider])
+        .await
+        .unwrap();
+    let mut providers: Vec<_> = rows
+        .iter()
+        .map(|(id, row)| {
+            assert_eq!(*id, provider);
+            (row.tier.clone(), row.performance.requests)
+        })
+        .collect();
+    providers.sort();
+    assert_eq!(
+        providers, got,
+        "batched provider comparisons use the identical grouping state"
+    );
+}

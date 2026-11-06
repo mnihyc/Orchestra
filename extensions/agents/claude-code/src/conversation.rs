@@ -228,7 +228,7 @@ pub struct Params {
 pub fn start(params: Params) -> ConversationHandle {
     let (sender, receiver) = flow::channel(command_weight);
     let (process_tx, process_rx) = crate::process::event_channel();
-    let mapper = EventMapper::new(
+    let mut mapper = EventMapper::new(
         MapperSettings {
             directory: params.spec.settings.directory.clone(),
             cwd: params.spec.settings.cwd.clone(),
@@ -236,6 +236,7 @@ pub fn start(params: Params) -> ConversationHandle {
         },
         Arc::clone(&params.clock),
     );
+    mapper.set_native_session(&params.session_id);
     let first_origin = params.origin.clone();
     let conversation = Conversation {
         params,
@@ -249,7 +250,11 @@ pub fn start(params: Params) -> ConversationHandle {
         materialized: false,
         turn: None,
         last_turn_id: None,
+        native_wake_wait: None,
+        consumed_background: std::collections::HashSet::new(),
+        silent_native: None,
         live: None,
+        live_reviewer: None,
         needs_restart: false,
         requests: HashMap::new(),
         context_asks: HashMap::new(),
@@ -295,6 +300,14 @@ struct PendingSteer {
     deadline: Instant,
 }
 
+#[derive(Debug)]
+struct NativeWakeWait {
+    token: String,
+    origins: Vec<TurnId>,
+    frames: Vec<String>,
+    bytes: usize,
+}
+
 struct Conversation {
     params: Params,
     mapper: EventMapper,
@@ -309,7 +322,12 @@ struct Conversation {
     materialized: bool,
     turn: Option<ActiveTurn>,
     last_turn_id: Option<TurnId>,
+    native_wake_wait: Option<NativeWakeWait>,
+    consumed_background: std::collections::HashSet<String>,
+    silent_native: Option<TurnId>,
     live: Option<TurnSettings>,
+    /// Declaration for the process that actually emitted native review facts.
+    live_reviewer: Option<orch_agent_contract::review::ApprovalReviewer>,
     needs_restart: bool,
     /// The tool use of a plan a person proceeded with, until its result shows that plan mode was left.
     plan_proceeded: Option<String>,
@@ -546,8 +564,12 @@ impl Conversation {
     }
 
     fn reconfigure(&mut self, spec: SessionSpec) {
-        let changed = spec.mcp != self.params.spec.mcp
+        let changed = spec.settings.background_wake != self.params.spec.settings.background_wake
+            || spec.mcp != self.params.spec.mcp
             || spec.settings.subagent_limits != self.params.spec.settings.subagent_limits
+            || ((spec.settings.approval_mode == ApprovalMode::Auto
+                || self.params.spec.settings.approval_mode == ApprovalMode::Auto)
+                && spec.settings.available_models != self.params.spec.settings.available_models)
             || spec.settings.instructions != self.params.spec.settings.instructions
             || spec.settings.memory != self.params.spec.settings.memory
             || spec.settings.orch_tools != self.params.spec.settings.orch_tools
@@ -566,6 +588,7 @@ impl Conversation {
             },
             Arc::clone(&self.params.clock),
         );
+        self.mapper.set_native_session(&self.params.session_id);
         self.params.spec = spec;
         if changed && self.process.is_some() {
             self.needs_restart = true;
@@ -583,7 +606,142 @@ impl Conversation {
         }
     }
 
+    async fn adopt_native_wake(
+        &mut self,
+        turn: &TurnStart,
+        token: &str,
+    ) -> Result<(), AdapterError> {
+        if self.turn.is_some()
+            || self
+                .native_wake_wait
+                .as_ref()
+                .is_none_or(|wait| wait.token != token)
+        {
+            return Err(AdapterError::SessionNotFound(
+                "the native completion no longer belongs to this session generation".to_owned(),
+            ));
+        }
+        let Some(wait) = self.native_wake_wait.take() else {
+            return Err(AdapterError::SessionNotFound(
+                "the native continuation is gone".to_owned(),
+            ));
+        };
+        self.mapper.begin_turn(turn.turn_id);
+        self.turn = Some(ActiveTurn {
+            turn_id: turn.turn_id,
+        });
+        self.last_turn_id = Some(turn.turn_id);
+        self.idle_since = None;
+        self.emit(SessionEvent::TurnStarted(TurnStarted {
+            turn_id: turn.turn_id,
+            native_turn_ref: token.to_owned(),
+        }))
+        .await;
+        // The controller committed the visible wake cause and author before releasing any output.
+        for line in wait.frames {
+            Box::pin(self.on_line(&line)).await;
+        }
+        Ok(())
+    }
+
+    async fn capture_native_followup(&mut self, frame: &Frame, line: &str) -> bool {
+        if self.turn.is_some() || self.silent_native.is_some() {
+            return false;
+        }
+        if matches!(
+            frame.kind(),
+            FrameKind::ControlResponse | FrameKind::ControlCancelRequest | FrameKind::KeepAlive
+        ) {
+            return false;
+        }
+        if frame.kind() == FrameKind::System {
+            return false;
+        }
+        if frame
+            .raw()
+            .get("parent_tool_use_id")
+            .is_some_and(|parent| !parent.is_null())
+        {
+            return false;
+        }
+        if frame.kind() == FrameKind::User
+            && frame
+                .blocks()
+                .iter()
+                .any(|block| block.get("type").and_then(Json::as_str) == Some("tool_result"))
+        {
+            return false;
+        }
+        if self.native_wake_wait.is_none() {
+            if !matches!(
+                frame.kind(),
+                FrameKind::Assistant | FrameKind::StreamEvent | FrameKind::User | FrameKind::Result
+            ) {
+                return false;
+            }
+            use orch_agent_contract::background::{BackgroundTasks, NativeBackgroundWake};
+            let known = self.mapper.background_tasks();
+            let key = |task: &orch_agent_contract::background::BackgroundTask| {
+                json!([task.id, task.run_id]).to_string()
+            };
+            self.consumed_background
+                .retain(|id| known.iter().any(|task| key(task) == *id));
+            let run = frame.raw().pointer("/origin/runId").and_then(Json::as_str);
+            let completed: Vec<_> = known
+                .into_iter()
+                .filter(|task| {
+                    task.state.wakes()
+                        && !self.consumed_background.contains(&key(task))
+                        && run.is_none_or(|run| task.run_id.as_deref() == Some(run))
+                })
+                .collect();
+            if completed.is_empty() {
+                // Late tool results have their own path above; unowned model output is never shown.
+                return matches!(
+                    frame.kind(),
+                    FrameKind::Assistant | FrameKind::StreamEvent | FrameKind::Result
+                );
+            }
+            let task_ids: Vec<_> = completed.iter().map(key).collect();
+            self.consumed_background.extend(task_ids.iter().cloned());
+            let token = format!("{}:{}", self.generation, orch_types::new_id());
+            self.native_wake_wait = Some(NativeWakeWait {
+                token: token.clone(),
+                origins: completed.iter().map(|task| task.origin_turn).collect(),
+                frames: Vec::new(),
+                bytes: 0,
+            });
+            self.emit(SessionEvent::BackgroundTasks(BackgroundTasks {
+                self_waking: true,
+                tasks: completed,
+                native_wake: Some(NativeBackgroundWake { token, task_ids }),
+            }))
+            .await;
+        }
+        if let Some(wait) = self.native_wake_wait.as_mut() {
+            // Use the existing native-frame budget for unpublished continuation output.
+            if wait.bytes.saturating_add(line.len()) > crate::config::FRAME_MAX_BYTES {
+                if let Some(process) = self.process.as_mut() {
+                    process.kill();
+                }
+                wait.frames.clear();
+            } else {
+                wait.bytes += line.len();
+                wait.frames.push(line.to_owned());
+            }
+        }
+        true
+    }
+
     async fn start_turn(&mut self, turn: TurnStart, blocks: Vec<Json>) -> Result<(), AdapterError> {
+        if let Some(token) = turn.native_wake.as_deref() {
+            return self.adopt_native_wake(&turn, token).await;
+        }
+        if self.native_wake_wait.is_some() || self.silent_native.is_some() {
+            return Err(AdapterError::HarnessError(
+                "a native continuation is still being interrupted".to_owned(),
+            ));
+        }
         if turn.sandbox_mode == orch_agent_contract::descriptor::SandboxMode::ReadOnly {
             return Err(AdapterError::Unsupported(
                 "a native read-only sandbox has not been proved for this Claude Code build"
@@ -605,6 +763,8 @@ impl Conversation {
             self.needs_restart = true;
         }
         let settings = Self::turn_settings(&turn);
+        let reviewer =
+            crate::sessions::approval_reviewer(&self.params.setup, &self.params.spec, &settings)?;
         if settings.approval_mode == orch_agent_contract::descriptor::ApprovalMode::Auto {
             if !crate::descriptor::auto_proven() {
                 return Err(AdapterError::Unsupported(
@@ -618,6 +778,7 @@ impl Conversation {
         self.params.spec.settings.approval_mode = settings.approval_mode;
         self.bring_up_to_date(&settings).await?;
         self.ensure_process(&settings).await?;
+        self.live_reviewer = reviewer;
         self.idle_since = None;
         self.heard_at = Instant::now();
         self.retrying_since = None;
@@ -768,6 +929,8 @@ impl Conversation {
                     })?;
             }
         }
+        let reviewer =
+            crate::sessions::approval_reviewer(&self.params.setup, &self.params.spec, settings)?;
         let spec = launch(&Launch {
             setup: &self.params.setup,
             spec: &self.params.spec,
@@ -802,6 +965,7 @@ impl Conversation {
         match self.handshake().await {
             Ok(()) => {
                 self.live = Some(settings.clone());
+                self.live_reviewer = reviewer;
                 Ok(())
             }
             Err(error) => {
@@ -832,9 +996,9 @@ impl Conversation {
             tokio::select! {
                 outcome = &mut answer => {
                     return match outcome {
-                        Ok(ControlOutcome::Success(_)) => {
+                        Ok(ControlOutcome::Success(result)) => {
                             if self.params.spec.settings.approval_mode == orch_agent_contract::descriptor::ApprovalMode::Auto {
-                                crate::review::confirmed(self.reported_permission_mode.as_deref(), None)
+                                crate::review::confirmed(result.get("current_permission_mode").and_then(Json::as_str).or(self.reported_permission_mode.as_deref()), None)
                             } else { Ok(()) }
                         },
                         Ok(ControlOutcome::Error(error)) => Err(AdapterError::HarnessError(error)),
@@ -977,6 +1141,7 @@ impl Conversation {
             });
         }
         self.live = None;
+        self.live_reviewer = None;
         self.idle_since = None;
     }
 
@@ -1006,6 +1171,29 @@ impl Conversation {
     // Interrupt, steer, approvals
 
     async fn interrupt(&mut self, turn_id: TurnId) -> Result<(), AdapterError> {
+        if self
+            .native_wake_wait
+            .as_ref()
+            .is_some_and(|wait| wait.origins.contains(&turn_id))
+        {
+            let id = self.next_request_id();
+            if !self
+                .write(&control_request(&id, json!({"subtype":"interrupt"})))
+                .await
+            {
+                return Err(AdapterError::HarnessError(
+                    "the native continuation process is gone".to_owned(),
+                ));
+            }
+            self.mapper.begin_rejected_wake(turn_id);
+            self.silent_native = Some(turn_id);
+            if let Some(wait) = self.native_wake_wait.take() {
+                for line in wait.frames {
+                    Box::pin(self.on_line(&line)).await;
+                }
+            }
+            return Ok(());
+        }
         let Some(active) = &self.turn else {
             return Ok(());
         };
@@ -1113,6 +1301,9 @@ impl Conversation {
                 return;
             }
         };
+        if self.capture_native_followup(&frame, line).await {
+            return;
+        }
         crate::provider::observe_frame(
             frame.raw(),
             self.params.setup.home.as_deref(),
@@ -1162,6 +1353,15 @@ impl Conversation {
                 let shortened = frame.kind() == FrameKind::System
                     && frame.subtype() == Some("compact_boundary");
                 let mut events = self.mapper.on_frame(&frame);
+                if self.silent_native.is_some() {
+                    events.retain(|event| matches!(event, SessionEvent::BackgroundTasks(_)));
+                    self.emit_all(events).await;
+                    if is_result {
+                        self.silent_native = None;
+                        self.on_turn_over().await;
+                    }
+                    return;
+                }
                 if is_result {
                     self.say_when_the_credential_was_refused(&mut events);
                 }
@@ -1225,9 +1425,9 @@ impl Conversation {
             && request.get("callback_id").and_then(Json::as_str) == Some("orch-permission-review")
         {
             if let Some(input) = request.get("input") {
-                let events = crate::review::denial(
+                let events = crate::review::denial_for_reviewer(
                     input,
-                    &self.params.spec.settings,
+                    self.live_reviewer.as_ref(),
                     self.turn
                         .as_ref()
                         .map(|turn| turn.turn_id)
@@ -1386,6 +1586,7 @@ impl Conversation {
             process.kill();
         }
         self.live = None;
+        self.live_reviewer = None;
         let message = if shared {
             "The provider refused the copy of the credential this session was given; a new copy is needed."
         } else {
@@ -1428,6 +1629,7 @@ impl Conversation {
             process.kill();
         }
         self.live = None;
+        self.live_reviewer = None;
         self.retrying_since = None;
         let events = self.mapper.fail_turn_with(error);
         self.emit_all(events).await;
@@ -1497,6 +1699,7 @@ impl Conversation {
     async fn lose_session(&mut self, why: &str) {
         self.process = None;
         self.live = None;
+        self.live_reviewer = None;
         let open: Vec<_> = self.asks.drain().collect();
         for (request_ref, _) in open {
             self.emit(SessionEvent::ApprovalClosed(ApprovalClosed { request_ref }))

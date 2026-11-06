@@ -1303,10 +1303,41 @@ async fn a_move_offers_each_mount_detach_as_is_or_copy_and_asks_before_a_copy_la
     assert!(made.location.made);
     let name = made.location.source.unwrap();
     let machine = f.target.machine.simple().to_string();
-    assert_eq!(
-        name,
-        format!("orch-mount-{data}-{}", &machine[machine.len() - 12..]),
-        "a new location has a name of the machine's own"
+    let prefix = format!("orch-mount-{data}-{}-", &machine[machine.len() - 12..]);
+    let suffix = name
+        .strip_prefix(&prefix)
+        .expect("a new location has the exact mount and machine prefix");
+    assert!(
+        !suffix.is_empty(),
+        "each new location has its own destination"
+    );
+    let another = plan_with(
+        &f,
+        Some(vec![
+            MountChoice {
+                mount_id: data,
+                fate: MountFate::Copy,
+                into: Some(CopyInto::NewLocation),
+            },
+            MountChoice {
+                mount_id: notes,
+                fate: MountFate::Detach,
+                into: None,
+            },
+        ]),
+    )
+    .await;
+    let other = row(&another, data).copy.unwrap();
+    assert!(other.location.made);
+    let other_name = other.location.source.unwrap();
+    assert!(
+        other_name
+            .strip_prefix(&prefix)
+            .is_some_and(|suffix| !suffix.is_empty())
+    );
+    assert_ne!(
+        name, other_name,
+        "two new-location plans have distinct destinations before either is published"
     );
     let off = row(&both, notes);
     assert_eq!(off.detached_because, Some(MountDetachedBecause::Asked));

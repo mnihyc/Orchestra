@@ -8,7 +8,6 @@
 mod support;
 
 use orch_access_contract::{
-    pages::Holder,
     permissions::{Permission, Placement},
     roles::Role,
 };
@@ -158,11 +157,12 @@ async fn a_full_access_directory_uses_the_units_rows_while_a_kept_directory_stay
 
     // A share on only one defaults column must use the same selection for an agent.
     let observer = w.node("thread", w.topic, "Column observer").await;
-    w.name_default(
-        Some(w.topic),
-        Permission::ThreadView,
+    w.agent_entry(
+        &access::PageKey::new("node", w.topic, "defaults"),
         "managed",
-        Holder::Agents { id: observer },
+        Permission::ThreadView,
+        observer,
+        None,
     )
     .await;
     let mut conn = w.conn().await;
@@ -170,10 +170,9 @@ async fn a_full_access_directory_uses_the_units_rows_while_a_kept_directory_stay
         .await
         .unwrap()
         .unwrap();
-    let reach = orch_authz::reach::Reach::load(
+    let reach = orch_authz::reach::Reach::load_current(
         &mut conn,
         agent,
-        orch_authz::reach::AgentReach::None,
         w.now,
         &orch_authz::reach::Things {
             nodes: threads.to_vec(),

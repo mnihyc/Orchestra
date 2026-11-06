@@ -170,11 +170,17 @@ impl Sessions {
 /// Accepts the session on a connection that was just upgraded, and serves it
 /// until it ends.
 pub(crate) async fn serve_connection(gateway: Gateway, connection: Connection) {
+    #[cfg(feature = "test-observers")]
+    let (connection, observation) = orch_link::test_observers::gateway_connection(connection);
     let authority = crate::authentication::BackplaneAuthority::new(&gateway);
     let config = gateway.session_config();
     let accepted = session::accept(connection, &config, &authority, gateway.clock().as_ref()).await;
     match accepted {
-        Ok(accepted) => serve_session(gateway, accepted).await,
+        Ok(accepted) => {
+            #[cfg(feature = "test-observers")]
+            observation.accepted(accepted.auth.machine_id, accepted.session_id);
+            serve_session(gateway, accepted).await
+        }
         Err(error) => tracing::debug!(%error, "a session was not accepted"),
     }
 }

@@ -7,6 +7,8 @@
 
 mod places;
 mod support;
+use crate::support::FullPermissionPageReply;
+use support::FullRoleReply as _;
 
 use orch_api_contract::access::{
     AccessChoice, AccessThrough, EffectiveAccessGet, EffectiveAccessGetQuery, Holder, HolderInput,
@@ -61,6 +63,7 @@ async fn roles_name_all_owners_and_a_viewer_chip_marks_actual_owners_including_n
         })
         .send()
         .await
+        .full_permission_page()
         .ok();
     let inner = group(&world, &t.owner, t.dep2, "Reviewers").await;
     let outer = group(&world, &t.owner, t.dep3, "Owners").await;
@@ -115,6 +118,7 @@ async fn roles_name_all_owners_and_a_viewer_chip_marks_actual_owners_including_n
         })
         .send()
         .await
+        .full_permission_page()
         .ok();
     let roles = world
         .app
@@ -297,6 +301,7 @@ async fn open_to(world: &World, by: &Who, node: Id, holder: HolderInput) {
         })
         .send()
         .await
+        .full_permission_page()
         .ok();
 }
 
@@ -428,6 +433,7 @@ async fn giving_dep2_developers_developer_at_dep3_reaches_a_dep2_developer_and_n
         })
         .send()
         .await
+        .full_role()
         .ok();
     assert_eq!(given.subject.at.as_ref().unwrap().id, t.dep2);
     let Node::Org(bob) = read(&world, &t.bob, t.dep3).await else {
@@ -789,6 +795,7 @@ async fn everyone_in_a_place_includes_a_page_only_guest_without_opening_the_plac
         })
         .send()
         .await
+        .full_permission_page()
         .ok();
     for node in [t.dep2, reached, direct] {
         assert!(

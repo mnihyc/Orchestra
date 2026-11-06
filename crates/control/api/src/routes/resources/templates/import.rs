@@ -89,6 +89,8 @@ pub(super) async fn import(
     for (name, value) in &body.values {
         let field = import.fields.iter().find(|field| field.name == *name);
         let value = match field.map(|field| field.kind) {
+            Some(FieldType::Json) => serde_json::from_str(value)
+                .map_err(|_| invalid(&format!("values.{name}"), "must be valid JSON"))?,
             Some(FieldType::Boolean) => value
                 .parse::<bool>()
                 .map(Json::Bool)

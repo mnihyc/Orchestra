@@ -14,6 +14,92 @@ pub const SNAPSHOT_COMMANDS: usize = 2_000;
 /// Half a link frame leaves room for its envelope and identity metadata.
 pub const PAGE_BYTES: usize = 128 * 1_024;
 
+/// Owned work whose lifetime can extend beyond its starting foreground turn.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+pub struct BackgroundTask {
+    /// Native task identity within this session generation.
+    pub id: String,
+    /// A distinct execution of the same native task, when supplied.
+    pub run_id: Option<String>,
+    /// The actual tool item that started the task.
+    pub native_item_ref: String,
+    /// The recorded turn that owns that item.
+    pub origin_turn: Id,
+    /// Command or child-agent work.
+    pub kind: BackgroundTaskKind,
+    /// Reported description, command or child name.
+    pub label: String,
+    /// Native child title, nickname and role, where the harness reports them.
+    #[serde(default)]
+    pub name: Option<String>,
+    /// Optional native child nickname.
+    #[serde(default)]
+    pub nickname: Option<String>,
+    /// Optional native child role.
+    #[serde(default)]
+    pub role: Option<String>,
+    /// The observed lifecycle state.
+    pub state: BackgroundTaskState,
+    /// A command's reported exit status, never invented for an agent.
+    pub exit_code: Option<i64>,
+    /// Whether this kind can be ended by a native control.
+    pub can_end: bool,
+}
+
+/// The kind of retained native work.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+#[serde(rename_all = "snake_case")]
+pub enum BackgroundTaskKind {
+    /// A shell command.
+    Command,
+    /// A child agent with its own lane.
+    Subagent,
+}
+
+/// Terminal observations distinguish a person's End from ordinary failure.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+#[serde(rename_all = "snake_case")]
+pub enum BackgroundTaskState {
+    /// Native work still runs.
+    Running,
+    /// Native work finished successfully.
+    Completed,
+    /// Native work ended unsuccessfully.
+    Failed,
+    /// A person explicitly ended the work.
+    Stopped,
+    /// The owning session disappeared.
+    Lost,
+}
+
+impl BackgroundTaskState {
+    /// Only natural completion and failure are eligible for continuation.
+    #[must_use]
+    pub const fn wakes(self) -> bool {
+        matches!(self, Self::Completed | Self::Failed)
+    }
+}
+
+/// A task update and, separately, a native follow-up awaiting controller admission.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+pub struct BackgroundTasks {
+    /// Whether the harness itself starts the completion follow-up.
+    pub self_waking: bool,
+    /// Actual task updates, with their original tool and turn ownership.
+    pub tasks: Vec<BackgroundTask>,
+    /// Native follow-up token; absent when only task state changed.
+    pub native_wake: Option<NativeBackgroundWake>,
+}
+
+/// A native model follow-up whose output waits for the ordinary preflight.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+pub struct NativeBackgroundWake {
+    /// Unique token echoed by the admitted turn start.
+    pub token: String,
+    /// The exact completed native task runs carried into this follow-up.
+    pub task_ids: Vec<String>,
+}
+
 /// One native command, with references that only the controller can resolve to recorded items.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize, JsonSchema)]
 pub struct NativeBackgroundCommand {

@@ -5,6 +5,7 @@
 //! managers, which the access engine decides before the handler runs; the segment has to be one of
 //! the thread's, or it is not there.
 
+use crate::middleware::authorization;
 use crate::middleware::requests::{ApiError, ApiResult};
 use crate::registry::{Ctx, Registry};
 use orch_api_contract::threads::{ThreadRawList, ThreadRawListQuery, ThreadRawListReply};
@@ -13,7 +14,7 @@ use orch_engine::raw_events::{self, PAGE_DEFAULT, PAGE_MAX};
 
 /// Binds this module's requests.
 pub fn mount(registry: &mut Registry) {
-    registry.on(ThreadRawList, list);
+    registry.on_with_operation(ThreadRawList, crate::key_operations::direct::declared, list);
 }
 
 /// A page of the raw events of one segment, newest first, from the number given backwards.
@@ -31,6 +32,8 @@ async fn list(ctx: Ctx, query: ThreadRawListQuery, (): ()) -> ApiResult<ThreadRa
         ));
     }
     let mut conn = orch_db::queries::feeds::begin_reading(&ctx.app.db).await?;
+    let principal = ctx.operation_principal(&mut conn).await?;
+    authorization::require_on_path_in(&ctx, &mut conn, &principal, "thread.manage").await?;
     let projection = orch_db::queries::thread_continuations::projection(
         &mut conn,
         thread,
@@ -79,7 +82,10 @@ async fn list(ctx: Ctx, query: ThreadRawListQuery, (): ()) -> ApiResult<ThreadRa
         .await
         .map_err(ApiError::internal)?;
     conn.commit().await.map_err(orch_db::DbError::from)?;
-    crate::middleware::authorization::require_on_path(&ctx, "thread.manage").await?;
+    // Preserve the existing post-snapshot checkpoint, with current target facts as well.
+    let mut current = ctx.app.db.acquire().await?;
+    let principal = ctx.operation_principal(&mut current).await?;
+    authorization::require_on_path_in(&ctx, &mut current, &principal, "thread.manage").await?;
     Ok(ThreadRawListReply {
         projection: Some(orch_engine::continuations::projection::scope(&projection)),
         events: page.events,

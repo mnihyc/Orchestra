@@ -190,13 +190,14 @@ export function Composer({ thread, onSent }: { thread: Thread; onSent?: () => vo
 
   const tooLong = maxChars !== null && text.length > maxChars;
   const empty = text.trim() === '' && parts.length === 0;
-  const reached = limits.data !== undefined && limits.data.reached.length > 0;
+  const reached = limits.data?.reached.some((limit) => !(limit.cap === null && limit.provider_limit !== null)) === true;
 
   const send = (delivery: Delivery) => {
     if (empty || tooLong || !mayDrive || attachmentsWaiting) return;
     if (whyNot(delivery, state, t) !== false) return;
     // A person who already said that the next message may go past what is in its way is not asked again.
-    const letPass = useComposerStore.getState().passNext[threadId];
+    const requestedPass = useComposerStore.getState().passNext[threadId];
+    const letPass = requestedPass?.caps !== undefined && requestedPass.caps !== null && requestedPass.caps.length > 0 ? { caps: requestedPass.caps } : undefined;
     if (reached && letPass === undefined) {
       setPrompt(delivery);
       return;

@@ -14,6 +14,7 @@ fn asked(command: Command, path: &str) -> Asked {
         paths: vec![path.to_owned()],
         to: None,
         name: None,
+        message_id: None,
     }
 }
 
@@ -22,6 +23,7 @@ fn waiting(made: DateTime<Utc>, asked: &Asked) -> Waiting {
         made,
         asked: asked.clone(),
         stamp: None,
+        shared_stamp: None,
     }
 }
 
@@ -207,7 +209,9 @@ fn the_arguments_of_a_command_are_checked_for_what_a_schema_cannot_say() {
             read(json!({ "command": command, "paths": ["a.md"], "to": "docs" })).unwrap_err();
         assert_eq!(wrong.code, Code::Invalid);
         assert!(
-            wrong.message.contains("\"to\" is only for copy and move"),
+            wrong
+                .message
+                .contains("\"to\" is only for copy, move and fork"),
             "{}",
             wrong.message
         );

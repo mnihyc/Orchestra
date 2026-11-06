@@ -35,3 +35,42 @@ export function endpointsNeedNoKey(provider: Pick<Provider, 'upstreams'>): boole
 export function amountText(value: string | null | undefined, unit: string, unknown: string): string {
   return value === null || value === undefined ? unknown : `${value} ${unit}`;
 }
+
+/** The shared contract resolves field support; absent metadata preserves the earlier unknown display. */
+export function detailFieldVisible(provider: Provider, path: string): boolean {
+  return provider.facts_state.fields?.[path] !== 'unsupported';
+}
+
+/** A metric hides only when every known amount is explicitly unsupported; unresolved groups remain unknown. */
+export function creditHistoryVisible(provider:Provider):boolean {
+  const fields=provider.facts_state.fields ?? {};
+  for(const member of ['balances','spend','extra_usage'] as const){
+    if(detailState(provider,member)==='unsupported')continue;
+    const quantities=member==='balances' ? ['remaining','total','used','unlimited'] : member==='spend' ? ['used','limit','remaining'] : ['used','limit'];
+    const groups=member==='extra_usage' ? new Set(['extra_usage']) : new Set([
+      ...provider.facts[member].map((item)=>`${member}.${item.id}`),
+      ...Object.keys(fields).filter((path)=>path.startsWith(`${member}.`)).map((path)=>path.slice(0,path.lastIndexOf('.'))),
+    ]);
+    if(groups.size===0 || [...groups].some((group)=>quantities.some((quantity)=>fields[`${group}.${quantity}`]!=='unsupported')))return true;
+  }
+  return false;
+}
+
+/** Moving a decimal point keeps every reported digit. Huge scales stay explicit without unbounded padding. */
+export function scaledDecimal(value: string, places: number | null | undefined): string {
+  const scale=places ?? 0;
+  if(scale===0)return value;
+  // The amount contract permits at most forty characters. Beyond its textual precision, a power is clearer and bounded.
+  if(scale>40)return `${value} × 10^−${scale}`;
+  const negative=value.startsWith('-');
+  const [whole='',fraction='']=(negative ? value.slice(1) : value).split('.');
+  const digits=(whole+fraction).padStart(fraction.length+scale+1,'0');
+  const point=digits.length-fraction.length-scale;
+  const integer=digits.slice(0,point).replace(/^0+(?=\d)/,'');
+  const decimal=digits.slice(point).replace(/0+$/,'');
+  return `${negative ? '-' : ''}${integer}${decimal==='' ? '' : `.${decimal}`}`;
+}
+
+export function scaledAmountText(value:string | null | undefined,unit:string | null,places:number | null | undefined,unknown:string,unitUnknown:string):string {
+  return value===null || value===undefined ? unknown : `${scaledDecimal(value,places)} ${unit ?? unitUnknown}`;
+}
