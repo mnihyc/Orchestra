@@ -8,7 +8,7 @@ import type { TFunction } from 'i18next';
 import { accessProgramDisplayName, effortDisplayName, modelDisplayName } from '@/features/models/names';
 import { programNameIn } from '@/features/resources/programNames';
 import { i18n } from '@/i18n';
-import { offeredChoice } from '@/i18n/choices';
+import { tierId, tierLabel } from './tier';
 
 import type { NodeRef, UsageDimension, UsageKey } from '@/generated/api-types';
 import { FILTER_DIMENSION, type FilterName } from '@/features/usage/search';
@@ -23,6 +23,7 @@ export function isRest(key: UsageKey): boolean {
     key.environment === undefined &&
     key.effort === undefined &&
     key.tier === undefined &&
+    key.tier_unknown !== true &&
     key.program === undefined &&
     key.org === undefined &&
     key.project === undefined &&
@@ -63,7 +64,7 @@ export function keyId(dimension: UsageDimension, key: UsageKey): string {
     case 'effort':
       return key.effort ?? 'none';
     case 'tier':
-      return key.tier ?? 'standard';
+      return tierId(key);
     case 'program':
       return key.program ?? 'none';
     default: {
@@ -90,7 +91,7 @@ export function keyLabel(dimension: UsageDimension, key: UsageKey, t: TFunction)
     case 'effort':
       return key.effort === null || key.effort === undefined ? t('usage.key.noEffort') : effortDisplayName(key.effort, t);
     case 'tier':
-      return key.tier === null || key.tier === undefined ? t('usage.key.standard') : offeredChoice(t, 'serviceTier', key.tier)?.name ?? key.tier;
+      return tierLabel(key, t);
     case 'program':
       return key.program === null || key.program === undefined ? t('usagePerf.noProgram') : accessProgramDisplayName(key.program, t);
     default: {
@@ -121,7 +122,7 @@ export function filterValue(dimension: UsageDimension, key: UsageKey): string | 
     case 'model':
       return key.model ?? null;
     case 'effort': return key.effort ?? 'none';
-    case 'tier': return key.tier ?? 'none';
+    case 'tier': return key.tier_unknown === true ? null : key.tier ?? 'none';
     case 'program': return key.program ?? 'none';
     case 'org': return key.org !== undefined && key.org !== null && !key.org.redacted ? key.org.id : null;
     case 'topic': return key.topic !== undefined && key.topic !== null && !key.topic.redacted ? key.topic.id : null;
@@ -147,5 +148,5 @@ export function narrows(dimension: UsageDimension): boolean {
 
 /** The words for a filter that is set: "Model: GPT-5.4". The label of the value is found among the rows of the table it narrows. */
 export function chipLabel(name: FilterName, label: string, t: TFunction): string {
-  return t('usage.chip.label', { what: t(`usage.chip.${name}`), value: label });
+  return t('usage.chip.label', { what: t(`usage.chip.${name === 'tier_unknown' ? 'tier' : name}`), value: label });
 }

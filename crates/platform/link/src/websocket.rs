@@ -228,6 +228,7 @@ pub async fn accept_tls(
 /// Dials endpoints over TCP and TLS and upgrades them to a session socket.
 #[derive(Clone)]
 pub struct TlsDialer {
+    prober: Option<Arc<dyn crate::gateways::GatewayProber>>,
     pinned: Option<Arc<rustls::ClientConfig>>,
     public: Option<Arc<rustls::ClientConfig>>,
     connect_timeout: Duration,
@@ -250,6 +251,7 @@ impl TlsDialer {
         public: Option<Arc<rustls::ClientConfig>>,
     ) -> Self {
         Self {
+            prober: None,
             pinned,
             public,
             connect_timeout: Duration::from_secs(u64::from(CONNECT_TIMEOUT_SECS)),
@@ -269,6 +271,13 @@ impl TlsDialer {
     #[must_use]
     pub fn with_proxy(mut self, proxy: Option<OutwardProxy>) -> Self {
         self.proxy = proxy;
+        self
+    }
+
+    /// Use the connector's shared verified HTTPS implementation for non-admitting probes.
+    #[must_use]
+    pub fn with_gateway_prober(mut self, prober: Arc<dyn crate::gateways::GatewayProber>) -> Self {
+        self.prober = Some(prober);
         self
     }
 
@@ -336,6 +345,15 @@ impl TlsDialer {
 
 #[async_trait]
 impl Dialer for TlsDialer {
+    async fn probe(
+        &self,
+        endpoint: &Endpoint,
+    ) -> Result<orch_link_contract::gateways::GatewayMeasurement, DialError> {
+        let prober = self.prober.as_ref().ok_or_else(|| {
+            DialError::Connect("no verified gateway prober was configured".into())
+        })?;
+        prober.measure(endpoint).await
+    }
     async fn dial(&self, endpoint: &Endpoint) -> Result<Connection, DialError> {
         tokio::time::timeout(self.connect_timeout, self.connect(endpoint))
             .await

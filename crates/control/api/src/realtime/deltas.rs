@@ -85,6 +85,22 @@ pub enum Next {
     Close(u16, String),
 }
 
+/// The existing outbox's one taken-but-unaccepted frame, not an authority grant.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(super) struct PendingFrame {
+    ticket: u64,
+    pub(super) tag: Option<Tag>,
+    pub(super) event: bool,
+    pub(super) resource: bool,
+}
+
+#[derive(Debug)]
+struct Flight {
+    frame: PendingFrame,
+    cancelled: bool,
+    accepted: bool,
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 struct Key {
     generation: u64,
@@ -94,6 +110,8 @@ struct Key {
 
 #[derive(Debug)]
 enum What {
+    /// Protocol metadata for an already known request/subscription, never a content projection.
+    Control(String),
     /// A frame that is never dropped.
     Row(String),
     /// A pending reset must survive replacement by another authority reset.
@@ -119,6 +137,7 @@ enum What {
 #[derive(Debug)]
 struct Entry {
     generation: u64,
+    tag: Tag,
     size: i64,
     what: What,
 }
@@ -140,6 +159,8 @@ struct Queue {
     bytes: i64,
     /// Bytes of the frame the socket is taking now.
     in_flight: i64,
+    flight: Option<Flight>,
+    flight_sequence: u64,
     backlog: Backlog,
     closing: Option<(u16, String)>,
 }
@@ -158,14 +179,15 @@ impl Queue {
         self.bytes.saturating_add(self.in_flight)
     }
 
-    fn push(&mut self, generation: u64, size: i64, what: What) -> u64 {
+    fn push(&mut self, tag: Tag, size: i64, what: What) -> u64 {
         let number = self.next_number();
         if matches!(what, What::Event { .. } | What::Delta { .. }) {
             self.droppable += 1;
         }
         self.bytes = self.bytes.saturating_add(size);
         self.entries.push_back(Entry {
-            generation,
+            generation: tag.generation,
+            tag,
             size,
             what,
         });
@@ -243,12 +265,25 @@ impl Outbox {
                 droppable: 0,
                 bytes: 0,
                 in_flight: 0,
+                flight: None,
+                flight_sequence: 0,
                 backlog: Backlog::new(max_bytes, max_millis),
                 closing: None,
             }),
             wake: Notify::new(),
             clock,
         }
+    }
+
+    /// Protocol acknowledgement/close metadata, distinct from a recipient content projection.
+    pub(crate) fn push_control(&self, tag: Tag, text: String) {
+        let mut queue = lock(&self.queue);
+        if queue.closing.is_some() {
+            return;
+        }
+        let size = bytes_of(&text);
+        queue.push(tag, size, What::Control(text));
+        self.after_push(&mut queue);
     }
 
     /// Queues a frame that is never dropped: an answer to a subscription, the
@@ -259,7 +294,7 @@ impl Outbox {
             return;
         }
         let size = bytes_of(&text);
-        queue.push(tag.generation, size, What::Row(text));
+        queue.push(tag, size, What::Row(text));
         self.after_push(&mut queue);
     }
 
@@ -269,7 +304,7 @@ impl Outbox {
             return;
         }
         let size = bytes_of(&text);
-        queue.push(tag.generation, size, What::Resync(text));
+        queue.push(tag, size, What::Resync(text));
         self.after_push(&mut queue);
     }
 
@@ -305,7 +340,7 @@ impl Outbox {
             }
         }
         let size = bytes_of(&text);
-        queue.push(tag.generation, size, What::Row(text));
+        queue.push(tag, size, What::Row(text));
         self.after_push(&mut queue);
     }
 
@@ -328,7 +363,7 @@ impl Outbox {
         }
         let size = bytes_of(&text);
         queue.push(
-            tag.generation,
+            tag,
             size,
             What::Event {
                 id: tag.id,
@@ -392,7 +427,7 @@ impl Outbox {
         }
         let size = bytes_of(fresh.data()).saturating_add(DELTA_OVERHEAD_BYTES);
         let number = queue.push(
-            tag.generation,
+            tag,
             size,
             What::Delta {
                 id: tag.id,
@@ -428,6 +463,17 @@ impl Outbox {
     pub(crate) fn purge_projection(&self, generation: u64) -> Purged {
         let mut queue = lock(&self.queue);
         let mut purged = Purged::default();
+        if let Some(flight) = queue.flight.as_mut()
+            && !flight.accepted
+            && flight
+                .frame
+                .tag
+                .is_some_and(|tag| tag.generation == generation)
+        {
+            flight.cancelled = true;
+            purged.resource |= flight.frame.resource;
+        }
+
         for entry in &queue.entries {
             if entry.generation == generation {
                 purged.resource |= matches!(&entry.what, What::Event { resource: true, .. });
@@ -523,7 +569,7 @@ impl Outbox {
             .encode()
             {
                 let size = bytes_of(&text);
-                queue.push(generation, size, What::Resync(text));
+                queue.push(Tag { id, generation }, size, What::Resync(text));
             }
         }
     }
@@ -540,6 +586,11 @@ impl Outbox {
         queue.open.clear();
         queue.droppable = 0;
         queue.bytes = 0;
+        if let Some(flight) = queue.flight.as_mut()
+            && !flight.accepted
+        {
+            flight.cancelled = true;
+        }
         queue.closing = Some((code, reason.to_owned()));
     }
 
@@ -566,19 +617,22 @@ impl Outbox {
 
     /// The writer is done with the frame it was given.
     pub fn done(&self) {
-        lock(&self.queue).in_flight = 0;
+        let mut queue = lock(&self.queue);
+        queue.in_flight = 0;
+        queue.flight = None;
     }
 
-    fn take(&self) -> Option<Next> {
+    fn take_with_flight(&self, tracked: bool) -> Option<(Next, Option<PendingFrame>)> {
         let mut queue = lock(&self.queue);
         if let Some((code, reason)) = queue.closing.clone() {
-            return Some(Next::Close(code, reason));
+            return Some((Next::Close(code, reason), None));
         }
         if let Some(text) = queue.urgent.pop_front() {
             let size = bytes_of(&text);
             queue.bytes = queue.bytes.saturating_sub(size);
             queue.in_flight = size;
-            return Some(Next::Frame(text));
+            let frame = Self::track_frame(&mut queue, tracked, None, false, false);
+            return Some((Next::Frame(text), frame));
         }
         while let Some(entry) = queue.entries.pop_front() {
             queue.front += 1;
@@ -586,9 +640,19 @@ impl Outbox {
             if matches!(entry.what, What::Event { .. } | What::Delta { .. }) {
                 queue.droppable = queue.droppable.saturating_sub(1);
             }
+            let tag = if matches!(&entry.what, What::Control(_) | What::Resync(_)) {
+                None
+            } else {
+                Some(entry.tag)
+            };
+            let event = matches!(&entry.what, What::Event { .. });
+            let resource = matches!(&entry.what, What::Event { resource: true, .. });
             let text = match entry.what {
                 What::Gone => continue,
-                What::Row(text) | What::Resync(text) | What::Event { text, .. } => text,
+                What::Control(text)
+                | What::Row(text)
+                | What::Resync(text)
+                | What::Event { text, .. } => text,
                 What::Delta {
                     id,
                     feed,
@@ -611,9 +675,91 @@ impl Outbox {
                 }
             };
             queue.in_flight = bytes_of(&text);
-            return Some(Next::Frame(text));
+            let frame = Self::track_frame(&mut queue, tracked, tag, event, resource);
+            return Some((Next::Frame(text), frame));
         }
         None
+    }
+
+    fn track_frame(
+        queue: &mut Queue,
+        tracked: bool,
+        tag: Option<Tag>,
+        event: bool,
+        resource: bool,
+    ) -> Option<PendingFrame> {
+        if !tracked {
+            queue.flight = None;
+            return None;
+        }
+        queue.flight_sequence = queue.flight_sequence.wrapping_add(1);
+        let frame = PendingFrame {
+            ticket: queue.flight_sequence,
+            tag,
+            event,
+            resource,
+        };
+        queue.flight = Some(Flight {
+            frame,
+            cancelled: false,
+            accepted: false,
+        });
+        Some(frame)
+    }
+
+    fn take(&self) -> Option<Next> {
+        self.take_with_flight(false).map(|(next, _)| next)
+    }
+
+    /// Observe queue availability without detaching a projection before socket capacity.
+    pub(super) async fn available(&self) {
+        loop {
+            let notified = self.wake.notified();
+            tokio::pin!(notified);
+            notified.as_mut().enable();
+            {
+                let queue = lock(&self.queue);
+                if queue.closing.is_some()
+                    || !queue.urgent.is_empty()
+                    || queue
+                        .entries
+                        .iter()
+                        .any(|entry| !matches!(entry.what, What::Gone))
+                {
+                    return;
+                }
+            }
+            notified.await;
+        }
+    }
+
+    /// Called only after the real sink reported capacity. Existing purge/reset can still cancel it.
+    pub(super) fn take_pending(&self) -> Option<(Next, Option<PendingFrame>)> {
+        self.take_with_flight(true)
+    }
+
+    /// Linearize cancellation and the synchronous physical start_send, never an awaited operation.
+    pub(super) fn accept<E>(
+        &self,
+        frame: PendingFrame,
+        send: impl FnOnce() -> Result<bool, E>,
+    ) -> Result<bool, E> {
+        let mut queue = lock(&self.queue);
+        if queue.closing.is_some()
+            || queue
+                .flight
+                .as_ref()
+                .is_none_or(|flight| flight.frame != frame || flight.cancelled || flight.accepted)
+        {
+            return Ok(false);
+        }
+        if !send()? {
+            return Ok(false);
+        }
+        if let Some(flight) = queue.flight.as_mut() {
+            flight.accepted = true;
+        }
+        Ok(true)
     }
 
     /// The next thing for the socket, waiting for it. The caller tells the

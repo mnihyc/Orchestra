@@ -1,4 +1,4 @@
-/** R1b S25/S27: real topic agent/default navigation and Settings identity in both languages, widths and themes. */
+/** Usable topic profiles and qualified settings sections in both languages, widths and themes. */
 import { expect, test } from '@playwright/test';
 import { RUNS_ON } from '../doubles/fixtures.ts';
 import { ACME, expectAccessible, scenario, signIn } from './support.ts';
@@ -8,7 +8,7 @@ const CONTROL_TIMEOUT_MS = 10_000;
 test.beforeEach(async () => { await scenario(); });
 
 for (const locale of ['en', 'zh-CN'] as const) {
-  test(`Agents lists real usable profiles and Settings names the page, not its General section (${locale})`, async ({ page }) => {
+  test(`Agents lists real usable profiles and settings tabs name their section and place (${locale})`, async ({ page }) => {
     await signIn(page);
     const appearance = await fetch(`${DOUBLE}/__double/first-steps/appearance`, { method: 'POST', headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify({ locale, theme: 'system' }), signal: AbortSignal.timeout(CONTROL_TIMEOUT_MS) });
@@ -20,7 +20,7 @@ for (const locale of ['en', 'zh-CN'] as const) {
       else writes.push(path);
     });
     await page.goto(`/topic/${ACME.fixLogin}?tab=activity`);
-    const main = page.getByTestId('main');
+    const main = page.getByRole('main');
     await expect(main.getByRole('heading', { name: 'Fix login', level: 1, exact: true })).toBeVisible();
     expect(reads.filter((path) => path.endsWith('/binding/options'))).toEqual([]);
     const optionsReply = page.waitForResponse((response) => response.request().method() === 'GET' && new URL(response.url()).pathname.endsWith(`/nodes/${ACME.fixLogin}/binding/options`));
@@ -60,19 +60,27 @@ for (const locale of ['en', 'zh-CN'] as const) {
 
     const defaults = panel.getByRole('link', { name: locale === 'en' ? 'Defaults' : '默认设置', exact: true });
     await defaults.focus(); await page.keyboard.press('Enter');
-    const settingsName = locale === 'en' ? 'Settings' : '设置';
-    await expect(page.getByRole('tab', { name: settingsName, exact: true })).toHaveCount(1);
-    await expect(main.getByRole('heading', { level: 1, name: locale === 'en' ? 'Defaults' : '默认设置', exact: true })).toBeVisible();
-    await page.locator('[data-section-id="general"]:visible').click();
-    const heading = main.getByRole('heading', { level: 1, name: locale === 'en' ? 'General' : '常规', exact: true });
+    const defaultsName = locale === 'en' ? 'Defaults' : '默认设置';
+    const generalName = locale === 'en' ? 'General' : '常规';
+    const tabs = page.getByRole('tablist', { name: locale === 'en' ? 'Main area' : '主区域', exact: true });
+    await expect(page).toHaveURL((url) => url.pathname === `/topic/${ACME.fixLogin}` && url.searchParams.get('tab') === 'settings' && url.searchParams.get('section') === 'policies');
+    await expect(tabs.getByRole('tab', { name: `${defaultsName} · Fix login`, exact: true })).toHaveCount(1);
+    await expect(main.getByRole('heading', { level: 1, name: defaultsName, exact: true })).toBeVisible();
+    const navigation = main.getByRole('navigation', { name: locale === 'en' ? 'Sections of the settings of Fix login' : 'Fix login设置的各个部分', exact: true });
+    const picker = navigation.getByRole('combobox');
+    await expect(picker).toBeVisible();
+    await picker.click();
+    await page.getByRole('option', { name: generalName, exact: true }).click();
+    const heading = main.getByRole('heading', { level: 1, name: generalName, exact: true });
     await expect(heading).toBeVisible();
-    await expect(page.getByRole('tab', { name: settingsName, exact: true })).toHaveCount(1);
-    await expect(page.getByRole('tab', { name: locale === 'en' ? 'General' : '常规', exact: true })).toHaveCount(0);
+    await expect(page).toHaveURL((url) => url.pathname === `/topic/${ACME.fixLogin}` && url.searchParams.get('tab') === 'settings' && url.searchParams.get('section') === 'general');
+    await expect(tabs.getByRole('tab', { name: `${generalName} · Fix login`, exact: true })).toHaveCount(1);
+    await expect(page.getByRole('tab', { name: generalName, exact: true })).toHaveCount(0);
     const path = page.locator('[data-screen-path]:visible');
     const topicLink = path.getByRole('link', { name: 'Fix login', exact: true });
     await expect(topicLink).toHaveAttribute('href', `/topic/${ACME.fixLogin}?tab=overview`);
     await expect(path.locator('li').last()).toContainText('Fix login');
-    await expect(path.getByText(settingsName, { exact: true })).toHaveCount(0);
+    await expect(path.getByText(locale === 'en' ? 'Settings' : '设置', { exact: true })).toHaveCount(0);
     for (const width of [1440, 400]) for (const theme of ['light', 'dark'] as const) {
       await page.setViewportSize({ width, height: 900 });
       await expectAccessible(page, theme, '[data-settings-frame]');

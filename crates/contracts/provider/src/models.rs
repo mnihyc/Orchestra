@@ -22,6 +22,9 @@ pub struct ServiceTier {
 /// What a harness or an endpoint last said a model offers.
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
 pub struct ModelOffered {
+    /// Native search modes the source offers, without enabling them.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub web_search: Option<Vec<String>>,
     /// Speeds on offer.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub service_tiers: Option<Vec<ServiceTier>>,
@@ -55,6 +58,9 @@ pub struct RateAbove {
 /// What a model costs, in credits, written as decimal strings.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
 pub struct Rate {
+    /// Credits for one successful native web search, additional to token prices.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub web_search_per_call: Option<String>,
     /// Credits for a million input tokens.
     pub input_per_mtok: String,
     /// Credits for a million cached input tokens.
@@ -80,6 +86,12 @@ pub struct Rate {
 /// *does* run with is the thread's own setting, chosen within what is open.
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
 pub struct ModelParameters {
+    /// Native search modes enabled by a provider manager; absence leaves search disabled.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub web_search: Option<Vec<String>>,
+    /// The enabled search mode used when a use makes no choice; absent means disabled.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub default_web_search: Option<String>,
     /// The efforts it takes.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub efforts: Option<Vec<String>>,
@@ -122,12 +134,84 @@ pub struct ModelParameters {
     /// Whether it takes images.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub input_images: Option<bool>,
+    /// Provider constraints on additional request options, keyed by wire protocol; `native` uses
+    /// declared adapter parameter keys. JSON Schema enum/const/default/required retain their distinct
+    /// meanings. An omitted schema preserves the protocol's existing extension surface.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub request_options: Option<BTreeMap<String, orch_types::Json>>,
     /// What it costs, when a manager entered a price or discovery found one.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub rate: Option<Rate>,
 }
 
 impl ModelParameters {
+    /// The provider's option schema for this wire format, or for declared native parameters.
+    #[must_use]
+    pub fn option_schema(&self, protocol: &str) -> Option<&orch_types::Json> {
+        self.request_options.as_ref()?.get(protocol)
+    }
+
+    /// One declared option's rule. Absence leaves the existing protocol/adapter declaration in force.
+    #[must_use]
+    pub fn option_rule(&self, protocol: &str, key: &str) -> Option<&orch_types::Json> {
+        let schema = self.option_schema(protocol)?;
+        let mut rule = schema.get("properties")?.get(key)?;
+        let mut visited = std::collections::BTreeSet::new();
+        while let Some(reference) = rule.get("$ref").and_then(orch_types::Json::as_str) {
+            if rule.get("const").is_some() || !visited.insert(reference) {
+                break;
+            }
+            let Some(pointer) = reference.strip_prefix('#') else {
+                break;
+            };
+            let Some(next) = schema.pointer(pointer) else {
+                break;
+            };
+            rule = next;
+        }
+        Some(rule)
+    }
+
+    /// Checks manager-authored schemas with the same local validator used by extension forms.
+    pub fn check_option_schemas(&self) -> Result<(), &'static str> {
+        for schema in self
+            .request_options
+            .iter()
+            .flat_map(|schemas| schemas.values())
+        {
+            if !schema.is_object() {
+                return Err("request option constraints must be an object schema");
+            }
+            if !option_form_supported(schema) {
+                return Err(
+                    "request options use property, item, enum, const, default, range and local-reference schemas; conditional schemas have no supported option form",
+                );
+            }
+            orch_types::schema::check(schema)
+                .map_err(|_| "request option constraints contain an invalid schema")?;
+        }
+        Ok(())
+    }
+
+    /// Search modes explicitly enabled on this model. Disabled remains an explicit ordinary choice.
+    #[must_use]
+    pub fn web_search_modes(&self) -> &[String] {
+        self.web_search.as_deref().unwrap_or_default()
+    }
+
+    /// A default never enables a mode that the manager has not enabled.
+    #[must_use]
+    pub fn web_search_start(&self) -> &str {
+        self.default_web_search
+            .as_deref()
+            .filter(|mode| {
+                self.web_search_modes()
+                    .iter()
+                    .any(|enabled| enabled == mode)
+            })
+            .unwrap_or("disabled")
+    }
+
     /// The offered reasoning efforts, or none.
     #[must_use]
     pub fn efforts(&self) -> &[String] {
@@ -195,6 +279,32 @@ impl ModelParameters {
     pub fn effort_is_gone(&self, wanted: Option<&str>) -> bool {
         wanted.is_some_and(|effort| !self.efforts().iter().any(|listed| listed == effort))
     }
+}
+
+/// Keep newly configured option declarations within the existing form renderer's vocabulary.
+/// Values still use the shared JSON Schema validator; this only checks what can be explained by a form.
+fn option_form_supported(schema: &orch_types::Json) -> bool {
+    use orch_types::Json;
+    if schema.is_boolean() {
+        return true;
+    }
+    let Some(object) = schema.as_object() else {
+        return false;
+    };
+    object.iter().all(|(key, value)| match key.as_str() {
+        "properties" | "$defs" | "definitions" => value
+            .as_object()
+            .is_some_and(|fields| fields.values().all(option_form_supported)),
+        "items" | "additionalProperties" => option_form_supported(value),
+        "$ref" => value
+            .as_str()
+            .is_some_and(|reference| reference == "#" || reference.starts_with("#/")),
+        "$schema" | "type" | "title" | "description" | "enum" | "const" | "default"
+        | "required" | "minimum" | "maximum" | "exclusiveMinimum" | "exclusiveMaximum"
+        | "multipleOf" | "minLength" | "maxLength" | "pattern" | "format" | "minItems"
+        | "maxItems" | "uniqueItems" | "minProperties" | "maxProperties" | "examples" => true,
+        _ => key.starts_with("x-"),
+    })
 }
 
 /// A model as a list of models gives it: a proposal and no more.

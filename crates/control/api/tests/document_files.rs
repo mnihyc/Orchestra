@@ -9,6 +9,8 @@ mod desk;
 mod places;
 mod support;
 
+use crate::support::FullArchiveReply as _;
+use crate::support::FullPermissionPageReply;
 use desk::Desk;
 use http::StatusCode;
 use orch_api_contract::access::{
@@ -664,6 +666,7 @@ async fn a_file_follows_the_page_of_its_document() {
         })
         .send()
         .await
+        .full_permission_page()
         .ok();
     assert_eq!(
         get(&desk, &vera, private.base.id, in_private.id, None, None)
@@ -719,6 +722,7 @@ async fn a_document_that_is_archived_is_read_and_takes_no_file_and_one_that_is_d
         .body(&places::archive_body(&desk.world, &desk.ada.token, desk.project, true).await)
         .send()
         .await
+        .full_archive()
         .ok();
     let refused = put(&desk, &desk.ada, id, "b.txt", b"x", false)
         .await

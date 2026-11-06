@@ -52,7 +52,7 @@ pub fn mount(registry: &mut Registry) {
         .on(UploadSessionDelete, session_delete)
         .on(UploadBlobDelete, blob_delete)
         .on_raw(ThreadAttachmentCreate, attach)
-        .on_raw(ThreadBlobGet, blob_get);
+        .on_raw_read_with_operation(ThreadBlobGet, super::read_operation::prepare, blob_get);
 }
 
 /// The name a request gives the file in its body: the header's text, with the escapes a browser
@@ -363,6 +363,7 @@ async fn blob_get(ctx: Ctx, query: ThreadBlobGetQuery, _: Body) -> ApiResult<Res
         .parse()
         .map_err(|_| ApiError::not_found())?;
     let mut conn = ctx.app.db.acquire().await?;
+    super::read_operation::require_current(&ctx, &mut conn).await?;
     let carrying = storage::input_carrying(&mut conn, thread, &hash).await?;
     let described = carrying
         .clone()

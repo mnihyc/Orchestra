@@ -154,6 +154,8 @@ impl Fixture {
             thread: Some(self.thread),
             caller: self.world.ada,
             token: None,
+            creator_origin: None,
+            scheduled_input: None,
             action,
         })
     }

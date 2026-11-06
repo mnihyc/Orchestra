@@ -1049,25 +1049,6 @@ pub struct Passed {
     pub by: Id,
 }
 
-/// A turn that starts past the limit of its provider's own plan, and who let it.
-#[derive(Debug, Clone, Copy)]
-pub(crate) struct ProviderPass<'a> {
-    /// The thread.
-    pub thread: Id,
-    /// The segment the turn is in.
-    pub segment: Id,
-    /// The turn.
-    pub turn: Id,
-    /// Whose input it is.
-    pub author: Option<Id>,
-    /// The provider whose limit it was.
-    pub provider: Id,
-    /// Who let it past.
-    pub by: Id,
-    /// What the limit showed.
-    pub detail: &'a str,
-}
-
 /// What the caps say of a turn that would start.
 #[derive(Debug, Clone, PartialEq)]
 pub enum Verdict {
@@ -1380,72 +1361,6 @@ impl Engine {
         }
         Ok(())
     }
-
-    /// Writes down that a turn was let past the provider's own limit, by whom.
-    pub(crate) async fn record_passed_provider(
-        &self,
-        unit: &mut Unit<'_>,
-        pass: &ProviderPass<'_>,
-    ) -> Result<(), EngineError> {
-        let ProviderPass {
-            thread,
-            segment,
-            turn,
-            author,
-            provider,
-            by,
-            detail,
-        } = *pass;
-        let now = unit.now();
-        rows::record_bypass(
-            &mut *unit.conn,
-            &NewBypass {
-                id: new_id(),
-                cap_id: None,
-                provider_id: Some(provider),
-                thread_id: thread,
-                turn_id: turn,
-                author_id: author,
-                by_user: by,
-                meter: "provider_limit",
-                used: None,
-                amount: None,
-                period_start: None,
-                at: now,
-            },
-        )
-        .await?;
-        let org = rows::node_org(&mut *unit.conn, thread).await?;
-        let action = AuditAction::UsageLimitBypassed;
-        let summary = format!("A turn was let past the limit of its provider's plan: {detail}");
-        let mut entry = audit::Entry::new(
-            Actor::User(by),
-            action.as_str(),
-            action.object_kind().unwrap_or("usage"),
-            Some(thread),
-            &summary,
-        );
-        entry.history = action.is_history_line();
-        entry.node_id = Some(thread);
-        entry.org_id = org;
-        entry.details =
-            json!({ "turn_id": turn, "provider_id": provider, "meter": "provider_limit" });
-        audit::append(&mut *unit.conn, &entry, &Origin::default(), now).await?;
-        let person = crate::views::user_ref_json(&mut *unit.conn, by).await?;
-        ingest::add_marker(
-            unit,
-            thread,
-            segment,
-            Some(turn),
-            &json!({ "marker": "limit_bypassed", "data": { "by": person, "turn_id": turn, "limits": [{
-                "cap": Json::Null, "label": detail, "used": "0", "amount": Json::Null,
-            }] } }),
-            &format!("limit_bypassed:{turn}:{by}:provider"),
-        )
-        .await?;
-        metrics::counter!("orch_limit_bypasses_total","meter"=>"provider_limit").increment(1);
-        Ok(())
-    }
 }
 
 fn capitalised(text: &str) -> String {
@@ -1519,13 +1434,26 @@ impl Engine {
         provider: Id,
         model: &str,
     ) -> Result<bool, EngineError> {
+        self.room_for_summary_with_tier(conn, topic, provider, model, None)
+            .await
+    }
+
+    /// The same shared-cap policy for a completion with a resolved requested processing tier.
+    pub(crate) async fn room_for_summary_with_tier(
+        &self,
+        conn: &mut Conn,
+        topic: Id,
+        provider: Id,
+        model: &str,
+        tier: Option<&str>,
+    ) -> Result<bool, EngineError> {
         let now = self.inner.clock.now();
         let ask = Ask {
             thread: topic,
             path: threads::node_path(conn, topic).await?,
             provider,
             model: model.to_owned(),
-            tier: None,
+            tier: tier.map(str::to_owned),
             harness_kind: None,
             person: None,
             metering: None,
@@ -1681,7 +1609,7 @@ impl Engine {
 }
 
 /// The same next-turn coverage for preflight, the waiting display, and queue ordering.
-async fn ask_from_settings(
+pub(crate) async fn ask_from_settings(
     conn: &mut Conn,
     thread: &threads::ThreadRow,
     settings: &crate::resolved::Resolved,

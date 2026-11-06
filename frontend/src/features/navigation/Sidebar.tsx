@@ -927,8 +927,8 @@ function NavigationBody({ orgId }: { orgId: string | null }) {
           </Section>
         )}
 
-        {arrangement === 'tree' && <Section title={t('navigation.recent')} folded={recentFolded} onFoldedChange={(folded) => setFolded('recent', folded)} needs={recentNeeds}
-          action={<button type="button" className="focus-inset rounded-md px-2 text-sm text-text-muted hover:text-text" onClick={() => { chooseArrangement('recent'); setFolded('projects', false); }}>{t('navigation.recentAll')}</button>}>
+        {arrangement === 'tree' && <Section title={t('navigation.recent')} toggleLabel={t('navigation.recentShortcuts')} folded={recentFolded} onFoldedChange={(folded) => setFolded('recent', folded)} needs={recentNeeds}
+          action={<button type="button" className="focus-inset rounded-md px-2 text-sm text-text-muted hover:text-text" onClick={() => { chooseArrangement('recent'); setFolded('projects', false); }}>{t('navigation.recentAllItems')}</button>}>
           {recent.length === 0 ? (
             <Nothing>{t('navigation.noRecent')}</Nothing>
           ) : (

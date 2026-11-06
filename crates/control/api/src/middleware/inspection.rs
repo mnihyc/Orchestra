@@ -427,6 +427,37 @@ pub(crate) async fn children(
     ctx: Ctx,
     query: orch_api_contract::nodes::NodeChildListQuery,
 ) -> ApiResult<orch_api_contract::common::Page<orch_api_contract::nodes::Node>> {
+    let mut conn = ctx.app.db.acquire().await?;
+    let principal = authorization::principal(&ctx, &mut conn).await?;
+    let (page, inspections) = children_in(&ctx, &query, &mut conn, &principal, None).await?;
+    drop(conn);
+    for info in inspections {
+        let mut child = ctx.for_id(info.id);
+        child.inspection = Some(info);
+        finish(&child).await?;
+    }
+    Ok(orch_api_contract::common::Page {
+        next_cursor: page.page.next_cursor,
+        items: page
+            .page
+            .items
+            .into_iter()
+            .filter_map(orch_api_contract::common::Listed::into_visible)
+            .collect(),
+    })
+}
+
+/// The same native retained-child producer without audit effects during preparation.
+pub(crate) async fn children_in(
+    ctx: &Ctx,
+    query: &orch_api_contract::nodes::NodeChildListQuery,
+    conn: &mut Conn,
+    principal: &Principal,
+    scope: Option<&crate::routes::nodes::projection::Projection<'_>>,
+) -> ApiResult<(
+    crate::routes::nodes::projection::Window<orch_api_contract::nodes::Node>,
+    Vec<Info>,
+)> {
     use orch_api_contract::{
         common::{DEFAULT_LIMIT, MAX_LIMIT, Page},
         nodes::Node,
@@ -442,18 +473,30 @@ pub(crate) async fn children(
                 .map_err(|_| ApiError::invalid("cursor", "is not a cursor of this list"))
         })
         .transpose()?;
-    let mut conn = ctx.app.db.acquire().await?;
-    let principal = authorization::principal(&ctx, &mut conn).await?;
     let mut entries = Vec::new();
     loop {
         let ids:Vec<Id>=sqlx::query_scalar("SELECT id FROM nodes WHERE parent_id=$1 AND ($2::uuid IS NULL OR id>$2) ORDER BY id LIMIT $3").bind(parent).bind(after).bind(i64::from(MAX_LIMIT)).fetch_all(&mut *conn).await.map_err(DbError::from)?;
         if ids.is_empty() {
             break;
         }
+        let selected = match scope {
+            Some(scope) => scope.selected(conn, &ids).await?,
+            None => Vec::new(),
+        };
+        let selected_ids: std::collections::HashSet<_> =
+            selected.iter().filter_map(|row| row.object.id).collect();
+        let scoped_principal = match scope {
+            Some(scope) if !selected.is_empty() => Some(scope.principal(conn, &selected).await?),
+            _ => None,
+        };
+        let principal = scoped_principal.as_ref().unwrap_or(principal);
         for id in &ids {
             after = Some(*id);
             let mut child = ctx.for_id(*id);
-            let info = match prepare(&child, &mut conn, &principal).await {
+            if scope.is_some() && !selected_ids.contains(id) {
+                continue;
+            }
+            let info = match prepare(&child, conn, principal).await {
                 Ok(info) => info,
                 Err(error)
                     if matches!(
@@ -467,8 +510,8 @@ pub(crate) async fn children(
             };
             if info.is_none()
                 && authorization::require(
-                    &mut conn,
-                    &principal,
+                    conn,
+                    principal,
                     *id,
                     authorization::VIEW,
                     orch_authz::Act::Use,
@@ -482,15 +525,18 @@ pub(crate) async fn children(
             let read_ids = info.as_ref().map(|i| i.reads.clone()).unwrap_or_default();
             let node = trace::read_scope(
                 &read_ids,
-                crate::routes::nodes::view::one(
-                    &mut conn,
-                    &principal,
-                    *id,
-                    ctx.now,
-                    Policy::default(),
-                ),
+                crate::routes::nodes::view::one(conn, principal, *id, ctx.now, Policy::default()),
             )
             .await?;
+            let node = match (scope, node) {
+                (Some(scope), Some(node)) => {
+                    trace::read_scope(&read_ids, scope.project(conn, principal, vec![node]))
+                        .await?
+                        .into_iter()
+                        .next()
+                }
+                (_, node) => node,
+            };
             let Some(mut node) = node else {
                 continue;
             };
@@ -531,6 +577,9 @@ pub(crate) async fn children(
         }
     }
     let more = entries.len() > limit;
+    let witness = entries
+        .get(limit)
+        .map(|(node, _)| crate::routes::nodes::node_id(node));
     entries.truncate(limit);
     let next_cursor = more
         .then(|| {
@@ -541,9 +590,66 @@ pub(crate) async fn children(
         .flatten()
         .transpose()?;
     let mut items = Vec::with_capacity(entries.len());
+    let mut inspections = Vec::new();
     for (node, child) in entries {
-        finish(&child).await?;
-        items.push(node);
+        if let Some(info) = child.inspection {
+            inspections.push(info);
+        }
+        items.push(orch_api_contract::common::Listed::visible(node));
     }
-    Ok(Page { items, next_cursor })
+    Ok((
+        crate::routes::nodes::projection::Window {
+            page: Page { items, next_cursor },
+            more: witness,
+        },
+        inspections,
+    ))
+}
+
+/// A list retains its own operation identity while reusing each actual child's native
+/// restoration/deletion checks and inspection audit. No child-reader admission is borrowed.
+pub(crate) async fn finish_child(
+    ctx: &Ctx,
+    info: &Info,
+    node: &orch_api_contract::nodes::Node,
+) -> ApiResult<()> {
+    let (mut tx, guard) = transaction_guard::begin(ctx).await?;
+    let scope = crate::routes::nodes::projection::Projection::new(
+        ctx,
+        guard.principal().caller(),
+        "NodeChildList.inspect_deleted",
+    )?;
+    // This audit is an actual current checkpoint. Rebind the original selected
+    // payload's typed sources too: a repaged current list cannot authorize old
+    // environment/binding/README content after the same key lost that Read.
+    let response = scope
+        .finish(&mut tx, std::slice::from_ref(node), &[], None)
+        .await?;
+    response
+        .read_response(ctx, &mut tx, guard.principal().caller(), |_, _| {
+            Box::pin(async { Ok(()) })
+        })
+        .await?
+        .ok_or_else(|| {
+            ApiError::new(
+                ErrorCode::AuthzDenied,
+                "the node inspection is no longer allowed",
+            )
+        })?;
+    let child = ctx.for_id(info.id);
+    let current = prepare(&child, &mut tx, guard.principal()).await?;
+    if current
+        .as_ref()
+        .is_some_and(|current| current.deletion != info.deletion)
+    {
+        return Err(ApiError::new(
+            ErrorCode::ConflictStaleRevision,
+            "the deletion changed during inspection",
+        ));
+    }
+    if current.is_some() {
+        record(&child, &mut tx, guard.principal(), info, guard.now()).await?;
+    }
+    tx.commit().await.map_err(DbError::from)?;
+    Ok(())
 }

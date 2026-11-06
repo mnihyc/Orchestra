@@ -12,14 +12,15 @@ export type ChoiceValues = Record<string, string | number>;
 /** Schema-only editors receive the setting's context once; nested choices keep the same context. */
 export const SETTING_CHOICE_GROUPS: Readonly<Record<string, readonly ChoiceGroup[] | undefined>> = {
   'notify.operations': ['operationNotices'],
+  'threads.agent_access': ['agentReach', 'agentStep'],
   'agent.effort': ['effort'], 'agent.memory': ['memory'], 'approval.mode': ['approvalMode'], 'approval.allowed_modes': ['approvalMode'],
   'sandbox.mode': ['sandboxLevel'], 'collab.attribution': ['attribution'], 'collab.default_delivery': ['delivery'],
   'env.thread_default': ['environmentDefault'], 'env.lifetime': ['environmentLifetime'], 'env.update': ['updateMode'], 'runtime.update': ['updateMode'], 'env.mounts': ['mountMode'],
   'env.data_sources': ['dataSource'], 'runtime.data_sources': ['dataSource'], 'runtime.home': ['dataSource'],
-  'orch_tools.enabled': ['sharedTool'], 'sharing.agent_reach': ['agentReach'], 'sharing.agent_documents': ['agentDocumentAccess'],
+  'orch_tools.enabled': ['sharedTool'],
   'workspace.index': ['indexMode'], 'broadcast.delivery': ['delivery'], 'broadcast.fallback': ['delivery'], 'broadcast.agent_options': ['delivery'],
   'browser.preset': ['browserMode'], 'hosts.when_full': ['capacityMode'], 'resources.created_by_members': ['memberCreates'],
-  'broadcast.agent_scope': ['broadcastReach'], 'nodes.new_color': ['newColor'], 'switch.active_turn': ['activeTurn'],
+  'nodes.new_color': ['newColor'], 'switch.active_turn': ['activeTurn'],
   'binding.prefer': ['arrangement'], 'binding.allowed': ['arrangement'], 'auto.title': ['automation'], 'auto.description': ['automation'],
   'auto.tags': ['automation'], 'auto.topic_rollup': ['automation'], 'auto.triggers': ['automationTrigger'],
   'capability.policy': ['capabilityDecision', 'approverScope'], 'chat.direct': ['directMessages'], 'chat.group_mentions': ['groupMentions'],

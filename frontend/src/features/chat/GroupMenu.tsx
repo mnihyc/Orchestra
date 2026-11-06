@@ -14,8 +14,8 @@ import { useState } from 'react';
 import { useTranslation } from 'react-i18next';
 
 import { addMember, GROUP_NAME_MAX_CHARS, removeMember, renameChat } from '@/api/chats';
-import { ApiError } from '@/api/client';
-import { failed } from '@/features/chat/acts';
+import { ApiError, ReceiptAcknowledged } from '@/api/client';
+import { acknowledgeReceipt, failed } from '@/features/chat/acts';
 import { useChatExportEntries } from '@/features/export/ChatMenu';
 import { PeoplePicker } from '@/features/chat/NewChat';
 import type { Chat, UserRef } from '@/generated/api-types';
@@ -62,9 +62,35 @@ export function GroupMenu({ chat, me, onLeft }: { chat: Chat; me: string | null;
       done();
       refreshChat(chat.id);
     } catch (cause) {
-      setError(cause);
+      if (acknowledgeReceipt(cause)) {
+        done();
+        refreshChat(chat.id);
+      } else setError(cause);
     } finally {
       setPending(false);
+    }
+  };
+
+  const addChosen = async () => {
+    let acknowledged: ReceiptAcknowledged | undefined;
+    let changed = false;
+    let complete = false;
+    try {
+      for (const user of chosen) {
+        try { await addMember(chat.id, user.id); }
+        catch (cause) {
+          if (!(cause instanceof ReceiptAcknowledged)) throw cause;
+          acknowledged ??= cause;
+        }
+        changed = true;
+        // A later refusal leaves only failed/unattempted people selected. A
+        // committed addition is never repeated just to recover a readable row.
+        setChosen((before) => before.filter((one) => one.id !== user.id));
+      }
+      complete = true;
+    } finally {
+      if (acknowledged !== undefined) acknowledgeReceipt(acknowledged);
+      if (changed && !complete) refreshChat(chat.id);
     }
   };
 
@@ -146,9 +172,7 @@ export function GroupMenu({ chat, me, onLeft }: { chat: Chat; me: string | null;
               blocked={chosen.length === 0}
               onClick={() =>
                 void run(
-                  async () => {
-                    for (const user of chosen) await addMember(chat.id, user.id);
-                  },
+                  addChosen,
                   close,
                 )
               }
@@ -161,7 +185,7 @@ export function GroupMenu({ chat, me, onLeft }: { chat: Chat; me: string | null;
         <PeoplePicker
           orgId={chat.org_id}
           chosen={chosen}
-          onToggle={(user) => setChosen((before) => (before.some((one) => one.id === user.id) ? before.filter((one) => one.id !== user.id) : [...before, user]))}
+          onToggle={(user) => { if (!pending) setChosen((before) => (before.some((one) => one.id === user.id) ? before.filter((one) => one.id !== user.id) : [...before, user])); }}
           exclude={new Set(members.map((member) => member.id))}
           guests={guestsAllowed}
           me={me}

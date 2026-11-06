@@ -73,7 +73,7 @@ function CardFace({ topic, menu = true, showPaths = false }: { topic: Topic; men
         {menu && (
           <TopicMenu
             topic={topic}
-            className="opacity-0 group-hover:opacity-100 focus-visible:opacity-100 data-[state=open]:opacity-100 [@media(hover:none)]:opacity-100"
+            className="relative top-[calc((1lh-var(--control-sm))/2)] opacity-0 group-hover:opacity-100 focus-visible:opacity-100 data-[state=open]:opacity-100 [@media(hover:none)]:opacity-100"
           />
         )}
       </div>
@@ -128,6 +128,7 @@ function ColumnView({ column, topics, pendingIds, canMove, dragging, showPaths }
   const { t, i18n } = useTranslation();
   const drop = useDroppable({ id: column });
   const quiet = HEADINGS[column];
+  const heading = column === 'done' ? t('places.board.done') : t(`state.${column}`);
   // While a card is carried the columns it can be dropped in say so, and the others step back.
   const target = dragging !== null && statusOnDrop(dragging, column) !== null;
   return (
@@ -143,11 +144,11 @@ function ColumnView({ column, topics, pendingIds, canMove, dragging, showPaths }
     >
       <h3 id={`column-${column}`} className="flex items-center gap-2 text-base font-medium text-text">
         {quiet === undefined ? <StateIcon state={column === 'done' ? 'done' : column} /> : <quiet.Icon className={quiet.tone} aria-hidden />}
-        {column === 'done' ? t('places.board.done') : t(`state.${column}`)}
+        {heading}
         <span className="text-sm font-normal text-text-muted">{formatNumber(topics.length, i18n.resolvedLanguage ?? i18n.language)}</span>
       </h3>
       {topics.length === 0 ? (
-        <EmptyState compact title={t('places.board.emptyColumn')} />
+        <EmptyState compact title={t('places.board.emptyColumn', { state: heading })} />
       ) : (
         <ul className="flex flex-col gap-2">
           {topics.map((topic) => (

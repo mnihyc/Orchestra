@@ -211,14 +211,6 @@ const CASES: &[Case] = &[
         ),
     },
     Case {
-        name: "the provider's allowance is used up",
-        reason: "provider_exhausted",
-        cause: Cause::Sql(
-            "UPDATE providers SET status = 'exhausted', status_detail = 'this month is used'",
-            "UPDATE providers SET status = 'ready', status_detail = NULL",
-        ),
-    },
-    Case {
         name: "the thread has no model",
         reason: "model_not_set",
         cause: Cause::NoModel,
@@ -797,11 +789,11 @@ async fn a_usage_cap_that_covers_the_turn_blocks_it_and_caps_that_do_not_cover_i
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
-async fn an_input_let_past_the_providers_limit_by_someone_who_may_runs_while_the_limit_is_reached()
-{
-    let world = World::new().await;
-    let thread = world.thread("Past the limit").await;
+async fn cached_vendor_quota_needs_no_bypass_and_the_legacy_flag_creates_no_bypass_authority() {
+    let world = World::observed().await;
+    let thread = world.thread("Vendor decides each request").await;
     let ada = Caller::session(world.ada);
+    world.access.refuse_bypass(world.ada);
     world
         .exec("UPDATE providers SET status = 'exhausted', status_detail = 'used up'")
         .await;
@@ -811,42 +803,39 @@ async fn an_input_let_past_the_providers_limit_by_someone_who_may_runs_while_the
         .submit_input(&ada, thread, queued("Plain"))
         .await
         .unwrap();
-    world.wait_blocked(thread, "provider_exhausted").await;
+    assert!(plain.input.limit_bypass.is_empty());
+    let first = world.turn_start(thread, 0).await;
+    assert_eq!(common::words_after_where(&first.text), "Plain");
+    let observed: String = world
+        .scalar("SELECT status FROM providers WHERE id=$1", world.provider)
+        .await;
+    assert_eq!(
+        observed, "exhausted",
+        "the vendor observation remains visible"
+    );
+    world.run_turn(thread, 0, "The ordinary request ran.").await;
+    world.wait_state(thread, "idle").await;
 
     let mut request = queued("Regardless");
     request.bypass = Some(LimitBypassRequest {
         caps: None,
         provider_limit: Some(true),
     });
-    // The input that waits is first, and it stays blocked; the one let past goes ahead of it only
-    // when it is first in the queue, so the first is removed.
-    world
-        .engine()
-        .cancel_input(&ada, thread, plain.input.id)
-        .await
-        .unwrap();
+    // Old clients can still send this member. It grants nothing and needs no
+    // provider-bypass privilege; named configured-cap bypasses remain separate.
     let passed = world
         .engine()
         .submit_input(&ada, thread, request)
         .await
         .unwrap();
-    assert_eq!(
-        passed.input.limit_bypass.len(),
-        1,
-        "the record says who let it past"
-    );
-    let start = world.turn_start(thread, 0).await;
+    assert!(passed.input.limit_bypass.is_empty());
+    let start = world.turn_start(thread, 1).await;
     assert_eq!(common::words_after_where(&start.text), "Regardless");
-
-    // Somebody who does not hold the right cannot let an input past.
-    world.access.refuse_bypass(world.ada);
-    let mut again = queued("Again");
-    again.bypass = Some(LimitBypassRequest {
-        caps: None,
-        provider_limit: Some(true),
-    });
-    let refused = world.engine().submit_input(&ada, thread, again).await;
-    assert!(matches!(refused, Err(InputError::Denied(_))), "{refused:?}");
+    world
+        .run_turn(thread, 1, "The legacy member was ignored.")
+        .await;
+    assert_eq!(world.turn_starts(thread).len(), 2);
+    world.shutdown().await;
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
@@ -1186,8 +1175,8 @@ async fn run_it_keeps_the_approvers_token_boundary_after_restart_and_does_not_re
     assert_eq!(approved.author_id, Some(world.ada));
     assert_eq!(approved.run_as, Some(world.ada));
     assert_eq!(
-        approved.run_as_authority.as_ref().unwrap()["credentials"][0]["token_id"],
-        runner_id.to_string()
+        approved.run_as_authority.as_ref().unwrap()["credentials"][0]["token_ids"],
+        json!([runner_id])
     );
     sqlx::query("UPDATE api_tokens SET scopes=ARRAY['thread.view','thread.interact'] WHERE id=$1")
         .bind(runner_id)

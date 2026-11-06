@@ -23,8 +23,9 @@
 
 use crate::commands::{CommandHandler, CommandServer, ServerOptions};
 use crate::framing::Measurements;
+use crate::gateways::PrimaryGateway;
 use crate::journal::Journal;
-use crate::reconnect::{Backoff, Dialer, Endpoints, dial_in_order};
+use crate::reconnect::{Backoff, DialError, Dialer, Endpoints};
 use crate::session::{
     ClientIdentity, EndReason, Established, HandshakeError, SessionEvent, SessionSender, connect,
 };
@@ -96,6 +97,8 @@ pub enum LinkStatus {
 /// What a machine is and how it reaches the system.
 #[derive(Debug)]
 pub struct MachineConfig {
+    /// The local primary choice and the latest authenticated gateway catalogue.
+    pub gateway: PrimaryGateway,
     /// The machine.
     pub machine_id: Id,
     /// The connector's own version.
@@ -174,6 +177,11 @@ struct SessionStart {
 
 #[derive(Debug)]
 struct Shared {
+    primary_changed: tokio::sync::Notify,
+    gateway: Mutex<PrimaryGateway>,
+    gateway_id: Mutex<Option<String>>,
+    gateway_measurements: Mutex<Vec<orch_link_contract::gateways::GatewayMeasurement>>,
+    advertised_gateways: watch::Sender<Option<Vec<orch_link_contract::gateways::GatewayInstance>>>,
     directory: PathBuf,
     access_token: Mutex<Option<String>>,
     endpoints: Arc<Mutex<Vec<Endpoint>>>,
@@ -254,6 +262,53 @@ impl Drop for PendingImport {
 }
 
 impl MachineLink {
+    /// The actual primary gateway, distinct from the entrance URL and auxiliary carriers.
+    #[must_use]
+    pub fn gateway_id(&self) -> Option<String> {
+        self.shared
+            .gateway_id
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner)
+            .clone()
+    }
+
+    /// Authenticated catalogue updates, including those a local primary override does not use.
+    #[must_use]
+    pub fn advertised_gateways(
+        &self,
+    ) -> watch::Receiver<Option<Vec<orch_link_contract::gateways::GatewayInstance>>> {
+        self.shared.advertised_gateways.subscribe()
+    }
+
+    /// Latest verified entrance measurements; not a permission or admission grant.
+    #[must_use]
+    pub fn gateway_measurements(&self) -> Vec<orch_link_contract::gateways::GatewayMeasurement> {
+        self.shared
+            .gateway_measurements
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner)
+            .clone()
+    }
+
+    /// The local operator changed the persisted primary choice. Reconnect explicitly.
+    pub fn select_gateway(&self, choice: orch_link_contract::gateways::GatewayChoice) {
+        self.shared
+            .gateway
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner)
+            .choice = choice;
+        if let Some(sender) = self
+            .shared
+            .session
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner)
+            .as_ref()
+        {
+            sender.end();
+        }
+        self.shared.primary_changed.notify_one();
+    }
+
     /// Current port control from the enrolled gateway; a host listener retires on false.
     #[must_use]
     pub fn port_control(&self) -> tokio::sync::watch::Receiver<bool> {
@@ -289,9 +344,15 @@ impl MachineLink {
         let (status_tx, status_rx) = watch::channel(LinkStatus::Starting);
         let tunnels = TunnelHub::with_options(config.tunnels, config.tunnel_gauge.clone());
         let (advertised, _) = watch::channel(None);
+        let (advertised_gateways, _) = watch::channel(None);
         let endpoints_now = Arc::new(Mutex::new(config.endpoints.clone()));
         let active_endpoint = Arc::new(Mutex::new(None));
         let shared = Arc::new(Shared {
+            primary_changed: tokio::sync::Notify::new(),
+            gateway: Mutex::new(config.gateway),
+            gateway_id: Mutex::new(None),
+            gateway_measurements: Mutex::new(Vec::new()),
+            advertised_gateways,
             directory: config.data_dir.clone(),
             access_token: Mutex::new(None),
             follows_system: config.follow_system_endpoints,
@@ -311,6 +372,7 @@ impl MachineLink {
             tunnels: tunnels.clone(),
         });
         let identity = ClientIdentity {
+            gateway_id: None,
             machine_id: config.machine_id,
             connector_version: config.connector_version,
             platform: config.platform,
@@ -679,7 +741,7 @@ impl MachineLink {
 /// Keeps a session going: dials, runs the handshake, hands the session to the
 /// core, and, when it ends, waits and begins again.
 async fn supervise(
-    identity: ClientIdentity,
+    mut identity: ClientIdentity,
     mut endpoints: Endpoints,
     dialer: Arc<dyn Dialer>,
     clock: Arc<dyn Clock>,
@@ -695,70 +757,98 @@ async fn supervise(
         status.send_replace(LinkStatus::Connecting {
             failures: backoff.failures(),
         });
+        let policy = shared
+            .gateway
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner)
+            .clone();
+        let attempt = tokio::select! {
+            () = shared.primary_changed.notified() => continue,
+            attempt = establish_primary(
+                &mut identity,
+                &policy,
+                &endpoints,
+                dialer.as_ref(),
+                clock.as_ref(),
+                &shared,
+            ) => attempt,
+        };
         let mut named_by_gateway = None;
-        let why = match dial_in_order(dialer.as_ref(), &endpoints).await {
-            Err(failures) => failures
+        let why = match attempt {
+            Ok((established, endpoint)) => {
+                endpoints.worked(&endpoint);
+                *shared
+                    .gateway_id
+                    .lock()
+                    .unwrap_or_else(PoisonError::into_inner) = Some(established.gateway_id.clone());
+                *shared
+                    .access_token
+                    .lock()
+                    .unwrap_or_else(PoisonError::into_inner) =
+                    Some(established.ready.session_token.clone());
+                *shared
+                    .active_endpoint
+                    .lock()
+                    .unwrap_or_else(PoisonError::into_inner) = Some(endpoint.clone());
+                if !established.ready.gateways.is_empty() {
+                    let catalogue = established.ready.gateways.clone();
+                    shared
+                        .gateway
+                        .lock()
+                        .unwrap_or_else(PoisonError::into_inner)
+                        .catalogue = catalogue.clone();
+                    shared.advertised_gateways.send_replace(Some(catalogue));
+                }
+                if let Some(listed) = &established.ready.endpoints {
+                    shared.advertised.send_replace(Some(listed.clone()));
+                    if shared.follows_system
+                        && *shared
+                            .endpoints
+                            .lock()
+                            .unwrap_or_else(PoisonError::into_inner)
+                            != *listed
+                    {
+                        *shared
+                            .endpoints
+                            .lock()
+                            .unwrap_or_else(PoisonError::into_inner) = listed.clone();
+                        // Preserve the successful entrance for tie breaking only.
+                        endpoints.replace(listed.clone());
+                    }
+                }
+                backoff.succeeded();
+                status.send_replace(LinkStatus::Connected {
+                    session_id: established.ready.session_id,
+                    endpoint: endpoint.url.clone(),
+                });
+                let ended = run_session(established, &inputs, &shared.primary_changed).await;
+                format!("the session ended: {ended:?}")
+            }
+            Err(PrimaryFailure::Selection(detail)) => detail,
+            Err(PrimaryFailure::Dial(failures)) => failures
                 .into_iter()
                 .map(|(endpoint, error)| format!("{}: {error}", endpoint.url))
                 .collect::<Vec<_>>()
                 .join("; "),
-            Ok((connection, endpoint)) => {
-                if let Err(error) = keep_connected_endpoint(&shared.directory, &endpoint) {
-                    tracing::warn!(%error, "the verified connection address could not be saved");
-                }
-                match connect(connection, &identity, clock.as_ref()).await {
-                    Ok(established) => {
-                        endpoints.worked(&endpoint);
-                        *shared
-                            .access_token
-                            .lock()
-                            .unwrap_or_else(PoisonError::into_inner) =
-                            Some(established.ready.session_token.clone());
-                        *shared
-                            .active_endpoint
-                            .lock()
-                            .unwrap_or_else(PoisonError::into_inner) = Some(endpoint.clone());
-                        if let Some(listed) = &established.ready.endpoints {
-                            shared.advertised.send_replace(Some(listed.clone()));
-                            if shared.follows_system
-                                && *shared
-                                    .endpoints
-                                    .lock()
-                                    .unwrap_or_else(PoisonError::into_inner)
-                                    != *listed
-                            {
-                                *shared
-                                    .endpoints
-                                    .lock()
-                                    .unwrap_or_else(PoisonError::into_inner) = listed.clone();
-                                endpoints = Endpoints::new(listed.clone());
-                            }
-                        }
-                        backoff.succeeded();
-                        status.send_replace(LinkStatus::Connected {
-                            session_id: established.ready.session_id,
-                            endpoint: endpoint.url.clone(),
-                        });
-                        let ended = run_session(established, &inputs).await;
-                        format!("the session ended: {ended:?}")
-                    }
-                    Err(HandshakeError::Rejected(reject)) => {
-                        named_by_gateway = reject
-                            .retry_after_secs
-                            .map(|secs| Duration::from_secs(u64::from(secs)));
-                        status.send_replace(LinkStatus::Refused {
-                            update_permit: reject.update_permit.clone(),
-                            code: reject.code,
-                            detail: reject.detail.clone(),
-                        });
-                        format!("refused: {:?}", reject.code)
-                    }
-                    Err(error) => error.to_string(),
-                }
+            Err(PrimaryFailure::Handshake(HandshakeError::Rejected(reject))) => {
+                named_by_gateway = reject
+                    .retry_after_secs
+                    .map(|secs| Duration::from_secs(u64::from(secs)));
+                status.send_replace(LinkStatus::Refused {
+                    update_permit: reject.update_permit.clone(),
+                    code: reject.code,
+                    detail: reject.detail.clone(),
+                });
+                format!("refused: {:?}", reject.code)
             }
+            Err(PrimaryFailure::Handshake(error)) => error.to_string(),
         };
         *shared
             .active_endpoint
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner) = None;
+        *shared
+            .gateway_id
             .lock()
             .unwrap_or_else(PoisonError::into_inner) = None;
         *shared
@@ -774,8 +864,66 @@ async fn supervise(
                 why,
             });
         }
-        tokio::time::sleep(retry_in).await;
+        tokio::select! {
+            () = shared.primary_changed.notified() => {},
+            () = tokio::time::sleep(retry_in) => {},
+        }
     }
+}
+
+enum PrimaryFailure {
+    Selection(String),
+    Dial(Vec<(Endpoint, DialError)>),
+    Handshake(HandshakeError),
+}
+
+async fn establish_primary(
+    identity: &mut ClientIdentity,
+    policy: &PrimaryGateway,
+    endpoints: &Endpoints,
+    dialer: &dyn Dialer,
+    clock: &dyn Clock,
+    shared: &Shared,
+) -> Result<(Established, Endpoint), PrimaryFailure> {
+    let (candidates, measurements) = policy
+        .candidates(dialer, endpoints.list(), endpoints.last_worked())
+        .await
+        .map_err(PrimaryFailure::Selection)?;
+    *shared
+        .gateway_measurements
+        .lock()
+        .unwrap_or_else(PoisonError::into_inner) = measurements;
+    let mut failures = Vec::new();
+    let mut busy = None;
+    for candidate in candidates {
+        let endpoint = candidate.endpoint;
+        let connection = match dialer.dial(&endpoint).await {
+            Ok(connection) => connection,
+            Err(error) => {
+                failures.push((endpoint, error));
+                continue;
+            }
+        };
+        identity.gateway_id = candidate.gateway_id;
+        if let Err(error) = keep_connected_endpoint(&shared.directory, &endpoint) {
+            tracing::warn!(%error, "the verified connection address could not be saved");
+        }
+        match connect(connection, identity, clock).await {
+            Ok(established) => return Ok((established, endpoint)),
+            Err(HandshakeError::Rejected(reject)) if reject.code == RejectCode::Busy => {
+                busy = Some(reject);
+            }
+            // A refused identity/update must not be retried through another gateway.
+            Err(error @ HandshakeError::Rejected(_)) => {
+                return Err(PrimaryFailure::Handshake(error));
+            }
+            Err(error) => failures.push((endpoint, DialError::Connect(error.to_string()))),
+        }
+    }
+    if let Some(reject) = busy {
+        return Err(PrimaryFailure::Handshake(HandshakeError::Rejected(reject)));
+    }
+    Err(PrimaryFailure::Dial(failures))
 }
 
 /// The last address whose transport was verified, including an authenticated update refusal.
@@ -796,7 +944,11 @@ fn keep_connected_endpoint(data_dir: &std::path::Path, endpoint: &Endpoint) -> s
 }
 
 /// Forwards the events of a session to the core until it ends.
-async fn run_session(established: Established, inputs: &mpsc::UnboundedSender<Input>) -> EndReason {
+async fn run_session(
+    established: Established,
+    inputs: &mpsc::UnboundedSender<Input>,
+    primary_changed: &tokio::sync::Notify,
+) -> EndReason {
     let Established {
         sender,
         mut inbox,
@@ -804,6 +956,7 @@ async fn run_session(established: Established, inputs: &mpsc::UnboundedSender<In
         clock_offset_ms,
         ..
     } = established;
+    let operator_sender = sender.clone();
     let start = SessionStart {
         ready,
         sender,
@@ -813,7 +966,11 @@ async fn run_session(established: Established, inputs: &mpsc::UnboundedSender<In
         return EndReason::Local;
     }
     loop {
-        match inbox.next().await {
+        let event = tokio::select! {
+            event = inbox.next() => event,
+            () = primary_changed.notified() => { operator_sender.end(); continue; },
+        };
+        match event {
             Some(SessionEvent::Frame(frame)) => {
                 if inputs.send(Input::Frame(frame)).is_err() {
                     return EndReason::Local;

@@ -383,6 +383,14 @@ impl World {
 
     /// As [`World::start`], with something that answers content requests.
     pub async fn start_with(content: Router<App>) -> Self {
+        Self::start_with_config(content, |_| {}).await
+    }
+
+    /// The same real listeners with operator configuration supplied before startup.
+    pub async fn start_with_config(
+        content: Router<App>,
+        configure: impl FnOnce(&mut ServerConfig),
+    ) -> Self {
         let clock: Arc<dyn Clock> = Arc::new(SystemClock);
         let secrets = Secrets::compose(clock.as_ref());
         let test_db = TestDb::fresh().await;
@@ -398,6 +406,7 @@ impl World {
         let pinned_port = reserve_port();
         let edge_port = reserve_port();
         let mut config = ServerConfig::default();
+        config.gateway.gateway_id = "test-gateway".to_owned();
         // Renewal must issue the same deployment names that the fixture's original services use.
         config.pki.service_dns_names = NAMES.iter().map(|name| (*name).to_owned()).collect();
         config.gateway.endpoints = vec![
@@ -410,6 +419,7 @@ impl World {
                 trust: "public".to_owned(),
             },
         ];
+        configure(&mut config);
         let config = Arc::new(config);
         let mut master = [0u8; 32];
         rand::fill(&mut master[..]);
@@ -658,9 +668,21 @@ impl World {
             Arc::clone(&self.clock),
         )
         .unwrap();
-        let dialer = TlsDialer::new(Some(self.pinned_config(enrolled)), Some(public));
+        let pinned = self.pinned_config(enrolled);
+        let prober = orch_connector_core::gateway_selection::HttpsGatewayProber::new(
+            Arc::clone(&pinned),
+            Arc::clone(&public),
+            &self.secrets.ca_certificate(),
+            Arc::clone(&self.clock),
+        )
+        .unwrap();
+        let dialer =
+            TlsDialer::new(Some(pinned), Some(public)).with_gateway_prober(Arc::new(prober));
+        #[cfg(feature = "test-observers")]
+        let observed_buffers = Arc::new(orch_link::tunnels::flow::Gauge::new());
         let link = MachineLink::start(
             MachineConfig {
+                gateway: Default::default(),
                 hosted_endpoints: None,
                 follow_system_endpoints: false,
                 machine_id: enrolled.identity.machine_id,
@@ -684,7 +706,16 @@ impl World {
                 journal_keep: Duration::from_secs(24 * 3_600),
                 connected: true,
                 tunnels: TunnelOptions::default(),
-                tunnel_gauge: None,
+                tunnel_gauge: {
+                    #[cfg(feature = "test-observers")]
+                    {
+                        Some(Arc::clone(&observed_buffers))
+                    }
+                    #[cfg(not(feature = "test-observers"))]
+                    {
+                        None
+                    }
+                },
             },
             Arc::new(dialer),
             Arc::clone(&self.clock),
@@ -696,6 +727,8 @@ impl World {
             id: enrolled.identity.machine_id,
             link,
             handler,
+            #[cfg(feature = "test-observers")]
+            observed_buffers,
         }
     }
 
@@ -735,6 +768,8 @@ pub struct Machine {
     pub id: Id,
     pub link: MachineLink,
     pub handler: Arc<ScriptedHandler>,
+    #[cfg(feature = "test-observers")]
+    pub observed_buffers: Arc<orch_link::tunnels::flow::Gauge>,
 }
 
 /// A port that nothing holds right now: found by binding and letting go.

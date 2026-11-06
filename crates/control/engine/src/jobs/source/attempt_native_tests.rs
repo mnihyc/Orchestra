@@ -330,6 +330,9 @@ impl Commands for IssueTap {
     async fn cancel(&self, id: Id) -> Result<bool, CommandsError> {
         self.inner.cancel(id).await
     }
+    async fn stopped(&self, id: Id) -> Result<bool, CommandsError> {
+        self.inner.stopped(id).await
+    }
     fn hears_behind(&self, machine: Id, stream: &Stream) -> bool {
         self.inner.hears_behind(machine, stream)
     }

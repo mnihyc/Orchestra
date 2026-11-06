@@ -13,6 +13,14 @@
 //! A snapshot is a thread's directory kept as of a moment, and work that takes a
 //! while, such as taking one, is a [`Job`].
 
+use crate::operations::{
+    FacetSpec as Facet, OperationSpec as Op, TargetResolver as Target, VariantSpec as Variant,
+};
+use orch_access_contract::key_scope::KeyAction::{Manage, Read, Write};
+use orch_access_contract::key_scope::KeyIdentityKind as I;
+use orch_access_contract::key_scope::KeyTargetKind::{Identity, Object};
+use orch_access_contract::permissions::ObjectKind as K;
+
 use orch_types::{Hash, Id, Json, Time};
 use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
@@ -1049,21 +1057,39 @@ crate::endpoints! {
     /// Serves the bytes of one version of a file, found by its hash, with the hash as its ETag and ranges supported.
     EnvironmentFileContentGet: GET "/environments/{id}/files/content", Permission("files.view"), query EnvironmentFileContentGetQuery, none, raw, 200;
     /// Writes a file of an environment from the body or from an upload, if the file is still the version the writer saw.
-    EnvironmentFileContentPut: PUT "/environments/{id}/files/content", Permission("files.manage"), query EnvironmentFileContentPutQuery, bytes, json FileStat, 200;
+    EnvironmentFileContentPut: PUT "/environments/{id}/files/content", Permission("files.manage"), query EnvironmentFileContentPutQuery, bytes, json FileStat, 200,
+        operation Op::single(Write, &[Object(K::Environment)], Target::PermissionObject);
     /// Writes completed uploaded content as a job, whose cancellation waits for the machine to stop.
-    EnvironmentUploadWrite: POST "/environments/{id}/files/uploads/{upload_id}/write", Permission("files.manage"), query ThroughThreadQuery, json EnvironmentUploadWriteBody, json Job, 202;
+    EnvironmentUploadWrite: POST "/environments/{id}/files/uploads/{upload_id}/write", Permission("files.manage"), query ThroughThreadQuery, json EnvironmentUploadWriteBody, json Job, 202,
+        operation Op::single(Write, &[Object(K::Environment)], Target::PermissionObject);
     /// Reads the confirmed file receipt, or the actual refusal, after an upload job ends.
     EnvironmentUploadWriteResult: GET "/environments/{id}/files/uploads/{upload_id}/write", Permission("files.view"), query ThroughThreadQuery, none, json FileStat, 200;
     /// Groups the caller's upload writes and retained partial progress into one history entry.
-    EnvironmentUploadFinish: POST "/environments/{id}/files/uploads/{upload_id}/finish", Permission("files.manage"), query ThroughThreadQuery, json EnvironmentUploadFinishBody, none, 204;
+    EnvironmentUploadFinish: POST "/environments/{id}/files/uploads/{upload_id}/finish", Permission("files.manage"), query ThroughThreadQuery, json EnvironmentUploadFinishBody, none, 204,
+        operation Op::single(Write, &[Object(K::Environment)], Target::PermissionObject);
     /// Makes a directory in an environment's workspace.
-    EnvironmentFileMkdir: POST "/environments/{id}/files/mkdir", Permission("files.manage"), query ThroughThreadQuery, json FilePathBody, json FileStat, 200;
+    EnvironmentFileMkdir: POST "/environments/{id}/files/mkdir", Permission("files.manage"), query ThroughThreadQuery, json FilePathBody, json FileStat, 200,
+        operation Op::single(Write, &[Object(K::Environment)], Target::PermissionObject);
     /// Renames a file or a directory, which is also how one is moved.
-    EnvironmentFileRename: POST "/environments/{id}/files/rename", Permission("files.manage"), query ThroughThreadQuery, json FileFromToBody, json FileStat, 200;
+    EnvironmentFileRename: POST "/environments/{id}/files/rename", Permission("files.manage"), query ThroughThreadQuery, json FileFromToBody, json FileStat, 200,
+        operation Op::single(Write, &[Object(K::Environment)], Target::PermissionObject);
     /// Copies a file, or a directory with what is in it.
-    EnvironmentFileCopy: POST "/environments/{id}/files/copy", Permission("files.manage"), query ThroughThreadQuery, json FileFromToBody, json FileStat, 200;
+    EnvironmentFileCopy: POST "/environments/{id}/files/copy", Permission("files.manage"), query ThroughThreadQuery, json FileFromToBody, json FileStat, 200,
+        operation Op::facets(&[
+            Facet::required(
+                Read,
+                &[Object(K::Environment)],
+                Target::Resolved("copy_source"),
+            ),
+            Facet::required(
+                Write,
+                &[Object(K::Environment)],
+                Target::Resolved("copy_destination"),
+            ),
+        ]);
     /// Deletes a file, or a directory with what is in it.
-    EnvironmentFileDelete: DELETE "/environments/{id}/files", Permission("files.manage"), query EnvironmentFileDeleteQuery, none, none, 204;
+    EnvironmentFileDelete: DELETE "/environments/{id}/files", Permission("files.manage"), query EnvironmentFileDeleteQuery, none, none, 204,
+        operation Op::single(Write, &[Object(K::Environment)], Target::PermissionObject);
     /// Lists the latest change to each path that agents made, from their file-change tool calls.
     EnvironmentChangeList: GET "/environments/{id}/changes", Permission("files.view"), query EnvironmentChangeListQuery, none, json EnvironmentChangeListReply, 200;
     /// Searches an environment's files by name, or the lines of its text files.
@@ -1077,29 +1103,173 @@ crate::endpoints! {
     /// Reads the unified diff of a repository in the workspace, as plain text.
     EnvironmentGitDiffGet: GET "/environments/{id}/git/diff", Permission("files.view"), query EnvironmentGitDiffGetQuery, none, raw, 200;
     /// Lists the snapshots of a thread, newest first.
-    ThreadSnapshotList: GET "/threads/{id}/snapshots", Rule("files.view on the thread's environment"), query PageQuery, none, json Page<Snapshot>, 200;
+    ThreadSnapshotList: GET "/threads/{id}/snapshots", Rule("files.view on the thread's environment"), query PageQuery, none, json Page<Snapshot>, 200,
+        operation Op::single(
+            Read,
+            &[Object(K::Environment)],
+            Target::Resolved("thread_environment"),
+        );
     /// Starts taking a snapshot of a thread's directory as a job whose result names the snapshot.
-    ThreadSnapshotCreate: POST "/threads/{id}/snapshots", Rule("files.manage on the thread's environment"), none, json ThreadSnapshotCreateBody, json Job, 202;
+    ThreadSnapshotCreate: POST "/threads/{id}/snapshots", Rule("files.manage on the thread's environment"), none, json ThreadSnapshotCreateBody, json Job, 202,
+        operation Op::facets(&[
+            Facet::required(
+                Read,
+                &[Object(K::Environment)],
+                Target::Resolved("environment"),
+            ),
+            Facet::required(
+                Manage,
+                &[Object(K::Environment)],
+                Target::Resolved("environment"),
+            ),
+        ]);
     /// Captures an owner's complete workspace through the same leased snapshot job, even without a thread.
-    EnvironmentFilesExport: POST "/environments/{id}/files/export", Rule("environment.manage"), none, none, json Job, 202;
+    EnvironmentFilesExport: POST "/environments/{id}/files/export", Rule("environment.manage"), none, none, json Job, 202,
+        operation Op::facets(&[
+            Facet::required(
+                Read,
+                &[Object(K::Environment)],
+                Target::Resolved("environment"),
+            ),
+            Facet::required(
+                Manage,
+                &[Object(K::Environment)],
+                Target::Resolved("environment"),
+            ),
+        ]);
     /// Measures selected files and refuses an oversized or slow selection before any snapshot job exists.
-    ThreadSnapshotPreflight: POST "/threads/{id}/snapshots/preflight", Rule("files.manage on the thread's environment"), none, json ThreadSnapshotPreflightBody, json SnapshotPreflight, 200;
+    ThreadSnapshotPreflight: POST "/threads/{id}/snapshots/preflight", Rule("files.manage on the thread's environment"), none, json ThreadSnapshotPreflightBody, json SnapshotPreflight, 200,
+        operation Op::facets(&[
+            Facet::required(
+                Read,
+                &[Object(K::Environment)],
+                Target::Resolved("environment"),
+            ),
+            Facet::required(
+                Manage,
+                &[Object(K::Environment)],
+                Target::Resolved("environment"),
+            ),
+        ]);
     /// Reads one snapshot.
-    SnapshotGet: GET "/snapshots/{id}", Rule("files.view on the environment its thread runs in now"), none, none, json Snapshot, 200;
+    SnapshotGet: GET "/snapshots/{id}", Rule("private export maker, recorded owning environment files.view, or files.view where the thread runs now"), none, none, json Snapshot, 200,
+        operation Op::facets(&[
+            Facet::required(Read, &[Object(K::Environment)], Target::Resolved("snapshot_environment")),
+            Facet::required(Read, &[Object(K::Environment)], Target::Resolved("snapshot_origin_environment")),
+        ]);
     /// Lists a directory of a snapshot.
-    SnapshotFileList: GET "/snapshots/{id}/files", Rule("files.view on the environment its thread runs in now"), query SnapshotPathQuery, none, json DirListing, 200;
+    SnapshotFileList: GET "/snapshots/{id}/files", Rule("private export maker, recorded owning environment files.view, or files.view where the thread runs now"), query SnapshotPathQuery, none, json DirListing, 200,
+        operation Op::single(
+            Read,
+            &[Object(K::Environment)],
+            Target::Resolved("snapshot_environment"),
+        );
     /// Serves the bytes of one file of a snapshot.
-    SnapshotFileContentGet: GET "/snapshots/{id}/files/content", Rule("files.view on the environment its thread runs in now"), query SnapshotPathQuery, none, raw, 200;
+    SnapshotFileContentGet: GET "/snapshots/{id}/files/content", Rule("private export maker, recorded owning environment files.view, or files.view where the thread runs now"), query SnapshotPathQuery, none, raw, 200,
+        operation Op::single(
+            Read,
+            &[Object(K::Environment)],
+            Target::Resolved("snapshot_environment"),
+        );
     /// Serves a snapshot as one stream.
-    SnapshotArchiveGet: GET "/snapshots/{id}/archive", Rule("files.view on the environment its thread runs in now"), query SnapshotArchiveGetQuery, none, raw, 200;
+    SnapshotArchiveGet: GET "/snapshots/{id}/archive", Rule("private export maker, recorded owning environment files.view, or files.view where the thread runs now"), query SnapshotArchiveGetQuery, none, raw, 200,
+        operation Op::single(
+            Read,
+            &[Object(K::Environment)],
+            Target::Resolved("snapshot_environment"),
+        );
     /// Renames a snapshot.
-    SnapshotUpdate: PATCH "/snapshots/{id}", Rule("files.manage on the environment its thread runs in now"), none, json SnapshotUpdateBody, json Snapshot, 200;
+    SnapshotUpdate: PATCH "/snapshots/{id}", Rule("files.manage on the environment its thread runs in now"), none, json SnapshotUpdateBody, json Snapshot, 200,
+        operation Op::returning(
+            Manage,
+            &[Object(K::Environment)],
+            Target::Resolved("snapshot_environment"),
+        );
     /// Deletes a snapshot and unpins its blobs.
-    SnapshotDelete: DELETE "/snapshots/{id}", Rule("files.manage on the environment its thread runs in now"), none, none, none, 204;
+    SnapshotDelete: DELETE "/snapshots/{id}", Rule("files.manage on the environment its thread runs in now"), none, none, none, 204,
+        operation Op::single(
+            Manage,
+            &[Object(K::Environment)],
+            Target::Resolved("snapshot_environment"),
+        );
     /// Reads a job.
-    JobGet: GET "/jobs/{id}", Rule("node.view on the job's thread, any permission on its environment, or provider.manage on its provider; an export's maker, or current access to a measurement's subject"), none, none, json Job, 200;
+    JobGet: GET "/jobs/{id}", Rule("node.view on the job's thread, any permission on its environment, or provider.manage on its provider; an export's maker, or current access to a measurement's subject"), none, none, json Job, 200,
+        operation Op::variants(&[
+            Variant {
+                name: "ordinary",
+                selector: "job uses ordinary subject visibility rather than provider-only management",
+                facets: &[
+                    Facet::required(Read, &[Identity(I::Job)], Target::Path("id")),
+                    Facet::required(
+                        Read,
+                        &[
+                            Object(K::Thread),
+                            Object(K::Document),
+                            Object(K::Environment),
+                            Object(K::Provider),
+                            Object(K::Host),
+                            Object(K::Machine),
+                            Object(K::Mount),
+                            Identity(I::Export),
+                            Identity(I::Import),
+                        ],
+                        Target::Resolved("job_subjects"),
+                    ),
+                ],
+            },
+            Variant {
+                name: "provider",
+                selector: "job uses current provider management for visibility",
+                facets: &[
+                    Facet::required(Read, &[Identity(I::Job)], Target::Path("id")),
+                    Facet::required(
+                        Manage,
+                        &[Object(K::Provider)],
+                        Target::Resolved("job_subjects"),
+                    ),
+                ],
+            },
+        ]);
     /// Cancels a job that has not passed its commit phase; one that has is undone like a failure.
-    JobCancel: POST "/jobs/{id}/cancel", Rule("whoever could have started it"), none, none, json Job, 200;
+    JobCancel: POST "/jobs/{id}/cancel", Rule("whoever could have started it"), none, none, json Job, 200,
+        operation Op::variants(&[
+            Variant {
+                name: "continuation",
+                selector: "stored kind is thread continuation",
+                facets: &[
+                    Facet::required(Manage, &[Identity(I::Job)], Target::Path("id")),
+                    Facet::required(
+                        Write,
+                        &[Object(K::Thread)],
+                        Target::Resolved("job_subjects"),
+                    ),
+                    Facet::response_content(&[Identity(I::Job)], Target::Path("id")),
+                ],
+            },
+            Variant {
+                name: "lifecycle",
+                selector: "stored kind is not thread continuation",
+                facets: &[
+                    Facet::required(Manage, &[Identity(I::Job)], Target::Path("id")),
+                    Facet::required(
+                        Manage,
+                        &[
+                            Object(K::Thread),
+                            Object(K::Document),
+                            Object(K::Environment),
+                            Object(K::Provider),
+                            Object(K::Host),
+                            Object(K::Machine),
+                            Object(K::Mount),
+                            Identity(I::Export),
+                            Identity(I::Import),
+                        ],
+                        Target::Resolved("job_subjects"),
+                    ),
+                    Facet::response_content(&[Identity(I::Job)], Target::Path("id")),
+                ],
+            },
+        ]);
 }
 
 #[cfg(test)]

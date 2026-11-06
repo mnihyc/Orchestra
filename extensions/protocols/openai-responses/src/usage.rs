@@ -48,7 +48,24 @@ const RESPONSE_EVENTS: [&str; 6] = [
 struct ResponseView {
     id: Option<Value>,
     model: Option<Value>,
+    service_tier: Option<Value>,
     usage: Option<Box<RawValue>>,
+    output: Option<Vec<SearchItem>>,
+}
+
+/// Only hosted search actions are counted; message bodies and function arguments are skipped.
+#[derive(Deserialize)]
+struct SearchItem {
+    #[serde(rename = "type")]
+    kind: Option<String>,
+    status: Option<String>,
+    action: Option<SearchAction>,
+}
+
+#[derive(Deserialize)]
+struct SearchAction {
+    #[serde(rename = "type")]
+    kind: Option<String>,
 }
 
 /// An event that carries a response object.
@@ -67,6 +84,7 @@ struct Probe<'a> {
 /// The members of a usage object that matter here.
 #[derive(Deserialize)]
 struct UsageView {
+    server_tool_use: Option<Value>,
     #[serde(alias = "prompt_tokens")]
     input_tokens: Option<Value>,
     #[serde(alias = "completion_tokens")]
@@ -144,8 +162,10 @@ fn tokens(usage: &UsageView) -> Option<TokenUsage> {
 /// What has been learned of the response so far.
 #[derive(Debug, Clone, Default)]
 struct Seen {
+    web_searches: Option<i64>,
     id: Option<String>,
     model: Option<String>,
+    service_tier: Option<String>,
     tokens: Option<TokenUsage>,
     cost: Option<String>,
 }
@@ -153,6 +173,28 @@ struct Seen {
 impl Seen {
     /// Takes in a response object.
     fn take(&mut self, response: ResponseView) {
+        if let Some(output) = response.output {
+            self.web_searches = Some(
+                i64::try_from(
+                    output
+                        .iter()
+                        .filter(|item| {
+                            item.kind.as_deref() == Some("web_search_call")
+                                && item.status.as_deref() == Some("completed")
+                                && item
+                                    .action
+                                    .as_ref()
+                                    .and_then(|action| action.kind.as_deref())
+                                    == Some("search")
+                        })
+                        .count(),
+                )
+                .unwrap_or(i64::MAX),
+            );
+        }
+        if let Some(tier) = text(response.service_tier) {
+            self.service_tier = Some(tier);
+        }
         if let Some(id) = text(response.id) {
             self.id = Some(id);
         }
@@ -163,6 +205,16 @@ impl Seen {
         let Ok(usage) = serde_json::from_str::<UsageView>(raw.get()) else {
             return;
         };
+        if let Some(searches) = usage
+            .server_tool_use
+            .as_ref()
+            .and_then(|usage| usage.get("tool_search"))
+            .and_then(Value::as_i64)
+            .filter(|count| *count >= 0)
+        {
+            // The server's aggregate is authoritative, including an explicit zero.
+            self.web_searches = Some(searches);
+        }
         if let Some(tokens) = tokens(&usage) {
             self.tokens = Some(tokens);
             self.cost = usage
@@ -197,6 +249,8 @@ impl Seen {
     /// What was seen, if it holds figures.
     fn observed(&self) -> Option<ObservedUsage> {
         Some(ObservedUsage {
+            web_searches: self.web_searches,
+            service_tier: self.service_tier.clone(),
             model: self.model.clone(),
             tokens: self.tokens?,
             cost: self.cost.clone(),

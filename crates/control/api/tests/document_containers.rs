@@ -6,6 +6,7 @@ mod desk;
 mod places;
 mod support;
 
+use crate::support::FullPermissionPageReply;
 use desk::{Desk, paragraph};
 use orch_api_contract::access::{
     AccessChoice, HolderInput, PageChange, PageChangeName, PageChangeWhole, PermissionPageGet,
@@ -217,6 +218,7 @@ async fn a_direct_folder_grant_lists_only_its_descendants_and_redacts_unreadable
         })
         .send()
         .await
+        .full_permission_page()
         .ok();
     desk.world
         .app
@@ -235,6 +237,7 @@ async fn a_direct_folder_grant_lists_only_its_descendants_and_redacts_unreadable
         })
         .send()
         .await
+        .full_permission_page()
         .ok();
     let listed = desk
         .world
@@ -330,6 +333,7 @@ async fn a_direct_folder_grant_lists_only_its_descendants_and_redacts_unreadable
         })
         .send()
         .await
+        .full_permission_page()
         .ok();
     let made = desk
         .world
@@ -388,6 +392,7 @@ async fn a_recursive_refusal_and_hidden_collision_leave_every_member_unchanged()
         })
         .send()
         .await
+        .full_permission_page()
         .ok();
     let before: Vec<(Id, Option<chrono::DateTime<chrono::Utc>>)> =
         sqlx::query_as("SELECT id,deleted_at FROM documents WHERE node_id=$1 ORDER BY id")
@@ -802,6 +807,7 @@ async fn recipient_replacement_invalidates_a_preview_even_without_an_epoch_or_co
         })
         .send()
         .await
+        .full_permission_page()
         .ok();
     let mut request = operation(
         DocumentTreeCommand::Delete,

@@ -39,10 +39,10 @@ use std::collections::{HashMap, HashSet};
 pub fn mount(registry: &mut Registry) {
     registry
         .on(OrgTreeGet, org_tree)
-        .on(SharedList, shared)
-        .on(TopicList, topic_list)
-        .on(TopicUpdate, topic_update)
-        .on(NodeTagSet, tag_set);
+        .on_with_optional_operation(SharedList, super::shared_operation::prepare, shared)
+        .on_with_optional_operation(TopicList, super::list_operation::topics, topic_list)
+        .on_with_operation(TopicUpdate, super::metadata_mutation::topic, topic_update)
+        .on_with_operation(NodeTagSet, super::metadata_mutation::tags, tag_set);
 }
 
 fn word<T: DeserializeOwned>(text: &str) -> Option<T> {
@@ -378,14 +378,14 @@ fn gone(row: &hierarchy::TreeRow, kind: NodeKind) -> TreeNode {
 
 /// Stable descending tie order: hierarchy node, document folder, text document.
 #[derive(Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
-enum SharedKind {
+pub(super) enum SharedKind {
     Document,
     Folder,
     Node,
 }
 
 impl SharedKind {
-    fn name(self) -> &'static str {
+    pub(super) fn name(self) -> &'static str {
         match self {
             Self::Node => "node",
             Self::Folder => "document_container",
@@ -396,13 +396,13 @@ impl SharedKind {
 
 /// One scanned identity in the merged creation-time order; no hidden name is retained here.
 #[derive(Clone, Copy)]
-struct SharedCandidate {
-    id: Id,
-    at: chrono::DateTime<chrono::Utc>,
-    kind: SharedKind,
+pub(super) struct SharedCandidate {
+    pub(super) id: Id,
+    pub(super) at: chrono::DateTime<chrono::Utc>,
+    pub(super) kind: SharedKind,
 }
 
-fn shared_cursor(text: &str, user: Id) -> ApiResult<SharedCandidate> {
+pub(super) fn shared_cursor(text: &str, user: Id) -> ApiResult<SharedCandidate> {
     let bad = || invalid("cursor", "is not a cursor of your shared places");
     let parts: Vec<&str> = text.split('|').collect();
     if !matches!(parts.len(), 3 | 4) || parts[0] != user.to_string() {
@@ -435,21 +435,24 @@ fn shared_cursor(text: &str, user: Id) -> ApiResult<SharedCandidate> {
 }
 
 async fn shared(ctx: Ctx, query: PageQuery, (): ()) -> ApiResult<SharedListReply> {
-    let mut conn = ctx.app.db.acquire().await?;
-    let principal = authorization::principal(&ctx, &mut conn).await?;
-    let before = query
-        .cursor
-        .as_deref()
-        .map(|cursor| shared_cursor(cursor, principal.user()))
-        .transpose()?;
-    let limit = query.limit();
+    super::shared_operation::read(ctx, query).await
+}
+
+/// The original two native candidate producers and stable union ordering.
+pub(super) async fn shared_candidates(
+    conn: &mut orch_db::Conn,
+    principal: &orch_authz::Principal,
+    now: chrono::DateTime<chrono::Utc>,
+    before: Option<SharedCandidate>,
+    limit: u32,
+) -> ApiResult<Vec<SharedCandidate>> {
     let boundary = before.map(|last| (last.at, last.id));
     let mut candidates: Vec<_> = hierarchy::named_for(
-        &mut conn,
+        conn,
         principal.user(),
         principal.groups(),
         principal.member_of(),
-        ctx.now,
+        now,
         boundary,
         i64::from(limit) + 1,
     )
@@ -461,17 +464,16 @@ async fn shared(ctx: Ctx, query: PageQuery, (): ()) -> ApiResult<SharedListReply
         kind: SharedKind::Node,
     })
     .collect();
-    let holders =
-        orch_authz::holders::held(&mut conn, principal.user(), orch_types::Time::new(ctx.now))
-            .await
-            .map_err(ApiError::internal)?;
+    let holders = orch_authz::holders::held(conn, principal.user(), orch_types::Time::new(now))
+        .await
+        .map_err(ApiError::internal)?;
     candidates.extend(
         orch_db::queries::shared::documents(
-            &mut conn,
+            conn,
             &orch_db::queries::shared::DocumentQuery {
                 user: principal.user(),
                 held: &holders.held,
-                at: ctx.now,
+                at: now,
                 before: boundary,
                 after_kind: before.map_or("node", |last| last.kind.name()),
                 limit: i64::from(limit) + 1,
@@ -496,27 +498,23 @@ async fn shared(ctx: Ctx, query: PageQuery, (): ()) -> ApiResult<SharedListReply
             .then(other.id.cmp(&one.id))
             .then(other.kind.cmp(&one.kind))
     });
-    let partial = candidates.len() > usize::try_from(limit).unwrap_or(0);
-    candidates.truncate(usize::try_from(limit).unwrap_or(0));
-    let next_cursor = if partial {
-        candidates.last().map(|last| {
-            format!(
-                "{}|{}|{}|{}",
-                principal.user(),
-                last.at.timestamp_micros(),
-                last.kind.name(),
-                last.id
-            )
-        })
-    } else {
-        None
-    };
+    Ok(candidates)
+}
+
+/// The original account visibility, parent suppression and native DTO producers.
+pub(super) async fn shared_items(
+    conn: &mut orch_db::Conn,
+    principal: &orch_authz::Principal,
+    now: chrono::DateTime<chrono::Utc>,
+    candidates: &[SharedCandidate],
+    names: Option<&crate::routes::access::page::NameBounds>,
+) -> ApiResult<Vec<SharedListItem>> {
     let ids: Vec<Id> = candidates
         .iter()
         .filter(|candidate| candidate.kind == SharedKind::Node)
         .map(|candidate| candidate.id)
         .collect();
-    let nodes = view::visible(&mut conn, &principal, &ids, ctx.now, Policy::default()).await?;
+    let nodes = view::visible(conn, principal, &ids, now, Policy::default()).await?;
     let parents: Vec<Id> = nodes
         .iter()
         .filter_map(view::parent_of)
@@ -524,8 +522,8 @@ async fn shared(ctx: Ctx, query: PageQuery, (): ()) -> ApiResult<SharedListReply
         .into_iter()
         .collect();
     let seen_parents: HashSet<Id> = access::holding(
-        &mut conn,
-        &principal,
+        conn,
+        principal,
         &parents,
         PermissionName::OfNode(NodePermission::View),
         Act::Use,
@@ -546,9 +544,9 @@ async fn shared(ctx: Ctx, query: PageQuery, (): ()) -> ApiResult<SharedListReply
         .filter(|candidate| candidate.kind != SharedKind::Node)
         .map(|candidate| candidate.id)
         .collect();
-    let mut documents = shared_documents(&mut conn, &principal, &ids, ctx.now).await?;
+    let mut documents = shared_documents(conn, principal, &ids, now, names).await?;
     let items = candidates
-        .into_iter()
+        .iter()
         .filter_map(|candidate| {
             if candidate.kind == SharedKind::Node {
                 nodes.remove(&candidate.id)
@@ -557,6 +555,33 @@ async fn shared(ctx: Ctx, query: PageQuery, (): ()) -> ApiResult<SharedListReply
             }
         })
         .collect();
+    Ok(items)
+}
+
+/// The unchanged ordinary union window. Scope adapters use the same selectors.
+pub(super) async fn shared_in(
+    conn: &mut orch_db::Conn,
+    principal: &orch_authz::Principal,
+    now: chrono::DateTime<chrono::Utc>,
+    query: &PageQuery,
+) -> ApiResult<SharedListReply> {
+    let before = query
+        .cursor
+        .as_deref()
+        .map(|cursor| shared_cursor(cursor, principal.user()))
+        .transpose()?;
+    let limit = query.limit();
+    let mut candidates = shared_candidates(conn, principal, now, before, limit).await?;
+    let partial = candidates.len() > usize::try_from(limit).unwrap_or(0);
+    candidates.truncate(usize::try_from(limit).unwrap_or(0));
+    let next_cursor = if partial {
+        candidates
+            .last()
+            .map(|last| shared_cursor_text(principal.user(), *last))
+    } else {
+        None
+    };
+    let items = shared_items(conn, principal, now, &candidates, None).await?;
     Ok(SharedListReply {
         partial,
         next_cursor,
@@ -564,12 +589,23 @@ async fn shared(ctx: Ctx, query: PageQuery, (): ()) -> ApiResult<SharedListReply
     })
 }
 
+pub(super) fn shared_cursor_text(user: Id, last: SharedCandidate) -> String {
+    format!(
+        "{}|{}|{}|{}",
+        user,
+        last.at.timestamp_micros(),
+        last.kind.name(),
+        last.id
+    )
+}
+
 /// Project both document-domain kinds through their one native permission frame.
-async fn shared_documents(
+pub(super) async fn shared_documents(
     conn: &mut orch_db::Conn,
     principal: &orch_authz::Principal,
     ids: &[Id],
     now: chrono::DateTime<chrono::Utc>,
+    names: Option<&crate::routes::access::page::NameBounds>,
 ) -> ApiResult<HashMap<(SharedKind, Id), SharedListItem>> {
     use orch_access_contract::permissions::ObjectKind;
     use orch_api_contract::document_tree::{DocumentContainerMark, DocumentContainerRef};
@@ -587,12 +623,21 @@ async fn shared_documents(
         return Ok(HashMap::new());
     }
     let nodes: Vec<_> = readable.iter().map(|listed| listed.document.node).collect();
-    let paths = view::ways(conn, principal, &nodes, Policy::default()).await?;
+    let paths = match names {
+        Some(names) => {
+            view::ways_with_name_sources(conn, principal, &nodes, Policy::default(), &names.nodes)
+                .await?
+        }
+        None => view::ways(conn, principal, &nodes, Policy::default()).await?,
+    };
     let admin_ids: Vec<_> = readable
         .iter()
         .filter_map(|listed| listed.admin_access.and_then(|reach| reach.place.node()))
         .collect();
-    let admin_refs = view::qualified_refs(conn, principal, &admin_ids, Policy::default()).await?;
+    let admin_refs = match names {
+        Some(names) => names.qualified_refs(conn, principal, &admin_ids).await?,
+        None => view::qualified_refs(conn, principal, &admin_ids, Policy::default()).await?,
+    };
     let mut result = HashMap::new();
     let mut text = HashMap::new();
     for listed in readable {
@@ -656,9 +701,30 @@ async fn shared_documents(
         .iter()
         .map(|(row, listed)| (row.id, listed.participating))
         .collect();
-    let references =
-        crate::routes::documents::build::refs(conn, principal, &entries, now, Policy::default())
-            .await?;
+    let references = match names {
+        None => {
+            crate::routes::documents::build::refs(conn, principal, &entries, now, Policy::default())
+                .await?
+        }
+        Some(names) => {
+            let allowed: Vec<_> = names
+                .nodes
+                .iter()
+                .copied()
+                .map(crate::routes::documents::build::WrittenLabelSource::Node)
+                .collect();
+            crate::routes::documents::build::ProjectedDocumentRef::capture_many_allowed(
+                conn,
+                principal,
+                &entries,
+                now,
+                Policy::default(),
+                &allowed,
+            )
+            .await?
+            .0
+        }
+    };
     for document in references {
         let path = paths.get(&document.node.id).cloned().unwrap_or_default();
         result.insert(
@@ -714,6 +780,7 @@ async fn private_topics(
     project: Id,
     query: &TopicListQuery,
     archived: ArchivedMode,
+    scope: Option<&super::projection::Projection<'_>>,
 ) -> ApiResult<Vec<HiddenItem>> {
     let candidates = hierarchy::topics_of(
         conn,
@@ -732,7 +799,10 @@ async fn private_topics(
     )
     .await?;
     let ids: Vec<Id> = candidates.iter().map(|(id, _)| *id).collect();
-    private_rows(conn, principal, &ids).await
+    match scope {
+        Some(scope) => scope.private_rows(conn, &ids).await,
+        None => private_rows(conn, principal, &ids).await,
+    }
 }
 
 /// The minimal rows of the nodes `ids` that the caller administers and may not view, sorted by name
@@ -816,6 +886,17 @@ pub(crate) async fn private_rows(
 }
 
 async fn topic_list(ctx: Ctx, query: TopicListQuery, (): ()) -> ApiResult<Page<Listed<Topic>>> {
+    super::list_operation::read_topics(ctx, query).await
+}
+
+/// The existing native topic filters, ordering and cursor/window producer.
+pub(super) async fn topic_list_in(
+    ctx: &Ctx,
+    query: &TopicListQuery,
+    conn: &mut orch_db::Conn,
+    principal: &orch_authz::Principal,
+    scope: Option<&super::projection::Projection<'_>>,
+) -> ApiResult<super::projection::Window<Topic>> {
     let project = ctx.id("id")?;
     let page = PageQuery {
         limit: query.limit,
@@ -848,13 +929,11 @@ async fn topic_list(ctx: Ctx, query: TopicListQuery, (): ()) -> ApiResult<Page<L
         .as_deref()
         .map(|text| topic_cursor(order, text))
         .transpose()?;
-    let mut conn = ctx.app.db.acquire().await?;
-    let principal = authorization::principal(&ctx, &mut conn).await?;
     let batch = i64::try_from(limit + 1).unwrap_or(i64::MAX);
     let mut items: Vec<(Topic, TopicCursor)> = Vec::new();
     loop {
         let found = hierarchy::topics_of(
-            &mut conn,
+            conn,
             &TopicQuery {
                 project,
                 status,
@@ -876,7 +955,11 @@ async fn topic_list(ctx: Ctx, query: TopicListQuery, (): ()) -> ApiResult<Page<L
         after = Some(last.clone());
         let ids: Vec<Id> = found.iter().map(|(id, _)| *id).collect();
         let cursors: HashMap<Id, TopicCursor> = found.into_iter().collect();
-        for node in view::visible(&mut conn, &principal, &ids, ctx.now, Policy::default()).await? {
+        let nodes = match scope {
+            Some(scope) => scope.visible(conn, &ids).await?,
+            None => view::visible(conn, principal, &ids, ctx.now, Policy::default()).await?,
+        };
+        for node in nodes {
             if let Node::Topic(topic) = node
                 && (!query.participating.unwrap_or(false) || topic.base.access.participating)
                 && let Some(cursor) = cursors.get(&topic.base.id)
@@ -889,33 +972,37 @@ async fn topic_list(ctx: Ctx, query: TopicListQuery, (): ()) -> ApiResult<Page<L
         }
     }
     let more = items.len() > limit;
+    let witness = items.get(limit).map(|(topic, _)| topic.base.id);
     items.truncate(limit);
     // The private topics the caller administers stand once, on the first page, after what they may read.
     let hidden = if query.cursor.is_none() && !query.participating.unwrap_or(false) {
-        private_topics(&mut conn, &principal, project, &query, archived).await?
+        private_topics(conn, principal, project, query, archived, scope).await?
     } else {
         Vec::new()
     };
-    Ok(Page {
-        next_cursor: more
-            .then(|| items.last().map(|(_, cursor)| cursor_text(cursor)))
-            .flatten(),
-        items: items
-            .into_iter()
-            .map(|(topic, _)| Listed::visible(topic))
-            .chain(hidden.into_iter().map(Listed::hidden))
-            .collect(),
+    Ok(super::projection::Window {
+        page: Page {
+            next_cursor: more
+                .then(|| items.last().map(|(_, cursor)| cursor_text(cursor)))
+                .flatten(),
+            items: items
+                .into_iter()
+                .map(|(topic, _)| Listed::visible(topic))
+                .chain(hidden.into_iter().map(Listed::hidden))
+                .collect(),
+        },
+        more: witness,
     })
 }
 
-/// Changes a topic's status or tags.
-async fn topic_update(ctx: Ctx, (): (), body: TopicUpdateBody) -> ApiResult<Topic> {
+pub(super) async fn prepare_topic(
+    ctx: &Ctx,
+    conn: &mut orch_db::Conn,
+    principal: &orch_authz::Principal,
+    body: &TopicUpdateBody,
+) -> ApiResult<super::metadata_mutation::TopicChange> {
     let id = ctx.id("id")?;
-    let (ctx, mut tx, principal) = super::action(&ctx).await?;
-    if !hierarchy::lock(&mut tx, id).await? {
-        return Err(ApiError::not_found());
-    }
-    let (place, kind) = placed(&mut tx, id).await?;
+    let (place, kind) = placed(conn, id).await?;
     if kind != NodeKind::Topic {
         return Err(if kind == NodeKind::Thread {
             threads_are_not_served_here()
@@ -923,7 +1010,7 @@ async fn topic_update(ctx: Ctx, (): (), body: TopicUpdateBody) -> ApiResult<Topi
             ApiError::not_found()
         });
     }
-    let before = match shown(&ctx, &mut tx, &principal, id).await? {
+    let before = match shown(ctx, conn, principal, id).await? {
         Node::Topic(topic) => topic,
         _ => return Err(ApiError::not_found()),
     };
@@ -936,9 +1023,48 @@ async fn topic_update(ctx: Ctx, (): (), body: TopicUpdateBody) -> ApiResult<Topi
         )
         .with("current", &before));
     }
+    if let Some(tags) = &body.tag_ids {
+        check_tags(conn, id, tags).await?;
+    }
+    Ok(super::metadata_mutation::TopicChange { place, before })
+}
+
+pub(super) async fn prepare_tags(
+    ctx: &Ctx,
+    conn: &mut orch_db::Conn,
+    principal: &orch_authz::Principal,
+    body: &NodeTagSetBody,
+) -> ApiResult<super::metadata_mutation::Tags> {
+    let id = ctx.id("id")?;
+    let (place, _) = placed(conn, id).await?;
+    let before = shown(ctx, conn, principal, id).await?;
+    let revision = match &before {
+        Node::Org(row) => row.base.revision,
+        Node::Project(row) => row.base.revision,
+        Node::Topic(row) => row.base.revision,
+        Node::Thread(row) => row.base.revision,
+    };
+    if body
+        .expected_revision
+        .is_some_and(|expected| expected != revision)
+    {
+        return Err(super::stale(&before));
+    }
+    check_tags(conn, id, &body.tag_ids).await?;
+    Ok(super::metadata_mutation::Tags { place, before })
+}
+
+/// Changes a topic's status or tags.
+async fn topic_update(ctx: Ctx, (): (), body: TopicUpdateBody) -> ApiResult<Topic> {
+    let id = ctx.id("id")?;
+    let (ctx, mut tx, _initial) = super::action(&ctx).await?;
+    let (ctx, guard) = super::lock_node_change(&ctx, &mut tx, id).await?;
+    let principal = guard.principal().clone();
+    let prepared = guard.operation_data::<super::metadata_mutation::TopicChange>()?;
+    let super::metadata_mutation::TopicChange { place, before } = prepared.as_ref().clone();
+    guard.check_deadline(&ctx)?;
     let who = actor_name(&ctx)?;
     if let Some(tags) = &body.tag_ids {
-        check_tags(&mut tx, id, tags).await?;
         hierarchy::set_node_tags(&mut tx, id, tags, ctx.now).await?;
         record_topic(
             &ctx,
@@ -982,25 +1108,12 @@ async fn topic_update(ctx: Ctx, (): (), body: TopicUpdateBody) -> ApiResult<Topi
 
 async fn tag_set(ctx: Ctx, (): (), body: NodeTagSetBody) -> ApiResult<Node> {
     let id = ctx.id("id")?;
-    let (ctx, mut tx, principal) = super::action(&ctx).await?;
-    if !hierarchy::lock(&mut tx, id).await? {
-        return Err(ApiError::not_found());
-    }
-    let (place, _) = placed(&mut tx, id).await?;
-    let before = shown(&ctx, &mut tx, &principal, id).await?;
-    let revision = match &before {
-        Node::Org(row) => row.base.revision,
-        Node::Project(row) => row.base.revision,
-        Node::Topic(row) => row.base.revision,
-        Node::Thread(row) => row.base.revision,
-    };
-    if body
-        .expected_revision
-        .is_some_and(|expected| expected != revision)
-    {
-        return Err(super::stale(&before));
-    }
-    check_tags(&mut tx, id, &body.tag_ids).await?;
+    let (ctx, mut tx, _initial) = super::action(&ctx).await?;
+    let (ctx, guard) = super::lock_node_change(&ctx, &mut tx, id).await?;
+    let principal = guard.principal().clone();
+    let prepared = guard.operation_data::<super::metadata_mutation::Tags>()?;
+    let super::metadata_mutation::Tags { place, before } = prepared.as_ref().clone();
+    guard.check_deadline(&ctx)?;
     hierarchy::set_node_tags(&mut tx, id, &body.tag_ids, ctx.now).await?;
     let who = actor_name(&ctx)?;
     record(

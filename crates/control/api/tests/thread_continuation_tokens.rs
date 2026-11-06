@@ -4,6 +4,7 @@ mod continuation_diagnostics;
 mod places;
 mod rig;
 mod support;
+use support::FullTokenReply as _;
 
 use orch_api_contract::{
     auth::{ApiTokenCreateBody, MeTokenCreate, SensitiveProof},
@@ -79,17 +80,19 @@ async fn token(scene: &rig::Scene, thread: Id, scopes: &[&str]) -> Proof<String>
         .call(MeTokenCreate, &[])
         .token(&scene.ada.token)
         .body(&ApiTokenCreateBody {
+            rules: None,
             name: format!("Scoped continuation {}", scopes.len()),
             scopes: Some(scopes.iter().map(|scope| (*scope).to_owned()).collect()),
             node_id: Some(thread),
             expires_at: None,
-            proof: SensitiveProof {
+            proof: Some(SensitiveProof {
                 password: Some(support::PASSWORD.into()),
                 ..Default::default()
-            },
+            }),
         })
         .send()
         .await
+        .full_token()
         .ok()
         .token
         .ok_or_else(|| "new synthetic token has no returned secret".into())
@@ -286,7 +289,10 @@ async fn ordinary_input_and_prompt_edit_require_provider_scope_without_narrowing
         .send()
         .await;
     assert_eq!(accepted.status, http::StatusCode::CREATED);
-    let accepted = accepted.ok();
+    let accepted = accepted
+        .ok()
+        .into_full()
+        .expect("the legacy key retains its full input response");
     assert_eq!(
         accepted.input.state,
         orch_api_contract::threads::InputState::Pending

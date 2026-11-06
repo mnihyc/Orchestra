@@ -31,7 +31,7 @@ const RATE_WINDOW_HOURS: i64 = 1;
 
 #[derive(Clone)]
 pub(super) enum Target {
-    Document(documents::DocumentRow),
+    Document(Box<documents::DocumentRow>),
     Node(hierarchy::NodeRow),
     Chat(chats::ChatRow),
     Resource {
@@ -86,7 +86,11 @@ impl Target {
 pub(super) fn mount(registry: &mut Registry) {
     registry
         .on(PersonNotifyCreate, create)
-        .on(PersonNotifyContextGet, context)
+        .on_with_optional_operation(
+            PersonNotifyContextGet,
+            crate::key_operations::native::stored::<super::subjects::Subjects, _, _>,
+            crate::key_operations::native::stored_read::<super::subjects::Subjects>,
+        )
         .on(
             orch_api_contract::notifications::DocumentNoticeJobList,
             document_jobs,
@@ -98,7 +102,7 @@ pub(super) async fn target(conn: &mut Conn, object: &str, id: Id) -> ApiResult<T
         "documents" => documents::get(conn, id)
             .await?
             .filter(|row| row.deleted_at.is_none())
-            .map(Target::Document)
+            .map(|row| Target::Document(Box::new(row)))
             .ok_or_else(ApiError::not_found),
         "nodes" => hierarchy::with_ancestors(conn, &[id])
             .await?
@@ -616,7 +620,7 @@ pub(crate) async fn tell(
     }
     let mut entry = orch_db::audit::Entry::new(
         orch_db::audit::Actor::User(sender),
-        AuditAction::PersonNotified.as_str(),
+        orch_db::audit::action!(AuditAction::PersonNotified).as_str(),
         target.kind(),
         Some(id),
         "Notified people",
@@ -698,53 +702,44 @@ async fn create(mut ctx: Ctx, (): (), body: PersonNotifyBody) -> ApiResult<()> {
     Ok(())
 }
 
-async fn context(ctx: Ctx, (): (), (): ()) -> ApiResult<PersonNotifyContext> {
-    let id = ctx.id("id")?;
+pub(super) async fn context_for(
+    ctx: &Ctx,
+    conn: &mut Conn,
+    principal: &Principal,
+    target: &Target,
+) -> ApiResult<PersonNotifyContext> {
     let user = ctx.id("user_id")?;
-    let object = ctx.param("object")?;
-    let mut conn = ctx.app.db.acquire().await?;
-    let principal = authorization::principal(&ctx, &mut conn).await?;
-    let target = target(&mut conn, object, id).await?;
-    if !reads(&mut conn, &principal, &target).await? {
-        return Err(ApiError::not_found());
-    }
-    let can_view = person_reads(&mut conn, &target, user, principal.now()).await?;
-    let human = orch_db::queries::identity::user_by_id(&mut conn, user)
+    let can_view = person_reads(conn, target, user, principal.now()).await?;
+    let human = orch_db::queries::identity::user_by_id(conn, user)
         .await?
         .is_some_and(|row| row.kind == "human" && row.status == "active");
     let mut gives = Vec::new();
     let mut visible = false;
     if !matches!(target, Target::Chat(_)) {
-        let named = subject::named(&ctx)?;
-        let may_inspect = match subject::require_page(
-            &mut conn,
-            &principal,
-            named.thing,
-            Policy::default(),
-        )
-        .await
-        {
-            Ok(()) => true,
-            Err(error) if matches!(error.code(), ErrorCode::AuthzDenied | ErrorCode::NotFound) => {
-                false
-            }
-            Err(error) => return Err(error),
-        };
+        let named = subject::named(ctx)?;
+        let may_inspect =
+            match subject::require_page(conn, principal, named.thing, Policy::default()).await {
+                Ok(()) => true,
+                Err(error)
+                    if matches!(error.code(), ErrorCode::AuthzDenied | ErrorCode::NotFound) =>
+                {
+                    false
+                }
+                Err(error) => return Err(error),
+            };
         if may_inspect {
             visible = true;
-            let (_, site) = orch_authz::things::site(&mut conn, named.thing)
+            let (_, site) = orch_authz::things::site(conn, named.thing)
                 .await
                 .map_err(ApiError::internal)?;
-            let policy = subject::policy_of(&mut conn, named.thing, &site).await?;
-            let page = orch_authz::pages::read(&mut conn, &principal, named.thing.target(), policy)
+            let policy = subject::policy_of(conn, named.thing, &site).await?;
+            let page = orch_authz::pages::read(conn, principal, named.thing.target(), policy)
                 .await
                 .map_err(ApiError::internal)?;
             let local = match target.root() {
-                Some(root) => {
-                    !orch_db::queries::access::local_holders_among(&mut conn, root, &[user])
-                        .await?
-                        .is_empty()
-                }
+                Some(root) => !orch_db::queries::access::local_holders_among(conn, root, &[user])
+                    .await?
+                    .is_empty(),
                 None => true,
             };
             if !can_view && human && (page.external || local) {
@@ -760,12 +755,11 @@ async fn context(ctx: Ctx, (): (), (): ()) -> ApiResult<PersonNotifyContext> {
                 }
             }
         }
-    } else if let Target::Chat(row) = &target {
+    } else if let Target::Chat(row) = target {
         (visible, gives) =
-            super::chat_grants::choices(&ctx, &mut conn, &principal, row, user, can_view, human)
-                .await?;
+            super::chat_grants::choices(ctx, conn, principal, row, user, can_view, human).await?;
     }
-    let note_chars = note_chars(&mut conn, &target).await?;
+    let note_chars = note_chars(conn, target).await?;
     Ok(PersonNotifyContext {
         can_view: visible.then_some(can_view),
         // A person's own card never offers to notify themselves.
@@ -773,7 +767,7 @@ async fn context(ctx: Ctx, (): (), (): ()) -> ApiResult<PersonNotifyContext> {
             && can_view
             && principal.user() != user
             && !orch_db::queries::notifications::operations::receivers(
-                &mut conn,
+                conn,
                 &[user],
                 "person.notify",
             )

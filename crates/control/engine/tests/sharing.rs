@@ -31,6 +31,7 @@ fn ask(
     client: &str,
 ) -> ShareWithAgents {
     ShareWithAgents {
+        viewers_read: None,
         read_first: None,
         download: None,
         what,
@@ -102,6 +103,30 @@ async fn share_as(
 
 async fn share_live(world: &common::World, request: &ShareWithAgents) -> Vec<Record> {
     share_as(world, world.ada, request).await.unwrap()
+}
+
+async fn assert_passive(world: &common::World, thread: Id) {
+    let notices: serde_json::Value = world
+        .scalar(
+            "SELECT pending_notices FROM threads WHERE node_id=$1",
+            thread,
+        )
+        .await;
+    assert_eq!(
+        notices,
+        json!([]),
+        "a live gift supplies no agent instruction"
+    );
+    assert_eq!(
+        world
+            .count(
+                "SELECT count(*) FROM thread_inputs WHERE thread_id=$1",
+                thread,
+            )
+            .await,
+        0
+    );
+    assert!(world.turn_starts(thread).is_empty());
 }
 
 /// Cuts every row of a document's page loose, so that its owners alone hold it.
@@ -385,6 +410,7 @@ async fn a_whole_place_shared_with_the_agents_of_another_covers_what_is_made_in_
                 timeline: Some(ShareLevel::Read),
                 chat: Some(ShareLevel::Read),
                 documents: Some(ShareDocumentsLevel::Read),
+                ..ShareParts::default()
             }),
             ShareMode::Live,
             places(&[p.world.topic]),
@@ -515,7 +541,8 @@ async fn asking_again_with_the_same_value_shares_once() {
             p.reader,
         )
         .await;
-    assert_eq!(notices.as_array().unwrap().len(), 1, "{notices}");
+    assert_eq!(notices, json!([]));
+    assert_passive(&p.world, p.reader).await;
     let marker: serde_json::Value = p
         .world
         .scalar(
@@ -594,7 +621,7 @@ async fn changing_and_taking_back_one_documents_share_are_lines_naming_the_docum
 }
 
 #[tokio::test]
-async fn a_place_shared_with_a_thread_is_a_line_in_its_history_and_a_notice_for_its_next_turn() {
+async fn a_place_shared_with_a_thread_adds_passive_history_without_a_next_turn_notice() {
     let p = a_reader_and_a_topic_to_share().await;
     share_live(
         &p.world,
@@ -623,10 +650,8 @@ async fn a_place_shared_with_a_thread_is_a_line_in_its_history_and_a_notice_for_
             p.reader,
         )
         .await;
-    assert!(
-        notices[0]["body"].as_str().unwrap().contains("list_shared"),
-        "{notices}"
-    );
+    assert_eq!(notices, json!([]));
+    assert_passive(&p.world, p.reader).await;
     // The marker reads as a marker of the contract.
     let sync = p.world.sync(p.reader).await;
     assert!(sync.items.iter().any(|item| matches!(
@@ -638,13 +663,16 @@ async fn a_place_shared_with_a_thread_is_a_line_in_its_history_and_a_notice_for_
 }
 
 #[tokio::test]
-async fn somebody_who_may_not_change_the_page_shares_nothing() {
+async fn a_holder_cannot_share_when_the_place_keeps_sharing_with_managers() {
     let p = a_reader_and_a_topic_to_share().await;
     let doc = p
         .world
         .document_beside(p.topic, "Handbook", &["Be kind."])
         .await;
     let bea = p.world.person("bea").await;
+    p.world
+        .set(p.topic, "sharing.allow_holders", json!(false))
+        .await;
     {
         let mut conn = p.world.pool.acquire().await.unwrap();
         access_testing::give_role(
@@ -689,8 +717,7 @@ async fn somebody_who_may_not_change_the_page_shares_nothing() {
 }
 
 #[tokio::test]
-async fn the_agents_of_a_topic_that_has_the_tools_off_cannot_be_shared_with_and_nothing_is_written()
-{
+async fn pure_live_gifts_remain_available_when_tools_are_off() {
     let p = a_reader_and_a_topic_to_share().await;
     let doc = p
         .world
@@ -699,18 +726,21 @@ async fn the_agents_of_a_topic_that_has_the_tools_off_cannot_be_shared_with_and_
     p.world
         .set(p.world.topic, "orch_tools.enabled", json!([]))
         .await;
-    let result = share_as(
-        &p.world,
-        p.world.ada,
-        &ask(
-            document(doc),
-            None,
-            ShareMode::Live,
-            threads(&[p.reader]),
-            "c1",
-        ),
-    )
-    .await;
+    let mut request = ask(
+        document(doc),
+        None,
+        ShareMode::Live,
+        threads(&[p.reader]),
+        "gift",
+    );
+    let gifted = share_as(&p.world, p.world.ada, &request).await.unwrap();
+    assert_eq!(gifted.len(), 1);
+    assert_eq!(gifted[0].parts.documents, Some(ShareDocumentsLevel::Read));
+    assert!(gifted[0].input.is_none());
+    assert_passive(&p.world, p.reader).await;
+    request.client_id = "instruct".into();
+    request.comment = Some("Read the shared material.".into());
+    let result = share_as(&p.world, p.world.ada, &request).await;
     assert!(
         matches!(
             result,
@@ -728,20 +758,30 @@ async fn the_agents_of_a_topic_that_has_the_tools_off_cannot_be_shared_with_and_
             doc,
         )
         .await;
-    assert_eq!(entries, 0);
+    assert_eq!(entries, 2, "only the passive View and Export gift remains");
+    assert_passive(&p.world, p.reader).await;
 }
 
 #[tokio::test]
-async fn a_harness_that_cannot_be_given_the_tools_cannot_be_shared_with() {
+async fn a_harness_without_shared_tools_can_receive_a_passive_live_gift() {
     let world = common::World::new().await;
     let reader = world.thread("Reader").await;
     let topic = world.topic("Docs").await;
-    let result = share_as(
-        &world,
-        world.ada,
-        &ask(node(topic), None, ShareMode::Live, threads(&[reader]), "c1"),
-    )
-    .await;
+    let mut request = ask(
+        node(topic),
+        None,
+        ShareMode::Live,
+        threads(&[reader]),
+        "gift",
+    );
+    let gifted = share_as(&world, world.ada, &request).await.unwrap();
+    assert_eq!(gifted.len(), 1);
+    assert_eq!(gifted[0].parts.timeline, Some(ShareLevel::Read));
+    assert!(gifted[0].input.is_none());
+    assert_passive(&world, reader).await;
+    request.client_id = "instruct".into();
+    request.comment = Some("Read the shared conversation.".into());
+    let result = share_as(&world, world.ada, &request).await;
     assert!(
         matches!(
             result,
@@ -752,6 +792,7 @@ async fn a_harness_that_cannot_be_given_the_tools_cannot_be_shared_with() {
         ),
         "{result:?}"
     );
+    assert_passive(&world, reader).await;
 }
 
 #[tokio::test]
@@ -861,6 +902,7 @@ async fn a_copy_holds_what_the_tree_reads_and_waits_for_the_next_turn() {
                 timeline: Some(ShareLevel::Read),
                 chat: None,
                 documents: Some(ShareDocumentsLevel::Read),
+                ..ShareParts::default()
             }),
             ShareMode::Snapshot,
             threads(&[p.reader]),

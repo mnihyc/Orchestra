@@ -270,6 +270,9 @@ async fn handle(
     request: Request<Incoming>,
 ) -> Response<Body> {
     let path = request.uri().path();
+    if path == orch_link_contract::gateways::PROBE_PATH {
+        return crate::probe::reply(&gateway, &request);
+    }
     if path == SESSION_PATH {
         return upgrade(gateway, kind, &tls, remote, request);
     }

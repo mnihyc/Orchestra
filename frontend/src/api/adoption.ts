@@ -17,7 +17,7 @@ export const harnessSessionsQuery = (providerId: string, agentId: string) =>
 /** What adopting the session into the topic would do: where it would stand, the model, the history it brings. */
 export const adoptionPlanQuery = (topicId: string, body: ThreadAdoptBody) =>
   queryOptions({
-    queryKey: ['adoption-plan', topicId, body.provider_id, body.agent_id, body.native_session_ref] as const,
+    queryKey: ['adoption-plan', topicId, body] as const,
     queryFn: ({ signal }): Promise<AdoptPlan> =>
       ok(api.POST('/topics/{id}/threads/adopt/preview', { params: { path: { id: topicId } }, body, signal })),
     staleTime: 0,

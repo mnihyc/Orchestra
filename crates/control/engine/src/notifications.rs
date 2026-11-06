@@ -503,6 +503,47 @@ pub async fn capability_requested(
     Ok(())
 }
 
+/// The existing notification audience/order, shared by publication and its pure lock prefix.
+async fn tell_targets(
+    conn: &mut Conn,
+    event: &Event,
+    people: &[Id],
+) -> Result<BTreeSet<Id>, EngineError> {
+    let candidates: Vec<Id> = people
+        .iter()
+        .copied()
+        .filter(|user| Some(*user) != event.actor)
+        .collect();
+    let ordered: BTreeSet<Id> = subscribers::people_among(conn, &candidates)
+        .await?
+        .into_iter()
+        .collect();
+    Ok(ordered)
+}
+
+/// Pin only the real not-yet-announced human receivers before a user's first effect.
+/// This selects no permission and sends nothing; the normal writer retains its own checks.
+pub(crate) async fn lock_tell_targets(
+    conn: &mut Conn,
+    event: &Event,
+    people: &[Id],
+) -> Result<(), EngineError> {
+    if NOTIFICATION_OPERATION
+        .try_with(|id| id.is_some())
+        .unwrap_or(false)
+    {
+        return Ok(());
+    }
+    let ordered: Vec<_> = tell_targets(conn, event, people)
+        .await?
+        .into_iter()
+        .collect();
+    let kind = word(event.kind);
+    let key = event.dedupe_key();
+    people::lock_announce_receivers(conn, &ordered, &kind, &key).await?;
+    Ok(())
+}
+
 /// Writes the event to the Inbox of each of these people, and for each row
 /// that was written, to the outbox for each of their routes that tells it at
 /// once. A person whose Inbox has a row for this event already is not told
@@ -513,6 +554,33 @@ pub async fn tell(
     event: &Event,
     people: &[Id],
     place_org: Option<Id>,
+) -> Result<Vec<Id>, EngineError> {
+    tell_with(conn, event, people, place_org, None).await
+}
+
+/// Source decisions share the same notification producer and the transaction's first effect.
+pub(crate) async fn tell_in(
+    unit: &mut Unit<'_>,
+    event: &Event,
+    people: &[Id],
+    place_org: Option<Id>,
+) -> Result<Vec<Id>, EngineError> {
+    tell_with(
+        unit.conn,
+        event,
+        people,
+        place_org,
+        Some(&mut unit.first_effect),
+    )
+    .await
+}
+
+async fn tell_with(
+    conn: &mut Conn,
+    event: &Event,
+    people: &[Id],
+    place_org: Option<Id>,
+    mut boundary: Option<&mut crate::unit::FirstEffect<'_>>,
 ) -> Result<Vec<Id>, EngineError> {
     if NOTIFICATION_OPERATION
         .try_with(|id| id.is_some())
@@ -529,18 +597,10 @@ pub async fn tell(
     // In one order, so that two events that tell the same people at the same
     // moment do not wait for each other's rows. A service identity is told
     // nothing.
-    let candidates: Vec<Id> = people
-        .iter()
-        .copied()
-        .filter(|user| Some(*user) != event.actor)
-        .collect();
-    let ordered: BTreeSet<Id> = subscribers::people_among(conn, &candidates)
-        .await?
-        .into_iter()
-        .collect();
+    let ordered = tell_targets(conn, event, people).await?;
     let mut told = Vec::new();
     for user in ordered {
-        let written = people::announce(
+        let written = people::announce_with(
             conn,
             &NewNotification {
                 user_id: user,
@@ -555,6 +615,10 @@ pub async fn tell(
                 dedupe_key: &key,
                 at: event.at,
             },
+            boundary
+                .as_deref_mut()
+                .filter(|boundary| boundary.pending())
+                .map(|boundary| move || boundary.check()),
         )
         .await?;
         let Some(written) = written else {

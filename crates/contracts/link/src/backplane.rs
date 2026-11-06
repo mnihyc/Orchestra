@@ -94,6 +94,9 @@ pub struct AuthQuery {
 /// The system's answer to an [`AuthQuery`].
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
 pub struct AuthReply {
+    /// The system's gateway catalogue, delivered only after machine authentication.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub gateways: Vec<crate::gateways::GatewayInstance>,
     /// The system's current preference list, delivered after authenticating the machine.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub endpoints: Option<Vec<crate::enrollment::Endpoint>>,

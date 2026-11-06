@@ -140,30 +140,64 @@ async fn a_thread_input_mentions_a_current_reader_even_with_their_bell_off_and_l
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
-async fn provider_exhaustion_tells_managers_and_blocked_thread_followers_once_in_one_episode() {
-    let world = World::new().await;
+async fn provider_quota_notifies_managers_once_without_a_blocked_thread_follower_notice() {
+    use orch_link_contract::commands::{Command, CommandKind};
+
+    let world = World::observed().await;
     let thread = world.thread("A provider limit").await;
     let bob = viewer(&world, "bob").await;
     follow(&world, bob, thread, "important").await;
     world
-        .say_of_provider(orch_link_contract::events::Event::ProviderStatus(
+        .say_of_provider_taken_in(orch_link_contract::events::Event::ProviderStatus(
             orch_link_contract::events::ProviderStatus {
                 status: "exhausted".to_owned(),
                 detail: Some("The plan is used up".to_owned()),
             },
         ))
         .await;
-    world
+    assert_eq!(told_of(&world, world.ada, "provider.exhausted").await, 1);
+    assert_eq!(told_of(&world, bob, "provider.exhausted").await, 0);
+
+    world.access.refuse_bypass(world.ada);
+    let submitted = world
         .engine()
         .submit_input(
             &Caller::session(world.ada),
             thread,
-            queued("Wait for the provider"),
+            queued("Ask the vendor with its current allowance"),
         )
         .await
         .unwrap();
-    world.wait_blocked(thread, "provider_exhausted").await;
-    assert_eq!(told_of(&world, bob, "provider.exhausted").await, 1);
+    assert!(submitted.input.limit_bypass.is_empty());
+    let started = world.turn_start(thread, 0).await;
+    assert_eq!(
+        common::words_after_where(&started.text),
+        "Ask the vendor with its current allowance"
+    );
+    let commands: Vec<_> = [CommandKind::TurnStart, CommandKind::TurnStartFenced]
+        .into_iter()
+        .flat_map(|kind| world.commands.issued_commands(kind.as_str()))
+        .filter(|(_, command)| match command.command().unwrap() {
+            Command::TurnStart(start) => {
+                start.thread_id == thread && start.turn_id == started.turn_id
+            }
+            Command::TurnStartFenced(start) => {
+                start.thread_id == thread && start.turn.turn_id == started.turn_id
+            }
+            _ => false,
+        })
+        .collect();
+    assert_eq!(commands.len(), 1);
+    let (machine, command) = &commands[0];
+    assert_eq!(*machine, world.machine_id);
+    assert_eq!(world.machine.handler.runs_of(command.id), 1);
+    world.say(thread, turn_began(started.turn_id)).await;
+    world.wait_state(thread, "running").await;
+    assert_eq!(
+        told_of(&world, bob, "provider.exhausted").await,
+        0,
+        "a thread follower gets no quota-blocked notice for work that runs normally"
+    );
     assert_eq!(told_of(&world, world.ada, "provider.exhausted").await, 1);
     world
         .say_of_provider_taken_in(orch_link_contract::events::Event::ProviderStatus(
@@ -174,6 +208,14 @@ async fn provider_exhaustion_tells_managers_and_blocked_thread_followers_once_in
         ))
         .await;
     assert_eq!(told_of(&world, world.ada, "provider.exhausted").await, 1);
+    assert_eq!(told_of(&world, bob, "provider.exhausted").await, 0);
+    assert_eq!(world.turn_state(started.turn_id).await, "running");
+    world
+        .say(thread, turn_ended(started.turn_id, TurnOutcome::Completed))
+        .await;
+    world.wait_turn(started.turn_id, "completed").await;
+    assert_eq!(world.turn_starts(thread).len(), 1);
+    world.shutdown().await;
 }
 
 /// What the Inbox of `person` holds of a kind, the oldest first: its title, its first line, whether it was read.

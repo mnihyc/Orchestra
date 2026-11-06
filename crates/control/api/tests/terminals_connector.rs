@@ -174,6 +174,7 @@ impl System {
             notices: Some(notices),
         });
         Ok(EnrollReply {
+            gateways: Vec::new(),
             machine_id: enrolled.machine_id,
             certificate_pem: enrolled.certificate.pem(),
             ca_pem: self.pki.authority().certificate_pem(),

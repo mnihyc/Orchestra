@@ -47,6 +47,48 @@ pub const OPENAI_EMBEDDINGS: &str = "openai-embeddings";
 /// The protocol that makes vectors, by what it does and not by whose format it is.
 pub const EMBEDDINGS: &str = OPENAI_EMBEDDINGS;
 
+/// The parameter field declarations of a wire format. Generic option resolution
+/// consumes these alongside the request allowlists rather than selecting a vendor.
+#[derive(Clone, Copy, Default)]
+pub(crate) struct ParameterFormat {
+    /// Tier field and its explicit ordinary value, when the format reports tiers.
+    pub tier: Option<(&'static str, &'static str)>,
+    /// Neutral native-search option, whose tool mapping is declared by this format.
+    pub web_search: Option<&'static str>,
+    /// Effort field and optional nested member.
+    pub effort: Option<(&'static str, Option<&'static str>)>,
+    /// Program object, member and explicit ordinary value.
+    pub program: Option<(&'static str, &'static str, &'static str)>,
+    /// Reported tier and its pricing alias; the reverse maps a requested cap alias.
+    pub tier_aliases: &'static [(&'static str, &'static str)],
+}
+
+/// Canonical format data, independent of the vendor hosting an endpoint.
+pub(crate) fn parameter_format(protocol: &str) -> ParameterFormat {
+    match protocol {
+        OPENAI_RESPONSES => ParameterFormat {
+            web_search: Some("web_search"),
+            tier: Some(("service_tier", "default")),
+            effort: Some(("reasoning", Some("effort"))),
+            program: Some(("access_programs", "cyber", "standard")),
+            tier_aliases: &[("priority", "fast")],
+        },
+        OPENAI_CHAT => ParameterFormat {
+            tier: Some(("service_tier", "default")),
+            effort: Some(("reasoning_effort", None)),
+            tier_aliases: &[("priority", "fast")],
+            ..Default::default()
+        },
+        ANTHROPIC_MESSAGES => ParameterFormat {
+            web_search: Some("web_search"),
+            tier: Some(("speed", "standard")),
+            effort: Some(("output_config", Some("effort"))),
+            ..Default::default()
+        },
+        _ => ParameterFormat::default(),
+    }
+}
+
 /// The requests that `openai-responses` lets through, below the upstream base.
 pub const OPENAI_RESPONSES_REQUESTS: [(&str, &str); 3] = [
     ("POST", "/responses"),
@@ -363,7 +405,22 @@ mod tests {
         )
         .unwrap();
         assert_eq!(headers["authorization"], "Bearer sk-1");
-        assert_eq!(p.endpoint_options().len(), 5);
+        let fields: Vec<_> = p
+            .endpoint_options()
+            .into_iter()
+            .map(|field| field.name)
+            .collect();
+        assert_eq!(
+            fields,
+            [
+                "auth",
+                "auth_header",
+                "headers",
+                "secret_headers",
+                "query",
+                "params"
+            ]
+        );
     }
 
     #[test]

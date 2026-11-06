@@ -4,10 +4,19 @@
 //! short names of the orgs it lies in, its first owner and its own name, so that nobody mistakes
 //! whose thing it is) and how it stands. Every function here reads for a whole list at once, so
 //! that the statements of a list do not grow with the number of rows.
+//!
+//! An operation reuses the native producer's actual content-source set; reference types do not
+//! invent a second privilege. A Host's own physical Machine/facade is the same governing subject
+//! and remains intrinsic Host content. Qualified distinct sources, such as an Agent's readable
+//! Provider/models or an MCP offering, keep their existing source gates under the consuming
+//! operation. Use stored relationships and canonical subjects, without adding native View gates
+//! or inferring extra authority from a DTO field's type, label or URL.
 
 use crate::middleware::authorization::refusals::user_refs;
 use crate::middleware::requests::{ApiError, ApiResult};
-use crate::routes::access::page::entries_named;
+use crate::routes::access::page::{
+    NameBounds, NameSources, entries_named, entries_named_at_bounded, entry_name_sources,
+};
 use crate::state::AppState;
 use orch_access_contract::decisions::{Held, Through};
 use orch_access_contract::pages as stored;
@@ -115,9 +124,22 @@ pub async fn agent_refs(
     ids: &[Id],
     machines: &[Id],
 ) -> ApiResult<Vec<(Option<Id>, AgentRef)>> {
+    if ids.is_empty() && machines.is_empty() {
+        return Ok(Vec::new());
+    }
     let found = rows::agents_among(conn, ids, machines).await?;
     let wanted: Vec<Id> = found.iter().map(|row| row.id).collect();
     let addresses = addresses(conn, &wanted).await?;
+    agent_refs_with_addresses(app, conn, found, &addresses).await
+}
+
+/// Uses the same address batch as the resources which point at these already-read profiles.
+pub(crate) async fn agent_refs_with_addresses(
+    app: &AppState,
+    conn: &mut Conn,
+    found: Vec<rows::AgentRefRow>,
+    addresses: &HashMap<Id, String>,
+) -> ApiResult<Vec<(Option<Id>, AgentRef)>> {
     let on: Vec<Id> = found.iter().filter_map(|row| row.machine_id).collect();
     let machine_refs = machine_refs(app, conn, &on).await?;
     Ok(found
@@ -152,6 +174,9 @@ pub async fn environment_refs(
     machines: &[Id],
     now: orch_types::Time,
 ) -> ApiResult<Vec<(Option<Id>, EnvironmentRef)>> {
+    if ids.is_empty() && machines.is_empty() {
+        return Ok(Vec::new());
+    }
     let found = rows::environments_among(conn, ids, machines).await?;
     let wanted: Vec<Id> = found.iter().map(|row| row.id).collect();
     let activity = environment_activity(conn, &wanted).await?;
@@ -230,6 +255,36 @@ pub struct Holding<'a> {
     pub held: &'a [Held],
 }
 
+impl<'a> Holding<'a> {
+    /// Borrow the existing native resource decision; no permission is inferred or added.
+    pub(crate) fn from_seen(seen: &'a orch_authz::resources::Seen) -> Self {
+        Self {
+            admin_place: seen.admin_place,
+            admin_only: &seen.admin_only,
+            admin_access: seen.admin_access,
+            participating: seen.participating,
+            id: seen.resource.id,
+            owner: seen.owner,
+            administers: seen.administers,
+            held: &seen.held,
+        }
+    }
+
+    /// Borrow the equivalent native scalar/bulk effective-access result.
+    pub(crate) fn from_effective(effective: &'a orch_authz::resources::Effective) -> Self {
+        Self {
+            admin_place: effective.admin_place,
+            admin_only: &effective.admin_only,
+            admin_access: effective.admin_access,
+            participating: effective.participating,
+            id: effective.object.id,
+            owner: effective.owner,
+            administers: effective.administers,
+            held: &effective.held,
+        }
+    }
+}
+
 /// What the caller holds on each of the resources, with the entries that give it named: the
 /// statements are those of one resource, however many there are.
 pub async fn accesses(
@@ -237,23 +292,36 @@ pub async fn accesses(
     principal: &Principal,
     holdings: &[Holding<'_>],
 ) -> ApiResult<HashMap<Id, ResourceAccess>> {
+    let prepared = prepare_accesses(conn, holdings).await?;
+    accesses_prepared(conn, principal, holdings, &prepared, None).await
+}
+
+/// The existing access projection's stored entries and name identities, before any
+/// foreign names or full Group values are projected. The caller admits those sources.
+#[derive(Clone)]
+pub(crate) struct PreparedAccess {
+    entries: Vec<stored::Entry>,
+    places: Vec<Id>,
+    pub(crate) names: NameSources,
+}
+
+/// Reuse the ordinary access walk once, retaining its actual entries for projection
+/// in the same read snapshot. NameSources contains identities, never permission proof.
+pub(crate) async fn prepare_accesses(
+    conn: &mut Conn,
+    holdings: &[Holding<'_>],
+) -> ApiResult<PreparedAccess> {
     let places: Vec<Id> = holdings
         .iter()
         .flat_map(|holding| {
             holding
                 .admin_place
+                .filter(|_| !holding.admin_only.is_empty())
                 .into_iter()
                 .chain(holding.admin_access.map(|reach| reach.place))
         })
         .filter_map(orch_access_contract::roles::PlaceRef::node)
         .collect();
-    let places = crate::routes::nodes::view::qualified_refs(
-        conn,
-        principal,
-        &places,
-        orch_authz::Policy::default(),
-    )
-    .await?;
     let mut entry_ids: Vec<Id> = holdings
         .iter()
         .flat_map(|holding| holding.held.iter())
@@ -265,15 +333,59 @@ pub async fn accesses(
         .collect();
     entry_ids.sort_unstable();
     entry_ids.dedup();
-    let named: HashMap<Id, Entry> = if entry_ids.is_empty() {
-        HashMap::new()
+    let entries = if entry_ids.is_empty() {
+        Vec::new()
     } else {
         let found = access::entries_by_id(conn, &entry_ids).await?;
-        let entries: Vec<stored::Entry> = found
+        found
             .iter()
             .filter_map(|row| orch_authz::engine::entry_of(row).ok())
-            .collect();
-        entries_named(conn, principal, None, &entries).await?
+            .collect()
+    };
+    let mut names = entry_name_sources(&entries, None);
+    names.nodes.extend(places.iter().copied());
+    Ok(PreparedAccess {
+        entries,
+        places,
+        names,
+    })
+}
+
+/// Render the same access rows with an optional bound on protected name sources.
+/// Full Group sources must already be admitted; no entry or count is redacted away.
+pub(crate) async fn accesses_prepared(
+    conn: &mut Conn,
+    principal: &Principal,
+    holdings: &[Holding<'_>],
+    prepared: &PreparedAccess,
+    bounds: Option<&NameBounds>,
+) -> ApiResult<HashMap<Id, ResourceAccess>> {
+    let places = match bounds {
+        Some(bounds) => {
+            bounds
+                .qualified_refs(conn, principal, &prepared.places)
+                .await?
+        }
+        None => {
+            crate::routes::nodes::view::qualified_refs(
+                conn,
+                principal,
+                &prepared.places,
+                orch_authz::Policy::default(),
+            )
+            .await?
+        }
+    };
+    let named: HashMap<Id, Entry> = if prepared.entries.is_empty() {
+        HashMap::new()
+    } else {
+        match bounds {
+            Some(bounds) => {
+                entries_named_at_bounded(conn, principal, None, None, &prepared.entries, bounds)
+                    .await?
+            }
+            None => entries_named(conn, principal, None, &prepared.entries).await?,
+        }
     };
     Ok(holdings
         .iter()

@@ -6,7 +6,7 @@
 //! the node in the path; storing a read position checks it again inside the
 //! transaction that writes that position.
 
-use super::{one, read_failed};
+use super::{one, read_failed, read_operation};
 use crate::middleware::requests::{ApiError, ApiResult};
 use crate::middleware::transaction_guard;
 use crate::registry::{Ctx, Registry};
@@ -31,12 +31,12 @@ use orch_types::Time;
 /// Binds this module's requests.
 pub fn mount(registry: &mut Registry) {
     registry
-        .on(ThreadSyncGet, sync)
-        .on(ThreadItemList, item_list)
-        .on(ThreadItemGet, item_get)
-        .on_raw(ThreadItemOutputGet, output_get)
-        .on(ThreadOutlineGet, outline)
-        .on(ThreadCatchupGet, catchup)
+        .on_with_operation(ThreadSyncGet, read_operation::prepare, sync)
+        .on_with_operation(ThreadItemList, read_operation::prepare, item_list)
+        .on_with_operation(ThreadItemGet, read_operation::prepare, item_get)
+        .on_raw_read_with_operation(ThreadItemOutputGet, read_operation::prepare, output_get)
+        .on_with_operation(ThreadOutlineGet, read_operation::prepare, outline)
+        .on_with_operation(ThreadCatchupGet, read_operation::prepare, catchup)
         .on(ThreadRead, read);
 }
 
@@ -52,9 +52,10 @@ pub(super) fn limit_of(asked: Option<u32>, default: u32, most: u32) -> ApiResult
 /// A coherent window with its required metadata, or what changed since a sequence.
 pub(super) async fn sync(ctx: Ctx, query: ThreadSyncGetQuery, (): ()) -> ApiResult<ThreadSync> {
     let mut tx = orch_db::queries::feeds::begin_reading(&ctx.app.db).await?;
+    read_operation::require_current(&ctx, &mut tx).await?;
     let reply = sync_in(&ctx, &mut tx, query).await?;
     tx.commit().await.map_err(orch_db::DbError::from)?;
-    crate::middleware::authorization::require_on_path(&ctx, "thread.view").await?;
+    read_operation::before_return(&ctx).await?;
     Ok(reply)
 }
 
@@ -186,6 +187,7 @@ fn around_of(query: &ThreadItemListQuery) -> ApiResult<Around> {
 async fn item_list(ctx: Ctx, query: ThreadItemListQuery, (): ()) -> ApiResult<ThreadItemListReply> {
     let thread = ctx.id("id")?;
     let mut tx = orch_db::queries::feeds::begin_reading(&ctx.app.db).await?;
+    read_operation::require_current(&ctx, &mut tx).await?;
     let projection = continuation_rows::projection(&mut tx, thread, query.continuation_id)
         .await?
         .ok_or_else(ApiError::not_found)?;
@@ -260,7 +262,7 @@ async fn item_list(ctx: Ctx, query: ThreadItemListQuery, (): ()) -> ApiResult<Th
         .await?;
     }
     tx.commit().await.map_err(orch_db::DbError::from)?;
-    crate::middleware::authorization::require_on_path(&ctx, "thread.view").await?;
+    read_operation::before_return(&ctx).await?;
     Ok(ThreadItemListReply {
         projection: Some(page.projection),
         prompt_summaries,
@@ -281,6 +283,7 @@ async fn item_get(
     let thread = ctx.id("id")?;
     let item = ctx.id("item_id")?;
     let mut tx = orch_db::queries::feeds::begin_reading(&ctx.app.db).await?;
+    read_operation::require_current(&ctx, &mut tx).await?;
     let mut found = ctx
         .app
         .engine
@@ -309,7 +312,7 @@ async fn item_get(
         .await?;
     }
     tx.commit().await.map_err(orch_db::DbError::from)?;
-    crate::middleware::authorization::require_on_path(&ctx, "thread.view").await?;
+    read_operation::before_return(&ctx).await?;
     Ok(found)
 }
 
@@ -326,17 +329,24 @@ async fn output_get(ctx: Ctx, query: ThreadItemOutputGetQuery, _: Body) -> ApiRe
     if limit < 1 {
         return Err(ApiError::invalid("limit", "must be at least 1"));
     }
+    let mut tx = orch_db::queries::feeds::begin_reading(&ctx.app.db).await?;
+    read_operation::require_current(&ctx, &mut tx).await?;
+    let row = orch_engine::Engine::command_output_item_in(
+        &mut tx,
+        thread,
+        item,
+        query.continuation_id,
+        query.projection_revision,
+    )
+    .await
+    .map_err(read_failed)?;
+    tx.commit().await.map_err(orch_db::DbError::from)?;
+    // Immutable output I/O keeps its existing producer and happens after releasing the snapshot.
+    // The configured raw registration rechecks this same operation before returning any response.
     let page = ctx
         .app
         .engine
-        .command_output_view(
-            thread,
-            item,
-            offset,
-            limit,
-            query.continuation_id,
-            query.projection_revision,
-        )
+        .command_output_from_item(row, offset, limit)
         .await
         .map_err(read_failed)?;
     let mut response = Response::new(Body::from(page.text));
@@ -519,9 +529,10 @@ pub(super) async fn outline(
     (): (),
 ) -> ApiResult<ThreadOutlinePage> {
     let mut tx = orch_db::queries::feeds::begin_reading(&ctx.app.db).await?;
+    read_operation::require_current(&ctx, &mut tx).await?;
     let page = outline_in(&ctx, &mut tx, query).await?;
     tx.commit().await.map_err(orch_db::DbError::from)?;
-    crate::middleware::authorization::require_on_path(&ctx, "thread.view").await?;
+    read_operation::before_return(&ctx).await?;
     Ok(page)
 }
 
@@ -713,6 +724,7 @@ async fn catchup(ctx: Ctx, query: ThreadCatchupGetQuery, (): ()) -> ApiResult<Ca
     }
     let limit = limit_of(query.limit, ITEMS_DEFAULT_LIMIT, ITEMS_MAX_LIMIT)?;
     let mut conn = orch_db::queries::feeds::begin_reading(&ctx.app.db).await?;
+    read_operation::require_current(&ctx, &mut conn).await?;
     let row = rows::thread(&mut conn, thread)
         .await?
         .ok_or_else(ApiError::not_found)?;
@@ -792,6 +804,6 @@ async fn catchup(ctx: Ctx, query: ThreadCatchupGetQuery, (): ()) -> ApiResult<Ca
         announcements_next_after,
     };
     conn.commit().await.map_err(orch_db::DbError::from)?;
-    crate::middleware::authorization::require_on_path(&ctx, "thread.view").await?;
+    read_operation::before_return(&ctx).await?;
     Ok(reply)
 }

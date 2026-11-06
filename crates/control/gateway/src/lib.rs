@@ -35,6 +35,7 @@ pub mod backplane;
 pub mod content;
 pub mod listeners;
 pub mod liveness;
+mod probe;
 pub mod relay;
 pub mod routing;
 pub mod service_renewal;

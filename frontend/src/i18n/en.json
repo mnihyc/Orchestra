@@ -786,24 +786,36 @@
     },
     "agentStep": {
       "none": {
-        "name": "None",
+        "name": "—",
         "description": "Give no access in this area."
       },
       "view": {
-        "name": "View",
+        "name": "Can view",
         "description": "Let agents read this area."
       },
       "write": {
-        "name": "Write",
+        "name": "Can write",
         "description": "Let agents write messages in this area."
       },
       "edit": {
-        "name": "Edit",
+        "name": "Can edit",
         "description": "Let agents edit documents in this area."
       },
       "manage": {
-        "name": "Manage",
-        "description": "Let agents manage this area, including its access."
+        "name": "Can manage",
+        "description": "Manage documents, moderate chat messages, or archive, fork and delete threads. Permission pages and ownership stay separate."
+      },
+      "post": {
+        "name": "Can post",
+        "description": "Read and post messages in the shared chats."
+      },
+      "send": {
+        "name": "Can send",
+        "description": "Read and send messages to the shared threads."
+      },
+      "read": {
+        "name": "$t(choiceCatalog.agentStep.view.name)",
+        "description": "$t(choiceCatalog.agentStep.view.description)"
       }
     },
     "period": {
@@ -1762,48 +1774,6 @@
         "description": "Apply the selected update when this unit next starts."
       }
     },
-    "broadcastReach": {
-      "topic": {
-        "name": "Topic",
-        "description": "Announce to threads in the current topic."
-      },
-      "project": {
-        "name": "Project",
-        "description": "Announce to threads in the current project where the agent may take part."
-      },
-      "org": {
-        "name": "Organization",
-        "description": "Announce to threads in the nearest organization where the agent may take part."
-      }
-    },
-    "agentReach": {
-      "none": {
-        "name": "None",
-        "description": "Do not offer this reach to agents by this setting."
-      },
-      "topic": {
-        "name": "Topic",
-        "description": "Use the visible work in this topic as the setting allows."
-      },
-      "project": {
-        "name": "Project",
-        "description": "Use the visible work in this project, including its readable folders, as allowed."
-      }
-    },
-    "agentDocumentAccess": {
-      "none": {
-        "name": "None",
-        "description": "Give no automatic document access through this setting."
-      },
-      "read": {
-        "name": "Read",
-        "description": "Let the selected agents read the documents covered by this setting."
-      },
-      "write": {
-        "name": "Write",
-        "description": "Let the selected agents change documents within the permitted reach."
-      }
-    },
     "indexMode": {
       "full": {
         "name": "Indexed",
@@ -2087,7 +2057,7 @@
       },
       "manage_shared": {
         "name": "Manage shared",
-        "description": "Review and confirm a permitted management act on shared work. Ambiguous document names are refused with candidates before anything changes."
+        "description": "Create document folders, copy, move and restore directly. Document deletion and thread/chat management require a preview and confirmation. Ambiguous document names are refused with candidates before anything changes."
       },
       "send_message": {
         "name": "Send message",
@@ -2737,6 +2707,38 @@
         "name": "Off",
         "description": "Use the initial graph breadth without an iterative scan."
       }
+    },
+    "agentReach": {
+      "nothing": {
+        "name": "$t(agentAccess.where.nothing)",
+        "description": "$t(agentAccess.reach.nothing)"
+      },
+      "thread": {
+        "name": "$t(agentAccess.where.thread)",
+        "description": "$t(agentAccess.reach.thread)"
+      },
+      "topic": {
+        "name": "$t(agentAccess.where.topic)",
+        "description": "$t(agentAccess.reach.topic)"
+      },
+      "project": {
+        "name": "$t(agentAccess.where.project)",
+        "description": "$t(agentAccess.reach.project)"
+      }
+    },
+    "webSearch": {
+      "disabled": {
+        "name": "Disabled",
+        "description": "Do not offer the native web search tool."
+      },
+      "cached": {
+        "name": "Cached",
+        "description": "Use indexed content without live web retrieval where supported."
+      },
+      "live": {
+        "name": "Live",
+        "description": "Let the model search the public web when needed."
+      }
     }
   },
   "inventoryChoices": {
@@ -3346,6 +3348,10 @@
       }
     },
     "exec": {
+      "version_overrides": {
+        "title": "Any agent version",
+        "description": "Machine program paths and versions that an environment manager allows with any agent version. A changed path or version needs approval again."
+      },
       "offers": {
         "title": "Exec offers",
         "description": "How an agent running with its provider may run tools in this environment, in the order tried."
@@ -3366,14 +3372,6 @@
       }
     },
     "sharing": {
-      "agent_reach": {
-        "title": "Agents' reach",
-        "description": "Which other threads the agents here may read without anybody sharing them: none, those of their topic, or those of their project."
-      },
-      "agent_documents": {
-        "title": "Topic documents",
-        "description": "Whether agents may read or also edit and create public documents beside their topic and its main threads; private documents, conversations, chats, management and Export keep their own rules."
-      },
       "snapshot_max_bytes": {
         "title": "Largest copy",
         "description": "The largest copy that may be shared with an agent in one request, in bytes."
@@ -3415,10 +3413,6 @@
       "rate_per_hour": {
         "title": "Announcements an hour",
         "description": "How many announcements one thread's agent may send in a rolling hour; 0 allows none."
-      },
-      "agent_scope": {
-        "title": "Announcement reach",
-        "description": "How far an agent's announcement may reach: its topic, its project or its nearest org."
       }
     },
     "export": {
@@ -4222,6 +4216,12 @@
         "title": "Summary input share",
         "description": "How much of the summary model's context window a hand-off, a fork or a goal check may fill with the conversation it sends: the newest turns first, older ones as their one-line index."
       }
+    },
+    "threads": {
+      "agent_access": {
+        "title": "Agent access",
+        "description": "The initial reach and area levels shown when creating a thread. The creator confirms what they may give. Applies to new threads, without rewriting existing grants."
+      }
     }
   },
   "helpScreenReview": {
@@ -4686,8 +4686,8 @@
     "alreadyMore_other": "{{count}} more people already hold some of these permissions.",
     "inside": "This place and what follows it inside",
     "itself": "This thing alone",
-    "download": "Agents may also take files away",
-    "noDownload": "No file download is added",
+    "download": "Export requested",
+    "noDownload": "Export not requested",
     "future": "Includes future threads in the destination",
     "copy_one": "A copy of {{count}} file, {{bytes}} bytes",
     "copy_other": "A copy of {{count}} files, {{bytes}} bytes",
@@ -6490,6 +6490,8 @@
       "noEnvironment": "No environment",
       "noEffort": "No effort",
       "standard": "Standard",
+      "actualTierNotReported": "Actual tier not reported",
+      "knownTier": "Known tier",
       "direct": "Directly in this org",
       "hidden": "A {{kind}} you cannot see",
       "kind": {
@@ -6739,7 +6741,32 @@
     "update": "Update the connector to change roles here.",
     "node": "Node runs through orch-node. Add a connector for other roles."
   },
+  "environmentTools": {
+    "codex": "Codex tools",
+    "unknownProgram": "Agent tools",
+    "anyVersion": "Any agent version",
+    "anyVersionBy": "Any agent version · {{name}}",
+    "approverUnavailable": "Name not available",
+    "configUnavailable": "The environment's current configuration is not available. Refresh the page to try again.",
+    "unknownVersion": "unknown",
+    "versionMismatch": "Codex on {{machine}} is {{programVersion}}; this agent runs {{agentVersion}}. An environment manager can allow it on the environment's page."
+  },
   "machinePrograms": {
+    "nativeTitle": "Agent programs on this machine",
+    "nativeFound": "Found",
+    "nativeConfirmed": "Confirmed",
+    "nativeUse": "Use",
+    "nativeRemove": "Remove",
+    "nativeRefresh": "Refresh programs",
+    "nativeUnknownVersion": "Version unknown",
+    "nativeNotReported": "This machine has not reported agent program discovery.",
+    "nativeNotSearched": "No agent program kinds were searched.",
+    "nativeEmpty": "No agent programs were found.",
+    "nativeRoleNeeded": "Agent programs need the Environment or Agent role.",
+    "nativeKept": "Agent programs are kept in this machine’s local policy.",
+    "nativeCommandNotReported": "This machine has not reported its current harness policy and command.",
+    "nativeRemoveTitle": "Remove {{name}} from confirmed programs?",
+    "nativeRemoveBody": "Executors started from this program stop. Threads are checked again before they run. The program file stays on the machine.",
     "signIns": "Sign-ins: {{methods}}",
     "noSignIn": "None",
     "noModels": "No models listed",
@@ -6763,7 +6790,6 @@
     "remove": "Delete",
     "empty": "No external programs are registered.",
     "needsAttention": "Needs attention",
-    "installedHarnesses": "Installed agent programs",
     "invalidCommand": "Close the quoted path or argument. Commands are run directly, without a shell.",
     "roleNeeded": "Agent and provider programs need those connector roles. Change the roles on Overview, or add a connector.",
     "kept": "Kept on this machine · {{file}}",
@@ -7713,6 +7739,11 @@
     },
     "detailCard": {
       "inspect": "Inspect {{name}}"
+    },
+    "receipt": {
+      "title": "Accepted",
+      "accepted": "The operation was accepted. Existing content was not returned. Read the current state with the required access; do not send the operation again.",
+      "readback": "Read current state"
     }
   },
   "state": {
@@ -8510,6 +8541,7 @@
     "pathJoin": " / ",
     "starred": "Starred",
     "recent": "Recent",
+    "recentShortcuts": "Recent shortcuts",
     "inside": "Inside {{org}}",
     "notKept": "Your choice was not saved",
     "unread": "Unread",
@@ -8635,7 +8667,11 @@
     "arrangement": {
       "label": "Navigation view",
       "tree": "Tree",
-      "recent": "Recent"
+      "recent": "Recent",
+      "resources": {
+        "tree": "Resource tree",
+        "recent": "Recent resources"
+      }
     },
     "recentOrder": {
       "label": "Recent order",
@@ -8651,6 +8687,7 @@
       "earlier": "Earlier"
     },
     "recentAll": "All",
+    "recentAllItems": "All recent items",
     "showInTree": "Show in tree",
     "openEverything": "Open in Everything",
     "noActivity": "No recent activity"
@@ -9723,10 +9760,6 @@
       "cannotShare": "Sharing {{name}} with agents takes holding something here to share.",
       "nothing": "Nothing of {{name}} is shared with agents.",
       "repeat": "Anyone who can talk to one of these agents can ask it to repeat what it reads, and to write or send what it may.",
-      "policy": {
-        "topic": "The agents of this topic can read each other’s threads, by {{place}}’s setting.",
-        "project": "The agents of this project can read each other’s threads, by {{place}}’s setting."
-      },
       "placeAlone": "only {{name}} itself",
       "copy": "A copy · {{date}} · {{state}}",
       "state": {
@@ -9740,21 +9773,22 @@
       "expiresLabel": "Ends on",
       "takeCopyBack": "Take the copy for {{name}} back",
       "stopFor": "Stop sharing with the agents of {{name}}",
-      "notYoursToChange": "Whoever shared this, or whoever could share the same now, changes it.",
+      "notYoursToChange": "The source page’s managers, or the original giver while they may still give this access, can change this contribution.",
       "by": "by {{name}}, {{date}}",
       "area": {
-        "timeline": "Conversations",
+        "timeline": "Threads",
         "chat": "Chats",
         "documents": "Documents"
       },
       "step": {
-        "none": "Not shared",
-        "read": "Read",
-        "write": "Read and write",
-        "edit": "Read and edit",
-        "manage": "Manage"
+        "none": "—",
+        "read": "Can view",
+        "edit": "Can edit",
+        "manage": "Can manage",
+        "post": "Can post",
+        "send": "Can send"
       },
-      "manageNote": "They can also remove documents here and move them. Nothing is destroyed: what they remove can be brought back until it is purged (30 days, as shipped), by them or by you.",
+      "manageNote": "Manage also permits the existing lifecycle or moderation acts in each selected area. Permission pages and ownership stay separate.",
       "makeNote": "They can also make new documents there.",
       "change": {
         "title": "Change what {{who}} may do?",
@@ -9763,7 +9797,7 @@
       },
       "stop": {
         "title": "Stop sharing with {{who}}?",
-        "body": "They find it gone at their next call. What they already read stays read.",
+        "body": "Only this contribution is removed. Other contributions and ordinary grants remain. Information already read is not withdrawn.",
         "confirm": "Stop sharing"
       },
       "takeBack": {
@@ -9829,7 +9863,9 @@
         },
         "namesFailed": "Names cannot be looked up just now. The agents of this place can still be chosen with the button below."
       },
-      "whoIs": "the agents of {{place}}"
+      "whoIs": "the agents of {{place}}",
+      "fork": "Fork",
+      "archive": "Archive"
     },
     "menu": {
       "share": "Share…"
@@ -9927,7 +9963,8 @@
     "newPage": {
       "ownerOnly": "only its owner works with it",
       "machine": "On a person’s machine, only the machine’s owner works with a thread until a default says otherwise.",
-      "forkLabel": "Which page the fork starts with"
+      "forkLabel": "Which page the fork starts with",
+      "audienceSummary": "People: {{summary}}"
     },
     "gallery": {
       "field": "Whom to name",
@@ -10628,7 +10665,7 @@
     },
     "board": {
       "done": "Done",
-      "emptyColumn": "Nothing here",
+      "emptyColumn": "No topics in {{state}}",
       "drag": {
         "instructions": "To move a topic, press Space to pick it up, move it to the Done column or out of it with the arrow keys, and press Space again to drop it. Escape puts it back.",
         "pickedUp": "Picked up {{name}}.",
@@ -11186,7 +11223,6 @@
     "privateThread": "a private thread",
     "nextPost": "Next post allowed: {{time}}",
     "privateReference": "Unavailable reference",
-    "policyUnavailable": "The current document policy is unavailable.",
     "openMaterial": "Open",
     "closeMaterial": "Close",
     "noMaterial": "No material under the current access",
@@ -11255,13 +11291,6 @@
     "templates": "Start from a document",
     "readFirst": "Read first",
     "readFirstHint": "The agent reads this material with its tools. Its text is not inserted as instructions.",
-    "documentsPolicy": "Documents beside this topic",
-    "policyWrite": "Agents here can read, edit and make public documents beside this topic and its main threads.",
-    "policyRead": "Agents here can read public documents beside this topic and its main threads.",
-    "policyNone": "Agents here have no document access from this policy.",
-    "privateExcluded": "Private documents stay private.",
-    "conversationsSeparate": "Other conversations use their own policy. Chats need a share. Managing and Export need their own permission.",
-    "policySetting": "Document policy setting",
     "recentReactions": "Often used",
     "agentChoices": "Agents",
     "blocksCount": "{{count}} blocks",
@@ -12025,7 +12054,9 @@
       "queueReleased": "Nothing held by Stop waits any more",
       "ruleAllowed": "{{by}} allowed an action for this thread",
       "ruleRevoked": "{{by}} took back an action allowed for this thread",
-      "ruleEnded": "An action allowed for this thread ended: what the thread runs on changed"
+      "ruleEnded": "An action allowed for this thread ended: what the thread runs on changed",
+      "agentForkedFrom": "An agent forked this from {{thread}} for {{by}}",
+      "agentForked": "An agent forked this into {{into}} for {{by}}"
     },
     "selection": {
       "label": "Selected items",
@@ -12149,7 +12180,8 @@
       "would": "If you approve it",
       "notGranted": "Approved; not granted",
       "applying": "Applying approved capability",
-      "liveEffect": "This capability becomes available without stopping work when its live application succeeds. If application fails, the grant is not made and the environment may restart to restore its previous permissions; the failure is reported with the decision."
+      "liveEffect": "This capability becomes available without stopping work when its live application succeeds. If application fails, the grant is not made and the environment may restart to restore its previous permissions; the failure is reported with the decision.",
+      "gatewayEffect": "This capability becomes available without stopping anything. Existing processes and all files are kept."
     },
     "scope": {
       "host": "Decided by whoever manages the host",
@@ -14099,11 +14131,9 @@
   },
   "tokens": {
     "lead": "Keys for programs and scripts that act as you.",
-    "about": "A token acts as you, narrowed to what you tick, for as long as you say. Its secret is shown once, when it is made.",
     "new": {
       "button": "New token…",
       "title": "New API token",
-      "lead": "Choose what it may do and for how long.",
       "name": "Name",
       "nameHint": "What it is for, so that you know it again.",
       "password": "Your password",
@@ -15473,6 +15503,18 @@
           "docker_inside": {
             "name": "Docker inside",
             "description": "Let tools run Docker of their own inside the environment."
+          },
+          "port_place": {
+            "name": "$t(capabilityWords.port_place.name)",
+            "description": "$t(capabilityWords.port_place.description)"
+          },
+          "port_host": {
+            "name": "$t(capabilityWords.port_host.name)",
+            "description": "$t(capabilityWords.port_host.description)"
+          },
+          "port_link": {
+            "name": "$t(capabilityWords.port_link.name)",
+            "description": "$t(capabilityWords.port_link.description)"
           }
         }
       },
@@ -15513,6 +15555,18 @@
           "docker_inside": {
             "name": "$t(templates.choices.base_capabilities.*.docker_inside.name)",
             "description": "$t(templates.choices.base_capabilities.*.docker_inside.description)"
+          },
+          "port_place": {
+            "name": "$t(templates.choices.base_capabilities.*.port_place.name)",
+            "description": "$t(templates.choices.base_capabilities.*.port_place.description)"
+          },
+          "port_host": {
+            "name": "$t(templates.choices.base_capabilities.*.port_host.name)",
+            "description": "$t(templates.choices.base_capabilities.*.port_host.description)"
+          },
+          "port_link": {
+            "name": "$t(templates.choices.base_capabilities.*.port_link.name)",
+            "description": "$t(templates.choices.base_capabilities.*.port_link.description)"
           }
         }
       },
@@ -16793,15 +16847,15 @@
       },
       "agents-whose": {
         "title": "Whose agents",
-        "what": "The agents of a place are every agent thread in it, those started later among them. Sharing with one thread’s agent reaches that thread alone."
+        "what": "A place’s agents include its current and future agent threads; sharing with one thread’s agent reaches that thread alone. This is an actual share, which a parent’s creation preset does not rewrite."
       },
       "agents-areas": {
-        "title": "What they know",
-        "what": "Conversations are what the agents did, chats are what people said, and documents are what people wrote. Each is shared apart: not at all, to read, or to read and write."
+        "title": "What they can access",
+        "what": "Choose Documents, Chats and Threads separately. Edit, Post and Send include reading. Manage adds the existing acts for that area; Fork and Archive are independent Advanced rows. Each act is limited by its giver’s current sharing rights."
       },
       "agents-manage": {
         "title": "Can manage",
-        "what": "Agents that manage documents may also remove them, move them and bring them back. Nothing is destroyed: what they remove can be brought back until it is purged."
+        "what": "Documents can be deleted, moved and restored. Creating document folders, copying, moving and restoring execute directly; only document deletion requires a preview and confirmation. Chat Manage deletes anybody’s message. Thread Manage permits archive, unarchive, fork and delete; Fork and Archive can also be given separately. manage_shared first previews every new thread or chat act, then requires its confirmation word. A fork’s first owner is the giver. Agents do not manage places, permission pages or ownership."
       },
       "agents-copy": {
         "title": "A copy",
@@ -16809,12 +16863,12 @@
         "which": "To hand an agent a snapshot to work from: give a copy. To let it read what is written later too: keep it shared."
       },
       "agents-live": {
-        "title": "Keep it shared",
-        "what": "The agents read it through Orch whenever they work, what is written later included, until you end it. Nothing is copied."
+        "title": "A live contribution",
+        "what": "Contributions combine, with each act bounded by its giver’s current sharing rights and the chosen maximum; lost rights can reduce or pause a contribution, and regained rights can restore it while it remains valid. A pure grant sends no instruction and starts no work."
       },
       "agents-download": {
-        "title": "They may download it",
-        "what": "Downloading is taking away: the agents write what they read into their workspace as files. Untick it to let them read and search it and not copy it."
+        "title": "Export",
+        "what": "This choice includes Export where ordinary checks allow it; unticking does not erase information already read or prevent quoting and permitted writes. Document moves still follow their ordinary access and inheritance rules."
       },
       "line-custom": {
         "title": "Custom",
@@ -18276,12 +18330,7 @@
       "empty": "This agent reads nothing but its own thread.",
       "truncated": "This branch has more entries than can be shown. Open a smaller branch.",
       "share": "Share something with this agent…",
-      "copy": "Copy shared by {{name}}",
-      "policy": {
-        "none": "No wider reach is given by policy.",
-        "topic": "The agents of this topic can read each other’s threads.",
-        "project": "The agents of this project can read each other’s threads."
-      }
+      "copy": "Copy shared by {{name}}"
     },
     "given": {
       "title": "Given to the agent",
@@ -18545,7 +18594,7 @@
       "notReported": "Not reported",
       "reviewer": "Reviewer: {{model}}",
       "reviewUseApart": "Review usage is counted separately to this thread.",
-      "reviewUseInside": "Review usage is included in the agent program’s totals.",
+      "reviewUseInside": "Separate review usage is not reported. Totals are reported by the agent program.",
       "subagentsAtOnce": "Sub-agents at once: {{count}}",
       "subagentDepth": "Sub-agent depth: {{count}} (1 allows no nesting)",
       "subagentsUnsupported": "Does not apply: this agent program offers no control for it.",
@@ -23301,6 +23350,30 @@
     "dataUnavailable": "Files unavailable",
     "recoveryCount": "{{number}} to recover"
   },
+  "providerCredits": {
+    "panel": "Provider usage",
+    "metric": "Provider usage metric",
+    "subscription": "Subscription",
+    "credits": "Credits / paid usage",
+    "history": "Reported credit history",
+    "quantities": "Reported amounts",
+    "observationsOnly": "Reported balance, paid usage and spending limits keep their own units. A spending limit is not a credit balance.",
+    "noAmounts": "No numeric amount reported",
+    "overridden": "Manually set",
+    "total": "Total: {{amount}}",
+    "used": "Used: {{amount}}",
+    "limit": "Spending limit: {{amount}}",
+    "previous": "Previous amounts",
+    "next": "Next amounts",
+    "quantity": {
+      "balance": "Credit balance",
+      "remaining": "Remaining",
+      "total": "Total credits",
+      "used": "Used",
+      "paid": "Paid usage",
+      "limit": "Spending limit"
+    }
+  },
   "planUsage": {
     "title": "Plan",
     "mode": "Plan view",
@@ -23554,6 +23627,14 @@
       "owner": "Owner",
       "age": "Age",
       "why": "Kept for"
+    },
+    "grouping": {
+      "host": "By host",
+      "kind": "By kind",
+      "place": "By place",
+      "owner": "By owner",
+      "age": "By age",
+      "why": "By retention reason"
     },
     "whys": {
       "in_use": "In use",
@@ -24165,5 +24246,213 @@
   "threadSetup": {
     "title": "Set up thread",
     "save": "Set up"
+  },
+  "agentAccess": {
+    "title": "Agent access",
+    "change": "Change agent access",
+    "scope": "Access to",
+    "where": {
+      "nothing": "Nothing",
+      "thread": "This thread",
+      "topic": "This topic",
+      "project": "This project"
+    },
+    "reach": {
+      "nothing": "No contribution from you. Other contributions and the agent’s own conversation stay separate.",
+      "thread": "Associated documents and the separate chat only. The agent already has its own conversation; other threads and environment files are separate.",
+      "topic": "The topic’s documents, chats and other threads, within the areas you choose.",
+      "project": "The project’s documents, chats and other threads, within the areas you choose."
+    },
+    "noContribution": "No contribution",
+    "confirm": "Use this choice",
+    "unavailable": "You cannot currently give all of these rights. Choose an available level or Nothing.",
+    "preset": "This is a creation preset. The creator confirms the choice; changing it does not rewrite existing grants.",
+    "giverBound": "Each contribution is bounded by its giver’s current sharing rights. Creation presets apply only when a thread is created; changing them does not rewrite existing contributions.",
+    "checking": "Checking agent access…",
+    "presetReduced": "The preset asks for more than you can give. The available choice is shown below. Preset:",
+    "presetUnavailable": "The creation preset or its giving limits are unavailable. You can choose Nothing and still create a thread.",
+    "forkTitle": "Agent access for the fork of {{name}}",
+    "forkAudience": "The fork copies {{name}}’s current audience under the existing fork rules. Use Fork to… to change human access.",
+    "forkThrough": "History through turn {{turn}}",
+    "levels": {
+      "view": "Read the selected areas.",
+      "edit": "Read and edit documents, or read and post or send messages, in the selected areas.",
+      "manage": "Also manage documents, delete anybody’s chat message, and archive, unarchive, fork or delete threads. Permission pages and ownership stay separate."
+    }
+  },
+  "agentContributions": {
+    "requested": "Requested maximum",
+    "current": "Current contribution",
+    "proposed": "Proposed contribution",
+    "none": "None",
+    "unassessed": "Not assessed for this material and recipient.",
+    "separate": "This describes one contribution’s area rights, not combined access or current Export authority.",
+    "giverUnavailable": "Unavailable giver",
+    "previousToProposed": "Your requested maximum: before → proposed",
+    "viewerChoice": "Also give the thread’s viewers Read",
+    "viewerHint": "Ordinary Read includes current and future thread viewers. It follows normal grant rules separately from the agent’s loan. Unticking does not remove existing Read entries.",
+    "viewerStanding": "Separate viewer Read entries stay in place when this agent contribution is removed.",
+    "viewerEntries": "Separate viewer Read entries",
+    "state": {
+      "active": "Active for this material and recipient",
+      "reduced": "Reduced by current limits",
+      "inactive": "Inactive now",
+      "unassessed": "Assessed per material or recipient"
+    },
+    "reason": {
+      "giver_unavailable": "The giver is unavailable or cannot currently supply a contribution.",
+      "current_limits": "Current giver, entry, source or recipient limits apply.",
+      "per_target": "Rights are assessed for each actual material; this is not an assessment of the whole subtree.",
+      "recipient_context_required": "A concrete recipient thread is needed to assess effective rights.",
+      "source_unavailable": "The source is unavailable for this assessment."
+    },
+    "proposedState": {
+      "active": "Would supply rights for this material and recipient",
+      "reduced": "Would be reduced by current limits",
+      "inactive": "Would currently supply no rights",
+      "unassessed": "Requires assessment per material or recipient"
+    },
+    "remaining": "Other recorded shares on this source remain unchanged:",
+    "recordedFor": "{{giver}} → agents of {{recipient}}"
+  },
+  "operationKeys": {
+    "about": "Each key acts as you within its explicit targets and operations. Its secret is shown once. Your current permissions still apply.",
+    "newLead": "Choose targets, resource kinds and exact operations. No rules means this key can perform no operation.",
+    "rules": "Allowed operations",
+    "addRule": "Add target and operations",
+    "editRule": "Edit target and operations",
+    "keepRule": "Use this rule",
+    "targetKind": "Target kind",
+    "target": "Target",
+    "targetId": "Target ID",
+    "targetIdHint": "Enter the exact identifier of an existing target. This does not grant access to it.",
+    "findTarget": "Find an existing target",
+    "noTargets": "No visible targets found.",
+    "thisAccount": "Use this account",
+    "reachLabel": "Reach",
+    "reach": {
+      "self": "This target only",
+      "subtree": "This target and its hierarchy"
+    },
+    "accountSubtree": "For an account, its hierarchy includes only that account’s API keys and sessions.",
+    "resourceKinds": "Resource kinds",
+    "chooseResources": "Choose the resource kinds this rule may address.",
+    "allResources": "All resource kinds",
+    "noResources": "No resource kinds",
+    "preset": {
+      "read": "Read only",
+      "write": "Write only",
+      "readWrite": "Read and write",
+      "manage": "Read, write and manage"
+    },
+    "action": {
+      "read": "Read",
+      "write": "Write",
+      "manage": "Manage"
+    },
+    "usage": {
+      "required": "Required effect",
+      "response_content": "Optional response content"
+    },
+    "search": "Find an operation",
+    "exactReview": "Selections save these exact operation IDs and actions. Write does not include Read. A compound operation still needs every required target and action; optional response-content Read is separate.",
+    "unavailable": "These saved operation actions are outside the current catalogue or resource filter. They remain selected until you explicitly remove them or choose a preset.",
+    "currentRights": "Every use checks the key’s account permissions and all required targets. These requested limits grant no additional permissions.",
+    "legacy": "Legacy permission-scope key. Its original permission scopes and place restriction remain in force.",
+    "denyAll": "No operations are allowed. This creates a key that denies all operations.",
+    "denyAllShort": "No operations",
+    "ruleCount_one": "{{count}} target rule",
+    "ruleCount_other": "{{count}} target rules",
+    "boundTargets": "Targets listed in scope review",
+    "review": "Review scope",
+    "reviewTitle": "Scope of {{name}}",
+    "ceilings": "Inherited issuance ceilings",
+    "ceilingsHint": "Every ceiling below also applies. These server-retained limits do not add permissions.",
+    "placeLimits": "Retained place limits",
+    "refused": "Excluded place",
+    "maxDays_one": "At most {{count}} day",
+    "maxDays_other": "At most {{count}} days",
+    "kind": {
+      "org": "Org",
+      "project": "Project",
+      "topic": "Topic",
+      "thread": "Thread",
+      "document": "Document",
+      "document_container": "Document folder",
+      "provider": "Provider",
+      "agent": "Agent",
+      "environment": "Environment",
+      "host": "Host",
+      "machine": "Machine",
+      "template": "Template",
+      "mcp_server": "MCP server",
+      "mount": "Mount",
+      "skill": "Skill",
+      "chat": "Chat",
+      "group": "Group",
+      "account": "Account",
+      "key": "API key",
+      "session": "Session",
+      "job": "Job",
+      "export": "Export",
+      "import": "Import",
+      "upload": "Upload",
+      "invitation": "Invitation",
+      "approval": "Approval",
+      "schedule": "Schedule",
+      "notification": "Notification",
+      "system": "System-level operations"
+    },
+    "byId": "Use an exact ID without reading its name",
+    "removeUnavailable": "Remove these selections",
+    "removeUnavailableFor": "Remove unavailable selections for {{operation}}",
+    "activity": {
+      "title": "Recent activity",
+      "view": "Key details",
+      "forKey": "Recent activity of {{name}}",
+      "retention": "At most the latest 100 calls from the past 7 days. Names and IP addresses follow your current access.",
+      "refresh": "Refresh activity",
+      "operation": "Operation",
+      "time": "Time",
+      "outcome": "Outcome",
+      "status": "Status {{status}}",
+      "replayed": "Replayed",
+      "durationLabel": "Duration",
+      "duration": "{{duration}} ms",
+      "details": "Call details",
+      "requestId": "Request ID",
+      "ip": "IP address",
+      "undisclosedName": "Name not disclosed",
+      "undisclosedIp": "Not disclosed",
+      "none": "No recent calls",
+      "page": "Page {{page}}"
+    },
+    "editRuleButton": "Edit rule",
+    "removeRule": "Remove rule"
+  },
+  "providerOptions": {
+    "title": "Request options",
+    "fixedByProvider": "Fixed by the provider",
+    "fixedValue": "Fixed value",
+    "unavailable": "This option cannot be changed here",
+    "schemaTitle": "Allowed request options",
+    "schemaHelp": "Set a JSON Schema for each protocol, or native for declared agent parameters. Use enum for allowed values, const for a fixed value, and default for an overridable starting value. Additional properties remain allowed unless explicitly closed.",
+    "invalidSchema": "Enter an object of protocol names and JSON Schema objects."
+  },
+  "webSearch": {
+    "title": "Web search",
+    "managerHint": "Enable native search only for models your endpoint or harness supports. Offering a mode does not enable it.",
+    "perUseHint": "Search the public web using modes enabled by the provider. Search fees may be additional to tokens.",
+    "offered": "Offered by {{source}}; enabled only by a provider manager.",
+    "declared": "The protocol supports this mode. Confirm that this model supports it before enabling it.",
+    "defaultHint": "New uses start here; each use may choose another allowed mode. A default is not a lock.",
+    "price": "Credits per web search",
+    "priceNamed": "{{price}} credits per web search",
+    "enabledModes": "Web search: {{modes}}",
+    "modeNamed": "Web search ({{mode}})",
+    "guide": "How provider web search works",
+    "count": "Web searches",
+    "unknown": "Unknown",
+    "optionsHint": "Configure domain filters, location and search limits in the endpoint request defaults. The guide lists the fields each protocol supports."
   }
 }

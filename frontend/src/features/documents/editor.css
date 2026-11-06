@@ -358,7 +358,7 @@ pre.oc,
 }
 .oc-code .oc-code-copy:hover,
 .oc-code .oc-code-copy:focus-visible {
-  border-color: var(--border-strong);
+  border-color: var(--control-border);
   background: var(--bg);
   color: var(--text);
 }

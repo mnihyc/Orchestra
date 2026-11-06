@@ -1,7 +1,7 @@
 //! The state behind an environment's feed: the environment as the caller sees it, and the jobs that make it or change it.
 //!
 //! A client that lost its place on the feed of an environment asks here for what it needs to be
-//! whole again: the environment itself, always, and the jobs about it that are under way, or from
+//! whole again: the environment itself, always, its permitted Library facts, and the jobs about it that are under way, or from
 //! a number on, those that were stamped on the feed after it, whatever became of them since. It is
 //! read by whoever may read the environment (`GET /environments/{id}`: a permission on it, or a
 //! thread there that the caller may view) and is the same environment, with the same cut for a
@@ -34,7 +34,7 @@ pub const JOBS_MAX: i64 = 200;
 
 /// What the feed of an environment consists of, in the order it is put together. Each member is
 /// named as the reply names it.
-pub const MEMBERS: &[&dyn Member] = &[&TheEnvironment, &TheJobs];
+pub const MEMBERS: &[&dyn Member] = &[&TheEnvironment, &TheLibrary, &TheJobs];
 
 /// Binds this module's requests.
 pub(super) fn mount(registry: &mut Registry) {
@@ -61,6 +61,50 @@ impl Member for TheEnvironment {
         .await?;
         Ok(Piece::whole(
             serde_json::to_value(&environment).map_err(ApiError::internal)?,
+        ))
+    }
+}
+
+/// The Library's own View and privacy checks apply even when another door allows this feed.
+struct TheLibrary;
+
+#[async_trait]
+impl Member for TheLibrary {
+    fn name(&self) -> &'static str {
+        "library"
+    }
+
+    async fn read(&self, reading: &mut Reading<'_>) -> ApiResult<Piece> {
+        use orch_access_contract::{decisions::ObjectRef, permissions::ObjectKind};
+        use orch_api_contract::resource_facts::FactSubject;
+        use orch_engine::resource_facts::{self, library::RecordedUses};
+        let object = ObjectRef {
+            kind: ObjectKind::Environment,
+            id: reading.subject,
+        };
+        let readable =
+            crate::routes::resources::library::readable(reading.conn, reading.principal, &[object])
+                .await?;
+        if !readable.contains(&object) {
+            return Ok(Piece::whole(serde_json::Value::Null));
+        }
+        let raw = resource_facts::read_with(
+            reading.conn,
+            &[FactSubject::Resource { object }],
+            orch_types::Time::new(reading.ctx.now),
+            Some(&RecordedUses),
+        )
+        .await
+        .map_err(ApiError::internal)?;
+        let facts =
+            crate::routes::everything::library::project(reading.conn, reading.principal, raw)
+                .await?
+                .pop()
+                .ok_or_else(|| {
+                    ApiError::internal("the environment's Library facts were not read")
+                })?;
+        Ok(Piece::whole(
+            serde_json::to_value(facts).map_err(ApiError::internal)?,
         ))
     }
 }

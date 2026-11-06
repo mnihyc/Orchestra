@@ -8,6 +8,11 @@ rust-version.workspace = true
 repository.workspace = true
 publish.workspace = true
 
+[features]
+default = []
+# Explicit test-command instrumentation; absent from normal/release builds.
+test-observers = []
+
 [dependencies]
 async-trait.workspace = true
 base64.workspace = true

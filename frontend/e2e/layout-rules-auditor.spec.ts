@@ -1,7 +1,7 @@
 /** Negative controls prove the rules fail for the owner's classes rather than merely taking screenshots. */
 import { expect, test } from '@playwright/test';
 import { inspectLayout, trackLayoutPointer, type LayoutInput } from './layout-rules-dom.ts';
-import { auditHighlightedOptions, auditHoverIcons, auditPage, duplicateAccessibleNames, pressLayoutKey } from './layout-rules-helpers.ts';
+import { auditHighlightedOptions, auditHoverIcons, auditOpenMenus, auditPage, duplicateAccessibleNames, pressLayoutKey } from './layout-rules-helpers.ts';
 
 const input: LayoutInput = { duplicateAllowList: [], rawValues: ['mock-large', 'on_request'] };
 
@@ -598,4 +598,76 @@ for (const mode of ['complete', 'unowned hint', 'stolen focus'] as const) test(`
   const faults = (await auditPage(page)).faults.filter((fault) => fault.rule === 'cut-text');
   expect(faults.map((fault) => fault.text)).toEqual(mode === 'complete' ? [] : [value]);
   if (mode === 'complete') await expect(page.locator('#owner')).toBeFocused();
+});
+
+
+test('context-menu audits open a tab menu by keyboard without selecting the tab', async ({ page }) => {
+  await page.setContent('<style>body{background:white;color:black}</style><div role="tablist"><button id="tab" role="tab" aria-selected="true" aria-controls="panel" aria-haspopup="menu">Review</button></div><main id="panel" role="tabpanel" aria-labelledby="tab">Current work</main>');
+  await page.locator('#tab').evaluate((tab) => {
+    tab.setAttribute('data-selections', '0');
+    tab.addEventListener('click', () => { tab.setAttribute('data-selections', String(Number(tab.getAttribute('data-selections')) + 1)); });
+    tab.addEventListener('keydown', (event) => {
+      if (!(event instanceof KeyboardEvent) || !event.isTrusted || !event.shiftKey || event.key !== 'F10') return;
+      event.preventDefault();
+      const menu = document.createElement('div');
+      menu.setAttribute('role', 'menu');
+      menu.setAttribute('aria-label', 'Review actions');
+      menu.innerHTML = '<button role="menuitem">Inspect details</button>';
+      document.body.append(menu);
+      menu.querySelector('button')?.focus();
+    });
+    document.addEventListener('keydown', (event) => {
+      if (event.key !== 'Escape') return;
+      document.querySelector('[role="menu"]')?.remove();
+      tab.focus();
+    });
+  });
+  expect(await auditOpenMenus(page, ['#tab'])).toEqual([]);
+  await expect(page.locator('#tab')).toHaveAttribute('data-selections', '0');
+  await expect(page.getByRole('menu')).toHaveCount(0);
+  await expect(page.locator('#tab')).toBeFocused();
+});
+
+
+test('wrapping filter actions use the control line and keep their own icon centred', async ({ page }) => {
+  await page.setContent('<style>body{margin:0;font:14px/20px Arial}.row{display:flex;flex-wrap:wrap;align-items:flex-end;gap:12px}.field{display:flex;flex-direction:column;gap:4px;width:180px}.value{display:flex;align-items:center;justify-content:center;width:180px;height:28px;line-height:28px}.icon{display:flex;align-items:center;justify-content:center;flex:none;width:28px;height:28px}button{border:0;padding:0;background:transparent;color:black}svg{display:block;width:16px;height:16px}</style><div class="row"><div class="field"><label for="scope">Scope</label><button id="scope" class="value"><span>My storage</span></button></div><button class="icon" aria-label="Refresh"><svg></svg></button></div>');
+  for (const width of [260, 180]) {
+    await page.locator('.row').evaluate((row, size) => { row.style.width = `${size}px`; }, width);
+    const sameLine = await page.locator('.icon').evaluate((button) => (button as HTMLElement).offsetTop === document.querySelector<HTMLElement>('#scope')!.offsetTop);
+    expect(sameLine).toBe(width === 260);
+    expect((await page.evaluate(inspectLayout, { ...input, mode: 'icons' as const })).faults).toEqual([]);
+    await page.locator('.icon svg').evaluate((icon) => { icon.style.transform = 'translateY(1px)'; });
+    expect((await page.evaluate(inspectLayout, { ...input, mode: 'icons' as const })).faults.map((fault) => fault.text)).toEqual(['Refresh']);
+    await page.locator('.icon svg').evaluate((icon) => { icon.style.transform = ''; });
+  }
+});
+
+test('a wrapped header action does not borrow the previous action line or an outer heading', async ({ page }) => {
+  await page.setContent('<style>body{margin:0;font:14px/28px Arial}.outer{display:flex;flex-wrap:wrap;align-items:center}.row{display:flex;flex-wrap:wrap;align-items:center;gap:4px;width:180px}button{border:0;padding:0;background:transparent;color:black;height:28px;display:flex;align-items:center;justify-content:center}.caption{width:180px;flex:none}.icon{width:28px;flex:none}svg{display:block;width:16px;height:16px}</style><header class="outer"><h2>Current conversation</h2><div class="row"><button class="caption"><span>Thread · Off</span></button><button class="icon" aria-label="Conversation actions"><svg></svg></button></div></header>');
+  expect(await page.locator('.icon').evaluate((button) => (button as HTMLElement).offsetTop > document.querySelector<HTMLElement>('.caption')!.offsetTop)).toBe(true);
+  expect((await page.evaluate(inspectLayout, { ...input, mode: 'icons' as const })).faults).toEqual([]);
+  await page.locator('.icon svg').evaluate((icon) => { icon.style.transform = 'translateY(1px)'; });
+  expect((await page.evaluate(inspectLayout, { ...input, mode: 'icons' as const })).faults.map((fault) => fault.text)).toEqual(['Conversation actions']);
+});
+
+test('a wrapping row retains its first heading line and cannot hide displaced buttons', async ({ page }) => {
+  await page.setContent('<style>body{margin:0}.row{display:flex;flex-wrap:wrap;align-items:flex-start;gap:8px;width:200px}.words{font:16px/24px Arial;width:130px}button{position:relative;border:0;padding:0;background:transparent;width:28px;height:28px;display:flex;align-items:center;justify-content:center;flex:none}svg{display:block;width:16px;height:16px}</style><div class="row"><span class="words">First heading line and another line</span><button aria-label="Heading actions"><svg></svg></button></div>');
+  const origin = await page.locator('.row').evaluate((row) => {
+    const text = row.querySelector('.words')?.firstChild, icon = row.querySelector('svg');
+    if (text === undefined || text === null || icon === null) throw new Error('Missing first-line fixture.');
+    const range = document.createRange(); range.selectNodeContents(text);
+    const line = range.getClientRects()[0], box = icon.getBoundingClientRect();
+    if (line === undefined) throw new Error('Missing first heading line.');
+    return line.top + line.height / 2 - box.top - box.height / 2;
+  });
+  await page.locator('button').evaluate((button, offset) => { button.style.transform = `translateY(${offset + 0.5}px)`; }, origin);
+  expect((await page.evaluate(inspectLayout, { ...input, mode: 'icons' as const })).faults).toEqual([]);
+  for (const displacement of ['one pixel', 'transform', 'margin', 'relative position']) {
+    await page.locator('button').evaluate((button, setup) => {
+      button.style.transform = setup.kind === 'one pixel' ? `translateY(${setup.origin + 1}px)` : setup.kind === 'transform' ? 'translateY(120px)' : '';
+      button.style.marginTop = setup.kind === 'margin' ? '120px' : '';
+      button.style.top = setup.kind === 'relative position' ? '120px' : '';
+    }, { kind: displacement, origin });
+    expect((await page.evaluate(inspectLayout, { ...input, mode: 'icons' as const })).faults.map((fault) => fault.text)).toEqual(['Heading actions']);
+  }
 });

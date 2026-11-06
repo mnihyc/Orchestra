@@ -15,7 +15,7 @@ export function ArrangementSwitch({ value, onChange, wide = false }: { value: Na
     {ARRANGEMENTS.map((choice) => {
       const icon = choice === 'tree' ? <ListTree aria-hidden /> : <History aria-hidden />;
       const selected = choice === value;
-      return wide ? <Button key={choice} size="sm" variant="ghost" icon={icon} aria-pressed={selected} className={selected ? 'bg-surface shadow-sm' : undefined} onClick={() => onChange(choice)}>{t(`navigation.arrangement.${choice}`)}</Button>
+      return wide ? <Button key={choice} size="sm" variant="ghost" icon={icon} aria-pressed={selected} className={selected ? 'bg-surface shadow-sm' : undefined} onClick={() => onChange(choice)}>{t(`navigation.arrangement.resources.${choice}`)}</Button>
         : <IconButton key={choice} size="sm" label={t(`navigation.arrangement.${choice}`)} icon={icon} pressed={selected} className={selected ? 'bg-surface shadow-sm' : undefined} onClick={() => onChange(choice)} />;
     })}
   </span>{wide && <Hint id="navigation-arrangements" popover />}</span>;

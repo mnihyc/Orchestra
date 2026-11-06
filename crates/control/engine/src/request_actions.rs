@@ -116,13 +116,38 @@ impl Engine {
     /// Accepts returning or declaring a credential lost before changing its holder or sending commands.
     pub async fn return_credential_in(
         &self,
-        tx: Tx,
+        mut tx: Tx,
         principal: &Principal,
         origin: &Origin,
         provider: Id,
         interrupt: bool,
         declare_lost: bool,
     ) -> Result<(), ReturnError> {
+        // Classified/key callers cannot drop their operation by choosing the compatibility facade.
+        if principal.caller().grant().is_some() || principal.caller().admitted_operation().is_some()
+        {
+            let authority = crate::credentials::handover_authority::HandoverAuthority::capture(
+                &mut tx,
+                principal.caller(),
+                provider,
+                interrupt,
+                declare_lost,
+                principal.now(),
+            )
+            .await?;
+            return self
+                .return_credential_operation_in(
+                    tx,
+                    principal,
+                    origin,
+                    provider,
+                    interrupt,
+                    declare_lost,
+                    authority,
+                )
+                .await
+                .map(|_| ());
+        }
         provider_decision(
             tx,
             principal,
@@ -144,6 +169,55 @@ impl Engine {
             )
             .await
         }
+    }
+
+    /// The same return writer with its exact accepted operation and custody source retained.
+    #[expect(
+        clippy::too_many_arguments,
+        reason = "preserve the existing request facade and attach its captured operation"
+    )]
+    pub async fn return_credential_operation_in(
+        &self,
+        mut tx: Tx,
+        principal: &Principal,
+        origin: &Origin,
+        provider: Id,
+        interrupt: bool,
+        declare_lost: bool,
+        authority: crate::credentials::handover_authority::HandoverAuthority,
+    ) -> Result<i64, ReturnError> {
+        if !authority.matches(provider, principal.caller(), interrupt, declare_lost) {
+            return Err(crate::credentials::handover_authority::refused());
+        }
+        authority.require(&mut tx, principal.now()).await?;
+        provider_decision(
+            tx,
+            principal,
+            origin,
+            provider,
+            "bring the credential home on",
+        )
+        .await?;
+        let revision = if declare_lost {
+            self.declare_credential_lost_with_authority(
+                provider,
+                principal.user(),
+                Some(&authority),
+            )
+            .await
+        } else {
+            self.return_credential_with_authority(
+                provider,
+                ReturnWhy::Person {
+                    by: principal.user(),
+                    interrupt,
+                },
+                Some(&authority),
+            )
+            .await
+        }?;
+        // Actual terminal state, never a pre-return snapshot or guessed increment.
+        revision.ok_or(ReturnError::NotHeld)
     }
 
     /// Accepts a runtime start in the caller's transaction before queuing the job that starts it.
@@ -176,13 +250,20 @@ impl Engine {
     /// Accepts cancellation in the caller's transaction before forgetting pending values or telling its harness.
     pub async fn cancel_sign_in_in(
         &self,
-        tx: Tx,
+        mut tx: Tx,
         principal: &Principal,
         origin: &Origin,
         provider: Id,
     ) -> Result<Asked, EngineError> {
+        let plan = crate::provider_setup::login_operation(&mut tx, provider, "ProviderLoginCancel")
+            .await?;
+        let caller = plan
+            .admit(principal.caller(), false)
+            .map_err(EngineError::unreadable)?;
+        let accepted =
+            orch_authz::CapturedOperation::capture(&caller).map_err(EngineError::unreadable)?;
         provider_decision(tx, principal, origin, provider, "cancel the sign-in on").await?;
-        self.cancel_sign_in(provider).await
+        self.cancel_sign_in_authorized(provider, accepted).await
     }
 
     /// Accepts a refresh in the caller's guarded transaction, then asks the machine after commit.

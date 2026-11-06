@@ -42,7 +42,7 @@ test('many readable teams keep personal fallback without setup guidance and canc
   await expect(page).toHaveURL(/\/org\/ada$/);
   const first = page.getByTestId('first-steps');
   await expect(first).toHaveCount(0);
-  const create = page.getByTestId('main').getByRole('button', { name: 'New project', exact: true });
+  const create = page.getByRole('main').getByRole('button', { name: 'New project', exact: true });
   await create.focus();
   await page.keyboard.press('Enter');
   await expect(page.getByRole('dialog', { name: 'New project in Ada Lovelace' })).toBeVisible();
@@ -58,7 +58,7 @@ test('a readable saved department remains the landing place without changing the
   await control('/landing', { org: ACME.research });
   await control('/choice', { org: ACME.research, mode: 'team' });
   await signIn(page);
-  await expect(page).toHaveURL(/\/org\/acme\.research$/);
+  await expect(page).toHaveURL((url) => url.pathname === '/org/acme.research');
   await expect(page.getByRole('heading', { name: 'Research', exact: true })).toBeVisible();
   await expect(page.getByTestId('first-steps')).toHaveCount(0);
   expect(reads).toEqual([]);
@@ -142,7 +142,8 @@ test('a new team is created in the existing form before its first provider or in
   await page.goto('/org/ada');
   await expect(page.getByTestId('first-steps')).toHaveCount(0);
   await page.locator('[data-screen-titlebar]:visible').getByRole('switch', { name: 'As admin: Off', exact: true }).click();
-  await page.getByRole('button', { name: 'New org…', exact: true }).click();
+  await page.getByRole('button', { name: 'New org or join one', exact: true }).click();
+  await page.getByRole('menuitem', { name: 'New org…', exact: true }).click();
   const dialog = page.getByRole('dialog');
   await dialog.getByRole('textbox', { name: 'Name', exact: true }).fill('First steps team');
   await dialog.getByRole('textbox', { name: 'Short name', exact: true }).fill('first-steps-team');
@@ -240,7 +241,7 @@ test(`the compact card works by keyboard at 1440 and 400 in both themes (${local
   await expect(first.locator('[data-step="team"]')).toHaveCount(0);
   await page.goto('/org/ada');
   await expect(first).toHaveCount(0);
-  await expect(page.getByTestId('main').getByRole('button', { name: locale === 'en' ? 'New project' : '新建项目', exact: true })).toHaveCount(1);
+  await expect(page.getByRole('main').getByRole('button', { name: locale === 'en' ? 'New project' : '新建项目', exact: true })).toHaveCount(1);
 });
 }
 

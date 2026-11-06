@@ -216,6 +216,24 @@ impl HttpsClient {
         headers: &[(&str, String)],
         body: Bytes,
     ) -> Result<hyper::Response<hyper::body::Incoming>, HttpsError> {
+        let plain = self.loopback_enrollment
+            && loopback_http(base)
+            && ((method == Method::POST
+                && path_and_query == orch_link_contract::enrollment::ENROLL_PATH)
+                || (method == Method::GET
+                    && path_and_query == orch_link_contract::gateways::DISCOVERY_PATH));
+        self.connection(base, plain)
+            .await?
+            .respond(method, path_and_query, headers, body)
+            .await
+    }
+
+    /// One verified HTTPS connection for consecutive small RTT probes, excluding TLS setup.
+    pub(crate) async fn connect_https(&self, base: &Url) -> Result<HttpConnection, HttpsError> {
+        self.connection(base, false).await
+    }
+
+    async fn connection(&self, base: &Url, plain: bool) -> Result<HttpConnection, HttpsError> {
         let hostname = base
             .host()
             .ok_or_else(|| HttpsError::Address(base.to_string()))?;
@@ -224,10 +242,6 @@ impl HttpsClient {
             url::Host::Ipv4(ip) => ip.to_string(),
             url::Host::Ipv6(ip) => ip.to_string(),
         };
-        let plain = self.loopback_enrollment
-            && loopback_http(base)
-            && method == Method::POST
-            && path_and_query == orch_link_contract::enrollment::ENROLL_PATH;
         if !plain && base.scheme() != "https" {
             return Err(HttpsError::Address("HTTP is allowed only for enrollment on localhost or a loopback IP; use HTTPS otherwise.".into()));
         }
@@ -254,16 +268,6 @@ impl HttpsClient {
             Some(port) => format!("{hostname}:{port}"),
             None => hostname.to_string(),
         };
-        let mut request = Request::builder()
-            .method(method)
-            .uri(path_and_query)
-            .header(hyper::header::HOST, authority);
-        for (name, value) in headers {
-            request = request.header(*name, value);
-        }
-        let request = request
-            .body(Full::new(body))
-            .map_err(|e| HttpsError::Http(e.to_string()))?;
         if plain {
             if !socket
                 .peer_addr()
@@ -275,7 +279,7 @@ impl HttpsClient {
                     "The HTTP enrollment peer is not loopback; use HTTPS.".into(),
                 ));
             }
-            request_on(socket, request).await
+            connection_on(socket, authority).await
         } else {
             let name =
                 ServerName::try_from(host).map_err(|_| HttpsError::Address(base.to_string()))?;
@@ -283,28 +287,75 @@ impl HttpsClient {
                 .connect(name, socket)
                 .await
                 .map_err(|e| HttpsError::Tls(e.to_string()))?;
-            request_on(stream, request).await
+            connection_on(stream, authority).await
         }
     }
 }
 
-async fn request_on<S>(
-    stream: S,
-    request: Request<Full<Bytes>>,
-) -> Result<hyper::Response<hyper::body::Incoming>, HttpsError>
+async fn connection_on<S>(stream: S, authority: String) -> Result<HttpConnection, HttpsError>
 where
     S: tokio::io::AsyncRead + tokio::io::AsyncWrite + Unpin + Send + 'static,
 {
-    let (mut sender, connection) = hyper::client::conn::http1::handshake(TokioIo::new(stream))
+    let (sender, connection) = hyper::client::conn::http1::handshake(TokioIo::new(stream))
         .await
         .map_err(|e| HttpsError::Http(e.to_string()))?;
     tokio::spawn(async move {
         let _ = connection.await;
     });
-    sender
-        .send_request(request)
-        .await
-        .map_err(|e| HttpsError::Http(e.to_string()))
+    Ok(HttpConnection { sender, authority })
+}
+
+/// A verified HTTP/1 connection. Body reads remain explicitly bounded by the caller.
+pub(crate) struct HttpConnection {
+    sender: hyper::client::conn::http1::SendRequest<Full<Bytes>>,
+    authority: String,
+}
+
+impl HttpConnection {
+    async fn respond(
+        &mut self,
+        method: Method,
+        path: &str,
+        headers: &[(&str, String)],
+        body: Bytes,
+    ) -> Result<hyper::Response<hyper::body::Incoming>, HttpsError> {
+        let mut request = Request::builder()
+            .method(method)
+            .uri(path)
+            .header(hyper::header::HOST, &self.authority);
+        for (name, value) in headers {
+            request = request.header(*name, value);
+        }
+        let request = request
+            .body(Full::new(body))
+            .map_err(|error| HttpsError::Http(error.to_string()))?;
+        self.sender
+            .send_request(request)
+            .await
+            .map_err(|error| HttpsError::Http(error.to_string()))
+    }
+
+    pub(crate) async fn send_bounded(
+        &mut self,
+        method: Method,
+        path: &str,
+        headers: &[(&str, String)],
+        body: Bytes,
+        max: usize,
+    ) -> Result<Reply, HttpsError> {
+        let response = self.respond(method, path, headers, body).await?;
+        let (parts, incoming) = response.into_parts();
+        let body = Limited::new(incoming, max)
+            .collect()
+            .await
+            .map_err(|error| HttpsError::Http(error.to_string()))?
+            .to_bytes();
+        Ok(Reply {
+            status: parts.status,
+            headers: parts.headers,
+            body,
+        })
+    }
 }
 
 /// Writes the body `incoming` to `path`, at most `max` bytes; gives the bytes written and their SHA-256.

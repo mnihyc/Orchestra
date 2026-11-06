@@ -205,6 +205,16 @@ async fn a_reply_is_by_the_number_of_the_message_it_answers() {
 async fn one_enabled_message_tool_routes_both_targets_without_borrowing_the_owners_reach() {
     let s = with_a_shared_chat(true).await;
     let receiver = s.world.thread("Validate").await;
+    share(
+        &s.world,
+        "node",
+        receiver,
+        "live",
+        "thread.interact",
+        "any",
+        s.agent,
+    )
+    .await;
     s.world
         .set(s.world.topic, "orch_tools.enabled", json!(["send_message"]))
         .await;
@@ -327,6 +337,7 @@ async fn historical_single_destination_settings_do_not_gain_the_other_destinatio
     ] {
         let s = with_a_shared_chat(true).await;
         let receiver = s.world.thread("Validate").await;
+        share_threads_inside(&s.world, s.world.topic, s.agent, true).await;
         s.world
             .set(s.world.topic, "orch_tools.enabled", json!(["send_message"]))
             .await;
