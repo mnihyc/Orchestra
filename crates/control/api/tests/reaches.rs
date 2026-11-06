@@ -9,6 +9,7 @@ mod desk;
 mod places;
 mod support;
 
+use crate::support::FullPermissionPageReply;
 use desk::Desk;
 use orch_api_contract::access::{
     AccessChoice, AccessThrough, EffectiveAccess, EffectiveAccessGet, EffectiveAccessGetQuery,
@@ -47,6 +48,7 @@ async fn name_on(desk: &Desk, plural: &str, id: Id, user: Id, choice: AccessChoi
         })
         .send()
         .await
+        .full_permission_page()
         .ok();
 }
 

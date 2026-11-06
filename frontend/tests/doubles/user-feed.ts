@@ -11,6 +11,7 @@ export interface Listening {
   subscriber: Subscriber;
   id: number;
   username: string;
+  person: Person;
   last: number;
 }
 
@@ -56,7 +57,7 @@ export class UserFeed implements Part {
       const since = typeof frame.since === 'number' ? frame.since : null;
       // A number from after what the Inbox holds means it was put back: the reader loads it anew.
       const reload = since !== null && since > seq;
-      const joined: Listening = { subscriber, id, username, last: reload ? seq : (since ?? seq) };
+      const joined: Listening = { subscriber, id, username, person, last: reload ? seq : (since ?? seq) };
       this.listening.push(joined);
       subscriber.send({ op: 'subscribed', id, feed: 'user', seq, mode: reload ? 'reload' : 'delta' });
       if (!reload && since !== null && since < seq && this.inbox !== null) {

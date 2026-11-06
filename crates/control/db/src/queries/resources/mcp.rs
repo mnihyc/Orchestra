@@ -33,6 +33,25 @@ pub struct McpRow {
     pub revision: i64,
 }
 
+/// The live server's real permission subject, before loading its public definition.
+#[derive(Debug, Clone, Copy, sqlx::FromRow)]
+pub struct ServerSubject {
+    /// The outward server identity.
+    pub id: Id,
+    /// The owning permission page when this is one environment's own server.
+    pub environment_id: Option<Id>,
+}
+
+/// Identity only; the ordinary guard and full projection remain with their existing readers.
+pub async fn subject(conn: &mut Conn, id: Id) -> Result<Option<ServerSubject>, DbError> {
+    Ok(sqlx::query_as(
+        "SELECT id,environment_id FROM mcp_servers WHERE id=$1 AND deleted_at IS NULL",
+    )
+    .bind(id)
+    .fetch_optional(conn)
+    .await?)
+}
+
 /// Reads live servers by identifier.
 pub async fn servers(conn: &mut Conn, ids: &[Id]) -> Result<Vec<McpRow>, DbError> {
     Ok(sqlx::query_as("SELECT id,name,description,org_id,home_id,owner_id,machine_id,environment_id,spec,enabled,revision,imported
@@ -199,10 +218,25 @@ pub async fn on_machine(conn: &mut Conn, machine: Id) -> Result<Vec<Id>, DbError
 
 /// Safe discoveries reported by this machine's environments, without reading a definition.
 pub async fn found_on_machine(conn: &mut Conn, machine: Id) -> Result<Vec<Json>, DbError> {
-    Ok(sqlx::query_scalar("SELECT items.found FROM environments e
+    Ok(found_on_machines(conn, &[machine])
+        .await?
+        .into_iter()
+        .map(|(_, found)| found)
+        .collect())
+}
+
+/// The same safe discoveries in one batch, retaining their actual physical source.
+pub async fn found_on_machines(
+    conn: &mut Conn,
+    machines: &[Id],
+) -> Result<Vec<(Id, Json)>, DbError> {
+    if machines.is_empty() {
+        return Ok(Vec::new());
+    }
+    Ok(sqlx::query_as("SELECT e.machine_id,items.found FROM environments e
         CROSS JOIN LATERAL jsonb_array_elements(COALESCE(e.facts->'mcp_found','[]'::jsonb)) AS items(found)
-        WHERE e.machine_id=$1 AND e.deleted_at IS NULL")
-        .bind(machine).fetch_all(conn).await?)
+        WHERE e.machine_id=ANY($1) AND e.deleted_at IS NULL")
+        .bind(machines).fetch_all(conn).await?)
 }
 
 /// Sealed secret references for a server, for the command writer to seal to its target machine.

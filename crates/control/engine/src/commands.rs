@@ -8,6 +8,9 @@
 //! its end can be read at any time after, also by a process that did not
 //! issue it; and waiting for it survives nothing but the row.
 
+pub mod authority;
+pub use authority::{CommandAuthority, TerminalCloseAuthority};
+
 use async_trait::async_trait;
 use orch_link_contract::commands::{CommandBody, CommandError, CommandKind, SerialKey};
 use orch_types::{Id, Json, Time};
@@ -24,6 +27,11 @@ pub enum CommandsError {
     /// The machine was revoked.
     #[error("the machine was revoked")]
     Revoked,
+    /// A new scoped attempt cannot consume or rewrite another retained native origin.
+    #[error(
+        "the retained native command belongs to another origin; its existing work was unchanged"
+    )]
+    AuthorityMismatch,
     /// The system is stopping.
     #[error("the system is stopping")]
     Stopping,
@@ -52,6 +60,14 @@ pub struct Outgoing {
     /// The moment after which it is not to be started; the kind's own time
     /// after now when none is given.
     pub deadline: Option<Time>,
+    /// Private command admission evidence; never part of the machine body or wire frame.
+    #[serde(
+        default,
+        rename = "login_authority",
+        deserialize_with = "authority::deserialize_optional",
+        skip_serializing_if = "Option::is_none"
+    )]
+    pub authority: Option<CommandAuthority>,
 }
 
 /// A saved engine command retains the semantic key kind as well as its value. UUID keys
@@ -93,7 +109,25 @@ impl Outgoing {
             body: serde_json::to_value(body)
                 .map_err(|error| CommandsError::Body(error.to_string()))?,
             deadline: None,
+            authority: None,
         })
+    }
+
+    /// Retains login-origin evidence until the durable link's first-send/retry checkpoint.
+    #[must_use]
+    pub fn with_login_authority(
+        mut self,
+        authority: crate::provider_setup::LoginCommandAuthority,
+    ) -> Self {
+        self.authority = Some(CommandAuthority::login(authority));
+        self
+    }
+
+    /// Retains the one server-private operation evidence channel without changing native bytes.
+    #[must_use]
+    pub fn with_authority(mut self, authority: CommandAuthority) -> Self {
+        self.authority = Some(authority);
+        self
     }
 
     /// The same command with a deadline of its own.
@@ -239,11 +273,15 @@ pub struct Info {
     pub outcome: Option<Outcome>,
 }
 
-/// A command's original machine and protected body, read from one retained record.
+/// A command's original recipient and canonical wire facts, read from one retained record.
 #[derive(Debug, Clone, PartialEq)]
 pub struct RetainedCommand {
     /// The machine the command was admitted for.
     pub machine: Id,
+    /// The command kind actually stored by the issuer, never reconstructed from a retry.
+    pub kind: String,
+    /// The actual retained serial lane, including its absent value.
+    pub key: Option<String>,
     /// The body the command retained for replay.
     pub body: Json,
 }
@@ -251,6 +289,13 @@ pub struct RetainedCommand {
 /// The commands the engine sends and waits for.
 #[async_trait]
 pub trait Commands: Send + Sync {
+    /// Private physical provenance of a retained credential-return command, never a grant.
+    async fn retained_return_source(
+        &self,
+        _id: Id,
+    ) -> Result<Option<crate::credentials::handover_authority::ReturnSource>, CommandsError> {
+        Ok(None)
+    }
     /// Reads a live observation without putting its result in a durable command row.
     async fn observe(&self, _command: Outgoing) -> Result<Outcome, CommandsError> {
         Err(CommandsError::Other(
@@ -267,7 +312,7 @@ pub trait Commands: Send + Sync {
         Ok(None)
     }
 
-    /// Reads the frozen recipient with the body so a replay cannot choose another machine.
+    /// Reads one frozen frame so a replay cannot borrow a different recipient, kind or serial lane.
     async fn retained_command(&self, id: Id) -> Result<Option<RetainedCommand>, CommandsError> {
         if self.retained_body(id).await?.is_some() {
             return Err(CommandsError::Other(
@@ -424,3 +469,6 @@ mod tests {
         Ok(())
     }
 }
+
+#[cfg(test)]
+mod authority_controls;

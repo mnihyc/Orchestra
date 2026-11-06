@@ -105,6 +105,7 @@ async fn plan_failed(conn: &mut Conn, error: PlanError) -> ApiError {
             )
             .with("blockers", &draft.plan.blockers)
         }
+        PlanError::AgentAccess(error) => crate::routes::share::failed(conn, *error).await,
         PlanError::Internal(error) => ApiError::engine(error),
     }
 }
@@ -167,6 +168,55 @@ async fn complete(
         },
     )
     .collect();
+    if draft.plan.result == ForkResult::New {
+        let destination = draft.request.topic_id.unwrap_or(topic);
+        let copy_from = orch_engine::jobs::fork::fork_page_source(
+            draft.plan.source.id,
+            draft.request.access.as_ref(),
+        );
+        if let Some(source) = copy_from.filter(|source| *source != draft.plan.source.id) {
+            // The ordinary planner requires ThreadManage to carry another thread's page.
+            // A blocked plan may still be shown, but cannot reveal bounds derived from
+            // that unadmitted page through this optional metadata.
+            match nodes::check(
+                conn,
+                principal,
+                source,
+                Permission::ThreadManage,
+                Act::Use,
+                Policy::default(),
+            )
+            .await
+            {
+                Ok(decision) if decision.is_allowed() => {}
+                Ok(_) => return Ok(()),
+                Err(error) => {
+                    return Err(authorization::engine_problem(conn, principal, error).await);
+                }
+            }
+        }
+        let page = orch_engine::jobs::fork::fork_page(draft.request.access.as_ref());
+        let environment = match &draft.plan.to.environment {
+            orch_api_contract::forks::ForkPlanTarget::Existing(environment) => Some(
+                orch_db::queries::environments::thread_engine::environment(conn, environment.id)
+                    .await?
+                    .ok_or_else(ApiError::not_found)?,
+            ),
+            // The normal fork plan's new hosted environment has the managed placement.
+            orch_api_contract::forks::ForkPlanTarget::Made { .. } => None,
+        };
+        draft.plan.agent_access = Some(
+            super::threads::binding::creation::existing_topic(
+                conn,
+                principal,
+                destination,
+                page.as_ref(),
+                copy_from,
+                environment.as_ref(),
+            )
+            .await?,
+        );
+    }
     Ok(())
 }
 
@@ -223,6 +273,7 @@ async fn now(ctx: Ctx, (): (), body: ForkNowBody) -> ApiResult<ForkNowReply> {
         topic_id: None,
         name: body.name,
         access: None,
+        agent_access: body.agent_access,
         history: body
             .to_turn
             .map(|to_turn| orch_api_contract::forks::ForkHistory {

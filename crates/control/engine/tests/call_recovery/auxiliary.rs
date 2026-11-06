@@ -1037,11 +1037,13 @@ async fn automatic_retries_and_continuations_keep_all_origin_authority_and_stop_
         .unwrap();
         assert_eq!(original.run_as, Some(world.ada));
         assert_eq!(
-            original.submission_authority.as_ref().unwrap()["credentials"][0]["token_id"],
+            original.submission_authority.as_ref().unwrap()["boundaries"][0]["credentials"][0]["token_ids"]
+                [0],
             author_token.to_string()
         );
         assert_eq!(
-            original.run_as_authority.as_ref().unwrap()["credentials"][0]["token_id"],
+            original.run_as_authority.as_ref().unwrap()["boundaries"][0]["credentials"][0]["token_ids"]
+                [0],
             runner_token.to_string()
         );
         if effects {
@@ -1352,4 +1354,267 @@ async fn the_shipped_agent_policy_schedules_transient_faults_and_a_known_quota_r
             "the shipped policy cannot spend a second call before its deadline"
         );
     }
+}
+
+/// Keep the shipped rules and reserve their next action through a real failed native turn.
+async fn scheduled_default_failure(
+    world: &World,
+    code: &str,
+) -> (Id, Id, Id, orch_engine::calls::Recovery) {
+    let thread = world
+        .thread("A fresh input beside scheduled recovery")
+        .await;
+    let input = world
+        .engine()
+        .submit_input(
+            &Caller::session(world.ada),
+            thread,
+            queued("The original failed request"),
+        )
+        .await
+        .unwrap();
+    let first = world.turn_start(thread, 0).await;
+    world.say(thread, turn_began(first.turn_id)).await;
+    // One hour is the vendor's declared reset, independent of the shipped transient retry delay.
+    let reset = world.clock.now() + chrono::Duration::hours(1);
+    let error: TurnError = serde_json::from_value(json!({
+        "code":code,"message":"The scripted vendor refused this request",
+        "retryable":code!="provider_exhausted",
+        "resets_at":if code=="provider_exhausted" {Some(orch_types::Time::new(reset))} else {None}
+    }))
+    .unwrap();
+    world
+        .say(
+            thread,
+            Event::TurnCompleted(TurnCompleted {
+                turn_id: first.turn_id,
+                status: TurnOutcome::Failed,
+                error: Some(error),
+            }),
+        )
+        .await;
+    world.wait_turn(first.turn_id, "failed").await;
+    world.wait_followed_up(thread).await;
+    let row = recovery(world, thread).await;
+    assert_eq!(row.state, "scheduled");
+    assert_eq!(row.reference, first.turn_id);
+    assert_eq!(row.failure["code"], code);
+    assert_eq!(row.context["input_id"], json!(input.input.id));
+    let presented = orch_engine::calls::presentation(&row).unwrap();
+    if code == "provider_exhausted" {
+        assert_eq!(
+            presented.step,
+            Some(Step::Wait {
+                until: orch_provider_contract::calls::Until::Reset,
+            })
+        );
+        assert_eq!(row.due_at, Some(reset));
+    } else {
+        assert!(matches!(
+            presented.step,
+            Some(Step::Retry {
+                delay_secs: 60,
+                times: 3,
+                ..
+            })
+        ));
+        assert_eq!(
+            row.due_at,
+            Some(world.clock.now() + chrono::Duration::seconds(60))
+        );
+    }
+    assert_eq!(world.turn_starts(thread).len(), 1);
+    (thread, input.input.id, first.turn_id, row)
+}
+
+/// Freeze the failed turn, its original input and its actual timeline payloads after end work drains.
+async fn failed_history(world: &World, turn: Id) -> Json {
+    sqlx::query_scalar("SELECT jsonb_build_object(
+        'turn',jsonb_build_object('id',t.id,'input_id',t.input_id,'state',t.state,'error',t.error),
+        'input',jsonb_build_object('id',i.id,'author_id',i.author_id,'content',i.content,'state',i.state,'turn_id',i.turn_id,'limit_bypass',i.limit_bypass),
+        'history',(SELECT jsonb_agg(jsonb_build_object('id',h.id,'kind',h.kind,'payload',h.payload) ORDER BY h.seq_created,h.id) FROM items h WHERE h.turn_id=t.id))
+        FROM turns t JOIN thread_inputs i ON i.id=t.input_id WHERE t.id=$1")
+        .bind(turn).fetch_one(world.pool.pool()).await.unwrap()
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn a_fresh_explicit_input_supersedes_the_shipped_quota_reset_wait_without_resending_old_work()
+{
+    let clock = orch_testkit::clock::manual();
+    let world = World::with_clock(std::sync::Arc::new(clock.clone())).await;
+    let (thread, original, failed, scheduled) =
+        scheduled_default_failure(&world, "provider_exhausted").await;
+    let history = failed_history(&world, failed).await;
+    let fresh = world
+        .engine()
+        .submit_input(
+            &Caller::session(world.ada),
+            thread,
+            queued("A fresh ordinary request after external recovery"),
+        )
+        .await
+        .unwrap();
+    assert_ne!(fresh.input.id, original);
+    let second = world.turn_start(thread, 1).await;
+    assert_eq!(
+        world
+            .scalar::<Id>("SELECT input_id FROM turns WHERE id=$1", second.turn_id)
+            .await,
+        fresh.input.id
+    );
+    assert_eq!(failed_history(&world, failed).await, history);
+    let completed = recovery(&world, thread).await;
+    assert_eq!(completed.state, "completed");
+    assert_eq!(completed.due_at, None);
+    assert_eq!(completed.reference, scheduled.reference);
+    assert_eq!(completed.failure, scheduled.failure);
+    world.say(thread, turn_began(second.turn_id)).await;
+    world
+        .say(
+            thread,
+            common::turn_ended(second.turn_id, TurnOutcome::Completed),
+        )
+        .await;
+    world.wait_turn(second.turn_id, "completed").await;
+    world.wait_followed_up(thread).await;
+    world.wait_state(thread, "idle").await;
+    // Passing the old reset proves its old automatic resend was durably superseded.
+    clock.advance(chrono::Duration::hours(1));
+    world.engine().keep_call_recoveries().await.unwrap();
+    assert_eq!(recovery(&world, thread).await.state, "completed");
+    assert_eq!(world.turn_starts(thread).len(), 2);
+    assert_eq!(
+        world
+            .count("SELECT count(*) FROM turns WHERE input_id=$1", original)
+            .await,
+        1
+    );
+    assert_eq!(
+        world
+            .count(
+                "SELECT count(*) FROM thread_inputs WHERE thread_id=$1",
+                thread
+            )
+            .await,
+        2
+    );
+    assert_eq!(failed_history(&world, failed).await, history);
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn a_fresh_input_supersedes_quota_reset_wait_but_still_obeys_a_configured_provider_cap() {
+    let clock = orch_testkit::clock::manual();
+    let world = World::with_clock(std::sync::Arc::new(clock.clone())).await;
+    let (thread, original, failed, scheduled) =
+        scheduled_default_failure(&world, "provider_exhausted").await;
+    let history = failed_history(&world, failed).await;
+    // A shared zero-running cap is deterministically full without fabricated ledger usage.
+    sqlx::query(
+        "INSERT INTO usage_caps(id,provider_id,subject_kind,split,meter,amount,at_limit,created_by)
+        VALUES($1,$2,'everyone','shared','running',0,'stop',$3)",
+    )
+    .bind(orch_types::new_id())
+    .bind(world.provider)
+    .bind(world.ada)
+    .execute(world.pool.pool())
+    .await
+    .unwrap();
+    let fresh = world
+        .engine()
+        .submit_input(
+            &Caller::session(world.ada),
+            thread,
+            queued("Fresh work still needs room in the configured cap"),
+        )
+        .await
+        .unwrap();
+    assert_ne!(fresh.input.id, original);
+    world.wait_blocked(thread, "quota_exceeded").await;
+    assert_eq!(
+        world
+            .scalar::<String>(
+                "SELECT state FROM thread_inputs WHERE id=$1",
+                fresh.input.id
+            )
+            .await,
+        "pending"
+    );
+    let completed = recovery(&world, thread).await;
+    assert_eq!(completed.state, "completed");
+    assert_eq!(completed.due_at, None);
+    assert_eq!(completed.reference, scheduled.reference);
+    assert_eq!(completed.failure, scheduled.failure);
+    clock.advance(chrono::Duration::hours(1));
+    world.engine().keep_call_recoveries().await.unwrap();
+    let after_reset = recovery(&world, thread).await;
+    assert_eq!(after_reset.state, "completed");
+    assert_eq!(after_reset.due_at, None);
+    assert_eq!(world.turn_starts(thread).len(), 1);
+    assert_eq!(
+        world.state(thread).await.1.as_deref(),
+        Some("quota_exceeded")
+    );
+    assert_eq!(
+        world
+            .count(
+                "SELECT count(*) FROM thread_inputs WHERE thread_id=$1",
+                thread
+            )
+            .await,
+        2
+    );
+    assert_eq!(
+        world
+            .count("SELECT count(*) FROM turns WHERE input_id=$1", original)
+            .await,
+        1
+    );
+    assert_eq!(failed_history(&world, failed).await, history);
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn a_fresh_input_does_not_supersede_the_shipped_nonquota_retry_backoff() {
+    let clock = orch_testkit::clock::manual();
+    let world = World::with_clock(std::sync::Arc::new(clock.clone())).await;
+    let (thread, original, failed, scheduled) =
+        scheduled_default_failure(&world, "provider_busy").await;
+    let history = failed_history(&world, failed).await;
+    let fresh = world
+        .engine()
+        .submit_input(
+            &Caller::session(world.ada),
+            thread,
+            queued("Fresh input cannot skip normal transient backoff"),
+        )
+        .await
+        .unwrap();
+    assert_ne!(fresh.input.id, original);
+    // Hold the domain clock before the shipped sixty-second retry, even on a slow test machine.
+    world.engine().keep_call_recoveries().await.unwrap();
+    let retained = recovery(&world, thread).await;
+    assert_eq!(retained.state, "scheduled");
+    assert_eq!(retained.due_at, scheduled.due_at);
+    assert_eq!(retained.reference, scheduled.reference);
+    assert_eq!(retained.failure, scheduled.failure);
+    assert_eq!(retained.action, scheduled.action);
+    assert_eq!(world.turn_starts(thread).len(), 1);
+    assert_eq!(
+        world
+            .scalar::<String>(
+                "SELECT state FROM thread_inputs WHERE id=$1",
+                fresh.input.id
+            )
+            .await,
+        "pending"
+    );
+    assert_eq!(
+        world
+            .count(
+                "SELECT count(*) FROM thread_inputs WHERE thread_id=$1",
+                thread
+            )
+            .await,
+        2
+    );
+    assert_eq!(failed_history(&world, failed).await, history);
 }

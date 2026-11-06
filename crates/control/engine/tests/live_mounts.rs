@@ -123,9 +123,14 @@ impl Commands for JournaledCommands {
             journal::command(&mut *self.db.acquire().await.map_err(command_error)?, id)
                 .await
                 .map_err(command_error)?
-                .map(|row| orch_engine::commands::RetainedCommand {
-                    machine: row.machine_id,
-                    body: row.body,
+                .map(|row| {
+                    let key = row.serial_key().map(str::to_owned);
+                    orch_engine::commands::RetainedCommand {
+                        machine: row.machine_id,
+                        kind: row.kind,
+                        key,
+                        body: row.body,
+                    }
                 }),
         )
     }

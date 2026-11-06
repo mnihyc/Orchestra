@@ -99,7 +99,9 @@ async fn a_thread_goes_from_its_making_to_the_agents_answer_through_the_whole_sy
         })
         .send()
         .await
-        .ok();
+        .ok()
+        .into_full()
+        .unwrap();
     let id = thread.base.id;
     assert_eq!(thread.base.name, "Fix login");
     assert_eq!(thread.topic_id, tree.topic.base.id);
@@ -136,7 +138,10 @@ async fn a_thread_goes_from_its_making_to_the_agents_answer_through_the_whole_sy
         .send()
         .await;
     assert_eq!(sent.status, 201);
-    let sent = sent.ok();
+    let sent = sent
+        .ok()
+        .into_full()
+        .expect("a browser-session input keeps its full projection");
     assert!(matches!(
         sent.input.state,
         InputState::Pending | InputState::Delivering

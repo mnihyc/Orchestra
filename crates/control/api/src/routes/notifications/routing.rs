@@ -263,9 +263,9 @@ pub async fn link_create(ctx: Ctx, (): (), (): ()) -> ApiResult<NotificationRout
 /// Switches the caller's route off and unlinks it: where a bot had them, it
 /// forgets the chat.
 pub async fn delete(ctx: Ctx, (): (), (): ()) -> ApiResult<()> {
-    let mut tx = ctx.app.db.begin().await?;
+    let (mut tx, guard) = transaction_guard::begin(&ctx).await?;
     let (channel, _) = reaching(&ctx, &mut tx).await?;
-    route_logic::end(&mut tx, ctx.user()?.id(), channel, ctx.now).await?;
+    route_logic::end(&mut tx, guard.user().id(), channel, guard.now().get()).await?;
     tx.commit().await.map_err(DbError::from)?;
     Ok(())
 }

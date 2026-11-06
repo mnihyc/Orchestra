@@ -6,6 +6,8 @@
 //! on of the kind of thing it is, and the answer is the thing as its own request reads it. A node is
 //! handed over by its own request; a kind that has no page here is answered plainly as not there.
 
+pub(crate) mod operation;
+
 use crate::middleware::authorization::{self, refusals};
 use crate::middleware::requests::{ApiError, ApiResult};
 use crate::registry::{Ctx, Registry};
@@ -90,14 +92,7 @@ async fn as_read(ctx: &Ctx, object: ObjectRef) -> ApiResult<Resource> {
         }
         ObjectKind::Document => {
             drop(conn);
-            Resource::Document(
-                documents::get(
-                    ctx.clone(),
-                    orch_api_contract::nodes::DeletedInspectionQuery::default(),
-                    (),
-                )
-                .await?,
-            )
+            Resource::Document(documents::show(ctx, id).await?)
         }
         ObjectKind::DocumentContainer => {
             let read = orch_engine::document_tree::read_in(

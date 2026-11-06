@@ -275,6 +275,7 @@ pub fn full_capabilities(memory: MemoryKind) -> Capabilities {
             ProviderFactKind::Windows,
             ProviderFactKind::PlanCredits,
         ],
+        provider_fact_fields: Default::default(),
         model_discovery: true,
         title: true,
         auxiliary_models: AuxiliaryModels::Pinned,

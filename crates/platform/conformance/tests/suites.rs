@@ -279,7 +279,7 @@ fn protocol_fixture() -> protocol::Fixture<'static> {
     protocol::Fixture {
         method: Method::POST, path: "/responses", body: br#"{"model":"test-model","input":"hello"}"#, model:"test-model",
         response: b"event: response.completed\ndata: {\"response\":{\"id\":\"resp_test\",\"model\":\"test-model\",\"usage\":{\"input_tokens\":10,\"output_tokens\":2}}}\n\n",
-        usage: ObservedUsage { model:Some("test-model".into()), request_ref:Some("resp_test".into()), cost:None,
+        usage: ObservedUsage { service_tier:None, model:Some("test-model".into()), request_ref:Some("resp_test".into()), cost:None,
             tokens: TokenUsage { input_tokens:10, output_tokens:2, total_tokens:12, ..TokenUsage::default() } }
     }
 }

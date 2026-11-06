@@ -4,7 +4,7 @@ use crate::middleware::authentication::Via;
 use crate::middleware::authorization::{self, refusals};
 use crate::middleware::requests::{ApiError, ApiResult};
 use crate::middleware::transaction_guard;
-use crate::registry::{Answer, Ctx, Registry};
+use crate::registry::{Answer, Ctx, OperationFuture, Registry};
 use orch_access_contract::decisions::Decision;
 use orch_api_contract::background::{
     BackgroundEndRequest, ThreadBackground, ThreadBackgroundEnd, ThreadBackgroundGet,
@@ -17,7 +17,7 @@ use orch_engine::background::{BackgroundError, Identity};
 /// Binds the roster read and the captured mutation request.
 pub fn mount(registry: &mut Registry) {
     registry
-        .on(ThreadBackgroundGet, get)
+        .on_with_operation(ThreadBackgroundGet, operation, get)
         .on(ThreadBackgroundEnd, end);
 }
 
@@ -36,6 +36,10 @@ fn identity(via: &Via) -> Identity {
 
 async fn failed(ctx: &Ctx, error: BackgroundError) -> ApiError {
     match error {
+        BackgroundError::Scope => ApiError::new(
+            ErrorCode::AuthzDenied,
+            "the key does not allow this background read",
+        ),
         BackgroundError::NotFound => ApiError::not_found(),
         BackgroundError::Stale => ApiError::new(
             ErrorCode::ConflictStaleRevision,
@@ -58,9 +62,43 @@ async fn failed(ctx: &Ctx, error: BackgroundError) -> ApiError {
     }
 }
 
+fn operation<'a>(
+    ctx: &'a Ctx,
+    conn: &'a mut orch_db::Conn,
+    caller: &'a orch_authz::Caller,
+    _query: ThreadBackgroundGetQuery,
+    (): (),
+) -> OperationFuture<'a> {
+    Box::pin(async move {
+        let mut plan = crate::key_operations::admission::Prepared::new(ctx.route, ctx.route.name)?;
+        *plan.shared_mut() = orch_engine::background::read_scope(conn, caller, ctx.id("id")?)
+            .await
+            .map_err(|error| match error {
+                BackgroundError::Scope => ApiError::new(ErrorCode::AuthzDenied, error.to_string()),
+                BackgroundError::NotFound => ApiError::not_found(),
+                other => ApiError::internal(other),
+            })?;
+        Ok(plan)
+    })
+}
+
 async fn get(ctx: Ctx, query: ThreadBackgroundGetQuery, (): ()) -> ApiResult<ThreadBackground> {
     let user = ctx.user()?;
-    let caller = authorization::caller_of(user)?;
+    let mut conn = ctx.app.db.acquire().await?;
+    let principal = ctx.operation_principal(&mut conn).await?;
+    authorization::require_on_path_in(&ctx, &mut conn, &principal, "thread.view").await?;
+    let caller = if principal
+        .caller()
+        .grant()
+        .is_some_and(|grant| grant.operation_scope().is_some())
+    {
+        principal.caller().clone()
+    } else {
+        // Keep the existing session/legacy review identity, which End compares.
+        // Modern keys retain their admitted operation instead of rebuilding it.
+        authorization::caller_of(user)?
+    };
+    drop(conn);
     match ctx
         .app
         .engine
@@ -73,7 +111,12 @@ async fn get(ctx: Ctx, query: ThreadBackgroundGetQuery, (): ()) -> ApiResult<Thr
         )
         .await
     {
-        Ok(roster) => Ok(roster),
+        Ok(roster) => {
+            let mut conn = ctx.app.db.acquire().await?;
+            let principal = ctx.operation_principal(&mut conn).await?;
+            authorization::require_on_path_in(&ctx, &mut conn, &principal, "thread.view").await?;
+            Ok(roster)
+        }
         Err(error) => Err(failed(&ctx, error).await),
     }
 }

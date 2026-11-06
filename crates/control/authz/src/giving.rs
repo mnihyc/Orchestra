@@ -106,8 +106,7 @@ pub enum AgentLevel {
     View,
     /// Can edit: the agents also send to the threads, post in the chats and change the documents.
     Edit,
-    /// Can manage: the agents also delete, move and bring back the documents. It adds nothing for
-    /// conversations and chats: no agent removes a thread, a chat or a place.
+    /// Can manage: also manage documents, moderate chats and archive, fork or delete threads.
     Manage,
 }
 
@@ -120,6 +119,8 @@ pub struct Gives {
     pub roles: Vec<Role>,
     /// What they may share with agents.
     pub agents: Vec<AgentLevel>,
+    /// Independently giveable agent rows, for exact By area choices rather than whole presets.
+    pub agent_permissions: Vec<Permission>,
     /// Whether the place lets holders share, as the policy resolves there, so that a form can say
     /// why it offers nothing.
     pub holders_share: bool,
@@ -146,6 +147,7 @@ pub enum Judgement {
 #[derive(Debug)]
 pub struct Giving<'a, 'p> {
     frame: &'a Frame<'p>,
+    policy: Policy,
     site: Option<&'a Site>,
     page: PageKind,
     acting: Acting,
@@ -203,17 +205,21 @@ impl<'a, 'p> Giving<'a, 'p> {
         let principal = frame.principal();
         let manages = match site {
             Some(site) => !frame.ways(site, Permission::AccessManage).is_empty(),
-            None => principal.is_system_admin(),
+            None => crate::system_administration::system_defaults(principal),
         };
-        let (owns, administers) = site.map_or((false, principal.is_system_admin()), |site| {
-            (frame.owns(site), frame.administers(site))
-        });
+        let (owns, administers) = site.map_or(
+            (
+                false,
+                crate::system_administration::system_defaults(principal),
+            ),
+            |site| (frame.owns(site), frame.administers(site)),
+        );
         let admin_of_the_place = match site {
             Some(site) if is_a_place(site) => frame
                 .role_at(site.id)
                 .is_some_and(|held| held.role == Role::Admin),
             Some(_) => false,
-            None => principal.is_system_admin(),
+            None => crate::system_administration::system_defaults(principal),
         };
         let place = site.filter(|site| is_a_place(site));
         let places = place.map_or_else(Vec::new, |site| {
@@ -229,6 +235,7 @@ impl<'a, 'p> Giving<'a, 'p> {
         });
         Self {
             frame,
+            policy: frame.policy(),
             site,
             page,
             acting,
@@ -244,7 +251,14 @@ impl<'a, 'p> Giving<'a, 'p> {
     /// The policy the question is asked under.
     #[must_use]
     pub fn policy(&self) -> Policy {
-        self.frame.policy()
+        self.policy
+    }
+
+    /// Uses the same giving rules with the current policy resolved at this reached site.
+    #[must_use]
+    pub fn with_policy(mut self, policy: Policy) -> Self {
+        self.policy = policy;
+        self
     }
 
     /// Whether the giver manages the page: they hold `access.manage` on it (an owner, an admin of
@@ -269,7 +283,7 @@ impl<'a, 'p> Giving<'a, 'p> {
     /// Whether the place lets holders share, as the policy resolves there.
     #[must_use]
     pub fn holders_share(&self) -> bool {
-        self.frame.policy().holders_share
+        self.policy.holders_share
     }
 
     /// Whether the giver may share here at all: managing the page is enough, and so is holding
@@ -514,7 +528,7 @@ impl<'a, 'p> Giving<'a, 'p> {
     /// The rows that sharing a thing of kind `kind` with agents at `level` names, in every area
     /// the thing has, with whether each is read through what the place gives to what is inside it:
     /// the conversations of a place are, the chat and the documents are on its own page. Writing
-    /// includes reading, and managing includes writing; managing adds the documents' row alone.
+    /// includes reading, and managing includes writing in each area.
     fn rows_of_agents(kind: ObjectKind, level: AgentLevel) -> Vec<(Permission, bool)> {
         use Permission as P;
         let place = kind.node().is_some_and(|node| node.place().is_some());
@@ -552,6 +566,9 @@ impl<'a, 'p> Giving<'a, 'p> {
         }
         if level == AgentLevel::Manage && !rows.is_empty() {
             rows.push((P::DocManage, false));
+            if kind == ObjectKind::Thread || place {
+                rows.extend([(P::ThreadManage, place), (P::ChatManage, false)]);
+            }
         }
         rows
     }
@@ -570,6 +587,9 @@ impl<'a, 'p> Giving<'a, 'p> {
         let rows = Self::rows_of_agents(site.kind, level);
         !rows.is_empty()
             && rows.iter().all(|(permission, inside)| {
+                if !self.frame.principal().caller().permits(*permission) {
+                    return false;
+                }
                 if *inside {
                     // The managed form is the one a thing follows unless it works on a person's
                     // machine, where nobody but its owner holds the right to drive it.
@@ -581,6 +601,42 @@ impl<'a, 'p> Giving<'a, 'p> {
                         && !self.locked_above(*permission, Profile::Any, false)
                 }
             })
+    }
+
+    /// Source availability for each area, using the ordinary Share rules. A share of a place may
+    /// retain either environment profile; the actual writer still selects the permitted rows.
+    fn agent_permissions(&self) -> Vec<Permission> {
+        let Some(site) = self.site else {
+            return Vec::new();
+        };
+        if self.page != PageKind::Live || !self.may_share() {
+            return Vec::new();
+        }
+        let mut rows = Self::rows_of_agents(site.kind, AgentLevel::Manage);
+        if site.kind == ObjectKind::Thread || is_a_place(site) {
+            rows.extend([
+                (Permission::ThreadFork, is_a_place(site)),
+                (Permission::ThreadArchive, is_a_place(site)),
+            ]);
+        }
+        rows.into_iter()
+            .filter(|(permission, inside)| {
+                if !self.frame.principal().caller().permits(*permission) {
+                    return false;
+                }
+                if *inside {
+                    [Profile::Managed, Profile::Connected]
+                        .into_iter()
+                        .any(|profile| {
+                            self.holds_inside(*permission, profile)
+                                && !self.locked_above(*permission, profile, true)
+                        })
+                } else {
+                    self.can_give(*permission, Profile::Any)
+                }
+            })
+            .map(|(permission, _)| permission)
+            .collect()
     }
 
     /// Everything the page tells of what its reader may give.
@@ -611,6 +667,7 @@ impl<'a, 'p> Giving<'a, 'p> {
             choices,
             roles: self.roles(),
             agents,
+            agent_permissions: self.agent_permissions(),
             holders_share,
         }
     }

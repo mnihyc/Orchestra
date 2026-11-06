@@ -16,8 +16,9 @@
 use super::workspace::door;
 use crate::middleware::authorization::{self, refusals};
 use crate::middleware::requests::{ApiError, ApiResult};
+use crate::middleware::transaction_guard;
 use crate::realtime::terminals::{Door, Told, agent_socket, shell_socket};
-use crate::registry::{Ctx, Registry};
+use crate::registry::{Ctx, OperationFuture, Registry};
 use crate::sign_in::origin;
 use axum::body::Body;
 use axum::response::Response;
@@ -53,7 +54,7 @@ pub fn mount(registry: &mut Registry) {
     registry
         .on(api::EnvironmentTerminalList, list)
         .on(api::EnvironmentTerminalCreate, create)
-        .on(api::TerminalTicketCreate, ticket)
+        .on_with_operation(api::TerminalTicketCreate, ticket_operation, ticket)
         .on(api::TerminalClose, close)
         .on(api::AgentTerminalTicketCreate, agent_ticket)
         .on_raw(api::TerminalRecordingGet, recording)
@@ -384,11 +385,11 @@ async fn create(
     let TerminalTicket {
         ticket,
         ticket_expires_at,
-    } = ctx.app.realtime.terminals().issue(
-        ctx.app.clock.now(),
-        person,
-        Door::Shell(opened.session.id),
-    );
+    } = ctx
+        .app
+        .realtime
+        .terminals()
+        .issue(&ctx, Door::Shell(opened.session.id))?;
     let mut conn = ctx.app.db.acquire().await?;
     let session = views(&mut conn, &shells, std::slice::from_ref(&opened.session))
         .await?
@@ -439,15 +440,41 @@ async fn lost(
 
 /// Gives a new ticket to attach to a shell again, from this browser or another. Only its opener has
 /// one, and only while they still pass the gates it was opened under.
+fn ticket_operation<'a>(
+    ctx: &'a Ctx,
+    conn: &'a mut Conn,
+    _caller: &'a orch_authz::Caller,
+    (): (),
+    (): (),
+) -> OperationFuture<'a> {
+    Box::pin(async move {
+        let row = rows::get(conn, ctx.id("terminal_id")?)
+            .await?
+            .ok_or_else(ApiError::not_found)?;
+        super::interactive_tickets::plan(ctx, conn, "TerminalTicketCreate", row.environment_id)
+            .await
+    })
+}
+
 async fn ticket(ctx: Ctx, (): (), (): ()) -> ApiResult<TerminalTicket> {
     let id = ctx.id("terminal_id")?;
-    let person = ctx.user()?.id();
-    let mut conn = ctx.app.db.acquire().await?;
+    let (mut conn, guard) = transaction_guard::begin(&ctx).await?;
+    let caller = guard.principal().caller().clone();
+    let person = caller.user();
+    let environment = *guard.operation_data::<Id>()?;
+    let mut ctx = ctx;
+    ctx.caller =
+        crate::middleware::authentication::Caller::User(std::sync::Arc::new(guard.user().clone()));
+    ctx.now = guard.now().into();
+    let ctx = ctx.with_admitted_caller(caller)?;
     let row = rows::get(&mut conn, id)
         .await?
-        .filter(|row| row.opened_by == person && row.state == rows::state::OPEN)
+        .filter(|row| {
+            row.environment_id == environment
+                && row.opened_by == person
+                && row.state == rows::state::OPEN
+        })
         .ok_or_else(ApiError::not_found)?;
-    let principal = authorization::principal(&ctx, &mut conn).await?;
     let holding = ctx
         .app
         .engine
@@ -456,13 +483,23 @@ async fn ticket(ctx: Ctx, (): (), (): ()) -> ApiResult<TerminalTicket> {
         .await
         .map_err(ApiError::internal)?;
     if holding != Holding::Yes {
-        return Err(lost(&ctx, &mut conn, &principal, &row, holding).await?);
+        // The existing ordinary opener-loss cleanup owns native IO; no transaction spans it.
+        conn.commit().await.map_err(orch_db::DbError::from)?;
+        let mut conn = ctx.app.db.acquire().await?;
+        return Err(lost(&ctx, &mut conn, guard.principal(), &row, holding).await?);
     }
-    Ok(ctx
-        .app
-        .realtime
-        .terminals()
-        .issue(ctx.app.clock.now(), person, Door::Shell(id)))
+    let site = rows::site(&mut conn, row.environment_id)
+        .await?
+        .ok_or_else(ApiError::not_found)?;
+    let issued = ctx.app.realtime.terminals().issue_shell(
+        &ctx,
+        id,
+        row.environment_id,
+        site.machine_id,
+        row.env_generation,
+    )?;
+    conn.commit().await.map_err(orch_db::DbError::from)?;
+    Ok(issued)
 }
 
 /// Closes a shell: its opener may, and so may whoever manages its environment. Closing one that is
@@ -567,7 +604,6 @@ async fn agent_ticket(
     body: AgentTerminalTicketCreateBody,
 ) -> ApiResult<TerminalTicket> {
     let thread = ctx.id("id")?;
-    let person = ctx.user()?.id();
     let control = body.control.unwrap_or(false);
     let mut conn = ctx.app.db.acquire().await?;
     let principal = authorization::principal(&ctx, &mut conn).await?;
@@ -619,9 +655,8 @@ async fn agent_ticket(
             },
         ));
     }
-    Ok(ctx.app.realtime.terminals().issue(
-        ctx.app.clock.now(),
-        person,
-        Door::Agent { thread, control },
-    ))
+    ctx.app
+        .realtime
+        .terminals()
+        .issue(&ctx, Door::Agent { thread, control })
 }

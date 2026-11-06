@@ -152,6 +152,8 @@ async fn file(app: &App, machine: Id, request: McpImportAsk) -> ApiResult<Id> {
             token_id: Id::nil(),
             scopes: vec!["*".to_owned()],
             node_id: None,
+            operation_scope: None,
+            expires_at: None,
         },
     };
     // This value is for projections/audit only, never passed to an HTTP credential guard.

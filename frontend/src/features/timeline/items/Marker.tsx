@@ -170,9 +170,9 @@ export function markerSentence(payload: MarkerPayload, t: TFunction, context: { 
       return t('timeline.marker.switchedCarried', { ...words, count: carried });
     }
     case 'forked_from':
-      return t('timeline.marker.forkedFrom', { by: who(payload.data.by, t), thread: payload.data.thread.name ?? t('timeline.marker.aThread') });
+      return t(payload.data.by_agent === undefined || payload.data.by_agent === null ? 'timeline.marker.forkedFrom' : 'timeline.marker.agentForkedFrom', { by: who(payload.data.by, t), thread: payload.data.thread.name ?? t('timeline.marker.aThread') });
     case 'forked':
-      return t('timeline.marker.forked', { by: who(payload.data.by, t), into: payload.data.into.name ?? t('timeline.marker.aThread') });
+      return t(payload.data.by_agent === undefined || payload.data.by_agent === null ? 'timeline.marker.forked' : 'timeline.marker.agentForked', { by: who(payload.data.by, t), into: payload.data.into.name ?? t('timeline.marker.aThread') });
     case 'environment_recreated':
       return t('timeline.marker.environmentRecreated', { template: payload.data.template.name, reason: t(`timeline.marker.recreated.${payload.data.reason}`) });
     case 'environment_restarted':

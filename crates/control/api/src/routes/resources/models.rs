@@ -10,7 +10,6 @@
 //! so accepting a suggestion puts what it lists under `offered` and enables none of it. The groups a manager
 //! puts a model in are the names by which a cap, an allowlist or an entry's models name several at once.
 
-use crate::middleware::authorization;
 use crate::middleware::requests::{ApiError, ApiResult};
 use crate::registry::{Ctx, Registry};
 use crate::routes::access::page::same;
@@ -39,12 +38,28 @@ const DISPLAY_NAME_MAX_CHARS: usize = 120;
 /// Binds this module's requests.
 pub fn mount(registry: &mut Registry) {
     registry
-        .on(api::ProviderModelList, list)
-        .on(api::ProviderModelCreate, create)
-        .on(api::ProviderModelUpdate, update)
+        .on_with_operation(
+            api::ProviderModelList,
+            crate::key_operations::direct::declared,
+            list,
+        )
+        .on_with_operation(
+            api::ProviderModelCreate,
+            crate::key_operations::direct::declared,
+            create,
+        )
+        .on_with_operation(
+            api::ProviderModelUpdate,
+            crate::key_operations::direct::declared,
+            update,
+        )
         .on(api::ProviderModelDelete, delete)
         .on(api::ProviderModelSuggestionList, suggestions)
-        .on(api::ProviderModelSuggestionAccept, accept);
+        .on_with_operation(
+            api::ProviderModelSuggestionAccept,
+            super::provider_projection::prepare,
+            accept,
+        );
 }
 
 /// A routing name: taken exactly as it is given, so long as it is something that can be sent.
@@ -98,12 +113,16 @@ fn clash(
         .map(|model| model.id)
 }
 
-fn exists(existing: Id) -> ApiError {
-    ApiError::new(
+fn exists(ctx: &Ctx, existing: Id) -> ApiError {
+    let error = ApiError::new(
         ErrorCode::ConflictExists,
         "this provider has a model by that name already",
-    )
-    .with("existing_id", existing)
+    );
+    if ctx.key_receipt_required() {
+        error
+    } else {
+        error.with("existing_id", existing)
+    }
 }
 
 /// The groups of a model as they are kept: each once, in the order they were written. A name that is not
@@ -223,7 +242,7 @@ fn parameters_json(parameters: &ModelParameters) -> ApiResult<Json> {
 async fn list(ctx: Ctx, (): (), (): ()) -> ApiResult<Vec<ProviderModel>> {
     let id = ctx.id("id")?;
     let mut conn = ctx.app.db.acquire().await?;
-    let principal = authorization::principal(&ctx, &mut conn).await?;
+    let principal = ctx.operation_principal(&mut conn).await?;
     provider_for(&mut conn, &principal, id, Permission::ProviderView).await?;
     queries::models_of(&mut conn, &[id])
         .await?
@@ -233,7 +252,11 @@ async fn list(ctx: Ctx, (): (), (): ()) -> ApiResult<Vec<ProviderModel>> {
 }
 
 /// Adds a model to a provider, enabled.
-async fn create(ctx: Ctx, (): (), body: api::ProviderModelCreateBody) -> ApiResult<ProviderModel> {
+async fn create(
+    ctx: Ctx,
+    (): (),
+    body: api::ProviderModelCreateBody,
+) -> ApiResult<api::ProviderModelWriteResponse> {
     let id = ctx.id("id")?;
     clean_routing_name("model_name", &body.model_name)?;
     let display = clean_display_name("display_name", body.display_name.as_deref().unwrap_or(""))?;
@@ -242,14 +265,14 @@ async fn create(ctx: Ctx, (): (), body: api::ProviderModelCreateBody) -> ApiResu
     let groups = clean_groups("groups", body.groups.as_deref().unwrap_or_default())?;
     let parameters = parameters_json(&asked)?;
     // The provider's Manage is asked again in the transaction that writes, once the body has come.
-    let (ctx, mut tx, _principal) = crate::routes::nodes::action(&ctx).await?;
+    let (ctx, mut tx, principal) = crate::routes::nodes::action(&ctx).await?;
     let row = queries::providers(&mut tx, &[id])
         .await?
         .pop()
         .ok_or_else(ApiError::not_found)?;
     let models = queries::models_of(&mut tx, &[id]).await?;
     if let Some(existing) = clash(&models, Some(&body.model_name), Some(&display), None) {
-        return Err(exists(existing));
+        return Err(exists(&ctx, existing));
     }
     let model = orch_types::new_id();
     queries::insert_model(
@@ -269,11 +292,46 @@ async fn create(ctx: Ctx, (): (), body: api::ProviderModelCreateBody) -> ApiResu
     .await?;
     models_changed(&ctx, &mut tx, &row, json!({ "added": [body.model_name] })).await?;
     refresh_standing(&ctx, &mut tx, id).await?;
-    let added = queries::model_of(&mut tx, id, model)
-        .await?
-        .ok_or_else(|| ApiError::internal("a model was added and is not there"))?;
     tx.commit().await.map_err(DbError::from)?;
-    model_view(&added)
+    model_reply(&ctx, principal.caller(), id, model).await
+}
+
+/// Project the actual current model only through this write's optional Provider Read.
+async fn model_reply(
+    ctx: &Ctx,
+    accepted: &orch_authz::Caller,
+    provider: Id,
+    model: Id,
+) -> ApiResult<api::ProviderModelWriteResponse> {
+    let full = crate::key_operations::completed_projection::run(ctx, async {
+        let mut reading = ctx.app.db.begin_snapshot().await?;
+        let full = super::provider_projection::read(
+            ctx,
+            &mut reading,
+            accepted,
+            provider,
+            move |conn, _reader, _prepared| {
+                Box::pin(async move {
+                    let row = queries::model_of(conn, provider, model)
+                        .await?
+                        .ok_or_else(ApiError::not_found)?;
+                    model_view(&row)
+                })
+            },
+        )
+        .await?;
+        reading.commit().await.map_err(DbError::from)?;
+        Ok(full)
+    })
+    .await?;
+    Ok(match full {
+        Some(model) => api::ProviderModelWriteResponse::Full(model),
+        None => api::ProviderModelWriteResponse::Receipt(api::ProviderModelWriteReceipt {
+            projection: orch_api_contract::common::ReceiptProjection::Receipt,
+            provider_id: provider,
+            model_id: model,
+        }),
+    })
 }
 
 /// Writes the audit row of a change to the models a provider lists.
@@ -305,7 +363,7 @@ async fn update(
     ctx: Ctx,
     query: orch_api_contract::resource_facts::ResourcePauseQuery,
     body: api::ProviderModelUpdateBody,
-) -> ApiResult<ProviderModel> {
+) -> ApiResult<api::ProviderModelWriteResponse> {
     let id = ctx.id("id")?;
     let note = super::impact::note(query.note.as_deref())?;
     if note.is_some() && body.enabled != Some(false) {
@@ -340,7 +398,7 @@ async fn update(
     if let Some(display) = &display {
         let models = queries::models_of(&mut tx, &[id]).await?;
         if let Some(existing) = clash(&models, None, Some(display), Some(model_id)) {
-            return Err(exists(existing));
+            return Err(exists(&ctx, existing));
         }
     }
     // What the harness or the endpoint last reported stays when a manager writes what is on.
@@ -473,7 +531,7 @@ async fn update(
             .await
             .map_err(ApiError::internal)?;
     }
-    model_view(&changed)
+    model_reply(&ctx, principal.caller(), id, model_id).await
 }
 
 /// Removes a model from a provider.
@@ -573,7 +631,11 @@ async fn suggestions(ctx: Ctx, (): (), (): ()) -> ApiResult<Vec<ModelSuggestion>
         .pop()
         .ok_or_else(ApiError::not_found)?;
     drop(conn);
-    discover(&ctx, &row).await
+    let found = discover(&ctx, &row).await?;
+    let (mut tx, guard) = Box::pin(crate::middleware::transaction_guard::begin(&ctx)).await?;
+    provider_for(&mut tx, guard.principal(), id, Permission::ProviderManage).await?;
+    tx.commit().await.map_err(DbError::from)?;
+    Ok(found)
 }
 
 /// What a suggestion becomes when it is accepted: the speeds and access programs it lists, and a context
@@ -616,7 +678,7 @@ async fn accept(
     ctx: Ctx,
     (): (),
     body: api::ProviderModelSuggestionAcceptBody,
-) -> ApiResult<api::ProviderModelSuggestionAcceptReply> {
+) -> ApiResult<api::ProviderModelSuggestionAcceptResponse> {
     let id = ctx.id("id")?;
     let mut conn = ctx.app.db.acquire().await?;
     let row = queries::providers(&mut conn, &[id])
@@ -625,6 +687,8 @@ async fn accept(
         .ok_or_else(ApiError::not_found)?;
     drop(conn);
     let found = discover(&ctx, &row).await?;
+    // A completed discovery cannot lend its old authority to validation or writes.
+    let (ctx, mut tx, principal) = crate::routes::nodes::action(&ctx).await?;
     let mut chosen: Vec<&ModelSuggestion> = Vec::new();
     for (index, name) in body.model_names.iter().enumerate() {
         let Some(suggestion) = found.iter().find(|each| &each.model_name == name) else {
@@ -640,8 +704,6 @@ async fn accept(
             chosen.push(suggestion);
         }
     }
-    // Discovery may take a while; the provider's Manage is asked again in the transaction that writes.
-    let (ctx, mut tx, principal) = crate::routes::nodes::action(&ctx).await?;
     let mut models = queries::models_of(&mut tx, &[id]).await?;
     let mut added: Vec<Id> = Vec::new();
     for suggestion in chosen {
@@ -660,7 +722,7 @@ async fn accept(
                     "these suggestions have the same display name; add one and rename it before adding the other",
                 ));
             }
-            return Err(exists(existing));
+            return Err(exists(&ctx, existing));
         }
         let model = orch_types::new_id();
         let parameters = accepted_parameters(&suggestion.parameters)?;
@@ -697,15 +759,52 @@ async fn accept(
         .await?;
         refresh_standing(&ctx, &mut tx, id).await?;
     }
-    let models = queries::models_of(&mut tx, &[id]).await?;
-    let added = models
-        .iter()
-        .filter(|model| added.contains(&model.id))
-        .map(model_view)
-        .collect::<ApiResult<Vec<_>>>()?;
-    let provider = super::providers::show(&ctx, &mut tx, &principal, id).await?;
     tx.commit().await.map_err(DbError::from)?;
-    Ok(api::ProviderModelSuggestionAcceptReply { added, provider })
+    let projection = ctx.clone();
+    let actual = added.clone();
+    let full = crate::key_operations::completed_projection::run(&ctx, async {
+        let mut reading = ctx.app.db.begin_snapshot().await?;
+        let full = super::provider_projection::read(
+            &ctx,
+            &mut reading,
+            principal.caller(),
+            id,
+            move |conn, reader, prepared| {
+                Box::pin(async move {
+                    let models = queries::models_of(conn, &[id]).await?;
+                    let added = models
+                        .iter()
+                        .filter(|model| actual.contains(&model.id))
+                        .map(model_view)
+                        .collect::<ApiResult<Vec<_>>>()?;
+                    let provider = super::providers::show_prepared(
+                        &projection,
+                        conn,
+                        reader,
+                        prepared.ok_or_else(|| {
+                            ApiError::internal("the bounded provider projection is absent")
+                        })?,
+                    )
+                    .await?;
+                    Ok(api::ProviderModelSuggestionAcceptReply { added, provider })
+                })
+            },
+        )
+        .await?;
+        reading.commit().await.map_err(DbError::from)?;
+        Ok(full)
+    })
+    .await?;
+    Ok(match full {
+        Some(full) => api::ProviderModelSuggestionAcceptResponse::Full(full),
+        None => api::ProviderModelSuggestionAcceptResponse::Receipt(
+            api::ProviderModelSuggestionAcceptReceipt {
+                projection: orch_api_contract::common::ReceiptProjection::Receipt,
+                provider_id: id,
+                model_ids: added,
+            },
+        ),
+    })
 }
 
 #[cfg(test)]

@@ -7,6 +7,7 @@
 mod places;
 mod support;
 
+use crate::support::FullArchiveReply as _;
 use orch_api_contract::common::ErrorCode;
 use orch_api_contract::nodes::{
     Node, NodeArchive, NodeArchiveBody, NodeArchivePlan, NodeArchivePreview, NodeArchiveResult,
@@ -52,6 +53,7 @@ async fn apply(world: &World, who: &Who, plan: &NodeArchivePlan) -> Reply<NodeAr
             .body(&body)
             .send()
             .await
+            .full_archive()
     } else {
         world
             .app
@@ -60,6 +62,7 @@ async fn apply(world: &World, who: &Who, plan: &NodeArchivePlan) -> Reply<NodeAr
             .body(&body)
             .send()
             .await
+            .full_archive()
     }
 }
 

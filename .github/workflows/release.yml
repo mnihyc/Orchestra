@@ -10,7 +10,7 @@ on:
         required: true
         type: string
       warm_caches:
-        description: Warm caches from the default branch without creating a draft or publishing images
+        description: Warm caches from the default branch without publishing a release or images
         required: true
         default: false
         type: boolean
@@ -77,12 +77,31 @@ jobs:
       - name: Refuse image publication during repackaging
         if: inputs.source_run_id && inputs.publish_images
         run: |
-          echo '::error::Repackaging only creates packages and a draft; publish images in a separate approved run.'
+          echo '::error::Repackaging only creates packages and a release; publish images in a separate approved run.'
           exit 1
       - name: Release helper behavior
         run: python3 -I -B -m unittest discover -s .github/scripts -p 'test_release_*.py'
       - name: Lint the workflows in the pinned tooling image
         run: python3 .github/scripts/workflow_lint.py
+
+  ci:
+    if: ${{ !inputs.warm_caches }}
+    needs: gate
+    runs-on: ubuntu-24.04
+    timeout-minutes: 310
+    permissions:
+      contents: read
+      actions: read
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+        with:
+          ref: ${{ needs.gate.outputs.commit }}
+      - name: Wait for the tagged commit's CI
+        env:
+          GH_TOKEN: ${{ github.token }}
+          TAG: ${{ needs.gate.outputs.tag }}
+          COMMIT: ${{ needs.gate.outputs.commit }}
+        run: python3 .github/scripts/release_ci.py --tag "$TAG" --commit "$COMMIT"
 
   native:
     needs: gate
@@ -145,6 +164,7 @@ jobs:
           path: .tmp/native/*
           if-no-files-found: error
           retention-days: 14
+          overwrite: true
 
   frontend:
     needs: gate
@@ -181,6 +201,7 @@ jobs:
           if-no-files-found: error
           include-hidden-files: true
           retention-days: 14
+          overwrite: true
 
   package:
     needs: [gate, native, frontend]
@@ -254,10 +275,11 @@ jobs:
           path: .tmp/package/*
           if-no-files-found: error
           retention-days: 14
+          overwrite: true
 
   images:
     if: github.event_name == 'workflow_dispatch' && inputs.publish_images && !inputs.warm_caches
-    needs: [gate, package]
+    needs: [gate, ci, package]
     environment: release-images
     permissions:
       contents: read
@@ -287,15 +309,17 @@ jobs:
           path: .tmp/image/*.json
           if-no-files-found: error
           retention-days: 14
+          overwrite: true
 
-  draft:
-    if: always() && !inputs.warm_caches && needs.gate.result == 'success' && needs.package.result == 'success' && (needs.images.result == 'success' || needs.images.result == 'skipped')
-    needs: [gate, package, images]
+  publish:
+    if: always() && !cancelled() && !inputs.warm_caches && needs.gate.result == 'success' && needs.ci.result == 'success' && needs.package.result == 'success' && (needs.images.result == 'success' || needs.images.result == 'skipped')
+    needs: [gate, ci, package, images]
     runs-on: ubuntu-24.04
     timeout-minutes: 30
     permissions:
       contents: write
       packages: write
+      actions: read
     env:
       GH_TOKEN: ${{ github.token }}
       ORCH_BUILD_NUMBER_DIR: ${{ github.workspace }}/.tmp/release-counters
@@ -316,7 +340,7 @@ jobs:
         env:
           RELEASE_BASE_URL: ${{ github.server_url }}/${{ github.repository }}/releases/download/${{ needs.gate.outputs.tag }}
         run: python3 .github/scripts/release_assemble.py --inputs .tmp/packages --out .tmp/release --base-url "$RELEASE_BASE_URL"
-      - name: Create the reviewed draft without replacing assets
+      - name: Publish the verified release after rechecking CI
         env:
           PUBLISH_IMAGES: ${{ needs.images.result == 'success' }}
         run: python3 .github/scripts/release_publish.py --release .tmp/release --repo "$GITHUB_REPOSITORY" --images .tmp/images

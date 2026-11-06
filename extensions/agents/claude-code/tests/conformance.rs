@@ -18,7 +18,8 @@ use orch_agent_contract::adapter::{AgentAdapter, AgentStart};
 use orch_agent_contract::descriptor::ApprovalMode;
 use orch_agent_contract::events::{SessionEvent, TurnOutcome};
 use orch_agent_contract::facts::AgentProfile;
-use orch_conformance::native::{self, Fixture, ModelRequest};
+use orch_conformance::native::{self, Fixture, ModelControl, ModelRequest};
+use orch_testkit::doubles::model::QueueFilter;
 use orch_types::{SystemClock, new_id};
 use serde_json::json;
 use std::sync::{Arc, Mutex};
@@ -85,6 +86,8 @@ async fn shared(case: &str) {
             .map(|request| ModelRequest {
                 path: request.path,
                 body: request.body,
+                status: request.status,
+                queued: request.script == Some(orch_testkit::doubles::model::ScriptSource::Queue),
             })
             .collect()
     };
@@ -106,6 +109,57 @@ async fn shared(case: &str) {
         address.port(),
         orch_plugin_contract::Secret::new(common::TOKEN),
     );
+    let control_model = |control: ModelControl| -> Result<(), String> {
+        match control {
+            ModelControl::Reset => {
+                rig.model.reset();
+                Ok(())
+            }
+            ModelControl::Queue {
+                model: model_name,
+                script,
+            } => rig
+                .model
+                .queue_for(
+                    &script,
+                    &QueueFilter {
+                        model: Some(model_name),
+                        format: None,
+                    },
+                    1,
+                )
+                .map_err(|error| error.to_string()),
+            ModelControl::QueueMatching {
+                model: selected_model,
+                script,
+                pattern,
+                times,
+            } => rig
+                .model
+                .queue_matching(
+                    &script,
+                    &QueueFilter {
+                        model: selected_model,
+                        format: None,
+                    },
+                    times,
+                    move |body| pattern.matches(body),
+                )
+                .map_err(|error| error.to_string()),
+            ModelControl::Default { script } => rig
+                .model
+                .set_default(&script)
+                .map_err(|error| error.to_string()),
+        }
+    };
+    // Until the real subscription trial passes, only this ignored test sees the local probe.
+    let local_checks = (case == "auto_review").then(|| {
+        let mut checks = orch_adapter_claude_code::descriptor::manifest()
+            .checks
+            .clone();
+        checks.probes.push(case.to_owned());
+        checks
+    });
     let fixture = Fixture {
         start: AgentStart {
             provider_id: new_id(),
@@ -125,19 +179,33 @@ async fn shared(case: &str) {
             binary,
         },
         version: std::env::var("ORCH_EXPECTED_CLAUDE_VERSION").unwrap_or_else(|_| "2.1.296".into()),
-        checks: &orch_adapter_claude_code::descriptor::manifest().checks,
+        checks: local_checks
+            .as_ref()
+            .unwrap_or(&orch_adapter_claude_code::descriptor::manifest().checks),
         workspace: rig.work.path().into(),
         within: NATIVE_CASE_WITHIN,
         requests: &requests,
+        control_model: Some(&control_model),
         launches: &launches,
         elicitation: &elicitation,
         observe: None,
     };
-    let result = native::run_case(&mut rig.adapter, &fixture, case).await;
+    let informational = local_checks.is_some();
+    let result = if informational {
+        native::run_probe(&mut rig.adapter, &fixture, case).await
+    } else {
+        native::run_case(&mut rig.adapter, &fixture, case).await
+    };
     model_only::record(
         "claude-code",
         case,
-        if result.passed { "passed" } else { "failed" },
+        if informational {
+            "informational"
+        } else if result.passed {
+            "passed"
+        } else {
+            "failed"
+        },
         &fixture.version,
         json!(result),
     );
@@ -312,4 +380,11 @@ async fn changing_bypass_keeps_ask_mode_and_uses_the_matching_launch_environment
         .collect();
     assert_eq!(launch_modes, [None, Some("1".to_owned()), None]);
     rig.adapter.stop().await.unwrap();
+}
+
+#[tokio::test]
+#[ignore = "explicit candidate-only staged classifier proof; real subscription and manifest activation remain pending"]
+async fn native_auto_classifier_stages_hooks_and_model_policy_are_observed() {
+    assert!(!orch_adapter_claude_code::descriptor::auto_proven());
+    shared("auto_review").await;
 }

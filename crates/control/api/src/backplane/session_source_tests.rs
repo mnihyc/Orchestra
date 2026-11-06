@@ -33,6 +33,8 @@ impl Wire {
             closed: CancellationToken::new(),
             stats: Mutex::new(None),
             started_at: orch_types::Time::new(chrono::Utc::now()),
+            #[cfg(feature = "test-observers")]
+            observed: orch_link::test_observers::QueueGauge::new("api.backplane.fixture"),
         });
         let session = new_id();
         link.attach(&gateway, machine, session, None).await;

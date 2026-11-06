@@ -13,10 +13,13 @@ use crate::middleware::authorization::{self, refusals};
 use crate::middleware::requests::{ApiError, ApiResult};
 use crate::registry::{Ctx, Registry};
 use crate::routes::access::page::same;
+use crate::routes::access::page::{NameBounds, NameSources};
 use crate::routes::nodes::{actor_name, invalid, placed, policy_at, view as node_view};
 use crate::routes::resources::machines::{registrable_machine as own_machine, reported_policy};
 use crate::routes::resources::sealing::master_key;
-use crate::routes::resources::view::{Holding, accesses, addresses, machine_refs, parse};
+use crate::routes::resources::view::{
+    Holding, PreparedAccess, accesses_prepared, addresses, machine_refs, parse, prepare_accesses,
+};
 use crate::routes::resources::{Home, LIST_LIMIT, clean_name, record, require};
 use crate::sign_in::origin;
 use orch_access_contract::audit::AuditAction;
@@ -50,12 +53,14 @@ use orch_settings::{Place as SettingsPlace, resolve_all};
 use orch_settings_contract::registry::{self, Invalid, Scope};
 use orch_types::{Id, Json, Time};
 use serde_json::json;
-use std::collections::HashMap;
+use std::collections::{BTreeSet, HashMap};
 
 /// The longest a root directory is written: a path, as long as the longest the platforms take.
 const ROOT_MAX_CHARS: usize = 4_096;
 
 mod agent_reach;
+mod exec_version;
+pub(crate) use exec_version::confirmed as confirmed_machine_programs;
 pub(crate) mod hosted;
 mod incarnation;
 pub(crate) mod jobs;
@@ -65,6 +70,7 @@ pub(crate) mod moves;
 pub(crate) mod network;
 mod places;
 mod reach;
+mod reach_operation;
 pub(crate) mod reading;
 mod recovery;
 pub(crate) mod retained;
@@ -97,7 +103,11 @@ pub fn mount(registry: &mut Registry) {
         .on(settings_api::EnvironmentSettingList, setting_list)
         .on(settings_api::EnvironmentSecretList, secret_list)
         .on(settings_api::EnvironmentSecretSet, secret_set)
-        .on(settings_api::EnvironmentSecretDelete, secret_delete);
+        .on_with_operation(
+            settings_api::EnvironmentSecretDelete,
+            crate::key_operations::direct::declared,
+            secret_delete,
+        );
 }
 
 // ---- the view ----
@@ -175,6 +185,7 @@ fn exec_of(config: &Json, machine_policy: Option<&Json>) -> EnvironmentExec {
             .and_then(Json::as_bool)
             .unwrap_or(true),
         machine_offers,
+        machine_programs: Vec::new(),
     }
 }
 
@@ -185,6 +196,16 @@ pub(crate) async fn inventory(
     principal: &Principal,
     seen: &[resources::Seen],
 ) -> ApiResult<Vec<Environment>> {
+    let prepared = prepare_inventory(ctx, conn, principal, seen).await?;
+    show_inventory_prepared(ctx, conn, principal, &prepared).await
+}
+
+pub(crate) async fn prepare_inventory(
+    _ctx: &Ctx,
+    conn: &mut Conn,
+    _principal: &Principal,
+    seen: &[resources::Seen],
+) -> ApiResult<PreparedInventory> {
     let ids: Vec<_> = seen.iter().map(|each| each.resource.id).collect();
     let rows = queries::environments(conn, &ids).await?;
     let standing = seen
@@ -204,7 +225,155 @@ pub(crate) async fn inventory(
             )
         })
         .collect();
-    environment_views(ctx, conn, principal, rows, &standing).await
+    prepare_environment_views(conn, rows, standing).await
+}
+
+/// Opaque existing Environment view facts; no ordinary permission or operation is selected here.
+pub(crate) struct PreparedInventory {
+    rows: Vec<EnvironmentFull>,
+    standing: HashMap<Id, Standing>,
+    access: PreparedAccess,
+    sources: NameSources,
+    bounds: NameBounds,
+    machine_facts: HashMap<Id, orch_db::queries::environment_facts::EnvironmentMachine>,
+    hosted: Vec<(Id, Id, String)>,
+    defaults: Vec<(Id, Id)>,
+    threads: Vec<env_rows::ThreadInEnvironment>,
+    runtime_rows: Vec<hosting::RuntimeFull>,
+    templates: Vec<Id>,
+    template_names: Vec<(Id, String, String)>,
+    hosts: Vec<Id>,
+    physical_machines: Vec<Id>,
+    #[expect(
+        dead_code,
+        reason = "retained source facts for the native family adapter rollout"
+    )]
+    connector_machines: Vec<Id>,
+    #[expect(
+        dead_code,
+        reason = "retained source facts for the native family adapter rollout"
+    )]
+    runtime_machines: Vec<Id>,
+}
+impl PreparedInventory {
+    pub(crate) fn name_sources(&self) -> &NameSources {
+        &self.sources
+    }
+    pub(crate) fn bound_names(&mut self, bounds: NameBounds) {
+        self.bounds = bounds;
+    }
+    pub(crate) fn template_ids(&self) -> &[Id] {
+        &self.templates
+    }
+    pub(crate) fn host_ids(&self) -> &[Id] {
+        &self.hosts
+    }
+    /// Physical policy/capacity source from the ordinary environment_facts supplier.
+    pub(crate) fn physical_machine_ids(&self) -> &[Id] {
+        &self.physical_machines
+    }
+    /// The Environment row's registered connector, used by its existing update/program fields.
+    #[expect(
+        dead_code,
+        reason = "retained source accessor for native family adapters"
+    )]
+    pub(crate) fn connector_machine_ids(&self) -> &[Id] {
+        &self.connector_machines
+    }
+    /// Enrolled connectors of the same already-read live runtime rows.
+    #[expect(
+        dead_code,
+        reason = "retained source accessor for native family adapters"
+    )]
+    pub(crate) fn runtime_machine_ids(&self) -> &[Id] {
+        &self.runtime_machines
+    }
+}
+fn inventory_holdings<'a>(
+    rows: &'a [EnvironmentFull],
+    standing: &'a HashMap<Id, Standing>,
+) -> Vec<Holding<'a>> {
+    rows.iter()
+        .filter_map(|row| {
+            standing.get(&row.id).map(|each| Holding {
+                admin_only: &each.admin_only,
+                admin_access: each.admin_access,
+                admin_place: each.admin_place,
+                participating: each.participating,
+                id: row.id,
+                owner: each.owner,
+                administers: each.administers,
+                held: &each.held,
+            })
+        })
+        .collect()
+}
+async fn prepare_environment_views(
+    conn: &mut Conn,
+    rows: Vec<EnvironmentFull>,
+    standing: HashMap<Id, Standing>,
+) -> ApiResult<PreparedInventory> {
+    let ids: Vec<_> = rows.iter().map(|row| row.id).collect();
+    let machine_facts: HashMap<_, _> = orch_db::queries::environment_facts::of_many(conn, &ids)
+        .await?
+        .into_iter()
+        .collect();
+    let hosted = hosting::hosts_of(conn, &ids).await?;
+    let defaults = queries::default_for(conn, &ids).await?;
+    let threads = env_rows::threads_in(conn, &ids).await?;
+    let runtime_rows = hosting::live_runtimes_of(conn, &ids, &[]).await?;
+    let access = prepare_accesses(conn, &inventory_holdings(&rows, &standing)).await?;
+    let mut sources = access.names.clone();
+    sources
+        .nodes
+        .extend(rows.iter().map(|row| row.home_node_id));
+    sources.nodes.extend(defaults.iter().map(|(_, node)| *node));
+    sources.nodes.extend(
+        threads
+            .iter()
+            .flat_map(|thread| [thread.thread_id, thread.topic_id]),
+    );
+    let distinct = |ids: Vec<Id>| {
+        ids.into_iter()
+            .collect::<BTreeSet<_>>()
+            .into_iter()
+            .collect::<Vec<_>>()
+    };
+    let template_ids: Vec<_> = rows.iter().filter_map(|row| row.template_id).collect();
+    let template_names = queries::template_names(conn, &template_ids).await?;
+    let templates = distinct(template_names.iter().map(|(id, _, _)| *id).collect());
+    let hosts = distinct(hosted.iter().map(|(_, host, _)| *host).collect());
+    let physical_machines = distinct(
+        machine_facts
+            .values()
+            .filter_map(|facts| facts.machine_id)
+            .collect(),
+    );
+    let connector_machines = distinct(rows.iter().filter_map(|row| row.machine_id).collect());
+    let runtime_machines = distinct(
+        runtime_rows
+            .iter()
+            .filter_map(|runtime| runtime.machine_id)
+            .collect(),
+    );
+    Ok(PreparedInventory {
+        rows,
+        standing,
+        access,
+        sources,
+        bounds: NameBounds::default(),
+        machine_facts,
+        hosted,
+        defaults,
+        threads,
+        runtime_rows,
+        templates,
+        template_names,
+        hosts,
+        physical_machines,
+        connector_machines,
+        runtime_machines,
+    })
 }
 
 /// Environments as the API shows them, for any number of them in the same few statements. What
@@ -216,6 +385,24 @@ async fn environment_views(
     rows: Vec<EnvironmentFull>,
     standing: &HashMap<Id, Standing>,
 ) -> ApiResult<Vec<Environment>> {
+    let prepared = prepare_environment_views(conn, rows, standing.clone()).await?;
+    show_inventory_prepared(ctx, conn, principal, &prepared).await
+}
+
+pub(crate) async fn show_inventory_prepared(
+    ctx: &Ctx,
+    conn: &mut Conn,
+    principal: &Principal,
+    prepared: &PreparedInventory,
+) -> ApiResult<Vec<Environment>> {
+    let rows = prepared.rows.clone();
+    let standing = &prepared.standing;
+    let machine_facts = &prepared.machine_facts;
+    let hosted = &prepared.hosted;
+    let defaults = &prepared.defaults;
+    let threads = &prepared.threads;
+    let runtime_rows = &prepared.runtime_rows;
+    let bounds = prepared.bounds.limited.then_some(&prepared.bounds);
     let ids: Vec<Id> = rows.iter().map(|row| row.id).collect();
     let activity = crate::routes::resources::view::environment_activity(conn, &ids).await?;
     let display_settings = list_settings::load(conn, &rows).await?;
@@ -226,12 +413,16 @@ async fn environment_views(
         .collect();
     let exposed = crate::routes::ports::exposures(conn, &ids, Time::new(ctx.now)).await?;
     let addresses = addresses(conn, &ids).await?;
-    let people: Vec<Id> = rows.iter().map(|row| row.owner_id).collect();
-    let people = refusals::user_refs(conn, &people).await?;
-    let machine_facts: HashMap<_, _> = orch_db::queries::environment_facts::of_many(conn, &ids)
-        .await?
-        .into_iter()
+    let people: Vec<Id> = rows
+        .iter()
+        .map(|row| row.owner_id)
+        .chain(rows.iter().flat_map(|row| {
+            exec_version::stored(&row.config)
+                .into_values()
+                .map(|entry| entry.by)
+        }))
         .collect();
+    let people = refusals::user_refs(conn, &people).await?;
     let machine_ids: Vec<Id> = machine_facts
         .values()
         .filter_map(|machine| machine.machine_id)
@@ -246,14 +437,12 @@ async fn environment_views(
             .await?
             .into_iter()
             .collect();
-    let policies: HashMap<Id, Json> = queries::machine_policies(conn, &machine_ids)
+    let program_facts: HashMap<Id, Json> = queries::machine_program_facts(conn, &machine_ids)
         .await?
         .into_iter()
         .collect();
-    let template_ids: Vec<Id> = rows.iter().filter_map(|row| row.template_id).collect();
-    let templates = queries::template_names(conn, &template_ids).await?;
+    let templates = &prepared.template_names;
     // What a managed one has beyond a directory: its host, the job under way, why it is to be removed.
-    let hosted = hosting::hosts_of(conn, &ids).await?;
     let loss_eligible = orch_db::queries::loss::eligible_environments(conn, &ids)
         .await?
         .into_iter()
@@ -273,10 +462,8 @@ async fn environment_views(
         .map(|row| row.id)
         .collect();
     let networks = network::of_environments(conn, principal, &ids, &connected).await?;
-    let defaults = queries::default_for(conn, &ids).await?;
     // Each harness's own configuration in its workspace, and the answer given for it.
     let mut config_trust = crate::routes::trust::views_of(conn, &ids).await?;
-    let threads = env_rows::threads_in(conn, &ids).await?;
     let thread_owners: Vec<_> = threads.iter().map(|thread| thread.owner_id).collect();
     let thread_owners = refusals::user_refs(conn, &thread_owners).await?;
     let reach = orch_authz::environments::reach_counts(conn, principal, &ids, Policy::default())
@@ -284,29 +471,22 @@ async fn environment_views(
         .map_err(ApiError::internal)?;
     let mut nodes: Vec<Id> = rows.iter().map(|row| row.home_node_id).collect();
     nodes.extend(defaults.iter().map(|(_, topic)| *topic));
-    for thread in &threads {
+    for thread in threads {
         nodes.extend([thread.thread_id, thread.topic_id]);
     }
     nodes.sort_unstable();
     nodes.dedup();
-    let refs = node_view::refs(conn, principal, &nodes, Policy::default()).await?;
-    let holdings: Vec<Holding<'_>> = rows
+    let refs = match bounds {
+        Some(bounds) => bounds.refs(conn, principal, &nodes).await?,
+        None => node_view::refs(conn, principal, &nodes, Policy::default()).await?,
+    };
+    let known: BTreeSet<Id> = refs
         .iter()
-        .filter_map(|row| {
-            standing.get(&row.id).map(|each| Holding {
-                admin_only: &each.admin_only,
-                admin_access: each.admin_access,
-                admin_place: each.admin_place,
-                participating: each.participating,
-                id: row.id,
-                owner: each.owner,
-                administers: each.administers,
-                held: &each.held,
-            })
-        })
+        .filter(|(_, node)| !node.redacted)
+        .map(|(id, _)| *id)
         .collect();
-    let access = accesses(conn, principal, &holdings).await?;
-    let runtime_rows = hosting::live_runtimes_of(conn, &ids, &[]).await?;
+    let holdings = inventory_holdings(&rows, standing);
+    let access = accesses_prepared(conn, principal, &holdings, &prepared.access, bounds).await?;
     let mut runtime_updates = ctx
         .app
         .engine
@@ -345,6 +525,10 @@ async fn environment_views(
             .iter()
             .filter(|thread| thread.environment_id == row.id)
         {
+            if !bound_thread_visible(thread, &known) {
+                hidden += 1;
+                continue;
+            }
             match (seen(thread.thread_id), seen(thread.topic_id)) {
                 (Some(node), Some(topic)) => {
                     shown_threads.push(EnvironmentThread {
@@ -476,13 +660,24 @@ async fn environment_views(
             } else {
                 Vec::new()
             },
-            exec: exec_of(
-                &row.config,
-                machine_facts
+            exec: {
+                let reported = machine_facts
                     .get(&row.id)
                     .and_then(|machine| machine.machine_id)
-                    .and_then(|machine| policies.get(&machine)),
-            ),
+                    .or(row.machine_id)
+                    .and_then(|machine| program_facts.get(&machine));
+                let mut exec = exec_of(
+                    &row.config,
+                    reported.and_then(orch_db::queries::environment_facts::policy_in),
+                );
+                if row.placement == "connected"
+                    && row.template_id.is_none()
+                    && let Some(reported) = reported
+                {
+                    exec.machine_programs = exec_version::view(&row.config, reported, &people);
+                }
+                exec
+            },
             mcp_found,
             index: row
                 .facts
@@ -571,6 +766,15 @@ async fn environment_views(
         });
     }
     Ok(views)
+}
+
+/// The existing Environment view admits a bound Thread line only when both its
+/// Thread and Topic references are known to this ordinary account/credential.
+pub(super) fn bound_thread_visible(
+    thread: &env_rows::ThreadInEnvironment,
+    known: &BTreeSet<Id>,
+) -> bool {
+    known.contains(&thread.thread_id) && known.contains(&thread.topic_id)
 }
 
 /// One environment as the caller sees it: all of it where they hold something on it, and what a
@@ -1093,6 +1297,16 @@ fn clean_config(path: &str, config: &Json) -> ApiResult<()> {
     Ok(())
 }
 
+/// PATCH accepts an unstamped decision, then prepares it under the environment's Manage guard.
+/// Every other value is checked here, and the complete stored config is checked after preparation.
+fn clean_patch_config(path: &str, config: &Json) -> ApiResult<()> {
+    let mut ordinary = config.clone();
+    if let Some(values) = ordinary.as_object_mut() {
+        values.remove(registry::keys::EXEC_VERSION_OVERRIDES);
+    }
+    clean_config(path, &ordinary)
+}
+
 /// The answer to a change that was made against a revision that is out of date.
 async fn stale(ctx: &Ctx, conn: &mut Conn, principal: &Principal, id: Id) -> ApiError {
     let current = show(ctx, conn, principal, id).await.ok();
@@ -1115,7 +1329,7 @@ async fn update(ctx: Ctx, (): (), mut body: api::EnvironmentUpdateBody) -> ApiRe
         .map(|name| clean_name("name", name))
         .transpose()?;
     if let Some(config) = &body.config {
-        clean_config("config", config)?;
+        clean_patch_config("config", config)?;
     }
     let mut tx = ctx.app.db.begin().await?;
     let principal = authorization::principal(&ctx, &mut tx).await?;
@@ -1144,7 +1358,39 @@ async fn update(ctx: Ctx, (): (), mut body: api::EnvironmentUpdateBody) -> ApiRe
             );
         body.config = Some(config);
     }
-    if let Some(config) = &body.config {
+    let program_report = if body.config.is_some()
+        && let Some(machine) = row.machine_id
+    {
+        queries::machine_program_facts(&mut tx, &[machine])
+            .await?
+            .into_iter()
+            .next()
+            .map(|(_, report)| report)
+    } else {
+        None
+    };
+    let mut version_consent_changed = false;
+    if let Some(config) = &mut body.config {
+        let facts = if row.placement == "connected" && row.template_id.is_none() {
+            program_report.as_ref().unwrap_or(&Json::Null)
+        } else {
+            &Json::Null
+        };
+        version_consent_changed = exec_version::prepare(
+            config,
+            &row.config,
+            facts,
+            ctx.user()?.id(),
+            Time::new(ctx.now),
+        )
+        .map_err(|reason| invalid("config.exec.version_overrides", reason))?;
+        if version_consent_changed && ctx.user()?.user.kind != "human" {
+            return Err(ApiError::new(
+                ErrorCode::AuthzDenied,
+                "Only a person managing the environment can change its machine program consent.",
+            )
+            .with("required", "person"));
+        }
         clean_config("config", config)?;
         let sources = orch_driver_contract::runtime::EnvironmentDataSources::from_config(config)
             .map_err(ApiError::internal)?;
@@ -1185,11 +1431,11 @@ async fn update(ctx: Ctx, (): (), mut body: api::EnvironmentUpdateBody) -> ApiRe
         .await?;
     }
     // What the machine's local policy offers bounds what the environment may offer.
-    if let (Some(config), Some(machine)) = (&body.config, row.machine_id) {
-        let policies = queries::machine_policies(&mut tx, &[machine]).await?;
-        let machine_offers = policies
-            .first()
-            .and_then(|(_, policy)| texts(policy.get("exec.offers")));
+    if let Some(config) = &body.config {
+        let machine_offers = program_report
+            .as_ref()
+            .and_then(orch_db::queries::environment_facts::policy_in)
+            .and_then(|policy| texts(policy.get("exec.offers")));
         let asked = texts(config.get("exec.offers"));
         if let (Some(offered), Some(asked)) = (machine_offers, asked)
             && asked.iter().any(|each| {
@@ -1256,8 +1502,16 @@ async fn update(ctx: Ctx, (): (), mut body: api::EnvironmentUpdateBody) -> ApiRe
     let exec_changed = body.config.as_ref().is_some_and(|config| {
         config.get("exec.offers") != row.config.get("exec.offers")
             || config.get("exec.orch_tools") != row.config.get("exec.orch_tools")
+            || version_consent_changed
     });
     if exec_changed {
+        let mut details = json!({"environment":id});
+        if version_consent_changed {
+            details["version_overrides"] = json!({
+                "before":row.config.get(registry::keys::EXEC_VERSION_OVERRIDES).cloned().unwrap_or_else(|| json!({})),
+                "after":body.config.as_ref().and_then(|config| config.get(registry::keys::EXEC_VERSION_OVERRIDES)).cloned().unwrap_or_else(|| json!({})),
+            });
+        }
         record(
             &ctx,
             &mut tx,
@@ -1268,7 +1522,7 @@ async fn update(ctx: Ctx, (): (), mut body: api::EnvironmentUpdateBody) -> ApiRe
                 "{who} changed what the exec node of the environment {} offers",
                 row.name
             ),
-            json!({ "environment": id }),
+            details,
         )
         .await?;
     }
@@ -1277,6 +1531,11 @@ async fn update(ctx: Ctx, (): (), mut body: api::EnvironmentUpdateBody) -> ApiRe
     job_rows::stamp_environment(&mut tx, id, ctx.now).await?;
     let changed = show(&ctx, &mut tx, &principal, id).await?;
     tx.commit().await.map_err(DbError::from)?;
+    if version_consent_changed
+        && let Err(error) = ctx.app.engine.reevaluate_bindings(None, Some(id)).await
+    {
+        tracing::warn!(environment=%id,%error,"machine program consent is saved; blocked bindings await their next recheck");
+    }
     if body.config.is_some() || change.home_node_id.is_some() {
         if let Err(error) = ctx.app.engine.apply_environment_mounts(id).await {
             tracing::warn!(environment = %id, %error, "environment mount changes remain pending");
@@ -1739,6 +1998,21 @@ async fn secret_delete(ctx: Ctx, (): (), (): ()) -> ApiResult<()> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn existing_config_previews_validate_full_consent_and_patch_deferral_is_narrow() {
+        let config = json!({"exec.version_overrides":{"codex":{
+            "path":"/codex","version":"unknown","by":orch_types::new_id(),
+            "at":"2026-10-31T00:00:00.000Z"
+        }}});
+        assert!(clean_config("config", &config).is_ok());
+        let mut pending = config.clone();
+        pending[registry::keys::EXEC_VERSION_OVERRIDES]["codex"]["at"] = json!("untrusted");
+        assert!(clean_config("config", &pending).is_err());
+        assert!(clean_patch_config("config", &pending).is_ok());
+        pending["unknown.setting"] = json!(true);
+        assert!(clean_patch_config("config", &pending).is_err());
+    }
 
     #[test]
     fn a_root_is_an_absolute_path_of_the_machines_own_kind_that_does_not_climb() {

@@ -14,9 +14,10 @@ use crate::middleware::requests::{ApiError, ApiResult};
 use crate::middleware::transaction_guard;
 use crate::registry::{Ctx, Registry};
 use crate::routes::nodes::invalid;
-use orch_api_contract::common::{ErrorCode, FieldFault, Problem};
+use orch_api_contract::common::{ErrorCode, FieldFault, Problem, ReceiptProjection};
 use orch_api_contract::documents::{
-    DocumentOpsCreate, DocumentOpsCreateBody, DocumentOpsCreateReply,
+    DocumentOpsCreate, DocumentOpsCreateBody, DocumentOpsCreateReply, DocumentOpsCreateResponse,
+    DocumentOpsReceipt,
 };
 use orch_authz::{Policy, Principal};
 use orch_db::DbError;
@@ -29,7 +30,7 @@ use limits::{DocSettings, Limit};
 
 /// Binds this module's requests.
 pub fn mount(registry: &mut Registry) {
-    registry.on(DocumentOpsCreate, create);
+    registry.on_with_operation(DocumentOpsCreate, super::operation::resolve, create);
 }
 
 /// The answer to a batch that was not applied: what is wrong with it, which
@@ -42,16 +43,46 @@ pub async fn refuse(
     outcome: Outcome,
     policy: Policy,
 ) -> ApiError {
+    refuse_projected(conn, principal, settings, outcome, policy, false, None).await
+}
+
+/// Refuses without constructing existing content when the admitted operation permits only a receipt.
+async fn refuse_projected(
+    conn: &mut orch_db::Conn,
+    principal: &Principal,
+    settings: &DocSettings,
+    outcome: Outcome,
+    policy: Policy,
+    receipt_only: bool,
+    ctx: Option<&Ctx>,
+) -> ApiError {
     match outcome {
         Outcome::Gone => ApiError::not_found(),
         Outcome::Stale { current } => {
             metrics::counter!("orch_document_ops_total","result"=>"conflict").increment(1);
-            match build::blocks_for(conn, principal, &current, policy).await {
-                Ok(current) => ApiError::new(
+            if receipt_only {
+                return ApiError::new(
                     ErrorCode::ConflictStaleRevision,
                     "a block the batch builds on was changed or removed meanwhile",
-                )
-                .with("current", current),
+                );
+            }
+            let projected = match ctx {
+                Some(ctx) => {
+                    super::operation::read_back(ctx, conn, principal, &current, policy, false)
+                        .await
+                        .map(|value| value.map(|read| read.blocks))
+                }
+                None => build::blocks_for(conn, principal, &current, policy)
+                    .await
+                    .map(Some),
+            };
+            let refusal = ApiError::new(
+                ErrorCode::ConflictStaleRevision,
+                "a block the batch builds on was changed or removed meanwhile",
+            );
+            match projected {
+                Ok(Some(current)) => refusal.with("current", current),
+                Ok(None) => refusal,
                 Err(error) => error,
             }
         }
@@ -72,20 +103,67 @@ pub async fn refuse(
         .into(),
         Outcome::BlockTooLarge { .. } => {
             metrics::counter!("orch_document_ops_total","result"=>"too_large").increment(1);
-            limits::too_large(conn, principal, settings, Limit::BlockBytes, policy).await
+            too_large(
+                conn,
+                principal,
+                settings,
+                Limit::BlockBytes,
+                policy,
+                receipt_only,
+            )
+            .await
         }
         Outcome::TooDeep { .. } => {
-            limits::too_large(conn, principal, settings, Limit::Depth, policy).await
+            too_large(
+                conn,
+                principal,
+                settings,
+                Limit::Depth,
+                policy,
+                receipt_only,
+            )
+            .await
         }
         Outcome::TooManyBlocks { .. } => {
-            limits::too_large(conn, principal, settings, Limit::Blocks, policy).await
+            too_large(
+                conn,
+                principal,
+                settings,
+                Limit::Blocks,
+                policy,
+                receipt_only,
+            )
+            .await
         }
         Outcome::TooLarge { .. } => {
-            limits::too_large(conn, principal, settings, Limit::Bytes, policy).await
+            too_large(
+                conn,
+                principal,
+                settings,
+                Limit::Bytes,
+                policy,
+                receipt_only,
+            )
+            .await
         }
         Outcome::Applied(_) | Outcome::Repeated { .. } => {
             ApiError::internal("a batch that was kept is not refused")
         }
+    }
+}
+
+async fn too_large(
+    conn: &mut orch_db::Conn,
+    principal: &Principal,
+    settings: &DocSettings,
+    limit: Limit,
+    policy: Policy,
+    receipt_only: bool,
+) -> ApiError {
+    if receipt_only {
+        limits::too_large_receipt(settings, limit)
+    } else {
+        limits::too_large(conn, principal, settings, limit, policy).await
     }
 }
 
@@ -94,7 +172,7 @@ async fn create(
     mut ctx: Ctx,
     (): (),
     body: DocumentOpsCreateBody,
-) -> ApiResult<DocumentOpsCreateReply> {
+) -> ApiResult<DocumentOpsCreateResponse> {
     let id = ctx.id("id")?;
     let client: Id = body
         .client_id
@@ -108,12 +186,22 @@ async fn create(
     let settings = DocSettings::at(&mut tx, row.node_id).await?;
     if let Err(Refusal::Invalid(_)) = operations::check_size(&body.ops) {
         metrics::counter!("orch_document_ops_total","result"=>"too_large").increment(1);
-        return Err(
-            limits::too_large(&mut tx, &principal, &settings, Limit::Operations, policy).await,
-        );
+        return Err(too_large(
+            &mut tx,
+            &principal,
+            &settings,
+            Limit::Operations,
+            policy,
+            ctx.key_receipt_required(),
+        )
+        .await);
     }
     let rules = settings.version_rules(ctx.app.config.documents.version_window_secs);
-    let ops = build::label_written(&mut tx, &principal, body.ops).await?;
+    // The guarded resolver captured exactly the source names admitted at this checkpoint.
+    // Applying that value cannot discover an unbound source after a concurrent content rename.
+    let ops = guard
+        .operation_data::<build::WrittenLabels>()?
+        .apply(body.ops)?;
     let outcome = batch::apply_fenced(
         &mut tx,
         id,
@@ -129,20 +217,50 @@ async fn create(
     let fresh = matches!(&outcome, Outcome::Applied(_));
     let (seq, touched) = match outcome {
         Outcome::Applied(applied) => (applied.seq, applied.touched),
-        Outcome::Repeated { seq } => (seq, batch::stamped_at(&mut tx, id, seq).await?),
-        other => return Err(refuse(&mut tx, &principal, &settings, other, policy).await),
+        Outcome::Repeated { seq } => {
+            let touched = if ctx.key_receipt_required() {
+                Vec::new()
+            } else {
+                batch::stamped_at(&mut tx, id, seq).await?
+            };
+            (seq, touched)
+        }
+        other => {
+            return Err(refuse_projected(
+                &mut tx,
+                &principal,
+                &settings,
+                other,
+                policy,
+                ctx.key_receipt_required(),
+                Some(&ctx),
+            )
+            .await);
+        }
     };
-    let row = super::live(&mut tx, id).await?;
-    let listed = build::standing(&mut tx, &principal, id, policy).await?;
-    let document = build::reference(&mut tx, &principal, &row, &listed, ctx.now, policy).await?;
-    let blocks = build::blocks_for(&mut tx, &principal, &touched, policy).await?;
+    let full = match super::operation::read_back(&ctx, &mut tx, &principal, &touched, policy, true)
+        .await?
+    {
+        None => None,
+        Some(read) => Some(DocumentOpsCreateReply {
+            document: read
+                .document
+                .ok_or_else(|| ApiError::internal("the full document readback has no reference"))?,
+            blocks: read.blocks,
+            seq,
+        }),
+    };
     tx.commit().await.map_err(DbError::from)?;
     if fresh {
         metrics::counter!("orch_document_ops_total","result"=>"applied").increment(1);
     }
-    Ok(DocumentOpsCreateReply {
-        document,
-        blocks,
-        seq,
+    // A guarded commit may have narrowed the shared request/reply disclosure decision.
+    Ok(match (full, ctx.key_receipt_required()) {
+        (Some(full), false) => DocumentOpsCreateResponse::Full(full),
+        _ => DocumentOpsCreateResponse::Receipt(DocumentOpsReceipt {
+            projection: ReceiptProjection::Receipt,
+            document_id: id,
+            seq,
+        }),
     })
 }

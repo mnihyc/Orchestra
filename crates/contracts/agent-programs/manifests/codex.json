@@ -242,6 +242,10 @@
         "feature": "approvals.command"
       },
       {
+        "name": "auto_review",
+        "feature": "approval_modes.auto"
+      },
+      {
         "name": "user_input",
         "feature": "approvals.user_input"
       },

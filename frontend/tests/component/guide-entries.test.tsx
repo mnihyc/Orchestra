@@ -52,10 +52,10 @@ describe('one guide entry on the screen', () => {
 });
 
 describe('the empty place’s creation question', () => {
-  it.each(['org', 'project'] as const)('opens %s’s own interaction row without an access write', async (kind) => {
+  it.each(['org', 'project'] as const)('opens %s’s own creation row without an access write', async (kind) => {
     calls.access.mockClear();
     show(<CreationPermissionLink place={{ kind, id: 'actual-place', name: 'My place' }} />);
     await userEvent.click(screen.getByRole('button', { name: kind === 'org' ? 'Who may make projects here?' : 'Who may open topics here?' }));
-    expect(calls.access).toHaveBeenCalledWith({ kind, id: 'actual-place', name: 'My place' }, { share: false, permission: `${kind}.interact` });
+    expect(calls.access).toHaveBeenCalledWith({ kind, id: 'actual-place', name: 'My place' }, { share: false, permission: kind === 'project' ? 'project.create_topics' : 'org.interact' });
   });
 });

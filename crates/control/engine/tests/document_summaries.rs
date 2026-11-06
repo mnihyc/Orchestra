@@ -58,6 +58,258 @@ async fn current(world: &World, id: Id) -> rows::DocumentRow {
         .unwrap()
 }
 
+#[tokio::test]
+async fn model_defaults_and_per_use_options_reach_document_calls_and_actual_tier_prices() {
+    use orch_link_contract::commands::{Command, CommandKind, CommandResult, ProviderComplete};
+    let world = World::on_a_key("synthetic-options-key").await;
+    world.engine().stop();
+    sqlx::query("UPDATE providers SET key_machine_id=$2 WHERE id=$1")
+        .bind(world.provider)
+        .bind(world.machine_id)
+        .execute(world.pool.pool())
+        .await
+        .unwrap();
+    let seen = Arc::new(std::sync::Mutex::new(Vec::<ProviderComplete>::new()));
+    let captured = seen.clone();
+    world.machine.handler.on(CommandKind::ProviderComplete, move |command| {
+        let Command::ProviderComplete(request) = command else { panic!("completion"); };
+        let mut requests = captured.lock().unwrap();
+        requests.push(request.clone());
+        let requested = request.params.as_ref().and_then(|params| params.get("service_tier"))
+            .and_then(serde_json::Value::as_str).unwrap_or("default");
+        let tier = if requested == "fast" { "priority" } else { requested };
+        let reported = if requested == "auto" { json!({"state":"empty"}) }
+            else { json!({"state":"told","value":tier}) };
+        Ok(CommandResult::ProviderComplete(serde_json::from_value(json!({
+            "timing":{"requested_service_tier":requested,
+                "reported_service_tier":reported},
+            "text":"A reviewed summary", "usage":{"input_tokens":100,"output_tokens":20,"total_tokens":120},
+            "request_ref":format!("options-call-{}",requests.len())
+        })).unwrap()))
+    });
+    world
+        .set(
+            world.project,
+            "auto.summarizer",
+            json!({
+                "kind":"model","provider_id":world.provider,"model_name":common::MODEL
+            }),
+        )
+        .await;
+    let ordinary = world
+        .document_beside(world.project, "Ordinary", &["Ordinary material."])
+        .await;
+    assert!(
+        world
+            .engine()
+            .summarize_document_due(ordinary)
+            .await
+            .unwrap()
+    );
+    assert_eq!(
+        current(&world, ordinary).await.description,
+        "A reviewed summary"
+    );
+    assert_eq!(seen.lock().unwrap().len(), 1, "ordinary same-path premise");
+    let parameters = json!({"efforts":["low","high"],"default_effort":"low",
+        "service_tiers":[{"id":"priority","label":"Fast"}],"default_service_tier":"priority",
+        "rate":{"input_per_mtok":"1000000","cached_input_per_mtok":"1000000","output_per_mtok":"1000000",
+            "tiers":{"priority":"2"}}});
+    let changed = sqlx::query(
+        "UPDATE provider_models SET parameters=$2 WHERE provider_id=$1 AND model_name=$3",
+    )
+    .bind(world.provider)
+    .bind(parameters)
+    .bind(common::MODEL)
+    .execute(world.pool.pool())
+    .await
+    .unwrap();
+    assert_eq!(
+        changed.rows_affected(),
+        1,
+        "model-default fixture updates the actual selected model"
+    );
+    let stored: serde_json::Value = sqlx::query_scalar(
+        "SELECT parameters FROM provider_models WHERE provider_id=$1 AND model_name=$2",
+    )
+    .bind(world.provider)
+    .bind(common::MODEL)
+    .fetch_one(world.pool.pool())
+    .await
+    .unwrap();
+    assert_eq!(
+        stored["default_service_tier"], "priority",
+        "stored model-default premise"
+    );
+    let defaulted = world
+        .document_beside(world.project, "Defaulted", &["Defaulted material."])
+        .await;
+    assert!(
+        world
+            .engine()
+            .summarize_document_due(defaulted)
+            .await
+            .unwrap()
+    );
+    assert_eq!(
+        seen.lock().unwrap().len(),
+        2,
+        "default stage issued its second same-path request"
+    );
+    let issued = seen.lock().unwrap()[1].clone();
+    assert_eq!(
+        issued
+            .params
+            .as_ref()
+            .and_then(|params| params.get("service_tier"))
+            .and_then(serde_json::Value::as_str),
+        Some("priority"),
+        "current configured model default must reach issued ProviderComplete.params"
+    );
+    let (tier, credits): (Option<String>, Option<String>) = sqlx::query_as(
+        "SELECT tier,credits::text FROM usage_events WHERE request_ref='options-call-2'",
+    )
+    .fetch_one(world.pool.pool())
+    .await
+    .unwrap();
+    assert_eq!(tier.as_deref(), Some("priority"));
+    assert_eq!(credits.as_deref(), Some("240.000000"));
+    let future = json!({"nested":[true,null,3]});
+    world
+        .set(
+            world.project,
+            "auto.summarizer",
+            json!({
+                "kind":"model","provider_id":world.provider,"model_name":common::MODEL,
+                "params":{"service_tier":"default","future_vendor_option":future}
+            }),
+        )
+        .await;
+    let selected = world
+        .document_beside(world.project, "Selected", &["Selected material."])
+        .await;
+    assert!(
+        world
+            .engine()
+            .summarize_document_due(selected)
+            .await
+            .unwrap()
+    );
+    let request = seen.lock().unwrap()[2].clone();
+    assert_eq!(request.params.as_ref().unwrap()["service_tier"], "default");
+    assert_eq!(
+        request.params.as_ref().unwrap()["future_vendor_option"],
+        future
+    );
+    let (tier, credits): (Option<String>, Option<String>) = sqlx::query_as(
+        "SELECT tier,credits::text FROM usage_events WHERE request_ref='options-call-3'",
+    )
+    .fetch_one(world.pool.pool())
+    .await
+    .unwrap();
+    assert_eq!(tier, None);
+    assert_eq!(credits.as_deref(), Some("120.000000"));
+
+    sqlx::query("UPDATE provider_models SET parameters=jsonb_set(parameters,'{rate,tiers}',$2) WHERE provider_id=$1 AND model_name=$3")
+        .bind(world.provider).bind(json!({"fast":"2"})).bind(common::MODEL)
+        .execute(world.pool.pool()).await.unwrap();
+    world
+        .set(
+            world.project,
+            "auto.summarizer",
+            json!({
+                "kind":"model","provider_id":world.provider,"model_name":common::MODEL,
+                "params":{"service_tier":"fast"}
+            }),
+        )
+        .await;
+    let alias = world
+        .document_beside(world.project, "Alias", &["Alias material."])
+        .await;
+    assert!(world.engine().summarize_document_due(alias).await.unwrap());
+    let (tier,credits,rate,states):(Option<String>,Option<String>,Option<serde_json::Value>,serde_json::Value)=sqlx::query_as(
+        "SELECT tier,credits::text,rate,measurement_states FROM usage_events WHERE request_ref='options-call-4'")
+        .fetch_one(world.pool.pool()).await.unwrap();
+    assert_eq!(tier.as_deref(), Some("priority"));
+    assert_eq!(credits.as_deref(), Some("240.000000"));
+    assert_eq!(rate.unwrap()["tiers"]["priority"], "2");
+    assert_eq!(states["requested_service_tier"], "fast");
+    assert_eq!(
+        states["reported_service_tier"],
+        json!({"state":"told","value":"priority"})
+    );
+    let configured: serde_json::Value = sqlx::query_scalar(
+        "SELECT parameters FROM provider_models WHERE provider_id=$1 AND model_name=$2",
+    )
+    .bind(world.provider)
+    .bind(common::MODEL)
+    .fetch_one(world.pool.pool())
+    .await
+    .unwrap();
+    assert!(
+        configured["rate"]["tiers"].get("priority").is_none(),
+        "event pricing does not rewrite configured rates"
+    );
+
+    world
+        .set(
+            world.project,
+            "auto.summarizer",
+            json!({
+                "kind":"model","provider_id":world.provider,"model_name":common::MODEL,
+                "params":{"service_tier":"auto"}
+            }),
+        )
+        .await;
+    let unknown = world
+        .document_beside(world.project, "Unreported", &["Unreported material."])
+        .await;
+    assert!(
+        world
+            .engine()
+            .summarize_document_due(unknown)
+            .await
+            .unwrap()
+    );
+    let (tier,credits,rate,source,states):(Option<String>,Option<String>,Option<serde_json::Value>,Option<String>,serde_json::Value)=sqlx::query_as(
+        "SELECT tier,credits::text,rate,rate_source,measurement_states FROM usage_events WHERE request_ref='options-call-5'")
+        .fetch_one(world.pool.pool()).await.unwrap();
+    assert_eq!(tier, None);
+    assert_eq!(
+        credits, None,
+        "requested auto does not prove an ordinary price"
+    );
+    assert!(
+        rate.is_some() && source.is_some(),
+        "the known rate source is retained"
+    );
+    assert_eq!(states["requested_service_tier"], "auto");
+    assert_eq!(states["reported_service_tier"]["state"], "empty");
+
+    sqlx::query("INSERT INTO usage_caps(id,node_id,provider_id,meter,period,amount,created_by,tiers) VALUES ($1,$2,$3,'tokens','day',200,$4,ARRAY['priority'])")
+        .bind(orch_types::new_id()).bind(world.project).bind(world.provider).bind(world.ada)
+        .execute(world.pool.pool()).await.unwrap();
+    world
+        .set(
+            world.project,
+            "auto.summarizer",
+            json!({
+                "kind":"model","provider_id":world.provider,"model_name":common::MODEL,
+                "params":{"service_tier":"fast"}
+            }),
+        )
+        .await;
+    let capped = world
+        .document_beside(world.project, "Capped", &["Capped material."])
+        .await;
+    assert!(world.engine().summarize_document_due(capped).await.unwrap());
+    assert_eq!(
+        seen.lock().unwrap().len(),
+        5,
+        "actual priority cap also covers its documented fast request alias"
+    );
+}
+
 async fn change_text(world: &World, document: Id, holds: &str, text: &str) {
     use orch_api_contract::documents::{BlockContent, DocumentOp, Inline};
     use orch_db::queries::documents::batch;

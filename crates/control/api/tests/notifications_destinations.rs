@@ -12,8 +12,8 @@ mod support;
 use orch_api_contract::common::{ErrorCode, Problem};
 use orch_api_contract::notifications::{
     Destination, DestinationDelete, DestinationLevel, DestinationTest, DestinationUpdate,
-    DestinationUpdateBody, NodeDestinationCreate, NodeDestinationCreateBody, NodeDestinationList,
-    NotificationTestReply,
+    DestinationUpdateBody, DestinationUpdateResponse, NodeDestinationCreate,
+    NodeDestinationCreateBody, NodeDestinationList, NotificationTestReply,
 };
 use orch_api_core::testing::Reply;
 use orch_types::Id;
@@ -80,13 +80,26 @@ async fn list(p: &Place, by: &Who, node: Id) -> Reply<Vec<Destination>> {
 }
 
 async fn patch(p: &Place, by: &Who, id: Id, body: &DestinationUpdateBody) -> Reply<Destination> {
-    p.o.world
-        .app
-        .call(DestinationUpdate, &[&id])
-        .token(&by.token)
-        .body(body)
-        .send()
-        .await
+    let reply =
+        p.o.world
+            .app
+            .call(DestinationUpdate, &[&id])
+            .token(&by.token)
+            .body(body)
+            .send()
+            .await;
+    Reply {
+        status: reply.status,
+        headers: reply.headers,
+        raw: reply.raw,
+        body: reply.body.map(|response| {
+            match response {
+                DestinationUpdateResponse::Full(destination) => Some(destination),
+                DestinationUpdateResponse::Receipt(_) => None,
+            }
+            .expect("this ordinary control expects the permitted full destination projection")
+        }),
+    }
 }
 
 async fn remove(p: &Place, by: &Who, id: Id) -> Reply<()> {

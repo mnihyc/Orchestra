@@ -93,6 +93,41 @@ struct ToolState {
     parent: Option<String>,
     item_started: bool,
     async_launched: bool,
+    generation: u64,
+    progress_title: Option<String>,
+    native_terminal: Option<ItemStatus>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct NativeTaskKey {
+    pub task_id: String,
+    pub run_id: Option<String>,
+}
+
+impl NativeTaskKey {
+    pub(crate) fn from_value(value: &Json) -> Option<Self> {
+        let task_id = value.get("task_id")?.as_str()?.to_owned();
+        if task_id.is_empty() {
+            return None;
+        }
+        Some(Self {
+            task_id,
+            run_id: value
+                .get("run_id")
+                .and_then(Json::as_str)
+                .filter(|run| !run.is_empty())
+                .map(str::to_owned),
+        })
+    }
+}
+
+#[derive(Debug, Clone)]
+struct NativeTask {
+    key: NativeTaskKey,
+    tool_ref: String,
+    local_bash: bool,
+    resumed: bool,
+    tool_reused: bool,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
@@ -139,6 +174,9 @@ impl From<StoredTool> for ToolState {
             parent: tool.parent,
             item_started: tool.item_started,
             async_launched: tool.async_launched,
+            generation: 0,
+            progress_title: None,
+            native_terminal: None,
         }
     }
 }
@@ -507,6 +545,9 @@ pub struct EventMapper {
     pending_message: Option<ItemCompleted>,
     messages: HashMap<(String, String), Message>,
     tools: HashMap<String, ToolState>,
+    native_session: Option<String>,
+    native_generation: u64,
+    native_tasks: HashMap<String, NativeTask>,
     tasks: BTreeMap<String, Task>,
     plan_for: Option<TurnId>,
     turn_tally: TokenUsage,
@@ -571,6 +612,9 @@ impl EventMapper {
             pending_message: None,
             messages: HashMap::new(),
             tools: HashMap::new(),
+            native_session: None,
+            native_generation: 0,
+            native_tasks: HashMap::new(),
             tasks: BTreeMap::new(),
             plan_for: None,
             turn_tally: TokenUsage::default(),
@@ -620,6 +664,12 @@ impl EventMapper {
     /// one that resumed or forked it starts from totals the harness restored, which are not known here.
     pub fn process_started(&mut self, fresh: bool) {
         self.model_base = fresh.then(BTreeMap::new);
+        self.native_generation = self.native_generation.saturating_add(1);
+        self.native_tasks.clear();
+    }
+
+    pub(crate) fn set_native_session(&mut self, session: &str) {
+        self.native_session = Some(session.to_owned());
     }
 
     /// The turn was asked to stop.
@@ -1402,6 +1452,9 @@ impl EventMapper {
             parent: parent.map(str::to_owned),
             item_started: !hidden,
             async_launched: false,
+            generation: self.native_generation,
+            progress_title: None,
+            native_terminal: None,
         };
         if !hidden {
             let payload = self.call_payload(&state, id, None);
@@ -1417,12 +1470,29 @@ impl EventMapper {
         outcome: Option<&ToolOutcome>,
     ) -> ToolCallPayload {
         let ctx = self.tool_context();
-        let tool = tool_payload(&state.family, &state.name, id, &state.input, outcome, &ctx);
+        let mut tool = tool_payload(&state.family, &state.name, id, &state.input, outcome, &ctx);
+        if outcome.is_none()
+            && let ToolPayload::Subagent {
+                state: native_state,
+                ..
+            } = &mut tool
+            && let Some(terminal) = &state.native_terminal
+        {
+            *native_state = match terminal {
+                ItemStatus::Completed => orch_agent_contract::events::SubagentState::Completed,
+                ItemStatus::Cancelled => orch_agent_contract::events::SubagentState::Interrupted,
+                _ => orch_agent_contract::events::SubagentState::Failed,
+            };
+        }
         let duration_ms = outcome
             .map(|_| (self.clock.time().unix_millis() - state.started_at.unix_millis()).max(0));
         ToolCallPayload {
             tool,
-            title: call_title(&state.family, &state.name, &state.input, &ctx),
+            title: outcome
+                .is_none()
+                .then(|| state.progress_title.clone())
+                .flatten()
+                .unwrap_or_else(|| call_title(&state.family, &state.name, &state.input, &ctx)),
             started_at: state.started_at,
             duration_ms,
             raw: raw_call(&state.name, &state.input, outcome),
@@ -1531,8 +1601,16 @@ impl EventMapper {
                 return;
             }
         }
+        let native_background = outcome
+            .structured
+            .as_ref()
+            .and_then(|result| result.get("backgroundTaskId"))
+            .and_then(Json::as_str)
+            .filter(|id| !id.is_empty());
         if matches!(state.family, Family::Command)
-            && state.input.get("run_in_background").and_then(Json::as_bool) == Some(true)
+            && (state.input.get("run_in_background").and_then(Json::as_bool) == Some(true)
+                || state.async_launched
+                || native_background.is_some())
             && !outcome.is_error
         {
             // A native launch is not an exit. Keep the command open until a native task result,
@@ -1555,6 +1633,16 @@ impl EventMapper {
                 }));
             }
             self.tools.insert(id.to_owned(), state);
+            if let Some(task) = native_background {
+                self.bind_native_task(
+                    NativeTaskKey {
+                        task_id: task.to_owned(),
+                        run_id: None,
+                    },
+                    id,
+                    false,
+                );
+            }
             return;
         }
         let status = if self.interrupted && outcome.is_error {
@@ -1719,6 +1807,16 @@ impl EventMapper {
     // --- system messages ---------------------------------------------------------------------------------
 
     fn system(&mut self, frame: &Frame, out: &mut Vec<SessionEvent>) {
+        if matches!(
+            frame.subtype(),
+            Some("task_started" | "task_progress" | "task_updated" | "task_notification")
+        ) && self
+            .native_session
+            .as_ref()
+            .is_some_and(|session| frame.text("session_id") != Some(session.as_str()))
+        {
+            return;
+        }
         match frame.subtype() {
             Some("init") => {
                 self.running_model = frame.text("model").map(str::to_owned);
@@ -1834,8 +1932,266 @@ impl EventMapper {
                     out,
                 );
             }
+            Some("task_started") => self.task_started(frame, out),
+            Some("task_progress") => self.task_progress(frame, out),
+            Some("task_updated") => self.task_updated(frame, out),
             Some("task_notification") => self.task_ended(frame, out),
             _ => {}
+        }
+    }
+
+    fn bind_native_task(&mut self, key: NativeTaskKey, id: &str, local_bash: bool) -> bool {
+        let Some(tool) = self.tools.get(id) else {
+            return false;
+        };
+        if tool.generation != self.native_generation
+            || !matches!(tool.family, Family::Command | Family::Subagent)
+        {
+            return false;
+        }
+        let mut resumed = false;
+        let mut tool_reused = false;
+        let mut local_bash = local_bash;
+        if let Some(old) = self.native_tasks.get(&key.task_id) {
+            if old.key.run_id.is_some() && key.run_id.is_none() {
+                return old.tool_ref == id;
+            }
+            if let (Some(old_run), Some(run)) = (&old.key.run_id, &key.run_id)
+                // Native run ids sort by when the runs opened; their format is otherwise opaque.
+                && (run < old_run || (run == old_run && old.tool_ref != id))
+            {
+                return false;
+            }
+            let newer = old.key.run_id.is_some() && old.key.run_id != key.run_id;
+            resumed = old.resumed || newer;
+            tool_reused = old.tool_ref == id && (old.tool_reused || newer);
+            local_bash |= old.local_bash && old.tool_ref == id;
+        }
+        self.native_tasks
+            .retain(|_, task| self.tools.contains_key(&task.tool_ref));
+        if !self.native_tasks.contains_key(&key.task_id)
+            && self.native_tasks.len() == orch_agent_contract::background::SNAPSHOT_COMMANDS
+        {
+            return false;
+        }
+        let weight = |task: &NativeTask| {
+            std::mem::size_of::<NativeTask>()
+                .saturating_add(task.key.task_id.capacity().saturating_mul(2))
+                .saturating_add(task.key.run_id.as_ref().map_or(0, String::capacity))
+                .saturating_add(task.tool_ref.capacity())
+        };
+        let task = NativeTask {
+            key,
+            tool_ref: id.to_owned(),
+            local_bash,
+            resumed,
+            tool_reused,
+        };
+        let used = self
+            .native_tasks
+            .values()
+            .map(weight)
+            .fold(0usize, usize::saturating_add)
+            .saturating_sub(self.native_tasks.get(&task.key.task_id).map_or(0, weight));
+        if used.saturating_add(weight(&task)) > crate::config::FRAME_MAX_BYTES {
+            return false;
+        }
+        self.native_tasks.insert(task.key.task_id.clone(), task);
+        true
+    }
+
+    fn task_tool(&self, frame: &Frame, legacy: bool) -> Option<String> {
+        let explicit = frame.text("tool_use_id");
+        let frame_key = NativeTaskKey::from_value(frame.raw());
+        let compatible = |task: &NativeTask| {
+            frame_key.as_ref() == Some(&task.key)
+                || (!task.resumed
+                    && frame_key.as_ref().is_some_and(|key| {
+                        key.task_id == task.key.task_id
+                            && (key.run_id.is_none() || task.key.run_id.is_none())
+                    }))
+                || (!task.tool_reused
+                    && explicit == Some(task.tool_ref.as_str())
+                    && frame_key.as_ref().is_none_or(|key| {
+                        key.task_id == task.key.task_id
+                            && (key.run_id.is_none() || task.key.run_id.is_none())
+                    }))
+        };
+        let id = if let Some(key) = &frame_key {
+            if let Some(task) = self.native_tasks.get(&key.task_id) {
+                if !compatible(task) || explicit.is_some_and(|id| id != task.tool_ref) {
+                    return None;
+                }
+                task.tool_ref.as_str()
+            } else if legacy {
+                explicit?
+            } else {
+                return None;
+            }
+        } else if legacy {
+            explicit?
+        } else {
+            return None;
+        };
+        if legacy
+            && self
+                .native_tasks
+                .values()
+                .any(|task| task.tool_ref == id && !compatible(task))
+        {
+            return None;
+        }
+        let tool = self.tools.get(id)?;
+        (tool.generation == self.native_generation).then(|| id.to_owned())
+    }
+
+    fn task_started(&mut self, frame: &Frame, out: &mut Vec<SessionEvent>) {
+        let Some(key) = NativeTaskKey::from_value(frame.raw()) else {
+            return;
+        };
+        let resumed = self.native_tasks.get(&key.task_id).is_some_and(|old| {
+            old.key.run_id.is_some() && key.run_id.is_some() && old.key.run_id != key.run_id
+        });
+        if let Some(old) = self.native_tasks.get(&key.task_id)
+            && old.key.run_id.is_some()
+            && key.run_id.is_none()
+            && (old.tool_reused
+                || (old.resumed && frame.text("tool_use_id") != Some(old.tool_ref.as_str())))
+        {
+            return;
+        }
+        let Some(id) = frame.text("tool_use_id").map(str::to_owned).or_else(|| {
+            self.native_tasks
+                .get(&key.task_id)
+                .map(|task| task.tool_ref.clone())
+        }) else {
+            return;
+        };
+        let Some(tool) = self.tools.get(&id) else {
+            return;
+        };
+        if tool.native_terminal.is_some() && !resumed {
+            return;
+        }
+        match (frame.text("task_type"), &tool.family) {
+            (Some("local_bash"), Family::Command)
+            | (Some("local_agent"), Family::Subagent)
+            // The native kind is optional; an observed call already supplies its kind.
+            | (None, Family::Command | Family::Subagent) => {}
+            _ => return,
+        }
+        if !self.bind_native_task(key, &id, frame.text("task_type") == Some("local_bash")) {
+            return;
+        }
+        self.update_native_task(
+            &id,
+            frame.get("is_backgrounded").and_then(Json::as_bool) == Some(true),
+            frame.text("description"),
+            resumed.then_some("running"),
+            out,
+        );
+    }
+
+    fn task_progress(&mut self, frame: &Frame, out: &mut Vec<SessionEvent>) {
+        let Some(id) = self.task_tool(frame, false) else {
+            return;
+        };
+        if self
+            .tools
+            .get(&id)
+            .is_some_and(|tool| tool.native_terminal.is_some())
+        {
+            return;
+        }
+        self.update_native_task(
+            &id,
+            false,
+            frame.text("summary").or_else(|| frame.text("description")),
+            None,
+            out,
+        );
+    }
+
+    fn task_updated(&mut self, frame: &Frame, out: &mut Vec<SessionEvent>) {
+        let Some(id) = self.task_tool(frame, false) else {
+            return;
+        };
+        // Only a newer registered run reopens a task; a late same-run patch cannot do so.
+        if self
+            .tools
+            .get(&id)
+            .is_some_and(|tool| tool.native_terminal.is_some())
+        {
+            return;
+        }
+        let Some(patch) = frame.get("patch") else {
+            return;
+        };
+        self.update_native_task(
+            &id,
+            patch.get("is_backgrounded").and_then(Json::as_bool) == Some(true),
+            patch.get("description").and_then(Json::as_str),
+            patch.get("status").and_then(Json::as_str),
+            out,
+        );
+    }
+
+    fn update_native_task(
+        &mut self,
+        id: &str,
+        backgrounded: bool,
+        title: Option<&str>,
+        status: Option<&str>,
+        out: &mut Vec<SessionEvent>,
+    ) {
+        let Some(state) = self.tools.get_mut(id) else {
+            return;
+        };
+        let mut changed = backgrounded && !state.async_launched;
+        state.async_launched |= backgrounded;
+        if status == Some("running") {
+            changed |= state.native_terminal.take().is_some();
+        }
+        let terminal = match status {
+            Some("completed") => Some(ItemStatus::Completed),
+            Some("failed" | "killed") => Some(ItemStatus::Failed),
+            _ => None,
+        };
+        if let Some(terminal) = terminal {
+            changed |= state.native_terminal.as_ref() != Some(&terminal);
+            state.native_terminal = Some(terminal);
+        }
+        if let Some(title) = title.filter(|title| !title.is_empty()) {
+            let mut end = title
+                .len()
+                .min(orch_agent_contract::background::COMMAND_PREVIEW_BYTES);
+            while !title.is_char_boundary(end) {
+                end -= 1;
+            }
+            let title = title[..end].to_owned();
+            changed |= state.progress_title.as_ref() != Some(&title);
+            state.progress_title = Some(title);
+        }
+        if !changed {
+            return;
+        }
+        let state = state.clone();
+        let mut payload = self.call_payload(&state, id, None);
+        if state.async_launched
+            && let ToolPayload::Command {
+                background,
+                exit_code,
+                ..
+            } = &mut payload.tool
+        {
+            *background = true;
+            *exit_code = None;
+        }
+        if let Ok(payload) = serde_json::to_value(payload) {
+            out.push(SessionEvent::ItemUpdated(ItemUpdated {
+                native_ref: id.to_owned(),
+                payload,
+            }));
         }
     }
 
@@ -1911,10 +2267,10 @@ impl EventMapper {
 
     /// A sub-agent that ran in the background is done: its call, which stayed open, is closed.
     fn task_ended(&mut self, frame: &Frame, out: &mut Vec<SessionEvent>) {
-        let Some(id) = frame.text("tool_use_id") else {
+        let Some(id) = self.task_tool(frame, true) else {
             return;
         };
-        let Some(state) = self.tools.get(id) else {
+        let Some(state) = self.tools.get(&id) else {
             return;
         };
         if !state.async_launched {
@@ -1922,27 +2278,34 @@ impl EventMapper {
         }
         if !matches!(
             frame.text("status"),
-            Some("completed" | "failed" | "killed")
+            Some("completed" | "failed" | "killed" | "stopped")
         ) {
             return;
         }
         let summary = frame.text("summary").unwrap_or_default().to_owned();
         let failed = matches!(frame.text("status"), Some("failed" | "killed"));
+        let stopped = frame.text("status") == Some("stopped");
         let outcome = ToolOutcome {
             text: summary,
-            is_error: failed,
+            is_error: failed || stopped,
             structured: None,
         };
         let state = state.clone();
-        self.tools.remove(id);
-        let mut payload = self.call_payload(&state, id, Some(&outcome));
+        self.tools.remove(&id);
+        self.native_tasks.retain(|_, task| task.tool_ref != id);
+        let mut payload = self.call_payload(&state, &id, Some(&outcome));
         if let ToolPayload::Command { exit_code, .. } = &mut payload.tool {
             *exit_code = frame.get("exit_code").and_then(Json::as_i64);
+        }
+        if stopped && let ToolPayload::Subagent { state, .. } = &mut payload.tool {
+            *state = orch_agent_contract::events::SubagentState::Interrupted;
         }
         if let Ok(payload) = serde_json::to_value(&payload) {
             out.push(SessionEvent::ItemCompleted(ItemCompleted {
                 native_ref: id.to_owned(),
-                status: if failed {
+                status: if stopped {
+                    ItemStatus::Cancelled
+                } else if failed {
                     ItemStatus::Failed
                 } else {
                     ItemStatus::Completed
@@ -3352,6 +3715,357 @@ mod tests {
             "a missing native exit code stays unknown"
         );
         assert!(!crate::descriptor::capabilities().background_commands);
+    }
+
+    #[test]
+    fn a_native_stopped_task_closes_its_existing_background_item_once() {
+        for (name, input, launched) in [
+            (
+                "Bash",
+                json!({"command":"sleep 300","run_in_background":true}),
+                json!({"backgroundTaskId":"task"}),
+            ),
+            (
+                "Agent",
+                json!({"description":"Look","prompt":"Read the code","subagent_type":"general-purpose"}),
+                json!({"status":"async_launched","agentId":"task"}),
+            ),
+        ] {
+            let (mut mapper, _) = mapper(false);
+            feed(
+                &mut mapper,
+                vec![
+                    json!({"type":"assistant","message":{"id":"m","content":[{"type":"tool_use","id":"bg","name":name,"input":input}]}}),
+                    json!({"type":"user","message":{"role":"user","content":[{"type":"tool_result","tool_use_id":"bg","content":"launched"}]},"tool_use_result":launched}),
+                ],
+            );
+            let turn_end = feed(&mut mapper, vec![result_frame(json!({}))]);
+            assert!(
+                !turn_end.iter().any(
+                    |event| matches!(event, SessionEvent::ItemCompleted(item) if item.native_ref == "bg")
+                ),
+                "the turn ending is not native task completion"
+            );
+            let stopped = json!({
+                "type":"system","subtype":"task_notification","session_id":"session",
+                "uuid":"stopped","task_id":"task","run_id":"run-1","tool_use_id":"bg",
+                "status":"stopped","output_file":"/workspace/task-output","summary":"Stopped by the user"
+            });
+            let ended = feed(&mut mapper, vec![stopped.clone()]);
+            let [SessionEvent::ItemCompleted(item)] = ended.as_slice() else {
+                panic!("the native stopped notification closes {name}: {ended:?}");
+            };
+            assert_eq!(item.native_ref, "bg");
+            assert_eq!(item.status, ItemStatus::Cancelled);
+            assert_eq!(item.payload["raw"]["name"], name);
+            assert_eq!(
+                serde_json::from_str::<Json>(
+                    item.payload["raw"]["input"]["inline"].as_str().unwrap()
+                )
+                .unwrap(),
+                input
+            );
+            if name == "Bash" {
+                assert!(item.payload["tool"]["exit_code"].is_null());
+            } else {
+                assert_eq!(item.payload["tool"]["state"], "interrupted");
+                assert_eq!(item.payload["tool"]["child_stream"], "sub:bg");
+            }
+            assert!(feed(&mut mapper, vec![stopped]).is_empty());
+        }
+    }
+
+    #[test]
+    fn a_native_background_transition_keeps_the_original_command_until_its_task_ends() {
+        let (mut mapper, _) = mapper(false);
+        let input = json!({"command":"printf ready","description":"Wait"});
+        feed(
+            &mut mapper,
+            vec![
+                json!({"type":"assistant","message":{"id":"m","content":[{"type":"tool_use","id":"bg","name":"Bash","input":input}]}}),
+                json!({"type":"system","subtype":"task_started","session_id":"session","uuid":"started","task_id":"task","run_id":"run-1","tool_use_id":"bg","task_type":"local_bash","description":"Wait","is_backgrounded":false}),
+            ],
+        );
+        let backgrounded = feed(
+            &mut mapper,
+            vec![
+                json!({"type":"system","subtype":"task_updated","session_id":"session","uuid":"backgrounded","task_id":"task","run_id":"run-1","patch":{"is_backgrounded":true}}),
+            ],
+        );
+        let [SessionEvent::ItemUpdated(item)] = backgrounded.as_slice() else {
+            panic!("the native transition updates the existing command: {backgrounded:?}");
+        };
+        assert_eq!(item.native_ref, "bg");
+        assert_eq!(item.payload["tool"]["background"], true);
+        assert!(item.payload["tool"]["exit_code"].is_null());
+        assert_eq!(
+            serde_json::from_str::<Json>(item.payload["raw"]["input"]["inline"].as_str().unwrap())
+                .unwrap(),
+            input
+        );
+        let turn_end = feed(&mut mapper, vec![result_frame(json!({}))]);
+        assert!(
+            !turn_end.iter().any(
+                |event| matches!(event, SessionEvent::ItemCompleted(item) if item.native_ref == "bg")
+            ),
+            "a natively backgrounded command outlives its turn"
+        );
+        let ended = feed(
+            &mut mapper,
+            vec![
+                json!({"type":"system","subtype":"task_notification","session_id":"session","uuid":"stopped","task_id":"task","run_id":"run-1","status":"stopped","output_file":"/workspace/task-output","summary":"Stopped by the user"}),
+            ],
+        );
+        let [SessionEvent::ItemCompleted(item)] = ended.as_slice() else {
+            panic!("the exact task identity closes its original command: {ended:?}");
+        };
+        assert_eq!(item.native_ref, "bg");
+        assert_eq!(item.status, ItemStatus::Cancelled);
+        assert!(item.payload["tool"]["exit_code"].is_null());
+    }
+
+    #[test]
+    fn native_subagent_progress_updates_its_existing_lane_without_inventing_usage() {
+        let (mut mapper, _) = mapper(false);
+        feed(
+            &mut mapper,
+            vec![
+                json!({"type":"assistant","message":{"id":"m","content":[{"type":"tool_use","id":"ag","name":"Agent","input":{"description":"Look","prompt":"Read the code","subagent_type":"general-purpose"}}]}}),
+                json!({"type":"system","subtype":"task_started","session_id":"session","uuid":"started","task_id":"task","run_id":"run-1","tool_use_id":"ag","task_type":"local_agent","description":"Look","is_backgrounded":true}),
+            ],
+        );
+        let progress = json!({
+            "type":"system","subtype":"task_progress","session_id":"session","uuid":"progress",
+            "task_id":"task","run_id":"run-1","tool_use_id":"ag","description":"Look",
+            "summary":"Reading the request handler","usage":{"total_tokens":12,"tool_uses":2,"duration_ms":100}
+        });
+        let events = feed(&mut mapper, vec![progress.clone()]);
+        let [SessionEvent::ItemUpdated(item)] = events.as_slice() else {
+            panic!("native progress updates only the existing subagent: {events:?}");
+        };
+        assert_eq!(item.native_ref, "ag");
+        assert_eq!(item.payload["title"], "Reading the request handler");
+        assert_eq!(item.payload["tool"]["child_stream"], "sub:ag");
+        assert_eq!(item.payload["tool"]["prompt"], "Read the code");
+        assert_eq!(item.payload["tool"]["state"], "running");
+        assert!(item.payload["duration_ms"].is_null());
+        let ended = feed(
+            &mut mapper,
+            vec![
+                json!({"type":"system","subtype":"task_notification","session_id":"session","uuid":"completed","task_id":"task","run_id":"run-1","status":"completed","output_file":"/workspace/task-output","summary":"Read it"}),
+            ],
+        );
+        let [SessionEvent::ItemCompleted(item)] = ended.as_slice() else {
+            panic!("native completion closes the same subagent: {ended:?}");
+        };
+        assert_eq!(item.native_ref, "ag");
+        assert_eq!(item.payload["tool"]["state"], "completed");
+        assert!(feed(&mut mapper, vec![progress]).is_empty());
+    }
+
+    #[test]
+    fn native_task_updates_require_the_known_tool_session_and_current_run() {
+        let older_run = "7f4dd67e-a8bb-487f-98a0-83e1b656c13a";
+        let current_run = "b1ee84f0-5d27-45ae-9a6a-f418fe710387";
+        let newer_run = "f01e7336-ab7f-4b14-9768-1f54d1c98080";
+        let (mut mapper, _) = mapper(false);
+        mapper.set_native_session("session");
+        feed(
+            &mut mapper,
+            vec![
+                json!({"type":"assistant","message":{"id":"m","content":[{"type":"tool_use","id":"ag","name":"Agent","input":{"description":"Look","prompt":"Read"}},{"type":"tool_use","id":"plan","name":"TaskCreate","input":{"subject":"Read"}}]}}),
+                json!({"type":"system","subtype":"task_started","session_id":"session","task_id":"task","run_id":current_run,"tool_use_id":"ag","task_type":"local_agent","description":"Look","is_backgrounded":true}),
+            ],
+        );
+        let refused = feed(
+            &mut mapper,
+            vec![
+                json!({"type":"system","subtype":"task_started","session_id":"session","task_id":"unknown","run_id":older_run,"tool_use_id":"unowned","task_type":"local_agent","description":"Other"}),
+                json!({"type":"system","subtype":"task_started","session_id":"session","task_id":"plan","run_id":older_run,"tool_use_id":"plan","task_type":"local_agent","description":"Not a subagent"}),
+                json!({"type":"system","subtype":"task_started","session_id":"session","task_id":"wrong-kind","run_id":older_run,"tool_use_id":"ag","task_type":"local_bash","description":"Not a shell"}),
+                json!({"type":"system","subtype":"task_progress","session_id":"other","task_id":"task","run_id":current_run,"summary":"Wrong session"}),
+                json!({"type":"system","subtype":"task_progress","session_id":"session","task_id":"task","run_id":older_run,"summary":"Older run"}),
+                json!({"type":"system","subtype":"task_progress","session_id":"session","task_id":"unknown","run_id":current_run,"tool_use_id":"ag","summary":"Unknown task"}),
+                json!({"type":"system","subtype":"task_notification","session_id":"session","task_id":"task","run_id":current_run,"tool_use_id":"unowned","status":"completed","summary":"Wrong tool"}),
+                json!({"type":"system","subtype":"task_notification","session_id":"session","task_id":"other-task","run_id":current_run,"tool_use_id":"ag","status":"completed","summary":"Wrong task"}),
+                json!({"type":"system","subtype":"task_notification","task_id":"task","run_id":current_run,"tool_use_id":"ag","status":"completed","summary":"Missing session"}),
+                json!({"type":"system","subtype":"task_started","session_id":"session","task_id":"task","run_id":older_run,"tool_use_id":"ag","task_type":"local_agent","description":"Late start"}),
+            ],
+        );
+        assert!(
+            refused.is_empty(),
+            "unknown or stale tasks change no owned line"
+        );
+        let valid = feed(
+            &mut mapper,
+            vec![
+                json!({"type":"system","subtype":"task_progress","session_id":"session","task_id":"task","run_id":current_run,"summary":"Still reading"}),
+            ],
+        );
+        let [SessionEvent::ItemUpdated(item)] = valid.as_slice() else {
+            panic!("the current owned task still updates: {valid:?}");
+        };
+        assert_eq!(item.native_ref, "ag");
+        assert_eq!(item.payload["title"], "Still reading");
+        mapper.process_started(false);
+        assert!(
+            feed(
+                &mut mapper,
+                vec![
+                    json!({"type":"system","subtype":"task_started","session_id":"session","task_id":"task","run_id":newer_run,"tool_use_id":"ag","task_type":"local_agent","description":"Old process tool"}),
+                    json!({"type":"system","subtype":"task_notification","session_id":"session","task_id":"task","run_id":current_run,"tool_use_id":"ag","status":"stopped","summary":"Old process result"}),
+                ],
+            )
+            .is_empty()
+        );
+    }
+
+    #[test]
+    fn a_native_terminal_update_keeps_the_completion_bookend_and_rejects_late_progress() {
+        let (mut mapper, _) = mapper(false);
+        feed(
+            &mut mapper,
+            vec![
+                json!({"type":"assistant","message":{"id":"m","content":[{"type":"tool_use","id":"ag","name":"Agent","input":{"description":"Look","prompt":"Read"}}]}}),
+                json!({"type":"system","subtype":"task_started","session_id":"session","task_id":"task","run_id":"run-1","tool_use_id":"ag","task_type":"local_agent","description":"Look","is_backgrounded":true}),
+            ],
+        );
+        let updated = feed(
+            &mut mapper,
+            vec![
+                json!({"type":"system","subtype":"task_updated","session_id":"session","task_id":"task","run_id":"run-1","patch":{"status":"completed","description":"Finished"}}),
+            ],
+        );
+        let [SessionEvent::ItemUpdated(item)] = updated.as_slice() else {
+            panic!("the native terminal patch updates its existing subagent: {updated:?}");
+        };
+        assert_eq!(item.payload["tool"]["state"], "completed");
+        assert!(item.payload["raw"]["output"].is_null());
+        let late = json!({"type":"system","subtype":"task_progress","session_id":"session","task_id":"task","run_id":"run-1","summary":"Late running description"});
+        assert!(feed(&mut mapper, vec![late.clone()]).is_empty());
+        assert!(
+            feed(
+                &mut mapper,
+                vec![
+                    json!({"type":"system","subtype":"task_updated","session_id":"session","task_id":"task","run_id":"run-1","patch":{"status":"running","description":"Late running patch"}}),
+                    json!({"type":"system","subtype":"task_started","session_id":"session","task_id":"task","run_id":"run-1","tool_use_id":"ag","task_type":"local_agent","description":"Duplicate same-run start","is_backgrounded":true}),
+                ],
+            )
+            .is_empty()
+        );
+        let completed = json!({"type":"system","subtype":"task_notification","session_id":"session","task_id":"task","run_id":"run-1","status":"completed","summary":"The full native completion summary"});
+        let ended = feed(&mut mapper, vec![completed.clone()]);
+        let [SessionEvent::ItemCompleted(item)] = ended.as_slice() else {
+            panic!("the bookend retains the actual native summary: {ended:?}");
+        };
+        assert_eq!(item.native_ref, "ag");
+        assert_eq!(
+            item.payload["raw"]["output"]["inline"],
+            "The full native completion summary"
+        );
+        assert!(feed(&mut mapper, vec![completed, late]).is_empty());
+    }
+
+    #[test]
+    fn native_optional_fields_preserve_an_explicit_known_tool_bookend() {
+        let (mut mapper, _) = mapper(false);
+        mapper.set_native_session("session");
+        feed(
+            &mut mapper,
+            vec![
+                json!({"type":"assistant","message":{"id":"m","content":[{"type":"tool_use","id":"ag","name":"Agent","input":{"description":"Look","prompt":"Read"}}]}}),
+                json!({"type":"system","subtype":"task_started","session_id":"session","task_id":"task","run_id":"b1ee84f0-5d27-45ae-9a6a-f418fe710387","tool_use_id":"ag","description":"Look","is_backgrounded":true}),
+            ],
+        );
+        let progress = feed(
+            &mut mapper,
+            vec![
+                json!({"type":"system","subtype":"task_progress","session_id":"session","task_id":"task","tool_use_id":"ag","summary":"Known tool, optional run"}),
+            ],
+        );
+        let [SessionEvent::ItemUpdated(item)] = progress.as_slice() else {
+            panic!("an explicit known tool still updates without optional fields: {progress:?}");
+        };
+        assert_eq!(item.native_ref, "ag");
+        assert_eq!(item.payload["tool"]["child_stream"], "sub:ag");
+        let ended = feed(
+            &mut mapper,
+            vec![
+                json!({"type":"system","subtype":"task_notification","session_id":"session","task_id":"task","tool_use_id":"ag","status":"completed","summary":"Read it"}),
+            ],
+        );
+        let [SessionEvent::ItemCompleted(item)] = ended.as_slice() else {
+            panic!("the explicit known tool retains its completion: {ended:?}");
+        };
+        assert_eq!(item.native_ref, "ag");
+        assert_eq!(item.status, ItemStatus::Completed);
+    }
+
+    #[test]
+    fn native_resumption_can_keep_its_tool_and_rejects_only_stale_or_ambiguous_bookends() {
+        let older_run = "7f4dd67e-a8bb-487f-98a0-83e1b656c13a";
+        let current_run = "b1ee84f0-5d27-45ae-9a6a-f418fe710387";
+        let (mut mapper, _) = mapper(false);
+        mapper.set_native_session("session");
+        feed(
+            &mut mapper,
+            vec![
+                json!({"type":"assistant","message":{"id":"m","content":[{"type":"tool_use","id":"ag","name":"Agent","input":{"description":"Look","prompt":"Read"}}]}}),
+                json!({"type":"system","subtype":"task_started","session_id":"session","task_id":"task","run_id":older_run,"tool_use_id":"ag","task_type":"local_agent","description":"Look","is_backgrounded":true}),
+                json!({"type":"system","subtype":"task_updated","session_id":"session","task_id":"task","run_id":older_run,"patch":{"status":"completed","description":"Finished an earlier run"}}),
+            ],
+        );
+        let resumed = feed(
+            &mut mapper,
+            vec![
+                json!({"type":"system","subtype":"task_started","session_id":"session","task_id":"task","run_id":current_run,"description":"Resumed","is_backgrounded":true}),
+            ],
+        );
+        let [SessionEvent::ItemUpdated(item)] = resumed.as_slice() else {
+            panic!("the known logical task resumes in its existing lane: {resumed:?}");
+        };
+        assert_eq!(item.native_ref, "ag");
+        assert_eq!(item.payload["tool"]["state"], "running");
+        assert_eq!(item.payload["tool"]["child_stream"], "sub:ag");
+        assert!(
+            feed(
+                &mut mapper,
+                vec![
+                    json!({"type":"system","subtype":"task_progress","session_id":"session","task_id":"task","run_id":older_run,"tool_use_id":"ag","summary":"Late old progress"}),
+                    json!({"type":"system","subtype":"task_notification","session_id":"session","task_id":"task","run_id":older_run,"tool_use_id":"ag","status":"completed","summary":"Late old result"}),
+                    json!({"type":"system","subtype":"task_notification","session_id":"session","task_id":"task","tool_use_id":"ag","status":"completed","summary":"Cannot identify which of two runs ended"}),
+                ],
+            )
+            .is_empty()
+        );
+        let ended = feed(
+            &mut mapper,
+            vec![
+                json!({"type":"system","subtype":"task_notification","session_id":"session","task_id":"task","run_id":current_run,"status":"completed","summary":"The resumed run finished"}),
+            ],
+        );
+        let [SessionEvent::ItemCompleted(item)] = ended.as_slice() else {
+            panic!("the current run closes the same owned line: {ended:?}");
+        };
+        assert_eq!(item.native_ref, "ag");
+        assert_eq!(item.payload["tool"]["prompt"], "Read");
+        assert_eq!(
+            item.payload["raw"]["output"]["inline"],
+            "The resumed run finished"
+        );
+    }
+
+    #[test]
+    fn a_foreign_task_frame_is_retained_only_as_a_raw_diagnostic() {
+        let (mut mapper, _) = mapper(true);
+        mapper.set_native_session("session");
+        let events = feed(
+            &mut mapper,
+            vec![
+                json!({"type":"system","subtype":"task_started","session_id":"other","task_id":"task","run_id":"run","tool_use_id":"unowned","task_type":"local_agent","description":"Other"}),
+            ],
+        );
+        assert_eq!(kinds(&events), ["raw.frame"]);
     }
 
     #[test]

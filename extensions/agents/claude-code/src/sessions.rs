@@ -724,6 +724,31 @@ pub fn environment(launch: &Launch<'_>) -> BTreeMap<String, String> {
     env
 }
 
+/// The reviewer's declared model is resolved from the same fully composed environment that the
+/// native process receives. Session IDs, origin and credentials do not alter model environment.
+pub fn approval_reviewer(
+    setup: &HarnessSetup,
+    spec: &SessionSpec,
+    turn: &TurnSettings,
+) -> Result<
+    Option<orch_agent_contract::review::ApprovalReviewer>,
+    orch_agent_contract::adapter::AdapterError,
+> {
+    let mut settings = spec.settings.clone();
+    settings.model = turn.model.clone();
+    settings.approval_mode = turn.approval_mode;
+    settings.params = turn.params.clone();
+    let env = environment(&Launch {
+        setup,
+        spec,
+        session_id: "",
+        origin: &Origin::New,
+        turn,
+        oauth_token: None,
+    });
+    crate::review::reviewer_in_environment(&settings, &env)
+}
+
 /// The arguments of a session's process.
 #[must_use]
 pub fn arguments(launch: &Launch<'_>) -> Vec<String> {
@@ -1753,5 +1778,80 @@ mod tests {
         };
         turn.params = json!({});
         assert!(settings(&turn, &own).get("skipWebFetchPreflight").is_none());
+    }
+    #[test]
+    fn auto_reviewer_uses_the_actual_profile_alias_and_current_allowed_models_without_rewriting_env()
+     {
+        let mut setup = setup();
+        let mut session = spec();
+        session.settings.model = "claude-opus-5".into();
+        session.settings.approval_mode = ApprovalMode::Auto;
+        session.settings.available_models = vec!["claude-opus-5".into(), "claude-sonnet-5".into()];
+        let mut wanted = turn();
+        wanted.model = session.settings.model.clone();
+        wanted.approval_mode = ApprovalMode::Auto;
+        assert_eq!(
+            approval_reviewer(&setup, &session, &wanted)
+                .unwrap()
+                .unwrap()
+                .model,
+            "claude-opus-5"
+        );
+        setup.profile_env.insert(
+            "ANTHROPIC_DEFAULT_SONNET_MODEL".into(),
+            "claude-sonnet-5".into(),
+        );
+        assert_eq!(
+            approval_reviewer(&setup, &session, &wanted)
+                .unwrap()
+                .unwrap()
+                .model,
+            "claude-sonnet-5"
+        );
+        session.settings.available_models = vec!["claude-opus-5".into()];
+        assert_eq!(
+            approval_reviewer(&setup, &session, &wanted)
+                .unwrap()
+                .unwrap()
+                .model,
+            "claude-opus-5"
+        );
+        let process = built(&setup, &session, &wanted, &Origin::New);
+        assert_eq!(
+            process.env["ANTHROPIC_DEFAULT_SONNET_MODEL"],
+            "claude-sonnet-5"
+        );
+        assert_eq!(process.env["ANTHROPIC_MODEL"], "claude-opus-5");
+        assert_eq!(process.env["CLAUDE_CODE_SUBAGENT_MODEL"], "claude-opus-5");
+        session.settings.available_models.clear();
+        assert!(approval_reviewer(&setup, &session, &wanted).is_err());
+        wanted.approval_mode = ApprovalMode::OnRequest;
+        assert!(
+            approval_reviewer(&setup, &session, &wanted)
+                .unwrap()
+                .is_none()
+        );
+    }
+
+    #[test]
+    fn a_next_turn_reviewer_uses_that_turns_model_and_checks_its_existing_allowlist() {
+        let setup = setup();
+        let mut session = spec();
+        session.settings.model = "claude-opus-5".into();
+        session.settings.approval_mode = ApprovalMode::Auto;
+        session.settings.available_models = vec!["claude-opus-5".into(), "claude-sonnet-5".into()];
+        let mut wanted = turn();
+        wanted.model = "claude-sonnet-5".into();
+        wanted.approval_mode = ApprovalMode::Auto;
+        assert_eq!(
+            approval_reviewer(&setup, &session, &wanted)
+                .unwrap()
+                .unwrap()
+                .model,
+            "claude-sonnet-5"
+        );
+        session.settings.available_models = vec!["claude-opus-5".into()];
+        assert!(approval_reviewer(&setup, &session, &wanted).is_err());
+        assert_eq!(session.settings.model, "claude-opus-5");
     }
 }

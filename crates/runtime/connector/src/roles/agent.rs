@@ -615,6 +615,7 @@ fn typed(name: &str, kind: Option<FieldType>, text: String) -> Result<Json, Comm
         )
     };
     match kind {
+        Some(FieldType::Json) => serde_json::from_str(&text).map_err(|_| unfit("valid JSON")),
         Some(FieldType::Boolean) => match text.as_str() {
             "true" => Ok(Json::Bool(true)),
             "false" => Ok(Json::Bool(false)),

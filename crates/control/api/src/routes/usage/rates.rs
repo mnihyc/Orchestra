@@ -12,7 +12,6 @@ use super::csv::json_response;
 use super::names::{Names, rate_of};
 use crate::middleware::authorization::{self, refusals};
 use crate::middleware::requests::{ApiError, ApiResult};
-use crate::middleware::transaction_guard;
 use crate::registry::Ctx;
 use crate::sign_in::origin;
 use axum::body::Body;
@@ -70,16 +69,7 @@ pub async fn table(ctx: Ctx, query: UsageRateTableGetQuery, (): ()) -> ApiResult
         if query.node_id.is_some() {
             return Err(ApiError::invalid("system", "choose a node or the system"));
         }
-        if !principal.is_system_admin()
-            || !matches!(
-                &ctx.user()?.via,
-                crate::middleware::authentication::Via::Session { .. }
-            )
-        {
-            return Err(refusals::system_admin_only(
-                "only a system admin in a browser reads the system rate card",
-            ));
-        }
+        ctx.ordinary_system_admin_with(ctx.user()?, principal.caller())?;
         // The system form edits its own patterns, not the contents of any private provider.
         let on = orch_settings::get(&mut conn, Place::System, keys::USAGE_CATALOGUE)
             .await
@@ -327,15 +317,10 @@ pub async fn catalogue(
 }
 
 /// Replaces the catalogue in force by a file, by one fetched from the configured address, or by the
-/// shipped one: a system admin, in a browser session.
+/// shipped one, through the ordinary administrative operation gate.
 pub async fn set(ctx: Ctx, (): (), body: Body) -> ApiResult<Response> {
     let mut conn = ctx.app.db.acquire().await?;
-    let principal = authorization::principal(&ctx, &mut conn).await?;
-    if !principal.is_system_admin() {
-        return Err(refusals::system_admin_only(
-            "only a system admin replaces the rate catalogue",
-        ));
-    }
+    crate::routes::admin::admin_of(&ctx)?;
     let limit = usize::try_from(USAGE_CATALOGUE_MAX_BYTES).unwrap_or(usize::MAX);
     let bytes = axum::body::to_bytes(body, limit).await.map_err(|_| {
         ApiError::new(ErrorCode::RequestTooLarge, "a catalogue is at most 2 MiB")
@@ -374,7 +359,7 @@ pub async fn set(ctx: Ctx, (): (), body: Body) -> ApiResult<Response> {
     } else {
         None
     };
-    let (mut tx, guard) = transaction_guard::begin(&ctx).await?;
+    let (mut tx, guard) = crate::routes::admin::action(&ctx).await?;
     let by = Actor::User(guard.user().id());
     let from = origin(&ctx);
     let now = guard.now().get();

@@ -1,6 +1,9 @@
 //! Current thread command rosters, reviewed exact End requests and factual outcomes.
 
+use crate::operations::{FacetSpec as Facet, OperationSpec as Op, TargetResolver as Target};
 use crate::routes::Access::Permission;
+use orch_access_contract::key_scope::{KeyAction::Read, KeyTargetKind::Object};
+use orch_access_contract::permissions::ObjectKind as K;
 use orch_types::{Id, Time};
 use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
@@ -172,7 +175,21 @@ pub struct ThreadBackgroundGetQuery {
 
 crate::endpoints! {
     /// Reads the current native commands of this thread's existing sessions.
-    ThreadBackgroundGet: GET "/threads/{id}/background", Permission("thread.view"), query ThreadBackgroundGetQuery, none, json ThreadBackground, 200;
+    ThreadBackgroundGet: GET "/threads/{id}/background", Permission("thread.view"), query ThreadBackgroundGetQuery, none, json ThreadBackground, 200,
+        operation Op::facets(&[
+            Facet::required(
+                Read,
+                &[Object(K::Thread)],
+                Target::TypedPath {
+                    parameter: "id",
+                    kind: Object(K::Thread),
+                },
+            ),
+            Facet::response_content(
+                &[Object(K::Provider)],
+                Target::ResolvedCollection("background_provider_directories"),
+            ),
+        ]);
     /// Ends exactly the reviewed commands through an attributed job.
     ThreadBackgroundEnd: POST "/threads/{id}/background/end", Permission("thread.interact"), none, json BackgroundEndRequest, json crate::workspace::Job, 202;
 }

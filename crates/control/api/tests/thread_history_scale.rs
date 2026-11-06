@@ -308,6 +308,19 @@ async fn one_hundred_twenty_eight_http_rounds_and_ten_billion_synthetic_tokens_k
     let rig = Rig::tuned(|tuning| tuning.sweep_every = std::time::Duration::ZERO).await;
     native(&rig).await?;
     let http = reqwest::Client::builder().timeout(PATIENCE).build()?;
+    // This fixture isolates history and terminal accounting; recovery rules have their own controls.
+    body(
+        http.put(url(
+            &rig,
+            &format!("/nodes/{}/settings/calls.rules", rig.topic),
+        ))
+        .bearer_auth(&rig.token)
+        .json(&json!({"value":[]}))
+        .send()
+        .await?,
+        PAGE_BYTES,
+    )
+    .await?;
     let thread = rig.thread("Synthetic 128-round 10B-token fixture").await;
     let opening = get(
         &rig,

@@ -182,7 +182,7 @@ function AccessRow({ approval, live, onSettled }: { approval: AccessApproval; li
       </div>
 
       {!other && approval.can_decide && <QuickGrant approval={approval} live={live} onSettled={onSettled} onOther={()=>setOther(true)} />}
-      {other && approval.can_decide && <>{!request.membership&&<fieldset className="flex flex-col gap-1" disabled={!approval.can_decide || busy}>
+      {other && approval.can_decide && <>{!request.membership&&<fieldset className="flex flex-col gap-1" disabled={busy}>
         <legend className="pb-1 text-sm font-medium text-text">{t('approvals.access.gives')}</legend>
         <p className="pb-1 text-sm text-text-muted">{t('approvals.access.givesHint')}</p>
         {asked.map((permission) => (
@@ -201,7 +201,7 @@ function AccessRow({ approval, live, onSettled }: { approval: AccessApproval; li
       )}
 
       {models.length > 0 && (
-        <fieldset className="flex flex-col gap-1" disabled={!approval.can_decide || busy}>
+        <fieldset className="flex flex-col gap-1" disabled={busy}>
           <legend className="pb-1 text-sm font-medium text-text">{t('approvals.access.models')}</legend>
           {models.map((model) => (
             <Checkbox key={model} label={model} checked={pickedModels.has(model)} disabled={!approval.can_decide || busy} onCheckedChange={(on) => setPickedModels((set) => toggled(set, model, on))} />
@@ -209,7 +209,7 @@ function AccessRow({ approval, live, onSettled }: { approval: AccessApproval; li
         </fieldset>
       )}
       {efforts.length > 0 && (
-        <fieldset className="flex flex-col gap-1" disabled={!approval.can_decide || busy}>
+        <fieldset className="flex flex-col gap-1" disabled={busy}>
           <legend className="pb-1 text-sm font-medium text-text">{t('approvals.access.efforts')}</legend>
           {efforts.map((effort) => (
             <Checkbox key={effort} label={effort} checked={pickedEfforts.has(effort)} disabled={!approval.can_decide || busy} onCheckedChange={(on) => setPickedEfforts((set) => toggled(set, effort, on))} />
@@ -217,28 +217,26 @@ function AccessRow({ approval, live, onSettled }: { approval: AccessApproval; li
         </fieldset>
       )}
 
-      {approval.can_decide && (
-        <>
-          <Select
-            label={t('approvals.access.ends')}
-            value={ends}
-            onValueChange={setEnds}
-            disabled={busy}
-            error={!validEnd ? t('access.request.futureDate') : undefined}
-            fieldClassName="max-w-(--field-wide)"
-            options={[
-              ...(requestedEnd === null ? [] : [{ value: 'requested' as const, label: t('access.request.asRequested') }]),
-              { value: 'never', label: t('access.request.untilRemoved') },
-              { value: 'day', ...choiceOption(t, 'accessExpiry.day') },
-              { value: 'week', ...choiceOption(t, 'accessExpiry.week') },
-              { value: 'month', ...choiceOption(t, 'accessExpiry.month') },
-              {value:'custom',label:t('approvals.access.customEnd')},
-            ]}
-          />
-          {ends==='custom'&&<Input type="datetime-local" label={t('approvals.access.endsOn')} hideLabel value={customEnd} onChange={(event)=>setCustomEnd(event.target.value)} />}
-          <Textarea label={t('approvals.note')} rows={2} value={note} disabled={busy} onChange={(event) => setNote(event.target.value)} />
-        </>
-      )}
+      <>
+        <Select
+          label={t('approvals.access.ends')}
+          value={ends}
+          onValueChange={setEnds}
+          disabled={busy}
+          error={!validEnd ? t('access.request.futureDate') : undefined}
+          fieldClassName="max-w-(--field-wide)"
+          options={[
+            ...(requestedEnd === null ? [] : [{ value: 'requested' as const, label: t('access.request.asRequested') }]),
+            { value: 'never', label: t('access.request.untilRemoved') },
+            { value: 'day', ...choiceOption(t, 'accessExpiry.day') },
+            { value: 'week', ...choiceOption(t, 'accessExpiry.week') },
+            { value: 'month', ...choiceOption(t, 'accessExpiry.month') },
+            {value:'custom',label:t('approvals.access.customEnd')},
+          ]}
+        />
+        {ends==='custom'&&<Input type="datetime-local" label={t('approvals.access.endsOn')} hideLabel value={customEnd} onChange={(event)=>setCustomEnd(event.target.value)} />}
+        <Textarea label={t('approvals.note')} rows={2} value={note} disabled={busy} onChange={(event) => setNote(event.target.value)} />
+      </>
 
       <div className="flex flex-wrap items-center gap-2">
         <Button action="approve" aria-label={actionName('approve', approval.title)} variant="secondary" pending={decision.pressed === t('approvals.approve')} disabled={!may || busy || !validEnd || !request.membership && given.size === 0} onClick={approve}>
@@ -247,10 +245,9 @@ function AccessRow({ approval, live, onSettled }: { approval: AccessApproval; li
         <Button action="deny" aria-label={actionName('deny', approval.title)} variant="danger-ghost" pending={decision.pressed === t('approvals.deny')} disabled={!may || busy} onClick={deny}>
           {actionName('deny', requesterName)}
         </Button>
-        {approval.can_decide && !request.membership && given.size === 0 && <span className="text-sm text-text-muted">{t('approvals.access.nothing')}</span>}
+        {!request.membership && given.size === 0 && <span className="text-sm text-text-muted">{t('approvals.access.nothing')}</span>}
       </div>
-      {!approval.can_decide && <p className="text-sm text-text-muted">{t('approvals.cannotAnswer')}</p>}
-      {approval.can_decide && !live && <p className="text-sm text-text-muted">{t('approvals.waitForLine')}</p>}
+      {!live && <p className="text-sm text-text-muted">{t('approvals.waitForLine')}</p>}
       {decision.error !== null && <ErrorAlert error={decision.error} />}
       </>}
     </div>

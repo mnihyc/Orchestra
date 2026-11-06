@@ -10,6 +10,7 @@ mod places;
 mod rig;
 mod support;
 
+use crate::support::FullPermissionPageReply;
 use archive_world::{Office, entry, everything, kept};
 use orch_api_contract::common::ErrorCode;
 use orch_api_contract::common::PageQuery;
@@ -1434,6 +1435,7 @@ async fn check_document_authorship(mode: &str) {
     }
     let mut export_request = everything();
     export_request.package = Some(true);
+    export_request.versions = Some(true);
     let export = o.made(ada, o.topic(), &export_request).await;
     let held = o.contents(ada, &export).await;
     let exported_versions: Vec<Value> = held
@@ -1788,6 +1790,10 @@ async fn plain(o: &Office, by: &Who, client: &str, names: &[&str]) -> ImportRequ
 #[tokio::test]
 async fn a_folder_the_person_may_not_add_to_is_no_folder_of_this_place_to_them_and_one_they_may_is()
 {
+    use orch_api_contract::access::{
+        AccessChoice, HolderInput, PageChange, PageChangeName, PageChangeWhole,
+        PermissionPageUpdate,
+    };
     let o = Office::new().await;
     let (ada, cai, dan) = (&o.s.ada, &o.s.cai, &o.s.dan);
     let topic = o.topic();
@@ -1805,6 +1811,51 @@ async fn a_folder_the_person_may_not_add_to_is_no_folder_of_this_place_to_them_a
         .as_ref()
         .unwrap()
         .id;
+
+    // The shipped viewer role can create documents; set up a read-only share explicitly.
+    o.s.rig
+        .world
+        .app
+        .call(PermissionPageUpdate, &[&"document-containers", &folder])
+        .token(&ada.token)
+        .body(&PageChange {
+            whole: Some(PageChangeWhole::Private),
+            ..Default::default()
+        })
+        .send()
+        .await
+        .full_permission_page()
+        .ok();
+    o.s.rig
+        .world
+        .app
+        .call(PermissionPageUpdate, &[&"document-containers", &folder])
+        .token(&ada.token)
+        .body(&PageChange {
+            name: Some(vec![
+                PageChangeName {
+                    holders: vec![HolderInput::User { id: cai.id() }],
+                    choice: AccessChoice::FullView,
+                    options: None,
+                    expires_at: None,
+                    note: None,
+                    export: None,
+                },
+                PageChangeName {
+                    holders: vec![HolderInput::User { id: dan.id() }],
+                    choice: AccessChoice::FullInteract,
+                    options: None,
+                    expires_at: None,
+                    note: None,
+                    export: None,
+                },
+            ]),
+            ..Default::default()
+        })
+        .send()
+        .await
+        .full_permission_page()
+        .ok();
 
     // Cai may read but not add: the folder is not one he may bring files into, with the answer that a folder that is not there gets.
     let mut asked_by_cai = plain(&o, cai, "cai", &["more.md"]).await;

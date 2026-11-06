@@ -43,7 +43,7 @@ use orch_link_contract::backplane::{
     ApiHello, AuthQuery, AuthReply, BackplaneData, BackplaneFrame, Down, DownFrame, Kick,
     MachineDown, MachineUp, STATS_EVERY_SECS, Stats, UpFrame,
 };
-use orch_link_contract::commands::{Cmd, CmdRes, SerialKey, SessionResync};
+use orch_link_contract::commands::{Cmd, CommandError, ErrorCode, SerialKey, SessionResync};
 use orch_link_contract::events::{Event, EventKind};
 use orch_link_contract::frames::{self, Text};
 use orch_link_contract::session::Role;
@@ -258,6 +258,27 @@ enum Outbound {
     },
 }
 
+#[cfg(feature = "test-observers")]
+impl Outbound {
+    fn observed_bytes(&self) -> Option<usize> {
+        match self {
+            Self::Frame(frame) => frames::encode(frame.as_ref(), MAX_BACKPLANE_FRAME_BYTES)
+                .ok()
+                .map(|text| text.len()),
+            Self::Data(bytes) => Some(bytes.len()),
+            Self::Datagram { machine, packet } => {
+                orch_link_contract::ports::BackplanePortDatagram {
+                    machine_id: *machine,
+                    datagram: packet.frame.clone(),
+                }
+                .encode()
+                .ok()
+                .map(|bytes| bytes.len())
+            }
+        }
+    }
+}
+
 /// One connection of a gateway to the system.
 pub(crate) struct GatewayConn {
     generation: u64,
@@ -266,6 +287,8 @@ pub(crate) struct GatewayConn {
     stats: Mutex<Option<Stats>>,
     /// When the gateway's process started, as its hello said; when it connected, where it did not.
     started_at: orch_types::Time,
+    #[cfg(feature = "test-observers")]
+    observed: Arc<orch_link::test_observers::QueueGauge>,
 }
 
 impl std::fmt::Debug for GatewayConn {
@@ -278,19 +301,30 @@ impl std::fmt::Debug for GatewayConn {
 
 impl GatewayConn {
     fn send_datagram(&self, machine: Id, packet: orch_link::ports::Datagram) -> bool {
-        self.out
-            .send(Outbound::Datagram { machine, packet })
-            .is_ok()
+        self.send_outbound(Outbound::Datagram { machine, packet })
     }
     fn send(&self, frame: BackplaneFrame) -> bool {
-        self.out.send(Outbound::Frame(Box::new(frame))).is_ok()
+        self.send_outbound(Outbound::Frame(Box::new(frame)))
     }
 
     fn send_data(&self, data: &BackplaneData) -> bool {
         match data.encode() {
-            Ok(bytes) => self.out.send(Outbound::Data(bytes)).is_ok(),
+            Ok(bytes) => self.send_outbound(Outbound::Data(bytes)),
             Err(_) => false,
         }
+    }
+
+    fn send_outbound(&self, message: Outbound) -> bool {
+        #[cfg(feature = "test-observers")]
+        let bytes = message.observed_bytes();
+        #[cfg(feature = "test-observers")]
+        self.observed.enqueue(bytes);
+        let sent = self.out.send(message).is_ok();
+        #[cfg(feature = "test-observers")]
+        if !sent {
+            self.observed.failed_enqueue(bytes);
+        }
+        sent
     }
 }
 
@@ -2375,6 +2409,7 @@ impl Link {
                 // again when it has, as the rules of the link have it.
                 continue;
             };
+            let mut current_callers = Vec::new();
             let frame = match frame {
                 DownFrame::Cmd(cmd) => {
                     let id = cmd.id;
@@ -2387,15 +2422,19 @@ impl Link {
                         Err(error) => Err(error),
                     };
                     match admitted {
-                        Ok(Some(cmd)) => DownFrame::Cmd(cmd),
+                        Ok(Some((cmd, callers))) => {
+                            current_callers = callers;
+                            DownFrame::Cmd(cmd)
+                        }
                         Ok(None) => continue,
                         Err(error) => {
                             tracing::warn!(%error, command = %id, "a command cannot be put on the wire");
-                            entry.controller.commands().on_cmd_res(&CmdRes {
-                                id,
-                                outcome: Err(error),
-                            });
-                            entry.mirror.notify_one();
+                            // The native ACK reaches the controller before its DB mirror.
+                            // Atomically preserve that acknowledgement (or a native result)
+                            // when a queued duplicate fails preparation or scope admission.
+                            self.refuse_unaccepted_publication(&entry, id, &error);
+                            #[cfg(test)]
+                            crate::backplane::command_admission_tests::local_refused(id).await;
                             continue;
                         }
                     }
@@ -2404,7 +2443,15 @@ impl Link {
             };
             // Publication is synchronous and holds no database lease. Rebuild/route
             // replacement cannot let an older output task publish after its successor.
-            self.send_current(&entry, &route, frame);
+            let command = match &frame {
+                DownFrame::Cmd(command) => Some(command.id),
+                _ => None,
+            };
+            if let Err(error) = self.send_current(&entry, &route, frame, &current_callers) {
+                if let Some(id) = command {
+                    self.refuse_unaccepted_publication(&entry, id, &error);
+                }
+            }
         }
     }
 
@@ -2413,24 +2460,47 @@ impl Link {
         entry: &Arc<MachineEntry>,
         route: &SessionRoute,
         frame: DownFrame,
-    ) -> bool {
+        callers: &[(Option<orch_authz::Caller>, Option<Time>)],
+    ) -> Result<bool, CommandError> {
         let machines = lock(&self.inner.machines);
         let current = machines.get(&entry.id).and_then(|cell| cell.get());
         if !current.is_some_and(|current| Arc::ptr_eq(current, entry))
             || entry.retired.is_cancelled()
         {
-            return false;
+            return Ok(false);
         }
         let mut state = lock(&entry.state);
         if !state.route.as_ref().is_some_and(|current| {
             current.session_id == route.session_id && Arc::ptr_eq(&current.gateway, &route.gateway)
         }) {
-            return false;
+            return Ok(false);
         }
         let command = match &frame {
             DownFrame::Cmd(command) => Some(command.id),
             _ => None,
         };
+        if let Some(id) = command {
+            // Actual native acknowledgement/result custody is factual reconciliation, not
+            // new forwarding authority. New work checks every real caller deadline and
+            // every raw ownership/source deadline, including credential-free owned cleanup.
+            let progress = entry.controller.commands().progress(id);
+            if progress.as_ref().is_some_and(Progress::is_final) {
+                return Ok(false);
+            }
+            let accepted = matches!(progress, Some(Progress::Accepted));
+            if !accepted
+                && callers.iter().any(|(caller, source_deadline)| {
+                    caller.as_ref().is_some_and(|caller| {
+                        !caller.key_deadline_allows(self.inner.clock.as_ref())
+                    }) || source_deadline.is_some_and(|end| end.get() <= self.inner.clock.now())
+                })
+            {
+                return Err(CommandError::new(
+                    ErrorCode::Conflict,
+                    "the originating operation expired before native publication",
+                ));
+            }
+        }
         let sent = route.gateway.send(BackplaneFrame::Down(Down {
             machine_id: entry.id,
             frame,
@@ -2439,7 +2509,12 @@ impl Link {
             state.handed_over.push(id);
             entry.mirror.notify_one();
         }
-        sent
+        Ok(sent)
+    }
+
+    fn refuse_unaccepted_publication(&self, entry: &MachineEntry, id: Id, error: &CommandError) {
+        entry.controller.commands().refuse_unaccepted(id, error);
+        entry.mirror.notify_one();
     }
 
     /// Puts what the issuer follows into the rows: the commands handed to a gateway, and the states a
@@ -2472,6 +2547,11 @@ impl Link {
                         }
                     }
                     for (id, progress, before) in changes {
+                        #[cfg(test)]
+                        crate::backplane::command_admission_tests::before_mirror_progress(
+                            id, &progress,
+                        )
+                        .await;
                         if let Err(error) = write_progress(&mut conn, id, &progress, now).await {
                             tracing::warn!(%error, command = %id, "the state of a command could not be written");
                             if let Some(tracked) = lock(&entry.state).tracked.get_mut(&id) {
@@ -2691,6 +2771,8 @@ impl Link {
             started_at: hello
                 .started_at
                 .unwrap_or_else(|| orch_types::Time::new(self.inner.clock.now())),
+            #[cfg(feature = "test-observers")]
+            observed: orch_link::test_observers::QueueGauge::new("api.backplane"),
         });
         let replaced =
             lock(&self.inner.gateways).insert(hello.gateway_id.clone(), Arc::clone(&gateway));
@@ -2707,34 +2789,59 @@ impl Link {
         self.heartbeat(&hello.version, &gateway).await;
 
         let writer_closed = gateway.closed.clone();
+        #[cfg(feature = "test-observers")]
+        let writer_observed = Arc::clone(&gateway.observed);
         let writer = tokio::spawn(async move {
+            #[cfg(feature = "test-observers")]
+            let _receiver_lifetime = writer_observed.receiver();
             let mut ping = tokio::time::interval(PING_EVERY);
             ping.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
             loop {
+                #[cfg(feature = "test-observers")]
+                let mut observed_send = None;
                 let message = tokio::select! {
                     () = writer_closed.cancelled() => break,
                     _ = ping.tick() => Message::Ping(Bytes::new()),
                     item = queued.recv() => match item {
                         None => break,
-                        Some(Outbound::Frame(frame)) => match frames::encode(frame.as_ref(), MAX_BACKPLANE_FRAME_BYTES) {
+                        Some(Outbound::Frame(frame)) => {
+                            #[cfg(feature = "test-observers")]
+                            {
+                                observed_send = Some(writer_observed.selected(frames::encode(frame.as_ref(), MAX_BACKPLANE_FRAME_BYTES).ok().map(|text| text.len())));
+                                orch_link::test_observers::api_sending(frame.as_ref());
+                            }
+                            match frames::encode(frame.as_ref(), MAX_BACKPLANE_FRAME_BYTES) {
                             Ok(text) => Message::Text(text.into()),
                             Err(error) => {
                                 tracing::error!(%error, "a frame of the backplane cannot be written");
                                 continue;
                             }
+                        }},
+                        Some(Outbound::Data(bytes)) => {
+                            #[cfg(feature = "test-observers")]
+                            { observed_send = Some(writer_observed.selected(Some(bytes.len()))); }
+                            Message::Binary(bytes)
                         },
-                        Some(Outbound::Data(bytes)) => Message::Binary(bytes),
                         Some(Outbound::Datagram {machine,packet}) => {
                             let data=orch_link_contract::ports::BackplanePortDatagram {machine_id:machine,datagram:packet.frame.clone()};
-                            let Ok(bytes)=data.encode() else {continue;};
+                            let encoded = data.encode();
+                            #[cfg(feature = "test-observers")]
+                            { observed_send = Some(writer_observed.selected(encoded.as_ref().ok().map(|bytes| bytes.len()))); }
+                            let Ok(bytes)=encoded else {continue;};
                             if sink.send(Message::Binary(bytes)).await.is_err() {break;}
                             packet.delivered();
+                            #[cfg(feature = "test-observers")]
+                            if let Some(flight) = observed_send.take() { flight.complete(); }
                             continue;
                         },
                     },
                 };
                 if sink.send(message).await.is_err() {
                     break;
+                }
+                #[cfg(feature = "test-observers")]
+                if let Some(flight) = observed_send.take() {
+                    flight.complete();
                 }
             }
             let _ = sink.close().await;
@@ -2760,6 +2867,8 @@ impl Link {
                     match frames::decode::<BackplaneFrame>(text.as_str(), MAX_BACKPLANE_FRAME_BYTES)
                     {
                         Ok(Text::Known(frame)) => {
+                            #[cfg(feature = "test-observers")]
+                            orch_link::test_observers::api_received(&frame);
                             self.on_frame(&gateway, &hello.version, frame).await
                         }
                         Ok(Text::Unknown(kind)) => {

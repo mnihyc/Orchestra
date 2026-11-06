@@ -64,6 +64,59 @@ fn request(field: SummaryField) -> SummaryRequest {
 }
 
 #[tokio::test]
+async fn selected_request_options_follow_every_summary_field_without_replacing_its_prompt() {
+    for field in SummaryField::ALL {
+        let port = Arc::new(Port {
+            text: if field == SummaryField::Tags {
+                "[\"backend\"]".to_owned()
+            } else {
+                "A bounded summary".to_owned()
+            },
+            requests: Mutex::new(Vec::new()),
+        });
+        let model = Model::new(port.clone());
+        model.summarize(request(field)).await.unwrap();
+        let original = port.requests.lock().unwrap()[0].clone();
+        let mut selected = request(field);
+        let params = json!({
+            "service_tier": "priority",
+            "future_vendor_option": {"enabled": true, "levels": [1, 2], "reset": null}
+        });
+        selected.config["params"] = params.clone();
+        model.summarize(selected).await.unwrap();
+        let seen = port.requests.lock().unwrap();
+        let carried = &seen[1];
+        assert_eq!(carried.params.as_ref(), Some(&params), "{field:?}");
+        assert_eq!(carried.system, original.system, "{field:?}");
+        assert_eq!(carried.input, original.input, "{field:?}");
+        assert_eq!(carried.max_output_tokens, original.max_output_tokens);
+        assert_eq!(carried.purpose, original.purpose);
+    }
+}
+
+#[tokio::test]
+async fn malformed_request_options_are_refused_before_the_completion_port() {
+    let port = Arc::new(Port {
+        text: "A bounded summary".to_owned(),
+        requests: Mutex::new(Vec::new()),
+    });
+    let model = Model::new(port.clone());
+    model
+        .summarize(request(SummaryField::Description))
+        .await
+        .unwrap();
+    for params in [json!([]), json!(true), json!("not an object")] {
+        let mut selected = request(SummaryField::Description);
+        selected.config["params"] = params;
+        assert!(matches!(
+            model.summarize(selected).await,
+            Err(SummarizeError::Config(_))
+        ));
+    }
+    assert_eq!(port.requests.lock().unwrap().len(), 1);
+}
+
+#[tokio::test]
 async fn a_fitting_title_is_returned_unchanged_and_hostile_activity_stays_in_user_material() {
     let port = Arc::new(Port {
         text: "Fix login".to_owned(),

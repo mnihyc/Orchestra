@@ -28,10 +28,11 @@ use std::sync::{Arc, Mutex, MutexGuard, PoisonError};
 use async_trait::async_trait;
 use orch_agent_contract::credentials::{GivenCredential, IssuedCredential};
 use orch_link_contract::commands::{
-    Command, CommandError, CommandKind, CommandResult, Empty, ErrorCode, LeaseCloseResult,
+    CmdRes, Command, CommandError, CommandKind, CommandResult, Empty, ErrorCode, LeaseCloseResult,
     LeaseMode, Secret as LinkSecret,
 };
 use orch_link_contract::events::Event;
+use orch_link_contract::frames::Frame;
 use orch_link_contract::session::Role;
 use orch_link_contract::streams::Stream;
 use orch_model_contract::credentials::{Credential, WireError};
@@ -70,6 +71,39 @@ const TAKES: &[CommandKind] = &[
     CommandKind::ProviderComplete,
     CommandKind::ProviderEmbed,
 ];
+
+/// Keeps the longest canonical prefix of factual groups that fits the existing command frame.
+/// The journal retains every group; aggregate tokens remain exact, and the host can recognize any
+/// omitted usage as uncovered. Sorting is O(groups log groups), then each group is serialized once:
+/// an empty-array CmdRes frame supplies the exact fixed overhead, and commas cost one byte each.
+/// A role handler cannot read a lower negotiated session limit, so this uses the shipped frame budget.
+fn fitting_close_groups(
+    command: Id,
+    mut answer: LeaseCloseResult,
+    max_bytes: usize,
+) -> Result<LeaseCloseResult, serde_json::Error> {
+    let Some(groups) = answer.usage_groups.take() else {
+        return Ok(answer);
+    };
+    let mut ordered = groups
+        .into_iter()
+        .map(|group| serde_json::to_vec(&group.key()).map(|key| (key, group)))
+        .collect::<Result<Vec<_>, _>>()?;
+    ordered.sort_by(|a, b| a.0.cmp(&b.0));
+    answer.usage_groups = Some(Vec::new());
+    let mut bytes = serde_json::to_vec(&Frame::from(CmdRes::ok(command, &answer)?))?.len();
+    let mut kept = Vec::new();
+    for (_, group) in ordered {
+        let added = serde_json::to_vec(&group)?.len() + usize::from(!kept.is_empty());
+        if added > max_bytes.saturating_sub(bytes) {
+            break;
+        }
+        bytes += added;
+        kept.push(group);
+    }
+    answer.usage_groups = Some(kept);
+    Ok(answer)
+}
 
 /// One endpoint of an API provider's upstream, as it was checked when the provider was started.
 #[derive(Debug, Clone)]
@@ -799,6 +833,124 @@ impl ProviderRole {
     }
 }
 
+#[cfg(test)]
+mod close_group_tests {
+    use super::*;
+    use orch_agent_contract::events::{TokenUsage, TokensReportedApart};
+    use orch_api_contract::usage::{RequestTiming, UsageMeasurement};
+    use orch_link_contract::commands::LeaseUsageGroup;
+    use orch_types::new_id;
+
+    fn group(model: String, tier: String) -> LeaseUsageGroup {
+        LeaseUsageGroup {
+            model,
+            usage: TokenUsage::from_parts(TokensReportedApart {
+                input: 100,
+                cache_read: 0,
+                cache_write: 0,
+                output: 10,
+                reasoning: 0,
+            }),
+            requests: 1,
+            min_context_tokens: 100,
+            max_context_tokens: 100,
+            timing: RequestTiming {
+                wire_protocol: Some("openai-responses".to_owned()),
+                requested_service_tier: Some("auto".to_owned()),
+                reported_service_tier: UsageMeasurement::Told { value: tier },
+                ..Default::default()
+            },
+        }
+    }
+
+    fn answer(groups: Vec<LeaseUsageGroup>) -> LeaseCloseResult {
+        LeaseCloseResult {
+            requests: groups.len() as i64,
+            usage: Some(
+                groups
+                    .iter()
+                    .fold(TokenUsage::default(), |sum, group| sum.plus(group.usage)),
+            ),
+            usage_groups: Some(groups),
+        }
+    }
+
+    fn frame(command: Id, answer: &LeaseCloseResult) -> Vec<u8> {
+        serde_json::to_vec(&Frame::from(CmdRes::ok(command, answer).unwrap())).unwrap()
+    }
+
+    #[test]
+    fn close_prefix_budget_counts_the_actual_command_envelope_and_escaped_group_bytes() {
+        let command = new_id();
+        let a = group("a".to_owned(), "quote\" and slash\\ and snow 雪".to_owned());
+        let b = group("b".to_owned(), "priority".to_owned());
+        let c = group("c".to_owned(), "default".to_owned());
+        let full = answer(vec![c.clone(), a.clone(), b.clone()]);
+        let mut expected = full.clone();
+        expected.usage_groups = Some(vec![a.clone(), b]);
+        let budget = frame(command, &expected).len();
+        let fitted = fitting_close_groups(command, full.clone(), budget).unwrap();
+        assert_eq!(fitted, expected);
+        assert_eq!(frame(command, &fitted).len(), budget);
+        let smaller = fitting_close_groups(command, full.clone(), budget - 1).unwrap();
+        assert_eq!(smaller.usage_groups, Some(vec![a]));
+        assert_eq!(
+            smaller.usage, full.usage,
+            "omission cannot change aggregate tokens"
+        );
+        assert_eq!(
+            full.usage_groups.unwrap().len(),
+            3,
+            "the journal snapshot stays complete"
+        );
+    }
+
+    #[test]
+    fn close_groups_fit_the_shipped_frame_limit_without_an_arbitrary_group_cap() {
+        let command = new_id();
+        let full = answer(
+            (0..400)
+                .rev()
+                .map(|index| {
+                    group(
+                        format!("{index:04}-{}", "x".repeat(1000)),
+                        "default".to_owned(),
+                    )
+                })
+                .collect(),
+        );
+        let max = orch_link_contract::version::MAX_FRAME_BYTES as usize;
+        assert!(frame(command, &full).len() > max);
+        let fitted = fitting_close_groups(command, full.clone(), max).unwrap();
+        let count = fitted.usage_groups.as_ref().unwrap().len();
+        assert!(count > 0 && count < 400);
+        assert!(frame(command, &fitted).len() <= max);
+        assert_eq!(fitted.usage, full.usage);
+        assert_eq!(fitted.requests, full.requests);
+        assert!(fitted.usage_groups.unwrap()[0].model.starts_with("0000-"));
+    }
+
+    #[test]
+    fn oversized_first_group_leaves_an_aware_empty_reply_with_exact_aggregate_usage() {
+        let command = new_id();
+        let max = orch_link_contract::version::MAX_FRAME_BYTES as usize;
+        let full = answer(vec![group("a".to_owned(), "x".repeat(max))]);
+        let fitted = fitting_close_groups(command, full.clone(), max).unwrap();
+        assert_eq!(fitted.usage_groups, Some(Vec::new()));
+        assert_eq!(fitted.usage, full.usage);
+        assert!(frame(command, &fitted).len() <= max);
+        let legacy = LeaseCloseResult {
+            requests: 0,
+            usage: None,
+            usage_groups: None,
+        };
+        assert_eq!(
+            fitting_close_groups(command, legacy.clone(), max).unwrap(),
+            legacy
+        );
+    }
+}
+
 pub(crate) fn refusal_of(status: u16) -> CommandError {
     match status {
         401 | 403 => CommandError::new(
@@ -888,10 +1040,18 @@ impl RoleHandler for ProviderRole {
                     .leases
                     .close_checked(body.lease_id, self.services.clock.time())
                     .map_err(|error| internal(error.to_string()))?;
-                CommandResult::LeaseClose(LeaseCloseResult {
-                    requests: totals.requests,
-                    usage: totals.reported(),
-                })
+                CommandResult::LeaseClose(
+                    fitting_close_groups(
+                        call.context.id,
+                        LeaseCloseResult {
+                            requests: totals.requests,
+                            usage: totals.reported(),
+                            usage_groups: totals.usage_groups,
+                        },
+                        orch_link_contract::version::MAX_FRAME_BYTES as usize,
+                    )
+                    .map_err(|error| internal(error.to_string()))?,
+                )
             }
             Command::ProviderCredentialIssue(body) => {
                 CommandResult::ProviderCredentialIssue(self.issue(body).await?)

@@ -18,6 +18,9 @@ use orch_types::{Id, Time, new_id};
 use serde::{Deserialize, Serialize};
 use serde_json::json;
 
+mod reading;
+pub use reading::read_scope;
+
 use crate::commands::{Outcome, Outgoing};
 use crate::engine::{Engine, lock};
 use crate::error::EngineError;
@@ -105,6 +108,9 @@ pub struct Memory {
 /// A roster or End refusal that the person can act on.
 #[derive(Debug, thiserror::Error)]
 pub enum BackgroundError {
+    /// This read is outside the credential's current operation or source bounds.
+    #[error("the key does not allow this background read")]
+    Scope,
     /// The thread does not exist.
     #[error("the thread does not exist")]
     NotFound,
@@ -284,6 +290,20 @@ impl Engine {
         thread: Id,
         capture: &Capture,
     ) -> Result<(ThreadBackground, Vec<Target>), BackgroundError> {
+        let (reader, provider_directories) =
+            reading::projection(conn, principal, thread, capture).await?;
+        self.project_background_for(conn, &reader, thread, capture, &provider_directories)
+            .await
+    }
+
+    async fn project_background_for(
+        &self,
+        conn: &mut Conn,
+        principal: &Principal,
+        thread: Id,
+        capture: &Capture,
+        provider_directories: &HashSet<Id>,
+    ) -> Result<(ThreadBackground, Vec<Target>), BackgroundError> {
         permitted(
             nodes::check(
                 conn,
@@ -333,18 +353,19 @@ impl Engine {
                 reason.clone_from(&observed.reason);
             }
             total = total.zip(observed.total).map(|(sum, count)| sum + count);
-            let may_see_provider = resources::check(
-                conn,
-                principal,
-                ObjectRef {
-                    kind: ObjectKind::Provider,
-                    id: source.provider_id,
-                },
-                Permission::ProviderManage,
-                Policy::default(),
-            )
-            .await
-            .is_ok_and(|decision| decision.is_allowed());
+            let may_see_provider = provider_directories.contains(&source.provider_id)
+                && resources::check(
+                    conn,
+                    principal,
+                    ObjectRef {
+                        kind: ObjectKind::Provider,
+                        id: source.provider_id,
+                    },
+                    Permission::ProviderManage,
+                    Policy::default(),
+                )
+                .await
+                .is_ok_and(|decision| decision.is_allowed());
             let environment = orch_db::queries::environments::thread_engine::environment(
                 conn,
                 source.environment_id,
@@ -587,8 +608,15 @@ impl Engine {
             let selected = select_targets(&review.targets, review.total, &request)?;
             (review.capture.clone(), selected)
         };
+        // End retains its own operation boundary; do not add the roster read's
+        // key selection to this existing ordinary control check.
+        let provider_directories = capture
+            .sessions
+            .iter()
+            .map(|(source, _)| source.provider_id)
+            .collect();
         let (roster, _) = self
-            .project_background(&mut tx, &principal, thread, &capture)
+            .project_background_for(&mut tx, &principal, thread, &capture, &provider_directories)
             .await?;
         if !roster.can_end {
             return Err(BackgroundError::Stale);

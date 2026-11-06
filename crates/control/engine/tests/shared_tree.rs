@@ -13,8 +13,7 @@ use serde_json::json;
 use shared::*;
 
 #[tokio::test]
-async fn an_agent_with_nothing_shared_lists_its_own_topic_and_the_threads_beside_it_and_nothing_more()
- {
+async fn an_agent_with_nothing_shared_lists_only_its_own_conversation_and_location() {
     let world = a_world_whose_agent_takes_tools().await;
     let mine = world.thread("Repro").await;
     let beside = world.thread("Docs").await;
@@ -38,21 +37,9 @@ async fn an_agent_with_nothing_shared_lists_its_own_topic_and_the_threads_beside
         .collect();
     assert_eq!(
         names,
-        ["Docs", "Repro", "docs"],
-        "the threads of the topic, by name: {entries:?}"
+        ["Repro"],
+        "Nothing lends no sibling identity or document creation: {entries:?}"
     );
-    let other = entry(&result, "Docs");
-    assert_eq!(other["kind"], "thread");
-    assert_eq!(other["id"], json!(beside));
-    assert_eq!(
-        other["readable"], false,
-        "it may not read what nobody shared"
-    );
-    assert_eq!(
-        other["writable"], true,
-        "it may always hand something to a thread of its own topic"
-    );
-    assert_eq!(other["via"], "topic");
     let own = entry(&result, "Repro");
     assert_eq!(own["is_self"], true);
     assert_eq!(
@@ -60,22 +47,37 @@ async fn an_agent_with_nothing_shared_lists_its_own_topic_and_the_threads_beside
         "its own conversation is its own to read"
     );
     assert_eq!(own["writable"], false);
-    assert!(
-        entries
-            .iter()
-            .all(|e| e["kind"] == "thread" || (e["kind"] == "folder" && e["name"] == "docs")),
-        "no chat or foreign content; the topic policy supplies its document directory"
-    );
+
+    share(&world, "node", beside, "live", "thread.view", "any", mine).await;
+    share(&world, "node", world.topic, "live", "doc.edit", "any", mine).await;
+    let result = ok(call(
+        &world,
+        mine,
+        OrchTool::ListShared,
+        json!({"ids":true,"sort":"name"}),
+    )
+    .await);
+    let entries = result["entries"].as_array().unwrap();
+    let names: Vec<&str> = entries
+        .iter()
+        .map(|entry| entry["name"].as_str().unwrap())
+        .collect();
+    assert_eq!(names, ["Docs", "Repro", "docs"]);
+    let other = entry(&result, "Docs");
+    assert_eq!(other["kind"], "thread");
+    assert_eq!(other["id"], json!(beside));
+    assert_eq!(other["readable"], true);
+    assert_eq!(other["writable"], false);
     let docs = entry(&result, "docs");
-    assert_eq!(docs["via"], "policy");
+    assert_eq!(docs["via"], "share");
     assert_eq!(docs["children"], 0);
     assert_eq!(
         docs["writable"], true,
-        "the shipped document policy permits creation without an explicit share"
+        "the current Edit gift permits document creation"
     );
     assert!(
         docs.get("manageable").is_none(),
-        "the policy grants no document management"
+        "Edit grants no document management"
     );
 }
 

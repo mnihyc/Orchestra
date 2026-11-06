@@ -44,6 +44,7 @@ async fn a_completed_embedding_call_survives_a_lost_counting_process_and_is_reco
             provider_id: provider,
             protocol: "openai-embeddings".into(),
             model_name: MODEL.into(),
+            params: None,
             inputs: vec!["query".into()],
             dimensions: Some(2),
         },
@@ -333,8 +334,7 @@ async fn background_use_retains_the_writers_model_limits_without_requiring_threa
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-async fn every_spending_switch_and_provider_deletion_cancel_a_real_embedding_without_releasing_its_reply()
- {
+async fn spending_switches_cancel_dependent_embeddings_and_leave_unrelated_requests_running() {
     use orch_api_contract::environment::EnvironmentDisable;
     use orch_api_contract::resources::{
         AgentUpdate, AgentUpdateBody, ProviderDelete, ProviderDisable, ProviderModelUpdate,
@@ -344,13 +344,6 @@ async fn every_spending_switch_and_provider_deletion_cancel_a_real_embedding_wit
     for kind in ["provider", "model", "agent", "environment", "delete"] {
         let s = Scene::new().await;
         let provider = embeddings_provider(&s).await;
-        sqlx::query("UPDATE providers SET agent_id=$2,held_by_environment_id=$3 WHERE id=$1")
-            .bind(provider)
-            .bind(s.on.agent)
-            .bind(s.on.environment)
-            .execute(s.rig.db.pool())
-            .await
-            .unwrap();
         let seen = script(&s);
         s.rig.machine.handler.hold(CommandKind::ProviderEmbed);
         s.rig.machine.handler.on(CommandKind::ProviderStop, |_| {
@@ -464,6 +457,40 @@ async fn every_spending_switch_and_provider_deletion_cancel_a_real_embedding_wit
                     .await
                     .ok();
             }
+        }
+        if matches!(kind, "agent" | "environment") {
+            // These are independent of an API provider's background embedding request.
+            // The provider has no subscription profile or borrowed environment credential.
+            assert!(
+                !work.is_finished(),
+                "an unrelated switch must not settle the request: {kind}"
+            );
+            assert!(
+                s.rig
+                    .commands
+                    .status(id)
+                    .await
+                    .unwrap()
+                    .unwrap()
+                    .outcome
+                    .is_none()
+            );
+            s.rig.machine.handler.release();
+            let vectors = work.await.unwrap().unwrap();
+            assert_eq!(vectors.len(), 1);
+            assert_eq!(vectors[0].len(), 2);
+            assert_eq!(seen.lock().unwrap().len(), 1);
+            let counted: i64 =
+                sqlx::query_scalar("SELECT total_tokens FROM usage_events WHERE id=$1")
+                    .bind(id)
+                    .fetch_one(s.rig.db.pool())
+                    .await
+                    .unwrap();
+            assert_eq!(
+                counted, 7,
+                "the independent request keeps its actual usage: {kind}"
+            );
+            continue;
         }
         rig::eventually(
             "administrative cancellation settles the accepted embedding",
