@@ -1,5 +1,7 @@
 //! Resource-list filters and bounded rich rows, using the inventory's own frame and existing readers.
 
+pub(super) mod scoped;
+
 use std::collections::{HashMap, HashSet};
 
 use crate::routes::resources::{
@@ -134,7 +136,11 @@ pub(super) async fn page(
         }
         _ => return Err(ApiError::invalid("kinds", "Choose one resource kind.")),
     };
-    Ok(values
+    Ok(keyed(values))
+}
+
+fn keyed(values: Vec<EverythingResource>) -> HashMap<String, EverythingResource> {
+    values
         .into_iter()
         .map(|value| {
             let id = match &value {
@@ -150,5 +156,5 @@ pub(super) async fn page(
             };
             (id.to_string(), value)
         })
-        .collect())
+        .collect()
 }

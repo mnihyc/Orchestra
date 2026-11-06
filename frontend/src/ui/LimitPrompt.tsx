@@ -5,6 +5,7 @@
  * what they pass and goes on; anybody else reads who could let them through, and may still send, in
  * which case the message waits as it would have. Nothing is passed unless the person says so here.
  */
+import { useEffect } from 'react';
 import { useTranslation } from 'react-i18next';
 
 import type { LimitBypassRequest, LimitReached, ThreadLimits } from '@/generated/api-types';
@@ -28,18 +29,22 @@ export interface LimitPromptProps {
 
 function LimitLine({ limit }: { limit: LimitReached }) { return <UsageLimitLine limit={limit} />; }
 
-/** What the person lets past: the caps and the provider's limit they hold the bypass row for. */
+/** What the person lets past: configured Orch caps they hold the bypass row for. */
 export function bypassOf(limits: ThreadLimits): LimitBypassRequest | undefined {
   const caps = limits.reached.flatMap((limit) => (limit.can_bypass && limit.cap !== null && limit.passed_by === null ? [limit.cap.cap.id] : []));
-  const provider = limits.reached.some((limit) => limit.can_bypass && limit.provider_limit !== null && limit.passed_by === null);
-  if (caps.length === 0 && !provider) return undefined;
-  return { ...(caps.length > 0 ? { caps } : {}), ...(provider ? { provider_limit: true } : {}) };
+  return caps.length === 0 ? undefined : { caps };
 }
 
 export function LimitPrompt({ open, onOpenChange, limits, onSend, pending, error, threadId }: LimitPromptProps) {
   const { t } = useTranslation();
-  const bypass = bypassOf(limits);
-  const all = limits.bypass_all;
+  // Cached vendor observations are advisory; configured caps and opaque limits still apply.
+  const reached = limits.reached.filter((limit) => !(limit.cap === null && limit.provider_limit !== null));
+  const bypass = bypassOf({ ...limits, reached });
+  const all = reached.length === limits.reached.length ? limits.bypass_all : reached.every((limit) => limit.can_bypass || limit.passed_by !== null);
+  useEffect(() => {
+    if (open && reached.length === 0 && !pending) onOpenChange(false);
+  }, [open, reached.length, pending, onOpenChange]);
+  if (reached.length === 0) return null;
   return (
     <Dialog
       open={open}
@@ -68,7 +73,7 @@ export function LimitPrompt({ open, onOpenChange, limits, onSend, pending, error
       <div className="flex flex-col gap-3">
         {threadId !== undefined && <ViewLimits thread={{ id:threadId,name:'',binding:null }} />}
         <ul className="flex flex-col gap-2">
-          {limits.reached.map((limit, index) => (
+          {reached.map((limit, index) => (
             <LimitLine key={limit.cap?.cap.id ?? `provider-${index}`} limit={limit} />
           ))}
         </ul>

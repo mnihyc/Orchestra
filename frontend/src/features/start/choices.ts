@@ -162,7 +162,7 @@ export const modelName = (model: ModelOption): string => modelDisplayName(model.
 function providerRows(options: StartOptions): ProviderRow[] {
   const rows = options.providers.map((entry): ProviderRow => {
     const status = entry.provider.status;
-    const why: ProviderWhy | null = !entry.usable ? { kind: 'reason', reason: entry.reason ?? 'no_use' } : status !== 'ready' ? { kind: 'status', status } : null;
+    const why: ProviderWhy | null = !entry.usable ? { kind: 'reason', reason: entry.reason ?? 'no_use' } : status !== 'ready' && status !== 'exhausted' ? { kind: 'status', status } : null;
     return { id: entry.provider.id, entry, choosable: why === null, why, isDefault: options.defaults.provider_id === entry.provider.id };
   });
   return [...rows.filter((row) => row.choosable), ...rows.filter((row) => !row.choosable)];

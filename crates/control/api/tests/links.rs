@@ -128,6 +128,8 @@ async fn say(s: &Scene, chat: Id, words: &str) -> Id {
         .send()
         .await
         .ok()
+        .into_full()
+        .expect("the browser session receives the full chat message reply")
         .message
         .id
 }
@@ -350,7 +352,7 @@ async fn a_source_the_reader_may_not_read_leaves_no_trace_in_the_list_the_counts
         ],
         &[(hidden, "Secret Layoffs")],
     );
-    // A stranger may not even ask.
+    // A stranger is refused at the document View door.
     let refused = s
         .rig
         .world
@@ -360,7 +362,15 @@ async fn a_source_the_reader_may_not_read_leaves_no_trace_in_the_list_the_counts
         .query(&ask(LinkDirection::In))
         .send()
         .await;
-    assert_eq!(refused.status, 404);
+    assert_eq!(refused.status, 403);
+    let refusal_wire = String::from_utf8(refused.raw.to_vec()).unwrap();
+    let problem = refused.problem();
+    assert_eq!(problem.code, ErrorCode::AuthzDenied);
+    assert_eq!(problem.extra["required"], "doc.view");
+    mentions_nowhere(
+        &[refusal_wire],
+        &[(open, "Open notes"), (hidden, "Secret Layoffs")],
+    );
 }
 
 #[tokio::test]
@@ -450,6 +460,239 @@ async fn a_cursor_never_names_a_hidden_source_and_pages_over_them_deliver_each_r
             .await;
         assert_eq!(stolen.status, 400);
     }
+}
+
+#[tokio::test]
+async fn graph_pairs_keep_duplicate_mentions_live_history_and_private_boundaries_equivalent() {
+    use orch_api_contract::threads::{ContentPart, ThreadSideCreate, ThreadSideCreateBody};
+    use orch_db::queries::links as rows;
+    use std::collections::HashSet;
+
+    let s = Scene::new().await;
+    let topic = s.tree.topic.base.id;
+    let hub = document(&s, topic, "Pair hub", "The shared destination.", false).await;
+    let hidden = document(
+        &s,
+        topic,
+        "Private pair source",
+        &format!("[Hub](/documents/{hub})"),
+        true,
+    )
+    .await;
+    let open = document(&s, topic, "Repeated pair source", &format!(
+        "[Hub](/documents/{hub}) and [private](/documents/{hidden}).\n\nAgain [Hub](/documents/{hub})."
+    ), false).await;
+    let thread = s.thread().await.base.id;
+    s.rig
+        .lets_use("node", thread, "thread.view", &s.cai, json!({}))
+        .await;
+    s.exchange(
+        thread,
+        0,
+        "Internal bookkeeping",
+        &format!("<orch>internal</orch> [Hub](/documents/{hub})"),
+    )
+    .await;
+    s.exchange(
+        thread,
+        1,
+        "Visible answer",
+        &format!("Public [Hub](/documents/{hub})"),
+    )
+    .await;
+    let superseded = s.thread().await.base.id;
+    s.exchange(
+        superseded,
+        0,
+        "Keep this",
+        "A retained answer without a link.",
+    )
+    .await;
+    s.exchange(
+        superseded,
+        1,
+        "Exclude this",
+        &format!("Excluded [Hub](/documents/{hub})"),
+    )
+    .await;
+    for id in [thread, superseded] {
+        rig::eventually("the graph fixture's native turns finish accounting", || async {
+            sqlx::query_scalar::<_, bool>("SELECT NOT EXISTS(SELECT 1 FROM turns WHERE thread_id=$1 AND (end_work IS NOT NULL OR files_end_due OR files_work_pending))")
+                .bind(id).fetch_one(s.rig.db.pool()).await.unwrap_or(false)
+        }).await;
+    }
+    let view = retained(
+        &s.rig.db,
+        superseded,
+        s.ada.id(),
+        Time::new(s.rig.world.now()),
+    )
+    .await
+    .unwrap();
+    select(
+        &s.rig.db,
+        superseded,
+        view.child,
+        Time::new(s.rig.world.now()),
+    )
+    .await
+    .unwrap();
+    // An empty parent uses the declared read-only mode without importing native history.
+    let side_parent = s.thread().await.base.id;
+    let made_side = s
+        .rig
+        .world
+        .app
+        .call(ThreadSideCreate, &[&side_parent])
+        .token(&s.ada.token)
+        .body(&ThreadSideCreateBody {
+            content: vec![ContentPart::Text {
+                text: format!("Side [Hub](/documents/{hub})"),
+            }],
+            client_id: "graph-side".into(),
+            to_turn: None,
+        })
+        .send()
+        .await
+        .ok();
+    assert_eq!(
+        made_side.thread.side_of.as_ref().map(|parent| parent.id),
+        Some(side_parent)
+    );
+    assert_eq!(made_side.thread.side_from_turn, Some(0));
+    let side = made_side.thread.base.id;
+    s.rig
+        .run_turn(side, 0, &format!("Side reply [Hub](/documents/{hub})"))
+        .await;
+    let side_target = document(
+        &s,
+        topic,
+        "Side target source",
+        &format!("[Side](/nodes/{side})"),
+        false,
+    )
+    .await;
+
+    let mentions: i64 = sqlx::query_scalar("SELECT count(*) FROM related_references WHERE source_kind='document' AND source_id=$1 AND target_kind='document' AND target_id=$2")
+        .bind(open).bind(hub).fetch_one(s.rig.db.pool()).await.unwrap();
+    assert!(
+        mentions >= 2,
+        "separate blocks must supply duplicate mentions of the same pair"
+    );
+    let candidates: Vec<(Id, bool)> = sqlx::query_as("SELECT i.id,i.contains_internal_marker FROM related_references r JOIN items i ON i.id=r.part_id AND i.thread_id=r.source_id WHERE r.source_kind='conversation' AND r.source_id=$1 AND r.target_kind='document' AND r.target_id=$2 ORDER BY r.part_id")
+        .bind(thread).bind(hub).fetch_all(s.rig.db.pool()).await.unwrap();
+    assert_eq!(candidates.len(), 2);
+    assert!(
+        candidates[0].0 < candidates[1].0 && candidates[0].1 && !candidates[1].1,
+        "the first stored mention is ineligible and the later one is a live message"
+    );
+    let side_mentions: i64 = sqlx::query_scalar("SELECT count(*) FROM related_references WHERE source_kind='conversation' AND source_id=$1 AND target_id=$2")
+        .bind(side).bind(hub).fetch_one(s.rig.db.pool()).await.unwrap();
+    assert!(
+        side_mentions > 0,
+        "a side must really refer before its source exclusion is tested"
+    );
+    let side_targets: i64 = sqlx::query_scalar("SELECT count(*) FROM related_references WHERE source_kind='document' AND source_id=$1 AND target_kind='node' AND target_id=$2")
+        .bind(side_target).bind(side).fetch_one(s.rig.db.pool()).await.unwrap();
+    assert!(
+        side_targets > 0,
+        "a side must really be a target before its target exclusion is tested"
+    );
+    let unique = [
+        ("document", hub),
+        ("document", open),
+        ("document", hidden),
+        ("document", side_target),
+        ("conversation", thread),
+        ("conversation", superseded),
+        ("conversation", side),
+    ];
+    let mut duplicated = unique.to_vec();
+    duplicated.extend([
+        ("document", open),
+        ("conversation", thread),
+        ("document", hub),
+    ]);
+    let mut conn = s.rig.db.acquire().await.unwrap();
+    let once = rows::among(&mut conn, &unique).await.unwrap();
+    let repeated = rows::among(&mut conn, &duplicated).await.unwrap();
+    let set = |links: Vec<rows::Link>| {
+        links
+            .into_iter()
+            .map(|link| (link.from_kind, link.from_id, link.to_kind, link.to_id))
+            .collect::<HashSet<_>>()
+    };
+    let expected = HashSet::from([
+        ("document".to_owned(), open, "document".to_owned(), hub),
+        ("document".to_owned(), open, "document".to_owned(), hidden),
+        ("document".to_owned(), hidden, "document".to_owned(), hub),
+        (
+            "conversation".to_owned(),
+            thread,
+            "document".to_owned(),
+            hub,
+        ),
+    ]);
+    assert_eq!(once.len(), expected.len());
+    assert_eq!(
+        repeated.len(),
+        expected.len(),
+        "input and mention duplicates never multiply edges"
+    );
+    assert_eq!(set(once), expected);
+    assert_eq!(set(repeated), expected);
+    drop(conn);
+
+    let reader = graph(&s, hub, &s.cai.token, &graph_query(2)).await;
+    assert_eq!(
+        reader
+            .nodes
+            .iter()
+            .map(|node| node.id)
+            .collect::<HashSet<_>>(),
+        HashSet::from([hub, open, thread])
+    );
+    assert!(
+        reader
+            .edges
+            .iter()
+            .all(|edge| edge.kind == GraphEdgeKind::Reference)
+    );
+    assert_eq!(
+        reader
+            .edges
+            .iter()
+            .map(|edge| (edge.from, edge.to))
+            .collect::<HashSet<_>>(),
+        HashSet::from([(open, hub), (thread, hub)])
+    );
+    mentions_nowhere(
+        &[serde_json::to_string(&reader).unwrap()],
+        &[(hidden, "Private pair source")],
+    );
+    let owner = graph(&s, hub, &s.ada.token, &graph_query(2)).await;
+    assert_eq!(
+        owner
+            .nodes
+            .iter()
+            .map(|node| node.id)
+            .collect::<HashSet<_>>(),
+        HashSet::from([hub, open, hidden, thread])
+    );
+    assert!(
+        owner
+            .edges
+            .iter()
+            .all(|edge| edge.kind == GraphEdgeKind::Reference)
+    );
+    assert_eq!(
+        owner
+            .edges
+            .iter()
+            .map(|edge| (edge.from, edge.to))
+            .collect::<HashSet<_>>(),
+        HashSet::from([(open, hub), (open, hidden), (hidden, hub), (thread, hub)])
+    );
 }
 
 #[tokio::test]
@@ -952,9 +1195,13 @@ async fn related_items_page_on_with_a_cursor_that_holds_nothing_hidden() {
     set(&s, topic, "related.count", json!(2), false).await;
     let source = document(&s, topic, "Source", "Words.", false).await;
     let mut readable = Vec::new();
+    for place in [s.tree.org.base.id, s.tree.project.base.id, topic] {
+        readable.push(chat_world::chat_of(&s.rig.world, &s.cai, place).await);
+    }
+    let mut hidden = Vec::new();
     for round in 0..5 {
         readable.push(document(&s, topic, &format!("Beside {round}"), "Words.", false).await);
-        document(&s, topic, &format!("Private {round}"), "Words.", true).await;
+        hidden.push(document(&s, topic, &format!("Private {round}"), "Words.", true).await);
     }
     let page = |cursor: Option<String>| {
         let app = &s.rig.world.app;
@@ -991,7 +1238,7 @@ async fn related_items_page_on_with_a_cursor_that_holds_nothing_hidden() {
         got, readable,
         "every readable item once, none of the private ones"
     );
-    let hidden: Vec<(Id, &str)> = Vec::new();
+    let hidden: Vec<(Id, &str)> = hidden.into_iter().map(|id| (id, "Private")).collect();
     mentions_nowhere(&cursors, &hidden);
     let owner_names: Vec<String> =
         sqlx::query_scalar("SELECT title FROM documents WHERE title LIKE 'Private %'")

@@ -149,6 +149,17 @@ pub async fn load(conn: &mut Conn, act: &Acting<'_>, id: Id, mode: Mode) -> Resu
         Mode::Write => rows::lock(conn, id).await?,
     };
     let row = found.ok_or(Error::NotFound)?;
+    read_selected(conn, act, row).await
+}
+
+/// The same native standing for an authoritative row already selected by a reader.
+/// Mutating callers still obtain their serialization lock through `load` with Write.
+pub async fn read_selected(
+    conn: &mut Conn,
+    act: &Acting<'_>,
+    row: ChatRow,
+) -> Result<Loaded, Error> {
+    let id = row.id;
     let members = if row.is_people_chat() {
         rows::effective_members(&rows::members(conn, id).await?, act.now)
     } else {
@@ -527,21 +538,42 @@ fn ensure_in(loaded: &Loaded, act: &Acting<'_>) -> Result<(), Error> {
     }
 }
 
-/// Gives a group a name, or names it after its members again.
-pub async fn rename(
+/// The effect-free operands of the existing group rename rule.
+#[derive(Debug, Clone)]
+pub struct PreparedRename {
+    name: Option<String>,
+    unchanged: bool,
+}
+
+/// The complete native rename prefix, with no sequence or persistent mutation.
+pub async fn prepare_rename(
     conn: &mut Conn,
     act: &Acting<'_>,
     loaded: &mut Loaded,
     name: Option<&str>,
-) -> Result<ChatRow, Error> {
+) -> Result<PreparedRename, Error> {
     ensure_group(loaded)?;
     ensure_in(loaded, act)?;
     loaded.ensure_send()?;
     let name = name_of(name)?;
     loaded.lock(conn).await?;
-    if loaded.row.name == name {
+    Ok(PreparedRename {
+        unchanged: loaded.row.name == name,
+        name,
+    })
+}
+
+/// Apply an already checked native rename; its first SQL is the sequence mutation.
+pub async fn apply_rename(
+    conn: &mut Conn,
+    act: &Acting<'_>,
+    loaded: &mut Loaded,
+    prepared: PreparedRename,
+) -> Result<ChatRow, Error> {
+    if prepared.unchanged {
         return Ok(loaded.row.clone());
     }
+    let name = prepared.name;
     let seq = take(conn, loaded.id()).await?;
     rows::rename(conn, loaded.id(), name.as_deref()).await?;
     rows::stamp_state(conn, loaded.id(), seq).await?;
@@ -573,6 +605,17 @@ pub async fn rename(
         .ok_or(Error::NotFound)?;
     loaded.row = row.clone();
     Ok(row)
+}
+
+/// Gives a group a name, or names it after its members again.
+pub async fn rename(
+    conn: &mut Conn,
+    act: &Acting<'_>,
+    loaded: &mut Loaded,
+    name: Option<&str>,
+) -> Result<ChatRow, Error> {
+    let prepared = prepare_rename(conn, act, loaded, name).await?;
+    apply_rename(conn, act, loaded, prepared).await
 }
 
 /// Puts a person in a group. A member of the root org is let in by any member
@@ -636,29 +679,64 @@ pub async fn can_add_member(
     Ok(guest)
 }
 
-/// Adds the same ordinary membership with an optional deadline. Existing live membership is never shortened.
-pub async fn add_member_until(
+/// Effect-free operands of the existing group-add rule, including duplicate outcome.
+#[derive(Debug, Clone)]
+pub struct PreparedAddMember {
+    user: Id,
+    guest: bool,
+    expires_at: Option<DateTime<Utc>>,
+    members: Vec<MemberRow>,
+    already_present: bool,
+}
+
+/// The complete ordinary add prefix, preserving validation before duplicate and capacity.
+pub async fn prepare_add_member(
     conn: &mut Conn,
     act: &Acting<'_>,
     loaded: &mut Loaded,
     user: Id,
     owners_name_outsiders: bool,
     expires_at: Option<DateTime<Utc>>,
-) -> Result<(), Error> {
+) -> Result<PreparedAddMember, Error> {
     if expires_at.is_some_and(|end| end <= act.now) {
         return Err(Error::invalid("expires_at", "must be in the future"));
     }
     let guest = can_add_member(conn, act, loaded, user, owners_name_outsiders).await?;
     loaded.lock(conn).await?;
-    let mut members = rows::effective_members(&rows::members(conn, loaded.id()).await?, act.now);
-    if members.iter().any(|row| row.user_id == user && row.is_in()) {
-        loaded.members = members;
+    let members = rows::effective_members(&rows::members(conn, loaded.id()).await?, act.now);
+    let already_present = members.iter().any(|row| row.user_id == user && row.is_in());
+    if !already_present {
+        let present = members.iter().filter(|row| row.is_in()).count();
+        if i64::try_from(present).unwrap_or(i64::MAX) >= group_max(conn).await? {
+            return Err(Error::NotAllowed(Why::Full));
+        }
+    }
+    Ok(PreparedAddMember {
+        user,
+        guest,
+        expires_at,
+        members,
+        already_present,
+    })
+}
+
+/// Apply the existing checked add; its first SQL is the sequence mutation.
+pub async fn apply_add_member(
+    conn: &mut Conn,
+    act: &Acting<'_>,
+    loaded: &mut Loaded,
+    prepared: PreparedAddMember,
+) -> Result<(), Error> {
+    if prepared.already_present {
+        loaded.members = prepared.members;
         return Ok(());
     }
-    let present = members.iter().filter(|row| row.is_in()).count();
-    if i64::try_from(present).unwrap_or(i64::MAX) >= group_max(conn).await? {
-        return Err(Error::NotAllowed(Why::Full));
-    }
+    let PreparedAddMember {
+        user,
+        guest,
+        expires_at,
+        ..
+    } = prepared;
     let seq = take(conn, loaded.id()).await?;
     rows::add_member(
         conn,
@@ -697,19 +775,39 @@ pub async fn add_member_until(
     )
     .await?;
     changed_people(conn, loaded.id(), seq, act.now, &[user]).await?;
-    members = rows::effective_members(&rows::members(conn, loaded.id()).await?, act.now);
+    let members = rows::effective_members(&rows::members(conn, loaded.id()).await?, act.now);
     loaded.members = members;
     Ok(())
 }
 
-/// Takes a person out of a group: the person themself, to leave, or the one
-/// who made the group.
-pub async fn remove_member(
+/// Adds the same ordinary membership with an optional deadline. Existing live membership is never shortened.
+pub async fn add_member_until(
     conn: &mut Conn,
     act: &Acting<'_>,
     loaded: &mut Loaded,
     user: Id,
+    owners_name_outsiders: bool,
+    expires_at: Option<DateTime<Utc>>,
 ) -> Result<(), Error> {
+    let prepared =
+        prepare_add_member(conn, act, loaded, user, owners_name_outsiders, expires_at).await?;
+    apply_add_member(conn, act, loaded, prepared).await
+}
+
+/// Effect-free operands of the existing self-leave or group-removal rule.
+#[derive(Debug, Clone)]
+pub struct PreparedRemoveMember {
+    user: Id,
+    leaving: bool,
+}
+
+/// The native remove prefix; its archive-only send exception remains unchanged.
+pub async fn prepare_remove_member(
+    conn: &mut Conn,
+    act: &Acting<'_>,
+    loaded: &mut Loaded,
+    user: Id,
+) -> Result<PreparedRemoveMember, Error> {
     ensure_group(loaded)?;
     ensure_in(loaded, act)?;
     let leaving = user == act.user();
@@ -720,6 +818,17 @@ pub async fn remove_member(
         return Err(archived);
     }
     loaded.lock(conn).await?;
+    Ok(PreparedRemoveMember { user, leaving })
+}
+
+/// Apply the existing checked removal, starting at its transactional sequence mutation.
+pub async fn apply_remove_member(
+    conn: &mut Conn,
+    act: &Acting<'_>,
+    loaded: &mut Loaded,
+    prepared: PreparedRemoveMember,
+) -> Result<(), Error> {
+    let PreparedRemoveMember { user, leaving } = prepared;
     let seq = take(conn, loaded.id()).await?;
     if !rows::remove_member(conn, loaded.id(), user, seq, act.now).await? {
         return Err(Error::NotFound);
@@ -758,6 +867,17 @@ pub async fn remove_member(
     changed_people(conn, loaded.id(), seq, act.now, &[user]).await?;
     loaded.members = rows::members(conn, loaded.id()).await?;
     Ok(())
+}
+
+/// Takes a person out of a group: the person themself, to leave, or the one who made it.
+pub async fn remove_member(
+    conn: &mut Conn,
+    act: &Acting<'_>,
+    loaded: &mut Loaded,
+    user: Id,
+) -> Result<(), Error> {
+    let prepared = prepare_remove_member(conn, act, loaded, user).await?;
+    apply_remove_member(conn, act, loaded, prepared).await
 }
 
 /// What follows from a change of who is in a chat: the authorization epoch

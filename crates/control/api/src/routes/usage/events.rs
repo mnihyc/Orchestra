@@ -9,7 +9,6 @@
 use super::csv::{self, json_response};
 use super::names::{Names, rate_of};
 use super::scope::{self, Wanted};
-use crate::middleware::authorization;
 use crate::middleware::requests::{ApiError, ApiResult};
 use crate::registry::Ctx;
 use crate::routes::resources::view as resource_view;
@@ -56,11 +55,16 @@ fn word<T: serde::de::DeserializeOwned>(text: &str) -> Option<T> {
 }
 
 /// Lists the rows of the ledger behind a figure.
-pub async fn list(ctx: Ctx, query: UsageEventListQuery, _body: Body) -> ApiResult<Response> {
-    let mut conn = ctx.app.db.begin().await?;
-    let principal = authorization::principal(&ctx, &mut conn).await?;
+pub async fn list(ctx: Ctx, query: UsageEventListQuery, body: Body) -> ApiResult<Response> {
+    crate::key_operations::native::selected_raw::<Records>(ctx, query, body).await
+}
+async fn select_rows(
+    conn: &mut orch_db::Conn,
+    principal: &orch_authz::Principal,
+    query: &UsageEventListQuery,
+) -> ApiResult<(Vec<EventRow>, Option<String>, scope::Opened)> {
     let asked = scope::parse(&query.scope)?;
-    let opened = scope::open(&mut conn, &principal, asked).await?;
+    let opened = scope::open(conn, principal, asked).await?;
     let from = scope::parse_day("from", &query.from)?;
     let to = scope::parse_day("to", &query.to)?;
     if to < from {
@@ -76,9 +80,10 @@ pub async fn list(ctx: Ctx, query: UsageEventListQuery, _body: Body) -> ApiResul
         topic_id: query.topic_id,
         thread_id: query.thread_id,
     };
-    let mut filter = scope::filter(&mut conn, &principal, &opened, &wanted, true).await?;
+    let mut filter = scope::filter(conn, principal, &opened, &wanted, true).await?;
     filter.effort = query.effort.clone();
     filter.tier = query.tier.clone();
+    filter.tier_unknown = query.tier_unknown;
     filter.program = query.program.clone();
     filter.outcome = query.outcome;
     filter.org = query.org_id;
@@ -86,10 +91,10 @@ pub async fn list(ctx: Ctx, query: UsageEventListQuery, _body: Body) -> ApiResul
     let limit = i64::from(query.limit.unwrap_or(DEFAULT_LIMIT).clamp(1, MAX_LIMIT));
     let newest_first = query.order.unwrap_or_default() == UsageEventOrder::Desc;
     let after = query.cursor.as_deref().map(parse_cursor).transpose()?;
-    let all_places = scope::all_record_places(&mut conn, &principal, &opened).await?;
+    let all_places = scope::all_record_places(conn, principal, &opened).await?;
     let mut rows = record_page(
-        &mut conn,
-        &principal,
+        conn,
+        principal,
         all_places,
         &Listing {
             from: Some(midnight(from)?),
@@ -109,18 +114,90 @@ pub async fn list(ctx: Ctx, query: UsageEventListQuery, _body: Body) -> ApiResul
     rows.truncate(usize::try_from(limit).unwrap_or(usize::MAX));
     let next_cursor = more.then(|| rows.last().map(cursor_of)).flatten();
 
-    let items = events(&ctx.app, &mut conn, &principal, &rows).await?;
-    conn.commit().await.map_err(orch_db::DbError::from)?;
-    if scope::wants_csv(&ctx.headers) {
-        let mut answer = csv::response(events_csv(&items));
-        if let Some(next) = &next_cursor
-            && let Ok(value) = HeaderValue::from_str(next)
-        {
-            answer.headers_mut().insert(NEXT_CURSOR_HEADER, value);
-        }
-        return Ok(answer);
+    Ok((rows, next_cursor, opened))
+}
+
+pub(super) struct Records;
+impl crate::key_operations::native::Selected for Records {
+    type Source = orch_api_contract::usage_sources::Source;
+    type Query = UsageEventListQuery;
+    type Value = super::native::Report<Page<UsageEvent>>;
+    type Reply = Response;
+    const DECLARATION: &'static orch_api_contract::operation_sources::Declaration<Self::Source> =
+        &orch_api_contract::usage_sources::EVENTS;
+    fn select<'a>(
+        ctx: &'a Ctx,
+        conn: &'a mut orch_db::Conn,
+        caller: &'a orch_authz::Caller,
+        query: &'a Self::Query,
+    ) -> futures::future::BoxFuture<
+        'a,
+        ApiResult<(
+            Self::Value,
+            Vec<crate::key_operations::native::Facts<Self::Source>>,
+        )>,
+    > {
+        Box::pin(async move {
+            let (principal, facts) =
+                super::native::report_reader(ctx, conn, caller, Self::DECLARATION, &query.scope)
+                    .await?;
+            let (rows, next_cursor, opened) = select_rows(conn, &principal, query).await?;
+            let (items, names) = events_with_cut(&ctx.app, conn, &principal, &rows).await?;
+            Ok((
+                super::native::Report {
+                    answer: Page { items, next_cursor },
+                    disclosure: super::native::Disclosure {
+                        scope: scope::parse(&query.scope)?,
+                        depth: opened.depth,
+                        names,
+                        records: rows,
+                    },
+                },
+                facts,
+            ))
+        })
     }
-    json_response(&Page { items, next_cursor }, StatusCode::OK)
+    fn require<'a>(
+        _ctx: &'a Ctx,
+        _conn: &'a mut orch_db::Conn,
+        _principal: &'a orch_authz::Principal,
+    ) -> futures::future::BoxFuture<'a, ApiResult<()>> {
+        Box::pin(async { Ok(()) })
+    }
+    fn render<'a>(
+        ctx: &'a Ctx,
+        conn: &'a mut orch_db::Conn,
+        principal: &'a orch_authz::Principal,
+        value: &'a Self::Value,
+    ) -> futures::future::BoxFuture<'a, ApiResult<Response>> {
+        Box::pin(async move {
+            value.disclosure.require(conn, principal).await?;
+            if scope::wants_csv(&ctx.headers) {
+                let mut answer = csv::response(events_csv(&value.answer.items));
+                if let Some(next) = &value.answer.next_cursor
+                    && let Ok(header) = HeaderValue::from_str(next)
+                {
+                    answer.headers_mut().insert(NEXT_CURSOR_HEADER, header);
+                }
+                Ok(answer)
+            } else {
+                json_response(&value.answer, StatusCode::OK)
+            }
+        })
+    }
+    fn check_opened<'a>(
+        _ctx: &'a Ctx,
+        conn: &'a mut orch_db::Conn,
+        principal: &'a orch_authz::Principal,
+        _query: &'a Self::Query,
+        opened: &'a Self::Value,
+        _fresh: &'a Self::Value,
+    ) -> futures::future::BoxFuture<'a, ApiResult<bool>> {
+        Box::pin(async move {
+            opened.disclosure.require(conn, principal).await?;
+            Ok(true)
+        })
+    }
 }
 
 /// Page in bounded candidate batches until the visible page is full. A hidden row never becomes
@@ -160,6 +237,14 @@ pub(crate) async fn events(
     principal: &orch_authz::Principal,
     rows: &[EventRow],
 ) -> ApiResult<Vec<UsageEvent>> {
+    Ok(events_with_cut(app, conn, principal, rows).await?.0)
+}
+async fn events_with_cut(
+    app: &crate::state::AppState,
+    conn: &mut orch_db::Conn,
+    principal: &orch_authz::Principal,
+    rows: &[EventRow],
+) -> ApiResult<(Vec<UsageEvent>, super::names::Cut)> {
     let mut users: Vec<Id> = rows.iter().filter_map(|row| row.user_id).collect();
     users.sort_unstable();
     users.dedup();
@@ -207,7 +292,8 @@ pub(crate) async fn events(
         .filter_map(|row| row.turn_id)
         .collect();
     let ordinals = ledger::turn_ordinals(conn, &turns).await?;
-    Ok(rows
+    let cut = names.cut();
+    let items = rows
         .iter()
         .filter_map(|row| {
             Some(UsageEvent {
@@ -257,6 +343,10 @@ pub(crate) async fn events(
                     .unwrap_or_default(),
                 effort: row.effort.clone(),
                 tier: row.tier.clone(),
+                tier_unknown: orch_db::usage::rollup::tier_unknown(
+                    row.tier.as_deref(),
+                    &row.measurement_states,
+                ),
                 tokens: TokenUsage {
                     input_tokens: row.input_tokens,
                     cached_input_tokens: row.cached_input_tokens,
@@ -272,7 +362,8 @@ pub(crate) async fn events(
                 credits: row.credits.clone(),
             })
         })
-        .collect())
+        .collect();
+    Ok((items, cut))
 }
 
 /// The rows as CSV: a line for each, with what a spreadsheet wants to filter by.
@@ -299,6 +390,7 @@ fn events_csv(events: &[UsageEvent]) -> String {
         "model_display",
         "effort",
         "tier",
+        "tier_unknown",
         "input_tokens",
         "cached_input_tokens",
         "output_tokens",
@@ -367,6 +459,7 @@ fn events_csv(events: &[UsageEvent]) -> String {
             each.model_display.clone(),
             each.effort.clone().unwrap_or_default(),
             each.tier.clone().unwrap_or_default(),
+            each.tier_unknown.to_string(),
             count(
                 reported.and_then(|tokens| tokens.input_tokens),
                 each.tokens.input_tokens,

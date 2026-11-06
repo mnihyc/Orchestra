@@ -59,6 +59,12 @@ zip.workspace = true
 zstd.workspace = true
 
 [dev-dependencies]
+orch-adapter-claude-code.workspace = true # continuation admission uses the isolated scripted native rig
+orch-adapter-codex.workspace = true # real separated-turn loss uses the existing pinned native adapter rig
+orch-executor-codex.workspace = true # retire the real local-program executor, not a socket stand-in
+orch-executor-contract.workspace = true
+axum.workspace = true # the shared native rig compiles its existing relay module
+reqwest.workspace = true # the shared native rig compiles its existing relay module
 orch-driver-docker.workspace = true
 orch-envhost.workspace = true # source-attempt proofs use the real Git receipts and filesystem cleanup
 orch-blob-local.workspace = true

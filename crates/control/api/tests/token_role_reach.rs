@@ -7,6 +7,8 @@
 
 mod places;
 mod support;
+use support::FullRoleReply as _;
+use support::FullTokenReply as _;
 
 use orch_api_contract::access::NodeRoleCreate;
 use orch_api_contract::auth::{ApiTokenCreateBody, MeTokenCreate};
@@ -37,17 +39,19 @@ async fn a_token_kept_to_one_project_cannot_give_a_role_in_another() {
         .call(MeTokenCreate, &[])
         .token(&owner.token)
         .body(&ApiTokenCreateBody {
+            rules: None,
             name: "Inside only".to_owned(),
             scopes: Some(vec!["*".to_owned()]),
             node_id: Some(inside.base.id),
             expires_at: None,
-            proof: orch_api_contract::auth::SensitiveProof {
+            proof: Some(orch_api_contract::auth::SensitiveProof {
                 password: Some(support::PASSWORD.to_owned()),
                 ..Default::default()
-            },
+            }),
         })
         .send()
         .await
+        .full_token()
         .ok()
         .token
         .expect("the first answer carries the secret");
@@ -61,6 +65,7 @@ async fn a_token_kept_to_one_project_cannot_give_a_role_in_another() {
         )
         .send()
         .await
+        .full_role()
         .ok();
     assert_eq!(held.node.id, inside.base.id);
     let problem = world

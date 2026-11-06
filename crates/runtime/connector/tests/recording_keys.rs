@@ -1,33 +1,52 @@
 //! Real connector commands keep capture ordered while a controlled content endpoint holds publication.
+#[cfg(target_os = "linux")]
 mod rig_environment;
 
+#[cfg(target_os = "linux")]
 use async_trait::async_trait;
+#[cfg(target_os = "linux")]
 use bytes::Bytes;
+#[cfg(target_os = "linux")]
 use orch_link::commands::Progress;
+#[cfg(target_os = "linux")]
 use orch_link::content::{BlobEndpoint, PutRefusal};
+#[cfg(target_os = "linux")]
 use orch_link::journal::{Entry, Step};
+#[cfg(target_os = "linux")]
 use orch_link_contract::commands::{CommandBody, EnvDetach, FsList, FsWrite, SerialKey};
+#[cfg(target_os = "linux")]
 use orch_link_contract::content::{BlobProgress, PutQuery};
+#[cfg(target_os = "linux")]
 use orch_link_contract::source::{
     EnvironmentDataPart, FsDataImport, FsRecord, FsRecordRead, FsRecordResult, RecordKind,
     RecordState,
 };
+#[cfg(target_os = "linux")]
 use orch_testkit::doubles::link::ShapedBlobs;
+#[cfg(target_os = "linux")]
 use orch_types::{Hash, Id, Json, new_id};
+#[cfg(target_os = "linux")]
 use rig_environment::{EnvRig, PATIENCE};
+#[cfg(target_os = "linux")]
 use std::collections::BTreeMap;
+#[cfg(target_os = "linux")]
 use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
+#[cfg(target_os = "linux")]
 use std::sync::{Arc, Mutex, PoisonError};
+#[cfg(target_os = "linux")]
 use tokio::sync::{Notify, Semaphore};
 
+#[cfg(target_os = "linux")]
 type TestResult<T = ()> = Result<T, Box<dyn std::error::Error + Send + Sync>>;
 
+#[cfg(target_os = "linux")]
 struct Pause {
     entered: Semaphore,
     changed: Notify,
     open: AtomicBool,
     calls: AtomicUsize,
 }
+#[cfg(target_os = "linux")]
 impl Pause {
     fn new() -> Self {
         Self {
@@ -72,10 +91,12 @@ impl Pause {
     }
 }
 
+#[cfg(target_os = "linux")]
 struct Endpoint {
     inner: ShapedBlobs,
     held: Mutex<BTreeMap<Id, Arc<Pause>>>,
 }
+#[cfg(target_os = "linux")]
 impl Endpoint {
     fn hold(&self, id: Id) -> Arc<Pause> {
         let pause = Arc::new(Pause::new());
@@ -88,6 +109,7 @@ impl Endpoint {
 }
 
 #[async_trait]
+#[cfg(target_os = "linux")]
 impl BlobEndpoint for Endpoint {
     async fn head(&self, command: Id, hash: &Hash) -> Result<Option<BlobProgress>, PutRefusal> {
         let pause = {
@@ -125,6 +147,7 @@ impl BlobEndpoint for Endpoint {
     }
 }
 
+#[cfg(target_os = "linux")]
 fn fixture() -> (EnvRig, Arc<Endpoint>) {
     let mut rig = EnvRig::new();
     let endpoint = Arc::new(Endpoint {
@@ -135,6 +158,7 @@ fn fixture() -> (EnvRig, Arc<Endpoint>) {
     (rig, endpoint)
 }
 
+#[cfg(target_os = "linux")]
 fn request(environment: Id) -> FsRecord {
     FsRecord {
         environment_id: environment,
@@ -146,6 +170,7 @@ fn request(environment: Id) -> FsRecord {
     }
 }
 
+#[cfg(target_os = "linux")]
 fn issue<B: CommandBody>(rig: &EnvRig, id: Id, environment: Id, body: &B) {
     rig.blobs.open_command(id);
     rig.controller.issue_with_id(
@@ -156,6 +181,7 @@ fn issue<B: CommandBody>(rig: &EnvRig, id: Id, environment: Id, body: &B) {
     );
 }
 
+#[cfg(target_os = "linux")]
 fn command_state(rig: &EnvRig, id: Id) -> String {
     let progress = match rig.controller.progress(id) {
         None => "absent".to_owned(),
@@ -179,6 +205,7 @@ fn command_state(rig: &EnvRig, id: Id) -> String {
     format!("{id}: controller={progress}, journal={journal}")
 }
 
+#[cfg(target_os = "linux")]
 fn phase_timeout(
     rig: &EnvRig,
     phase: &str,
@@ -199,6 +226,7 @@ fn phase_timeout(
     format!("recording_keys phase '{phase}' timed out after {PATIENCE:?}; {states}; fs.changed reports={reports}; {detail}").into()
 }
 
+#[cfg(target_os = "linux")]
 async fn progress(
     rig: &EnvRig,
     id: Id,
@@ -217,6 +245,7 @@ async fn progress(
     Ok(answer)
 }
 
+#[cfg(target_os = "linux")]
 async fn answer(rig: &EnvRig, id: Id, phase: &'static str, related: &[Id]) -> TestResult<Json> {
     match progress(rig, id, phase, related).await? {
         Progress::Succeeded(answer) => Ok(answer),
@@ -226,6 +255,7 @@ async fn answer(rig: &EnvRig, id: Id, phase: &'static str, related: &[Id]) -> Te
     }
 }
 
+#[cfg(target_os = "linux")]
 async fn send_as<B: CommandBody>(
     rig: &EnvRig,
     id: Id,
@@ -239,6 +269,7 @@ async fn send_as<B: CommandBody>(
     progress(rig, id, phase, &[]).await
 }
 
+#[cfg(target_os = "linux")]
 async fn succeed<B: CommandBody>(rig: &EnvRig, body: &B, phase: &'static str) -> TestResult<Json> {
     match send_as(rig, new_id(), body, phase).await? {
         Progress::Succeeded(answer) => Ok(answer),
@@ -248,6 +279,7 @@ async fn succeed<B: CommandBody>(rig: &EnvRig, body: &B, phase: &'static str) ->
     }
 }
 
+#[cfg(target_os = "linux")]
 async fn failure<B: CommandBody>(
     rig: &EnvRig,
     body: &B,
@@ -261,6 +293,7 @@ async fn failure<B: CommandBody>(
     }
 }
 
+#[cfg(target_os = "linux")]
 async fn stop(rig: &mut EnvRig, phase: &'static str, commands: &[Id]) -> TestResult {
     eprintln!("recording_keys phase begin: {phase}");
     tokio::time::timeout(PATIENCE, rig.stop())
@@ -270,6 +303,7 @@ async fn stop(rig: &mut EnvRig, phase: &'static str, commands: &[Id]) -> TestRes
     Ok(())
 }
 
+#[cfg(target_os = "linux")]
 async fn ready(rig: &EnvRig, environment: Id, phase: &'static str) -> TestResult {
     let environment = rig
         .connector
@@ -302,12 +336,14 @@ async fn ready(rig: &EnvRig, environment: Id, phase: &'static str) -> TestResult
     Ok(())
 }
 
+#[cfg(target_os = "linux")]
 fn journal(rig: &EnvRig, id: Id) -> TestResult<Entry> {
     Ok(serde_json::from_slice(&std::fs::read(
         rig.data.path().join("journal").join(format!("{id}.json")),
     )?)?)
 }
 
+#[cfg(target_os = "linux")]
 #[tokio::test]
 async fn slow_manifest_publication_allows_ordered_mutation_and_another_complete_capture_with_original_bytes_kept()
 -> TestResult {
@@ -505,6 +541,7 @@ async fn slow_manifest_publication_allows_ordered_mutation_and_another_complete_
     Ok(())
 }
 
+#[cfg(target_os = "linux")]
 #[tokio::test]
 async fn a_second_environment_captures_and_publishes_while_the_first_environment_upload_is_held()
 -> TestResult {
@@ -555,6 +592,7 @@ async fn a_second_environment_captures_and_publishes_while_the_first_environment
     Ok(())
 }
 
+#[cfg(target_os = "linux")]
 #[tokio::test]
 async fn graceful_stop_cancels_a_held_publication_and_restart_replays_its_durable_failure()
 -> TestResult {

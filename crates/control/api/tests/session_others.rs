@@ -6,6 +6,7 @@
 )]
 
 mod support;
+use support::FullTokenReply as _;
 
 use orch_api_contract::auth::{
     ApiTokenCreateBody, AuthRefresh, MeGet, MeSessionList, MeSessionOthersDelete, MeTokenCreate,
@@ -28,17 +29,19 @@ async fn sign_out_everywhere_else_keeps_exactly_this_session_other_people_and_pe
         .call(MeTokenCreate, &[])
         .token(current.token())
         .body(&ApiTokenCreateBody {
+            rules: None,
             name: "automation".to_owned(),
             scopes: Some(vec!["*".to_owned()]),
             node_id: None,
             expires_at: None,
-            proof: SensitiveProof {
+            proof: Some(SensitiveProof {
                 password: Some(PASSWORD.to_owned()),
                 ..SensitiveProof::default()
-            },
+            }),
         })
         .send()
         .await
+        .full_token()
         .ok()
         .token
         .unwrap();
@@ -136,17 +139,19 @@ async fn an_api_token_cannot_revoke_its_persons_other_browsers() {
         .call(MeTokenCreate, &[])
         .token(signed.token())
         .body(&ApiTokenCreateBody {
+            rules: None,
             name: "automation".to_owned(),
             scopes: Some(vec!["*".to_owned()]),
             node_id: None,
             expires_at: None,
-            proof: SensitiveProof {
+            proof: Some(SensitiveProof {
                 password: Some(PASSWORD.to_owned()),
                 ..SensitiveProof::default()
-            },
+            }),
         })
         .send()
         .await
+        .full_token()
         .ok()
         .token
         .unwrap();

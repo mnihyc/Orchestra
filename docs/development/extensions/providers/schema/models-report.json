@@ -48,6 +48,23 @@
     "ModelParameters": {
       "type": "object",
       "properties": {
+        "web_search": {
+          "type": [
+            "array",
+            "null"
+          ],
+          "items": {
+            "type": "string"
+          },
+          "description": "Native search modes enabled by a provider manager; absence leaves search disabled."
+        },
+        "default_web_search": {
+          "type": [
+            "string",
+            "null"
+          ],
+          "description": "The enabled search mode used when a use makes no choice; absent means disabled."
+        },
         "efforts": {
           "type": [
             "array",
@@ -141,6 +158,14 @@
           ],
           "description": "Whether it takes images."
         },
+        "request_options": {
+          "type": [
+            "object",
+            "null"
+          ],
+          "additionalProperties": true,
+          "description": "Provider constraints on additional request options, keyed by wire protocol; `native` uses\ndeclared adapter parameter keys. JSON Schema enum/const/default/required retain their distinct\nmeanings. An omitted schema preserves the protocol's existing extension surface."
+        },
         "rate": {
           "anyOf": [
             {
@@ -176,6 +201,16 @@
     "ModelOffered": {
       "type": "object",
       "properties": {
+        "web_search": {
+          "type": [
+            "array",
+            "null"
+          ],
+          "items": {
+            "type": "string"
+          },
+          "description": "Native search modes the source offers, without enabling them."
+        },
         "service_tiers": {
           "type": [
             "array",
@@ -210,6 +245,13 @@
     "Rate": {
       "type": "object",
       "properties": {
+        "web_search_per_call": {
+          "type": [
+            "string",
+            "null"
+          ],
+          "description": "Credits for one successful native web search, additional to token prices."
+        },
         "input_per_mtok": {
           "type": "string",
           "description": "Credits for a million input tokens."

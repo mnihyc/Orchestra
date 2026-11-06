@@ -524,6 +524,18 @@ pub struct Seen<'a> {
     pub my: Option<&'a ChatState>,
 }
 
+/// The chat's own reference, using the same already-authorized name lookups as its full view.
+#[must_use]
+pub fn chat_reference(row: &ChatRow, lookups: &Lookups) -> ChatRef {
+    ChatRef {
+        id: row.id,
+        kind: kind_of(row),
+        org_id: row.org_id,
+        node: row.node_id.map(|node| lookups.node(node, NodeKind::Org)),
+        name: row.name.clone(),
+    }
+}
+
 /// A chat as the reader sees it.
 #[must_use]
 pub fn chat(seen: &Seen<'_>, lookups: &Lookups) -> Chat {
@@ -533,13 +545,7 @@ pub fn chat(seen: &Seen<'_>, lookups: &Lookups) -> Chat {
     Chat {
         inspection_holders: None,
         agents: None,
-        base: ChatRef {
-            id: row.id,
-            kind: kind_of(row),
-            org_id: row.org_id,
-            node: row.node_id.map(|node| lookups.node(node, NodeKind::Org)),
-            name: row.name.clone(),
-        },
+        base: chat_reference(row, lookups),
         members: people.then(|| {
             present
                 .iter()

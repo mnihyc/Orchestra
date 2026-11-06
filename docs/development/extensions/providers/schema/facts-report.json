@@ -490,20 +490,40 @@
           "description": "Whether extra spending is enabled."
         },
         "limit": {
-          "type": [
-            "number",
-            "null"
+          "anyOf": [
+            {
+              "type": [
+                "string",
+                "null"
+              ],
+              "maxLength": 40,
+              "pattern": "^-?[0-9]+(\\.[0-9]+)?$"
+            },
+            {
+              "type": "number",
+              "description": "Legacy numeric input; the source reader checks bounded decimal normalization."
+            }
           ],
-          "format": "double",
-          "description": "The spending limit, where known."
+          "description": "The spending limit, as exact decimal text in the source's unit and scale.",
+          "default": null
         },
         "used": {
-          "type": [
-            "number",
-            "null"
+          "anyOf": [
+            {
+              "type": [
+                "string",
+                "null"
+              ],
+              "maxLength": 40,
+              "pattern": "^-?[0-9]+(\\.[0-9]+)?$"
+            },
+            {
+              "type": "number",
+              "description": "Legacy numeric input; the source reader checks bounded decimal normalization."
+            }
           ],
-          "format": "double",
-          "description": "What has been used, where known."
+          "description": "What has been used, as exact decimal text in the source's unit and scale.",
+          "default": null
         },
         "used_percent": {
           "type": [

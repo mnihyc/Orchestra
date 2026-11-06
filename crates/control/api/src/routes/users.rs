@@ -27,11 +27,12 @@ use orch_api_contract::access::Role;
 use orch_api_contract::common::ErrorCode;
 use orch_api_contract::nodes::{Node, NodeKind, NodeRef};
 use orch_api_contract::users::{
-    Invitation, InvitationAccept, InvitationAcceptBody, InvitationAcceptReply, InvitationCreate,
-    InvitationCreateBody, InvitationCreateReply, InvitationDelete, InvitationForm, InvitationKind,
-    InvitationList, InvitationListQuery, InvitationLookup, InvitationPreview, InvitationPreviewOrg,
-    InvitationPreviewWhat, USER_SEARCH_MAX_RESULTS, USER_SEARCH_MIN_CHARS, UserGet, UserRef,
-    UserSearch, UserSearchQuery,
+    Invitation, InvitationAccept, InvitationAcceptBody, InvitationAcceptReceipt,
+    InvitationAcceptReply, InvitationAcceptResponse, InvitationCreate, InvitationCreateBody,
+    InvitationCreateReceipt, InvitationCreateReply, InvitationCreateResponse, InvitationDelete,
+    InvitationForm, InvitationKind, InvitationList, InvitationListQuery, InvitationLookup,
+    InvitationPreview, InvitationPreviewOrg, InvitationPreviewWhat, USER_SEARCH_MAX_RESULTS,
+    USER_SEARCH_MIN_CHARS, UserGet, UserRef, UserSearch, UserSearchQuery,
 };
 use orch_authz::pages::{self, Target};
 use orch_authz::{Act, Caller, Policy, Principal, epoch, nodes};
@@ -42,6 +43,9 @@ use orch_settings::{Place, resolve};
 use orch_settings_contract::registry::keys;
 use orch_types::{Id, Time, new_id};
 use serde_json::json;
+
+mod invitation_operation;
+mod search;
 
 /// What an invitation's secret begins with.
 const INVITATION_TOKEN_PREFIX: &str = "oinv_";
@@ -58,59 +62,42 @@ pub fn mount(registry: &mut Registry) {
             orch_api_contract::auth::AuthNameAvailabilityGet,
             crate::sign_in::accounts::name_availability,
         )
-        .on(UserSearch, user_search)
-        .on(UserGet, user_get)
-        .on(InvitationCreate, invitation_create)
-        .on(InvitationList, invitation_list)
-        .on(InvitationDelete, invitation_delete)
+        .on_snapshot_read_with_optional_operation(
+            UserSearch,
+            crate::key_operations::native::selected::<search::Accounts>,
+            user_search,
+        )
+        .on_with_operation(UserGet, crate::key_operations::direct::declared, user_get)
+        .on_with_operation(
+            InvitationCreate,
+            invitation_operation::create,
+            invitation_create,
+        )
+        .on_with_optional_operation(InvitationList, invitation_operation::list, invitation_list)
+        .on_with_operation(
+            InvitationDelete,
+            invitation_operation::delete,
+            invitation_delete,
+        )
         .on(InvitationLookup, invitation_lookup)
-        .on(InvitationAccept, invitation_accept);
+        .on_with_operation(
+            InvitationAccept,
+            invitation_operation::accept,
+            invitation_accept,
+        );
 }
 
 /// People whose name starts or holds what is asked among those who share an
 /// org with the caller, and by an exact username or address anywhere.
 async fn user_search(ctx: Ctx, query: UserSearchQuery, (): ()) -> ApiResult<Vec<UserRef>> {
-    let text = query.q.trim();
-    if text.chars().count() < usize::try_from(USER_SEARCH_MIN_CHARS).unwrap_or(2) {
-        return Err(invalid(
-            "q",
-            &format!("must be at least {USER_SEARCH_MIN_CHARS} characters"),
-        ));
-    }
-    let mut conn = ctx.app.db.acquire().await?;
-    let principal = authorization::principal(&ctx, &mut conn).await?;
-    if let Some(org) = query.org_id {
-        let (_, kind) = placed(&mut conn, org).await?;
-        if kind != NodeKind::Org {
-            return Err(invalid("org_id", "is no org"));
-        }
-        authorization::require(
-            &mut conn,
-            &principal,
-            org,
-            authorization::VIEW,
-            Act::Use,
-            Policy::default(),
-        )
-        .await?;
-    }
-    Ok(identity::search_users(
-        &mut conn,
-        principal.user(),
-        text,
-        query.org_id,
-        i64::from(USER_SEARCH_MAX_RESULTS),
-    )
-    .await?
-    .iter()
-    .map(refusals::user_ref)
-    .collect())
+    crate::key_operations::native::selected_read::<search::Accounts>(ctx, query, ()).await
 }
 
 /// One person as others see them.
 async fn user_get(ctx: Ctx, (): (), (): ()) -> ApiResult<UserRef> {
     let id = ctx.id("id")?;
     let mut conn = ctx.app.db.acquire().await?;
+    let _principal = ctx.operation_principal(&mut conn).await?;
     refusals::user_refs(&mut conn, &[id])
         .await?
         .remove(&id)
@@ -378,7 +365,7 @@ async fn invitation_create(
     mut ctx: Ctx,
     (): (),
     body: InvitationCreateBody,
-) -> ApiResult<InvitationCreateReply> {
+) -> ApiResult<InvitationCreateResponse> {
     invitation_scope(&body)?;
     let email = body.email.as_deref().map(clean_email).transpose()?;
     let note = body.note.clone().unwrap_or_default();
@@ -390,302 +377,317 @@ async fn invitation_create(
     }
     let (mut tx, guard) = transaction_guard::begin(&ctx).await?;
     ctx.now = guard.now().get();
-    let principal = guard.principal();
-    let user = principal.user();
-    // Where it points, and what that asks of the maker.
-    let (kind_word, org, node, place, audit_place): (
-        &str,
-        Option<Id>,
-        Option<Id>,
-        Place,
-        Option<Placed>,
-    ) = match body.kind {
-        InvitationKind::System => {
-            if !principal.is_system_admin() {
-                return Err(refusals::system_admin_only(
-                    "only a system admin invites to the system",
-                ));
+    let governed = guard.operation_data::<invitation_operation::Governed>()?;
+    invitation_operation::lock_governing(&mut tx, &governed.target).await?;
+    ctx.now = ctx.app.clock.now();
+    let guard = transaction_guard::check_conn(&ctx, &mut tx).await?;
+    let governed = guard.operation_data::<invitation_operation::Governed>()?;
+    let outcome: ApiResult<InvitationCreateResponse> = async {
+        let principal = guard.principal();
+        let user = principal.user();
+        // Where it points, and what that asks of the maker.
+        let (kind_word, org, node, place, audit_place): (
+            &str,
+            Option<Id>,
+            Option<Id>,
+            Place,
+            Option<Placed>,
+        ) = match body.kind {
+            InvitationKind::System => {
+                if !invitation_operation::system_operation(&ctx, principal)? {
+                    return Err(refusals::system_admin_only(
+                        "only a system admin invites to the system",
+                    ));
+                }
+                ("system", None, None, Place::System, None)
             }
-            ("system", None, None, Place::System, None)
-        }
-        InvitationKind::Org => {
-            let org = body
-                .org_id
-                .ok_or_else(|| invalid("org_id", "is needed to invite into an org"))?;
-            let (audit_place, kind) = placed(&mut tx, org).await?;
-            if kind != NodeKind::Org {
-                return Err(invalid("org_id", "is no org"));
-            }
-            authorization::require(
-                &mut tx,
-                principal,
-                org,
-                exact(Permission::MembersManage),
-                Act::Use,
-                Policy::default(),
-            )
-            .await?;
-            if orch_authz::orgs::limits(&mut tx, audit_place.org)
-                .await
-                .map_err(ApiError::internal)?
-                .is_some_and(|limits| limits.closed)
-            {
-                return Err(ApiError::new(
-                    ErrorCode::OrgClosed,
-                    "that tree takes no further member",
-                )
-                .with("org", refusals::named_node(&mut tx, audit_place.org).await?));
-            }
-            (
-                "org",
-                Some(org),
-                None,
-                Place::Node(audit_place.org),
-                Some(audit_place),
-            )
-        }
-        InvitationKind::Node => {
-            let node = body
-                .node_id
-                .ok_or_else(|| invalid("node_id", "is needed to invite to a node"))?;
-            let (audit_place, kind) = placed(&mut tx, node).await?;
-            if kind == NodeKind::Org {
-                return Err(invalid("node_id", "an org is invited into, not to"));
-            }
-            let policy = crate::routes::nodes::policy_at(&mut tx, node).await?;
-            for permission in [Permission::AccessManage, Permission::AccessExternal] {
+            InvitationKind::Org => {
+                let org = body
+                    .org_id
+                    .ok_or_else(|| invalid("org_id", "is needed to invite into an org"))?;
+                let (audit_place, kind) = placed(&mut tx, org).await?;
+                if kind != NodeKind::Org {
+                    return Err(invalid("org_id", "is no org"));
+                }
                 authorization::require(
                     &mut tx,
                     principal,
-                    node,
-                    exact(permission),
+                    org,
+                    exact(Permission::MembersManage),
                     Act::Use,
-                    policy,
+                    Policy::default(),
                 )
                 .await?;
+                if orch_authz::orgs::limits(&mut tx, audit_place.org)
+                    .await
+                    .map_err(ApiError::internal)?
+                    .is_some_and(|limits| limits.closed)
+                {
+                    return Err(ApiError::new(
+                        ErrorCode::OrgClosed,
+                        "that tree takes no further member",
+                    )
+                    .with("org", refusals::named_node(&mut tx, audit_place.org).await?));
+                }
+                (
+                    "org",
+                    Some(org),
+                    None,
+                    Place::Node(audit_place.org),
+                    Some(audit_place),
+                )
             }
-            (
-                "node",
-                None,
-                Some(node),
-                Place::Node(audit_place.org),
-                Some(audit_place),
+            InvitationKind::Node => {
+                let node = body
+                    .node_id
+                    .ok_or_else(|| invalid("node_id", "is needed to invite to a node"))?;
+                let (audit_place, kind) = placed(&mut tx, node).await?;
+                if kind == NodeKind::Org {
+                    return Err(invalid("node_id", "an org is invited into, not to"));
+                }
+                let policy = crate::routes::nodes::policy_at(&mut tx, node).await?;
+                for permission in [Permission::AccessManage, Permission::AccessExternal] {
+                    authorization::require(
+                        &mut tx,
+                        principal,
+                        node,
+                        exact(permission),
+                        Act::Use,
+                        policy,
+                    )
+                    .await?;
+                }
+                (
+                    "node",
+                    None,
+                    Some(node),
+                    Place::Node(audit_place.org),
+                    Some(audit_place),
+                )
+            }
+            InvitationKind::Chat => {
+                let chat = body
+                    .chat_id
+                    .ok_or_else(|| invalid("chat_id", "is needed to invite to a group chat"))?;
+                let (loaded, _) = invitable_chat(&mut tx, principal, chat).await?;
+                let root = loaded.row.org_id;
+                (
+                    "chat",
+                    None,
+                    None,
+                    Place::Node(root),
+                    Some(Placed {
+                        id: root,
+                        org: root,
+                    }),
+                )
+            }
+        };
+        let policies = policies_at(&mut tx, place).await?;
+        let form = if email.is_some() {
+            InvitationForm::Email
+        } else {
+            InvitationForm::Link
+        };
+        if !policies
+            .forms
+            .iter()
+            .any(|allowed| allowed == form_word(form))
+        {
+            return Err(ApiError::new(
+                ErrorCode::InvitationNotAllowed,
+                "this form of invitation is not allowed here",
             )
+            .with("form", form_word(form))
+            .with("scope", policies.forms_scope));
         }
-        InvitationKind::Chat => {
-            let chat = body
-                .chat_id
-                .ok_or_else(|| invalid("chat_id", "is needed to invite to a group chat"))?;
-            let (loaded, _) = invitable_chat(&mut tx, principal, chat).await?;
-            let root = loaded.row.org_id;
-            (
-                "chat",
-                None,
-                None,
-                Place::Node(root),
-                Some(Placed {
-                    id: root,
-                    org: root,
-                }),
-            )
-        }
-    };
-    let policies = policies_at(&mut tx, place).await?;
-    let form = if email.is_some() {
-        InvitationForm::Email
-    } else {
-        InvitationForm::Link
-    };
-    if !policies
-        .forms
-        .iter()
-        .any(|allowed| allowed == form_word(form))
-    {
-        return Err(ApiError::new(
-            ErrorCode::InvitationNotAllowed,
-            "this form of invitation is not allowed here",
-        )
-        .with("form", form_word(form))
-        .with("scope", policies.forms_scope));
-    }
-    let max_uses = match (form, body.max_uses) {
-        (InvitationForm::Email, None | Some(1)) => 1,
-        (InvitationForm::Email, Some(_)) => {
-            return Err(invalid("max_uses", "a personal link is good for one use"));
-        }
-        (InvitationForm::Link, requested) => {
-            let uses = requested.unwrap_or(1);
-            if uses < 1 || uses > policies.max_uses {
-                return Err(invalid(
-                    "max_uses",
-                    &format!("must be from 1 to {}", policies.max_uses),
-                ));
+        let max_uses = match (form, body.max_uses) {
+            (InvitationForm::Email, None | Some(1)) => 1,
+            (InvitationForm::Email, Some(_)) => {
+                return Err(invalid("max_uses", "a personal link is good for one use"));
             }
-            uses
-        }
-    };
-    let hours = body.expires_in_hours.unwrap_or(policies.default_hours);
-    if hours < 1 || hours > policies.max_hours {
-        return Err(invalid(
-            "expires_in_hours",
-            &format!("must be from 1 to {}", policies.max_hours),
-        ));
-    }
-    let (role, rows): (Option<String>, Vec<String>) = match body.kind {
-        InvitationKind::Org => {
-            let role = body.role.unwrap_or(Role::Viewer);
-            if let Some(org) = org {
-                invitation_role(&mut tx, principal, org, role).await?;
-            }
-            (
-                serde_json::to_value(role)
-                    .ok()
-                    .and_then(|v| v.as_str().map(str::to_owned)),
-                Vec::new(),
-            )
-        }
-        InvitationKind::Node => {
-            let node = node.unwrap_or_else(Id::nil);
-            let (_, kind) = placed(&mut tx, node).await?;
-            let rows: Vec<String> = if body.role.is_some() {
-                Vec::new()
-            } else {
-                body.permissions
-                    .clone()
-                    .unwrap_or_else(|| DEFAULT_ROWS.iter().map(|row| (*row).to_owned()).collect())
-            };
-            if body.role.is_none() && rows.is_empty() {
-                return Err(invalid("permissions", "must name at least one permission"));
-            }
-            for (index, row) in rows.iter().enumerate() {
-                let known = row.parse::<Permission>().ok().is_some_and(|permission| {
-                    permission.exists_on(match kind {
-                        NodeKind::Project => orch_access_contract::permissions::ObjectKind::Project,
-                        NodeKind::Topic => orch_access_contract::permissions::ObjectKind::Topic,
-                        NodeKind::Thread => orch_access_contract::permissions::ObjectKind::Thread,
-                        NodeKind::Org => orch_access_contract::permissions::ObjectKind::Org,
-                    })
-                });
-                if !known {
+            (InvitationForm::Link, requested) => {
+                let uses = requested.unwrap_or(1);
+                if uses < 1 || uses > policies.max_uses {
                     return Err(invalid(
-                        &format!("permissions[{index}]"),
-                        "is no permission of that node",
+                        "max_uses",
+                        &format!("must be from 1 to {}", policies.max_uses),
                     ));
                 }
+                uses
             }
-            if body.role.is_some() && kind == NodeKind::Thread {
-                return Err(invalid(
-                    "role",
-                    "a role is held in a project or a topic, not on a thread",
-                ));
-            }
-            if let Some(role) = body.role {
-                invitation_role(&mut tx, principal, node, role).await?;
-            } else {
-                invitation_rows(&mut tx, principal, node, &rows).await?;
-            }
-            (
-                body.role
-                    .and_then(|role| serde_json::to_value(role).ok())
-                    .and_then(|v| v.as_str().map(str::to_owned)),
-                rows,
-            )
+        };
+        let hours = body.expires_in_hours.unwrap_or(policies.default_hours);
+        if hours < 1 || hours > policies.max_hours {
+            return Err(invalid(
+                "expires_in_hours",
+                &format!("must be from 1 to {}", policies.max_hours),
+            ));
         }
-        _ => (None, Vec::new()),
-    };
-    let token = new_token(INVITATION_TOKEN_PREFIX);
-    let id = new_id();
-    let expires_at = Duration::try_hours(hours)
-        .and_then(|life| ctx.now.checked_add_signed(life))
-        .ok_or_else(|| invalid("expires_in_hours", "is outside the supported clock range"))?;
-    identity::create_invitation(
-        &mut tx,
-        &NewInvitation {
-            id,
-            token_hash: &token_hash(&token),
-            kind: kind_word,
-            org,
-            node,
-            chat: body.chat_id,
-            role: role.as_deref(),
-            permissions: &rows,
-            email: email.as_deref(),
-            max_uses: i32::try_from(max_uses).unwrap_or(i32::MAX),
-            note: &note,
-            expires_at,
-            by: user,
-            as_admin: principal.caller().as_admin(),
-            at: ctx.now,
-        },
-    )
-    .await?;
-    let url = mail::link(&ctx.app.config, "invite", &token);
-    if let Some(address) = &email
-        && let Some(invitee) = identity::user_by_confirmed_email(&mut tx, address).await?
-    {
-        orch_engine::notifications::tell(&mut tx, &orch_engine::notifications::Event {
-            kind:orch_engine::notifications::Kind::Invitation, node:None, thread:None, approval:None,
-            title:format!("{} invited you", guard.user().user.display_name), body:note.clone(),
-            data:json!({"invitation_id":id,"kind":kind_word,"expires_at":Time::new(expires_at),"path":format!("/invite/{token}")}),
-            source:id.to_string(), actor:Some(user), at:ctx.now,
-        }, &[invitee.id], None).await.map_err(ApiError::internal)?;
-    }
-    let mut sent = false;
-    if let Some(address) = &email
-        && let Some(channel) = identity::system_mail_channel(&mut tx).await?
-    {
-        let system = &ctx.app.config.system.name;
-        let who = &guard.user().user.display_name;
-        identity::queue_mail(
+        let (role, rows): (Option<String>, Vec<String>) = match body.kind {
+            InvitationKind::Org => {
+                let role = body.role.unwrap_or(Role::Viewer);
+                if let Some(org) = org {
+                    invitation_role(&mut tx, principal, org, role).await?;
+                }
+                (
+                    serde_json::to_value(role)
+                        .ok()
+                        .and_then(|v| v.as_str().map(str::to_owned)),
+                    Vec::new(),
+                )
+            }
+            InvitationKind::Node => {
+                let node = node.unwrap_or_else(Id::nil);
+                let (_, kind) = placed(&mut tx, node).await?;
+                let rows: Vec<String> = if body.role.is_some() {
+                    Vec::new()
+                } else {
+                    body.permissions
+                        .clone()
+                        .unwrap_or_else(|| DEFAULT_ROWS.iter().map(|row| (*row).to_owned()).collect())
+                };
+                if body.role.is_none() && rows.is_empty() {
+                    return Err(invalid("permissions", "must name at least one permission"));
+                }
+                for (index, row) in rows.iter().enumerate() {
+                    let known = row.parse::<Permission>().ok().is_some_and(|permission| {
+                        permission.exists_on(match kind {
+                            NodeKind::Project => orch_access_contract::permissions::ObjectKind::Project,
+                            NodeKind::Topic => orch_access_contract::permissions::ObjectKind::Topic,
+                            NodeKind::Thread => orch_access_contract::permissions::ObjectKind::Thread,
+                            NodeKind::Org => orch_access_contract::permissions::ObjectKind::Org,
+                        })
+                    });
+                    if !known {
+                        return Err(invalid(
+                            &format!("permissions[{index}]"),
+                            "is no permission of that node",
+                        ));
+                    }
+                }
+                if body.role.is_some() && kind == NodeKind::Thread {
+                    return Err(invalid(
+                        "role",
+                        "a role is held in a project or a topic, not on a thread",
+                    ));
+                }
+                if let Some(role) = body.role {
+                    invitation_role(&mut tx, principal, node, role).await?;
+                } else {
+                    invitation_rows(&mut tx, principal, node, &rows).await?;
+                }
+                (
+                    body.role
+                        .and_then(|role| serde_json::to_value(role).ok())
+                        .and_then(|v| v.as_str().map(str::to_owned)),
+                    rows,
+                )
+            }
+            _ => (None, Vec::new()),
+        };
+        let token = new_token(INVITATION_TOKEN_PREFIX);
+        let id = new_id();
+        let expires_at = Duration::try_hours(hours)
+            .and_then(|life| ctx.now.checked_add_signed(life))
+            .ok_or_else(|| invalid("expires_in_hours", "is outside the supported clock range"))?;
+        let issuer_origin = invitation_operation::capture(&ctx, principal)?;
+        identity::create_invitation(
             &mut tx,
-            CHANNEL_KIND,
-            channel,
-            &json!({
-                "purpose": "invitation",
-                "to": address,
-                "user_id": null,
-                "language": "en",
-                "data": { "token": token, "url": url, "expires_at": Time::new(expires_at) },
-                "subject": format!("{who} invited you to {system}"),
-                "body": format!("{who} invited you. Open this link:\n{url}\nIt is good for one use, until {}.", expires_at.to_rfc3339()),
-            }),
-            ctx.now,
+            &NewInvitation {
+                id,
+                token_hash: &token_hash(&token),
+                kind: kind_word,
+                org,
+                node,
+                chat: body.chat_id,
+                role: role.as_deref(),
+                permissions: &rows,
+                email: email.as_deref(),
+                max_uses: i32::try_from(max_uses).unwrap_or(i32::MAX),
+                note: &note,
+                expires_at,
+                by: user,
+                as_admin: principal.caller().as_admin(),
+                issuer_origin: issuer_origin.as_ref(),
+                at: ctx.now,
+            },
         )
         .await?;
-        sent = true;
+        let url = mail::link(&ctx.app.config, "invite", &token);
+        if let Some(address) = &email
+            && let Some(invitee) = identity::user_by_confirmed_email(&mut tx, address).await?
+        {
+            orch_engine::notifications::tell(&mut tx, &orch_engine::notifications::Event {
+                kind:orch_engine::notifications::Kind::Invitation, node:None, thread:None, approval:None,
+                title:format!("{} invited you", guard.user().user.display_name), body:note.clone(),
+                data:json!({"invitation_id":id,"kind":kind_word,"expires_at":Time::new(expires_at),"path":format!("/invite/{token}")}),
+                source:id.to_string(), actor:Some(user), at:ctx.now,
+            }, &[invitee.id], None).await.map_err(ApiError::internal)?;
+        }
+        let mut sent = false;
+        if let Some(address) = &email
+            && let Some(channel) = identity::system_mail_channel(&mut tx).await?
+        {
+            let system = &ctx.app.config.system.name;
+            let who = &guard.user().user.display_name;
+            identity::queue_mail(
+                &mut tx,
+                CHANNEL_KIND,
+                channel,
+                &json!({
+                    "purpose": "invitation",
+                    "to": address,
+                    "user_id": null,
+                    "language": "en",
+                    "data": { "token": token, "url": url, "expires_at": Time::new(expires_at) },
+                    "subject": format!("{who} invited you to {system}"),
+                    "body": format!("{who} invited you. Open this link:\n{url}\nIt is good for one use, until {}.", expires_at.to_rfc3339()),
+                }),
+                ctx.now,
+            )
+            .await?;
+            sent = true;
+        }
+        let who = &guard.user().user.display_name;
+        let audit_place = match audit_place {
+            Some(place) => place,
+            None => Placed {
+                id: Id::nil(),
+                org: Id::nil(),
+            },
+        };
+        audit_invitation(
+            (&ctx, ctx.user()?.id()),
+            &mut tx,
+            orch_db::audit::action!(AuditAction::InviteCreated),
+            id,
+            audit_place,
+            &format!("{who} made an invitation"),
+            json!({ "kind": kind_word, "form": form_word(form), "uses": max_uses, "role": role }),
+        )
+        .await?;
+        let row = identity::invitation_by_id(&mut tx, id)
+            .await?
+            .ok_or_else(|| ApiError::internal("an invitation was made and is not there"))?;
+        invitation_operation::creation_reply(&ctx, &mut tx, principal, &governed.target, &row,
+            InvitationCreateReceipt { projection:orch_api_contract::common::ReceiptProjection::Receipt, invitation_id:id,token,url,sent }).await
     }
-    let who = &guard.user().user.display_name;
-    let audit_place = match audit_place {
-        Some(place) => place,
-        None => Placed {
-            id: Id::nil(),
-            org: Id::nil(),
-        },
-    };
-    audit_invitation(
-        (&ctx, ctx.user()?.id()),
-        &mut tx,
-        orch_db::audit::action!(AuditAction::InviteCreated),
-        id,
-        audit_place,
-        &format!("{who} made an invitation"),
-        json!({ "kind": kind_word, "form": form_word(form), "uses": max_uses, "role": role }),
-    )
-    .await?;
-    let row = identity::invitation_by_id(&mut tx, id)
-        .await?
-        .ok_or_else(|| ApiError::internal("an invitation was made and is not there"))?;
-    let shown = invitations_shown(&mut tx, principal, &[row]).await?;
-    tx.commit().await.map_err(DbError::from)?;
-    Ok(InvitationCreateReply {
-        invitation: shown
-            .into_iter()
-            .next()
-            .ok_or_else(|| ApiError::internal("an invitation was made and is not shown"))?,
-        token,
-        url,
-        sent,
-    })
+    .await;
+    match outcome {
+        Ok(reply) => {
+            tx.commit().await.map_err(DbError::from)?;
+            Ok(reply)
+        }
+        Err(error) => Err(invitation_operation::project_problem(
+            &ctx,
+            &mut tx,
+            guard.principal(),
+            &governed.target,
+            error,
+        )
+        .await?),
+    }
 }
 
 /// Checks that an invitation's maker may give this role at the place now.
@@ -762,10 +764,15 @@ async fn audit_invitation(
 }
 
 /// What the maker of an invitation has to hold to list or take one back.
-async fn may_manage(conn: &mut Conn, principal: &Principal, row: &InvitationRow) -> ApiResult<()> {
+async fn may_manage(
+    ctx: &Ctx,
+    conn: &mut Conn,
+    principal: &Principal,
+    row: &InvitationRow,
+) -> ApiResult<()> {
     match (row.kind.as_str(), row.org_id, row.node_id) {
         ("system", ..) => {
-            if principal.is_system_admin() {
+            if invitation_operation::system_operation(ctx, principal)? {
                 Ok(())
             } else {
                 Err(refusals::system_admin_only(
@@ -807,8 +814,27 @@ async fn invitation_list(
     query: InvitationListQuery,
     (): (),
 ) -> ApiResult<Vec<Invitation>> {
-    let mut conn = ctx.app.db.acquire().await?;
-    let principal = authorization::principal(&ctx, &mut conn).await?;
+    crate::key_operations::snapshot_read::run(ctx, move |ctx| {
+        invitation_list_snapshot(ctx, query.clone())
+    })
+    .await
+}
+
+async fn invitation_list_snapshot(
+    ctx: Ctx,
+    query: InvitationListQuery,
+) -> ApiResult<Vec<Invitation>> {
+    let mut conn = ctx.app.db.begin_snapshot().await?;
+    let principal = ctx.operation_principal(&mut conn).await?;
+    if principal
+        .caller()
+        .grant()
+        .is_some_and(|grant| grant.operation_scope().is_some())
+    {
+        let values = invitation_operation::listed(&ctx, &mut conn, &principal).await?;
+        conn.commit().await.map_err(DbError::from)?;
+        return Ok(values);
+    }
     if let Some(org) = query.org_id {
         let (_, kind) = placed(&mut conn, org).await?;
         if kind != NodeKind::Org {
@@ -831,7 +857,9 @@ async fn invitation_list(
         principal.user(),
     )
     .await?;
-    invitations_shown(&mut conn, &principal, &rows).await
+    let values = invitations_shown(&mut conn, &principal, &rows).await?;
+    conn.commit().await.map_err(DbError::from)?;
+    Ok(values)
 }
 
 /// Takes an invitation back.
@@ -839,39 +867,63 @@ async fn invitation_delete(mut ctx: Ctx, (): (), (): ()) -> ApiResult<()> {
     let id = ctx.id("id")?;
     let (mut tx, guard) = transaction_guard::begin(&ctx).await?;
     ctx.now = guard.now().get();
-    let principal = guard.principal();
-    let row = identity::invitation_by_id(&mut tx, id)
-        .await?
-        .ok_or_else(ApiError::not_found)?;
-    may_manage(&mut tx, principal, &row).await?;
-    if identity::revoke_invitation(&mut tx, id, ctx.now).await? {
-        let target = match row.chat_id {
-            Some(chat) => orch_db::queries::chats::chat(&mut tx, chat)
-                .await?
-                .map(|chat| chat.org_id),
-            None => row.org_id.or(row.node_id),
-        };
-        let place = match target {
-            Some(node) => placed(&mut tx, node).await?.0,
-            None => Placed {
-                id: Id::nil(),
-                org: Id::nil(),
-            },
-        };
-        let who = &guard.user().user.display_name;
-        audit_invitation(
-            (&ctx, ctx.user()?.id()),
-            &mut tx,
-            orch_db::audit::action!(AuditAction::InviteRevoked),
-            id,
-            place,
-            &format!("{who} took an invitation back"),
-            json!({ "kind": row.kind }),
-        )
-        .await?;
+    let governed = guard.operation_data::<invitation_operation::Governed>()?;
+    if !identity::lock_invitation(&mut tx, id).await? {
+        return Err(ApiError::not_found());
     }
-    tx.commit().await.map_err(DbError::from)?;
-    Ok(())
+    invitation_operation::lock_governing(&mut tx, &governed.target).await?;
+    ctx.now = ctx.app.clock.now();
+    let guard = transaction_guard::check_conn(&ctx, &mut tx).await?;
+    let governed = guard.operation_data::<invitation_operation::Governed>()?;
+    let outcome: ApiResult<()> = async {
+        let principal = guard.principal();
+        let row = identity::invitation_by_id(&mut tx, id)
+            .await?
+            .ok_or_else(ApiError::not_found)?;
+        may_manage(&ctx, &mut tx, principal, &row).await?;
+        if identity::revoke_invitation(&mut tx, id, ctx.now).await? {
+            let target = match row.chat_id {
+                Some(chat) => orch_db::queries::chats::chat(&mut tx, chat)
+                    .await?
+                    .map(|chat| chat.org_id),
+                None => row.org_id.or(row.node_id),
+            };
+            let place = match target {
+                Some(node) => placed(&mut tx, node).await?.0,
+                None => Placed {
+                    id: Id::nil(),
+                    org: Id::nil(),
+                },
+            };
+            let who = &guard.user().user.display_name;
+            audit_invitation(
+                (&ctx, ctx.user()?.id()),
+                &mut tx,
+                orch_db::audit::action!(AuditAction::InviteRevoked),
+                id,
+                place,
+                &format!("{who} took an invitation back"),
+                json!({ "kind": row.kind }),
+            )
+            .await?;
+        }
+        Ok(())
+    }
+    .await;
+    match outcome {
+        Ok(()) => {
+            tx.commit().await.map_err(DbError::from)?;
+            Ok(())
+        }
+        Err(error) => Err(invitation_operation::project_problem(
+            &ctx,
+            &mut tx,
+            guard.principal(),
+            &governed.target,
+            error,
+        )
+        .await?),
+    }
 }
 
 fn gone() -> ApiError {
@@ -939,9 +991,12 @@ fn issuer_refusal(mut error: ApiError) -> ApiError {
 async fn invitation_maker(
     conn: &mut Conn,
     row: &InvitationRow,
-    now: DateTime<Utc>,
+    clock: &dyn orch_types::Clock,
 ) -> ApiResult<Principal> {
-    let maker = match Principal::load(conn, issuer_caller(row), Time::new(now)).await {
+    if let Some(maker) = invitation_operation::restore_issuer(conn, row, clock).await? {
+        return Ok(maker);
+    }
+    let maker = match Principal::load(conn, issuer_caller(row), clock.time()).await {
         Ok(maker) => maker,
         Err(orch_authz::Error::NoSuchUser(_) | orch_authz::Error::Suspended { .. }) => {
             return Err(issuer_gone());
@@ -955,14 +1010,18 @@ async fn invitation_maker(
 }
 
 /// A link cannot disclose its target after its maker can no longer offer that access.
-async fn preview_issuer(conn: &mut Conn, row: &InvitationRow, now: DateTime<Utc>) -> ApiResult<()> {
-    let maker = invitation_maker(conn, row, now).await?;
+async fn preview_issuer(
+    conn: &mut Conn,
+    row: &InvitationRow,
+    clock: &dyn orch_types::Clock,
+) -> ApiResult<()> {
+    let maker = invitation_maker(conn, row, clock).await?;
     match (row.kind.as_str(), row.org_id, row.node_id, row.chat_id) {
         ("system", None, None, None) => {
             if row.role.is_some() || !row.permissions.is_empty() {
                 return Err(gone());
             }
-            if !maker.is_system_admin() {
+            if !invitation_operation::system_issuer(&maker)? {
                 return Err(issuer_gone());
             }
         }
@@ -1029,12 +1088,19 @@ async fn good(conn: &mut Conn, token: &str, now: DateTime<Utc>) -> ApiResult<Inv
 
 /// What a link would give, before it is accepted.
 async fn invitation_lookup(ctx: Ctx, (): (), (): ()) -> ApiResult<InvitationPreview> {
+    {
+        let mut conn = ctx.app.db.acquire().await?;
+        let limits = Limits::of(&ctx.app.config.auth);
+        throttle::by_address(&ctx, &mut conn, &limits, "invitation").await?;
+    }
+    crate::key_operations::snapshot_read::run(ctx, invitation_lookup_snapshot).await
+}
+
+async fn invitation_lookup_snapshot(ctx: Ctx) -> ApiResult<InvitationPreview> {
     let token = ctx.param("token")?.to_owned();
-    let mut conn = ctx.app.db.acquire().await?;
-    let limits = Limits::of(&ctx.app.config.auth);
-    throttle::by_address(&ctx, &mut conn, &limits, "invitation").await?;
+    let mut conn = ctx.app.db.begin_snapshot().await?;
     let row = good(&mut conn, &token, ctx.now).await?;
-    preview_issuer(&mut conn, &row, ctx.now).await?;
+    preview_issuer(&mut conn, &row, ctx.app.clock.as_ref()).await?;
     let found = hierarchy::with_ancestors(
         &mut conn,
         &[row.org_id.or(row.node_id).unwrap_or_else(Id::nil)],
@@ -1070,7 +1136,7 @@ async fn invitation_lookup(ctx: Ctx, (): (), (): ()) -> ApiResult<InvitationPrev
         if row.role.is_some() || !row.permissions.is_empty() {
             return Err(gone());
         }
-        let maker = invitation_maker(&mut conn, &row, ctx.now).await?;
+        let maker = invitation_maker(&mut conn, &row, ctx.app.clock.as_ref()).await?;
         let (loaded, _) = invitable_chat(&mut conn, &maker, chat)
             .await
             .map_err(issuer_refusal)?;
@@ -1085,7 +1151,10 @@ async fn invitation_lookup(ctx: Ctx, (): (), (): ()) -> ApiResult<InvitationPrev
         .await?
         .remove(&row.created_by)
         .ok_or_else(gone)?;
-    Ok(InvitationPreview {
+    if row.expires_at <= ctx.app.clock.now() {
+        return Err(gone());
+    }
+    let reply = InvitationPreview {
         kind: kind_of(&row.kind).ok_or_else(gone)?,
         org,
         what,
@@ -1097,7 +1166,9 @@ async fn invitation_lookup(ctx: Ctx, (): (), (): ()) -> ApiResult<InvitationPrev
         inviter,
         email_bound: row.email.is_some(),
         expires_at: Time::new(row.expires_at),
-    })
+    };
+    conn.commit().await.map_err(DbError::from)?;
+    Ok(reply)
 }
 
 /// Accepts an invitation as the existing signed-in person.
@@ -1105,14 +1176,32 @@ async fn invitation_accept(
     mut ctx: Ctx,
     (): (),
     body: InvitationAcceptBody,
-) -> ApiResult<InvitationAcceptReply> {
+) -> ApiResult<InvitationAcceptResponse> {
     let (mut tx, guard) = transaction_guard::begin(&ctx).await?;
     ctx.now = guard.now().get();
-    let row = redeem(&ctx, &mut tx, &guard.user().user, &body.token).await?;
-    let principal = authorization::principal(&ctx, &mut tx).await?;
-    let reply = accepted_reply(&ctx, &mut tx, &principal, &row).await?;
-    tx.commit().await.map_err(DbError::from)?;
-    Ok(reply)
+    let governed = guard.operation_data::<invitation_operation::Governed>()?;
+    let outcome: ApiResult<InvitationAcceptResponse> = async {
+        let row = redeem(&ctx, &mut tx, &guard.user().user, &body.token).await?;
+        ctx.now = ctx.app.clock.now();
+        let principal = authorization::principal(&ctx, &mut tx).await?;
+        let actual = invitation_operation::governing_row(&mut tx, &row).await?;
+        invitation_operation::acceptance_reply(&ctx, &mut tx, &principal, &actual, &row).await
+    }
+    .await;
+    match outcome {
+        Ok(reply) => {
+            tx.commit().await.map_err(DbError::from)?;
+            Ok(reply)
+        }
+        Err(error) => Err(invitation_operation::project_problem(
+            &ctx,
+            &mut tx,
+            guard.principal(),
+            &governed.target,
+            error,
+        )
+        .await?),
+    }
 }
 
 /// The authority mode the issuer delegated, independent of the accepting
@@ -1164,28 +1253,38 @@ pub(crate) async fn redeem(
 ) -> ApiResult<InvitationRow> {
     let initial = good(conn, token, ctx.now).await?;
     // Capacity and its target are ordered before the definitive clock and authority checks.
-    let locked: Option<Id> =
-        sqlx::query_scalar("SELECT id FROM invitations WHERE id = $1 FOR UPDATE")
-            .bind(initial.id)
-            .fetch_optional(&mut *conn)
-            .await
-            .map_err(DbError::from)?;
-    if locked.is_none() {
+    if !identity::lock_invitation(conn, initial.id).await? {
         return Err(gone());
     }
     if let Some(node) = initial.org_id.or(initial.node_id) {
         if !hierarchy::lock(conn, node).await? {
             return Err(gone());
         }
-    } else if let Some(chat) = initial.chat_id {
-        if orch_db::queries::chats::lock(conn, chat).await?.is_none() {
-            return Err(issuer_refusal(ApiError::not_found()));
-        }
+    } else if let Some(chat) = initial.chat_id
+        && orch_db::queries::chats::lock(conn, chat).await?.is_none()
+    {
+        return Err(issuer_refusal(ApiError::not_found()));
     }
     let mut current = ctx.clone();
     current.now = current.app.clock.now();
+    let recipient_id = if current.route.name == "InvitationAccept" {
+        // Same authenticated operation and original restrictions, after the
+        // actual Invitation/target waits. Public registration has its own proof.
+        let guard = crate::middleware::transaction_guard::check_conn(&current, conn).await?;
+        current.now = guard.now().get();
+        current.caller = crate::middleware::authentication::Caller::User(std::sync::Arc::new(
+            guard.user().clone(),
+        ));
+        guard.user().id()
+    } else {
+        recipient.id
+    };
     let ctx = &current;
     let row = good(conn, token, ctx.now).await?;
+    let recipient = identity::user_by_id(conn, recipient_id)
+        .await?
+        .ok_or_else(gone)?;
+    let recipient = &recipient;
     // A personal link is accepted by the address it was sent to.
     if let Some(address) = &row.email {
         let confirmed = recipient
@@ -1202,7 +1301,7 @@ pub(crate) async fn redeem(
     }
     let user = recipient.id;
     orch_db::queries::transaction_guard::watch_standing(conn).await?;
-    let maker = invitation_maker(conn, &row, ctx.now).await?;
+    let maker = invitation_maker(conn, &row, ctx.app.clock.as_ref()).await?;
     let delegation =
         json!({"issuer":row.created_by,"administrator_mode":maker.caller().as_admin()});
     match (row.kind.as_str(), row.org_id, row.node_id) {
@@ -1300,7 +1399,7 @@ pub(crate) async fn redeem(
             if row.role.is_some() || !row.permissions.is_empty() {
                 return Err(gone());
             }
-            if !maker.is_system_admin() {
+            if !invitation_operation::system_issuer(&maker)? {
                 return Err(issuer_gone());
             }
             if !identity::use_invitation(&mut *conn, row.id, user, ctx.now).await? {

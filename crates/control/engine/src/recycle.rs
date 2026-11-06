@@ -25,6 +25,9 @@ impl Engine {
         else {
             return Ok(false);
         };
+        if crate::background_wake::running(&mut tx, None, None, Some(environment)).await? {
+            return Ok(false);
+        }
         if !orch_db::queries::environment_facts::has_unit(&mut tx, environment).await?
             || state.status != "running"
             || state.remove_at.is_some()
@@ -70,6 +73,9 @@ impl Engine {
         include_with_processes: bool,
     ) -> Result<bool, EngineError> {
         let mut conn = self.db().acquire().await?;
+        if crate::background_wake::running(&mut conn, None, None, Some(environment)).await? {
+            return Ok(false);
+        }
         let Some(state) = envs::environment(&mut conn, environment)
             .await?
             .filter(|s| s.deleted_at.is_none())

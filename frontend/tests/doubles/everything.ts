@@ -88,14 +88,15 @@ export class EverythingWorld implements Part {
         participating: (this.world.chats.states.get(`${person.me.username}:${chat.id}`)?.effective_level ?? (participant ? 'all' : 'off')) !== 'off',
         href: webHref({ kind: 'chat', id: chat.id, nodeId: chat.node?.id, orgId: org, path }) }));
     }
-    const resources: readonly [EverythingKind, string][] = [['environment', '/environments'], ['provider', '/providers'], ['agent', '/agents'], ['machine', '/machines'], ['host', '/hosts'], ['mount', '/mounts'], ['mcp_server', '/mcp-servers'], ['template', '/templates']];
+    const extra = this.world.requestFeeds.inventory(person);
+    const resources: readonly [EverythingKind, string][] = [['environment', '/environments'], ['provider', '/providers'], ['agent', '/agents'], ['machine', '/machines'], ['host', '/hosts'], ['mount', '/mounts'], ['mcp_server', '/mcp-servers'], ['template', '/templates'], ['skill', '/skills']];
     for (const [kind, route] of resources) {
       const response = this.world.resources.handle(person, 'GET', route, new URLSearchParams(), {});
-      const entries: unknown[] = Array.isArray(response?.body) ? response.body : isRecord(response?.body) && Array.isArray(response.body.items) ? response.body.items : [];
+      const entries: unknown[] = [...(Array.isArray(response?.body) ? response.body : isRecord(response?.body) && Array.isArray(response.body.items) ? response.body.items : []), ...extra.filter((row) => row.kind === kind).map((row) => row.value)];
       for (const resource of entries) {
         if (!isRecord(resource) || typeof resource.id !== 'string' || typeof resource.name !== 'string') continue;
         const hidden = resource.content_hidden === true;
-        const detail = hidden ? null : this.world.resources.inventoryView(person, kind, resource.id);
+        const detail = hidden ? null : extra.find((row) => row.kind === kind && row.value.id === resource.id) ?? this.world.resources.inventoryView(person, kind, resource.id);
         const home = isRecord(resource.home) && typeof resource.home.id === 'string' ? resource.home.id : null;
         const path = home === null ? [] : this.path(person, home);
         const access = detail?.value.access;

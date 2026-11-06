@@ -8,6 +8,8 @@
 mod places;
 mod support;
 
+use crate::support::FullArchiveReply as _;
+use crate::support::FullMoveReply as _;
 use chrono::{NaiveDate, TimeZone, Utc};
 use orch_api_contract::common::{ErrorCode, Problem};
 use orch_api_contract::directory::{NodeTagCreate, NodeTagCreateBody, NodeTagList};
@@ -80,6 +82,8 @@ async fn make_folder(world: &World, by: &Who, project: Id, name: &str) -> Projec
         .send()
         .await
         .ok()
+        .into_full()
+        .expect("this control expects the ordinary full project response")
 }
 
 async fn folder_refused(world: &World, by: &Who, project: Id, name: &str) -> Problem {
@@ -119,6 +123,7 @@ async fn project_moved(world: &World, by: &Who, node: Id, parent: Id) -> Project
         })
         .send()
         .await
+        .full_move()
         .ok()
 }
 
@@ -151,6 +156,7 @@ async fn topic_moved(world: &World, by: &Who, node: Id, parent: Id) -> Topic {
         })
         .send()
         .await
+        .full_move()
         .ok()
 }
 
@@ -183,6 +189,7 @@ async fn plan_of_topic(
         .body(&MovePreviewBody { parent_id: parent })
         .send()
         .await
+        .full_move()
         .ok()
 }
 
@@ -269,7 +276,9 @@ async fn a_folder_made_private_is_its_makers_alone_until_somebody_is_named() {
         })
         .send()
         .await
-        .ok();
+        .ok()
+        .into_full()
+        .expect("this control expects the ordinary full project response");
     assert_eq!(folder.base.page, PageState::Restricted);
     let seen = world
         .app
@@ -473,6 +482,7 @@ async fn a_project_is_refused_into_itself_below_itself_into_another_tree_and_int
             .body(&MovePreviewBody { parent_id: parent })
             .send()
             .await
+            .full_move()
             .ok();
         assert_eq!(
             plan.blockers.first().map(|blocker| blocker.code.as_str()),
@@ -514,6 +524,7 @@ async fn a_project_is_refused_past_the_depth_the_system_allows_counting_what_is_
         .body(&MovePreviewBody { parent_id: two })
         .send()
         .await
+        .full_move()
         .ok();
     assert_eq!(
         plan.blockers.first().map(|blocker| blocker.code.as_str()),
@@ -975,6 +986,7 @@ async fn used_in(world: &World, by: &Who, node: Id) -> i64 {
         measure: None,
         effort: None,
         tier: None,
+        tier_unknown: None,
         program: None,
         outcome: None,
         scope: format!("node:{node}"),
@@ -1352,6 +1364,7 @@ async fn the_plan_of_a_move_into_a_project_says_who_gains_and_loses_what_and_whi
                 .body(&MovePreviewBody { parent_id: parent })
                 .send()
                 .await
+                .full_move()
                 .ok()
         }
     };
@@ -1406,6 +1419,7 @@ async fn nothing_is_moved_out_of_what_is_archived_or_into_it() {
                 .body(&places::archive_body(world, &boss.token, node, true).await)
                 .send()
                 .await
+                .full_archive()
                 .ok();
         }
     };

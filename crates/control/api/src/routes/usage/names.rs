@@ -7,6 +7,7 @@
 //! nothing says where below it the use was.
 
 use crate::middleware::requests::ApiResult;
+use crate::routes::access::page::NameBounds;
 use crate::routes::nodes::view as node_view;
 use crate::routes::resources::view as resource_view;
 use orch_api_contract::nodes::{NodeKind, NodeRef};
@@ -47,7 +48,100 @@ fn ids_of<'a>(values: impl IntoIterator<Item = &'a str>) -> Vec<Id> {
     ids
 }
 
+/// Visibility facts of the native names that an authorized report actually emits.
+#[derive(Clone, Default)]
+pub(super) struct Cut {
+    nodes: std::collections::BTreeSet<Id>,
+    addresses: std::collections::BTreeMap<Id, String>,
+}
+impl Cut {
+    pub(super) fn extend(&mut self, other: Self) {
+        self.nodes.extend(other.nodes);
+        self.addresses.extend(other.addresses);
+    }
+    pub(super) async fn current(&self, conn: &mut Conn, principal: &Principal) -> ApiResult<bool> {
+        let nodes = node_view::refs(
+            conn,
+            principal,
+            &self.nodes.iter().copied().collect::<Vec<_>>(),
+            Policy::default(),
+        )
+        .await?;
+        if self
+            .nodes
+            .iter()
+            .any(|id| !nodes.get(id).is_some_and(|node| !node.redacted))
+        {
+            return Ok(false);
+        }
+        let users = crate::routes::access::page::user_refs_at(
+            conn,
+            principal,
+            None,
+            &self.addresses.keys().copied().collect::<Vec<_>>(),
+        )
+        .await?;
+        Ok(self.addresses.iter().all(|(id, address)| {
+            users
+                .get(id)
+                .is_some_and(|user| user.address.as_ref() == Some(address))
+        }))
+    }
+}
+
 impl Names {
+    /// Only the selected output keys contribute witnesses; hidden/unreturned keys add none.
+    pub(super) fn cut_for_dimension(
+        &self,
+        dimension: UsageDimension,
+        values: &[Option<String>],
+    ) -> Cut {
+        let ids: std::collections::BTreeSet<Id> = values
+            .iter()
+            .flatten()
+            .filter_map(|value| value.parse().ok())
+            .collect();
+        match dimension {
+            UsageDimension::Person => Cut {
+                addresses: self
+                    .users
+                    .iter()
+                    .filter(|(id, _)| ids.contains(*id))
+                    .filter_map(|(id, user)| user.address.clone().map(|address| (*id, address)))
+                    .collect(),
+                ..Cut::default()
+            },
+            UsageDimension::Org
+            | UsageDimension::Project
+            | UsageDimension::Topic
+            | UsageDimension::Thread => Cut {
+                nodes: self
+                    .nodes
+                    .iter()
+                    .filter(|(id, node)| ids.contains(*id) && !node.redacted)
+                    .map(|(id, _)| *id)
+                    .collect(),
+                ..Cut::default()
+            },
+            _ => Cut::default(),
+        }
+    }
+    pub(super) fn cut(&self) -> Cut {
+        Cut {
+            nodes: self
+                .nodes
+                .iter()
+                .filter(|(_, node)| !node.redacted)
+                .map(|(id, _)| *id)
+                .collect(),
+            addresses: self
+                .users
+                .iter()
+                .filter_map(|(id, user)| user.address.clone().map(|address| (*id, address)))
+                .collect(),
+        }
+    }
+
     /// The people, providers and places among `users`, `providers` and `nodes`, named for the reader.
     pub async fn load(
         conn: &mut Conn,
@@ -56,8 +150,36 @@ impl Names {
         providers: &[Id],
         nodes: &[Id],
     ) -> ApiResult<Self> {
+        Self::load_bounded(conn, principal, users, providers, nodes, None).await
+    }
+
+    /// The same names within an already admitted operation's optional node-name bound.
+    /// Public user identities and intrinsic provider references keep their original projection.
+    pub(crate) async fn load_bounded(
+        conn: &mut Conn,
+        principal: &Principal,
+        users: &[Id],
+        providers: &[Id],
+        nodes: &[Id],
+        bounds: Option<&NameBounds>,
+    ) -> ApiResult<Self> {
+        let bounds = bounds.filter(|bounds| bounds.limited);
         let mut names = Self {
-            users: crate::routes::access::page::user_refs_at(conn, principal, None, users).await?,
+            users: match bounds {
+                Some(bounds) => {
+                    crate::routes::access::page::user_refs_at_bounded(
+                        conn,
+                        principal,
+                        None,
+                        users,
+                        Some(bounds),
+                    )
+                    .await?
+                }
+                None => {
+                    crate::routes::access::page::user_refs_at(conn, principal, None, users).await?
+                }
+            },
             ..Self::default()
         };
         if !providers.is_empty() {
@@ -70,7 +192,10 @@ impl Names {
         if !nodes.is_empty() {
             // The screen already supplies scope, and records have separate place columns.
             // Keep the familiar name first rather than repeating the entire path in every cell.
-            names.nodes = node_view::refs(conn, principal, nodes, Policy::default()).await?;
+            names.nodes = match bounds {
+                Some(bounds) => bounds.refs(conn, principal, nodes).await?,
+                None => node_view::refs(conn, principal, nodes, Policy::default()).await?,
+            };
         }
         Ok(names)
     }
@@ -154,7 +279,12 @@ impl Names {
 
     /// The key a member of a dimension is shown as.
     #[must_use]
-    pub fn key(&self, dimension: UsageDimension, value: Option<&str>) -> UsageKey {
+    pub fn key(
+        &self,
+        dimension: UsageDimension,
+        value: Option<&str>,
+        tier_unknown: bool,
+    ) -> UsageKey {
         let id = value.and_then(|text| text.parse::<Id>().ok());
         let mut key = UsageKey::default();
         match dimension {
@@ -184,7 +314,10 @@ impl Names {
                 }));
             }
             UsageDimension::Effort => key.effort = Some(value.map(str::to_owned)),
-            UsageDimension::Tier => key.tier = Some(value.map(str::to_owned)),
+            UsageDimension::Tier => {
+                key.tier = Some(value.map(str::to_owned));
+                key.tier_unknown = tier_unknown;
+            }
             UsageDimension::Program => key.program = Some(value.map(str::to_owned)),
             UsageDimension::Org => key.org = Some(id.map(|id| self.node(id, NodeKind::Org))),
             UsageDimension::Project => {

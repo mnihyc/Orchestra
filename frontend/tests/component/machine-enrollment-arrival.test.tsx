@@ -30,6 +30,9 @@ vi.mock('@tanstack/react-router', () => ({
   useNavigate: () => live.navigate,
   Link: ({ children }: { children: ReactNode }) => <a href="#enrolled">{children}</a>,
 }));
+vi.mock('@/api/gateways', async (load) => ({ ...await load<typeof import('@/api/gateways')>(),
+  gatewayCatalogueQuery: { queryKey: ['enrollment-gateway-catalogue'], queryFn: () => Promise.resolve({ revision: 'fixture', gateways: [] }) },
+}));
 vi.mock('@/features/help/open', () => ({ useHelpOpener: () => vi.fn() }));
 vi.mock('@/features/help/Hint', () => ({ Hint: () => null }));
 vi.mock('@/features/resources/HomePicker', () => ({
@@ -104,7 +107,7 @@ async function issueCommand(command = 'INSTALL_CONNECTOR') {
   const button = screen.getByRole('button', { name: i18n.t('machineInstallation.showCommand') });
   await waitFor(() => expect(button).toBeEnabled());
   await userEvent.click(button);
-  await screen.findByText(command);
+  await screen.findByText(`${command} --gateway automatic`);
 }
 async function receive(update: () => void | Promise<void>) {
   await act(async () => {
@@ -193,7 +196,7 @@ it('ignores earlier arrivals and existing reconnections, including a row arrivin
     client.setQueryData(machinesQuery.queryKey, [{ ...existing, online: true }, duringRequest]);
     finish(token('INSTALL_CONNECTOR')); await pending;
   });
-  await screen.findByText('INSTALL_CONNECTOR');
+  await screen.findByText('INSTALL_CONNECTOR --gateway automatic');
   expect(screen.getByRole('dialog')).toBeVisible(); expect(closed).not.toHaveBeenCalled(); expect(live.navigate).not.toHaveBeenCalled();
   await receive(() => announceMachine(client, machine('unrelated-after-command', true), OTHER_RECEIPT));
   expect(screen.getByRole('dialog')).toBeVisible(); expect(live.navigate).not.toHaveBeenCalled();
@@ -211,7 +214,7 @@ it('does not open from a late command for changed consent or from a dialog the p
   await userEvent.selectOptions(screen.getByRole('combobox', { name: 'Home' }), 'org');
   await act(async () => { finish(token('OLD_COMMAND')); await pending; });
   await receive(() => announceMachine(client, machine('old-consent', true)));
-  expect(screen.queryByText('OLD_COMMAND')).not.toBeInTheDocument();
+  expect(screen.queryByText('OLD_COMMAND --gateway automatic')).not.toBeInTheDocument();
   expect(live.navigate).not.toHaveBeenCalled(); expect(toast).not.toHaveBeenCalled();
   vi.mocked(createMachineToken).mockResolvedValueOnce(token('INSTALL_CONNECTOR', OTHER_RECEIPT));
   await issueCommand();

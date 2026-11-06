@@ -244,7 +244,9 @@ async fn a_new_environment_and_its_thread_are_accepted_together_before_executor_
         })
         .send()
         .await
-        .ok();
+        .ok()
+        .into_full()
+        .unwrap();
     let workspace = made.environment.as_ref().unwrap();
     assert_eq!(made.binding.as_ref().unwrap().agent.id, binding.agent_id);
     assert_eq!(
@@ -266,6 +268,120 @@ async fn a_new_environment_and_its_thread_are_accepted_together_before_executor_
     assert!(
         jobs > 0,
         "the accepted workspace has its durable provisioning job"
+    );
+}
+
+#[tokio::test]
+async fn an_omitted_environment_creates_main_from_the_topics_permitted_defaults() {
+    use orch_api_contract::nodes::{CreateThread, ThreadCreate};
+    let world = World::new().await;
+    let t = team(&world).await;
+    let binding = start_binding(&world, &t).await;
+    let made = world
+        .app
+        .call(ThreadCreate, &[&t.topic])
+        .token(&t.c.admin.token)
+        .body(&CreateThread {
+            binding: Some(binding),
+            model: Some("atomic-1".into()),
+            ..Default::default()
+        })
+        .send()
+        .await
+        .ok()
+        .into_full()
+        .unwrap();
+    let workspace = made.environment.as_ref().unwrap();
+    assert_eq!(workspace.name, "Main");
+    assert_eq!(workspace.owner.id, t.c.admin.id());
+    assert_eq!(made.base.owner.id, t.c.admin.id());
+    let template: Id = sqlx::query_scalar("SELECT template_id FROM environments WHERE id=$1")
+        .bind(workspace.id)
+        .fetch_one(&world.db.pool)
+        .await
+        .unwrap();
+    assert_eq!(template, t.template);
+    let has_job: bool =
+        sqlx::query_scalar("SELECT EXISTS(SELECT 1 FROM jobs WHERE environment_id=$1)")
+            .bind(workspace.id)
+            .fetch_one(&world.db.pool)
+            .await
+            .unwrap();
+    assert!(
+        has_job,
+        "the accepted workspace has its durable provisioning job"
+    );
+}
+
+#[tokio::test]
+async fn no_join_or_creation_authority_refuses_a_thread_without_creating_anything() {
+    use orch_api_contract::nodes::{CreateThread, ThreadCreate};
+    use orch_api_contract::resources::{HostGet, TemplateGet};
+    let world = World::new().await;
+    let t = team(&world).await;
+    let binding = start_binding(&world, &t).await;
+    places::give_role(&world, t.topic, &t.c.viewer, "developer", &t.c.admin).await;
+    for (kind, id, permission) in [
+        ("agent", binding.agent_id, "agent.use"),
+        ("provider", binding.provider_id, "provider.use"),
+        ("host", t.host, "host.view"),
+        ("template", t.template, "template.view"),
+    ] {
+        resources::name_person(&world, kind, id, permission, t.c.viewer.id()).await;
+    }
+    let host = world
+        .app
+        .call(HostGet, &[&t.host])
+        .token(&t.c.viewer.token)
+        .send()
+        .await
+        .ok();
+    let template = world
+        .app
+        .call(TemplateGet, &[&t.template])
+        .token(&t.c.viewer.token)
+        .send()
+        .await
+        .ok();
+    assert!(!host.access.permissions.iter().any(|p| p == "host.use"));
+    assert!(
+        !template
+            .access
+            .permissions
+            .iter()
+            .any(|p| p == "template.use")
+    );
+    let places = world
+        .app
+        .call(TopicPlaceList, &[&t.topic])
+        .token(&t.c.viewer.token)
+        .query(&orch_api_contract::environment::PlaceListQuery {
+            template_id: Some(t.template),
+            config: None,
+        })
+        .send()
+        .await
+        .ok();
+    assert!(places.is_empty());
+    let before = creation_counts(&world).await;
+    assert_eq!(before.0, 0, "there is no existing environment to join");
+    let refused = world
+        .app
+        .call(ThreadCreate, &[&t.topic])
+        .token(&t.c.viewer.token)
+        .body(&CreateThread {
+            binding: Some(binding),
+            model: Some("atomic-1".into()),
+            ..Default::default()
+        })
+        .send()
+        .await
+        .problem();
+    assert_eq!(creation_counts(&world).await, before);
+    assert_eq!(
+        refused.code,
+        ErrorCode::EnvironmentNoneUsable,
+        "{refused:?}"
     );
 }
 
@@ -576,6 +692,7 @@ async fn an_explicit_empty_live_executor_report_overrules_the_templates_initial_
         .query(&NodeBindingOptionsGetQuery {
             environment_new: true,
             environment_id: Some(environment.base.id),
+            ..NodeBindingOptionsGetQuery::default()
         })
         .send()
         .await
@@ -1510,6 +1627,91 @@ async fn the_places_of_a_topic_are_the_hosts_the_caller_may_use_with_why_one_can
 }
 
 #[tokio::test]
+async fn program_consent_is_readable_in_a_config_preview_but_cannot_be_copied_into_a_new_environment()
+ {
+    use orch_api_contract::binding::EnvironmentChoice;
+    use orch_api_contract::nodes::{CreateThread, ThreadCreate};
+    let world = World::new().await;
+    let t = team(&world).await;
+    let binding = start_binding(&world, &t).await;
+    let config = json!({"exec.version_overrides":{"codex":{
+        "path":"/controlled/codex","version":"unknown","by":t.c.admin.id(),
+        "at":"2026-10-31T00:00:00.000Z"
+    }}});
+    let before = creation_counts(&world).await;
+    let audit_before: i64 = sqlx::query_scalar("SELECT count(*) FROM audit_log")
+        .fetch_one(&world.db.pool)
+        .await
+        .unwrap();
+    let preview = world
+        .app
+        .call(TopicPlaceList, &[&t.topic])
+        .token(&t.c.admin.token)
+        .query(&orch_api_contract::environment::PlaceListQuery {
+            template_id: Some(t.template),
+            config: Some(config.to_string()),
+        })
+        .send()
+        .await
+        .ok();
+    assert!(preview.iter().any(|place| matches!(place, Place::Host(_))));
+    let mut malformed = config.clone();
+    malformed["exec.version_overrides"]["codex"]
+        .as_object_mut()
+        .unwrap()
+        .remove("at");
+    let invalid = world
+        .app
+        .call(TopicPlaceList, &[&t.topic])
+        .token(&t.c.admin.token)
+        .query(&orch_api_contract::environment::PlaceListQuery {
+            template_id: Some(t.template),
+            config: Some(malformed.to_string()),
+        })
+        .send()
+        .await
+        .problem();
+    assert_eq!(invalid.code, ErrorCode::RequestInvalid);
+    let mut request = wanted(&t, "Cannot copy consent");
+    request.config = Some(config);
+    let refused = world
+        .app
+        .call(EnvironmentCreate, &[])
+        .token(&t.c.admin.token)
+        .body(&request)
+        .send()
+        .await
+        .problem();
+    assert_eq!(refused.code, ErrorCode::RequestInvalid);
+    assert_eq!(
+        refused.extra["errors"][0]["path"],
+        "config.exec.version_overrides"
+    );
+    let refused = world
+        .app
+        .call(ThreadCreate, &[&t.topic])
+        .token(&t.c.admin.token)
+        .body(&CreateThread {
+            binding: Some(binding),
+            model: Some("atomic-1".into()),
+            environment: Some(EnvironmentChoice::New(Box::new(request))),
+            ..Default::default()
+        })
+        .send()
+        .await
+        .problem();
+    assert_eq!(refused.code, ErrorCode::RequestInvalid);
+    assert_eq!(creation_counts(&world).await, before);
+    assert_eq!(
+        sqlx::query_scalar::<_, i64>("SELECT count(*) FROM audit_log")
+            .fetch_one(&world.db.pool)
+            .await
+            .unwrap(),
+        audit_before
+    );
+}
+
+#[tokio::test]
 async fn a_topic_names_the_environment_that_new_threads_join_and_lists_its_environments_with_that_one_first()
  {
     let world = World::new().await;
@@ -1849,4 +2051,82 @@ async fn a_hosts_manager_sees_everything_that_runs_on_it_and_takes_a_unit_away_a
     .await
     .unwrap();
     assert_eq!((state.as_str(), status.as_str()), ("retired", "stopped"));
+}
+
+#[tokio::test]
+async fn explicit_new_keeps_its_placement_refusal_while_implicit_creation_needs_template_use() {
+    use orch_api_contract::binding::EnvironmentChoice;
+    use orch_api_contract::nodes::{CreateThread, ThreadCreate};
+    use orch_api_contract::resources::{HostGet, TemplateGet};
+    let world = World::new().await;
+    let t = team(&world).await;
+    let binding = start_binding(&world, &t).await;
+    places::give_role(&world, t.topic, &t.c.viewer, "developer", &t.c.admin).await;
+    for (kind, id, permission) in [
+        ("agent", binding.agent_id, "agent.use"),
+        ("provider", binding.provider_id, "provider.use"),
+        ("host", t.host, "host.use"),
+        ("template", t.template, "template.view"),
+    ] {
+        resources::name_person(&world, kind, id, permission, t.c.viewer.id()).await;
+    }
+    let host = world
+        .app
+        .call(HostGet, &[&t.host])
+        .token(&t.c.viewer.token)
+        .send()
+        .await
+        .ok();
+    let template = world
+        .app
+        .call(TemplateGet, &[&t.template])
+        .token(&t.c.viewer.token)
+        .send()
+        .await
+        .ok();
+    assert!(host.access.permissions.iter().any(|p| p == "host.use"));
+    assert!(
+        !template
+            .access
+            .permissions
+            .iter()
+            .any(|p| p == "template.use")
+    );
+    let before = creation_counts(&world).await;
+    assert_eq!(before.0, 0);
+    let mut request = CreateThread {
+        binding: Some(binding),
+        model: Some("atomic-1".into()),
+        environment: Some(EnvironmentChoice::New(Box::new(wanted(
+            &t,
+            "Explicit workspace",
+        )))),
+        ..Default::default()
+    };
+    let explicit = world
+        .app
+        .call(ThreadCreate, &[&t.topic])
+        .token(&t.c.viewer.token)
+        .body(&request)
+        .send()
+        .await
+        .problem();
+    assert_eq!(explicit.code, ErrorCode::PlanBlocked, "{explicit:?}");
+    assert_eq!(explicit.extra["reason"], json!("no_host"));
+    assert_eq!(creation_counts(&world).await, before);
+    request.environment = None;
+    let implicit = world
+        .app
+        .call(ThreadCreate, &[&t.topic])
+        .token(&t.c.viewer.token)
+        .body(&request)
+        .send()
+        .await
+        .problem();
+    assert_eq!(creation_counts(&world).await, before);
+    assert_eq!(
+        implicit.code,
+        ErrorCode::EnvironmentNoneUsable,
+        "{implicit:?}"
+    );
 }

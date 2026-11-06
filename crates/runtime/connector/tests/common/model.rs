@@ -42,6 +42,16 @@ use serde_json::json;
 
 use super::{PATIENCE, Rig};
 
+/// Explicit synthetic provider authority for tests of ordinary and faster structured requests.
+pub fn enabled_parameters() -> orch_provider_contract::models::ModelParameters {
+    serde_json::from_value(
+        json!({"efforts":["low","medium","high"],"service_tiers":[{"id":"priority","label":"Fast"},
+        {"id":"fast","label":"Fast"},{"id":"ultrafast","label":"Ultrafast"}],
+        "access_programs":["daybreak_blue","daybreak_red"]}),
+    )
+    .unwrap()
+}
+
 /// The name of the Responses format.
 pub const RESPONSES: &str = "openai-responses";
 /// The name of the Chat Completions format.
@@ -579,6 +589,18 @@ impl ProviderRig {
             "lease_id": lease, "provider_id": self.rig.provider, "thread_id": thread,
             "mode": "forwarded", "allowed_models": models
         });
+        // The synthetic provider enables Fast for the accounting cases; offers alone never grant it.
+        body["model_parameters"] = Json::Object(
+            models
+                .iter()
+                .map(|model| {
+                    (
+                        (*model).to_owned(),
+                        json!({"service_tiers":[{"id":"priority","label":"Fast"}]}),
+                    )
+                })
+                .collect(),
+        );
         if let Some(protocol) = protocol {
             body["protocol"] = json!(protocol);
         }

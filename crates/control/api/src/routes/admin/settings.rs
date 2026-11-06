@@ -7,7 +7,6 @@
 
 use super::{admin_of, invalid};
 use crate::middleware::requests::{ApiError, ApiResult};
-use crate::middleware::transaction_guard;
 use crate::registry::{Ctx, Registry};
 use crate::routes::access::page::same;
 use crate::sign_in::origin;
@@ -128,7 +127,7 @@ async fn reach(
 async fn set(mut ctx: Ctx, (): (), body: AdminSettingSetBody) -> ApiResult<ResolvedSetting> {
     admin_of(&ctx)?;
     let key = ctx.param("key")?.to_owned();
-    let (mut tx, guard) = transaction_guard::begin(&ctx).await?;
+    let (mut tx, guard) = super::action(&ctx).await?;
     ctx.now = guard.now().get();
     let admin = guard.user().id();
     crate::routes::resources::validation::setting(&ctx.app.engine, &key, &body.value)?;
@@ -172,7 +171,7 @@ async fn delete(
 ) -> ApiResult<ResolvedSetting> {
     admin_of(&ctx)?;
     let key = ctx.param("key")?.to_owned();
-    let (mut tx, guard) = transaction_guard::begin(&ctx).await?;
+    let (mut tx, guard) = super::action(&ctx).await?;
     ctx.now = guard.now().get();
     let admin = guard.user().id();
     let cleared = clear(

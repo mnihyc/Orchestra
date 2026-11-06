@@ -9,6 +9,8 @@ mod desk;
 mod places;
 mod rig;
 mod support;
+use crate::support::FullPermissionPageReply;
+use support::FullRoleReply as _;
 
 use desk::Desk;
 use orch_api_contract::access::{
@@ -73,6 +75,7 @@ async fn private_with_reader(desk: &Desk, reader: &Who) {
         .raw_body(&json!({"whole":"private"}))
         .send()
         .await
+        .full_permission_page()
         .ok();
     desk.world
         .app
@@ -83,6 +86,7 @@ async fn private_with_reader(desk: &Desk, reader: &Who) {
         )
         .send()
         .await
+        .full_permission_page()
         .ok();
 }
 async fn durable_counts(desk: &Desk) -> (i64, i64, i64) {
@@ -128,6 +132,7 @@ async fn a_holder_can_preview_the_same_real_share_without_being_a_page_manager_o
         .raw_body(&applying)
         .send()
         .await
+        .full_permission_page()
         .ok();
     desk.world
         .app
@@ -261,6 +266,7 @@ async fn a_group_preview_names_real_people_once_and_a_role_preview_is_not_a_role
         .raw_body(&give)
         .send()
         .await
+        .full_role()
         .ok();
 }
 

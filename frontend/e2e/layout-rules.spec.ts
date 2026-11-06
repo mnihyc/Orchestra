@@ -1,13 +1,12 @@
 /** Layout and accessibility for every fake-world route, both languages/themes, on a desktop and a phone. */
-import { expect, test, type BrowserContext, type Page, type TestInfo } from '@playwright/test';
+import { expect, test, type Page, type TestInfo } from '@playwright/test';
 import { readFileSync, readdirSync } from 'node:fs';
 import { join } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { asAdmin } from '../tests/e2e/admin-mode-support.ts';
 import { replySent, scenario, signIn } from '../tests/e2e/support.ts';
-import { resourceFixtures } from './layout-fixtures.ts';
-import { documentTreeFixture } from '../tests/e2e/document-tree-support.ts';
-import { SIGNED_IN_ROUTES, SIGNED_OUT_ROUTES, type LayoutRoute } from './layout-routes.ts';
+import { openLayoutRoute, prepareLayoutRoute, resourceFixtures } from './layout-fixtures.ts';
+import { layoutRouteName, SIGNED_IN_ROUTES, SIGNED_OUT_ROUTES, type LayoutRoute } from './layout-routes.ts';
 import { auditHighlightedOptions, auditHoverIcons, auditOpenMenus, auditPage, DUPLICATE_ALLOW_LIST, FULL_VALUE_DISCLOSURE, screenReady } from './layout-rules-helpers.ts';
 import { caption } from './capture/open.ts';
 
@@ -57,14 +56,17 @@ test('the layout manifest covers every route and every parameterized section wit
 
 async function inspect(page: Page, row: LayoutRoute, locale: string, theme: string, info: TestInfo) {
   try {
-  await page.goto(row.url);
-  await screenReady(page, locale, theme);
-  const result = await auditPage(page);
-  result.faults.push(...await auditHoverIcons(page, result.icons));
+  await test.step('Open the settled screen', async () => {
+    await page.goto(row.url);
+    await screenReady(page, locale, theme);
+    await openLayoutRoute(page, row);
+  });
+  const result = await test.step('Measure the page and reveal every cut value', () => auditPage(page));
+  result.faults.push(...await test.step('Hover every icon', () => auditHoverIcons(page, result.icons)));
   // Read-only pickers expose descriptions, labels and boundaries that are absent while closed.
-  result.faults.push(...await auditOpenMenus(page, result.menus));
+  result.faults.push(...await test.step('Open every menu and check every option', () => auditOpenMenus(page, result.menus)));
   const faults = [...new Map(result.faults.map((fault) => [JSON.stringify(fault), fault])).values()];
-  await info.attach('layout-rules', { body: JSON.stringify({ route: row.pattern, url: row.url, note: row.note, locale, theme,
+  await info.attach('layout-rules', { body: JSON.stringify({ route: row.pattern, url: row.url, actualUrl: page.url(), note: row.note, locale, theme,
     viewport: page.viewportSize(), faults, cutValues: result.cuts, duplicateAllowList: DUPLICATE_ALLOW_LIST, fullValueDisclosure: FULL_VALUE_DISCLOSURE, appliedAllowances: result.allowances }, null, 2), contentType: 'application/json' });
   expect(faults, `${row.url} ${locale} ${theme} ${page.viewportSize()?.width ?? 0}px`).toEqual([]);
   } finally {
@@ -76,14 +78,10 @@ async function inspect(page: Page, row: LayoutRoute, locale: string, theme: stri
 test.describe.configure({ retries: 0 });
 for (const width of [1440, 400]) for (const theme of ['light', 'dark'] as const) for (const locale of ['en', 'zh-CN'] as const) {
   test.describe(`layout rules ${width}px ${theme} ${locale}`, () => {
-    // One browser and one fake world per matrix entry; routes remain separate bounded tests with separate evidence.
-    let context: BrowserContext | undefined;
-    let page: Page;
-    test.beforeAll(async ({ browser }, info) => {
+    // Each bounded route owns a fresh fixture context; product tab persistence is exercised by its functional suites.
+    test.use({ viewport: { width, height: 900 }, colorScheme: theme, reducedMotion: 'reduce', locale: 'en-US', timezoneId: 'UTC' });
+    test.beforeEach(async ({ page }) => {
       await scenario();
-      context = await browser.newContext({ baseURL: info.project.use.baseURL, viewport: { width, height: 900 }, colorScheme: theme,
-        reducedMotion: 'reduce', locale: 'en-US', timezoneId: 'UTC' });
-      page = await context.newPage();
       await resourceFixtures(page);
       const loggedIn = page.waitForResponse((response) => response.request().method() === 'POST' && new URL(response.url()).pathname.endsWith('/auth/login')).then(replySent);
       await signIn(page);
@@ -96,19 +94,14 @@ for (const width of [1440, 400]) for (const theme of ['light', 'dark'] as const)
       await page.reload();
       await screenReady(page, locale, theme);
     });
-    test.afterAll(async () => { if (context !== undefined) await context.close(); });
     for (const row of SIGNED_IN_ROUTES) {
-      test(row.url, async ({ browserName }, info) => {
+      test(layoutRouteName(row), async ({ page, browserName }, info) => {
         expect(browserName, 'Computed-name evidence uses Chromium accessibility nodes.').toBe('chromium');
-        if (row.fixture === 'document-tree') {
-          // Folder projections are typed fixtures; keep their routes away from the shared page's later walks.
-          const folder = await context!.newPage();
-          try { await resourceFixtures(folder); await documentTreeFixture(folder); await inspect(folder, row, locale, theme, info); }
-          finally { await folder.close(); }
-        } else await inspect(page, row, locale, theme, info);
+        await prepareLayoutRoute(page, row);
+        await inspect(page, row, locale, theme, info);
       });
     }
-    test('the native command palette keeps every keyboard and pointer highlight readable', async ({ browserName }, info) => {
+    test('the native command palette keeps every keyboard and pointer highlight readable', async ({ page, browserName }, info) => {
       expect(browserName).toBe('chromium');
       await page.goto('/org/acme'); await screenReady(page, locale, theme);
       await page.keyboard.press('Control+k');
@@ -125,7 +118,7 @@ for (const width of [1440, 400]) for (const theme of ['light', 'dark'] as const)
       for (let attempt = 0; attempt < 2 && await finder.evaluateAll((elements) => elements.some((element) => element.getAttribute('data-state') === 'open')); attempt += 1) await page.keyboard.press('Escape');
       await expect(finder).toHaveCount(0);
     });
-    test('a late ellipsis and a line clamp reveal their full value by pointer and keyboard', async () => {
+    test('a late ellipsis and a line clamp reveal their full value by pointer and keyboard', async ({ page }) => {
       await page.goto('/org/acme'); await screenReady(page, locale, theme);
       const full = locale === 'en' ? 'The entire long value, including its final words. '.repeat(8) : '完整的长文本，包括末尾的文字。'.repeat(8);
       await page.evaluate((full) => {

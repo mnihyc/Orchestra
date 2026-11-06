@@ -20,13 +20,14 @@ use crate::registry::{Ctx, Registry};
 use crate::sign_in::{origin, system_policy};
 use orch_access_contract::audit::AuditAction;
 use orch_access_contract::pages::{PageChange, StoredKind, Whole};
+use orch_access_contract::permissions::ObjectKind;
 use orch_access_contract::roles::PlaceRef;
 use orch_api_contract::auth::OrgCreation;
 use orch_api_contract::common::{ErrorCode, FieldFault};
 use orch_api_contract::nodes::{
     NewNodeAccess, Node, NodeKind, Org, OrgChildCreate, OrgChildCreateBody, OrgCreate,
-    OrgCreateBody, Project, ProjectChildCreate, ProjectCreate, ProjectCreateBody, TopicCreate,
-    TopicCreateBody, TopicCreateReply, TopicWithThread,
+    OrgCreateBody, ProjectChildCreate, ProjectCreate, ProjectCreateBody, ProjectCreateResponse,
+    TopicCreate, TopicCreateBody, TopicCreateReply, TopicWithThread,
 };
 use orch_authz::pages::{self, Target};
 use orch_authz::{Policy, Principal, epoch, orgs};
@@ -48,9 +49,17 @@ pub fn mount(registry: &mut Registry) {
     registry
         .on(OrgCreate, org_create)
         .on(OrgChildCreate, org_child_create)
-        .on(ProjectCreate, project_create)
-        .on(ProjectChildCreate, project_child_create)
-        .on(TopicCreate, topic_create);
+        .on_with_operation(
+            ProjectCreate,
+            super::creation_operation::project,
+            project_create,
+        )
+        .on_with_operation(
+            ProjectChildCreate,
+            super::creation_operation::project_child,
+            project_child_create,
+        )
+        .on_with_optional_operation(TopicCreate, super::creation_operation::topic, topic_create);
 }
 
 /// The most numbered short names tried when one is offered in place of a taken one ("dep2-2" to "dep2-99"):
@@ -449,13 +458,21 @@ async fn org_create(ctx: Ctx, (): (), body: OrgCreateBody) -> ApiResult<Org> {
 }
 
 /// Makes a project in an org, at whatever level it lies.
-async fn project_create(ctx: Ctx, (): (), body: ProjectCreateBody) -> ApiResult<Project> {
+async fn project_create(
+    ctx: Ctx,
+    (): (),
+    body: ProjectCreateBody,
+) -> ApiResult<ProjectCreateResponse> {
     make_project(&ctx, NodeKind::Org, &body).await
 }
 
 /// Makes a project inside a project, beside its topics: what the screens call a folder, and a project
 /// like any other, made in the same form by whoever opens topics there.
-async fn project_child_create(ctx: Ctx, (): (), body: ProjectCreateBody) -> ApiResult<Project> {
+async fn project_child_create(
+    ctx: Ctx,
+    (): (),
+    body: ProjectCreateBody,
+) -> ApiResult<ProjectCreateResponse> {
     make_project(&ctx, NodeKind::Project, &body).await
 }
 
@@ -466,7 +483,7 @@ async fn make_project(
     ctx: &Ctx,
     parent_kind: NodeKind,
     body: &ProjectCreateBody,
-) -> ApiResult<Project> {
+) -> ApiResult<ProjectCreateResponse> {
     let parent = ctx.id("id")?;
     let name = clean_name("name", &body.name)?;
     let description = clean_description("description", body.description.as_deref().unwrap_or(""))?;
@@ -503,16 +520,43 @@ async fn make_project(
         },
     )
     .await?;
-    let node = shown(ctx, &mut tx, &principal, made.id).await?;
+    let node = super::creation_operation::read(
+        ctx,
+        &mut tx,
+        &principal,
+        made.id,
+        if parent_kind == NodeKind::Org {
+            ObjectKind::Org
+        } else {
+            ObjectKind::Project
+        },
+        ObjectKind::Project,
+        ctx.route.name,
+    )
+    .await?;
     tx.commit().await.map_err(DbError::from)?;
+    if ctx.key_receipt_required() {
+        return Ok(ProjectCreateResponse::Receipt(
+            super::creation_operation::receipt(made.id, NodeKind::Project),
+        ));
+    }
     match node {
-        Node::Project(project) => Ok(project),
+        Some(Node::Project(project)) => Ok(ProjectCreateResponse::full(project)),
+        None => Ok(ProjectCreateResponse::Receipt(
+            super::creation_operation::receipt(made.id, NodeKind::Project),
+        )),
         _ => Err(ApiError::internal("a project was made and is not one")),
     }
 }
 
-/// Makes a topic in a project. A thread made with it is the threads routes'.
-async fn topic_create(ctx: Ctx, (): (), body: TopicCreateBody) -> ApiResult<TopicCreateReply> {
+/// The rollbackable Topic-only prefix, shared by ordinary creation and the closed
+/// Topic-with-thread stage. It performs no environment, thread, job or input work.
+pub(crate) async fn topic_prefix(
+    ctx: &Ctx,
+    conn: &mut Conn,
+    principal: &Principal,
+    body: &TopicCreateBody,
+) -> ApiResult<Placed> {
     let parent = ctx.id("id")?;
     let name = body
         .name
@@ -520,15 +564,14 @@ async fn topic_create(ctx: Ctx, (): (), body: TopicCreateBody) -> ApiResult<Topi
         .map(|name| clean_name("name", name))
         .transpose()?;
     let description = clean_description("description", body.description.as_deref().unwrap_or(""))?;
-    let (ctx, mut tx, principal) = super::action(&ctx).await?;
-    let (_, kind) = super::placed(&mut tx, parent).await?;
+    let (_, kind) = super::placed(conn, parent).await?;
     if kind != NodeKind::Project {
         return Err(ApiError::not_found());
     }
-    let made = make(
-        &ctx,
-        &mut tx,
-        &principal,
+    make(
+        ctx,
+        conn,
+        principal,
         &New {
             kind: "topic",
             parent: Some(parent),
@@ -536,11 +579,20 @@ async fn topic_create(ctx: Ctx, (): (), body: TopicCreateBody) -> ApiResult<Topi
             name_by_person: name.is_some(),
             description: &description,
             org: None,
-            access: body.access,
+            access: body.access.clone(),
             invitation: None,
         },
     )
-    .await?;
+    .await
+}
+
+/// Makes a topic in a project. A thread made with it is the threads routes'.
+async fn topic_create(ctx: Ctx, (): (), body: TopicCreateBody) -> ApiResult<TopicCreateReply> {
+    if ctx.topic_creation_prefix().is_some() {
+        return topic_with_thread_scoped(ctx, body).await;
+    }
+    let (ctx, mut tx, principal) = super::action(&ctx).await?;
+    let made = topic_prefix(&ctx, &mut tx, &principal, &body).await?;
     let thread = match body.first_thread.as_ref() {
         Some(first) => Some(
             crate::routes::threads::make::create_in(&ctx, &mut tx, &principal, made.id, first)
@@ -548,19 +600,39 @@ async fn topic_create(ctx: Ctx, (): (), body: TopicCreateBody) -> ApiResult<Topi
         ),
         None => None,
     };
-    let node = shown(&ctx, &mut tx, &principal, made.id).await?;
+    let node = if body.first_thread.is_some() {
+        Some(shown(&ctx, &mut tx, &principal, made.id).await?)
+    } else {
+        super::creation_operation::read(
+            &ctx,
+            &mut tx,
+            &principal,
+            made.id,
+            ObjectKind::Project,
+            ObjectKind::Topic,
+            "TopicCreate.create",
+        )
+        .await?
+    };
     tx.commit().await.map_err(DbError::from)?;
+    if let Some(thread) = &thread {
+        if body
+            .first_thread
+            .as_ref()
+            .is_some_and(|first| first.first_input.is_some())
+        {
+            ctx.app.engine.wake(thread.base.id);
+        }
+        ctx.app.engine.kick();
+    }
+    if ctx.key_receipt_required() {
+        return Ok(TopicCreateReply::Receipt(
+            super::creation_operation::receipt(made.id, NodeKind::Topic),
+        ));
+    }
     match node {
-        Node::Topic(topic) => {
+        Some(Node::Topic(topic)) => {
             if let Some(thread) = thread {
-                if body
-                    .first_thread
-                    .as_ref()
-                    .is_some_and(|first| first.first_input.is_some())
-                {
-                    ctx.app.engine.wake(thread.base.id);
-                }
-                ctx.app.engine.kick();
                 Ok(TopicCreateReply::WithThread(TopicWithThread {
                     topic,
                     thread,
@@ -569,6 +641,70 @@ async fn topic_create(ctx: Ctx, (): (), body: TopicCreateBody) -> ApiResult<Topi
                 Ok(TopicCreateReply::Topic(topic))
             }
         }
+        None => Ok(TopicCreateReply::Receipt(
+            super::creation_operation::receipt(made.id, NodeKind::Topic),
+        )),
         _ => Err(ApiError::internal("a topic was made and is not one")),
     }
+}
+
+async fn topic_with_thread_scoped(ctx: Ctx, body: TopicCreateBody) -> ApiResult<TopicCreateReply> {
+    let (ctx, mut tx, guard, topic) =
+        crate::key_operations::creation_stage::begin(&ctx, &body).await?;
+    let creation =
+        guard.operation_data::<crate::routes::threads::creation_operation::Creation>()?;
+    let principal = guard.into_principal();
+    let created = if let Some(created) = &creation.created {
+        created.clone()
+    } else {
+        let created = ctx
+            .app
+            .engine
+            .create_thread_in_transaction(
+                &mut tx,
+                principal.caller(),
+                &creation.new,
+                &creation.birth,
+                new_id(),
+                principal.now().get(),
+            )
+            .await;
+        let created = match created {
+            Ok(created) => created,
+            Err(error) => return Err(crate::routes::threads::create_failed(&mut tx, error).await),
+        };
+        created
+    };
+    let first = body
+        .first_thread
+        .as_ref()
+        .and_then(|first| first.first_input.as_ref());
+    let receipt = crate::routes::threads::creation_operation::receipt(
+        &mut tx,
+        principal.user(),
+        created.thread,
+        topic,
+        first,
+    )
+    .await?;
+    let shown = crate::routes::threads::creation_operation::read(
+        &ctx,
+        &mut tx,
+        &principal,
+        &creation,
+        created.thread,
+        true,
+    )
+    .await?;
+    tx.commit().await.map_err(DbError::from)?;
+    if first.is_some() {
+        ctx.app.engine.wake(created.thread);
+    }
+    ctx.app.engine.kick();
+    Ok(match shown {
+        Some((thread, Some(topic))) if !ctx.key_receipt_required() => {
+            TopicCreateReply::WithThread(TopicWithThread { topic, thread })
+        }
+        _ => TopicCreateReply::ThreadReceipt(receipt),
+    })
 }

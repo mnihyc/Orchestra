@@ -38,6 +38,8 @@ async fn a_minimum_version_node_gets_one_audited_idle_grant_until_it_reconnects_
         .unwrap();
     drop(conn);
     let mut query = AuthQuery {
+        purpose: Default::default(),
+        capabilities: Vec::new(),
         endpoints: None,
         hosted_endpoints: None,
         n: 1,

@@ -9,6 +9,7 @@ mod desk;
 mod places;
 mod support;
 
+use crate::support::FullPermissionPageReply;
 use desk::Desk;
 use orch_api_contract::access::{
     AccessChoice, HolderInput, PageChange, PageChangeName, PermissionPageUpdate,
@@ -150,6 +151,7 @@ async fn a_private_source_is_refused_until_view_is_held_then_copy_has_fresh_owne
         })
         .send()
         .await
+        .full_permission_page()
         .ok();
     let made = desk
         .world

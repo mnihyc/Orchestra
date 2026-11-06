@@ -19,11 +19,14 @@
 pub mod channels;
 mod chat_grants;
 pub mod destinations;
+mod document_jobs;
+mod exception_read;
 pub mod exceptions;
 pub mod grouping;
 pub mod inbox;
 pub(crate) mod person;
 pub mod routing;
+mod subjects;
 pub mod views;
 
 use crate::middleware::requests::ApiResult;
@@ -114,8 +117,9 @@ pub fn mount(registry: &mut Registry) {
         .on(NotificationRead, inbox::read)
         .on(MeNotificationPrefsGet, inbox::prefs_get)
         .on(MeNotificationPrefsSet, inbox::prefs_set)
-        .on(
+        .on_snapshot_read_with_optional_operation(
             orch_api_contract::notifications::MeNotificationExceptionList,
+            crate::key_operations::native::selected::<exception_read::Exceptions>,
             exceptions::list,
         )
         .on(
@@ -141,7 +145,19 @@ pub fn mount(registry: &mut Registry) {
         .on(MeNotificationRouteDelete, routing::delete)
         .on(NodeDestinationList, destinations::list)
         .on(NodeDestinationCreate, destinations::create)
-        .on(DestinationUpdate, destinations::update)
-        .on(DestinationDelete, destinations::delete)
-        .on(DestinationTest, destinations::test);
+        .on_with_operation(
+            DestinationUpdate,
+            destinations::operation::prepare,
+            destinations::update,
+        )
+        .on_with_operation(
+            DestinationDelete,
+            destinations::operation::prepare,
+            destinations::delete,
+        )
+        .on_with_operation(
+            DestinationTest,
+            destinations::operation::prepare,
+            destinations::test,
+        );
 }

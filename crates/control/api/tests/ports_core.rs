@@ -5,9 +5,15 @@
     reason = "a test fails by panicking"
 )]
 
+#[path = "ports_core/opening_operation_scopes.rs"]
+mod opening_operation_scopes;
 mod places;
 mod resources;
 mod support;
+use support::FullApprovalReply;
+
+#[path = "ports_core/approval_operation_scopes.rs"]
+mod approval_operation_scopes;
 
 use orch_api_contract::common::ErrorCode;
 use orch_api_contract::environment::{
@@ -535,7 +541,9 @@ async fn rule_6_stop_generation_change_and_an_owned_restart_preserve_admission_b
         })
         .send()
         .await
-        .ok();
+        .ok()
+        .into_full()
+        .unwrap();
     assert_eq!(closed.state, PortOpeningState::Closed);
     let twice = world
         .app
@@ -546,7 +554,9 @@ async fn rule_6_stop_generation_change_and_an_owned_restart_preserve_admission_b
         })
         .send()
         .await
-        .ok();
+        .ok()
+        .into_full()
+        .unwrap();
     assert_eq!(twice.revision, closed.revision);
     assert!(reconcile(&world, env).await.is_empty());
     let env_view = world
@@ -797,7 +807,9 @@ async fn rule_6_an_administrator_lists_stopped_outside_admission_and_closes_it_o
         })
         .send()
         .await
-        .ok();
+        .ok()
+        .into_full()
+        .unwrap();
     assert_eq!(closed.state, PortOpeningState::Closed);
     let used_override: i64 = sqlx::query_scalar(
         "SELECT count(*) FROM audit_log WHERE action='permission.added' AND override",
@@ -1079,6 +1091,7 @@ async fn b3_a_threads_link_card_kept_by_its_decider_gives_the_link_in_the_decisi
         ))
         .send()
         .await
+        .full_approval()
         .ok();
     assert_eq!(decided.state, ApprovalState::Approved);
     let result = decided
@@ -1120,6 +1133,7 @@ async fn b3_a_threads_link_card_kept_by_its_decider_gives_the_link_in_the_decisi
         ))
         .send()
         .await
+        .full_approval()
         .problem();
     assert_eq!(twice.code, ErrorCode::ApprovalAlreadyDecided);
 }
@@ -1150,6 +1164,7 @@ async fn b3_a_refused_card_ends_its_opening_and_the_same_request_is_refused_agai
         ))
         .send()
         .await
+        .full_approval()
         .ok();
     assert_eq!(denied.state, ApprovalState::Denied);
     let result = denied.opening_result.clone().expect("the refused opening");
@@ -1228,6 +1243,7 @@ async fn b3_the_agent_learns_an_unstarted_ports_address_and_a_persons_no_is_a_st
         .body(&port_decision(PortDecisionChoice::Deny, None, card.1))
         .send()
         .await
+        .full_approval()
         .ok();
     assert_eq!(
         decided.opening_result.as_ref().unwrap().opening.state,
@@ -1389,6 +1405,7 @@ async fn b3_a_late_decision_is_told_once_to_an_idle_thread_without_starting_a_tu
         ))
         .send()
         .await
+        .full_approval()
         .ok();
     orch_api_core::port_tools::tell_late(&world.app.app)
         .await
@@ -1626,6 +1643,7 @@ async fn d360_a_link_under_ask_makes_a_card_whose_grant_lets_the_next_link_open_
         ))
         .send()
         .await
+        .full_approval()
         .ok();
     assert_eq!(decided.state, ApprovalState::Approved);
     let result = decided.opening_result.clone().unwrap();

@@ -191,6 +191,10 @@ impl Adapter {
         descriptor.facts = Some(SourceDescriptorFacts {
             spends_resets: reports.contains(&FactMember::AvailableResets),
             reports,
+            field_reports: native
+                .as_ref()
+                .map(|native| native.capabilities.provider_fact_fields.clone())
+                .unwrap_or_default(),
             plans: native
                 .as_ref()
                 .and_then(|native| native.native_provider.as_ref())

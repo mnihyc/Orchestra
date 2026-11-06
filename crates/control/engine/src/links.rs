@@ -348,6 +348,8 @@ impl RelatedPosition {
 /// A page of related items, with where the next goes on.
 #[derive(Debug, Clone)]
 pub struct RelatedPage {
+    /// Actual selected native sources, before their reply and context are hydrated.
+    pub sources: Vec<related_rows::Item>,
     /// The page, as the plain related list answers it.
     pub answer: orch_api_contract::search::RelatedItems,
     /// The position after the last item delivered, when more readable items follow.
@@ -367,13 +369,35 @@ impl Engine {
         after: Option<RelatedPosition>,
         limit: Option<usize>,
     ) -> Result<Option<RelatedPage>, EngineError> {
+        self.related_page_for_access(conn, principal, document, after, limit, &Person(principal))
+            .await
+    }
+
+    /// The same native ranked window, using the existing source-access hook before its cursor and limit.
+    pub async fn related_page_for_access(
+        &self,
+        conn: &mut Conn,
+        principal: &Principal,
+        document: Id,
+        after: Option<RelatedPosition>,
+        limit: Option<usize>,
+        access: &impl SourceAccess,
+    ) -> Result<Option<RelatedPage>, EngineError> {
         let Some(source) = related_source(conn, principal, document).await? else {
             return Ok(None);
         };
         let ranked = self
             .related_candidates(conn, &source.item, &source.scopes)
             .await?;
-        let readable = readable_related(conn, principal, &ranked).await?;
+        let live: Vec<_> = ranked
+            .items
+            .iter()
+            .map(|item| rows::LiveSource {
+                kind: item.item.kind.clone(),
+                source_id: item.item.source_id,
+            })
+            .collect();
+        let readable = access.readable(conn, &live).await?;
         let mut digest = Hash::hasher();
         digest.update(document.as_bytes());
         digest.update(principal.user().as_bytes());
@@ -401,6 +425,7 @@ impl Engine {
         let page = limit.unwrap_or(ranked.count);
         let mut delivered: Vec<(RelatedPosition, orch_api_contract::search::RelatedItem)> =
             Vec::new();
+        let mut sources = Vec::new();
         let mut more = false;
         for item in ranked.items {
             if !readable.contains(&item.item.source_id) {
@@ -416,6 +441,7 @@ impl Engine {
                 more = true;
                 break;
             }
+            sources.push(item.item.clone());
             delivered.push((
                 RelatedPosition {
                     score: item.score,
@@ -431,6 +457,7 @@ impl Engine {
             None
         };
         Ok(Some(RelatedPage {
+            sources,
             answer: orch_api_contract::search::RelatedItems {
                 seq: source.item.marker,
                 items: delivered.into_iter().map(|(_, item)| item).collect(),
@@ -499,9 +526,7 @@ async fn related_source(
     {
         return Ok(None);
     }
-    let projection =
-        orch_authz::everything::project_search(conn, principal, None, &[document], &[], &[])
-            .await?;
+    let projection = orch_authz::everything::project_related(conn, principal, document).await?;
     Ok(Some(RelatedSource {
         item,
         scopes: projection.search_candidates(principal),

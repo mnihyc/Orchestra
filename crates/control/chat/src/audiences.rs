@@ -334,7 +334,7 @@ pub async fn list(
     let ids: Vec<Id> = groups.iter().map(|group| group.id).collect();
     // This deliberate act resolves the whole audience, independently of roster pagination.
     let mut members: HashMap<Id, Vec<Id>> = HashMap::new();
-    for (group, user) in access::group_people(conn, &ids, i64::MAX, act.now).await? {
+    for (group, user) in holders::group_people(conn, &ids, Time::new(act.now)).await? {
         if reader_set.contains(&user) {
             members.entry(group).or_default().push(user);
         }
