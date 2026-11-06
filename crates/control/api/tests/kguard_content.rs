@@ -1041,7 +1041,9 @@ async fn creating_updating_and_removing_a_cap_checks_the_authority_of_its_curren
                             .raw_body(&body)
                             .send()
                             .await
-                            .ok(),
+                            .ok()
+                            .into_full()
+                            .unwrap(),
                     )
                 };
                 let call = match (method, cap) {

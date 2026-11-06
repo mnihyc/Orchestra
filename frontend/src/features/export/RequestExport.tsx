@@ -64,7 +64,7 @@ export function RequestExport({ target, open, onClose }: { target: ExportTarget;
     >
       {send.isSuccess ? (
         <><InlineAlert tone="success">{asking === undefined ? t('export.request.sentNoOwner') : t('export.request.sent', { name: asking })}</InlineAlert>
-          {send.data.approvals[0]?.kind === 'access' && <RequestedEnd at={send.data.approvals[0].request.expires_at} />}</>
+          {'approvals' in send.data && send.data.approvals[0]?.kind === 'access' && <RequestedEnd at={send.data.approvals[0].request.expires_at} />}</>
       ) : (
         <form
           className="flex flex-col gap-3"

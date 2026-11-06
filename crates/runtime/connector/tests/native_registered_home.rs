@@ -21,8 +21,10 @@ use orch_agent_contract::login::LoginRequest;
 use orch_agent_contract::session::{SessionOpened, SessionSpec, ThreadId, TurnStart};
 use orch_connector_core::harnesses::{AdapterRegistry, HomeRule};
 use orch_link_contract::commands::{
-    AgentStart, ProviderDiscoverModels, ProviderRefresh, SerialKey,
+    AgentStart, ProviderDiscoverModels, ProviderLoginStart, ProviderLogout, ProviderRefresh,
+    SerialKey,
 };
+use orch_link_contract::policy::PolicyKey;
 use orch_types::{Clock, new_id};
 use serde_json::json;
 use std::path::PathBuf;
@@ -81,6 +83,12 @@ impl AgentAdapter for NativeHomeFake {
     }
     async fn probe(&mut self) -> Result<AgentDescriptor, AdapterError> {
         self.inner.probe().await
+    }
+    async fn login(&mut self, request: LoginRequest) -> Result<(), AdapterError> {
+        self.inner.login(request).await
+    }
+    async fn logout(&mut self) -> Result<(), AdapterError> {
+        self.inner.logout().await
     }
     async fn provider_facts(&mut self) -> Result<ProviderFacts, AdapterError> {
         let mut facts = self.inner.provider_facts().await?;
@@ -250,4 +258,115 @@ async fn an_api_providers_native_capable_consumer_never_replaces_its_key_keeper_
         assert_eq!(read["facts"]["credential"]["yields"], "key");
     }
     p.rig.kill().await;
+}
+
+#[tokio::test]
+async fn a_native_default_home_rechecks_sign_in_revocation_without_hiding_read_only_facts() {
+    // A unit's protected mapping must not select an actual user profile in this fixture.
+    assert!(std::env::var_os("ORCH_HARNESS_HOME").is_none());
+    assert!(std::env::var_os("ORCH_HARNESS_HOME_SOURCE").is_none());
+    let mut rig = Rig::new();
+    rig.config.provider.signin = true;
+    let home = tempfile::tempdir().unwrap();
+    std::fs::write(home.path().join("personal-file"), "keep").unwrap();
+    let starts: Arc<Mutex<Vec<Option<String>>>> = Arc::default();
+    let recorded = Arc::clone(&starts);
+    let user_home = home.path().to_owned();
+    let mut registration = common::fake_registration();
+    registration.home_rule = HomeRule::Harness;
+    registration.factory = Arc::new(move |clock| {
+        Box::new(NativeHomeFake {
+            inner: FakeAdapter::new(Arc::clone(&clock)),
+            clock,
+            user_home: user_home.clone(),
+            starts: Arc::clone(&recorded),
+        })
+    });
+    rig.adapters = AdapterRegistry::new();
+    rig.adapters.register(registration).unwrap();
+    rig.start().await;
+    let start: AgentStart = serde_json::from_value(json!({
+        "provider_id":rig.provider,
+        "agent_id":rig.agent,
+        "harness_kind":"fake",
+        "profile":{"config":{},"env":{}}
+    }))
+    .unwrap();
+    assert!(start.home.is_none());
+    assert!(start.runtime.is_none());
+    assert!(start.profile.attach.is_none());
+    rig.succeed(&rig.harness_key(), &start).await;
+    assert_eq!(*starts.lock().unwrap(), vec![None]);
+    let hosting = rig.connector.as_ref().unwrap().hosting().unwrap();
+    assert!(
+        !hosting
+            .process(rig.provider, rig.agent)
+            .unwrap()
+            .home_owned()
+    );
+    assert!(
+        rig.connector
+            .as_ref()
+            .unwrap()
+            .facts()
+            .adapters
+            .iter()
+            .any(|adapter| adapter.kind == "fake" && !adapter.default_home_owned)
+    );
+    let login: ProviderLoginStart = serde_json::from_value(json!({
+        "provider_id":rig.provider,
+        "agent_id":rig.agent,
+        "method":"fake_import",
+        "values":{"credential_text":"only-the-scripted-login"},
+        "config":{}
+    }))
+    .unwrap();
+    rig.succeed(&rig.harness_key(), &login).await;
+    hosting
+        .services()
+        .policy
+        .set_here(PolicyKey::ProviderSignIn, &json!(false))
+        .unwrap();
+    assert_eq!(
+        rig.fail(
+            &rig.harness_key(),
+            &ProviderLogout {
+                provider_id: rig.provider,
+                agent_id: rig.agent,
+            },
+        )
+        .await,
+        "policy.signin_not_allowed"
+    );
+    let refresh = ProviderRefresh {
+        provider_id: rig.provider,
+        retry: None,
+        renew: None,
+        facts: None,
+    };
+    assert_eq!(
+        rig.succeed(&rig.harness_key(), &refresh).await["status"],
+        "ready"
+    );
+    let renewed = rig
+        .succeed(
+            &rig.harness_key(),
+            &ProviderRefresh {
+                renew: Some(true),
+                ..refresh
+            },
+        )
+        .await;
+    assert_eq!(renewed["status"], "not_told");
+    assert!(
+        renewed["source"]["error"]["message"]
+            .as_str()
+            .unwrap()
+            .contains("provider.signin")
+    );
+    rig.kill().await;
+    assert_eq!(
+        std::fs::read_to_string(home.path().join("personal-file")).unwrap(),
+        "keep"
+    );
 }

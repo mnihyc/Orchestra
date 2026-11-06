@@ -2,10 +2,10 @@
 //!
 //! The model and the reasoning effort are not parameters of the adapter: the engine states both with every
 //! session and turn, and this adapter passes both to the harness every time, in the harness's terms. What
-//! the adapter does publish are five parameters of its own ([`definitions`]), and the rule by which the
+//! the adapter does publish are parameters of its own ([`definitions`]), and the rule by which the
 //! models of the harness's helper steps are kept on the thread's model ([`model_environment`]).
 //!
-//! Two of the five read the model's entry at its provider: the **service tier**, which for this harness is its
+//! Several parameters read the model's entry at its provider: the **service tier**, which for this harness is its
 //! fast mode on the models that have one, and the **context**. The harness is told the context and nothing
 //! else: it keeps room for the answer by a margin of its own, so there is no point for the adapter to work out
 //! ([`ONE_MILLION_ABOVE`], [`auto_compact_window`], [`model_argument`]).
@@ -241,7 +241,7 @@ pub fn definitions() -> Vec<ParameterDef> {
         ParameterDef {
             key: WEBFETCH_PREFLIGHT.to_owned(),
             title: "Check pages with the vendor".to_owned(),
-            description: "Before it loads a page, the harness tells the vendor's API the page's host to check it against a blocklist. Automatic keeps that for the vendor's own upstream and turns it off for any other, where it would tell a third party which hosts are fetched. It applies where the harness has its own tools.".to_owned(),
+            description: "Before it loads a page, the harness tells the vendor's API the page's host to check it against a blocklist. Automatic keeps that for the vendor's own upstream and turns it off for any other, where it would tell a third party which hosts are fetched. It applies to native WebFetch in either arrangement.".to_owned(),
             group: ParameterGroup::Safety,
             kind: ParameterType::Enum,
             options: Some(ParameterOptions::Listed(vec![
@@ -256,6 +256,7 @@ pub fn definitions() -> Vec<ParameterDef> {
             eligible_when: None,
             feature: None,
         },
+        orch_agent_contract::parameters::web_search_parameter(false),
     ]
 }
 
@@ -276,7 +277,8 @@ mod tests {
                 CONTEXT,
                 SMALL_MODEL,
                 TOOL_SEARCH,
-                WEBFETCH_PREFLIGHT
+                WEBFETCH_PREFLIGHT,
+                "web_search"
             ]
         );
     }

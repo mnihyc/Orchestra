@@ -113,7 +113,7 @@ async fn a_file_from_the_agents_workspace_is_downloaded_whole_and_its_history_is
     let call_ref = new_id().to_string();
     tokio::time::timeout(rig::PATIENCE, s.rig.engine.answer_tool_call(&CallContext {
         machine: s.rig.machine_id, thread, turn, call_ref: call_ref.clone(), attempt: None,
-        tool: OrchTool::EditDocument, arguments: json!({ "command": "attach", "path": format!("id:{document}"), "file": "out/result.bin" }),
+        tool: OrchTool::EditDocument, arguments: json!({ "command": "attach", "path": format!("id:{document}"), "file": "out/result.bin", "place": false }),
     })).await.unwrap().unwrap();
     rig::eventually("the attachment tool result", || async {
         s.rig.seen.of_kind(CommandKind::OrchToolResult).iter().any(|command| matches!(command,

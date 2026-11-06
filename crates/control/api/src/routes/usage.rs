@@ -23,6 +23,7 @@ pub mod csv;
 pub mod events;
 pub mod figures;
 pub mod names;
+mod native;
 pub mod rates;
 pub mod scope;
 
@@ -37,16 +38,48 @@ use orch_api_contract::usage::{
 pub fn mount(registry: &mut Registry) {
     registry
         .on_raw(UsageGet, figures::get)
-        .on(UsageHealthGet, figures::health)
+        .on_with_optional_operation(
+            UsageHealthGet,
+            crate::key_operations::native::stored_query::<native::Subjects, ()>,
+            figures::health,
+        )
         .on_raw(UsageEventList, events::list)
-        .on(UsageRateTableGet, rates::table)
+        .on_with_optional_operation(
+            UsageRateTableGet,
+            crate::key_operations::native::selected::<rates::Table>,
+            rates::table,
+        )
         .on(UsageCatalogueGet, rates::catalogue)
         .on_raw(AdminUsageCatalogueSet, rates::set)
-        .on(UsageLimitsGet, caps::limits)
+        .on_with_optional_operation(
+            UsageLimitsGet,
+            crate::key_operations::native::selected::<caps::native_reads::LimitsReader>,
+            caps::limits,
+        )
         .on(MeLimitsGet, caps::mine)
-        .on(UsageCapList, caps::list)
-        .on(UsageCapWaitingList, caps::waiting)
-        .on(UsageCapCreate, caps::create)
-        .on(UsageCapUpdate, caps::update)
-        .on(UsageCapDelete, caps::delete);
+        .on_with_optional_operation(
+            UsageCapList,
+            crate::key_operations::native::selected::<caps::native_reads::List>,
+            caps::list,
+        )
+        .on_with_optional_operation(
+            UsageCapWaitingList,
+            crate::key_operations::native::selected::<caps::native_reads::Waiting>,
+            caps::waiting,
+        )
+        .on_with_operation(
+            UsageCapCreate,
+            crate::key_operations::native::effects::prepare::<caps::native_effects::Create>,
+            caps::create,
+        )
+        .on_with_operation(
+            UsageCapUpdate,
+            crate::key_operations::native::effects::prepare::<caps::native_effects::Update>,
+            caps::update,
+        )
+        .on_with_optional_operation(
+            UsageCapDelete,
+            crate::key_operations::native::stored::<native::Subjects, (), ()>,
+            caps::delete,
+        );
 }

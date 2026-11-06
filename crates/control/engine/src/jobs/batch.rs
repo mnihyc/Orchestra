@@ -56,6 +56,7 @@ fn request_of(body: &ForkBatchPreflightBody) -> ForkRequest {
         topic_id: None,
         name: None,
         access: None,
+        agent_access: None,
         history: None,
         to: body.to.clone(),
         environment: body.environment.clone(),
@@ -289,7 +290,7 @@ impl Engine {
                 reason,
             };
             match self
-                .draft_in(&mut conn, caller, thread, &request, reach, None)
+                .draft_in(&mut conn, caller, thread, &request, reach, None, None)
                 .await
             {
                 Ok(mut draft) => {
@@ -636,6 +637,7 @@ impl Engine {
                     &request,
                     member.reach,
                     Some(batch),
+                    None,
                 )
                 .await
             else {

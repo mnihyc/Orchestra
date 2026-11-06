@@ -40,9 +40,10 @@ pub enum Access {
     Public,
     /// The browser that holds the session cookie, with the CSRF header.
     Cookie,
-    /// Any signed-in caller: a browser session or an API token.
+    /// A signed-in caller of the selected browser/key HTTP surface.
     User,
-    /// A browser session only; an API token is refused.
+    /// Session assurance for the browser/legacy path; modern scoped keys may use declared
+    /// Business operations through their existing shared operation guards.
     Session,
     /// A signed-in caller who holds this permission of the catalogue on
     /// the object the path names. The server checks it before the handler
@@ -54,7 +55,8 @@ pub enum Access {
 }
 
 impl Access {
-    /// Whether an API token is accepted.
+    /// Historical access-class eligibility for legacy permission-scoped tokens.
+    /// Modern Business key eligibility is declared separately by operation metadata.
     #[must_use]
     pub const fn tokens(self) -> bool {
         !matches!(self, Self::Public | Self::Cookie | Self::Session)
@@ -98,6 +100,9 @@ pub struct Route {
     pub path: &'static str,
     /// Who may make it.
     pub access: Access,
+    /// Business action and target metadata. A fixed permission can supply its ordinary
+    /// facet; compound rules and exceptions declare their metadata on the endpoint.
+    pub operation: Option<crate::operations::OperationSpec>,
     /// Its query parameters.
     pub query: Shape,
     /// Its body.
@@ -182,6 +187,9 @@ pub const fn writable<T: Serialize + JsonSchema>() {}
 /// doc comment is the summary.
 /// An optional `responses [201 => Created, 202 => Pending]` declares each
 /// success schema by status while the endpoint's reply stays their Rust union.
+/// An optional `operation expression` declares business facets and target resolution.
+/// It follows `responses` when both are present. Missing metadata on a non-permission
+/// endpoint fails catalogue generation rather than guessing from its HTTP method.
 #[macro_export]
 macro_rules! endpoints {
     ($(
@@ -189,6 +197,7 @@ macro_rules! endpoints {
         $name:ident : $method:ident $path:literal, $access:expr,
         $qk:ident $($qt:ty)?, $bk:ident $($bt:ty)?, $rk:ident $($rt:ty)?, $status:literal
         $(, responses [$($response_status:literal => $response_type:ty),+ $(,)?])?
+        $(, operation $operation:expr)?
     );* $(;)?) => {
         $(
             $(#[doc = $doc])*
@@ -205,6 +214,7 @@ macro_rules! endpoints {
                     method: $crate::routes::Method::$method,
                     path: $path,
                     access: $access,
+                    operation: $crate::__endpoint_operation!($($operation)?),
                     query: $crate::__endpoint_part!(shape in $qk $($qt)?),
                     body: $crate::__endpoint_part!(shape in $bk $($bt)?),
                     reply: $crate::__endpoint_part!(shape out $rk $($rt)?),
@@ -218,6 +228,17 @@ macro_rules! endpoints {
         pub const ROUTES: &[$crate::routes::Route] = &[
             $( <$name as $crate::routes::Endpoint>::ROUTE, )*
         ];
+    };
+}
+
+#[doc(hidden)]
+#[macro_export]
+macro_rules! __endpoint_operation {
+    () => {
+        None
+    };
+    ($operation:expr) => {
+        Some($operation)
     };
 }
 
@@ -267,6 +288,7 @@ macro_rules! __endpoint_part {
 pub fn all() -> Vec<Route> {
     let modules: &[&[Route]] = &[
         crate::auth::ROUTES,
+        crate::operations::ROUTES,
         crate::users::ROUTES,
         crate::nodes::ROUTES,
         crate::everything::ROUTES,
@@ -276,6 +298,7 @@ pub fn all() -> Vec<Route> {
         crate::threads::ROUTES,
         crate::calls::ROUTES,
         crate::goals::ROUTES,
+        crate::gateways::ROUTES,
         crate::thread_move::ROUTES,
         crate::background::ROUTES,
         crate::native::ROUTES,

@@ -158,7 +158,9 @@ impl Engine {
             .await?;
         let grace = self.recreate_grace_secs(&mut conn, environment).await?;
         let effect = self.capability_effect(&mut conn, environment, &key).await?;
-        let pending_notice = if live {
+        let pending_notice = if orch_driver_contract::capabilities::gateway_given(&key) {
+            crate::capabilities::PENDING_GATEWAY_TEXT.replace("<label>", &label)
+        } else if live {
             crate::capabilities::PENDING_LIVE_TEXT.replace("<label>", &label)
         } else {
             said(

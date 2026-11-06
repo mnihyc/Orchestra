@@ -537,6 +537,8 @@ async fn private_project(world: &World, by: &Who, root: Id) -> Id {
         .send()
         .await
         .ok()
+        .into_full()
+        .expect("this control expects the ordinary full project response")
         .base
         .id
 }

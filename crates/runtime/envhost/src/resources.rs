@@ -311,7 +311,13 @@ mod tests {
             "the first sample has nothing to compare with"
         );
         assert_eq!((first.net_rx_bps, first.net_tx_bps), (0, 0));
+        #[cfg(unix)]
         assert!(first.disk_used_bytes.is_some_and(|used| used > 0));
+        #[cfg(not(unix))]
+        assert_eq!(
+            first.disk_used_bytes, None,
+            "this host does not report disk usage"
+        );
 
         tokio::time::sleep(std::time::Duration::from_millis(250)).await;
         write("cpu.stat", "usage_usec 1250000\n");

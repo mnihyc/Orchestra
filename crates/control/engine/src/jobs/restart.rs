@@ -213,6 +213,7 @@ impl Engine {
             MakeError::Running(row) => Error::Busy(row),
             MakeError::NoEnvironment => Error::NotFound,
             MakeError::Db(error) => Error::Internal(error.into()),
+            MakeError::Internal(error) => Error::Internal(error),
         })?;
         let mut unit = Unit::new(conn, at.get());
         for thread in affected {

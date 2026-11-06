@@ -72,7 +72,9 @@ async fn destination(s: &Scene) -> Id {
         })
         .send()
         .await
-        .ok();
+        .ok()
+        .into_full()
+        .expect("this control expects the ordinary full project response");
     places::make_topic(&s.rig.world, &s.ada, folder.base.id, "Refunds")
         .await
         .base

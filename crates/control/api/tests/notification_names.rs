@@ -10,6 +10,7 @@ mod places;
 mod search_world;
 mod support;
 
+use crate::support::FullPermissionPageReply;
 use desk::Desk;
 use orch_api_contract::access::{PageChange, PermissionPageGet, PermissionPageUpdate};
 use orch_api_contract::nodes::{Node, NodeUpdate};
@@ -138,6 +139,7 @@ async fn threads_in_one_topic_have_distinct_current_titles_in_day_and_place_page
         .body(&change)
         .send()
         .await
+        .full_permission_page()
         .ok();
     for grouping in [None, Some(NotificationGrouping::Place)] {
         let page = list(&desk, &vera, grouping).await;

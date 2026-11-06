@@ -13,6 +13,9 @@ import { i18n,setLocale } from '@/i18n';
 import { show } from './support';
 
 const info=vi.hoisted(()=>({secure:true,public_url:'https://orch.example',configure:undefined as string|undefined}));
+vi.mock('@/api/gateways', async (load) => ({ ...await load<typeof import('@/api/gateways')>(),
+  gatewayCatalogueQuery: { queryKey: ['enrollment-gateway-catalogue'], queryFn: () => Promise.resolve({ revision: 'fixture', gateways: [{ id: 'asia', label: 'Asia tools', region: 'Asia', endpoints: [{ url: 'wss://asia.gateway.example.test', trust: 'pinned' as const }] }] }) },
+}));
 vi.mock('@/features/help/open',()=>({useHelpOpener:()=>vi.fn()}));
 vi.mock('@/features/help/Hint',()=>({Hint:()=>null}));
 vi.mock('@tanstack/react-router',()=>({useNavigate:()=>vi.fn(),Link:({children}:{children:ReactNode})=><a href="#enrolled">{children}</a>}));
@@ -56,7 +59,7 @@ for(const locale of ['en','zh-CN'] as const) it(`names roles once and mints only
     await user.click(screen.getByRole('checkbox',{name:i18n.t('machines.add.roleChoices.provider.name')}));
     expect(createMachineToken).not.toHaveBeenCalled();
     await showCommand();
-    expect(await screen.findByText("install.sh --roles 'environment,agent,provider' --delegate ''")).toBeVisible();
+    expect(await screen.findByText("install.sh --roles 'environment,agent,provider' --delegate '' --gateway automatic")).toBeVisible();
     expect(createMachineToken).toHaveBeenCalledTimes(1);
     await user.type(screen.getByRole('textbox',{name:instanceName}),'work');
     expect(screen.getByText(/install.sh.*--data-dir/u)).toHaveTextContent('/instances/work');
@@ -94,14 +97,14 @@ for (const locale of ['en', 'zh-CN'] as const) for (const entry of ['machine', '
 
 it('hands over only selected roles and hides an old command until explicitly issuing new consent',async()=>{
   const user=userEvent.setup();show(<AddMachineDialog onClose={vi.fn()}/>);await showCommand();
-  await screen.findByText("install.sh --roles 'environment,agent' --delegate ''");
+  await screen.findByText("install.sh --roles 'environment,agent' --delegate '' --gateway automatic");
   await user.click(screen.getByRole('checkbox',{name:'Agent'}));await user.click(screen.getByRole('checkbox',{name:'Provider'}));
   await user.click(within(screen.getByRole('group',{name:'Environment'})).getByRole('switch'));
   await user.click(screen.getByRole('switch',{name:'Full control'}));
   expect(screen.queryByRole('button',{name:'Copy the command'})).not.toBeInTheDocument();
   expect(createMachineToken).toHaveBeenCalledTimes(1);
   await showCommand();
-  expect(await screen.findByText("install.sh --roles 'environment,provider' --delegate 'environment' --dedicated")).toBeVisible();
+  expect(await screen.findByText("install.sh --roles 'environment,provider' --delegate 'environment' --dedicated --gateway automatic")).toBeVisible();
   expect(createMachineToken).toHaveBeenLastCalledWith(expect.any(String),{roles:['environment','provider'],delegate:['environment'],dedicated:true});
 });
 
@@ -135,7 +138,7 @@ it('never displays a late token for a different home and requires another explic
   const user=userEvent.setup();show(<AddMachineDialog onClose={vi.fn()}/>);await showCommand();
   await user.selectOptions(screen.getByRole('combobox',{name:'Home'}),'org');
   await act(async()=>{finish(reply('OLD COMMAND'));await pending;});
-  expect(screen.queryByText('OLD COMMAND')).not.toBeInTheDocument();expect(createMachineToken).toHaveBeenCalledTimes(1);
+  expect(screen.queryByText('OLD COMMAND --gateway automatic')).not.toBeInTheDocument();expect(createMachineToken).toHaveBeenCalledTimes(1);
   await showCommand();await waitFor(()=>expect(createMachineToken).toHaveBeenCalledTimes(2));
   expect(createMachineToken).toHaveBeenLastCalledWith(expect.any(String),{home_id:'org',roles:['environment','agent'],delegate:[],dedicated:false});
 });
@@ -152,7 +155,7 @@ it('honors loopback HTTP installer eligibility while retaining explicit Show com
   show(<AddMachineDialog onClose={vi.fn()}/>);
   await waitFor(()=>expect(screen.getByRole('button',{name:'Show command'})).toBeEnabled());
   expect(createMachineToken).not.toHaveBeenCalled();expect(screen.queryByRole('alert')).not.toBeInTheDocument();
-  await showCommand();expect(await screen.findByText("install.sh --roles 'environment,agent' --delegate ''")).toBeVisible();
+  await showCommand();expect(await screen.findByText("install.sh --roles 'environment,agent' --delegate '' --gateway automatic")).toBeVisible();
   expect(createMachineToken).toHaveBeenCalledTimes(1);
 });
 
@@ -188,3 +191,15 @@ for(const locale of ['en','zh-CN'] as const) for(const entry of ['machine','host
     }finally{view.unmount();await setLocale('en');}
   });
 }
+
+it('changes the gateway flag of the displayed installer without minting another consent token', async () => {
+  show(<AddMachineDialog onClose={vi.fn()} />);
+  await showCommand();
+  expect(await screen.findByText("install.sh --roles 'environment,agent' --delegate '' --gateway automatic")).toBeVisible();
+  await userEvent.click(screen.getByRole('combobox', { name: i18n.t('regionalGateways.gateway') }));
+  await userEvent.click(screen.getByRole('option', { name: 'Asia tools', exact: true }));
+  expect(await screen.findByText("install.sh --roles 'environment,agent' --delegate '' --gateway asia")).toBeVisible();
+  expect(createMachineToken).toHaveBeenCalledTimes(1);
+  expect(createMachineToken).toHaveBeenLastCalledWith(expect.any(String), { roles: ['environment', 'agent'], delegate: [], dedicated: false });
+  expect(createHostToken).not.toHaveBeenCalled();
+});

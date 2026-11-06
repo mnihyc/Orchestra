@@ -46,10 +46,10 @@ it('offers the nested labels in order, separates the admin view and saves this l
  show(<Library/>);expect(screen.getByRole('combobox',{name:'Show'})).toHaveTextContent('I manage');
 });
 
-it('leaves out Use for environments and replaces an unavailable saved admin view with the default',async()=>{
+it('offers Use for environments and replaces an unavailable saved admin view with the default',async()=>{
  const user=userEvent.setup();const environment=show(<Library kind="environments"/>);
- const view=screen.getByRole('combobox',{name:'Show'});expect(view).toHaveTextContent('I can view');await user.click(view);
- expect(screen.queryByRole('option',{name:'I can use'})).not.toBeInTheDocument();await user.keyboard('{Escape}');environment.unmount();
+ const view=screen.getByRole('combobox',{name:'Show'});expect(view).toHaveTextContent('I can use');await user.click(view);
+ expect(screen.getByRole('option',{name:'I can use'})).toBeVisible();await user.keyboard('{Escape}');environment.unmount();
  admin=true;const first=show(<Library/>);await user.click(screen.getByRole('combobox',{name:'Show'}));await user.click(screen.getByRole('option',{name:'All in Workshop'}));first.unmount();
  admin=false;show(<Library/>);expect(screen.getByRole('combobox',{name:'Show'})).toHaveTextContent('I can use');
 });

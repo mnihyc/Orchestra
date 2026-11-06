@@ -40,6 +40,13 @@ pub const STATS_EVERY_SECS: u32 = 15;
 /// allows the whole step, so that the refusal still reaches it.
 pub const AUTH_QUERY_TIMEOUT_SECS: u32 = 5;
 
+fn tunnel_idle_secs() -> u64 {
+    crate::gateways::TUNNEL_IDLE_SECS
+}
+fn is_default_tunnel_idle_secs(value: &u64) -> bool {
+    *value == tunnel_idle_secs()
+}
+
 /// The gateway's first word on the backplane.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
 pub struct GwHello {
@@ -68,6 +75,15 @@ pub struct ApiHello {
 /// A gateway's question whether a session may start.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
 pub struct AuthQuery {
+    /// Auxiliary identity admission must not replace primary presence or roles.
+    #[serde(
+        default,
+        skip_serializing_if = "crate::gateways::SessionPurpose::is_primary"
+    )]
+    pub purpose: crate::gateways::SessionPurpose,
+    /// Declared protocol features of the authenticated client.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub capabilities: Vec<String>,
     /// Authenticated owner-selected addresses, distinct from the server's defaults.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub endpoints: Option<Vec<crate::enrollment::Endpoint>>,
@@ -94,6 +110,15 @@ pub struct AuthQuery {
 /// The system's answer to an [`AuthQuery`].
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
 pub struct AuthReply {
+    /// Idle-close setting for unused auxiliary attachments.
+    #[serde(
+        default = "tunnel_idle_secs",
+        skip_serializing_if = "is_default_tunnel_idle_secs"
+    )]
+    pub tunnel_session_idle_secs: u64,
+    /// The system's gateway catalogue, delivered only after machine authentication.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub gateways: Vec<crate::gateways::GatewayInstance>,
     /// The system's current preference list, delivered after authenticating the machine.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub endpoints: Option<Vec<crate::enrollment::Endpoint>>,
@@ -119,6 +144,15 @@ pub struct AuthReply {
 /// A gateway's word that a machine has a session.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
 pub struct MachineUp {
+    /// Replay primary protocol capabilities when only the API/backplane restarts.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub capabilities: Vec<String>,
+    /// Only Primary can establish authoritative machine presence.
+    #[serde(
+        default,
+        skip_serializing_if = "crate::gateways::SessionPurpose::is_primary"
+    )]
+    pub purpose: crate::gateways::SessionPurpose,
     /// The machine.
     pub machine_id: Id,
     /// The session.
@@ -130,6 +164,12 @@ pub struct MachineUp {
 /// A gateway's word that a session ended.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
 pub struct MachineDown {
+    /// An auxiliary going away cannot take primary presence down.
+    #[serde(
+        default,
+        skip_serializing_if = "crate::gateways::SessionPurpose::is_primary"
+    )]
+    pub purpose: crate::gateways::SessionPurpose,
     /// The machine.
     pub machine_id: Id,
     /// The session that ended: an older one than the machine's current
@@ -142,6 +182,12 @@ pub struct MachineDown {
 /// A text frame that a machine sent for the system.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize, JsonSchema)]
 pub struct Up {
+    /// Auxiliary frames cannot contribute business/control traffic.
+    #[serde(
+        default,
+        skip_serializing_if = "crate::gateways::SessionPurpose::is_primary"
+    )]
+    pub purpose: crate::gateways::SessionPurpose,
     /// The machine.
     pub machine_id: Id,
     /// The session it came on.
@@ -351,6 +397,18 @@ tagged! {
     /// A text frame of a machine that is for the system, and that a
     /// gateway therefore passes up.
     UpFrame {
+        /// A source-bound request for carrier metadata.
+        TunnelRouteAsk(crate::gateways::TunnelRouteAsk) = "tunnel_route_ask",
+        /// A peer attachment request, not model/tool payload.
+        TunnelPrepareAsk(Box<crate::gateways::TunnelPrepareAsk>) = "tunnel_prepare_ask",
+        /// A peer's attachment acknowledgement.
+        TunnelAttachResult(crate::gateways::TunnelAttachResult) = "tunnel_attach_result",
+        /// Release this source's own references.
+        TunnelRelease(crate::gateways::TunnelRelease) = "tunnel_release",
+        /// Actual tool gateway metadata.
+        TunnelSelected(crate::gateways::TunnelSelected) = "tunnel_selected",
+        /// Safe source-bound failure metadata.
+        TunnelFailed(Box<crate::gateways::TunnelFailed>) = "tunnel_failed",
         /// A local import asked by the authenticated machine, as its owner.
         McpImportAsk(crate::mcp_import::McpImportAsk) = "mcp_import_ask",
         /// The authenticated machine's environment-local read/assertion refresh.
@@ -376,6 +434,16 @@ tagged! {
     /// A text frame of the system that is for a machine, and that a
     /// gateway therefore passes down.
     DownFrame {
+        /// Authenticated installation metadata refresh for a primary.
+        Gateways(crate::gateways::GatewayAdvertisement) = "gateways",
+        /// Frozen carrier metadata.
+        TunnelRouteAnswer(crate::gateways::TunnelRouteAnswer) = "tunnel_route_answer",
+        /// A transport-only attachment instruction.
+        TunnelAttach(Box<crate::gateways::TunnelAttach>) = "tunnel_attach",
+        /// Matching source preparation outcome.
+        TunnelPrepareAnswer(crate::gateways::TunnelPrepareAnswer) = "tunnel_prepare_answer",
+        /// Release an accepted pair's references.
+        TunnelRelease(crate::gateways::TunnelRelease) = "tunnel_release",
         /// The system's answer to a local import request.
         McpImportAnswer(crate::mcp_import::McpImportAnswer) = "mcp_import_answer",
         /// The current scoped read; no row goes into an event spool or command journal.
@@ -411,6 +479,12 @@ impl TryFrom<Frame> for UpFrame {
     /// the system is given back.
     fn try_from(frame: Frame) -> Result<Self, Self::Error> {
         match frame {
+            Frame::TunnelRouteAsk(body) => Ok(Self::TunnelRouteAsk(body)),
+            Frame::TunnelPrepareAsk(body) => Ok(Self::TunnelPrepareAsk(body)),
+            Frame::TunnelAttachResult(body) => Ok(Self::TunnelAttachResult(body)),
+            Frame::TunnelRelease(body) => Ok(Self::TunnelRelease(body)),
+            Frame::TunnelSelected(body) => Ok(Self::TunnelSelected(body)),
+            Frame::TunnelFailed(body) => Ok(Self::TunnelFailed(body)),
             Frame::McpImportAsk(body) => Ok(Self::McpImportAsk(body)),
             Frame::PortLocalAsk(body) => Ok(Self::PortLocalAsk(body)),
             Frame::PortConnectionsReply(body) => Ok(Self::PortConnectionsReply(body)),
@@ -428,6 +502,11 @@ impl TryFrom<Frame> for UpFrame {
 impl From<DownFrame> for Frame {
     fn from(frame: DownFrame) -> Self {
         match frame {
+            DownFrame::Gateways(body) => Self::Gateways(body),
+            DownFrame::TunnelRouteAnswer(body) => Self::TunnelRouteAnswer(body),
+            DownFrame::TunnelAttach(body) => Self::TunnelAttach(body),
+            DownFrame::TunnelPrepareAnswer(body) => Self::TunnelPrepareAnswer(body),
+            DownFrame::TunnelRelease(body) => Self::TunnelRelease(body),
             DownFrame::McpImportAnswer(body) => Self::McpImportAnswer(body),
             DownFrame::PortLocalAnswer(body) => Self::PortLocalAnswer(body),
             DownFrame::PortConnectionsQuery(body) => Self::PortConnectionsQuery(body),

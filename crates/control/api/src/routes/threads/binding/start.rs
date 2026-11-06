@@ -278,6 +278,7 @@ async fn options(ctx: Ctx, query: NodeBindingOptionsGetQuery, (): ()) -> ApiResu
         environment_default,
         source: source_for(conn, principal, id).await?,
         access,
+        agent_access: Some(creation::availability(conn, principal, id, &query, environment).await?),
         new_environment,
         can_create,
         hosts,

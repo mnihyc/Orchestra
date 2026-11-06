@@ -571,11 +571,7 @@ async fn check_publisher(
     if !host_listener_support(conn, environment).await?.supported {
         return Err(Error::Conflict);
     }
-    sqlx::query("SELECT id FROM machines WHERE id=$1 FOR NO KEY UPDATE")
-        .bind(machine)
-        .execute(&mut *conn)
-        .await
-        .map_err(DbError::from)?;
+    rows::lock_publisher_machine(conn, machine).await?;
     let publisher = orch_db::queries::environment_facts::publisher_of(conn, environment)
         .await?
         .ok_or(Error::Conflict)?;

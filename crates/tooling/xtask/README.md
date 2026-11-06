@@ -18,7 +18,10 @@ from the committed ones. `cargo xtask package --out DIR` builds the files of a
 release for the architecture Docker runs on and the manifest that lists them
 with their sizes and BLAKE3 hashes; `--check` validates such a directory again
 (the manifest, every hash, the harness builds it pins, what each archive holds, and that the shipped
-`orch.toml` is accepted by the programs), and `--manifest-only` writes the
+`orch.toml` is accepted by the programs). Release jobs add `--check-source` to require a clean checkout
+of the manifest commit, every exact migration source, the current harness/rate pins, installers,
+licences and the complete deployment/docs bundle; generic offline `--check` remains available without
+that checkout, and `--manifest-only` writes the
 manifest of the files a directory holds, for a release put together from
 several machines. `cargo xtask image [--version V] [--fresh]` builds the default
 environment image alone, as `orch-env-base:V`, and refuses an image whose labels do
@@ -57,6 +60,7 @@ checking. Local smoke packaging without it continues to build the host platform.
 | [contracts/providers](src/contracts/providers.rs) | Provider implementer documentation derives its wire shapes and limits from the contracts. |
 | [release/manifest](src/release/manifest.rs) | Release metadata and asset hashes. |
 | [release/package](src/release/package.rs) | Server, frontend, connector, node, CLI and deployment payloads. |
+| [release/source](src/release/source.rs) | Exact candidate sources in release archives, without changing generic offline verification. |
 | [release/image](src/release/image.rs) | The default environment image: built from its recipe and held to what the recipe pins. |
 | [release/archive](src/release/archive.rs) | Archives written the same way every time, and read back to see what is in them. |
 | [release/container](src/release/container.rs) | Compiling and reading inside the builder image. |

@@ -769,19 +769,82 @@ async fn malformed_text_is_charged_and_backed_off_while_a_full_shared_cap_skips_
     let id = s.thread().await.base.id;
     resume_title(&s, id).await;
     s.exchange(id, 0, "Work", "Done").await;
-    wait_attempt(&s, id).await;
+    eventually("the failed summary waits for a person without automatic work", || async {
+        sqlx::query_scalar::<_, bool>("SELECT EXISTS(SELECT 1 FROM node_summary_state WHERE node_id=$1 AND last_at IS NOT NULL AND claimed_by IS NULL AND due_at IS NULL AND run_id IS NULL AND reason='calls.servicePaused')")
+            .bind(id).fetch_one(s.rig.db.pool()).await.unwrap()
+    }).await;
     assert_eq!(attempts(&s, id).await.0, 1);
     let delay: i64 = sqlx::query_scalar("SELECT EXTRACT(epoch FROM next_at-last_at)::bigint FROM node_summary_state WHERE node_id=$1")
         .bind(id).fetch_one(s.rig.db.pool()).await.unwrap();
     assert_eq!(delay, 240);
     assert_eq!(s.rig.commands.issued_of("provider.complete"), 1);
+    let charged: (i64, i64) = sqlx::query_as("SELECT count(*),sum(total_tokens)::bigint FROM usage_events WHERE origin='orch' AND purpose='summary' AND counted")
+        .fetch_one(s.rig.db.pool()).await.unwrap();
+    assert_eq!(
+        charged,
+        (1, 120),
+        "unusable output still costs its actual request"
+    );
     s.rig.engine.stop();
     sqlx::query("INSERT INTO usage_caps (id,node_id,meter,period,amount,created_by) VALUES ($1,$2,'tokens','day',120,$3)")
         .bind(new_id()).bind(s.tree.project.base.id).bind(s.ada.id()).execute(s.rig.db.pool()).await.unwrap();
     s.rig.world.advance(chrono::Duration::seconds(241));
-    s.rig.engine.summarize_due(id).await.unwrap();
+    assert!(!s.rig.engine.summarize_due(id).await.unwrap());
+    assert_eq!(s.rig.commands.issued_of("provider.complete"), 1);
+    assert_eq!(attempts(&s, id).await.0, 1);
+    let paused = {
+        let mut conn = s.rig.db.acquire().await.unwrap();
+        orch_engine::calls::read(
+            &mut conn,
+            id,
+            orch_provider_contract::calls::Purpose::Summary,
+        )
+        .await
+        .unwrap()
+        .unwrap()
+    };
+    assert_eq!(paused.state, "waiting");
+    assert_eq!(paused.failure["code"], "harness_error");
+    assert_eq!(paused.rule["id"], "other");
+    assert!(paused.due_at.is_none());
+
+    // The call policy waits for a person; elapsed backoff time alone does not retry.
+    s.rig
+        .world
+        .app
+        .call(NodeAuto, &[&id])
+        .token(&s.ada.token)
+        .body(&NodeAutoBody {
+            field: AutoField::Title,
+            action: AutoAction::Refresh,
+        })
+        .send()
+        .await
+        .ok();
+    let old = {
+        let mut conn = s.rig.db.acquire().await.unwrap();
+        orch_engine::calls::read_root(
+            &mut conn,
+            id,
+            orch_provider_contract::calls::Purpose::Summary,
+            paused.call_key,
+        )
+        .await
+        .unwrap()
+        .unwrap()
+    };
+    assert_eq!(old.state, "dismissed");
+    let _ = s.rig.engine.summarize_due(id).await.unwrap();
+    eventually("the fresh summary records the full shared cap as a skip", || async {
+        sqlx::query_scalar::<_, bool>("SELECT EXISTS(SELECT 1 FROM node_summary_state WHERE node_id=$1 AND last_at=$2 AND claimed_by IS NULL AND run_id IS NULL AND due_at IS NULL AND failures=0 AND reason='a shared usage cap has no room for summaries')")
+            .bind(id).bind(s.rig.world.now()).fetch_one(s.rig.db.pool()).await.unwrap()
+    }).await;
     assert_eq!(s.rig.commands.issued_of("provider.complete"), 1);
     assert_eq!(attempts(&s, id).await.0, 0, "lack of cap room is a skip");
+    assert_eq!(
+        attempts(&s, id).await.1.as_deref(),
+        Some("a shared usage cap has no room for summaries")
+    );
 }
 
 #[tokio::test]
@@ -1066,6 +1129,7 @@ async fn the_plan_of_a_summary_shows_what_it_will_send_and_what_that_costs_befor
         topic_id: None,
         name: Some("Trial".to_owned()),
         access: None,
+        agent_access: None,
         history: Some(ForkHistory {
             mode: HistoryMode::Summary,
             from_turn: None,

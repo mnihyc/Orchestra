@@ -95,7 +95,8 @@ impl Desk {
         document: Id,
         ops: Vec<DocumentOp>,
     ) -> Reply<DocumentOpsCreateReply> {
-        self.world
+        let reply = self
+            .world
             .app
             .call(DocumentOpsCreate, &[&document])
             .token(&by.token)
@@ -105,7 +106,17 @@ impl Desk {
                 ops,
             })
             .send()
-            .await
+            .await;
+        Reply {
+            status: reply.status,
+            headers: reply.headers,
+            raw: reply.raw,
+            body: reply.body.map(|answer| {
+                answer
+                    .into_full()
+                    .expect("the browser session receives the full document reply")
+            }),
+        }
     }
 
     /// Writes paragraphs one after the other at the top of a document and

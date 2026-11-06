@@ -356,8 +356,8 @@ describe('the complete hierarchy', () => {
     const user = userEvent.setup();
     levels.set(null, [inventoryRow({ id: 'document', kind: 'document', name: 'Notes', href: '/doc/document', last_opened: new Date().toISOString(), last_activity: new Date().toISOString() })]);
     const view = show(<EverythingBrowser />);
-    await user.click(await screen.findByRole('button', { name: 'Recent' }));
-    expect(screen.getByRole('button', { name: 'Recent' })).toHaveAttribute('aria-pressed', 'true');
+    await user.click(await screen.findByRole('button', { name: 'Recent items' }));
+    expect(screen.getByRole('button', { name: 'Recent items' })).toHaveAttribute('aria-pressed', 'true');
     expect(await screen.findByRole('columnheader', { name: 'Where' })).toBeVisible();
     expect(screen.getByRole('columnheader', { name: 'Opened' })).toHaveAttribute('aria-sort', 'descending');
     expect(screen.getByRole('rowheader', { name: 'Today' })).toBeVisible();
@@ -370,7 +370,7 @@ describe('the complete hierarchy', () => {
     view.unmount();
     show(<EverythingBrowser />);
     expect(await screen.findByRole('combobox', { name: 'Recent order' })).toHaveTextContent('Active');
-    expect(screen.getByRole('button', { name: 'Recent' })).toHaveAttribute('aria-pressed', 'true');
+    expect(screen.getByRole('button', { name: 'Recent items' })).toHaveAttribute('aria-pressed', 'true');
   });
 
   it('carries a narrowed beginning and its kind, archive and done choices in one cross-level request', async () => {
@@ -403,9 +403,9 @@ describe('the complete hierarchy', () => {
     const user = userEvent.setup();
     show(<EverythingBrowser />);
     await screen.findByRole('treegrid');
-    expect(screen.getByRole('button', { name: 'Tree' })).toHaveAttribute('aria-pressed', 'true');
+    expect(screen.getByRole('button', { name: 'Tree view' })).toHaveAttribute('aria-pressed', 'true');
     expect(readViewChoice(reader.id, 'everything', 'view', '', 'mine:all')).toBe(saved);
-    await user.click(screen.getByRole('button', { name: 'Recent' }));
+    await user.click(screen.getByRole('button', { name: 'Recent items' }));
     expect(JSON.parse(readViewChoice(reader.id, 'everything', 'view', '', 'mine:all'))).toMatchObject({ arrangement: 'recent', sort: 'opened' });
   });
 

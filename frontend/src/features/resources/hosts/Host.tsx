@@ -32,6 +32,7 @@ import { KeptLayers } from '@/features/resources/hosts/KeptLayers';
 import { DriverFeatures } from '@/features/resources/hosts/DriverFeatures';
 import { MountsHere } from '@/features/resources/mounts/Here';
 import { MachinePolicyTab } from '@/features/resources/machines/Policy';
+import { MachineGatewayStatus } from '@/features/gateways/MachineGatewayStatus';
 import { EnvironmentDirectoriesHere } from '@/features/resources/environments/DataSources';
 import { Hint } from '@/features/help/Hint';
 import { useHelpOpener } from '@/features/help/open';
@@ -228,6 +229,7 @@ function Overview({ host }: { host: Host }) {
           ]}
         />
       </Section>
+      <MachineGatewayStatus machineId={host.machine.id} online={host.machine.online} />
       <ResourceDetails><Facts compact rows={[{ name: t('hosts.overview.address'), value: host.address }]} /><Capacity host={host} /><Drivers host={host} /></ResourceDetails>
     </div>
   );

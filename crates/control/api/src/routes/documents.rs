@@ -30,9 +30,12 @@ mod imports;
 mod limits;
 mod listing;
 mod mentions;
+pub(crate) mod metadata_projection;
 mod notices;
+mod operation;
 mod ops;
 pub mod page;
+pub(crate) mod read_operation;
 pub(crate) mod references;
 mod subscription;
 
@@ -103,8 +106,8 @@ pub fn mount(registry: &mut Registry) {
             orch_api_contract::document_tree::DocumentContainerDocumentCreate,
             create,
         )
-        .on(DocumentGet, get)
-        .on(DocumentSyncGet, sync)
+        .on_with_operation(DocumentGet, read_operation::get, get)
+        .on_with_operation(DocumentSyncGet, read_operation::sync, sync)
         .on(DocumentUpdate, update)
         .on(DocumentSeen, seen)
         .on(DocumentDelete, delete)
@@ -679,29 +682,13 @@ pub(crate) async fn get(
     _query: orch_api_contract::nodes::DeletedInspectionQuery,
     (): (),
 ) -> ApiResult<Document> {
-    let id = ctx.id("id")?;
     let mut conn = orch_db::queries::feeds::begin_reading(&ctx.app.db).await?;
-    let principal = authorization::principal(&ctx, &mut conn).await?;
-    let row = live(&mut conn, id).await?;
-    let listed = build::standing(&mut conn, &principal, id, Policy::default()).await?;
-    let shown = build::document(
-        &mut conn,
-        &principal,
-        &row,
-        &listed,
-        ctx.now,
-        Policy::default(),
-    )
-    .await?;
-    let cut = crate::routes::document_tree::metadata::cut(
-        &mut conn,
-        &principal,
-        row.node_id,
-        ctx.app.clock.time(),
-    )
-    .await?;
+    let principal = ctx.operation_principal(&mut conn).await?;
+    let prepared = ctx.operation_data::<read_operation::PreparedRead>()?;
+    read_operation::same_inspection(&ctx, &prepared)?;
+    let shown = read_operation::project_document(&mut conn, &principal, &prepared).await?;
     conn.commit().await.map_err(DbError::from)?;
-    finish_document_read(&ctx, &cut).await?;
+    read_operation::finish(&ctx, &prepared).await?;
     Ok(shown)
 }
 
@@ -718,6 +705,35 @@ async fn read_sync(
     let row = live(conn, id).await?;
     let listed = build::standing(conn, principal, id, policy).await?;
     let document = build::document(conn, principal, &row, &listed, now, policy).await?;
+    let selected = sync_rows(conn, &row, since).await?;
+    let seq = row.doc_seq;
+    let SyncRows {
+        blocks,
+        discussions: found,
+        complete,
+    } = selected;
+    Ok(DocumentSync {
+        document,
+        blocks: build::blocks_for(conn, principal, &blocks, policy).await?,
+        discussions: build::discussions_for(conn, principal, id, &found, policy).await?,
+        seq,
+        since,
+        complete,
+    })
+}
+
+pub(super) struct SyncRows {
+    pub blocks: Vec<rows::BlockRow>,
+    pub discussions: Vec<discussions::Full>,
+    pub complete: bool,
+}
+
+pub(super) async fn sync_rows(
+    conn: &mut Conn,
+    row: &DocumentRow,
+    since: Option<i64>,
+) -> ApiResult<SyncRows> {
+    let id = row.id;
     let seq = row.doc_seq;
     let (blocks, found, complete) = match since {
         None => (
@@ -746,46 +762,26 @@ async fn read_sync(
             }
         }
     };
-    Ok(DocumentSync {
-        document,
-        blocks: build::blocks_for(conn, principal, &blocks, policy).await?,
-        discussions: build::discussions_for(conn, principal, id, &found, policy).await?,
-        seq,
-        since,
+    Ok(SyncRows {
+        blocks,
+        discussions: found,
         complete,
     })
 }
 
 /// Reads a document and every live block, or what changed since a sequence.
 async fn sync(ctx: Ctx, query: DocumentSyncGetQuery, (): ()) -> ApiResult<DocumentSync> {
-    let id = ctx.id("id")?;
     if query.since.is_some_and(|since| since < 0) {
         return Err(invalid("since", "must not be negative"));
     }
     let mut conn = orch_db::queries::feeds::begin_reading(&ctx.app.db).await?;
-    let principal = authorization::principal(&ctx, &mut conn).await?;
-    let shown = read_sync(&mut conn, &principal, id, query.since, ctx.now).await?;
-    let cut = crate::routes::document_tree::metadata::cut(
-        &mut conn,
-        &principal,
-        shown.document.base.node.id,
-        ctx.app.clock.time(),
-    )
-    .await?;
+    let principal = ctx.operation_principal(&mut conn).await?;
+    let prepared = ctx.operation_data::<read_operation::PreparedRead>()?;
+    read_operation::same_inspection(&ctx, &prepared)?;
+    let shown = read_operation::project_sync(&mut conn, &principal, &prepared).await?;
     conn.commit().await.map_err(DbError::from)?;
-    finish_document_read(&ctx, &cut).await?;
+    read_operation::finish(&ctx, &prepared).await?;
     Ok(shown)
-}
-
-async fn finish_document_read(
-    ctx: &Ctx,
-    cut: &crate::routes::document_tree::metadata::Cut,
-) -> ApiResult<()> {
-    let (mut tx, guard) = transaction_guard::begin(ctx).await?;
-    crate::routes::document_tree::metadata::unchanged(&mut tx, guard.principal(), cut, guard.now())
-        .await?;
-    tx.commit().await.map_err(DbError::from)?;
-    Ok(())
 }
 
 // ---------------------------------------------------------------- the document as a thing

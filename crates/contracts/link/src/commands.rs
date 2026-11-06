@@ -217,6 +217,8 @@ pub enum SecretOrText {
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize, JsonSchema)]
 #[serde(untagged)]
 pub enum TicketSlot {
+    /// Signed capability with the API's adjacent carrier plan.
+    Routed(Box<crate::gateways::RoutedTicket>),
     /// As the command is sent: the signed ticket.
     Signed(String),
     /// As the system stores the command: what the ticket is to allow. A
@@ -305,13 +307,22 @@ pub fn resolve_references<E>(
     body: &mut Json,
     resolve: &mut dyn FnMut(Reference<'_>) -> Result<String, E>,
 ) -> Result<(), E> {
+    resolve_reference_values(body, &mut |found| resolve(found).map(Json::String))
+}
+
+/// Resolve typed wire values, allowing a ticket's routing envelope beside its signed string.
+/// Secret callbacks still return the encrypted string placed under the existing sealed marker.
+pub fn resolve_reference_values<E>(
+    body: &mut Json,
+    resolve: &mut dyn FnMut(Reference<'_>) -> Result<Json, E>,
+) -> Result<(), E> {
     let replacement = match reference(body) {
         Some(found @ Reference::Secret(_)) => {
             let mut sealed = Object::new();
-            sealed.insert(SEALED_MEMBER.to_owned(), Json::String(resolve(found)?));
+            sealed.insert(SEALED_MEMBER.to_owned(), resolve(found)?);
             Some(Json::Object(sealed))
         }
-        Some(found @ Reference::Ticket(_)) => Some(Json::String(resolve(found)?)),
+        Some(found @ Reference::Ticket(_)) => Some(resolve(found)?),
         None => None,
     };
     if let Some(replacement) = replacement {
@@ -321,10 +332,10 @@ pub fn resolve_references<E>(
     match body {
         Json::Object(members) => members
             .values_mut()
-            .try_for_each(|value| resolve_references(value, resolve)),
+            .try_for_each(|value| resolve_reference_values(value, resolve)),
         Json::Array(entries) => entries
             .iter_mut()
-            .try_for_each(|value| resolve_references(value, resolve)),
+            .try_for_each(|value| resolve_reference_values(value, resolve)),
         _ => Ok(()),
     }
 }
@@ -1598,7 +1609,8 @@ pub enum OrchTool {
     DownloadShared,
     /// Makes or changes a document.
     EditDocument,
-    /// Organizes documents and folders; only deletion requires a preview and confirmation.
+    /// Organizes documents and folders: create, copy, move and restore execute directly;
+    /// document deletion and thread/chat management require a preview and confirmation.
     ManageShared,
     /// Posts to a chat or queues a note to a thread's agent, according to its typed target.
     SendMessage,
@@ -1752,6 +1764,12 @@ pub struct SessionOpenMcp {
 /// The body of `session.open`: everything a session is set up with.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize, JsonSchema)]
 pub struct SessionOpen {
+    /// Refresh only the model transport while preserving the native session generation.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub transport_only: bool,
+    /// Whether turn configuration is physically tied to this session process.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub turn_changes_require_restart: bool,
     /// The agent profile.
     pub agent_id: Id,
     /// The thread.
@@ -1793,6 +1811,9 @@ pub struct SessionOpen {
     /// Limits over the harness's own sub-agents, independent of its model parameters.
     #[serde(default)]
     pub subagent_limits: orch_agent_contract::session::SubagentLimits,
+    /// Whether owned background completions may wake this session.
+    #[serde(default = "orch_agent_contract::session::background_wake_default")]
+    pub background_wake: bool,
     /// What the harness's own sandbox allows.
     pub sandbox_mode: SandboxMode,
     /// What the agent is told that is no person's message.
@@ -2061,6 +2082,9 @@ pub struct TurnImage {
 /// The body of `turn.start`.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize, JsonSchema)]
 pub struct TurnStart {
+    /// Adopt a native follow-up already waiting for this controller admission.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub native_wake: Option<String>,
     /// The thread.
     pub thread_id: Id,
     /// The turn that starts.
@@ -2344,6 +2368,9 @@ pub enum CompletionPurpose {
 /// The body of `provider.complete`.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
 pub struct ProviderComplete {
+    /// Provider constraints frozen with this command; absent only on older retained commands.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub model_parameters: Option<orch_provider_contract::models::ModelParameters>,
     /// The provider whose key pays for the request.
     pub provider_id: Id,
     /// What the request is for.
@@ -2352,7 +2379,7 @@ pub struct ProviderComplete {
     pub protocol: String,
     /// The model, by the name that is sent.
     pub model_name: String,
-    /// Additional model parameters selected by an explicit recovery candidate.
+    /// Final endpoint-format options resolved by the issuer from defaults and this use's choices.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub params: Option<Json>,
     /// The instruction.
@@ -2381,12 +2408,18 @@ pub struct ProviderCompleteResult {
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
 #[serde(deny_unknown_fields)]
 pub struct ProviderEmbed {
+    /// Provider constraints frozen with this command; absent only on older retained commands.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub model_parameters: Option<orch_provider_contract::models::ModelParameters>,
     /// The provider whose endpoint makes the vectors and whose key, if it has one, pays for them.
     pub provider_id: Id,
     /// The protocol to make them in.
     pub protocol: String,
     /// The model, by the name that is sent.
     pub model_name: String,
+    /// Final endpoint-format options frozen by the issuer; legacy commands omit them.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub params: Option<Json>,
     /// The texts, each with whatever its model wants put before it already in place.
     pub inputs: Vec<String>,
     /// The length of vector asked of a model that can shorten its vectors; absent for its own length.
@@ -2501,6 +2534,9 @@ pub struct LeaseOpen {
     pub recipient: Option<MachineKey>,
     /// The models a request under the lease may name.
     pub allowed_models: Vec<String>,
+    /// Per-model provider ceilings frozen for this turn and retained in the local lease journal.
+    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+    pub model_parameters: BTreeMap<String, orch_provider_contract::models::ModelParameters>,
     /// What the turn may use before the forwarder refuses; absent when
     /// no cap covers it.
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -2599,6 +2635,74 @@ pub struct LeaseCloseResult {
     pub requests: i64,
     /// What they used together; `null` where that could not be read.
     pub usage: Option<foreign::TokenUsage>,
+    /// Actual factual groups already metered at this cut. Absent preserves the legacy aggregate.
+    /// An aware empty list with unknown aggregate usage does not establish measured zero.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub usage_groups: Option<Vec<LeaseUsageGroup>>,
+}
+
+/// Factual identity shared by the connector's aggregate and the host's stable ledger rows.
+/// Request identifiers, latency and performance state do not split an actual-tier group.
+#[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize, JsonSchema)]
+pub struct LeaseUsageGroupKey {
+    /// The admitted routing model.
+    pub model: String,
+    /// The actual upstream wire protocol, not the caller-facing translated format.
+    pub wire_protocol: Option<String>,
+    /// The tier in the final actual upstream request, where present.
+    pub requested_service_tier: Option<String>,
+    /// The actual upstream report, including explicit absence or unavailable capability.
+    pub reported_service_tier: orch_api_contract::usage::UsageMeasurement<String>,
+}
+
+impl LeaseUsageGroupKey {
+    /// The same actual factual key for both counter and host accounting.
+    #[must_use]
+    pub fn of(model: &str, timing: &orch_api_contract::usage::RequestTiming) -> Self {
+        Self {
+            model: model.to_owned(),
+            wire_protocol: timing.wire_protocol.clone(),
+            requested_service_tier: timing.requested_service_tier.clone(),
+            reported_service_tier: timing.reported_service_tier.clone(),
+        }
+    }
+}
+
+/// Cumulative native searches with an explicit completeness count.
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+pub struct LeaseSearchUsage {
+    /// The searches actually reported by the known requests.
+    pub searches: i64,
+    /// Requests with a reported count or no hosted search tool selected.
+    pub known_requests: i64,
+}
+
+/// Aggregate usage with one actual request/report state, never a requested-tier substitute.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+pub struct LeaseUsageGroup {
+    /// Search counts and how many requests supplied complete search facts; absent for older peers.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub search_usage: Option<LeaseSearchUsage>,
+    /// The admitted routing model.
+    pub model: String,
+    /// Exact inclusive token totals for this group.
+    pub usage: foreign::TokenUsage,
+    /// Requests which reported usage in this group.
+    pub requests: i64,
+    /// Conservative observed prompt-size bounds, retained when reports refine their state.
+    pub min_context_tokens: i64,
+    /// Conservative observed prompt-size bounds, retained when reports refine their state.
+    pub max_context_tokens: i64,
+    /// Actual factual request/report metadata; no performance value is inferred from tokens.
+    pub timing: orch_api_contract::usage::RequestTiming,
+}
+
+impl LeaseUsageGroup {
+    /// The shared factual identity, excluding totals, context bounds and performance.
+    #[must_use]
+    pub fn key(&self) -> LeaseUsageGroupKey {
+        LeaseUsageGroupKey::of(&self.model, &self.timing)
+    }
 }
 
 // ---------------------------------------------------------------- bodies: environments
@@ -4600,6 +4704,7 @@ mod tests {
             "sandbox_mode": "workspace",
             "available_models": [], "side_reading": null, "workspace_configuration": null,
             "subagent_limits": {"at_once": 8, "depth": 1},
+            "background_wake": true,
             "instructions": "You are working inside Orch.",
             "memory": { "directory": "/workspace/web/.orch/memory", "kept_by": "agent" },
             "arrangement": "separated",

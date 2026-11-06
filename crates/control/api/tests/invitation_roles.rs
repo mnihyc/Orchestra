@@ -8,6 +8,8 @@
 mod chat_world;
 mod places;
 mod support;
+use support::FullInvitationReply as _;
+use support::FullTokenReply as _;
 
 use orch_api_contract::access::Role;
 use orch_api_contract::common::ErrorCode;
@@ -100,6 +102,7 @@ async fn an_org_member_manager_cannot_invite_someone_above_their_own_role() {
             .body(&org_invitation(org.base.id, role))
             .send()
             .await
+            .full_invitation()
             .problem();
         assert_eq!(problem.code, ErrorCode::AuthzDenied);
     }
@@ -110,6 +113,7 @@ async fn an_org_member_manager_cannot_invite_someone_above_their_own_role() {
         .body(&org_invitation(org.base.id, Role::Viewer))
         .send()
         .await
+        .full_invitation()
         .ok();
     world
         .app
@@ -120,6 +124,7 @@ async fn an_org_member_manager_cannot_invite_someone_above_their_own_role() {
         })
         .send()
         .await
+        .full_invitation()
         .ok();
     let mut conn = world.conn().await;
     assert_eq!(
@@ -161,6 +166,7 @@ async fn a_node_invitation_can_offer_only_the_permissions_its_maker_can_give() {
         ])))
         .send()
         .await
+        .full_invitation()
         .problem();
     assert_eq!(too_much.code, ErrorCode::AuthzDenied);
     assert_eq!(too_much.extra["required"], "project.manage");
@@ -171,6 +177,7 @@ async fn a_node_invitation_can_offer_only_the_permissions_its_maker_can_give() {
         .body(&offer(Some(vec![])))
         .send()
         .await
+        .full_invitation()
         .problem();
     assert_eq!(empty.code, ErrorCode::RequestInvalid);
     sqlx::query("INSERT INTO permission_rows (object_kind, object_id, page, profile, permission, inherit) VALUES ('node', $1, 'live', 'any', 'chat.interact', false) ON CONFLICT (object_kind, object_id, page, profile, permission) DO UPDATE SET inherit = false")
@@ -182,6 +189,7 @@ async fn a_node_invitation_can_offer_only_the_permissions_its_maker_can_give() {
         .body(&offer(None))
         .send()
         .await
+        .full_invitation()
         .problem();
     assert_eq!(default_offer.code, ErrorCode::AuthzDenied);
     assert_eq!(default_offer.extra["required"], "chat.interact");
@@ -207,6 +215,7 @@ async fn a_scoped_token_cannot_invite_an_outsider_into_a_row_it_cannot_give() {
         .call(MeTokenCreate, &[])
         .token(&owner.token)
         .body(&ApiTokenCreateBody {
+            rules: None,
             name: "Access only".to_owned(),
             scopes: Some(vec![
                 "project.view".to_owned(),
@@ -215,13 +224,14 @@ async fn a_scoped_token_cannot_invite_an_outsider_into_a_row_it_cannot_give() {
             ]),
             node_id: Some(project.base.id),
             expires_at: None,
-            proof: SensitiveProof {
+            proof: Some(SensitiveProof {
                 password: Some(support::PASSWORD.to_owned()),
                 ..Default::default()
-            },
+            }),
         })
         .send()
         .await
+        .full_token()
         .ok()
         .token
         .unwrap();
@@ -244,6 +254,7 @@ async fn a_scoped_token_cannot_invite_an_outsider_into_a_row_it_cannot_give() {
         .body(&offer)
         .send()
         .await
+        .full_invitation()
         .problem();
     assert_eq!(problem.code, ErrorCode::AuthzDenied);
     assert_eq!(problem.extra["required"], "project.manage");
@@ -259,6 +270,7 @@ async fn a_scoped_token_cannot_invite_an_outsider_into_a_row_it_cannot_give() {
         .body(&offer)
         .send()
         .await
+        .full_invitation()
         .ok();
     assert_eq!(made.invitation.permissions, ["project.manage"]);
     world
@@ -268,6 +280,7 @@ async fn a_scoped_token_cannot_invite_an_outsider_into_a_row_it_cannot_give() {
         .body(&InvitationAcceptBody { token: made.token })
         .send()
         .await
+        .full_invitation()
         .ok();
     let (uses, entries): (i32, i64) = sqlx::query_as(
         "SELECT uses, (SELECT count(*) FROM permission_entries WHERE object_id = $2 AND permission = 'project.manage' AND holder_id = $3) FROM invitations WHERE id = $1",
@@ -305,6 +318,7 @@ async fn a_multi_use_node_link_rechecks_the_makers_row_authority_for_every_perso
         .body(&offer)
         .send()
         .await
+        .full_invitation()
         .ok();
     world
         .app
@@ -315,6 +329,7 @@ async fn a_multi_use_node_link_rechecks_the_makers_row_authority_for_every_perso
         })
         .send()
         .await
+        .full_invitation()
         .ok();
     sqlx::query("INSERT INTO permission_rows (object_kind, object_id, page, profile, permission, inherit) VALUES ('node', $1, 'live', 'any', 'project.view', false) ON CONFLICT (object_kind, object_id, page, profile, permission) DO UPDATE SET inherit = false")
         .bind(project.base.id).execute(&world.db.pool).await.unwrap();
@@ -327,6 +342,7 @@ async fn a_multi_use_node_link_rechecks_the_makers_row_authority_for_every_perso
         })
         .send()
         .await
+        .full_invitation()
         .problem();
     assert_eq!(problem.code, ErrorCode::AuthzDenied);
     assert_eq!(problem.extra["reason"], "invitation_issuer_authority_lost");
@@ -371,6 +387,7 @@ async fn a_changed_external_lifetime_refuses_the_grant_without_naming_a_hidden_p
         .body(&offer)
         .send()
         .await
+        .full_invitation()
         .ok();
     world
         .set_at(
@@ -386,6 +403,7 @@ async fn a_changed_external_lifetime_refuses_the_grant_without_naming_a_hidden_p
         .body(&InvitationAcceptBody { token: made.token })
         .send()
         .await
+        .full_invitation()
         .problem();
     assert_eq!(problem.code, ErrorCode::SharingExternalLifetimeExceeded);
     assert!(!problem.extra.contains_key("scope"));
@@ -425,6 +443,7 @@ async fn a_multi_use_group_link_does_not_add_a_person_when_its_maker_leaves_duri
         })
         .send()
         .await
+        .full_invitation()
         .ok();
     let accepted = room
         .world
@@ -436,6 +455,7 @@ async fn a_multi_use_group_link_does_not_add_a_person_when_its_maker_leaves_duri
         })
         .send()
         .await
+        .full_invitation()
         .ok();
     assert_eq!(accepted.chat.unwrap().id, group);
 
@@ -466,7 +486,7 @@ async fn a_multi_use_group_link_does_not_add_a_person_when_its_maker_leaves_duri
             .call(InvitationAccept, &[])
             .token(&token)
             .body(&InvitationAcceptBody { token: link });
-        request.send().await
+        request.send().await.full_invitation()
     });
     tokio::time::timeout(Duration::from_secs(10), async {
         loop {
@@ -544,6 +564,7 @@ async fn an_invitation_that_expires_while_its_capacity_lock_is_held_is_not_used(
         .body(&offer)
         .send()
         .await
+        .full_invitation()
         .ok();
     let mut held = world.db.pool.begin().await.unwrap();
     let pid: i32 = sqlx::query_scalar("SELECT pg_backend_pid()")
@@ -564,7 +585,7 @@ async fn an_invitation_that_expires_while_its_capacity_lock_is_held_is_not_used(
             .call(InvitationAccept, &[])
             .token(&token)
             .body(&InvitationAcceptBody { token: link });
-        request.send().await
+        request.send().await.full_invitation()
     });
     wait_for_invitation_lock(&world, pid).await;
     world.advance(chrono::Duration::hours(2));
@@ -600,6 +621,7 @@ async fn a_malformed_system_offer_carrying_a_role_is_never_used() {
         .body(&offer)
         .send()
         .await
+        .full_invitation()
         .ok();
     sqlx::query("UPDATE invitations SET role = 'admin' WHERE id = $1")
         .bind(made.invitation.id)
@@ -620,6 +642,7 @@ async fn a_malformed_system_offer_carrying_a_role_is_never_used() {
         .body(&InvitationAcceptBody { token: made.token })
         .send()
         .await
+        .full_invitation()
         .problem();
     assert_eq!(refused.code, ErrorCode::Gone);
     let (uses, elevated): (i32, bool) = sqlx::query_as(
@@ -642,6 +665,7 @@ async fn an_older_role_invitation_shows_only_the_role_it_will_grant() {
         .body(&invitation(project.base.id, Role::Viewer))
         .send()
         .await
+        .full_invitation()
         .ok();
     sqlx::query(
         "UPDATE invitations SET permissions = ARRAY['chat.view', 'chat.interact'] WHERE id = $1",
@@ -665,6 +689,7 @@ async fn an_older_role_invitation_shows_only_the_role_it_will_grant() {
         .body(&InvitationAcceptBody { token: made.token })
         .send()
         .await
+        .full_invitation()
         .ok();
     let mut conn = world.conn().await;
     assert_eq!(
@@ -711,6 +736,7 @@ async fn a_makers_timed_chat_membership_is_rechecked_after_waiting_for_the_chat_
         .body(&offer)
         .send()
         .await
+        .full_invitation()
         .ok();
     let mut held = room.world.db.pool.begin().await.unwrap();
     let pid: i32 = sqlx::query_scalar("SELECT pg_backend_pid()")
@@ -731,7 +757,7 @@ async fn a_makers_timed_chat_membership_is_rechecked_after_waiting_for_the_chat_
             .call(InvitationAccept, &[])
             .token(&token)
             .body(&InvitationAcceptBody { token: link });
-        request.send().await
+        request.send().await.full_invitation()
     });
     wait_for_invitation_lock(&room.world, pid).await;
     room.world.advance(chrono::Duration::seconds(2));
@@ -776,6 +802,7 @@ async fn a_makers_timed_node_role_is_rechecked_after_waiting_for_the_node_lock()
         .body(&invitation(project.base.id, Role::Developer))
         .send()
         .await
+        .full_invitation()
         .ok();
     let mut held = world.db.pool.begin().await.unwrap();
     let pid: i32 = sqlx::query_scalar("SELECT pg_backend_pid()")
@@ -796,7 +823,7 @@ async fn a_makers_timed_node_role_is_rechecked_after_waiting_for_the_node_lock()
             .call(InvitationAccept, &[])
             .token(&token)
             .body(&InvitationAcceptBody { token: link });
-        request.send().await
+        request.send().await.full_invitation()
     });
     wait_for_invitation_lock(&world, pid).await;
     world.advance(chrono::Duration::seconds(2));
@@ -854,6 +881,7 @@ async fn registering_with_a_node_invitation_rolls_back_the_account_and_home_when
         .body(&invitation(project.base.id, Role::Developer))
         .send()
         .await
+        .full_invitation()
         .ok();
     assert!(
         made.invitation.permissions.is_empty(),
@@ -923,6 +951,7 @@ async fn accepting_an_org_invitation_rechecks_the_makers_current_role() {
         .body(&org_invitation(org.base.id, Role::Developer))
         .send()
         .await
+        .full_invitation()
         .ok();
     {
         let mut conn = world.conn().await;
@@ -950,6 +979,7 @@ async fn accepting_an_org_invitation_rechecks_the_makers_current_role() {
         })
         .send()
         .await
+        .full_invitation()
         .problem();
     assert_eq!(problem.code, ErrorCode::AuthzDenied);
     let preview = world
@@ -1005,6 +1035,7 @@ async fn a_personal_invitation_tells_the_existing_confirmed_invitee_and_nobody_e
         .body(&body)
         .send()
         .await
+        .full_invitation()
         .ok();
     let rows: Vec<(Id, serde_json::Value)> =
         sqlx::query_as("SELECT user_id, data FROM notifications WHERE kind = 'invitation'")
@@ -1031,6 +1062,7 @@ async fn a_page_manager_who_is_no_admin_cannot_invite_somebody_as_admin() {
         .body(&invitation(project.base.id, Role::Admin))
         .send()
         .await
+        .full_invitation()
         .problem();
     assert_eq!(problem.code, ErrorCode::AuthzDenied);
 }
@@ -1065,6 +1097,7 @@ async fn accepting_a_role_invitation_rechecks_the_role_its_maker_may_give_now() 
         .body(&invitation(project.base.id, Role::Developer))
         .send()
         .await
+        .full_invitation()
         .ok();
     {
         let mut conn = world.conn().await;
@@ -1081,6 +1114,7 @@ async fn accepting_a_role_invitation_rechecks_the_role_its_maker_may_give_now() 
         })
         .send()
         .await
+        .full_invitation()
         .problem();
     assert_eq!(problem.code, ErrorCode::AuthzDenied);
     let mut conn = world.conn().await;
