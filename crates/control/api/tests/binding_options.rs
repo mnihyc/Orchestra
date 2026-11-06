@@ -620,7 +620,9 @@ async fn an_environment_that_has_served_only_other_topics_gives_a_new_directory_
         })
         .send()
         .await
-        .ok();
+        .ok()
+        .into_full()
+        .unwrap();
     let options = options_for(&s, &s.ada, thread).await;
     let listed = options
         .environments

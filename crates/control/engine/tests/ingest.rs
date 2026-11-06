@@ -323,14 +323,39 @@ async fn growing_text_is_held_and_written_before_what_ends_its_turn() {
     world.say(thread, message_began(start.turn_id, "m4")).await;
     world.say(thread, message_grew("m4", 0, "Half of ")).await;
     world.say(thread, message_grew("m4", 8, "an answer")).await;
+    let observed = std::sync::Mutex::new(None::<Json>);
     eventually("both stretches reach the live readers", || async {
-        world
-            .live
-            .deltas()
+        let item: Option<Id> =
+            sqlx::query_scalar("SELECT id FROM items WHERE thread_id=$1 AND native_ref='m4'")
+                .bind(thread)
+                .fetch_optional(world.pool.pool())
+                .await
+                .unwrap();
+        let deltas = world.live.deltas();
+        let snapshot = json!(deltas.iter().map(|delta| {
+            json!({"thread_id":delta.thread_id,"item_id":delta.item_id,"turn_id":delta.turn_id,
+                "stream":delta.stream,"field":delta.field,"offset":delta.offset,
+                "len":delta.len,"data":delta.data})
+        }).collect::<Vec<_>>());
+        let mut previous = observed.lock().unwrap();
+        if previous.as_ref() != Some(&snapshot) {
+            eprintln!(
+                "held-text-live thread={thread} turn={} deltas={snapshot}",
+                start.turn_id
+            );
+            *previous = Some(snapshot);
+        }
+        drop(previous);
+        deltas
             .iter()
-            .filter(|delta| delta.data == "Half of " || delta.data == "an answer")
-            .count()
-            == 2
+            .filter(|delta| {
+                delta.thread_id == thread
+                    && Some(delta.item_id) == item
+                    && delta.field == DeltaField::Text
+            })
+            .map(|delta| delta.data.as_str())
+            .collect::<String>()
+            == "Half of an answer"
     })
     .await;
     meanwhile(Duration::from_millis(200)).await;
@@ -339,6 +364,35 @@ async fn growing_text_is_held_and_written_before_what_ends_its_turn() {
         Some(""),
         "the pieces are held, not written to the item"
     );
+    let item: Id = world
+        .scalar(
+            "SELECT id FROM items WHERE thread_id=$1 AND native_ref='m4'",
+            thread,
+        )
+        .await;
+    let mut offset = 0;
+    let mut streamed = String::new();
+    for delta in world
+        .live
+        .deltas()
+        .into_iter()
+        .filter(|delta| delta.item_id == item)
+    {
+        assert_eq!(delta.thread_id, thread);
+        assert_eq!(delta.item_id, item);
+        assert_eq!(delta.turn_id, Some(start.turn_id));
+        assert_eq!(delta.stream, "main");
+        assert_eq!(delta.field, DeltaField::Text);
+        assert_eq!(delta.offset, offset, "live text has no gaps or duplicates");
+        assert_eq!(
+            delta.len,
+            i64::try_from(delta.data.chars().count()).unwrap()
+        );
+        offset += delta.len;
+        streamed.push_str(&delta.data);
+    }
+    assert_eq!(streamed, "Half of an answer");
+    assert_eq!(offset, i64::try_from(streamed.chars().count()).unwrap());
 
     world
         .say(thread, turn_ended(start.turn_id, TurnOutcome::Interrupted))

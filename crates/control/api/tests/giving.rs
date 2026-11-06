@@ -7,6 +7,7 @@
 
 mod places;
 mod support;
+use support::FullRoleReply as _;
 
 use orch_api_contract::access::{
     AccessChoice, AgentLevel, Holder, HolderInput, NodeDefaultsGet, NodeRoleCreate, NodeRoleList,
@@ -124,6 +125,7 @@ async fn give(
         })
         .send()
         .await
+        .full_role()
 }
 
 async fn the_policy(world: &World, place: Id, value: bool) {
@@ -424,6 +426,7 @@ async fn a_role_is_given_by_the_rule_of_the_rows_up_to_the_giver_s_own_and_taken
         })
         .send()
         .await
+        .full_role()
         .ok();
     assert_eq!(raised.role, Role::Interactor);
     // Where the place keeps sharing to its owners and to whoever manages its page, Fay gives none, and the owner still does.

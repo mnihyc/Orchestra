@@ -1,19 +1,17 @@
 /** One share with agents as a line of the Agents tab: whose agents, at what level in each area, until when, who shared it and since when, the level changed after being asked about, and the ✕ that takes it back.
  *
  * A live share is changed area by area; a copy is only taken back, which removes its files from the agent's
- * workspace. Whoever shared it, and whoever could share the same thing now, may change or take back a share:
+ * workspace. The source page’s managers, and its giver while they could still give it again, may take back a live share:
  * for anybody else the controls stand off and say so. Every change says what it does before it is made.
  */
 import { useMutation } from '@tanstack/react-query';
-import type { TFunction } from 'i18next';
 import { CalendarClock, X } from 'lucide-react';
 import { useState } from 'react';
 import { useTranslation } from 'react-i18next';
-import { choiceOption } from '@/i18n/choices';
 
 import type { AccessTarget } from '@/api/access';
 import { changeAgentShare, stopAgentShare } from '@/api/share';
-import type { AgentLevel, AgentShare, ShareParts } from '@/generated/api-types';
+import type { AgentShare, PermissionPage, ShareParts } from '@/generated/api-types';
 import { useAppearance } from '@/lib/appearance';
 import { Button } from '@/ui/Button';
 import { ByteSize } from '@/ui/ByteSize';
@@ -24,45 +22,36 @@ import { IconButton } from '@/ui/IconButton';
 import { DateField } from '@/ui/DateField';
 import { Select } from '@/ui/Select';
 
-import { type Area, areasOf, isCopy, levelNeeded, mayGiveParts, reachOf, stepOf, stepsOf, withStep } from './agentShares';
+import { type Area, areasOf, isCopy, mayGiveParts, reachOf, stepOf, stepsOf, withStep } from './agentShares';
+import { AgentPartsSummary, CurrentAgentContribution, ViewerReadStanding } from './AgentContribution';
 import { shortDate } from './holders';
 
-/** What a level is called in an area, in the words of the form: conversations and chats are read, or read and written; documents are read, read and edited, or managed. */
-export function stepWords(t: TFunction, area: Area, step: number): string {
-  if (step === 0) return t('access.agents.step.none');
-  if (step === 1) return t('access.agents.step.read');
-  if (step === 2) {
-    if (area === 'documents') return t('access.agents.step.edit');
-    return t('access.agents.step.write');
-  }
-  return t('access.agents.step.manage');
-}
-
-/** The short choice name, with the existing area-specific wording kept as its description. */
-export function stepOption(t: TFunction, area: Area, step: number) {
-  const word = step === 0 ? 'none' : step === 1 ? 'view' : step === 2 ? area === 'documents' ? 'edit' : 'write' : 'manage';
-  return { ...choiceOption(t, `agentStep.${word}`), description: stepWords(t, area, step) };
-}
-
-/** The areas of a share, named as the columns of the form are. */
-export const AREA_WORDS = { timeline: 'access.agents.area.timeline', chat: 'access.agents.area.chat', documents: 'access.agents.area.documents' } as const;
+import { AREA_WORDS, stepOption, stepWords } from './agentShareWords';
+export { AREA_WORDS, stepOption, stepWords } from './agentShareWords';
 
 interface Change {
   area: Area;
   parts: ShareParts;
 }
 
-export function AgentRow({ share, target, gives, meId }: { share: AgentShare; target: AccessTarget; gives: readonly AgentLevel[]; meId: string | undefined }) {
+export function AgentRow({ share, target, available, page, meId, remaining = [] }: { share: AgentShare; target: AccessTarget; available: ShareParts; page: PermissionPage | undefined; meId: string | undefined; remaining?: readonly AgentShare[] }) {
   const { t } = useTranslation();
   const locale = useAppearance((state) => state.locale);
   const copy = isCopy(share);
   const reach = reachOf(share);
   const areas = areasOf(target.kind, reach);
-  const mine = meId !== undefined && share.by.id === meId;
-  const may = mine || mayGiveParts(share.parts, gives);
+  const mine = meId !== undefined && share.by?.id === meId;
+  const affected = page?.rows.filter((row) => row.entries.some((entry) => share.entries.some((given) => given.id === entry.id))) ?? [];
+  const mayGive = mayGiveParts(share.parts, available) && affected.every((row) => row.can_give);
+  const mineAndGiveable = mine && mayGive;
+  const managesEntries = share.entries.length > 0 && share.entries.every((given) => affected.some((row) => row.writable && row.entries.some((entry) => entry.id === given.id)));
+  const managesLoan = !copy && !affected.some((row) => row.locked !== null) && (page?.owners_writable === true || managesEntries);
+  const may = mineAndGiveable || managesLoan;
+  const mayRemove = may;
   const why = may ? undefined : t('access.agents.notYoursToChange');
   const [asking, setAsking] = useState<Change | null>(null);
   const [removing, setRemoving] = useState(false);
+  const otherShares = removing ? remaining.filter((other) => other.id !== share.id) : [];
   const [ending, setEnding] = useState(false);
   const [until, setUntil] = useState('');
   const place = share.to.name ?? t('access.place.hidden');
@@ -115,12 +104,13 @@ export function AgentRow({ share, target, gives, meId }: { share: AgentShare; ta
             size="sm"
             label={copy ? t('access.agents.takeCopyBack', { name: share.to.name ?? '' }) : t('access.agents.stopFor', { name: share.to.name ?? '' })}
             icon={<X aria-hidden />}
-            disabled={!may}
+            disabled={!mayRemove}
             onClick={() => setRemoving(true)}
           />
         </div>
       </div>
 
+      {!copy && <p className="text-sm font-medium text-text">{t('agentContributions.requested')}</p>}
       {!copy && (
         <div role="group" aria-label={who} className="flex flex-wrap gap-x-4 gap-y-2">
           {areas.map((area) => (
@@ -136,8 +126,7 @@ export function AgentRow({ share, target, gives, meId }: { share: AgentShare; ta
                 if (step !== stepOf(area, share.parts)) setAsking({ area, parts: withStep(share.parts, area, step) });
               }}
               options={stepsOf(area).map((step) => {
-                const needed = levelNeeded(step);
-                const off = (needed !== null && !gives.includes(needed)) || (step === 0 && onlyArea);
+                const off = step > stepOf(area, available) || (step === 0 && onlyArea);
                 return { value: String(step), ...stepOption(t, area, step), disabled: off };
               })}
             />
@@ -145,7 +134,9 @@ export function AgentRow({ share, target, gives, meId }: { share: AgentShare; ta
         </div>
       )}
 
-      <p className="text-sm text-text-muted">{t('access.agents.by', { name: share.by.display_name, date })}</p>
+      {!copy && <CurrentAgentContribution current={share.current} />}
+      <ViewerReadStanding entries={share.viewer_entries} />
+      <p className="text-sm text-text-muted">{t('access.agents.by', { name: (share.by?.display_name ?? '').length > 0 ? share.by?.display_name : t('agentContributions.giverUnavailable'), date })}</p>
 
       <ConfirmDialog
         open={asking !== null}
@@ -183,7 +174,13 @@ export function AgentRow({ share, target, gives, meId }: { share: AgentShare; ta
         error={stop.error}
         onConfirm={() => stop.mutate()}
       >
-        {copy ? t('access.agents.takeBack.body', { name: share.to.name ?? '' }) : t('access.agents.stop.body')}
+        {copy ? t('access.agents.takeBack.body', { name: share.to.name ?? '' }) : <div className="flex flex-col gap-2">
+          <p>{t('access.agents.stop.body')}</p><ViewerReadStanding entries={share.viewer_entries} />
+          {otherShares.length > 0 && <><p className="font-medium">{t('agentContributions.remaining')}</p><ul className="flex flex-col gap-2">{otherShares.map((other) => <li key={other.id}>
+            <p>{t('agentContributions.recordedFor', { giver: (other.by?.display_name ?? '').length > 0 ? other.by?.display_name : t('agentContributions.giverUnavailable'), recipient: other.to.name ?? t('access.place.hidden') })}</p>
+            <p className="text-xs text-text-muted">{t('agentContributions.requested')}</p><AgentPartsSummary parts={other.parts} />
+          </li>)}</ul></>}
+        </div>}
       </ConfirmDialog>
 
       <Dialog

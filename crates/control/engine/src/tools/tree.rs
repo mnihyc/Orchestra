@@ -29,7 +29,7 @@ use crate::written::{FILES_SUFFIX, HISTORY_SUFFIX};
 use globset::{Glob, GlobMatcher};
 use orch_api_contract::share::{SharedEntryKind, SharedEntryUnit, SharedEntryVia};
 use orch_authz::documents::Document;
-use orch_authz::reach::{self, Agent, AgentReach, Reach, Standing, Things, Via};
+use orch_authz::reach::{self, Agent, Reach, Standing, Things, Via};
 use orch_db::Conn;
 use orch_db::queries::documents as document_rows;
 use orch_db::queries::shares::{self as rows, PlaceRow};
@@ -394,7 +394,6 @@ impl Entry {
 
 fn via_of(via: Via) -> SharedEntryVia {
     match via {
-        Via::Policy => SharedEntryVia::Policy,
         Via::Share => SharedEntryVia::Share,
         Via::Topic => SharedEntryVia::Topic,
     }
@@ -919,41 +918,26 @@ impl Tree {
     pub async fn load(
         conn: &mut Conn,
         agent: Agent,
-        policy: AgentReach,
-        documents_policy: reach::DocumentPolicy,
         now: Time,
         scope: Scope,
     ) -> Result<Self, EngineError> {
-        Self::load_selected(conn, agent, policy, documents_policy, now, scope, None).await
+        Self::load_selected(conn, agent, now, scope, None).await
     }
 
     /// Reads indexed source candidates and file directories, preserving ordinary reach and canonical names.
     pub async fn load_search(
         conn: &mut Conn,
         agent: Agent,
-        policy: AgentReach,
-        documents_policy: reach::DocumentPolicy,
         now: Time,
         scope: Scope,
         selected: &orch_db::queries::search::CandidateSet,
     ) -> Result<Self, EngineError> {
-        Self::load_selected(
-            conn,
-            agent,
-            policy,
-            documents_policy,
-            now,
-            scope,
-            Some(selected),
-        )
-        .await
+        Self::load_selected(conn, agent, now, scope, Some(selected)).await
     }
 
     async fn load_selected(
         conn: &mut Conn,
         agent: Agent,
-        policy: AgentReach,
-        documents_policy: reach::DocumentPolicy,
         now: Time,
         scope: Scope,
         search_parts: Option<&orch_db::queries::search::CandidateSet>,
@@ -968,7 +952,7 @@ impl Tree {
         let loaded = if let Some(parts) = search_parts.filter(|_| headers_only) {
             loading::headers(conn, &agent, parts, scope).await?
         } else {
-            loading::load(conn, &agent, policy, scope, &grants).await?
+            loading::load(conn, &agent, scope, &grants).await?
         };
         let places = loaded.places;
         let capped = loaded.capped;
@@ -1168,10 +1152,9 @@ impl Tree {
             .iter()
             .find(|place| place.id == agent.thread)
             .and_then(|place| place.environment_id);
-        let reach = Reach::load(
+        let reach = Reach::load_current(
             conn,
             agent.clone(),
-            policy,
             now,
             &Things {
                 nodes: ids.clone(),
@@ -1183,8 +1166,7 @@ impl Tree {
                 people_chats: people_ids.clone(),
             },
         )
-        .await?
-        .with_document_policy(documents_policy);
+        .await?;
         let member_names = if headers_only {
             HashMap::new()
         } else {

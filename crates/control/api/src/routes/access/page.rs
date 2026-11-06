@@ -24,7 +24,7 @@ use orch_db::queries::{access, hierarchy};
 use orch_types::{Id, Time};
 use serde::Serialize;
 use serde::de::DeserializeOwned;
-use std::collections::{HashMap, HashSet};
+use std::collections::{BTreeSet, HashMap, HashSet};
 
 /// A word of one contract as the same word of another.
 pub fn same<A: Serialize, B: DeserializeOwned>(word: &A) -> Option<B> {
@@ -40,6 +40,19 @@ pub(crate) async fn user_refs_at(
     root: Option<Id>,
     users: &[Id],
 ) -> ApiResult<HashMap<Id, UserRef>> {
+    user_refs_at_bounded(conn, principal, root, users, None).await
+}
+
+pub(crate) async fn user_refs_at_bounded(
+    conn: &mut Conn,
+    principal: &Principal,
+    root: Option<Id>,
+    users: &[Id],
+    bounds: Option<&NameBounds>,
+) -> ApiResult<HashMap<Id, UserRef>> {
+    if users.is_empty() {
+        return Ok(HashMap::new());
+    }
     let mut names = user_refs(conn, users).await?;
     let addresses = access::holder_user_addresses(conn, users).await?;
     let domains: Vec<Id> = addresses.iter().map(|(_, _, domain, _)| *domain).collect();
@@ -60,6 +73,7 @@ pub(crate) async fn user_refs_at(
     .collect();
     for (user, tree, domain, address) in addresses {
         if visible.contains(&domain)
+            && bounds.is_none_or(|bounds| bounds.nodes.contains(&domain))
             && root.is_none_or(|root| root == tree)
             && let Some(named) = names.get_mut(&user)
         {
@@ -67,6 +81,154 @@ pub(crate) async fn user_refs_at(
         }
     }
     Ok(names)
+}
+
+/// Names already admitted by this operation's shared typed scope binder. Ordinary page readers
+/// pass no bound; this only narrows protected names and domain-derived addresses.
+#[derive(Clone, Default)]
+pub(crate) struct NameBounds {
+    /// False for ordinary callers: preserve the exact existing unbounded name producer.
+    pub(crate) limited: bool,
+    pub(crate) nodes: BTreeSet<Id>,
+    pub(crate) containers: BTreeSet<Id>,
+}
+impl NameBounds {
+    pub(crate) async fn refs(
+        &self,
+        conn: &mut Conn,
+        principal: &Principal,
+        ids: &[Id],
+    ) -> ApiResult<HashMap<Id, NodeRef>> {
+        if self.limited {
+            view::refs_with_name_sources(conn, principal, ids, Policy::default(), &self.nodes).await
+        } else {
+            view::refs(conn, principal, ids, Policy::default()).await
+        }
+    }
+
+    /// Names the same visible qualified paths as the page, within this operation's bound.
+    pub(crate) async fn qualified_refs(
+        &self,
+        conn: &mut Conn,
+        principal: &Principal,
+        ids: &[Id],
+    ) -> ApiResult<HashMap<Id, NodeRef>> {
+        qualified_refs_bounded(conn, principal, ids, self.limited.then_some(self)).await
+    }
+
+    /// Keeps every folder identity and its ordinary redaction while bounding name lookup.
+    pub(crate) async fn container_refs(
+        &self,
+        conn: &mut Conn,
+        principal: &Principal,
+        ids: &[Id],
+    ) -> ApiResult<HashMap<Id, orch_api_contract::document_tree::DocumentContainerRef>> {
+        container_refs_bounded(conn, principal, ids, self.limited.then_some(self)).await
+    }
+}
+
+async fn qualified_refs_bounded(
+    conn: &mut Conn,
+    principal: &Principal,
+    ids: &[Id],
+    bounds: Option<&NameBounds>,
+) -> ApiResult<HashMap<Id, NodeRef>> {
+    let Some(bounds) = bounds else {
+        return view::qualified_refs(conn, principal, ids, Policy::default()).await;
+    };
+    let graph = orch_authz::engine::Graph::load(conn, ids)
+        .await
+        .map_err(ApiError::internal)?;
+    let all: BTreeSet<Id> = ids
+        .iter()
+        .flat_map(|id| {
+            graph
+                .get(*id)
+                .into_iter()
+                .flat_map(|node| node.path.iter().copied())
+        })
+        .collect();
+    let refs = view::refs_with_name_sources(
+        conn,
+        principal,
+        &all.into_iter().collect::<Vec<_>>(),
+        Policy::default(),
+        &bounds.nodes,
+    )
+    .await?;
+    Ok(ids
+        .iter()
+        .filter_map(|id| {
+            let named = if bounds.nodes.contains(id) {
+                view::qualified_from(&graph, &refs, *id)
+            } else {
+                refs.get(id).cloned()
+            };
+            named.map(|named| (*id, named))
+        })
+        .collect())
+}
+
+/// The source identities the existing page projection may name. Public people remain public;
+/// their identifiers let the caller resolve optional domain-derived addresses. Group DTOs need
+/// admission as a whole before projection because they have no redacted wire form.
+#[derive(Clone, Default)]
+pub(crate) struct NameSources {
+    pub(crate) users: BTreeSet<Id>,
+    pub(crate) groups: BTreeSet<Id>,
+    pub(crate) nodes: BTreeSet<Id>,
+    pub(crate) containers: BTreeSet<Id>,
+}
+
+/// The identities named by a page, without loading names, member lists or content.
+pub(crate) fn page_name_sources(page: &PageView) -> NameSources {
+    Wanted::page(page).sources(page.role_place)
+}
+
+/// The identities named by permission entries, including their recorded givers.
+pub(crate) fn entry_name_sources(entries: &[Entry], role_place: Option<Id>) -> NameSources {
+    Wanted::entries(entries).sources(role_place)
+}
+
+/// The identities named by effective-access holder chains, using the ordinary holder walk.
+pub(crate) fn holder_list_name_sources(
+    lists: &[Vec<Holder>],
+    role_place: Option<Id>,
+) -> NameSources {
+    Wanted::holder_lists(lists).sources(role_place)
+}
+
+async fn container_refs_bounded(
+    conn: &mut Conn,
+    principal: &Principal,
+    ids: &[Id],
+    bounds: Option<&NameBounds>,
+) -> ApiResult<HashMap<Id, orch_api_contract::document_tree::DocumentContainerRef>> {
+    let Some(bounds) = bounds else {
+        return crate::routes::document_tree::container_refs(conn, principal, ids).await;
+    };
+    let admitted: Vec<Id> = ids
+        .iter()
+        .copied()
+        .filter(|id| bounds.containers.contains(id))
+        .collect();
+    let mut refs: HashMap<_, _> = ids
+        .iter()
+        .map(|id| {
+            (
+                *id,
+                orch_api_contract::document_tree::DocumentContainerRef {
+                    id: *id,
+                    kind:
+                        orch_api_contract::document_tree::DocumentContainerMark::DocumentContainer,
+                    name: None,
+                    redacted: true,
+                },
+            )
+        })
+        .collect();
+    refs.extend(crate::routes::document_tree::container_refs(conn, principal, &admitted).await?);
+    Ok(refs)
 }
 
 /// Everyone and everything a page names, looked up.
@@ -99,6 +261,55 @@ struct Wanted {
 }
 
 impl Wanted {
+    fn page(page: &PageView) -> Self {
+        let mut wanted = Self::default();
+        wanted.users.extend(page.first_owner);
+        for entry in &page.owners {
+            wanted.entry(entry);
+        }
+        for row in &page.rows {
+            for entry in &row.entries {
+                wanted.entry(entry);
+            }
+            for inherited in row.inherited.iter().flatten() {
+                wanted.entry(&inherited.entry);
+                wanted.origin(inherited.from);
+            }
+            if let Some(lock) = &row.locked {
+                wanted.place(lock.by);
+            }
+        }
+        for place in &page.admins_of {
+            wanted.place(*place);
+        }
+        wanted
+    }
+
+    fn entries(entries: &[Entry]) -> Self {
+        let mut wanted = Self::default();
+        for entry in entries {
+            wanted.entry(entry);
+        }
+        wanted
+    }
+
+    fn holder_lists(lists: &[Vec<Holder>]) -> Self {
+        let mut wanted = Self::default();
+        for holder in lists.iter().flatten() {
+            wanted.holder(holder);
+        }
+        wanted
+    }
+
+    fn sources(self, role_place: Option<Id>) -> NameSources {
+        NameSources {
+            users: self.users.into_iter().collect(),
+            groups: self.groups.into_iter().collect(),
+            nodes: self.nodes.into_iter().chain(role_place).collect(),
+            containers: self.containers.into_iter().collect(),
+        }
+    }
+
     fn holder(&mut self, holder: &Holder) {
         match *holder {
             Holder::Role { role, at } => {
@@ -115,7 +326,9 @@ impl Wanted {
     }
 
     fn entry(&mut self, entry: &Entry) {
-        self.entries.push(entry.id);
+        if matches!(&entry.holder, Holder::Agents { .. }) {
+            self.entries.push(entry.id);
+        }
         self.holder(&entry.holder);
         self.users.extend(entry.created_by);
     }
@@ -135,6 +348,24 @@ impl Wanted {
 }
 
 impl Names {
+    /// Ordinary permission entries, using exactly the page's holder and identity redaction.
+    pub(crate) async fn entries(
+        conn: &mut Conn,
+        principal: &Principal,
+        root: Option<Id>,
+        place: Option<Id>,
+        entries: &[Entry],
+    ) -> ApiResult<Vec<api::Entry>> {
+        let mut wanted = Wanted::default();
+        for entry in entries {
+            wanted.entry(entry);
+        }
+        let names = Self::load(conn, principal, root, place, principal.now(), wanted, None).await?;
+        Ok(entries
+            .iter()
+            .filter_map(|entry| names.entry(entry))
+            .collect())
+    }
     /// Names a list of holders by the same visibility rules as a permission page.
     pub(crate) async fn holders(
         conn: &mut Conn,
@@ -147,12 +378,58 @@ impl Names {
         for holder in holders {
             wanted.holder(holder);
         }
-        let names = Self::load(conn, principal, root, place, principal.now(), wanted).await?;
+        let names = Self::load(conn, principal, root, place, principal.now(), wanted, None).await?;
         Ok(holders
             .iter()
             .filter_map(|holder| names.holder(holder))
             .collect())
     }
+    /// The same holder producer with operation-admitted protected names. Group data itself
+    /// must already be admitted by the caller because Group has no redacted DTO variant.
+    pub(crate) async fn holders_bounded(
+        conn: &mut Conn,
+        principal: &Principal,
+        root: Option<Id>,
+        place: Option<Id>,
+        holders: &[Holder],
+        bounds: &NameBounds,
+    ) -> ApiResult<Vec<api::Holder>> {
+        let mut wanted = Wanted::default();
+        for holder in holders {
+            wanted.holder(holder);
+        }
+        let names = Self::load(
+            conn,
+            principal,
+            root,
+            place,
+            principal.now(),
+            wanted,
+            bounds.limited.then_some(bounds),
+        )
+        .await?;
+        Ok(holders
+            .iter()
+            .filter_map(|holder| names.holder(holder))
+            .collect())
+    }
+
+    /// The same entry producer with operation-admitted protected names.
+    pub(crate) async fn entries_bounded(
+        conn: &mut Conn,
+        principal: &Principal,
+        root: Option<Id>,
+        place: Option<Id>,
+        entries: &[Entry],
+        bounds: &NameBounds,
+    ) -> ApiResult<Vec<api::Entry>> {
+        let named = entries_named_at_bounded(conn, principal, root, place, entries, bounds).await?;
+        Ok(entries
+            .iter()
+            .filter_map(|entry| named.get(&entry.id).cloned())
+            .collect())
+    }
+
     /// [`Names::holders`] of several lists, every list named as that would name it, with one
     /// lookup for all of them: a holder's name and head count depend on that holder alone.
     pub(crate) async fn holder_lists(
@@ -162,11 +439,48 @@ impl Names {
         place: Option<Id>,
         lists: &[Vec<Holder>],
     ) -> ApiResult<Vec<Vec<api::Holder>>> {
-        let mut wanted = Wanted::default();
-        for holder in lists.iter().flatten() {
-            wanted.holder(holder);
-        }
-        let names = Self::load(conn, principal, root, place, principal.now(), wanted).await?;
+        Self::holder_lists_with(conn, principal, root, place, lists, None).await
+    }
+
+    /// The same holder-chain projection with operation-admitted names. The caller admits each
+    /// full Group source first; role head counts remain metadata of the authorized page.
+    pub(crate) async fn holder_lists_bounded(
+        conn: &mut Conn,
+        principal: &Principal,
+        root: Option<Id>,
+        place: Option<Id>,
+        lists: &[Vec<Holder>],
+        bounds: &NameBounds,
+    ) -> ApiResult<Vec<Vec<api::Holder>>> {
+        Self::holder_lists_with(
+            conn,
+            principal,
+            root,
+            place,
+            lists,
+            bounds.limited.then_some(bounds),
+        )
+        .await
+    }
+
+    async fn holder_lists_with(
+        conn: &mut Conn,
+        principal: &Principal,
+        root: Option<Id>,
+        place: Option<Id>,
+        lists: &[Vec<Holder>],
+        bounds: Option<&NameBounds>,
+    ) -> ApiResult<Vec<Vec<api::Holder>>> {
+        let names = Self::load(
+            conn,
+            principal,
+            root,
+            place,
+            principal.now(),
+            Wanted::holder_lists(lists),
+            bounds,
+        )
+        .await?;
         Ok(lists
             .iter()
             .map(|holders| {
@@ -186,6 +500,7 @@ impl Names {
         role_place: Option<Id>,
         now: Time,
         wanted: Wanted,
+        bounds: Option<&NameBounds>,
     ) -> ApiResult<Self> {
         // How many people the roles named stand for, for all of them in one statement.
         let mut chips: Vec<(Role, Option<Id>)> =
@@ -202,9 +517,15 @@ impl Names {
                 )
             })
             .collect();
-        let heads = access::role_head_counts(conn, &words, now.get()).await?;
-        let read_first: HashSet<Id> = sqlx::query_scalar("SELECT id FROM permission_entries WHERE id=ANY($1) AND read_first AND holder_kind='agents' AND permission='doc.view'")
-            .bind(&wanted.entries).fetch_all(&mut *conn).await.map_err(orch_db::DbError::from)?.into_iter().collect();
+        let heads = orch_authz::holders::role_head_counts(conn, &words, now)
+            .await
+            .map_err(ApiError::internal)?;
+        let read_first: HashSet<Id> = if wanted.entries.is_empty() {
+            HashSet::new()
+        } else {
+            sqlx::query_scalar("SELECT id FROM permission_entries WHERE id=ANY($1) AND read_first AND holder_kind='agents' AND permission='doc.view'")
+                .bind(&wanted.entries).fetch_all(&mut *conn).await.map_err(orch_db::DbError::from)?.into_iter().collect()
+        };
         let counts: HashMap<(Role, Option<Id>), i64> = chips.into_iter().zip(heads).collect();
         let mut users = wanted.users;
         users.sort_unstable();
@@ -216,16 +537,24 @@ impl Names {
         nodes.extend(role_place);
         nodes.sort_unstable();
         nodes.dedup();
-        let user_names = user_refs_at(conn, principal, root, &users).await?;
-        let group_rows = access::groups_full(conn, &groups).await?;
-        let node_refs = view::qualified_refs(conn, principal, &nodes, Policy::default()).await?;
+        let user_names = user_refs_at_bounded(conn, principal, root, &users, bounds).await?;
+        let group_rows = if groups.is_empty() {
+            Vec::new()
+        } else {
+            access::groups_full(conn, &groups).await?
+        };
+        let node_refs = qualified_refs_bounded(conn, principal, &nodes, bounds).await?;
         let container_refs =
-            crate::routes::document_tree::container_refs(conn, principal, &wanted.containers)
-                .await?;
+            container_refs_bounded(conn, principal, &wanted.containers, bounds).await?;
         let group_orgs: Vec<Id> = group_rows.iter().map(|row| row.org_id).collect();
-        let group_places =
-            view::qualified_refs(conn, principal, &group_orgs, Policy::default()).await?;
-        let group_people = access::group_people(conn, &groups, i64::MAX, now.get()).await?;
+        let group_places = qualified_refs_bounded(conn, principal, &group_orgs, bounds).await?;
+        let group_people = if group_rows.is_empty() {
+            Vec::new()
+        } else {
+            orch_authz::holders::group_people(conn, &groups, now)
+                .await
+                .map_err(ApiError::internal)?
+        };
         let mut group_counts = HashMap::<Id, i64>::new();
         for (group, _) in group_people {
             *group_counts.entry(group).or_default() += 1;
@@ -426,6 +755,18 @@ fn row(row: &RowView, names: &Names) -> api::PermissionRow {
 
 /// What the reader of a page may give, in the words of the API.
 fn gives(gives: &Gives) -> api::PageGives {
+    use orch_access_contract::permissions::Permission as P;
+    use orch_api_contract::share::{ShareDocumentsLevel, ShareLevel, ShareParts};
+    let held = |permission| gives.agent_permissions.contains(&permission);
+    let level = |read, write| {
+        if held(write) {
+            Some(ShareLevel::Write)
+        } else if held(read) {
+            Some(ShareLevel::Read)
+        } else {
+            None
+        }
+    };
     api::PageGives {
         choices: gives.choices.iter().filter_map(same).collect(),
         roles: gives.roles.iter().filter_map(same).collect(),
@@ -438,6 +779,19 @@ fn gives(gives: &Gives) -> api::PageGives {
                 AgentLevel::Manage => api::AgentLevel::Manage,
             })
             .collect(),
+        agent_parts: ShareParts {
+            timeline: level(P::ThreadView, P::ThreadInteract),
+            chat: level(P::ChatView, P::ChatInteract),
+            documents: if held(P::DocManage) {
+                Some(ShareDocumentsLevel::Manage)
+            } else if held(P::DocEdit) {
+                Some(ShareDocumentsLevel::Edit)
+            } else if held(P::DocView) {
+                Some(ShareDocumentsLevel::Read)
+            } else {
+                None
+            },
+        },
         holders_share: gives.holders_share,
     }
 }
@@ -450,27 +804,52 @@ pub async fn permission_page(
     root: Option<Id>,
     now: Time,
 ) -> ApiResult<api::PermissionPage> {
-    let mut wanted = Wanted::default();
-    wanted.users.extend(view_of.first_owner);
-    for entry in &view_of.owners {
-        wanted.entry(entry);
-    }
-    for each in &view_of.rows {
-        for entry in &each.entries {
-            wanted.entry(entry);
-        }
-        for inherited in each.inherited.iter().flatten() {
-            wanted.entry(&inherited.entry);
-            wanted.origin(inherited.from);
-        }
-        if let Some(lock) = &each.locked {
-            wanted.place(lock.by);
-        }
-    }
-    for place in &view_of.admins_of {
-        wanted.place(*place);
-    }
-    let names = Names::load(conn, principal, root, view_of.role_place, now, wanted).await?;
+    permission_page_with(conn, principal, view_of, root, now, None, None).await
+}
+
+/// The same page projection with operation-admitted external names. Its own ACL information,
+/// counts and object name retain the existing page authority, including Manage-only inspection.
+/// The caller admits full Group and dependency sources before this producer materializes them.
+pub(crate) async fn permission_page_bounded(
+    conn: &mut Conn,
+    principal: &Principal,
+    view_of: &PageView,
+    root: Option<Id>,
+    now: Time,
+    bounds: &NameBounds,
+    dependencies: &super::dependencies::PreparedDependencies,
+) -> ApiResult<api::PermissionPage> {
+    permission_page_with(
+        conn,
+        principal,
+        view_of,
+        root,
+        now,
+        bounds.limited.then_some(bounds),
+        Some(dependencies),
+    )
+    .await
+}
+
+async fn permission_page_with(
+    conn: &mut Conn,
+    principal: &Principal,
+    view_of: &PageView,
+    root: Option<Id>,
+    now: Time,
+    bounds: Option<&NameBounds>,
+    dependencies: Option<&super::dependencies::PreparedDependencies>,
+) -> ApiResult<api::PermissionPage> {
+    let names = Names::load(
+        conn,
+        principal,
+        root,
+        view_of.role_place,
+        now,
+        Wanted::page(view_of),
+        bounds,
+    )
+    .await?;
     let admin_places: Vec<Id> = view_of
         .admins_of
         .iter()
@@ -538,7 +917,12 @@ pub async fn permission_page(
         followers: view_of.followers,
         gives: gives(&view_of.gives),
         covers: None,
-        depends: super::dependencies::of_page(conn, principal, view_of).await?,
+        depends: match dependencies {
+            Some(prepared) => {
+                super::dependencies::project_page(conn, principal, prepared, bounds).await?
+            }
+            None => super::dependencies::of_page(conn, principal, view_of).await?,
+        },
         reaches: None,
         revision: view_of.revision,
     })
@@ -568,7 +952,45 @@ pub async fn entries_named_at(
     for entry in entries {
         wanted.entry(entry);
     }
-    let names = Names::load(conn, principal, root, role_place, principal.now(), wanted).await?;
+    let names = Names::load(
+        conn,
+        principal,
+        root,
+        role_place,
+        principal.now(),
+        wanted,
+        None,
+    )
+    .await?;
+    Ok(entries
+        .iter()
+        .filter_map(|entry| names.entry(entry).map(|named| (entry.id, named)))
+        .collect())
+}
+
+/// [`entries_named_at`] with the caller's current operation-level name bound.
+pub(crate) async fn entries_named_at_bounded(
+    conn: &mut Conn,
+    principal: &Principal,
+    root: Option<Id>,
+    role_place: Option<Id>,
+    entries: &[Entry],
+    bounds: &NameBounds,
+) -> ApiResult<HashMap<Id, api::Entry>> {
+    let mut wanted = Wanted::default();
+    for entry in entries {
+        wanted.entry(entry);
+    }
+    let names = Names::load(
+        conn,
+        principal,
+        root,
+        role_place,
+        principal.now(),
+        wanted,
+        bounds.limited.then_some(bounds),
+    )
+    .await?;
     Ok(entries
         .iter()
         .filter_map(|entry| names.entry(entry).map(|named| (entry.id, named)))

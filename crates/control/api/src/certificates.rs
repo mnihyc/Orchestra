@@ -42,8 +42,8 @@ use orch_pki::PkiError;
 use orch_pki::ca::{CertificateAuthority, Holder};
 use orch_pki::certificates::{Certificate, CertificateRequest, Identity, ServiceName};
 use orch_pki::enrollment::{
-    EnrollError, TokenGrant, TokenLedger, TokenPurpose, enroll as pki_enroll, issue_token,
-    token_digest,
+    EnrollError, IssuedToken, TokenGrant, TokenLedger, TokenPurpose, enroll as pki_enroll,
+    issue_token, token_digest,
 };
 use orch_pki::renewal::{
     MachineRecord, RenewalError, RenewalPolicy, RenewalProof, RenewalProofFault,
@@ -405,6 +405,52 @@ impl CertificateService {
         self.issue_token_choices(request, None, None).await
     }
 
+    /// Issues the same runtime enrollment token on the caller's connection, so its
+    /// authorization, sealed secret and private job checkpoint may commit together.
+    pub async fn issue_runtime_token_in(
+        &self,
+        conn: &mut orch_db::Conn,
+        request: &TokenRequest,
+    ) -> Result<NewToken, LinkFault> {
+        let TokenFor::Runtime { runtime } = request.purpose else {
+            return Err(LinkFault::invalid(
+                "this issuance requires a runtime target",
+            ));
+        };
+        let issued = self.fresh_token();
+        Self::store_runtime_token(conn, request, runtime, &issued).await
+    }
+
+    fn fresh_token(&self) -> IssuedToken {
+        issue_token(
+            &self.inner.authority,
+            self.inner.settings.token_ttl,
+            self.inner.clock.as_ref(),
+        )
+    }
+
+    async fn store_runtime_token(
+        conn: &mut orch_db::Conn,
+        request: &TokenRequest,
+        runtime: Id,
+        issued: &IssuedToken,
+    ) -> Result<NewToken, LinkFault> {
+        resources::hosting::insert_runtime_token(
+            conn,
+            &raw_hash(&issued.digest),
+            request.created_by,
+            request.name_hint.as_deref(),
+            runtime,
+            utc(issued.expires_at),
+        )
+        .await?;
+        Ok(NewToken {
+            token: issued.token.to_string(),
+            expires_at: issued.expires_at,
+            receipt: issued.digest.clone(),
+        })
+    }
+
     /// Issues a connector token bound to the roles and local handover its command names.
     pub async fn issue_machine_token(
         &self,
@@ -449,11 +495,7 @@ impl CertificateService {
         choices: Option<&EnrollmentChoices>,
         home: Option<Id>,
     ) -> Result<NewToken, LinkFault> {
-        let mut issued = issue_token(
-            &self.inner.authority,
-            self.inner.settings.token_ttl,
-            self.inner.clock.as_ref(),
-        );
+        let mut issued = self.fresh_token();
         if let Some(choices) = choices {
             issued.token = issued
                 .token
@@ -484,20 +526,7 @@ impl CertificateService {
             TokenFor::Host { home } => ("host", home),
             TokenFor::Runtime { runtime } => {
                 let mut conn = self.inner.db.acquire().await?;
-                resources::hosting::insert_runtime_token(
-                    &mut conn,
-                    &raw_hash(&issued.digest),
-                    request.created_by,
-                    request.name_hint.as_deref(),
-                    runtime,
-                    utc(issued.expires_at),
-                )
-                .await?;
-                return Ok(NewToken {
-                    token: issued.token.to_string(),
-                    expires_at: issued.expires_at,
-                    receipt: issued.digest.clone(),
-                });
+                return Self::store_runtime_token(&mut conn, request, runtime, &issued).await;
             }
         };
         let row = TokenRow {

@@ -14,10 +14,12 @@
 
 pub mod candidates;
 pub mod dependencies;
+pub(crate) mod operations;
 pub mod page;
 pub mod previews;
 pub mod readers;
 pub mod requests;
+mod role_operations;
 pub mod share_preview;
 pub mod subject;
 pub mod thread_environment;
@@ -54,18 +56,30 @@ pub fn mount(registry: &mut Registry) {
         .on(api::PermissionCatalogueGet, catalogue)
         .on(api::HolderSearch, candidates::search)
         .on(api::NodeRoleList, role_list)
-        .on(api::NodeRoleCreate, role_create)
-        .on(api::RoleUpdate, role_update)
-        .on(api::RoleDelete, role_delete)
-        .on(api::PermissionPageGet, page_get)
+        .on_with_operation(api::NodeRoleCreate, role_operations::create, role_create)
+        .on_with_operation(api::RoleUpdate, role_operations::update, role_update)
+        .on_with_operation(api::RoleDelete, role_operations::delete, role_delete)
+        .on_with_operation(api::PermissionPageGet, operations::page, page_get)
         .on(api::PermissionPageUpdate, page_update)
-        .on(api::EffectiveAccessGet, readers::effective)
-        .on(api::PermissionPeopleList, readers::people)
+        .on_with_operation(
+            api::EffectiveAccessGet,
+            operations::effective,
+            readers::effective,
+        )
+        .on_with_operation(
+            api::PermissionPeopleList,
+            operations::people,
+            readers::people,
+        )
         .on(api::HistoryList, readers::history)
-        .on(api::NodeDefaultsGet, defaults_get)
+        .on_with_operation(api::NodeDefaultsGet, operations::defaults, defaults_get)
         .on(api::NodeDefaultsUpdate, defaults_update)
         .on(api::PermissionPagePreview, previews::page)
-        .on(api::SharePreviewCreate, share_preview::create)
+        .on_with_operation(
+            api::SharePreviewCreate,
+            share_preview::resolve,
+            share_preview::create,
+        )
         .on(api::NodeDefaultsPreview, previews::node_defaults)
         .on(
             orch_api_contract::admin::AdminDefaultsPreview,
@@ -91,6 +105,17 @@ pub(crate) async fn roles_held(
     rows: &[access::RoleRow],
     root: Id,
 ) -> ApiResult<Vec<api::RoleHeld>> {
+    roles_held_bounded(conn, principal, rows, root, None).await
+}
+
+/// The same role projection with its operation's admitted optional name sources.
+async fn roles_held_bounded(
+    conn: &mut Conn,
+    principal: &Principal,
+    rows: &[access::RoleRow],
+    root: Id,
+    bounds: Option<&page::NameBounds>,
+) -> ApiResult<Vec<api::RoleHeld>> {
     let ids: Vec<Id> = rows.iter().map(|row| row.id).collect();
     let flags: HashMap<Id, access::RoleFlags> = access::role_flags(conn, &ids, root)
         .await?
@@ -105,10 +130,10 @@ pub(crate) async fn roles_held(
     };
     let mut people = of_kind("user");
     people.extend(rows.iter().map(|row| row.created_by));
-    let people = page::user_refs_at(conn, principal, Some(root), &people).await?;
+    let people = page::user_refs_at_bounded(conn, principal, Some(root), &people, bounds).await?;
     let group_rows = access::groups_full(conn, &of_kind("group")).await?;
     let groups: HashMap<Id, orch_api_contract::directory::Group> =
-        crate::routes::directory::groups_named(conn, principal, group_rows)
+        crate::routes::directory::groups_named_bounded(conn, principal, group_rows, bounds)
             .await?
             .into_iter()
             .map(|group| (group.id, group))
@@ -116,7 +141,10 @@ pub(crate) async fn roles_held(
     let mut places: Vec<Id> = rows.iter().map(|row| row.node_id).collect();
     places.extend(of_kind("members"));
     places.extend(of_kind("role"));
-    let refs = view::qualified_refs(conn, principal, &places, Policy::default()).await?;
+    let refs = match bounds {
+        Some(bounds) => bounds.qualified_refs(conn, principal, &places).await?,
+        None => view::qualified_refs(conn, principal, &places, Policy::default()).await?,
+    };
     rows.iter()
         .map(|row| {
             let subject_kind: api::SubjectKind = match row.subject_kind.as_str() {
@@ -367,12 +395,30 @@ fn expiry(at: Option<Time>, now: DateTime<Utc>) -> ApiResult<Option<DateTime<Utc
 }
 
 /// Gives a role in a place.
-async fn role_create(ctx: Ctx, (): (), body: api::RoleCreateBody) -> ApiResult<api::RoleHeld> {
+async fn role_create(
+    ctx: Ctx,
+    (): (),
+    body: api::RoleCreateBody,
+) -> ApiResult<api::RoleWriteResponse> {
+    role_operations::projected(ctx.clone(), role_create_action(ctx, body)).await
+}
+
+async fn role_create_action(
+    ctx: Ctx,
+    body: api::RoleCreateBody,
+) -> ApiResult<api::RoleWriteResponse> {
     let node = ctx.id("id")?;
-    let (ctx, mut tx, principal) = crate::routes::nodes::action(&ctx).await?;
-    let held = role_create_in(&ctx, &mut tx, &principal, node, &body).await?;
+    let (ctx, mut tx, guard) = role_operations::action(&ctx).await?;
+    let principal = guard.principal();
+    let (row, place) = role_create_row_in(&ctx, &mut tx, principal, node, &body).await?;
+    let held = role_operations::read(&ctx, &mut tx, principal, &row, place.org).await?;
     tx.commit().await.map_err(DbError::from)?;
-    Ok(held)
+    match held {
+        Some(held) if !ctx.key_receipt_required() => {
+            Ok(api::RoleWriteResponse::Full(Box::new(held)))
+        }
+        _ => Ok(role_operations::receipt(&row)),
+    }
 }
 
 /// The ordinary role producer, also used inside a preview's rolled-back transaction.
@@ -383,6 +429,23 @@ pub(crate) async fn role_create_in(
     node: Id,
     body: &api::RoleCreateBody,
 ) -> ApiResult<api::RoleHeld> {
+    let (row, place) = role_create_row_in(ctx, tx, principal, node, body).await?;
+    roles_held(tx, principal, &[row], place.org)
+        .await?
+        .into_iter()
+        .next()
+        .ok_or_else(|| ApiError::internal("a role was given and is not there"))
+}
+
+/// The ordinary write, shared by the committing route and the existing share preview.
+/// Projection follows only after the caller's current optional Read has been checked.
+async fn role_create_row_in(
+    ctx: &Ctx,
+    tx: &mut Conn,
+    principal: &Principal,
+    node: Id,
+    body: &api::RoleCreateBody,
+) -> ApiResult<(access::RoleRow, Placed)> {
     let note = clean_note(body.note.as_deref())?;
     let ends = expiry(body.expires_at, ctx.now)?;
     let (place, kind) = placed(tx, node).await?;
@@ -516,11 +579,7 @@ pub(crate) async fn role_create_in(
         json!({ "role": role_word, "subject": { "kind": subject_kind, "id": body.subject.id, "role": subject_role }, "role_id": id }),
     )
     .await?;
-    let rows = role_rows(tx, &[id]).await?;
-    let held = roles_held(tx, principal, &rows, place.org).await?;
-    held.into_iter()
-        .next()
-        .ok_or_else(|| ApiError::internal("a role was given and is not there"))
+    Ok((role_operations::created(tx, id).await?, place))
 }
 
 async fn place_name(conn: &mut Conn, node: Id) -> ApiResult<String> {
@@ -556,32 +615,44 @@ async fn the_role(conn: &mut Conn, id: Id) -> ApiResult<(access::RoleRow, Placed
 }
 
 /// Changes a role that was given.
-async fn role_update(ctx: Ctx, (): (), body: api::RoleUpdateBody) -> ApiResult<api::RoleHeld> {
+async fn role_update(
+    ctx: Ctx,
+    (): (),
+    body: api::RoleUpdateBody,
+) -> ApiResult<api::RoleWriteResponse> {
+    role_operations::projected(ctx.clone(), role_update_action(ctx, body)).await
+}
+
+async fn role_update_action(
+    ctx: Ctx,
+    body: api::RoleUpdateBody,
+) -> ApiResult<api::RoleWriteResponse> {
     let id = ctx.id("id")?;
     let note = body
         .note
         .as_deref()
         .map(|note| clean_note(Some(note)))
         .transpose()?;
-    let (ctx, mut tx, principal) = crate::routes::nodes::action(&ctx).await?;
+    let (ctx, mut tx, guard) = role_operations::action(&ctx).await?;
+    let principal = guard.principal();
     let ends = match body.expires_at {
         None => None,
         Some(None) => Some(None),
         Some(Some(at)) => Some(expiry(Some(at), ctx.now)?),
     };
     let new_role: Option<String> = body.role.map(|role| same(&role).unwrap_or_default());
-    let (row, place) = the_role(&mut tx, id).await?;
+    let (row, place) = role_operations::guarded_role(&guard)?;
     let policy = policy_at(&mut tx, row.node_id).await?;
-    let standing = giving::role_standing(&mut tx, &principal, row.node_id, policy)
+    let standing = giving::role_standing(&mut tx, principal, row.node_id, policy)
         .await
         .map_err(refusals_of)?;
-    role_changeable(&mut tx, &principal, &row, &standing, policy).await?;
+    role_changeable(&mut tx, principal, &row, &standing, policy).await?;
     // Taking away administration needs the current administrator identity;
     // extending a role or raising it also needs every permission it gives.
     if (row.role == "admin" || new_role.as_deref() == Some("admin")) && !standing.is_admin() {
         role_matters(
             &mut tx,
-            &principal,
+            principal,
             row.node_id,
             api::Role::Admin,
             &standing,
@@ -606,7 +677,7 @@ async fn role_update(ctx: Ctx, (): (), body: api::RoleUpdateBody) -> ApiResult<a
             .ok_or_else(|| ApiError::internal("a stored role does not read"))?;
         role_matters(
             &mut tx,
-            &principal,
+            principal,
             row.node_id,
             resulting,
             &standing,
@@ -626,12 +697,15 @@ async fn role_update(ctx: Ctx, (): (), body: api::RoleUpdateBody) -> ApiResult<a
     )
     .await?;
     let Some(changed) = changed else {
-        let current = roles_held(&mut tx, &principal, &[row], place.org).await?;
-        return Err(ApiError::new(
+        let current = role_operations::read(&ctx, &mut tx, principal, &row, place.org).await?;
+        let mut error = ApiError::new(
             ErrorCode::ConflictStaleRevision,
             "the role was changed since it was read",
-        )
-        .with("current", current.first()));
+        );
+        if let Some(current) = current.filter(|_| !ctx.key_receipt_required()) {
+            error = error.with("current", current);
+        }
+        return Err(error);
     };
     epoch::bump(&mut tx).await.map_err(ApiError::internal)?;
     let who = actor_name(&ctx)?;
@@ -645,28 +719,36 @@ async fn role_update(ctx: Ctx, (): (), body: api::RoleUpdateBody) -> ApiResult<a
         json!({ "role_id": id, "from": row.role, "to": changed.role }),
     )
     .await?;
-    let held = roles_held(&mut tx, &principal, &[changed], place.org).await?;
+    let held = role_operations::read(&ctx, &mut tx, principal, &changed, place.org).await?;
     tx.commit().await.map_err(DbError::from)?;
-    held.into_iter()
-        .next()
-        .ok_or_else(|| ApiError::internal("a role was changed and is not there"))
+    match held {
+        Some(held) if !ctx.key_receipt_required() => {
+            Ok(api::RoleWriteResponse::Full(Box::new(held)))
+        }
+        _ => Ok(role_operations::receipt(&changed)),
+    }
 }
 
 /// Takes a role away. The role a member holds at their domain stays until
 /// their membership ends or they are moved.
 async fn role_delete(ctx: Ctx, (): (), (): ()) -> ApiResult<()> {
+    role_operations::projected(ctx.clone(), role_delete_action(ctx)).await
+}
+
+async fn role_delete_action(ctx: Ctx) -> ApiResult<()> {
     let id = ctx.id("id")?;
-    let (ctx, mut tx, principal) = crate::routes::nodes::action(&ctx).await?;
-    let (row, place) = the_role(&mut tx, id).await?;
+    let (ctx, mut tx, guard) = role_operations::action(&ctx).await?;
+    let principal = guard.principal();
+    let (row, place) = role_operations::guarded_role(&guard)?;
     let policy = policy_at(&mut tx, row.node_id).await?;
-    let standing = giving::role_standing(&mut tx, &principal, row.node_id, policy)
+    let standing = giving::role_standing(&mut tx, principal, row.node_id, policy)
         .await
         .map_err(refusals_of)?;
-    role_changeable(&mut tx, &principal, &row, &standing, policy).await?;
+    role_changeable(&mut tx, principal, &row, &standing, policy).await?;
     if row.role == "admin" && !standing.is_admin() {
         role_matters(
             &mut tx,
-            &principal,
+            principal,
             row.node_id,
             api::Role::Admin,
             &standing,
@@ -777,28 +859,8 @@ fn refusals_of(error: orch_authz::Error) -> ApiError {
     }
 }
 
-async fn get_page(ctx: &Ctx, which: Which) -> ApiResult<api::PermissionPage> {
-    let id = ctx.id("id")?;
-    let mut conn = ctx.app.db.acquire().await?;
-    let principal = authorization::principal(ctx, &mut conn).await?;
-    match which {
-        Which::Live => {
-            subject::require_page(
-                &mut conn,
-                &principal,
-                orch_authz::things::Thing::Node(id),
-                Policy::default(),
-            )
-            .await?;
-        }
-        Which::Defaults => {
-            authorization::require(&mut conn, &principal, id, VIEW, Act::Use, Policy::default())
-                .await?;
-        }
-    }
-    let (place, kind) = placed(&mut conn, id).await?;
-    check_which(which, kind)?;
-    read_page(ctx, &mut conn, &principal, id, place.org, which).await
+async fn get_page(ctx: &Ctx, _which: Which) -> ApiResult<api::PermissionPage> {
+    operations::read_page(ctx).await
 }
 
 /// Reads a permission page.

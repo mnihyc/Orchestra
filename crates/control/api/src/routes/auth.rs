@@ -14,6 +14,7 @@
 mod bootstrap;
 pub mod me;
 pub mod oidc;
+mod token_activity;
 pub mod tokens;
 
 use crate::middleware::authentication::{SESSION_PREFIX, new_token, token_hash};
@@ -59,6 +60,7 @@ pub fn mount(registry: &mut Registry) {
     me::mount(registry);
     oidc::mount(registry);
     tokens::mount(registry);
+    token_activity::mount(registry);
 }
 
 /// `410 gone`: a link that was used, that ended, or that nobody made, which

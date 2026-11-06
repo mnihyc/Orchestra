@@ -597,13 +597,16 @@ impl HostServices for ApiHostServices {
         };
         let issued = self
             .certificates
-            .issue_token(&TokenRequest {
-                created_by: ask.created_by,
-                purpose: TokenFor::Runtime {
-                    runtime: ask.runtime,
+            .issue_runtime_token_in(
+                conn,
+                &TokenRequest {
+                    created_by: ask.created_by,
+                    purpose: TokenFor::Runtime {
+                        runtime: ask.runtime,
+                    },
+                    name_hint: Some(ask.name_hint.clone()),
                 },
-                name_hint: Some(ask.name_hint.clone()),
-            })
+            )
             .await
             .map_err(|fault| HostingError::Failed(fault.detail))?;
         let sealed = master_key()

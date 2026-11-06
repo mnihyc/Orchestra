@@ -66,6 +66,8 @@ pub(crate) struct Cache {
 /// What a read found for one subscriber.
 #[derive(Debug)]
 pub(crate) enum Rows {
+    /// This read lost its current operation or mandatory source authority; no cursor is advanced.
+    Revoked,
     /// A numeric sequence belongs to a different execution projection and cannot be merged.
     ProjectionChanged,
     /// Nothing the subscriber may see lies in the range.
@@ -137,7 +139,15 @@ impl Inner {
         thread_scope: threads::ReadScope,
     ) -> Result<Rows, Fail> {
         let person = sub.connection().user;
-        super::subscriptions::viewing(sub.connection(), async {
+        let Some(caller) = super::key_reads::admit(self, sub.connection(), sub.feed()).await?
+        else {
+            return Ok(if matches!(sub.feed(), Feed::Chat(_) | Feed::Doc(_)) {
+                Rows::Revoked
+            } else {
+                Rows::Nothing
+            });
+        };
+        super::subscriptions::viewing_admitted(sub.connection(), caller, async {
             match sub.feed() {
                 Feed::Thread(id) => {
                     threads::read_scoped(self, person, *id, after, upto, cache, thread_scope).await
@@ -151,7 +161,7 @@ impl Inner {
                 _ => Ok(Rows::Nothing),
             }
         })
-        .await
+        .await?
     }
 
     /// Sends a subscriber what is owed it up to `target`: one frame, with the
@@ -194,6 +204,10 @@ impl Inner {
         }
         let connection = sub.connection();
         match rows {
+            Rows::Revoked => {
+                self.close_sub(sub, st, FeedClosedReason::Revoked).await;
+                return Ok(());
+            }
             Rows::ProjectionChanged => {
                 self.invalidate_thread_projection(sub, st);
                 return Ok(());
@@ -632,7 +646,7 @@ impl Inner {
             }
             let cut = (
                 sub.decided(),
-                sub.connection().session(),
+                sub.connection().decision_identity(),
                 sub.connection().as_admin(),
             );
             // The state lock orders projection after the reset, even when the epoch
@@ -649,7 +663,7 @@ impl Inner {
             }
             if latest != epoch
                 || expired
-                || sub.connection().session() != cut.1
+                || sub.connection().decision_identity() != cut.1
                 || sub.connection().as_admin() != cut.2
             {
                 // Retry only after an actual authority/identity/deadline transition;

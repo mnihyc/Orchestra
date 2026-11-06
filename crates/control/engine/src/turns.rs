@@ -81,7 +81,7 @@ const LEASE_OPEN_ATTEMPTS: u32 = 1;
 /// How many times the session of one turn is opened at most: once, and again
 /// after each repair. The identifiers of the commands that open it are told
 /// apart by turn and by attempt, so each turn reserves this many.
-const SESSION_ATTEMPTS: u32 = SESSION_REPAIRS + 1;
+pub(crate) const SESSION_ATTEMPTS: u32 = SESSION_REPAIRS + 1;
 
 /// What becomes of the input of a turn that ended before the harness took it.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -466,6 +466,11 @@ impl Engine {
     /// the session, then `turn.start`. Every step looks at the database
     /// again first, so it is safe to call at any time and from any process;
     /// it returns when the turn has been handed to the harness, or has failed.
+    // A repair raises `repairs` and continues the outer `'driving` loop, which starts a new range from it.
+    #[allow(
+        clippy::mut_range_bound,
+        reason = "the outer driving loop rebuilds the range after a state change"
+    )]
     pub(crate) async fn drive_start(&self, thread_id: Id) -> Result<(), EngineError> {
         let mut repairs: u32 = 0;
         'driving: loop {
@@ -1199,6 +1204,7 @@ impl Engine {
             + chrono::Duration::from_std(self.inner.config.start_timeout)
                 .unwrap_or_else(|_| chrono::Duration::zero());
         let command = Outgoing {
+            authority: None,
             id,
             machine: row.machine_id,
             key,
@@ -1357,7 +1363,13 @@ impl Engine {
             return Ok(false);
         };
         if !rejected
-            && !crate::native_actions::hold_invalid(&mut unit, thread.node_id, &input).await?
+            && !crate::native_actions::hold_invalid(
+                &mut unit,
+                thread.node_id,
+                &input,
+                self.inner.clock.as_ref(),
+            )
+            .await?
         {
             let finished = unit.finish().await?;
             self.commit(tx, finished).await?;
@@ -1907,7 +1919,14 @@ impl Engine {
             orch_db::queries::transaction_guard::lock_authority(&mut tx).await?;
             let mut unit = Unit::new(&mut tx, self.inner.clock.now());
             threads::lock(&mut *unit.conn, thread_id).await?;
-            if crate::native_actions::hold_invalid(&mut unit, thread_id, input).await? {
+            if crate::native_actions::hold_invalid(
+                &mut unit,
+                thread_id,
+                input,
+                self.inner.clock.as_ref(),
+            )
+            .await?
+            {
                 let seq = unit.stamp(thread_id).await?;
                 threads::return_input_in_place(
                     &mut *unit.conn,
@@ -2080,12 +2099,10 @@ impl Engine {
         let id = ids::turn_steer(input.id);
         self.inner
             .commands
-            .issue(Outgoing::new(
-                id,
-                machine,
-                SerialKey::Thread(thread_id),
-                &body,
-            )?)
+            .issue(
+                Outgoing::new(id, machine, SerialKey::Thread(thread_id), &body)?
+                    .with_authority(crate::commands::CommandAuthority::input_steer(input.id)),
+            )
             .await?;
         let outcome = self.inner.commands.wait(id).await?;
         self.settle_model_input(thread_id, record, sent_of(&outcome))
@@ -2236,17 +2253,22 @@ impl Engine {
         {
             return Ok(false);
         }
-        let Some(caller) = crate::inputs::input_caller(unit, thread, input).await? else {
+        let Some(authority) =
+            crate::inputs::input_caller(unit, thread, input, self.inner.clock.as_ref()).await?
+        else {
             return Ok(false);
         };
-        match self
-            .check_sender_for_turn(unit, &caller, thread, true, Some(turn))
-            .await
-        {
-            Ok(()) => Ok(true),
-            Err(crate::inputs::InputError::Internal(error)) => Err(error),
-            Err(_) => Ok(false),
+        for caller in authority.callers() {
+            match self
+                .check_sender_for_turn(unit, caller, thread, true, Some(turn))
+                .await
+            {
+                Ok(()) => {}
+                Err(crate::inputs::InputError::Internal(error)) => return Err(error),
+                Err(_) => return Ok(false),
+            }
         }
+        Ok(true)
     }
 
     /// Keeps a steer's words in the timeline before sending, under the thread's lock.
@@ -3127,6 +3149,8 @@ pub struct OwnUse<'a> {
     pub person: Option<Id>,
     /// The model, by the name that was sent.
     pub model: &'a str,
+    /// The original request's wire format, where retained; used only for documented price aliases.
+    pub protocol: Option<&'a str>,
     /// What it used.
     pub tokens: orch_db::usage::ledger::Tokens,
     /// The upstream's own name for the request.
@@ -3166,14 +3190,16 @@ impl Engine {
         };
         let rate = crate::caps::own_rate(conn, own.provider, own.model).await?;
         let book = crate::rates::RateBook::load(conn, own.thread.unwrap_or(own.topic)).await?;
-        let priced = book
-            .price(
+        let observed = own.timing.cloned().unwrap_or_default();
+        let (tier, priced) = book
+            .price_observed(
                 conn,
                 rate.as_ref(),
                 own.model,
                 &own.tokens,
-                Some(own.tokens.input),
-                None,
+                (own.tokens.input, own.tokens.input),
+                &observed,
+                own.protocol,
             )
             .await?;
         let rate_json = priced
@@ -3196,7 +3222,7 @@ impl Engine {
                     user_id: own.person,
                 },
                 model: own.model,
-                tier: None,
+                tier: tier.as_deref(),
                 tokens: own.tokens,
                 context_tokens: Some(own.tokens.input),
                 request_ref: own.request_ref,
@@ -3208,7 +3234,7 @@ impl Engine {
         )
         .await?;
         if written && let Some(timing) = own.timing {
-            crate::providers::record_model_metrics(own.model, None, timing);
+            crate::providers::record_model_metrics(own.model, tier.as_deref(), timing);
         }
         Ok(written)
     }

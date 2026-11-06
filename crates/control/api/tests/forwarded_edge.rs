@@ -123,6 +123,9 @@ async fn edge(world: &World) -> Edge {
     let name = format!("fix-forwarded-nginx-{}", orch_types::new_id().simple());
     let directory: PathBuf = root().join(".tmp").join(&name);
     std::fs::create_dir_all(&directory).unwrap();
+    // The shipped entrypoint creates these empty includes when HTTPS is off.
+    std::fs::write(directory.join("frontend-https.conf"), "").unwrap();
+    std::fs::write(directory.join("ports-https.conf"), "").unwrap();
     let authority =
         CertificateAuthority::create("Forwarded edge test", 3650, &world.app.clock).unwrap();
     let (key, certificate) = authority
@@ -174,7 +177,9 @@ async fn edge(world: &World) -> Edge {
         .replace(
             "https://gateway:9444",
             &format!("https://127.0.0.1:{api_port}"),
-        );
+        )
+        .replace("/tmp/frontend-https.conf", "/fixture/frontend-https.conf")
+        .replace("/tmp/ports-https.conf", "/fixture/ports-https.conf");
     std::fs::write(directory.join("nginx.conf"), nginx).unwrap();
     drop(front);
     drop(body);
@@ -188,6 +193,11 @@ async fn edge(world: &World) -> Edge {
             &fixture.name,
             "--network",
             "host",
+            "--mount",
+            &format!(
+                "type=bind,src={},dst=/fixture,readonly",
+                directory.display()
+            ),
             "--tmpfs",
             "/var/cache/nginx",
             "--tmpfs",

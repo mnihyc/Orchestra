@@ -94,6 +94,7 @@ fn live(
     client: &str,
 ) -> ShareWithAgents {
     ShareWithAgents {
+        viewers_read: None,
         read_first: None,
         download: None,
         what: ShareWhat::Node(ShareWhatNode { node_id: place }),

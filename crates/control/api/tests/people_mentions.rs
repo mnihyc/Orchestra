@@ -259,7 +259,9 @@ async fn overlapping_role_and_group_targets_freeze_once_and_an_edit_tells_only_n
         .body(&ChatMessageUpdateBody { parts })
         .send()
         .await
-        .ok();
+        .ok()
+        .into_full()
+        .unwrap();
     expected.push(room.gus.id());
     expected.sort_unstable();
     assert_eq!(ids(&edited), expected);

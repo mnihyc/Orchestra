@@ -8,6 +8,7 @@
 mod places;
 mod support;
 
+use crate::support::FullMoveReply as _;
 use orch_api_contract::common::ErrorCode;
 use orch_api_contract::directory::{
     NodeTagCreate, NodeTagCreateBody, NodeTagList, TagDelete, TagUpdate, TagUpdateBody,
@@ -62,6 +63,7 @@ async fn move_review(world: &World, a: &Acme) -> NodeMovePlan {
         })
         .send()
         .await
+        .full_move()
         .ok()
 }
 
@@ -122,6 +124,7 @@ async fn a_confirmed_move_refuses_a_changed_subtree_or_new_destination_consequen
         })
         .send()
         .await
+        .full_move()
         .ok();
     assert_eq!(moved.base.parent_id, Some(a.research));
 }
@@ -198,6 +201,7 @@ async fn a_project_is_moved_under_another_org_of_its_tree_and_all_inside_it_goes
         })
         .send()
         .await
+        .full_move()
         .ok();
     assert_eq!(moved.base.parent_id, Some(a.research));
     assert_eq!(moved.base.revision, before + 1);
@@ -368,6 +372,7 @@ async fn a_department_is_moved_with_what_is_in_it_and_never_deeper_than_the_syst
         })
         .send()
         .await
+        .full_move()
         .ok();
     assert_eq!(moved.address, "acme.research.sales");
     assert_eq!(moved.depth, 2);
@@ -495,6 +500,7 @@ async fn the_plan_of_a_move_says_what_would_change_before_anything_does() {
         })
         .send()
         .await
+        .full_move()
         .ok();
     assert_eq!(plan.node.id, a.web);
     assert_eq!(plan.from.id, a.acme);
@@ -555,6 +561,7 @@ async fn a_plan_of_an_org_counts_its_members_and_names_what_stops_it() {
         })
         .send()
         .await
+        .full_move()
         .ok();
     assert_eq!(
         plan.addresses.members, 1,
@@ -567,6 +574,7 @@ async fn a_plan_of_an_org_counts_its_members_and_names_what_stops_it() {
         .body(&MovePreviewBody { parent_id: a.web })
         .send()
         .await
+        .full_move()
         .ok();
     assert_eq!(blocked.blockers.len(), 1);
     assert_eq!(blocked.blockers[0].code, "node.wrong_parent");

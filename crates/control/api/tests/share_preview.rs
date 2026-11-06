@@ -9,6 +9,7 @@ mod desk;
 mod places;
 mod rig;
 mod support;
+use support::FullRoleReply as _;
 
 use desk::Desk;
 use orch_api_contract::access::{
@@ -261,6 +262,7 @@ async fn a_group_preview_names_real_people_once_and_a_role_preview_is_not_a_role
         .raw_body(&give)
         .send()
         .await
+        .full_role()
         .ok();
 }
 

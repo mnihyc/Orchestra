@@ -35,7 +35,9 @@ proof_world() {
   sha256sum "$CONNECTOR" > "$EVIDENCE/connector.sha256"
   cp "$A/version.json" "$EVIDENCE/version.json"
   git -C "$SMOKE_REPO" rev-parse HEAD > "$EVIDENCE/commit.txt"
-  printf '[connector]\nroles = ["agent", "environment", "provider"]\n[environment]\nroots = ["/workspace"]\nports = true\n[update]\nauto = false\n' > "$WORK/lab/config.toml"
+  # One explicit pinned endpoint keeps the shaped connector path attributable.
+  # Enrollment's CA and machine identity still perform the ordinary TLS checks.
+  printf '[connector]\nroles = ["agent", "environment", "provider"]\n[environment]\nroots = ["/workspace"]\nterminal = true\n[ports]\nallowed = ["place"]\n[update]\nauto = false\n[[endpoints]]\nurl = "wss://gateway.orch.internal:%s"\ntrust = "pinned"\n' "$GATEWAY_PORT" > "$WORK/lab/config.toml"
   docker run -d --name "$LAB" --label "org.orch.smoke.run=$SMOKE_RUN" \
     --network "${PROJECT}_control" --user "$(id -u):$(id -g)" \
     -v "$WORK/lab:/data" -v "$WORK/workspace:/workspace" -v "$WORK/peer:/peer" \
@@ -97,6 +99,10 @@ EOF
 proof_done() {
   local previous=$? final=0
   final="$previous"
+  if [ -n "${WSS_RESOURCE_PID:-}" ]; then
+    kill "$WSS_RESOURCE_PID" 2> /dev/null || true
+    wait "$WSS_RESOURCE_PID" || final=1
+  fi
   if [ "$previous" != 0 ]; then FAILED=$((FAILED + 1)); fi
   if [ -n "${EVIDENCE:-}" ]; then
     compose logs --no-color > "$EVIDENCE/stack.log" 2>&1 || true
@@ -107,7 +113,7 @@ proof_done() {
     if [ "${LAB_STARTED:-0}" = 1 ]; then
       docker cp "$LAB:/data/run.log" "$EVIDENCE/connector.log" > /dev/null 2>&1 || true
     fi
-    printf '{"checks":%s,"failures":%s,"process_exit":%s,"executed":true}\n' "$CHECKED" "$FAILED" "$previous" > "$EVIDENCE/runner.json"
+    printf '{"checks":%s,"failures":%s,"process_exit":%s,"executed":true,"wss_release_gate_qualified":%s}\n' "$CHECKED" "$FAILED" "$previous" "${WSS_GATE_QUALIFIED:-null}" > "$EVIDENCE/runner.json"
   fi
   if [ "${ORCH_SMOKE_KEEP:-0}" != 1 ]; then
     if [ -n "${MODEL_PID:-}" ]; then kill "$MODEL_PID" 2> /dev/null || true; fi

@@ -1,5 +1,6 @@
 /** Native view/job events of the fake API, projected by the same authorized readers as its HTTP answers. */
 import { Refusal, type Answer, type Part, type Person, type Subscriber, type World } from './world.ts';
+import type { Listening } from './user-feed.ts';
 import type { McpServer, Mount, ResourceAccess } from '../../src/generated/api-types.ts';
 import { ACME, id, userRef } from './fixtures.ts';
 import { IncomingMessage } from 'node:http';
@@ -17,7 +18,7 @@ const JOB_STEP_MS = 500;
 
 export class RequestFeeds implements Part {
   private watches: Watch[] = [];
-  private readonly rows = new Map<string, Map<string, string>>();
+  private rows = new WeakMap<Listening, Map<string, Map<string, string>>>();
   private extraFixtures = false;
   private readonly world: World;
   constructor(world: World) { this.world = world; }
@@ -43,7 +44,13 @@ export class RequestFeeds implements Part {
     if (/^\/environments\/[^/]+\/sync$/.test(url.pathname)) {
       const reply = await this.read(person, url.pathname.slice(0, -5));
       const row = reply.body;
-      return { status: reply.status, body: { environment: row, seq: record(row) && typeof row.revision === 'number' ? row.revision : 1, complete: true, since: null, jobs: [] } };
+      let library: unknown = null;
+      if (record(row) && record(row.access) && Array.isArray(row.access.permissions) && row.access.permissions.includes('environment.view')) {
+        const facts = this.world.resources.handle(person, 'POST', '/resources/library', new URLSearchParams(), { targets: [{ object: { kind: 'environment', id: row.id }, version_id: null }] });
+        if (facts === null || !Array.isArray(facts.body) || !record(facts.body[0]) || !record(facts.body[0].facts)) throw new Error('The canonical Environment Library producer must return its facts');
+        library = facts.body[0].facts;
+      }
+      return { status: reply.status, body: { environment: row, library, seq: record(row) && typeof row.revision === 'number' ? row.revision : 1, complete: true, since: null, jobs: [] } };
     }
     if (this.extraFixtures && /^\/(?:mcp-servers|mounts)(?:\/|$)/.test(url.pathname)) {
       const own = await this.handle(person, 'GET', url.pathname);
@@ -164,29 +171,34 @@ export class RequestFeeds implements Part {
 
   reset(): void {
     for (const watch of this.watches) clearTimeout(watch.timer);
-    this.watches = []; this.rows.clear(); this.extraFixtures = false;
+    this.watches = []; this.rows = new WeakMap(); this.extraFixtures = false;
   }
 
   /** An actual fake-world mutation publishes changed native rows, separately authorized for each recipient. */
   async changed(): Promise<void> {
     for (const watch of this.watches) await this.publish(watch);
-    for (const [username, person] of this.world.people) {
-      if (this.world.users.listeners(username).length === 0) continue;
-      for (const [kind, path] of Object.entries(RESOURCE_PATHS)) {
-        let answer: Answer;
-        try { answer = await this.read(person, `/${path}`); } catch { continue; }
-        const body = answer.body;
-        const rows = Array.isArray(body) ? body as unknown[] : record(body) && Array.isArray(body.items) ? body.items as unknown[] : [];
-        const key = `${username}:${kind}`;
-        const previous = this.rows.get(key) ?? new Map<string, string>();
-        const next = new Map<string, string>();
-        for (const row of rows) {
-          if (!record(row) || typeof row.id !== 'string' || row.content_hidden === true) continue;
-          const json = JSON.stringify(row); next.set(row.id, json);
-          if (previous.get(row.id) !== json) this.world.users.tell(username, { what: 'resources', kind, id: row.id, row });
+    for (const username of this.world.people.keys()) {
+      for (const listener of this.world.users.listeners(username)) {
+        let held = this.rows.get(listener);
+        if (held === undefined) { held = new Map(); this.rows.set(listener, held); }
+        for (const [kind, path] of Object.entries(RESOURCE_PATHS)) {
+          let answer: Answer;
+          try { answer = await this.read(listener.person, `/${path}`); } catch { continue; }
+          // Authority changes retire the listener; an awaited old projection must not reach its replacement.
+          if (!this.world.users.listeners(username).includes(listener)) break;
+          const body = answer.body;
+          const rows = Array.isArray(body) ? body as unknown[] : record(body) && Array.isArray(body.items) ? body.items as unknown[] : [];
+          const previous = held.get(kind) ?? new Map<string, string>();
+          const next = new Map<string, string>();
+          const tell = (data: Record<string, unknown>) => listener.subscriber.send({ op: 'event', id: listener.id, feed: 'user', data });
+          for (const row of rows) {
+            if (!record(row) || typeof row.id !== 'string' || row.content_hidden === true) continue;
+            const json = JSON.stringify(row); next.set(row.id, json);
+            if (previous.get(row.id) !== json) tell({ what: 'resources', kind, id: row.id, row });
+          }
+          for (const id of previous.keys()) if (!next.has(id)) tell({ what: 'resources', kind, id, deleted: true });
+          held.set(kind, next);
         }
-        for (const id of previous.keys()) if (!next.has(id)) this.world.users.tell(username, { what: 'resources', kind, id, deleted: true });
-        this.rows.set(key, next);
       }
     }
   }

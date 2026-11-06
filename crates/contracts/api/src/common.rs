@@ -12,8 +12,12 @@ use serde::{Deserialize, Deserializer, Serialize};
 
 pub use orch_types::{Hash, Id, Revision, Seq, Time};
 
-/// Where every route lives.
-pub const BASE_PATH: &str = "/api/v1";
+/// Browser HTTP and the existing public protocol paths.
+pub const BROWSER_BASE_PATH: &str = "/api/v1";
+/// Account-key business HTTP and origin-bound key continuations.
+pub const KEY_BASE_PATH: &str = "/openapi/v1";
+/// The existing browser/public base, retained for callback and download URL producers.
+pub const BASE_PATH: &str = BROWSER_BASE_PATH;
 /// The header every response carries, and an error repeats in its body.
 pub const REQUEST_ID_HEADER: &str = "x-request-id";
 /// The header a request that is authenticated by a cookie alone must carry.
@@ -77,6 +81,14 @@ mod listed_tests {
             visible
         );
     }
+}
+
+/// Identifies a committed mutation acknowledgement without existing resource content.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+#[serde(rename_all = "snake_case")]
+pub enum ReceiptProjection {
+    /// Identifiers, revision and safe operation outcome only.
+    Receipt,
 }
 
 /// One page of a list that can grow. The order is stated by each list and

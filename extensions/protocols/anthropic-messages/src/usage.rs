@@ -74,6 +74,7 @@ struct Probe<'a> {
 /// The members of a usage object that matter here.
 #[derive(Deserialize)]
 struct UsageView {
+    speed: Option<Value>,
     input_tokens: Option<Value>,
     output_tokens: Option<Value>,
     cache_creation_input_tokens: Option<Value>,
@@ -188,6 +189,7 @@ impl Figures {
 struct Seen {
     id: Option<String>,
     model: Option<String>,
+    service_tier: Option<String>,
     figures: Figures,
 }
 
@@ -195,6 +197,9 @@ impl Seen {
     /// Takes in a usage object given as raw text.
     fn take_usage(&mut self, raw: &RawValue) {
         if let Ok(usage) = serde_json::from_str::<UsageView>(raw.get()) {
+            if let Some(speed) = text(usage.speed.clone()) {
+                self.service_tier = Some(speed);
+            }
             self.figures.take(&usage);
         }
     }
@@ -247,6 +252,7 @@ impl Seen {
     /// What was seen, if it holds figures.
     fn observed(&self) -> Option<ObservedUsage> {
         Some(ObservedUsage {
+            service_tier: self.service_tier.clone(),
             model: self.model.clone(),
             tokens: self.figures.tokens()?,
             cost: self.figures.cost.clone(),

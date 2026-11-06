@@ -140,6 +140,7 @@ fn asked() -> ProviderEmbed {
         provider_id: new_id(),
         protocol: EMBEDDINGS.to_owned(),
         model_name: "local".to_owned(),
+        params: None,
         inputs: vec![
             "title: none | text: 发布流程的说明".to_owned(),
             "title: none | text: the rollout plan".to_owned(),

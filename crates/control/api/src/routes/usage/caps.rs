@@ -30,6 +30,7 @@ use crate::middleware::authorization::{self, exact, refusals};
 use crate::middleware::requests::{ApiError, ApiResult};
 use crate::middleware::transaction_guard;
 use crate::registry::Ctx;
+use crate::routes::access::page::{NameBounds, NameSources};
 use crate::routes::nodes::{actor_name, invalid};
 use crate::sign_in::origin;
 use chrono::{DateTime, NaiveDate, Utc};
@@ -178,13 +179,8 @@ struct Known {
 }
 
 impl Known {
-    /// Names what `caps` name, and the people in `more_users`.
-    async fn load(
-        conn: &mut Conn,
-        principal: &Principal,
-        caps: &[&CapRow],
-        more_users: &[Id],
-    ) -> ApiResult<Self> {
+    /// The exact identities read by the original name scan, without projecting them.
+    fn sources(caps: &[&CapRow], more_users: &[Id]) -> (NameSources, Vec<Id>) {
         let mut users: Vec<Id> = more_users.to_vec();
         let (mut providers, mut nodes, mut groups) = (Vec::new(), Vec::new(), Vec::new());
         for cap in caps {
@@ -202,12 +198,46 @@ impl Known {
             list.sort_unstable();
             list.dedup();
         }
-        let names = Names::load(conn, principal, &users, &providers, &nodes).await?;
-        let groups = if groups.is_empty() {
+        (
+            NameSources {
+                users: users.into_iter().collect(),
+                nodes: nodes.into_iter().collect(),
+                groups: groups.into_iter().collect(),
+                ..NameSources::default()
+            },
+            providers,
+        )
+    }
+
+    /// Names what `caps` name, and the people in `more_users`.
+    async fn load(
+        conn: &mut Conn,
+        principal: &Principal,
+        caps: &[&CapRow],
+        more_users: &[Id],
+    ) -> ApiResult<Self> {
+        let (sources, providers) = Self::sources(caps, more_users);
+        Self::project(conn, principal, &sources, &providers, None).await
+    }
+
+    /// Groups are projected whole after the caller admits their actual source;
+    /// only their optional place names and users' domain addresses are bounded here.
+    async fn project(
+        conn: &mut Conn,
+        principal: &Principal,
+        sources: &NameSources,
+        providers: &[Id],
+        bounds: Option<&NameBounds>,
+    ) -> ApiResult<Self> {
+        let users: Vec<Id> = sources.users.iter().copied().collect();
+        let nodes: Vec<Id> = sources.nodes.iter().copied().collect();
+        let names = Names::load_bounded(conn, principal, &users, providers, &nodes, bounds).await?;
+        let groups = if sources.groups.is_empty() {
             HashMap::new()
         } else {
+            let groups: Vec<Id> = sources.groups.iter().copied().collect();
             let rows = access::groups_full(conn, &groups).await?;
-            crate::routes::directory::groups_named(conn, principal, rows)
+            crate::routes::directory::groups_named_bounded(conn, principal, rows, bounds)
                 .await?
                 .into_iter()
                 .map(|group| (group.id, group))
@@ -294,13 +324,25 @@ struct Shown {
     replaced_by: Option<Id>,
 }
 
-/// How each of the caps stands, for the caller: with whether they may change each and let a turn past it.
-async fn statuses(
+type ComputedStatus = (CapRow, engine::Status, bool, bool);
+
+/// Existing provider-choice standings and every source their ordinary projection names.
+/// The caller admits full group payloads before bounded projection in the same read snapshot.
+#[derive(Clone)]
+pub(crate) struct PreparedProviderChoices {
+    computed: Vec<ComputedStatus>,
+    providers: Vec<Id>,
+    at: DateTime<Utc>,
+    pub(crate) names: NameSources,
+}
+
+/// Computes the original standings and permission pairs once, before any name projection.
+async fn compute_statuses(
     ctx: &Ctx,
     conn: &mut Conn,
     principal: &Principal,
     shown: Vec<Shown>,
-) -> ApiResult<Vec<CapStatus>> {
+) -> ApiResult<Vec<ComputedStatus>> {
     let mut computed = Vec::with_capacity(shown.len());
     let mut allowed: HashMap<(Option<Id>, Option<Id>), (bool, bool)> = HashMap::new();
     for each in shown {
@@ -324,19 +366,36 @@ async fn statuses(
         };
         computed.push((each.cap, status, can_edit, can_bypass));
     }
+    Ok(computed)
+}
+
+fn status_sources(computed: &[ComputedStatus]) -> (NameSources, Vec<Id>) {
     let caps: Vec<&CapRow> = computed.iter().map(|each| &each.0).collect();
     let mut people: Vec<Id> = Vec::new();
-    for (_, status, _, _) in &computed {
+    for (_, status, _, _) in computed {
         people.extend(status.standing.person);
         people.extend(status.bypassed.last_by);
     }
-    let known = Known::load(conn, principal, &caps, &people).await?;
+    Known::sources(&caps, &people)
+}
+
+/// Maps the exact computed rows; name admission does not recalculate or filter a cap.
+async fn project_statuses(
+    at: DateTime<Utc>,
+    conn: &mut Conn,
+    principal: &Principal,
+    computed: &[ComputedStatus],
+    sources: &NameSources,
+    providers: &[Id],
+    bounds: Option<&NameBounds>,
+) -> ApiResult<Vec<CapStatus>> {
+    let known = Known::project(conn, principal, sources, providers, bounds).await?;
     computed
         .iter()
         .map(|(cap, status, can_edit, can_bypass)| {
             let standing = &status.standing;
             Ok(CapStatus {
-                forecast: cap_forecast(standing, ctx.now),
+                forecast: cap_forecast(standing, at),
                 cap: known.cap(cap, *can_edit)?,
                 person: standing.person.map(|id| known.names.user(id)),
                 used: standing.used.text(),
@@ -367,6 +426,21 @@ async fn statuses(
             })
         })
         .collect()
+}
+
+/// How each of the caps stands, for the caller: with whether they may change each and let a turn past it.
+async fn statuses(
+    ctx: &Ctx,
+    conn: &mut Conn,
+    principal: &Principal,
+    shown: Vec<Shown>,
+) -> ApiResult<Vec<CapStatus>> {
+    let computed = compute_statuses(ctx, conn, principal, shown).await?;
+    let (sources, providers) = status_sources(&computed);
+    project_statuses(
+        ctx.now, conn, principal, &computed, &sources, &providers, None,
+    )
+    .await
 }
 
 /// Daily rollups give the exact period count without an extra ledger scan for each cap.
@@ -531,6 +605,17 @@ pub(crate) async fn for_provider_choices(
     principal: &Principal,
     providers: &[Id],
 ) -> ApiResult<HashMap<Id, Vec<CapStatus>>> {
+    let prepared = prepare_provider_choices(ctx, conn, principal, providers).await?;
+    project_provider_choices(ctx, conn, principal, prepared, None).await
+}
+
+/// Selects and computes the same applicable provider caps before their names are admitted.
+pub(crate) async fn prepare_provider_choices(
+    ctx: &Ctx,
+    conn: &mut Conn,
+    principal: &Principal,
+    providers: &[Id],
+) -> ApiResult<PreparedProviderChoices> {
     let mut covered = Vec::new();
     for cap in rows::on_providers(conn, providers).await? {
         // A cap may also name a place. Its ordinary visibility check still governs that name.
@@ -559,9 +644,37 @@ pub(crate) async fn for_provider_choices(
             replaced_by: None,
         })
         .collect();
+    let computed = compute_statuses(ctx, conn, principal, shown).await?;
+    let (names, providers) = status_sources(&computed);
+    Ok(PreparedProviderChoices {
+        computed,
+        providers,
+        at: ctx.now,
+        names,
+    })
+}
+
+/// The ordinary provider-choice DTOs from the retained standings and admitted name sources.
+pub(crate) async fn project_provider_choices(
+    _ctx: &Ctx,
+    conn: &mut Conn,
+    principal: &Principal,
+    prepared: PreparedProviderChoices,
+    bounds: Option<&NameBounds>,
+) -> ApiResult<HashMap<Id, Vec<CapStatus>>> {
     let mut grouped: HashMap<Id, Vec<CapStatus>> = HashMap::new();
-    if !shown.is_empty() {
-        for status in statuses(ctx, conn, principal, shown).await? {
+    if !prepared.computed.is_empty() {
+        for status in project_statuses(
+            prepared.at,
+            conn,
+            principal,
+            &prepared.computed,
+            &prepared.names,
+            &prepared.providers,
+            bounds,
+        )
+        .await?
+        {
             if let Some(provider) = &status.cap.provider {
                 grouped.entry(provider.id).or_default().push(status);
             }

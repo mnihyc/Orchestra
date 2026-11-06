@@ -43,7 +43,7 @@ function readyOf(frame: RawFrame): ReadyFrame {
     connection_id: typeof frame.connection_id === 'string' ? frame.connection_id : '',
     user_id: typeof frame.user_id === 'string' ? frame.user_id : '',
     server_time: typeof frame.server_time === 'string' ? frame.server_time : '',
-    access_expires_at: typeof frame.access_expires_at === 'string' ? frame.access_expires_at : '',
+    access_expires_at: typeof frame.access_expires_at === 'string' ? frame.access_expires_at : null,
     heartbeat_secs: typeof frame.heartbeat_secs === 'number' ? frame.heartbeat_secs : 0,
     build: typeof frame.build === 'string' ? frame.build : '',
   };

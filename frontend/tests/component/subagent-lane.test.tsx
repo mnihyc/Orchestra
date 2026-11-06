@@ -79,7 +79,7 @@ describe('a sub-agent lane', () => {
     await waitFor(() => expect(calls.read).toHaveBeenCalledTimes(1));
   });
 
-  it('names the model its program says the sub-agent runs on, and nothing where it says none', async () => {
+  it('names the model its program says the sub-agent runs on, and nothing where it says none', () => {
     draw(true);
     const lane = screen.getByRole('region', { name: 'Sub-agent reviewer' });
     expect(lane.querySelector('[data-subagent-model]')).toBeNull();

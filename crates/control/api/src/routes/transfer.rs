@@ -90,14 +90,7 @@ async fn as_read(ctx: &Ctx, object: ObjectRef) -> ApiResult<Resource> {
         }
         ObjectKind::Document => {
             drop(conn);
-            Resource::Document(
-                documents::get(
-                    ctx.clone(),
-                    orch_api_contract::nodes::DeletedInspectionQuery::default(),
-                    (),
-                )
-                .await?,
-            )
+            Resource::Document(documents::show(ctx, id).await?)
         }
         ObjectKind::DocumentContainer => {
             let read = orch_engine::document_tree::read_in(

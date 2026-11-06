@@ -1,4 +1,4 @@
-//! The shared tree: what is in an agent's reach as paths, from everything it may read or from its own topic: neighbouring threads by policy, the documents, chats and conversations people shared, and the files each carries; listed with what each entry is, how it is counted and whether it may be written.
+//! The shared tree: what is in an agent's reach as paths, from everything it may read or from its own topic: the documents, chats and conversations people shared, and the files each carries; listed with what each entry is, how it is counted and whether it may be written.
 //!
 //! `list_shared` lists the directory at `path`: the agent's own topic when it is left out, `/` for everything.
 //! It goes `depth` levels down in pages, active work and then recent changes first unless names are asked for;
@@ -17,13 +17,11 @@ use crate::tools::tree::{self, Entry, FoundEntry, Listing, Named, Pattern, Scope
 use crate::tools::{Answer, CallContext};
 use orch_access_contract::audit::AuditAction;
 use orch_api_contract::share::SharedEntryKind;
-use orch_authz::reach::{Agent, AgentReach, DocumentPolicy};
+use orch_authz::reach::Agent;
 use orch_db::Conn;
 use orch_db::audit::{Actor, Entry as AuditEntry, Origin, append};
 use orch_db::queries::identity;
 use orch_db::queries::threads::ThreadRow;
-use orch_settings::Place;
-use orch_settings_contract::registry::keys;
 use orch_types::{Id, Json, Time};
 use serde::Deserialize;
 use serde_json::json;
@@ -51,16 +49,12 @@ struct Arguments {
 pub struct Asking {
     /// The agent.
     pub agent: Agent,
-    /// What `sharing.agent_reach` says at its topic.
-    pub policy: AgentReach,
-    /// Independently resolved public topic-document reach.
-    pub documents_policy: DocumentPolicy,
     /// The moment of the call.
     pub now: Time,
 }
 
 impl Engine {
-    /// The agent of a thread and the policy of its topic, at this moment; nothing where the thread is not there.
+    /// The agent of a thread at this moment; nothing where the thread is not there.
     pub(crate) async fn asking(
         &self,
         conn: &mut Conn,
@@ -69,23 +63,8 @@ impl Engine {
         let Some(agent) = Agent::of(conn, thread).await? else {
             return Ok(None);
         };
-        let policy =
-            orch_settings::get::<String>(conn, Place::Node(agent.topic), keys::SHARING_AGENT_REACH)
-                .await?
-                .and_then(|word| AgentReach::parse(&word))
-                .unwrap_or_default();
         Ok(Some(Asking {
-            documents_policy: orch_settings::get::<String>(
-                conn,
-                Place::Node(agent.topic),
-                keys::SHARING_AGENT_DOCUMENTS,
-            )
-            .await?
-            .as_deref()
-            .and_then(DocumentPolicy::parse)
-            .unwrap_or(DocumentPolicy::Write),
             agent,
-            policy,
             now: Time::new(self.inner.clock.now()),
         }))
     }
@@ -100,15 +79,7 @@ impl Engine {
     ) -> Result<(Tree, tree::Walked, Named), EngineError> {
         let named = tree::absolute(conn, &asking.agent, named).await?;
         let walked = tree::walk(conn, &named).await?;
-        let tree = Tree::load(
-            conn,
-            asking.agent.clone(),
-            asking.policy,
-            asking.documents_policy,
-            asking.now,
-            walked.scope,
-        )
-        .await?;
+        let tree = Tree::load(conn, asking.agent.clone(), asking.now, walked.scope).await?;
         Ok((tree, walked, named))
     }
 
@@ -141,28 +112,13 @@ impl Engine {
             Scope::Under(_) => {}
         }
         for (at, node) in walked.chain.iter().enumerate().rev().skip(1) {
-            let above = Tree::load(
-                conn,
-                asking.agent.clone(),
-                asking.policy,
-                asking.documents_policy,
-                asking.now,
-                Scope::Under(*node),
-            )
-            .await?;
+            let above =
+                Tree::load(conn, asking.agent.clone(), asking.now, Scope::Under(*node)).await?;
             if above.directory_at(Where::Place(*node)) {
                 return Ok(not_found(&above, named, at + 1, asked));
             }
         }
-        let top = Tree::load(
-            conn,
-            asking.agent.clone(),
-            asking.policy,
-            asking.documents_policy,
-            asking.now,
-            Scope::Everything,
-        )
-        .await?;
+        let top = Tree::load(conn, asking.agent.clone(), asking.now, Scope::Everything).await?;
         Ok(not_found(&top, named, 0, asked))
     }
 
@@ -522,8 +478,6 @@ impl Engine {
             let tree = Tree::load_search(
                 conn,
                 asking.agent.clone(),
-                asking.policy,
-                asking.documents_policy,
                 asking.now,
                 walked.scope,
                 selected,
@@ -758,7 +712,7 @@ pub(crate) async fn audit_by_agent(
 }
 
 impl Engine {
-    /// A thread addressed through the common resolver: its own topic permits sending, elsewhere a write share does.
+    /// A thread addressed through the common resolver: a write share or the source topic's messaging opt-in permits sending.
     pub(crate) async fn thread_shared_for_writing(
         &self,
         thread: &ThreadRow,
@@ -816,11 +770,10 @@ impl Engine {
                 "A side thread is not a message target.",
             )));
         }
-        if topic != thread.topic_id
-            && !resolved
-                .tree
-                .conversation_of(id)
-                .is_some_and(|(standing, _)| standing.writes())
+        if !resolved
+            .tree
+            .conversation_of(id)
+            .is_some_and(|(standing, _)| standing.writes())
         {
             return Ok(Err(Refusal::new(
                 Code::NotFound,

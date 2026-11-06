@@ -1,6 +1,6 @@
 //! Read-only archive consequences and caller-bound subtree fences, including exact inverse reviews.
 
-use super::{may_archive, placed, view};
+use super::{archive_operation, placed, view};
 use crate::middleware::requests::{ApiError, ApiResult};
 use crate::registry::{Ctx, Registry};
 use chrono::Duration;
@@ -12,7 +12,7 @@ use orch_api_contract::nodes::{
     NodeArchiveBody, NodeArchiveEnvironment, NodeArchiveItem, NodeArchivePlan, NodeArchivePreview,
     NodeArchiveWork, NodeKind, NodeUnarchivePreview,
 };
-use orch_authz::{Act, Policy, Principal};
+use orch_authz::{Policy, Principal};
 use orch_db::queries::{archive_plans, hierarchy};
 use orch_db::{Conn, DbError};
 use orch_types::{Id, Time};
@@ -33,8 +33,8 @@ struct Kept {
 /// Binds both directions to the ordinary hierarchy action guard.
 pub fn mount(registry: &mut Registry) {
     registry
-        .on(NodeArchivePreview, archive)
-        .on(NodeUnarchivePreview, unarchive);
+        .on_with_operation(NodeArchivePreview, archive_operation::review, archive)
+        .on_with_operation(NodeUnarchivePreview, archive_operation::review, unarchive);
 }
 
 async fn stamp(conn: &mut Conn, id: Id) -> ApiResult<String> {
@@ -43,50 +43,72 @@ async fn stamp(conn: &mut Conn, id: Id) -> ApiResult<String> {
     Ok(hex::encode(Sha256::digest(bytes)))
 }
 
-async fn preview(ctx: Ctx, archiving: bool) -> ApiResult<NodeArchivePlan> {
+async fn preview(ctx: Ctx) -> ApiResult<NodeArchivePlan> {
     let id = ctx.id("id")?;
-    let (ctx, mut tx, principal) = super::action(&ctx).await?;
-    let root = hierarchy::with_ancestors(&mut tx, &[id]).await?;
-    let own = root
-        .iter()
-        .any(|row| row.id == id && row.archived_at.is_some());
-    may_archive(
-        &mut tx,
-        &principal,
-        id,
-        if archiving && !own {
-            Act::Use
-        } else {
-            Act::Unarchive
-        },
-    )
-    .await?;
-    ctx.app
-        .engine
-        .lock_archive_in(&mut tx, id)
-        .await
-        .map_err(ApiError::internal)?;
-    hierarchy::deletion_set(&mut tx, id, true).await?;
-    let plan = make(&ctx, &mut tx, &principal, id, archiving).await?;
+    let (ctx, mut tx, _) = archive_operation::action(&ctx).await?;
+    let (ctx, guard, bounds) = archive_operation::effect(&ctx, &mut tx, id).await?;
+    let Some(archive_operation::NativePrefix::Preview(plan)) = bounds.native else {
+        return Err(ApiError::internal(
+            "an archive preview lost its native operands",
+        ));
+    };
+    guard.check_deadline(&ctx)?;
+    let plan = plan.keep(&mut tx).await?;
     tx.commit().await.map_err(DbError::from)?;
     Ok(plan)
 }
 
 async fn archive(ctx: Ctx, (): (), (): ()) -> ApiResult<NodeArchivePlan> {
-    preview(ctx, true).await
+    let projection = ctx.clone();
+    preview(ctx)
+        .await
+        .map_err(|error| archive_operation::problem(&projection, error))
 }
 async fn unarchive(ctx: Ctx, (): (), (): ()) -> ApiResult<NodeArchivePlan> {
-    preview(ctx, false).await
+    let projection = ctx.clone();
+    preview(ctx)
+        .await
+        .map_err(|error| archive_operation::problem(&projection, error))
 }
 
-/// Builds a review without changing any node, work, share or link; only its expiring confirmation is kept.
+/// A complete native review value plus its existing private expiring confirmation.
+#[derive(Clone)]
+pub(super) struct PreparedPlan {
+    answer: NodeArchivePlan,
+    kept: orch_db::queries::jobs::forks::PreflightRow,
+}
+impl PreparedPlan {
+    /// Its first SQL is the existing private confirmation INSERT; no validation/read awaits.
+    pub(super) async fn keep(self, conn: &mut Conn) -> ApiResult<NodeArchivePlan> {
+        orch_db::queries::jobs::forks::save_preflight(conn, &self.kept).await?;
+        Ok(self.answer)
+    }
+}
+
+/// Builds the same review and stores it for ordinary accepted inverse/read callers.
 pub(super) async fn make(
     ctx: &Ctx,
     conn: &mut Conn,
     principal: &Principal,
     id: Id,
     archiving: bool,
+    bounds: Option<&archive_operation::Bounds>,
 ) -> ApiResult<NodeArchivePlan> {
+    prepare_make(ctx, conn, principal, id, archiving, bounds)
+        .await?
+        .keep(conn)
+        .await
+}
+
+/// The complete original read-only review producer, without storing its confirmation yet.
+pub(super) async fn prepare_make(
+    ctx: &Ctx,
+    conn: &mut Conn,
+    principal: &Principal,
+    id: Id,
+    archiving: bool,
+    bounds: Option<&archive_operation::Bounds>,
+) -> ApiResult<PreparedPlan> {
     let set = hierarchy::deletion_set(conn, id, false).await?;
     let ids: Vec<Id> = set
         .iter()
@@ -99,7 +121,10 @@ pub(super) async fn make(
         .find(|node| node.id == id)
         .ok_or_else(ApiError::not_found)?;
     let revision = root.revision;
-    let refs = view::refs(conn, principal, &ids, Policy::default()).await?;
+    let refs = match bounds.filter(|bounds| bounds.names.limited) {
+        Some(bounds) => bounds.names.refs(conn, principal, &ids).await?,
+        None => view::refs(conn, principal, &ids, Policy::default()).await?,
+    };
     let node = refs.get(&id).cloned().ok_or_else(ApiError::not_found)?;
     let mut subtree = Vec::new();
     for each in &ids {
@@ -140,19 +165,13 @@ pub(super) async fn make(
     }
     let mut environments = Vec::new();
     for (environment, name) in archive_plans::environments(conn, id).await? {
-        let allowed = orch_authz::resources::check(
-            conn,
-            principal,
-            ObjectRef {
-                kind: ObjectKind::Environment,
-                id: environment,
-            },
-            Permission::EnvironmentView,
-            Policy::default(),
-        )
-        .await
-        .map_err(ApiError::internal)?
-        .is_allowed();
+        let allowed = match bounds {
+            Some(bounds) if bounds.environment_candidates.contains(&environment) => {
+                bounds.environments.contains(&environment)
+            }
+            Some(bounds) if bounds.names.limited => false,
+            _ => environment_view(conn, principal, environment).await?,
+        };
         environments.push(NodeArchiveEnvironment {
             id: environment,
             name: allowed.then_some(name),
@@ -181,46 +200,84 @@ pub(super) async fn make(
         stamp: stamp.clone(),
         revision,
     };
-    orch_db::queries::jobs::forks::save_preflight(
-        conn,
-        &orch_db::queries::jobs::forks::PreflightRow {
-            id: preflight_id,
-            kind: KIND.to_owned(),
-            node_id: Some(id),
-            environment_id: None,
-            created_by: principal.user(),
-            plan: serde_json::to_value(kept).map_err(ApiError::internal)?,
-            expires_at,
-            created_at: ctx.now,
+    let kept = orch_db::queries::jobs::forks::PreflightRow {
+        id: preflight_id,
+        kind: KIND.to_owned(),
+        node_id: Some(id),
+        environment_id: None,
+        created_by: principal.user(),
+        plan: serde_json::to_value(kept).map_err(ApiError::internal)?,
+        expires_at,
+        created_at: ctx.now,
+    };
+    Ok(PreparedPlan {
+        kept,
+        answer: NodeArchivePlan {
+            preflight_id,
+            expires_at: Time::new(expires_at),
+            stamp,
+            archiving,
+            node,
+            revision,
+            subtree,
+            counts: super::removal::counts_of(&set),
+            work,
+            environments,
+            copies_kept,
+            live_shares_kept,
+            blockers,
         },
-    )
-    .await?;
-    Ok(NodeArchivePlan {
-        preflight_id,
-        expires_at: Time::new(expires_at),
-        stamp,
-        archiving,
-        node,
-        revision,
-        subtree,
-        counts: super::removal::counts_of(&set),
-        work,
-        environments,
-        copies_kept,
-        live_shares_kept,
-        blockers,
     })
 }
 
-/// Consumes the caller's review under the same locks the archive writer holds; stale facts return a fresh review.
-pub(super) async fn verify(
+/// The existing environment-name predicate, also prepared once for the same guarded projection.
+pub(super) async fn environment_view(
+    conn: &mut Conn,
+    principal: &Principal,
+    environment: Id,
+) -> ApiResult<bool> {
+    orch_authz::resources::check(
+        conn,
+        principal,
+        ObjectRef {
+            kind: ObjectKind::Environment,
+            id: environment,
+        },
+        Permission::EnvironmentView,
+        Policy::default(),
+    )
+    .await
+    .map_err(ApiError::internal)
+    .map(|decision| decision.is_allowed())
+}
+
+/// The same caller-bound confirmation decision, prepared before the first private write.
+#[derive(Clone)]
+pub(super) struct PreparedReview {
+    id: Id,
+    replacement: Option<PreparedPlan>,
+}
+impl PreparedReview {
+    /// The existing confirmation DELETE is first; a stale replacement uses the same INSERT.
+    pub(super) async fn consume(self, conn: &mut Conn) -> ApiResult<Option<NodeArchivePlan>> {
+        orch_db::queries::jobs::forks::forget_preflight(conn, self.id).await?;
+        match self.replacement {
+            Some(plan) => Ok(Some(plan.keep(conn).await?)),
+            None => Ok(None),
+        }
+    }
+}
+
+/// Reads the exact original review and canonical locked subtree facts, without consuming it.
+pub(super) async fn prepare_verify(
     ctx: &Ctx,
     conn: &mut Conn,
     principal: &Principal,
     id: Id,
     archiving: bool,
     body: &NodeArchiveBody,
-) -> ApiResult<Option<NodeArchivePlan>> {
+    bounds: Option<&archive_operation::Bounds>,
+) -> ApiResult<PreparedReview> {
     let row = orch_db::queries::jobs::forks::preflight(conn, body.preflight_id)
         .await?
         .filter(|row| {
@@ -245,12 +302,19 @@ pub(super) async fn verify(
             "This review is for the opposite archive action.",
         ));
     }
-    hierarchy::deletion_set(conn, id, true).await?;
+    // The action's native Thread→Node/Document serialization is owned by effect().
+    // Discovery is factual only; the final guarded producer repeats this under those locks.
+    hierarchy::deletion_set(conn, id, false).await?;
     let current = stamp(conn, id).await?;
-    orch_db::queries::jobs::forks::forget_preflight(conn, body.preflight_id).await?;
     if current == kept.stamp && body.stamp == kept.stamp && body.expected_revision == kept.revision
     {
-        return Ok(None);
+        return Ok(PreparedReview {
+            id: body.preflight_id,
+            replacement: None,
+        });
     }
-    Ok(Some(make(ctx, conn, principal, id, archiving).await?))
+    Ok(PreparedReview {
+        id: body.preflight_id,
+        replacement: Some(prepare_make(ctx, conn, principal, id, archiving, bounds).await?),
+    })
 }

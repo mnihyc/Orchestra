@@ -8,6 +8,7 @@
 mod desk;
 mod places;
 mod support;
+use support::FullTokenReply as _;
 
 use desk::Desk;
 use orch_api_contract::access::{
@@ -133,17 +134,19 @@ async fn role_sources_keep_their_identity_but_hide_a_private_or_out_of_scope_pla
         .call(MeTokenCreate, &[])
         .token(&reader.token)
         .body(&ApiTokenCreateBody {
+            rules: None,
             name: "Scoped explanation".to_owned(),
             scopes: Some(vec!["topic.view".to_owned()]),
             node_id: Some(desk.topic),
             expires_at: None,
-            proof: orch_api_contract::auth::SensitiveProof {
+            proof: Some(orch_api_contract::auth::SensitiveProof {
                 password: Some(support::PASSWORD.to_owned()),
                 ..Default::default()
-            },
+            }),
         })
         .send()
         .await
+        .full_token()
         .ok()
         .token
         .expect("the first answer carries the secret");

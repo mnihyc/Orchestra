@@ -25,6 +25,7 @@
 
 use crate::tools::texts;
 use chrono::{DateTime, Duration, Utc};
+use orch_agent_contract::descriptor::SideReading;
 use orch_agent_contract::events::OrchTool;
 use orch_api_contract::documents::DOCUMENT_DESCRIPTION_MAX_CHARS;
 use orch_types::{Id, Json};
@@ -1014,21 +1015,15 @@ pub fn definition(tool: OrchTool, messages: &BTreeMap<String, String>) -> ToolDe
     }
 }
 
-/// Advertises only the current place's announcement choices. Actual calls still recheck current policy.
+/// Advertises the place's delivery choices. Every audience still checks current recipient rights.
 #[must_use]
 pub fn definition_at(
     tool: OrchTool,
     messages: &BTreeMap<String, String>,
-    reach: &str,
     options: &[String],
 ) -> ToolDefinition {
     let mut definition = definition(tool, messages);
     if tool == OrchTool::Announce {
-        definition.input_schema["properties"]["audience"]["enum"] = match reach {
-            "org" => json!(["followers", "topic", "project", "org"]),
-            "project" => json!(["followers", "topic", "project"]),
-            _ => json!(["followers", "topic"]),
-        };
         let deliveries: Vec<_> = ["interrupt", "steer", "next_turn"]
             .into_iter()
             .filter(|value| options.iter().any(|allowed| allowed.as_str() == *value))
@@ -1058,10 +1053,10 @@ pub fn all(messages: &BTreeMap<String, String>) -> Vec<ToolDefinition> {
 }
 
 /// The tools a thread is offered: those of `enabled` (the resolved `orch_tools.enabled`) that are built, in
-/// their fixed order. A side thread is a quick aside from another thread and tells nobody: it has no
-/// `announce`.
+/// their fixed order. A reading side thread receives only tools whose whole operation is read-only;
+/// a no-tools side receives none. The same selection gates fresh calls, not just advertised tools.
 #[must_use]
-pub fn offered(enabled: &[String], side_thread: bool) -> Vec<OrchTool> {
+pub fn offered(enabled: &[String], side_reading: Option<SideReading>) -> Vec<OrchTool> {
     OrchTool::ALL
         .iter()
         .copied()
@@ -1073,7 +1068,11 @@ pub fn offered(enabled: &[String], side_thread: bool) -> Vec<OrchTool> {
                         && matches!(name.as_str(), "send_chat_message" | "send_thread_message"))
             })
         })
-        .filter(|tool| !(side_thread && *tool == OrchTool::Announce))
+        .filter(|tool| match side_reading {
+            None => true,
+            Some(SideReading::NoTools) => false,
+            Some(SideReading::ReadOnly | SideReading::ApprovalGated) => hints_of(*tool).read_only,
+        })
         .collect()
 }
 
@@ -1571,13 +1570,13 @@ mod tests {
     }
 
     #[test]
-    fn an_announcement_lists_only_the_current_places_delivery_and_audience_choices() {
+    fn an_announcement_lists_all_audiences_and_only_permitted_delivery_choices() {
         let messages = BTreeMap::new();
         let stock = definition(OrchTool::Announce, &messages);
-        let default = definition_at(OrchTool::Announce, &messages, "topic", &[]);
+        let default = definition_at(OrchTool::Announce, &messages, &[]);
         assert_eq!(
             default.input_schema["properties"]["audience"]["enum"],
-            json!(["followers", "topic"])
+            json!(["followers", "topic", "project", "org"])
         );
         assert!(default.input_schema["properties"].get("delivery").is_none());
         assert!(
@@ -1588,7 +1587,6 @@ mod tests {
         let allowed = definition_at(
             OrchTool::Announce,
             &messages,
-            "org",
             &["steer".to_owned(), "wake_idle".to_owned()],
         );
         assert_eq!(
@@ -1722,7 +1720,7 @@ mod tests {
                     .contains("existing writable docs root or document folder"))
         );
         assert_eq!(
-            definition_at(OrchTool::EditDocument, &BTreeMap::new(), "topic", &[]).input_schema,
+            definition_at(OrchTool::EditDocument, &BTreeMap::new(), &[]).input_schema,
             edit.input_schema,
             "offered definitions have no second create(from) workflow at any place"
         );
@@ -1765,22 +1763,33 @@ mod tests {
     }
 
     #[test]
-    fn a_thread_is_offered_what_it_enables_that_is_built_and_a_side_thread_has_no_announce() {
+    fn a_thread_is_offered_what_it_enables_and_sides_receive_only_their_reading_tools() {
         let enabled: Vec<String> = OrchTool::ALL
             .iter()
             .map(|tool| tool.name().to_owned())
             .collect();
-        let everything = offered(&enabled, false);
+        let everything = offered(&enabled, None);
         assert_eq!(
             everything, BUILT,
             "all enabled: the ones that are built, in their order"
         );
-        let aside = offered(&enabled, true);
-        assert!(!aside.contains(&OrchTool::Announce));
-        assert!(aside.contains(&OrchTool::SendMessage));
-        assert!(offered(&[], false).is_empty());
+        for mode in [SideReading::ReadOnly, SideReading::ApprovalGated] {
+            assert_eq!(
+                offered(&enabled, Some(mode)),
+                [
+                    OrchTool::ListShared,
+                    OrchTool::ReadShared,
+                    OrchTool::SearchShared,
+                    OrchTool::ListPorts,
+                    OrchTool::ListPortConnections,
+                ],
+                "a reading side has no mutation or control path, including a workspace download"
+            );
+        }
+        assert!(offered(&enabled, Some(SideReading::NoTools)).is_empty());
+        assert!(offered(&[], None).is_empty());
         assert_eq!(
-            offered(&["list_shared".to_owned()], false),
+            offered(&["list_shared".to_owned()], None),
             [OrchTool::ListShared],
             "only what is enabled is offered"
         );
@@ -1890,7 +1899,7 @@ mod tests {
         for historical in ["send_chat_message", "send_thread_message"] {
             assert!(!names.contains(&historical));
             assert_eq!(
-                offered(&[historical.to_owned()], false),
+                offered(&[historical.to_owned()], None),
                 [OrchTool::SendMessage]
             );
         }

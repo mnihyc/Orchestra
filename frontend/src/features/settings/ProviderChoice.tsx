@@ -6,7 +6,8 @@ import { useStore } from 'zustand';
 
 import { ApiError, api, client, ok } from '@/api/client';
 import { everythingQuery } from '@/api/everything';
-import { providerKey, providerQuery } from '@/api/resources';
+import { providerQuery } from '@/api/resources';
+import { defaultProviderReader, providerDefaultKey } from '@/api/defaultsOpening';
 import { useKnownPlaces } from '@/features/navigation/placeLabels';
 import { ResourceCreateButton } from '@/features/resources/ResourceCreation';
 import { ResourceHint, ResourceName, resourceChoice } from '@/features/resource-facts/ResourceFacts';
@@ -41,7 +42,7 @@ function NamedProvider({ id, render }: { id: string; render: ((provider: Provide
   return <span className="text-text-muted">{t('places.providerDefault.loading')}</span>;
 }
 
-const readerScope = () => { const state = client.session.getState(); return `${state.userId ?? ''}:${state.readerVersion ?? 0}`; };
+const readerScope = defaultProviderReader;
 const refused = (error: unknown) => error instanceof ApiError && [401, 403, 404].includes(error.status);
 
 /** The parent's revision/lock/autosave machinery remains the only writer of the setting. */
@@ -77,7 +78,7 @@ function ReaderChoice({ value, label, onChange, onEdited, error, disabled = fals
   const selected = typeof value === 'string' ? value : '';
   // Keep names across the parent's acknowledged-save remount, but never across
   // readers. Do not seed this exact read from an unscoped historical cache.
-  const currentKey = (id: string) => [...providerKey(id), 'default-choice', reader] as const;
+  const currentKey = (id: string) => providerDefaultKey(id, reader);
   const chosen = useQuery({ queryKey: currentKey(selected),
     // Native GET is non-null. A live cache withdrawal can remove a scoped row locally.
     queryFn: ({ signal }): Promise<Provider | null> => ok(api.GET('/providers/{id}', { params: { path: { id: selected } }, signal })),

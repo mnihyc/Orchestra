@@ -7,7 +7,7 @@
 //! made by the rights of the person at that moment; what they may not make is a row of the report and nothing of it is made.
 //!
 //! **Identity.** Everything an import makes has the identifier derived from who imports, where, which package and the identifier
-//! it had ([`identity`]), so a retry makes nothing twice, and each thing is recorded in `import_origins` by the place imported into
+//! it had (`identity`), so a retry makes nothing twice, and each thing is recorded in `import_origins` by the place imported into
 //! and its source identifier, so that a later import of the same thing finds it.
 
 mod identity;

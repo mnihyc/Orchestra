@@ -3,11 +3,11 @@
  * Agents are given the same three words as people, Can view, Can edit and Can manage, and by area the
  * same three columns the page has: their conversations, the people's chats and the documents. A choice
  * means a level in each area the thing has, and a level means rows on the page; this file works out the first
- * and the last from the other two and from what the reader may give (`PermissionPage.gives.agents`), and
+ * and the last from the other two and from what the reader may give (`PermissionPage.gives.agent_parts`), and
  * holds nothing that a request does.
  */
 import type { AccessKind } from '@/api/access';
-import type { AgentLevel, AgentShare, ShareDocumentsLevel, ShareLevel, ShareParts } from '@/generated/api-types';
+import type { AgentAccessChoice, AgentLevel, AgentShare, PermissionPage, ShareDocumentsLevel, ShareLevel, ShareParts } from '@/generated/api-types';
 
 import type { Reach } from './Covers';
 
@@ -61,12 +61,28 @@ export function levelNeeded(step: number): AgentLevel | null {
 }
 
 /** Whether the reader may give parts: every area shared at a level they may give. */
-export function mayGiveParts(parts: ShareParts, gives: readonly AgentLevel[]): boolean {
-  return AREAS.every((area) => {
-    const needed = levelNeeded(stepOf(area, parts));
-    return needed === null || gives.includes(needed);
-  });
+export function mayGiveParts(parts: ShareParts, available: ShareParts): boolean {
+  return AREAS.every((area) => stepOf(area, parts) <= stepOf(area, available));
 }
+
+/** Native and legacy JSON are checked before an area can be displayed as available. */
+export function sharePartsValue(value: unknown): ShareParts | null {
+  const record = (input: unknown): input is Record<string, unknown> => typeof input === 'object' && input !== null && !Array.isArray(input);
+  if (!record(value) || Object.keys(value).some((key) => !AREAS.some((area) => area === key))) return null;
+  const parts: ShareParts = {};
+  for (const area of AREAS) {
+    const level = value[area];
+    if (level === undefined || level === null) continue;
+    if (level === 'read') parts[area] = level;
+    else if (area === 'documents' && (level === 'edit' || level === 'manage')) parts.documents = level;
+    else if (area !== 'documents' && level === 'write') parts[area] = level;
+    else return null;
+  }
+  return parts;
+}
+
+export function agentGivingParts(page: PermissionPage): ShareParts { return sharePartsValue(page.gives.agent_parts) ?? {}; }
+export function canGiveToAgents(page: PermissionPage): boolean { const parts = agentGivingParts(page); return AREAS.some((area) => stepOf(area, parts) > 0); }
 
 /** Whether two sets of parts say the same. */
 export function sameParts(one: ShareParts, other: ShareParts): boolean {
@@ -102,3 +118,17 @@ export const isCopy = (share: AgentShare): boolean => share.mode === 'snapshot';
 
 /** Whether a share of a place reaches what lies inside it, which is the question the dialog and the tab ask in the same words. */
 export const reachOf = (share: AgentShare): Reach => (share.inside ? 'inside' : 'alone');
+
+/** Keep only the areas of the selected source reach, retaining exact levels and explicit omissions. */
+export function partsInAreas(parts: ShareParts, areas: readonly Area[]): ShareParts {
+  return areas.reduce<ShareParts>((selected, area) => withStep(selected, area, stepOf(area, parts)), {});
+}
+
+/** Creation controls share the generated contract and the ordinary Share parts. */
+export type AgentAccessDraft = AgentAccessChoice;
+export function creationAreas(where: AgentAccessDraft['where']): readonly Area[] {
+  return where === 'nothing' ? [] : where === 'thread' ? ['chat', 'documents'] : AREAS;
+}
+export function creationChoice(where: AgentAccessDraft['where'], parts: ShareParts): AgentAccessDraft {
+  return { where, parts: partsInAreas(parts, creationAreas(where)) };
+}

@@ -679,7 +679,7 @@ permissions! {
     ProviderManage = "provider.manage", Provider, Manage, PROVIDER, NOBODY,
         "Manage Provider", "Sign the provider in and out, rotate its key, say which models and arrangements it allows, run and update its runtime, and enable, disable and delete it.";
     ProviderBypass = "provider.bypass", Provider, Advanced, PROVIDER, NOBODY,
-        "Go past limits", "Let one turn run past a cap on the provider that has no room left, or past the limit of its plan.";
+        "Go past limits", "Let one turn run past a configured Orch usage cap on the provider that has no room left.";
     AgentView = "agent.view", Agent, View, AGENT, NOBODY,
         "View Agent profile", "See the agent profile in lists, with what its adapter declares.";
     AgentUse = "agent.use", Agent, Use, AGENT, NOBODY,

@@ -23,6 +23,7 @@ pub mod address;
 pub mod builtins;
 pub mod calls;
 pub mod choice;
+pub mod credit_fields;
 pub mod facts;
 pub mod failure;
 pub mod forecast;

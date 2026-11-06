@@ -508,15 +508,7 @@ impl Engine {
                 .collect(),
             people_chats: Vec::new(),
         };
-        let reach = Reach::load(
-            conn,
-            asking.agent.clone(),
-            asking.policy,
-            asking.now,
-            &things,
-        )
-        .await?
-        .with_document_policy(asking.documents_policy);
+        let reach = Reach::load_current(conn, asking.agent.clone(), asking.now, &things).await?;
         let counts = rows
             .iter()
             .map(|row| {

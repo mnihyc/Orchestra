@@ -11,6 +11,15 @@
 //! the person's own record ([`Import`]) with its report, a row for each object, and it can be undone ([`ImportUndo`])
 //! after a plan of what that would take away ([`ImportUndoPreflight`]).
 
+use crate::operations::{
+    FacetSpec as Facet, OperationSpec as Op, TargetResolver as Target, VariantSpec as Variant,
+};
+use orch_access_contract::key_scope::KeyAction::{Manage, Read, Write};
+use orch_access_contract::key_scope::KeyIdentityKind as I;
+use orch_access_contract::key_scope::KeyTargetKind::{Identity, Object};
+use orch_access_contract::permissions::ObjectKind as K;
+
+
 use orch_types::{Hash, Id, Json, Time};
 use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
@@ -721,25 +730,163 @@ pub struct ImportUndoBody {
 
 crate::endpoints! {
     /// Says what an import into a place would do: the action for each object, the people, the conflicts, the losses and what stands in its way. Nothing is made.
-    NodeImportPreflight: POST "/nodes/{id}/imports/preflight", Permission("node.view"), none, json ImportPreflightRequest, json ImportPlan, 200;
+    NodeImportPreflight: POST "/nodes/{id}/imports/preflight", Permission("node.view"), none, json ImportPreflightRequest, json ImportPlan, 200,
+        operation Op::facets(&[
+            Facet::required(
+                Read,
+                &[Identity(I::Upload)],
+                Target::Resolved("import_sources"),
+            ),
+            Facet::required(
+                Read,
+                &[
+                    Object(K::Org),
+                    Object(K::Project),
+                    Object(K::Topic),
+                    Object(K::Thread),
+                    Object(K::Document),
+                    Object(K::DocumentContainer),
+                    Identity(I::Chat),
+                ],
+                Target::Resolved("import_existing_targets"),
+            ),
+        ]);
     /// Shows an item of the source as text, before it is brought.
-    NodeImportPreview: POST "/nodes/{id}/imports/preview", Permission("node.view"), none, json ImportPreviewRequest, json ImportPreview, 200;
+    NodeImportPreview: POST "/nodes/{id}/imports/preview", Permission("node.view"), none, json ImportPreviewRequest, json ImportPreview, 200,
+        operation Op::facets(&[
+            Facet::required(
+                Read,
+                &[Identity(I::Upload)],
+                Target::Resolved("import_sources"),
+            ),
+            Facet::required(
+                Read,
+                &[
+                    Object(K::Org),
+                    Object(K::Project),
+                    Object(K::Topic),
+                    Object(K::Thread),
+                    Object(K::Document),
+                    Object(K::DocumentContainer),
+                    Identity(I::Chat),
+                ],
+                Target::Resolved("import_existing_targets"),
+            ),
+        ]);
     /// Brings an Orch package or plain files into a place, written by a job; each thing is made by the caller's creation rights at the moment it is made.
-    NodeImportCreate: POST "/nodes/{id}/imports", Permission("node.view"), none, json ImportRequest, json Job, 202;
+    NodeImportCreate: POST "/nodes/{id}/imports", Permission("node.view"), none, json ImportRequest, json Job, 202,
+        operation Op::variants(&[
+            Variant {
+                name: "content",
+                selector: "resolved plan access is false and resolved authors is labels",
+                facets: &[
+                    Facet::required(
+                        Read,
+                        &[Identity(I::Upload)],
+                        Target::Resolved("import_sources"),
+                    ),
+                    Facet::required(
+                        Write,
+                        &[
+                            Object(K::Org),
+                            Object(K::Project),
+                            Object(K::Topic),
+                            Object(K::Thread),
+                            Object(K::Document),
+                            Object(K::DocumentContainer),
+                            Identity(I::Chat),
+                        ],
+                        Target::Resolved("import_destinations"),
+                    ),
+                ],
+            },
+            Variant {
+                name: "restore_access",
+                selector: "resolved plan access is true or resolved authors is accounts, including administrator defaults",
+                facets: &[
+                    Facet::required(
+                        Read,
+                        &[Identity(I::Upload)],
+                        Target::Resolved("import_sources"),
+                    ),
+                    Facet::required(
+                        Write,
+                        &[
+                            Object(K::Org),
+                            Object(K::Project),
+                            Object(K::Topic),
+                            Object(K::Thread),
+                            Object(K::Document),
+                            Object(K::DocumentContainer),
+                            Identity(I::Chat),
+                        ],
+                        Target::Resolved("import_destinations"),
+                    ),
+                    Facet::required(
+                        Manage,
+                        &[
+                            Object(K::Org),
+                            Object(K::Project),
+                            Object(K::Topic),
+                            Object(K::Thread),
+                            Object(K::Document),
+                            Object(K::DocumentContainer),
+                            Identity(I::Chat),
+                        ],
+                        Target::Resolved("import_delegation_targets"),
+                    ),
+                ],
+            },
+        ]);
     /// Lists the caller's own imports, newest first.
-    MeImportList: GET "/me/imports", User, query PageQuery, none, json Page<ImportLine>, 200;
+    MeImportList: GET "/me/imports", User, query PageQuery, none, json Page<ImportLine>, 200,
+        operation Op::single(Read, &[Identity(I::Import)], Target::Resolved("results"));
     /// Reads one of the caller's imports.
-    ImportGet: GET "/imports/{id}", Rule("its person"), none, none, json Import, 200;
+    ImportGet: GET "/imports/{id}", Rule("its person"), none, none, json Import, 200,
+        operation Op::single(Read, &[Identity(I::Import)], Target::Path("id"));
     /// Lists the names of the files one of the caller's imports was made from, in the order they were given.
-    ImportFileList: GET "/imports/{id}/files", Rule("its person"), query PageQuery, none, json Page<String>, 200;
+    ImportFileList: GET "/imports/{id}/files", Rule("its person"), query PageQuery, none, json Page<String>, 200,
+        operation Op::single(Read, &[Identity(I::Import)], Target::Path("id"));
     /// Lists the report of an import: a row for each object and what became of it.
-    ImportReportList: GET "/imports/{id}/report", Rule("its person"), query ImportReportListQuery, none, json Page<ImportReportRow>, 200;
+    ImportReportList: GET "/imports/{id}/report", Rule("its person"), query ImportReportListQuery, none, json Page<ImportReportRow>, 200,
+        operation Op::single(Read, &[Identity(I::Import)], Target::Path("id"));
     /// Fetches the whole report of an import as a file.
-    ImportReportDownload: GET "/imports/{id}/report/download", Rule("its person, in a browser session or with a token of theirs"), query ImportReportDownloadQuery, none, raw, 200;
+    ImportReportDownload: GET "/imports/{id}/report/download", Rule("its person, in a browser session or with a token of theirs"), query ImportReportDownloadQuery, none, raw, 200,
+        operation Op::single(Read, &[Identity(I::Import)], Target::Path("id"));
     /// Says what taking an import back would remove. Nothing is changed.
-    ImportUndoPreflight: POST "/imports/{id}/undo/preflight", Rule("its person"), none, none, json ImportUndoPlan, 200;
+    ImportUndoPreflight: POST "/imports/{id}/undo/preflight", Rule("its person"), none, none, json ImportUndoPlan, 200,
+        operation Op::facets(&[
+            Facet::required(Manage, &[Identity(I::Import)], Target::Path("id")),
+            Facet::required(
+                Manage,
+                &[
+                    Object(K::Org),
+                    Object(K::Project),
+                    Object(K::Topic),
+                    Object(K::Thread),
+                    Object(K::Document),
+                    Identity(I::Chat),
+                ],
+                Target::Resolved("imported_objects"),
+            ),
+        ]);
     /// Takes an import back as a whole: what it made is deleted, and can be brought back for as long as deletions can.
-    ImportUndo: POST "/imports/{id}/undo", Rule("its person"), none, json ImportUndoBody, json Job, 202;
+    ImportUndo: POST "/imports/{id}/undo", Rule("its person"), none, json ImportUndoBody, json Job, 202,
+        operation Op::facets(&[
+            Facet::required(Manage, &[Identity(I::Import)], Target::Path("id")),
+            Facet::required(
+                Manage,
+                &[
+                    Object(K::Org),
+                    Object(K::Project),
+                    Object(K::Topic),
+                    Object(K::Thread),
+                    Object(K::Document),
+                    Identity(I::Chat),
+                ],
+                Target::Resolved("imported_objects"),
+            ),
+        ]);
 }
 
 #[cfg(test)]

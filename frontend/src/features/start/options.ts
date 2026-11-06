@@ -10,7 +10,7 @@ import { startOptionsQuery } from '@/api/start';
 
 import { canUseEnvironment, type Mode, NO_PICKS, type Picks, resolve, type Resolved } from './choices';
 import { useLastSetup } from './lastSetup';
-import type { StartOptions } from '@/api/start';
+import type { CreationAccessContext, StartOptions } from '@/api/start';
 
 export interface Started {
   /** The answer, or `null` before the first one. */
@@ -24,19 +24,20 @@ export interface Started {
 }
 
 /** What a thread made in a topic, or in a topic made in a project, could be bound to, and what the person's picks make of it. */
-export function useStartOptions(nodeId: string, picks: Picks, mode: Mode): Started {
+export function useStartOptions(nodeId: string, picks: Picks, mode: Mode, enabled = true, context?: CreationAccessContext): Started {
   const last = useLastSetup();
   const environmentId = picks.environment;
-  const base = useQuery({ ...startOptionsQuery(nodeId, environmentId), placeholderData: keepPreviousData });
+  const base = useQuery({ ...startOptionsQuery(nodeId, environmentId, context), enabled, placeholderData: keepPreviousData });
   // A place's environment rule wins. Reuse a location only in that same place, while it is still usable.
   const rememberedEnvironment = !base.isError && !base.isPlaceholderData && environmentId === null && picks.environment === null && last?.place === nodeId && base.data?.environment_default === 'shared' && !base.data.environments.some((row) => row.is_default && canUseEnvironment(row))
     ? base.data.environments.find((row) => canUseEnvironment(row) && row.environment.id === last.picks.environment)?.environment.id ?? null : null;
-  const remembered = useQuery({ ...startOptionsQuery(nodeId, rememberedEnvironment), enabled: rememberedEnvironment !== null, placeholderData: keepPreviousData });
+  const remembered = useQuery({ ...startOptionsQuery(nodeId, rememberedEnvironment, context), enabled: enabled && rememberedEnvironment !== null, placeholderData: keepPreviousData });
   const query = rememberedEnvironment === null ? base : remembered;
   const options = base.isError || query.isError ? null : query.data ?? null;
   const previous = last === null ? NO_PICKS : { ...last.picks, environment: last.place === nodeId ? last.picks.environment : null };
   const resolved = options === null ? null : resolve(options, picks, mode, previous);
   const retry = async () => {
+    if (!enabled) return;
     const fresh = await base.refetch();
     if (!fresh.isError && rememberedEnvironment !== null && fresh.data?.environments.some((row) => canUseEnvironment(row) && row.environment.id === rememberedEnvironment)) await remembered.refetch();
   };

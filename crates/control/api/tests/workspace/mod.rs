@@ -1351,6 +1351,8 @@ impl Site {
             .send()
             .await
             .ok()
+            .into_full()
+            .unwrap()
             .base
             .id;
         let content = Content::over(&world.app.app);
@@ -1395,6 +1397,8 @@ impl Site {
             .send()
             .await
             .ok()
+            .into_full()
+            .unwrap()
             .base
             .id
     }

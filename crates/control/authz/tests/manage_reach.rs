@@ -7,23 +7,18 @@
 
 mod support;
 
-use orch_access_contract::pages::Holder;
 use orch_access_contract::permissions::Permission;
 use orch_authz::documents::{self, Document};
-use orch_authz::reach::{Agent, AgentReach, Reach, Standing, Things, Via};
-use orch_db::queries::access::{PageKey, testing::*};
+use orch_authz::reach::{Agent, Reach, Standing, Things, Via};
+use orch_db::queries::access::PageKey;
 use orch_db::queries::documents as rows;
 use orch_types::{Id, new_id};
-use support::{World, stored};
-
-fn agents(place: Id) -> Holder {
-    Holder::Agents { id: place }
-}
+use support::World;
 
 async fn reach_of(w: &World, thread: Id, things: &Things) -> Reach {
     let mut conn = w.conn().await;
     let agent = Agent::of(&mut conn, thread).await.unwrap().unwrap();
-    Reach::load(&mut conn, agent, AgentReach::None, w.now, things)
+    Reach::load_current(&mut conn, agent, w.now, things)
         .await
         .unwrap()
 }
@@ -65,18 +60,14 @@ async fn delete(w: &World, document: &Document) -> Document {
 
 /// Names the agents of `place` in a row of the page of `thing` (a node or a document).
 async fn share(w: &World, kind: &str, thing: Id, permission: Permission, place: Id) -> Id {
-    let mut conn = w.conn().await;
-    add_entry(
-        &mut conn,
+    w.agent_entry(
         &PageKey::new(kind, thing, "live"),
         "any",
-        permission.as_str(),
-        stored(&agents(place)),
+        permission,
+        place,
         None,
-        w.now.get(),
     )
     .await
-    .unwrap()
 }
 
 #[tokio::test]
@@ -235,11 +226,12 @@ async fn the_places_a_document_is_shared_with_are_those_named_on_its_page_its_no
     share(&w, "node", elsewhere, Permission::DocManage, w.thread).await;
     share(&w, "document", plan.id, Permission::DocView, other).await;
     share(&w, "node", elsewhere, Permission::DocEdit, ops).await;
-    w.name_default(
-        Some(w.project),
-        Permission::DocView,
+    w.agent_entry(
+        &PageKey::new("node", w.project, "defaults"),
         "any",
-        agents(w.project),
+        Permission::DocView,
+        w.project,
+        None,
     )
     .await;
     let reach = reach_of(&w, w.thread, &things).await;

@@ -70,7 +70,7 @@ not corrected, and a harness that cannot render its catalogue leaves a manager t
 | [performance](src/performance.rs) | Codex request boundaries and FIFO token reports, without provider-specific timing arithmetic. |
 | [failure](src/failure.rs) | What the app-server says when a turn fails, taken in whole: its typed kind and status before its sentences, the moment a limit ends from the rate limits it reports, and the vendor's words kept as they were said. |
 | [approvals](src/approvals.rs) | Map harness approval and user-input requests. |
-| [review](src/review.rs) | Native Auto review completions, model declarations and provider policy refusal. Auto is undeclared until the shared trial gate is verified. |
+| [review](src/review.rs) | Native Auto review completions, the fixed `codex-auto-review` model and provider policy refusal. Auto requires native build conformance and access to that reviewer model. |
 | [provider](src/provider.rs) | Sign-in on the provider (a code, an existing sign-in file given as text or by its path inside the runtime, a workspace token), the workspace restriction, usage facts and model suggestions. |
 | [discovery](src/discovery.rs) | Sessions found in a Codex home; the MCP servers of its own configuration, the home's and a directory's, by name, and one definition read out for an import. |
 | [history](src/history.rs) | Neutral conversion of a carried conversation into the Responses items a new thread is told. |

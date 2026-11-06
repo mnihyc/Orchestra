@@ -90,12 +90,13 @@ Example addresses block enrollment commands until `public_url` and `[[gateway.en
 ## What the front must do
 
 - Proxy everything to the web edge's address.
-- Pass WebSocket upgrades for `/api/v1/ws` (the realtime socket, and the terminals under it) and for
+- Pass WebSocket upgrades for `/api/v1/ws` (browser sessions), `/openapi/v1/ws` (account keys),
+  their existing ticket continuations, and for
   `/link/v1/session` (the machines that come in through this front).
 - Allow request bodies of 8 MiB. Nothing the product sends is larger: the browser and the connectors send bigger
   content in pieces of at most 4 MiB. (apache2 puts no limit on a proxied body unless you set one; nginx
   limits to 1 MiB unless `client_max_body_size` says more.)
-- Not buffer or cache `/api/` and `/link/`.
+- Not buffer or cache `/api/`, `/openapi/` and `/link/`. Route both API prefixes to the same API service.
 - Keep idle connections for at least 60 s. The realtime socket is silent between a person's actions, and a front
   that cuts it earlier makes the page reconnect all the time.
 - Forward the client's address in `X-Forwarded-For`, and say that the page was reached over HTTPS

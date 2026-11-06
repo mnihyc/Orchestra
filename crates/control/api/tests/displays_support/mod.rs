@@ -10,7 +10,7 @@
     reason = "each display case uses part of the shared protocol client"
 )]
 
-use crate::browsers_support::{Floor, WAIT};
+use super::browsers_support::{Floor, WAIT};
 use crate::places::Who;
 use bytes::{Bytes, BytesMut};
 use futures::{SinkExt, StreamExt};
@@ -54,18 +54,15 @@ impl Screen {
     /// Completes the real viewer handshake with one already issued ticket.
     pub async fn with_ticket(floor: &Floor, display: Id, ticket: &str) -> Self {
         let address = floor.serve().await;
-        let mut request = format!("ws://{address}/api/v1/ws/displays/{display}?ticket={ticket}")
-            .into_client_request()
-            .unwrap();
-        request.headers_mut().insert(
-            "sec-websocket-protocol",
-            DISPLAY_SUBPROTOCOL.parse().unwrap(),
-        );
-        let (socket, response) = tokio_tungstenite::connect_async(request).await.unwrap();
-        assert_eq!(
-            response.headers()["sec-websocket-protocol"],
-            DISPLAY_SUBPROTOCOL
-        );
+        Self::connect_at(
+            address,
+            &format!("/api/v1/ws/displays/{display}?ticket={ticket}"),
+        )
+        .await
+    }
+    /// Reuses this exact RFB handshake on an explicit declared surface.
+    pub async fn connect_at(address: std::net::SocketAddr, path: &str) -> Self {
+        let socket = Self::socket_at(address, path).await;
         let mut screen = Self {
             socket,
             pending: BytesMut::new(),
@@ -89,6 +86,35 @@ impl Screen {
         screen.send(&[2, 0, 0, 1, 0, 0, 0, 0]).await; // Request only the standard raw encoding.
         screen
     }
+    pub async fn socket_at(
+        address: std::net::SocketAddr,
+        path: &str,
+    ) -> tokio_tungstenite::WebSocketStream<tokio_tungstenite::MaybeTlsStream<tokio::net::TcpStream>>
+    {
+        let mut request = format!("ws://{address}{path}")
+            .into_client_request()
+            .unwrap();
+        request.headers_mut().insert(
+            "sec-websocket-protocol",
+            DISPLAY_SUBPROTOCOL.parse().unwrap(),
+        );
+        let (socket, response) = tokio_tungstenite::connect_async(request).await.unwrap();
+        assert_eq!(
+            response.headers()["sec-websocket-protocol"],
+            DISPLAY_SUBPROTOCOL
+        );
+        socket
+    }
+    pub async fn next_wire(&mut self) -> Option<Message> {
+        tokio::time::timeout(WAIT, self.socket.next())
+            .await
+            .unwrap()
+            .map(Result::unwrap)
+    }
+    pub async fn close(mut self) {
+        let _ = self.socket.close(None).await;
+    }
+
     /// Sends binary RFB bytes; WebSocket boundaries deliberately need not be message boundaries.
     pub async fn send(&mut self, bytes: &[u8]) {
         self.socket

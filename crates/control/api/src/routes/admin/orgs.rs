@@ -9,7 +9,6 @@
 use super::{SECONDS_PER_DAY, admin_of, invalid, page_size, read_ahead};
 use crate::middleware::authorization::{self, refusals};
 use crate::middleware::requests::{ApiError, ApiResult};
-use crate::middleware::transaction_guard;
 use crate::registry::{Ctx, Registry};
 use crate::routes::nodes::{Placed, record, view};
 use chrono::{DateTime, Duration, Utc};
@@ -257,7 +256,7 @@ fn limits_summary(who: &str, name: &str, closed: Option<bool>, flat: Option<bool
 async fn update(mut ctx: Ctx, (): (), body: OrgLimitsChange) -> ApiResult<Org> {
     admin_of(&ctx)?;
     let id = ctx.id("id")?;
-    let (mut tx, guard) = transaction_guard::begin(&ctx).await?;
+    let (mut tx, guard) = super::action(&ctx).await?;
     ctx.now = guard.now().get();
     let org = hierarchy::lock_live_org(&mut tx, id)
         .await?

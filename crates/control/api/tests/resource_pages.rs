@@ -61,6 +61,8 @@ async fn provider(world: &World, by: &Who, home: Id) -> Provider {
         .send()
         .await
         .ok()
+        .into_full()
+        .unwrap()
         .provider
 }
 

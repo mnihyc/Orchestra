@@ -167,11 +167,45 @@ interface Answer {
   response: Response;
 }
 
-/** The body of a request that succeeded; an `ApiError` or a `NetworkError` is thrown otherwise. */
-export async function ok<A extends Answer>(answer: Promise<A>): Promise<Exclude<A['data'], undefined>> {
+/** A successful mutation acknowledged without its existing-content projection. */
+export type MutationReceipt = Readonly<Record<string, unknown>> & { readonly projection: 'receipt' };
+
+// A credential-creation receipt can contain its one-time secret. Do not put that payload on an Error's
+// enumerable properties, stack or message, where generic error reporting could copy it to a log.
+const receiptValues = new WeakMap<ReceiptAcknowledged, MutationReceipt>();
+
+/** The write committed. This signal asks the browser to show acknowledgement/readback, never resend. */
+export class ReceiptAcknowledged extends Error {
+  override readonly name = 'ReceiptAcknowledged';
+  readonly committed = true;
+  readonly status: number;
+  readonly requestId: string;
+
+  constructor(receipt: MutationReceipt, status: number, requestId: string) {
+    super('The change was accepted. This response contains its receipt without the full content.');
+    this.status = status;
+    this.requestId = requestId;
+    receiptValues.set(this, receipt);
+  }
+
+  get receipt(): MutationReceipt {
+    const receipt = receiptValues.get(this);
+    if (receipt === undefined) throw new Error('The accepted receipt is unavailable.');
+    return receipt;
+  }
+}
+
+/** Full replies expected by the session UI; the raw generated API retains both truthful alternatives. */
+type FullAnswer<A extends Answer> = Exclude<Exclude<A['data'], undefined>, { projection: 'receipt' }>;
+
+/** The full body, or a distinct committed acknowledgement; failed requests retain their ordinary errors. */
+export async function ok<A extends Answer>(answer: Promise<A>): Promise<FullAnswer<A>> {
   const { data, error, response } = await answer;
   if (!response.ok) throw toError(error, response);
-  return data as Exclude<A['data'], undefined>;
+  if (isRecord(data) && data.projection === 'receipt') {
+    throw new ReceiptAcknowledged(data as MutationReceipt, response.status, response.headers.get(REQUEST_ID_HEADER) ?? '');
+  }
+  return data as FullAnswer<A>;
 }
 
 /** The same for a request that answers with nothing. */
@@ -222,6 +256,17 @@ export interface Act {
   input?: unknown;
   /** The successful JSON answer: views apply these rows without reading their lists again. */
   answer?: unknown;
+}
+
+/** Token creation has a one-time secret, and its request may carry a fresh proof. Generic act
+ * observers need only the accepted identity; the dedicated API result still contains the secret.
+ */
+function tokenCreationAct(answer: unknown): { token_id: string; already_created: boolean } | null {
+  if (!isRecord(answer) || typeof answer.already_created !== 'boolean' || !(answer.token === null || typeof answer.token === 'string')) return null;
+  const id = answer.projection === 'receipt'
+    ? answer.token_id
+    : isRecord(answer.info) ? answer.info.id : undefined;
+  return typeof id === 'string' ? { token_id: id, already_created: answer.already_created } : null;
 }
 
 /** The methods of a request that changes something. */
@@ -353,7 +398,8 @@ export function createApiClient(options: ApiClientOptions = {}): ApiClient {
     const sent = await input;
     if (readerVersion !== (session.getState().readerVersion ?? 0)) return;
     const requestId = response.headers.get(REQUEST_ID_HEADER);
-    const act: Act = { ...(requestId ? { requestId } : {}), readerVersion, method: request.method as Act['method'], path: pathname.startsWith(basePath) ? pathname.slice(basePath.length) : pathname, input: sent, answer };
+    const tokenCreation = tokenCreationAct(answer);
+    const act: Act = { ...(requestId ? { requestId } : {}), readerVersion, method: request.method as Act['method'], path: pathname.startsWith(basePath) ? pathname.slice(basePath.length) : pathname, ...(tokenCreation === null ? { input: sent, answer } : { answer: tokenCreation }) };
     await Promise.all(
       [...actListeners].map(async (listener) => {
         try {

@@ -287,27 +287,60 @@ pub fn requested_effort(params: &Json) -> Result<Option<&str>, &'static str> {
     Ok(selected.flatten())
 }
 
-/// Completion candidates may change generation options, never tools, history or retention controls.
+/// Model request options can carry vendor extensions, never replace Orch's owned request fields.
 pub fn completion_options(params: &Json) -> Result<(), &'static str> {
     let object = params
         .as_object()
         .ok_or("completion parameters must be an object")?;
     requested_effort(params)?;
-    for (key, value) in object {
-        match key.as_str() {
-            "effort" | "reasoning_effort" => {}
-            "reasoning" | "output_config" => {
-                let nested = value
-                    .as_object()
-                    .ok_or("effort options must be an object")?;
-                if nested.keys().any(|key| key != "effort") {
-                    return Err(
-                        "only a declared effort can change the completion's reasoning options",
-                    );
-                }
-            }
-            "temperature" | "top_p" if value.is_number() => {}
-            _ => return Err("this completion option is not a supported model parameter"),
+    for key in ["temperature", "top_p"] {
+        if object
+            .get(key)
+            .is_some_and(|value| !value.is_number() && !value.is_null())
+        {
+            return Err("sampling parameters must be numbers or null");
+        }
+    }
+    for key in object.keys() {
+        if matches!(
+            key.as_str(),
+            "model"
+                | "input"
+                | "inputs"
+                | "instructions"
+                | "system"
+                | "messages"
+                | "prompt"
+                | "max_output_tokens"
+                | "max_tokens"
+                | "max_completion_tokens"
+                | "stream"
+                | "stream_options"
+                | "tools"
+                | "tool_choice"
+                | "parallel_tool_calls"
+                | "previous_response_id"
+                | "conversation"
+                | "store"
+                | "background"
+                | "metadata"
+                | "user"
+                | "safety_identifier"
+                | "provider_id"
+                | "protocol"
+                | "method"
+                | "path"
+                | "url"
+                | "base_url"
+                | "headers"
+                | "auth"
+                | "authorization"
+                | "api_key"
+                | "dimensions"
+        ) {
+            return Err(
+                "model options cannot replace routing, input, tools, retention or authentication",
+            );
         }
     }
     Ok(())

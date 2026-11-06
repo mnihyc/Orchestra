@@ -161,10 +161,17 @@ async fn resource_marks(world: &World, by: &Who, resources: &[(&str, Id)], enabl
                 rights.contains(&json!(format!("{permission_area}.view"))),
                 "{kind}: {one}"
             );
-            assert!(
-                rights.contains(&json!(format!("{permission_area}.manage"))),
-                "{kind}: {one}"
-            );
+            if *kind == "machine" {
+                assert!(rights.contains(&json!("access.manage")), "{kind}: {one}");
+                for permission in ["machine.use", "machine.manage"] {
+                    assert!(!rights.contains(&json!(permission)), "{kind}: {one}");
+                }
+            } else {
+                assert!(
+                    rights.contains(&json!(format!("{permission_area}.manage"))),
+                    "{kind}: {one}"
+                );
+            }
             assert_eq!(one["access"]["admin_place"], marker["place"]);
         } else {
             assert!(matches!(status, 403 | 404), "{kind}: {one}");
@@ -225,6 +232,8 @@ async fn private_thread(
         .send()
         .await
         .ok()
+        .into_full()
+        .unwrap()
 }
 
 async fn change_page(world: &World, by: &Who, object: &str, id: Id, mut change: PageChange) {

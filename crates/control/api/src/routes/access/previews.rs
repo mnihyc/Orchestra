@@ -133,8 +133,8 @@ pub async fn admin_defaults(
     admin_of(&ctx)?;
     let change = read_change(&body)?;
     let resets = change.whole == Some(stored::Whole::Reset);
-    let mut tx = ctx.app.db.begin().await?;
-    let principal = authorization::principal(&ctx, &mut tx).await?;
+    let (mut tx, guard) = crate::routes::admin::action(&ctx).await?;
+    let principal = guard.principal().clone();
     let before = Before::take(
         &mut tx,
         &principal,

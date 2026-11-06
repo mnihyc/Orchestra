@@ -31,7 +31,7 @@ const RATE_WINDOW_HOURS: i64 = 1;
 
 #[derive(Clone)]
 pub(super) enum Target {
-    Document(documents::DocumentRow),
+    Document(Box<documents::DocumentRow>),
     Node(hierarchy::NodeRow),
     Chat(chats::ChatRow),
     Resource {
@@ -98,7 +98,7 @@ pub(super) async fn target(conn: &mut Conn, object: &str, id: Id) -> ApiResult<T
         "documents" => documents::get(conn, id)
             .await?
             .filter(|row| row.deleted_at.is_none())
-            .map(Target::Document)
+            .map(|row| Target::Document(Box::new(row)))
             .ok_or_else(ApiError::not_found),
         "nodes" => hierarchy::with_ancestors(conn, &[id])
             .await?
@@ -616,7 +616,7 @@ pub(crate) async fn tell(
     }
     let mut entry = orch_db::audit::Entry::new(
         orch_db::audit::Actor::User(sender),
-        AuditAction::PersonNotified.as_str(),
+        orch_db::audit::action!(AuditAction::PersonNotified).as_str(),
         target.kind(),
         Some(id),
         "Notified people",

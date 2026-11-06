@@ -9,6 +9,10 @@ mod places;
 mod rig;
 mod support;
 
+#[path = "threads_drive/control_scopes.rs"]
+mod control_scopes;
+
+use crate::support::FullArchiveReply as _;
 use orch_api_contract::common::ErrorCode;
 use orch_api_contract::threads::{
     ContentPart, Delivery, InputState, LimitBypassRequest, ThreadInput, ThreadInputBypass,
@@ -1608,14 +1612,31 @@ async fn an_input_needs_the_senders_own_use_of_the_environment_its_agent_acts_in
         .ok()
         .input;
     assert_eq!(dan.state, InputState::Pending);
-    assert_eq!(dan.state_detail, None);
+    // Admission includes before-state capture, even for a text-only input.
+    assert_eq!(dan.state_detail.as_deref(), Some("files"));
+    let first = s.rig.run_turn(id, 0, "Dan finished").await;
+    let first_input: Id = sqlx::query_scalar("SELECT input_id FROM turns WHERE id=$1")
+        .bind(first.turn_id)
+        .fetch_one(s.rig.db.pool())
+        .await
+        .unwrap();
+    assert_eq!(first_input, dan.id);
+    s.rig.wait_state(id, "idle").await;
     // Eve, who manages the environment, holds its Use with it.
     let eve = s
         .say(&s.eve, id, "Hello", Delivery::Queue, "e1")
         .await
         .ok()
         .input;
-    assert_eq!(eve.state_detail, None);
+    assert_eq!(eve.state, InputState::Pending);
+    assert_eq!(eve.state_detail.as_deref(), Some("files"));
+    let second = s.rig.run_turn(id, 1, "Eve finished").await;
+    let second_input: Id = sqlx::query_scalar("SELECT input_id FROM turns WHERE id=$1")
+        .bind(second.turn_id)
+        .fetch_one(s.rig.db.pool())
+        .await
+        .unwrap();
+    assert_eq!(second_input, eve.id);
 }
 
 #[tokio::test]
@@ -1630,6 +1651,7 @@ async fn an_archived_thread_takes_no_input() {
         .body(&places::archive_body(&s.rig.world, &s.ada.token, id, true).await)
         .send()
         .await
+        .full_archive()
         .ok();
     let refused = s
         .say(&s.ada, id, "Still there?", Delivery::Queue, "x")
@@ -1639,7 +1661,7 @@ async fn an_archived_thread_takes_no_input() {
 }
 
 #[tokio::test]
-async fn an_input_waiting_for_the_providers_limit_is_let_past_by_whoever_holds_its_bypass_row() {
+async fn cached_provider_exhaustion_allows_an_ordinary_input_without_a_vendor_bypass() {
     let s = Scene::new().await;
     let id = s.thread().await.base.id;
     sqlx::query("UPDATE providers SET status = 'exhausted' WHERE id = $1")
@@ -1648,13 +1670,35 @@ async fn an_input_waiting_for_the_providers_limit_is_let_past_by_whoever_holds_i
         .await
         .unwrap();
     let sent = s
-        .say(&s.eve, id, "Go on anyway", Delivery::Queue, "limit")
+        .say(
+            &s.eve,
+            id,
+            "Try the provider normally",
+            Delivery::Queue,
+            "limit",
+        )
         .await
         .ok();
-    s.rig.wait_state(id, "blocked").await;
+    assert!(sent.input.limit_bypass.is_empty());
+    let start = s.rig.turn_start(id, 0).await;
+    assert_eq!(start.thread_id, id);
+    let accepted: (Id, Option<serde_json::Value>, Option<serde_json::Value>) = sqlx::query_as(
+        "SELECT t.input_id,i.limit_bypass,t.limit_bypass FROM turns t
+         JOIN thread_inputs i ON i.id=t.input_id WHERE t.id=$1",
+    )
+    .bind(start.turn_id)
+    .fetch_one(s.rig.db.pool())
+    .await
+    .unwrap();
+    assert_eq!(accepted, (sent.input.id, None, None));
+    let status: String = sqlx::query_scalar("SELECT status FROM providers WHERE id=$1")
+        .bind(s.on.provider)
+        .fetch_one(s.rig.db.pool())
+        .await
+        .unwrap();
     assert_eq!(
-        s.rig.state(id).await.1.as_deref(),
-        Some("provider_exhausted")
+        status, "exhausted",
+        "the cached observation was not an admission gate"
     );
     let limits = |who: &Who| {
         let call = s
@@ -1668,18 +1712,12 @@ async fn an_input_waiting_for_the_providers_limit_is_let_past_by_whoever_holds_i
             });
         async move { call.send().await.ok() }
     };
-    // Ada owns the provider and holds the row; Eve does not and is told who does.
-    let theirs = limits(&s.ada).await;
-    assert_eq!(theirs.reached.len(), 1);
-    assert!(theirs.reached[0].can_bypass && theirs.bypass_all);
-    let mine = limits(&s.eve).await;
-    assert!(!mine.reached[0].can_bypass && !mine.bypass_all);
-    assert!(
-        mine.reached[0]
-            .ask
-            .iter()
-            .any(|person| person.username == "ada")
-    );
+    // A vendor observation creates no local cap for either the owner or an ordinary sender.
+    for who in [&s.ada, &s.eve] {
+        let shown = limits(who).await;
+        assert!(shown.reached.is_empty());
+        assert!(!shown.bypass_all);
+    }
     let stranger = s
         .rig
         .world
@@ -1692,41 +1730,20 @@ async fn an_input_waiting_for_the_providers_limit_is_let_past_by_whoever_holds_i
         .problem();
     assert_eq!(stranger.code, ErrorCode::AuthzDenied);
     assert_eq!(missing_permissions(&stranger), ["thread.view"]);
-    let bypass = |who: &Who| {
-        let call = s
-            .rig
-            .world
-            .app
-            .call(ThreadInputBypass, &[&id, &sent.input.id])
-            .token(&who.token)
-            .body(&LimitBypassRequest {
-                caps: None,
-                provider_limit: Some(true),
-            });
-        async move { call.send().await }
-    };
-    let refused = bypass(&s.eve).await.problem();
-    assert_eq!(refused.code, ErrorCode::AuthzDenied);
-    assert_eq!(refused.extra["required"], "provider.bypass");
-    assert_eq!(s.rig.turn_starts(id).len(), 0);
-    let passed = bypass(&s.ada).await.ok();
-    assert_eq!(passed.limit_bypass.len(), 1);
-    assert_eq!(passed.limit_bypass[0].by.username, "ada");
-    assert!(passed.limit_bypass[0].provider_limit);
-    let start = s.rig.turn_start(id, 0).await;
+    s.rig
+        .run_turn(id, 0, "The provider accepted the ordinary request")
+        .await;
+    let bypass_audits: i64 = sqlx::query_scalar(
+        "SELECT count(*) FROM audit_log WHERE node_id=$1 AND action='usage.limit_bypassed'",
+    )
+    .bind(id)
+    .fetch_one(s.rig.db.pool())
+    .await
+    .unwrap();
     assert_eq!(
-        start.thread_id, id,
-        "pre-flight ran again at once and the turn started"
+        bypass_audits, 0,
+        "ordinary dispatch invents no vendor bypass audit"
     );
-    let after = limits(&s.ada).await;
-    assert_eq!(
-        after.reached[0]
-            .passed_by
-            .as_ref()
-            .map(|by| by.username.as_str()),
-        Some("ada")
-    );
-    assert!(!after.bypass_all, "nothing is left that nobody has passed");
 }
 
 #[tokio::test]
@@ -1986,4 +2003,309 @@ async fn every_driving_request_is_refused_to_a_viewer_and_to_a_stranger() {
         }
     }
     let _ = json!(null);
+}
+
+// Operation-scoped secret keys use the real authentication and guarded input producer. These
+// controls hold the ordinary queue, leaving provider/model authority intact and doing no native work.
+async fn input_receipt_scene() -> (Scene, Id) {
+    let scene = Scene::new().await;
+    let thread = scene.thread().await;
+    assert!(
+        thread.input_access.allowed,
+        "the owner can drive this bound thread"
+    );
+    let id = thread.base.id;
+    sqlx::query("UPDATE threads SET queue_held=true WHERE node_id=$1")
+        .bind(id)
+        .execute(scene.rig.db.pool())
+        .await
+        .unwrap();
+    (scene, id)
+}
+
+async fn input_operation_key(scene: &Scene, thread: Id, allow: serde_json::Value) -> String {
+    use orch_access_contract::key_scope::KeyScope;
+    use orch_api_core::middleware::authentication::{API_TOKEN_PREFIX, new_token, token_hash};
+    use orch_db::queries::identity::{NewApiToken, create_api_token_scoped};
+
+    let scope: KeyScope = serde_json::from_value(json!({
+        "rules": [{
+            "target": {"kind":"thread", "id":thread, "reach":"self"},
+            "allow": allow
+        }]
+    }))
+    .unwrap();
+    assert!(
+        scope.validate().is_empty(),
+        "a valid operation-bound key policy"
+    );
+    let stored = serde_json::to_value(scope).unwrap();
+    let secret = new_token(API_TOKEN_PREFIX);
+    let hash = token_hash(&secret);
+    let now = scene.rig.world.now();
+    let mut conn = scene.rig.world.conn().await;
+    create_api_token_scoped(
+        &mut conn,
+        &NewApiToken {
+            id: new_id(),
+            user_id: scene.ada.id(),
+            name: "Input receipt control",
+            token_hash: &hash,
+            scopes: &[],
+            node_id: None,
+            at: now,
+            // This fixture needs only a short bounded request sequence; one hour is within
+            // the default place lifetime and no manual clock advance is involved.
+            expires_at: Some(now + chrono::Duration::hours(1)),
+        },
+        Some(&stored),
+    )
+    .await
+    .unwrap();
+    secret
+}
+
+fn input_request(
+    client_id: &str,
+    words: &str,
+) -> orch_api_contract::threads::ThreadInputCreateBody {
+    orch_api_contract::threads::ThreadInputCreateBody {
+        content: text(words),
+        delivery: Delivery::Queue,
+        client_id: client_id.to_owned(),
+        bypass: None,
+        native_action: None,
+        plan: false,
+    }
+}
+
+fn input_receipt(
+    reply: orch_api_core::testing::Reply<orch_api_contract::threads::ThreadInputCreateResponse>,
+    thread: Id,
+    status: u16,
+) -> orch_api_contract::threads::ThreadInputReceipt {
+    use orch_api_contract::threads::ThreadInputCreateResponse;
+    assert_eq!(reply.status, status, "{:?}", reply.body);
+    let raw: serde_json::Value = serde_json::from_slice(&reply.raw).unwrap();
+    let ThreadInputCreateResponse::Receipt(receipt) = reply.ok() else {
+        panic!("a receipt-only input operation returned stored input content");
+    };
+    assert_eq!(receipt.thread_id, thread);
+    assert_eq!(
+        raw,
+        json!({"projection":"receipt", "thread_id":thread, "input_id":receipt.input_id, "seq":receipt.seq}),
+        "the declared receipt contains no stored content, people, attachment or queue projection"
+    );
+    receipt
+}
+
+#[tokio::test]
+async fn an_input_write_only_key_receives_receipts_for_fresh_and_changed_replayed_inputs() {
+    use orch_api_contract::threads::ThreadInputCreate;
+    let (scene, thread) = input_receipt_scene().await;
+    let ordinary = scene
+        .say(
+            &scene.ada,
+            thread,
+            "Normal session projection",
+            Delivery::Queue,
+            "receipt-session",
+        )
+        .await
+        .ok();
+    assert_eq!(ordinary.input.content, text("Normal session projection"));
+    assert!(ordinary.input.queue_held);
+    let key = input_operation_key(
+        &scene,
+        thread,
+        json!([{"operation":"ThreadInputCreate", "actions":["write"]}]),
+    )
+    .await;
+    let body = input_request("receipt-replay", "Supplied by this request");
+    let first = input_receipt(
+        scene
+            .rig
+            .world
+            .app
+            .call(ThreadInputCreate, &[&thread])
+            .token(&key)
+            .body(&body)
+            .send()
+            .await,
+        thread,
+        201,
+    );
+    let changed = scene
+        .rig
+        .world
+        .app
+        .call(ThreadInputUpdate, &[&thread, &first.input_id])
+        .token(&scene.ada.token)
+        .body(&ThreadInputUpdateBody {
+            content: Some(text("Stored later and unavailable to the key")),
+            ..ThreadInputUpdateBody::default()
+        })
+        .send()
+        .await
+        .ok();
+    assert_eq!(
+        changed.input.content,
+        text("Stored later and unavailable to the key")
+    );
+    let cancelled = scene
+        .rig
+        .world
+        .app
+        .call(ThreadInputCancel, &[&thread, &first.input_id])
+        .token(&scene.ada.token)
+        .send()
+        .await
+        .ok();
+    assert_eq!(cancelled.state, InputState::Cancelled);
+    let repeated = input_receipt(
+        scene
+            .rig
+            .world
+            .app
+            .call(ThreadInputCreate, &[&thread])
+            .token(&key)
+            .body(&body)
+            .send()
+            .await,
+        thread,
+        200,
+    );
+    assert_eq!(repeated.input_id, first.input_id);
+    let stored: (i64, serde_json::Value, String) = sqlx::query_as(
+        "SELECT count(*) OVER(), content, state FROM thread_inputs WHERE thread_id=$1 AND author_id=$2 AND client_id=$3",
+    )
+    .bind(thread).bind(scene.ada.id()).bind(&body.client_id)
+    .fetch_one(scene.rig.db.pool()).await.unwrap();
+    assert_eq!(stored.0, 1, "a replay does not queue a second input");
+    assert_eq!(
+        stored.1,
+        json!(text("Stored later and unavailable to the key"))
+    );
+    assert_eq!(stored.2, "cancelled");
+    assert!(scene.rig.turn_starts(thread).is_empty());
+    scene.rig.engine.stop();
+}
+
+#[tokio::test]
+async fn only_the_input_operations_own_read_facet_allows_its_full_response() {
+    use orch_api_contract::threads::{ThreadInputCreate, ThreadInputCreateResponse};
+    let (scene, thread) = input_receipt_scene().await;
+    let other_read = input_operation_key(
+        &scene,
+        thread,
+        json!([
+            {"operation":"ThreadInputCreate", "actions":["write"]},
+            {"operation":"ThreadSyncGet.read", "actions":["read"]}
+        ]),
+    )
+    .await;
+    let readable = scene
+        .rig
+        .world
+        .app
+        .call(ThreadSyncGet, &[&thread])
+        .token(&other_read)
+        .query(&ThreadSyncGetQuery::default())
+        .send()
+        .await
+        .ok();
+    assert_eq!(
+        readable.thread.base.id, thread,
+        "the unrelated read grant is effective"
+    );
+    input_receipt(
+        scene
+            .rig
+            .world
+            .app
+            .call(ThreadInputCreate, &[&thread])
+            .token(&other_read)
+            .body(&input_request("receipt-other-read", "A direct input"))
+            .send()
+            .await,
+        thread,
+        201,
+    );
+    let same_read = input_operation_key(
+        &scene,
+        thread,
+        json!([{"operation":"ThreadInputCreate", "actions":["write","read"]}]),
+    )
+    .await;
+    let reply = scene
+        .rig
+        .world
+        .app
+        .call(ThreadInputCreate, &[&thread])
+        .token(&same_read)
+        .body(&input_request(
+            "receipt-same-read",
+            "The operation may return this",
+        ))
+        .send()
+        .await;
+    assert_eq!(reply.status, 201, "{:?}", reply.body);
+    let ThreadInputCreateResponse::Full(full) = reply.ok() else {
+        panic!(
+            "the operation's own Read facet and the owner's ordinary rights allow its full projection"
+        );
+    };
+    assert_eq!(full.input.content, text("The operation may return this"));
+    assert_eq!(
+        full.input.author.as_ref().map(|author| author.id),
+        Some(scene.ada.id())
+    );
+    assert!(full.input.queue_held);
+    assert!(scene.rig.turn_starts(thread).is_empty());
+    scene.rig.engine.stop();
+}
+
+#[tokio::test]
+async fn an_input_read_facet_does_not_authorize_submission() {
+    use orch_api_contract::threads::ThreadInputCreate;
+    let (scene, thread) = input_receipt_scene().await;
+    // The ordinary account's authority remains positive; the missing key Write facet is the refusal.
+    let normal = scene
+        .say(
+            &scene.ada,
+            thread,
+            "Owner can submit",
+            Delivery::Queue,
+            "receipt-owner",
+        )
+        .await
+        .ok();
+    assert_eq!(normal.input.content, text("Owner can submit"));
+    let key = input_operation_key(
+        &scene,
+        thread,
+        json!([{"operation":"ThreadInputCreate", "actions":["read"]}]),
+    )
+    .await;
+    let problem = scene
+        .rig
+        .world
+        .app
+        .call(ThreadInputCreate, &[&thread])
+        .token(&key)
+        .body(&input_request("receipt-no-write", "Must not be queued"))
+        .send()
+        .await
+        .problem();
+    assert_eq!(problem.code, ErrorCode::AuthzDenied);
+    let count: i64 = sqlx::query_scalar(
+        "SELECT count(*) FROM thread_inputs WHERE thread_id=$1 AND client_id='receipt-no-write'",
+    )
+    .bind(thread)
+    .fetch_one(scene.rig.db.pool())
+    .await
+    .unwrap();
+    assert_eq!(count, 0);
+    assert!(scene.rig.turn_starts(thread).is_empty());
+    scene.rig.engine.stop();
 }

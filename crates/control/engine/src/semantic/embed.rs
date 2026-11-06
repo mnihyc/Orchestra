@@ -172,7 +172,7 @@ impl Engine {
                 "the embeddings provider has no endpoint of the Embeddings format",
             ));
         }
-        if provider.status != "ready" {
+        if !crate::providers::request_status_available(&provider.status) {
             return Err(unavailable(
                 "provider",
                 format!("the embeddings provider is {}", provider.status),
@@ -243,10 +243,18 @@ impl Engine {
         }
         let call = new_id();
         let inputs = texts.len();
+        let params =
+            resources::provider_request_defaults(&mut tx, provider.id, EMBEDDINGS_PROTOCOL).await?;
+        orch_provider_contract::calls::completion_options(&params)
+            .map_err(|reason| unavailable("parameters", reason))?;
         let request = ProviderEmbed {
             provider_id: provider.id,
             protocol: EMBEDDINGS_PROTOCOL.to_owned(),
             model_name: named.model_name.clone(),
+            params: params
+                .as_object()
+                .filter(|params| !params.is_empty())
+                .map(|_| params.clone()),
             inputs: texts,
             dimensions: named.dimensions,
         };
@@ -430,6 +438,7 @@ impl Engine {
                 entry: None,
                 person: writer,
                 model,
+                protocol: Some(EMBEDDINGS_PROTOCOL),
                 tokens: orch_db::usage::ledger::Tokens {
                     input: tokens.input_tokens,
                     cached_input: tokens.cached_input_tokens,

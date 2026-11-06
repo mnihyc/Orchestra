@@ -9,6 +9,12 @@
 //! and changed on the environment's page, and asked again only when the files change; a directory the harness
 //! made for itself and left empty is not asked about.
 
+use crate::operations::{OperationSpec as Op, TargetResolver as Target};
+use orch_access_contract::key_scope::KeyAction::Manage;
+use orch_access_contract::key_scope::KeyTargetKind::Object;
+use orch_access_contract::permissions::ObjectKind as K;
+
+
 use orch_types::Time;
 use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
@@ -53,5 +59,6 @@ pub struct ConfigTrustBody {
 
 crate::endpoints! {
     /// Answers, or changes the answer, for the workspace's own configuration of a harness: remembered until it is changed here or the files change; the threads that waited go on.
-    EnvironmentConfigTrustSet: PUT "/environments/{id}/config-trust/{harness}", Rule("environment.manage; never an agent's token"), none, json ConfigTrustBody, json crate::environment::Environment, 200;
+    EnvironmentConfigTrustSet: PUT "/environments/{id}/config-trust/{harness}", Rule("environment.manage; never an agent's token"), none, json ConfigTrustBody, json crate::environment::Environment, 200,
+        operation Op::returning(Manage, &[Object(K::Environment)], Target::Path("id"));
 }

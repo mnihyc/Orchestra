@@ -1,5 +1,11 @@
 //! One retained-storage report and reviewed cleanup plans across resources and machines.
 
+use crate::operations::{OperationSpec as Op, TargetResolver as Target};
+use orch_access_contract::key_scope::KeyAction::Manage;
+use orch_access_contract::key_scope::KeyTargetKind::Object;
+use orch_access_contract::permissions::ObjectKind as K;
+
+
 use orch_access_contract::decisions::ObjectRef;
 use orch_types::{Id, Time};
 use schemars::JsonSchema;
@@ -376,9 +382,48 @@ pub struct CleanupOutcome {
 
 crate::endpoints! {
     /// Reads retained storage the caller may manage through one scoped report.
-    StorageGet: GET "/storage", Rule("only storage the caller may manage in this scope"), query StorageQuery, none, json StorageReport, 200;
+    StorageGet: GET "/storage", Rule("only storage the caller may manage in this scope"), query StorageQuery, none, json StorageReport, 200,
+        operation Op::single(
+            Manage,
+            &[
+                Object(K::Environment),
+                Object(K::Provider),
+                Object(K::Host),
+                Object(K::Machine),
+                Object(K::Mount),
+                Object(K::Thread),
+                Object(K::Document),
+            ],
+            Target::Resolved("storage_subjects"),
+        );
     /// Previews the fates and blockers of selected retained storage.
-    StorageCleanupPreflight: POST "/storage/cleanup/preflight", User, none, json CleanupRequest, json CleanupPlan, 200;
+    StorageCleanupPreflight: POST "/storage/cleanup/preflight", User, none, json CleanupRequest, json CleanupPlan, 200,
+        operation Op::single(
+            Manage,
+            &[
+                Object(K::Environment),
+                Object(K::Provider),
+                Object(K::Host),
+                Object(K::Machine),
+                Object(K::Mount),
+                Object(K::Thread),
+                Object(K::Document),
+            ],
+            Target::Resolved("storage_subjects"),
+        );
     /// Starts one confirmed cleanup with current authority and the preview's exact objects.
-    StorageCleanupCreate: POST "/storage/cleanup", User, none, json CleanupStart, json crate::workspace::Job, 202;
+    StorageCleanupCreate: POST "/storage/cleanup", User, none, json CleanupStart, json crate::workspace::Job, 202,
+        operation Op::single(
+            Manage,
+            &[
+                Object(K::Environment),
+                Object(K::Provider),
+                Object(K::Host),
+                Object(K::Machine),
+                Object(K::Mount),
+                Object(K::Thread),
+                Object(K::Document),
+            ],
+            Target::Resolved("storage_subjects"),
+        );
 }

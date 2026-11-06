@@ -37,6 +37,7 @@ fn manage() -> Option<ShareParts> {
 
 fn share_of(what: ShareWhat, parts: Option<ShareParts>, to: Id, client: &str) -> ShareWithAgents {
     ShareWithAgents {
+        viewers_read: None,
         read_first: None,
         what,
         inside: None,
@@ -55,14 +56,25 @@ async fn create(
     by: &Who,
     request: &ShareWithAgents,
 ) -> orch_api_core::testing::Reply<ShareAgentCreateReply> {
-    s.rig
+    let reply = s
+        .rig
         .world
         .app
         .call(ShareAgentCreate, &[])
         .token(&by.token)
         .body(request)
         .send()
-        .await
+        .await;
+    orch_api_core::testing::Reply {
+        status: reply.status,
+        headers: reply.headers,
+        raw: reply.raw,
+        body: reply.body.map(|answer| {
+            answer
+                .into_full()
+                .expect("the ordinary session receives the full share projection")
+        }),
+    }
 }
 
 /// A scene whose agents take the tools, with a thread whose agents are to be given documents to manage.
@@ -165,7 +177,7 @@ async fn a_share_to_manage_is_given_by_a_developer_listed_changed_and_taken_back
         4,
         "View, Edit and Manage, and the Export row that travels with them"
     );
-    assert_eq!(share.by.id, s.dan.id());
+    assert_eq!(share.by.as_ref().map(|by| by.id), Some(s.dan.id()));
     // It is listed on the document's page.
     let listed = s
         .rig

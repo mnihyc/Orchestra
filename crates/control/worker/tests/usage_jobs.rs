@@ -198,6 +198,86 @@ async fn the_minutes_of_a_day_are_dropped_only_after_the_fold_has_made_their_hou
 
 // ---- the rate catalogue ----
 
+#[tokio::test(flavor = "multi_thread")]
+async fn exact_credit_observations_follow_the_existing_metrics_retention_duration_and_zero_keeps_them()
+ {
+    use orch_db::queries::resources::{
+        keeper::set_facts,
+        routes::{NewProvider, insert_provider},
+    };
+    let world = World::new(Notifiers::new()).await;
+    let home = world.org("Credit history").await;
+    let provider = orch_types::new_id();
+    let old = world.now() - Duration::days(10);
+    let mut conn = world.test.pool.acquire().await.unwrap();
+    assert!(
+        insert_provider(
+            &mut conn,
+            &NewProvider {
+                id: provider,
+                name: "Reported credits",
+                owner_id: world.admin,
+                home_id: home,
+                upstreams: &json!([]),
+                protocols: &[],
+                machine_id: None,
+                key_machine_id: None,
+                arrangements: &[],
+                runtime_config: &json!({}),
+                status: "ready",
+            },
+            old
+        )
+        .await
+        .unwrap()
+    );
+    for (at, amount) in [(old, "7.50000000000000000001"), (world.now(), "6.25")] {
+        set_facts(
+            &mut conn,
+            provider,
+            &json!({"balances":[{"id":"plan","unit":"credits","remaining":amount}],
+            "field_times":{"balances.plan":at}}),
+            at,
+        )
+        .await
+        .unwrap();
+    }
+    drop(conn);
+    let mut config = ServerConfig::default();
+    config.retention.metrics_fine_days = 0;
+    config.retention.metrics_days = 0;
+    let kept = retention::metric_minutes(&world.db(), &world.clock, &config)
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!(kept.credit_observations_removed, 0);
+    let count: i64 = sqlx::query_scalar(
+        "SELECT count(*) FROM provider_credit_observations WHERE provider_id=$1",
+    )
+    .bind(provider)
+    .fetch_one(&world.test.pool)
+    .await
+    .unwrap();
+    assert_eq!(
+        count, 2,
+        "zero retained days keeps actual history, without fabricating a rollup"
+    );
+    config.retention.metrics_days = 5;
+    let trimmed = retention::metric_minutes(&world.db(), &world.clock, &config)
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!(trimmed.credit_observations_removed, 1);
+    let amounts: Vec<String> = sqlx::query_scalar(
+        "SELECT amount FROM provider_credit_observations WHERE provider_id=$1 ORDER BY observed_at",
+    )
+    .bind(provider)
+    .fetch_all(&world.test.pool)
+    .await
+    .unwrap();
+    assert_eq!(amounts, ["6.25"]);
+}
+
 /// What the address answers with.
 #[derive(Clone)]
 enum Answer {

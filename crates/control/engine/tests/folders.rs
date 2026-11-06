@@ -40,9 +40,6 @@ async fn topics_told(world: &World, group: Id) -> Vec<Id> {
 async fn an_agents_announcement_to_its_project_reaches_the_topics_of_the_folders_inside_it_and_passes_over_a_private_one()
  {
     let world = a_world_whose_agent_takes_tools().await;
-    world
-        .set(world.root, "broadcast.agent_scope", json!("project"))
-        .await;
     let sender = world.thread("Build").await;
     let beside = world.topic("Elsewhere").await;
     // A folder in the project with a folder in it, a topic in each; and a private folder with a topic.
@@ -82,6 +79,16 @@ async fn an_agents_announcement_to_its_project_reaches_the_topics_of_the_folders
         )
         .await
         .unwrap();
+    }
+    // A project contribution covers its inheriting descendants, including nested folders.
+    shared::share_threads_inside(&world, world.project, sender, true).await;
+    for (topic, name) in [
+        (beside, "Beside"),
+        (cart, "Cart"),
+        (refunds, "Refunds"),
+        (secret, "Secret"),
+    ] {
+        shared::thread_in_topic(&world, topic, name).await;
     }
     let result = call(
         &world,
@@ -266,6 +273,7 @@ async fn the_use_of_a_thread_in_a_folder_is_put_down_to_the_folder_and_not_to_a_
             }))
             .unwrap(),
             request_ref: Some("resp_1".to_owned()),
+            timing: None,
         }))
         .await;
     let rows = world.wait_ledger(start.turn_id, 1).await;

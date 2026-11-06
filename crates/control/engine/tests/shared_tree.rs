@@ -49,8 +49,8 @@ async fn an_agent_with_nothing_shared_lists_its_own_topic_and_the_threads_beside
         "it may not read what nobody shared"
     );
     assert_eq!(
-        other["writable"], true,
-        "it may always hand something to a thread of its own topic"
+        other["writable"], false,
+        "automatic topic messages are off until enabled"
     );
     assert_eq!(other["via"], "topic");
     let own = entry(&result, "Repro");

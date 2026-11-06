@@ -99,6 +99,7 @@ async fn a_new_or_changed_source_is_due_without_opening_its_page_and_its_claim_p
             revision,
             &json!({}),
             true,
+            true,
             clock.now()
         )
         .await
@@ -499,8 +500,7 @@ async fn read_count(count: &Arc<Mutex<usize>>, expected: usize) {
 }
 
 #[tokio::test]
-async fn an_exhausted_provider_with_waiting_inputs_is_observed_at_the_active_cadence_without_a_running_turn()
- {
+async fn an_exhausted_provider_with_recent_completed_work_is_observed_at_the_active_cadence() {
     let (world, clock) = world().await;
     let count = listen(&world, "not_told", Json::Null);
     sqlx::query(
@@ -511,17 +511,37 @@ async fn an_exhausted_provider_with_waiting_inputs_is_observed_at_the_active_cad
     .execute(world.pool.pool())
     .await
     .unwrap();
-    let thread = world.thread("Waiting for the plan").await;
-    world
+    let thread = world.thread("Recent work on the plan").await;
+    world.access.refuse_bypass(world.ada);
+    let submitted = world
         .engine()
         .submit_input(
             &orch_authz::Caller::session(world.ada),
             thread,
-            common::queued("Continue when the limit lifts"),
+            common::queued("Ask the vendor with its current allowance"),
         )
         .await
         .unwrap();
-    world.wait_blocked(thread, "provider_exhausted").await;
+    assert!(submitted.input.limit_bypass.is_empty());
+    let started = world.turn_start(thread, 0).await;
+    let commands: Vec<_> = [CommandKind::TurnStart, CommandKind::TurnStartFenced]
+        .into_iter()
+        .flat_map(|kind| world.commands.issued_commands(kind.as_str()))
+        .filter(|(_, command)| match command.command().unwrap() {
+            Command::TurnStart(start) => start.turn_id == started.turn_id,
+            Command::TurnStartFenced(start) => start.turn.turn_id == started.turn_id,
+            _ => false,
+        })
+        .collect();
+    assert_eq!(commands.len(), 1);
+    let (machine, command) = &commands[0];
+    assert_eq!(*machine, world.machine_id);
+    assert_eq!(world.machine.handler.runs_of(command.id), 1);
+    let completed = world
+        .run_turn(thread, 0, "The vendor accepted the request.")
+        .await;
+    assert_eq!(completed.turn_id, started.turn_id);
+    world.wait_state(thread, "idle").await;
     clock.advance(Duration::minutes(4));
     world.engine().refresh_due_provider_facts().await.unwrap();
     assert_eq!(*count.lock().unwrap(), 0);
@@ -532,9 +552,12 @@ async fn an_exhausted_provider_with_waiting_inputs_is_observed_at_the_active_cad
         world
             .count("SELECT count(*) FROM turns WHERE thread_id=$1", thread)
             .await,
-        0,
-        "observing a limit does not create a turn"
+        1,
+        "observing the quota does not create another turn after the explicit work completed"
     );
+    assert_eq!(world.turn_starts(thread).len(), 1);
+    assert_eq!(world.turn_state(started.turn_id).await, "completed");
+    world.shutdown().await;
 }
 
 #[tokio::test]
@@ -1238,8 +1261,7 @@ async fn a_quota_denial_does_not_hide_the_keepers_missing_sign_in() {
 }
 
 #[tokio::test]
-async fn a_programs_admission_members_hold_a_key_provider_and_usage_allowed_releases_its_waiting_work()
- {
+async fn a_programs_quota_observation_allows_plain_work_before_a_later_usage_allowed_report() {
     let (world, clock) = world().await;
     sqlx::query("UPDATE providers SET sources=$2 WHERE id=$1")
         .bind(world.provider)
@@ -1247,7 +1269,8 @@ async fn a_programs_admission_members_hold_a_key_provider_and_usage_allowed_rele
         .execute(world.pool.pool())
         .await
         .unwrap();
-    listen(
+    let observed_at = clock.time();
+    let refreshes = listen(
         &world,
         "ready",
         json!({"ordinary_usage_allowed":false,"limit_reached":{"type":"weekly","resets_at":Time::new(clock.now()+Duration::minutes(2))},"field_times":{"ordinary_usage_allowed":clock.time(),"limit_reached":clock.time()}}),
@@ -1262,19 +1285,59 @@ async fn a_programs_admission_members_hold_a_key_provider_and_usage_allowed_rele
         .await;
     assert_eq!(
         status, "exhausted",
-        "admission members govern a key provider even if the role called itself ready"
+        "the vendor quota remains an observation even if the role called itself ready"
     );
-    let thread = world.thread("Waiting for the program").await;
-    world
+    let thread = world.thread("Explicit work after the program's report").await;
+    world.access.refuse_bypass(world.ada);
+    let submitted = world
         .engine()
         .submit_input(
             &orch_authz::Caller::session(world.ada),
             thread,
-            common::queued("Use the plan when it is available"),
+            common::queued("Ask the vendor with its current allowance"),
         )
         .await
         .unwrap();
-    world.wait_blocked(thread, "provider_exhausted").await;
+    assert!(submitted.input.limit_bypass.is_empty());
+    let started = world.turn_start(thread, 0).await;
+    let commands: Vec<_> = [CommandKind::TurnStart, CommandKind::TurnStartFenced]
+        .into_iter()
+        .flat_map(|kind| world.commands.issued_commands(kind.as_str()))
+        .filter(|(_, command)| match command.command().unwrap() {
+            Command::TurnStart(start) => start.turn_id == started.turn_id,
+            Command::TurnStartFenced(start) => start.turn.turn_id == started.turn_id,
+            _ => false,
+        })
+        .collect();
+    assert_eq!(commands.len(), 1);
+    let (machine, command) = &commands[0];
+    assert_eq!(*machine, world.machine_id);
+    assert_eq!(world.machine.handler.runs_of(command.id), 1);
+    world.say(thread, common::turn_began(started.turn_id)).await;
+    world.wait_state(thread, "running").await;
+    assert_eq!(
+        *refreshes.lock().unwrap(),
+        1,
+        "the ordinary input reaches the native peer without another observation"
+    );
+    let (status, facts): (String, Json) =
+        sqlx::query_as("SELECT status,facts FROM providers WHERE id=$1")
+            .bind(world.provider)
+            .fetch_one(world.pool.pool())
+            .await
+            .unwrap();
+    assert_eq!(status, "exhausted");
+    assert_eq!(facts["ordinary_usage_allowed"], false);
+    assert_eq!(facts["limit_reached"]["type"], "weekly");
+    assert_eq!(
+        facts["limit_reached"]["resets_at"],
+        json!(Time::new(observed_at.get() + Duration::minutes(2)))
+    );
+    assert_eq!(
+        facts["field_times"]["ordinary_usage_allowed"],
+        json!(observed_at)
+    );
+    assert_eq!(facts["field_times"]["limit_reached"], json!(observed_at));
     clock.advance(Duration::minutes(1));
     listen(
         &world,
@@ -1286,13 +1349,23 @@ async fn a_programs_admission_members_hold_a_key_provider_and_usage_allowed_rele
         .refresh_provider(world.provider)
         .await
         .unwrap();
-    let status: String = world
-        .scalar("SELECT status FROM providers WHERE id=$1", world.provider)
-        .await;
+    let (status, facts): (String, Json) =
+        sqlx::query_as("SELECT status,facts FROM providers WHERE id=$1")
+            .bind(world.provider)
+            .fetch_one(world.pool.pool())
+            .await
+            .unwrap();
     assert_eq!(status, "ready");
-    let started = world.turn_start(thread, 0).await;
-    world.say(thread, common::turn_began(started.turn_id)).await;
+    assert_eq!(facts["ordinary_usage_allowed"], true);
+    assert!(facts["limit_reached"].is_null());
+    assert_eq!(
+        facts["field_times"]["ordinary_usage_allowed"],
+        json!(clock.time())
+    );
+    assert_eq!(facts["field_times"]["limit_reached"], json!(clock.time()));
+    assert_eq!(world.turn_starts(thread).len(), 1);
     world.wait_state(thread, "running").await;
+    world.shutdown().await;
 }
 
 #[tokio::test]
@@ -1387,4 +1460,158 @@ async fn an_old_credentials_vendor_answer_cannot_recover_a_replacement_started_d
             .unwrap();
     assert_eq!(status, "error");
     assert_ne!(facts.get("plan"), Some(&json!("old-plan")));
+}
+
+#[tokio::test]
+async fn vendor_quota_observations_do_not_interrupt_forwarded_turns_or_block_new_explicit_work() {
+    use orch_link_contract::commands::LeaseMode;
+
+    // Both a reported future reset and an unknown reset remain vendor observations.
+    // Each case uses the existing real machine link and command journal; its
+    // scripted handlers make no vendor model request.
+    for future_reset in [true, false] {
+        let world = World::on_a_key("owned-vendor-observation-fixture").await;
+        let active_thread = world.thread("Already using the forwarder").await;
+        let next_thread = world.thread("New explicitly requested work").await;
+        let (active, _) = world.running_turn(active_thread, "Keep working").await;
+        let lease = world.open_lease_of(active_thread).await;
+        let before: (String, bool, Option<String>) = sqlx::query_as(
+            "SELECT mode,closed_at IS NULL,close_reason FROM leases WHERE id=$1",
+        )
+        .bind(lease)
+        .fetch_one(world.pool.pool())
+        .await
+        .unwrap();
+        assert_eq!(before, ("forwarded".to_owned(), true, None));
+        assert!(world.seen.of_kind(CommandKind::LeaseOpen).iter().any(
+            |command| matches!(command, Command::LeaseOpen(open)
+                if open.lease_id == lease
+                    && open.provider_id == world.provider
+                    && open.thread_id == active_thread
+                    && open.mode == LeaseMode::Forwarded)
+        ));
+
+        let refreshes = world
+            .commands
+            .issued_of(CommandKind::ProviderRefresh.as_str());
+        let interrupts = world.ran(CommandKind::TurnInterrupt);
+        let observed_at = world.clock.time();
+        // One hour keeps the reset beyond the fixture's bounded command waits;
+        // the test neither waits for it nor advances a clock to authorize work.
+        let resets_at =
+            future_reset.then(|| Time::new(observed_at.get() + Duration::hours(1)));
+        let facts: orch_agent_contract::facts::ProviderFacts = serde_json::from_value(json!({
+            "ordinary_usage_allowed":false,
+            "limit_reached":{"type":"included allowance","resets_at":resets_at},
+            "balances":[{"id":"account","unit":"USD","remaining":"12.50"}],
+            "field_times":{
+                "ordinary_usage_allowed":observed_at,
+                "limit_reached":observed_at,
+                "balances":observed_at,
+                "balances.account":observed_at
+            }
+        }))
+        .unwrap();
+        let observation = serde_json::to_value(&facts).unwrap();
+        world
+            .say_of_provider_taken_in(Event::ProviderFacts(facts))
+            .await;
+        // The existing cursor barrier means the complete observation transaction
+        // has committed, including any erroneous provider-wide turn termination.
+        assert_eq!(world.turn_state(active.turn_id).await, "running");
+        let after: (String, bool, Option<String>) = sqlx::query_as(
+            "SELECT mode,closed_at IS NULL,close_reason FROM leases WHERE id=$1",
+        )
+        .bind(lease)
+        .fetch_one(world.pool.pool())
+        .await
+        .unwrap();
+        assert_eq!(
+            after, before,
+            "an observation cannot close another turn's lease"
+        );
+
+        // This new, explicit input has no bypass request or permission. A recent
+        // observation attempt in on_a_key keeps unrelated scheduled refreshes out
+        // of the existing fixture's bounded command waits.
+        world.access.refuse_bypass(world.ada);
+        let submitted = world
+            .engine()
+            .submit_input(
+                &orch_authz::Caller::session(world.ada),
+                next_thread,
+                common::queued("Ask the vendor again with its current balance"),
+            )
+            .await
+            .unwrap();
+        assert!(submitted.input.limit_bypass.is_empty());
+        let next = world.turn_start(next_thread, 0).await;
+        assert_eq!(
+            common::words_after_where(&next.text),
+            "Ask the vendor again with its current balance"
+        );
+        let input: orch_types::Id = world
+            .scalar("SELECT input_id FROM turns WHERE id=$1", next.turn_id)
+            .await;
+        assert_eq!(input, submitted.input.id);
+        let delivered: Vec<_> = [CommandKind::TurnStart, CommandKind::TurnStartFenced]
+            .into_iter()
+            .flat_map(|kind| world.commands.issued_commands(kind.as_str()))
+            .filter(|(_, command)| match command.command().unwrap() {
+                Command::TurnStart(start) => {
+                    start.thread_id == next_thread && start.turn_id == next.turn_id
+                }
+                Command::TurnStartFenced(start) => {
+                    start.thread_id == next_thread && start.turn.turn_id == next.turn_id
+                }
+                _ => false,
+            })
+            .collect();
+        assert_eq!(
+            delivered.len(),
+            1,
+            "one explicit input reaches the native peer"
+        );
+        let (machine, command) = &delivered[0];
+        assert_eq!(*machine, world.machine_id);
+        assert_eq!(world.machine.handler.runs_of(command.id), 1);
+        world
+            .say(next_thread, common::turn_began(next.turn_id))
+            .await;
+        world.wait_turn(next.turn_id, "running").await;
+        assert_eq!(world.turn_state(active.turn_id).await, "running");
+        assert_eq!(world.open_lease_of(active_thread).await, lease);
+        assert_eq!(world.ran(CommandKind::TurnInterrupt), interrupts);
+        assert!(
+            world
+                .commands
+                .issued_commands(CommandKind::TurnInterrupt.as_str())
+                .iter()
+                .all(|(_, command)| !matches!(command.command().unwrap(),
+                    Command::TurnInterrupt(interrupt) if interrupt.turn_id == active.turn_id))
+        );
+        assert_eq!(
+            world
+                .commands
+                .issued_of(CommandKind::ProviderRefresh.as_str()),
+            refreshes,
+            "new work must not need a successful refresh to lift a cached vendor quota"
+        );
+        if let Some(resets_at) = resets_at {
+            assert!(world.clock.time() < resets_at);
+        }
+
+        let retained: Json = world
+            .scalar("SELECT facts FROM providers WHERE id=$1", world.provider)
+            .await;
+        for member in ["ordinary_usage_allowed", "limit_reached", "balances"] {
+            assert_eq!(retained[member], observation[member]);
+            assert_eq!(retained["field_times"][member], json!(observed_at));
+        }
+        assert_eq!(
+            retained["field_times"]["balances.account"],
+            json!(observed_at)
+        );
+        world.shutdown().await;
+    }
 }

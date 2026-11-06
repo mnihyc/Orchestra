@@ -554,12 +554,41 @@ export async function inspectLayout(input: LayoutInput): Promise<LayoutResult> {
 
   // An editor's noneditable toolbar owns ordinary visible labels; its enclosing editable
   // document must not make those labels disappear from their icon-alignment check.
-  function firstLine(row: HTMLElement, button: HTMLElement): DOMRect | null {
+  // Classify ownership in layout coordinates, so translating a broken button cannot
+  // make it escape its real line. Actual alignment still uses the painted Range/SVG.
+  function flowBand(element: HTMLElement): { top: number; bottom: number } {
+    let top = 0;
+    for (let item = element; ;) {
+      const style = styleOf(item);
+      const relative = style.position === 'relative'
+        ? (style.top !== 'auto' ? parseFloat(style.top) : -(parseFloat(style.bottom) || 0)) : 0;
+      top += item.offsetTop - relative;
+      const parent: Element | null = item.offsetParent;
+      if (!(parent instanceof HTMLElement)) break;
+      top += parent.clientTop;
+      item = parent;
+    }
+    const style = styleOf(element);
+    const unmargined = top - (parseFloat(style.marginTop) || 0);
+    return { top: Math.min(top, unmargined), bottom: Math.max(top, unmargined) + element.offsetHeight + Math.max(0, parseFloat(style.marginBottom) || 0) };
+  }
+  function firstLine(row: HTMLElement, button: HTMLElement, wrapping: boolean): DOMRect | null {
+    const buttonBand = wrapping ? flowBand(button) : null;
     const walker = document.createTreeWalker(row, NodeFilter.SHOW_TEXT);
     for (let node = walker.nextNode(); node !== null; node = walker.nextNode()) {
       const parent = node.parentElement;
       if (parent === null || button.contains(parent) || parent.closest('[role="tooltip"],svg,input,textarea') !== null || parent.closest('[contenteditable]')?.getAttribute('contenteditable') === 'true' || normalize(node.textContent ?? '') === '' || !visible(parent)) continue;
       const range = document.createRange(); range.selectNodeContents(node);
+      if (buttonBand !== null) {
+        let band = flowBand(parent);
+        if (parent === row) {
+          const text = range.getBoundingClientRect(), container = boxOf(row);
+          band = { top: band.top + text.top - container.top, bottom: band.top + text.bottom - container.top };
+        }
+        // Another wrap line or the label above somebody else's field is not
+        // this icon's inline text. A multiline heading retains its FIRST line.
+        if (Math.min(band.bottom, buttonBand.bottom) <= Math.max(band.top, buttonBand.top)) continue;
+      }
       const line = Array.from(range.getClientRects()).find((rect) => rect.width > 0 && rect.height > 0);
       if (line !== undefined) return line;
     }
@@ -584,8 +613,17 @@ export async function inspectLayout(input: LayoutInput): Promise<LayoutResult> {
         if (independent) break;
         continue;
       }
-      const line = firstLine(row, button);
-      if (line === null) { if (independent) break; continue; }
+      const wrapping = flex && style.flexWrap !== 'nowrap';
+      if (wrapping) {
+        const box = boxOf(icon), control = boxOf(button);
+        const offset = Math.abs(box.top + box.height / 2 - control.top - control.height / 2);
+        if (offset >= 1) {
+          fail('icon-centre', nameOf(button), [button], `Icon is ${offset.toFixed(2)}px off its button centre; required less than 1px.`);
+          break;
+        }
+      }
+      const line = firstLine(row, button, wrapping);
+      if (line === null) { if (independent || wrapping) break; continue; }
       const box = boxOf(icon);
       const offset = Math.abs(box.top + box.height / 2 - line.top - line.height / 2);
       if (offset >= 1) fail('icon-centre', nameOf(button), [button, row], `Icon is ${offset.toFixed(2)}px off the first text-line centre; required less than 1px.`);

@@ -12,6 +12,7 @@ use std::time::Duration;
 use chrono::Utc;
 use common::{World, eventually, meanwhile, queued, turn_began};
 use orch_authz::Caller;
+use orch_link_contract::commands::{Command, CommandKind, TurnStart};
 use orch_link_contract::events::{
     Event, ProviderStatus, SessionLost, TurnCompleted, TurnError, TurnOutcome,
 };
@@ -153,41 +154,44 @@ async fn a_limit_of_the_plan_closes_the_provider_until_the_vendors_time_and_the_
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
-async fn an_input_that_waits_for_a_closed_provider_is_told_which_limit_and_until_when() {
-    let world = World::new().await;
-    let thread = world.thread("Waiting").await;
-    failing_turn(&world, thread, "Go", plan_limit(Some(in_secs(3_600)))).await;
+async fn an_explicit_input_after_a_vendor_limit_starts_before_the_recorded_reset() {
+    let world = World::observed().await;
+    let thread = world.thread("Another explicit request").await;
+    let ends = in_secs(3_600);
+    let failed = failing_turn(&world, thread, "Go", plan_limit(Some(ends))).await;
+    let failure = error_of(&world, failed).await;
     world.wait_state(thread, "idle").await;
 
-    world
+    let submitted = world
         .engine()
         .submit_input(&Caller::session(world.ada), thread, queued("Again"))
         .await
         .unwrap();
-    world.wait_blocked(thread, "provider_exhausted").await;
-    let detail: Option<String> = world
-        .scalar(
-            "SELECT blocked_detail FROM threads WHERE node_id = $1",
-            thread,
-        )
-        .await;
+    assert!(submitted.input.limit_bypass.is_empty());
+    let next = world.turn_start(thread, 1).await;
+    assert_native_turn_start(&world, &next);
+    assert_eq!(common::words_after_where(&next.text), "Again");
+    assert!(world.clock.time() < ends);
+    let (status, detail) = provider_status(&world).await;
+    assert_eq!(status, "exhausted", "the earlier report remains visible");
     let detail = detail.unwrap();
     assert!(detail.contains("weekly limit"), "which limit: {detail}");
     assert!(
         detail.contains("ends Wednesday 09:00 UTC"),
         "until when: {detail}"
     );
-    assert_eq!(
-        world.turn_starts(thread).len(),
-        1,
-        "nothing was started on a closed provider"
-    );
+    assert_eq!(limit_of_provider(&world).await["resets_at"], json!(ends));
+    assert_eq!(error_of(&world, failed).await, failure);
+    world
+        .run_turn(thread, 1, "The new request was accepted.")
+        .await;
+    assert_eq!(world.turn_starts(thread).len(), 2);
+    world.shutdown().await;
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
-async fn a_provider_whose_limit_has_ended_is_looked_at_again_by_itself_and_the_waiting_input_starts()
- {
-    let world = World::new().await;
+async fn a_recorded_vendor_limit_expires_without_holding_explicit_work_until_its_reset() {
+    let world = World::observed().await;
     let thread = world.thread("Reopened").await;
     failing_turn(&world, thread, "Go", plan_limit(Some(in_secs(3_600)))).await;
     world.wait_state(thread, "idle").await;
@@ -196,13 +200,21 @@ async fn a_provider_whose_limit_has_ended_is_looked_at_again_by_itself_and_the_w
         .submit_input(&Caller::session(world.ada), thread, queued("Again"))
         .await
         .unwrap();
-    world.wait_blocked(thread, "provider_exhausted").await;
-    assert_eq!(world.turn_starts(thread).len(), 1);
-
-    // Nothing is done but waiting: the time comes, the provider opens, and the input that waited starts.
-    let_the_vendors_time_pass(&world).await;
     let second = world.turn_start(thread, 1).await;
+    assert_native_turn_start(&world, &second);
     assert_eq!(common::words_after_where(&second.text), "Again");
+    assert!(!limit_of_provider(&world).await.is_null());
+    world
+        .run_turn(thread, 1, "The new request was accepted.")
+        .await;
+
+    // Reset housekeeping still updates the old observation. Work has already
+    // reached the native handler and finished without waiting for that clock.
+    let_the_vendors_time_pass(&world).await;
+    eventually("the recorded vendor limit to expire", || async {
+        provider_status(&world).await.0 == "ready"
+    })
+    .await;
     let (status, detail) = provider_status(&world).await;
     assert_eq!(status, "ready");
     assert_eq!(
@@ -210,6 +222,8 @@ async fn a_provider_whose_limit_has_ended_is_looked_at_again_by_itself_and_the_w
         "the sentence of the limit goes with the limit"
     );
     assert_eq!(limit_of_provider(&world).await, Json::Null);
+    assert_eq!(world.turn_starts(thread).len(), 2);
+    world.shutdown().await;
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
@@ -450,4 +464,191 @@ async fn a_harness_that_is_gone_ends_the_turn_it_ran_and_the_thread_goes_on() {
         .await
         .unwrap();
     world.turn_start(thread, 1).await;
+}
+
+/// Match the engine's command identity to execution by the actual MachineLink
+/// handler. A saved input or an issued command alone does not prove it ran.
+fn assert_native_turn_start(world: &World, started: &TurnStart) {
+    let commands: Vec<_> = world
+        .commands
+        .issued_commands(CommandKind::TurnStart.as_str())
+        .into_iter()
+        .chain(
+            world
+                .commands
+                .issued_commands(CommandKind::TurnStartFenced.as_str()),
+        )
+        .filter(|(_, command)| {
+            let start = match command.command().unwrap() {
+                Command::TurnStart(start) => start,
+                Command::TurnStartFenced(start) => *start.turn,
+                _ => unreachable!("only turn starts were selected"),
+            };
+            start.thread_id == started.thread_id && start.turn_id == started.turn_id
+        })
+        .collect();
+    assert_eq!(commands.len(), 1);
+    let (machine, command) = &commands[0];
+    assert_eq!(*machine, world.machine_id);
+    assert_eq!(world.machine.handler.runs_of(command.id), 1);
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn cached_vendor_exhaustion_and_remaining_vendor_credit_do_not_block_an_explicit_native_attempt()
+ {
+    for has_reset in [true, false] {
+        // A recent observation keeps the existing background reader on its
+        // normal cadence. This control never refreshes or clears the cached facts.
+        let world = World::observed().await;
+        let thread = world.thread("Explicit vendor attempt").await;
+        world.access.refuse_bypass(world.ada);
+        // The future reset is beyond the fixture's acknowledgement watchdog;
+        // neither row can become usable merely by waiting for that reset.
+        let reset = has_reset.then(|| Time::new(world.clock.now() + chrono::Duration::hours(1)));
+        let facts: orch_agent_contract::facts::ProviderFacts = serde_json::from_value(json!({
+            "ordinary_usage_allowed":false,
+            "limit_reached":{"type":"weekly","resets_at":reset},
+            "balances":[{"id":"plan","unit":"credits","remaining":"5"}],
+            "field_times":{
+                "ordinary_usage_allowed":world.clock.time(),
+                "limit_reached":world.clock.time(),
+                "balances":world.clock.time()
+            }
+        }))
+        .unwrap();
+        let facts = serde_json::to_value(facts).unwrap();
+        sqlx::query(
+            "UPDATE providers SET status='exhausted',status_detail='Earlier vendor quota report',
+            facts=$2,facts_at=$3,facts_requested_at=$3 WHERE id=$1",
+        )
+        .bind(world.provider)
+        .bind(&facts)
+        .bind(world.clock.now())
+        .execute(world.pool.pool())
+        .await
+        .unwrap();
+        assert_eq!(provider_status(&world).await.0, "exhausted");
+        let reads = world
+            .commands
+            .issued_of(CommandKind::ProviderRefresh.as_str());
+
+        let submitted = world
+            .engine()
+            .submit_input(
+                &Caller::session(world.ada),
+                thread,
+                queued("Try the vendor with the credit it may still accept"),
+            )
+            .await
+            .unwrap();
+        assert!(submitted.input.limit_bypass.is_empty());
+        let started = world.turn_start(thread, 0).await;
+        assert_native_turn_start(&world, &started);
+        assert_eq!(started.model, common::MODEL);
+        assert_eq!(
+            common::words_after_where(&started.text),
+            "Try the vendor with the credit it may still accept"
+        );
+        let input: Id = world
+            .scalar("SELECT input_id FROM turns WHERE id=$1", started.turn_id)
+            .await;
+        assert_eq!(input, submitted.input.id);
+        let retained: Json = world
+            .scalar("SELECT facts FROM providers WHERE id=$1", world.provider)
+            .await;
+        assert_eq!(
+            retained, facts,
+            "the quota report remains diagnostic evidence"
+        );
+        assert_eq!(
+            world
+                .commands
+                .issued_of(CommandKind::ProviderRefresh.as_str()),
+            reads,
+            "reaching the vendor does not require another facts read"
+        );
+        let finished = world
+            .run_turn(thread, 0, "The new request was accepted.")
+            .await;
+        assert_eq!(finished.turn_id, started.turn_id);
+        assert_eq!(world.turn_starts(thread).len(), 1);
+        world.shutdown().await;
+    }
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn a_structured_vendor_model_family_failure_does_not_veto_the_next_explicit_native_attempt() {
+    for has_reset in [true, false] {
+        let world = World::observed().await;
+        let thread = world.thread("Try the same model again").await;
+        world.access.refuse_bypass(world.ada);
+        let reset = has_reset.then(|| Time::new(world.clock.now() + chrono::Duration::hours(1)));
+        let mut failure = plan_limit(reset);
+        // Keep the provider itself ready so this isolates the separate preflight
+        // gate over the prior structured failure of the same model family.
+        failure.retryable = true;
+        failure.message = "The vendor refused this model family's included use.".into();
+        failure.said = Some("The fake family is at its weekly limit.".into());
+        failure.limit = Some(
+            serde_json::to_value(orch_agent_contract::events::TurnLimit {
+                scope: orch_agent_contract::events::LimitScope::ModelFamily,
+                window_minutes: None,
+                model_family: Some("fake".into()),
+                retry_after_secs: None,
+            })
+            .unwrap(),
+        );
+        let failed = failing_turn(&world, thread, "The earlier vendor attempt", failure).await;
+        world.wait_state(thread, "idle").await;
+        let old_error = error_of(&world, failed).await;
+        assert_eq!(old_error["code"], "provider_exhausted");
+        assert_eq!(old_error["limit"]["scope"], "model_family");
+        assert_eq!(old_error["limit"]["model_family"], "fake");
+        assert_eq!(old_error["resets_at"], json!(reset));
+        assert_eq!(world.turn_starts(thread).len(), 1);
+        assert_eq!(provider_status(&world).await.0, "ready");
+        let reads = world
+            .commands
+            .issued_of(CommandKind::ProviderRefresh.as_str());
+
+        let submitted = world
+            .engine()
+            .submit_input(
+                &Caller::session(world.ada),
+                thread,
+                queued("Explicitly try the same model again"),
+            )
+            .await
+            .unwrap();
+        assert!(submitted.input.limit_bypass.is_empty());
+        let next = world.turn_start(thread, 1).await;
+        assert_native_turn_start(&world, &next);
+        assert_ne!(next.turn_id, failed);
+        assert_eq!(next.model, common::MODEL);
+        assert_eq!(
+            common::words_after_where(&next.text),
+            "Explicitly try the same model again"
+        );
+        let input: Id = world
+            .scalar("SELECT input_id FROM turns WHERE id=$1", next.turn_id)
+            .await;
+        assert_eq!(
+            input, submitted.input.id,
+            "only the new input was attempted"
+        );
+        assert_eq!(world.turn_state(failed).await, "failed");
+        assert_eq!(error_of(&world, failed).await, old_error);
+        assert_eq!(
+            world
+                .commands
+                .issued_of(CommandKind::ProviderRefresh.as_str()),
+            reads
+        );
+        world
+            .run_turn(thread, 1, "The new request was accepted.")
+            .await;
+        assert_eq!(error_of(&world, failed).await, old_error);
+        assert_eq!(world.turn_starts(thread).len(), 2);
+        world.shutdown().await;
+    }
 }

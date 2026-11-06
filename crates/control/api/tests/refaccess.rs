@@ -8,6 +8,7 @@
 mod desk;
 mod places;
 mod support;
+use support::FullApprovalReply;
 
 use chrono::Duration;
 use desk::{Desk, paragraph, put};
@@ -241,6 +242,7 @@ async fn every_quick_duration_gives_one_person_one_thing_and_expires_at_the_serv
             }))
             .send()
             .await
+            .full_approval()
             .ok();
         assert_eq!(decision.state, ApprovalState::Approved);
         let at = decision.decided_at.unwrap();

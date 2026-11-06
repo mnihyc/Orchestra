@@ -117,7 +117,9 @@ async fn every_general_preset_at_creation_gives_a_viewer_role_member_exactly_its
             })
             .send()
             .await
-            .ok();
+            .ok()
+            .into_full()
+            .unwrap();
         let viewer = held(&s, thread.base.id, s.cai.id()).await;
         for (permission, expected) in [
             ("thread.view", level != "private"),

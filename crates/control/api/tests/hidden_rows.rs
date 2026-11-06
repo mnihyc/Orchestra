@@ -49,6 +49,8 @@ async fn private_project(world: &World, by: &Who, org: Id, name: &str) -> Projec
         .send()
         .await
         .ok()
+        .into_full()
+        .expect("this control expects the ordinary full project response")
 }
 
 #[tokio::test]

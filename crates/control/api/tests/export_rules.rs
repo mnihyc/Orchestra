@@ -513,28 +513,40 @@ async fn share(
     download: Option<bool>,
     client: &str,
 ) -> orch_api_core::testing::Reply<orch_api_contract::share::ShareAgentCreateReply> {
-    o.s.rig
-        .world
-        .app
-        .call(ShareAgentCreate, &[])
-        .token(&by.token)
-        .body(&ShareWithAgents {
-            read_first: None,
-            download,
-            what: ShareWhat::Node(ShareWhatNode { node_id: what }),
-            inside: None,
-            parts: Some(ShareParts {
-                timeline: Some(ShareLevel::Read),
-                ..ShareParts::default()
-            }),
-            mode: ShareMode::Live,
-            to: ShareTo::Threads(vec![ShareToThread { thread_id: to }]),
-            comment: None,
-            expires_at: None,
-            client_id: client.to_owned(),
-        })
-        .send()
-        .await
+    let reply =
+        o.s.rig
+            .world
+            .app
+            .call(ShareAgentCreate, &[])
+            .token(&by.token)
+            .body(&ShareWithAgents {
+                viewers_read: None,
+                read_first: None,
+                download,
+                what: ShareWhat::Node(ShareWhatNode { node_id: what }),
+                inside: None,
+                parts: Some(ShareParts {
+                    timeline: Some(ShareLevel::Read),
+                    ..ShareParts::default()
+                }),
+                mode: ShareMode::Live,
+                to: ShareTo::Threads(vec![ShareToThread { thread_id: to }]),
+                comment: None,
+                expires_at: None,
+                client_id: client.to_owned(),
+            })
+            .send()
+            .await;
+    orch_api_core::testing::Reply {
+        status: reply.status,
+        headers: reply.headers,
+        raw: reply.raw,
+        body: reply.body.map(|answer| {
+            answer
+                .into_full()
+                .expect("the ordinary session receives the full share projection")
+        }),
+    }
 }
 
 #[tokio::test]

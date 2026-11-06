@@ -19,7 +19,7 @@ use orch_access_contract::permissions::Permission;
 use orch_access_contract::roles::PlaceRef;
 use orch_api_contract::access as api;
 use orch_api_contract::approvals::{
-    AccessDecision, AccessRequest, Approval, ApprovalDecision, ApprovalState, CapabilityDecision,
+    AccessDecision, AccessRequest, Approval, ApprovalDecision, ApprovalState,
 };
 use orch_api_contract::common::ErrorCode;
 use orch_api_contract::nodes::NodeRef;
@@ -453,36 +453,17 @@ pub fn sent_to(shown: &HashMap<Id, Shown>) -> HashSet<Id> {
 /// Decides a request for access: approving names the person who asked in the rows they asked
 /// for, as the approver's own change of the page; denying gives nothing. `tx` and `approver` are
 /// the transaction and the principal of the action guard of the request that decides.
-pub async fn decide(
+pub async fn decide_row(
     ctx: &Ctx,
     mut tx: orch_db::Tx,
     approver: Principal,
     id: Id,
     decision: &ApprovalDecision,
-) -> ApiResult<Approval> {
-    // A body that holds `approve` and at most a note fits a decision on a capability as well, and is
-    // read as that one when the body is read, whichever approval it is for.
-    let alone;
-    let decision = match decision {
-        ApprovalDecision::Capability(CapabilityDecision { approve, note }) => {
-            alone = AccessDecision {
-                approve: *approve,
-                permissions: None,
-                options: None,
-                expires_at: None,
-                quick_duration: None,
-                note: note.clone(),
-            };
-            &alone
-        }
-        ApprovalDecision::Access(access) => access,
-        _ => {
-            return Err(invalid(
-                "",
-                "a request for access is answered with approve, and if you like fewer permissions, narrower options, an end and a note",
-            ));
-        }
-    };
+) -> ApiResult<ApprovalRow> {
+    let decision = decision.as_access_decision().ok_or_else(|| invalid(
+        "",
+        "a request for access is answered with approve, and if you like fewer permissions, narrower options, an end and a note",
+    ))?;
     let AccessDecision {
         approve,
         permissions,
@@ -490,7 +471,7 @@ pub async fn decide(
         expires_at,
         quick_duration,
         note,
-    } = decision;
+    } = &decision;
     let expires_at = if let Some(duration) = quick_duration {
         if !approve || expires_at.is_some() {
             return Err(invalid(
@@ -561,10 +542,7 @@ pub async fn decide(
         .decide_access_request_guarded(tx, approver, id, &decided, &origin(ctx))
         .await
     {
-        Ok(_) => {
-            let mut conn = ctx.app.db.acquire().await?;
-            approvals::one_approval(ctx, &mut conn, id).await
-        }
+        Ok(row) => Ok(row),
         Err(DecideError::NotFound) => Err(ApiError::not_found()),
         Err(DecideError::AlreadyDecided) => Err(approvals::already_decided(ctx, id).await),
         Err(DecideError::Denied(refusal)) => {

@@ -1,8 +1,8 @@
 //! Display sockets terminate viewer security and filter every input under current authority.
 
 use super::rfb_filter::{Filter, MAX_INPUT, ProtocolError};
-use crate::middleware::authentication::{Via, new_token, token_hash};
-use crate::middleware::authorization;
+use super::ticket_origin::{CurrentCaller, Origin};
+use crate::middleware::authentication::{new_token, token_hash};
 use crate::middleware::requests::{ApiError, ApiResult};
 use crate::registry::Ctx;
 use crate::routes::displays as views;
@@ -16,7 +16,6 @@ use futures::StreamExt;
 use orch_access_contract::permissions::Permission;
 use orch_api_contract::common::ErrorCode;
 use orch_api_contract::displays::*;
-use orch_authz::{Caller, Principal};
 use orch_db::queries::displays as rows;
 use orch_engine::displays::{DisplayActions, Displays, SITTING_GAP};
 use orch_realtime_contract::feeds::Feed;
@@ -44,12 +43,12 @@ fn lock<T>(mutex: &Mutex<T>) -> std::sync::MutexGuard<'_, T> {
 
 #[derive(Clone)]
 struct Ticket {
+    surface: orch_api_contract::surface::HttpSurface,
     display: Id,
+    environment: Id,
     machine: Id,
     generation: i32,
-    caller: Caller,
-    user: Id,
-    via: Via,
+    origin: Origin,
     control: bool,
     expires: DateTime<Utc>,
 }
@@ -108,23 +107,34 @@ impl Sockets {
         ctx: &Ctx,
         display: Id,
         control: bool,
+        environment: Id,
         machine: Id,
         generation: i32,
     ) -> ApiResult<DisplayTicketCreateReply> {
         let token = new_token("dt_");
         let expires = ctx.now + Span::seconds(i64::from(DISPLAY_TICKET_SECONDS));
-        let authed = ctx.user()?;
+        let origin = Origin::capture(ctx)?;
+        let selection = if control {
+            "DisplayTicketCreate.control"
+        } else {
+            "DisplayTicketCreate.view"
+        };
+        if origin.operation() != Some(selection) {
+            return Err(ApiError::internal(
+                "a bound native ticket needs its actual selected operation",
+            ));
+        }
         let mut tickets = lock(&self.tickets);
         tickets.retain(|_, t| t.expires > ctx.now);
         tickets.insert(
             token_hash(&token),
             Ticket {
+                surface: ctx.http_surface()?,
                 display,
+                environment,
                 machine,
                 generation,
-                caller: authorization::caller_of(authed)?,
-                user: authed.id(),
-                via: authed.via.clone(),
+                origin,
                 control,
                 expires,
             },
@@ -134,29 +144,40 @@ impl Sockets {
             ticket_expires_at: Time::new(expires),
         })
     }
-    fn redeem(&self, display: Id, token: &str, now: DateTime<Utc>) -> Option<Ticket> {
-        lock(&self.tickets)
-            .remove(&token_hash(token))
-            .filter(|t| t.display == display && t.expires > now)
+    fn redeem(
+        &self,
+        display: Id,
+        token: &str,
+        now: DateTime<Utc>,
+        surface: orch_api_contract::surface::HttpSurface,
+    ) -> Option<Ticket> {
+        let mut tickets = lock(&self.tickets);
+        let hash = token_hash(token);
+        if tickets
+            .get(&hash)
+            .is_none_or(|held| held.surface != surface)
+        {
+            return None;
+        }
+        tickets
+            .remove(&hash)
+            .filter(|held| held.display == display && held.expires > now)
     }
 
-    async fn gates(app: &App, ticket: &Ticket) -> ApiResult<(bool, bool, &'static str)> {
-        let mut conn = app.db.acquire().await?;
-        let now = app.clock.now();
-        let valid = match ticket.via {
-            Via::Session { session_id } => rows::session_live(&mut conn, session_id, now).await?,
-            Via::Token { token_id, .. } => rows::token_live(&mut conn, token_id, now).await?,
+    async fn gates(
+        app: &App,
+        ticket: &Ticket,
+    ) -> ApiResult<(bool, bool, &'static str, Option<CurrentCaller>)> {
+        let mut conn = app.db.begin_snapshot().await?;
+        let Some((caller, session_deadline)) = ticket
+            .origin
+            .restore_current(&mut conn, app.clock.as_ref())
+            .await?
+        else {
+            return Ok((false, false, "revoked", None));
         };
-        if !valid {
-            return Ok((false, false, "revoked"));
-        }
-        let principal =
-            match Principal::load(&mut conn, ticket.caller.clone(), Time::new(now)).await {
-                Ok(p) => p,
-                Err(_) => return Ok((false, false, "revoked")),
-            };
         let Some(row) = rows::get(&mut conn, ticket.display).await? else {
-            return Ok((false, false, "exited"));
+            return Ok((false, false, "exited", None));
         };
         if row.state == "closed" {
             return Ok((
@@ -170,17 +191,19 @@ impl Sockets {
                     Some("link_lost") => "link_lost",
                     _ => "exited",
                 },
+                None,
             ));
         }
         let Some(site) = rows::site(&mut conn, row.environment_id).await? else {
-            return Ok((false, false, "environment_stopped"));
+            return Ok((false, false, "environment_stopped", None));
         };
-        if row.env_generation != site.generation
+        if row.environment_id != ticket.environment
+            || row.env_generation != site.generation
             || row.env_generation != ticket.generation
             || site.machine_id != Some(ticket.machine)
             || !matches!(site.status.as_str(), "running" | "offline")
         {
-            return Ok((false, false, "environment_stopped"));
+            return Ok((false, false, "environment_stopped", None));
         }
         if let Some(off) = Displays::off(&mut conn, &site)
             .await
@@ -194,8 +217,26 @@ impl Sockets {
                 } else {
                     "switched_off"
                 },
+                None,
             ));
         }
+        let Some((principal, scope_control)) = ticket
+            .origin
+            .principal(
+                &mut conn,
+                caller,
+                row.environment_id,
+                if ticket.control {
+                    "DisplayTicketCreate.control"
+                } else {
+                    "DisplayTicketCreate.view"
+                },
+                app.clock.as_ref(),
+            )
+            .await?
+        else {
+            return Ok((false, false, "revoked", None));
+        };
         let view = views::holds(
             &mut conn,
             &principal,
@@ -204,6 +245,7 @@ impl Sockets {
         )
         .await?;
         let control = ticket.control
+            && scope_control
             && views::holds(
                 &mut conn,
                 &principal,
@@ -211,7 +253,42 @@ impl Sockets {
                 Permission::VncManage,
             )
             .await?;
-        Ok((view && row.state == "open", control, "revoked"))
+        conn.commit().await.map_err(orch_db::DbError::from)?;
+        let caller = principal.caller().clone();
+        if !super::ticket_origin::deadline_allows(&caller, session_deadline, app.clock.as_ref()) {
+            return Ok((false, false, "revoked", None));
+        }
+        Ok((
+            view && row.state == "open",
+            control,
+            "revoked",
+            Some((caller, session_deadline)),
+        ))
+    }
+
+    async fn publish_bytes(
+        app: &App,
+        ticket: &Ticket,
+        socket: &mut WebSocket,
+        bytes: Bytes,
+    ) -> ApiResult<bool> {
+        super::publication::send(socket, app.clock.as_ref(), async {
+            let (view, _, _, current) = Self::gates(app, ticket).await?;
+            Ok(view
+                .then_some(current)
+                .flatten()
+                .map(|current| (Message::Binary(bytes), current)))
+        })
+        .await
+    }
+
+    async fn input_current(
+        app: &App,
+        ticket: &Ticket,
+        action: bool,
+    ) -> ApiResult<Option<CurrentCaller>> {
+        let (view, control, _, current) = Self::gates(app, ticket).await?;
+        Ok((view && (!action || control)).then_some(current).flatten())
     }
 
     async fn socket(&self, app: App, ticket: Ticket, mut socket: WebSocket) {
@@ -220,7 +297,7 @@ impl Sockets {
         // Use that current close reason instead of reporting a broken link to its viewer.
         let reason = if reason == "link_lost" {
             match Self::gates(&app, &ticket).await {
-                Ok((false, _, closed)) => closed,
+                Ok((false, _, closed, _)) => closed,
                 _ => reason,
             }
         } else {
@@ -236,8 +313,8 @@ impl Sockets {
 
     async fn relay(&self, app: &App, ticket: &Ticket, socket: &mut WebSocket) -> &'static str {
         match Self::gates(app, ticket).await {
-            Ok((true, _, _)) => {}
-            Ok((_, _, reason)) => return reason,
+            Ok((true, _, _, _)) => {}
+            Ok((_, _, reason, _)) => return reason,
             Err(_) => return "link_lost",
         }
         let machine = {
@@ -277,16 +354,24 @@ impl Sockets {
             Ok(handshake) => handshake,
             Err(_) => return "protocol",
         };
-        if socket
-            .send(Message::Binary(Bytes::copy_from_slice(&version)))
-            .await
-            .is_err()
-        {
-            return "link_lost";
+        // The native handshake awaited IO; restore current Read again before its first bytes.
+        match Self::gates(app, ticket).await {
+            Ok((true, _, _, _)) => {}
+            Ok((_, _, reason, _)) => return reason,
+            Err(_) => return "link_lost",
+        }
+        if !matches!(
+            Self::publish_bytes(app, ticket, socket, Bytes::copy_from_slice(&version)).await,
+            Ok(true)
+        ) {
+            return match Self::gates(app, ticket).await {
+                Ok((false, _, reason, _)) => reason,
+                _ => "link_lost",
+            };
         }
         let (mut reader, mut writer) = tokio::io::split(tunnel);
         let viewer = new_id();
-        lock(&self.viewers).insert((ticket.display, viewer), ticket.user);
+        lock(&self.viewers).insert((ticket.display, viewer), ticket.origin.user());
         let _ = app.engine.displays().used(ticket.display).await;
         if let Ok(mut conn) = app.db.acquire().await
             && let Ok(Some(row)) = rows::get(&mut conn, ticket.display).await
@@ -308,22 +393,37 @@ impl Sockets {
                     let Some(Ok(message))=incoming else{break "link_lost"};
                     match message {
                         Message::Binary(data)=>{
-                            let (view,_,reason)=match Self::gates(app,ticket).await{Ok(value)=>value,Err(_)=>break "link_lost"};
+                            let (view,_,reason,_)=match Self::gates(app,ticket).await{Ok(value)=>value,Err(_)=>break "link_lost"};
                             if !view{break reason}
                             let header=match handshake.receive(&data){Ok(header)=>header,Err(_)=>break "protocol"};
                             let mut failed=false;
-                            for reply in header.replies{if socket.send(Message::Binary(reply)).await.is_err(){failed=true;break;}}
-                            if failed{break "link_lost"}
-                            if header.shared&&writer.write_all(&[1]).await.is_err(){break "link_lost"}
+                            for reply in header.replies{if !matches!(Self::publish_bytes(app,ticket,socket,reply).await,Ok(true)){failed=true;break;}}
+                            if failed{break match Self::gates(app,ticket).await {Ok((false,_,reason,_))=>reason,_=>"link_lost"}}
+                            if header.shared {
+                                match super::publication::write_message(&mut writer,&[1],app.clock.as_ref(),||Self::input_current(app,ticket,false)).await {
+                                    Ok(Some(Ok(())))=>{},
+                                    Ok(None)=>{break match Self::gates(app,ticket).await{Ok((false,_,reason,_))=>reason,_=>"link_lost"}},
+                                    _=>break "link_lost",
+                                }
+                            }
                             if filter.push(&header.data).is_err(){break "protocol"}
                             let mut failure=None;
                             loop {
                                 let message=match filter.take(){Ok(Some(message))=>message,Ok(None)=>break,Err(_)=>{failure=Some("protocol");break;}};
-                                let (view,control,reason)=match Self::gates(app,ticket).await{Ok(value)=>value,Err(_)=>{failure=Some("link_lost");break;}};
+                                let (view,control,reason,_)=match Self::gates(app,ticket).await{Ok(value)=>value,Err(_)=>{failure=Some("link_lost");break;}};
                                 if !view {failure=Some(reason);break;}
                                 if message.action&&!control{continue}
-                                if writer.write_all(&message.bytes).await.is_err(){failure=Some("link_lost");break;}
-                                if message.activity{self.input(app,ticket);}
+                                match super::publication::write_message(&mut writer,&message.bytes,app.clock.as_ref(),||Self::input_current(app,ticket,message.action)).await {
+                                    Ok(Some(Ok(())))=>{if message.activity{self.input(app,ticket);}},
+                                    Ok(None)=>{
+                                        match Self::gates(app,ticket).await{
+                                            Ok((true,_,_,_))=>continue,
+                                            Ok((false,_,reason,_))=>{failure=Some(reason);break;},
+                                            Err(_)=>{failure=Some("link_lost");break;},
+                                        }
+                                    },
+                                    _=>{failure=Some("link_lost");break;},
+                                }
                             }
                             if let Some(reason)=failure{break reason}
                         }
@@ -338,14 +438,16 @@ impl Sockets {
                     // Raw RFB has no picture boundaries. A current epoch or the normal keeper tick
                     // refreshes viewing; input still refreshes authority for every complete message.
                     if permission_epoch.has_changed().unwrap_or(true)||checked_at.elapsed()>=KEEPER_TICK {
-                        let (view,_,reason)=match Self::gates(app,ticket).await{Ok(value)=>value,Err(_)=>break "link_lost"};
+                        let (view,_,reason,_)=match Self::gates(app,ticket).await{Ok(value)=>value,Err(_)=>break "link_lost"};
                         if !view{break reason}
                         permission_epoch.borrow_and_update();checked_at=tokio::time::Instant::now();
                     }
-                    if socket.send(Message::Binary(Bytes::copy_from_slice(&bytes[..n]))).await.is_err(){break "link_lost"}
+                    if !matches!(Self::publish_bytes(app,ticket,socket,Bytes::copy_from_slice(&bytes[..n])).await,Ok(true)){
+                        break match Self::gates(app,ticket).await {Ok((false,_,reason,_))=>reason,_=>"link_lost"}
+                    }
                 }
                 _=tick.tick()=>{
-                    let (view,_,reason)=match Self::gates(app,ticket).await{Ok(value)=>value,Err(_)=>break "link_lost"};
+                    let (view,_,reason,_)=match Self::gates(app,ticket).await{Ok(value)=>value,Err(_)=>break "link_lost"};
                     if !view{break reason}
                     permission_epoch.borrow_and_update();checked_at=tokio::time::Instant::now();
                     let _=app.engine.displays().used(ticket.display).await;
@@ -367,7 +469,7 @@ impl Sockets {
         let now = app.clock.now();
         let mut sittings = lock(&self.sittings);
         sittings
-            .entry((ticket.display, ticket.user))
+            .entry((ticket.display, ticket.origin.user()))
             .and_modify(|s| s.last = now)
             .or_insert(Sitting {
                 from: now,
@@ -568,7 +670,7 @@ async fn attach_checked(
     let display = ctx.id("display_id")?;
     let sockets = ctx.app.realtime.displays().clone();
     let ticket = sockets
-        .redeem(display, &query.ticket, ctx.now)
+        .redeem(display, &query.ticket, ctx.now, ctx.http_surface()?)
         .ok_or_else(|| ApiError::new(ErrorCode::Gone, "the display ticket expired or was used"))?;
     let app = Arc::clone(&ctx.app);
     Ok(upgrade
@@ -661,6 +763,77 @@ pub(crate) fn recover(app: &App) {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::middleware::authentication::Via;
+    use orch_authz::Caller;
+    #[test]
+    fn surface_ticket_foreign_redemption_cannot_consume_either_origin() {
+        use orch_api_contract::surface::HttpSurface;
+        for surface in [HttpSurface::Browser, HttpSurface::Key] {
+            let user = orch_types::new_id();
+            let target = orch_types::new_id();
+            let now = Utc::now();
+            let token = "synthetic-transport-ticket";
+            let token_id = orch_types::new_id();
+            let (caller, via) = match surface {
+                HttpSurface::Browser => (
+                    Caller::session(user),
+                    Via::Session {
+                        session_id: orch_types::new_id(),
+                    },
+                ),
+                HttpSurface::Key => {
+                    let grant = orch_authz::TokenGrant::from_stored_scope(
+                        &["*".to_owned()],
+                        None,
+                        None,
+                        None,
+                    )
+                    .unwrap();
+                    (
+                        Caller::token(user, grant.for_token(token_id)),
+                        Via::Token {
+                            token_id,
+                            scopes: vec!["*".to_owned()],
+                            node_id: None,
+                            operation_scope: None,
+                            expires_at: None,
+                        },
+                    )
+                }
+            };
+            let sockets = Sockets::default();
+            lock(&sockets.tickets).insert(
+                token_hash(token),
+                Ticket {
+                    surface,
+                    display: target,
+                    environment: orch_types::new_id(),
+                    machine: orch_types::new_id(),
+                    generation: 1,
+                    origin: Origin::from_caller(&caller, &via).unwrap(),
+                    control: false,
+                    expires: now + Span::seconds(30),
+                },
+            );
+            let foreign = if surface == HttpSurface::Browser {
+                HttpSurface::Key
+            } else {
+                HttpSurface::Browser
+            };
+            assert!(sockets.redeem(target, token, now, foreign).is_none());
+            let kept = sockets
+                .redeem(target, token, now, surface)
+                .expect("wrong plane must leave the original ticket");
+            assert_eq!(kept.surface, surface);
+            assert_eq!(kept.origin.user(), user);
+            assert!(!kept.control);
+            assert!(
+                sockets.redeem(target, token, now, surface).is_none(),
+                "same-plane use remains single-use"
+            );
+        }
+    }
+
     #[test]
     fn a_viewer_is_asked_for_no_password_even_when_its_messages_are_split() {
         let mut handshake = Handshake::new(*b"RFB 003.008\n").unwrap();
@@ -686,4 +859,52 @@ mod tests {
         handshake.receive(b"RFB 003.008\n").unwrap();
         assert!(handshake.receive(&[2, 1, 4, 1, 0, 0, 0, 0, 0, 65]).is_err());
     }
+}
+
+/// Test-only observation of the ACTUAL stored HTTP ticket and ordinary redemption predicate.
+/// No synthetic caller, metadata constructor or alternate authorization is installed.
+#[cfg(test)]
+pub(super) async fn ticket_scope_probe(
+    app: &App,
+    target: Id,
+    token: &str,
+) -> ApiResult<Option<(bool, bool)>> {
+    let sockets = app.realtime.displays();
+    let Some(ticket) = sockets.redeem(
+        target,
+        token,
+        app.clock.now(),
+        orch_api_contract::surface::HttpSurface::Key,
+    ) else {
+        return Ok(None);
+    };
+    let (view, control, _, _) = Sockets::gates(app, &ticket).await?;
+    Ok(Some((view, control)))
+}
+
+/// Test-only producer uses the ACTUAL HTTP-issued ticket and unchanged native gates.
+#[cfg(test)]
+pub(super) type InputFixture = Box<
+    dyn FnMut() -> futures::future::BoxFuture<'static, ApiResult<Option<CurrentCaller>>>
+        + Send
+        + 'static,
+>;
+#[cfg(test)]
+pub(super) fn ticket_input_fixture(app: App, id: Id, token: &str) -> Option<InputFixture> {
+    let ticket = app.realtime.displays().redeem(
+        id,
+        token,
+        app.clock.now(),
+        orch_api_contract::surface::HttpSurface::Key,
+    )?;
+    Some(Box::new(
+        move || -> futures::future::BoxFuture<'static, ApiResult<Option<CurrentCaller>>> {
+            let app = app.clone();
+            let ticket = ticket.clone();
+            Box::pin(async move {
+                let (view, control, _, current) = Sockets::gates(&app, &ticket).await?;
+                Ok((view && control).then_some(current).flatten())
+            })
+        },
+    ))
 }

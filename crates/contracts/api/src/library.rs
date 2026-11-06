@@ -1,5 +1,11 @@
 //! Authorized library facts for resource pages and immutable skill versions.
 
+use crate::operations::{OperationSpec as Op, TargetResolver as Target};
+use orch_access_contract::key_scope::KeyAction::Read;
+use orch_access_contract::key_scope::KeyTargetKind::Object;
+use orch_access_contract::permissions::ObjectKind as K;
+
+
 use orch_access_contract::decisions::ObjectRef;
 use orch_types::Id;
 use schemars::JsonSchema;
@@ -59,7 +65,37 @@ pub struct LibraryPeopleReply {
 
 crate::endpoints! {
     /// Reads giving and reported use for authorized resources and skill versions in one batch.
-    ResourceLibraryRead: POST "/resources/library", crate::routes::Access::User, none, json LibraryReadBody, json Vec<LibraryEntry>, 200;
+    ResourceLibraryRead: POST "/resources/library", crate::routes::Access::User, none, json LibraryReadBody, json Vec<LibraryEntry>, 200,
+        operation Op::single(
+            Read,
+            &[
+                Object(K::Provider),
+                Object(K::Agent),
+                Object(K::Environment),
+                Object(K::Host),
+                Object(K::Machine),
+                Object(K::Template),
+                Object(K::McpServer),
+                Object(K::Mount),
+                Object(K::Skill),
+            ],
+            Target::Resolved("requested_resources"),
+        );
     /// Lists captured people behind a resource's use count without naming hidden users.
-    ResourceLibraryPeopleRead: POST "/resources/library/people", crate::routes::Access::User, none, json LibraryPeopleBody, json LibraryPeopleReply, 200;
+    ResourceLibraryPeopleRead: POST "/resources/library/people", crate::routes::Access::User, none, json LibraryPeopleBody, json LibraryPeopleReply, 200,
+        operation Op::single(
+            Read,
+            &[
+                Object(K::Provider),
+                Object(K::Agent),
+                Object(K::Environment),
+                Object(K::Host),
+                Object(K::Machine),
+                Object(K::Template),
+                Object(K::McpServer),
+                Object(K::Mount),
+                Object(K::Skill),
+            ],
+            Target::Resolved("requested_resources"),
+        );
 }

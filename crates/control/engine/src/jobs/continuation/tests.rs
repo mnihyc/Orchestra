@@ -85,6 +85,8 @@ impl crate::commands::Commands for RecoveredCommands {
         if id == self.expected.id {
             Ok(Some(crate::commands::RetainedCommand {
                 machine: self.expected.machine,
+                kind: self.command.kind.clone(),
+                key: self.command.key.clone(),
                 body: self.expected.body.clone(),
             }))
         } else {

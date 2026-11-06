@@ -169,6 +169,7 @@ async fn a_request_the_ledger_names_guarded_cannot_answer_without_asking_again()
 /// Ada shares the topic's documents, to read, with the agents of the topic itself.
 fn documents_of_the_topic(desk: &Desk, client: &str) -> serde_json::Value {
     serde_json::to_value(ShareWithAgents {
+        viewers_read: None,
         read_first: None,
         what: ShareWhat::Node(ShareWhatNode {
             node_id: desk.topic,
