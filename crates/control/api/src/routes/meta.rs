@@ -72,31 +72,46 @@ pub fn health_router() -> axum::Router<App> {
 
 /// The address a connector reaches the server at, as the configuration
 /// names its trust.
-fn trust_of(word: &str) -> LinkTrust {
-    if word == "public" {
-        LinkTrust::Public
-    } else {
-        LinkTrust::Pinned
+fn trust_of(trust: orch_link_contract::enrollment::Trust) -> LinkTrust {
+    match trust {
+        orch_link_contract::enrollment::Trust::Public => LinkTrust::Public,
+        orch_link_contract::enrollment::Trust::Pinned => LinkTrust::Pinned,
     }
 }
 
 /// What a client may know before anybody has signed in.
 pub(crate) async fn meta(ctx: Ctx, (): (), (): ()) -> ApiResult<Meta> {
+    let identity = authentication::authenticate(&ctx.app, &ctx.headers, ctx.now)
+        .await
+        .ok();
+    let caller = match &identity {
+        Some(Caller::User(authed)) => Some(authed.as_ref()),
+        _ => None,
+    };
     let mut conn = ctx.app.db.acquire().await?;
-    let policy = system_policy(&mut conn).await?;
+    on_connection(&ctx, &mut conn, caller).await
+}
+
+/// The public supplier on an existing read connection, using the actual restored HTTP identity.
+pub(crate) async fn on_connection(
+    ctx: &Ctx,
+    conn: &mut orch_db::Conn,
+    caller: Option<&crate::middleware::authentication::Authed>,
+) -> ApiResult<Meta> {
+    let policy = system_policy(conn).await?;
     let defs: Vec<_> = [keys::SYSTEM_BANNER, keys::STORAGE_MAX_BLOB_BYTES]
         .into_iter()
         .filter_map(registry::get)
         .collect();
-    let snapshot = Snapshot::load(&mut conn, Place::System, Wanted::Keys(&defs))
+    let snapshot = Snapshot::load(conn, Place::System, Wanted::Keys(&defs))
         .await
         .map_err(ApiError::internal)?;
     let banner: Option<MetaBanner> = setting(&snapshot, keys::SYSTEM_BANNER)?.flatten();
     let max_upload: Option<i64> = setting(&snapshot, keys::STORAGE_MAX_BLOB_BYTES)?;
     let email_code_login =
-        policy.mail() && identity::email_code_sign_in_set_somewhere(&mut conn).await?;
-    let needs_setup = identity::no_users_yet(&mut conn).await?;
-    let identity_providers = identity::enabled_identity_providers(&mut conn)
+        policy.mail() && identity::email_code_sign_in_set_somewhere(conn).await?;
+    let needs_setup = identity::no_users_yet(conn).await?;
+    let identity_providers = identity::enabled_identity_providers(conn)
         .await?
         .into_iter()
         .map(|(key, name, auto_register)| MetaIdentityProvider {
@@ -107,10 +122,7 @@ pub(crate) async fn meta(ctx: Ctx, (): (), (): ()) -> ApiResult<Meta> {
         .collect();
     // Whoever the request says is asking learns whether they may make a team org now; nobody
     // signed in may not, and a token that does not hold is nobody here, as anywhere public.
-    let may_create_org = match authentication::authenticate(&ctx.app, &ctx.headers, ctx.now).await {
-        Ok(Caller::User(authed)) => may_make_org(policy.org_creation, &authed),
-        _ => false,
-    };
+    let may_create_org = caller.is_some_and(|caller| may_make_org(policy.org_creation, caller));
     let build = ctx.app.build;
     Ok(Meta {
         name: ctx.app.config.system.name.clone(),
@@ -132,13 +144,15 @@ pub(crate) async fn meta(ctx: Ctx, (): (), (): ()) -> ApiResult<Meta> {
         push_public_key: crate::routes::notifications::push_public_key(),
         link_endpoints: ctx
             .app
-            .config
-            .gateway
-            .endpoints
-            .iter()
+            .link
+            .certificates()
+            .gateway_discovery()
+            .gateways
+            .into_iter()
+            .flat_map(|gateway| gateway.endpoints)
             .map(|endpoint| MetaLinkEndpoint {
-                url: endpoint.url.clone(),
-                trust: trust_of(&endpoint.trust),
+                url: endpoint.url,
+                trust: trust_of(endpoint.trust),
             })
             .collect(),
         limits: MetaLimits {

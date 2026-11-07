@@ -10,7 +10,7 @@ use orch_access_contract::permissions::Permission;
 use orch_api_contract::common::{Page, PageQuery};
 use orch_api_contract::topics::{
     Announcement, AnnouncementCreateBody, AnnouncementTo, NodeAnnouncementCreate,
-    NodeAnnouncementList, NodeAnnouncementListQuery, PlaceAnnouncementCreateReply,
+    NodeAnnouncementList, NodeAnnouncementListQuery,
 };
 use orch_authz::{Act, Policy, nodes};
 use orch_db::queries::threads::tools as rows;
@@ -18,28 +18,51 @@ use orch_engine::tools::announce::{AnnounceError, PersonAnnouncement};
 use orch_types::Id;
 use std::collections::HashSet;
 
+mod operation;
+
 /// Binds the one place-level announcement path.
 pub fn mount_announcements(registry: &mut Registry) {
-    registry
-        .on(NodeAnnouncementList, list)
-        .on(NodeAnnouncementCreate, create);
+    registry.on(NodeAnnouncementList, list).on_with_operation(
+        NodeAnnouncementCreate,
+        crate::key_operations::native::effects::prepare::<operation::Create>,
+        operation::create,
+    );
 }
 
-async fn problem(ctx: &Ctx, error: AnnounceError) -> ApiError {
+async fn problem(ctx: &Ctx, conn: &mut orch_db::Conn, error: AnnounceError) -> ApiError {
+    let limited = ctx.key_receipt_required()
+        || ctx
+            .user()
+            .and_then(|authed| authorization::caller_of(authed))
+            .map(|caller| crate::key_operations::native::modern(&caller))
+            .unwrap_or(true);
     match error {
         AnnounceError::NotFound => ApiError::not_found(),
         AnnounceError::Invalid(message) => ApiError::invalid("", &message),
-        AnnounceError::Denied(refusal) => match ctx.app.db.acquire().await {
-            Ok(mut conn) => match refusals::denied(&mut conn, *refusal).await {
-                Ok(problem) | Err(problem) => problem,
-            },
-            Err(error) => error.into(),
+        AnnounceError::Denied(_) if limited => ApiError::new(
+            orch_api_contract::common::ErrorCode::AuthzDenied,
+            "the sender may not announce here",
+        ),
+        AnnounceError::Denied(refusal) => match refusals::denied(conn, *refusal).await {
+            Ok(problem) | Err(problem) => problem,
         },
-        AnnounceError::Internal(orch_engine::error::EngineError::Authz(error)) => {
-            match ctx.app.db.acquire().await {
-                Ok(mut conn) => refusals::problem(&mut conn, error).await,
-                Err(error) => error.into(),
+        AnnounceError::Internal(orch_engine::EngineError::Authz(error)) if limited => {
+            use orch_api_contract::common::ErrorCode;
+            match error {
+                orch_authz::Error::Suspended { org: Some(_) } => {
+                    ApiError::new(ErrorCode::OrgSuspended, "you are suspended in this org")
+                }
+                orch_authz::Error::Archived { .. } => {
+                    ApiError::new(ErrorCode::NodeArchived, "this place is archived")
+                }
+                orch_authz::Error::NotFound(_) | orch_authz::Error::NoSuchPermission { .. } => {
+                    ApiError::not_found()
+                }
+                other => ApiError::engine(orch_engine::EngineError::Authz(other)),
             }
+        }
+        AnnounceError::Internal(orch_engine::EngineError::Authz(error)) => {
+            refusals::problem(conn, error).await
         }
         AnnounceError::Internal(error) => ApiError::engine(error),
     }
@@ -198,40 +221,4 @@ async fn seen_by(
                     .any(|thread| viewable.contains(&thread))
         })
         .collect())
-}
-
-async fn create(
-    ctx: Ctx,
-    (): (),
-    body: AnnouncementCreateBody,
-) -> ApiResult<PlaceAnnouncementCreateReply> {
-    let place = ctx.id("id")?;
-    let (tx, guard) = crate::middleware::transaction_guard::begin(&ctx).await?;
-    let sent = match ctx
-        .app
-        .engine
-        .announce_to_place_guarded(tx, guard.into_principal(), place, &request_of(body))
-        .await
-    {
-        Ok(sent) => sent,
-        Err(error) => return Err(problem(&ctx, error).await),
-    };
-    let mut conn = ctx.app.db.acquire().await?;
-    let mut announcements = Vec::with_capacity(sent.sent.len());
-    for each in &sent.sent {
-        announcements.push(
-            orch_engine::tools::announce::announcement_view(
-                &mut conn,
-                &each.row,
-                Some(each.delivered),
-            )
-            .await
-            .map_err(ApiError::internal)?,
-        );
-    }
-    Ok(PlaceAnnouncementCreateReply {
-        group_id: sent.group_id,
-        announcements,
-        topics_skipped: sent.skipped,
-    })
 }

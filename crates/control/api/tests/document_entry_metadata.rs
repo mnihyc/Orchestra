@@ -9,6 +9,7 @@ mod realtime_support;
 mod rig;
 mod support;
 
+use crate::support::FullPermissionPageReply;
 use desk::Desk;
 use orch_api_contract::{
     access::{AccessChoice, HolderInput, PageChange, PageChangeName, PermissionPageUpdate},
@@ -66,7 +67,9 @@ async fn folder(desk: &Desk, parent: Option<Id>, name: &str) -> Proof<DocumentTr
         })
         .send()
         .await
-        .ok())
+        .ok()
+        .into_full()
+        .unwrap())
 }
 
 fn container(receipt: &DocumentTreeReceipt) -> Proof<Id> {
@@ -107,6 +110,7 @@ async fn give(desk: &Desk, kind: &str, id: Id, by: &Who, choice: AccessChoice) {
         })
         .send()
         .await
+        .full_permission_page()
         .ok();
 }
 
@@ -261,6 +265,7 @@ async fn leaf_grants_get_redacted_place_without_parent_node_view_and_keep_actual
             .raw_body(&json!({"whole":"private"}))
             .send()
             .await
+            .full_permission_page()
             .ok();
         diagnostics::phase("container.create");
         let hidden = container(&folder(&desk, None, "Hidden folder name").await?)?;
@@ -272,6 +277,7 @@ async fn leaf_grants_get_redacted_place_without_parent_node_view_and_keep_actual
             .raw_body(&json!({"whole":"private"}))
             .send()
             .await
+            .full_permission_page()
             .ok();
         diagnostics::phase("document.create");
         let doc = desk.make(&desk.ada, "Shared leaf").await.base.id;

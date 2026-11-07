@@ -13,7 +13,7 @@ use crate::middleware::authorization;
 use crate::middleware::requests::{ApiError, ApiResult};
 use crate::registry::{Ctx, Registry};
 use orch_api_contract::common::ErrorCode;
-use orch_api_contract::nodes::{AdoptPlan, ThreadAdopt, ThreadAdoptBody, ThreadAdoptPreview};
+use orch_api_contract::nodes::{ThreadAdopt, ThreadAdoptBody, ThreadAdoptPreview};
 use orch_api_contract::threads::{
     AdoptHistoryStatus, Thread, ThreadAdoptHistoryGet, ThreadAdoptRetryHistory,
 };
@@ -24,12 +24,23 @@ use orch_engine::adoption::{AdoptError, Adoption};
 /// is a UUID or a path, and nothing longer.
 const REFERENCE_MAX_CHARS: usize = 512;
 
+mod operation;
+
 /// Binds this module's requests.
 pub fn mount(registry: &mut Registry) {
     registry.on(ThreadAdopt, adopt);
-    registry.on(ThreadAdoptPreview, preview);
+    registry.on_snapshot_body_read_with_optional_initial_operation(
+        ThreadAdoptPreview,
+        crate::key_operations::native::effects::initial::<operation::Preview>,
+        crate::key_operations::native::selected_body::<operation::Preview,(),ThreadAdoptBody>,
+        crate::key_operations::native::selected_body_read::<operation::Preview,(),ThreadAdoptBody>,
+    );
     registry.on(ThreadAdoptRetryHistory, retry_history);
-    registry.on(ThreadAdoptHistoryGet, history_status);
+    registry.on_with_operation(
+        ThreadAdoptHistoryGet,
+        crate::key_operations::direct::declared,
+        history_status,
+    );
 }
 
 /// Why a session was not taken in, as the problem a client acts on.
@@ -71,6 +82,14 @@ async fn failed(conn: &mut Conn, error: AdoptError) -> ApiError {
             ErrorCode::ProviderUnavailable,
             format!("the harness could not list its sessions: {why}"),
         ),
+        AdoptError::Internal(orch_engine::EngineError::BeforeEffect(error))
+            if error.is::<orch_engine::adoption::operation::PreparationEnded>() =>
+        {
+            ApiError::new(
+                ErrorCode::AuthzDenied,
+                "the original adoption preparation no longer permits this work",
+            )
+        }
         AdoptError::Internal(error) => ApiError::engine(error),
     }
 }
@@ -88,6 +107,7 @@ fn adoption_of(ctx: &Ctx, body: ThreadAdoptBody) -> ApiResult<Adoption> {
         ));
     }
     Ok(Adoption {
+        agent_access: body.agent_access,
         topic,
         provider: body.provider_id,
         agent: body.agent_id,
@@ -95,20 +115,6 @@ fn adoption_of(ctx: &Ctx, body: ThreadAdoptBody) -> ApiResult<Adoption> {
         environment: body.environment_id,
         name: body.name,
     })
-}
-
-/// Says what taking a session in would do, before anything does.
-async fn preview(ctx: Ctx, (): (), body: ThreadAdoptBody) -> ApiResult<AdoptPlan> {
-    let adoption = adoption_of(&ctx, body)?;
-    let caller = authorization::caller_of(ctx.user()?)?;
-    let planned = ctx.app.engine.adoption_plan(&caller, adoption).await;
-    match planned {
-        Ok(plan) => Ok(plan),
-        Err(error) => {
-            let mut conn = ctx.app.db.acquire().await?;
-            Err(failed(&mut conn, error).await)
-        }
-    }
 }
 
 /// Takes a session in as a thread of the topic.
@@ -136,15 +142,13 @@ async fn retry_history(ctx: Ctx, (): (), (): ()) -> ApiResult<Thread> {
 
 async fn history_status(ctx: Ctx, (): (), (): ()) -> ApiResult<Option<AdoptHistoryStatus>> {
     let thread = ctx.id("id")?;
-    let mut status = ctx
-        .app
-        .engine
-        .adoption_history_status(thread)
+    let mut conn = ctx.app.db.acquire().await?;
+    let principal = ctx.operation_principal(&mut conn).await?;
+    authorization::require_on_path_in(&ctx, &mut conn, &principal, "thread.view").await?;
+    let mut status = orch_engine::adoption::history_status(&mut conn, thread)
         .await
         .map_err(ApiError::internal)?;
     if let Some(status) = &mut status {
-        let mut conn = ctx.app.db.acquire().await?;
-        let principal = authorization::principal(&ctx, &mut conn).await?;
         let allowed = orch_authz::nodes::check(
             &mut conn,
             &principal,

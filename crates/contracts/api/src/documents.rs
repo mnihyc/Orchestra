@@ -9,11 +9,18 @@
 //! for a table, rows. Discussions sit beside the text and are no part of it.
 //! The server cuts [`DocumentVersion`]s and renders exports.
 
+use crate::operations::{
+    FacetSpec as Facet, OperationSpec as Op, TargetResolver as Target, VariantSpec as Variant,
+};
+use orch_access_contract::key_scope::KeyAction::{Manage, Read, Write};
+use orch_access_contract::key_scope::KeyIdentityKind as I;
+use orch_access_contract::key_scope::KeyTargetKind::{Identity, Object};
+use orch_access_contract::permissions::ObjectKind as K;
+
 use orch_types::{Hash, Id, Seq, Time};
 use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
 
-use crate::access::PagePreview;
 use crate::chats::Reaction;
 use crate::common::{Listed, Page};
 use crate::nodes::{NodeRef, PageState};
@@ -842,6 +849,26 @@ pub struct DocumentFile {
     pub added_at: Time,
 }
 
+crate::common::full_or_receipt! {
+    /// Native written-file metadata or its content-free completed identity.
+    #[derive(Debug, Clone, PartialEq, Serialize, Deserialize, JsonSchema)]
+    pub enum DocumentFileCreateResponse {
+        Full(DocumentFile),
+        Receipt(DocumentFileCreateReceipt),
+    }
+}
+
+/// The actual file written under a document, without existing file or author metadata.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+pub struct DocumentFileCreateReceipt {
+    /// The restricted completed projection.
+    pub projection: crate::common::ReceiptProjection,
+    /// The document named by the request.
+    pub document_id: Id,
+    /// The file identity accepted by the native writer, also usable by a new file block.
+    pub file_id: Id,
+}
+
 /// A document, as the caller reads it.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
 pub struct Document {
@@ -1134,6 +1161,35 @@ pub struct NodeDocumentCreateBody {
     pub access: Option<NewDocumentAccess>,
 }
 
+/// A completed text creation without existing metadata or content.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+pub struct DocumentCreationReceipt {
+    /// Identifies the restricted acknowledgement.
+    pub projection: crate::common::ReceiptProjection,
+    /// The actual committed text identity.
+    pub document_id: Id,
+}
+
+/// The native document result or its truthful completed identity.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+#[serde(untagged)]
+pub enum DocumentCreationResponse {
+    /// The original native document under current response Read.
+    Full(Box<Document>),
+    /// The accepted creation without existing metadata.
+    Receipt(DocumentCreationReceipt),
+}
+
+impl DocumentCreationResponse {
+    /// Extract the full native result while preserving restricted acknowledgement.
+    pub fn into_full(self) -> Result<Document, DocumentCreationReceipt> {
+        match self {
+            Self::Full(document) => Ok(*document),
+            Self::Receipt(receipt) => Err(receipt),
+        }
+    }
+}
+
 /// Where a sync reads from.
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
 #[serde(deny_unknown_fields)]
@@ -1182,6 +1238,28 @@ pub struct DocumentOpsCreateReply {
     pub blocks: Vec<DocumentBlock>,
     /// The document's sequence after the batch.
     pub seq: Seq,
+}
+
+/// A document mutation acknowledgement when its operation cannot disclose existing content.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+pub struct DocumentOpsReceipt {
+    /// This answer acknowledges the operation without returning its document or blocks.
+    pub projection: crate::common::ReceiptProjection,
+    /// The document the operation reached.
+    pub document_id: Id,
+    /// The sequence assigned to the accepted batch, also on replay.
+    pub seq: Seq,
+}
+
+crate::common::full_or_receipt! {
+    /// The ordinary full reply, or a receipt when this credential cannot read the operation's content.
+    #[derive(Debug, Clone, PartialEq, Serialize, Deserialize, JsonSchema)]
+    pub enum DocumentOpsCreateResponse {
+        /// The existing document and touched-block projection.
+        Full(DocumentOpsCreateReply),
+        /// The operation's acknowledgement without existing content.
+        Receipt(DocumentOpsReceipt),
+    }
 }
 
 /// Which entries of a document's history are wanted.
@@ -1401,6 +1479,54 @@ pub struct DocumentCommentUpdateBody {
     pub expected_seq: Option<Seq>,
 }
 
+/// Acknowledges the actual accepted comment edit without returning stored comment content.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+pub struct DocumentCommentReceipt {
+    /// This is an acknowledgement rather than a comment projection.
+    pub projection: crate::common::ReceiptProjection,
+    /// The actual containing document.
+    pub document_id: Id,
+    /// The edited comment, including an exact retained replay.
+    pub comment_id: Id,
+    /// The accepted edit's original sequence, also on replay.
+    pub seq: Seq,
+}
+
+crate::common::full_or_receipt! {
+    /// The ordinary comment projection, or its content-free accepted acknowledgement.
+    #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+    pub enum DocumentCommentUpdateResponse {
+        /// The unchanged ordinary full comment.
+        Full(DocumentComment),
+        /// An accepted edit without existing content.
+        Receipt(DocumentCommentReceipt),
+    }
+}
+
+/// Acknowledges an actual discussion resolution change without returning its comments.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+pub struct DocumentDiscussionReceipt {
+    /// This is an acknowledgement rather than a discussion projection.
+    pub projection: crate::common::ReceiptProjection,
+    /// The actual containing document.
+    pub document_id: Id,
+    /// The discussion resolved or reopened.
+    pub discussion_id: Id,
+    /// The actual resulting discussion sequence.
+    pub seq: Seq,
+}
+
+crate::common::full_or_receipt! {
+    /// The ordinary discussion projection, or its content-free accepted acknowledgement.
+    #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+    pub enum DocumentDiscussionResolveResponse {
+        /// The unchanged ordinary full discussion.
+        Full(DocumentDiscussion),
+        /// An accepted change without existing content.
+        Receipt(DocumentDiscussionReceipt),
+    }
+}
+
 /// Puts the caller's reaction to a comment on, or takes it off.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
 #[serde(deny_unknown_fields)]
@@ -1419,6 +1545,65 @@ pub struct DocumentMoveBody {
     pub node_id: Id,
 }
 
+/// A completed review without its stored permission/audience content. No move occurred.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+pub struct DocumentMovePreviewReceipt {
+    /// Identifies the restricted acknowledgement.
+    pub projection: crate::common::ReceiptProjection,
+    /// The actual reviewed source.
+    pub document_id: Id,
+    /// The actual requested destination, without its metadata.
+    pub node_id: Id,
+}
+
+/// Native audience review or its truthful content-free acknowledgement.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+#[serde(untagged)]
+pub enum DocumentMovePreviewResponse {
+    /// The original native audience delta under current same-operation Read.
+    Full(Box<crate::access::PagePreview>),
+    /// The completed review without existing permission content.
+    Receipt(DocumentMovePreviewReceipt),
+}
+impl DocumentMovePreviewResponse {
+    /// Extract the full native result while preserving restricted acknowledgement.
+    pub fn into_full(self) -> Result<crate::access::PagePreview, DocumentMovePreviewReceipt> {
+        match self {
+            Self::Full(preview) => Ok(*preview),
+            Self::Receipt(receipt) => Err(receipt),
+        }
+    }
+}
+
+/// The actual accepted movement identity without its existing document content.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+pub struct DocumentMoveReceipt {
+    /// Identifies the restricted acknowledgement.
+    pub projection: crate::common::ReceiptProjection,
+    /// The actual stored document on which the native act completed.
+    pub document_id: Id,
+    /// Its actual node when this move/no-op committed.
+    pub node_id: Id,
+}
+/// Native current Document or a truthful completed movement/no-op acknowledgement.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+#[serde(untagged)]
+pub enum DocumentMoveResponse {
+    /// The original native document under current response Read.
+    Full(Box<Document>),
+    /// The completed movement without existing content.
+    Receipt(DocumentMoveReceipt),
+}
+impl DocumentMoveResponse {
+    /// Extract the full native result while preserving restricted acknowledgement.
+    pub fn into_full(self) -> Result<Document, DocumentMoveReceipt> {
+        match self {
+            Self::Full(document) => Ok(*document),
+            Self::Receipt(receipt) => Err(receipt),
+        }
+    }
+}
+
 /// Changes the caller's discussion bell without changing their read position.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
 #[serde(deny_unknown_fields)]
@@ -1434,6 +1619,33 @@ pub struct DocumentRestoreBody {
     /// The event's deletion group; absent for a separately confirmed current restore.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub expected_deletion_id: Option<Id>,
+}
+
+/// A completed restoration without the retained or current document content.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+pub struct DocumentRestoreReceipt {
+    /// Identifies the restricted acknowledgement.
+    pub projection: crate::common::ReceiptProjection,
+    /// The actual document restored by the native act.
+    pub document_id: Id,
+}
+/// Native current Document or a truthful completed restoration acknowledgement.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+#[serde(untagged)]
+pub enum DocumentRestoreResponse {
+    /// The original native restored document under current response Read.
+    Full(Box<Document>),
+    /// The completed restoration without existing content.
+    Receipt(DocumentRestoreReceipt),
+}
+impl DocumentRestoreResponse {
+    /// Extract the full native result while preserving restricted acknowledgement.
+    pub fn into_full(self) -> Result<Document, DocumentRestoreReceipt> {
+        match self {
+            Self::Full(document) => Ok(*document),
+            Self::Receipt(receipt) => Err(receipt),
+        }
+    }
 }
 
 /// Copies current readable material into the selected creation place.
@@ -1729,79 +1941,435 @@ pub struct DocumentMentionCandidate {
     pub can_view: bool,
 }
 
+/// The document remains the primary subject; only live protected location/author names add sources.
+const fn document_read_facets(action: orch_access_contract::key_scope::KeyAction) -> [Facet; 6] {
+    [
+        Facet::required(action, &[Object(K::Document)], Target::PermissionObject),
+        Facet::required(
+            Read,
+            &[Object(K::Org)],
+            Target::ResolvedCollection("document_names_orgs"),
+        ),
+        Facet::required(
+            Read,
+            &[Object(K::Project)],
+            Target::ResolvedCollection("document_names_projects"),
+        ),
+        Facet::required(
+            Read,
+            &[Object(K::Topic)],
+            Target::ResolvedCollection("document_names_topics"),
+        ),
+        Facet::required(
+            Read,
+            &[Object(K::Thread)],
+            Target::ResolvedCollection("document_names_threads"),
+        ),
+        Facet::required(
+            Read,
+            &[Object(K::DocumentContainer)],
+            Target::ResolvedCollection("document_names_containers"),
+        ),
+    ]
+}
+
+/// Stored blocks/comments stay document content; newly resolved reference labels use their actual source.
+const fn document_sync_facets(action: orch_access_contract::key_scope::KeyAction) -> [Facet; 8] {
+    let [root, org, project, topic, thread, container] = document_read_facets(action);
+    [
+        root,
+        org,
+        project,
+        topic,
+        thread,
+        container,
+        Facet::required(
+            Read,
+            &[Object(K::Document)],
+            Target::ResolvedCollection("document_reference_documents"),
+        ),
+        Facet::required(
+            Read,
+            &[Identity(I::Chat)],
+            Target::ResolvedCollection("document_reference_chats"),
+        ),
+    ]
+}
+
+/// Content windows publish stored document content and only their actual live reference labels.
+/// Full document placement/container metadata is not part of these projections.
+const fn document_content_facets(action: orch_access_contract::key_scope::KeyAction) -> [Facet; 7] {
+    let [root, org, project, topic, thread, _, documents, chats] = document_sync_facets(action);
+    [root, org, project, topic, thread, documents, chats]
+}
+
+/// The existing comment writer and its selected reply share the same live-reference sources.
+/// Source roles match the document batch writer, which uses the same label capture and Cast.
+const fn document_comment_write_facets() -> [Facet; 8] {
+    [
+        Facet::required(Write, &[Object(K::Document)], Target::Path("id")),
+        Facet::response_content(&[Object(K::Document)], Target::Path("id")),
+        Facet::required(
+            Read,
+            &[Object(K::Org)],
+            Target::ResolvedCollection("reference_orgs"),
+        ),
+        Facet::required(
+            Read,
+            &[Object(K::Project)],
+            Target::ResolvedCollection("reference_projects"),
+        ),
+        Facet::required(
+            Read,
+            &[Object(K::Topic)],
+            Target::ResolvedCollection("reference_topics"),
+        ),
+        Facet::required(
+            Read,
+            &[Object(K::Thread)],
+            Target::ResolvedCollection("reference_threads"),
+        ),
+        Facet::required(
+            Read,
+            &[Object(K::Document)],
+            Target::ResolvedCollection("reference_documents"),
+        ),
+        Facet::required(
+            Read,
+            &[Identity(I::Chat)],
+            Target::ResolvedCollection("reference_chats"),
+        ),
+    ]
+}
+
 crate::endpoints! {
     /// Reads the first document page of each expanded place under its own current authority.
-    NodeDocumentPagesGet: GET "/nodes/{id}/document-pages", User, query NodeDocumentPagesGetQuery, none, json Vec<NodeDocumentPage>, 200;
+    NodeDocumentPagesGet: GET "/nodes/{id}/document-pages", User, query NodeDocumentPagesGetQuery, none, json Vec<NodeDocumentPage>, 200,
+        operation Op::facets(&crate::document_sources::pages_facets());
     /// Lists readers first, then visible people the caller can share this document with.
     DocumentMentionList: GET "/documents/{id}/mentions", Permission("doc.view"), query crate::chats::ChatMentionListQuery, none, json Page<DocumentMentionCandidate>, 200;
     /// Copies readable current material with fresh identity, ownership and access.
-    NodeDocumentCopy: POST "/nodes/{id}/documents/copy", Rule("destination doc.create with docs.enabled and source doc.view"), none, json NodeDocumentCopyBody, json Document, 201;
+    NodeDocumentCopy: POST "/nodes/{id}/documents/copy", Rule("destination doc.create with docs.enabled and source doc.view"), none, json NodeDocumentCopyBody, json DocumentCreationResponse, 201,
+        operation Op::receipt(&Op::facets(&crate::document_sources::text_copy_facets()));
     /// Turns Markdown, HTML or plain text into blocks, without storing any: what a paste is read by.
-    DocumentConvert: POST "/documents/convert", Rule("any signed-in caller; with document_id, Edit on that document"), none, json DocumentConvertBody, json DocumentConvertReply, 200;
+    DocumentConvert: POST "/documents/convert", Rule("any signed-in caller; with document_id, Edit on that document"), none, json DocumentConvertBody, json DocumentConvertReply, 200,
+        operation Op::variants(&[
+            Variant {
+                name: "supplied",
+                selector: "document_id is absent; convert supplied content",
+                facets: &[Facet::required(
+                    Write,
+                    &[Identity(I::Account)],
+                    Target::CurrentAccount,
+                )],
+            },
+            Variant {
+                name: "document",
+                selector: "document_id is present; attachment references resolve there",
+                facets: &[Facet::required(
+                    Write,
+                    &[Object(K::Document)],
+                    Target::Resolved("document"),
+                )],
+            },
+        ]);
     /// Imports several text files or one bounded archive and reports every entry.
-    NodeDocumentImport: POST "/nodes/{id}/documents/import", Permission("doc.create"), none, json DocumentImportRequest, json DocumentImportResult, 200;
+    NodeDocumentImport: POST "/nodes/{id}/documents/import", Permission("doc.create"), none, json DocumentImportRequest, json DocumentImportResult, 200,
+        operation Op::facets(&[
+            Facet::required(
+                Read,
+                &[Identity(I::Upload)],
+                Target::Resolved("import_sources"),
+            ),
+            Facet::required(Write, &[Object(K::Document)], Target::PermissionObject),
+            Facet::response_content(
+                &[Object(K::Document)],
+                Target::Resolved("created_resources"),
+            ),
+        ]);
     /// Changes the caller's discussion bell on this document.
-    DocumentSubscriptionSet: PUT "/documents/{id}/subscription", Permission("doc.view"), none, json DocumentSubscriptionSetBody, none, 204;
+    DocumentSubscriptionSet: PUT "/documents/{id}/subscription", Permission("doc.view"), none, json DocumentSubscriptionSetBody, none, 204,
+        operation Op::single(Write, &[Object(K::Document)], Target::PermissionObject);
     /// Lists the documents written beside a node that the caller may read, the most recently changed first.
-    NodeDocumentList: GET "/nodes/{id}/documents", Permission("node.view"), query NodeDocumentListQuery, none, json Page<Listed<DocumentRef>>, 200;
+    NodeDocumentList: GET "/nodes/{id}/documents", Permission("node.view"), query NodeDocumentListQuery, none, json Page<Listed<DocumentRef>>, 200,
+        operation Op::variants(&[
+            Variant {
+                name: "read",
+                selector: "deleted is absent",
+                facets: &crate::document_sources::list_facets(Read),
+            },
+            Variant {
+                name: "deleted",
+                selector: "deleted is only; each listed document requires its restoration authority",
+                facets: &crate::document_sources::list_facets(Manage),
+            },
+        ]);
     /// Makes a document beside a node, from blocks or from Markdown.
-    NodeDocumentCreate: POST "/nodes/{id}/documents", Permission("doc.create"), none, json NodeDocumentCreateBody, json Document, 201;
+    NodeDocumentCreate: POST "/nodes/{id}/documents", Permission("doc.create"), none, json NodeDocumentCreateBody, json DocumentCreationResponse, 201,
+        operation Op::receipt(&Op::facets(&crate::document_sources::text_create_facets()));
     /// Reads a document without its blocks.
-    DocumentGet: GET "/documents/{id}", Permission("doc.view"), query crate::nodes::DeletedInspectionQuery, none, json Document, 200;
+    DocumentGet: GET "/documents/{id}", Permission("doc.view"), query crate::nodes::DeletedInspectionQuery, none, json Document, 200,
+        operation Op::variants(&[
+            Variant {
+                name: "read",
+                selector: "inspect_deleted is not true",
+                facets: &document_read_facets(Read),
+            },
+            Variant {
+                name: "inspect_deleted",
+                selector: "inspect_deleted is true; apply the stored object restoration rule",
+                facets: &document_read_facets(Manage),
+            },
+        ]);
     /// Reads a document and every live block, or what changed since a document sequence.
-    DocumentSyncGet: GET "/documents/{id}/sync", Permission("doc.view"), query DocumentSyncGetQuery, none, json DocumentSync, 200;
+    DocumentSyncGet: GET "/documents/{id}/sync", Permission("doc.view"), query DocumentSyncGetQuery, none, json DocumentSync, 200,
+        operation Op::variants(&[
+            Variant {
+                name: "read",
+                selector: "inspect_deleted is not true",
+                facets: &document_sync_facets(Read),
+            },
+            Variant {
+                name: "inspect_deleted",
+                selector: "inspect_deleted is true; apply the stored object restoration rule",
+                facets: &document_sync_facets(Manage),
+            },
+        ]);
     /// What a reference's card shows: the thing it names and the part, as the caller may read them; anything the caller may not read is not found.
-    ReferencePreviewGet: GET "/references/preview", Rule("reading the reference's target or attachment owner, or files.view on its environment"), query ReferencePreviewQuery, none, json ReferencePreview, 200;
+    ReferencePreviewGet: GET "/references/preview", Rule("reading the reference's target or attachment owner, or files.view on its environment"), query ReferencePreviewQuery, none, json ReferencePreview, 200,
+        operation Op::single(
+            Read,
+            &[
+                Object(K::Document),
+                Object(K::Thread),
+                Identity(I::Chat),
+                Object(K::Environment),
+            ],
+            Target::Resolved("reference_target"),
+        );
     /// Renames a document, or changes its description.
-    DocumentUpdate: PATCH "/documents/{id}", Permission("doc.edit"), none, json DocumentUpdateBody, json Document, 200;
+    DocumentUpdate: PATCH "/documents/{id}", Permission("doc.edit"), none, json DocumentUpdateBody, json Document, 200,
+        operation Op::returning(Write, &[Object(K::Document)], Target::PermissionObject);
     /// Applies a batch of operations to a document, whole or not at all.
-    DocumentOpsCreate: POST "/documents/{id}/ops", Permission("doc.edit"), none, json DocumentOpsCreateBody, json DocumentOpsCreateReply, 200;
+    DocumentOpsCreate: POST "/documents/{id}/ops", Permission("doc.edit"), none, json DocumentOpsCreateBody, json DocumentOpsCreateResponse, 200,
+        operation Op::receipt(&Op::facets(&[
+            Facet::required(Write, &[Object(K::Document)], Target::PermissionObject),
+            Facet::response_content(&[Object(K::Document)], Target::PermissionObject),
+            Facet::required(Read, &[Object(K::Org)], Target::ResolvedCollection("reference_orgs")),
+            Facet::required(Read, &[Object(K::Project)], Target::ResolvedCollection("reference_projects")),
+            Facet::required(Read, &[Object(K::Topic)], Target::ResolvedCollection("reference_topics")),
+            Facet::required(Read, &[Object(K::Thread)], Target::ResolvedCollection("reference_threads")),
+            Facet::required(Read, &[Object(K::Document)], Target::ResolvedCollection("reference_documents")),
+            Facet::required(Read, &[Identity(I::Chat)], Target::ResolvedCollection("reference_chats")),
+        ]));
     /// Lists the entries of a document's history, newest first; the open span, when something changed since the last version was cut, comes first.
-    DocumentVersionList: GET "/documents/{id}/versions", Permission("doc.view"), query DocumentVersionListQuery, none, json Page<DocumentVersion>, 200;
+    DocumentVersionList: GET "/documents/{id}/versions", Permission("doc.view"), query DocumentVersionListQuery, none, json Page<DocumentVersion>, 200,
+        operation Op::variants(&[
+            Variant {
+                name: "read",
+                selector: "inspect_deleted is not true",
+                facets: &document_content_facets(Read),
+            },
+            Variant {
+                name: "inspect_deleted",
+                selector: "inspect_deleted is true; apply the stored object restoration rule",
+                facets: &document_content_facets(Manage),
+            },
+        ]);
     /// Says what differs between two states of a document, block by block.
-    DocumentChangesGet: GET "/documents/{id}/changes", Permission("doc.view"), query DocumentChangesGetQuery, none, json DocumentChanges, 200;
+    DocumentChangesGet: GET "/documents/{id}/changes", Permission("doc.view"), query DocumentChangesGetQuery, none, json DocumentChanges, 200,
+        operation Op::variants(&[
+            Variant {
+                name: "read",
+                selector: "inspect_deleted is not true",
+                facets: &document_content_facets(Read),
+            },
+            Variant {
+                name: "inspect_deleted",
+                selector: "inspect_deleted is true; apply the stored object restoration rule",
+                facets: &document_content_facets(Manage),
+            },
+        ]);
     /// Reads a document as it stood at a version.
-    DocumentVersionGet: GET "/documents/{id}/versions/{version}", Permission("doc.view"), query crate::nodes::DeletedInspectionQuery, none, json DocumentVersionGetReply, 200;
+    DocumentVersionGet: GET "/documents/{id}/versions/{version}", Permission("doc.view"), query crate::nodes::DeletedInspectionQuery, none, json DocumentVersionGetReply, 200,
+        operation Op::variants(&[
+            Variant {
+                name: "read",
+                selector: "inspect_deleted is not true",
+                facets: &document_content_facets(Read),
+            },
+            Variant {
+                name: "inspect_deleted",
+                selector: "inspect_deleted is true; apply the stored object restoration rule",
+                facets: &document_content_facets(Manage),
+            },
+        ]);
     /// Puts a version back: the present state is cut as a version first, then the blocks of that version stand again.
-    DocumentVersionRestore: POST "/documents/{id}/versions/{version}/restore", Permission("doc.manage"), none, none, json DocumentSync, 200;
+    DocumentVersionRestore: POST "/documents/{id}/versions/{version}/restore", Permission("doc.manage"), none, none, json DocumentSync, 200,
+        operation Op::returning(Manage, &[Object(K::Document)], Target::PermissionObject);
     /// Puts a file of any kind into a document, from a raw body with a filename header or from a finished upload.
-    DocumentFileCreate: POST "/documents/{id}/files", Permission("doc.edit"), query DocumentFileCreateQuery, bytes, json DocumentFile, 200;
+    DocumentFileCreate: POST "/documents/{id}/files", Permission("doc.edit"), query DocumentFileCreateQuery, bytes, json DocumentFileCreateResponse, 200,
+        operation Op::receipt(&Op::variants(&[
+            Variant {
+                name: "direct",
+                selector: "raw content supplied in this request",
+                facets: &crate::document_file_sources::DIRECT_FACETS,
+            },
+            Variant {
+                name: "from_upload",
+                selector: "the handler resolves the supplied finished-upload reference",
+                facets: &crate::document_file_sources::REFERENCE_FACETS,
+            },
+        ]));
     /// Removes a file from a document, unless a live block names it.
     DocumentFileDelete: DELETE "/documents/{id}/files/{file_id}", Permission("doc.edit"), none, none, none, 204;
     /// Serves a file of a document: images, films and sounds inline, with `Range`; anything else as an attachment.
-    DocumentFileGet: GET "/documents/{id}/files/{file_id}", Permission("doc.view"), query DocumentFileGetQuery, none, raw, 200;
+    DocumentFileGet: GET "/documents/{id}/files/{file_id}", Permission("doc.view"), query DocumentFileGetQuery, none, raw, 200,
+        operation Op::variants(&[
+            Variant {
+                name: "read",
+                selector: "inspect_deleted is not true",
+                facets: &[Facet::required(
+                    Read,
+                    &[Object(K::Document)],
+                    Target::PermissionObject,
+                )],
+            },
+            Variant {
+                name: "inspect_deleted",
+                selector: "inspect_deleted is true; apply the stored object restoration rule",
+                facets: &[Facet::required(
+                    Manage,
+                    &[Object(K::Document)],
+                    Target::PermissionObject,
+                )],
+            },
+        ]);
     /// Lists the entries of a file of a document that is an archive.
-    DocumentFileArchiveList: GET "/documents/{id}/files/{file_id}/archive", Permission("doc.view"), query DocumentFileArchiveListQuery, none, json ArchiveListing, 200;
+    DocumentFileArchiveList: GET "/documents/{id}/files/{file_id}/archive", Permission("doc.view"), query DocumentFileArchiveListQuery, none, json ArchiveListing, 200,
+        operation Op::variants(&[
+            Variant {
+                name: "read",
+                selector: "inspect_deleted is not true",
+                facets: &[Facet::required(
+                    Read,
+                    &[Object(K::Document)],
+                    Target::PermissionObject,
+                )],
+            },
+            Variant {
+                name: "inspect_deleted",
+                selector: "inspect_deleted is true; apply the stored object restoration rule",
+                facets: &[Facet::required(
+                    Manage,
+                    &[Object(K::Document)],
+                    Target::PermissionObject,
+                )],
+            },
+        ]);
     /// Serves one entry of an archive that is a file of a document.
-    DocumentFileArchiveEntryGet: GET "/documents/{id}/files/{file_id}/archive/entry", Permission("doc.view"), query DocumentFileArchiveEntryGetQuery, none, raw, 200;
+    DocumentFileArchiveEntryGet: GET "/documents/{id}/files/{file_id}/archive/entry", Permission("doc.view"), query DocumentFileArchiveEntryGetQuery, none, raw, 200,
+        operation Op::variants(&[
+            Variant {
+                name: "read",
+                selector: "inspect_deleted is not true",
+                facets: &[Facet::required(
+                    Read,
+                    &[Object(K::Document)],
+                    Target::PermissionObject,
+                )],
+            },
+            Variant {
+                name: "inspect_deleted",
+                selector: "inspect_deleted is true; apply the stored object restoration rule",
+                facets: &[Facet::required(
+                    Manage,
+                    &[Object(K::Document)],
+                    Target::PermissionObject,
+                )],
+            },
+        ]);
     /// Says up to which sequence the caller has had a document on screen.
-    DocumentSeen: POST "/documents/{id}/seen", Permission("doc.view"), none, json DocumentSeenBody, none, 204;
+    DocumentSeen: POST "/documents/{id}/seen", Permission("doc.view"), none, json DocumentSeenBody, none, 204,
+        operation Op::single(Write, &[Object(K::Document)], Target::PermissionObject);
     /// Writes a document as Markdown, HTML, Typst or JSON, as a file download. It takes the document's Export row, and reading the document as well.
     DocumentExportGet: GET "/documents/{id}/export", Permission("doc.export"), query DocumentExportGetQuery, none, raw, 200;
     /// Lists the discussions beside a document, the newest answer first.
-    DocumentDiscussionList: GET "/documents/{id}/discussions", Permission("doc.view"), query DocumentDiscussionListQuery, none, json Page<DocumentDiscussion>, 200;
+    DocumentDiscussionList: GET "/documents/{id}/discussions", Permission("doc.view"), query DocumentDiscussionListQuery, none, json Page<DocumentDiscussion>, 200,
+        operation Op::variants(&[
+            Variant {
+                name: "read",
+                selector: "inspect_deleted is not true",
+                facets: &document_content_facets(Read),
+            },
+            Variant {
+                name: "inspect_deleted",
+                selector: "inspect_deleted is true; apply the stored object restoration rule",
+                facets: &document_content_facets(Manage),
+            },
+        ]);
     /// Opens a discussion on a block of a document, with its first comment.
-    DocumentDiscussionCreate: POST "/documents/{id}/discussions", Permission("doc.comment"), none, json DocumentDiscussionCreateBody, json DocumentDiscussion, 201;
+    DocumentDiscussionCreate: POST "/documents/{id}/discussions", Permission("doc.comment"), none, json DocumentDiscussionCreateBody, json DocumentDiscussion, 201,
+        operation Op::returning(Write, &[Object(K::Document)], Target::PermissionObject);
     /// Lists a discussion's comments in the order they were written, a window at a time from the newest.
-    DocumentCommentList: GET "/documents/{id}/discussions/{discussion_id}/comments", Permission("doc.view"), query DocumentCommentListQuery, none, json DocumentCommentPage, 200;
+    DocumentCommentList: GET "/documents/{id}/discussions/{discussion_id}/comments", Permission("doc.view"), query DocumentCommentListQuery, none, json DocumentCommentPage, 200,
+        operation Op::variants(&[
+            Variant {
+                name: "read",
+                selector: "inspect_deleted is not true",
+                facets: &document_content_facets(Read),
+            },
+            Variant {
+                name: "inspect_deleted",
+                selector: "inspect_deleted is true; apply the stored object restoration rule",
+                facets: &document_content_facets(Manage),
+            },
+        ]);
     /// Answers in a discussion.
-    DocumentCommentCreate: POST "/documents/{id}/discussions/{discussion_id}/comments", Permission("doc.comment"), none, json DocumentCommentCreateBody, json DocumentComment, 201;
+    DocumentCommentCreate: POST "/documents/{id}/discussions/{discussion_id}/comments", Permission("doc.comment"), none, json DocumentCommentCreateBody, json DocumentComment, 201,
+        operation Op::returning(Write, &[Object(K::Document)], Target::PermissionObject);
     /// Resolves a discussion, or opens it again.
-    DocumentDiscussionResolve: POST "/documents/{id}/discussions/{discussion_id}/resolve", Rule("doc.edit, or having written in that discussion"), none, json DocumentDiscussionResolveBody, json DocumentDiscussion, 200;
+    DocumentDiscussionResolve: POST "/documents/{id}/discussions/{discussion_id}/resolve", Rule("doc.edit, or having written in that discussion"), none, json DocumentDiscussionResolveBody, json DocumentDiscussionResolveResponse, 200,
+        operation Op::receipt(&Op::facets(&document_comment_write_facets()));
     /// Edits a comment.
-    DocumentCommentUpdate: PATCH "/documents/{id}/comments/{comment_id}", Rule("its author"), none, json DocumentCommentUpdateBody, json DocumentComment, 200;
+    DocumentCommentUpdate: PATCH "/documents/{id}/comments/{comment_id}", Rule("its author"), none, json DocumentCommentUpdateBody, json DocumentCommentUpdateResponse, 200,
+        operation Op::receipt(&Op::facets(&document_comment_write_facets()));
     /// Deletes a comment, which stays as an emptied line.
-    DocumentCommentDelete: DELETE "/documents/{id}/comments/{comment_id}", Rule("its author, or doc.manage"), none, none, none, 204;
+    DocumentCommentDelete: DELETE "/documents/{id}/comments/{comment_id}", Rule("its author, or doc.manage"), none, none, none, 204,
+        operation Op::variants(&[
+            Variant {
+                name: "own",
+                selector: "comment author is the caller",
+                facets: &[Facet::required(
+                    Write,
+                    &[Object(K::Document)],
+                    Target::Path("id"),
+                )],
+            },
+            Variant {
+                name: "moderate",
+                selector: "another author is moderated",
+                facets: &[Facet::required(
+                    Manage,
+                    &[Object(K::Document)],
+                    Target::Path("id"),
+                )],
+            },
+        ]);
     /// Puts the caller's reaction to a comment on, or takes it off.
-    DocumentCommentReactionSet: PUT "/documents/{id}/comments/{comment_id}/reaction", Permission("doc.comment"), none, json DocumentCommentReactionSetBody, json DocumentComment, 200;
+    DocumentCommentReactionSet: PUT "/documents/{id}/comments/{comment_id}/reaction", Permission("doc.comment"), none, json DocumentCommentReactionSetBody, json DocumentComment, 200,
+        operation Op::returning(Write, &[Object(K::Document)], Target::PermissionObject);
     /// Says who gains and who loses what when a document's rows follow those of another node.
-    DocumentMovePreview: POST "/documents/{id}/move/preview", Rule("as the move"), none, json DocumentMoveBody, json PagePreview, 200;
+    DocumentMovePreview: POST "/documents/{id}/move/preview", Rule("as the move"), none, json DocumentMoveBody, json DocumentMovePreviewResponse, 200,
+        operation Op::receipt(&Op::facets(&crate::document_sources::MOVE_PREVIEW_FACETS));
     /// Moves a document beside another node.
-    DocumentMove: POST "/documents/{id}/move", Rule("doc.manage on the document, and doc.create on the node it goes to, with docs.enabled there"), none, json DocumentMoveBody, json Document, 200;
+    DocumentMove: POST "/documents/{id}/move", Rule("doc.manage on the document, and doc.create on the node it goes to, with docs.enabled there"), none, json DocumentMoveBody, json DocumentMoveResponse, 200,
+        operation Op::receipt(&Op::facets(&crate::document_sources::MOVE_FACETS));
     /// Deletes a document, which can be restored until it is purged.
     DocumentDelete: DELETE "/documents/{id}", Permission("doc.manage"), none, none, none, 204;
     /// Restores a deleted document.
-    DocumentRestore: POST "/documents/{id}/restore", Rule("doc.manage on it as it was"), none, json DocumentRestoreBody, json Document, 200;
+    DocumentRestore: POST "/documents/{id}/restore", Rule("doc.manage on it as it was"), none, json DocumentRestoreBody, json DocumentRestoreResponse, 200,
+        operation Op::receipt(&Op::facets(&crate::document_sources::RESTORE_FACETS));
 }
 
 #[cfg(test)]

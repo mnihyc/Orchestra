@@ -193,6 +193,48 @@ impl World {
         .unwrap()
     }
 
+    /// A stored agent contribution from the source's actual ordinary owner (or current
+    /// chat participant). Raw unknown-giver rows remain explicit in their negative tests.
+    pub async fn agent_entry(
+        &self,
+        page: &PageKey,
+        profile: &str,
+        permission: Permission,
+        holder: Id,
+        expires_at: Option<Time>,
+    ) -> Id {
+        let mut conn = self.conn().await;
+        let giver: Id = if page.object_kind == "chat" {
+            sqlx::query_scalar("SELECT m.user_id FROM chats c JOIN chat_members m ON m.chat_id=c.id AND m.user_id=c.created_by WHERE c.id=$1 AND m.left_at IS NULL AND (m.expires_at IS NULL OR m.expires_at>$2)")
+                .bind(page.object_id).bind(self.now.get()).fetch_one(&mut *conn).await.unwrap()
+        } else {
+            sqlx::query_scalar("SELECT holder_id FROM permission_entries WHERE object_kind=$1 AND object_id=$2 AND page='live' AND permission='access.own' AND holder_kind='user' AND removed_at IS NULL AND (expires_at IS NULL OR expires_at>$3) ORDER BY created_at,id LIMIT 1")
+                .bind(&page.object_kind).bind(page.object_id).bind(self.now.get()).fetch_one(&mut *conn).await.unwrap()
+        };
+        let id = new_id();
+        orch_db::queries::access::insert_entry(
+            &mut conn,
+            &orch_db::queries::access::NewEntry {
+                id,
+                page,
+                profile,
+                permission: permission.as_str(),
+                holder_kind: "agents",
+                holder_id: Some(holder),
+                holder_role: None,
+                options: &serde_json::json!({}),
+                expires_at: expires_at.map(Time::get),
+                note: "",
+                source: "page",
+                created_by: Some(giver),
+                at: self.now.get(),
+            },
+        )
+        .await
+        .unwrap();
+        id
+    }
+
     /// Stores the row as it is given on the own page of `node`.
     pub async fn row(&self, node: Id, permission: Permission, inherit: bool) {
         let mut conn = self.conn().await;

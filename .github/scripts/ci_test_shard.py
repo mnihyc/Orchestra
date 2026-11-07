@@ -55,7 +55,12 @@ def commands(metadata, shard):
         result = [tests]
         if index == 0:
             # Target selection suppresses Cargo's default unit, example and doc tests.
-            result.append(common + ["-p", package_name, "--lib", "--bins", "--examples"])
+            units = common + ["-p", package_name, "--lib", "--bins", "--examples"]
+            if package_name == "orch-engine":
+                # The current CI PostgreSQL service has 97 usable connections; each fixture
+                # reserves 32, so only three database-owning unit cases fit at once.
+                units += ["--", "--test-threads=3"]
+            result.append(units)
             result.append(common + ["-p", package_name, "--doc"])
         return result
     if kind == "rest" and index < OTHER_SHARDS:

@@ -1,4 +1,5 @@
 /** Work screens have useful words, visible select values and one account/connection explanation. */
+import type * as AdmissionModule from '@/shell/admission';
 import { cleanup, screen, waitFor, within } from '@testing-library/react';
 import userEvent from '@testing-library/user-event';
 import type { ReactNode } from 'react';
@@ -51,6 +52,11 @@ vi.mock('@tanstack/react-router', async (original) => ({ ...await original<typeo
 vi.mock('@/api/auth', async (original) => ({ ...await original<typeof AuthApi>(),
   metaQuery: { queryKey: ['reader-meta'], queryFn: () => Promise.resolve(meta({ name: 'Workshop' })) },
 }));
+vi.mock('@/shell/admission', async (original) => ({
+  ...await original<typeof AdmissionModule>(),
+  admissionMetaQuery: (await import('@/api/auth')).metaQuery,
+}));
+
 vi.mock('@/api/shared', () => ({ sharedPageQuery: (cursor: string | null) => ({ queryKey: ['reader-shared', cursor], queryFn: () => Promise.resolve({ items: calls.emptyShared ? [] : [home()], next_cursor: null, partial: false }) }) }));
 vi.mock('@/api/usage', async (original) => ({ ...await original<typeof UsageApi>(),
   usageQuery: (params: UsageParams) => ({ queryKey: ['reader-usage', params], queryFn: (): Promise<UsageAnalytics> => {

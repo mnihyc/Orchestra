@@ -2,7 +2,7 @@
 import type { QueryClient, QueryKey } from '@tanstack/react-query';
 import { matches as matchesName } from '@/features/finder/ranking';
 import { ApiError } from '@/api/client';
-import type { Agent, Environment, Host, Machine, McpServer, Mount, Provider, Skill, Template, Thread } from '@/generated/api-types';
+import type { Agent, Environment, Host, Machine, MachineProgram, MachineProgramCapability, MachinePrograms, McpServer, Mount, Provider, Skill, Template, Thread } from '@/generated/api-types';
 import { isThreadForScreen } from '@/features/thread/cached';
 
 /** Cursors obtained with authoritative HTTP snapshots, cleared with the human session. */
@@ -56,6 +56,29 @@ export function applyCollection(cache: QueryClient, change: CollectionChange['co
 
 export const record = (value: unknown): value is Record<string, unknown> => typeof value === 'object' && value !== null && !Array.isArray(value);
 const array = (value: unknown): value is unknown[] => Array.isArray(value);
+
+const textOrNull = (value: unknown): value is string | null => value === null || typeof value === 'string';
+const strings = (value: unknown): value is string[] => Array.isArray(value) && value.every((item: unknown) => typeof item === 'string');
+function reportedProgram(value: unknown): value is MachineProgram {
+  return record(value) && (value.kind === 'agent' || value.kind === 'provider_source') && typeof value.name === 'string'
+    && strings(value.command) && (value.origin === 'local' || value.origin === 'orch') && typeof value.ready === 'boolean'
+    && textOrNull(value.version) && textOrNull(value.detail) && Object.hasOwn(value, 'descriptor');
+}
+function reportedCapability(value: unknown): value is MachineProgramCapability {
+  return record(value) && (value.kind === 'agent' || value.kind === 'provider_source') && typeof value.supported === 'boolean'
+    && typeof value.remote === 'boolean' && typeof value.delegated === 'boolean' && typeof value.enabled === 'boolean'
+    && typeof value.policy_key === 'string' && textOrNull(value.reason);
+}
+
+/** The Programs API projects this same report; its authority comes only from the current authorized Machine row. */
+export function machineProgramsProjection(facts: unknown, access: unknown): MachinePrograms | null {
+  if (!record(facts) || !record(facts.programs) || !record(access) || !strings(access.permissions)) return null;
+  const report = facts.programs;
+  if (!array(report.entries) || !report.entries.every(reportedProgram) || !array(report.capabilities) || !report.capabilities.every(reportedCapability)
+    || !textOrNull(report.config_file) || typeof report.can_manage !== 'boolean') return null;
+  return { entries: report.entries, capabilities: report.capabilities, config_file: report.config_file,
+    can_manage: access.permissions.some((permission) => permission === 'machine.manage' || permission === 'host.manage') };
+}
 
 /** Only these native DTOs can seed their corresponding resource detail readers. */
 interface CachedResources {
@@ -314,11 +337,13 @@ function writeRow(cache: QueryClient, change: RowChange['row'], thread?: Thread)
         if(!query.isActive())cache.removeQueries({queryKey:query.queryKey,exact:true});
         else query.setState({data:undefined,error:new ApiError({type:'orch:error:not_found',code:'not_found',title:'',detail:'',status:404,request_id:''},null),status:'error',fetchStatus:'idle'});
       }else {
-        const facts=record(change.value.facts)?change.value.facts:{};
-        const reported=record(facts.programs)?facts.programs:{entries:[],capabilities:[],config_file:null};
-        const access=record(change.value.access)?change.value.access:{};
-        const canManage=Array.isArray(access.permissions) && access.permissions.some((permission:unknown)=>permission==='machine.manage' || permission==='host.manage');
-        cache.setQueryData(query.queryKey,{...reported,can_manage:canManage});
+        const programs=machineProgramsProjection(change.value.facts,change.value.access);
+        if(programs!==null) cache.setQueryData(query.queryKey,programs);
+        else if(!query.isActive()) cache.removeQueries({queryKey:query.queryKey,exact:true});
+        else {
+          query.setState({data:undefined,error:null,status:'pending',fetchStatus:'idle'});
+          void cache.invalidateQueries({queryKey:query.queryKey,exact:true});
+        }
       }
     }
   }

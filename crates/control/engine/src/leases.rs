@@ -119,7 +119,13 @@ pub async fn open_for_turn(
 ) -> Result<Option<LeaseRow>, EngineError> {
     let now = unit.now();
     if let Some(stale) = threads::open_lease_of(&mut *unit.conn, thread).await? {
-        threads::close_lease(&mut *unit.conn, stale.id, ERROR, now).await?;
+        if crate::background_wake::running(unit.conn, Some(thread), None, None).await?
+            || crate::background_wake::awaiting_native(unit.conn, thread).await?
+        {
+            // Admission holds other authors and changes of provider/model until this work ends.
+            return Ok(Some(stale));
+        }
+        threads::close_lease(&mut *unit.conn, stale.id, TURN_ENDED, now).await?;
     }
     let allowed = models::lease_models(model);
     Ok(threads::open_lease(
@@ -153,7 +159,12 @@ pub async fn open_for_credential(
 ) -> Result<Option<LeaseRow>, EngineError> {
     let now = unit.now();
     if let Some(stale) = threads::open_lease_of(&mut *unit.conn, thread).await? {
-        threads::close_lease(&mut *unit.conn, stale.id, ERROR, now).await?;
+        if crate::background_wake::running(unit.conn, Some(thread), None, None).await?
+            || crate::background_wake::awaiting_native(unit.conn, thread).await?
+        {
+            return Ok(Some(stale));
+        }
+        threads::close_lease(&mut *unit.conn, stale.id, TURN_ENDED, now).await?;
     }
     let allowed = models::lease_models(model);
     Ok(credential_rows::open_credential_lease(
@@ -179,6 +190,11 @@ pub async fn close_for_turn(
     thread: Id,
     reason: &str,
 ) -> Result<Option<LeaseRow>, EngineError> {
+    if crate::background_wake::running(unit.conn, Some(thread), None, None).await?
+        || crate::background_wake::awaiting_native(unit.conn, thread).await?
+    {
+        return Ok(None);
+    }
     let Some(lease) = threads::open_lease_of(&mut *unit.conn, thread).await? else {
         return Ok(None);
     };
@@ -188,6 +204,27 @@ pub async fn close_for_turn(
 }
 
 impl Engine {
+    /// Snapshot the same model entries used by native selection and structured option resolution.
+    pub(crate) async fn lease_model_parameters(
+        &self,
+        provider: Id,
+        allowed: &[String],
+    ) -> Result<
+        std::collections::BTreeMap<String, orch_provider_contract::models::ModelParameters>,
+        EngineError,
+    > {
+        let mut conn = self.inner.db.acquire().await?;
+        let mut parameters = std::collections::BTreeMap::new();
+        for name in allowed {
+            let row = orch_db::queries::resources::thread_engine::model(&mut conn, provider, name)
+                .await?
+                .filter(|row| row.enabled)
+                .ok_or_else(|| EngineError::unreadable("a lease model is no longer enabled"))?;
+            parameters.insert(name.clone(), serde_json::from_value(row.parameters)?);
+        }
+        Ok(parameters)
+    }
+
     /// Sends `lease.open` for a lease to where the credential is kept and
     /// waits for the answer. Asked again, the machine answers with what it
     /// answered.
@@ -207,6 +244,9 @@ impl Engine {
             _ => LeaseMode::Forwarded,
         };
         let body = LeaseOpen {
+            model_parameters: self
+                .lease_model_parameters(lease.provider_id, &lease.allowed_models)
+                .await?,
             lease_id: lease.id,
             provider_id: lease.provider_id,
             thread_id: lease.thread_id,
@@ -249,6 +289,14 @@ impl Engine {
         };
         for lease in stale {
             let mut conn = self.inner.db.acquire().await?;
+            if crate::background_wake::running(&mut conn, Some(lease.thread_id), None, None).await?
+                || crate::background_wake::awaiting_native(&mut conn, lease.thread_id).await?
+                || threads::active_turn(&mut conn, lease.thread_id)
+                    .await?
+                    .is_some()
+            {
+                continue;
+            }
             let state = match lease.turn_id {
                 Some(turn) => threads::turn(&mut conn, turn).await?.map(|turn| turn.state),
                 None => None,

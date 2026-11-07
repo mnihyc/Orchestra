@@ -683,6 +683,7 @@ pub fn spec_in(work: &Path, agent_id: Id, provider: Id, mode: SessionMode) -> Se
             instructions: "You are working inside Orch.".to_owned(),
             available_models: vec!["scripted".to_owned(), "second".to_owned()],
             subagent_limits: Default::default(),
+            background_wake: true,
             memory: None,
             arrangement: ArrangementType::KeySeparated,
             orch_tools: vec![orch_agent_contract::events::OrchTool::ListShared],
@@ -719,6 +720,7 @@ pub fn agent_start(provider: Id, agent: Id, home: &Path) -> AgentStart {
 #[must_use]
 pub fn turn_for(spec: &SessionSpec, text: &str) -> TurnStart {
     TurnStart {
+        native_wake: None,
         plan: false,
         thread_id: spec.settings.thread_id,
         turn_id: new_id(),
@@ -855,6 +857,7 @@ impl Rig {
     #[must_use]
     pub fn turn_of(&self, session: &Opened, text: &str) -> TurnStart {
         TurnStart {
+            native_wake: None,
             plan: false,
             thread_id: session.thread,
             turn_id: new_id(),

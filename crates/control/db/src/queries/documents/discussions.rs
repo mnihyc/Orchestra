@@ -552,6 +552,19 @@ pub async fn resolve(
     if exists.is_none() {
         return Ok(None);
     }
+    resolve_prepared(conn, document, discussion, resolved, by, now).await
+}
+
+/// Applies the existing resolve after its caller has checked existence while holding
+/// the document row. The first database statement is the document sequence mutation.
+pub async fn resolve_prepared(
+    conn: &mut Conn,
+    document: Id,
+    discussion: Id,
+    resolved: bool,
+    by: Id,
+    now: DateTime<Utc>,
+) -> Result<Option<Seq>, DbError> {
     let Some(seq) = super::next_seq(conn, document).await? else {
         return Ok(None);
     };
@@ -577,7 +590,14 @@ async fn restamp(
     let Some(known) = comment(conn, document, comment_id).await? else {
         return Ok(None);
     };
-    let Some(seq) = super::next_seq(conn, document).await? else {
+    restamp_prepared(conn, &known).await
+}
+
+async fn restamp_prepared(
+    conn: &mut Conn,
+    known: &CommentRow,
+) -> Result<Option<(Seq, Id)>, DbError> {
+    let Some(seq) = super::next_seq(conn, known.document_id).await? else {
         return Ok(None);
     };
     stamp_discussion(conn, known.discussion_id, seq).await?;
@@ -595,10 +615,23 @@ pub async fn edit(
     let Some(known) = comment(conn, document, comment_id).await? else {
         return Ok(None);
     };
+    edit_prepared(conn, &known, content, now).await
+}
+
+/// Applies an existing checked comment under its caller's document-row lock.
+/// After the pure deleted check, the first SQL statement mutates the sequence.
+pub async fn edit_prepared(
+    conn: &mut Conn,
+    known: &CommentRow,
+    content: &Json,
+    now: DateTime<Utc>,
+) -> Result<Option<CommentRow>, DbError> {
     if known.deleted_at.is_some() {
         return Ok(None);
     }
-    let Some((seq, _)) = restamp(conn, document, comment_id).await? else {
+    let document = known.document_id;
+    let comment_id = known.id;
+    let Some((seq, _)) = restamp_prepared(conn, known).await? else {
         return Ok(None);
     };
     sqlx::query(
@@ -624,10 +657,22 @@ pub async fn delete(
     let Some(known) = comment(conn, document, comment_id).await? else {
         return Ok(None);
     };
+    delete_prepared(conn, &known, now).await
+}
+
+/// Applies the same tombstone or existing no-op after the checked native prefix.
+/// A live comment's first SQL statement mutates the document sequence.
+pub async fn delete_prepared(
+    conn: &mut Conn,
+    known: &CommentRow,
+    now: DateTime<Utc>,
+) -> Result<Option<CommentRow>, DbError> {
     if known.deleted_at.is_some() {
-        return Ok(Some(known));
+        return Ok(Some(known.clone()));
     }
-    let Some((seq, _)) = restamp(conn, document, comment_id).await? else {
+    let document = known.document_id;
+    let comment_id = known.id;
+    let Some((seq, _)) = restamp_prepared(conn, known).await? else {
         return Ok(None);
     };
     sqlx::query(

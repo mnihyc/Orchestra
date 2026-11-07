@@ -138,9 +138,9 @@ export function ResourceList<Row extends ResourceRow>({ readRow, filter: resourc
   const sort=sorting.some((value)=>value===keptSort)?keptSort:'name';
   const direction=keptDirection==='desc'?'desc':'asc';
   const {org:viewed,load:orgLoad} = useViewedOrgState();
-  const defaultView: ProviderListScope = props.kind === 'environments' ? 'viewable' : 'usable';
+  const defaultView: ProviderListScope = 'usable';
   const [keptView, chooseView] = useListChoice<ProviderListScope>(`resources.${props.kind}`, 'view', resource?.view ?? defaultView);
-  const offered: ProviderListScope[] = ['mine', 'managed', ...(props.kind === 'environments' ? [] : ['usable' as const]), 'viewable', ...(viewed?.access.administers === true ? ['all' as const] : [])];
+  const offered: ProviderListScope[] = ['mine', 'managed', 'usable', 'viewable', ...(viewed?.access.administers === true ? ['all' as const] : [])];
   const view = offered.includes(keptView) ? keptView : defaultView;
   useEffect(()=>{
     if(keptView!==view&&(keptView!=='all'||orgLoad.isSuccess))chooseView(view);
@@ -306,7 +306,7 @@ export function ResourceListFrame<Row extends ResourceRow>({
         actions={hasHeaderActions ? <>{action}{headerActions}</> : undefined}
       /></div>}
       {embedded && hasHeaderActions && <div className="flex flex-wrap items-center justify-end gap-2">{action}{headerActions}</div>}
-      <FilterBar wrap={false} leading={viewControl===undefined?undefined:<>{viewControl}<Hint id="resource-library" popover /></>}
+      <FilterBar wrap={false} leading={viewControl===undefined?undefined:<>{viewControl}<Hint id="resource-library" popover className="self-center" /></>}
         search={<SearchBox text={text} onText={onText} label={searchLabel} placeholder={searchPlaceholder} />}>
         <ResourceListControls filters={filters} sorting={sorting} participating={participating} onParticipation={setParticipating} filtered={filtersActive ?? (hasFilters || participating)} sorted={hasSorting} />
       </FilterBar>

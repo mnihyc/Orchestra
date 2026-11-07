@@ -10,7 +10,57 @@
 
 use crate::{Conn, DbError};
 use chrono::{DateTime, Utc};
-use orch_types::Id;
+use orch_types::{Id, Json};
+
+/// Locks the real browser origin retained by an accepted authorization flow.
+/// The caller checks the returned deadline after lock acquisition using its current clock.
+pub async fn lock_session_state(
+    conn: &mut Conn,
+    session: Id,
+    user: Id,
+) -> Result<Option<(bool, DateTime<Utc>)>, DbError> {
+    Ok(sqlx::query_as(
+        "SELECT as_admin, expires_at FROM sessions WHERE id=$1 AND user_id=$2
+         AND revoked_at IS NULL FOR SHARE",
+    )
+    .bind(session)
+    .bind(user)
+    .fetch_optional(conn)
+    .await?)
+}
+
+/// Current key restrictions for restoring accepted work; no secret or parent-key hierarchy.
+#[derive(Debug, Clone, PartialEq, Eq, sqlx::FromRow)]
+pub struct CurrentBoundary {
+    /// Existing legacy permission scopes.
+    pub scopes: Vec<String>,
+    /// Existing legacy node boundary.
+    pub node_id: Option<Id>,
+    /// Explicit operation rules and retained policy constraints, when present.
+    pub operation_scope: Option<Json>,
+    /// The key's current deadline.
+    pub expires_at: Option<DateTime<Utc>>,
+}
+
+/// Rechecks the real originating key and account under the caller's existing transaction.
+pub async fn current_boundary(
+    conn: &mut Conn,
+    token: Id,
+    user: Id,
+    now: DateTime<Utc>,
+) -> Result<Option<CurrentBoundary>, DbError> {
+    Ok(sqlx::query_as(
+        "SELECT t.scopes,t.node_id,t.operation_scope,t.expires_at FROM api_tokens t
+         JOIN users u ON u.id=t.user_id AND u.status='active'
+         WHERE t.id=$1 AND t.user_id=$2 AND t.revoked_at IS NULL
+           AND (t.expires_at IS NULL OR t.expires_at>$3) FOR SHARE OF t,u",
+    )
+    .bind(token)
+    .bind(user)
+    .bind(now)
+    .fetch_optional(conn)
+    .await?)
+}
 
 /// One place an API token is kept out of: an org with everything inside, or the whole system.
 #[derive(Debug, Clone, PartialEq, Eq, sqlx::FromRow)]
@@ -71,28 +121,13 @@ pub async fn refuse(
 /// A token that can reach an org, as its managers list it: never its secret.
 #[derive(Debug, Clone, PartialEq, Eq, sqlx::FromRow)]
 pub struct ReachingToken {
-    /// The token.
-    pub id: Id,
-    /// The name its maker gave it.
-    pub name: String,
-    /// Its scope words.
-    pub scopes: Vec<String>,
-    /// The node it is kept to.
-    pub node_id: Option<Id>,
-    /// That node's name, where it is kept to one.
-    pub node_name: Option<String>,
-    /// That node's kind.
-    pub node_kind: Option<String>,
-    /// When it was made.
-    pub created_at: DateTime<Utc>,
-    /// When it was last used.
-    pub last_used_at: Option<DateTime<Utc>>,
-    /// When it ends.
-    pub expires_at: Option<DateTime<Utc>>,
-    /// Whose it is.
-    pub user_id: Id,
-    /// It belongs to a service identity.
-    pub service: bool,
+    /// Existing whole credential metadata, including its actual owning account.
+    #[sqlx(flatten)]
+    pub key: super::identity::ApiTokenListed,
+    /// The actual owner row's kind, never inferred from role membership.
+    pub owner_kind: String,
+    /// Only a service owner is placed at its stored keeping org.
+    pub owner_org: Option<Id>,
     /// The org refused it already.
     pub refused_here: bool,
 }
@@ -128,8 +163,9 @@ pub async fn reaching(
              UNION
              SELECT u.id FROM users u WHERE u.kind = 'service' AND u.service_org_id IN (SELECT id FROM up)
          )
-         SELECT t.id, t.name, t.scopes, t.node_id, n.name AS node_name, n.kind AS node_kind,
-                t.created_at, t.last_used_at, t.expires_at, t.user_id, u.kind = 'service' AS service,
+         SELECT t.id, t.name, t.scopes, t.operation_scope, t.node_id, n.name AS node_name, n.kind AS node_kind,
+                t.created_at, t.last_used_at, t.expires_at, t.user_id,
+                u.kind AS owner_kind, u.service_org_id AS owner_org,
                 EXISTS (SELECT 1 FROM api_token_refusals r WHERE r.token_id = t.id AND r.org_id = $1)
                     AS refused_here
            FROM api_tokens t

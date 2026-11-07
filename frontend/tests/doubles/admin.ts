@@ -18,6 +18,8 @@ import type {
   HarnessChannelsStatus,
   HarnessKindInfo,
   Host,
+  GatewayCatalogue,
+  GatewayCatalogueEntry,
   IdentityProvider,
   InstallationRecords,
   MachineRef,
@@ -119,10 +121,16 @@ const KINDS: readonly [action: string, verb: string, object: string][] = [
   ['environment.created', 'made the environment', 'Main'],
 ];
 const SEEDED_ENTRIES = 130;
+const initialGatewayCatalogue = (): GatewayCatalogue => ({ revision: 'gateways-1', gateways: [
+  { id: 'main', label: 'Main gateway', region: 'Unspecified', endpoints: [{ url: 'wss://gateway.example.test:9443', trust: 'pinned' }] },
+] });
 
 // ---------------------------------------------------------------- the world
 
 export class AdminWorld implements Part {
+  /** Public installation metadata, mutable only through the existing system-admin gate. */
+  gatewayCatalogue: GatewayCatalogue = initialGatewayCatalogue();
+
   private channelsReadAt: string | null = null;
   private installation: InstallationRecords = { release: null, backup: null, backup_warning: true, backup_error: null };
   readonly world: World;
@@ -307,6 +315,7 @@ export class AdminWorld implements Part {
 
   /** Puts the double back as it was made. */
   reset(): void {
+    this.gatewayCatalogue = initialGatewayCatalogue();
     this.installation = { release: null, backup: null, backup_warning: true, backup_error: null };
     this.own.clear();
     this.entries = [];
@@ -348,6 +357,26 @@ export class AdminWorld implements Part {
     const route = `${method} ${path}`;
     let found: RegExpExecArray | null;
 
+
+    if (route === 'GET /gateways') return { status: 200, body: this.gatewayCatalogue };
+    if (route === 'PUT /gateways') {
+      this.need(person);
+      if (body.expected_revision !== this.gatewayCatalogue.revision) throw new Refusal(409, 'conflict.stale_revision', 'The catalogue changed. Review it again.');
+      if (!Array.isArray(body.gateways)) invalid('gateways', 'must be a list of gateways');
+      const gateways: GatewayCatalogueEntry[] = body.gateways.map((raw: unknown) => {
+        if (typeof raw !== 'object' || raw === null || Array.isArray(raw)) invalid('gateways', 'must contain gateway entries');
+        const entry = raw as Record<string, unknown>;
+        if (typeof entry.id !== 'string' || typeof entry.label !== 'string' || typeof entry.region !== 'string' || !Array.isArray(entry.endpoints)) invalid('gateways', 'must name the gateway and its endpoints');
+        return { id: entry.id, label: entry.label, region: entry.region, endpoints: entry.endpoints.map((rawEndpoint: unknown) => {
+          if (typeof rawEndpoint !== 'object' || rawEndpoint === null || Array.isArray(rawEndpoint)) invalid('endpoints', 'must contain addresses');
+          const endpoint = rawEndpoint as Record<string, unknown>;
+          if (typeof endpoint.url !== 'string' || (endpoint.trust !== 'pinned' && endpoint.trust !== 'public')) invalid('endpoints', 'must name the address and trust');
+          return { url: endpoint.url, trust: endpoint.trust };
+        }) };
+      });
+      this.gatewayCatalogue = { revision: `gateways-${randomUUID()}`, gateways };
+      return { status: 200, body: { revision: this.gatewayCatalogue.revision } };
+    }
     // What the system's screens read that does not lie under /admin.
     if (route === 'GET /harness-kinds') return { status: 200, body: this.harnessKinds() };
     if (route === 'GET /pki/ca.pem') {

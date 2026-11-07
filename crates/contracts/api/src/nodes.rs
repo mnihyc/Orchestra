@@ -9,6 +9,14 @@
 //! A place's history is its [`ActivityEntry`] lines, and moving a project, a
 //! topic or a department is planned first as a [`NodeMovePlan`].
 
+use crate::operations::{
+    FacetSpec as Facet, OperationSpec as Op, TargetResolver as Target, VariantSpec as Variant,
+};
+use orch_access_contract::key_scope::KeyAction::{Manage, Read, Write};
+use orch_access_contract::key_scope::KeyIdentityKind as I;
+use orch_access_contract::key_scope::KeyTargetKind::{Identity, Object};
+use orch_access_contract::permissions::ObjectKind as K;
+
 use std::collections::BTreeMap;
 
 use orch_types::{Id, Json, Revision, Seq, Time};
@@ -28,6 +36,80 @@ pub use orch_access_contract::audit::AuditKind;
 /// How many changed nodes a tree answer may hold; past this it says it is not
 /// complete, and the client loads the whole tree again.
 pub const TREE_SYNC_MAX_CHANGES: i64 = 5_000;
+
+/// One native bounded section, retaining an independent failure without losing
+/// the other sections of an opening. An omitted section was not applicable.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, JsonSchema)]
+#[serde(tag = "status", rename_all = "snake_case")]
+pub enum OverviewPart<T> {
+    /// The native reader's answer.
+    Ready { data: T },
+    /// The native reader's refusal or failure, with its ordinary diagnostics.
+    Failed {
+        /// The same problem the native reader would return.
+        problem: crate::common::Problem,
+        /// Native retry delay, in seconds, when supplied by the reader.
+        retry_after: Option<u64>,
+    },
+    /// The section does not apply to this organization/reader.
+    Omitted,
+}
+
+/// One page of the organization overview. Subsequent pages and changed controls
+/// continue through their existing native readers and cursors.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, JsonSchema)]
+pub struct OrgOverview {
+    /// The same current organization projection as the native node reader.
+    pub org: Org,
+    /// First unarchived child page, bounded by the native default of fifty.
+    pub children: Page<Listed<Node>>,
+    /// The reader's recent threads in this root, at the native maximum of fifty.
+    pub recent: crate::search::NameSearchPage,
+    /// Setup observations, only for a current owner of a live team root.
+    pub first_steps: OverviewPart<crate::first_steps::FirstSteps>,
+    /// The observed scoped notification status, under its native notification Read.
+    pub outside_status: OverviewPart<crate::notifications::OutsideStatus>,
+    /// The ordinary usage board for the requested span and split, ten rows per split.
+    pub usage: OverviewPart<crate::usage::UsageAnalytics>,
+    /// The first fifty summary activity rows.
+    pub activity: OverviewPart<Page<ActivityEntry>>,
+    /// The native first page of wider port admissions, only for its administrator.
+    pub outside_openings: OverviewPart<Page<crate::ports::PortOpening>>,
+}
+
+/// A bounded native opening or explicit place resolution before choosing a landing.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, JsonSchema)]
+#[serde(tag = "mode", rename_all = "snake_case")]
+pub enum OrgOverviewResponse {
+    /// The native overview, without unshown inventories.
+    Overview {
+        /// Its bounded sections.
+        data: Box<OrgOverview>,
+    },
+    /// Only the readable requested native nodes; no overview sections are read.
+    Places {
+        /// Native projections; unavailable identities are omitted without naming them.
+        nodes: Vec<Node>,
+    },
+}
+
+/// Existing overview controls or a bounded explicit place selector.
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+#[serde(deny_unknown_fields)]
+pub struct OrgOverviewGetQuery {
+    /// Resolve these comma-separated native node IDs instead of reading overview sections.
+    /// At most one native default page; this cannot be combined with overview controls.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub resolve_ids: Option<String>,
+    /// The participation filter of the child page.
+    pub participating: Option<bool>,
+    /// Usage period start, UTC; absent means this week's Monday.
+    pub from: Option<String>,
+    /// Usage period end, UTC; absent means today.
+    pub to: Option<String>,
+    /// The second usage split, alongside person. Defaults to model.
+    pub usage_by: Option<crate::usage::UsageDimension>,
+}
 
 /// What kind of node something is.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize, JsonSchema)]
@@ -544,6 +626,17 @@ pub struct TreeChat {
     pub seq: Seq,
 }
 
+crate::common::full_or_receipt! {
+    /// An ordinary created organization or its accepted creation receipt.
+    #[derive(Debug,Clone,PartialEq,Eq,Serialize,Deserialize,JsonSchema)]
+    pub enum OrgCreateResponse {
+        /// The unchanged native organization view under the same creation operation's Read.
+        Full(Org),
+        /// The actual new organization identity without its existing metadata.
+        Receipt(NodeCreateReceipt),
+    }
+}
+
 /// The nodes of an org's tree that the caller may view, whole or as a change.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize, JsonSchema)]
 pub struct OrgTreeGetReply {
@@ -826,6 +919,73 @@ pub struct NodeMovePlan {
     pub blockers: Vec<PlanBlocker>,
 }
 
+/// A current review acknowledged without its existing values or names.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+pub struct NodeMoveReviewReceipt {
+    /// Restricted response marker.
+    pub projection: crate::common::ReceiptProjection,
+    /// The reviewed moved-node identity.
+    pub node_id: Id,
+    /// The requested destination's actual identity.
+    pub parent_id: Id,
+    /// The node's actual business kind.
+    pub kind: NodeKind,
+    /// Caller-bound native review identifier.
+    pub preflight_id: Id,
+    /// The full native consequence stamp, before public projection.
+    pub stamp: String,
+    /// The reviewed node revision.
+    pub revision: Revision,
+    /// The native review's expiry.
+    pub expires_at: Time,
+    /// Native stable blockers, without names or existing setting values.
+    pub blocker_codes: Vec<String>,
+}
+
+crate::common::full_or_receipt! {
+    /// The native full review or its restricted confirmation data.
+    #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+    pub enum NodeMovePreviewResponse {
+        /// Existing complete review admitted by this operation's Read facets.
+        Full(NodeMovePlan),
+        /// Confirmation identities and safe outcome only.
+        Receipt(NodeMoveReviewReceipt),
+    }
+}
+
+/// The settled move without the node's existing content.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+pub struct NodeMoveReceipt {
+    /// Restricted response marker.
+    pub projection: crate::common::ReceiptProjection,
+    /// The moved node.
+    pub node_id: Id,
+    /// Its resulting parent.
+    pub parent_id: Id,
+    /// The actual moved kind.
+    pub kind: NodeKind,
+    /// The node's revision after the accepted act.
+    pub revision: Revision,
+}
+
+macro_rules! move_response {
+    ($response:ident, $full:ident) => {
+        crate::common::full_or_receipt! {
+            /// The unchanged native node result or its restricted acknowledgement.
+            #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+            pub enum $response {
+                /// Existing node content admitted under this same operation.
+                Full($full),
+                /// Identifiers and revision, without existing node content.
+                Receipt(NodeMoveReceipt),
+            }
+        }
+    };
+}
+move_response!(OrgMoveResponse, Org);
+move_response!(ProjectMoveResponse, Project);
+move_response!(TopicMoveResponse, Topic);
+
 /// How a node's page starts when it is made.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize, JsonSchema)]
 #[serde(rename_all = "snake_case")]
@@ -881,6 +1041,43 @@ pub struct FirstInput {
     pub client_id: String,
 }
 
+/// The reach of a new thread's initial, giver-bounded agent contribution.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize, JsonSchema)]
+#[serde(rename_all = "snake_case")]
+pub enum AgentAccessWhere {
+    /// Make no initial contribution.
+    Nothing,
+    /// The new thread's associated documents and separate chat.
+    Thread,
+    /// The containing topic and the resources that follow its permission rows.
+    Topic,
+    /// The containing project and the resources that follow its permission rows.
+    Project,
+}
+
+/// The creation choice confirmed by the giver. It becomes ordinary agent-share entries;
+/// subsequent edits to the inherited creation preset do not rewrite them.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize, JsonSchema)]
+#[serde(deny_unknown_fields)]
+pub struct AgentAccessChoice {
+    /// Where the initial contribution reaches.
+    #[serde(rename = "where")]
+    pub where_: AgentAccessWhere,
+    /// Existing Share levels, independently for conversations, chats and documents.
+    pub parts: crate::share::ShareParts,
+}
+
+/// The current creation preset and source bounds for each confirmed reach.
+/// These are privilege gifts, independent of who may read or control the human audience.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+pub struct AgentAccessAvailability {
+    /// The resolved creation preset; it never changes an existing contribution.
+    pub preset: AgentAccessChoice,
+    /// Nothing, This thread, This topic and This project, in that fixed order. Each parts
+    /// member is the highest independently giveable level at the corresponding source.
+    pub choices: Vec<AgentAccessChoice>,
+}
+
 /// Everything that makes a thread, all of it optional: where the topic has
 /// defaults, `{}` makes a thread that is ready, and `first_input` starts it.
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
@@ -892,6 +1089,10 @@ pub struct CreateThread {
     /// The page it starts with; it follows its topic's defaults when left out.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub access: Option<ThreadAccess>,
+    /// The confirmed initial contribution to the agent; omission accepts the topic's creation preset.
+    /// This is independent of the page controlling who may view or interact with the thread.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub agent_access: Option<AgentAccessChoice>,
     /// The agent and provider; the resolved defaults when left out.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub binding: Option<CreateThreadBinding>,
@@ -1029,6 +1230,28 @@ pub struct ProjectCreateBody {
     pub access: Option<NewNodeAccess>,
 }
 
+/// A successful creation without the new node's content or inherited names.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+pub struct NodeCreateReceipt {
+    /// Restricted response marker.
+    pub projection: crate::common::ReceiptProjection,
+    /// The node actually created by this request.
+    pub node_id: Id,
+    /// The kind actually created.
+    pub kind: NodeKind,
+}
+
+crate::common::full_or_receipt! {
+    /// The ordinary project view, or the same creation's restricted acknowledgement.
+    #[derive(Debug, Clone, PartialEq, Serialize, Deserialize, JsonSchema)]
+    pub enum ProjectCreateResponse {
+        /// Content admitted by the creation operation's own Read facet.
+        Full(Project),
+        /// Identifiers only; no project, parent, or permission-page content.
+        Receipt(NodeCreateReceipt),
+    }
+}
+
 /// Makes a topic, and with `first_thread` its first thread in the same step.
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
 #[serde(deny_unknown_fields)]
@@ -1056,6 +1279,30 @@ pub struct TopicWithThread {
     pub thread: Thread,
 }
 
+/// The accepted creation's actual identities, without existing content.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+pub struct ThreadCreateReceipt {
+    /// Restricted acknowledgement marker.
+    pub projection: crate::common::ReceiptProjection,
+    /// The Thread actually inserted.
+    pub thread_id: Id,
+    /// Its actual Topic, including one inserted by compound creation.
+    pub topic_id: Id,
+    /// Its accepted first input, when requested.
+    pub input_id: Option<Id>,
+}
+
+crate::common::full_or_receipt! {
+    /// Full ordinary view or the same creation's content-free acknowledgement.
+    #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+    pub enum ThreadCreateResponse {
+        /// Existing Thread content, only with this operation's Read admission.
+        Full(Thread),
+        /// The same committed creation without existing content.
+        Receipt(ThreadCreateReceipt),
+    }
+}
+
 /// What making a topic answers with.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
 #[serde(untagged)]
@@ -1066,14 +1313,21 @@ pub struct TopicWithThread {
 pub enum TopicCreateReply {
     /// The topic and its first thread, when one was asked for.
     WithThread(TopicWithThread),
+    /// The topic and its first thread were made without content disclosure.
+    ThreadReceipt(ThreadCreateReceipt),
     /// The topic alone.
     Topic(Topic),
+    /// The topic was made without permission to disclose its current content.
+    Receipt(NodeCreateReceipt),
 }
 
 /// Attaches a thread to a session that already exists in a provider's harness.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
 #[serde(deny_unknown_fields)]
 pub struct ThreadAdoptBody {
+    /// The confirmed initial contribution for this new thread's agent; omission accepts the topic preset.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub agent_access: Option<AgentAccessChoice>,
     /// The provider whose harness holds the session.
     pub provider_id: Id,
     /// The agent profile.
@@ -1093,6 +1347,10 @@ pub struct ThreadAdoptBody {
 /// the model it would run on, and what of what it held before would come with it.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
 pub struct AdoptPlan {
+    /// Initial agent gift bounds at the selected topic and resolved environment.
+    /// Absent until an environment is known, or when the session was already adopted.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub agent_access: Option<AgentAccessAvailability>,
     /// The session, as the harness lists it.
     pub session: crate::resources::NativeSession,
     /// The name the thread would have.
@@ -1525,73 +1783,562 @@ pub struct NodeArchiveResult {
     pub undo: Option<NodeArchivePlan>,
 }
 
+/// The accepted archive action without the node's existing content.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+pub struct NodeArchiveReceipt {
+    /// Restricted response marker.
+    pub projection: crate::common::ReceiptProjection,
+    /// The node whose own archive mark was addressed.
+    pub node_id: Id,
+    /// True for Archive, false for clearing this node's own mark.
+    pub archiving: bool,
+    /// The resulting node revision.
+    pub revision: Revision,
+    /// The same exact inverse confirmation, without its descriptive plan.
+    pub undo: Option<NodeArchiveBody>,
+}
+
+crate::common::full_or_receipt! {
+    /// The unchanged native full result or its restricted acknowledgement.
+    #[derive(Debug, Clone, PartialEq, Serialize, Deserialize, JsonSchema)]
+    pub enum NodeArchiveResponse {
+        /// Node and reviewed inverse admitted by this operation's own Read.
+        Full(NodeArchiveResult),
+        /// Effect identity, revision and a safe inverse confirmation only.
+        Receipt(NodeArchiveReceipt),
+    }
+}
+
+const fn archive_review_facets() -> [Facet; 6] {
+    [
+        Facet::required(
+            Manage,
+            &[
+                Object(K::Org),
+                Object(K::Project),
+                Object(K::Topic),
+                Object(K::Thread),
+            ],
+            Target::Resolved("archive_root"),
+        ),
+        Facet::required(
+            Read,
+            &[Object(K::Org)],
+            Target::ResolvedCollection("archive_names_orgs"),
+        ),
+        Facet::required(
+            Read,
+            &[Object(K::Project)],
+            Target::ResolvedCollection("archive_names_projects"),
+        ),
+        Facet::required(
+            Read,
+            &[Object(K::Topic)],
+            Target::ResolvedCollection("archive_names_topics"),
+        ),
+        Facet::required(
+            Read,
+            &[Object(K::Thread)],
+            Target::ResolvedCollection("archive_names_threads"),
+        ),
+        Facet::required(
+            Read,
+            &[Object(K::Environment)],
+            Target::ResolvedCollection("archive_environments"),
+        ),
+    ]
+}
+
+const fn archive_act_facets() -> [Facet; 16] {
+    let review = archive_review_facets();
+    [
+        review[0],
+        review[1],
+        review[2],
+        review[3],
+        review[4],
+        review[5],
+        Facet::response_content(
+            &[
+                Object(K::Org),
+                Object(K::Project),
+                Object(K::Topic),
+                Object(K::Thread),
+            ],
+            Target::Resolved("archive_result"),
+        ),
+        Facet::response_content(
+            &[Object(K::Org)],
+            Target::ResolvedCollection("archive_full_orgs"),
+        ),
+        Facet::response_content(
+            &[Object(K::Project)],
+            Target::ResolvedCollection("archive_full_projects"),
+        ),
+        Facet::response_content(
+            &[Object(K::Topic)],
+            Target::ResolvedCollection("archive_full_topics"),
+        ),
+        Facet::response_content(
+            &[Object(K::Thread)],
+            Target::ResolvedCollection("archive_full_threads"),
+        ),
+        Facet::response_content(
+            &[Object(K::Document)],
+            Target::ResolvedCollection("archive_full_documents"),
+        ),
+        Facet::response_content(
+            &[Object(K::Provider)],
+            Target::ResolvedCollection("archive_full_providers"),
+        ),
+        Facet::response_content(
+            &[Object(K::Agent)],
+            Target::ResolvedCollection("archive_full_agents"),
+        ),
+        Facet::response_content(
+            &[Object(K::Environment)],
+            Target::ResolvedCollection("archive_full_environments"),
+        ),
+        Facet::response_content(
+            &[Object(K::Machine)],
+            Target::ResolvedCollection("archive_full_machines"),
+        ),
+    ]
+}
+
+const fn org_reader_facets(primary: &'static str, collection: bool) -> [Facet; 6] {
+    [
+        Facet::required(
+            Read,
+            &[Object(K::Org)],
+            if collection {
+                Target::ResolvedCollection(primary)
+            } else {
+                Target::Resolved(primary)
+            },
+        ),
+        Facet::response_content(
+            &[Object(K::Document)],
+            Target::ResolvedCollection("org_readmes"),
+        ),
+        Facet::response_content(
+            &[Object(K::Org)],
+            Target::ResolvedCollection("org_names_orgs"),
+        ),
+        Facet::response_content(
+            &[Object(K::Project)],
+            Target::ResolvedCollection("org_names_projects"),
+        ),
+        Facet::response_content(
+            &[Object(K::Topic)],
+            Target::ResolvedCollection("org_names_topics"),
+        ),
+        Facet::response_content(
+            &[Object(K::Thread)],
+            Target::ResolvedCollection("org_names_threads"),
+        ),
+    ]
+}
+
+/// Actual native list rows and their optional or mandatory typed payload sources.
+const fn list_reader_facets(
+    action: orch_access_contract::key_scope::KeyAction,
+    kinds: &'static [orch_access_contract::key_scope::KeyTargetKind],
+    primary: &'static str,
+) -> [Facet; 2] {
+    [
+        Facet::required(action, kinds, Target::ResolvedCollection(primary)),
+        Facet::response_content(
+            &[
+                Object(K::Org),
+                Object(K::Project),
+                Object(K::Topic),
+                Object(K::Thread),
+                Object(K::Document),
+                Object(K::DocumentContainer),
+                Object(K::Provider),
+                Object(K::Agent),
+                Object(K::Environment),
+                Object(K::Host),
+                Object(K::Machine),
+                Object(K::Template),
+                Object(K::McpServer),
+                Object(K::Mount),
+                Object(K::Skill),
+            ],
+            Target::ResolvedCollection("node_sources"),
+        ),
+    ]
+}
+
+const fn move_preview_facets(
+    business: &'static [orch_access_contract::key_scope::KeyTargetKind],
+    destination: orch_access_contract::key_scope::KeyAction,
+) -> [Facet; 8] {
+    [
+        Facet::required(Manage, business, Target::Resolved("move_source")),
+        Facet::required(
+            destination,
+            business,
+            Target::ResolvedCollection("move_destinations"),
+        ),
+        Facet::response_content(business, Target::Resolved("move_result")),
+        Facet::response_content(
+            &[
+                Object(K::Org),
+                Object(K::Project),
+                Object(K::Topic),
+                Object(K::Thread),
+            ],
+            Target::ResolvedCollection("move_review_destinations"),
+        ),
+        Facet::response_content(
+            &[Object(K::Org)],
+            Target::ResolvedCollection("move_names_orgs"),
+        ),
+        Facet::response_content(
+            &[Object(K::Project)],
+            Target::ResolvedCollection("move_names_projects"),
+        ),
+        Facet::response_content(
+            &[Object(K::Topic)],
+            Target::ResolvedCollection("move_names_topics"),
+        ),
+        Facet::response_content(
+            &[Object(K::Thread)],
+            Target::ResolvedCollection("move_names_threads"),
+        ),
+    ]
+}
+
+const fn move_act_facets(
+    business: &'static [orch_access_contract::key_scope::KeyTargetKind],
+    destination: orch_access_contract::key_scope::KeyAction,
+) -> [Facet; 10] {
+    let review = move_preview_facets(business, destination);
+    [
+        review[0],
+        review[1],
+        review[2],
+        review[3],
+        review[4],
+        review[5],
+        review[6],
+        review[7],
+        Facet::response_content(
+            &[Object(K::Document)],
+            Target::ResolvedCollection("move_full_documents"),
+        ),
+        Facet::response_content(
+            &[Object(K::Environment)],
+            Target::ResolvedCollection("move_full_environments"),
+        ),
+    ]
+}
+
 crate::endpoints! {
     /// Exports the filtered permanent trail of this event-time place.
     NodeAuditExport: GET "/nodes/{id}/audit/export", Permission("audit.view"), query NodeAuditExportQuery, none, raw, 200;
     /// Lists the root orgs the caller owns or belongs to, their own org first.
-    OrgList: GET "/orgs", User, none, none, json Vec<Org>, 200;
+    OrgList: GET "/orgs", User, none, none, json Vec<Org>, 200,
+        operation Op::facets(&org_reader_facets("results", true));
     /// Makes a root org of kind team, with the caller as its first owner and member, where `orgs.created_by` lets the caller: anybody signed in, a system admin, or somebody a system admin invited to make one, whose invitation this uses up.
-    OrgCreate: POST "/orgs", User, none, json OrgCreateBody, json Org, 200;
+    OrgCreate: POST "/orgs", User, none, json OrgCreateBody, json OrgCreateResponse, 200,
+        operation Op::receipt(&Op::facets(&[
+            Facet::required(Manage, &[Object(K::Org)], Target::CurrentAccount),
+            Facet::response_content(&[Object(K::Org)], Target::Resolved("created_org")),
+            Facet::response_content(&[Object(K::Org),Object(K::Project),Object(K::Topic),Object(K::Thread),Object(K::Document),Object(K::DocumentContainer)],Target::ResolvedCollection("hierarchy_names")),
+        ]));
     /// Makes an org inside another, which people call a department.
-    OrgChildCreate: POST "/orgs/{id}/orgs", Permission("org.manage"), none, json OrgChildCreateBody, json Org, 200;
+    OrgChildCreate: POST "/orgs/{id}/orgs", Permission("org.manage"), none, json OrgChildCreateBody, json OrgCreateResponse, 200,
+        operation Op::receipt(&Op::facets(&[
+            Facet::required(Manage, &[Object(K::Org)], Target::PermissionObject),
+            Facet::response_content(&[Object(K::Org)], Target::Resolved("created_resource")),
+            Facet::response_content(&[Object(K::Org),Object(K::Project),Object(K::Topic),Object(K::Thread),Object(K::Document),Object(K::DocumentContainer)],Target::ResolvedCollection("hierarchy_names")),
+        ]));
     /// Shows what moving an org that lies in another would change, before anything does.
-    OrgMovePreview: POST "/orgs/{id}/move/preview", Rule("the same as the move itself"), none, json MovePreviewBody, json NodeMovePlan, 200;
+    OrgMovePreview: POST "/orgs/{id}/move/preview", Rule("the same as the move itself"), none, json MovePreviewBody, json NodeMovePreviewResponse, 200,
+        operation Op::receipt(&Op::facets(&move_preview_facets(&[Object(K::Org)],Manage)));
     /// Moves an org that lies in another under another org of the same root org.
-    OrgMove: POST "/orgs/{id}/move", Rule("org.manage on the org and on the org it moves under"), none, json NodeMoveBody, json Org, 200;
+    OrgMove: POST "/orgs/{id}/move", Rule("org.manage on the org and on the org it moves under"), none, json NodeMoveBody, json OrgMoveResponse, 200,
+        operation Op::receipt(&Op::facets(&move_act_facets(&[Object(K::Org)],Manage)));
     /// Reads an org by the short name of a root org, or by an address.
-    OrgBySlugGet: GET "/orgs/by-slug/{slug}", Permission("node.view"), none, none, json Org, 200;
+    OrgBySlugGet: GET "/orgs/by-slug/{slug}", Permission("node.view"), none, none, json Org, 200,
+        operation Op::facets(&org_reader_facets("org_by_slug", false));
+    /// Opens the reader's organization overview through its native bounded readers.
+    OrgOverviewGet: GET "/orgs/{id}/overview", Permission("node.view"), query OrgOverviewGetQuery, none, json OrgOverviewResponse, 200,
+        operation Op::facets(&crate::operations::org_overview_facets());
     /// Reads the nodes of an org's tree that the caller may view, whole or since a sequence.
-    OrgTreeGet: GET "/orgs/{id}/tree", User, query OrgTreeGetQuery, none, json OrgTreeGetReply, 200;
+    OrgTreeGet: GET "/orgs/{id}/tree", User, query OrgTreeGetQuery, none, json OrgTreeGetReply, 200,
+        operation Op::facets(&[
+            Facet::required(Read,&[Object(K::Org),Object(K::Project),Object(K::Topic),Object(K::Thread)],Target::ResolvedCollection("results")),
+            Facet::response_content(&[Object(K::Org),Object(K::Project),Object(K::Topic),Object(K::Thread)],Target::ResolvedCollection("hierarchy_names")),
+            Facet::response_content(&[Object(K::Org)],Target::ResolvedCollection("tree_settings")),
+        ]);
     /// Lists named places whose parent is unreadable and current named/owned document folders.
-    SharedList: GET "/shared", User, query crate::common::PageQuery, none, json SharedListReply, 200;
+    SharedList: GET "/shared", User, query crate::common::PageQuery, none, json SharedListReply, 200,
+        operation Op::facets(&list_reader_facets(Read, &[
+            Object(K::Org), Object(K::Project), Object(K::Topic), Object(K::Thread),
+            Object(K::Document), Object(K::DocumentContainer),
+        ], "results"));
     /// Reads a node of any kind.
-    NodeGet: GET "/nodes/{id}", Permission("node.view"), query crate::nodes::DeletedInspectionQuery, none, json Node, 200;
+    NodeGet: GET "/nodes/{id}", Permission("node.view"), query crate::nodes::DeletedInspectionQuery, none, json Node, 200,
+        operation Op::variants(&[
+            Variant {
+                name: "read",
+                selector: "inspect_deleted is not true",
+                facets: &[Facet::required(
+                    Read,
+                    &[
+                        Object(K::Org),
+                        Object(K::Project),
+                        Object(K::Topic),
+                        Object(K::Thread),
+                    ],
+                    Target::PermissionObject,
+                )],
+            },
+            Variant {
+                name: "inspect_deleted",
+                selector: "inspect_deleted is true; apply the stored object restoration rule",
+                facets: &[Facet::required(
+                    Manage,
+                    &[
+                        Object(K::Org),
+                        Object(K::Project),
+                        Object(K::Topic),
+                        Object(K::Thread),
+                    ],
+                    Target::PermissionObject,
+                )],
+            },
+        ]);
     /// Changes a node's name, description or icon colour.
-    NodeUpdate: PATCH "/nodes/{id}", Permission("node.manage"), none, json NodeUpdateBody, json Node, 200;
+    NodeUpdate: PATCH "/nodes/{id}", Permission("node.manage"), none, json NodeUpdateBody, json Node, 200,
+        operation Op::returning(
+            Manage,
+            &[
+                Object(K::Org),
+                Object(K::Project),
+                Object(K::Topic),
+                Object(K::Thread),
+            ],
+            Target::PermissionObject,
+        );
     /// Lists what lies directly inside a node, by when it was made.
-    NodeChildList: GET "/nodes/{id}/children", Permission("node.view"), query NodeChildListQuery, none, json Page<Listed<Node>>, 200;
+    NodeChildList: GET "/nodes/{id}/children", Permission("node.view"), query NodeChildListQuery, none, json Page<Listed<Node>>, 200,
+        operation Op::variants(&[
+            Variant {
+                name: "read",
+                selector: "inspect_deleted is not true",
+                facets: &list_reader_facets(Read, &[Object(K::Org), Object(K::Project), Object(K::Topic), Object(K::Thread)], "listed_nodes"),
+            },
+            Variant {
+                name: "inspect_deleted",
+                selector: "inspect_deleted is true; apply the stored object restoration rule",
+                facets: &list_reader_facets(Manage, &[Object(K::Org), Object(K::Project), Object(K::Topic), Object(K::Thread)], "listed_nodes"),
+            },
+        ]);
     /// Makes a project in an org, at whatever level it lies.
-    ProjectCreate: POST "/orgs/{id}/projects", Permission("org.interact"), none, json ProjectCreateBody, json Project, 200;
+    ProjectCreate: POST "/orgs/{id}/projects", Permission("org.interact"), none, json ProjectCreateBody, json ProjectCreateResponse, 200,
+        operation Op::receipt(&Op::facets(&[
+            Facet::required(Write, &[Object(K::Project)], Target::PermissionObject),
+            Facet::response_content(&[Object(K::Project)], Target::Resolved("created_resource")),
+            Facet::response_content(&[Object(K::Org)], Target::ResolvedCollection("created_names_orgs")),
+            Facet::response_content(&[Object(K::Project)], Target::ResolvedCollection("created_names_projects")),
+        ]));
     /// Makes a project inside a project, beside its topics: a folder, which is a project like any other.
-    ProjectChildCreate: POST "/projects/{id}/projects", Permission("project.interact"), none, json ProjectCreateBody, json Project, 200;
+    ProjectChildCreate: POST "/projects/{id}/projects", Permission("project.interact"), none, json ProjectCreateBody, json ProjectCreateResponse, 200,
+        operation Op::receipt(&Op::facets(&[
+            Facet::required(Write, &[Object(K::Project)], Target::PermissionObject),
+            Facet::response_content(&[Object(K::Project)], Target::Resolved("created_resource")),
+            Facet::response_content(&[Object(K::Org)], Target::ResolvedCollection("created_names_orgs")),
+            Facet::response_content(&[Object(K::Project)], Target::ResolvedCollection("created_names_projects")),
+        ]));
     /// Shows what moving a project would change, before anything does.
-    ProjectMovePreview: POST "/projects/{id}/move/preview", Rule("the same as the move itself"), none, json MovePreviewBody, json NodeMovePlan, 200;
+    ProjectMovePreview: POST "/projects/{id}/move/preview", Rule("the same as the move itself"), none, json MovePreviewBody, json NodeMovePreviewResponse, 200,
+        operation Op::receipt(&Op::facets(&move_preview_facets(&[Object(K::Project)],Write)));
     /// Moves a project to another org, or into another project, of its root org.
-    ProjectMove: POST "/projects/{id}/move", Rule("project.manage on the project, and org.interact on the org or project.interact on the project it moves under"), none, json NodeMoveBody, json Project, 200;
+    ProjectMove: POST "/projects/{id}/move", Rule("project.manage on the project, and org.interact on the org or project.interact on the project it moves under"), none, json NodeMoveBody, json ProjectMoveResponse, 200,
+        operation Op::receipt(&Op::facets(&move_act_facets(&[Object(K::Project)],Write)));
     /// Makes a topic in a project, and with it a first thread if one is asked for.
-    TopicCreate: POST "/projects/{id}/topics", Permission("project.create_topics"), none, json TopicCreateBody, json TopicCreateReply, 200;
+    TopicCreate: POST "/projects/{id}/topics", Permission("project.create_topics"), none, json TopicCreateBody, json TopicCreateReply, 200,
+        operation Op::receipt(&Op::variants(&[
+            Variant {
+                name: "create",
+                selector: "first_thread is absent",
+                facets: &[
+                    Facet::required(Write, &[Object(K::Topic)], Target::PermissionObject),
+                    Facet::response_content(&[Object(K::Topic)], Target::Resolved("created_resource")),
+                    Facet::response_content(&[Object(K::Org)], Target::ResolvedCollection("created_names_orgs")),
+                    Facet::response_content(&[Object(K::Project)], Target::ResolvedCollection("created_names_projects")),
+                    Facet::response_content(&[Object(K::Environment)], Target::ResolvedCollection("created_environments")),
+                ],
+            },
+            Variant {
+                name: "with_thread",
+                selector: "first_thread is present",
+                facets: &[
+                    Facet::required(Write, &[Object(K::Topic)], Target::PermissionObject),
+                    Facet::required(
+                        Write,
+                        &[Object(K::Thread)],
+                        Target::Resolved("first_thread_destination"),
+                    ),
+                    Facet::response_content(&[Object(K::Topic)], Target::Resolved("created_resources")),
+                    Facet::response_content(&[Object(K::Thread)], Target::Resolved("created_thread")),
+                    Facet::required(Write, &[Object(K::Environment)], Target::ResolvedCollection("creator_new_environment_homes")),
+                    Facet::required(Read, &[Object(K::Thread)], Target::ResolvedCollection("creator_initial_file_threads")),
+                    Facet::required(Read, &[Object(K::Environment)], Target::ResolvedCollection("creator_initial_file_environments")),
+                    Facet::required(Manage, &[Object(K::Environment)], Target::ResolvedCollection("creator_file_environments")),
+                    Facet::required(Read, &[Object(K::Environment)], Target::ResolvedCollection("creator_file_sources")),
+                    Facet::required(Manage, &[Object(K::Project)], Target::ResolvedCollection("creator_agent_projects")),
+                    Facet::required(Manage, &[Object(K::Topic)], Target::ResolvedCollection("creator_agent_topics")),
+                    Facet::required(Manage, &[Object(K::Thread)], Target::ResolvedCollection("creator_agent_threads")),
+                    Facet::required(Read, &[Identity(I::Chat)], Target::ResolvedCollection("message_source_chats")),
+                    Facet::required(Read, &[Object(K::Thread)], Target::ResolvedCollection("message_source_threads")),
+                    Facet::required(Read, &[Object(K::Document)], Target::ResolvedCollection("message_source_documents")),
+                    Facet::required(Read, &[Object(K::Environment)], Target::ResolvedCollection("message_source_environments")),
+                    Facet::required(Read, &[Identity(I::Upload)], Target::ResolvedCollection("message_retained_uploads")),
+                    Facet::response_content(&[Object(K::Org)], Target::ResolvedCollection("creator_names_orgs")),
+                    Facet::response_content(&[Object(K::Project)], Target::ResolvedCollection("creator_names_projects")),
+                    Facet::response_content(&[Object(K::Topic)], Target::ResolvedCollection("creator_names_topics")),
+                    Facet::response_content(&[Object(K::Environment)], Target::ResolvedCollection("creator_environments")),
+
+                ],
+            },
+        ]));
     /// Shows what moving a topic to another project or folder would change, before anything does.
-    TopicMovePreview: POST "/topics/{id}/move/preview", Rule("the same as the move itself"), none, json MovePreviewBody, json NodeMovePlan, 200;
+    TopicMovePreview: POST "/topics/{id}/move/preview", Rule("the same as the move itself"), none, json MovePreviewBody, json NodeMovePreviewResponse, 200,
+        operation Op::receipt(&Op::facets(&move_preview_facets(&[Object(K::Topic)],Write)));
     /// Moves a topic with its threads to another project or folder of its root org.
-    TopicMove: POST "/topics/{id}/move", Rule("topic.manage on the topic, and project.create_topics on the project or folder it moves to"), none, json NodeMoveBody, json Topic, 200;
+    TopicMove: POST "/topics/{id}/move", Rule("topic.manage on the topic, and project.create_topics on the project or folder it moves to"), none, json NodeMoveBody, json TopicMoveResponse, 200,
+        operation Op::receipt(&Op::facets(&move_act_facets(&[Object(K::Topic)],Write)));
     /// Makes a thread in a topic.
-    ThreadCreate: POST "/topics/{id}/threads", Permission("topic.start_threads"), none, json CreateThread, json Thread, 200;
+    ThreadCreate: POST "/topics/{id}/threads", Permission("topic.start_threads"), none, json CreateThread, json ThreadCreateResponse, 200,
+        operation Op::receipt(&Op::facets(&[
+            Facet::required(Write, &[Object(K::Thread)], Target::PermissionObject),
+            Facet::response_content(&[Object(K::Thread)], Target::Resolved("created_resource")),
+                    Facet::required(Write, &[Object(K::Environment)], Target::ResolvedCollection("creator_new_environment_homes")),
+                    Facet::required(Read, &[Object(K::Thread)], Target::ResolvedCollection("creator_initial_file_threads")),
+                    Facet::required(Read, &[Object(K::Environment)], Target::ResolvedCollection("creator_initial_file_environments")),
+                    Facet::required(Manage, &[Object(K::Environment)], Target::ResolvedCollection("creator_file_environments")),
+                    Facet::required(Read, &[Object(K::Environment)], Target::ResolvedCollection("creator_file_sources")),
+                    Facet::required(Manage, &[Object(K::Project)], Target::ResolvedCollection("creator_agent_projects")),
+                    Facet::required(Manage, &[Object(K::Topic)], Target::ResolvedCollection("creator_agent_topics")),
+                    Facet::required(Manage, &[Object(K::Thread)], Target::ResolvedCollection("creator_agent_threads")),
+                    Facet::required(Read, &[Identity(I::Chat)], Target::ResolvedCollection("message_source_chats")),
+                    Facet::required(Read, &[Object(K::Thread)], Target::ResolvedCollection("message_source_threads")),
+                    Facet::required(Read, &[Object(K::Document)], Target::ResolvedCollection("message_source_documents")),
+                    Facet::required(Read, &[Object(K::Environment)], Target::ResolvedCollection("message_source_environments")),
+                    Facet::required(Read, &[Identity(I::Upload)], Target::ResolvedCollection("message_retained_uploads")),
+                    Facet::response_content(&[Object(K::Org)], Target::ResolvedCollection("creator_names_orgs")),
+                    Facet::response_content(&[Object(K::Project)], Target::ResolvedCollection("creator_names_projects")),
+                    Facet::response_content(&[Object(K::Topic)], Target::ResolvedCollection("creator_names_topics")),
+                    Facet::response_content(&[Object(K::Environment)], Target::ResolvedCollection("creator_environments")),
+        ]));
     /// Attaches a new thread to a session that already exists in a provider's harness.
-    ThreadAdopt: POST "/topics/{id}/threads/adopt", Rule("topic.start_threads, the use of the provider and agent, and environment.use on the environment"), none, json ThreadAdoptBody, json Thread, 200;
+    ThreadAdopt: POST "/topics/{id}/threads/adopt", Rule("topic.start_threads, the use of the provider and agent, and environment.use on the environment"), none, json ThreadAdoptBody, json Thread, 200,
+        operation Op::facets(&[
+            Facet::required(Write, &[Object(K::Thread)], Target::PermissionObject),
+            Facet::required(Read, &[Object(K::Provider)], Target::Resolved("native_session")),
+            Facet::required(Write, &[Object(K::Provider),Object(K::Agent),Object(K::Environment)], Target::ResolvedCollection("chosen_binding")),
+            Facet::response_content(&[Object(K::Thread)], Target::Resolved("created_thread")),
+            Facet::required(Write, &[Object(K::Environment)], Target::ResolvedCollection("creator_new_environment_homes")),
+            Facet::required(Read, &[Object(K::Thread)], Target::ResolvedCollection("creator_initial_file_threads")),
+            Facet::required(Read, &[Object(K::Environment)], Target::ResolvedCollection("creator_initial_file_environments")),
+            Facet::required(Manage, &[Object(K::Environment)], Target::ResolvedCollection("creator_file_environments")),
+            Facet::required(Read, &[Object(K::Environment)], Target::ResolvedCollection("creator_file_sources")),
+            Facet::required(Manage, &[Object(K::Project)], Target::ResolvedCollection("creator_agent_projects")),
+            Facet::required(Manage, &[Object(K::Topic)], Target::ResolvedCollection("creator_agent_topics")),
+            Facet::required(Manage, &[Object(K::Thread)], Target::ResolvedCollection("creator_agent_threads")),
+            Facet::required(Read, &[Identity(I::Chat)], Target::ResolvedCollection("message_source_chats")),
+            Facet::required(Read, &[Object(K::Thread)], Target::ResolvedCollection("message_source_threads")),
+            Facet::required(Read, &[Object(K::Document)], Target::ResolvedCollection("message_source_documents")),
+            Facet::required(Read, &[Object(K::Environment)], Target::ResolvedCollection("message_source_environments")),
+            Facet::required(Read, &[Identity(I::Upload)], Target::ResolvedCollection("message_retained_uploads")),
+            Facet::response_content(&[Object(K::Org)], Target::ResolvedCollection("creator_names_orgs")),
+            Facet::response_content(&[Object(K::Project)], Target::ResolvedCollection("creator_names_projects")),
+            Facet::response_content(&[Object(K::Topic)], Target::ResolvedCollection("creator_names_topics")),
+            Facet::response_content(&[Object(K::Environment)], Target::ResolvedCollection("creator_environments")),
+        ]);
     /// Shows what adopting a session would do (where it would run, the model, the history it brings), before anything does.
-    ThreadAdoptPreview: POST "/topics/{id}/threads/adopt/preview", Rule("the same as adopting it"), none, json ThreadAdoptBody, json AdoptPlan, 200;
+    ThreadAdoptPreview: POST "/topics/{id}/threads/adopt/preview", Rule("the same as adopting it"), none, json ThreadAdoptBody, json AdoptPlan, 200,
+        operation Op::facets(&[
+            Facet::required(Write, &[Object(K::Thread)], Target::PermissionObject),
+            Facet::required(Read, &[Object(K::Provider)], Target::Resolved("native_session")),
+            Facet::required(Write, &[Object(K::Provider),Object(K::Agent),Object(K::Environment)], Target::ResolvedCollection("chosen_binding")),
+            Facet::required(Read, &[Object(K::Topic),Object(K::Environment)], Target::ResolvedCollection("preview_content")),
+            Facet::response_content(&[Object(K::Org)], Target::ResolvedCollection("preview_names_orgs")),
+        ]);
     /// Lists the topics of a project that the caller may view.
-    TopicList: GET "/projects/{id}/topics", Permission("node.view"), query TopicListQuery, none, json Page<Listed<Topic>>, 200;
+    TopicList: GET "/projects/{id}/topics", Permission("node.view"), query TopicListQuery, none, json Page<Listed<Topic>>, 200,
+        operation Op::facets(&list_reader_facets(Read, &[Object(K::Topic)], "listed_nodes"));
     /// Changes a topic's status or tags.
-    TopicUpdate: PATCH "/topics/{id}", Permission("topic.interact"), none, json TopicUpdateBody, json Topic, 200;
+    TopicUpdate: PATCH "/topics/{id}", Permission("topic.interact"), none, json TopicUpdateBody, json Topic, 200,
+        operation Op::returning(Write, &[Object(K::Topic)], Target::PermissionObject);
     /// Replaces the tags assigned to an org, project, topic or thread.
-    NodeTagSet: PUT "/nodes/{id}/tags", Permission("node.interact"), none, json NodeTagSetBody, json Node, 200;
+    NodeTagSet: PUT "/nodes/{id}/tags", Permission("node.interact"), none, json NodeTagSetBody, json Node, 200,
+        operation Op::returning(
+            Write,
+            &[
+                Object(K::Org),
+                Object(K::Project),
+                Object(K::Topic),
+                Object(K::Thread),
+            ],
+            Target::PermissionObject,
+        );
     /// Hands a title, a description or the tags back to automation, or asks it for a new value.
-    NodeAuto: POST "/nodes/{id}/auto", Permission("node.manage"), none, json NodeAutoBody, json Node, 200;
+    NodeAuto: POST "/nodes/{id}/auto", Permission("node.manage"), none, json NodeAutoBody, json Node, 200,
+        operation Op::returning(
+            Manage,
+            &[
+                Object(K::Org),
+                Object(K::Project),
+                Object(K::Topic),
+                Object(K::Thread),
+            ],
+            Target::PermissionObject,
+        );
     /// Archives an org, a project, a topic or a thread, with everything inside it; the system has no archive.
-    NodeArchive: POST "/nodes/{id}/archive", Rule("node.manage or node.archive on the node, and its current reviewed stamp"), none, json NodeArchiveBody, json NodeArchiveResult, 200;
+    NodeArchive: POST "/nodes/{id}/archive", Rule("node.manage or node.archive on the node, and its current reviewed stamp"), none, json NodeArchiveBody, json NodeArchiveResponse, 200,
+        operation Op::receipt(&Op::facets(&archive_act_facets()));
     /// Takes a node out of the archive.
-    NodeUnarchive: POST "/nodes/{id}/unarchive", Rule("node.manage or node.archive on the node, and its current reviewed stamp"), none, json NodeArchiveBody, json NodeArchiveResult, 200;
+    NodeUnarchive: POST "/nodes/{id}/unarchive", Rule("node.manage or node.archive on the node, and its current reviewed stamp"), none, json NodeArchiveBody, json NodeArchiveResponse, 200,
+        operation Op::receipt(&Op::facets(&archive_act_facets()));
     /// Reviews archiving the complete subtree without changing its work or archive marks.
-    NodeArchivePreview: POST "/nodes/{id}/archive/preview", Rule("node.manage or node.archive on the node"), none, none, json NodeArchivePlan, 200;
+    NodeArchivePreview: POST "/nodes/{id}/archive/preview", Rule("node.manage or node.archive on the node"), none, none, json NodeArchivePlan, 200,
+        operation Op::facets(&archive_review_facets());
     /// Reviews clearing this node's own archive mark; nothing is restarted.
-    NodeUnarchivePreview: POST "/nodes/{id}/unarchive/preview", Rule("node.manage or node.archive on the node"), none, none, json NodeArchivePlan, 200;
+    NodeUnarchivePreview: POST "/nodes/{id}/unarchive/preview", Rule("node.manage or node.archive on the node"), none, none, json NodeArchivePlan, 200,
+        operation Op::facets(&archive_review_facets());
     /// Lists the history of a place and what its threads did, newest first.
     NodeActivityList: GET "/nodes/{id}/activity", Permission("node.view"), query NodeActivityListQuery, none, json Page<ActivityEntry>, 200;
     /// Sets how much of a node the caller wants to be told.
-    NodeSubscriptionSet: PUT "/nodes/{id}/subscription", Permission("node.view"), none, json NodeSubscriptionSetBody, json Access, 200;
+    NodeSubscriptionSet: PUT "/nodes/{id}/subscription", Permission("node.view"), none, json NodeSubscriptionSetBody, json Access, 200,
+        operation Op::returning(
+            Write,
+            &[
+                Object(K::Org),
+                Object(K::Project),
+                Object(K::Topic),
+                Object(K::Thread),
+            ],
+            Target::PermissionObject,
+        );
     /// Removes the caller's own subscription row on a node.
-    NodeSubscriptionDelete: DELETE "/nodes/{id}/subscription", Permission("node.view"), none, none, json Access, 200;
+    NodeSubscriptionDelete: DELETE "/nodes/{id}/subscription", Permission("node.view"), none, none, json Access, 200,
+        operation Op::returning(
+            Write,
+            &[
+                Object(K::Org),
+                Object(K::Project),
+                Object(K::Topic),
+                Object(K::Thread),
+            ],
+            Target::PermissionObject,
+        );
     /// Lists the audit trail of a place, newest first.
     NodeAuditList: GET "/nodes/{id}/audit", Permission("audit.view"), query NodeAuditListQuery, none, json Page<AuditEntry>, 200;
 }
@@ -1699,6 +2446,35 @@ mod tests {
             base.extend(more);
         }
         written
+    }
+
+    #[test]
+    fn an_agent_creation_choice_preserves_nothing_and_custom_areas() {
+        let omitted: CreateThread = serde_json::from_value(json!({})).unwrap();
+        assert!(omitted.agent_access.is_none());
+        for choice in [
+            json!({"where":"nothing","parts":{}}),
+            json!({"where":"thread","parts":{"chat":"read"}}),
+            json!({"where":"topic","parts":{"documents":"edit"}}),
+            json!({"where":"project","parts":{"timeline":"write","documents":"manage"}}),
+            json!({"where":"topic","parts":{"chat":"manage","timeline":"read"}}),
+            json!({"where":"project","parts":{"timeline":"manage","chat":"manage","documents":"manage"}}),
+            json!({"where":"topic","parts":{"thread_fork":true}}),
+            json!({"where":"project","parts":{"timeline":"read","thread_archive":true}}),
+        ] {
+            let written = json!({"agent_access":choice});
+            let parsed: CreateThread = serde_json::from_value(written.clone()).unwrap();
+            assert_eq!(serde_json::to_value(parsed).unwrap(), written);
+        }
+        for choice in [
+            json!({"where":"org","parts":{}}),
+            json!({"where":"topic","parts":{"documents":"write"}}),
+            json!({"where":"topic","parts":{"chat":"edit"}}),
+            json!({"where":"topic","parts":{"thread_fork":"manage"}}),
+            json!({"where":"topic","parts":{},"owner_as_admin":true}),
+        ] {
+            assert!(serde_json::from_value::<AgentAccessChoice>(choice).is_err());
+        }
     }
 
     #[test]

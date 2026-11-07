@@ -417,6 +417,17 @@ pub async fn enroll_machine(
     let data = DataDir::open(dir).with_context(|| format!("opening {}", dir.display()))?;
     let config = data.config(var).context("reading config.toml")?;
     let choices = crate::enrollment_options::selected(options, &config)?;
+    let transport = HttpsEnroll::new(Arc::clone(&clock), None);
+    let gateway = orch_connector_core::gateway_selector::configure_enrollment(
+        &data,
+        &options.url,
+        &options.token,
+        &transport,
+        options.gateway.as_deref(),
+        true,
+    )
+    .await
+    .context("choosing the primary gateway")?;
     let name = options
         .name
         .clone()
@@ -433,17 +444,18 @@ pub async fn enroll_machine(
     let enrolled = orch_connector_core::enrollment::enroll_with_choices(
         &inputs,
         &data,
-        &HttpsEnroll::new(Arc::clone(&clock), None),
+        &transport,
         clock.as_ref(),
         &choices,
     )
     .await
     .context("enrolling")?;
     Ok(format!(
-        "Enrolled {} ({}) in {}.\nThe machine plays the roles {}; `orch-connector run` holds the session.",
+        "Enrolled {} ({}) in {}.\nPrimary gateway choice: {}.\nThe machine plays the roles {}; `orch-connector run` holds the session.",
         enrolled.record.name,
         enrolled.record.machine_id,
         enrolled.record.system.name,
+        orch_connector_core::gateway_selector::choice_name(&gateway, &enrolled.record.gateways),
         inputs
             .roles
             .iter()

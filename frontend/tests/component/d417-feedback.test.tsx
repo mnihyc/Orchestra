@@ -66,6 +66,21 @@ for (const language of ['en','zh-CN'] as const) describe('resource feedback in '
       expect(blockedDetail(`the approval mode ${mode} is not among those allowed here`,t)).toBe(t('threadConfinement.approvalNotAllowed'));
     }
   });
+  it('names the selected approval mode in localized engine refusals and preserves unknown details',()=>{
+    const english=i18n.getFixedT('en');
+    for(const [name,mode] of [['Ask','ask'],['On request','on_request'],['Auto','auto'],['Bypass','bypass']] as const){
+      for(const key of ['approvalNotAllowed','approvalUnsupported'] as const){
+        const raw=`${name}: ${english(`threadConfinement.${key}`)}`;
+        expect(blockedDetail(raw,t)).toBe(`${t(`composer.mode.labels.${mode}`)}: ${t(`threadConfinement.${key}`)}`);
+      }
+    }
+    for(const raw of [
+      `Native: ${english('threadConfinement.approvalUnsupported')}`,
+      `auto: ${english('threadConfinement.approvalUnsupported')}`,
+      `Auto: ${english('threadConfinement.approvalUnsupported')} Vendor explanation.`,
+      'Auto: the vendor supplied this exact detail',
+    ])expect(blockedDetail(raw,t)).toBe(raw);
+  });
   it('says when the offline time is unknown and ignores malformed host records',async()=>{
     const error=new ApiError({type:'orch:error:plan.blocked',code:'plan.blocked',status:409,title:'Blocked',detail:'No host',request_id:'request',host_blockers:[
       {host:{id:'a',name:'docker-1'},online:false,offline_since:'not-a-time',message:'offline'},

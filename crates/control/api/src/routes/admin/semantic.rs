@@ -10,19 +10,27 @@ use crate::routes::admin::admin_of;
 use orch_api_contract::admin::{
     AdminSemanticSearchGet, AdminSemanticSearchKeep, AdminSemanticSearchRebuild,
     SemanticGeneration, SemanticSearchKeepBody, SemanticSearchOrg, SemanticSearchOverview,
-    SemanticState,
+    SemanticSearchResponse, SemanticState,
 };
 use orch_api_contract::nodes::{NodeKind, NodeRef};
-use orch_db::DbError;
 use orch_engine::semantic::state::{Generation, OrgState};
-use serde_json::json;
+
+mod action;
 
 /// Binds this module's requests.
 pub fn mount(registry: &mut Registry) {
     registry
         .on(AdminSemanticSearchGet, overview)
-        .on(AdminSemanticSearchRebuild, rebuild)
-        .on(AdminSemanticSearchKeep, keep);
+        .on_with_operation(
+            AdminSemanticSearchRebuild,
+            crate::key_operations::native::effects::prepare::<action::Action<action::Rebuild>>,
+            rebuild,
+        )
+        .on_with_operation(
+            AdminSemanticSearchKeep,
+            crate::key_operations::native::effects::prepare::<action::Action<action::Keep>>,
+            keep,
+        );
 }
 
 fn state_of(word: &str) -> SemanticState {
@@ -114,132 +122,15 @@ async fn overview(ctx: Ctx, (): (), (): ()) -> ApiResult<SemanticSearchOverview>
     })
 }
 
-async fn rebuild(ctx: Ctx, (): (), (): ()) -> ApiResult<SemanticSearchOrg> {
-    admin_of(&ctx)?;
-    let id = ctx.id("id")?;
-    let mut conn = ctx.app.db.acquire().await?;
-    let (_, name) = orch_db::queries::semantic::root_orgs(&mut conn)
-        .await?
-        .into_iter()
-        .find(|(org, _)| *org == id)
-        .ok_or_else(ApiError::not_found)?;
-    drop(conn);
-    let engine = &ctx.app.engine;
-    engine
-        .semantic_rebuild_in_place(id)
-        .await
-        .map_err(ApiError::internal)?;
-    let state = engine
-        .semantic_state(id)
-        .await
-        .map_err(ApiError::internal)?;
-    engine.kick();
-    Ok(view(org_ref(id, name), state))
+async fn rebuild(ctx: Ctx, (): (), (): ()) -> ApiResult<SemanticSearchResponse> {
+    action::run::<action::Rebuild>(ctx).await
 }
 
-/// Keeps the whole vector configuration together, so retaining a model also retains its prompts and cuts.
-async fn keep(ctx: Ctx, (): (), body: SemanticSearchKeepBody) -> ApiResult<SemanticSearchOrg> {
-    use orch_api_contract::common::ErrorCode;
-    use orch_db::queries::semantic as rows;
-    use orch_settings::write::{Write, write};
-    use orch_settings_contract::registry::keys;
-
-    admin_of(&ctx)?;
-    let org = ctx.id("id")?;
-    let (ctx, mut tx, principal) = crate::routes::nodes::action(&ctx).await?;
-    admin_of(&ctx)?;
-    let name = rows::root_orgs(&mut tx)
-        .await?
-        .into_iter()
-        .find(|(id, _)| *id == org)
-        .map(|(_, name)| name)
-        .ok_or_else(ApiError::not_found)?;
-    let claimed: Option<chrono::DateTime<chrono::Utc>> =
-        sqlx::query_scalar("SELECT claimed_until FROM search_indexes WHERE org_id = $1 FOR UPDATE")
-            .bind(org)
-            .fetch_optional(&mut *tx)
-            .await
-            .map_err(DbError::from)?
-            .flatten();
-    if claimed.is_some_and(|until| until > ctx.now) {
-        return Err(ApiError::new(
-            ErrorCode::ConflictStaleRevision,
-            "The indexer is finishing a batch; try again when it has finished.",
-        ));
-    }
-    let generations = rows::generations(&mut tx, org).await?;
-    let active = generations
-        .iter()
-        .find(|generation| generation.state == "active" && generation.id == body.generation_id)
-        .ok_or_else(|| {
-            ApiError::new(
-                ErrorCode::ConflictStaleRevision,
-                "The active index changed; read the current model before choosing.",
-            )
-        })?;
-    let chunk_tokens = active
-        .chunking
-        .rsplit_once(':')
-        .and_then(|(_, size)| size.parse::<i64>().ok())
-        .ok_or_else(|| ApiError::internal("the active index's chunk size is unreadable"))?;
-    let mut named = json!({"provider_id":active.provider_id,"model_name":active.model_name,
-        "query_prefix":active.query_prefix,"document_prefix":active.document_prefix});
-    if let Some(dimensions) = active.asked_dimensions {
-        named["dimensions"] = json!(dimensions);
-    }
-    let mut tuning = orch_settings::get::<serde_json::Value>(
-        &mut tx,
-        orch_settings::Place::Node(org),
-        keys::SEARCH_SEMANTIC_TUNING,
-    )
-    .await
-    .map_err(ApiError::internal)?
-    .ok_or_else(|| ApiError::internal("search tuning has no value"))?;
-    tuning["chunk_tokens"] = json!(chunk_tokens);
-    let policy = crate::routes::nodes::policy_at(&mut tx, org).await?;
-    let origin = crate::sign_in::origin(&ctx);
-    for (key, value) in [
-        (keys::SEARCH_SEMANTIC_EMBEDDINGS, named),
-        (keys::SEARCH_SEMANTIC_TUNING, tuning),
-    ] {
-        let may_lock =
-            crate::routes::settings::permit(&mut tx, &principal, org, key, policy).await?;
-        let written = write(
-            &mut tx,
-            &Write {
-                actor: orch_db::audit::Actor::User(principal.user()),
-                target: orch_settings::Target::Node(org),
-                key,
-                value,
-                locked: None,
-                expected_revision: None,
-                may_lock,
-                origin: &origin,
-            },
-            ctx.now,
-        )
-        .await;
-        if let Err(error) = written {
-            return Err(
-                crate::routes::settings::write_failed(&mut tx, &principal, org, error).await,
-            );
-        }
-    }
-    for generation in &generations {
-        if generation.state == "building" {
-            rows::drop_generation(&mut tx, generation.id).await?;
-        }
-    }
-    rows::generation_writer(&mut tx, active.id, Some(principal.user())).await?;
-    rows::reset_index(&mut tx, org, ctx.now).await?;
-    orch_db::queries::hierarchy::stamp(&mut tx, org).await?;
-    tx.commit().await.map_err(DbError::from)?;
-    ctx.app.engine.kick();
-    let state = ctx
-        .app
-        .engine
-        .semantic_state(org)
-        .await
-        .map_err(ApiError::internal)?;
-    Ok(view(org_ref(org, name), state))
+/// Keeps the model, prompts and cuts through the same native prepared writer.
+async fn keep(
+    ctx: Ctx,
+    (): (),
+    _body: SemanticSearchKeepBody,
+) -> ApiResult<SemanticSearchResponse> {
+    action::run::<action::Keep>(ctx).await
 }

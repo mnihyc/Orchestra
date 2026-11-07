@@ -1,5 +1,10 @@
 //! Reviewed reparenting of a main conversation while its owner, native history and workspace stay.
 
+use crate::operations::{FacetSpec as Facet, OperationSpec as Op, TargetResolver as Target};
+use orch_access_contract::key_scope::KeyAction::{Manage, Write};
+use orch_access_contract::key_scope::KeyTargetKind::Object;
+use orch_access_contract::permissions::ObjectKind as K;
+
 use crate::environment::EnvironmentRef;
 use crate::nodes::NodeMovePlan;
 use crate::routes::Access::Rule;
@@ -52,9 +57,75 @@ pub struct ThreadMoveBody {
     pub preflight_id: Id,
 }
 
+/// Generated review identity and safe status without existing settings, names or workspace.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+pub struct ThreadMoveReviewReceipt {
+    pub projection: crate::common::ReceiptProjection,
+    pub thread_id: Id,
+    pub parent_id: Id,
+    pub preflight_id: Id,
+    pub expected_revision: Revision,
+    pub expires_at: orch_types::Time,
+    pub blocker_codes: Vec<String>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+#[serde(untagged)]
+pub enum ThreadMovePreviewResponse {
+    Receipt(ThreadMoveReviewReceipt),
+    Full(Box<ThreadMovePlan>),
+}
+impl ThreadMovePreviewResponse {
+    pub fn into_full(self) -> Result<ThreadMovePlan, ThreadMoveReviewReceipt> {
+        match self {
+            Self::Full(value) => Ok(*value),
+            Self::Receipt(value) => Err(value),
+        }
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+pub struct ThreadMoveReceipt {
+    pub projection: crate::common::ReceiptProjection,
+    pub thread_id: Id,
+    pub parent_id: Id,
+    pub revision: Revision,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+#[serde(untagged)]
+pub enum ThreadMoveResponse {
+    Receipt(ThreadMoveReceipt),
+    Full(Box<Thread>),
+}
+impl ThreadMoveResponse {
+    pub fn into_full(self) -> Result<Thread, ThreadMoveReceipt> {
+        match self {
+            Self::Full(value) => Ok(*value),
+            Self::Receipt(value) => Err(value),
+        }
+    }
+}
+
 crate::endpoints! {
     /// Reviews moving this main thread to another topic without changing its workspace.
-    ThreadMovePreview: POST "/threads/{id}/move/preview", Rule("thread.manage at the source and topic.start_threads at the destination, within the same root tree"), none, json ThreadMovePreviewBody, json ThreadMovePlan, 200;
+    ThreadMovePreview: POST "/threads/{id}/move/preview", Rule("thread.manage at the source and topic.start_threads at the destination, within the same root tree"), none, json ThreadMovePreviewBody, json ThreadMovePreviewResponse, 200,
+        operation Op::receipt(&Op::facets(&[
+            Facet::required(Manage, &[Object(K::Thread)], Target::Path("id")),
+            Facet::required(Manage, &[Object(K::Thread)], Target::ResolvedCollection("move_side_lanes")),
+            Facet::required(Write, &[Object(K::Thread)], Target::ResolvedCollection("move_destinations")),
+            Facet::response_content(&[Object(K::Thread)], Target::Path("id")),
+            Facet::response_content(&[Object(K::Thread)], Target::ResolvedCollection("move_side_lanes")),
+            Facet::response_content(&[Object(K::Org),Object(K::Project),Object(K::Topic),Object(K::Thread),Object(K::Environment)], Target::ResolvedCollection("move_review_content")),
+        ]));
     /// Moves the reviewed idle conversation with its side lanes and held queue.
-    ThreadMove: POST "/threads/{id}/move", Rule("the current source and destination rights and the actor's unchanged stored review"), none, json ThreadMoveBody, json Thread, 200;
+    ThreadMove: POST "/threads/{id}/move", Rule("the current source and destination rights and the actor's unchanged stored review"), none, json ThreadMoveBody, json ThreadMoveResponse, 200,
+        operation Op::receipt(&Op::facets(&[
+            Facet::required(Manage, &[Object(K::Thread)], Target::Path("id")),
+            Facet::required(Manage, &[Object(K::Thread)], Target::ResolvedCollection("move_side_lanes")),
+            Facet::required(Write, &[Object(K::Thread)], Target::ResolvedCollection("move_destinations")),
+            Facet::response_content(&[Object(K::Thread)], Target::Path("id")),
+            Facet::response_content(&[Object(K::Thread)], Target::ResolvedCollection("move_side_lanes")),
+            Facet::response_content(&[Object(K::Org),Object(K::Project),Object(K::Topic),Object(K::Thread),Object(K::Document),Object(K::Environment),Object(K::Agent),Object(K::Provider),Object(K::Machine)], Target::ResolvedCollection("move_thread_content")),
+        ]));
 }

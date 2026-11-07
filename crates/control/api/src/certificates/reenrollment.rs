@@ -89,11 +89,13 @@ pub(super) async fn finish(
     );
     entry.details = serde_json::json!({"again": true, "serial": hex::encode(certificate.serial())});
     audit::append(conn, &entry, origin, now).await?;
+    let advertisement = inner.advertisement();
     Ok(EnrollReply {
+        gateways: advertisement.gateways,
         machine_id: machine,
         certificate_pem: certificate.pem(),
         ca_pem: inner.authority.certificate_pem(),
-        endpoints: super::endpoints_for_machine(conn, machine, &inner.settings.endpoints).await?,
+        endpoints: super::endpoints_for_machine(conn, machine, &advertisement.endpoints).await?,
         system: EnrollReplySystem {
             name: inner.settings.system_name.clone(),
             public_url: inner.settings.public_url.clone(),

@@ -66,6 +66,8 @@ facts credential declaration, so it receives no provider key through it.
 
 | Member | JSON shape | Presence | Meaning |
 |--------|------------|----------|---------|
+| `web_search` | `array or null` | may be absent | Native search modes enabled by a provider manager; absence leaves search disabled. |
+| `default_web_search` | `string or null` | may be absent | The enabled search mode used when a use makes no choice; absent means disabled. |
 | `efforts` | `array or null` | may be absent | The efforts it takes. |
 | `default_effort` | `string or null` | may be absent | The effort used when none is chosen. |
 | `service_tiers` | `array or null` | may be absent | The speeds a manager of the provider enabled; empty until then, whatever the harness offers. |
@@ -77,6 +79,7 @@ facts credential declaration, so it receives no provider key through it.
 | `default_context` | `integer or null` | may be absent | The context a thread on this model starts with, at most `context_max`. Left out, all that is open (`context_max`), and where nothing larger is open, the model's own window. Where the conversation is shortened below a context is worked out and is a member of nothing. |
 | `offered` | `ModelOffered or null` | may be absent | What the harness or the endpoint most recently reported as on offer. Being listed here does not make anything usable. |
 | `input_images` | `boolean or null` | may be absent | Whether it takes images. |
+| `request_options` | `object or null` | may be absent | Provider constraints on additional request options, keyed by wire protocol; `native` uses declared adapter parameter keys. JSON Schema enum/const/default/required retain their distinct meanings. An omitted schema preserves the protocol's existing extension surface. |
 | `rate` | `Rate or null` | may be absent | What it costs, when a manager entered a price or discovery found one. |
 
 **ServiceTier**
@@ -90,6 +93,7 @@ facts credential declaration, so it receives no provider key through it.
 
 | Member | JSON shape | Presence | Meaning |
 |--------|------------|----------|---------|
+| `web_search` | `array or null` | may be absent | Native search modes the source offers, without enabling them. |
 | `service_tiers` | `array or null` | may be absent | Speeds on offer. |
 | `access_programs` | `array or null` | may be absent | Access programs on offer. |
 | `context_max` | `integer or null` | may be absent | The largest context, in tokens, that the harness or the endpoint says the model takes, where that is more than the window the model starts with. A manager opens it by writing it as the model's `context_max`; until then no thread can be given it. |
@@ -98,6 +102,7 @@ facts credential declaration, so it receives no provider key through it.
 
 | Member | JSON shape | Presence | Meaning |
 |--------|------------|----------|---------|
+| `web_search_per_call` | `string or null` | may be absent | Credits for one successful native web search, additional to token prices. |
 | `input_per_mtok` | `string` | required | Credits for a million input tokens. |
 | `cached_input_per_mtok` | `string` | required | Credits for a million cached input tokens. |
 | `output_per_mtok` | `string` | required | Credits for a million output tokens. |

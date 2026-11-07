@@ -68,6 +68,39 @@ async fn a_turn_of_plain_text_streams_into_neutral_events_and_ends() {
     rig.adapter.stop().await.unwrap();
 }
 
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn an_absent_resolved_effort_omits_the_native_default_and_clears_a_previous_effort() {
+    let mut rig = Rig::new()
+        .await
+        .expect("the pinned harness image is required");
+    rig.start_quick().await;
+    rig.open().await;
+    for effort in [None, Some("high"), None] {
+        let before = rig.model.requests().len();
+        let mut turn = rig.turn("hello");
+        turn.effort = effort.map(str::to_owned);
+        rig.adapter.start_turn(turn).await.unwrap();
+        let events = rig.until_the_turn_ends().await;
+        assert_eq!(outcome(&events), TurnOutcome::Completed, "{events:?}");
+        assert_eq!(said(&events), "You said: hello");
+        let requests = rig.model.requests();
+        let current: Vec<_> = requests[before..]
+            .iter()
+            .filter(|request| request.body.get("messages").is_some())
+            .collect();
+        assert!(!current.is_empty(), "the native turn reached the model");
+        for request in current {
+            assert_eq!(
+                request.body.pointer("/output_config/effort").cloned(),
+                effort.map(serde_json::Value::from),
+                "the request carries exactly the resolved effort: {:?}",
+                request.body
+            );
+        }
+    }
+    rig.adapter.stop().await.unwrap();
+}
+
 fn completed_calls(events: &[SessionEvent]) -> Vec<&orch_agent_contract::events::ItemCompleted> {
     events
         .iter()

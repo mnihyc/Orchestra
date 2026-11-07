@@ -30,7 +30,7 @@ use orch_link_contract::enrollment::Endpoint;
 use orch_link_contract::frames::{DataFrame, Frame, Text, decode};
 use orch_link_contract::session::{
     Auth, AuthProof, Bye, HANDSHAKE_STEP_TIMEOUT_SECS, Hello, NONCE_BYTES, Ping, Platform, Pong,
-    Ready, Reject, Role, TlsMode, auth_signing_input, clock_agrees, encode_nonce,
+    Ready, Reject, Role, TlsMode, clock_agrees, encode_nonce,
 };
 use orch_link_contract::version::{
     ByeCode, ConnectorVersions, Limits, MAX_FRAME_BYTES, PROTOCOL_VERSION, ProtocolRange,
@@ -210,13 +210,29 @@ impl SessionSender {
 #[derive(Debug)]
 pub struct SessionInbox {
     events: mpsc::UnboundedReceiver<SessionEvent>,
+    #[cfg(feature = "test-observers")]
+    observed: Arc<crate::test_observers::QueueGauge>,
+}
+
+#[cfg(feature = "test-observers")]
+impl Drop for SessionInbox {
+    fn drop(&mut self) {
+        drop(self.observed.receiver());
+    }
 }
 
 impl SessionInbox {
     /// The next event; `None` once the session is over and `Ended` was
     /// taken.
     pub async fn next(&mut self) -> Option<SessionEvent> {
-        self.events.recv().await
+        let event = self.events.recv().await;
+        #[cfg(feature = "test-observers")]
+        if let Some(event) = &event {
+            self.observed
+                .selected(crate::test_observers::session_event_bytes(event))
+                .complete();
+        }
+        event
     }
 }
 
@@ -257,6 +273,9 @@ fn start(
     let (out, queued) = queues();
     let (inbound_tx, inbound_rx) = mpsc::unbounded_channel();
     let (events_tx, events_rx) = mpsc::unbounded_channel();
+    #[cfg(feature = "test-observers")]
+    let observed =
+        ["session.inbound", "session.events"].map(crate::test_observers::QueueGauge::new);
     let ended = CancellationToken::new();
     let activity = Arc::new(Activity::new());
     let sender = SessionSender {
@@ -267,6 +286,8 @@ fn start(
     };
 
     let writer_failed = inbound_tx.clone();
+    #[cfg(feature = "test-observers")]
+    let failed_observed = Arc::clone(&observed[0]);
     let write_meter = Arc::clone(&meter);
     let write_activity = Arc::clone(&activity);
     let write_ended = ended.clone();
@@ -276,7 +297,12 @@ fn start(
             activity: write_activity,
         };
         if let Err(error) = write_loop(Box::new(counting), queued, write_meter, write_ended).await {
-            let _ = writer_failed.send(Inbound::Lost(Some(error)));
+            #[cfg(feature = "test-observers")]
+            failed_observed.enqueue(Some(0));
+            if writer_failed.send(Inbound::Lost(Some(error))).is_err() {
+                #[cfg(feature = "test-observers")]
+                failed_observed.failed_enqueue(Some(0));
+            }
         }
     });
     let read_activity = Arc::clone(&activity);
@@ -284,6 +310,8 @@ fn start(
         Box::new(ActivitySource {
             inner: source,
             activity: read_activity,
+            #[cfg(feature = "test-observers")]
+            observed: Arc::clone(&observed[0]),
         }),
         inbound_tx,
         limits.frame_bytes(),
@@ -291,9 +319,25 @@ fn start(
         Arc::clone(&meter),
     ));
     tokio::spawn(pump(
-        inbound_rx, events_tx, out, limits, timing, meter, activity, ended,
+        inbound_rx,
+        events_tx,
+        out,
+        limits,
+        timing,
+        meter,
+        activity,
+        ended,
+        #[cfg(feature = "test-observers")]
+        observed.clone(),
     ));
-    (sender, SessionInbox { events: events_rx })
+    (
+        sender,
+        SessionInbox {
+            events: events_rx,
+            #[cfg(feature = "test-observers")]
+            observed: Arc::clone(&observed[1]),
+        },
+    )
 }
 
 /// Notes in an [`Activity`] when something is sent.
@@ -325,10 +369,16 @@ impl MessageSink for ActivitySink {
 struct ActivitySource {
     inner: Box<dyn MessageSource>,
     activity: Arc<Activity>,
+    #[cfg(feature = "test-observers")]
+    observed: Arc<crate::test_observers::QueueGauge>,
 }
 
 #[async_trait]
 impl MessageSource for ActivitySource {
+    #[cfg(feature = "test-observers")]
+    fn inbound_observer(&self) -> Option<Arc<crate::test_observers::QueueGauge>> {
+        Some(Arc::clone(&self.observed))
+    }
     async fn recv(&mut self) -> Result<Option<crate::framing::Message>, TransportError> {
         let message = self.inner.recv().await?;
         self.activity
@@ -354,7 +404,22 @@ async fn pump(
     meter: Arc<LinkMeter>,
     activity: Arc<Activity>,
     ended: CancellationToken,
+    #[cfg(feature = "test-observers")] observed: [Arc<crate::test_observers::QueueGauge>; 2],
 ) {
+    #[cfg(feature = "test-observers")]
+    let _inbound_lifetime = observed[0].receiver();
+    let send = |item: SessionEvent| {
+        #[cfg(feature = "test-observers")]
+        let bytes = crate::test_observers::session_event_bytes(&item);
+        #[cfg(feature = "test-observers")]
+        observed[1].enqueue(bytes);
+        let result = events.send(item);
+        #[cfg(feature = "test-observers")]
+        if result.is_err() {
+            observed[1].failed_enqueue(bytes);
+        }
+        result
+    };
     let max = limits.frame_bytes();
     let mut next_ping: i64 = 1;
     let mut waiting_for: Option<(i64, Instant)> = None;
@@ -388,7 +453,10 @@ async fn pump(
         let wait = until_ping.min(until_dead).min(MAX_IDLE_LOOK);
         tokio::select! {
             () = ended.cancelled() => break EndReason::Local,
-            item = inbound.recv() => match item {
+            item = inbound.recv() => {
+                #[cfg(feature = "test-observers")]
+                if let Some(item) = &item { observed[0].selected(crate::test_observers::inbound_bytes(item)).complete(); }
+                match item {
                 None => break EndReason::PeerClosed,
                 Some(Inbound::Frame(frame)) => match frame.as_ref() {
                     Frame::Ping(Ping { n }) => {
@@ -405,19 +473,19 @@ async fn pump(
                     }
                     Frame::Bye(Bye { code }) => break EndReason::Bye(*code),
                     _ => {
-                        if events.send(SessionEvent::Frame(frame)).is_err() {
+                        if send(SessionEvent::Frame(frame)).is_err() {
                             break EndReason::Local;
                         }
                     }
                 },
                 Some(Inbound::Unknown(kind)) => tracing::debug!(kind, "a frame of an unknown type was passed over"),
                 Some(Inbound::Data(frame)) => {
-                    if events.send(SessionEvent::Data(frame)).is_err() {
+                    if send(SessionEvent::Data(frame)).is_err() {
                         break EndReason::Local;
                     }
                 }
                 Some(Inbound::Datagram(packet)) => {
-                    if events.send(SessionEvent::Datagram(packet)).is_err() {break EndReason::Local;}
+                    if send(SessionEvent::Datagram(packet)).is_err() {break EndReason::Local;}
                 }
                 Some(Inbound::Broken(error)) => {
                     let _ = out.control(&Bye { code: error.bye() }.into(), max);
@@ -425,12 +493,12 @@ async fn pump(
                 }
                 Some(Inbound::Lost(None)) => break EndReason::PeerClosed,
                 Some(Inbound::Lost(Some(error))) => break EndReason::Transport(error.to_string()),
-            },
+            }},
             () = tokio::time::sleep(wait) => {}
         }
     };
     ended.cancel();
-    let _ = events.send(SessionEvent::Ended(reason));
+    let _ = send(SessionEvent::Ended(reason));
 }
 
 // ---------------------------------------------------------------- the machine's side
@@ -438,6 +506,10 @@ async fn pump(
 /// Who a machine says it is, and what it proves it with.
 #[derive(Debug)]
 pub struct ClientIdentity {
+    /// Primary control or an explicitly negotiated tunnel-only attachment.
+    pub purpose: orch_link_contract::gateways::SessionPurpose,
+    /// A selected/measured gateway must identify itself before machine authentication.
+    pub gateway_id: Option<String>,
     /// Owner-selected addresses, when this machine overrides the system.
     pub endpoints: Option<Vec<Endpoint>>,
     /// A node's explicit addresses for hosted units.
@@ -491,6 +563,8 @@ pub enum HandshakeError {
 /// A session that was established.
 #[derive(Debug)]
 pub struct Established {
+    /// The logical gateway proved by the connection and its hello.
+    pub gateway_id: String,
     /// The gateway's word that the session stands.
     pub ready: Ready,
     /// The protocol version the two speak.
@@ -551,6 +625,16 @@ pub async fn connect(
             "the gateway did not begin with hello".to_owned(),
         ));
     };
+    if identity
+        .gateway_id
+        .as_ref()
+        .is_some_and(|expected| *expected != hello.gateway_id)
+    {
+        connection.sink.close().await;
+        return Err(HandshakeError::Malformed(
+            "this entrance does not reach the selected gateway".into(),
+        ));
+    }
     let protocol_version =
         hello
             .protocol
@@ -559,6 +643,17 @@ pub async fn connect(
                 min: hello.protocol.min,
                 max: hello.protocol.max,
             })?;
+    if !identity.purpose.is_primary()
+        && !hello
+            .capabilities
+            .iter()
+            .any(|capability| capability == orch_link_contract::gateways::TUNNEL_CAPABILITY)
+    {
+        connection.sink.close().await;
+        return Err(HandshakeError::Malformed(
+            "this gateway does not support tunnel-only attachments".into(),
+        ));
+    }
     let sent_at = clock.time();
     let host = connection.peer.host.clone();
     let proof = match hello.tls {
@@ -570,7 +665,13 @@ pub async fn connect(
             let host = host.as_deref().ok_or(HandshakeError::CannotProve(
                 "the machine does not know which host it connected to",
             ))?;
-            let signed = auth_signing_input(&hello.nonce, identity.machine_id, host, sent_at);
+            let signed = orch_link_contract::session::auth_signing_input_for(
+                identity.purpose,
+                &hello.nonce,
+                identity.machine_id,
+                host,
+                sent_at,
+            );
             Some(AuthProof {
                 certificate_pem: certificate.pem(),
                 signature: URL_SAFE_NO_PAD.encode(key.sign(signed.as_bytes())),
@@ -578,6 +679,12 @@ pub async fn connect(
         }
     };
     let auth = Auth {
+        purpose: identity.purpose,
+        capabilities: if identity.purpose.is_primary() {
+            vec![orch_link_contract::gateways::TUNNEL_CAPABILITY.to_owned()]
+        } else {
+            Vec::new()
+        },
         endpoints: identity.endpoints.clone(),
         hosted_endpoints: identity.hosted_endpoints.clone(),
         machine_id: identity.machine_id,
@@ -591,11 +698,18 @@ pub async fn connect(
     send_frame(connection.sink.as_mut(), &auth.into(), max).await?;
     match read_text(connection.source.as_mut(), "ready").await? {
         Frame::Ready(ready) => {
+            if ready.purpose != identity.purpose {
+                connection.sink.close().await;
+                return Err(HandshakeError::Malformed(
+                    "the gateway admitted a different session purpose".into(),
+                ));
+            }
             let limits = ready.limits;
             let timing = Timing::of_heartbeat(ready.heartbeat_secs);
             let offset = clock.time().unix_millis() - hello.server_time.unix_millis();
             let (sender, inbox) = start(connection, limits, timing, LinkMeter::new());
             Ok(Established {
+                gateway_id: hello.gateway_id,
                 ready,
                 protocol_version,
                 tls: hello.tls,
@@ -756,6 +870,7 @@ pub async fn accept(
         TlsMode::Server
     };
     let hello = Hello {
+        capabilities: vec![orch_link_contract::gateways::TUNNEL_CAPABILITY.to_owned()],
         protocol: ProtocolRange::SUPPORTED,
         nonce: nonce.clone(),
         server_time: clock.time(),
@@ -773,6 +888,15 @@ pub async fn accept(
         Err(error) => return Err(AcceptError::Failed(error.to_string())),
     };
     let now = clock.time();
+    if auth.purpose != connection.peer.purpose {
+        return Err(refuse(
+            &mut connection,
+            RejectCode::BadProof,
+            "the authentication purpose does not match the negotiated transport",
+            None,
+        )
+        .await);
+    }
 
     if !ProtocolRange::SUPPORTED.contains(auth.protocol_version) {
         return Err(refuse(
@@ -863,7 +987,13 @@ pub async fn accept(
                 )
                 .await);
             };
-            let signed = auth_signing_input(&nonce, auth.machine_id, &host, auth.sent_at);
+            let signed = orch_link_contract::session::auth_signing_input_for(
+                auth.purpose,
+                &nonce,
+                auth.machine_id,
+                &host,
+                auth.sent_at,
+            );
             let signature = URL_SAFE_NO_PAD.decode(&proof.signature).unwrap_or_default();
             match verify_machine_proof(
                 &gateway.authority,
@@ -911,6 +1041,8 @@ pub async fn accept(
         .remote_ip
         .unwrap_or(std::net::IpAddr::V4(std::net::Ipv4Addr::LOCALHOST));
     let query = AuthQuery {
+        purpose: auth.purpose,
+        capabilities: auth.capabilities.clone(),
         endpoints: auth.endpoints.clone(),
         hosted_endpoints: auth.hosted_endpoints.clone(),
         n: now.unix_millis(),
@@ -976,11 +1108,23 @@ pub async fn accept(
         .await);
     }
     let session_id = new_id();
-    let session_token = random_text();
+    let session_token = if auth.purpose.is_primary() {
+        random_text()
+    } else {
+        String::new()
+    };
     let placement = reply.placement;
-    let cursors = reply.cursors.unwrap_or_default();
+    let primary = auth.purpose.is_primary();
+    let cursors = if primary {
+        reply.cursors.unwrap_or_default()
+    } else {
+        Default::default()
+    };
     let ready = Ready {
-        endpoints: reply.endpoints,
+        purpose: auth.purpose,
+        tunnel_session_idle_secs: reply.tunnel_session_idle_secs,
+        gateways: if primary { reply.gateways } else { Vec::new() },
+        endpoints: if primary { reply.endpoints } else { None },
         session_id,
         session_token: session_token.clone(),
         heartbeat_secs: gateway.heartbeat_secs,

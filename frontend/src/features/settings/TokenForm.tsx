@@ -1,4 +1,8 @@
-/** The form that makes an API token, for its person or for a service identity: narrow as it opens, its exact permissions shown and sent, a subtree and an end, and the maker's fresh proof in the same act.
+/** The existing token form and fresh proof, shared by personal operation rules and service compatibility scopes.
+ *
+ * Personal creation keeps explicit target-bound operation rules, initially deny-all, through a linked
+ * sign-in round trip. Its presets expand only on a deliberate click in the operation editor.
+ * The standalone compatibility form retains its existing permission-scope representation.
  *
  * It opens on Only what I choose with Can view, the narrowest of the page's presets; Can interact and
  * Can manage expand the same way through the permission catalogue, and By area… ticks permissions one
@@ -19,7 +23,8 @@ import { ApiError } from '@/api/client';
 import { sendEmailCode } from '@/api/users';
 import { type FreshPurpose, proveAgain, takeDraft, takeFreshProof, takeFreshProofError } from '@/features/auth/freshProof';
 import { PlacePicker, type PickedPlace } from '@/features/settings/PlacePicker';
-import type { ApiTokenCreateBody, PermissionDef, SensitiveProof, TokenCreated } from '@/generated/api-types';
+import { KeyRulesField } from '@/features/settings/KeyRules';
+import type { ApiTokenCreateBody, KeyRule, PermissionDef, SensitiveProof, TokenCreateResponse } from '@/generated/api-types';
 import { useNow } from '@/lib/time';
 import { Button } from '@/ui/Button';
 import { Checkbox } from '@/ui/Checkbox';
@@ -91,6 +96,8 @@ export interface TokenDraft {
   place: PickedPlace | null;
   lifetime: Lifetime;
   date: string;
+  /** Exact modern rules survive a linked-sign-in round trip; no preset is re-expanded on return. */
+  rules?: KeyRule[];
   /** The service identity the token is for, where it is one. */
   serviceAccountId?: string;
 }
@@ -156,6 +163,8 @@ export interface TokenFormProps {
   returned?: Returned | null;
   /** The form's id, which a dialog's footer submits. */
   formId: string;
+  /** Current personal/service screens use explicit rules; legacy API/form compatibility remains explicit. */
+  operationScoped?: boolean;
 }
 
 /** Only the guarded submit calls this: the token's end is measured at the act, outside React's render scope. */
@@ -165,11 +174,11 @@ function tokenAtSubmission(body: Omit<ApiTokenCreateBody, 'expires_at'>, lifetim
 }
 
 /** The fields of a new token and its proof. */
-export function TokenForm({ onMake, pending, error, serviceAccountId, returned = null, formId }: TokenFormProps) {
+export function TokenForm({ onMake, pending, error, serviceAccountId, returned = null, formId, operationScoped = false }: TokenFormProps) {
   const { t } = useTranslation();
   const now = useNow();
   const me = useQuery(meQuery);
-  const catalogue = useQuery(permissionsQuery);
+  const catalogue = useQuery({ ...permissionsQuery, enabled: !operationScoped });
   const permissions = catalogue.data?.permissions ?? [];
   const start = returned?.draft ?? BLANK;
   const [name, setName] = useState(start.name);
@@ -179,6 +188,7 @@ export function TokenForm({ onMake, pending, error, serviceAccountId, returned =
   const [place, setPlace] = useState<PickedPlace | null>(start.place);
   const [lifetime, setLifetime] = useState<Lifetime>(start.lifetime);
   const [date, setDate] = useState(start.date);
+  const [rules, setRules] = useState<KeyRule[]>(start.rules ?? []);
   const [password, setPassword] = useState('');
   const [code, setCode] = useState('');
   const [codeWay, setCodeWay] = useState<'totp' | 'email_code' | 'recovery_code'>('totp');
@@ -190,7 +200,7 @@ export function TokenForm({ onMake, pending, error, serviceAccountId, returned =
 
   const scopes = mode === 'everything' ? [EVERYTHING] : how === 'area' ? [...chosen].sort() : presetScopes(how, permissions);
   const nameWrong = name.trim() === '' ? t('tokens.new.nameMissing') : undefined;
-  const scopesWrong = mode === 'some' && scopes.length === 0 ? t('tokens.new.scopesMissing') : undefined;
+  const scopesWrong = !operationScoped && mode === 'some' && scopes.length === 0 ? t('tokens.new.scopesMissing') : undefined;
   const dateWrong = lifetime === 'date' && Number.isNaN(Date.parse(`${date}T23:59:59.000Z`)) ? t('tokens.new.dateMissing') : undefined;
   const person = me.data;
   const hasPassword = person?.has_password ?? true;
@@ -209,6 +219,7 @@ export function TokenForm({ onMake, pending, error, serviceAccountId, returned =
     place,
     lifetime,
     date,
+    ...(operationScoped ? { rules } : {}),
     ...(serviceAccountId === undefined ? {} : { serviceAccountId }),
   });
   const proveSignIn = () => {
@@ -233,8 +244,8 @@ export function TokenForm({ onMake, pending, error, serviceAccountId, returned =
     };
     onMake(tokenAtSubmission({
       name: name.trim(),
-      scopes,
-      ...(place === null ? {} : { node_id: place.id }),
+      ...(operationScoped ? { rules: rules.map((rule) => ({ ...rule, target: { ...rule.target }, ...(rule.resources === undefined ? {} : { resources: rule.resources === null ? null : [...rule.resources] }), allow: rule.allow.map((item) => ({ ...item, actions: [...item.actions] })) })) }
+        : { scopes, ...(place === null ? {} : { node_id: place.id }) }),
       proof,
     }, lifetime, date));
   };
@@ -244,8 +255,8 @@ export function TokenForm({ onMake, pending, error, serviceAccountId, returned =
     { value: 'everything', ...choiceOption(t, 'tokenScope.everything') },
   ];
 
-  if (catalogue.isPending || me.isPending) return <SkeletonRows rows={4} />;
-  if (catalogue.isError) return <ErrorState compact error={catalogue.error} retrying={catalogue.isRefetching} onRetry={() => void catalogue.refetch()} />;
+  if ((!operationScoped && catalogue.isPending) || me.isPending) return <SkeletonRows rows={4} />;
+  if (!operationScoped && catalogue.isError) return <ErrorState compact error={catalogue.error} retrying={catalogue.isRefetching} onRetry={() => void catalogue.refetch()} />;
   return (
     <form
       id={formId}
@@ -264,7 +275,7 @@ export function TokenForm({ onMake, pending, error, serviceAccountId, returned =
         onChange={(event) => setName(event.target.value)}
         autoComplete="off"
       />
-      <ChoiceField label={t('tokens.new.mayDo')} options={scopeOptions}><RadioGroup
+      {operationScoped ? <KeyRulesField value={rules} onChange={setRules} accountId={serviceAccountId ?? person?.id ?? ''} disabled={pending} /> : <><ChoiceField label={t('tokens.new.mayDo')} options={scopeOptions}><RadioGroup
         label={t('tokens.new.mayDo')}
         value={mode}
         onValueChange={setMode}
@@ -299,6 +310,7 @@ export function TokenForm({ onMake, pending, error, serviceAccountId, returned =
       )}
       {mode === 'everything' && <InlineAlert tone="warning">{t('tokens.scopes.everythingWarn')}</InlineAlert>}
       <PlacePicker label={t('tokens.new.where')} hint={t('tokens.new.whereHint')} value={place} onChange={setPlace} />
+      </>}
       <div className="grid grid-cols-1 gap-4 sm:grid-cols-2">
         <Select
           label={t('tokens.new.lasts')}
@@ -380,17 +392,18 @@ export function TokenForm({ onMake, pending, error, serviceAccountId, returned =
 }
 
 /** A token just made, shown once; or, where the same creation was answered again, that it was made and has no secret to give. */
-export function TokenMade({ made }: { made: TokenCreated }) {
+export function TokenMade({ made, name }: { made: TokenCreateResponse; name?: string }) {
   const { t } = useTranslation();
+  const label = 'info' in made ? made.info.name : name ?? made.token_id;
   if (made.token === null) {
-    return <InlineAlert tone="warning" title={t('tokens.new.alreadyTitle', { name: made.info.name })}>{t('tokens.new.already')}</InlineAlert>;
+    return <InlineAlert tone="warning" title={t('tokens.new.alreadyTitle', { name: label })}>{t('tokens.new.already')}</InlineAlert>;
   }
   return (
     <div className="flex flex-col gap-4 py-2">
       <InlineAlert tone="warning">{t('tokens.new.onlyOnce')}</InlineAlert>
       <div className="flex items-end gap-2">
         <Input
-          label={t('tokens.new.secret', { name: made.info.name })}
+          label={t('tokens.new.secret', { name: label })}
           value={made.token}
           readOnly
           mono

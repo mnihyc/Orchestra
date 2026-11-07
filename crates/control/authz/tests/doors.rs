@@ -20,7 +20,7 @@ use orch_types::Id;
 use serde_json::json;
 use support::{World, user_holder};
 
-/// The rows of an environment's page that are its own two levels and its five doors: what a person
+/// The rows of an environment's page that are its own levels and its five doors: what a person
 /// holds there apart from saying who else may.
 fn the_room(held: Vec<P>) -> Vec<P> {
     held.into_iter()
@@ -45,6 +45,17 @@ const DOORS: [(P, Option<P>); 10] = [
 /// The rows of the page of an environment that the caller holds when they look into it.
 const LOOKING: [P; 6] = [
     P::EnvironmentView,
+    P::FilesView,
+    P::TerminalView,
+    P::BrowserView,
+    P::VncView,
+    P::PortsView,
+];
+
+/// The managed environment's Interactors can also use it.
+const LOOKING_AND_USING: [P; 7] = [
+    P::EnvironmentView,
+    P::EnvironmentUse,
     P::FilesView,
     P::TerminalView,
     P::BrowserView,
@@ -107,9 +118,9 @@ async fn whoever_manages_an_environment_holds_the_manage_of_all_five_doors_with_
     let everything: Vec<P> = the_room(ObjectKind::Environment.permissions().collect());
     assert_eq!(
         held, everything,
-        "its two levels and all ten rows of its doors"
+        "its three levels and all ten rows of its doors"
     );
-    assert_eq!(everything.len(), 12);
+    assert_eq!(everything.len(), 13);
     // Not one of the doors names them, and each is held through what they manage.
     let principal = w.principal(Caller::session(manager)).await;
     let mut conn = w.conn().await;
@@ -121,7 +132,11 @@ async fn whoever_manages_an_environment_holds_the_manage_of_all_five_doors_with_
     )
     .await
     .unwrap();
-    for (door, _) in DOORS {
+    for door in DOORS
+        .into_iter()
+        .map(|(door, _)| door)
+        .chain([P::EnvironmentUse])
+    {
         let held = effective
             .held
             .iter()
@@ -214,7 +229,14 @@ async fn the_doors_ship_to_the_roles_of_the_place_in_both_placements() {
         // Developers; on a person's machine nobody until its page says so.
         for (role, expected) in [
             (Role::Viewer, looking.clone()),
-            (Role::Interactor, looking.clone()),
+            (
+                Role::Interactor,
+                if placement == "managed" {
+                    LOOKING_AND_USING.to_vec()
+                } else {
+                    looking.clone()
+                },
+            ),
             (
                 Role::Developer,
                 if placement == "managed" {

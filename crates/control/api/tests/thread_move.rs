@@ -5,9 +5,12 @@
     reason = "a test fails by panicking"
 )]
 
+#[path = "thread_move/native_scopes.rs"]
+mod native_scopes;
 mod places;
 mod rig;
 mod support;
+mod thread_history_scope;
 
 use orch_api_contract::common::ErrorCode;
 use orch_api_contract::nodes::{
@@ -36,6 +39,8 @@ async fn preview(s: &Scene, thread: Id, to: Id) -> ThreadMovePlan {
         .send()
         .await
         .ok()
+        .into_full()
+        .expect("ordinary preview returns the native complete review")
 }
 
 fn confirmation(plan: &ThreadMovePlan) -> ThreadMoveBody {
@@ -72,7 +77,9 @@ async fn destination(s: &Scene) -> Id {
         })
         .send()
         .await
-        .ok();
+        .ok()
+        .into_full()
+        .expect("this control expects the ordinary full project response");
     places::make_topic(&s.rig.world, &s.ada, folder.base.id, "Refunds")
         .await
         .base
@@ -157,7 +164,9 @@ async fn a_move_keeps_the_same_history_workspace_and_stop_held_inputs_and_moves_
         .body(&confirmation(&plan))
         .send()
         .await
-        .ok();
+        .ok()
+        .into_full()
+        .expect("ordinary move returns the native Thread");
     assert_eq!(moved.base.id, id);
     assert_eq!(moved.topic_id, to);
     assert_eq!(moved.base.owner, before.thread.base.owner);
@@ -236,7 +245,9 @@ async fn a_move_asks_only_for_manage_of_the_thread_and_interact_of_the_destinati
         .body(&ThreadMovePreviewBody { parent_id: to })
         .send()
         .await
-        .ok();
+        .ok()
+        .into_full()
+        .expect("ordinary controller reads the native review");
     let moved = s
         .rig
         .world
@@ -246,7 +257,9 @@ async fn a_move_asks_only_for_manage_of_the_thread_and_interact_of_the_destinati
         .body(&confirmation(&plan))
         .send()
         .await
-        .ok();
+        .ok()
+        .into_full()
+        .expect("ordinary controller reads the native moved Thread");
     assert_eq!(
         moved.topic_id, to,
         "Dan needs neither provider Use nor environment Manage"

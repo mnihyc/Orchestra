@@ -576,6 +576,9 @@ pub struct Capabilities {
     /// Live native session commands can be listed and individually ended without model input.
     #[serde(default)]
     pub background_commands: bool,
+    /// Turn model, effort or confinement changes require a new native process.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub turn_changes_require_restart: bool,
     /// The kinds of approval it asks for.
     pub approvals: Vec<HarnessRequestKind>,
     /// It runs sub-agents of its own.
@@ -629,6 +632,14 @@ pub struct Capabilities {
     pub phases: bool,
     /// The facts it reports of its provider.
     pub provider_facts: Vec<ProviderFactKind>,
+    /// Optional normalized credit field declarations, passed through to the facts source.
+    /// Older adapters may omit this without changing their current unknown-state behavior.
+    #[serde(
+        default,
+        skip_serializing_if = "BTreeMap::is_empty",
+        deserialize_with = "orch_provider_contract::credit_fields::deserialize_reports"
+    )]
+    pub provider_fact_fields: BTreeMap<String, Vec<String>>,
     /// It can list the models of its provider.
     pub model_discovery: bool,
     /// It reports a title for a session.
@@ -964,6 +975,12 @@ impl AgentDescriptor {
                     .ok()
                     .is_some_and(|mode| self.approval_modes.contains(&mode))
             });
+        }
+        // A profile cannot turn a process-bound native setting into a live update.
+        if self.capabilities.turn_changes_require_restart
+            && let Some(capabilities) = merged.get_mut("capabilities").and_then(Json::as_object_mut)
+        {
+            capabilities.insert("turn_changes_require_restart".to_owned(), Json::Bool(true));
         }
         // A manager may turn proven native control off, but cannot manufacture its conformance proof.
         if !self.capabilities.background_commands

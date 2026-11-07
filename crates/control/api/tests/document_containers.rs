@@ -6,6 +6,7 @@ mod desk;
 mod places;
 mod support;
 
+use crate::support::FullPermissionPageReply;
 use desk::{Desk, paragraph};
 use orch_api_contract::access::{
     AccessChoice, HolderInput, PageChange, PageChangeName, PageChangeWhole, PermissionPageGet,
@@ -70,7 +71,9 @@ async fn folder(desk: &Desk, parent: Option<Id>, name: &str) -> TestResult<Id> {
         })
         .send()
         .await
-        .ok();
+        .ok()
+        .into_full()
+        .unwrap();
     match receipt.entries.first().map(|entry| entry.item) {
         Some(DocumentTreeItem::Container(id)) => Ok(id),
         _ => Err("folder creation must return a real container".into()),
@@ -184,7 +187,9 @@ async fn folders_are_navigable_typed_items_and_moves_preserve_text_identity_and_
         })
         .send()
         .await
-        .ok();
+        .ok()
+        .into_full()
+        .unwrap();
     let parent: Option<Id> =
         sqlx::query_scalar("SELECT parent_container_id FROM documents WHERE id=$1")
             .bind(document)
@@ -217,6 +222,7 @@ async fn a_direct_folder_grant_lists_only_its_descendants_and_redacts_unreadable
         })
         .send()
         .await
+        .full_permission_page()
         .ok();
     desk.world
         .app
@@ -235,6 +241,7 @@ async fn a_direct_folder_grant_lists_only_its_descendants_and_redacts_unreadable
         })
         .send()
         .await
+        .full_permission_page()
         .ok();
     let listed = desk
         .world
@@ -330,6 +337,7 @@ async fn a_direct_folder_grant_lists_only_its_descendants_and_redacts_unreadable
         })
         .send()
         .await
+        .full_permission_page()
         .ok();
     let made = desk
         .world
@@ -339,7 +347,9 @@ async fn a_direct_folder_grant_lists_only_its_descendants_and_redacts_unreadable
         .body(&desk::body("Created inside"))
         .send()
         .await
-        .ok();
+        .ok()
+        .into_full()
+        .unwrap();
     let entry = desk
         .world
         .app
@@ -388,6 +398,7 @@ async fn a_recursive_refusal_and_hidden_collision_leave_every_member_unchanged()
         })
         .send()
         .await
+        .full_permission_page()
         .ok();
     let before: Vec<(Id, Option<chrono::DateTime<chrono::Utc>>)> =
         sqlx::query_as("SELECT id,deleted_at FROM documents WHERE node_id=$1 ORDER BY id")
@@ -575,7 +586,9 @@ async fn ordinary_copy_keeps_raw_title_private_choice_provenance_and_current_aut
         .body(&body)
         .send()
         .await
-        .ok();
+        .ok()
+        .into_full()
+        .expect("this native creation control requires its full response");
     assert_eq!(copy.base.title, "Human / title");
     assert_eq!(
         desk.words(&desk.ada, copy.base.id).await,
@@ -599,7 +612,9 @@ async fn ordinary_copy_keeps_raw_title_private_choice_provenance_and_current_aut
         .body(&body)
         .send()
         .await
-        .ok();
+        .ok()
+        .into_full()
+        .expect("this native creation control requires its full response");
     assert_eq!(repeat.base.id, copy.base.id);
     assert_eq!(repeat.base.seq, copy.base.seq);
     let altered = NodeDocumentCopyBody {
@@ -741,7 +756,9 @@ async fn folder_creation_replays_the_same_identity_and_refuses_changed_arguments
         .body(&body)
         .send()
         .await
-        .ok();
+        .ok()
+        .into_full()
+        .unwrap();
     let again = desk
         .world
         .app
@@ -750,7 +767,9 @@ async fn folder_creation_replays_the_same_identity_and_refuses_changed_arguments
         .body(&body)
         .send()
         .await
-        .ok();
+        .ok()
+        .into_full()
+        .unwrap();
     assert_eq!(first.operation, again.operation);
     assert_eq!(first.entries, again.entries);
     let changed = DocumentContainerCreateBody {
@@ -802,6 +821,7 @@ async fn recipient_replacement_invalidates_a_preview_even_without_an_epoch_or_co
         })
         .send()
         .await
+        .full_permission_page()
         .ok();
     let mut request = operation(
         DocumentTreeCommand::Delete,
@@ -859,7 +879,9 @@ async fn recursive_purge_collects_children_before_folders_and_releases_attached_
         .bytes(b"purge this copy")
         .send()
         .await
-        .ok();
+        .ok()
+        .into_full()
+        .expect("this native creation control requires its full response");
     let blob: Vec<u8> =
         sqlx::query_scalar("SELECT blob FROM document_files WHERE document_id=$1 AND id=$2")
             .bind(document)

@@ -32,6 +32,7 @@ members = [
     "crates/control/documents",
     "crates/control/engine",
     "crates/control/gateway",
+    "crates/control/operation-scope",
     "crates/control/settings",
     "crates/control/worker",
     "crates/foundation/build-info",
@@ -126,6 +127,7 @@ orch-notifier-email = { path = "extensions/notifiers/email" }
 orch-notifier-push = { path = "extensions/notifiers/push" }
 orch-notifier-telegram = { path = "extensions/notifiers/telegram" }
 orch-notifier-webhook = { path = "extensions/notifiers/webhook" }
+orch-operation-scope = { path = "crates/control/operation-scope" }
 orch-pki = { path = "crates/platform/pki" }
 orch-plugin = { path = "crates/platform/plugin" }
 orch-plugin-contract = { path = "crates/contracts/plugin" }
@@ -164,7 +166,7 @@ http = "1"                                                 # header and status t
 http-body-util = "0.1"                                     # reading bodies in proxies and tests
 hyper = { version = "1", features = ["full"] }             # serving over our own TLS acceptors
 hyper-util = { version = "0.1", features = ["full"] }      # connection builders for those acceptors
-reqwest = { version = "0.13", default-features = false, features = ["rustls", "json", "stream", "http2", "socks"] }  # upstream model APIs, webhooks, bots; `socks` so that a SOCKS proxy the system names is spoken to
+reqwest = { version = "0.13", default-features = false, features = ["rustls", "json", "query", "stream", "http2", "socks"] }  # upstream model APIs, webhooks, bots; `socks` so that a SOCKS proxy the system names is spoken to
 tokio-tungstenite = { version = "0.30", features = ["rustls-tls-webpki-roots"] }  # the link's client side
 url = { version = "2", features = ["serde"] }              # endpoint and redirect addresses
 rquickjs = { version = "=0.14.0", default-features = false, features = ["std"] } # one inert HTML converter shared with browser paste
@@ -246,6 +248,7 @@ liblzma = "0.4"                                            # looking into a tar.
 # Services.
 lettre = { version = "0.11", default-features = false, features = ["builder", "smtp-transport", "tokio1", "tokio1-rustls", "ring", "rustls-native-certs", "hostname"] }  # mail
 ece = "2.4"                                                # RFC 8291 browser push encryption, without a signing or HTTP stack
+openssl = { version = "0.10", features = ["vendored"] }      # ece's crypto backend on Windows, built without a host OpenSSL installation
 openidconnect = { version = "4", default-features = false }  # sign-in through an identity provider
 rmcp = "3"                                                 # Orch's tools as an MCP server
 

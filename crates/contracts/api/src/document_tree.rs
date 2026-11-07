@@ -1,5 +1,12 @@
 //! Typed document-folder navigation and atomic document-tree organization.
 
+use crate::operations::{
+    FacetSpec as Facet, OperationSpec as Op, TargetResolver as Target, VariantSpec as Variant,
+};
+use orch_access_contract::key_scope::KeyAction::{Manage, Read, Write};
+use orch_access_contract::key_scope::KeyTargetKind::Object;
+use orch_access_contract::permissions::ObjectKind as K;
+
 use crate::routes::Access::Rule;
 use chrono::{DateTime, Utc};
 use orch_types::{Id, Seq, Time};
@@ -314,6 +321,37 @@ pub struct DocumentContainerCreateBody {
     pub client_id: String,
 }
 
+/// A truthful folder-creation outcome without existing directory metadata.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+pub struct DocumentContainerCreateReceipt {
+    /// Identifies the restricted acknowledgement.
+    pub projection: crate::common::ReceiptProjection,
+    /// The actual durable native operation.
+    pub operation: Id,
+    /// The actual folder produced by that operation, including a durable replay.
+    pub container_id: Id,
+}
+
+/// Native tree receipt content or the safe completed folder identity.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+#[serde(untagged)]
+pub enum DocumentContainerCreateResponse {
+    /// The native personalized tree receipt under current response Read.
+    Full(Box<DocumentTreeReceipt>),
+    /// The accepted creation without stored directory or audience metadata.
+    Receipt(DocumentContainerCreateReceipt),
+}
+
+impl DocumentContainerCreateResponse {
+    /// Extract the full native result while preserving restricted acknowledgement.
+    pub fn into_full(self) -> Result<DocumentTreeReceipt, DocumentContainerCreateReceipt> {
+        match self {
+            Self::Full(receipt) => Ok(*receipt),
+            Self::Receipt(receipt) => Err(receipt),
+        }
+    }
+}
+
 /// A typed entry read.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
 #[serde(rename_all = "snake_case")]
@@ -352,19 +390,170 @@ pub struct DocumentTreeListQuery {
 
 crate::endpoints! {
     /// Lists the readable document and folder children beside a node or inside one folder.
-    DocumentTreeList: GET "/nodes/{id}/document-tree", Rule("node.view on the root or doc.view on the specified folder; retained rows require current restore authority"), query DocumentTreeListQuery, none, json DocumentTreePage, 200;
+    DocumentTreeList: GET "/nodes/{id}/document-tree", Rule("node.view on the root or doc.view on the specified folder; retained rows require current restore authority"), query DocumentTreeListQuery, none, json DocumentTreePage, 200,
+        operation Op::variants(&[
+            Variant {
+                name: "view",
+                selector: "ordinary live entries",
+                facets: &crate::document_sources::tree_facets(Read),
+            },
+            Variant {
+                name: "retained",
+                selector: "explicit retained/deleted inspection",
+                facets: &crate::document_sources::tree_facets(Manage),
+            },
+        ]);
     /// Reads a document folder's metadata and redacted ancestry without opening an editor.
-    DocumentContainerGet: GET "/document-containers/{id}", Rule("doc.view on this document container; explicit retained inspection requires current restore authority"), query crate::nodes::DeletedInspectionQuery, none, json DocumentTreeRead, 200;
+    DocumentContainerGet: GET "/document-containers/{id}", Rule("doc.view on this document container; explicit retained inspection requires current restore authority"), query crate::nodes::DeletedInspectionQuery, none, json DocumentTreeRead, 200,
+        operation Op::variants(&[
+            Variant {
+                name: "read",
+                selector: "inspect_deleted is false or absent",
+                facets: &crate::document_sources::entry_facets(Read, &[Object(K::DocumentContainer)], Target::TypedPath { parameter: "id", kind: Object(K::DocumentContainer) }),
+            },
+            Variant {
+                name: "inspect_deleted",
+                selector: "inspect_deleted=true under current restoration authority",
+                facets: &crate::document_sources::entry_facets(Manage, &[Object(K::DocumentContainer)], Target::TypedPath { parameter: "id", kind: Object(K::DocumentContainer) }),
+            },
+        ]);
     /// Reads typed document metadata and redacted folder ancestry.
-    DocumentTreeEntryGet: GET "/document-tree/entries/{id}", Rule("doc.view on the exact typed entry"), query DocumentTreeEntryGetQuery, none, json DocumentTreeRead, 200;
+    DocumentTreeEntryGet: GET "/document-tree/entries/{id}", Rule("doc.view on the exact typed entry"), query DocumentTreeEntryGetQuery, none, json DocumentTreeRead, 200,
+        operation Op::variants(&[
+            Variant {
+                name: "read",
+                selector: "inspect_deleted is false or absent",
+                facets: &crate::document_sources::entry_facets(Read, &[Object(K::Document), Object(K::DocumentContainer)], Target::Resolved("typed_entry")),
+            },
+            Variant {
+                name: "inspect_deleted",
+                selector: "inspect_deleted=true under current restoration authority",
+                facets: &crate::document_sources::entry_facets(Manage, &[Object(K::Document), Object(K::DocumentContainer)], Target::Resolved("typed_entry")),
+            },
+        ]);
     /// Creates one empty document-only folder in an existing writable directory.
-    DocumentContainerCreate: POST "/nodes/{id}/document-containers", Rule("destination doc.create with docs.enabled"), none, json DocumentContainerCreateBody, json DocumentTreeReceipt, 201;
+    DocumentContainerCreate: POST "/nodes/{id}/document-containers", Rule("destination doc.create with docs.enabled"), none, json DocumentContainerCreateBody, json DocumentContainerCreateResponse, 201,
+        operation Op::receipt(&Op::facets(&crate::document_sources::folder_create_facets()));
     /// Creates ordinary text directly inside an existing writable document folder.
-    DocumentContainerDocumentCreate: POST "/document-containers/{id}/documents", Rule("doc.create on this container with docs.enabled"), none, json crate::documents::NodeDocumentCreateBody, json crate::documents::Document, 201;
+    DocumentContainerDocumentCreate: POST "/document-containers/{id}/documents", Rule("doc.create on this container with docs.enabled"), none, json crate::documents::NodeDocumentCreateBody, json crate::documents::DocumentCreationResponse, 201,
+        operation Op::receipt(&Op::facets(&crate::document_sources::text_create_facets()));
     /// Computes a complete authorized deletion preview without changing any document.
-    DocumentTreeDeletePreview: POST "/document-tree/delete/preview", Rule("doc.manage on every affected entry"), none, json DocumentTreeOperationBody, json DocumentTreePlan, 200;
+    DocumentTreeDeletePreview: POST "/document-tree/delete/preview", Rule("doc.manage on every affected entry"), none, json DocumentTreeOperationBody, json DocumentTreePlan, 200,
+        operation Op::single(
+            Manage,
+            &[Object(K::Document), Object(K::DocumentContainer)],
+            Target::Resolved("affected_entries"),
+        );
     /// Executes an atomic document operation, requiring a complete preview only for deletion.
-    DocumentTreeOperate: POST "/document-tree/operations", Rule("current complete source and destination document authority"), none, json DocumentTreeOperationBody, json DocumentTreeReceipt, 200;
+    DocumentTreeOperate: POST "/document-tree/operations", Rule("current complete source and destination document authority"), none, json DocumentTreeOperationBody, json DocumentTreeReceipt, 200,
+        operation Op::variants(&[
+            Variant {
+                name: "create_folder",
+                selector: "command=create_folder",
+                facets: &[
+                    Facet::required(
+                        Write,
+                        &[Object(K::DocumentContainer)],
+                        Target::Resolved("destination"),
+                    ),
+                    Facet::response_content(
+                        &[Object(K::DocumentContainer)],
+                        Target::Resolved("created_entries"),
+                    ),
+                ],
+            },
+            Variant {
+                name: "copy",
+                selector: "command=copy",
+                facets: &[
+                    Facet::required(
+                        Read,
+                        &[Object(K::Document), Object(K::DocumentContainer)],
+                        Target::Resolved("sources"),
+                    ),
+                    Facet::required(
+                        Write,
+                        &[Object(K::Document), Object(K::DocumentContainer)],
+                        Target::Resolved("destination"),
+                    ),
+                    Facet::response_content(
+                        &[Object(K::Document), Object(K::DocumentContainer)],
+                        Target::Resolved("created_entries"),
+                    ),
+                ],
+            },
+            Variant {
+                name: "move",
+                selector: "command=move, including folder rename",
+                facets: &[
+                    Facet::required(
+                        Manage,
+                        &[Object(K::Document), Object(K::DocumentContainer)],
+                        Target::Resolved("sources"),
+                    ),
+                    Facet::required(
+                        Write,
+                        &[Object(K::Document), Object(K::DocumentContainer)],
+                        Target::Resolved("destination"),
+                    ),
+                    Facet::response_content(
+                        &[Object(K::Document), Object(K::DocumentContainer)],
+                        Target::Resolved("affected_entries"),
+                    ),
+                ],
+            },
+            Variant {
+                name: "rename",
+                selector: "command=rename; exactly one text document",
+                facets: &[
+                    Facet::required(Write, &[Object(K::Document)], Target::Resolved("sources")),
+                    Facet::response_content(&[Object(K::Document)], Target::Resolved("sources")),
+                ],
+            },
+            Variant {
+                name: "delete",
+                selector: "command=delete",
+                facets: &[
+                    Facet::required(
+                        Manage,
+                        &[Object(K::Document), Object(K::DocumentContainer)],
+                        Target::Resolved("affected_entries"),
+                    ),
+                    Facet::response_content(
+                        &[Object(K::Document), Object(K::DocumentContainer)],
+                        Target::Resolved("affected_entries"),
+                    ),
+                ],
+            },
+            Variant {
+                name: "restore",
+                selector: "command=restore",
+                facets: &[
+                    Facet::required(
+                        Manage,
+                        &[Object(K::Document), Object(K::DocumentContainer)],
+                        Target::Resolved("affected_entries"),
+                    ),
+                    Facet::required(
+                        Write,
+                        &[Object(K::Document), Object(K::DocumentContainer)],
+                        Target::Resolved("restoration_destinations"),
+                    ),
+                    Facet::response_content(
+                        &[Object(K::Document), Object(K::DocumentContainer)],
+                        Target::Resolved("affected_entries"),
+                    ),
+                ],
+            },
+            Variant {
+                name: "restore_version",
+                selector: "command=restore_version",
+                facets: &[
+                    Facet::required(Manage, &[Object(K::Document)], Target::Resolved("sources")),
+                    Facet::response_content(&[Object(K::Document)], Target::Resolved("sources")),
+                ],
+            },
+        ]);
 }
 
 #[cfg(test)]

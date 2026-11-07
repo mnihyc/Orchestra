@@ -83,6 +83,8 @@ impl Office {
             .send()
             .await
             .ok()
+            .into_full()
+            .unwrap()
     }
 
     pub fn topic(&self) -> Id {

@@ -6,6 +6,7 @@
 )]
 
 mod support;
+use support::FullTokenReply as _;
 
 use chrono::Duration;
 use orch_api_contract::auth::{
@@ -63,11 +64,11 @@ fn login(name: &str, password: Option<&str>, code: &str) -> AuthLoginBody {
 
 fn replacement(password: &str, code: Option<&str>) -> MeRecoveryCodesRegenerateBody {
     MeRecoveryCodesRegenerateBody {
-        proof: SensitiveProof {
+        proof: Some(SensitiveProof {
             password: Some(password.to_owned()),
             recovery_code: code.map(str::to_owned),
             ..SensitiveProof::default()
-        },
+        }),
     }
 }
 
@@ -212,7 +213,7 @@ async fn codes_belong_to_one_person_and_stop_working_when_the_authenticator_is_d
         .call(MeTotpDisable, &[])
         .token(signed.token())
         .body(&MeTotpDisableBody {
-            password: PASSWORD.to_owned(),
+            password: Some(PASSWORD.to_owned()),
             code: batch.codes[0].clone(),
         })
         .send()
@@ -386,6 +387,7 @@ async fn the_last_code_can_replace_its_batch_in_that_browser_but_cannot_authoriz
         .call(MeTokenCreate, &[])
         .token(recovered.token())
         .body(&ApiTokenCreateBody {
+            rules: None,
             name: "cannot use recovery management".to_owned(),
             scopes: Some(vec!["thread.view".to_owned()]),
             proof: replacement(PASSWORD, None).proof,
@@ -393,7 +395,8 @@ async fn the_last_code_can_replace_its_batch_in_that_browser_but_cannot_authoriz
             expires_at: None,
         })
         .send()
-        .await;
+        .await
+        .full_token();
     assert_eq!(token.problem().code, ErrorCode::AuthSecondStepRequired);
     let new = world
         .app
@@ -527,17 +530,19 @@ async fn a_personal_api_token_cannot_read_or_replace_its_persons_recovery_codes(
         .call(MeTokenCreate, &[])
         .token(signed.token())
         .body(&ApiTokenCreateBody {
+            rules: None,
             name: "automation".to_owned(),
             scopes: Some(vec!["*".to_owned()]),
             node_id: None,
             expires_at: None,
-            proof: SensitiveProof {
+            proof: Some(SensitiveProof {
                 password: Some(PASSWORD.to_owned()),
                 ..SensitiveProof::default()
-            },
+            }),
         })
         .send()
         .await
+        .full_token()
         .ok()
         .token
         .unwrap();
