@@ -10,10 +10,19 @@
 use crate::access::AccessFault;
 use crate::commands::CommandsError;
 use orch_db::DbError;
+use orch_types::Id;
 
 /// A part the engine stands on failed, or what it stores does not read.
 #[derive(Debug, thiserror::Error)]
 pub enum EngineError {
+    /// A lifecycle change must first review and end the thread's live native work.
+    #[error(
+        "Background tasks are still running. Review and end them before changing this session."
+    )]
+    BackgroundRunning(Id),
+    /// An entry point refused its first effect. Preserve the opaque original error for that caller.
+    #[error(transparent)]
+    BeforeEffect(Box<dyn std::error::Error + Send + Sync>),
     /// A requested informational mount comparison could not read one of its locations.
     #[error("{0}")]
     MountFingerprint(String),

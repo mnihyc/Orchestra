@@ -9,6 +9,7 @@ mod places;
 mod resources;
 mod support;
 
+use crate::support::FullPermissionPageReply;
 use orch_api_contract::access::{
     EffectiveAccessGet, EffectiveAccessGetQuery, HistoryList, HistoryListQuery, PermissionPageGet,
     PermissionPageUpdate, PermissionPeopleList, PermissionPeopleListQuery,
@@ -55,6 +56,7 @@ async fn access_management_alone_reads_pages_people_effective_access_and_history
             .raw_body(&json!({"whole": "private"}))
             .send()
             .await
+            .full_permission_page()
             .ok();
         resources::name_person(&world, kind, id, "access.manage", company.viewer.id()).await;
         // Whoever holds the row that changes the page and nothing else; no admin is such a reader: an
@@ -248,6 +250,8 @@ async fn an_actual_provider_creation_leaves_its_home_admin_the_permission_page_w
         .send()
         .await
         .ok()
+        .into_full()
+        .unwrap()
         .provider
         .base
         .id;

@@ -7,10 +7,14 @@
 #![cfg(target_os = "linux")]
 mod ports_support;
 
+#[path = "ports_walk/native_scopes.rs"]
+mod native_scopes;
+
 use async_trait::async_trait;
 use orch_api_contract::environment::{MachineEnvironmentCreate, MachineEnvironmentCreateBody};
 use orch_api_contract::nodes::{OrgCreate, OrgCreateBody, ProjectCreate, ProjectCreateBody};
 use orch_api_contract::ports::*;
+use orch_api_contract::surface::HttpSurface;
 use orch_api_core::backplane::{ApplyError, EventApplier};
 use orch_api_core::registry::Registry;
 use orch_api_core::testing::TestApp;
@@ -244,6 +248,8 @@ async fn rules_2_3_6_a_manager_admits_a_colleague_the_connector_stops_starts_and
         .send()
         .await
         .ok()
+        .into_full()
+        .expect("ordinary created organization content")
         .base
         .id;
     let project = client
@@ -257,6 +263,8 @@ async fn rules_2_3_6_a_manager_admits_a_colleague_the_connector_stops_starts_and
         .send()
         .await
         .ok()
+        .into_full()
+        .expect("this control expects the ordinary full project response")
         .base
         .id;
     {
@@ -292,6 +300,15 @@ async fn rules_2_3_6_a_manager_admits_a_colleague_the_connector_stops_starts_and
         orch_link_contract::policy::PolicyKey::Ports.to_string(),
     ]);
     let pinned = world.pinned_config(&enrolled);
+    let prober = Arc::new(
+        orch_connector_core::gateway_selection::HttpsGatewayProber::new(
+            pinned.clone(),
+            pinned.clone(),
+            &enrolled.identity.authority,
+            world.clock.clone(),
+        )
+        .unwrap(),
+    );
     let params = || ConnectorParams {
         follow_system_endpoints: true,
         hosted_endpoints: None,
@@ -307,10 +324,10 @@ async fn rules_2_3_6_a_manager_admits_a_colleague_the_connector_stops_starts_and
         endpoints: enrolled.reply.endpoints.clone(),
         roles: vec![Role::Environment],
         managed: false,
-        dialer: Arc::new(orch_link::websocket::TlsDialer::new(
-            Some(pinned.clone()),
-            None,
-        )),
+        dialer: Arc::new(
+            orch_link::websocket::TlsDialer::new(Some(pinned.clone()), None)
+                .with_gateway_prober(prober.clone()),
+        ),
         clock: world.clock.clone(),
         platform: Platform {
             os: Os::Linux,
@@ -385,7 +402,9 @@ async fn rules_2_3_6_a_manager_admits_a_colleague_the_connector_stops_starts_and
         .body(&request(port, project))
         .send()
         .await
-        .ok();
+        .ok()
+        .into_full()
+        .expect("the ordinary port review retains its full native plan");
     let body = EnvironmentPortOpeningCreateBody {
         client_id: new_id(),
         preflight_id: plan.preflight_id,
@@ -396,14 +415,18 @@ async fn rules_2_3_6_a_manager_admits_a_colleague_the_connector_stops_starts_and
         .body(&body)
         .send()
         .await
-        .ok();
+        .ok()
+        .into_full()
+        .expect("ordinary opening confirmation retains the native full result");
     let repeated = client
         .call(EnvironmentPortOpeningCreate, &[&env, &port.to_string()])
         .token(&manager_token)
         .body(&body)
         .send()
         .await
-        .ok();
+        .ok()
+        .into_full()
+        .expect("ordinary opening confirmation retains the native full result");
     assert_eq!(first.opening.id, repeated.opening.id);
     let native = connector
         .environment_role()
@@ -473,6 +496,16 @@ async fn rules_2_3_6_a_manager_admits_a_colleague_the_connector_stops_starts_and
         assert!(refused.data.is_none());
         assert!(refused.failure.is_some());
     }
+    native_scopes::scoped_native_uses(
+        &world,
+        &client,
+        &app,
+        colleague,
+        env,
+        port,
+        first.opening.id,
+    )
+    .await;
     let usage = client
         .call(EnvironmentPortUseCreate, &[&env, &port.to_string()])
         .token(&colleague_token)
@@ -493,7 +526,7 @@ async fn rules_2_3_6_a_manager_admits_a_colleague_the_connector_stops_starts_and
     let mut channel = app
         .cache
         .ports()
-        .open_channel(usage.id, &usage.ticket, outside)
+        .open_channel(usage.id, &usage.ticket, outside, HttpSurface::Browser)
         .await
         .unwrap();
     let inside = channel.inside_peer().unwrap();
@@ -602,7 +635,7 @@ async fn rules_2_3_6_a_manager_admits_a_colleague_the_connector_stops_starts_and
     let mut own_channel = app
         .cache
         .ports()
-        .open_channel(own.id, &own.ticket, manager_peer)
+        .open_channel(own.id, &own.ticket, manager_peer, HttpSurface::Browser)
         .await
         .unwrap();
     let own_closer = own_channel.closer();
@@ -705,7 +738,7 @@ async fn rules_2_3_6_a_manager_admits_a_colleague_the_connector_stops_starts_and
     let udp_channel = app
         .cache
         .ports()
-        .open_channel(udp_use.id, &udp_use.ticket, peer)
+        .open_channel(udp_use.id, &udp_use.ticket, peer, HttpSurface::Browser)
         .await
         .unwrap();
     assert!(
@@ -813,7 +846,7 @@ async fn rules_2_3_6_a_manager_admits_a_colleague_the_connector_stops_starts_and
     let mut after = app
         .cache
         .ports()
-        .open_channel(usage.id, &usage.ticket, after_peer)
+        .open_channel(usage.id, &usage.ticket, after_peer, HttpSurface::Browser)
         .await
         .unwrap();
     let after_closer = after.closer();
@@ -840,7 +873,9 @@ async fn rules_2_3_6_a_manager_admits_a_colleague_the_connector_stops_starts_and
         })
         .send()
         .await
-        .ok();
+        .ok()
+        .into_full()
+        .unwrap();
     assert_eq!(closed.state, PortOpeningState::Closed);
     assert!(after_closer.is_closed());
     ports_support::eventually("a closed peer is no longer an inside identity", || async {

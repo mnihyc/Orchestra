@@ -9,6 +9,7 @@ mod places;
 mod resources;
 mod support;
 
+use crate::support::FullTransferReply;
 use orch_api_contract::access::{NodeRoleList, Role};
 use orch_api_contract::common::ErrorCode;
 use orch_api_contract::directory::{
@@ -118,12 +119,21 @@ async fn holdings(
     org: Id,
     user: &dyn std::fmt::Display,
 ) -> Reply<Holdings> {
-    world
+    let reply = world
         .app
         .call(OrgMemberHoldings, &[&org, user])
         .token(&who.token)
         .send()
-        .await
+        .await;
+    Reply {
+        status: reply.status,
+        headers: reply.headers,
+        raw: reply.raw,
+        body: reply.body.map(|body| {
+            body.into_full()
+                .expect("ordinary member holdings keeps its full body")
+        }),
+    }
 }
 
 async fn remove(world: &World, who: &Who, org: Id, user: &dyn std::fmt::Display) -> Reply<()> {
@@ -170,13 +180,22 @@ async fn preview(
     user: Id,
     body: &MemberMoveBody,
 ) -> Reply<MemberMovePlan> {
-    world
+    let reply = world
         .app
         .call(OrgMemberMovePreview, &[&org, &user])
         .token(&who.token)
         .body(body)
         .send()
-        .await
+        .await;
+    Reply {
+        status: reply.status,
+        headers: reply.headers,
+        raw: reply.raw,
+        body: reply.body.map(|body| {
+            body.into_full()
+                .expect("ordinary move previews keep their full plan")
+        }),
+    }
 }
 
 async fn move_to(
@@ -186,13 +205,22 @@ async fn move_to(
     user: Id,
     body: &MemberMoveBody,
 ) -> Reply<Member> {
-    world
+    let reply = world
         .app
         .call(OrgMemberMove, &[&org, &user])
         .token(&who.token)
         .body(body)
         .send()
-        .await
+        .await;
+    Reply {
+        status: reply.status,
+        headers: reply.headers,
+        raw: reply.raw,
+        body: reply.body.map(|body| {
+            body.into_full()
+                .expect("ordinary member movement keeps its full body")
+        }),
+    }
 }
 
 fn to(org: Id, role: Option<Role>) -> MemberMoveBody {
@@ -221,6 +249,7 @@ async fn hand_to_eve(world: &World, s: &Setup, node: Id, keep_previous: bool) {
         })
         .send()
         .await
+        .full_transfer()
         .ok();
 }
 
@@ -955,7 +984,9 @@ async fn ending_a_membership_passes_what_was_owned_alone_to_the_first_owner_of_t
         })
         .send()
         .await
-        .ok();
+        .ok()
+        .into_full()
+        .expect("this ordinary control requires the full native creation response");
     world
         .app
         .call(GroupMemberAdd, &[&crew.id, &s.eve.id()])
@@ -1097,6 +1128,7 @@ async fn a_member_leaves_by_themself_and_the_last_owner_of_a_root_org_names_anot
         })
         .send()
         .await
+        .full_transfer()
         .ok();
     let left = remove(&world, &s.boss, s.acme, &"me").await;
     assert_eq!(left.status, 204);

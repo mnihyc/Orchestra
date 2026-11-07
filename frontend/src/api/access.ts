@@ -9,10 +9,10 @@
  */
 import { infiniteQueryOptions, queryOptions } from '@tanstack/react-query';
 
-import { ApiError, api, done, ok, repeatable } from '@/api/client';
+import { ApiError, accepted, api, done, ok, repeatable } from '@/api/client';
 import type {
   AccessRequestCreateBody,
-  AccessRequestCreateReply,
+  AccessRequestWriteResponse,
   AccessRequestGetReply,
   Approval,
   EffectiveAccess,
@@ -326,13 +326,13 @@ export function takeRole(roleId: string): Promise<void> {
 // ---------------------------------------------------------------- asking for access
 
 /** Asks for what is missing, one approval for each thing, each sent to the people who can give it. */
-export function requestAccess(body: AccessRequestCreateBody, key: string): Promise<AccessRequestCreateReply> {
-  return ok(api.POST('/access-requests', { body, ...repeatable(key) }));
+export function requestAccess(body: AccessRequestCreateBody, key: string): Promise<AccessRequestWriteResponse> {
+  return accepted(api.POST('/access-requests', { body, ...repeatable(key) }));
 }
 
 /** Asks to join a known group; the grant is ordinary membership. */
-export function requestJoin(chatId:string,body:{reason:string;label?:string;expires_at?:string},key:string):Promise<AccessRequestCreateReply> {
-  return ok(api.POST('/chats/{id}/join-requests',{params:{path:{id:chatId}},body,...repeatable(key)}));
+export function requestJoin(chatId:string,body:{reason:string;label?:string;expires_at?:string},key:string):Promise<AccessRequestWriteResponse> {
+  return accepted(api.POST('/chats/{id}/join-requests',{params:{path:{id:chatId}},body,...repeatable(key)}));
 }
 
 /** Where a batch of requests stands. */

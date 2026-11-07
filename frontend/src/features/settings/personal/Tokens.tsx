@@ -1,9 +1,8 @@
 import { ThreadStateIcon } from '@/ui/ThreadState';
-/** Personal API-token scope and expiry.
+/** Personal API-token operation rules, expiry, review and revocation.
  *
- * A token acts as its person, narrowed to what they choose (a page's preset or permissions by area,
- * as it opens; everything only when chosen) and, if they choose, to one place and what lies under
- * it, for as long as they say, with their fresh proof in the same act. Making one is the only moment
+ * New keys keep explicit target/resource/operation/action selections and the existing fresh proof.
+ * Stored legacy keys retain their original scopes and place restriction. Making one is the only moment
  * its secret is shown: the dialog keeps it on screen until it is closed and never asks the server for
  * it again; a creation answered again says it was made, with Revoke and make another. A token is
  * ended for good by revoking it, which asks once.
@@ -18,7 +17,9 @@ import { isPlainClick } from '@/features/chat/open';
 import { PLACE_ICONS, placePath } from '@/features/navigation/places';
 import { PersonalFrame } from '@/features/settings/PersonalFrame';
 import { EVERYTHING, type Returned, returnedToTokenForm, TokenForm, TokenMade } from '@/features/settings/TokenForm';
-import type { ApiTokenCreateBody, ApiTokenInfo, TokenCreated } from '@/generated/api-types';
+import { KeyScopeReview } from '@/features/settings/KeyRules';
+import { KeyActivity } from '@/features/settings/KeyActivity';
+import type { ApiTokenCreateBody, ApiTokenInfo, TokenCreateResponse } from '@/generated/api-types';
 import { useFormatContext } from '@/lib/appearance';
 import { useActKey } from '@/lib/forms';
 import { formatNumber } from '@/lib/format';
@@ -30,6 +31,7 @@ import { ErrorAlert, ErrorState } from '@/ui/ErrorState';
 import { RelativeTime } from '@/ui/RelativeTime';
 import { ReferenceCard } from '@/ui/ReferenceCard';
 import { SkeletonRows } from '@/ui/Skeleton';
+import { SegmentedControl } from '@/ui/SegmentedControl';
 import { Table, type Column } from '@/ui/Table';
 import { toast } from '@/ui/Toast';
 
@@ -41,16 +43,18 @@ const FORM_ID = 'new-token';
 function NewToken({ onClose, returned }: { onClose: () => void; returned: Returned | null }) {
   const { t } = useTranslation();
   const actKey = useActKey();
-  const [made, setMade] = useState<TokenCreated | null>(null);
+  const [made, setMade] = useState<TokenCreateResponse | null>(null);
+  const [madeName, setMadeName] = useState('');
   const [revoking, setRevoking] = useState(false);
   const make = useMutation({
-    mutationFn: (body: ApiTokenCreateBody) => {
+    mutationFn: async (body: ApiTokenCreateBody) => {
       // The proof is not part of what the act is: a retry with a new code is the same creation.
-      return createToken(body, actKey({ ...body, proof: null }));
-    },
-    onSuccess: (reply) => {
+      const reply = await createToken(body, actKey({ ...body, proof: null }));
+      setMadeName(body.name);
       setMade(reply);
+      // Keep the fresh secret only in this result's local state, never in MutationCache.data.
     },
+    gcTime: 0,
   });
   // A creation answered again has no secret: it is revoked, and the form opens again for another.
   const revoke = useMutation({
@@ -67,7 +71,7 @@ function NewToken({ onClose, returned }: { onClose: () => void; returned: Return
       open
       onOpenChange={(next) => !next && !make.isPending && onClose()}
       title={made === null ? t('tokens.new.title') : again ? t('tokens.new.alreadyHeading') : t('tokens.new.madeTitle')}
-      description={made === null ? t('tokens.new.lead') : again ? t('tokens.new.alreadyLead') : t('tokens.new.madeLead')}
+      description={made === null ? t('operationKeys.newLead') : again ? t('tokens.new.alreadyLead') : t('tokens.new.madeLead')}
       dismissible={!make.isPending}
       size="lg"
       footer={
@@ -85,7 +89,7 @@ function NewToken({ onClose, returned }: { onClose: () => void; returned: Return
             <Button onClick={onClose}>{t('common.close')}</Button>
             <Button variant="danger" pending={revoke.isPending} onClick={() => {
               setRevoking(true);
-              revoke.mutate(made.info.id);
+              revoke.mutate('info' in made ? made.info.id : made.token_id);
             }}>
               {t('tokens.new.revokeAndAgain')}
             </Button>
@@ -98,10 +102,10 @@ function NewToken({ onClose, returned }: { onClose: () => void; returned: Return
       }
     >
       {made === null ? (
-        <TokenForm formId={FORM_ID} onMake={(body) => make.mutate(body)} pending={make.isPending} error={make.error} returned={returned} />
+        <TokenForm operationScoped formId={FORM_ID} onMake={(body) => make.mutate(body)} pending={make.isPending} error={make.error} returned={returned} />
       ) : (
         <>
-          <TokenMade made={made} />
+          <TokenMade made={made} name={madeName} />
           {revoking && revoke.error !== null && <ErrorAlert error={revoke.error} />}
         </>
       )}
@@ -112,6 +116,7 @@ function NewToken({ onClose, returned }: { onClose: () => void; returned: Return
 function ScopesCell({ token, compact = false }: { token: ApiTokenInfo; compact?: boolean }) {
   const { t } = useTranslation();
   const { locale } = useFormatContext();
+  if (token.rules !== undefined && token.rules !== null) return <span>{token.rules.length === 0 ? t('operationKeys.denyAllShort') : t('operationKeys.ruleCount', { count: token.rules.length })}</span>;
   if (token.scopes.includes(EVERYTHING)) return <span>{t('tokens.scopes.everything')}</span>;
   return (
     <details className={compact ? 'text-sm text-text-muted' : 'text-base'}>
@@ -123,6 +128,15 @@ function ScopesCell({ token, compact = false }: { token: ApiTokenInfo; compact?:
       </ul>
     </details>
   );
+}
+
+function KeyReview({ token }: { token: ApiTokenInfo }) {
+  const { t } = useTranslation();
+  const [view, setView] = useState<'scope' | 'activity'>('scope');
+  return <div className="flex min-w-0 flex-col gap-4"><SegmentedControl label={t('operationKeys.activity.view')} value={view} onValueChange={setView}
+    segments={[{ value: 'scope', label: t('operationKeys.review') }, { value: 'activity', label: t('operationKeys.activity.title') }]} />
+    {view === 'scope' ? <KeyScopeReview token={token} /> : <KeyActivity tokenId={token.id} />}
+  </div>;
 }
 
 /** A token's native place name needs no additional read until its shared reference card opens. */
@@ -149,6 +163,7 @@ export function Tokens() {
   });
   const [making, setMaking] = useState(returned !== null);
   const [revoking, setRevoking] = useState<ApiTokenInfo | null>(null);
+  const [reviewing, setReviewing] = useState<ApiTokenInfo | null>(null);
   const revoke = useMutation({
     mutationFn: (token: ApiTokenInfo) => revokeToken(token.id),
     onSuccess: (_none, token) => {
@@ -171,7 +186,7 @@ export function Tokens() {
           </div>
           <div className="flex flex-wrap gap-x-3 gap-y-1 text-sm text-text-muted">
             <span className="inline-flex flex-wrap gap-x-1"><span>{t('tokens.madePrefix')}</span><RelativeTime at={token.created_at} /></span>
-            {!placeShown && <TokenPlace node={token.node} />}
+            {!placeShown && (token.rules === undefined || token.rules === null ? <TokenPlace node={token.node} /> : <span>{t('operationKeys.boundTargets')}</span>)}
             {!usedShown && <span>{token.last_used_at === null ? t('tokens.neverUsed') : <RelativeTime at={token.last_used_at} />}</span>}
             {!expiryShown && <span className="inline-flex flex-wrap gap-x-1"><span>{t('tokens.columns.ends')}</span><span>{token.expires_at === null ? t('tokens.neverEnds') : <RelativeTime at={token.expires_at} />}</span></span>}
           </div>
@@ -180,7 +195,7 @@ export function Tokens() {
       },
     },
     { id: 'scopes', header: t('tokens.columns.mayDo'), from: 'sm', cell: (token) => <ScopesCell token={token} /> },
-    { id: 'where', header: t('tokens.columns.where'), from: 'md', cell: (token) => <TokenPlace node={token.node} /> },
+    { id: 'where', header: t('tokens.columns.where'), from: 'md', cell: (token) => token.rules === undefined || token.rules === null ? <TokenPlace node={token.node} /> : <span>{t('operationKeys.boundTargets')}</span> },
     {
       id: 'used',
       header: t('tokens.columns.lastUsed'),
@@ -199,9 +214,7 @@ export function Tokens() {
       hideHeader: true,
       align: 'end',
       cell: (token) => (
-        <Button size="sm" variant="ghost" onClick={() => setRevoking(token)}>
-          {t('tokens.revoke')}
-        </Button>
+        <div className="flex flex-wrap justify-end gap-2"><Button size="sm" variant="ghost" onClick={() => setReviewing(token)}>{t('operationKeys.review')}</Button><Button size="sm" variant="ghost" onClick={() => setRevoking(token)}>{t('tokens.revoke')}</Button></div>
       ),
     },
   ];
@@ -209,7 +222,7 @@ export function Tokens() {
   return (
     <PersonalFrame page="tokens" lead={t('tokens.lead')}>
       <div className="flex flex-wrap items-center justify-between gap-3">
-        <p className="max-w-prose text-sm text-text-muted">{t('tokens.about')}</p>
+        <p className="max-w-prose text-sm text-text-muted">{t('operationKeys.about')}</p>
         <Button variant="primary" icon={<Plus aria-hidden />} onClick={() => setMaking(true)}>
           {t('tokens.new.button')}
         </Button>
@@ -224,6 +237,7 @@ export function Tokens() {
         <Table label={t('tokens.table')} columns={columns} rows={list.data} rowKey={(token) => token.id} />
       )}
       {making && <NewToken returned={returned} onClose={() => setMaking(false)} />}
+      {reviewing !== null && <Dialog open onOpenChange={(open) => !open && setReviewing(null)} title={t('operationKeys.reviewTitle', { name: reviewing.name })} size="lg" footer={<Button onClick={() => setReviewing(null)}>{t('common.close')}</Button>}><KeyReview key={reviewing.id} token={reviewing} /></Dialog>}
       <ConfirmDialog
         open={revoking !== null}
         onOpenChange={(next) => !next && setRevoking(null)}

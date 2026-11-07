@@ -24,7 +24,7 @@ use orch_db::queries::jobs::{self, NewJob, kind};
 use orch_types::{Id, new_id};
 use places::Who;
 use resources::{Company, company, name_person};
-use serde_json::json;
+use serde_json::{Value, json};
 use support::World;
 
 struct Scene {
@@ -213,6 +213,263 @@ impl Scene {
             .await
             .ok()
     }
+}
+
+async fn sync_wire(scene: &Scene, token: &str) -> Value {
+    let reply = scene
+        .world
+        .app
+        .call(EnvironmentSyncGet, &[&scene.environment.base.id])
+        .token(token)
+        .query(&EnvironmentSyncGetQuery { since: Some(0) })
+        .send_bytes()
+        .await;
+    assert!(reply.status.is_success(), "{:?}", reply.problem());
+    serde_json::from_slice(&reply.raw).unwrap()
+}
+
+async fn library_read(scene: &Scene, token: &str) -> orch_api_core::testing::RawReply {
+    use orch_access_contract::{decisions::ObjectRef, permissions::ObjectKind};
+    use orch_api_contract::library::{LibraryReadBody, LibraryTarget, ResourceLibraryRead};
+    scene
+        .world
+        .app
+        .call(ResourceLibraryRead, &[])
+        .token(token)
+        .body(&LibraryReadBody {
+            targets: vec![LibraryTarget {
+                object: ObjectRef {
+                    kind: ObjectKind::Environment,
+                    id: scene.environment.base.id,
+                },
+                version_id: None,
+            }],
+        })
+        .send_bytes()
+        .await
+}
+
+async fn scoped_token(scene: &Scene, scope: &str, node: Option<Id>) -> (Id, String) {
+    use orch_api_core::middleware::authentication::{API_TOKEN_PREFIX, new_token, token_hash};
+    use orch_db::queries::identity::{NewApiToken, create_api_token};
+    let id = new_id();
+    let secret = new_token(API_TOKEN_PREFIX);
+    create_api_token(
+        &mut *scene.world.conn().await,
+        &NewApiToken {
+            id,
+            user_id: scene.people.admin.id(),
+            name: "environment library reader",
+            token_hash: &token_hash(&secret),
+            scopes: &[scope.to_owned()],
+            node_id: node,
+            at: scene.world.now(),
+            expires_at: None,
+        },
+    )
+    .await
+    .unwrap();
+    (id, secret)
+}
+
+#[tokio::test]
+async fn an_environment_sync_carries_the_same_private_library_projection_as_its_view_read() {
+    let scene = Scene::new().await;
+    name_person(
+        &scene.world,
+        "environment",
+        scene.environment.base.id,
+        "environment.view",
+        scene.people.viewer.id(),
+    )
+    .await;
+    // A retained binding can outlive its old sharing. Its current name stays private.
+    let secret_org = places::make_org(
+        &scene.world,
+        &scene.people.stranger,
+        "Private work",
+        "private-work",
+    )
+    .await;
+    let secret_project = places::make_project(
+        &scene.world,
+        &scene.people.stranger,
+        secret_org.base.id,
+        "Private project",
+    )
+    .await;
+    let secret_topic = places::make_topic(
+        &scene.world,
+        &scene.people.stranger,
+        secret_project.base.id,
+        "Private topic",
+    )
+    .await;
+    let hidden = new_id();
+    {
+        let mut conn = scene.world.conn().await;
+        insert_node(
+            &mut conn,
+            hidden,
+            "thread",
+            Some(secret_topic.base.id),
+            "Never reveal this binding",
+            scene.people.stranger.id(),
+        )
+        .await
+        .unwrap();
+        sqlx::query("UPDATE threads SET environment_id=$2 WHERE node_id=$1")
+            .bind(hidden)
+            .bind(scene.environment.base.id)
+            .execute(&mut *conn)
+            .await
+            .unwrap();
+    }
+    let standalone = library_read(&scene, &scene.people.viewer.token).await;
+    assert!(standalone.status.is_success());
+    let standalone: Value = serde_json::from_slice(&standalone.raw).unwrap();
+    let expected = &standalone[0]["facts"];
+    let binding = expected["dependents"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|group| group["relation"] == "binding")
+        .unwrap();
+    assert_eq!(binding["count"], 2);
+    assert_eq!(binding["hidden"], 1);
+    assert_eq!(binding["visible"].as_array().unwrap().len(), 1);
+    let sync = sync_wire(&scene, &scene.people.viewer.token).await;
+    assert_eq!(sync.get("library"), Some(expected));
+    let encoded = serde_json::to_string(&sync["library"]).unwrap();
+    assert!(!encoded.contains("Never reveal this binding"));
+    assert!(!encoded.contains(&hidden.to_string()));
+}
+
+#[tokio::test]
+async fn sync_library_requires_view_even_when_a_thread_or_another_door_allows_the_environment() {
+    let scene = Scene::new().await;
+    let current = scene.job(kind::ENVIRONMENT_RECREATE, false).await;
+    let old = scene.job(kind::ENVIRONMENT_PROVISION, true).await;
+    let through = sync_wire(&scene, &scene.people.viewer.token).await;
+    assert_eq!(through["environment"]["workspace_root"], "");
+    assert_eq!(through["environment"]["config"], json!({}));
+    assert_eq!(through["jobs"].as_array().unwrap().len(), 1);
+    assert_eq!(through["jobs"][0]["id"], current.to_string());
+    for field in ["log", "result", "created_by", "progress"] {
+        assert!(through["jobs"][0].get(field).is_none(), "{field}");
+    }
+    assert_eq!(
+        library_read(&scene, &scene.people.viewer.token)
+            .await
+            .problem()
+            .code,
+        ErrorCode::NotFound
+    );
+    name_person(
+        &scene.world,
+        "environment",
+        scene.environment.base.id,
+        "terminal.view",
+        scene.people.viewer.id(),
+    )
+    .await;
+    let door = sync_wire(&scene, &scene.people.viewer.token).await;
+    assert_eq!(door["environment"]["workspace_root"], "/srv/ada/main");
+    assert_eq!(door["jobs"].as_array().unwrap().len(), 2);
+    assert!(
+        door["jobs"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|job| job["id"] == old.to_string())
+    );
+    assert_eq!(
+        library_read(&scene, &scene.people.viewer.token)
+            .await
+            .problem()
+            .code,
+        ErrorCode::NotFound
+    );
+    // Explicit null is a denial of this optional projection, never invented empty facts.
+    assert_eq!(through.get("library"), Some(&Value::Null));
+    assert_eq!(door.get("library"), Some(&Value::Null));
+}
+
+#[tokio::test]
+async fn sync_library_keeps_the_tokens_scope_subtree_and_revocation_boundaries() {
+    let scene = Scene::new().await;
+    // A browser's administrator reach does not become the caller's ordinary token authority.
+    for permission in ["environment.view", "terminal.view"] {
+        name_person(
+            &scene.world,
+            "environment",
+            scene.environment.base.id,
+            permission,
+            scene.people.admin.id(),
+        )
+        .await;
+    }
+    let (view_id, view) = scoped_token(&scene, "environment.view", None).await;
+    let (_, door) = scoped_token(&scene, "terminal.view", None).await;
+    let (_, bounded) = scoped_token(&scene, "environment.view", Some(scene.topic)).await;
+    let outside = places::make_project(
+        &scene.world,
+        &scene.people.boss,
+        scene.people.acme,
+        "Another project",
+    )
+    .await;
+    let (_, away) = scoped_token(&scene, "environment.view", Some(outside.base.id)).await;
+    let admitted = sync_wire(&scene, &view).await;
+    let standalone = library_read(&scene, &view).await;
+    assert!(standalone.status.is_success());
+    let expected: Value = serde_json::from_slice(&standalone.raw).unwrap();
+    assert_eq!(
+        library_read(&scene, &door).await.problem().code,
+        ErrorCode::NotFound
+    );
+    let door = sync_wire(&scene, &door).await;
+    // These resource requests go through no node, including the environment's own home topic.
+    for token in [&bounded, &away] {
+        let outside = scene
+            .world
+            .app
+            .call(EnvironmentSyncGet, &[&scene.environment.base.id])
+            .token(token)
+            .query(&EnvironmentSyncGetQuery::default())
+            .send_bytes()
+            .await;
+        assert_eq!(outside.problem().code, ErrorCode::AuthzDenied);
+        assert_eq!(
+            library_read(&scene, token).await.problem().code,
+            ErrorCode::NotFound
+        );
+    }
+    assert!(
+        orch_db::queries::identity::revoke_api_token(
+            &mut *scene.world.conn().await,
+            view_id,
+            scene.people.admin.id(),
+            scene.world.now(),
+        )
+        .await
+        .unwrap()
+    );
+    let revoked = scene
+        .world
+        .app
+        .call(EnvironmentSyncGet, &[&scene.environment.base.id])
+        .token(&view)
+        .query(&EnvironmentSyncGetQuery::default())
+        .send_bytes()
+        .await;
+    assert_eq!(revoked.problem().code, ErrorCode::AuthInvalidToken);
+    assert_eq!(
+        library_read(&scene, &view).await.problem().code,
+        ErrorCode::AuthInvalidToken
+    );
+    assert_eq!(admitted.get("library"), Some(&expected[0]["facts"]));
+    assert_eq!(door.get("library"), Some(&Value::Null));
 }
 
 #[tokio::test]

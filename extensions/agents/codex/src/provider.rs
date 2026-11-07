@@ -1673,6 +1673,7 @@ mod tests {
         // A list that did give the window of a model, and the largest, is not corrected by the catalogue.
         found[3].parameters.context_window = Some(100_000);
         found[3].parameters.offered = Some(Offered {
+            web_search: None,
             context_max: Some(300_000),
             ..Offered::default()
         });

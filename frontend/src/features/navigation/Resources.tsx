@@ -90,7 +90,7 @@ export function resourceRows(lists: Readonly<Record<ResourceKind, Pick<KindList,
 function useBranch(kind: ResourceKind, open: ReadonlySet<ResourceKind>, reader: string | null): KindList {
   const shown = useViewShown();
   const options = everythingQuery(reader ?? '', 'resources', { scope: 'mine', kinds: [INVENTORY_KINDS[kind]],
-    q: '', owner: null, createdFrom: '', createdTo: '', sort: 'name', direction: 'asc' }, 'resource-navigation');
+    q: '', owner: null, createdFrom: '', createdTo: '', sort: 'name', direction: 'asc' }, 'resource-navigation', { keepReading: true });
   const query = useInfiniteQuery({ ...options, enabled: shown && reader !== null && open.has(kind) });
   return { things: query.data?.pages.flatMap((page) => page.items.flatMap((row) => row.name === null ? [] : [{ id: row.id, name: row.name }])) ?? null,
     failed: query.isError, retry: () => { if (query.isFetchNextPageError) void query.fetchNextPage(); else void query.refetch(); },

@@ -336,12 +336,12 @@ async fn take(
     })
 }
 
-/// The most (place, person) pairs read at once for the roles given in all the places of a preview.
+/// The most confirmed (place, person) pairs retained for the roles in a preview.
 const ROLE_ROWS_MOST: i64 = 200_000;
 
-/// The people behind each key, found for all the keys together: a handful of statements however many
-/// pages there are, since what a page names is the same few holders and the owners of each page are
-/// already read. It gives what [`holders::people_of`], [`holders::owner_people`] and
+/// The people behind each key, sharing source batches across the requested pages and confirming
+/// dynamic holder sources before applying the preview's existing cap. It gives what
+/// [`holders::people_of`], [`holders::owner_people`] and
 /// [`holders::admins_at`] give for each key one at a time.
 async fn expand(
     conn: &mut Conn,
@@ -350,6 +350,7 @@ async fn expand(
     keys: &HashMap<Key, usize>,
 ) -> Result<HashMap<Key, Vec<Id>>, Error> {
     let now = frame.now();
+    let role_limit = usize::try_from(ROLE_ROWS_MOST).unwrap_or(usize::MAX);
     let graph = frame.graph();
     let mut ways: HashMap<Id, Vec<Id>> = HashMap::new();
     let mut places: BTreeSet<Id> = BTreeSet::new();
@@ -373,6 +374,9 @@ async fn expand(
                 }) {
                     let way: Vec<Id> = graph.places_on(node).iter().map(|each| each.id).collect();
                     places.extend(way.iter().copied());
+                    if *role == Role::Viewer {
+                        places.insert(*place);
+                    }
                     owned.extend(way.iter().copied());
                     ways.insert(*place, way);
                     if !roles.contains(role) {
@@ -439,8 +443,10 @@ async fn expand(
     }
     let mut members_of: HashMap<Id, Vec<Id>> = HashMap::new();
     if !in_groups.is_empty() {
-        for (group, user) in
-            access::group_people(conn, &in_groups, ROLE_ROWS_MOST, now.get()).await?
+        for (group, user) in holders::group_people(conn, &in_groups, now)
+            .await?
+            .into_iter()
+            .take(role_limit)
         {
             members_of.entry(group).or_default().push(user);
         }
@@ -504,9 +510,10 @@ async fn expand(
             .collect();
         let mut at: HashMap<Id, Vec<Id>> = HashMap::new();
         if !place_list.is_empty() {
-            for (place, user) in
-                access::people_given_role(conn, &place_list, &names, now.get(), ROLE_ROWS_MOST)
-                    .await?
+            for (place, user) in holders::given_role_people(conn, &place_list, &names, now)
+                .await?
+                .into_iter()
+                .take(role_limit)
             {
                 at.entry(place).or_default().push(user);
             }
@@ -520,15 +527,25 @@ async fn expand(
     };
     let mut actual_viewers: HashMap<Id, Vec<Id>> = HashMap::new();
     if keys.keys().any(|key| matches!(key, Key::ImplicitViewer(_))) {
-        let roles: Vec<String> = Role::ALL
+        let sources: Vec<_> = place_list
             .iter()
-            .map(|role| role.as_str().to_owned())
+            .map(|place| access::HolderPeopleQuery {
+                kind: "role",
+                id: Some(*place),
+                role: "viewer",
+            })
             .collect();
-        for (place, user) in
-            access::people_in_roles(conn, &place_list, &roles, now.get(), ROLE_ROWS_MOST, false)
-                .await?
+        for (index, user) in holders::audience_people(conn, &sources, now)
+            .await?
+            .into_iter()
+            .take(role_limit)
         {
-            actual_viewers.entry(place).or_default().push(user);
+            if let Some(place) = usize::try_from(index - 1)
+                .ok()
+                .and_then(|slot| place_list.get(slot))
+            {
+                actual_viewers.entry(*place).or_default().push(user);
+            }
         }
     }
     let mut explicit_viewers: HashMap<Id, Vec<Id>> = HashMap::new();
@@ -541,17 +558,28 @@ async fn expand(
             })
         )
     }) {
-        let roles: Vec<String> = Role::ALL
+        let sources: Vec<_> = place_list
             .iter()
-            .map(|role| role.as_str().to_owned())
+            .map(|place| access::HolderPeopleQuery {
+                kind: "visible",
+                id: Some(*place),
+                role: "viewer",
+            })
             .collect();
-        for (place, user) in
-            access::people_in_roles(conn, &place_list, &roles, now.get(), ROLE_ROWS_MOST, true)
-                .await?
+        for (index, user) in holders::audience_people(conn, &sources, now)
+            .await?
+            .into_iter()
+            .take(role_limit)
         {
-            explicit_viewers.entry(place).or_default().push(user);
+            if let Some(place) = usize::try_from(index - 1)
+                .ok()
+                .and_then(|slot| place_list.get(slot))
+            {
+                explicit_viewers.entry(*place).or_default().push(user);
+            }
         }
     }
+
     let given_at = |role: Role, place: Id| -> Vec<Id> {
         given
             .iter()

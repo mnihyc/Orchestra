@@ -4,7 +4,11 @@
 //! surrounds every handler is in [`middleware`]; [`testing`] calls the
 //! application in memory, for the tests of every route.
 
+#![recursion_limit = "256"]
 #![forbid(unsafe_code)]
+
+#[cfg(feature = "test-observers")]
+pub use orch_link::test_observers;
 
 // The read-cut unit tests use the same native application and machine fixtures as route tests.
 #[cfg(test)]
@@ -34,6 +38,7 @@ pub mod harness_checks;
 pub mod host_ports;
 pub mod hosting;
 pub mod input_schedules;
+pub(crate) mod key_operations;
 pub mod local_ports;
 pub mod machine_requests;
 pub mod media;
@@ -47,6 +52,7 @@ pub mod programs;
 pub mod realtime;
 pub mod recordings;
 pub mod registry;
+pub(crate) mod response_body;
 pub mod routes;
 mod sandbox_readiness;
 pub mod server;

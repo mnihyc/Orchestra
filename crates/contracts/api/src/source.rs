@@ -4,6 +4,13 @@
 //! applies it, and its undo is another restore plan. Source credentials are names only; neither
 //! these responses nor thread links carry authentication material.
 
+use crate::operations::{
+    FacetSpec as Facet, OperationSpec as Op, TargetResolver as Target, VariantSpec as Variant,
+};
+use orch_access_contract::key_scope::KeyAction::{Manage, Read, Write};
+use orch_access_contract::key_scope::KeyTargetKind::Object;
+use orch_access_contract::permissions::ObjectKind as K;
+
 use orch_types::{Hash, Id, Time};
 use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
@@ -379,17 +386,38 @@ pub struct GitCommitResult {
 
 crate::endpoints! {
     /// Prepares or retries the frozen repository source before the retained first input.
-    EnvironmentSourcePrepare: POST "/environments/{id}/source/prepare", Rule("environment.manage, thread.view, remote-write and local policy"), none, json EnvironmentSourcePrepareBody, json Job, 202;
+    EnvironmentSourcePrepare: POST "/environments/{id}/source/prepare", Rule("environment.manage, thread.view, remote-write and local policy"), none, json EnvironmentSourcePrepareBody, json Job, 202,
+        operation Op::receipt(&Op::variants(&[
+            Variant{name:"prepare",selector:"native source action is a checkout or directory preparation",facets:&[
+                Facet::required(Manage,&[Object(K::Environment)],Target::Path("id")),
+                Facet::required(Read,&[Object(K::Thread)],Target::Resolved("bound_thread")),
+                Facet::response_content(&[Object(K::Environment)],Target::Resolved("source_problem_environment")),
+            ]},
+            Variant{name:"worktree",selector:"native source action creates an own worktree from existing workspace content",facets:&[
+                Facet::required(Manage,&[Object(K::Environment)],Target::Path("id")),
+                Facet::required(Read,&[Object(K::Thread)],Target::Resolved("bound_thread")),
+                Facet::required(Read,&[Object(K::Environment)],Target::Resolved("worktree_environment")),
+                Facet::response_content(&[Object(K::Environment)],Target::Resolved("source_problem_environment")),
+            ]},
+        ]));
     /// Commits exactly the reviewed changed paths as the caller.
-    EnvironmentGitCommit: POST "/environments/{id}/git/commit", Rule("files.manage, remote-write and local policy"), query ThroughThreadQuery, json EnvironmentGitCommitBody, json Job, 202;
+    EnvironmentGitCommit: POST "/environments/{id}/git/commit", Rule("files.manage, remote-write and local policy"), query ThroughThreadQuery, json EnvironmentGitCommitBody, json Job, 202,
+        operation Op::single(Manage, &[Object(K::Environment)], Target::Path("id"));
     /// Pushes the reviewed branch to its reviewed remote without force or implicit pull.
-    EnvironmentGitPush: POST "/environments/{id}/git/push", Rule("files.manage, remote-write and local policy"), query ThroughThreadQuery, json EnvironmentGitPushBody, json Job, 202;
+    EnvironmentGitPush: POST "/environments/{id}/git/push", Rule("files.manage, remote-write and local policy"), query ThroughThreadQuery, json EnvironmentGitPushBody, json Job, 202,
+        operation Op::facets(&[
+            Facet::required(Manage, &[Object(K::Environment)], Target::Path("id")),
+            Facet::required(Read, &[Object(K::Environment)], Target::Path("id")),
+        ]);
     /// Plans a complete recorded-file restore and names later changes and active writers.
-    EnvironmentRestorePreflight: POST "/environments/{id}/restores/preflight", Rule("files.manage, remote-write and authority over affected active writers"), none, json EnvironmentRestorePreflightBody, json RestorePlan, 200;
+    EnvironmentRestorePreflight: POST "/environments/{id}/restores/preflight", Rule("files.manage, remote-write and authority over affected active writers"), none, json EnvironmentRestorePreflightBody, json RestorePlan, 200,
+        operation Op::single(Manage, &[Object(K::Environment)], Target::Path("id"));
     /// Rechecks and applies one restore plan, keeping a complete undo state.
-    EnvironmentFilesRestore: POST "/environments/{id}/restores", Rule("files.manage, remote-write and authority over affected active writers"), none, json EnvironmentFilesRestoreBody, json Job, 202;
+    EnvironmentFilesRestore: POST "/environments/{id}/restores", Rule("files.manage, remote-write and authority over affected active writers"), none, json EnvironmentFilesRestoreBody, json Job, 202,
+        operation Op::single(Manage, &[Object(K::Environment)], Target::Path("id"));
     /// Replaces the links accepted by an interactor on this thread.
-    ThreadLinksSet: PUT "/threads/{id}/links", Permission("thread.interact"), none, json ThreadLinksSetBody, json Vec<ThreadLink>, 200;
+    ThreadLinksSet: PUT "/threads/{id}/links", Permission("thread.interact"), none, json ThreadLinksSetBody, json Vec<ThreadLink>, 200,
+        operation Op::returning(Write, &[Object(K::Thread)], Target::PermissionObject);
 }
 
 #[cfg(test)]

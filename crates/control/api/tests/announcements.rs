@@ -8,13 +8,16 @@
 mod places;
 mod rig;
 mod support;
+use support::FullApprovalReply;
 
 use orch_api_contract::approvals::{
     Approval, ApprovalDecide, ApprovalDecision, ApprovalList, ApprovalListQuery, ApprovalState,
     CapabilityDecision,
 };
 use orch_api_contract::common::{ErrorCode, Page};
-use orch_api_contract::environment::EnvironmentCapabilityRevoke;
+use orch_api_contract::environment::{
+    EnvironmentCapabilityRevoke, EnvironmentGet, EnvironmentUpdate, EnvironmentUpdateBody,
+};
 use orch_api_contract::threads::{AnnouncementCategory, Delivery};
 use orch_api_contract::topics::{
     Announcement, AnnouncementCreateBody, AnnouncementDelivery, AnnouncementSendAudience,
@@ -63,6 +66,8 @@ async fn tell_the_topic(s: &Scene, by: &Who, body: &AnnouncementCreateBody) -> A
         .send()
         .await
         .ok()
+        .into_full()
+        .expect("the ordinary announcement control returns its full native result")
         .announcements
         .into_iter()
         .next()
@@ -217,7 +222,9 @@ async fn a_project_announcement_needs_interact_and_goes_to_every_open_topic() {
         .body(&announcement("To the project"))
         .send()
         .await
-        .ok();
+        .ok()
+        .into_full()
+        .expect("the ordinary project announcement control returns its full native result");
     assert_eq!(
         made.announcements.len(),
         2,
@@ -343,7 +350,7 @@ async fn what_an_agent_announced_to_one_thread_or_to_followers_is_listed_only_wh
 // ---------------------------------------------------------------- capabilities
 
 /// The scene's environment, made from a template that allows `kvm` and `ptrace`, and the catalogue.
-async fn with_capabilities(s: &Scene) {
+async fn with_capabilities(s: &Scene) -> Id {
     // A prospective unit learns its capabilities from an available driver's report. No host is
     // selected yet, so this report gives it no physical machine's policy or host manager.
     let mut conn = s.rig.db.acquire().await.unwrap();
@@ -403,6 +410,7 @@ async fn with_capabilities(s: &Scene) {
     .await
     .unwrap();
     s.rig.tools_of_agents(json!("mcp")).await;
+    host
 }
 
 async fn pending_for(s: &Scene, who: &Who) -> Page<Approval> {
@@ -421,12 +429,45 @@ async fn pending_for(s: &Scene, who: &Who) -> Page<Approval> {
 async fn a_request_for_a_capability_is_listed_for_the_people_of_its_scope_and_decided_by_them_alone()
  {
     let s = Scene::new().await;
-    with_capabilities(&s).await;
+    let host = with_capabilities(&s).await;
     let thread = s.thread().await.base.id;
     // Whoever decides is there before the agent asks: a change of who may do what while the
     // machine's events are applied refuses them, and the machine sends them again only after its
     // stall time.
     let admin = places::admin(&s.rig.world, "root").await;
+    // An available driver is not a host selection or its authority. Select the request's actual host.
+    let environment = s
+        .rig
+        .world
+        .app
+        .call(EnvironmentGet, &[&s.on.environment])
+        .token(&admin.token)
+        .send()
+        .await
+        .ok();
+    let mut config = environment.config;
+    config["env.host_id"] = json!(host);
+    s.rig
+        .world
+        .app
+        .call(EnvironmentUpdate, &[&s.on.environment])
+        .token(&admin.token)
+        .body(&EnvironmentUpdateBody {
+            name: None,
+            config: Some(config),
+            data_sources: None,
+            remote_write: None,
+            terminal: None,
+            browser: None,
+            vnc: None,
+            home_node_id: None,
+            expected_revision: environment.revision,
+        })
+        .send()
+        .await
+        .ok()
+        .into_full()
+        .unwrap();
     let turn = running_turn(&s, thread).await;
     let call_ref = new_id().to_string();
     s.rig
@@ -453,6 +494,11 @@ async fn a_request_for_a_capability_is_listed_for_the_people_of_its_scope_and_de
         "the system's admin decides what is decided on a machine's side"
     );
     assert_eq!(approval.thread_id, Some(thread));
+    let orch_api_contract::approvals::ApprovalRequest::Capability(request) = &approval.request
+    else {
+        panic!("the approval describes a capability");
+    };
+    assert_eq!(request.host.id, host);
     // The owner of the thread, the topic and the environment is neither sent it nor allowed to decide it.
     assert!(pending_for(&s, &s.ada).await.items.is_empty());
     let refused = s
@@ -467,6 +513,7 @@ async fn a_request_for_a_capability_is_listed_for_the_people_of_its_scope_and_de
         }))
         .send()
         .await
+        .full_approval()
         .problem();
     assert_eq!(refused.code, ErrorCode::AuthzDenied);
     let decided = s
@@ -481,6 +528,7 @@ async fn a_request_for_a_capability_is_listed_for_the_people_of_its_scope_and_de
         }))
         .send()
         .await
+        .full_approval()
         .ok();
     assert_eq!(decided.state, ApprovalState::Approved);
     let granted: Vec<String> =

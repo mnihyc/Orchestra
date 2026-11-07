@@ -1,4 +1,5 @@
 //! The environment host as a whole, through the functions that carry out the commands: attaching, files, snapshots, watching, manifests, shells and gates.
+#![cfg(target_os = "linux")]
 #![allow(
     clippy::unwrap_used,
     clippy::expect_used,
@@ -356,6 +357,7 @@ async fn restore_commands_transfer_the_reviewed_plan_and_undo_the_exact_prior_fi
     );
     let apply = FsRestore {
         work: None,
+        recovery_only: None,
         environment_id: rig.env,
         job_id: orch_types::new_id(),
         snapshot_id: snapshot,
@@ -382,6 +384,7 @@ async fn restore_commands_transfer_the_reviewed_plan_and_undo_the_exact_prior_fi
         .fs_restore(
             &FsRestore {
                 work: None,
+                recovery_only: None,
                 job_id: orch_types::new_id(),
                 snapshot_id: result.undo_snapshot_id,
                 undo_snapshot_id: orch_types::new_id(),
@@ -500,6 +503,7 @@ async fn a_first_turn_in_a_new_directory_records_and_restores_with_the_shipped_d
         .fs_restore(
             &FsRestore {
                 work: None,
+                recovery_only: None,
                 environment_id: rig.env,
                 job_id: orch_types::new_id(),
                 snapshot_id: request.snapshot_id,

@@ -1,5 +1,10 @@
 //! One retained-storage report and reviewed cleanup plans across resources and machines.
 
+use crate::operations::{OperationSpec as Op, TargetResolver as Target};
+use orch_access_contract::key_scope::KeyAction::Manage;
+use orch_access_contract::key_scope::KeyTargetKind::Object;
+use orch_access_contract::permissions::ObjectKind as K;
+
 use orch_access_contract::decisions::ObjectRef;
 use orch_types::{Id, Time};
 use schemars::JsonSchema;
@@ -339,6 +344,36 @@ pub struct CleanupPlan {
     pub notify: bool,
 }
 
+/// Accepted native choices without existing storage names, people or sizes.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+pub struct CleanupItemReceipt {
+    /// The selected opaque native key, which can be used to confirm the plan.
+    pub id: String,
+    /// Permitted fates, including Keep.
+    pub choices: Vec<CleanupChoice>,
+    /// The native default.
+    pub selected: CleanupChoice,
+    /// The native safe blocker, if this item cannot go ahead.
+    pub blocker: Option<String>,
+}
+/// A saved preview remains usable without disclosing its existing metadata.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+pub struct CleanupPlanReceipt {
+    /// Identifies the sparse accepted response.
+    pub projection: crate::common::ReceiptProjection,
+    /// The actual stored plan.
+    pub id: Id,
+    /// The native preview's deadline.
+    pub expires_at: Time,
+    /// The accepted native choices, with no previous names or observations.
+    pub items: Vec<CleanupItemReceipt>,
+}
+crate::common::full_or_receipt! {
+    /// Native cleanup metadata or its saved identity and permitted choices.
+    #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+    pub enum CleanupPlanResponse { Full(CleanupPlan), Receipt(CleanupPlanReceipt), }
+}
+
 /// One edited fate in the accepted plan.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
 #[serde(deny_unknown_fields)]
@@ -376,9 +411,24 @@ pub struct CleanupOutcome {
 
 crate::endpoints! {
     /// Reads retained storage the caller may manage through one scoped report.
-    StorageGet: GET "/storage", Rule("only storage the caller may manage in this scope"), query StorageQuery, none, json StorageReport, 200;
+    StorageGet: GET "/storage", Rule("only storage the caller may manage in this scope"), query StorageQuery, none, json StorageReport, 200,
+        operation Op::facets(&crate::storage_sources::REPORT_FACETS);
     /// Previews the fates and blockers of selected retained storage.
-    StorageCleanupPreflight: POST "/storage/cleanup/preflight", User, none, json CleanupRequest, json CleanupPlan, 200;
+    StorageCleanupPreflight: POST "/storage/cleanup/preflight", User, none, json CleanupRequest, json CleanupPlanResponse, 200,
+        operation Op::receipt(&Op::facets(&crate::storage_sources::CLEANUP_FACETS));
     /// Starts one confirmed cleanup with current authority and the preview's exact objects.
-    StorageCleanupCreate: POST "/storage/cleanup", User, none, json CleanupStart, json crate::workspace::Job, 202;
+    StorageCleanupCreate: POST "/storage/cleanup", User, none, json CleanupStart, json crate::workspace::Job, 202,
+        operation Op::single(
+            Manage,
+            &[
+                Object(K::Environment),
+                Object(K::Provider),
+                Object(K::Host),
+                Object(K::Machine),
+                Object(K::Mount),
+                Object(K::Thread),
+                Object(K::Document),
+            ],
+            Target::Resolved("storage_subjects"),
+        );
 }

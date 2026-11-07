@@ -421,23 +421,44 @@ impl Blobs {
 
 // ---------------------------------------------------------------- the files of pieces
 
-/// Writes a piece at `offset` of the file where the pieces of an upload wait: whatever lies beyond
-/// the bytes that are known to have arrived (a piece the system did not get to record) is cut off
-/// first, and the piece is on the disk before it is answered.
-pub async fn write_piece(path: &Path, offset: i64, piece: &[u8]) -> std::io::Result<()> {
-    use tokio::io::AsyncSeekExt;
-    let mut file = tokio::fs::OpenOptions::new()
+/// An opened native part file; its existing bytes remain untouched until write.
+pub struct PieceFile {
+    file: tokio::fs::File,
+    offset: u64,
+}
+
+/// Open the native file once, outside any retryable metadata resolver.
+/// Callers may refresh authority after this filesystem wait before truncating or writing bytes.
+pub async fn prepare_piece(path: &Path, offset: i64) -> std::io::Result<PieceFile> {
+    let file = tokio::fs::OpenOptions::new()
         .create(true)
         .write(true)
         .truncate(false)
         .open(path)
         .await?;
-    let offset = u64::try_from(offset).unwrap_or(0);
-    file.set_len(offset).await?;
-    file.seek(std::io::SeekFrom::Start(offset)).await?;
-    file.write_all(piece).await?;
-    file.flush().await?;
-    file.sync_data().await
+    Ok(PieceFile {
+        file,
+        offset: u64::try_from(offset).unwrap_or(0),
+    })
+}
+
+impl PieceFile {
+    /// Preserve the native truncate/seek/write/flush/sync sequence after the caller's first-effect cut.
+    pub async fn write(mut self, piece: &[u8]) -> std::io::Result<()> {
+        use tokio::io::AsyncSeekExt;
+        self.file.set_len(self.offset).await?;
+        self.file
+            .seek(std::io::SeekFrom::Start(self.offset))
+            .await?;
+        self.file.write_all(piece).await?;
+        self.file.flush().await?;
+        self.file.sync_data().await
+    }
+}
+
+/// Writes a piece at its native offset, cutting off only unrecorded trailing bytes first.
+pub async fn write_piece(path: &Path, offset: i64, piece: &[u8]) -> std::io::Result<()> {
+    prepare_piece(path, offset).await?.write(piece).await
 }
 
 /// Removes the file of an upload that ended; a file that is not there is not a fault.
@@ -518,6 +539,34 @@ impl BlobStore for MemoryBlobs {
 mod tests {
     use super::*;
     use futures::stream;
+
+    #[tokio::test]
+    async fn preparing_a_piece_keeps_existing_bytes_until_the_native_write_is_admitted() {
+        let directory = tempfile::tempdir().unwrap();
+        let path = directory.path().join("part");
+        tokio::fs::write(&path, b"known-unrecorded-tail")
+            .await
+            .unwrap();
+        let prepared = prepare_piece(&path, 5).await.unwrap();
+        assert_eq!(
+            tokio::fs::read(&path).await.unwrap(),
+            b"known-unrecorded-tail"
+        );
+        drop(prepared);
+        assert_eq!(
+            tokio::fs::read(&path).await.unwrap(),
+            b"known-unrecorded-tail"
+        );
+        prepare_piece(&path, 5)
+            .await
+            .unwrap()
+            .write(b" next")
+            .await
+            .unwrap();
+        assert_eq!(tokio::fs::read(&path).await.unwrap(), b"known next");
+        write_piece(&path, 10, b" piece").await.unwrap();
+        assert_eq!(tokio::fs::read(&path).await.unwrap(), b"known next piece");
+    }
 
     #[tokio::test]
     async fn a_machine_runs_four_transfers_at_once_and_a_fifth_waits_for_one_to_end() {

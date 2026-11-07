@@ -72,7 +72,9 @@ impl Handler for Requests {
                 "the system is stopping",
             );
         };
-        crate::local_ports::answer(&app, machine, request).await
+        // Boxed: the answer's future is the deepest in this crate; inline it would push the
+        // compiler's layout queries past their depth limit.
+        Box::pin(crate::local_ports::answer(&app, machine, request)).await
     }
     async fn import(&self, machine: Id, request: McpImportAsk) -> McpImportAnswer {
         let Some(app) = self.app.upgrade() else {
@@ -152,6 +154,8 @@ async fn file(app: &App, machine: Id, request: McpImportAsk) -> ApiResult<Id> {
             token_id: Id::nil(),
             scopes: vec!["*".to_owned()],
             node_id: None,
+            operation_scope: None,
+            expires_at: None,
         },
     };
     // This value is for projections/audit only, never passed to an HTTP credential guard.

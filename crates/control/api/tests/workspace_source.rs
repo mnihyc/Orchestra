@@ -292,6 +292,8 @@ async fn source_retry_keeps_the_original_repository_branch_native_identity_and_d
         thread: Some(site.thread),
         caller: site.ada.id(),
         token: None,
+        creator_origin: None,
+        scheduled_input: None,
         action: Action::Prepare {
             directory: thread.workspace_dir,
             source: frozen.clone(),

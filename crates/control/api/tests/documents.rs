@@ -9,6 +9,8 @@ mod desk;
 mod places;
 mod support;
 
+use crate::support::FullArchiveReply as _;
+use crate::support::FullPermissionPageReply;
 use desk::{Desk, body, paragraph, said};
 use orch_api_contract::access::{
     AccessChoice, HolderInput, PageChange, PageChangeName, PageChangeWhole, PermissionPageGet,
@@ -339,6 +341,7 @@ async fn a_private_document_is_its_owners_alone_until_the_owner_names_somebody()
         })
         .send()
         .await
+        .full_permission_page()
         .ok();
     assert_eq!(
         shared.owner.as_ref().map(|owner| owner.username.as_str()),
@@ -357,6 +360,7 @@ async fn a_private_document_is_its_owners_alone_until_the_owner_names_somebody()
         })
         .send()
         .await
+        .full_permission_page()
         .ok();
     assert_eq!(reset.state, PageState::Follows);
     assert_eq!(listed(&vera).await.len(), 1);
@@ -404,6 +408,7 @@ async fn the_page_of_a_document_is_read_by_whoever_may_read_it_and_changed_by_th
         .body(&change)
         .send()
         .await
+        .full_permission_page()
         .problem();
     assert_eq!(refused.code, ErrorCode::AuthzDenied);
     assert_eq!(refused.extra["required"], "access.manage");
@@ -1104,6 +1109,7 @@ async fn under_an_archived_node_a_document_is_read_but_nothing_in_it_is_changed(
         .body(&places::archive_body(&desk.world, &desk.ada.token, desk.topic, true).await)
         .send()
         .await
+        .full_archive()
         .ok();
     let read = desk
         .world

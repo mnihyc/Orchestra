@@ -11,6 +11,7 @@
 import { QueryClient, type InvalidateOptions, type InvalidateQueryFilters, type QueryKey } from '@tanstack/react-query';
 
 import { ApiError } from '@/api/client';
+import { scheduledReads } from '@/api/readScheduler';
 import { NetworkError, retryPause, retryRead } from '@/lib/requests';
 
 /**
@@ -60,6 +61,13 @@ export const queryClient = new LiveQueryClient({
       networkMode: 'always',
     },
   },
+});
+
+queryClient.getQueryCache().subscribe((event) => {
+  if (event.type === 'removed') {
+    const key: unknown = event.query.queryKey;
+    if (Array.isArray(key)) scheduledReads.release(key);
+  }
 });
 
 /** An error as a screen tells it apart: an answer of the API, no answer, or a fault of the page itself. */

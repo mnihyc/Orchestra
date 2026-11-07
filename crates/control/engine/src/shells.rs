@@ -25,7 +25,9 @@
 //! **The last of what a shell printed** is the machine's to keep and to upload; masking it, and keeping it
 //! where it is read from, is the program's, which gives the engine its [`Recordings`] once at start.
 
-use crate::commands::{Outcome, Outgoing};
+use crate::commands::{
+    BeforeCommand, CommandAuthority, CommandsError, Outcome, Outgoing, TerminalCloseAuthority,
+};
 use crate::engine::Engine;
 use crate::error::EngineError;
 use crate::ids;
@@ -155,6 +157,33 @@ pub fn mask_secrets(content: &[u8], secrets: &[&str]) -> Vec<u8> {
 }
 
 // ---------------------------------------------------------------- opening
+/// The immutable stored shell and physical site selected by the native finish preparer.
+#[derive(Debug, Clone)]
+pub struct Finishing {
+    row: SessionRow,
+    site: Option<Site>,
+}
+impl Finishing {
+    /// The actual stored session being ended.
+    #[must_use]
+    pub fn session(&self) -> &SessionRow {
+        &self.row
+    }
+}
+
+/// The exact queued native close and its already prepared physical source.
+#[derive(Debug, Clone)]
+pub struct PendingFinish {
+    prepared: Finishing,
+    command: Option<Id>,
+}
+impl PendingFinish {
+    /// Whether the native queue owns the accepted close intent before waiting for its result.
+    #[must_use]
+    pub fn queued(&self) -> bool {
+        self.command.is_some()
+    }
+}
 
 /// What a request to open a shell asks for.
 #[derive(Debug, Clone)]
@@ -175,6 +204,47 @@ pub struct OpenRequest {
     pub close: Vec<Id>,
     /// Where the request came from, for the rows it writes.
     pub origin: Origin,
+}
+
+/// Pure native operands selected before reserving a new shell.
+#[derive(Debug, Clone)]
+pub struct PreparingOpen {
+    request: OpenRequest,
+    reserved: Reserved,
+}
+impl PreparingOpen {
+    /// Every selected close governor is this actual existing environment.
+    #[must_use]
+    pub fn environment(&self) -> Id {
+        self.reserved.site.id
+    }
+    /// The physical environment facts used by the native reservation and command.
+    #[must_use]
+    pub fn site(&self) -> &Site {
+        &self.reserved.site
+    }
+}
+
+/// The accepted native reservation, still before the machine opens its process.
+#[derive(Debug, Clone)]
+pub struct Opening {
+    id: Id,
+    prepared: PreparingOpen,
+}
+impl Opening {
+    /// Its actual new stored session identity.
+    #[must_use]
+    pub fn id(&self) -> Id {
+        self.id
+    }
+    /// Its physical source, selected by the same native preparer as ordinary open.
+    #[must_use]
+    pub fn site(&self) -> &Site {
+        self.prepared.site()
+    }
+    pub(crate) fn person(&self) -> Id {
+        self.prepared.request.person
+    }
 }
 
 /// A shell that was opened.
@@ -230,6 +300,9 @@ pub enum OpenError {
     /// A limit is reached.
     #[error("a limit of shells is reached")]
     AtLimit(Box<AtLimit>),
+    /// The accepted creator no longer satisfies its current scope or native opening door.
+    #[error("the accepted shell creation is no longer admitted")]
+    OriginClosed,
     /// The machine did not answer in time, or has no session.
     #[error("the machine could not be reached: {0}")]
     Unreachable(String),
@@ -397,6 +470,25 @@ impl Shells {
         conn: &mut orch_db::Conn,
         sessions: &[SessionRow],
     ) -> Result<HashMap<Id, bool>, EngineError> {
+        self.busy_from(conn, sessions, None).await
+    }
+
+    /// The same once-only native observation with its actual accepted creator on deferred commands.
+    pub async fn busy_for_creator(
+        &self,
+        conn: &mut orch_db::Conn,
+        sessions: &[SessionRow],
+        creator: &crate::commands::TerminalCreationOrigin,
+    ) -> Result<HashMap<Id, bool>, EngineError> {
+        self.busy_from(conn, sessions, Some(creator)).await
+    }
+
+    async fn busy_from(
+        &self,
+        conn: &mut orch_db::Conn,
+        sessions: &[SessionRow],
+        creator: Option<&crate::commands::TerminalCreationOrigin>,
+    ) -> Result<HashMap<Id, bool>, EngineError> {
         let mut groups: HashMap<Id, Vec<Id>> = HashMap::new();
         for session in sessions
             .iter()
@@ -422,7 +514,7 @@ impl Shells {
             };
             for selected in ids.chunks(200) {
                 let command_id = new_id();
-                let outgoing = Outgoing::new(
+                let mut outgoing = Outgoing::new(
                     command_id,
                     machine,
                     SerialKey::None,
@@ -431,6 +523,19 @@ impl Shells {
                         terminal_ids: selected.to_vec(),
                     },
                 )?;
+                if let Some(creator) = creator {
+                    if creator
+                        .current(conn, self.engine.inner.clock.as_ref())
+                        .await?
+                        .is_none()
+                    {
+                        return Err(EngineError::unreadable(
+                            "the accepted native observation source is closed",
+                        ));
+                    }
+                    let authority = creator.command(&outgoing)?;
+                    outgoing = outgoing.with_authority(authority);
+                }
                 self.engine.inner.commands.issue(outgoing).await?;
                 let outcome =
                     tokio::time::timeout(STATUS_WAIT, self.engine.inner.commands.wait(command_id))
@@ -471,8 +576,7 @@ impl Shells {
     /// The gates that no permission lifts, in the order the refusals are listed: a setting, the
     /// environment's own switch, the local policy of a person's machine, and whether the environment can
     /// be reached.
-    async fn gates(
-        &self,
+    pub async fn opening_gates(
         conn: &mut orch_db::Conn,
         site: &Site,
         place: Place,
@@ -544,122 +648,172 @@ impl Shells {
         request: OpenRequest,
         about: AboutTo<'_>,
     ) -> Result<Opened, OpenError> {
-        let id = new_id();
-        let now = self.now();
-        let reserved = {
-            let mut tx = self.db().begin().await?;
-            rows::lock(&mut tx, request.environment).await?;
-            let site = rows::site(&mut tx, request.environment)
-                .await?
-                .ok_or(OpenError::NoEnvironment)?;
-            let thread = match request.through {
-                Some(thread) => Some(self.thread_in(&mut tx, thread, request.environment).await?),
-                None => None,
-            };
-            let place = place_of(thread.as_ref().map(|row| row.node_id), request.environment);
-            if let Some(reason) = self.gates(&mut tx, &site, place).await? {
-                return Err(OpenError::NotAllowed(reason));
-            }
-            let directory = self
-                .directory(&mut tx, thread.as_ref(), request.directory.as_deref())
-                .await?;
-            let live = rows::live_in(&mut tx, request.environment).await?;
-            let mut give_up: Vec<SessionRow> = Vec::new();
-            for named in &request.close {
-                if give_up.iter().any(|row| row.id == *named) {
-                    continue;
-                }
-                match live.iter().find(|row| row.id == *named) {
-                    Some(row) if row.opened_by == request.person => give_up.push(row.clone()),
-                    // One that has ended already is no longer a thing to give up.
-                    None if rows::get(&mut tx, *named).await?.is_some_and(|row| {
-                        row.opened_by == request.person && row.environment_id == request.environment
-                    }) => {}
-                    _ => return Err(OpenError::NotYours(*named)),
-                }
-            }
-            let max_person = setting(
-                &mut tx,
-                place,
-                keys::TERMINAL_MAX_PER_PERSON,
-                MAX_PER_PERSON,
-            )
+        let mut tx = self.db().begin().await?;
+        rows::lock(&mut tx, request.environment).await?;
+        let prepared = self.preparing_open(&mut tx, &request).await?;
+        let opening = self.reserve_open_before(&mut tx, &prepared, None).await?;
+        tx.commit().await.map_err(orch_db::DbError::from)?;
+        self.continue_open(opening, None, about).await
+    }
+
+    /// The existing pure gate, directory, owned-close selection and limit planner.
+    /// The action caller holds the environment lock before its final prepared-value handoff.
+    pub async fn preparing_open(
+        &self,
+        conn: &mut orch_db::Conn,
+        request: &OpenRequest,
+    ) -> Result<PreparingOpen, OpenError> {
+        let site = rows::site(conn, request.environment)
+            .await?
+            .ok_or(OpenError::NoEnvironment)?;
+        let thread = match request.through {
+            Some(thread) => Some(self.thread_in(conn, thread, request.environment).await?),
+            None => None,
+        };
+        let place = place_of(thread.as_ref().map(|row| row.node_id), request.environment);
+        if let Some(reason) = Self::opening_gates(conn, &site, place).await? {
+            return Err(OpenError::NotAllowed(reason));
+        }
+        let directory = self
+            .directory(conn, thread.as_ref(), request.directory.as_deref())
             .await?;
-            let max_environment = setting(
-                &mut tx,
-                place,
-                keys::TERMINAL_MAX_PER_ENVIRONMENT,
-                MAX_PER_ENVIRONMENT,
-            )
-            .await?;
-            let mine_after = to_count(
-                live.iter()
-                    .filter(|row| {
-                        row.opened_by == request.person
-                            && !give_up.iter().any(|given| given.id == row.id)
-                    })
-                    .count(),
-            );
-            let all_after = to_count(live.len()) - to_count(give_up.len());
-            let limit = if mine_after >= max_person {
-                Some(Limit::Person)
-            } else if all_after >= max_environment {
-                Some(Limit::Environment)
-            } else {
-                None
-            };
-            if let Some(limit) = limit {
-                let mut people: Vec<Id> = live.iter().map(|row| row.opened_by).collect();
-                people.sort_unstable();
-                people.dedup();
-                return Err(OpenError::AtLimit(Box::new(AtLimit {
-                    limit,
-                    mine: live
-                        .iter()
-                        .filter(|row| row.opened_by == request.person)
-                        .cloned()
-                        .collect(),
-                    open: to_count(live.len()),
-                    people: to_count(people.len()),
-                })));
+        let live = rows::live_in(conn, request.environment).await?;
+        let mut give_up: Vec<SessionRow> = Vec::new();
+        for named in &request.close {
+            if give_up.iter().any(|row| row.id == *named) {
+                continue;
             }
-            let record = setting(&mut tx, place, keys::TERMINAL_RECORD, true).await?;
-            let shown = absolute(&site.workspace_root, &directory);
-            rows::insert(
-                &mut tx,
-                &NewSession {
-                    id,
-                    thread_id: thread.as_ref().map(|row| row.node_id),
-                    environment_id: request.environment,
-                    env_generation: site.generation,
-                    opened_by: request.person,
-                    cwd: &shown,
-                    cols: i32::from(request.cols),
-                    rows: i32::from(request.rows),
-                },
-                now,
-            )
-            .await?;
-            tx.commit().await.map_err(orch_db::DbError::from)?;
-            Reserved {
+            match live.iter().find(|row| row.id == *named) {
+                Some(row) if row.opened_by == request.person => give_up.push(row.clone()),
+                // One that has ended already is no longer a thing to give up.
+                None if rows::get(conn, *named).await?.is_some_and(|row| {
+                    row.opened_by == request.person && row.environment_id == request.environment
+                }) => {}
+                _ => return Err(OpenError::NotYours(*named)),
+            }
+        }
+        let max_person =
+            setting(conn, place, keys::TERMINAL_MAX_PER_PERSON, MAX_PER_PERSON).await?;
+        let max_environment = setting(
+            conn,
+            place,
+            keys::TERMINAL_MAX_PER_ENVIRONMENT,
+            MAX_PER_ENVIRONMENT,
+        )
+        .await?;
+        let mine_after = to_count(
+            live.iter()
+                .filter(|row| {
+                    row.opened_by == request.person
+                        && !give_up.iter().any(|given| given.id == row.id)
+                })
+                .count(),
+        );
+        let all_after = to_count(live.len()) - to_count(give_up.len());
+        let limit = if mine_after >= max_person {
+            Some(Limit::Person)
+        } else if all_after >= max_environment {
+            Some(Limit::Environment)
+        } else {
+            None
+        };
+        if let Some(limit) = limit {
+            let mut people: Vec<Id> = live.iter().map(|row| row.opened_by).collect();
+            people.sort_unstable();
+            people.dedup();
+            return Err(OpenError::AtLimit(Box::new(AtLimit {
+                limit,
+                mine: live
+                    .iter()
+                    .filter(|row| row.opened_by == request.person)
+                    .cloned()
+                    .collect(),
+                open: to_count(live.len()),
+                people: to_count(people.len()),
+            })));
+        }
+        let record = setting(conn, place, keys::TERMINAL_RECORD, true).await?;
+        Ok(PreparingOpen {
+            request: request.clone(),
+            reserved: Reserved {
                 site,
                 directory,
                 record,
                 give_up,
-            }
-        };
+            },
+        })
+    }
+
+    /// The actual first reservation INSERT, with no generated ID used as an admission parent.
+    pub async fn reserve_open_before(
+        &self,
+        conn: &mut orch_db::Conn,
+        prepared: &PreparingOpen,
+        before: Option<BeforeCommand<'_>>,
+    ) -> Result<Opening, OpenError> {
+        let id = new_id();
+        let request = &prepared.request;
+        let reserved = &prepared.reserved;
+        let shown = absolute(&reserved.site.workspace_root, &reserved.directory);
+        if let Some(check) = before {
+            check().map_err(EngineError::BeforeEffect)?;
+        }
+        rows::insert(
+            conn,
+            &NewSession {
+                id,
+                thread_id: request.through,
+                environment_id: request.environment,
+                env_generation: reserved.site.generation,
+                opened_by: request.person,
+                cwd: &shown,
+                cols: i32::from(request.cols),
+                rows: i32::from(request.rows),
+            },
+            self.now(),
+        )
+        .await?;
+        Ok(Opening {
+            id,
+            prepared: prepared.clone(),
+        })
+    }
+
+    /// Continues the same accepted reservation through native closes/open and its original audit.
+    pub async fn continue_open(
+        &self,
+        opening: Opening,
+        issuer: Option<crate::commands::TerminalCreationOrigin>,
+        about: AboutTo<'_>,
+    ) -> Result<Opened, OpenError> {
+        let id = opening.id;
+        let request = opening.prepared.request;
+        let reserved = opening.prepared.reserved;
         let mut closed = Vec::new();
         for given in &reserved.give_up {
-            about(given, Ending::CLOSED);
-            if self
-                .finish(given.id, Ending::CLOSED, &request.origin)
-                .await?
-                .is_some()
+            if issuer.is_none() {
+                about(given, Ending::CLOSED);
+            }
+            match self
+                .finish_given(
+                    given,
+                    &reserved.site,
+                    issuer.as_ref(),
+                    &request.origin,
+                    about,
+                )
+                .await
             {
-                closed.push(given.id);
+                Ok(Some(_)) => closed.push(given.id),
+                Ok(None) => {}
+                Err(error) => {
+                    let mut conn = self.db().acquire().await?;
+                    rows::drop_opening(&mut conn, id).await?;
+                    return Err(error);
+                }
             }
         }
-        let started = self.start(id, &request, &reserved).await;
+        let started = self.start(id, &request, &reserved, issuer.as_ref()).await;
         let result = match started {
             Ok(started) => started,
             Err(error) => {
@@ -689,12 +843,110 @@ impl Shells {
         Ok(Opened { session, closed })
     }
 
+    async fn finish_given(
+        &self,
+        selected: &SessionRow,
+        _site: &Site,
+        issuer: Option<&crate::commands::TerminalCreationOrigin>,
+        origin: &Origin,
+        about: AboutTo<'_>,
+    ) -> Result<Option<SessionRow>, OpenError> {
+        let Some(issuer) = issuer else {
+            return self
+                .finish(selected.id, Ending::CLOSED, origin)
+                .await
+                .map_err(OpenError::Engine);
+        };
+        let mut tx = self.db().begin().await?;
+        orch_db::queries::transaction_guard::lock_authority(&mut tx).await?;
+        rows::lock(&mut tx, selected.id).await?;
+        let Some(row) = rows::get(&mut tx, selected.id).await? else {
+            return Err(OpenError::NotYours(selected.id));
+        };
+        let Some((principal, deadline)) = issuer
+            .given(&mut tx, &row, self.engine.inner.clock.as_ref())
+            .await?
+        else {
+            return Err(OpenError::OriginClosed);
+        };
+        if !row.is_live() {
+            tx.commit().await.map_err(orch_db::DbError::from)?;
+            return Ok(None);
+        }
+        let site = rows::site(&mut tx, row.environment_id).await?;
+        if !principal
+            .caller()
+            .key_deadline_allows(self.engine.inner.clock.as_ref())
+            || deadline.is_some_and(|end| self.now() >= end.get())
+        {
+            return Err(OpenError::OriginClosed);
+        }
+        about(&row, Ending::CLOSED);
+        let mut pending = PendingFinish {
+            prepared: Finishing { row, site },
+            command: None,
+        };
+        if let Some(machine) = pending
+            .prepared
+            .site
+            .as_ref()
+            .filter(|site| site.generation == pending.prepared.row.env_generation)
+            .and_then(|site| site.machine_id)
+        {
+            let id = pending.prepared.row.id;
+            let command_id = ids::derived("pty.close", &[id.as_bytes().as_slice()]);
+            let mut command = Outgoing::new(
+                command_id,
+                machine,
+                SerialKey::None,
+                &PtyClose { terminal_id: id },
+            )
+            .map_err(EngineError::from)?;
+            let authority = issuer.command(&command)?;
+            command = command.with_authority(authority);
+            self.engine
+                .inner
+                .commands
+                .issue(command)
+                .await
+                .map_err(EngineError::from)?;
+            pending.command = Some(command_id);
+        }
+        if pending.queued() {
+            tx.commit().await.map_err(orch_db::DbError::from)?;
+            self.finish_pending(pending, Ending::CLOSED, origin)
+                .await
+                .map_err(OpenError::Engine)
+        } else {
+            if !principal
+                .caller()
+                .key_deadline_allows(self.engine.inner.clock.as_ref())
+                || deadline.is_some_and(|end| self.now() >= end.get())
+            {
+                return Err(OpenError::OriginClosed);
+            }
+            let closed = self
+                .finish_local_in(&mut tx, &pending, Ending::CLOSED, origin, None)
+                .await?;
+            if issuer
+                .current(&mut tx, self.engine.inner.clock.as_ref())
+                .await?
+                .is_none()
+            {
+                return Err(OpenError::OriginClosed);
+            }
+            tx.commit().await.map_err(orch_db::DbError::from)?;
+            Ok(closed)
+        }
+    }
+
     /// Sends `pty.open` and waits for the machine's answer.
     async fn start(
         &self,
         id: Id,
         request: &OpenRequest,
         reserved: &Reserved,
+        issuer: Option<&crate::commands::TerminalCreationOrigin>,
     ) -> Result<PtyOpenResult, OpenError> {
         let machine = reserved
             .site
@@ -709,10 +961,32 @@ impl Shells {
             record: reserved.record,
         };
         let command_id = ids::derived("pty.open", &[id.as_bytes().as_slice()]);
-        let command = Outgoing::new(command_id, machine, SerialKey::None, &body)
+        let mut command = Outgoing::new(command_id, machine, SerialKey::None, &body)
             .map_err(EngineError::from)?;
+        if let Some(issuer) = issuer {
+            let authority = issuer.command(&command).map_err(OpenError::Engine)?;
+            command = command.with_authority(authority);
+        }
+        let mut boundary = if issuer.is_some() {
+            Some(self.db().begin().await?)
+        } else {
+            None
+        };
+        if let (Some(tx), Some(issuer)) = (boundary.as_mut(), issuer) {
+            orch_db::queries::transaction_guard::lock_authority(tx).await?;
+            if issuer
+                .current(tx, self.engine.inner.clock.as_ref())
+                .await?
+                .is_none()
+            {
+                return Err(OpenError::OriginClosed);
+            }
+        }
         let commands = &self.engine.inner.commands;
         commands.issue(command).await.map_err(EngineError::from)?;
+        if let Some(tx) = boundary {
+            tx.commit().await.map_err(orch_db::DbError::from)?;
+        }
         let outcome = match tokio::time::timeout(OPEN_WAIT, commands.wait(command_id)).await {
             Ok(outcome) => outcome.map_err(EngineError::from)?,
             Err(_) => {
@@ -882,22 +1156,154 @@ impl Shells {
         origin: &Origin,
     ) -> Result<Option<SessionRow>, EngineError> {
         let mut conn = self.db().acquire().await?;
-        let Some(row) = rows::get(&mut conn, id).await? else {
+        let Some(prepared) = self.preparing_finish(&mut conn, id).await? else {
             return Ok(None);
         };
-        if !row.is_live() {
-            return Ok(None);
-        }
-        let site = rows::site(&mut conn, row.environment_id).await?;
         drop(conn);
-        let said = match site.as_ref().and_then(|site| site.machine_id) {
-            Some(machine) => self.ask_to_close(machine, id).await,
+        let pending = self.begin_finish_before(&prepared, None, None).await?;
+        self.finish_pending(pending, ending, origin).await
+    }
+
+    /// Pure stored native selection, also consumed by the HTTP close writer's guarded source.
+    pub async fn preparing_finish(
+        &self,
+        conn: &mut orch_db::Conn,
+        id: Id,
+    ) -> Result<Option<Finishing>, EngineError> {
+        let Some(row) = rows::get(conn, id).await? else {
+            return Ok(None);
+        };
+        let site = if row.is_live() {
+            rows::site(conn, row.environment_id).await?
+        } else {
+            None
+        };
+        Ok(Some(Finishing { row, site }))
+    }
+
+    /// Queues the exact prepared close, without holding its caller's transaction over an answer.
+    /// The native command keeps its original operation/credential until first acceptance.
+    pub async fn begin_finish_before(
+        &self,
+        prepared: &Finishing,
+        issuer: Option<(&Caller, Option<Id>)>,
+        before: Option<BeforeCommand<'_>>,
+    ) -> Result<PendingFinish, EngineError> {
+        let row = &prepared.row;
+        let mut pending = PendingFinish {
+            prepared: prepared.clone(),
+            command: None,
+        };
+        if !row.is_live() {
+            return Ok(pending);
+        }
+        if let Some(machine) = prepared
+            .site
+            .as_ref()
+            .filter(|site| site.generation == row.env_generation)
+            .and_then(|site| site.machine_id)
+        {
+            let command_id = ids::derived("pty.close", &[row.id.as_bytes().as_slice()]);
+            let mut command = Outgoing::new(
+                command_id,
+                machine,
+                SerialKey::None,
+                &PtyClose {
+                    terminal_id: row.id,
+                },
+            )?;
+            if let Some((caller, session)) = issuer {
+                let authority = TerminalCloseAuthority::capture_with_session(
+                    caller, session, row, machine, &command,
+                )?;
+                command = command.with_authority(CommandAuthority::terminal_close(authority));
+            }
+            match self
+                .engine
+                .inner
+                .commands
+                .issue_prepared(command, before)
+                .await
+            {
+                Ok(()) => pending.command = Some(command_id),
+                Err(CommandsError::BeforeEffect(error)) => {
+                    return Err(EngineError::BeforeEffect(error));
+                }
+                Err(CommandsError::AuthorityMismatch) => {
+                    return Err(CommandsError::AuthorityMismatch.into());
+                }
+                Err(_) => {}
+            }
+        }
+        Ok(pending)
+    }
+
+    /// Reconciles the already issued native close, preserving its original result/masking/audit.
+    pub async fn finish_pending(
+        &self,
+        pending: PendingFinish,
+        ending: Ending,
+        origin: &Origin,
+    ) -> Result<Option<SessionRow>, EngineError> {
+        let said = match pending.command {
+            Some(id) => {
+                match tokio::time::timeout(CLOSE_WAIT, self.engine.inner.commands.wait(id)).await {
+                    Ok(Ok(Outcome::Succeeded(result))) => serde_json::from_value(result).ok(),
+                    _ => None,
+                }
+            }
             None => None,
         };
         let mut tx = self.db().begin().await?;
+        let closed = self
+            .finish_result_in(&mut tx, &pending, ending, origin, said, None)
+            .await?;
+        tx.commit().await.map_err(orch_db::DbError::from)?;
+        Ok(closed)
+    }
+
+    /// Completes a no-queue close on its actor's existing transaction, with no supplier IO.
+    pub async fn finish_local_in(
+        &self,
+        conn: &mut orch_db::Conn,
+        pending: &PendingFinish,
+        ending: Ending,
+        origin: &Origin,
+        before: Option<BeforeCommand<'_>>,
+    ) -> Result<Option<SessionRow>, EngineError> {
+        if pending.queued() {
+            return Err(EngineError::unreadable(
+                "a queued close uses its owned result reconciliation",
+            ));
+        }
+        self.finish_result_in(conn, pending, ending, origin, None, before)
+            .await
+    }
+
+    /// The same local CAS/recording/history writer on its actor's existing native transaction.
+    /// The no-queue branch has no machine result or supplier IO and consumes its first check here.
+    #[expect(
+        clippy::too_many_arguments,
+        reason = "native pending result, actor, connection and first-effect seam are independent operands"
+    )]
+    async fn finish_result_in(
+        &self,
+        conn: &mut orch_db::Conn,
+        pending: &PendingFinish,
+        ending: Ending,
+        origin: &Origin,
+        said: Option<PtyCloseResult>,
+        before: Option<BeforeCommand<'_>>,
+    ) -> Result<Option<SessionRow>, EngineError> {
+        let row = &pending.prepared.row;
+        if !row.is_live() {
+            return Ok(None);
+        }
+        let site = &pending.prepared.site;
+        let id = row.id;
         let place = place_of(row.thread_id, row.environment_id);
         let kept = match said.as_ref().and_then(|said| said.kept) {
-            Some(kept) => self.keep(&mut tx, row.environment_id, place, kept).await?,
+            Some(kept) => self.keep(conn, row.environment_id, place, kept).await?,
             None => None,
         };
         let closing = Closing {
@@ -909,43 +1315,22 @@ impl Shells {
             bytes_out: said.as_ref().map(|said| said.bytes_out),
             recording: kept,
         };
-        let closed = rows::close(&mut tx, id, &closing, self.now()).await?;
+        if let Some(check) = before {
+            check().map_err(EngineError::BeforeEffect)?;
+        }
+        let closed = rows::close(conn, id, &closing, self.now()).await?;
         match &closed {
             Some(closed) => {
-                self.write_closed(
-                    &mut tx,
-                    closed,
-                    site.as_ref().map(|site| site.org_id),
-                    origin,
-                )
-                .await?;
+                self.write_closed(conn, closed, site.as_ref().map(|site| site.org_id), origin)
+                    .await?;
             }
             None => {
                 if let Some(hash) = kept {
-                    rows::unpin_recording(&mut tx, &hash).await?;
+                    rows::unpin_recording(conn, &hash).await?;
                 }
             }
         }
-        tx.commit().await.map_err(orch_db::DbError::from)?;
         Ok(closed)
-    }
-
-    /// Sends `pty.close` and waits a little for the answer.
-    async fn ask_to_close(&self, machine: Id, shell: Id) -> Option<PtyCloseResult> {
-        let command_id = ids::derived("pty.close", &[shell.as_bytes().as_slice()]);
-        let command = Outgoing::new(
-            command_id,
-            machine,
-            SerialKey::None,
-            &PtyClose { terminal_id: shell },
-        )
-        .ok()?;
-        let commands = &self.engine.inner.commands;
-        commands.issue(command).await.ok()?;
-        match tokio::time::timeout(CLOSE_WAIT, commands.wait(command_id)).await {
-            Ok(Ok(Outcome::Succeeded(result))) => serde_json::from_value(result).ok(),
-            _ => None,
-        }
     }
 
     /// Puts away what a machine kept of a shell's output, masked, and holds it for the shell's line.
@@ -1086,7 +1471,7 @@ impl Shells {
             return Ok(Holding::Permission);
         }
         let place = place_of(session.thread_id, session.environment_id);
-        Ok(match self.gates(conn, &site, place).await? {
+        Ok(match Self::opening_gates(conn, &site, place).await? {
             Some(TerminalNotAllowedReason::EnvironmentOffline) | None => Holding::Yes,
             Some(reason) => Holding::Gate(reason),
         })
@@ -1380,6 +1765,7 @@ pub struct AgentScreen {
 }
 
 /// What opening a shell reserved before the machine was asked.
+#[derive(Debug, Clone)]
 struct Reserved {
     site: Site,
     directory: String,

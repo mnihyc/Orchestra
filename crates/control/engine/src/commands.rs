@@ -8,6 +8,21 @@
 //! its end can be read at any time after, also by a process that did not
 //! issue it; and waiting for it survives nothing but the row.
 
+pub mod authority;
+mod host_probe;
+mod mcp_delete;
+mod terminal_creation;
+mod workspace;
+pub use authority::{CommandAuthority, TerminalCloseAuthority};
+pub use host_probe::HostPortsProbe;
+pub use mcp_delete::McpDeletionCleanup;
+pub use terminal_creation::{TerminalCreationAuthority, TerminalCreationOrigin};
+pub(crate) use workspace::snapshots as snapshot_origin;
+pub use workspace::{
+    FileCopyCommand, FileCopyInput, FileCopySource, SnapshotCommand, SnapshotCreateSource,
+    SnapshotMeasureInput, SnapshotMeasureSource, SnapshotRequest, WorkspaceCommand,
+};
+
 use async_trait::async_trait;
 use orch_link_contract::commands::{CommandBody, CommandError, CommandKind, SerialKey};
 use orch_types::{Id, Json, Time};
@@ -18,12 +33,20 @@ pub(crate) const BUSY_RETRY_PAUSE: std::time::Duration = std::time::Duration::fr
 /// Why a command could not be sent, or its end not learned.
 #[derive(Debug, thiserror::Error)]
 pub enum CommandsError {
+    /// The actual issuing writer's check failed immediately before its first queue insert.
+    #[error("the command's current issuing boundary has ended: {0}")]
+    BeforeEffect(Box<dyn std::error::Error + Send + Sync>),
     /// The system does not know the machine, or it was deleted.
     #[error("the system does not know that machine")]
     UnknownMachine,
     /// The machine was revoked.
     #[error("the machine was revoked")]
     Revoked,
+    /// A new scoped attempt cannot consume or rewrite another retained native origin.
+    #[error(
+        "the retained native command belongs to another origin; its existing work was unchanged"
+    )]
+    AuthorityMismatch,
     /// The system is stopping.
     #[error("the system is stopping")]
     Stopping,
@@ -34,6 +57,10 @@ pub enum CommandsError {
     #[error("{0}")]
     Other(String),
 }
+
+/// A native writer's once-only check, after queue preparation and before its first insert.
+pub type BeforeCommand<'a> =
+    Box<dyn FnOnce() -> Result<(), Box<dyn std::error::Error + Send + Sync>> + Send + 'a>;
 
 /// A command to send to a machine.
 #[derive(Debug, Clone, PartialEq, serde::Serialize, serde::Deserialize)]
@@ -52,6 +79,14 @@ pub struct Outgoing {
     /// The moment after which it is not to be started; the kind's own time
     /// after now when none is given.
     pub deadline: Option<Time>,
+    /// Private command admission evidence; never part of the machine body or wire frame.
+    #[serde(
+        default,
+        rename = "login_authority",
+        deserialize_with = "authority::deserialize_optional",
+        skip_serializing_if = "Option::is_none"
+    )]
+    pub authority: Option<CommandAuthority>,
 }
 
 /// A saved engine command retains the semantic key kind as well as its value. UUID keys
@@ -93,7 +128,25 @@ impl Outgoing {
             body: serde_json::to_value(body)
                 .map_err(|error| CommandsError::Body(error.to_string()))?,
             deadline: None,
+            authority: None,
         })
+    }
+
+    /// Retains login-origin evidence until the durable link's first-send/retry checkpoint.
+    #[must_use]
+    pub fn with_login_authority(
+        mut self,
+        authority: crate::provider_setup::LoginCommandAuthority,
+    ) -> Self {
+        self.authority = Some(CommandAuthority::login(authority));
+        self
+    }
+
+    /// Retains the one server-private operation evidence channel without changing native bytes.
+    #[must_use]
+    pub fn with_authority(mut self, authority: CommandAuthority) -> Self {
+        self.authority = Some(authority);
+        self
     }
 
     /// The same command with a deadline of its own.
@@ -239,11 +292,15 @@ pub struct Info {
     pub outcome: Option<Outcome>,
 }
 
-/// A command's original machine and protected body, read from one retained record.
+/// A command's original recipient and canonical wire facts, read from one retained record.
 #[derive(Debug, Clone, PartialEq)]
 pub struct RetainedCommand {
     /// The machine the command was admitted for.
     pub machine: Id,
+    /// The command kind actually stored by the issuer, never reconstructed from a retry.
+    pub kind: String,
+    /// The actual retained serial lane, including its absent value.
+    pub key: Option<String>,
     /// The body the command retained for replay.
     pub body: Json,
 }
@@ -251,6 +308,13 @@ pub struct RetainedCommand {
 /// The commands the engine sends and waits for.
 #[async_trait]
 pub trait Commands: Send + Sync {
+    /// Private physical provenance of a retained credential-return command, never a grant.
+    async fn retained_return_source(
+        &self,
+        _id: Id,
+    ) -> Result<Option<crate::credentials::handover_authority::ReturnSource>, CommandsError> {
+        Ok(None)
+    }
     /// Reads a live observation without putting its result in a durable command row.
     async fn observe(&self, _command: Outgoing) -> Result<Outcome, CommandsError> {
         Err(CommandsError::Other(
@@ -258,16 +322,34 @@ pub trait Commands: Send + Sync {
         ))
     }
 
-    /// Stores a command and hands it to the machine's link. Asked again
-    /// under an identifier that exists, it does nothing.
-    async fn issue(&self, command: Outgoing) -> Result<(), CommandsError>;
+    /// Stores a command and hands it to the machine's link. Existing callers have no new check.
+    async fn issue(&self, command: Outgoing) -> Result<(), CommandsError> {
+        self.issue_prepared(command, None).await
+    }
+
+    /// The native writer's once-only check reaches the implementation's actual first mutation.
+    async fn issue_before(
+        &self,
+        command: Outgoing,
+        before: BeforeCommand<'_>,
+    ) -> Result<(), CommandsError> {
+        self.issue_prepared(command, Some(before)).await
+    }
+
+    /// Implementors must place a supplied check after awaited preparation and before first effect;
+    /// delegating ports pass it through rather than checking above another writer's waits.
+    async fn issue_prepared(
+        &self,
+        command: Outgoing,
+        before: Option<BeforeCommand<'_>>,
+    ) -> Result<(), CommandsError>;
 
     /// The retained protected body of a command, including an expired tool-result delivery.
     async fn retained_body(&self, _id: Id) -> Result<Option<Json>, CommandsError> {
         Ok(None)
     }
 
-    /// Reads the frozen recipient with the body so a replay cannot choose another machine.
+    /// Reads one frozen frame so a replay cannot borrow a different recipient, kind or serial lane.
     async fn retained_command(&self, id: Id) -> Result<Option<RetainedCommand>, CommandsError> {
         if self.retained_body(id).await?.is_some() {
             return Err(CommandsError::Other(
@@ -319,7 +401,11 @@ mod tests {
 
     #[async_trait]
     impl Commands for ReportedStatus {
-        async fn issue(&self, _: Outgoing) -> Result<(), CommandsError> {
+        async fn issue_prepared(
+            &self,
+            _: Outgoing,
+            _before: Option<BeforeCommand<'_>>,
+        ) -> Result<(), CommandsError> {
             Err(CommandsError::Stopping)
         }
         async fn status(&self, _: Id) -> Result<Option<Info>, CommandsError> {
@@ -424,3 +510,6 @@ mod tests {
         Ok(())
     }
 }
+
+#[cfg(test)]
+mod authority_controls;

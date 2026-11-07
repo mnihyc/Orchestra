@@ -23,6 +23,8 @@ use serde_json::json;
 use super::runner::{Done, Failure, Job, Phase, Phased, Stop, Undone};
 use crate::{Engine, EngineError, commands::Outgoing, ids, resource_facts};
 
+pub mod sources;
+
 /// Cleanup shares the ordinary durable job ledger.
 pub const KIND: &str = "storage_cleanup";
 /// Each item is acknowledged before the next item is admitted.

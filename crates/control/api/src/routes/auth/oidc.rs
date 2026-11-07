@@ -8,7 +8,7 @@
 //!   people, under the system's `registration.mode` (an invitation that is still good satisfies
 //!   `invite`);
 //! - **a link** of an identity to the person who is signed in (`POST /me/identities/{key}/link`, from a
-//!   browser sign-in alone, as a password is changed), which comes back to the Security page;
+//!   browser session or explicitly scoped account key), which comes back to the Security page;
 //! - **a fresh proof** of a signed-in person who has no password, for one sensitive act
 //!   (`sensitive_purpose`), bound to the browser session whose cookie the start carried.
 //!
@@ -35,12 +35,13 @@
 //! The kind that speaks a provider's protocol is installed by the server ([`install_kind`]); the
 //! release installs OpenID Connect. Where none is, a sign-in ends with `idp_error`.
 
+mod authority;
 pub mod landing;
 
 use crate::middleware::authentication::{SESSION_PREFIX, new_token, token_hash};
 use crate::middleware::requests::{ApiError, ApiResult};
 use crate::middleware::transaction_guard;
-use crate::registry::{Answer, Ctx, Registry};
+use crate::registry::{Answer, Ctx, OperationFuture, Registry};
 use crate::routes::resources::sealing::{binding, master_key};
 use crate::sign_in::second_step::SECURITY_PATH;
 use crate::sign_in::{NOT_KEPT, record, throttle};
@@ -116,8 +117,8 @@ pub fn mount(registry: &mut Registry) {
     registry
         .on_raw(AuthOidcStart, start)
         .on_raw(AuthOidcCallback, callback)
-        .on(MeIdentityLink, link_start)
-        .on(MeIdentityDelete, unlink);
+        .on_with_operation(MeIdentityLink, identity_operation, link_start)
+        .on_with_operation(MeIdentityDelete, identity_operation, unlink);
 }
 
 /// The word a purpose is kept by.
@@ -255,6 +256,7 @@ fn state_row(ctx: &Ctx, provider: Id, pending: PendingSignIn, mark: &str) -> Sig
         pkce_verifier: pending.pkce_verifier,
         redirect_path: "/".to_owned(),
         link_user_id: None,
+        link_authority: None,
         invitation: None,
         accept_invitation: false,
         session_id: None,
@@ -547,29 +549,38 @@ async fn callback(ctx: Ctx, query: AuthOidcCallbackQuery, _body: Body) -> ApiRes
             )
             .await
         }
-        Purpose::Link { user } => landing::link(&ctx, &provider, &identity, user).await,
+        Purpose::Link { user } => landing::link(&ctx, &provider, &identity, &row, user).await,
         Purpose::Proof { session, act } => {
             landing::proof(&ctx, &provider, &identity, &row, session, &act).await
         }
     }
 }
 
-/// `403 auth.session_required`: how a person signs in is changed from a browser sign-in alone, as a
-/// password is, never with a token.
-fn browser_only() -> ApiError {
-    ApiError::new(
-        ErrorCode::AuthSessionRequired,
-        "a way to sign in is linked and unlinked from a browser sign-in",
-    )
+/// The same account singleton is prepared again on the guarded write transaction.
+/// This also gives browser-origin continuations a genuine exact operation proof.
+fn identity_operation<'a>(
+    ctx: &'a Ctx,
+    conn: &'a mut Conn,
+    caller: &'a orch_authz::Caller,
+    (): (),
+    (): (),
+) -> OperationFuture<'a> {
+    Box::pin(async move {
+        authority::check_legacy(caller)?;
+        let target = crate::key_operations::targets::account(conn, ctx.user()?.id()).await?;
+        let mut plan = crate::key_operations::admission::Prepared::new(ctx.route, ctx.route.name)?;
+        plan.bind(0, target.object.kind, &[target])?;
+        Ok(plan)
+    })
 }
 
 /// Begins linking the identity provider `key` to the signed-in person: the address of the provider to
 /// send the browser to, which comes back to the Security page.
 async fn link_start(ctx: Ctx, (): (), (): ()) -> ApiResult<Answer<MeIdentityLinkReply>> {
     let key = ctx.param("key")?.to_owned();
-    if !ctx.user()?.is_session() {
-        return Err(browser_only());
-    }
+    // The common operation gate supplies an admitted caller for explicit keys.
+    // Legacy keys retain the historical browser-only boundary.
+    authority::admit_credential(&ctx)?;
     let provider = {
         let mut conn = ctx.app.db.acquire().await?;
         throttle::identity_start(&ctx, &mut conn).await?;
@@ -594,15 +605,15 @@ async fn link_start(ctx: Ctx, (): (), (): ()) -> ApiResult<Answer<MeIdentityLink
     let mark = browser_mark(&ctx);
     let (mut tx, guard) = transaction_guard::begin(&ctx).await?;
     let person = guard.user();
-    if !person.is_session() {
-        return Err(browser_only());
-    }
+    authority::check_caller(guard.principal().caller())?;
+    let captured = authority::capture(&guard)?;
     identity::begin_sign_in(
         &mut tx,
         &SignInState {
             accept_invitation: false,
             redirect_path: SECURITY_PATH.to_owned(),
             link_user_id: Some(person.id()),
+            link_authority: Some(captured),
             ..state_row(&ctx, provider.id, started.pending, &mark)
         },
     )
@@ -621,9 +632,7 @@ async fn unlink(ctx: Ctx, (): (), (): ()) -> ApiResult<()> {
     let key = ctx.param("key")?.to_owned();
     let (mut tx, guard) = transaction_guard::begin(&ctx).await?;
     let person = guard.user();
-    if !person.is_session() {
-        return Err(browser_only());
-    }
+    authority::check_caller(guard.principal().caller())?;
     let provider = identity::identity_provider_by_key(&mut tx, &key)
         .await?
         .ok_or_else(ApiError::not_found)?;

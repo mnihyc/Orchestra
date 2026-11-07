@@ -27,7 +27,7 @@ use crate::realtime::server::Connection;
 use crate::realtime::subscriptions::{Access, principal_of};
 use crate::realtime::sync::{Frame, Head, Rows};
 use crate::realtime::{Fail, Inner, Source};
-use crate::routes::chats::{chat_view, messages_view};
+use crate::routes::chats::read_operation;
 use orch_api_contract::chats::CHAT_SYNC_MAX_CHANGES;
 use orch_chat::chats::{self, Mode};
 use orch_chat::{Acting, Error as ChatError, inspection};
@@ -138,12 +138,34 @@ pub(crate) async fn read(
     after: Seq,
     upto: Seq,
 ) -> Result<Rows, Fail> {
-    let mut conn = inner.db.acquire().await?;
+    let mut conn = orch_db::queries::feeds::begin_reading(&inner.db).await?;
+    let Some(principal) = principal_of(inner, &mut conn, person).await? else {
+        return Ok(Rows::Revoked);
+    };
     let Some(row) = rows::chat(&mut conn, chat).await? else {
         return Ok(Rows::Gone);
     };
-    let Some((principal, loaded)) = load_for(inner, &mut conn, person, chat).await? else {
-        return Ok(Rows::Nothing);
+    let origin = Origin::default();
+    let act = Acting {
+        principal: &principal,
+        now: inner.clock.now(),
+        origin: &origin,
+    };
+    let loaded = match chats::load(&mut conn, &act, chat, Mode::Read).await {
+        Ok(loaded) => loaded,
+        Err(ChatError::NotFound) => {
+            // Root scope was admitted before this read. A retained chat row whose governing
+            // place was deleted is gone; a live private chat that withdrew access is revoked.
+            let place = row.node_id.unwrap_or(row.org_id);
+            let graph = orch_authz::engine::Graph::load(&mut conn, &[place]).await?;
+            return Ok(if graph.site_of(place).is_none() {
+                Rows::Gone
+            } else {
+                Rows::Revoked
+            });
+        }
+        Err(ChatError::Lacks { .. } | ChatError::Suspended { .. }) => return Ok(Rows::Revoked),
+        Err(error) => return Err(Fail::other(error)),
     };
     let messages = rows::changed(
         &mut conn,
@@ -165,33 +187,37 @@ pub(crate) async fn read(
     let Some(highest) = highest else {
         return Ok(Rows::Nothing);
     };
-    let shown_chat = if state_moved {
-        Some(
-            chat_view(
-                &mut conn,
-                &principal,
-                &loaded.row,
-                &loaded.members,
-                &loaded.standing,
-            )
-            .await
-            .map_err(|error| Fail::other(error.problem.detail))?,
-        )
-    } else {
-        None
+    let projected = match read_operation::read_for(
+        &mut conn,
+        &principal,
+        &loaded,
+        &messages,
+        state_moved,
+    )
+    .await
+    {
+        Ok(projected) => projected,
+        Err(error)
+            if matches!(
+                error.problem.code,
+                orch_api_contract::common::ErrorCode::AuthzDenied
+                    | orch_api_contract::common::ErrorCode::NotFound
+                    | orch_api_contract::common::ErrorCode::AuthSuspended
+                    | orch_api_contract::common::ErrorCode::OrgSuspended
+                    | orch_api_contract::common::ErrorCode::AuthInvalidToken
+                    | orch_api_contract::common::ErrorCode::TokenRefusedHere
+                    | orch_api_contract::common::ErrorCode::TokenLifetimeExceeded
+            ) =>
+        {
+            return Ok(Rows::Revoked);
+        }
+        Err(error) => return Err(Fail::other(error)),
     };
-    let shown_messages = if messages.is_empty() {
-        None
-    } else {
-        Some(
-            messages_view(&mut conn, &principal, chat, &messages)
-                .await
-                .map_err(|error| Fail::other(error.problem.detail))?,
-        )
-    };
+    let shown_messages = (!messages.is_empty()).then_some(projected.messages);
+    conn.commit().await.map_err(orch_db::DbError::from)?;
     Ok(Rows::Frame(Box::new(Frame {
         data: SyncData::Chat(orch_realtime_contract::feeds::ChatData {
-            chat: shown_chat,
+            chat: projected.chat,
             messages: shown_messages,
         }),
         highest,

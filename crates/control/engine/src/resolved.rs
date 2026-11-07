@@ -83,6 +83,8 @@ pub struct Resolved {
     pub params: Json,
     /// The smallest inherited native limits over the harness's own sub-agents.
     pub subagent_limits: orch_agent_contract::session::SubagentLimits,
+    /// Whether background task completion may start an admitted continuation.
+    pub background_wake: bool,
     /// The features that are on, by name.
     pub features: BTreeMap<String, bool>,
     /// The standing instructions scope by scope, outermost first, those that say nothing left out.
@@ -112,7 +114,6 @@ pub struct Resolved {
     /// How many times in an hour the agent may send to other threads, as the guide to the tools says.
     pub sends_per_hour: Option<i64>,
     /// What announcement choices the current place permits advertising in its schema.
-    pub broadcast_agent_scope: String,
     pub broadcast_agent_options: Vec<String>,
 }
 
@@ -186,6 +187,7 @@ pub async fn load(conn: &mut Conn, thread: Id) -> Result<Resolved, EngineError> 
         keys::AGENT_EFFORT,
         keys::AGENT_PARAMS,
         keys::AGENT_FEATURES,
+        keys::THREADS_BACKGROUND_WAKE,
         keys::AGENT_INSTRUCTIONS,
         keys::AGENT_MEMORY,
         keys::AGENTS_SUBAGENTS_AT_ONCE,
@@ -201,7 +203,6 @@ pub async fn load(conn: &mut Conn, thread: Id) -> Result<Resolved, EngineError> 
         keys::BINDING_ALLOWED,
         keys::ORCH_TOOLS_CALLS_PER_MINUTE,
         keys::BROADCAST_RATE_PER_HOUR,
-        keys::BROADCAST_AGENT_SCOPE,
         keys::BROADCAST_AGENT_OPTIONS,
     ]
     .into_iter()
@@ -218,6 +219,8 @@ pub async fn load(conn: &mut Conn, thread: Id) -> Result<Resolved, EngineError> 
             at_once: value(&snapshot, keys::AGENTS_SUBAGENTS_AT_ONCE)?.unwrap_or(8),
             depth: value(&snapshot, keys::AGENTS_SUBAGENT_DEPTH)?.unwrap_or(1),
         },
+        background_wake: value::<String>(&snapshot, keys::THREADS_BACKGROUND_WAKE)?.as_deref()
+            != Some("off"),
         features: value(&snapshot, keys::AGENT_FEATURES)?.unwrap_or_default(),
         standing: standing_from(&snapshot)?,
         memory: word(&snapshot, keys::AGENT_MEMORY)?.unwrap_or_default(),
@@ -246,8 +249,6 @@ pub async fn load(conn: &mut Conn, thread: Id) -> Result<Resolved, EngineError> 
         binding_allowed: types(&snapshot, keys::BINDING_ALLOWED)?,
         tool_calls_per_minute: value(&snapshot, keys::ORCH_TOOLS_CALLS_PER_MINUTE)?,
         sends_per_hour: value(&snapshot, keys::BROADCAST_RATE_PER_HOUR)?,
-        broadcast_agent_scope: value(&snapshot, keys::BROADCAST_AGENT_SCOPE)?
-            .unwrap_or_else(|| "topic".to_owned()),
         broadcast_agent_options: value(&snapshot, keys::BROADCAST_AGENT_OPTIONS)?
             .unwrap_or_default(),
     };

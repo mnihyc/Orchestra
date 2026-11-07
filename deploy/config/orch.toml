@@ -60,12 +60,27 @@ managed_endpoint = "wss://gateway.orch.internal:9443"
 url = "wss://gateway.example.com:9443"
 trust = "pinned"
 
+# With several regional gateways, replace the legacy list above with catalogue entries.
+# Every ID must match that gateway's own gateway_id; aliases belong to the same instance.
+# [[gateway.instances]]
+# id = "compose-gateway"
+# label = "Europe"
+# region = "Europe"
+# endpoints = [{ url = "wss://eu.example.com:9443", trust = "pinned" }]
+# [[gateway.instances]]
+# id = "asia"
+# label = "Asia tools"
+# region = "Asia"
+# endpoints = [{ url = "wss://asia.example.com:9443", trust = "pinned" }]
+# Admin gateway edits persist as a system override and take precedence after an API restart.
+
 [link]
 heartbeat_secs = 20
 dead_after_secs = 60
 max_frame_bytes = 262144
 tunnel_window_bytes = 1048576
 tunnel_resume_grace_secs = 60
+tunnel_session_idle_secs = 60                # unused tunnel-only sessions; active work protects them
 tunnel_replay_buffer_bytes = 8388608
 port_connections_max = 64                    # parallel assets/colleagues, bounded per environment
 port_waiting_max = 16                        # a short burst waiting for the ordinary ten-second open result

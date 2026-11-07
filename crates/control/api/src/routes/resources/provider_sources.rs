@@ -331,6 +331,7 @@ pub(crate) async fn write(
             row.revision,
             &choices,
             facts_changed || changed[1],
+            facts_changed,
             ctx.now,
         )
         .await?
@@ -502,6 +503,7 @@ fn builtin_descriptor(
                     reports: orch_provider_contract::FactMember::of_kinds(
                         &adapter.capabilities.provider_facts,
                     ),
+                    field_reports: adapter.capabilities.provider_fact_fields.clone(),
                     spends_resets: adapter.capabilities.provider_facts.contains(
                         &orch_agent_contract::descriptor::ProviderFactKind::AvailableResets,
                     ),
@@ -526,6 +528,7 @@ fn builtin_descriptor(
 pub(crate) struct SourceViews {
     adapters: HashMap<Id, orch_agent_contract::descriptor::AgentDescriptor>,
     programs: HashMap<(Id, String), orch_provider_contract::SourceDescriptor>,
+    profiles: Vec<(Id, Json)>,
 }
 
 impl SourceViews {
@@ -538,6 +541,13 @@ impl SourceViews {
                 .collect::<Vec<_>>(),
         )
         .await?;
+        // Declarations include disabled profiles; only enabled profiles select a home.
+        let mut profiles: Vec<_> = agents
+            .iter()
+            .filter(|row| !row.disabled)
+            .map(|row| (row.id, row.profile.clone()))
+            .collect();
+        profiles.sort_unstable_by_key(|(id, _)| *id);
         let adapters = agents
             .into_iter()
             .filter_map(|row| {
@@ -556,19 +566,23 @@ impl SourceViews {
             .iter()
             .filter_map(|row| row.key_machine_id)
             .collect();
-        let found: Vec<(Id, String, Option<Json>)> = sqlx::query_as(
-            "SELECT m.id, plugin->>'name', plugin->'descriptor'
+        let found: Vec<(Id, String, Option<Json>)> = if machine_ids.is_empty() {
+            Vec::new()
+        } else {
+            sqlx::query_as(
+                "SELECT m.id, plugin->>'name', plugin->'descriptor'
                FROM machines m
                CROSS JOIN LATERAL jsonb_array_elements(
                  CASE WHEN jsonb_typeof(m.facts->'plugins')='array' THEN m.facts->'plugins'
                       ELSE '[]'::jsonb END) plugin
               WHERE m.id=ANY($1) AND m.deleted_at IS NULL
                 AND plugin->>'kind'='provider' AND plugin->>'name' IS NOT NULL",
-        )
-        .bind(machine_ids)
-        .fetch_all(&mut *conn)
-        .await
-        .map_err(DbError::from)?;
+            )
+            .bind(machine_ids)
+            .fetch_all(&mut *conn)
+            .await
+            .map_err(DbError::from)?
+        };
         let programs = found
             .into_iter()
             .filter_map(|(machine, name, value)| {
@@ -581,7 +595,24 @@ impl SourceViews {
                     .map(|descriptor| ((machine, name), descriptor))
             })
             .collect();
-        Ok(Self { adapters, programs })
+        Ok(Self {
+            adapters,
+            programs,
+            profiles,
+        })
+    }
+
+    pub(crate) fn profile_homes(
+        &self,
+    ) -> ApiResult<HashMap<Id, Option<orch_driver_contract::runtime::EnvironmentDataSource>>> {
+        self.profiles
+            .iter()
+            .map(|(id, profile)| {
+                orch_settings::profile_home_in(profile)
+                    .map(|home| (*id, home))
+                    .map_err(ApiError::internal)
+            })
+            .collect()
     }
 }
 
@@ -661,6 +692,17 @@ pub(crate) fn view(
     );
     let mut states = serde_json::to_value(orch_provider_contract::members::facts_state(
         &typed, &declared,
+    ))
+    .map_err(ApiError::internal)?;
+    states["fields"] = serde_json::to_value(orch_provider_contract::credit_fields::states(
+        &typed,
+        &choices
+            .facts
+            .as_ref()
+            .and_then(|choice| choice.descriptor.as_ref())
+            .and_then(|descriptor| descriptor.facts.as_ref())
+            .map(|facts| facts.field_reports.clone())
+            .unwrap_or_default(),
     ))
     .map_err(ApiError::internal)?;
     let lists_models = choices

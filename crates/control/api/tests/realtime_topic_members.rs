@@ -6,7 +6,9 @@
 )]
 
 mod realtime_support;
+mod support;
 
+use crate::support::FullPermissionPageReply;
 use orch_api_contract::access::{PageChange, PageChangeWhole, PermissionPageUpdate};
 use orch_api_contract::topics::{TopicSyncGet, TopicSyncGetQuery};
 use orch_api_core::{registry::Registry, testing::TestApp};
@@ -46,6 +48,7 @@ async fn a_topic_socket_and_http_show_the_same_members_and_leave_out_a_private_t
         })
         .send()
         .await
+        .full_permission_page()
         .ok();
     rig.server.engine.stop();
     let before = feeds::topic_seqs(&mut rig.pool.acquire().await.unwrap(), &[rig.topic])
