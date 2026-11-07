@@ -65,6 +65,9 @@ impl RequestOutcome {
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
 #[serde(default)]
 pub struct UsageRequest {
+    /// Vendor-reported successful native searches; missing is not a measured zero.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub web_searches: Option<i64>,
     /// Stable within the turn and reused by every observation of this request.
     pub id: String,
     /// The model actually used, where reported.
@@ -118,7 +121,7 @@ impl UsageRequest {
             }
             _ => (None, None),
         };
-        orch_api_contract::performance::request_timing(&RequestSample {
+        let mut timing = orch_api_contract::performance::request_timing(&RequestSample {
             asked: self.asked,
             first_output: self.first_output,
             end: self.end,
@@ -136,11 +139,20 @@ impl UsageRequest {
                 .map_or(UsageMeasurement::Unread, |outcome| UsageMeasurement::Told {
                     value: outcome.code().to_owned(),
                 }),
-        })
+        });
+        timing.web_searches = self
+            .web_searches
+            .map_or(UsageMeasurement::Unsupported, |value| {
+                UsageMeasurement::Told { value }
+            });
+        timing
     }
 
     /// Checks observable ordering and known counts; absence is permitted and is never replaced by zero.
     pub fn check(&self) -> Result<(), String> {
+        if self.web_searches.is_some_and(|count| count < 0) {
+            return Err("web search count cannot be negative".into());
+        }
         if self.id.is_empty() {
             return Err("a model request needs its stable id".into());
         }

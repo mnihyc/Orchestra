@@ -8,6 +8,10 @@ rust-version.workspace = true
 repository.workspace = true
 publish.workspace = true
 
+[features]
+default = []
+test-observers = ["orch-api-core/test-observers"]
+
 [dependencies]
 anyhow.workspace = true
 clap.workspace = true

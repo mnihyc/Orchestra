@@ -119,6 +119,9 @@ pub struct Proxy {
 /// `enroll`.
 #[derive(Debug, ClapArgs)]
 pub struct Enroll {
+    /// Primary gateway: automatic or an advertised gateway ID. A selected gateway never changes itself.
+    #[arg(long, value_name = "automatic|ID")]
+    pub gateway: Option<String>,
     /// The roles to offer: environment, agent, provider, separated by commas.
     #[arg(long, value_name = "ROLES")]
     pub roles: Option<String>,
@@ -359,6 +362,27 @@ pub struct PortForward {
 mod tests {
     use super::*;
     use clap::CommandFactory;
+
+    #[test]
+    fn enrollment_accepts_automatic_or_an_exact_gateway_id() {
+        for gateway in ["automatic", "asia"] {
+            let arguments = Args::try_parse_from([
+                "orch-connector",
+                "enroll",
+                "--url",
+                "https://orch.test",
+                "--token",
+                "oenr_fixture",
+                "--gateway",
+                gateway,
+            ])
+            .unwrap();
+            let Some(Command::Enroll(enrollment)) = arguments.command else {
+                panic!("not enrollment");
+            };
+            assert_eq!(enrollment.gateway.as_deref(), Some(gateway));
+        }
+    }
 
     #[test]
     fn port_forward_takes_its_credential_from_standard_input_and_one_kind_of_it() {

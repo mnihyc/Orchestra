@@ -2,7 +2,7 @@
 
 use crate::{
     middleware::{
-        authorization::{self, refusals},
+        authorization::refusals,
         requests::{ApiError, ApiResult},
         transaction_guard,
     },
@@ -17,18 +17,39 @@ use orch_types::Time;
 use serde::{Serialize, de::DeserializeOwned};
 use std::collections::HashMap;
 
+mod confirmation;
+mod creation;
+mod deletion;
+mod list;
 pub(crate) mod metadata;
+mod read;
 /// Exact unit conversion for the deployment's retention policy.
 const SECONDS_PER_DAY: u64 = 86_400;
 
 /// Registers only typed document-domain endpoints; none accepts hierarchy folders as a container.
 pub fn mount(registry: &mut Registry) {
     registry
-        .on(DocumentTreeList, list)
-        .on(DocumentContainerGet, get_container)
-        .on(DocumentTreeEntryGet, get_entry)
-        .on(DocumentContainerCreate, create)
-        .on(DocumentTreeDeletePreview, preview)
+        .on_snapshot_read_with_optional_operation(DocumentTreeList, list::prepare, list::get)
+        .on_snapshot_read_with_optional_operation(
+            DocumentContainerGet,
+            read::container,
+            read::container_get,
+        )
+        .on_snapshot_read_with_optional_operation(
+            DocumentTreeEntryGet,
+            read::entry,
+            read::entry_get,
+        )
+        .on_with_operation(
+            DocumentContainerCreate,
+            crate::key_operations::native::effects::prepare::<creation::Folders>,
+            creation::create,
+        )
+        .on_with_operation(
+            DocumentTreeDeletePreview,
+            crate::key_operations::native::effects::prepare::<deletion::Reviews>,
+            deletion::preview,
+        )
         .on(DocumentTreeOperate, operate);
 }
 
@@ -134,41 +155,36 @@ fn request(body: &DocumentTreeOperationBody) -> ApiResult<domain::Request> {
     })
 }
 
-async fn list(ctx: Ctx, query: DocumentTreeListQuery, (): ()) -> ApiResult<DocumentTreePage> {
-    let node = ctx.id("id")?;
-    let at = query.parent_container_id.map_or(
-        DocumentDirectory::NodeDocs(node),
-        DocumentDirectory::Container,
-    );
-    // Loading deployment key material may touch its file; do that before the read transaction.
-    crate::routes::resources::sealing::master_key()?;
-    let mut tx = orch_db::queries::feeds::begin_reading(&ctx.app.db).await?;
-    let principal = authorization::principal(&ctx, &mut tx).await?;
-    let read = metadata::page(&ctx, &mut tx, &principal, Some(node), at, &query).await?;
-    tx.commit().await.map_err(DbError::from)?;
-    finish_read(&ctx, &read).await?;
-    Ok(read.value)
+enum ReadSource<'a> {
+    Entry(&'a read::Ready),
+    TreePage(&'a list::Ready),
 }
 
-async fn read_one(ctx: Ctx, item: domain::Item) -> ApiResult<DocumentTreeRead> {
-    let mut tx = orch_db::queries::feeds::begin_reading(&ctx.app.db).await?;
-    let principal = authorization::principal(&ctx, &mut tx).await?;
-    let read = metadata::entry(
-        &ctx,
-        &mut tx,
-        &principal,
-        convert(item)?,
-        ctx.inspect_deleted,
-    )
-    .await?;
-    tx.commit().await.map_err(DbError::from)?;
-    finish_read(&ctx, &read).await?;
-    Ok(read.value)
+async fn finish_read_scoped<T>(
+    ctx: &Ctx,
+    read: &metadata::Projection<T>,
+    source: Option<&read::Ready>,
+) -> ApiResult<()> {
+    finish_read(ctx, read, source.map(ReadSource::Entry)).await
 }
 
-async fn finish_read<T>(ctx: &Ctx, read: &metadata::Projection<T>) -> ApiResult<()> {
+async fn finish_read<T>(
+    ctx: &Ctx,
+    read: &metadata::Projection<T>,
+    source: Option<ReadSource<'_>>,
+) -> ApiResult<()> {
     let (mut tx, guard) = transaction_guard::begin(ctx).await?;
     metadata::unchanged(&mut tx, guard.principal(), &read.cut, guard.now()).await?;
+    match source {
+        Some(ReadSource::Entry(source)) => {
+            read::check_sources(ctx, &mut tx, guard.principal().caller(), source).await?;
+        }
+        Some(ReadSource::TreePage(source)) => {
+            list::check_sources(ctx, &mut tx, guard.principal(), source).await?;
+        }
+        None => {}
+    }
+    guard.check_deadline(ctx)?;
     for info in &read.inspections {
         // Explicit entry inspection is audited by the ordinary registry finish path.
         if ctx
@@ -187,123 +203,7 @@ async fn finish_read<T>(ctx: &Ctx, read: &metadata::Projection<T>) -> ApiResult<
         }
     }
     tx.commit().await.map_err(DbError::from)?;
-    Ok(())
-}
-
-async fn get_container(
-    ctx: Ctx,
-    _query: orch_api_contract::nodes::DeletedInspectionQuery,
-    (): (),
-) -> ApiResult<DocumentTreeRead> {
-    let id = ctx.id("id")?;
-    read_one(ctx, domain::Item::Container(id)).await
-}
-
-async fn get_entry(
-    ctx: Ctx,
-    query: DocumentTreeEntryGetQuery,
-    (): (),
-) -> ApiResult<DocumentTreeRead> {
-    let id = ctx.id("id")?;
-    let item = match query.kind {
-        DocumentTreeKind::Document => domain::Item::Document(id),
-        DocumentTreeKind::Container => domain::Item::Container(id),
-    };
-    read_one(ctx, item).await
-}
-
-async fn create(
-    ctx: Ctx,
-    (): (),
-    body: DocumentContainerCreateBody,
-) -> ApiResult<DocumentTreeReceipt> {
-    orch_db::queries::transaction_guard::request_scope(
-        orch_db::queries::transaction_guard::Scope::Creation,
-        create_body(ctx, body),
-    )
-    .await
-}
-
-async fn create_body(
-    mut ctx: Ctx,
-    body: DocumentContainerCreateBody,
-) -> ApiResult<DocumentTreeReceipt> {
-    let node = ctx.id("id")?;
-    let (mut tx, guard) = transaction_guard::begin(&ctx).await?;
-    ctx.now = guard.now().get();
-    let principal = guard.principal().clone();
-    if let Some(id) = body.parent_container_id {
-        orch_db::queries::documents::containers::lock_scopes(&mut tx, &[node]).await?;
-        authorization::require_document(
-            &mut tx,
-            &principal,
-            id,
-            orch_access_contract::permissions::Permission::DocCreate,
-            orch_authz::Policy::default(),
-        )
-        .await?;
-        let folder = orch_db::queries::documents::containers::get(&mut tx, id)
-            .await?
-            .ok_or_else(ApiError::not_found)?;
-        if folder.node_id != node {
-            return Err(ApiError::new(
-                ErrorCode::NodeWrongParent,
-                "that parent belongs to another document area",
-            ));
-        }
-    }
-    let request = domain::Request {
-        command: domain::Command::CreateFolder,
-        items: Vec::new(),
-        to: Some(body.parent_container_id.map_or(
-            domain::Directory::NodeDocs(node),
-            domain::Directory::Container,
-        )),
-        name: Some(body.name),
-        request_ref: body.client_id,
-        version: None,
-    };
-    let done = domain::execute_in(
-        &mut tx,
-        domain::Actor::Person(&principal),
-        &request,
-        None,
-        Time::new(ctx.now),
-        options(&ctx),
-    )
-    .await;
-    let receipt = result(&mut tx, done).await?;
-    let receipt = metadata::receipt(&ctx, &mut tx, &principal, receipt).await?;
-    tx.commit().await.map_err(DbError::from)?;
-    Ok(receipt)
-}
-
-async fn preview(
-    mut ctx: Ctx,
-    (): (),
-    body: DocumentTreeOperationBody,
-) -> ApiResult<DocumentTreePlan> {
-    if body.command != DocumentTreeCommand::Delete || body.deletion_plan.is_some() {
-        return Err(ApiError::invalid(
-            "command",
-            "only deletion has a fresh preview",
-        ));
-    }
-    let (mut tx, guard) = transaction_guard::begin(&ctx).await?;
-    ctx.now = guard.now().get();
-    let principal = guard.principal().clone();
-    let plan = domain::plan_delete_in(
-        &mut tx,
-        domain::Actor::Person(&principal),
-        &request(&body)?,
-        Time::new(ctx.now),
-        options(&ctx),
-    )
-    .await;
-    let plan = result(&mut tx, plan).await?;
-    // No capability or mutation receipt is stored by a preview.
-    tx.commit().await.map_err(DbError::from)?;
-    convert(plan)
+    guard.check_deadline(ctx)
 }
 
 async fn operate(
@@ -329,12 +229,18 @@ async fn operate_body(
     let (mut tx, guard) = transaction_guard::begin(&ctx).await?;
     ctx.now = guard.now().get();
     let principal = guard.principal().clone();
-    let deletion_plan: Option<domain::MembershipStamp> = convert(&body.deletion_plan)?;
-    let done = domain::execute_in(
+    let deletion_plan = body
+        .deletion_plan
+        .as_ref()
+        .map(confirmation::decode)
+        .transpose()?;
+    let done = domain::execute_confirmed_in(
         &mut tx,
         domain::Actor::Person(&principal),
         &request(&body)?,
-        deletion_plan.as_ref(),
+        deletion_plan
+            .as_ref()
+            .map(confirmation::Decoded::as_confirmation),
         Time::new(ctx.now),
         options(&ctx),
     )

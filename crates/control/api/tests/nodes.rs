@@ -8,6 +8,7 @@
 mod places;
 mod support;
 
+use crate::support::FullArchiveReply as _;
 use orch_api_contract::common::ErrorCode;
 use orch_api_contract::common::SubscriptionLevel;
 use orch_api_contract::nodes::{
@@ -201,7 +202,9 @@ async fn a_department_may_be_given_a_general_project_when_asked() {
         })
         .send()
         .await
-        .ok();
+        .ok()
+        .into_full()
+        .expect("ordinary created organization content");
     assert_eq!(sales.project_count, 1);
     assert_eq!(sales.base.description, "Who sells");
     assert_eq!(sales.base.description_source, FieldSource::User);
@@ -417,7 +420,9 @@ async fn a_private_project_is_its_makers_alone_until_somebody_is_named() {
         })
         .send()
         .await
-        .ok();
+        .ok()
+        .into_full()
+        .expect("this control expects the ordinary full project response");
     assert_eq!(secret.base.page, PageState::Restricted);
     // Dan, a viewer of the org, sees the open project and not the secret one.
     let seen = children(&world, &dan, acme.base.id).await;
@@ -503,7 +508,9 @@ async fn an_admin_of_the_place_reads_a_private_page_by_administering_it_and_only
         })
         .send()
         .await
-        .ok();
+        .ok()
+        .into_full()
+        .expect("this control expects the ordinary full project response");
     // With As admin on, a system admin administers everything: the private page names only its
     // owners, and administering it gives its View and Manage all the same, marked as such.
     let read = world
@@ -720,6 +727,7 @@ async fn archiving_closes_a_project_to_changes_and_unarchiving_opens_it_again() 
         .body(&places::archive_body(&world, &boss.token, web.base.id, true).await)
         .send()
         .await
+        .full_archive()
         .ok();
     let Node::Project(archived) = archived.node else {
         panic!("a project stays one");
@@ -801,6 +809,7 @@ async fn archiving_closes_a_project_to_changes_and_unarchiving_opens_it_again() 
         .body(&places::archive_body(&world, &boss.token, web.base.id, false).await)
         .send()
         .await
+        .full_archive()
         .ok();
     let Node::Project(back) = back.node else {
         panic!("a project stays one");
@@ -840,6 +849,7 @@ async fn orgs_and_departments_archive_their_contents_read_only_and_the_same_hold
             .body(&places::archive_body(&world, &ada.token, id, true).await)
             .send()
             .await
+            .full_archive()
             .ok();
         assert!(
             matches!(archived.node, Node::Org(ref org) if org.base.archived && org.base.archived_at.is_some())
@@ -867,6 +877,7 @@ async fn orgs_and_departments_archive_their_contents_read_only_and_the_same_hold
             .body(&places::archive_body(&world, &ada.token, id, false).await)
             .send()
             .await
+            .full_archive()
             .ok();
         assert!(matches!(restored.node, Node::Org(ref org) if !org.base.archived));
         assert!(

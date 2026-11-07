@@ -5,6 +5,12 @@
 //! shows on the others; what a device arranges for itself, such as the sizes
 //! of its panes, stays on that device.
 
+use crate::operations::{FacetSpec as Facet, OperationSpec as Op, TargetResolver as Target};
+use orch_access_contract::key_scope::KeyAction::{Read, Write};
+use orch_access_contract::key_scope::KeyIdentityKind as I;
+use orch_access_contract::key_scope::KeyTargetKind::{Identity, Object};
+use orch_access_contract::permissions::ObjectKind as K;
+
 use std::collections::BTreeMap;
 
 use orch_types::{Id, Json, Seq, Time};
@@ -483,35 +489,75 @@ pub type PersonalState = BTreeMap<String, Json>;
 
 crate::endpoints! {
     /// Lists the caller's favorites, in order.
-    MeFavoriteList: GET "/me/favorites", User, none, none, json Vec<Favorite>, 200;
+    MeFavoriteList: GET "/me/favorites", User, none, none, json Vec<Favorite>, 200,
+        operation Op::facets(&[
+            Facet::required(Read, &[Identity(I::Account)], Target::CurrentAccount),
+            Facet::required(Read, &[Object(K::Org), Object(K::Project), Object(K::Topic), Object(K::Thread)], Target::ResolvedCollection("favorite_nodes")),
+            Facet::response_content(&[Object(K::Org)], Target::ResolvedCollection("favorite_names_orgs")),
+            Facet::response_content(&[Object(K::Project)], Target::ResolvedCollection("favorite_names_projects")),
+            Facet::response_content(&[Object(K::Topic)], Target::ResolvedCollection("favorite_names_topics")),
+            Facet::response_content(&[Object(K::Thread)], Target::ResolvedCollection("favorite_names_threads")),
+        ]);
     /// Makes a node a favorite, or moves it within the list.
-    MeFavoriteSet: PUT "/me/favorites/{node_id}", Permission("node.view"), none, json MeFavoriteSetBody, none, 204;
+    MeFavoriteSet: PUT "/me/favorites/{node_id}", Permission("node.view"), none, json MeFavoriteSetBody, none, 204,
+        operation Op::single(
+            Write,
+            &[
+                Object(K::Org),
+                Object(K::Project),
+                Object(K::Topic),
+                Object(K::Thread),
+            ],
+            Target::PermissionObject,
+        );
     /// Takes a node out of the favorites.
-    MeFavoriteDelete: DELETE "/me/favorites/{node_id}", User, none, none, none, 204;
+    MeFavoriteDelete: DELETE "/me/favorites/{node_id}", User, none, none, none, 204,
+        operation Op::single(Write, &[Identity(I::Account)], Target::CurrentAccount);
     /// Notes that the caller went to a node; the client calls it on navigation.
-    MeRecentCreate: POST "/me/recents", User, none, json MeRecentCreateBody, none, 204;
+    MeRecentCreate: POST "/me/recents", User, none, json MeRecentCreateBody, none, 204,
+        operation Op::single(Write, &[Identity(I::Account)], Target::CurrentAccount);
     /// Stars or reorders a readable thing of any kind in the caller's own favorites.
-    MeItemFavoriteSet: PUT "/me/favorites/{kind}/{id}", User, none, json MeItemFavoriteSetBody, none, 204;
+    MeItemFavoriteSet: PUT "/me/favorites/{kind}/{id}", User, none, json MeItemFavoriteSetBody, none, 204,
+        operation Op::single(Write, &[Identity(I::Account)], Target::CurrentAccount);
     /// Removes only this kind/id favorite, including when the target is no longer readable.
-    MeItemFavoriteDelete: DELETE "/me/favorites/{kind}/{id}", User, none, none, none, 204;
+    MeItemFavoriteDelete: DELETE "/me/favorites/{kind}/{id}", User, none, none, none, 204,
+        operation Op::single(Write, &[Identity(I::Account)], Target::CurrentAccount);
     /// Records one visit to a readable thing, using the server's clock and decaying count.
-    MeVisitCreate: POST "/me/visits", User, none, json PersonalTarget, none, 204;
+    MeVisitCreate: POST "/me/visits", User, none, json PersonalTarget, none, 204,
+        operation Op::single(Write, &[Identity(I::Account)], Target::CurrentAccount);
     /// Lists how far the caller has read their threads.
-    MeReadStateList: GET "/me/read-states", User, query MeReadStateListQuery, none, json Vec<ReadState>, 200;
+    MeReadStateList: GET "/me/read-states", User, query MeReadStateListQuery, none, json Vec<ReadState>, 200,
+        operation Op::facets(&[
+            Facet::required(Read, &[Identity(I::Account)], Target::CurrentAccount),
+            Facet::required(Read, &[Object(K::Thread)], Target::ResolvedCollection("read_state_threads")),
+        ]);
     /// Lists the caller's subscriptions.
-    MeSubscriptionList: GET "/me/subscriptions", User, query MeSubscriptionListQuery, none, json Vec<MeSubscription>, 200;
+    MeSubscriptionList: GET "/me/subscriptions", User, query MeSubscriptionListQuery, none, json Vec<MeSubscription>, 200,
+        operation Op::facets(&[
+            Facet::required(Read, &[Identity(I::Account)], Target::CurrentAccount),
+            Facet::required(Read, &[Object(K::Org),Object(K::Project),Object(K::Topic),Object(K::Thread),Object(K::Document)], Target::ResolvedCollection("subscription_nodes")),
+        ]);
     /// Lists the caller's state in every chat where they have one.
-    MeChatStateList: GET "/me/chat-states", User, none, none, json Vec<ChatState>, 200;
+    MeChatStateList: GET "/me/chat-states", User, none, none, json Vec<ChatState>, 200,
+        operation Op::facets(&[
+            Facet::required(Read, &[Identity(I::Account)], Target::CurrentAccount),
+            Facet::required(Read, &[Identity(I::Chat)], Target::ResolvedCollection("personal_state_chats")),
+        ]);
     /// Reads what the caller's interface remembers for them across devices.
-    MeStateGet: GET "/me/state", User, none, none, json PersonalState, 200;
+    MeStateGet: GET "/me/state", User, none, none, json PersonalState, 200,
+        operation Op::single(Read, &[Identity(I::Account)], Target::CurrentAccount);
     /// Replaces the whole value of one key of that state.
-    MeStateSet: PUT "/me/state/{key}", User, none, json Json, none, 204;
+    MeStateSet: PUT "/me/state/{key}", User, none, json Json, none, 204,
+        operation Op::single(Write, &[Identity(I::Account)], Target::CurrentAccount);
     /// Keeps the caller's last view of one project, beside those of the others.
-    MeProjectViewSet: PUT "/me/state/project_views/{project_id}", Rule("the caller, who may view the project"), none, json ProjectView, none, 204;
+    MeProjectViewSet: PUT "/me/state/project_views/{project_id}", Rule("the caller, who may view the project"), none, json ProjectView, none, 204,
+        operation Op::single(Write, &[Identity(I::Account)], Target::CurrentAccount);
     /// Forgets the caller's last view of one project.
-    MeProjectViewDelete: DELETE "/me/state/project_views/{project_id}", User, none, none, none, 204;
+    MeProjectViewDelete: DELETE "/me/state/project_views/{project_id}", User, none, none, none, 204,
+        operation Op::single(Write, &[Identity(I::Account)], Target::CurrentAccount);
     /// Records how far the caller has read a thread.
-    ThreadRead: POST "/threads/{id}/read", Permission("thread.view"), none, json ThreadReadBody, json ThreadReadReply, 200;
+    ThreadRead: POST "/threads/{id}/read", Permission("thread.view"), none, json ThreadReadBody, json ThreadReadReply, 200,
+        operation Op::returning(Write, &[Object(K::Thread)], Target::PermissionObject);
 }
 
 #[cfg(test)]

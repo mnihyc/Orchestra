@@ -51,7 +51,9 @@ async fn an_editor_puts_one_block_back_preserving_a_colleagues_later_sibling_and
         .body(&inverse)
         .send()
         .await
-        .ok();
+        .ok()
+        .into_full()
+        .expect("the browser session receives the full document reply");
     assert_eq!(
         desk.words(&editor, doc.base.id).await,
         ["Before", "A colleague's newer sibling"]
@@ -71,7 +73,9 @@ async fn an_editor_puts_one_block_back_preserving_a_colleagues_later_sibling_and
         .body(&inverse)
         .send()
         .await
-        .ok();
+        .ok()
+        .into_full()
+        .expect("the browser session receives the full document reply");
     assert_eq!(
         repeated.seq, answer.seq,
         "a retry is answered before the now-old snapshot fence"

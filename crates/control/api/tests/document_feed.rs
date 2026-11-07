@@ -55,6 +55,8 @@ impl Office {
             .send()
             .await
             .ok()
+            .into_full()
+            .unwrap()
             .base
             .id
     }
@@ -77,6 +79,8 @@ impl Office {
             .send()
             .await
             .ok()
+            .into_full()
+            .expect("the browser session receives the full document reply")
     }
 
     /// A person with a role on the topic, and their token.

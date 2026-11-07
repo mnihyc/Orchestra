@@ -18,17 +18,9 @@ use orch_db::{
 };
 use orch_engine::resource_facts::{self, library::RecordedUses};
 use orch_types::Time;
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 
 pub(super) fn validate(query: &EverythingListQuery, kinds: &[String]) -> ApiResult<()> {
-    if query.resource_view == Some(ProviderListScope::Usable)
-        && matches!(kinds.first().map(String::as_str), Some("environment"))
-    {
-        return Err(ApiError::invalid(
-            "resource_view",
-            "This resource has View and Manage.",
-        ));
-    }
     if query.sort == Some(EverythingSort::Use)
         && (kinds.len() != 1
             || !matches!(
@@ -57,7 +49,7 @@ pub(super) async fn prepare(
             .ok_or_else(|| ApiError::invalid("home", "Choose an administered organization."))?;
         let access = orch_authz::nodes::effective(conn, principal, home, Default::default())
             .await
-            .map_err(ApiError::internal)?;
+            .map_err(crate::middleware::authorization::restoration_error)?;
         if !access.administers {
             return Err(ApiError::not_found());
         }
@@ -96,7 +88,7 @@ pub(super) async fn prepare(
             .collect();
         let counts: HashMap<_, _> = resource_facts::library::lifetimes(conn, &objects, at)
             .await
-            .map_err(ApiError::internal)?
+            .map_err(crate::key_operations::snapshot_read::engine_error)?
             .into_iter()
             .map(|(object, count)| (object.id.to_string(), count))
             .collect();
@@ -113,6 +105,20 @@ pub(super) async fn page(
     grants: &[Grant],
     at: Time,
 ) -> ApiResult<HashMap<String, ResourceFacts>> {
+    let raw = raw_page(conn, rows, grants, at).await?;
+    Ok(keyed(
+        resource_facts::project(conn, principal, Default::default(), &raw)
+            .await
+            .map_err(crate::key_operations::snapshot_read::engine_error)?,
+    ))
+}
+
+async fn raw_page(
+    conn: &mut Conn,
+    rows: &[Row],
+    grants: &[Grant],
+    at: Time,
+) -> ApiResult<Vec<resource_facts::RawFacts>> {
     let subjects: Vec<_> = rows
         .iter()
         .zip(grants)
@@ -129,25 +135,62 @@ pub(super) async fn page(
         .collect();
     let raw = resource_facts::read_with(conn, &subjects, at, Some(&RecordedUses))
         .await
-        .map_err(ApiError::internal)?;
-    Ok(project(conn, principal, raw)
+        .map_err(crate::key_operations::snapshot_read::engine_error)?;
+    let mut raw = raw;
+    select_relations(&mut raw);
+    Ok(raw)
+}
+
+pub(super) struct Prepared {
+    raw: Vec<resource_facts::RawFacts>,
+    visibility: resource_facts::PreparedVisibility,
+}
+
+impl Prepared {
+    pub(super) fn name_sources(&self) -> impl Iterator<Item = ObjectRef> + '_ {
+        self.visibility.sources()
+    }
+
+    pub(super) fn bound_sources(
+        &mut self,
+        allowed: &HashSet<(
+            orch_access_contract::permissions::ObjectKind,
+            orch_types::Id,
+        )>,
+    ) {
+        self.visibility.restrict_to(allowed);
+    }
+
+    pub(super) fn render(&self) -> HashMap<String, ResourceFacts> {
+        keyed(self.visibility.project(&self.raw))
+    }
+}
+
+pub(super) async fn prepare_page(
+    conn: &mut Conn,
+    principal: &Principal,
+    rows: &[Row],
+    grants: &[Grant],
+    at: Time,
+) -> ApiResult<Prepared> {
+    let raw = raw_page(conn, rows, grants, at).await?;
+    let visibility = resource_facts::prepare_projection(conn, principal, Default::default(), &raw)
         .await
-        .map_err(ApiError::internal)?
-        .into_iter()
+        .map_err(crate::key_operations::snapshot_read::engine_error)?;
+    Ok(Prepared { raw, visibility })
+}
+
+fn keyed(rows: Vec<ResourceFacts>) -> HashMap<String, ResourceFacts> {
+    rows.into_iter()
         .filter_map(|facts| match &facts.subject {
             FactSubject::Resource { object } => Some((object.id.to_string(), facts)),
             _ => None,
         })
-        .collect())
+        .collect()
 }
 
-/// A library selects the meaningful current relationships before using the shared privacy projector.
-pub(crate) async fn project(
-    conn: &mut Conn,
-    principal: &Principal,
-    mut raw: Vec<resource_facts::RawFacts>,
-) -> ApiResult<Vec<ResourceFacts>> {
-    for facts in &mut raw {
+pub(crate) fn select_relations(raw: &mut [resource_facts::RawFacts]) {
+    for facts in raw {
         let FactSubject::Resource { object } = &facts.subject else {
             continue;
         };
@@ -190,9 +233,6 @@ pub(crate) async fn project(
             }
         });
     }
-    resource_facts::project(conn, principal, Default::default(), &raw)
-        .await
-        .map_err(ApiError::internal)
 }
 
 /// Historical thread counts reuse the exact same source and turn deduplication as Usage.

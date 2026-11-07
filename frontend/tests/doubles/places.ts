@@ -302,14 +302,16 @@ export class Places {
    */
   rowsFor(person: Person, rows: readonly TreeNode[], since: number | null): TreeNode[] {
     const counts = this.documentCounts();
+    const documentSequences = this.world.documents.directorySequences();
     const waits = this.world.notifications.treeWaits(person, new Set(rows.filter((row) => row.kind === 'thread').map((row) => row.id)));
     return rows.flatMap((row): TreeNode[] => {
       const access = row.deleted ? null : this.access(person, row.id);
       const held = access?.permissions ?? [];
       if (held.includes(`${row.kind}.view`)) return [{ ...row, participating: access?.participating === true, docs: held.includes('doc.view') ? (counts.get(row.id) ?? 0) : 0,
+        docs_seq: held.includes('doc.view') ? documentSequences.get(row.id) ?? 0 : 0,
         thread: row.thread === null ? null : { ...row.thread, waiting: waits.get(row.id) ?? null } }];
       if (since === null) return [];
-      return [{ ...row, name: '', address: null, color: null, docs: 0, deleted: true, restricted: false, thread: null, topic: null, chat: { id: row.chat.id, seq: 0 } }];
+      return [{ ...row, name: '', address: null, color: null, docs: 0, docs_seq: 0, deleted: true, restricted: false, thread: null, topic: null, chat: { id: row.chat.id, seq: 0 } }];
     });
   }
 

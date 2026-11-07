@@ -67,8 +67,8 @@ for (const locale of ['en', 'zh-CN'] as const) {
     await waitFor(() => expect(calls.request).toHaveBeenCalledOnce());
     const end = calls.request.mock.calls[0]?.[0].expires_at;
     expect(end).toBeDefined();
-    expect(Date.parse(end as string) - before).toBeGreaterThanOrEqual(7 * 24 * 60 * 60 * 1000);
-    expect(Date.parse(end as string) - Date.now()).toBeLessThanOrEqual(7 * 24 * 60 * 60 * 1000);
+    expect(Date.parse(end!) - before).toBeGreaterThanOrEqual(7 * 24 * 60 * 60 * 1000);
+    expect(Date.parse(end!) - Date.now()).toBeLessThanOrEqual(7 * 24 * 60 * 60 * 1000);
     expect(await screen.findByText(i18n.t('access.request.requestedUntil'))).toBeVisible();
   });
 
@@ -138,7 +138,8 @@ it('sends the same proposed end when asking to join a group chat', async () => {
   await user.click(screen.getByRole('button', { name: i18n.t('access.request.send') }));
   await waitFor(() => expect(calls.join).toHaveBeenCalledOnce());
   expect(calls.join.mock.calls[0]?.[0]).toBe('group');
-  expect(calls.join.mock.calls[0]?.[1]).toMatchObject({ reason: '', label: 'Shared group', expires_at: expect.any(String) });
+  expect(calls.join.mock.calls[0]?.[1]).toMatchObject({ reason: '', label: 'Shared group' });
+  expect(calls.join.mock.calls[0]?.[1].expires_at).toEqual(expect.any(String));
 });
 
 it.each(['export', 'defaults'] as const)('shows the proposed end after sending the %s request', async (kind) => {

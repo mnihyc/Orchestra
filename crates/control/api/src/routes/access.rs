@@ -14,10 +14,14 @@
 
 pub mod candidates;
 pub mod dependencies;
+pub(crate) mod operations;
 pub mod page;
+pub(crate) mod page_operations;
 pub mod previews;
 pub mod readers;
+pub(crate) mod request_operation;
 pub mod requests;
+mod role_operations;
 pub mod share_preview;
 pub mod subject;
 pub mod thread_environment;
@@ -36,12 +40,12 @@ use orch_api_contract::common::ErrorCode;
 use orch_api_contract::nodes::NodeKind;
 use orch_authz::giving;
 use orch_authz::pages::{self, ChangeError, Target};
-use orch_authz::{Act, Policy, Principal, covers, epoch, holders, nodes};
+use orch_authz::{Act, Policy, Principal, epoch, holders, nodes};
 use orch_db::queries::hierarchy;
 use orch_db::queries::{access, identity};
 use orch_db::{Conn, DbError};
 use orch_types::{Id, Time, new_id};
-use page::{permission_page, same};
+use page::same;
 use serde_json::json;
 use std::collections::HashMap;
 
@@ -52,31 +56,67 @@ const NOTE_MAX_CHARS: usize = 500;
 pub fn mount(registry: &mut Registry) {
     registry
         .on(api::PermissionCatalogueGet, catalogue)
-        .on(api::HolderSearch, candidates::search)
+        .on_snapshot_read_with_optional_operation(
+            api::HolderSearch,
+            crate::key_operations::native::selected::<candidates::scoped::Holders>,
+            candidates::search,
+        )
         .on(api::NodeRoleList, role_list)
-        .on(api::NodeRoleCreate, role_create)
-        .on(api::RoleUpdate, role_update)
-        .on(api::RoleDelete, role_delete)
-        .on(api::PermissionPageGet, page_get)
-        .on(api::PermissionPageUpdate, page_update)
-        .on(api::EffectiveAccessGet, readers::effective)
-        .on(api::PermissionPeopleList, readers::people)
-        .on(api::HistoryList, readers::history)
-        .on(api::NodeDefaultsGet, defaults_get)
-        .on(api::NodeDefaultsUpdate, defaults_update)
+        .on_with_operation(api::NodeRoleCreate, role_operations::create, role_create)
+        .on_with_operation(api::RoleUpdate, role_operations::update, role_update)
+        .on_with_operation(api::RoleDelete, role_operations::delete, role_delete)
+        .on_with_operation(api::PermissionPageGet, operations::page, page_get)
+        .on_with_operation(
+            api::PermissionPageUpdate,
+            page_operations::update,
+            page_update,
+        )
+        .on_with_operation(
+            api::EffectiveAccessGet,
+            operations::effective,
+            readers::effective,
+        )
+        .on_with_operation(
+            api::PermissionPeopleList,
+            operations::people,
+            readers::people,
+        )
+        .on_snapshot_read_with_optional_operation(
+            api::HistoryList,
+            crate::key_operations::native::selected::<readers::native_history::History>,
+            readers::history,
+        )
+        .on_with_operation(api::NodeDefaultsGet, operations::defaults, defaults_get)
+        .on_with_operation(
+            api::NodeDefaultsUpdate,
+            page_operations::update,
+            defaults_update,
+        )
         .on(api::PermissionPagePreview, previews::page)
-        .on(api::SharePreviewCreate, share_preview::create)
+        .on_with_operation(
+            api::SharePreviewCreate,
+            share_preview::resolve,
+            share_preview::create,
+        )
         .on(api::NodeDefaultsPreview, previews::node_defaults)
         .on(
             orch_api_contract::admin::AdminDefaultsPreview,
             previews::admin_defaults,
         )
-        .on(api::AccessRequestCreate, requests::create)
-        .on(api::AccessRequestGet, requests::get);
+        .on_with_optional_operation(
+            api::AccessRequestCreate,
+            request_operation::create,
+            requests::create,
+        )
+        .on_with_optional_operation(api::AccessRequestGet, request_operation::get, requests::get);
 }
 
 /// The catalogue of permissions, as data.
 async fn catalogue(_ctx: Ctx, (): (), (): ()) -> ApiResult<api::PermissionCatalogueGetReply> {
+    catalogue_reply()
+}
+
+pub(crate) fn catalogue_reply() -> ApiResult<api::PermissionCatalogueGetReply> {
     same(&orch_access_contract::permissions::catalogue())
         .ok_or_else(|| ApiError::internal("the catalogue does not read as the API's"))
 }
@@ -90,6 +130,17 @@ pub(crate) async fn roles_held(
     principal: &Principal,
     rows: &[access::RoleRow],
     root: Id,
+) -> ApiResult<Vec<api::RoleHeld>> {
+    roles_held_bounded(conn, principal, rows, root, None).await
+}
+
+/// The same role projection with its operation's admitted optional name sources.
+async fn roles_held_bounded(
+    conn: &mut Conn,
+    principal: &Principal,
+    rows: &[access::RoleRow],
+    root: Id,
+    bounds: Option<&page::NameBounds>,
 ) -> ApiResult<Vec<api::RoleHeld>> {
     let ids: Vec<Id> = rows.iter().map(|row| row.id).collect();
     let flags: HashMap<Id, access::RoleFlags> = access::role_flags(conn, &ids, root)
@@ -105,10 +156,10 @@ pub(crate) async fn roles_held(
     };
     let mut people = of_kind("user");
     people.extend(rows.iter().map(|row| row.created_by));
-    let people = page::user_refs_at(conn, principal, Some(root), &people).await?;
+    let people = page::user_refs_at_bounded(conn, principal, Some(root), &people, bounds).await?;
     let group_rows = access::groups_full(conn, &of_kind("group")).await?;
     let groups: HashMap<Id, orch_api_contract::directory::Group> =
-        crate::routes::directory::groups_named(conn, principal, group_rows)
+        crate::routes::directory::groups_named_bounded(conn, principal, group_rows, bounds)
             .await?
             .into_iter()
             .map(|group| (group.id, group))
@@ -116,7 +167,10 @@ pub(crate) async fn roles_held(
     let mut places: Vec<Id> = rows.iter().map(|row| row.node_id).collect();
     places.extend(of_kind("members"));
     places.extend(of_kind("role"));
-    let refs = view::qualified_refs(conn, principal, &places, Policy::default()).await?;
+    let refs = match bounds {
+        Some(bounds) => bounds.qualified_refs(conn, principal, &places).await?,
+        None => view::qualified_refs(conn, principal, &places, Policy::default()).await?,
+    };
     rows.iter()
         .map(|row| {
             let subject_kind: api::SubjectKind = match row.subject_kind.as_str() {
@@ -367,12 +421,30 @@ fn expiry(at: Option<Time>, now: DateTime<Utc>) -> ApiResult<Option<DateTime<Utc
 }
 
 /// Gives a role in a place.
-async fn role_create(ctx: Ctx, (): (), body: api::RoleCreateBody) -> ApiResult<api::RoleHeld> {
+async fn role_create(
+    ctx: Ctx,
+    (): (),
+    body: api::RoleCreateBody,
+) -> ApiResult<api::RoleWriteResponse> {
+    role_operations::projected(ctx.clone(), role_create_action(ctx, body)).await
+}
+
+async fn role_create_action(
+    ctx: Ctx,
+    body: api::RoleCreateBody,
+) -> ApiResult<api::RoleWriteResponse> {
     let node = ctx.id("id")?;
-    let (ctx, mut tx, principal) = crate::routes::nodes::action(&ctx).await?;
-    let held = role_create_in(&ctx, &mut tx, &principal, node, &body).await?;
+    let (ctx, mut tx, guard) = role_operations::action(&ctx).await?;
+    let principal = guard.principal();
+    let (row, place) = role_create_row_in(&ctx, &mut tx, principal, node, &body).await?;
+    let held = role_operations::read(&ctx, &mut tx, principal, &row, place.org).await?;
     tx.commit().await.map_err(DbError::from)?;
-    Ok(held)
+    match held {
+        Some(held) if !ctx.key_receipt_required() => {
+            Ok(api::RoleWriteResponse::Full(Box::new(held)))
+        }
+        _ => Ok(role_operations::receipt(&row)),
+    }
 }
 
 /// The ordinary role producer, also used inside a preview's rolled-back transaction.
@@ -383,6 +455,23 @@ pub(crate) async fn role_create_in(
     node: Id,
     body: &api::RoleCreateBody,
 ) -> ApiResult<api::RoleHeld> {
+    let (row, place) = role_create_row_in(ctx, tx, principal, node, body).await?;
+    roles_held(tx, principal, &[row], place.org)
+        .await?
+        .into_iter()
+        .next()
+        .ok_or_else(|| ApiError::internal("a role was given and is not there"))
+}
+
+/// The ordinary write, shared by the committing route and the existing share preview.
+/// Projection follows only after the caller's current optional Read has been checked.
+async fn role_create_row_in(
+    ctx: &Ctx,
+    tx: &mut Conn,
+    principal: &Principal,
+    node: Id,
+    body: &api::RoleCreateBody,
+) -> ApiResult<(access::RoleRow, Placed)> {
     let note = clean_note(body.note.as_deref())?;
     let ends = expiry(body.expires_at, ctx.now)?;
     let (place, kind) = placed(tx, node).await?;
@@ -516,11 +605,7 @@ pub(crate) async fn role_create_in(
         json!({ "role": role_word, "subject": { "kind": subject_kind, "id": body.subject.id, "role": subject_role }, "role_id": id }),
     )
     .await?;
-    let rows = role_rows(tx, &[id]).await?;
-    let held = roles_held(tx, principal, &rows, place.org).await?;
-    held.into_iter()
-        .next()
-        .ok_or_else(|| ApiError::internal("a role was given and is not there"))
+    Ok((role_operations::created(tx, id).await?, place))
 }
 
 async fn place_name(conn: &mut Conn, node: Id) -> ApiResult<String> {
@@ -556,32 +641,44 @@ async fn the_role(conn: &mut Conn, id: Id) -> ApiResult<(access::RoleRow, Placed
 }
 
 /// Changes a role that was given.
-async fn role_update(ctx: Ctx, (): (), body: api::RoleUpdateBody) -> ApiResult<api::RoleHeld> {
+async fn role_update(
+    ctx: Ctx,
+    (): (),
+    body: api::RoleUpdateBody,
+) -> ApiResult<api::RoleWriteResponse> {
+    role_operations::projected(ctx.clone(), role_update_action(ctx, body)).await
+}
+
+async fn role_update_action(
+    ctx: Ctx,
+    body: api::RoleUpdateBody,
+) -> ApiResult<api::RoleWriteResponse> {
     let id = ctx.id("id")?;
     let note = body
         .note
         .as_deref()
         .map(|note| clean_note(Some(note)))
         .transpose()?;
-    let (ctx, mut tx, principal) = crate::routes::nodes::action(&ctx).await?;
+    let (ctx, mut tx, guard) = role_operations::action(&ctx).await?;
+    let principal = guard.principal();
     let ends = match body.expires_at {
         None => None,
         Some(None) => Some(None),
         Some(Some(at)) => Some(expiry(Some(at), ctx.now)?),
     };
     let new_role: Option<String> = body.role.map(|role| same(&role).unwrap_or_default());
-    let (row, place) = the_role(&mut tx, id).await?;
+    let (row, place) = role_operations::guarded_role(&guard)?;
     let policy = policy_at(&mut tx, row.node_id).await?;
-    let standing = giving::role_standing(&mut tx, &principal, row.node_id, policy)
+    let standing = giving::role_standing(&mut tx, principal, row.node_id, policy)
         .await
         .map_err(refusals_of)?;
-    role_changeable(&mut tx, &principal, &row, &standing, policy).await?;
+    role_changeable(&mut tx, principal, &row, &standing, policy).await?;
     // Taking away administration needs the current administrator identity;
     // extending a role or raising it also needs every permission it gives.
     if (row.role == "admin" || new_role.as_deref() == Some("admin")) && !standing.is_admin() {
         role_matters(
             &mut tx,
-            &principal,
+            principal,
             row.node_id,
             api::Role::Admin,
             &standing,
@@ -606,7 +703,7 @@ async fn role_update(ctx: Ctx, (): (), body: api::RoleUpdateBody) -> ApiResult<a
             .ok_or_else(|| ApiError::internal("a stored role does not read"))?;
         role_matters(
             &mut tx,
-            &principal,
+            principal,
             row.node_id,
             resulting,
             &standing,
@@ -626,12 +723,15 @@ async fn role_update(ctx: Ctx, (): (), body: api::RoleUpdateBody) -> ApiResult<a
     )
     .await?;
     let Some(changed) = changed else {
-        let current = roles_held(&mut tx, &principal, &[row], place.org).await?;
-        return Err(ApiError::new(
+        let current = role_operations::read(&ctx, &mut tx, principal, &row, place.org).await?;
+        let mut error = ApiError::new(
             ErrorCode::ConflictStaleRevision,
             "the role was changed since it was read",
-        )
-        .with("current", current.first()));
+        );
+        if let Some(current) = current.filter(|_| !ctx.key_receipt_required()) {
+            error = error.with("current", current);
+        }
+        return Err(error);
     };
     epoch::bump(&mut tx).await.map_err(ApiError::internal)?;
     let who = actor_name(&ctx)?;
@@ -645,28 +745,36 @@ async fn role_update(ctx: Ctx, (): (), body: api::RoleUpdateBody) -> ApiResult<a
         json!({ "role_id": id, "from": row.role, "to": changed.role }),
     )
     .await?;
-    let held = roles_held(&mut tx, &principal, &[changed], place.org).await?;
+    let held = role_operations::read(&ctx, &mut tx, principal, &changed, place.org).await?;
     tx.commit().await.map_err(DbError::from)?;
-    held.into_iter()
-        .next()
-        .ok_or_else(|| ApiError::internal("a role was changed and is not there"))
+    match held {
+        Some(held) if !ctx.key_receipt_required() => {
+            Ok(api::RoleWriteResponse::Full(Box::new(held)))
+        }
+        _ => Ok(role_operations::receipt(&changed)),
+    }
 }
 
 /// Takes a role away. The role a member holds at their domain stays until
 /// their membership ends or they are moved.
 async fn role_delete(ctx: Ctx, (): (), (): ()) -> ApiResult<()> {
+    role_operations::projected(ctx.clone(), role_delete_action(ctx)).await
+}
+
+async fn role_delete_action(ctx: Ctx) -> ApiResult<()> {
     let id = ctx.id("id")?;
-    let (ctx, mut tx, principal) = crate::routes::nodes::action(&ctx).await?;
-    let (row, place) = the_role(&mut tx, id).await?;
+    let (ctx, mut tx, guard) = role_operations::action(&ctx).await?;
+    let principal = guard.principal();
+    let (row, place) = role_operations::guarded_role(&guard)?;
     let policy = policy_at(&mut tx, row.node_id).await?;
-    let standing = giving::role_standing(&mut tx, &principal, row.node_id, policy)
+    let standing = giving::role_standing(&mut tx, principal, row.node_id, policy)
         .await
         .map_err(refusals_of)?;
-    role_changeable(&mut tx, &principal, &row, &standing, policy).await?;
+    role_changeable(&mut tx, principal, &row, &standing, policy).await?;
     if row.role == "admin" && !standing.is_admin() {
         role_matters(
             &mut tx,
-            &principal,
+            principal,
             row.node_id,
             api::Role::Admin,
             &standing,
@@ -727,45 +835,6 @@ fn check_which(which: Which, kind: NodeKind) -> ApiResult<()> {
     Ok(())
 }
 
-async fn read_page(
-    ctx: &Ctx,
-    conn: &mut Conn,
-    principal: &Principal,
-    node: Id,
-    root: Id,
-    which: Which,
-) -> ApiResult<api::PermissionPage> {
-    let policy = policy_at(conn, node).await?;
-    let page = pages::read(conn, principal, which.target(node), policy)
-        .await
-        .map_err(|error| ApiError::internal(error.to_string()))?;
-    let mut shown = permission_page(conn, principal, &page, Some(root), Time::new(ctx.now)).await?;
-    // The live page of a place says what a role held there, or a share of it with what is in it, reaches.
-    if matches!(which, Which::Live)
-        && let Some(counted) = covers::of_place(conn, principal, node, policy)
-            .await
-            .map_err(ApiError::internal)?
-    {
-        let counts = |each: covers::Counts| api::PageCounts {
-            places: each.places,
-            threads: each.threads,
-            documents: each.documents,
-        };
-        shown.covers = Some(api::PageCovers {
-            places: counted.follows.places,
-            threads: counted.follows.threads,
-            documents: counted.follows.documents,
-            apart: counts(counted.apart),
-        });
-    }
-    // The live page of a thread says what it reaches: its environment, whose files are read by
-    // whoever looks into it, and what sharing the thread offers beside it.
-    if matches!(which, Which::Live) && shown.object.kind == "thread" {
-        thread_environment::show(conn, principal, node, policy, &mut shown).await?;
-    }
-    Ok(shown)
-}
-
 /// What went wrong in asking the engine about a role, as the answer a client gets.
 fn refusals_of(error: orch_authz::Error) -> ApiError {
     match error {
@@ -777,28 +846,8 @@ fn refusals_of(error: orch_authz::Error) -> ApiError {
     }
 }
 
-async fn get_page(ctx: &Ctx, which: Which) -> ApiResult<api::PermissionPage> {
-    let id = ctx.id("id")?;
-    let mut conn = ctx.app.db.acquire().await?;
-    let principal = authorization::principal(ctx, &mut conn).await?;
-    match which {
-        Which::Live => {
-            subject::require_page(
-                &mut conn,
-                &principal,
-                orch_authz::things::Thing::Node(id),
-                Policy::default(),
-            )
-            .await?;
-        }
-        Which::Defaults => {
-            authorization::require(&mut conn, &principal, id, VIEW, Act::Use, Policy::default())
-                .await?;
-        }
-    }
-    let (place, kind) = placed(&mut conn, id).await?;
-    check_which(which, kind)?;
-    read_page(ctx, &mut conn, &principal, id, place.org, which).await
+async fn get_page(ctx: &Ctx, _which: Which) -> ApiResult<api::PermissionPage> {
+    operations::read_page(ctx).await
 }
 
 /// Reads a permission page.
@@ -821,7 +870,7 @@ async fn change_page(
     ctx: &Ctx,
     which: Which,
     body: &api::PageChange,
-) -> ApiResult<api::PermissionPage> {
+) -> ApiResult<api::PermissionPageWriteResponse> {
     let id = ctx.id("id")?;
     let (change, people) = crate::routes::notifications::person::page_change(body)?;
     if matches!(which, Which::Defaults) && !people.is_empty() {
@@ -830,9 +879,10 @@ async fn change_page(
             "is available on a thing's own permission page",
         ));
     }
-    let mut tx = ctx.app.db.begin().await?;
-    let principal = authorization::principal(ctx, &mut tx).await?;
-    let (place, kind) = placed(&mut tx, id).await?;
+    let (current, mut tx, guard) = page_operations::action(ctx).await?;
+    let ctx = &current;
+    let principal = guard.principal().clone();
+    let (_, kind) = placed(&mut tx, id).await?;
     check_which(which, kind)?;
     let policy = policy_at(&mut tx, id).await?;
     if crate::routes::notifications::person::replay_page(ctx, &mut tx, &principal, body).await? {
@@ -843,9 +893,12 @@ async fn change_page(
             policy,
         )
         .await?;
-        let page = read_page(ctx, &mut tx, &principal, id, place.org, which).await?;
+        let view = pages::read(&mut tx, &principal, which.target(id), policy)
+            .await
+            .map_err(ApiError::internal)?;
+        let receipt = page_operations::acknowledged(ctx, view.revision)?;
         tx.commit().await.map_err(DbError::from)?;
-        return Ok(page);
+        return page_operations::reply(ctx, &principal, receipt).await;
     }
     // A thread's own page: its history says that it changed, and who is first now.
     let first_before = if matches!(which, Which::Live) && kind == NodeKind::Thread {
@@ -873,17 +926,20 @@ async fn change_page(
     } else {
         Vec::new()
     };
-    match pages::change(
+    let accepted_revision;
+    match pages::change_fenced(
         &mut tx,
         &principal,
         which.target(id),
         &change,
         policy,
         &origin(ctx),
+        || guard.check_deadline(ctx),
     )
     .await
     {
         Ok(outcome) => {
+            accepted_revision = outcome.revision;
             if outcome.changed {
                 hierarchy::stamp(&mut tx, id).await?;
                 if first_before.is_some() {
@@ -909,15 +965,18 @@ async fn change_page(
                 }
             }
         }
-        Err(ChangeError::Stale { current }) => {
-            let page = read_page(ctx, &mut tx, &principal, id, place.org, which).await?;
-            return Err(
-                refusals::change_failed(&mut tx, ChangeError::Stale { current })
-                    .await
-                    .with("current", page),
-            );
+        Err(pages::ChangeFailure::Native(ChangeError::Stale { current })) => {
+            let page = page_operations::current(ctx, &mut tx, &principal).await?;
+            let mut error = refusals::change_failed(&mut tx, ChangeError::Stale { current }).await;
+            if let Some(page) = page {
+                error = error.with("current", page);
+            }
+            return Err(error);
         }
-        Err(error) => return Err(refusals::change_failed(&mut tx, error).await),
+        Err(pages::ChangeFailure::Native(error)) => {
+            return Err(refusals::change_failed(&mut tx, error).await);
+        }
+        Err(pages::ChangeFailure::BeforeEffect(error)) => return Err(error),
     }
     if !people.is_empty() {
         crate::routes::notifications::person::tell(
@@ -932,14 +991,24 @@ async fn change_page(
         )
         .await?;
     }
-    let page = read_page(ctx, &mut tx, &principal, id, place.org, which).await?;
+    let receipt = page_operations::acknowledged(ctx, accepted_revision)?;
     crate::routes::notifications::person::keep_page(ctx, &mut tx, &principal, body).await?;
     tx.commit().await.map_err(DbError::from)?;
-    Ok(page)
+    page_operations::reply(ctx, &principal, receipt).await
 }
 
 /// Changes a permission page: the one request that does.
-async fn page_update(ctx: Ctx, (): (), body: api::PageChange) -> ApiResult<api::PermissionPage> {
+async fn page_update(
+    ctx: Ctx,
+    (): (),
+    body: api::PageChange,
+) -> ApiResult<api::PermissionPageWriteResponse> {
+    page_operations::projected(ctx.clone(), page_update_action(ctx, body)).await
+}
+async fn page_update_action(
+    ctx: Ctx,
+    body: api::PageChange,
+) -> ApiResult<api::PermissionPageWriteResponse> {
     if matches!(ctx.param("object")?, "documents" | "document-containers") {
         return crate::routes::documents::page::update(&ctx, &body).await;
     }
@@ -954,6 +1023,6 @@ async fn defaults_update(
     ctx: Ctx,
     (): (),
     body: api::PageChange,
-) -> ApiResult<api::PermissionPage> {
-    change_page(&ctx, Which::Defaults, &body).await
+) -> ApiResult<api::PermissionPageWriteResponse> {
+    page_operations::projected(ctx.clone(), change_page(&ctx, Which::Defaults, &body)).await
 }

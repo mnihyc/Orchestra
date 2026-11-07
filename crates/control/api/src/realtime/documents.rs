@@ -20,7 +20,6 @@ use crate::realtime::server::Connection;
 use crate::realtime::subscriptions::{Access, principal_of};
 use crate::realtime::sync::{Cache, Frame, Head, Rows};
 use crate::realtime::{Fail, Inner, Source};
-use crate::routes::documents::build;
 use orch_access_contract::decisions::Decision;
 use orch_access_contract::permissions::Permission;
 use orch_api_contract::documents::DOCUMENT_SYNC_MAX_CHANGES;
@@ -220,38 +219,40 @@ pub(crate) async fn read(
     let Some(highest) = shared.highest else {
         return Ok(Rows::Nothing);
     };
-    let mut conn = inner.db.acquire().await?;
+    let mut conn = orch_db::queries::feeds::begin_reading(&inner.db).await?;
     let Some(principal) = principal_of(inner, &mut conn, person).await? else {
-        return Ok(Rows::Nothing);
+        return Ok(Rows::Revoked);
     };
-    let policy = Policy::default();
-    let blocks = build::blocks_for(&mut conn, &principal, &shared.blocks, policy)
-        .await
-        .map_err(Fail::other)?;
-    let discussions =
-        build::discussions_for(&mut conn, &principal, document, &shared.discussions, policy)
-            .await
-            .map_err(Fail::other)?;
-    let reference = match &shared.row {
-        Some(row) => {
-            let listed = build::standing(&mut conn, &principal, document, policy)
-                .await
-                .map_err(Fail::other)?;
-            Some(
-                build::reference(
-                    &mut conn,
-                    &principal,
-                    row,
-                    &listed,
-                    inner.clock.now(),
-                    policy,
-                )
-                .await
-                .map_err(Fail::other)?,
-            )
-        }
-        None => None,
+    let Some(current) = rows::get(&mut conn, document)
+        .await?
+        .filter(|row| row.deleted_at.is_none())
+    else {
+        return Ok(Rows::Gone);
     };
+    if !rows::gone(&mut conn, &[document]).await?.is_empty() {
+        return Ok(Rows::Gone);
+    }
+    // Preserve the original row/sequence cut; only live protected-name and authority facts are refreshed.
+    let row = shared.row.as_ref().unwrap_or(&current);
+    let projected = match crate::routes::documents::read_operation::read_for(
+        &mut conn,
+        &principal,
+        row,
+        &shared.blocks,
+        &shared.discussions,
+        shared.row.is_some(),
+    )
+    .await
+    {
+        Ok(projected) => projected,
+        Err(error) if matches!(error.problem.status, 401 | 403) => return Ok(Rows::Revoked),
+        Err(error) if matches!(error.problem.status, 404 | 410) => return Ok(Rows::Gone),
+        Err(error) => return Err(Fail::other(error)),
+    };
+    let reference = projected.document;
+    let blocks = projected.blocks;
+    let discussions = projected.discussions;
+    conn.commit().await.map_err(orch_db::DbError::from)?;
     Ok(Rows::Frame(Box::new(Frame {
         data: SyncData::Doc(DocData {
             document: reference,

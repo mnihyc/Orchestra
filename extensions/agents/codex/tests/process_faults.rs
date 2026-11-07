@@ -129,6 +129,7 @@ impl Setup {
         );
         self.adapter.open_session(spec).await.unwrap();
         let turn = TurnStart {
+            native_wake: None,
             plan: false,
             thread_id: thread,
             turn_id: new_id(),
@@ -546,6 +547,7 @@ async fn a_harness_that_says_nothing_while_the_model_is_awaited_has_its_turn_end
         json!({ "threadId": "thr_1", "turn": { "id": "turn_2", "status": "inProgress" } }),
     );
     let next = TurnStart {
+        native_wake: None,
         plan: false,
         thread_id: thread,
         turn_id: new_id(),

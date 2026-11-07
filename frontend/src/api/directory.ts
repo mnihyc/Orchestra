@@ -9,7 +9,9 @@ import { infiniteQueryOptions, queryOptions } from '@tanstack/react-query';
 import { api, done, ok, repeatable } from '@/api/client';
 import type {
   ApiTokenCreateBody,
-  TokenCreated,
+  ApiTokenActivityPage,
+  ApiTokenActivityQuery,
+  TokenCreateResponse,
   ApiTokenInfo,
   Group,
   Holder,
@@ -225,8 +227,10 @@ export const serviceTokensQuery = (id: string) =>
     queryFn: ({ signal }): Promise<ApiTokenInfo[]> => ok(api.GET('/service-accounts/{id}/tokens', { params: { path: { id } }, signal })),
   });
 
-export function createServiceToken(id: string, body: ApiTokenCreateBody, key: string): Promise<TokenCreated> {
-  return ok(api.POST('/service-accounts/{id}/tokens', { params: { path: { id } }, body, ...repeatable(key) }));
+export async function createServiceToken(id: string, body: ApiTokenCreateBody, key: string): Promise<TokenCreateResponse> {
+  const answer = await api.POST('/service-accounts/{id}/tokens', { params: { path: { id } }, body, ...repeatable(key) });
+  if (answer.response.ok && answer.data !== undefined) return answer.data;
+  return ok(Promise.resolve(answer));
 }
 
 export function revokeServiceToken(id: string, tokenId: string): Promise<void> {
@@ -236,6 +240,15 @@ export function revokeServiceToken(id: string, tokenId: string): Promise<void> {
 // ---------------------------------------------------------------- tokens that reach an org
 
 export const orgTokensKey = (orgId: string) => ['org-tokens', orgId] as const;
+
+/** The selected org's safe activity slice, through its ordinary membership-management reader. */
+export function orgTokenActivityQuery(orgId: string, tokenId: string, query: ApiTokenActivityQuery) {
+  return queryOptions<ApiTokenActivityPage>({
+    queryKey: ['token-activity', 'org', orgId, tokenId, query.limit ?? null, query.cursor ?? null] as const,
+    queryFn: ({ signal }): Promise<ApiTokenActivityPage> => ok(api.GET('/orgs/{id}/tokens/{token_id}/activity', { params: { path: { id: orgId, token_id: tokenId }, query }, signal })),
+    staleTime: 0, retry: false, refetchOnWindowFocus: false, refetchOnReconnect: false,
+  });
+}
 
 /** The tokens that can reach anything of an org, with whether each is refused here or lives too long for it: safe facts, never a secret. */
 export const orgTokensQuery = (orgId: string) =>

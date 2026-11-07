@@ -1,0 +1,264 @@
+{
+  "protocols": {
+    "openai-responses": {
+      "web_search": {
+        "paths": [
+          "/responses"
+        ],
+        "tool": {
+          "type": "web_search"
+        },
+        "identities": [
+          {
+            "type": "web_search"
+          },
+          {
+            "type": "web_search_2025_08_26"
+          },
+          {
+            "type": "web_search_preview"
+          },
+          {
+            "type": "web_search_preview_2025_03_11"
+          }
+        ],
+        "modes": {
+          "live": {
+            "external_web_access": true
+          },
+          "cached": {
+            "external_web_access": false
+          }
+        },
+        "options_schema": {
+          "type": "object",
+          "additionalProperties": false,
+          "properties": {
+            "search_context_size": {
+              "enum": [
+                "low",
+                "medium",
+                "high"
+              ]
+            },
+            "return_token_budget": {
+              "enum": [
+                "default",
+                "unlimited"
+              ]
+            },
+            "filters": {
+              "type": [
+                "object",
+                "null"
+              ],
+              "additionalProperties": false,
+              "properties": {
+                "allowed_domains": {
+                  "type": [
+                    "array",
+                    "null"
+                  ],
+                  "maxItems": 100,
+                  "items": {
+                    "type": "string",
+                    "minLength": 1
+                  }
+                },
+                "blocked_domains": {
+                  "type": [
+                    "array",
+                    "null"
+                  ],
+                  "maxItems": 100,
+                  "items": {
+                    "type": "string",
+                    "minLength": 1
+                  }
+                }
+              },
+              "not": {
+                "required": [
+                  "allowed_domains",
+                  "blocked_domains"
+                ]
+              }
+            },
+            "user_location": {
+              "type": [
+                "object",
+                "null"
+              ],
+              "required": [
+                "type"
+              ],
+              "additionalProperties": false,
+              "properties": {
+                "type": {
+                  "const": "approximate"
+                },
+                "city": {
+                  "type": [
+                    "string",
+                    "null"
+                  ]
+                },
+                "region": {
+                  "type": [
+                    "string",
+                    "null"
+                  ]
+                },
+                "country": {
+                  "type": [
+                    "string",
+                    "null"
+                  ],
+                  "minLength": 2,
+                  "maxLength": 2
+                },
+                "timezone": {
+                  "type": [
+                    "string",
+                    "null"
+                  ]
+                }
+              }
+            }
+          },
+          "x-orch-mode-overrides": [
+            {
+              "identity": {
+                "type": "web_search_preview"
+              },
+              "mode": "live"
+            },
+            {
+              "identity": {
+                "type": "web_search_preview_2025_03_11"
+              },
+              "mode": "live"
+            }
+          ]
+        }
+      }
+    },
+    "anthropic-messages": {
+      "web_search": {
+        "paths": [
+          "/v1/messages"
+        ],
+        "tool": {
+          "type": "web_search_20250305",
+          "name": "web_search"
+        },
+        "identities": [
+          {
+            "type": "web_search_20250305"
+          },
+          {
+            "type": "web_search_20260209"
+          },
+          {
+            "type": "web_search_20260318"
+          }
+        ],
+        "modes": {
+          "live": {}
+        },
+        "options_schema": {
+          "type": "object",
+          "additionalProperties": false,
+          "properties": {
+            "max_uses": {
+              "type": [
+                "integer",
+                "null"
+              ]
+            },
+            "allowed_domains": {
+              "type": [
+                "array",
+                "null"
+              ],
+              "items": {
+                "type": "string",
+                "minLength": 1
+              }
+            },
+            "blocked_domains": {
+              "type": [
+                "array",
+                "null"
+              ],
+              "items": {
+                "type": "string",
+                "minLength": 1
+              }
+            },
+            "user_location": {
+              "type": [
+                "object",
+                "null"
+              ],
+              "required": [
+                "type"
+              ],
+              "additionalProperties": false,
+              "properties": {
+                "type": {
+                  "const": "approximate"
+                },
+                "city": {
+                  "type": [
+                    "string",
+                    "null"
+                  ]
+                },
+                "region": {
+                  "type": [
+                    "string",
+                    "null"
+                  ]
+                },
+                "country": {
+                  "type": [
+                    "string",
+                    "null"
+                  ],
+                  "minLength": 2,
+                  "maxLength": 2
+                },
+                "timezone": {
+                  "type": [
+                    "string",
+                    "null"
+                  ]
+                }
+              }
+            }
+          },
+          "not": {
+            "required": [
+              "allowed_domains",
+              "blocked_domains"
+            ]
+          }
+        }
+      }
+    }
+  },
+  "harnesses": {
+    "codex": {
+      "web_search": [
+        "cached",
+        "live"
+      ]
+    },
+    "claude-code": {
+      "web_search": [
+        "live"
+      ]
+    }
+  }
+}

@@ -329,6 +329,25 @@ pub async fn unpin_blobs(
     Ok(unpinned)
 }
 
+/// Locks the native unpin writer's exact existing rows before its caller's first-effect check.
+/// Zero-count rows stay locked too, so another pin cannot appear between this preparation and the update.
+pub async fn prepare_unpin_blobs(conn: &mut Conn, hashes: &[Hash]) -> Result<bool, DbError> {
+    let mut changes = false;
+    let mut ordered = hashes.to_vec();
+    ordered.sort_unstable_by(|a, b| a.as_bytes().cmp(b.as_bytes()));
+    ordered.dedup();
+    for batch in ordered.chunks(PIN_BATCH) {
+        let counts: Vec<i64> = sqlx::query_scalar(
+            "SELECT pin_count FROM blobs WHERE hash=ANY($1) ORDER BY hash FOR UPDATE",
+        )
+        .bind(raw_hashes(batch))
+        .fetch_all(&mut *conn)
+        .await?;
+        changes |= counts.iter().any(|count| *count > 0);
+    }
+    Ok(changes)
+}
+
 /// Blobs that nothing points at, no cached version of a file names, and nobody asked for since
 /// `idle_since`: the ones the grace has run out for, oldest first.
 pub async fn unreferenced(
@@ -640,6 +659,16 @@ pub async fn begin_session(conn: &mut Conn, session: &SessionRow) -> Result<(), 
     .execute(conn)
     .await?;
     Ok(())
+}
+
+/// The unfinished session's native identity and progress, without taking its writer lock.
+pub async fn session(conn: &mut Conn, id: Id) -> Result<Option<SessionRow>, DbError> {
+    Ok(sqlx::query_as(sqlx::AssertSqlSafe(format!(
+        "SELECT {SESSION_COLUMNS} FROM upload_sessions WHERE id = $1 AND cancelled_at IS NULL AND completed_at IS NULL"
+    )))
+    .bind(id)
+    .fetch_optional(conn)
+    .await?)
 }
 
 /// The session `id`, locked until the transaction ends.
@@ -1204,13 +1233,57 @@ pub async fn visible_snapshots_of_thread(
     manual: bool,
     recorded_environments: &[Id],
 ) -> Result<Vec<SnapshotRow>, DbError> {
+    visible_snapshots_of_thread_from(
+        conn,
+        thread,
+        after,
+        limit,
+        manual,
+        recorded_environments,
+        None,
+    )
+    .await
+}
+
+/// The same native selector, optionally bounded by the actual metadata origins before pagination.
+pub async fn visible_snapshots_of_thread_from(
+    conn: &mut Conn,
+    thread: Id,
+    after: Option<(DateTime<Utc>, Id)>,
+    limit: i64,
+    manual: bool,
+    recorded_environments: &[Id],
+    origins: Option<&[Id]>,
+) -> Result<Vec<SnapshotRow>, DbError> {
     let (at, id) = after.map_or((None, None), |(at, id)| (Some(at), Some(id)));
     let raw: Vec<RawSnapshot> = sqlx::query_as(sqlx::AssertSqlSafe(format!(
         "SELECT {SNAPSHOT_COLUMNS} FROM snapshots WHERE thread_id = $1
             AND ($2::timestamptz IS NULL OR (created_at, id) < ($2, $3))
             AND ((storage = 'blobs' AND $5) OR (storage = 'environment' AND environment_id = ANY($6)))
+            AND ($7::uuid[] IS NULL OR environment_id = ANY($7))
             ORDER BY created_at DESC, id DESC LIMIT $4"
-    ))).bind(thread).bind(at).bind(id).bind(limit).bind(manual).bind(recorded_environments).fetch_all(conn).await?;
+    ))).bind(thread).bind(at).bind(id).bind(limit).bind(manual).bind(recorded_environments).bind(origins).fetch_all(conn).await?;
+    raw.into_iter().map(SnapshotRow::try_from).collect()
+}
+
+/// Factual candidate origins used only to bound the native selector, never as returned sources.
+pub async fn snapshot_origins_of_thread(conn: &mut Conn, thread: Id) -> Result<Vec<Id>, DbError> {
+    Ok(
+        sqlx::query_scalar("SELECT DISTINCT environment_id FROM snapshots WHERE thread_id=$1")
+            .bind(thread)
+            .fetch_all(conn)
+            .await?,
+    )
+}
+
+/// Reloads only the exact held native page identities, without selecting another cursor window.
+pub async fn snapshots_by_ids(conn: &mut Conn, ids: &[Id]) -> Result<Vec<SnapshotRow>, DbError> {
+    let raw: Vec<RawSnapshot> = sqlx::query_as(sqlx::AssertSqlSafe(format!(
+        "SELECT {SNAPSHOT_COLUMNS} FROM snapshots WHERE id=ANY($1) ORDER BY id"
+    )))
+    .bind(ids)
+    .fetch_all(conn)
+    .await?;
     raw.into_iter().map(SnapshotRow::try_from).collect()
 }
 

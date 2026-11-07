@@ -299,7 +299,7 @@ impl ClaudeCodeAdapter {
                 "Auto approval is not offered by this Claude Code harness.".into(),
             ));
         }
-        crate::review::reviewer(&spec.settings)
+        crate::sessions::approval_reviewer(&self.started()?.setup, spec, &Self::turn_settings(spec))
     }
 
     pub(super) async fn install_session(

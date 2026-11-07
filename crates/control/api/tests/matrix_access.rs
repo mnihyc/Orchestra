@@ -236,7 +236,9 @@ async fn run(
         })
         .send()
         .await
-        .ok();
+        .ok()
+        .into_full()
+        .unwrap();
     let made = began.elapsed();
     let held: HashSet<String> = world
         .app
