@@ -32,13 +32,13 @@ export function HostCapacity({ place }: { place: PlaceHost }) {
   return <span className="flex min-w-0 flex-col gap-1"><Meter neutral showActual look="compact" value={place.declared.memory_mb / place.capacity.memory_mb * 100} label={label} /><span className="text-sm text-text-muted">{label}</span></span>;
 }
 
-export function ResourceHint({ subject, className }: { subject: ResourceSubject; className?: string }) {
+export function ResourceHint({ subject, className, wrap = false }: { subject: ResourceSubject; className?: string; wrap?: boolean }) {
   const { t } = useTranslation();
   const format = useFormatContext();
   const now = useNow();
   const hint = resourceHint(subject, { ...format, t, now });
   return hint.text === '' ? null : <span data-resource-hint={subject.kind} data-warning={hint.warning || undefined}
-    className={cx('block min-w-0 max-w-full truncate text-sm font-normal', hint.warning ? 'text-warning-text' : 'text-text-muted', className)}>{hint.warning ? <StatusDot tone="warning" label={hint.text} showLabel className="min-w-0 max-w-full [&>span:last-child]:truncate" /> : hint.text}</span>;
+    className={cx('block min-w-0 max-w-full text-sm font-normal', wrap ? 'whitespace-normal wrap-anywhere' : 'truncate', hint.warning ? 'text-warning-text' : 'text-text-muted', className)}>{hint.warning ? <StatusDot tone="warning" label={hint.text} showLabel className={cx('min-w-0 max-w-full', !wrap && '[&>span:last-child]:truncate')} /> : hint.text}</span>;
 }
 
 export function resourcePreview(subject: ResourceSubject): CardPreview {
@@ -51,11 +51,12 @@ export function resourceChoice(subject: ResourceSubject) {
 }
 
 /** Names keep their native link or control; their details appear on hover and focus. */
-export function ResourceChip({ subject, children, asChild = false, card = true, hint = true, className }: { subject: ResourceSubject; children?: ReactNode; asChild?: boolean; card?: boolean; hint?: boolean; className?: string }) {
-  if (!card) return <span className={cx(chipClasses, 'border-border', className)}><ResourceGlyph kind={subject.kind} /><span className="min-w-0 truncate">{children ?? resourceName(subject)}</span>{hint && <ResourceHint subject={subject} className="truncate" />}</span>;
+export function ResourceChip({ subject, children, asChild = false, card = true, hint = true, wrap = false, className }: { subject: ResourceSubject; children?: ReactNode; asChild?: boolean; card?: boolean; hint?: boolean; wrap?: boolean; className?: string }) {
+  const valueClass = cx('min-w-0', wrap ? 'whitespace-normal wrap-anywhere' : 'truncate');
+  if (!card) return <span className={cx(chipClasses, 'border-border', className)}><ResourceGlyph kind={subject.kind} /><span className={valueClass}>{children ?? resourceName(subject)}</span>{hint && <ResourceHint subject={subject} wrap={wrap} />}</span>;
   const trigger = asChild && isValidElement<{ children?: ReactNode; className?: string }>(children)
-    ? cloneElement(children, { className: cx(chipClasses, 'border-control-border', children.props.className, className) }, <><ResourceGlyph kind={subject.kind} />{typeof children.props.children === 'string' ? <span className="min-w-0 truncate">{children.props.children}</span> : children.props.children}</>)
-    : <><ResourceGlyph kind={subject.kind} /><span className="min-w-0 truncate">{children ?? resourceName(subject)}</span>{hint && <ResourceHint subject={subject} className="truncate" />}</>;
+    ? cloneElement(children, { className: cx(chipClasses, 'border-control-border', children.props.className, className) }, <><ResourceGlyph kind={subject.kind} />{typeof children.props.children === 'string' ? <span className={valueClass}>{children.props.children}</span> : children.props.children}</>)
+    : <><ResourceGlyph kind={subject.kind} /><span className={valueClass}>{children ?? resourceName(subject)}</span>{hint && <ResourceHint subject={subject} wrap={wrap} />}</>;
   return <DetailCard {...resourcePreview(subject)} asChild={asChild} className={cx(chipClasses, 'border-control-border', className)}>
     {trigger}
   </DetailCard>;

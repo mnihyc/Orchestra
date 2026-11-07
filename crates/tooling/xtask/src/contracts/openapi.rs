@@ -6,8 +6,7 @@
 use orch_api_contract::routes::Route;
 use serde_json::Value;
 
-/// The wire types a route refers to that its own contract is below: the browser's socket and an agent program's
-/// descriptor.
+/// Existing realtime wire and agent descriptor schemas shared by key clients and the frontend.
 fn schemas(generator: &mut schemars::SchemaGenerator) {
     orch_realtime_contract::schemas(generator);
     orch_agent_contract::schemas(generator);
@@ -19,13 +18,18 @@ pub fn document(routes: &[Route], version: &str) -> Value {
     orch_api_contract::openapi::document(routes, version, schemas)
 }
 
+/// Unpublished full input for the frontend, from the same contract renderer.
+pub fn internal_document(routes: &[Route], version: &str) -> Value {
+    orch_api_contract::openapi::internal_document(routes, version, schemas)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
 
     #[test]
     fn a_client_is_told_that_only_a_created_registration_carries_a_session() {
-        let document = document(orch_api_contract::auth::ROUTES, "test");
+        let document = internal_document(orch_api_contract::auth::ROUTES, "test");
         let replies = &document["paths"]["/auth/register"]["post"]["responses"];
         let created = &replies["201"]["content"]["application/json"]["schema"]["$ref"];
         let pending = &replies["202"]["content"]["application/json"]["schema"]["$ref"];

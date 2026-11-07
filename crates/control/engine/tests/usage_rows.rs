@@ -298,6 +298,7 @@ fn forwarder_says(lease: Id, input: i64, output: i64, named: &str) -> Event {
         }))
         .unwrap(),
         request_ref: Some(named.to_owned()),
+        timing: None,
     })
 }
 
@@ -387,6 +388,7 @@ async fn what_orch_asks_of_a_model_for_itself_is_one_row_that_counts_for_the_sha
         entry: None,
         person: Some(bob),
         model: MODEL,
+        protocol: None,
         tokens: Tokens {
             input: 400,
             cached_input: 0,

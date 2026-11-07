@@ -21,13 +21,16 @@ use std::collections::{BTreeMap, HashMap, HashSet, VecDeque};
 /// The published reciprocal-rank constant, also the indexer's shipped setting.
 pub(super) const DEFAULT_FUSION_K: u32 = 60;
 
-#[derive(serde::Serialize, serde::Deserialize)]
+#[derive(Clone, serde::Serialize, serde::Deserialize)]
 struct Cursor {
     session: Id,
     revision: i64,
     generation: String,
     selection: SearchListQuery,
     user: Id,
+    /// Exact accepted operation/key ceilings; no old target admission or payload.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    origin: Option<orch_authz::CapturedOperation>,
     words: Option<String>,
     words_done: bool,
     meaning_offset: i64,
@@ -307,7 +310,52 @@ pub(super) async fn search(
     query: SearchStreamListQuery,
     _body: Body,
 ) -> ApiResult<Response> {
-    let user = ctx.user()?.id();
+    if !ctx.snapshot_read() {
+        let selected = validate(query)?;
+        let mut conn = ctx.app.db.acquire().await?;
+        let prepared = prepare(&ctx, &mut conn, selected).await?;
+        drop(conn);
+        return start(ctx, prepared);
+    }
+    let (ctx, accepted, output) =
+        super::stream_native::read(ctx, super::stream_native::Query::Start(query)).await?;
+    let super::stream_native::Output::Start(mut prepared) = output else {
+        return Err(ApiError::internal(
+            "the search opening returned another native frame",
+        ));
+    };
+    prepared.accept(&accepted)?;
+    crate::key_operations::publication::retain(
+        &ctx,
+        &accepted,
+        (),
+        |ctx, conn, reader, _source| {
+            Box::pin(async move {
+                let plan = crate::key_operations::native::bind_known(
+                    ctx,
+                    &orch_api_contract::search_sources::STREAM,
+                    &[],
+                )?;
+                crate::key_operations::native::preparation_principal(
+                    ctx,
+                    conn,
+                    reader.caller(),
+                    &plan,
+                )
+                .await?;
+                Ok(())
+            })
+        },
+    )?;
+    start(ctx, *prepared)
+}
+
+/// Validated native query intent, without source IO or a running retrieval task.
+pub(super) struct StreamSelection {
+    query: SearchStreamListQuery,
+    select: SearchListQuery,
+}
+pub(super) fn validate(query: SearchStreamListQuery) -> ApiResult<StreamSelection> {
     let select = selection(&query);
     if select.q.trim().is_empty() {
         return Err(invalid("q", "give a word or phrase"));
@@ -322,11 +370,43 @@ pub(super) async fn search(
             ));
         }
     }
-    let mut conn = ctx.app.db.acquire().await?;
+    Ok(StreamSelection { query, select })
+}
+/// Immutable initial native state. Cursor/config lookup is separate from once-only retrieval.
+#[derive(Clone)]
+pub(super) struct PreparedStream {
+    query: SearchStreamListQuery,
+    select: SearchListQuery,
+    cursor: Cursor,
+    generation: String,
+    options: HashMap<&'static str, i64>,
+}
+impl PreparedStream {
+    pub(super) fn origin(&self) -> Option<&orch_authz::CapturedOperation> {
+        self.cursor.origin.as_ref()
+    }
+    pub(super) fn selection(&self) -> &SearchListQuery {
+        &self.select
+    }
+    pub(super) fn accept(&mut self, caller: &orch_authz::Caller) -> ApiResult<()> {
+        if crate::key_operations::native::modern(caller) {
+            self.cursor.origin =
+                Some(orch_authz::CapturedOperation::capture(caller).map_err(ApiError::internal)?);
+        }
+        Ok(())
+    }
+}
+pub(super) async fn prepare(
+    ctx: &Ctx,
+    conn: &mut orch_db::Conn,
+    selected: StreamSelection,
+) -> ApiResult<PreparedStream> {
+    let StreamSelection { query, select } = selected;
+    let user = ctx.user()?.id();
     let generation: String = sqlx::query_scalar("SELECT COALESCE(string_agg(id::text||':'||COALESCE(dimensions,0)::text,',' ORDER BY id),'') FROM search_generations WHERE state='active'")
         .fetch_one(&mut *conn).await.map_err(orch_db::DbError::from)?;
     let generation = orch_types::Hash::of(generation.as_bytes()).to_string();
-    let mut cursor = if let Some(raw) = &query.cursor {
+    let cursor = if let Some(raw) = &query.cursor {
         let bad = || invalid("cursor", "is expired or belongs to another search");
         let (id, revision) = raw.split_once(':').ok_or_else(bad)?;
         let id = id.parse::<Id>().map_err(|_| bad())?;
@@ -345,6 +425,7 @@ pub(super) async fn search(
             generation: generation.clone(),
             selection: select.clone(),
             user,
+            origin: None,
             words: None,
             words_done: false,
             meaning_offset: 0,
@@ -365,13 +446,29 @@ pub(super) async fn search(
     ] {
         options.insert(
             key,
-            get::<i64>(&mut conn, place, key)
+            get::<i64>(conn, place, key)
                 .await
                 .map_err(ApiError::internal)?
                 .unwrap_or_default(),
         );
     }
-    drop(conn);
+    Ok(PreparedStream {
+        query,
+        select,
+        cursor,
+        generation,
+        options,
+    })
+}
+/// Retrieval belongs to the polled body, after HTTP activity bookkeeping releases the key.
+fn begin(ctx: Ctx, prepared: PreparedStream, queued_at: std::time::Instant) -> Streaming {
+    let PreparedStream {
+        query,
+        select,
+        mut cursor,
+        generation,
+        options,
+    } = prepared;
     let number = |key| u32::try_from(options[&key]).unwrap_or_default();
     let page_size = number(keys::SEARCH_PAGE_SIZE);
     let pause = number(keys::SEARCH_MEANING_PAUSE_MS);
@@ -424,10 +521,11 @@ pub(super) async fn search(
             received: 0,
         });
         let shown = cursor.seen.clone();
+        let origin = cursor.origin.clone();
         let task = pending.spawn(async move {
             (
                 0,
-                super::words::retrieve(ctx, words, shown)
+                super::words::retrieve(ctx, words, shown, origin)
                     .await
                     .map(|page| Batch {
                         source: 0,
@@ -470,8 +568,13 @@ pub(super) async fn search(
         let offset = cursor.meaning_offset;
         let positions = cursor.meaning_positions.clone();
         let meaning = select.clone();
+        let origin = cursor.origin.clone();
+        let shown = cursor.seen.clone();
         let immediate = query.immediate.unwrap_or(false);
-        let delay = pause.saturating_sub(query.typing_age_ms.unwrap_or(0));
+        let elapsed = u32::try_from(queued_at.elapsed().as_millis()).unwrap_or(u32::MAX);
+        let delay = pause
+            .saturating_sub(query.typing_age_ms.unwrap_or(0))
+            .saturating_sub(elapsed);
         events.push_back(Event::Source {
             source: "meaning".into(),
             state: "running".into(),
@@ -484,7 +587,7 @@ pub(super) async fn search(
             }
             (
                 1,
-                super::meaning::retrieve(ctx, meaning, positions, offset)
+                super::meaning::retrieve(ctx, meaning, positions, offset, origin, shown)
                     .await
                     .map(|batch| Batch {
                         source: 1,
@@ -501,7 +604,7 @@ pub(super) async fn search(
         });
         tasks.insert(task.id(), 1);
     }
-    let state = Streaming {
+    Streaming {
         pending,
         tasks,
         events,
@@ -515,25 +618,47 @@ pub(super) async fn search(
         ctx: ctx.clone(),
         ttl_secs: options[keys::SEARCH_CURSOR_TTL_SECS],
         cursor_entries: options[keys::SEARCH_CURSOR_ENTRIES],
-    };
-    let stream = futures::stream::unfold(state, |mut state| async move {
-        match state.next().await {
-            Ok(Some(event)) => {
-                let bytes = serde_json::to_vec(&event)
-                    .map(|mut bytes| {
-                        bytes.push(b'\n');
-                        Bytes::from(bytes)
-                    })
-                    .map_err(std::io::Error::other);
-                Some((bytes, state))
+    }
+}
+
+enum Delivery {
+    Opening(Box<(Ctx, PreparedStream, std::time::Instant)>),
+    Running(Box<Streaming>),
+}
+/// The once-only native retrieval starts after preparation, without holding up response bookkeeping.
+pub(super) fn start(ctx: Ctx, prepared: PreparedStream) -> ApiResult<Response> {
+    let stream = futures::stream::unfold(
+        Delivery::Opening(Box::new((ctx, prepared, std::time::Instant::now()))),
+        |delivery| async move {
+            let mut state = match delivery {
+                Delivery::Opening(opening) => {
+                    let (ctx, prepared, queued_at) = *opening;
+                    Box::new(begin(ctx, prepared, queued_at))
+                }
+                Delivery::Running(state) => state,
+            };
+
+            match state.next().await {
+                Ok(Some(event)) => {
+                    let bytes = serde_json::to_vec(&event)
+                        .map(|mut bytes| {
+                            bytes.push(b'\n');
+                            Bytes::from(bytes)
+                        })
+                        .map_err(std::io::Error::other);
+                    Some((bytes, Delivery::Running(state)))
+                }
+                Ok(None) => None,
+                Err(error) => {
+                    state.finished = true;
+                    Some((
+                        Err(std::io::Error::other(error.to_string())),
+                        Delivery::Running(state),
+                    ))
+                }
             }
-            Ok(None) => None,
-            Err(error) => {
-                state.finished = true;
-                Some((Err(std::io::Error::other(error.to_string())), state))
-            }
-        }
-    });
+        },
+    );
     let mut response = Response::new(Body::from_stream(stream));
     response.headers_mut().insert(
         http::header::CONTENT_TYPE,

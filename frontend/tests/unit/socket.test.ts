@@ -211,6 +211,16 @@ describe('the connection', () => {
     expect(socket.status.getState()).toMatchObject({ phase: 'ready', lostAt: null, build: 'b7' });
   });
 
+  it('keeps the same ready protocol for a key with no expiry', () => {
+    const { socket, last } = harness();
+    socket.start();
+    last().accept();
+    last().say({ op: 'ready', connection_id: 'key', user_id: 'u1', server_time: '', access_expires_at: null, heartbeat_secs: 25, build: 'b1' });
+    expect(socket.status.getState().phase).toBe('ready');
+    expect(last().sent[0]).toEqual({ op: 'auth', token: 'token-1' });
+    socket.stop();
+  });
+
   it('does not connect while nobody is signed in', () => {
     const { socket, sockets } = harness({ token: () => null });
     socket.start();

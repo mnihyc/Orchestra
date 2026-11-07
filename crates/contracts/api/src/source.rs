@@ -4,6 +4,16 @@
 //! applies it, and its undo is another restore plan. Source credentials are names only; neither
 //! these responses nor thread links carry authentication material.
 
+use crate::operations::{
+    FacetSpec as Facet, OperationSpec as Op, TargetResolver as Target, VariantSpec as Variant,
+};
+use orch_access_contract::key_scope::KeyAction::{Manage, Read, Write};
+use orch_access_contract::key_scope::{
+    KeyIdentityKind as I,
+    KeyTargetKind::{Identity, Object},
+};
+use orch_access_contract::permissions::ObjectKind as K;
+
 use orch_types::{Hash, Id, Time};
 use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
@@ -295,6 +305,64 @@ pub struct RestorePlan {
     pub blockers: Vec<String>,
 }
 
+/// A newly saved native restore review without its existing files or writer names.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+pub struct RestorePreflightReceipt {
+    /// Identifies the restricted acknowledgement.
+    pub projection: crate::common::ReceiptProjection,
+    /// The generated saved review.
+    pub preflight_id: Id,
+}
+/// Existing plan content under current same-operation Read, or its generated review identity.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+#[serde(untagged)]
+pub enum RestorePreflightResponse {
+    /// The unchanged complete native plan.
+    Full(Box<RestorePlan>),
+    /// The saved review was accepted without existing-content disclosure.
+    Receipt(RestorePreflightReceipt),
+}
+impl RestorePreflightResponse {
+    /// Preserve native complete readers while keeping receipts explicit.
+    pub fn into_full(self) -> Result<RestorePlan, RestorePreflightReceipt> {
+        match self {
+            Self::Full(plan) => Ok(*plan),
+            Self::Receipt(receipt) => Err(receipt),
+        }
+    }
+}
+/// A new restore Job or an existing accepted Job's safe confirmation acknowledgement.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+pub struct RestoreStartReceipt {
+    /// Identifies the restricted acknowledgement.
+    pub projection: crate::common::ReceiptProjection,
+    /// The actual native Job created for this saved review.
+    pub job_id: Id,
+    /// The supplied saved review.
+    pub preflight_id: Id,
+    /// The actual generated Undo state, when a new job was created here.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub undo_snapshot_id: Option<Id>,
+}
+/// The native initial/live Job under this operation's current Read, or safe accepted identities.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, JsonSchema)]
+#[serde(untagged)]
+pub enum RestoreStartResponse {
+    /// The unchanged native Job body.
+    Full(Box<Job>),
+    /// No existing plan, source contents or live Job progress is disclosed.
+    Receipt(RestoreStartReceipt),
+}
+impl RestoreStartResponse {
+    /// Extract ordinary complete content without treating a receipt as content.
+    pub fn into_full(self) -> Result<Job, RestoreStartReceipt> {
+        match self {
+            Self::Full(job) => Ok(*job),
+            Self::Receipt(receipt) => Err(receipt),
+        }
+    }
+}
+
 /// Retries preparation with the frozen source, or explicitly accepts the currently resolved one.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
 #[serde(deny_unknown_fields)]
@@ -379,17 +447,60 @@ pub struct GitCommitResult {
 
 crate::endpoints! {
     /// Prepares or retries the frozen repository source before the retained first input.
-    EnvironmentSourcePrepare: POST "/environments/{id}/source/prepare", Rule("environment.manage, thread.view, remote-write and local policy"), none, json EnvironmentSourcePrepareBody, json Job, 202;
+    EnvironmentSourcePrepare: POST "/environments/{id}/source/prepare", Rule("environment.manage, thread.view, remote-write and local policy"), none, json EnvironmentSourcePrepareBody, json Job, 202,
+        operation Op::receipt(&Op::variants(&[
+            Variant{name:"prepare",selector:"native source action is a checkout or directory preparation",facets:&[
+                Facet::required(Manage,&[Object(K::Environment)],Target::Path("id")),
+                Facet::required(Read,&[Object(K::Thread)],Target::Resolved("bound_thread")),
+                Facet::response_content(&[Object(K::Environment)],Target::Resolved("source_problem_environment")),
+            ]},
+            Variant{name:"worktree",selector:"native source action creates an own worktree from existing workspace content",facets:&[
+                Facet::required(Manage,&[Object(K::Environment)],Target::Path("id")),
+                Facet::required(Read,&[Object(K::Thread)],Target::Resolved("bound_thread")),
+                Facet::required(Read,&[Object(K::Environment)],Target::Resolved("worktree_environment")),
+                Facet::response_content(&[Object(K::Environment)],Target::Resolved("source_problem_environment")),
+            ]},
+        ]));
     /// Commits exactly the reviewed changed paths as the caller.
-    EnvironmentGitCommit: POST "/environments/{id}/git/commit", Rule("files.manage, remote-write and local policy"), query ThroughThreadQuery, json EnvironmentGitCommitBody, json Job, 202;
+    EnvironmentGitCommit: POST "/environments/{id}/git/commit", Rule("files.manage, remote-write and local policy"), query ThroughThreadQuery, json EnvironmentGitCommitBody, json Job, 202,
+        operation Op::single(Manage, &[Object(K::Environment)], Target::Path("id"));
     /// Pushes the reviewed branch to its reviewed remote without force or implicit pull.
-    EnvironmentGitPush: POST "/environments/{id}/git/push", Rule("files.manage, remote-write and local policy"), query ThroughThreadQuery, json EnvironmentGitPushBody, json Job, 202;
+    EnvironmentGitPush: POST "/environments/{id}/git/push", Rule("files.manage, remote-write and local policy"), query ThroughThreadQuery, json EnvironmentGitPushBody, json Job, 202,
+        operation Op::facets(&[
+            Facet::required(Manage, &[Object(K::Environment)], Target::Path("id")),
+            Facet::required(Read, &[Object(K::Environment)], Target::Path("id")),
+        ]);
     /// Plans a complete recorded-file restore and names later changes and active writers.
-    EnvironmentRestorePreflight: POST "/environments/{id}/restores/preflight", Rule("files.manage, remote-write and authority over affected active writers"), none, json EnvironmentRestorePreflightBody, json RestorePlan, 200;
+    EnvironmentRestorePreflight: POST "/environments/{id}/restores/preflight", Rule("files.manage, remote-write and authority over affected active writers"), none, json EnvironmentRestorePreflightBody, json RestorePreflightResponse, 200,
+        operation Op::receipt(&Op::facets(&[
+            Facet::required(Manage, &[Object(K::Environment)], Target::Path("id")),
+            Facet::required(Read, &[Object(K::Environment)], Target::Resolved("restore_files")),
+            Facet::response_content(&[Object(K::Environment)], Target::Resolved("restore_content")),
+            Facet::response_content(&[Object(K::Thread)], Target::ResolvedCollection("restore_writer_names")),
+        ]));
     /// Rechecks and applies one restore plan, keeping a complete undo state.
-    EnvironmentFilesRestore: POST "/environments/{id}/restores", Rule("files.manage, remote-write and authority over affected active writers"), none, json EnvironmentFilesRestoreBody, json Job, 202;
+    EnvironmentFilesRestore: POST "/environments/{id}/restores", Rule("files.manage, remote-write and authority over affected active writers"), none, json EnvironmentFilesRestoreBody, json RestoreStartResponse, 202,
+        operation Op::receipt(&Op::variants(&[
+            Variant {name:"environment",selector:"new restore waits for writers or uses the native Environment management control alternative",facets:&[
+                Facet::required(Manage, &[Object(K::Environment)], Target::Path("id")),
+                Facet::required(Read, &[Object(K::Environment)], Target::Resolved("restore_files")),
+                Facet::response_content(&[Object(K::Environment)], Target::Resolved("restore_content")),
+            ]},
+            Variant {name:"threads",selector:"new restore interrupts its actual reviewed writers through native Thread Interact",facets:&[
+                Facet::required(Manage, &[Object(K::Environment)], Target::Path("id")),
+                Facet::required(Read, &[Object(K::Environment)], Target::Resolved("restore_files")),
+                Facet::required(Write, &[Object(K::Thread)], Target::ResolvedCollection("restore_writers")),
+                Facet::response_content(&[Object(K::Environment)], Target::Resolved("restore_content")),
+            ]},
+            Variant {name:"existing",selector:"the saved review already created its actual Job; no new file act occurs",facets:&[
+                Facet::required(Manage, &[Object(K::Environment)], Target::Path("id")),
+                Facet::response_content(&[Identity(I::Job)], Target::Resolved("restore_existing_job")),
+                Facet::response_content(&[Object(K::Machine)], Target::ResolvedCollection("restore_machine_names")),
+            ]},
+        ]));
     /// Replaces the links accepted by an interactor on this thread.
-    ThreadLinksSet: PUT "/threads/{id}/links", Permission("thread.interact"), none, json ThreadLinksSetBody, json Vec<ThreadLink>, 200;
+    ThreadLinksSet: PUT "/threads/{id}/links", Permission("thread.interact"), none, json ThreadLinksSetBody, json Vec<ThreadLink>, 200,
+        operation Op::returning(Write, &[Object(K::Thread)], Target::PermissionObject);
 }
 
 #[cfg(test)]

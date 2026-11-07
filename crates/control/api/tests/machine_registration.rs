@@ -7,13 +7,15 @@
 
 mod places;
 mod rig;
+#[path = "machine_registration/scopes.rs"]
+mod scopes;
 mod support;
 
 use orch_api_contract::common::ErrorCode;
 use orch_api_contract::resources::{
     Agent, MachineAgentCreate, MachineAgentCreateBody, MachineProviderCreate,
-    MachineProviderCreateBody, Provider, ProviderGet, ProviderKeySet, ProviderKeySetBody,
-    ProviderList, ProviderListQuery, ProviderStatus, Upstream,
+    MachineProviderCreateBody, MachineProviderCreateResponse, Provider, ProviderGet,
+    ProviderKeySet, ProviderKeySetBody, ProviderList, ProviderListQuery, ProviderStatus, Upstream,
 };
 use orch_link_contract::commands::{CommandKind, CommandResult, ProviderRefreshResult};
 use orch_types::Id;
@@ -103,7 +105,8 @@ async fn register_agent(
     home: Id,
     kind: &str,
 ) -> orch_api_core::testing::Reply<Agent> {
-    s.rig
+    let reply = s
+        .rig
         .world
         .app
         .call(MachineAgentCreate, &[&s.rig.machine_id])
@@ -115,7 +118,32 @@ async fn register_agent(
             profile: None,
         })
         .send()
-        .await
+        .await;
+    orch_api_core::testing::Reply {
+        status: reply.status,
+        headers: reply.headers,
+        raw: reply.raw,
+        body: reply.body.map(|body| {
+            body.into_full()
+                .expect("ordinary native agent registration keeps its Full projection")
+        }),
+    }
+}
+
+// These helpers make ordinary browser requests and expect Full only on success.
+// Map the success body without consuming Problem/status/header/raw refusal evidence.
+fn full_registration(
+    reply: orch_api_core::testing::Reply<MachineProviderCreateResponse>,
+) -> orch_api_core::testing::Reply<Provider> {
+    orch_api_core::testing::Reply {
+        status: reply.status,
+        headers: reply.headers,
+        raw: reply.raw,
+        body: reply.body.map(|body| {
+            body.into_full()
+                .expect("ordinary successful machine registration has its Full projection")
+        }),
+    }
 }
 
 async fn register_login(
@@ -124,7 +152,8 @@ async fn register_login(
     home: Id,
     agent: Id,
 ) -> orch_api_core::testing::Reply<Provider> {
-    s.rig
+    let reply = s
+        .rig
         .world
         .app
         .call(MachineProviderCreate, &[&s.rig.machine_id])
@@ -136,11 +165,13 @@ async fn register_login(
             sources: None,
         })
         .send()
-        .await
+        .await;
+    full_registration(reply)
 }
 
 async fn register_api(s: &Scene, by: &Who, home: Id) -> orch_api_core::testing::Reply<Provider> {
-    s.rig
+    let reply = s
+        .rig
         .world
         .app
         .call(MachineProviderCreate, &[&s.rig.machine_id])
@@ -152,7 +183,8 @@ async fn register_api(s: &Scene, by: &Who, home: Id) -> orch_api_core::testing::
             sources: None,
         })
         .send()
-        .await
+        .await;
+    full_registration(reply)
 }
 
 // ---------------------------------------------------------------- a profile for a harness the machine drives
@@ -649,7 +681,9 @@ async fn a_provider_on_a_key_the_server_holds_runs_on_the_machine_it_was_registe
         })
         .send()
         .await
-        .ok();
+        .ok()
+        .into_full()
+        .unwrap();
     s.exchange(thread.base.id, 0, "Hello", "Hi").await;
     let starts = started.lock().unwrap().clone();
     assert_eq!(

@@ -5,6 +5,8 @@
     reason = "a test fails by panicking"
 )]
 
+#[path = "forks/agent_access.rs"]
+mod agent_access;
 #[path = "forks/approval_mode.rs"]
 mod approval_mode;
 #[path = "forks/call_recovery.rs"]
@@ -19,6 +21,8 @@ mod history_size;
 mod hosting;
 #[path = "forks/native_transfer.rs"]
 mod native_transfer;
+#[path = "shared/mod.rs"]
+mod shared;
 #[path = "forks/snapshot.rs"]
 mod snapshot;
 
@@ -293,6 +297,7 @@ impl Rig {
             topic_id: None,
             name: None,
             access: None,
+            agent_access: None,
             history: None,
             to: Some(ForkTo {
                 provider_id: Some(self.other_provider),
@@ -1223,6 +1228,7 @@ impl Rig {
             topic_id: None,
             name: Some("Trial".to_owned()),
             access: None,
+            agent_access: None,
             history: None,
             to: None,
             environment: None,
@@ -4214,5 +4220,84 @@ async fn an_aside_of_a_conversation_its_harness_can_neither_fork_nor_take_in_is_
             Err(orch_engine::side_threads::SideError::NoHistory)
         ),
         "{refused:?}"
+    );
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn native_fork_selection_precedes_suppliers_and_preserves_the_original_ordinary_draft() {
+    let can = Can {
+        import_neutral: true,
+        ..Can::default()
+    };
+    let rig = Rig::new(can, "fake", can).await;
+    let thread = rig.world.thread("Prepared fork source").await;
+    let mut request = rig.to_other();
+    request.history = Some(ForkHistory {
+        mode: HistoryMode::Nothing,
+        from_turn: None,
+        to_turn: None,
+    });
+    request.directory = Some("selected-copy".into());
+    let kinds = [
+        CommandKind::FsStat,
+        CommandKind::GitStatus,
+        CommandKind::FsManifest,
+        CommandKind::GitWorktreeCopyPlan,
+        CommandKind::NodeMountMeasure,
+        CommandKind::NodeMountFingerprint,
+    ];
+    let before = kinds.map(|kind| rig.world.commands.issued_of(kind.as_str()));
+    let engine = rig.world.engine();
+    let caller = rig.caller();
+    let mut conn = rig.world.pool.acquire().await.unwrap();
+    let prepared = engine
+        .prepare_fork_in(
+            &mut conn,
+            &caller,
+            thread,
+            &request,
+            orch_engine::fork_plan::Reach::Seen,
+            None,
+            None,
+        )
+        .await
+        .unwrap();
+    assert_eq!(prepared.source().node_id, thread);
+    assert_eq!(prepared.agent().id, rig.other_agent);
+    assert_eq!(prepared.provider().id, rig.other_provider);
+    assert_eq!(
+        kinds.map(|kind| rig.world.commands.issued_of(kind.as_str())),
+        before,
+        "retryable native selection must not run any supplier"
+    );
+    let assembled = engine
+        .assemble_prepared_fork(&mut conn, &prepared)
+        .await
+        .unwrap();
+    let ordinary = engine.draft_fork(&caller, thread, &request).await.unwrap();
+    assert_eq!(
+        assembled, ordinary,
+        "the old entrypoint still consumes the same native selector and assembler"
+    );
+    sqlx::query("UPDATE providers SET status='disabled' WHERE id=$1")
+        .bind(rig.other_provider)
+        .execute(&mut *conn)
+        .await
+        .unwrap();
+    let changed = engine
+        .prepare_fork_in(
+            &mut conn,
+            &caller,
+            thread,
+            &request,
+            orch_engine::fork_plan::Reach::Seen,
+            None,
+            None,
+        )
+        .await
+        .unwrap();
+    assert!(
+        !prepared.preserves(&changed),
+        "a changed actual native prerequisite cannot validate the earlier prepared result"
     );
 }

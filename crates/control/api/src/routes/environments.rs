@@ -12,12 +12,14 @@
 use crate::middleware::authorization::{self, refusals};
 use crate::middleware::requests::{ApiError, ApiResult};
 use crate::registry::{Ctx, Registry};
-use crate::routes::access::page::same;
+use crate::routes::access::page::{NameBounds, NameSources};
 use crate::routes::nodes::{actor_name, invalid, placed, policy_at, view as node_view};
-use crate::routes::resources::machines::{registrable_machine as own_machine, reported_policy};
+use crate::routes::resources::machines::reported_policy;
 use crate::routes::resources::sealing::master_key;
-use crate::routes::resources::view::{Holding, accesses, addresses, machine_refs, parse};
-use crate::routes::resources::{Home, LIST_LIMIT, clean_name, record, require};
+use crate::routes::resources::view::{
+    Holding, PreparedAccess, accesses_prepared, machine_refs, parse, prepare_accesses,
+};
+use crate::routes::resources::{Home, clean_name, record, require};
 use crate::sign_in::origin;
 use orch_access_contract::audit::AuditAction;
 use orch_access_contract::decisions::{Held, ObjectRef};
@@ -25,15 +27,14 @@ use orch_access_contract::permissions::{NodePermission, Permission, PermissionNa
 use orch_api_contract::binding::NewEnvironmentAccess;
 use orch_api_contract::common::ErrorCode;
 use orch_api_contract::environment::{
-    self as api, Environment, EnvironmentExec, EnvironmentHolding, EnvironmentIndex,
-    EnvironmentRef, EnvironmentTemplate, EnvironmentThread, ExecOffer, McpFound,
+    self as api, Environment, EnvironmentExec, EnvironmentIndex, EnvironmentRef,
+    EnvironmentTemplate, EnvironmentThread, ExecOffer, McpFound,
 };
 use orch_api_contract::nodes::{JobRef, JobState, NodeKind, NodeRef};
 use orch_api_contract::resources::HostRef;
 use orch_api_contract::settings as settings_api;
 use orch_authz::engine::Graph;
 use orch_authz::environments::{Creating, NewEnvironment, Place, check_creation};
-use orch_authz::nodes::Page;
 use orch_authz::ownership::{self, NewAccess};
 use orch_authz::usable::{Policies, ResourcePolicy};
 use orch_authz::{Act, Policy, Principal, resources};
@@ -46,34 +47,41 @@ use orch_db::queries::environments::routes::{
 use orch_db::queries::jobs as job_rows;
 use orch_db::{Conn, DbError};
 use orch_settings::secrets::{self, Owner, SecretError};
-use orch_settings::{Place as SettingsPlace, resolve_all};
 use orch_settings_contract::registry::{self, Invalid, Scope};
 use orch_types::{Id, Json, Time};
 use serde_json::json;
-use std::collections::HashMap;
+use std::collections::{BTreeSet, HashMap};
 
 /// The longest a root directory is written: a path, as long as the longest the platforms take.
 const ROOT_MAX_CHARS: usize = 4_096;
 
 mod agent_reach;
+mod exec_version;
+mod settings_read;
+pub(crate) use exec_version::confirmed as confirmed_machine_programs;
 pub(crate) mod hosted;
 mod incarnation;
 pub(crate) mod jobs;
 mod list_settings;
+mod machine_create;
 pub(crate) mod mcp;
 pub(crate) mod moves;
 pub(crate) mod network;
-mod places;
+pub(crate) mod places;
 mod reach;
+mod reach_operation;
+mod read_sources;
 pub(crate) mod reading;
-mod recovery;
+pub(crate) mod recovery;
 pub(crate) mod retained;
 mod support;
 pub(crate) mod sync;
+mod update_sources;
 pub(crate) mod updates;
 
 /// Binds this module's requests.
 pub fn mount(registry: &mut Registry) {
+    crate::routes::resources::environment_read::mount(registry);
     hosted::mount(registry);
     retained::mount(registry);
     jobs::mount(registry);
@@ -87,17 +95,36 @@ pub fn mount(registry: &mut Registry) {
     mcp::mount(registry);
     crate::routes::fleet::mount(registry);
     registry
-        .on(api::MachineEnvironmentCreate, create_on_machine)
-        .on(api::EnvironmentList, list)
-        .on(api::EnvironmentGet, get)
-        .on(api::EnvironmentUpdate, update)
+        .on_with_operation(
+            api::MachineEnvironmentCreate,
+            crate::key_operations::native::effects::prepare::<machine_create::Create>,
+            machine_create::create,
+        )
+        .on_snapshot_read_with_optional_operation(
+            api::EnvironmentGet,
+            crate::key_operations::native::selected::<read_sources::EnvironmentRead>,
+            crate::key_operations::native::selected_read::<read_sources::EnvironmentRead>,
+        )
+        .on_with_operation(
+            api::EnvironmentUpdate,
+            crate::key_operations::native::effects::prepare::<update_sources::Update>,
+            update,
+        )
         .on(api::EnvironmentDisable, disable)
         .on(api::EnvironmentEnable, enable)
         .on(api::EnvironmentDelete, delete)
-        .on(settings_api::EnvironmentSettingList, setting_list)
+        .on_snapshot_read_with_optional_operation(
+            settings_api::EnvironmentSettingList,
+            crate::key_operations::native::selected::<settings_read::Environment>,
+            setting_list,
+        )
         .on(settings_api::EnvironmentSecretList, secret_list)
         .on(settings_api::EnvironmentSecretSet, secret_set)
-        .on(settings_api::EnvironmentSecretDelete, secret_delete);
+        .on_with_operation(
+            settings_api::EnvironmentSecretDelete,
+            crate::key_operations::direct::declared,
+            secret_delete,
+        );
 }
 
 // ---- the view ----
@@ -175,6 +202,7 @@ fn exec_of(config: &Json, machine_policy: Option<&Json>) -> EnvironmentExec {
             .and_then(Json::as_bool)
             .unwrap_or(true),
         machine_offers,
+        machine_programs: Vec::new(),
     }
 }
 
@@ -185,6 +213,16 @@ pub(crate) async fn inventory(
     principal: &Principal,
     seen: &[resources::Seen],
 ) -> ApiResult<Vec<Environment>> {
+    let prepared = prepare_inventory(ctx, conn, principal, seen).await?;
+    show_inventory_prepared(ctx, conn, principal, &prepared).await
+}
+
+pub(crate) async fn prepare_inventory(
+    _ctx: &Ctx,
+    conn: &mut Conn,
+    principal: &Principal,
+    seen: &[resources::Seen],
+) -> ApiResult<PreparedInventory> {
     let ids: Vec<_> = seen.iter().map(|each| each.resource.id).collect();
     let rows = queries::environments(conn, &ids).await?;
     let standing = seen
@@ -204,34 +242,366 @@ pub(crate) async fn inventory(
             )
         })
         .collect();
-    environment_views(ctx, conn, principal, rows, &standing).await
+    prepare_environment_views(conn, rows, standing, principal.now()).await
 }
 
-/// Environments as the API shows them, for any number of them in the same few statements. What
-/// the caller does not manage is left out: the environment's own values.
-async fn environment_views(
+/// Opaque existing Environment view facts; no ordinary permission or operation is selected here.
+pub(crate) struct PreparedInventory {
+    rows: Vec<EnvironmentFull>,
+    standing: HashMap<Id, Standing>,
+    access: PreparedAccess,
+    sources: NameSources,
+    bounds: NameBounds,
+    machine_facts: HashMap<Id, orch_db::queries::environment_facts::EnvironmentMachine>,
+    hosted: Vec<(Id, Id, String)>,
+    defaults: Vec<(Id, Id)>,
+    threads: Vec<env_rows::ThreadInEnvironment>,
+    runtime_rows: Vec<hosting::RuntimeFull>,
+    templates: Vec<Id>,
+    template_names: Vec<(Id, String, String)>,
+    hosts: Vec<Id>,
+    physical_machines: Vec<Id>,
+    #[expect(
+        dead_code,
+        reason = "retained source facts for the native family adapter rollout"
+    )]
+    connector_machines: Vec<Id>,
+    #[expect(
+        dead_code,
+        reason = "retained source facts for the native family adapter rollout"
+    )]
+    runtime_machines: Vec<Id>,
+    display_settings: list_settings::DisplaySettings,
+    mounts: HashMap<Id, orch_engine::mounts::PreparedViews>,
+    mount_sources: Vec<Id>,
+}
+impl PreparedInventory {
+    /// Native FK/reference associations used by this exact prepared Environment body.
+    pub(crate) fn preserves_sources(&self, fresh: &Self) -> bool {
+        let rows = fresh
+            .rows
+            .iter()
+            .map(|row| (row.id, row))
+            .collect::<HashMap<_, _>>();
+        let hosted = fresh
+            .hosted
+            .iter()
+            .map(|(first, second, _)| (*first, *second))
+            .collect::<BTreeSet<_>>();
+        self.access.preserves_authority(&fresh.access)
+            && self.rows.iter().all(|old| {
+                rows.get(&old.id).is_some_and(|current| {
+                    old.placement == current.placement
+                        && old.template_id == current.template_id
+                        && old.machine_id == current.machine_id
+                })
+            })
+            && self
+                .hosted
+                .iter()
+                .all(|(first, second, _)| hosted.contains(&(*first, *second)))
+            && self.machine_facts.iter().all(|(id, old)| {
+                old.machine_id.is_none_or(|machine| {
+                    fresh
+                        .machine_facts
+                        .get(id)
+                        .is_some_and(|current| current.machine_id == Some(machine))
+                })
+            })
+            && self.mounts.iter().all(|(environment, old)| {
+                fresh.mounts.get(environment).is_some_and(|current| {
+                    let selected: BTreeSet<_> = current.mount_ids().collect();
+                    old.mount_ids().all(|mount| selected.contains(&mount))
+                })
+            })
+    }
+
+    pub(crate) fn selected_ids(&self) -> Vec<Id> {
+        self.rows.iter().map(|row| row.id).collect()
+    }
+    /// The native through-thread style has no Host/Template/Machine/Mount disclosure.
+    pub(crate) async fn content_sources(
+        &self,
+        conn: &mut Conn,
+    ) -> ApiResult<HashMap<Id, Vec<orch_access_contract::decisions::ObjectRef>>> {
+        use orch_access_contract::permissions::ObjectKind;
+        let live = orch_db::queries::resources::routes::live_machine_ids(
+            conn,
+            self.physical_machine_ids(),
+        )
+        .await?
+        .into_iter()
+        .collect::<BTreeSet<_>>();
+        let mut sources = HashMap::new();
+        for row in &self.rows {
+            let mut selected = Vec::new();
+            if self
+                .standing
+                .get(&row.id)
+                .is_some_and(Standing::holds_something)
+            {
+                if let Some(id) = row.template_id
+                    && self.template_ids().contains(&id)
+                {
+                    selected.push(orch_access_contract::decisions::ObjectRef {
+                        kind: ObjectKind::Template,
+                        id,
+                    });
+                }
+                selected.extend(
+                    self.hosted
+                        .iter()
+                        .filter(|(env, id, _)| *env == row.id && self.host_ids().contains(id))
+                        .map(|(_, id, _)| orch_access_contract::decisions::ObjectRef {
+                            kind: ObjectKind::Host,
+                            id: *id,
+                        }),
+                );
+                if let Some(id) = self
+                    .machine_facts
+                    .get(&row.id)
+                    .and_then(|facts| facts.machine_id)
+                    .filter(|id| live.contains(id))
+                {
+                    selected.push(orch_access_contract::decisions::ObjectRef {
+                        kind: ObjectKind::Machine,
+                        id,
+                    });
+                }
+                if let Some(mounts) = self.mounts.get(&row.id) {
+                    selected.extend(
+                        mounts
+                            .mount_ids()
+                            .filter(|id| self.mount_ids().contains(id))
+                            .map(|id| orch_access_contract::decisions::ObjectRef {
+                                kind: ObjectKind::Mount,
+                                id,
+                            }),
+                    );
+                }
+            }
+            selected.sort_unstable_by_key(|object| (object.kind, object.id));
+            selected.dedup();
+            sources.insert(row.id, selected);
+        }
+        Ok(sources)
+    }
+    /// Source identities for the native PlaceEnvironment subset, before its DTO is constructed.
+    pub(crate) async fn place_names(&self, conn: &mut Conn) -> ApiResult<NameSources> {
+        let mut wanted = NameSources::default();
+        let ids = self
+            .rows
+            .iter()
+            .map(|row| row.id)
+            .chain(self.hosted.iter().map(|(_, id, _)| *id))
+            .collect::<Vec<_>>();
+        wanted.nodes.extend(
+            orch_authz::resources::address_name_sources(conn, &ids)
+                .await
+                .map_err(ApiError::internal)?,
+        );
+        wanted.nodes.extend(
+            self.threads
+                .iter()
+                .flat_map(|thread| [thread.thread_id, thread.topic_id]),
+        );
+        Ok(wanted)
+    }
+    pub(crate) fn name_sources(&self) -> &NameSources {
+        &self.sources
+    }
+    pub(crate) fn bound_names(&mut self, bounds: NameBounds) {
+        self.bounds = bounds;
+    }
+    pub(crate) fn template_ids(&self) -> &[Id] {
+        &self.templates
+    }
+    pub(crate) fn host_ids(&self) -> &[Id] {
+        &self.hosts
+    }
+    /// Native selected attachments, prepared before any Environment response is rendered.
+    pub(crate) fn mount_ids(&self) -> &[Id] {
+        &self.mount_sources
+    }
+    /// Physical policy/capacity source from the ordinary environment_facts supplier.
+    pub(crate) fn physical_machine_ids(&self) -> &[Id] {
+        &self.physical_machines
+    }
+    /// The Environment row's registered connector, used by its existing update/program fields.
+    #[expect(
+        dead_code,
+        reason = "retained source accessor for native family adapters"
+    )]
+    pub(crate) fn connector_machine_ids(&self) -> &[Id] {
+        &self.connector_machines
+    }
+    /// Enrolled connectors of the same already-read live runtime rows.
+    #[expect(
+        dead_code,
+        reason = "retained source accessor for native family adapters"
+    )]
+    pub(crate) fn runtime_machine_ids(&self) -> &[Id] {
+        &self.runtime_machines
+    }
+}
+fn inventory_holdings<'a>(
+    rows: &'a [EnvironmentFull],
+    standing: &'a HashMap<Id, Standing>,
+) -> Vec<Holding<'a>> {
+    rows.iter()
+        .filter_map(|row| {
+            standing.get(&row.id).map(|each| Holding {
+                admin_only: &each.admin_only,
+                admin_access: each.admin_access,
+                admin_place: each.admin_place,
+                participating: each.participating,
+                id: row.id,
+                owner: each.owner,
+                administers: each.administers,
+                held: &each.held,
+            })
+        })
+        .collect()
+}
+async fn prepare_environment_views(
+    conn: &mut Conn,
+    rows: Vec<EnvironmentFull>,
+    standing: HashMap<Id, Standing>,
+    now: Time,
+) -> ApiResult<PreparedInventory> {
+    let ids: Vec<_> = rows.iter().map(|row| row.id).collect();
+    let machine_facts: HashMap<_, _> = orch_db::queries::environment_facts::of_many(conn, &ids)
+        .await?
+        .into_iter()
+        .collect();
+    let hosted = hosting::hosts_of(conn, &ids).await?;
+    let defaults = queries::default_for(conn, &ids).await?;
+    let threads = env_rows::threads_in(conn, &ids).await?;
+    let runtime_rows = hosting::live_runtimes_of(conn, &ids, &[]).await?;
+    let access = prepare_accesses(conn, &inventory_holdings(&rows, &standing)).await?;
+    let mut sources = access.names.clone();
+    sources
+        .nodes
+        .extend(rows.iter().map(|row| row.home_node_id));
+    sources.nodes.extend(defaults.iter().map(|(_, node)| *node));
+    sources.nodes.extend(
+        threads
+            .iter()
+            .flat_map(|thread| [thread.thread_id, thread.topic_id]),
+    );
+    let address_ids = ids
+        .iter()
+        .copied()
+        .chain(hosted.iter().map(|(_, id, _)| *id))
+        .collect::<Vec<_>>();
+    sources.nodes.extend(
+        orch_authz::resources::address_name_sources(conn, &address_ids)
+            .await
+            .map_err(ApiError::internal)?,
+    );
+
+    let distinct = |ids: Vec<Id>| {
+        ids.into_iter()
+            .collect::<BTreeSet<_>>()
+            .into_iter()
+            .collect::<Vec<_>>()
+    };
+    let template_ids: Vec<_> = rows.iter().filter_map(|row| row.template_id).collect();
+    let template_names = queries::template_names(conn, &template_ids).await?;
+    let templates = distinct(template_names.iter().map(|(id, _, _)| *id).collect());
+    let hosts = distinct(hosted.iter().map(|(_, host, _)| *host).collect());
+    let physical_machines = distinct(
+        machine_facts
+            .values()
+            .filter_map(|facts| facts.machine_id)
+            .collect(),
+    );
+    let connector_machines = distinct(rows.iter().filter_map(|row| row.machine_id).collect());
+    let runtime_machines = distinct(
+        runtime_rows
+            .iter()
+            .filter_map(|runtime| runtime.machine_id)
+            .collect(),
+    );
+    let display_settings = list_settings::load(conn, &rows).await?;
+    let mut mounts = HashMap::new();
+    for row in &rows {
+        if standing.get(&row.id).is_some_and(Standing::holds_something)
+            && display_settings.has_mounts(row.id)
+        {
+            mounts.insert(
+                row.id,
+                orch_engine::mounts::prepare_views(conn, row.id, now.get())
+                    .await
+                    .map_err(ApiError::engine)?,
+            );
+        }
+    }
+    let mount_sources = distinct(
+        mounts
+            .values()
+            .flat_map(|mounts| mounts.mount_ids())
+            .collect(),
+    );
+    Ok(PreparedInventory {
+        rows,
+        standing,
+        access,
+        sources,
+        bounds: NameBounds::default(),
+        machine_facts,
+        hosted,
+        defaults,
+        threads,
+        runtime_rows,
+        templates,
+        template_names,
+        hosts,
+        physical_machines,
+        connector_machines,
+        runtime_machines,
+        display_settings,
+        mounts,
+        mount_sources,
+    })
+}
+
+/// Render the native prepared rows, preserving whole and through-thread cuts.
+pub(crate) async fn show_inventory_prepared(
     ctx: &Ctx,
     conn: &mut Conn,
     principal: &Principal,
-    rows: Vec<EnvironmentFull>,
-    standing: &HashMap<Id, Standing>,
+    prepared: &PreparedInventory,
 ) -> ApiResult<Vec<Environment>> {
+    let rows = prepared.rows.clone();
+    let standing = &prepared.standing;
+    let machine_facts = &prepared.machine_facts;
+    let hosted = &prepared.hosted;
+    let defaults = &prepared.defaults;
+    let threads = &prepared.threads;
+    let runtime_rows = &prepared.runtime_rows;
+    let bounds = prepared.bounds.limited.then_some(&prepared.bounds);
     let ids: Vec<Id> = rows.iter().map(|row| row.id).collect();
     let activity = crate::routes::resources::view::environment_activity(conn, &ids).await?;
-    let display_settings = list_settings::load(conn, &rows).await?;
+    let display_settings = &prepared.display_settings;
     let lifetimes: HashMap<_, _> = orch_db::queries::environments::temporary::among(conn, &ids)
         .await?
         .into_iter()
         .map(|row| (row.environment_id, row))
         .collect();
     let exposed = crate::routes::ports::exposures(conn, &ids, Time::new(ctx.now)).await?;
-    let addresses = addresses(conn, &ids).await?;
-    let people: Vec<Id> = rows.iter().map(|row| row.owner_id).collect();
-    let people = refusals::user_refs(conn, &people).await?;
-    let machine_facts: HashMap<_, _> = orch_db::queries::environment_facts::of_many(conn, &ids)
-        .await?
-        .into_iter()
+    let addresses =
+        crate::routes::resources::view::addresses_with_names(conn, &ids, bounds).await?;
+    let people: Vec<Id> = rows
+        .iter()
+        .map(|row| row.owner_id)
+        .chain(rows.iter().flat_map(|row| {
+            exec_version::stored(&row.config)
+                .into_values()
+                .map(|entry| entry.by)
+        }))
         .collect();
+    let people = refusals::user_refs(conn, &people).await?;
     let machine_ids: Vec<Id> = machine_facts
         .values()
         .filter_map(|machine| machine.machine_id)
@@ -246,20 +616,19 @@ async fn environment_views(
             .await?
             .into_iter()
             .collect();
-    let policies: HashMap<Id, Json> = queries::machine_policies(conn, &machine_ids)
+    let program_facts: HashMap<Id, Json> = queries::machine_program_facts(conn, &machine_ids)
         .await?
         .into_iter()
         .collect();
-    let template_ids: Vec<Id> = rows.iter().filter_map(|row| row.template_id).collect();
-    let templates = queries::template_names(conn, &template_ids).await?;
+    let templates = &prepared.template_names;
     // What a managed one has beyond a directory: its host, the job under way, why it is to be removed.
-    let hosted = hosting::hosts_of(conn, &ids).await?;
     let loss_eligible = orch_db::queries::loss::eligible_environments(conn, &ids)
         .await?
         .into_iter()
         .collect::<std::collections::HashSet<_>>();
     let host_ids: Vec<Id> = hosted.iter().map(|(_, host, _)| *host).collect();
-    let host_addresses = crate::routes::resources::view::addresses(conn, &host_ids).await?;
+    let host_addresses =
+        crate::routes::resources::view::addresses_with_names(conn, &host_ids, bounds).await?;
     let open_jobs = job_rows::open_for(conn, &ids, &job_rows::kind::ONE_AT_A_TIME).await?;
     let reasons = hosting::removal_reasons(conn, &ids).await?;
     // Each one's network, as its host's node last reported it.
@@ -273,10 +642,8 @@ async fn environment_views(
         .map(|row| row.id)
         .collect();
     let networks = network::of_environments(conn, principal, &ids, &connected).await?;
-    let defaults = queries::default_for(conn, &ids).await?;
     // Each harness's own configuration in its workspace, and the answer given for it.
     let mut config_trust = crate::routes::trust::views_of(conn, &ids).await?;
-    let threads = env_rows::threads_in(conn, &ids).await?;
     let thread_owners: Vec<_> = threads.iter().map(|thread| thread.owner_id).collect();
     let thread_owners = refusals::user_refs(conn, &thread_owners).await?;
     let reach = orch_authz::environments::reach_counts(conn, principal, &ids, Policy::default())
@@ -284,29 +651,22 @@ async fn environment_views(
         .map_err(ApiError::internal)?;
     let mut nodes: Vec<Id> = rows.iter().map(|row| row.home_node_id).collect();
     nodes.extend(defaults.iter().map(|(_, topic)| *topic));
-    for thread in &threads {
+    for thread in threads {
         nodes.extend([thread.thread_id, thread.topic_id]);
     }
     nodes.sort_unstable();
     nodes.dedup();
-    let refs = node_view::refs(conn, principal, &nodes, Policy::default()).await?;
-    let holdings: Vec<Holding<'_>> = rows
+    let refs = match bounds {
+        Some(bounds) => bounds.refs(conn, principal, &nodes).await?,
+        None => node_view::refs(conn, principal, &nodes, Policy::default()).await?,
+    };
+    let known: BTreeSet<Id> = refs
         .iter()
-        .filter_map(|row| {
-            standing.get(&row.id).map(|each| Holding {
-                admin_only: &each.admin_only,
-                admin_access: each.admin_access,
-                admin_place: each.admin_place,
-                participating: each.participating,
-                id: row.id,
-                owner: each.owner,
-                administers: each.administers,
-                held: &each.held,
-            })
-        })
+        .filter(|(_, node)| !node.redacted)
+        .map(|(id, _)| *id)
         .collect();
-    let access = accesses(conn, principal, &holdings).await?;
-    let runtime_rows = hosting::live_runtimes_of(conn, &ids, &[]).await?;
+    let holdings = inventory_holdings(&rows, standing);
+    let access = accesses_prepared(conn, principal, &holdings, &prepared.access, bounds).await?;
     let mut runtime_updates = ctx
         .app
         .engine
@@ -345,6 +705,10 @@ async fn environment_views(
             .iter()
             .filter(|thread| thread.environment_id == row.id)
         {
+            if !bound_thread_visible(thread, &known) {
+                hidden += 1;
+                continue;
+            }
             match (seen(thread.thread_id), seen(thread.topic_id)) {
                 (Some(node), Some(topic)) => {
                     shown_threads.push(EnvironmentThread {
@@ -469,20 +833,35 @@ async fn environment_views(
                     name: name.clone(),
                     address: host_addresses.get(host).cloned().unwrap_or_default(),
                 }),
-            mounts: if whole && display_settings.has_mounts(row.id) {
-                orch_engine::mounts::views(conn, row.id, ctx.now)
-                    .await
-                    .map_err(ApiError::internal)?
+            mounts: if whole {
+                prepared
+                    .mounts
+                    .get(&row.id)
+                    .map(|mounts| mounts.render())
+                    .transpose()
+                    .map_err(ApiError::engine)?
+                    .unwrap_or_default()
             } else {
                 Vec::new()
             },
-            exec: exec_of(
-                &row.config,
-                machine_facts
+            exec: {
+                let reported = machine_facts
                     .get(&row.id)
                     .and_then(|machine| machine.machine_id)
-                    .and_then(|machine| policies.get(&machine)),
-            ),
+                    .or(row.machine_id)
+                    .and_then(|machine| program_facts.get(&machine));
+                let mut exec = exec_of(
+                    &row.config,
+                    reported.and_then(orch_db::queries::environment_facts::policy_in),
+                );
+                if row.placement == "connected"
+                    && row.template_id.is_none()
+                    && let Some(reported) = reported
+                {
+                    exec.machine_programs = exec_version::view(&row.config, reported, &people);
+                }
+                exec
+            },
             mcp_found,
             index: row
                 .facts
@@ -573,6 +952,15 @@ async fn environment_views(
     Ok(views)
 }
 
+/// The existing Environment view admits a bound Thread line only when both its
+/// Thread and Topic references are known to this ordinary account/credential.
+pub(super) fn bound_thread_visible(
+    thread: &env_rows::ThreadInEnvironment,
+    known: &BTreeSet<Id>,
+) -> bool {
+    known.contains(&thread.thread_id) && known.contains(&thread.topic_id)
+}
+
 /// One environment as the caller sees it: all of it where they hold something on it, and what a
 /// thread lets them see where they hold nothing. The caller was let read it by [`reading::decide`],
 /// or is the one who just made or changed it.
@@ -582,33 +970,68 @@ pub(crate) async fn show(
     principal: &Principal,
     id: Id,
 ) -> ApiResult<Environment> {
+    let prepared = prepare_shown(conn, principal, id).await?;
+    let view = show_inventory_prepared(ctx, conn, principal, &prepared)
+        .await?
+        .pop()
+        .ok_or_else(|| ApiError::internal("an environment was read and is not shown"))?;
+    finish_shown(ctx, conn, principal, id, view).await
+}
+
+/// Stored individual-view operands before the native formatter or runtime additions run.
+async fn prepare_shown(
+    conn: &mut Conn,
+    principal: &Principal,
+    id: Id,
+) -> ApiResult<PreparedInventory> {
     let row = queries::environments(conn, &[id])
         .await?
         .pop()
         .ok_or_else(ApiError::not_found)?;
-    let object = ObjectRef {
-        kind: ResourceKind::Environment.into(),
-        id,
-    };
-    let effective = resources::effective(conn, principal, object, Policy::default())
-        .await
-        .map_err(ApiError::internal)?;
-    let standing = HashMap::from([(
-        id,
-        Standing {
-            admin_access: effective.admin_access,
-            admin_place: effective.admin_place,
-            participating: effective.participating,
-            admin_only: effective.admin_only,
-            owner: effective.owner,
-            administers: effective.administers,
-            held: effective.held,
-        },
-    )]);
-    let mut view = environment_views(ctx, conn, principal, vec![row], &standing)
-        .await?
-        .pop()
-        .ok_or_else(|| ApiError::internal("an environment was read and is not shown"))?;
+    prepare_shown_rows(conn, principal, vec![row]).await
+}
+
+/// The same native formatter inputs for actual stored snapshots of completed fleet decisions.
+/// Their source owner separately verifies current custody and the ordinary Read door.
+pub(crate) async fn prepare_shown_rows(
+    conn: &mut Conn,
+    principal: &Principal,
+    rows: Vec<EnvironmentFull>,
+) -> ApiResult<PreparedInventory> {
+    let mut standing = HashMap::new();
+    for row in &rows {
+        let object = ObjectRef {
+            kind: ResourceKind::Environment.into(),
+            id: row.id,
+        };
+        let effective = resources::effective(conn, principal, object, Policy::default())
+            .await
+            .map_err(ApiError::internal)?;
+        standing.insert(
+            row.id,
+            Standing {
+                admin_access: effective.admin_access,
+                admin_place: effective.admin_place,
+                participating: effective.participating,
+                admin_only: effective.admin_only,
+                owner: effective.owner,
+                administers: effective.administers,
+                held: effective.held,
+            },
+        );
+    }
+    prepare_environment_views(conn, rows, standing, principal.now()).await
+}
+
+/// The native individual Environment projection's ordinary whole-view additions.
+/// Inventory preparation does not lend a Get operation or add Environment View.
+pub(crate) async fn finish_shown(
+    ctx: &Ctx,
+    conn: &mut Conn,
+    principal: &Principal,
+    id: Id,
+    mut view: Environment,
+) -> ApiResult<Environment> {
     if reading::decide(conn, principal, id).await? == reading::Reading::Whole {
         view.runtime_changes = ctx
             .app
@@ -629,7 +1052,7 @@ pub(crate) async fn show(
     Ok(view)
 }
 
-pub(crate) use places::{host_choices, places_for};
+pub(crate) use places::host_choices;
 
 /// Reads an environment as the caller may: decided by [`reading::decide`], then shown as it says.
 /// Whatever else shows the view of an environment that a request of its own reads is to ask this.
@@ -651,6 +1074,27 @@ async fn viewed_among(
     principal: &Principal,
     ids: &[Id],
 ) -> ApiResult<(Vec<Environment>, HashMap<Id, Standing>)> {
+    let (prepared, standing) = prepare_viewed_among(conn, principal, ids).await?;
+    let views = show_inventory_prepared(ctx, conn, principal, &prepared).await?;
+    Ok((views, standing))
+}
+
+/// The same native whole/through-thread list cut, before rendering.
+pub(crate) async fn prepare_viewed(
+    _ctx: &Ctx,
+    conn: &mut Conn,
+    principal: &Principal,
+    ids: &[Id],
+) -> ApiResult<PreparedInventory> {
+    Ok(prepare_viewed_among(conn, principal, ids).await?.0)
+}
+
+/// The same native whole/through-thread selection, before public references are formatted.
+async fn prepare_viewed_among(
+    conn: &mut Conn,
+    principal: &Principal,
+    ids: &[Id],
+) -> ApiResult<(PreparedInventory, HashMap<Id, Standing>)> {
     let seen = reading::among(conn, principal, ids).await?;
     let standing: HashMap<Id, Standing> = seen
         .into_iter()
@@ -685,8 +1129,8 @@ async fn viewed_among(
         .collect();
     let wanted: Vec<Id> = standing.keys().copied().collect();
     let rows = queries::environments(conn, &wanted).await?;
-    let views = environment_views(ctx, conn, principal, rows, &standing).await?;
-    Ok((views, standing))
+    let prepared = prepare_environment_views(conn, rows, standing.clone(), principal.now()).await?;
+    Ok((prepared, standing))
 }
 
 /// The environments among `ids` that the caller holds something on, as they see them.
@@ -764,177 +1208,6 @@ fn within_roots(root: &str, roots: &[String]) -> bool {
         })
 }
 
-/// Registers a directory through Machine Use, first owned by its creator.
-async fn create_on_machine(
-    ctx: Ctx,
-    (): (),
-    body: api::MachineEnvironmentCreateBody,
-) -> ApiResult<Environment> {
-    let name = clean_name("name", &body.name)?;
-    let mut tx = ctx.app.db.begin().await?;
-    let principal = authorization::principal(&ctx, &mut tx).await?;
-    let machine = own_machine(&ctx, &mut tx, ctx.id("id")?).await?;
-    if !machine.is_active() {
-        return Err(ApiError::not_found());
-    }
-    let root = match body.data_sources.as_ref() {
-        Some(sources) => {
-            orch_engine::environments::check_machine_data_sources(&mut tx, &machine, sources)
-                .await
-                .map_err(|why| invalid("data_sources", &why))?;
-            sources.workspace.directory().unwrap_or("").to_owned()
-        }
-        None => clean_root("root", &body.root, machine.platform_os == "windows")?,
-    };
-    if body.data_sources.is_none()
-        && let Some(policy) = reported_policy(&mut tx, &machine).await?
-        && !within_roots(&root, &policy.environment_roots)
-    {
-        return Err(invalid(
-            "root",
-            "the machine's local policy does not let an environment be there",
-        ));
-    }
-    // The org it is registered in: the caller's domain or an org inside it.
-    let (home_place, home_kind) = placed(&mut tx, body.home_id).await?;
-    if home_kind != NodeKind::Org {
-        return Err(invalid("home_id", "an environment is registered in an org"));
-    }
-    let graph = Graph::load(&mut tx, &[body.home_id])
-        .await
-        .map_err(ApiError::internal)?;
-    let in_domain = graph.get(body.home_id).is_some_and(|node| {
-        principal
-            .memberships()
-            .domain_in(node.root)
-            .is_some_and(|domain| node.path.contains(&domain))
-    });
-    if !in_domain {
-        return Err(invalid(
-            "home_id",
-            "an environment is registered in the caller's domain or an org inside it",
-        ));
-    }
-    let home_node = body.home_node_id.unwrap_or(body.home_id);
-    if home_node != body.home_id
-        && orch_db::queries::resources::routes::homes_under(&mut tx, body.home_id, &[home_node])
-            .await?
-            .is_empty()
-    {
-        return Err(invalid(
-            "home_node_id",
-            "this is no project or topic of that org",
-        ));
-    }
-    let policy = policy_at(&mut tx, home_node).await?;
-    let policies = Policies::everywhere(ResourcePolicy {
-        owners_name_outsiders: policy.owners_name_outsiders,
-        shared_subscriptions: None,
-    });
-    let created = match check_creation(
-        &mut tx,
-        &principal,
-        &NewEnvironment {
-            home: home_node,
-            place: Place::Machine {
-                machine: machine.id,
-            },
-            mounts: Vec::new(),
-        },
-        &policies,
-    )
-    .await
-    {
-        Ok(Creating::Allowed(created)) => created,
-        Ok(Creating::Refused(refusal)) => return Err(refusals::denied(&mut tx, *refusal).await?),
-        Ok(Creating::NotYourMachine | Creating::Exceeds(_)) => return Err(ApiError::not_found()),
-        Err(error) => return Err(refusals::problem(&mut tx, error).await),
-    };
-    if !orch_authz::environments::reserve_capacity(&mut tx, &created)
-        .await
-        .map_err(ApiError::internal)?
-    {
-        return Err(ApiError::not_found());
-    }
-    if let Some(existing) = queries::named(&mut tx, principal.user(), home_place.org, &name).await?
-    {
-        return Err(taken(Some(existing)));
-    }
-    let id = orch_types::new_id();
-    let made = queries::insert_connected(
-        &mut tx,
-        &NewConnected {
-            id,
-            name: &name,
-            owner_id: principal.user(),
-            machine_id: machine.id,
-            home_node_id: home_node,
-            workspace_root: &root,
-            remote_write: body.remote_write,
-            terminal: body.terminal,
-        },
-        ctx.now,
-    )
-    .await;
-    match made {
-        Ok(true) => {}
-        Ok(false) => return Err(ApiError::not_found()),
-        Err(DbError::Unique { .. }) => return Err(taken(None)),
-        Err(error) => return Err(error.into()),
-    }
-    orch_db::queries::environments::hosting::set_entries(
-        &mut tx,
-        id,
-        created.host.as_ref().and_then(|(entry, _)| *entry),
-        None,
-    )
-    .await?;
-    if let Some(sources) = &body.data_sources {
-        // Initial configuration is part of creation, rather than a second visible revision.
-        sqlx::query("UPDATE environments SET config=$2 WHERE id=$1")
-            .bind(id)
-            .bind(json!({"env.data_sources":sources}))
-            .execute(&mut *tx)
-            .await
-            .map_err(DbError::from)?;
-    }
-    ownership::start_resource(
-        &mut tx,
-        ObjectRef {
-            kind: ResourceKind::Environment.into(),
-            id,
-        },
-        principal.user(),
-        match body.access {
-            None | Some(NewEnvironmentAccess::Defaults) => NewAccess::Defaults,
-            Some(NewEnvironmentAccess::OnlyMe) => NewAccess::OnlyMe,
-        },
-        Time::new(ctx.now),
-    )
-    .await
-    .map_err(ApiError::internal)?;
-    let who = actor_name(&ctx)?;
-    record(
-        &ctx,
-        &mut tx,
-        orch_db::audit::action!(AuditAction::EnvironmentCreated),
-        id,
-        Home {
-            node: Some(home_node),
-            org: Some(home_place.org),
-        },
-        &format!(
-            "{who} registered {root} of the machine {} as the environment {name}",
-            machine.name
-        ),
-        json!({ "environment": id, "name": name, "machine": machine.id, "root": root }),
-    )
-    .await?;
-    let made = show(&ctx, &mut tx, &principal, id).await?;
-    tx.commit().await.map_err(DbError::from)?;
-    Ok(made)
-}
-
 /// The answer to a name that one of the caller's environments of that org has already.
 fn taken(existing: Option<Id>) -> ApiError {
     let error = ApiError::new(
@@ -949,105 +1222,9 @@ fn taken(existing: Option<Id>) -> ApiError {
 
 // ---- listing and reading ----
 
-/// The environments the caller owns or holds a permission on.
-async fn list(
-    ctx: Ctx,
-    query: api::EnvironmentListQuery,
-    (): (),
-) -> ApiResult<Vec<orch_api_contract::common::Listed<Environment>>> {
-    let mut conn = ctx.app.db.acquire().await?;
-    let principal = authorization::principal(&ctx, &mut conn).await?;
-    let page = Page {
-        after: None,
-        limit: LIST_LIMIT,
-    };
-    let seen = resources::visible(
-        &mut conn,
-        &principal,
-        ResourceKind::Environment,
-        page,
-        Policy::default(),
-    )
-    .await
-    .map_err(ApiError::internal)?;
-    let mut seen: Vec<_> = seen
-        .items
-        .into_iter()
-        .filter(|each| match query.holding {
-            Some(EnvironmentHolding::Manage) => each
-                .held
-                .iter()
-                .any(|held| held.permission == Permission::EnvironmentManage),
-            Some(EnvironmentHolding::View) => each
-                .held
-                .iter()
-                .any(|held| held.permission == Permission::EnvironmentView),
-            None => true,
-        })
-        .collect();
-    if let Some(org) = query.org_id {
-        let homes: Vec<Id> = seen.iter().filter_map(|each| each.resource.home).collect();
-        let inside =
-            orch_db::queries::resources::routes::homes_under(&mut conn, org, &homes).await?;
-        seen.retain(|each| {
-            each.resource
-                .home
-                .is_some_and(|home| inside.contains(&home))
-        });
-    }
-    let private = crate::routes::resources::hidden_items(&mut conn, &principal, &mut seen).await?;
-    let ids: Vec<Id> = seen.iter().map(|each| each.resource.id).collect();
-    let rows = queries::environments(&mut conn, &ids).await?;
-    let standing: HashMap<Id, Standing> = seen
-        .into_iter()
-        .map(|each| {
-            (
-                each.resource.id,
-                Standing {
-                    admin_access: each.admin_access,
-                    admin_place: each.admin_place,
-                    participating: each.participating,
-                    admin_only: each.admin_only,
-                    owner: each.owner,
-                    administers: each.administers,
-                    held: each.held,
-                },
-            )
-        })
-        .collect();
-    Ok(crate::routes::resources::listed(
-        environment_views(&ctx, &mut conn, &principal, rows, &standing).await?,
-        private,
-    ))
-}
-
 /// Reads an environment: whoever holds any permission on it, one of its two levels or one of its
 /// four doors, reads all of it; whoever may view a thread that runs in it reads its name, owner, place,
 /// state and the job under way and nothing else ([`read`]).
-async fn get(
-    ctx: Ctx,
-    query: orch_api_contract::nodes::DeletedInspectionQuery,
-    (): (),
-) -> ApiResult<Environment> {
-    if query.inspect_deleted == Some(true) {
-        let id = ctx.id("id")?;
-        let mut conn = ctx.app.db.acquire().await?;
-        if hosting::environment(&mut conn, id)
-            .await?
-            .is_some_and(|row| row.deleted_at.is_some())
-        {
-            drop(conn);
-            return retained::inspect(ctx, id).await;
-        }
-    }
-    let id = ctx.id("id")?;
-    let mut conn = ctx.app.db.acquire().await?;
-    let principal = authorization::principal(&ctx, &mut conn).await?;
-    // A page is a stored projection. Resource inspection belongs to an explicit change/probe,
-    // never this GET: an online but unresponsive node must not hold every tab open for 30 seconds.
-    read(&ctx, &mut conn, &principal, id).await
-}
-
 // ---- changing one ----
 
 /// The values an environment has of its own: only keys that are set on an environment, each with
@@ -1093,9 +1270,18 @@ fn clean_config(path: &str, config: &Json) -> ApiResult<()> {
     Ok(())
 }
 
-/// The answer to a change that was made against a revision that is out of date.
-async fn stale(ctx: &Ctx, conn: &mut Conn, principal: &Principal, id: Id) -> ApiError {
-    let current = show(ctx, conn, principal, id).await.ok();
+/// PATCH accepts an unstamped decision, then prepares it under the environment's Manage guard.
+/// Every other value is checked here, and the complete stored config is checked after preparation.
+fn clean_patch_config(path: &str, config: &Json) -> ApiResult<()> {
+    let mut ordinary = config.clone();
+    if let Some(values) = ordinary.as_object_mut() {
+        values.remove(registry::keys::EXEC_VERSION_OVERRIDES);
+    }
+    clean_config(path, &ordinary)
+}
+
+/// A native stale revision keeps current content only when this operation can read it.
+fn stale_current(current: Option<Environment>) -> ApiError {
     ApiError::new(
         ErrorCode::ConflictStaleRevision,
         "the environment was changed since it was read",
@@ -1106,186 +1292,69 @@ async fn stale(ctx: &Ctx, conn: &mut Conn, principal: &Principal, id: Id) -> Api
 /// Changes an environment: its name, its own values, whether files may be written from outside
 /// and shells opened, and the node it takes its settings from. Who may was asked of the engine:
 /// `environment.manage` on it, and `node.interact` on another home.
-async fn update(ctx: Ctx, (): (), mut body: api::EnvironmentUpdateBody) -> ApiResult<Environment> {
-    body.config = body.config.as_ref().map(registry::canonical_own_values);
-    let id = ctx.id("id")?;
-    let name = body
-        .name
-        .as_deref()
-        .map(|name| clean_name("name", name))
-        .transpose()?;
-    if let Some(config) = &body.config {
-        clean_config("config", config)?;
+async fn update(
+    ctx: Ctx,
+    (): (),
+    _body: api::EnvironmentUpdateBody,
+) -> ApiResult<api::EnvironmentUpdateResponse> {
+    let (mut tx, _) = crate::middleware::transaction_guard::begin(&ctx).await?;
+    let done =
+        crate::key_operations::native::effects::apply::<update_sources::Update>(&ctx, &mut tx)
+            .await?;
+    tx.commit().await.map_err(DbError::from)?;
+    let conflicted = done.output.stale;
+    let receipt = api::EnvironmentUpdateReceipt {
+        projection: orch_api_contract::common::ReceiptProjection::Receipt,
+        environment_id: done.output.environment,
+        revision: done.output.revision,
+        changed: done.output.changed,
+    };
+    if !conflicted {
+        crate::key_operations::publication::receipt(&done.ctx, &receipt)?;
     }
-    let mut tx = ctx.app.db.begin().await?;
-    let principal = authorization::principal(&ctx, &mut tx).await?;
-    let row = queries::environments(&mut tx, &[id])
-        .await?
-        .pop()
-        .ok_or_else(ApiError::not_found)?;
-    require(
-        &mut tx,
-        &principal,
-        ResourceKind::Environment,
-        id,
-        Permission::EnvironmentManage,
-    )
-    .await?;
-    // Runtime updates and moves hold configuration together with every affected thread.
-    updates::ensure_unheld(&mut tx, id).await?;
-    if let Some(sources) = &body.data_sources {
-        let mut config = body.config.take().unwrap_or_else(|| row.config.clone());
-        config
-            .as_object_mut()
-            .ok_or_else(|| invalid("config", "the environment's own values are an object"))?
-            .insert(
-                orch_settings_contract::registry::keys::ENV_DATA_SOURCES.into(),
-                serde_json::to_value(sources).map_err(ApiError::internal)?,
-            );
-        body.config = Some(config);
+    let id = done.output.environment;
+    // Reconciliation consumes the committed native settings; it is not another submitted act.
+    if done.output.version_consent_changed
+        && let Err(error) = done
+            .ctx
+            .app
+            .engine
+            .reevaluate_bindings(None, Some(id))
+            .await
+    {
+        tracing::warn!(environment=%id,%error,"machine program consent is saved; blocked bindings await their next recheck");
     }
-    if let Some(config) = &body.config {
-        clean_config("config", config)?;
-        let sources = orch_driver_contract::runtime::EnvironmentDataSources::from_config(config)
-            .map_err(ApiError::internal)?;
-        if sources.borrows_directories() {
-            let source_machine = orch_db::queries::environment_facts::of(&mut tx, id)
-                .await?
-                .and_then(|facts| facts.machine_id)
-                .ok_or_else(|| {
-                    invalid(
-                        "data_sources",
-                        "choose a machine before choosing an existing directory there",
-                    )
-                })?;
-            let machine = orch_db::queries::resources::machine(&mut tx, source_machine)
-                .await?
-                .ok_or_else(ApiError::not_found)?;
-            orch_engine::environments::check_machine_data_sources(&mut tx, &machine, &sources)
-                .await
-                .map_err(|why| invalid("data_sources", &why))?;
+    if done.output.reconcile {
+        if let Err(error) = done.ctx.app.engine.apply_environment_mounts(id).await {
+            tracing::warn!(environment=%id,%error,"environment mount changes remain pending");
+        }
+        if let Err(error) = done.ctx.app.engine.apply_environment_resources(id).await {
+            tracing::warn!(environment=%id,%error,"environment resource changes remain pending");
         }
     }
-    if let Some(new_home) = body.home_node_id.filter(|home| *home != row.home_node_id) {
-        if !queries::same_tree(&mut tx, new_home, row.home_node_id).await? {
-            return Err(invalid(
-                "home_node_id",
-                "this is no node of the same root org",
+    let shown =
+        crate::key_operations::native::resource_reply::with_input::<update_sources::Update>(
+            &done.ctx,
+            &done.accepted,
+            done.output,
+        )
+        .await?;
+    let current = match shown {
+        Some(orch_api_contract::resources::Resource::Environment(value)) => Some(value),
+        Some(_) => {
+            return Err(ApiError::internal(
+                "the native Environment update projection changed kind",
             ));
         }
-        let policy = policy_at(&mut tx, new_home).await?;
-        authorization::require(
-            &mut tx,
-            &principal,
-            new_home,
-            PermissionName::OfNode(NodePermission::Interact),
-            Act::Use,
-            policy,
-        )
-        .await?;
-    }
-    // What the machine's local policy offers bounds what the environment may offer.
-    if let (Some(config), Some(machine)) = (&body.config, row.machine_id) {
-        let policies = queries::machine_policies(&mut tx, &[machine]).await?;
-        let machine_offers = policies
-            .first()
-            .and_then(|(_, policy)| texts(policy.get("exec.offers")));
-        let asked = texts(config.get("exec.offers"));
-        if let (Some(offered), Some(asked)) = (machine_offers, asked)
-            && asked.iter().any(|each| {
-                !orch_agent_programs::Programs::builtin().offers_include(&offered, each)
-            })
-        {
-            return Err(ApiError::new(
-                ErrorCode::PolicyExecNotOffered,
-                "the machine's local policy does not let its exec node offer that",
-            )
-            .with("offers", offered));
-        }
-    }
-    let change = Change {
-        name: name.as_deref(),
-        config: body.config.as_ref(),
-        remote_write: body.remote_write,
-        terminal: body.terminal,
-        browser: body.browser,
-        vnc: body.vnc,
-        home_node_id: body.home_node_id.filter(|home| *home != row.home_node_id),
+        None => None,
     };
-    if change == Change::default() {
-        if row.revision != body.expected_revision {
-            return Err(stale(&ctx, &mut tx, &principal, id).await);
-        }
-        return show(&ctx, &mut tx, &principal, id).await;
+    if conflicted {
+        return Err(stale_current(current));
     }
-    if let Some(new_name) = &name
-        && let Some(existing) = queries::named(&mut tx, row.owner_id, row.org_id, new_name).await?
-        && existing != id
-    {
-        return Err(taken(Some(existing)));
-    }
-    match queries::change(&mut tx, id, body.expected_revision, &change, ctx.now).await {
-        Ok(true) => {}
-        Ok(false) => return Err(stale(&ctx, &mut tx, &principal, id).await),
-        Err(DbError::Unique { .. }) => return Err(taken(None)),
-        Err(error) => return Err(error.into()),
-    }
-    if body.config.is_some() || change.home_node_id.is_some() {
-        orch_db::queries::resources::mounts::changed(&mut tx, &[id], ctx.now).await?;
-    }
-    let who = actor_name(&ctx)?;
-    record(
-        &ctx,
-        &mut tx,
-        orch_db::audit::action!(AuditAction::EnvironmentUpdated),
-        id,
-        home_of(&row),
-        &format!("{who} changed the environment {}", row.name),
-        json!({
-            "environment": id,
-            "name": name,
-            "config": body.config.is_some(),
-            "remote_write": body.remote_write,
-            "terminal": body.terminal,
-            "browser": body.browser,
-            "vnc": body.vnc,
-            "home_node_id": change.home_node_id,
-        }),
-    )
-    .await?;
-    let exec_changed = body.config.as_ref().is_some_and(|config| {
-        config.get("exec.offers") != row.config.get("exec.offers")
-            || config.get("exec.orch_tools") != row.config.get("exec.orch_tools")
-    });
-    if exec_changed {
-        record(
-            &ctx,
-            &mut tx,
-            orch_db::audit::action!(AuditAction::EnvironmentExecChanged),
-            id,
-            home_of(&row),
-            &format!(
-                "{who} changed what the exec node of the environment {} offers",
-                row.name
-            ),
-            json!({ "environment": id }),
-        )
-        .await?;
-    }
-    // Publish after mount invalidation so the announced cursor covers the whole mutation.
-    // The notification commits with the row; metadata-only changes need it too.
-    job_rows::stamp_environment(&mut tx, id, ctx.now).await?;
-    let changed = show(&ctx, &mut tx, &principal, id).await?;
-    tx.commit().await.map_err(DbError::from)?;
-    if body.config.is_some() || change.home_node_id.is_some() {
-        if let Err(error) = ctx.app.engine.apply_environment_mounts(id).await {
-            tracing::warn!(environment = %id, %error, "environment mount changes remain pending");
-        }
-        if let Err(error) = ctx.app.engine.apply_environment_resources(id).await {
-            tracing::warn!(environment = %id, %error, "environment resource changes remain pending");
-        }
-    }
-    Ok(changed)
+    Ok(match current {
+        Some(value) => api::EnvironmentUpdateResponse::Full(Box::new(value)),
+        None => api::EnvironmentUpdateResponse::Receipt(receipt),
+    })
 }
 
 /// Switches an environment off.
@@ -1587,57 +1656,7 @@ pub(crate) fn removal_schedule_error(
 
 /// Every key valid on the environment, as it holds there: what its home resolves, then its own.
 async fn setting_list(ctx: Ctx, (): (), (): ()) -> ApiResult<Vec<settings_api::ResolvedSetting>> {
-    let id = ctx.id("id")?;
-    let mut conn = ctx.app.db.acquire().await?;
-    let principal = authorization::principal(&ctx, &mut conn).await?;
-    queries::environments(&mut conn, &[id])
-        .await?
-        .pop()
-        .ok_or_else(ApiError::not_found)?;
-    require(
-        &mut conn,
-        &principal,
-        ResourceKind::Environment,
-        id,
-        Permission::EnvironmentView,
-    )
-    .await?;
-    let manages = resources::check(
-        &mut conn,
-        &principal,
-        ObjectRef {
-            kind: ResourceKind::Environment.into(),
-            id,
-        },
-        Permission::EnvironmentManage,
-        Policy::default(),
-    )
-    .await
-    .map_err(ApiError::internal)?
-    .is_allowed();
-    let views = resolve_all(&mut conn, SettingsPlace::Environment(id))
-        .await
-        .map_err(ApiError::internal)?;
-    let mut nodes: Vec<Id> = views.iter().flat_map(|view| view.nodes()).collect();
-    nodes.sort_unstable();
-    nodes.dedup();
-    let refs = node_view::refs(&mut conn, &principal, &nodes, Policy::default()).await?;
-    views
-        .into_iter()
-        .map(|view| {
-            let writable = manages && view.def().set_at(Scope::Environment);
-            let setting = view.into_setting(writable).map_node(|node| {
-                refs.get(&node).cloned().unwrap_or(NodeRef {
-                    thread_display: None,
-                    id: node,
-                    kind: NodeKind::Org,
-                    name: None,
-                    redacted: true,
-                })
-            });
-            same(&setting).ok_or_else(|| ApiError::internal("a setting does not read as the API's"))
-        })
-        .collect()
+    crate::key_operations::native::selected_read::<settings_read::Environment>(ctx, (), ()).await
 }
 
 fn secret_failed(error: SecretError) -> ApiError {
@@ -1739,6 +1758,21 @@ async fn secret_delete(ctx: Ctx, (): (), (): ()) -> ApiResult<()> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn existing_config_previews_validate_full_consent_and_patch_deferral_is_narrow() {
+        let config = json!({"exec.version_overrides":{"codex":{
+            "path":"/codex","version":"unknown","by":orch_types::new_id(),
+            "at":"2026-10-31T00:00:00.000Z"
+        }}});
+        assert!(clean_config("config", &config).is_ok());
+        let mut pending = config.clone();
+        pending[registry::keys::EXEC_VERSION_OVERRIDES]["codex"]["at"] = json!("untrusted");
+        assert!(clean_config("config", &pending).is_err());
+        assert!(clean_patch_config("config", &pending).is_ok());
+        pending["unknown.setting"] = json!(true);
+        assert!(clean_patch_config("config", &pending).is_err());
+    }
 
     #[test]
     fn a_root_is_an_absolute_path_of_the_machines_own_kind_that_does_not_climb() {

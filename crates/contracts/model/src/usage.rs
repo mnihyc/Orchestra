@@ -20,6 +20,11 @@ use serde::{Deserialize, Serialize};
 /// What the upstream says a response used.
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
 pub struct ObservedUsage {
+    /// Successful native search operations, only where the vendor reports them.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub web_searches: Option<i64>,
+    /// The processing tier or speed the upstream actually reported, never the requested choice.
+    pub service_tier: Option<String>,
     /// The model that answered, as the response names it.
     pub model: Option<String>,
     /// What was used, in tokens.
@@ -189,6 +194,8 @@ mod tests {
     #[test]
     fn usage_that_is_observed_reads_and_writes_as_a_figure() {
         let seen = ObservedUsage {
+            web_searches: None,
+            service_tier: None,
             model: Some("gpt-6-sol".into()),
             tokens: TokenUsage::from_parts(orch_agent_contract::events::TokensReportedApart {
                 input: 10,

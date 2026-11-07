@@ -10,6 +10,14 @@
 //! [`SemanticSearchOverview`] is search by meaning across the system: each
 //! root org's index with its progress, estimate, disk and reason.
 
+use crate::operations::{
+    FacetSpec as Facet, OperationSpec as Op, TargetResolver as Target, VariantSpec as Variant,
+};
+use orch_access_contract::key_scope::KeyAction::{Manage, Read};
+use orch_access_contract::key_scope::KeyIdentityKind as I;
+use orch_access_contract::key_scope::KeyTargetKind::{Identity, Object};
+use orch_access_contract::permissions::ObjectKind as K;
+
 use std::collections::BTreeMap;
 
 use orch_types::{Id, Json, Revision, Time};
@@ -88,6 +96,26 @@ pub struct AdminUser {
     pub created_at: Time,
     /// When they were last seen.
     pub last_seen_at: Option<Time>,
+}
+
+/// The accepted standing change without the account's current private metadata.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+pub struct AdminUserUpdateReceipt {
+    /// Restricted response marker.
+    pub projection: crate::common::ReceiptProjection,
+    /// The exact account whose standing change was accepted.
+    pub account_id: Id,
+}
+
+crate::common::full_or_receipt! {
+    /// Ordinary account content or the same standing change's restricted acknowledgement.
+    #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+    pub enum AdminUserUpdateResponse {
+        /// The unchanged ordinary account projection, admitted by this operation's Read.
+        Full(AdminUser),
+        /// No private account metadata.
+        Receipt(AdminUserUpdateReceipt),
+    }
 }
 
 /// A unit that a host runs, whoever's it is.
@@ -722,6 +750,28 @@ pub struct HarnessVersionFetchBody {
     pub node_id: Option<Id>,
 }
 
+/// Accepted exact-version work without disclosing the global build catalogue.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+pub struct HarnessFetchReceipt {
+    /// Restricted projection marker.
+    pub projection: crate::common::ReceiptProjection,
+    /// The requested native program kind.
+    pub kind: String,
+    /// The exact accepted version.
+    pub version: String,
+}
+
+crate::common::full_or_receipt! {
+    /// The native catalogue under this operation's own Read, or its accepted version receipt.
+    #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+    pub enum HarnessFetchResponse {
+        /// The unchanged ordinary build projection.
+        Full(Vec<HarnessBuild>),
+        /// No global catalogue or check metadata.
+        Receipt(HarnessFetchReceipt),
+    }
+}
+
 /// How a plugin fares.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize, JsonSchema)]
 #[serde(rename_all = "snake_case")]
@@ -874,6 +924,27 @@ pub struct AdminSettingDeleteQuery {
     /// The own revision to remove, when a guarded reset or Undo is requested.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub expected_revision: Option<Revision>,
+}
+
+/// Accepted root-organization limits without its existing page content.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+pub struct OrgLimitsReceipt {
+    /// Restricted response marker.
+    pub projection: crate::common::ReceiptProjection,
+    /// The stored root organization changed or already matching the request.
+    pub id: Id,
+    /// Its accepted current revision.
+    pub revision: Revision,
+}
+crate::common::full_or_receipt! {
+    /// Ordinary organization content or a truthful limits acknowledgement.
+    #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+    pub enum OrgLimitsResponse {
+        /// The existing native organization projection under this operation's Read.
+        Full(Org),
+        /// The accepted effect with no organization content.
+        Receipt(OrgLimitsReceipt),
+    }
 }
 
 /// Which runtimes to list.
@@ -1169,6 +1240,28 @@ pub struct SemanticSearchOverview {
     pub orgs: Vec<SemanticSearchOrg>,
 }
 
+/// Accepted administrative index work without disclosing its configuration or progress.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+pub struct SemanticSearchReceipt {
+    /// Restricted projection marker.
+    pub projection: crate::common::ReceiptProjection,
+    /// The actual root organization whose index was changed.
+    pub org_id: Id,
+    /// The accepted native request identity.
+    pub request_id: Id,
+}
+
+crate::common::full_or_receipt! {
+    /// The ordinary index projection under the same operation's Read, or its accepted receipt.
+    #[derive(Debug, Clone, PartialEq, Serialize, Deserialize, JsonSchema)]
+    pub enum SemanticSearchResponse {
+        /// The existing native configuration and progress.
+        Full(SemanticSearchOrg),
+        /// The accepted act without configuration content.
+        Receipt(SemanticSearchReceipt),
+    }
+}
+
 /// The active generation an admin chose to keep, with its model, prompts and chunking.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
 #[serde(deny_unknown_fields)]
@@ -1179,107 +1272,202 @@ pub struct SemanticSearchKeepBody {
 
 crate::endpoints! {
     /// Lists the people of the system with what only a system admin reads about them.
-    AdminUserList: GET "/admin/users", Session, query AdminUserListQuery, none, json Page<AdminUser>, 200;
+    AdminUserList: GET "/admin/users", Session, query AdminUserListQuery, none, json Page<AdminUser>, 200,
+        operation Op::single(Manage, &[Identity(I::Account)], Target::System);
     /// Makes a person, their optional personal org, and a link to set a password.
-    AdminUserCreate: POST "/admin/users", Session, none, json AdminUserCreateBody, json AdminUserCreateReply, 200;
+    AdminUserCreate: POST "/admin/users", Session, none, json AdminUserCreateBody, json AdminUserCreateReply, 200,
+        operation Op::single(Manage, &[Identity(I::Account)], Target::System);
     /// Suspends a person or lets them sign in again, or changes whether they are a system admin.
-    AdminUserUpdate: PATCH "/admin/users/{id}", Session, none, json AdminUserUpdateBody, json AdminUser, 200;
+    AdminUserUpdate: PATCH "/admin/users/{id}", Session, none, json AdminUserUpdateBody, json AdminUserUpdateResponse, 200,
+        operation Op::receipt(&Op::returning(Manage, &[Identity(I::Account)], Target::TypedPath { parameter: "id", kind: Identity(I::Account) }));
     /// Makes a link with which a person sets a new password, that may also switch their second step off.
-    AdminUserResetLinkCreate: POST "/admin/users/{id}/reset-link", Session, none, json AdminUserResetLinkCreateBody, json AdminUserResetLinkCreateReply, 200;
+    AdminUserResetLinkCreate: POST "/admin/users/{id}/reset-link", Session, none, json AdminUserResetLinkCreateBody, json AdminUserResetLinkCreateReply, 200,
+        operation Op::receipt(&Op::returning(Manage, &[Identity(I::Account)], Target::TypedPath { parameter: "id", kind: Identity(I::Account) }));
     /// Gives a person one invitation to make a team org, which making one uses up while `orgs.created_by` is `invited`; a second one before the first is used changes nothing.
-    AdminUserOrgInvitationGive: POST "/admin/users/{id}/org-invitation", Session, none, none, none, 204;
+    AdminUserOrgInvitationGive: POST "/admin/users/{id}/org-invitation", Session, none, none, none, 204,
+        operation Op::returning(Manage, &[Identity(I::Account)], Target::TypedPath { parameter: "id", kind: Identity(I::Account) });
     /// Takes back the invitation to make a team org that a person has not used.
-    AdminUserOrgInvitationTakeBack: DELETE "/admin/users/{id}/org-invitation", Session, none, none, none, 204;
+    AdminUserOrgInvitationTakeBack: DELETE "/admin/users/{id}/org-invitation", Session, none, none, none, 204,
+        operation Op::returning(Manage, &[Identity(I::Account)], Target::TypedPath { parameter: "id", kind: Identity(I::Account) });
     /// Lists the settings at system scope, resolved.
-    AdminSettingList: GET "/admin/settings", Session, none, none, json Vec<ResolvedSetting>, 200;
+    AdminSettingList: GET "/admin/settings", Session, none, none, json Vec<ResolvedSetting>, 200,
+        operation Op::single(Read, &[Identity(I::System)], Target::System);
     /// Counts a system setting's readable reach and lists the places that override it.
-    AdminSettingReachGet: GET "/admin/settings/{key}/reach", Session, query PageQuery, none, json SettingReach, 200;
+    AdminSettingReachGet: GET "/admin/settings/{key}/reach", Session, query PageQuery, none, json SettingReach, 200,
+        operation Op::single(Read, &[Identity(I::System)], Target::System);
     /// Sets a setting at system scope, locked for every node below or not.
-    AdminSettingSet: PUT "/admin/settings/{key}", Session, none, json AdminSettingSetBody, json ResolvedSetting, 200;
+    AdminSettingSet: PUT "/admin/settings/{key}", Session, none, json AdminSettingSetBody, json ResolvedSetting, 200,
+        operation Op::returning(Manage, &[Identity(I::System)], Target::System);
     /// Takes a setting at system scope back to what Orch ships.
-    AdminSettingDelete: DELETE "/admin/settings/{key}", Session, query AdminSettingDeleteQuery, none, json ResolvedSetting, 200;
+    AdminSettingDelete: DELETE "/admin/settings/{key}", Session, query AdminSettingDeleteQuery, none, json ResolvedSetting, 200,
+        operation Op::returning(Manage, &[Identity(I::System)], Target::System);
     /// Reads the defaults page of the system, which every org starts from.
-    AdminDefaultsGet: GET "/admin/defaults", Session, none, none, json PermissionPage, 200;
+    AdminDefaultsGet: GET "/admin/defaults", Session, none, none, json PermissionPage, 200,
+        operation Op::single(Read, &[Identity(I::System)], Target::System);
     /// Changes the defaults page of the system; `whole: 'reset'` puts back what Orch ships.
-    AdminDefaultsUpdate: PATCH "/admin/defaults", Session, none, json PageChange, json PermissionPage, 200;
+    AdminDefaultsUpdate: PATCH "/admin/defaults", Session, none, json PageChange, json PermissionPage, 200,
+        operation Op::returning(Manage, &[Identity(I::System)], Target::System);
     /// Says how many pages, in how many orgs, follow the rows of a change to the defaults.
-    AdminDefaultsPreview: POST "/admin/defaults/preview", Session, none, json PageChange, json PagePreview, 200;
+    AdminDefaultsPreview: POST "/admin/defaults/preview", Session, none, json PageChange, json PagePreview, 200,
+        operation Op::single(Read, &[Identity(I::System)], Target::System);
     /// Lists every host on the system; hosts themselves are managed through their own requests.
-    AdminHostList: GET "/admin/hosts", Session, none, none, json Vec<Host>, 200;
+    AdminHostList: GET "/admin/hosts", Session, none, none, json Vec<Host>, 200,
+        operation Op::facets(&[
+            Facet::required(Read, &[Object(K::Host)], Target::ResolvedCollection("results")),
+            Facet::response_content(&[Object(K::Org),Object(K::Project),Object(K::Topic),Object(K::Thread),Object(K::Environment)], Target::ResolvedCollection("names")),
+        ]);
     /// Lists the runtimes of both pools, whoever's they are.
-    AdminRuntimeList: GET "/admin/runtimes", Session, query AdminRuntimeListQuery, none, json Vec<Runtime>, 200;
+    AdminRuntimeList: GET "/admin/runtimes", Session, query AdminRuntimeListQuery, none, json Vec<Runtime>, 200,
+        operation Op::facets(&[
+            Facet::required(Manage, &[Object(K::Environment),Object(K::Provider)], Target::ResolvedCollection("results")),
+            Facet::required(Manage, &[Object(K::Host),Object(K::Machine),Object(K::Template)], Target::ResolvedCollection("references")),
+            Facet::response_content(&[Object(K::Org),Object(K::Project),Object(K::Topic),Object(K::Thread)], Target::ResolvedCollection("names")),
+        ]);
     /// Reads what the system stored about itself as series over a span.
-    AdminMetricList: GET "/admin/metrics", Session, query AdminMetricListQuery, none, json Vec<MetricSeries>, 200;
+    AdminMetricList: GET "/admin/metrics", Session, query AdminMetricListQuery, none, json Vec<MetricSeries>, 200,
+        operation Op::single(Read, &[Identity(I::System)], Target::System);
     /// Makes an agent profile of the system, whose profile has no home.
-    AdminAgentCreate: POST "/admin/agents", Session, none, json OrgAgentCreateBody, json Agent, 200;
+    AdminAgentCreate: POST "/admin/agents", Session, none, json OrgAgentCreateBody, json Agent, 200,
+        operation Op::returning(Manage, &[Object(K::Agent)], Target::System);
     /// Lists the external implementations loaded anywhere, with how they fare.
-    AdminPluginList: GET "/admin/plugins", Session, none, none, json Vec<AdminPlugin>, 200;
+    AdminPluginList: GET "/admin/plugins", Session, none, none, json Vec<AdminPlugin>, 200,
+        operation Op::single(Read, &[Identity(I::System)], Target::System);
     /// Lists the definitions of capabilities.
-    AdminCapabilityList: GET "/admin/capabilities", Session, none, none, json Vec<CapabilityDef>, 200;
+    AdminCapabilityList: GET "/admin/capabilities", Session, none, none, json Vec<CapabilityDef>, 200,
+        operation Op::single(Read, &[Identity(I::System)], Target::System);
     /// Writes the definition of a capability, adding it or replacing it.
-    AdminCapabilitySet: PUT "/admin/capabilities/{key}", Session, none, json CapabilityDef, json CapabilityDef, 200;
+    AdminCapabilitySet: PUT "/admin/capabilities/{key}", Session, none, json CapabilityDef, json CapabilityDef, 200,
+        operation Op::returning(Manage, &[Identity(I::System)], Target::System);
     /// Removes the definition of a capability.
-    AdminCapabilityDelete: DELETE "/admin/capabilities/{key}", Session, none, none, json CapabilityDef, 200;
+    AdminCapabilityDelete: DELETE "/admin/capabilities/{key}", Session, none, none, json CapabilityDef, 200,
+        operation Op::returning(Manage, &[Identity(I::System)], Target::System);
     /// Lists the builds of harnesses that the tool cache can fetch.
-    AdminHarnessList: GET "/admin/harnesses", Session, none, none, json Vec<HarnessBuild>, 200;
+    AdminHarnessList: GET "/admin/harnesses", Session, none, none, json Vec<HarnessBuild>, 200,
+        operation Op::single(Read, &[Identity(I::System)], Target::System);
     /// Lists immutable build metadata for choosing versions and reviewing a target.
-    HarnessBuildList: GET "/harnesses/builds", User, none, none, json Vec<HarnessBuild>, 200;
+    HarnessBuildList: GET "/harnesses/builds", User, none, none, json Vec<HarnessBuild>, 200,
+        operation Op::single(Read, &[Identity(I::System)], Target::System);
     /// Fetches one exact vendor version with its checksum and begins its background check.
-    HarnessVersionFetch: POST "/harnesses/{kind}/{version}/fetch", Rule("manage the named environment or node settings, or system administration"), none, json HarnessVersionFetchBody, json Vec<HarnessBuild>, 202;
+    HarnessVersionFetch: POST "/harnesses/{kind}/{version}/fetch", Rule("manage the named environment or node settings, or system administration"), none, json HarnessVersionFetchBody, json HarnessFetchResponse, 202,
+        operation Op::receipt(&Op::variants(&[
+            Variant {
+                name: "environment",
+                selector: "environment_id is present",
+                facets: &[Facet::required(
+                    Manage,
+                    &[Object(K::Environment)],
+                    Target::Resolved("environment"),
+                ), Facet::response_content(&[Identity(I::System)], Target::System)],
+            },
+            Variant {
+                name: "node",
+                selector: "node_id is present",
+                facets: &[Facet::required(
+                    Manage,
+                    &[Object(K::Org), Object(K::Project)],
+                    Target::Resolved("node"),
+                ), Facet::response_content(&[Identity(I::System)], Target::System)],
+            },
+            Variant {
+                name: "system",
+                selector: "neither environment_id nor node_id is present",
+                facets: &[Facet::required(
+                    Manage,
+                    &[Identity(I::System)],
+                    Target::System,
+                ), Facet::response_content(&[Identity(I::System)], Target::System)],
+            },
+        ]));
     /// Lists the visible units holding each build and those behind their effective version choice.
-    AdminHarnessUsageList: GET "/admin/harnesses/usage", Session, none, none, json Vec<HarnessBuildUsage>, 200;
+    AdminHarnessUsageList: GET "/admin/harnesses/usage", Session, none, none, json Vec<HarnessBuildUsage>, 200,
+        operation Op::facets(&[
+            Facet::required(Read, &[Object(K::Environment),Object(K::Provider)], Target::ResolvedCollection("results")),
+            Facet::response_content(&[Object(K::Org),Object(K::Project),Object(K::Topic),Object(K::Thread)], Target::ResolvedCollection("names")),
+        ]);
     /// Lists the program builds held by this environment even when no update is pending.
     EnvironmentHarnessBuildList: GET "/environments/{id}/harnesses", Permission("environment.view"), none, none, json Vec<RunningHarnessBuild>, 200;
     /// Adds or replaces a build of a harness and lists them all.
-    AdminHarnessSet: PUT "/admin/harnesses/{kind}/{version}", Session, none, json HarnessBuild, json Vec<HarnessBuild>, 200;
+    AdminHarnessSet: PUT "/admin/harnesses/{kind}/{version}", Session, none, json HarnessBuild, json Vec<HarnessBuild>, 200,
+        operation Op::returning(Manage, &[Identity(I::System)], Target::System);
     /// Reads the vendors' release channels now (as the schedule does) and lists the builds.
-    AdminHarnessChannelsRead: POST "/admin/harnesses/channels", Session, none, none, json Vec<HarnessBuild>, 200;
+    AdminHarnessChannelsRead: POST "/admin/harnesses/channels", Session, none, none, json Vec<HarnessBuild>, 200,
+        operation Op::returning(Manage, &[Identity(I::System)], Target::System);
     /// Reads when release channels were last read and why they are or are not read on a schedule.
-    AdminHarnessChannelsGet: GET "/admin/harnesses/channels", Session, none, none, json HarnessChannelsStatus, 200;
+    AdminHarnessChannelsGet: GET "/admin/harnesses/channels", Session, none, none, json HarnessChannelsStatus, 200,
+        operation Op::single(Read, &[Identity(I::System)], Target::System);
     /// Imports a carried-in vendor checksum list and audits its digest.
-    AdminHarnessChecksumsImport: POST "/admin/harnesses/checksums", Session, none, json HarnessChecksumsImportBody, json HarnessChecksumsImportReply, 200;
+    AdminHarnessChecksumsImport: POST "/admin/harnesses/checksums", Session, none, json HarnessChecksumsImportBody, json HarnessChecksumsImportReply, 200,
+        operation Op::returning(Manage, &[Identity(I::System)], Target::System);
     /// Checks every kept build of a harness at a version again, in the background, and lists the builds.
-    AdminHarnessCheck: POST "/admin/harnesses/{kind}/{version}/check", Session, none, none, json Vec<HarnessBuild>, 200;
+    AdminHarnessCheck: POST "/admin/harnesses/{kind}/{version}/check", Session, none, none, json Vec<HarnessBuild>, 200,
+        operation Op::returning(Manage, &[Identity(I::System)], Target::System);
     /// Reads the audit trail of the whole system.
-    AdminAuditList: GET "/admin/audit", Session, query AdminAuditListQuery, none, json Page<AuditEntry>, 200;
+    AdminAuditList: GET "/admin/audit", Session, query AdminAuditListQuery, none, json Page<AuditEntry>, 200,
+        operation Op::single(Read, &[Identity(I::System)], Target::System);
     /// Writes a span of the audit trail, at most 366 days, as a streamed file.
-    AdminAuditExport: GET "/admin/audit/export", Session, query AdminAuditExportQuery, none, raw, 200;
+    AdminAuditExport: GET "/admin/audit/export", Session, query AdminAuditExportQuery, none, raw, 200,
+        operation Op::single(Read, &[Identity(I::System)], Target::System);
     /// Lists every org on the system; with `deleted=only`, those deleted and not purged yet.
-    AdminOrgList: GET "/admin/orgs", Session, query AdminOrgListQuery, none, json Page<Org>, 200;
+    AdminOrgList: GET "/admin/orgs", Session, query AdminOrgListQuery, none, json Page<Org>, 200,
+        operation Op::facets(&[
+            Facet::required(Read, &[Object(K::Org)], Target::ResolvedCollection("results")),
+            Facet::response_content(&[Object(K::Org),Object(K::Project),Object(K::Topic),Object(K::Thread),Object(K::Document),Object(K::DocumentContainer)], Target::ResolvedCollection("names")),
+        ]);
     /// Sets the two limits of a root org, a personal one or any other: whether its tree takes further members, and whether it holds orgs inside it.
-    AdminOrgUpdate: PATCH "/admin/orgs/{id}", Session, none, json OrgLimitsChange, json Org, 200;
+    AdminOrgUpdate: PATCH "/admin/orgs/{id}", Session, none, json OrgLimitsChange, json OrgLimitsResponse, 200,
+        operation Op::receipt(&Op::facets(&[
+            Facet::required(Manage,&[Object(K::Org)],Target::Path("id")),
+            Facet::response_content(&[Object(K::Org)],Target::Path("id")),
+            Facet::response_content(&[Object(K::Org),Object(K::Project),Object(K::Topic),Object(K::Thread),Object(K::Document),Object(K::DocumentContainer)],Target::ResolvedCollection("names")),
+        ]));
     /// Lists the identity providers.
-    AdminIdentityProviderList: GET "/admin/identity-providers", Session, none, none, json Vec<IdentityProvider>, 200;
+    AdminIdentityProviderList: GET "/admin/identity-providers", Session, none, none, json Vec<IdentityProvider>, 200,
+        operation Op::single(Read, &[Identity(I::System)], Target::System);
     /// Adds an identity provider.
-    AdminIdentityProviderCreate: POST "/admin/identity-providers", Session, none, json IdentityProviderInput, json IdentityProvider, 200;
+    AdminIdentityProviderCreate: POST "/admin/identity-providers", Session, none, json IdentityProviderInput, json IdentityProvider, 200,
+        operation Op::returning(Manage, &[Identity(I::System)], Target::System);
     /// Changes an identity provider.
-    AdminIdentityProviderUpdate: PATCH "/admin/identity-providers/{id}", Session, none, json IdentityProviderUpdateBody, json IdentityProvider, 200;
+    AdminIdentityProviderUpdate: PATCH "/admin/identity-providers/{id}", Session, none, json IdentityProviderUpdateBody, json IdentityProvider, 200,
+        operation Op::returning(Manage, &[Identity(I::System)], Target::System);
     /// Deletes an identity provider, which is refused while it is the only sign-in method of any active user.
-    AdminIdentityProviderDelete: DELETE "/admin/identity-providers/{id}", Session, none, none, none, 204;
+    AdminIdentityProviderDelete: DELETE "/admin/identity-providers/{id}", Session, none, none, none, 204,
+        operation Op::single(Manage, &[Identity(I::System)], Target::System);
     /// Fetches the discovery document of an identity provider's issuer, to see that it works.
-    AdminIdentityProviderTest: POST "/admin/identity-providers/{id}/test", Session, none, none, json IdentityProviderTestReply, 200;
+    AdminIdentityProviderTest: POST "/admin/identity-providers/{id}/test", Session, none, none, json IdentityProviderTestReply, 200,
+        operation Op::returning(Manage, &[Identity(I::System)], Target::System);
     /// Reads what the blob store holds.
-    AdminStorageGet: GET "/admin/storage", Session, none, none, json StorageStats, 200;
+    AdminStorageGet: GET "/admin/storage", Session, none, none, json StorageStats, 200,
+        operation Op::single(Read, &[Identity(I::System)], Target::System);
     /// Reads the state of the system's certificates.
-    AdminPkiGet: GET "/admin/pki", Session, none, none, json PkiInfo, 200;
+    AdminPkiGet: GET "/admin/pki", Session, none, none, json PkiInfo, 200,
+        operation Op::single(Read, &[Identity(I::System)], Target::System);
     /// Reads the state of the system: its release, its parts and its queues.
-    AdminSystemGet: GET "/admin/system", Session, none, none, json SystemInfo, 200;
+    AdminSystemGet: GET "/admin/system", Session, none, none, json SystemInfo, 200,
+        operation Op::single(Read, &[Identity(I::System)], Target::System);
     /// Checks only the operator's configured source and installs nothing.
-    AdminReleaseCheck: POST "/admin/releases/check", Session, none, none, json ReleaseCheck, 200;
+    AdminReleaseCheck: POST "/admin/releases/check", Session, none, none, json ReleaseCheck, 200,
+        operation Op::single(Read, &[Identity(I::System)], Target::System);
     /// Reconciles protected host metadata before returning operational facts.
-    AdminInstallationRecordsGet: GET "/admin/installation-records", Session, none, none, json InstallationRecords, 200;
+    AdminInstallationRecordsGet: GET "/admin/installation-records", Session, none, none, json InstallationRecords, 200,
+        operation Op::single(Manage, &[Identity(I::System)], Target::System);
     /// Reads the exact verified backup manifest's restore inventory; none without an available verified manifest.
-    AdminBackupRestoreList: GET "/admin/backup-restore-list", Session, none, none, json Option<BackupRestoreList>, 200;
+    AdminBackupRestoreList: GET "/admin/backup-restore-list", Session, none, none, json Option<BackupRestoreList>, 200,
+        operation Op::single(Manage, &[Identity(I::System)], Target::System);
     /// Reads where search by meaning stands for each root org where it is on or that has an index.
-    AdminSemanticSearchGet: GET "/admin/semantic-search", Session, none, none, json SemanticSearchOverview, 200;
+    AdminSemanticSearchGet: GET "/admin/semantic-search", Session, none, none, json SemanticSearchOverview, 200,
+        operation Op::single(Read, &[Identity(I::System)], Target::System);
     /// Rebuilds a root org's index in place: its vectors are removed and made anew with the model named.
-    AdminSemanticSearchRebuild: POST "/admin/semantic-search/{id}/rebuild", Session, none, none, json SemanticSearchOrg, 200;
+    AdminSemanticSearchRebuild: POST "/admin/semantic-search/{id}/rebuild", Session, none, none, json SemanticSearchResponse, 200,
+        operation Op::receipt(&Op::returning(Manage, &[Object(K::Org)], Target::Path("id")));
     /// Keeps the present generation's model, prompts and chunk size, respecting the org's settings and locks.
-    AdminSemanticSearchKeep: POST "/admin/semantic-search/{id}/keep", Session, none, json SemanticSearchKeepBody, json SemanticSearchOrg, 200;
+    AdminSemanticSearchKeep: POST "/admin/semantic-search/{id}/keep", Session, none, json SemanticSearchKeepBody, json SemanticSearchResponse, 200,
+        operation Op::receipt(&Op::returning(Manage, &[Object(K::Org)], Target::Path("id")));
     /// Reads the OpenAPI 3.1 document, generated from the same types as this contract.
-    OpenapiGet: GET "/openapi.json", User, none, none, raw, 200;
+    OpenapiGet: GET "/openapi.json", User, none, none, raw, 200,
+        operation Op::single(Read, &[Identity(I::System)], Target::System);
     /// Reads the certificate of the system's authority.
-    PkiCaGet: GET "/pki/ca.pem", Public, none, none, raw, 200;
+    PkiCaGet: GET "/pki/ca.pem", Public, none, none, raw, 200,
+        operation Op::public();
 }
 
 #[cfg(test)]

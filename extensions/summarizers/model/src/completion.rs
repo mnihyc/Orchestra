@@ -5,7 +5,7 @@
 use crate::{descriptor, prompts};
 use async_trait::async_trait;
 use orch_agent_contract::events::TokenUsage;
-use orch_link_contract::commands::{CompletionPurpose, ProviderComplete, ProviderCompleteResult};
+use orch_link_contract::commands::{ProviderComplete, ProviderCompleteResult};
 use orch_summarizer_contract::descriptor::{SummarizerDescriptor, SummaryField};
 use orch_summarizer_contract::result::{SummaryResult, UsageEvent};
 use orch_summarizer_contract::summarizer::{SummarizeError, Summarizer, SummaryRequest};
@@ -49,17 +49,7 @@ impl Summarizer for Model {
             .complete
             .complete(
                 request.node.id,
-                ProviderComplete {
-                    params: None,
-                    provider_id: config.provider_id,
-                    purpose: CompletionPurpose::Summary,
-                    // The host replaces this with a protocol this actual provider offers.
-                    protocol: String::new(),
-                    model_name: config.model_name.clone(),
-                    system,
-                    input,
-                    max_output_tokens: config.max_output_tokens,
-                },
+                config.completion(system, input, config.max_output_tokens),
             )
             .await?;
         let tokens: TokenUsage = answer.usage;

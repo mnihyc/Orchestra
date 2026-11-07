@@ -5,15 +5,17 @@
 //! rules of its org, and the access engine decides that with every other question here: who sees
 //! a profile, who may use it, who manages it, and what a refusal says is missing.
 
-use crate::middleware::authorization::{self, refusals};
+use crate::middleware::authorization::refusals;
 use crate::middleware::requests::{ApiError, ApiResult};
 use crate::registry::{Ctx, Registry};
+use crate::routes::access::page::{NameBounds, NameSources};
 use crate::routes::admin::catalogue::builds_listed;
 use crate::routes::downloads::payload_dir;
-use crate::routes::nodes::{actor_name, invalid, placed, view as node_view};
-use crate::routes::resources::machines::registrable_machine as own_machine;
+use crate::routes::nodes::{actor_name, invalid, view as node_view};
 use crate::routes::resources::providers::registration_home;
-use crate::routes::resources::view::{Holding, accesses, addresses, machine_refs};
+use crate::routes::resources::view::{
+    Holding, PreparedAccess, accesses, accesses_prepared, addresses, machine_refs, prepare_accesses,
+};
 use crate::routes::resources::{Home, LIST_LIMIT, begin_mutation, clean_name, record, require};
 use orch_access_contract::audit::AuditAction;
 use orch_access_contract::decisions::{Held, ObjectRef};
@@ -21,13 +23,11 @@ use orch_access_contract::permissions::{Permission, ResourceKind};
 use orch_agent_contract::facts::AgentProfile;
 use orch_api_contract::admin::HarnessBuild;
 use orch_api_contract::common::ErrorCode;
-use orch_api_contract::nodes::NodeKind;
 use orch_api_contract::resources::{self as api, Agent, AgentRef};
 use orch_authz::nodes::Page;
-use orch_authz::ownership::{self, NewAccess};
 use orch_authz::{Policy, Principal, resources};
 use orch_db::queries::resources::binding::{self as binding_rows, AgentKindRow};
-use orch_db::queries::resources::routes::{self as queries, AgentChange, AgentRow, NewAgent};
+use orch_db::queries::resources::routes::{self as queries, AgentChange, AgentRow};
 use orch_db::{Conn, DbError};
 use orch_types::{Id, Json, Time};
 use serde_json::json;
@@ -40,17 +40,33 @@ const PROFILE_MEMBERS: [&str; 4] = ["harness_version", "attach", "config", "env"
 /// The longest a harness kind is: a name of an adapter.
 const HARNESS_KIND_MAX_CHARS: usize = 64;
 
+mod collection_read;
+mod creation;
+mod read;
+
 /// Binds this module's requests.
 pub fn mount(registry: &mut Registry) {
     registry
-        .on(api::AgentList, list)
-        .on(api::OrgAgentCreate, create)
-        .on(api::AgentGet, get)
+        .on_with_optional_operation(
+            api::AgentList,
+            collection_read::prepare,
+            collection_read::get,
+        )
+        .on_with_operation(
+            api::OrgAgentCreate,
+            crate::key_operations::native::effects::prepare::<creation::Profiles>,
+            creation::create,
+        )
+        .on_with_optional_operation(api::AgentGet, read::prepare, read::get)
         .on(api::AgentUpdate, update)
         .on(api::AgentDelete, delete)
         .on(api::HarnessKindList, harness_kinds)
         .on(api::HarnessExecutorList, harness_executors)
-        .on(api::MachineAgentCreate, machine_agent_create);
+        .on_with_operation(
+            api::MachineAgentCreate,
+            crate::key_operations::native::effects::prepare::<creation::MachineProfiles>,
+            creation::create_machine,
+        );
 }
 
 /// The profile as the API reads a body: only the members a profile has, and the right kind of
@@ -157,12 +173,35 @@ async fn agent_views(
     rows: Vec<AgentRow>,
     standing: &HashMap<Id, Standing>,
 ) -> ApiResult<Vec<Agent>> {
+    agent_views_prepared(ctx, conn, principal, rows, standing, None).await
+}
+
+async fn agent_views_prepared(
+    ctx: &Ctx,
+    conn: &mut Conn,
+    principal: &Principal,
+    rows: Vec<AgentRow>,
+    standing: &HashMap<Id, Standing>,
+    prepared: Option<&PreparedListProjection>,
+) -> ApiResult<Vec<Agent>> {
     let ids: Vec<Id> = rows.iter().map(|row| row.id).collect();
     let addresses = addresses(conn, &ids).await?;
     let people: Vec<Id> = rows.iter().filter_map(|row| row.owner_id).collect();
     let people = refusals::user_refs(conn, &people).await?;
     let homes: Vec<Id> = rows.iter().filter_map(|row| row.home_id).collect();
-    let homes = node_view::refs(conn, principal, &homes, Policy::default()).await?;
+    let homes = match prepared {
+        Some(prepared) if prepared.bounds.limited => {
+            node_view::refs_with_name_sources(
+                conn,
+                principal,
+                &homes,
+                Policy::default(),
+                &prepared.bounds.nodes,
+            )
+            .await?
+        }
+        _ => node_view::refs(conn, principal, &homes, Policy::default()).await?,
+    };
     let machines: Vec<Id> = rows.iter().filter_map(|row| row.machine_id).collect();
     let machines = machine_refs(&ctx.app, conn, &machines).await?;
     let holdings: Vec<Holding<'_>> = rows
@@ -180,26 +219,23 @@ async fn agent_views(
             })
         })
         .collect();
-    let access = accesses(conn, principal, &holdings).await?;
-    let associations: Vec<(Id, Id)> = sqlx::query_as(
-        "SELECT agent_id,id FROM providers WHERE agent_id=ANY($1) AND deleted_at IS NULL
-         UNION SELECT DISTINCT t.agent_id,t.provider_id FROM threads t JOIN nodes n ON n.id=t.node_id
-         WHERE t.agent_id=ANY($1) AND t.provider_id IS NOT NULL AND n.deleted_at IS NULL",
-    ).bind(&ids).fetch_all(&mut *conn).await.map_err(DbError::from)?;
-    let provider_ids: Vec<Id> = associations.iter().map(|(_, provider)| *provider).collect();
-    let readable: Vec<Id> =
-        resources::effective_among(conn, principal, &provider_ids, Policy::default())
-            .await
-            .map_err(ApiError::internal)?
-            .into_iter()
-            .filter(|holding| {
-                holding
-                    .held
-                    .iter()
-                    .any(|held| held.permission == Permission::ProviderView)
-            })
-            .map(|holding| holding.object.id)
-            .collect();
+    let access = match prepared {
+        Some(prepared) => {
+            accesses_prepared(
+                conn,
+                principal,
+                &holdings,
+                &prepared.access,
+                Some(&prepared.bounds),
+            )
+            .await?
+        }
+        None => accesses(conn, principal, &holdings).await?,
+    };
+    let (associations, readable) = match prepared {
+        Some(prepared) => (prepared.associations.clone(), prepared.providers.clone()),
+        None => readable_providers(conn, principal, &ids).await?,
+    };
     let providers = crate::routes::resources::view::provider_refs(conn, &readable, &[]).await?;
     let models = queries::models_of(conn, &readable).await?;
     rows.into_iter()
@@ -257,6 +293,179 @@ async fn agent_views(
         .collect()
 }
 
+fn query_scope<'a>(
+    conn: &'a mut Conn,
+    _principal: &'a Principal,
+    seen: Vec<resources::Seen>,
+    query: &'a api::AgentListQuery,
+) -> futures::future::BoxFuture<'a, ApiResult<Vec<resources::Seen>>> {
+    Box::pin(async move {
+        // To use or to manage: looking at a profile is not enough to be offered it.
+        let mut seen: Vec<_> = seen
+            .into_iter()
+            .filter(|each| {
+                each.administers
+                    || each.held.iter().any(|held| {
+                        matches!(
+                            held.permission,
+                            Permission::AgentView
+                                | Permission::AgentUse
+                                | Permission::AgentManage
+                                | Permission::AccessManage
+                        )
+                    })
+            })
+            .collect();
+        if let Some(org) = query.org_id {
+            let homes: Vec<Id> = seen.iter().filter_map(|each| each.resource.home).collect();
+            let inside = queries::homes_under(conn, org, &homes).await?;
+            // A profile of the system belongs to every org.
+            seen.retain(|each| each.resource.home.is_none_or(|home| inside.contains(&home)));
+        }
+        Ok(seen)
+    })
+}
+
+/// Actual ordinary-readable provider sources; scope never manufactures ProviderView.
+async fn readable_providers(
+    conn: &mut Conn,
+    principal: &Principal,
+    agents: &[Id],
+) -> ApiResult<(Vec<(Id, Id)>, Vec<Id>)> {
+    let associations = queries::agent_provider_associations(conn, agents).await?;
+    let provider_ids: Vec<_> = associations.iter().map(|(_, provider)| *provider).collect();
+    let readable = resources::effective_among(conn, principal, &provider_ids, Policy::default())
+        .await
+        .map_err(ApiError::internal)?
+        .into_iter()
+        .filter(|holding| {
+            holding
+                .held
+                .iter()
+                .any(|held| held.permission == Permission::ProviderView)
+        })
+        .map(|holding| holding.object.id)
+        .collect();
+    Ok((associations, readable))
+}
+
+pub(crate) struct PreparedListProjection {
+    rows: Vec<AgentRow>,
+    standing: HashMap<Id, Standing>,
+    access: PreparedAccess,
+    sources: NameSources,
+    bounds: NameBounds,
+    associations: Vec<(Id, Id)>,
+    providers: Vec<Id>,
+    machines: Vec<Id>,
+}
+
+impl PreparedListProjection {
+    pub(crate) fn name_sources(&self) -> &NameSources {
+        &self.sources
+    }
+
+    pub(crate) fn bound_names(&mut self, bounds: NameBounds) {
+        self.bounds = bounds;
+    }
+
+    pub(crate) fn provider_ids(&self) -> &[Id] {
+        &self.providers
+    }
+
+    pub(crate) fn machine_ids(&self) -> &[Id] {
+        &self.machines
+    }
+}
+
+pub(crate) async fn prepare_list_projection(
+    conn: &mut Conn,
+    principal: &Principal,
+    seen: &[resources::Seen],
+) -> ApiResult<PreparedListProjection> {
+    let ids: Vec<_> = seen.iter().map(|each| each.resource.id).collect();
+    let rows = queries::agents(conn, &ids).await?;
+    let standing: HashMap<_, _> = seen
+        .iter()
+        .map(|each| {
+            (
+                each.resource.id,
+                Standing {
+                    admin_access: each.admin_access,
+                    admin_place: each.admin_place,
+                    participating: each.participating,
+                    admin_only: each.admin_only.clone(),
+                    owner: each.owner,
+                    administers: each.administers,
+                    held: each.held.clone(),
+                },
+            )
+        })
+        .collect();
+    prepare_rows_projection(conn, principal, rows, standing).await
+}
+
+async fn prepare_rows_projection(
+    conn: &mut Conn,
+    principal: &Principal,
+    rows: Vec<AgentRow>,
+    standing: HashMap<Id, Standing>,
+) -> ApiResult<PreparedListProjection> {
+    let ids: Vec<_> = rows.iter().map(|row| row.id).collect();
+    let holdings: Vec<_> = rows
+        .iter()
+        .filter_map(|row| {
+            standing.get(&row.id).map(|each| Holding {
+                admin_only: &each.admin_only,
+                admin_access: each.admin_access,
+                admin_place: each.admin_place,
+                participating: each.participating,
+                id: row.id,
+                owner: each.owner,
+                administers: each.administers,
+                held: &each.held,
+            })
+        })
+        .collect();
+    let access = prepare_accesses(conn, &holdings).await?;
+    let mut sources = access.names.clone();
+    sources
+        .nodes
+        .extend(rows.iter().filter_map(|row| row.home_id));
+    let (associations, providers) = readable_providers(conn, principal, &ids).await?;
+    // The same native machine_refs deleted predicate supplies every scoped caller's
+    // factual source set. No Machine View is added to the Agent's ordinary renderer.
+    let machines: Vec<_> = rows.iter().filter_map(|row| row.machine_id).collect();
+    let machines = queries::live_machine_ids(conn, &machines).await?;
+    Ok(PreparedListProjection {
+        rows,
+        standing,
+        access,
+        sources,
+        bounds: NameBounds::default(),
+        associations,
+        providers,
+        machines,
+    })
+}
+
+pub(crate) async fn show_list_prepared(
+    ctx: &Ctx,
+    conn: &mut Conn,
+    principal: &Principal,
+    prepared: &PreparedListProjection,
+) -> ApiResult<Vec<Agent>> {
+    agent_views_prepared(
+        ctx,
+        conn,
+        principal,
+        prepared.rows.clone(),
+        &prepared.standing,
+        Some(prepared),
+    )
+    .await
+}
+
 /// Bounded inventory rows reuse the very same bulk view and standings from its permission frame.
 pub(crate) async fn inventory(
     ctx: &Ctx,
@@ -288,12 +497,11 @@ pub(crate) async fn inventory(
 
 /// One profile as the caller sees it, with what they hold on it. The caller holds something on
 /// it already, or this is not asked.
-pub(crate) async fn show(
-    ctx: &Ctx,
+async fn single_rows(
     conn: &mut Conn,
     principal: &Principal,
     id: Id,
-) -> ApiResult<Agent> {
+) -> ApiResult<(Vec<AgentRow>, HashMap<Id, Standing>)> {
     let row = queries::agents(conn, &[id])
         .await?
         .pop()
@@ -317,59 +525,55 @@ pub(crate) async fn show(
             held: effective.held,
         },
     )]);
-    agent_views(ctx, conn, principal, vec![row], &standing)
+    Ok((vec![row], standing))
+}
+
+pub(crate) async fn show(
+    ctx: &Ctx,
+    conn: &mut Conn,
+    principal: &Principal,
+    id: Id,
+) -> ApiResult<Agent> {
+    let (rows, standing) = single_rows(conn, principal, id).await?;
+    agent_views(ctx, conn, principal, rows, &standing)
         .await?
         .pop()
         .ok_or_else(|| ApiError::internal("a profile was read and is not shown"))
 }
 
+pub(crate) async fn prepare_projection(
+    conn: &mut Conn,
+    principal: &Principal,
+    id: Id,
+) -> ApiResult<PreparedListProjection> {
+    let (rows, standing) = single_rows(conn, principal, id).await?;
+    prepare_rows_projection(conn, principal, rows, standing).await
+}
+
 /// The profiles the caller may use or manage.
-async fn list(
-    ctx: Ctx,
-    query: api::AgentListQuery,
-    (): (),
+async fn ordinary_list(
+    ctx: &Ctx,
+    conn: &mut Conn,
+    principal: &Principal,
+    query: &api::AgentListQuery,
 ) -> ApiResult<Vec<orch_api_contract::common::Listed<Agent>>> {
-    let mut conn = ctx.app.db.acquire().await?;
-    let principal = authorization::principal(&ctx, &mut conn).await?;
     let page = Page {
         after: None,
         limit: LIST_LIMIT,
     };
     let seen = resources::visible(
-        &mut conn,
-        &principal,
+        conn,
+        principal,
         ResourceKind::Agent,
         page,
         Policy::default(),
     )
     .await
     .map_err(ApiError::internal)?;
-    // To use or to manage: looking at a profile is not enough to be offered it.
-    let mut seen: Vec<_> = seen
-        .items
-        .into_iter()
-        .filter(|each| {
-            each.administers
-                || each.held.iter().any(|held| {
-                    matches!(
-                        held.permission,
-                        Permission::AgentView
-                            | Permission::AgentUse
-                            | Permission::AgentManage
-                            | Permission::AccessManage
-                    )
-                })
-        })
-        .collect();
-    if let Some(org) = query.org_id {
-        let homes: Vec<Id> = seen.iter().filter_map(|each| each.resource.home).collect();
-        let inside = queries::homes_under(&mut conn, org, &homes).await?;
-        // A profile of the system belongs to every org.
-        seen.retain(|each| each.resource.home.is_none_or(|home| inside.contains(&home)));
-    }
-    let private = super::hidden_items(&mut conn, &principal, &mut seen).await?;
+    let mut seen = query_scope(conn, principal, seen.items, query).await?;
+    let private = super::hidden_items(conn, principal, &mut seen).await?;
     let ids: Vec<Id> = seen.iter().map(|each| each.resource.id).collect();
-    let rows = queries::agents(&mut conn, &ids).await?;
+    let rows = queries::agents(conn, &ids).await?;
     let standing: HashMap<Id, Standing> = seen
         .into_iter()
         .map(|each| {
@@ -388,87 +592,26 @@ async fn list(
         })
         .collect();
     Ok(super::listed(
-        agent_views(&ctx, &mut conn, &principal, rows, &standing).await?,
+        agent_views(ctx, conn, principal, rows, &standing).await?,
         private,
     ))
 }
 
-/// Makes a profile in an org, the caller's own. Whoever may make it is told by the access engine
-/// before this runs: they hold `settings.manage` on the org.
-async fn create(ctx: Ctx, (): (), body: api::OrgAgentCreateBody) -> ApiResult<Agent> {
-    let org = ctx.id("id")?;
-    let name = clean_name("name", &body.name)?;
-    let harness_kind = clean_harness_kind("harness_kind", &body.harness_kind)?;
-    let profile = clean_profile("profile", &body.profile, false)?;
-    let (ctx, mut tx, principal) = begin_mutation(&ctx).await?;
-    let (place, kind) = placed(&mut tx, org).await?;
-    if kind != NodeKind::Org {
-        return Err(ApiError::not_found());
-    }
-    let id = orch_types::new_id();
-    queries::insert_agent(
-        &mut tx,
-        &NewAgent {
-            id,
-            name: &name,
-            owner_id: principal.user(),
-            home_id: org,
-            harness_kind: &harness_kind,
-            machine_id: None,
-            profile: &profile,
-        },
-        ctx.now,
-    )
-    .await?;
-    ownership::start_resource(
-        &mut tx,
-        ObjectRef {
-            kind: ResourceKind::Agent.into(),
-            id,
-        },
-        principal.user(),
-        NewAccess::Defaults,
-        Time::new(ctx.now),
-    )
-    .await
-    .map_err(ApiError::internal)?;
-    let who = actor_name(&ctx)?;
-    record(
-        &ctx,
-        &mut tx,
-        orch_db::audit::action!(AuditAction::AgentCreated),
-        id,
-        Home {
-            node: Some(org),
-            org: Some(place.org),
-        },
-        &format!("{who} added the agent profile {name}"),
-        json!({ "agent": id, "name": name, "harness_kind": harness_kind }),
-    )
-    .await?;
-    let made = show(&ctx, &mut tx, &principal, id).await?;
-    tx.commit().await.map_err(DbError::from)?;
-    Ok(made)
-}
-
 /// Reads a profile: whoever holds any permission on it.
-async fn get(ctx: Ctx, (): (), (): ()) -> ApiResult<Agent> {
-    let id = ctx.id("id")?;
-    let mut conn = ctx.app.db.acquire().await?;
-    let principal = authorization::principal(&ctx, &mut conn).await?;
-    queries::agents(&mut conn, &[id])
+async fn require_read(conn: &mut Conn, principal: &Principal, id: Id) -> ApiResult<()> {
+    queries::agents(conn, &[id])
         .await?
         .pop()
         .ok_or_else(ApiError::not_found)?;
     require(
-        &mut conn,
-        &principal,
+        conn,
+        principal,
         ResourceKind::Agent,
         id,
         Permission::AgentView,
     )
     .await?;
-    show(&ctx, &mut conn, &principal, id).await
+    Ok(())
 }
 
 /// Changes a profile, or switches it off or on.
@@ -962,82 +1105,6 @@ pub(crate) fn machine_reports(facts: &Json, kind: &str) -> bool {
                         })
                 })
     })
-}
-
-/// Registers a profile for a harness that a machine of the caller's drives, in their domain or an org
-/// inside it. The profile is the caller's own, as the machine is. What the machine did not report it
-/// can drive is not registered on it.
-async fn machine_agent_create(
-    ctx: Ctx,
-    (): (),
-    body: api::MachineAgentCreateBody,
-) -> ApiResult<Agent> {
-    let name = clean_name("name", &body.name)?;
-    let harness_kind = clean_harness_kind("harness_kind", &body.harness_kind)?;
-    let profile = clean_profile("profile", body.profile.as_ref().unwrap_or(&json!({})), true)?;
-    let (ctx, mut tx, principal) = begin_mutation(&ctx).await?;
-    let now = ctx.now;
-    let machine = own_machine(&ctx, &mut tx, ctx.id("id")?).await?;
-    if !machine.is_active() {
-        return Err(ApiError::not_found());
-    }
-    crate::backplane::require_facts(&machine.facts)?;
-    let place = registration_home(&mut tx, &principal, body.home_id, "home_id").await?;
-    if !machine.roles.iter().any(|role| role == "agent")
-        || !machine_reports(&machine.facts, &harness_kind)
-    {
-        return Err(invalid(
-            "harness_kind",
-            "this machine did not report that it can run this harness",
-        ));
-    }
-    let id = orch_types::new_id();
-    queries::insert_agent(
-        &mut tx,
-        &NewAgent {
-            id,
-            name: &name,
-            owner_id: principal.user(),
-            home_id: body.home_id,
-            harness_kind: &harness_kind,
-            machine_id: Some(machine.id),
-            profile: &profile,
-        },
-        now,
-    )
-    .await?;
-    ownership::start_resource(
-        &mut tx,
-        ObjectRef {
-            kind: ResourceKind::Agent.into(),
-            id,
-        },
-        principal.user(),
-        NewAccess::Defaults,
-        Time::new(now),
-    )
-    .await
-    .map_err(ApiError::internal)?;
-    let who = actor_name(&ctx)?;
-    record(
-        &ctx,
-        &mut tx,
-        AuditAction::AgentCreated,
-        id,
-        Home {
-            node: Some(body.home_id),
-            org: Some(place.org),
-        },
-        &format!(
-            "{who} added the agent profile {name} for the harness {harness_kind} on the machine {}",
-            machine.name
-        ),
-        json!({ "agent": id, "name": name, "harness_kind": harness_kind, "machine": machine.id }),
-    )
-    .await?;
-    let made = show(&ctx, &mut tx, &principal, id).await?;
-    tx.commit().await.map_err(DbError::from)?;
-    Ok(made)
 }
 
 #[cfg(test)]

@@ -349,6 +349,41 @@ pub const APPROVAL_UNSUPPORTED: &str = "This agent does not support the selected
 /// No supported sandbox fits all the current ceilings.
 pub const SANDBOX_UNSUPPORTED: &str = "This agent and environment cannot provide the requested tool access. Choose another agent or environment, or ask a manager to change sandbox.mode and the sandbox.max or agent.max_sandbox limits.";
 
+/// Names the requested mode while preserving its catalogued unsupported explanation.
+#[must_use]
+pub fn unsupported_approval_detail(mode: ApprovalMode) -> String {
+    approval_mode_detail(mode, APPROVAL_UNSUPPORTED)
+}
+
+/// Names the requested mode while preserving its catalogued policy explanation.
+#[must_use]
+pub fn disallowed_approval_detail(mode: ApprovalMode) -> String {
+    approval_mode_detail(mode, APPROVAL_NOT_ALLOWED)
+}
+
+fn approval_mode_detail(mode: ApprovalMode, explanation: &'static str) -> String {
+    let name = match mode {
+        ApprovalMode::Ask => "Ask",
+        ApprovalMode::OnRequest => "On request",
+        ApprovalMode::Auto => "Auto",
+        ApprovalMode::Bypass => "Bypass",
+    };
+    format!("{name}: {explanation}")
+}
+
+/// Recognizes only current and retained product explanations for approval-mode recovery.
+#[must_use]
+pub fn is_approval_mode_refusal(detail: &str) -> bool {
+    matches!(detail, APPROVAL_NOT_ALLOWED | APPROVAL_UNSUPPORTED)
+        || matches!(
+            detail.split_once(": "),
+            Some((
+                "Ask" | "On request" | "Auto" | "Bypass",
+                APPROVAL_NOT_ALLOWED | APPROVAL_UNSUPPORTED
+            ))
+        )
+}
+
 /// How the harness is confined for a turn: the approval mode and the sandbox
 /// mode, or what has to give.
 pub fn confinement(
@@ -540,6 +575,18 @@ impl StartSnapshot {
     pub fn session_configuration(&self) -> harnesses::SessionConfiguration {
         harnesses::SessionConfiguration {
             cwd: self.cwd(),
+            background_wake: self.settings.background_wake,
+            restart_sensitive: self
+                .descriptor
+                .capabilities
+                .turn_changes_require_restart
+                .then(|| {
+                    serde_json::json!({
+                        "model":self.turn.model,"effort":self.turn.effort,
+                        "params":self.adapter_params().unwrap_or_else(|_| self.turn.params.clone()),
+                        "approval_mode":self.approval,"sandbox_mode":self.sandbox,
+                    })
+                }),
             memory: self
                 .memory_plan()
                 .session_memory(&self.directory())
@@ -547,13 +594,36 @@ impl StartSnapshot {
                     directory: memory.directory,
                     kept_by: keeper(memory.kept_by),
                 }),
+            executor_version: self.executor_version(),
         }
+    }
+
+    /// The build reported by the executor this admitted snapshot selected, never a manifest fallback.
+    fn executor_version(&self) -> Option<String> {
+        let kind = self
+            .thread
+            .executor
+            .as_deref()
+            .filter(|kind| *kind != "orch-exec")?;
+        Some(
+            self.environment
+                .facts
+                .get("executors")
+                .and_then(Json::as_array)
+                .into_iter()
+                .flatten()
+                .find(|fact| fact.get("kind").and_then(Json::as_str) == Some(kind))
+                .and_then(|fact| fact.get("version"))
+                .and_then(Json::as_str)
+                .filter(|version| !version.is_empty())
+                .unwrap_or("unknown")
+                .to_owned(),
+        )
     }
 
     /// What the session's texts say of the thread's place.
     fn place<'a>(&'a self, directory: &'a str, cwd: &'a str) -> Place<'a> {
         Place {
-            documents_policy: self.material.policy,
             read_first: &self.material.paths,
             directory,
             cwd,
@@ -672,7 +742,6 @@ impl StartSnapshot {
                 let definition = crate::tools::definitions::definition_at(
                     *tool,
                     &self.settings.messages,
-                    &self.settings.broadcast_agent_scope,
                     &self.settings.broadcast_agent_options,
                 );
                 crate::model_inputs::ModelBlock::new(
@@ -709,7 +778,6 @@ impl StartSnapshot {
                 let definition = crate::tools::definitions::definition_at(
                     *tool,
                     &self.settings.messages,
-                    &self.settings.broadcast_agent_scope,
                     &self.settings.broadcast_agent_options,
                 );
                 (tool.name().to_owned(), definition.input_schema)
@@ -804,6 +872,7 @@ fn ticket(
     thread: Id,
     tool_set: Option<&str>,
     environment: Option<(Id, i64)>,
+    executor_version: Option<&str>,
 ) -> link::TicketSlot {
     let mut more = serde_json::Map::new();
     more.insert("service".to_owned(), Json::String(service.to_string()));
@@ -818,6 +887,9 @@ fn ticket(
             Json::String(environment.to_string()),
         );
         more.insert("environment_generation".to_owned(), Json::from(generation));
+    }
+    if let Some(version) = executor_version {
+        more.insert("executor_version".into(), Json::String(version.into()));
     }
     link::TicketSlot::Asked(link::TicketAsk {
         ticket: link::TicketWanted { kind, more },
@@ -877,6 +949,7 @@ pub fn session_open_body_importing(
                     thread,
                     None,
                     None,
+                    None,
                 ),
             }
         }
@@ -930,6 +1003,7 @@ pub fn session_open_body_importing(
                 snapshot.environment.id,
                 i64::from(snapshot.environment.generation),
             )),
+            None,
         )),
         (Some(other), Some(machine)) => Some(ticket(
             TunnelKind::Exec,
@@ -943,6 +1017,7 @@ pub fn session_open_body_importing(
                 snapshot.environment.id,
                 i64::from(snapshot.environment.generation),
             )),
+            configuration.executor_version.as_deref(),
         )),
     };
     let parameters = snapshot.adapter_params()?;
@@ -951,6 +1026,11 @@ pub fn session_open_body_importing(
         _ => serde_json::Map::new(),
     };
     Ok(link::SessionOpen {
+        transport_only: false,
+        turn_changes_require_restart: snapshot
+            .descriptor
+            .capabilities
+            .turn_changes_require_restart,
         agent_id: snapshot.agent.id,
         thread_id: thread,
         segment_id: snapshot.segment.id,
@@ -976,6 +1056,7 @@ pub fn session_open_body_importing(
         approval_mode: convert(&snapshot.approval)?,
         available_models: snapshot.available_models.clone(),
         subagent_limits: snapshot.settings.subagent_limits,
+        background_wake: snapshot.settings.background_wake,
         sandbox_mode: convert(&snapshot.sandbox)?,
         instructions: snapshot.instructions().text,
         memory: configuration.memory,
@@ -1160,7 +1241,8 @@ impl Engine {
         if turn.state != state {
             return Ok(StartLoad::NoTurn);
         }
-        self.snapshot_for_turn(conn, thread, turn).await
+        // Keep the snapshot future out of the enclosing turn drivers.
+        Box::pin(self.snapshot_for_turn(conn, thread, turn)).await
     }
 
     /// Prepares configuration for an idle continuation without minting a turn or a cap reservation.
@@ -1380,7 +1462,8 @@ impl Engine {
             Vec::new()
         };
         let context_sent = threads::context_sent(conn, segment.id).await?;
-        let material = self.topic_material(conn, thread_id).await?;
+        // Keep the shared-material future out of the snapshot's accumulated state.
+        let material = Box::pin(self.topic_material(conn, thread_id)).await?;
         Ok(StartLoad::Ready(Box::new(StartSnapshot {
             material,
             thread,

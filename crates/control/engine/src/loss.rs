@@ -17,6 +17,63 @@ use orch_db::{
 use orch_types::{Hash, Id, Time, new_id};
 use serde::{Deserialize, Serialize};
 use serde_json::json;
+use std::collections::HashSet;
+
+/// An additional projection bound over native names; it supplies no ordinary permission.
+pub struct NameBounds {
+    allowed: HashSet<ObjectRef>,
+}
+impl NameBounds {
+    /// Keep only actual typed name subjects selected by the consuming operation.
+    pub fn new(allowed: impl IntoIterator<Item = ObjectRef>) -> Self {
+        Self {
+            allowed: allowed.into_iter().collect(),
+        }
+    }
+}
+
+fn name_allowed(bounds: Option<&NameBounds>, kind: ObjectKind, id: Id) -> bool {
+    bounds.is_none_or(|bounds| bounds.allowed.contains(&ObjectRef { kind, id }))
+}
+
+/// Actual potentially named subjects of this native dependency cut, before name projection.
+pub async fn preview_name_candidates(
+    conn: &mut Conn,
+    inventory: &rows::Inventory,
+) -> Result<HashSet<ObjectRef>, LossError> {
+    let mut subjects = inventory
+        .environments
+        .iter()
+        .map(|row| ObjectRef {
+            kind: ObjectKind::Environment,
+            id: row.id,
+        })
+        .chain(inventory.providers.iter().map(|id| ObjectRef {
+            kind: ObjectKind::Provider,
+            id: *id,
+        }))
+        .chain(inventory.mounts.iter().map(|id| ObjectRef {
+            kind: ObjectKind::Mount,
+            id: *id,
+        }))
+        .collect::<HashSet<_>>();
+    let environments = inventory
+        .environments
+        .iter()
+        .map(|row| row.id)
+        .collect::<Vec<_>>();
+    for thread in orch_db::queries::environments::threads_in(conn, &environments).await? {
+        subjects.insert(ObjectRef {
+            kind: ObjectKind::Thread,
+            id: thread.thread_id,
+        });
+    }
+    subjects.extend(inventory.provider_threads.iter().map(|id| ObjectRef {
+        kind: ObjectKind::Thread,
+        id: *id,
+    }));
+    Ok(subjects)
+}
 
 /// Why a permanent-loss request cannot be accepted.
 #[derive(Debug, thiserror::Error)]
@@ -48,6 +105,41 @@ pub enum LossError {
 struct Stored {
     plan: LossPlan,
     fingerprint: Hash,
+}
+
+/// The actual native review record and audience before its once-only persistence.
+pub struct PreparedLossPreview {
+    plan: LossPlan,
+    inventory: rows::Inventory,
+    fingerprint: Hash,
+    audience: Vec<crate::notifications::OperationRecipient>,
+    creator: Id,
+    created_at: chrono::DateTime<chrono::Utc>,
+    named: HashSet<ObjectRef>,
+}
+impl PreparedLossPreview {
+    /// Native response operands, not a source of inferred scope targets.
+    pub fn plan(&self) -> &LossPlan {
+        &self.plan
+    }
+    /// The actual actor whose native review is being saved.
+    pub fn creator(&self) -> Id {
+        self.creator
+    }
+    /// The actual selected native dependency cut, before response formatting.
+    pub fn inventory(&self) -> &rows::Inventory {
+        &self.inventory
+    }
+    /// Actual native names emitted by this preparation, recorded before wire formatting.
+    pub fn named_sources(&self) -> &HashSet<ObjectRef> {
+        &self.named
+    }
+}
+
+/// The actual loss subject of the privately kept native preview, before audience formatting.
+pub fn recipient_subject(plan: &orch_types::Json) -> Result<ObjectRef, EngineError> {
+    let stored: Stored = serde_json::from_value(plan.clone())?;
+    Ok(stored.plan.target.object())
 }
 
 /// Checks the source actor without borrowing authority over environments that merely run there.
@@ -129,25 +221,32 @@ async fn shown(
     target: LossTarget,
     inventory: &rows::Inventory,
     now: chrono::DateTime<chrono::Utc>,
-) -> Result<LossPlan, LossError> {
+    bounds: Option<&NameBounds>,
+) -> Result<(LossPlan, HashSet<ObjectRef>), LossError> {
+    let mut named = HashSet::new();
     let mut environments = Vec::new();
     let mut kept_bytes = inventory.mount_bytes;
     for environment in &inventory.environments {
         let mut threads = Vec::new();
         let mut hidden = 0;
         for thread in orch_db::queries::environments::threads_in(conn, &[environment.id]).await? {
-            if orch_authz::nodes::check(
-                conn,
-                principal,
-                thread.thread_id,
-                Permission::ThreadView,
-                Act::Use,
-                Policy::default(),
-            )
-            .await
-            .map_err(EngineError::from)?
-            .is_allowed()
+            if name_allowed(bounds, ObjectKind::Thread, thread.thread_id)
+                && orch_authz::nodes::check(
+                    conn,
+                    principal,
+                    thread.thread_id,
+                    Permission::ThreadView,
+                    Act::Use,
+                    Policy::default(),
+                )
+                .await
+                .map_err(EngineError::from)?
+                .is_allowed()
             {
+                named.insert(ObjectRef {
+                    kind: ObjectKind::Thread,
+                    id: thread.thread_id,
+                });
                 threads.push(NodeRef {
                     thread_display: None,
                     id: thread.thread_id,
@@ -159,15 +258,22 @@ async fn shown(
                 hidden += 1;
             }
         }
-        let name = visible(
-            conn,
-            principal,
-            ObjectKind::Environment,
-            environment.id,
-            Permission::EnvironmentView,
-        )
-        .await?
-        .then(|| environment.name.clone());
+        let name = (name_allowed(bounds, ObjectKind::Environment, environment.id)
+            && visible(
+                conn,
+                principal,
+                ObjectKind::Environment,
+                environment.id,
+                Permission::EnvironmentView,
+            )
+            .await?)
+            .then(|| environment.name.clone());
+        if name.is_some() {
+            named.insert(ObjectRef {
+                kind: ObjectKind::Environment,
+                id: environment.id,
+            });
+        }
         environments.push(LossEnvironment {
             environment: LossResource {
                 id: environment.id,
@@ -185,14 +291,15 @@ async fn shown(
     }
     let mut providers = Vec::new();
     for id in &inventory.providers {
-        let name = if visible(
-            conn,
-            principal,
-            ObjectKind::Provider,
-            *id,
-            Permission::ProviderView,
-        )
-        .await?
+        let name = if name_allowed(bounds, ObjectKind::Provider, *id)
+            && visible(
+                conn,
+                principal,
+                ObjectKind::Provider,
+                *id,
+                Permission::ProviderView,
+            )
+            .await?
         {
             orch_db::queries::resources::thread_engine::provider(conn, *id)
                 .await?
@@ -200,41 +307,57 @@ async fn shown(
         } else {
             None
         };
+        if name.is_some() {
+            named.insert(ObjectRef {
+                kind: ObjectKind::Provider,
+                id: *id,
+            });
+        }
         providers.push(LossResource { id: *id, name });
     }
     let mut mounts = Vec::new();
     for (id, name) in
         orch_db::queries::resources::hosting::mount_names(conn, &inventory.mounts).await?
     {
-        mounts.push(LossResource {
-            id,
-            name: visible(
+        let name = (name_allowed(bounds, ObjectKind::Mount, id)
+            && visible(
                 conn,
                 principal,
                 ObjectKind::Mount,
                 id,
                 Permission::MountView,
             )
-            .await?
-            .then_some(name),
-        });
+            .await?)
+            .then_some(name);
+        if name.is_some() {
+            named.insert(ObjectRef {
+                kind: ObjectKind::Mount,
+                id,
+            });
+        }
+        mounts.push(LossResource { id, name });
     }
     let mut provider_threads = Vec::new();
     let mut provider_threads_hidden = 0;
     for thread in &inventory.provider_threads {
-        if orch_authz::nodes::check(
-            conn,
-            principal,
-            *thread,
-            Permission::ThreadView,
-            Act::Use,
-            Policy::default(),
-        )
-        .await
-        .map_err(EngineError::from)?
-        .is_allowed()
+        if name_allowed(bounds, ObjectKind::Thread, *thread)
+            && orch_authz::nodes::check(
+                conn,
+                principal,
+                *thread,
+                Permission::ThreadView,
+                Act::Use,
+                Policy::default(),
+            )
+            .await
+            .map_err(EngineError::from)?
+            .is_allowed()
         {
             if let Some(row) = orch_db::queries::threads::thread(conn, *thread).await? {
+                named.insert(ObjectRef {
+                    kind: ObjectKind::Thread,
+                    id: *thread,
+                });
                 provider_threads.push(NodeRef {
                     thread_display: None,
                     id: *thread,
@@ -247,21 +370,24 @@ async fn shown(
             provider_threads_hidden += 1;
         }
     }
-    Ok(LossPlan {
-        admin_grants: Vec::new(),
-        notification: Default::default(),
-        preflight_id: Id::nil(),
-        expires_at: Time::new(crate::updates::expires(now)),
-        target,
-        name: inventory.name.clone(),
-        environments,
-        provider_threads,
-        provider_threads_hidden,
-        mounts,
-        providers,
-        jobs: inventory.jobs.len() as i64,
-        kept_bytes,
-    })
+    Ok((
+        LossPlan {
+            admin_grants: Vec::new(),
+            notification: Default::default(),
+            preflight_id: Id::nil(),
+            expires_at: Time::new(crate::updates::expires(now)),
+            target,
+            name: inventory.name.clone(),
+            environments,
+            provider_threads,
+            provider_threads_hidden,
+            mounts,
+            providers,
+            jobs: inventory.jobs.len() as i64,
+            kept_bytes,
+        },
+        named,
+    ))
 }
 
 /// Expands current resource managers through the same roles and groups as permission decisions.
@@ -287,13 +413,13 @@ pub(crate) async fn managers(
 }
 
 impl Engine {
-    /// Plans permanent loss, with names filtered under the caller's current authority.
-    pub async fn plan_loss(
+    /// The original native management and availability gate over actual loss dependencies.
+    pub async fn loss_preview_inventory(
         &self,
         conn: &mut Conn,
         principal: &Principal,
         target: LossTarget,
-    ) -> Result<LossPlan, LossError> {
+    ) -> Result<rows::Inventory, LossError> {
         if !allowed(conn, principal, target).await? {
             return Err(LossError::Denied);
         }
@@ -303,7 +429,54 @@ impl Engine {
         if inventory.online || inventory.lost {
             return Err(LossError::Online);
         }
-        let mut plan = shown(conn, principal, target, &inventory, self.inner.clock.now()).await?;
+        Ok(inventory)
+    }
+
+    /// Plans permanent loss, with names filtered under the caller's current authority.
+    pub async fn plan_loss(
+        &self,
+        conn: &mut Conn,
+        principal: &Principal,
+        target: LossTarget,
+    ) -> Result<LossPlan, LossError> {
+        let prepared = self
+            .prepare_loss_preview(conn, principal, target, new_id())
+            .await?;
+        self.save_loss_preview(conn, &prepared).await?;
+        Ok(prepared.plan)
+    }
+
+    /// Effect-free native loss plan and actual audience; the supplied nonce is never an authority target.
+    pub async fn prepare_loss_preview(
+        &self,
+        conn: &mut Conn,
+        principal: &Principal,
+        target: LossTarget,
+        preview: Id,
+    ) -> Result<PreparedLossPreview, LossError> {
+        self.prepare_loss_preview_with_names(conn, principal, target, preview, None)
+            .await
+    }
+
+    /// The same native planner with an additional typed bound over independently protected names.
+    pub async fn prepare_loss_preview_with_names(
+        &self,
+        conn: &mut Conn,
+        principal: &Principal,
+        target: LossTarget,
+        preview: Id,
+        bounds: Option<&NameBounds>,
+    ) -> Result<PreparedLossPreview, LossError> {
+        let inventory = self.loss_preview_inventory(conn, principal, target).await?;
+        let (mut plan, named) = shown(
+            conn,
+            principal,
+            target,
+            &inventory,
+            self.inner.clock.now(),
+            bounds,
+        )
+        .await?;
         let mut audience = crate::notifications::operation_audience(
             conn,
             principal,
@@ -364,7 +537,7 @@ impl Engine {
                 .map_or(orch_settings::Place::System, orch_settings::Place::Node),
             LossTarget::Machine { .. } => orch_settings::Place::System,
         };
-        plan.preflight_id = new_id();
+        plan.preflight_id = preview;
         plan.notification = OperationNotificationPlan {
             preview_id: Some(plan.preflight_id),
             people: audience.len() as i64,
@@ -375,37 +548,58 @@ impl Engine {
             )
             .await?,
         };
+        let fingerprint = inventory.fingerprint()?;
+        Ok(PreparedLossPreview {
+            plan,
+            inventory,
+            fingerprint,
+            audience,
+            creator: principal.user(),
+            created_at: self.inner.clock.now(),
+            named,
+        })
+    }
+
+    /// Save exactly the prepared native preview and its audience on the caller's guarded transaction.
+    /// Serialization is effect-free; the first SQL is the native preflight insert.
+    pub async fn save_loss_preview(
+        &self,
+        conn: &mut Conn,
+        prepared: &PreparedLossPreview,
+    ) -> Result<(), LossError> {
         let stored = Stored {
-            plan: plan.clone(),
-            fingerprint: inventory.fingerprint()?,
+            plan: prepared.plan.clone(),
+            fingerprint: prepared.fingerprint,
         };
+        let body = serde_json::to_value(stored).map_err(EngineError::from)?;
         jobs::forks::save_preflight(
             conn,
             &jobs::forks::PreflightRow {
-                id: plan.preflight_id,
+                id: prepared.plan.preflight_id,
                 kind: "loss".into(),
                 node_id: None,
-                environment_id: match target {
+                environment_id: match prepared.plan.target {
                     LossTarget::Environment { id } => Some(id),
                     _ => None,
                 },
-                created_by: principal.user(),
-                plan: serde_json::to_value(stored).map_err(EngineError::from)?,
-                expires_at: plan.expires_at.get(),
-                created_at: self.inner.clock.now(),
+                created_by: prepared.creator,
+                plan: body,
+                expires_at: prepared.plan.expires_at.get(),
+                created_at: prepared.created_at,
             },
         )
         .await?;
         orch_db::queries::notifications::operations::preview(
             conn,
-            plan.preflight_id,
-            &audience
+            prepared.plan.preflight_id,
+            &prepared
+                .audience
                 .iter()
                 .map(|person| person.user)
                 .collect::<Vec<_>>(),
         )
         .await?;
-        Ok(plan)
+        Ok(())
     }
 
     /// Declares an unchanged reviewed inventory lost inside the caller's mutation transaction.

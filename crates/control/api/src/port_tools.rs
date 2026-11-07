@@ -193,6 +193,8 @@ async fn begin(app: &App, id: Id) -> ApiResult<(Tx, ThreadRow, Principal, Ctx)> 
             token_id: Id::nil(),
             scopes: vec!["*".to_owned()],
             node_id: None,
+            operation_scope: None,
+            expires_at: None,
         },
     }));
     let ctx = Ctx::for_tool(

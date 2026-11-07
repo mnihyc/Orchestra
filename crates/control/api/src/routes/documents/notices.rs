@@ -97,13 +97,13 @@ pub async fn started(
     .await
     .map_err(ApiError::internal)?;
     let mut owners = orch_authz::holders::notification_sources(&frame, &site, &[]);
-    if let Some(block) = at.block {
-        if let Some(writer) = rows::people::block_writer(conn, document.id, block).await? {
-            owners.kinds.push("user".to_owned());
-            owners.ids.push(Some(writer));
-            owners.minimum_roles.push(String::new());
-            owners.owner_roots.push(None);
-        }
+    if let Some(block) = at.block
+        && let Some(writer) = rows::people::block_writer(conn, document.id, block).await?
+    {
+        owners.kinds.push("user".to_owned());
+        owners.ids.push(Some(writer));
+        owners.minimum_roles.push(String::new());
+        owners.owner_roots.push(None);
     }
     publish(conn, document, at, said, true, owners, now).await
 }

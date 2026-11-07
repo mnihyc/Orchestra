@@ -155,6 +155,6 @@ export function useSearchStream(filters: SearchFilters, enabled: boolean, immedi
   }));
   const available = state.shown.filter((id) => hits[id] !== undefined);
   const ids = state.expanded ? available : available.slice(0, state.pageSize);
-  return {...state, hits, ids, total: Object.keys(hits).length, unfinished: !state.ended || Object.values(state.running).some(Boolean),
+  return {...state, hits, ids, total: Object.keys(hits).length, unfinished: enabled && (!state.ended || Object.values(state.running).some(Boolean)),
     more, block, hasMore: !state.expanded && Object.keys(hits).length > state.pageSize || state.cursor !== null};
 }

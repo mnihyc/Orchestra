@@ -1157,7 +1157,9 @@ mod tests {
             })
             .send()
             .await
-            .ok();
+            .ok()
+            .into_full()
+            .unwrap();
         let file = app
             .call(DocumentFileCreate, &[&doc.base.id])
             .token(&scene.ada.token)
@@ -1166,7 +1168,9 @@ mod tests {
             .bytes(b"first\nsecond\nthird\n")
             .send()
             .await
-            .ok();
+            .ok()
+            .into_full()
+            .expect("this native creation control requires its full response");
         let query = ReferencePreviewQuery {
             line: Some(2),
             ..whole(InlineRefKind::File, file.id)
@@ -1214,7 +1218,9 @@ mod tests {
             })
             .send()
             .await
-            .ok();
+            .ok()
+            .into_full()
+            .unwrap();
         let file = app
             .call(DocumentFileCreate, &[&doc.base.id])
             .token(&scene.ada.token)
@@ -1223,7 +1229,9 @@ mod tests {
             .bytes(b"fn first() {}\nfn second() {}\n")
             .send()
             .await
-            .ok();
+            .ok()
+            .into_full()
+            .expect("this native creation control requires its full response");
         let mut conn = scene.rig.db.acquire().await.unwrap();
         let held = rows::file(&mut conn, doc.base.id, file.id)
             .await

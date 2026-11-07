@@ -1,4 +1,4 @@
-//! Native reviewer facts are visible and charged once; Auto admission stays closed before the real trial.
+//! Native reviewer facts are visible and charged once; an unproved fake harness still cannot open Auto.
 #![allow(
     clippy::unwrap_used,
     clippy::expect_used,
@@ -145,7 +145,7 @@ async fn a_reported_denial_is_a_visible_item_with_its_model_reason_and_separate_
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
-async fn auto_is_refused_before_opening_a_session_until_the_integrators_trial() {
+async fn auto_is_refused_before_opening_a_session_for_an_unproved_harness() {
     let world = World::new().await;
     let thread = world.thread("Auto not proved").await;
     world.set(thread, keys::APPROVAL_MODE, json!("auto")).await;

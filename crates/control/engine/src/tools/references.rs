@@ -151,15 +151,7 @@ impl Engine {
         let Some(asking) = self.asking(conn, thread).await? else {
             return Ok(None);
         };
-        let tree = Tree::load(
-            conn,
-            asking.agent.clone(),
-            asking.policy,
-            asking.documents_policy,
-            asking.now,
-            Scope::Everything,
-        )
-        .await?;
+        let tree = Tree::load(conn, asking.agent.clone(), asking.now, Scope::Everything).await?;
         let topic = tree.path_of_node(asking.agent.topic);
         let workspace = match orch_db::queries::threads::thread(conn, thread).await? {
             Some(row) => match row.environment_id {

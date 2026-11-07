@@ -120,9 +120,9 @@ export function Inbox({ filter, onFilter }: { filter: InboxFilter; onFilter: (ne
           </PlaceMark>
         }
         title={t('screens.inbox.title')}
+        help={<Hint id="inbox" popover />}
         actions={
           <>
-            <Hint id="inbox" popover />
             <GroupingControl value={grouping.value} onChange={grouping.choose} disabled={grouping.loading || grouping.saving} error={grouping.error} />
             <SegmentedControl
               label={t('inbox.filter.label')}

@@ -46,20 +46,23 @@ it('uses the reserved continuation and configured denominator rather than guessi
   expect(threadStateLabel(stopped, i18n.t, { locale: 'en' }, NOW)).toBe(i18n.t('calls.details.author_lacks_use'));
 });
 
-it('shares its clocks across a thousand icons and releases them when those icons leave', async () => {
+it('shares its clocks across a thousand icons and releases them when those icons leave', () => {
   vi.useFakeTimers(); vi.setSystemTime(NOW);
   const queued = display('queued', { recovery: recoveryDisplay() });
   const icons = (count: number) => <>{Array.from({ length: count }, (_, index) => <ThreadStateIcon key={index} display={queued} />)}</>;
   const view = show(icons(1));
-  await act(async () => { await vi.advanceTimersByTimeAsync(1_000); });
+  // Both shared interval callbacks publish synchronously. One act batches their readers
+  // without draining unrelated asynchronous tooltip/DOM work once per mounted icon.
+  act(() => { vi.advanceTimersByTime(1_000); });
   const oneIconTimers = vi.getTimerCount();
   const network = vi.spyOn(globalThis, 'fetch');
-  view.rerender(icons(1_000));
-  await act(async () => { await vi.advanceTimersByTimeAsync(1_000); });
-  expect(screen.getAllByRole('img')).toHaveLength(1_000);
-  expect(vi.getTimerCount()).toBe(oneIconTimers);
-  expect(network).not.toHaveBeenCalled();
-  view.unmount();
-  expect(vi.getTimerCount()).toBe(0);
-  network.mockRestore();
+  try {
+    view.rerender(icons(1_000));
+    act(() => { vi.advanceTimersByTime(1_000); });
+    expect(screen.getAllByRole('img')).toHaveLength(1_000);
+    expect(vi.getTimerCount()).toBe(oneIconTimers);
+    expect(network).not.toHaveBeenCalled();
+    view.unmount();
+    expect(vi.getTimerCount()).toBe(0);
+  } finally { view.unmount(); network.mockRestore(); }
 });

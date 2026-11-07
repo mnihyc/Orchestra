@@ -7,7 +7,7 @@
 //! which the list and the reading of approvals use for the approvals of this kind.
 
 use super::subject;
-use crate::middleware::authorization::{self, refusals};
+use crate::middleware::authorization::refusals;
 use crate::middleware::requests::{ApiError, ApiResult};
 use crate::middleware::transaction_guard;
 use crate::registry::Ctx;
@@ -19,7 +19,7 @@ use orch_access_contract::permissions::Permission;
 use orch_access_contract::roles::PlaceRef;
 use orch_api_contract::access as api;
 use orch_api_contract::approvals::{
-    AccessDecision, AccessRequest, Approval, ApprovalDecision, ApprovalState, CapabilityDecision,
+    AccessDecision, AccessRequest, ApprovalDecision, ApprovalState,
 };
 use orch_api_contract::common::ErrorCode;
 use orch_api_contract::nodes::NodeRef;
@@ -126,15 +126,8 @@ fn item_refused(index: usize, error: AskError) -> ApiError {
     }
 }
 
-/// Asks for access to up to eight things in one batch. The request is made in the transaction that asked
-/// the caller's credential and authority again once the body had come, with the caller and the time of
-/// that check.
-pub async fn create(
-    mut ctx: Ctx,
-    (): (),
-    body: api::AccessRequestCreateBody,
-) -> ApiResult<api::AccessRequestCreateReply> {
-    let asker = ctx.user()?.id();
+/// The native request body's existing validation, shared with its typed source producer.
+pub(super) fn read_body(body: &api::AccessRequestCreateBody, asker: Id) -> ApiResult<Vec<Ask>> {
     let most = usize::try_from(api::ACCESS_REQUEST_MAX_ITEMS).unwrap_or(usize::MAX);
     if body.items.is_empty() || body.items.len() > most {
         return Err(invalid(
@@ -154,39 +147,47 @@ pub async fn create(
         .enumerate()
         .map(|(index, item)| ask_of(index, item, asker))
         .collect::<ApiResult<_>>()?;
-    let (tx, guard) = transaction_guard::begin(&ctx).await?;
-    ctx.now = guard.now().get();
-    let principal = guard.into_principal();
-    if body.expires_at.is_some_and(|end| end <= principal.now()) {
+    Ok(asks)
+}
+
+/// Asks for access to up to eight things in one batch. The request is made in the transaction that asked
+/// the caller's credential and authority again once the body had come, with the caller and the time of
+/// that check.
+pub async fn create(
+    ctx: Ctx,
+    (): (),
+    body: api::AccessRequestCreateBody,
+) -> ApiResult<api::AccessRequestWriteResponse> {
+    let asks = read_body(&body, ctx.user()?.id())?;
+    let (mut tx, initial) = transaction_guard::begin(&ctx).await?;
+    orch_db::queries::approvals::access::lock_requester(&mut tx, initial.user().id()).await?;
+    let (ctx, guard) = transaction_guard::after_wait(&ctx, &mut tx).await?;
+    if body.expires_at.is_some_and(|end| end <= guard.now()) {
         return Err(invalid("expires_at", "must be in the future"));
     }
-    let raised = ctx
+    let principal = guard.principal().clone();
+    let prepared = ctx
         .app
         .engine
-        .raise_access_requests_guarded(
-            tx,
-            principal.clone(),
+        .prepare_access_requests(
+            &mut tx,
+            &principal,
             &asks,
             body.reason.trim(),
             body.for_thread,
             body.expires_at,
-            &origin(&ctx),
         )
         .await
+        .map_err(raise_failed);
+    guard.check_deadline(&ctx)?;
+    let prepared = prepared?;
+    let raised = ctx
+        .app
+        .engine
+        .raise_prepared_access_requests(tx, prepared, &origin(&ctx))
+        .await
         .map_err(raise_failed)?;
-    let mut conn = ctx.app.db.acquire().await?;
-    let approvals = approvals::views(
-        &mut conn,
-        &principal,
-        &raised.approvals,
-        ctx.now,
-        &ctx.app.engine,
-    )
-    .await?;
-    Ok(api::AccessRequestCreateReply {
-        batch_id: raised.batch_id,
-        approvals,
-    })
+    super::request_operation::created_reply(&ctx, principal.caller(), raised).await
 }
 
 /// The same refusal shape for permission requests and membership requests.
@@ -209,30 +210,7 @@ pub(crate) fn raise_failed(error: RaiseError) -> ApiError {
 
 /// Where a batch of requests stands, for the person who made it.
 pub async fn get(ctx: Ctx, (): (), (): ()) -> ApiResult<api::AccessRequestGetReply> {
-    let batch = ctx.id("batch_id")?;
-    let mut conn = ctx.app.db.acquire().await?;
-    let principal = authorization::principal(&ctx, &mut conn).await?;
-    let found = rows::access::batch(&mut conn, batch).await?;
-    if found.is_empty()
-        || found
-            .iter()
-            .any(|row| row.requester_user_id != Some(principal.user()))
-    {
-        return Err(ApiError::not_found());
-    }
-    let complete = ctx
-        .app
-        .engine
-        .access_batch_is_held(principal.user(), batch)
-        .await
-        .map_err(ApiError::internal)?;
-    let approvals =
-        approvals::views(&mut conn, &principal, &found, ctx.now, &ctx.app.engine).await?;
-    Ok(api::AccessRequestGetReply {
-        batch_id: batch,
-        approvals,
-        complete,
-    })
+    super::request_operation::get_reply(ctx).await
 }
 
 /// How an approval of the kind `access` is shown to the one who reads it.
@@ -453,36 +431,17 @@ pub fn sent_to(shown: &HashMap<Id, Shown>) -> HashSet<Id> {
 /// Decides a request for access: approving names the person who asked in the rows they asked
 /// for, as the approver's own change of the page; denying gives nothing. `tx` and `approver` are
 /// the transaction and the principal of the action guard of the request that decides.
-pub async fn decide(
+pub async fn decide_row(
     ctx: &Ctx,
     mut tx: orch_db::Tx,
     approver: Principal,
     id: Id,
     decision: &ApprovalDecision,
-) -> ApiResult<Approval> {
-    // A body that holds `approve` and at most a note fits a decision on a capability as well, and is
-    // read as that one when the body is read, whichever approval it is for.
-    let alone;
-    let decision = match decision {
-        ApprovalDecision::Capability(CapabilityDecision { approve, note }) => {
-            alone = AccessDecision {
-                approve: *approve,
-                permissions: None,
-                options: None,
-                expires_at: None,
-                quick_duration: None,
-                note: note.clone(),
-            };
-            &alone
-        }
-        ApprovalDecision::Access(access) => access,
-        _ => {
-            return Err(invalid(
-                "",
-                "a request for access is answered with approve, and if you like fewer permissions, narrower options, an end and a note",
-            ));
-        }
-    };
+) -> ApiResult<ApprovalRow> {
+    let decision = decision.as_access_decision().ok_or_else(|| invalid(
+        "",
+        "a request for access is answered with approve, and if you like fewer permissions, narrower options, an end and a note",
+    ))?;
     let AccessDecision {
         approve,
         permissions,
@@ -490,7 +449,7 @@ pub async fn decide(
         expires_at,
         quick_duration,
         note,
-    } = decision;
+    } = &decision;
     let expires_at = if let Some(duration) = quick_duration {
         if !approve || expires_at.is_some() {
             return Err(invalid(
@@ -561,10 +520,7 @@ pub async fn decide(
         .decide_access_request_guarded(tx, approver, id, &decided, &origin(ctx))
         .await
     {
-        Ok(_) => {
-            let mut conn = ctx.app.db.acquire().await?;
-            approvals::one_approval(ctx, &mut conn, id).await
-        }
+        Ok(row) => Ok(row),
         Err(DecideError::NotFound) => Err(ApiError::not_found()),
         Err(DecideError::AlreadyDecided) => Err(approvals::already_decided(ctx, id).await),
         Err(DecideError::Denied(refusal)) => {

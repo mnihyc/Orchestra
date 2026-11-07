@@ -74,9 +74,9 @@ function Overview({ template }: { template: Template }) {
   const confinementWords = useConfinementWords();
   const words = useAmountWords();
   const driverTitle = drivers.data?.find((driver) => driver.name === template.driver)?.title;
-  const hosts = useQuery(hostsQuery(null));
   // The runtime the template starts under, as the hosts that report its driver declare it.
   const runtimeName = templateRuntime(template.spec);
+  const hosts = useQuery({ ...hostsQuery(null), enabled: runtimeName !== null });
   const runtime = classNamed(classesOfDriver(hosts.data ?? [], template.driver), runtimeName);
   const limits = runtime === undefined ? [] : limitsTouching(runtime.limits, templateSubjects(template.spec, true));
   const unavailable = Object.fromEntries(Object.entries(runtime?.unavailable ?? {}).filter(([key]) => templateSubjects(template.spec).includes(key)));

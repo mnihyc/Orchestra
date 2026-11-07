@@ -202,12 +202,12 @@ const Row = memo(function Row({ row, parentKey, depth, first, stale = false }: {
       {tree.selection !== undefined && <td role="gridcell" className={`${CELL} ${flat ? 'flat-choice' : 'col-start-1 row-start-1 z-(--layer-sticky) w-fit justify-self-start sm:w-auto'}`}>
         {shareableRow(row) && <Checkbox presentation="compact" label={<span className="sr-only">{t('everything.selectNamed', { name: label })}</span>} checked={tree.selection.selected.has(key)} onCheckedChange={(selected) => tree.selection?.toggle(row, selected)} />}
       </td>}
-      <td role="gridcell" className={`${CELL} ${flat ? 'flat-name' : 'col-span-2 col-start-1 row-start-1 pr-[calc(var(--control-sm)+var(--spacing-3)+var(--spacing-2))] sm:pr-3'}`} style={flat ? undefined : { paddingInlineStart: `calc(var(--spacing-4) * ${depth} + var(--spacing-2))` }}>
-        <span className={`flex min-w-0 items-center gap-2 ${!flat && tree.selection !== undefined ? 'pl-8 sm:pl-0' : ''}`}>
+      <td role="gridcell" className={`${CELL} ${flat ? 'flat-name' : 'col-span-2 col-start-1 row-start-1 self-start pr-[calc(var(--control-sm)+var(--spacing-3)+var(--spacing-2))] sm:pr-3'}`} style={flat ? undefined : { verticalAlign: 'top', paddingInlineStart: `calc(var(--spacing-4) * ${depth} + var(--spacing-2))` }}>
+        <span className={`flex min-w-0 items-start gap-2 ${!flat && tree.selection !== undefined ? 'pl-8 sm:pl-0' : ''}`}>
           {!flat && (expandable ? <IconButton size="sm" label={t(open ? 'everything.collapse' : 'everything.expand', { name: label })} icon={open ? <ChevronDown aria-hidden /> : <ChevronRight aria-hidden />} aria-expanded={open} onClick={() => tree.toggle(key, !open)} /> : <span className="size-(--control-sm) shrink-0" aria-hidden />)}
-          <KindIcon row={row} activity={!flat || !tree.columns.includes('state')} />
+          <span className="flex h-(--control-sm) shrink-0 items-center"><KindIcon row={row} activity={!flat || !tree.columns.includes('state')} /></span>
           <span className={`flex min-w-0 flex-1 flex-col gap-1 ${flat ? '' : 'wrap-anywhere sm:min-w-[12ch] sm:wrap-normal'}`}>
-            {row.href === null ? <span title={name} className={`font-medium text-text ${flat ? 'truncate' : ''}`}>{name}</span> : <a data-open title={name} aria-label={label} href={row.href} className={`rounded-md font-medium text-text underline-offset-2 hover:underline ${flat ? 'truncate' : ''}`}>{name}</a>}
+            {row.href === null ? <span title={name} className={`font-medium leading-(--control-sm) text-text ${flat ? 'truncate' : ''}`}>{name}</span> : <a data-open title={name} aria-label={label} href={row.href} className={`rounded-md font-medium leading-(--control-sm) text-text underline-offset-2 hover:underline ${flat ? 'truncate' : ''}`}>{name}</a>}
             {row.place_label !== null && !tree.columns.includes('where') && <RowPlace value={place} />}
           </span>
           {!pathOnly && (row.kind === 'org' || row.kind === 'project' || row.kind === 'topic') && <ContainedThreadStateIcon id={row.id} />}
@@ -225,7 +225,7 @@ const Row = memo(function Row({ row, parentKey, depth, first, stale = false }: {
                 : <Cell column={column} row={row} onOwner={tree.onOwner} />}
         </>}
       </td>)}
-      <td role="gridcell" className={`${CELL} ${flat ? 'flat-actions' : 'col-start-2 row-start-1 justify-self-end sm:table-cell'}`}>{actions.length > 0 && !pathOnly && <Menu label={t('everything.actions', { name })} entries={actions} trigger={<IconButton label={t('everything.actions', { name })} size="sm" icon={<MoreHorizontal aria-hidden />} />} />}</td>
+      <td role="gridcell" className={`${CELL} ${flat ? 'flat-actions' : 'col-start-2 row-start-1 self-start justify-self-end sm:table-cell'}`} style={flat ? undefined : { verticalAlign: 'top' }}>{actions.length > 0 && !pathOnly && <Menu label={t('everything.actions', { name })} entries={actions} trigger={<IconButton label={t('everything.actions', { name })} size="sm" icon={<MoreHorizontal aria-hidden />} />} />}</td>
     </tr></ContextMenu>
     {open && <Level parent={row.id} parentKey={key} depth={depth + 1} />}
   </>;
