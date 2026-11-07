@@ -138,11 +138,30 @@ export class Documents implements Part {
   private linkLocks = new Set<string>();
   private watchers: Watcher[] = [];
   private counter = 0;
+  private directoryVersions = new Map<string, { fingerprint: string; seq: number }>();
   /** Frames to withhold from live connections, to look at what a gap does. */
   private lose = false;
 
   constructor(world: World) {
     this.world = world;
+  }
+
+  /** Stable namespace observations, shared by tree summaries and native directory pages. */
+  directorySequences(): ReadonlyMap<string, number> {
+    const groups = new Map<string, unknown[][]>();
+    for (const doc of this.docs.values()) {
+      const rows = groups.get(doc.nodeId) ?? [];
+      rows.push([doc.id, doc.title, doc.page, doc.deleted]);
+      groups.set(doc.nodeId, rows);
+    }
+    for (const node of new Set([...groups.keys(), ...this.directoryVersions.keys()])) {
+      const rows = groups.get(node) ?? [];
+      rows.sort((one, other) => String(one[0]).localeCompare(String(other[0])));
+      const fingerprint = JSON.stringify(rows);
+      const before = this.directoryVersions.get(node);
+      if (before?.fingerprint !== fingerprint) this.directoryVersions.set(node, { fingerprint, seq: (before?.seq ?? 0) + 1 });
+    }
+    return new Map([...this.directoryVersions].map(([node, value]) => [node, value.seq]));
   }
 
   // ---------------------------------------------------------------- who holds what
@@ -394,6 +413,7 @@ export class Documents implements Part {
     const participating = ordinary.permissions.includes('doc.view');
     return {
       ...this.ref(person, doc),
+      link_settings: doc.deleted ? null : this.linksOf(person, doc),
       path: this.path(doc.nodeId),
       location: { parent: { kind: 'node_docs', id: doc.nodeId }, basename, ancestors: [] },
       files: clone(doc.files),
@@ -461,7 +481,7 @@ export class Documents implements Part {
       const page: DocumentTreePage = { items: listed.items.map((row) => this.treeRow(person, this.find(person, row.id, row.deleted))),
         ancestors: [], next_cursor: listed.next_cursor, feed: `fixture-root-documents:${node.id}`,
         directory: { at: { kind: 'node_docs', id: node.id }, node: this.nodeRef(node.id), path: node.path, folder: null,
-          ancestors: [], can_create: !node.archived && node.access.permissions.includes('doc.create'), inspection: null, membership_seq: node.revision } };
+          ancestors: [], can_create: !node.archived && node.access.permissions.includes('doc.create'), inspection: null, membership_seq: this.directorySequences().get(node.id) ?? 0 } };
       return { status: 200, body: page };
     }
     if (method !== 'POST' || path !== '/document-tree/operations' && path !== '/document-tree/delete/preview') return null;

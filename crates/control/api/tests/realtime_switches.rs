@@ -1,3 +1,4 @@
+#![recursion_limit = "256"]
 //! An open thread receives switch holds, progress, the new provider and its next turn without reloading or reconnecting.
 #![allow(
     clippy::unwrap_used,

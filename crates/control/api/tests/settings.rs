@@ -7,6 +7,7 @@
 
 mod places;
 mod support;
+use support::FullSettingReply;
 
 use orch_api_contract::common::ErrorCode;
 use orch_api_contract::settings::{
@@ -70,6 +71,7 @@ async fn put(
         .body(body)
         .send()
         .await
+        .full_setting()
 }
 
 fn value(value: Value) -> NodeSettingSetBody {
@@ -212,6 +214,7 @@ async fn a_viewer_writes_no_key_and_is_told_what_is_missing() {
         .token(&s.dan.token)
         .send()
         .await
+        .full_setting()
         .problem();
     assert_eq!(refused.extra["required"], "settings.manage");
 }
@@ -290,6 +293,7 @@ async fn a_topic_developer_changes_parameters_but_not_policies_or_locks_and_the_
         .token(&alice.token)
         .send()
         .await
+        .full_setting()
         .ok();
     assert!(
         one(&settings(&world, &alice, topic).await, "agent.model")
@@ -341,6 +345,7 @@ async fn a_lock_decides_the_key_below_it_and_only_whoever_makes_the_rules_sets_o
         .token(&s.boss.token)
         .send()
         .await
+        .full_setting()
         .problem();
     assert_eq!(refused.code, ErrorCode::AccessLocked);
     // Lifting the lock is done where it is set.
@@ -443,6 +448,7 @@ async fn a_setting_is_written_against_the_revision_the_writer_saw_and_taken_back
         .token(&s.boss.token)
         .send()
         .await
+        .full_setting()
         .ok();
     assert!(gone.own.is_none());
     assert_eq!(gone.source.scope, SettingScope::Default);
@@ -492,6 +498,7 @@ async fn a_first_setting_write_and_a_reset_use_the_row_seen_and_omitting_a_revis
         })
         .send()
         .await
+        .full_setting()
         .problem();
     assert_eq!(stale.code, ErrorCode::ConflictStaleRevision);
     assert_eq!(stale.extra["current"]["value"], json!(true));
@@ -504,6 +511,7 @@ async fn a_first_setting_write_and_a_reset_use_the_row_seen_and_omitting_a_revis
         })
         .send()
         .await
+        .full_setting()
         .ok();
     assert!(gone.own.is_none());
 }

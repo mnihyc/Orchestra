@@ -10,6 +10,11 @@
 //! Moving an environment to another host and updating the unit of an
 //! environment or of a provider's runtime are planned the same way.
 
+use crate::operations::{FacetSpec as Facet, OperationSpec as Op, TargetResolver as Target};
+use orch_access_contract::key_scope::KeyAction::{Manage, Read};
+use orch_access_contract::key_scope::KeyTargetKind::Object;
+use orch_access_contract::permissions::ObjectKind as K;
+
 use std::collections::BTreeMap;
 
 use orch_types::{Id, Json, Time};
@@ -312,6 +317,10 @@ pub struct ForkRequest {
     /// over, when left out.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub access: Option<ThreadAccess>,
+    /// For a new thread: its confirmed initial agent contribution, or the destination's creation
+    /// preset when omitted. A switch keeps its existing contributions.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub agent_access: Option<crate::nodes::AgentAccessChoice>,
     /// How much of the history; all of it when left out.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub history: Option<ForkHistory>,
@@ -1033,6 +1042,11 @@ pub struct ForkPlan {
     pub options: AppliedChangeOptions,
     /// The page the result will have.
     pub access: ForkPlanAccess,
+    /// Initial agent gift bounds for a new thread's actual prospective human page.
+    /// Absent for a switch, an older saved plan or an unadmitted copied page;
+    /// never inferred from the parent summary.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub agent_access: Option<crate::nodes::AgentAccessAvailability>,
     /// Whose the result is.
     pub owner: ForkPlanOwner,
     /// What the result needs on its new side to be talked to, and whether the people on its page
@@ -1153,6 +1167,26 @@ pub struct ForkBatch {
     pub hidden: i64,
     /// How many jobs are in each state.
     pub counts: ForkBatchCounts,
+}
+
+/// Only the cancellation outcomes produced by this request; existing job content needs Read.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+pub struct ForkBatchCancelReceipt {
+    pub projection: crate::common::ReceiptProjection,
+    pub batch_id: Id,
+    /// Queued jobs that this request ended.
+    pub cancelled: Vec<Id>,
+    /// Running jobs whose cancellation request was accepted.
+    pub requested: Vec<Id>,
+    /// False if authority closed after earlier members had already committed.
+    pub complete: bool,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+#[serde(untagged)]
+pub enum ForkBatchCancelResponse {
+    Receipt(ForkBatchCancelReceipt),
+    Full(Box<ForkBatch>),
 }
 
 /// What the thread of a moved environment does.
@@ -1369,6 +1403,9 @@ pub struct ProviderUpdatePlan {
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
 #[serde(deny_unknown_fields)]
 pub struct ForkNowBody {
+    /// Its confirmed initial agent contribution, or the topic's creation preset when omitted.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub agent_access: Option<crate::nodes::AgentAccessChoice>,
     /// Its name; the source's with a mark when left out.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub name: Option<String>,
@@ -1387,21 +1424,92 @@ pub struct ForkNowReply {
     pub thread_id: Id,
 }
 
+/// The actual accepted private plan identity and counts, without member names or content.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, JsonSchema)]
+pub struct ForkPlanReceipt {
+    pub projection: crate::common::ReceiptProjection,
+    pub preflight_id: Id,
+    pub planned: usize,
+    pub executable: usize,
+    pub blocked: usize,
+}
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, JsonSchema)]
+#[serde(untagged)]
+pub enum ForkPlanResponse {
+    Receipt(ForkPlanReceipt),
+    Full(Box<ForkPlan>),
+}
+impl ForkPlanResponse {
+    pub fn into_full(self) -> Result<ForkPlan, ForkPlanReceipt> {
+        match self {
+            Self::Full(value) => Ok(*value),
+            Self::Receipt(value) => Err(value),
+        }
+    }
+}
+
+/// The accepted aggregate identity and native counts, without member identities or names.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, JsonSchema)]
+pub struct ForkBatchPlanReceipt {
+    pub projection: crate::common::ReceiptProjection,
+    pub preflight_id: Id,
+    pub planned: usize,
+    pub executable: usize,
+    pub blocked: usize,
+    pub skipped: usize,
+}
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, JsonSchema)]
+#[serde(untagged)]
+pub enum ForkBatchPlanResponse {
+    Receipt(ForkBatchPlanReceipt),
+    Full(Box<ForkBatchPlan>),
+}
+impl ForkBatchPlanResponse {
+    pub fn into_full(self) -> Result<ForkBatchPlan, ForkBatchPlanReceipt> {
+        match self {
+            Self::Full(value) => Ok(*value),
+            Self::Receipt(value) => Err(value),
+        }
+    }
+}
+
 crate::endpoints! {
     /// Forks a thread at once, with nothing to choose and no plan to review: the same topic, environment, provider, profile and model, with all of the history.
-    ThreadForkNow: POST "/threads/{id}/forks/now", Rule("the same as planning a fork of it"), none, json ForkNowBody, json ForkNowReply, 202;
+    ThreadForkNow: POST "/threads/{id}/forks/now", Rule("the same as planning a fork of it"), none, json ForkNowBody, json ForkNowReply, 202,
+        operation Op::facets(crate::fork_sources::NOW_FACETS);
     /// Plans a fork or a switch of a thread, before anything is done.
-    ThreadForkPreflight: POST "/threads/{id}/forks/preflight", Rule("what the result needs: for a new thread, manage or fork on the source and what making it takes; for a switch, what the request changes"), none, json ForkRequest, json ForkPlan, 200;
+    ThreadForkPreflight: POST "/threads/{id}/forks/preflight", Rule("what the result needs: for a new thread, manage or fork on the source and what making it takes; for a switch, what the request changes"), none, json ForkRequest, json ForkPlanResponse, 200,
+        operation Op::receipt(&Op::variants(&crate::fork_sources::SINGLE_VARIANTS));
     /// Carries out a plan of a fork or a switch of a thread as a job; a switch locks the thread at once.
-    ThreadForkCreate: POST "/threads/{id}/forks", Rule("the same as planning it"), none, json ForkCreateBody, json Job, 202;
+    ThreadForkCreate: POST "/threads/{id}/forks", Rule("the same as planning it"), none, json ForkCreateBody, json Job, 202,
+        operation Op::variants(&crate::fork_sources::SINGLE_VARIANTS);
     /// Plans a switch of several threads together.
-    ForkBatchPreflight: POST "/forks/preflight", Rule("what a switch needs, on each thread planned"), none, json ForkBatchPreflightBody, json ForkBatchPlan, 200;
+    ForkBatchPreflight: POST "/forks/preflight", Rule("what a switch needs, on each thread planned"), none, json ForkBatchPreflightBody, json ForkBatchPlanResponse, 200,
+        operation Op::receipt(&Op::variants(&crate::fork_sources::BATCH_VARIANTS));
     /// Carries out a plan of a batch: one job for each plan without blockers.
-    ForkBatchCreate: POST "/forks", Rule("as for each plan"), none, json ForkCreateBody, json ForkBatch, 202;
+    ForkBatchCreate: POST "/forks", Rule("as for each plan"), none, json ForkCreateBody, json ForkBatch, 202,
+        operation Op::variants(&crate::fork_sources::BATCH_VARIANTS);
     /// Reads where a batch stands, limited to the threads the caller may view.
-    ForkBatchGet: GET "/forks/{batch_id}", Rule("the batch's creator, or thread.manage on a listed thread"), none, none, json ForkBatch, 200;
+    ForkBatchGet: GET "/forks/{batch_id}", Rule("the batch's creator, or thread.manage on a listed thread"), none, none, json ForkBatch, 200,
+        operation Op::facets(&[
+            Facet::required(Read, &[Object(K::Thread), Object(K::Environment)], Target::ResolvedCollection("batch_subjects")),
+            Facet::response_content(&[Object(K::Machine)], Target::ResolvedCollection("batch_waiting_machines")),
+            Facet::response_content(&[Object(K::Org)], Target::ResolvedCollection("batch_names_orgs")),
+            Facet::response_content(&[Object(K::Project)], Target::ResolvedCollection("batch_names_projects")),
+            Facet::response_content(&[Object(K::Topic)], Target::ResolvedCollection("batch_names_topics")),
+            Facet::response_content(&[Object(K::Thread)], Target::ResolvedCollection("batch_names_threads")),
+        ]);
     /// Cancels the jobs of a batch that have not passed their commit phase.
-    ForkBatchCancel: POST "/forks/{batch_id}/cancel", Rule("the batch's creator"), none, none, json ForkBatch, 200;
+    ForkBatchCancel: POST "/forks/{batch_id}/cancel", Rule("the batch's creator"), none, none, json ForkBatchCancelResponse, 200,
+        operation Op::receipt(&Op::facets(&[
+            Facet::required(Manage, &[Object(K::Thread), Object(K::Environment)], Target::ResolvedCollection("remaining_batch_subjects")),
+            Facet::response_content(&[Object(K::Thread), Object(K::Environment)], Target::ResolvedCollection("batch_subjects")),
+            Facet::response_content(&[Object(K::Machine)], Target::ResolvedCollection("batch_waiting_machines")),
+            Facet::response_content(&[Object(K::Org)], Target::ResolvedCollection("batch_names_orgs")),
+            Facet::response_content(&[Object(K::Project)], Target::ResolvedCollection("batch_names_projects")),
+            Facet::response_content(&[Object(K::Topic)], Target::ResolvedCollection("batch_names_topics")),
+            Facet::response_content(&[Object(K::Thread)], Target::ResolvedCollection("batch_names_threads")),
+        ]));
 }
 
 #[cfg(test)]

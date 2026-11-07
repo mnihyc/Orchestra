@@ -6,6 +6,8 @@
 //! after the runtime it made (`orch-environment-…`, `orch-ws-…`), carries the lab's label because the driver
 //! puts it on all it makes, and is tracked by the name as soon as the runtime's row says what it is called,
 //! so that the lab removes it by that exact name whatever becomes of the test.
+// The engine's futures this fixture awaits are deep; the default query depth does not lay them out.
+#![recursion_limit = "256"]
 #![allow(
     clippy::unwrap_used,
     clippy::expect_used,
@@ -412,7 +414,9 @@ async fn an_environment_made_over_http_is_a_container_whose_connector_enrolls_an
         })
         .send()
         .await
-        .ok();
+        .ok()
+        .into_full()
+        .expect("the creator's own full thread view");
     let thread = thread.base.id;
     let sent = app
         .call(ThreadInputCreate, &[&thread])

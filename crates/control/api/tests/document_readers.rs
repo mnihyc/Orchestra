@@ -1,3 +1,4 @@
+#![recursion_limit = "256"]
 //! The people who have a document open, as the engine asks for them before an agent deletes or moves it: those who said the document is in front of them, each counted once however many windows they have it in, and nobody for a document that only follows.
 #![allow(
     clippy::unwrap_used,
@@ -66,6 +67,8 @@ async fn the_engine_is_told_how_many_people_have_a_document_open_each_counted_on
         .send()
         .await
         .ok()
+        .into_full()
+        .unwrap()
         .base
         .id;
     let (vera, vera_token) = rig.person("vera").await;

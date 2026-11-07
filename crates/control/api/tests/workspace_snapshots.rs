@@ -6,6 +6,18 @@
 )]
 
 mod places;
+#[path = "workspace_snapshots/creation_scopes.rs"]
+mod snapshot_creation;
+#[path = "workspace_snapshots/list.rs"]
+mod snapshot_list;
+#[path = "workspace_snapshots/mutations.rs"]
+mod snapshot_mutations;
+#[path = "workspace_snapshots/preflight_scopes.rs"]
+mod snapshot_preflight;
+#[path = "workspace_snapshots/scope_helpers.rs"]
+mod snapshot_scope_helpers;
+#[path = "workspace_snapshots/scopes.rs"]
+mod snapshot_scopes;
 mod support;
 mod workspace;
 
@@ -78,7 +90,9 @@ async fn a_background_count_is_readable_to_its_resource_reader_and_its_maker_can
         .token(&site.ada.token)
         .send()
         .await
-        .ok();
+        .ok()
+        .into_full()
+        .expect("ordinary cancellation keeps the full job");
     assert!(stopped.progress.activity.unwrap().stopping);
     assert_eq!(
         stopped.state,
@@ -118,13 +132,26 @@ async fn a_background_count_is_readable_to_its_resource_reader_and_its_maker_can
     assert_eq!(site.sent(CommandKind::FsSnapshot), 0);
 }
 
+fn initial_job(reply: Reply<orch_api_contract::workspace::SnapshotStartResponse>) -> Reply<Job> {
+    Reply {
+        status: reply.status,
+        headers: reply.headers,
+        raw: reply.raw,
+        body: reply.body.map(|response| {
+            response
+                .into_full()
+                .expect("ordinary snapshot creation keeps its initial job")
+        }),
+    }
+}
+
 async fn create(site: &Site, by: &Who, body: ThreadSnapshotCreateBody) -> Reply<Job> {
-    site.app()
+    let call = site
+        .app()
         .call(ThreadSnapshotCreate, &[&site.thread])
         .token(&by.token)
-        .body(&body)
-        .send()
-        .await
+        .body(&body);
+    initial_job(call.send().await)
 }
 
 async fn job(site: &Site, by: &Who, id: Id) -> Reply<Job> {
@@ -1038,7 +1065,9 @@ async fn an_environment_export_copies_the_entire_workspace_without_a_thread_and_
         .token(&site.ada.token)
         .send()
         .await
-        .ok();
+        .ok()
+        .into_full()
+        .expect("ordinary export keeps its initial job");
     assert_eq!(begun.node_id, None);
     let ended = over(&site, begun.id).await;
     assert_eq!(ended.state, JobState::Succeeded, "{ended:?}");
@@ -1170,7 +1199,11 @@ async fn a_snapshot_is_renamed_by_whoever_may_write_the_files() {
             });
         async move { call.send().await }
     };
-    let renamed = rename(&site.ada, "  Before the move  ").await.ok();
+    let renamed = rename(&site.ada, "  Before the move  ")
+        .await
+        .ok()
+        .into_full()
+        .unwrap();
     assert_eq!(renamed.label, "Before the move");
     assert_eq!(
         rename(&site.ada, "   ").await.problem().code,
@@ -1354,7 +1387,10 @@ async fn a_job_under_way_is_cancelled_and_the_snapshot_it_was_taking_fails() {
         .send()
         .await;
     assert!(asked.status.is_success(), "{:?}", asked.body);
-    let stopping = asked.ok();
+    let stopping = asked
+        .ok()
+        .into_full()
+        .expect("ordinary cancellation keeps the full job");
     assert_eq!(stopping.state, JobState::Running);
     assert!(stopping.progress.activity.unwrap().stopping);
     // The machine still owns the held command: cancellation is a visible request until it answers.
@@ -1399,7 +1435,9 @@ async fn a_job_under_way_is_cancelled_and_the_snapshot_it_was_taking_fails() {
         .token(&site.ada.token)
         .send()
         .await
-        .ok();
+        .ok()
+        .into_full()
+        .expect("ordinary cancellation keeps the full job");
     assert_eq!(late.state, JobState::Cancelled);
 }
 

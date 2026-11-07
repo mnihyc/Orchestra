@@ -172,8 +172,14 @@ impl Engine {
             && runtime.kind == "provider"
             && let Some(provider) = runtime.provider_id
         {
-            self.provider_unit_failed(&mut *unit.conn, provider, runtime.machine_id, now)
-                .await?;
+            self.provider_unit_failed(
+                &mut *unit.conn,
+                provider,
+                runtime.id,
+                runtime.machine_id,
+                now,
+            )
+            .await?;
         }
         if moved
             && runtime.kind == "environment"
@@ -486,6 +492,9 @@ fn hook_summary(run: &NodeHook) -> String {
         run.duration_ms
     )
 }
+
+#[cfg(test)]
+mod provider_runtime_tests;
 
 #[cfg(test)]
 #[allow(

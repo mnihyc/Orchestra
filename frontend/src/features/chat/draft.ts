@@ -10,7 +10,7 @@ import { useQuery, useQueryClient } from '@tanstack/react-query';
 import { create } from 'zustand';
 
 import { discardDraft, draftKey, fetchDraft, saveDraft } from '@/api/chats';
-import { client } from '@/api/client';
+import { client, ReceiptAcknowledged } from '@/api/client';
 import { sameValue } from '@/features/settings/settingsModel';
 import { draftMentionText, editedMentionNames, insertedMentionName, typedTextParts } from '@/features/people/mentionParts';
 import type { NamedMention } from '@/features/people/pending';
@@ -58,7 +58,7 @@ export interface Draft extends Content {
 const EMPTY: Content = { text: '', replyTo: null, quotes: [], attachments: [], mentions: [] };
 
 /** What the page keeps of each chat's draft while its composer is not drawn, so that going to another chat and back loses nothing. */
-const kept = new Map<string, Content>();
+const kept = new Map<string, { content: Content; accepted: string }>();
 // Replaced/expanded composers share one write order, so an older request cannot overwrite newer words.
 const writes = new Map<string, Promise<void>>();
 function writeInOrder(scope: string, work: () => Promise<void>): Promise<void> {
@@ -117,10 +117,10 @@ export function useDraft(chatId: string, writable: boolean, reading = true): Dra
   const scope = `${client.session.getState().userId ?? ''}:${chatId}`;
   // The cache owns one read across a panel/expanded copy and transient mounts; a hidden composer reads nothing.
   const draft = useQuery({ queryKey: draftKey(chatId), queryFn: () => fetchDraft(chatId), enabled: writable && reading, staleTime: Infinity, retry: false });
-  const [content, setContent] = useState<Content>(() => kept.get(scope) ?? EMPTY);
+  const [content, setContent] = useState<Content>(() => kept.get(scope)?.content ?? EMPTY);
   const [saving, setSaving] = useState<SaveState>('idle');
   // What the server holds, as far as this page knows: the baseline a change is measured against.
-  const saved = useRef(key(EMPTY));
+  const saved = useRef(kept.get(scope)?.accepted ?? key(EMPTY));
   const latest = useRef(content);
   const restored = useRef<string | null>(null);
   useLayoutEffect(() => {
@@ -131,7 +131,7 @@ export function useDraft(chatId: string, writable: boolean, reading = true): Dra
     (next: (before: Content) => Content) => {
       setContent((before) => {
         const after = next(before);
-        kept.set(scope, after);
+        kept.set(scope, { content: after, accepted: kept.get(scope)?.accepted ?? saved.current });
         markUnsaved(scope, key(after) !== saved.current);
         return after;
       });
@@ -146,12 +146,15 @@ export function useDraft(chatId: string, writable: boolean, reading = true): Dra
     const accepted = sameValue(latest.current, theirs);
     if (restored.current === chatId) {
       // Another mounted copy can acknowledge these same words. Object member order is immaterial.
-      if (accepted) { saved.current = key(latest.current); markUnsaved(scope, key(kept.get(scope) ?? latest.current) !== saved.current); }
+      if (accepted) { saved.current = key(latest.current); markUnsaved(scope, key(kept.get(scope)?.content ?? latest.current) !== saved.current); }
       return;
     }
     restored.current = chatId;
-    saved.current = accepted ? key(latest.current) : key(theirs);
-    markUnsaved(scope, !isEmpty(latest.current) && !accepted);
+    // A receipt confirms only this device's submitted words. Keep that local acceptance
+    // across a composer replacement without manufacturing a readable server draft.
+    const locallyAccepted = kept.get(scope)?.accepted === key(latest.current);
+    saved.current = accepted || locallyAccepted ? key(latest.current) : key(theirs);
+    markUnsaved(scope, !isEmpty(latest.current) && !accepted && !locallyAccepted);
     if (isEmpty(latest.current) && !isEmpty(theirs)) change(() => theirs);
   }, [draft.isSuccess, draft.data, writable, change, chatId, scope]);
 
@@ -168,7 +171,9 @@ export function useDraft(chatId: string, writable: boolean, reading = true): Dra
           const accepted = sameValue(latest.current, theirs);
           if (!hasPastedTextEdits('chat', chatId) && (key(latest.current) === saved.current || accepted)) {
             saved.current = accepted ? key(latest.current) : key(theirs);
-            markUnsaved(scope, key(kept.get(scope) ?? latest.current) !== saved.current);
+            const held = kept.get(scope);
+            if (held !== undefined) kept.set(scope, { ...held, accepted: saved.current });
+            markUnsaved(scope, key(held?.content ?? latest.current) !== saved.current);
             if (!accepted) change(() => theirs);
           }
         };
@@ -184,20 +189,28 @@ export function useDraft(chatId: string, writable: boolean, reading = true): Dra
     (now: Content): Promise<void> => writeInOrder(scope, async () => {
       if (reader.current !== client.session.getState().readerVersion) return;
       // Cleanup from a retired composer never republishes words changed in its replacement.
-      if (key(now) !== key(kept.get(scope) ?? latest.current)) return;
-      if (key(now) === saved.current) return;
+      if (key(now) !== key(kept.get(scope)?.content ?? latest.current)) return;
+      if (key(now) === saved.current || key(now) === kept.get(scope)?.accepted) return;
       if (!isEmpty(now)) setSaving('saving');
       try {
         let accepted: ChatDraft | null = null;
+        let receipt = false;
         if (isEmpty(now)) {
           if (saved.current !== key(EMPTY)) await discardDraft(chatId);
         } else {
-          accepted = await saveDraft(chatId, { parts: partsOfDraft(now), reply_to: now.replyTo });
+          try {
+            accepted = await saveDraft(chatId, { parts: partsOfDraft(now), reply_to: now.replyTo });
+          } catch (error) {
+            if (!(error instanceof ReceiptAcknowledged)) throw error;
+            receipt = true;
+          }
         }
         if (reader.current !== client.session.getState().readerVersion) return;
-        cache.setQueryData(draftKey(chatId), accepted);
+        if (!receipt) cache.setQueryData(draftKey(chatId), accepted);
         saved.current = key(now);
-        markUnsaved(scope, key(kept.get(scope) ?? latest.current) !== saved.current);
+        const held = kept.get(scope);
+        kept.set(scope, { content: held?.content ?? latest.current, accepted: saved.current });
+        markUnsaved(scope, key(held?.content ?? latest.current) !== saved.current);
         setSaving(isEmpty(now) ? 'idle' : 'saved');
       } catch {
         if (reader.current !== client.session.getState().readerVersion) return;

@@ -100,9 +100,27 @@ pub(crate) async fn threads(
     principal: &Principal,
     draft: &Draft,
 ) -> ApiResult<Vec<UpdateThread>> {
-    let refs =
-        crate::routes::nodes::view::refs(conn, principal, &draft.recipe.threads, Policy::default())
-            .await?;
+    threads_bounded(conn, principal, draft, None).await
+}
+
+async fn threads_bounded(
+    conn: &mut Conn,
+    principal: &Principal,
+    draft: &Draft,
+    bounds: Option<&crate::routes::access::page::NameBounds>,
+) -> ApiResult<Vec<UpdateThread>> {
+    let refs = match bounds {
+        Some(bounds) => bounds.refs(conn, principal, &draft.recipe.threads).await?,
+        None => {
+            crate::routes::nodes::view::refs(
+                conn,
+                principal,
+                &draft.recipe.threads,
+                Policy::default(),
+            )
+            .await?
+        }
+    };
     let mut shown = Vec::new();
     for id in &draft.recipe.threads {
         shown.push(UpdateThread {
@@ -123,6 +141,25 @@ pub(crate) async fn environment_plan(
     id: Id,
     draft: &Draft,
 ) -> ApiResult<EnvironmentUpdatePlan> {
+    environment_plan_bounded(ctx, conn, principal, id, draft, None).await
+}
+
+/// The native plan formatter's optional protected name inputs, selected before rendering.
+pub(crate) struct PlanBounds<'a> {
+    pub environment: &'a api::EnvironmentRef,
+    pub names: &'a crate::routes::access::page::NameBounds,
+    pub template_name: bool,
+}
+
+/// The same plan, using the existing response source and name bounds on scoped replies.
+pub(crate) async fn environment_plan_bounded(
+    ctx: &Ctx,
+    conn: &mut Conn,
+    principal: &Principal,
+    id: Id,
+    draft: &Draft,
+    bounds: Option<PlanBounds<'_>>,
+) -> ApiResult<EnvironmentUpdatePlan> {
     let Target::Environment(environment) = draft.recipe.target else {
         return Err(ApiError::internal("an environment plan names a provider"));
     };
@@ -131,21 +168,51 @@ pub(crate) async fn environment_plan(
             crate::routes::admin::catalogue::target_programs(ctx, conn, &draft.recipe.tools)
                 .await?,
         ),
-        notify: Some(audience(ctx, conn, principal, &draft.recipe.threads).await?),
+        notify: Some(
+            audience_bounded(
+                ctx,
+                conn,
+                principal,
+                &draft.recipe.threads,
+                bounds.as_ref().map(|b| b.names),
+            )
+            .await?,
+        ),
         preflight_id: id,
         expires_at: Time::new(updates::expires(ctx.now)),
-        environment: super::show(ctx, conn, principal, environment).await?.base,
+        environment: match &bounds {
+            Some(bounds) => bounds.environment.clone(),
+            None => super::show(ctx, conn, principal, environment).await?.base,
+        },
         reason: if draft.recipe.reason == api::UpdatePreflightReason::Update {
             UpdateReason::Update
         } else {
             UpdateReason::Recreate
         },
-        updates: draft.updates.clone(),
+        updates: draft
+            .updates
+            .iter()
+            .cloned()
+            .map(|mut update| {
+                if update.what == api::UpdateWhat::Template
+                    && bounds.as_ref().is_some_and(|bounds| !bounds.template_name)
+                {
+                    update.name = "Template".to_owned();
+                }
+                update
+            })
+            .collect(),
         kept: draft.kept.clone(),
         lost: draft.lost.clone(),
         rollback: Rollback::Unit,
-        network: super::network::planned(conn, principal, &draft.recipe).await?,
-        threads: threads(conn, principal, draft).await?,
+        network: super::network::planned_bounded(
+            conn,
+            principal,
+            &draft.recipe,
+            bounds.as_ref().map(|b| b.names),
+        )
+        .await?,
+        threads: threads_bounded(conn, principal, draft, bounds.as_ref().map(|b| b.names)).await?,
         options: draft.recipe.options.clone(),
         estimate: updates::estimate(),
         blockers: draft.blockers.clone(),
@@ -328,9 +395,24 @@ pub(crate) async fn audience(
     principal: &Principal,
     threads: &[Id],
 ) -> ApiResult<orch_api_contract::forks::UpdateAudience> {
+    audience_bounded(ctx, conn, principal, threads, None).await
+}
+
+/// The same notification audience, within this operation's current optional name sources.
+pub(crate) async fn audience_bounded(
+    ctx: &Ctx,
+    conn: &mut Conn,
+    principal: &Principal,
+    threads: &[Id],
+    bounds: Option<&crate::routes::access::page::NameBounds>,
+) -> ApiResult<orch_api_contract::forks::UpdateAudience> {
     let affected = affected_people(conn, threads, ctx.user()?.id()).await?;
-    let refs =
-        crate::routes::nodes::view::refs(conn, principal, threads, Policy::default()).await?;
+    let refs = match bounds {
+        Some(bounds) => bounds.refs(conn, principal, threads).await?,
+        None => {
+            crate::routes::nodes::view::refs(conn, principal, threads, Policy::default()).await?
+        }
+    };
     let all: std::collections::BTreeSet<_> = affected.iter().map(|(_, person)| *person).collect();
     let visible: std::collections::BTreeSet<_> = affected
         .iter()
@@ -397,6 +479,51 @@ pub(crate) async fn keep_batch(
     recipes: &[Recipe],
     providers: bool,
 ) -> ApiResult<()> {
+    keep_batch_plan(
+        ctx,
+        conn,
+        id,
+        node,
+        json!({"recipes":recipes,"providers":providers}),
+    )
+    .await
+}
+
+/// Provider runtime batches retain their exact accepted preview in the existing private row.
+pub(crate) async fn keep_provider_batch(
+    ctx: &Ctx,
+    conn: &mut Conn,
+    id: Id,
+    recipes: &[Recipe],
+    origin: &orch_authz::CapturedOperation,
+) -> ApiResult<()> {
+    if origin.operation() != "ProviderRuntimeUpdateBatchPreflight"
+        || origin.user() != ctx.user()?.id()
+        || recipes.iter().any(|recipe| {
+            !matches!(recipe.target, Target::Provider(_)) || recipe.by != origin.user()
+        })
+    {
+        return Err(ApiError::internal(
+            "the provider batch preview origin does not match its recipes",
+        ));
+    }
+    keep_batch_plan(
+        ctx,
+        conn,
+        id,
+        None,
+        json!({"recipes":recipes,"providers":true,"provider_update_origins":[origin]}),
+    )
+    .await
+}
+
+async fn keep_batch_plan(
+    ctx: &Ctx,
+    conn: &mut Conn,
+    id: Id,
+    node: Option<Id>,
+    plan: orch_types::Json,
+) -> ApiResult<()> {
     jobs::forks::save_preflight(
         conn,
         &PreflightRow {
@@ -405,7 +532,7 @@ pub(crate) async fn keep_batch(
             node_id: node,
             environment_id: None,
             created_by: ctx.user()?.id(),
-            plan: json!({"recipes":recipes,"providers":providers}),
+            plan,
             expires_at: updates::expires(ctx.now),
             created_at: ctx.now,
         },
@@ -452,7 +579,11 @@ pub(crate) async fn batch_drafts(
             )
             .await
             .map_err(refused)?;
-        if draft.recipe.old != recipe.old || draft.recipe.hash != recipe.hash {
+        if draft.recipe.old != recipe.old
+            || draft.recipe.hash != recipe.hash
+            || providers
+                && (draft.recipe.host != recipe.host || draft.recipe.template != recipe.template)
+        {
             return Err(ApiError::new(
                 ErrorCode::ConflictStaleRevision,
                 "a unit or its selected target changed after this batch was planned; review a new plan",

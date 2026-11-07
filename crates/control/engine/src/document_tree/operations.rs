@@ -15,6 +15,9 @@ use orch_types::{Id, Time, new_id};
 use serde_json::json;
 use std::collections::HashSet;
 
+mod sources;
+pub use sources::{OperationSources, prepare_operation_sources_in, require_operation_sources_in};
+
 fn validate_root_name(row: &containers::EntryRow, name: &str) -> Result<(), Error> {
     create::validate_name(name, row.kind == "container")?;
     if row.kind == "document" && !name.ends_with(".md") {
@@ -166,9 +169,19 @@ async fn move_entries(
     prepared: &prepare::Prepared,
     now: Time,
 ) -> Result<Vec<Item>, Error> {
+    let identity = access::identity(conn, actor).await?;
+    move_entries_with_identity(conn, &identity, request, prepared, now).await
+}
+
+async fn move_entries_with_identity(
+    conn: &mut Conn,
+    identity: &access::Identity,
+    request: &Request,
+    prepared: &prepare::Prepared,
+    now: Time,
+) -> Result<Vec<Item>, Error> {
     let (node, root, parent) = prepared.destination.ok_or(Error::NotFound)?;
     let selected: HashSet<_> = prepared.roots.iter().map(access::item).collect();
-    let identity = access::identity(conn, actor).await?;
     let by = identity.thread.is_none().then_some(identity.owner);
     let mut out = Vec::new();
     for row in prepare::topological(&prepared.entries)? {
@@ -241,14 +254,18 @@ async fn delete_entries(
     Ok(out)
 }
 
-async fn restore_entries(
+async fn restoring_selection(
     conn: &mut Conn,
-    actor: Actor<'_>,
-    request: &Request,
     prepared: &prepare::Prepared,
     now: Time,
     options: Options,
-) -> Result<Vec<Item>, Error> {
+) -> Result<
+    (
+        Vec<containers::EntryRow>,
+        Option<chrono::DateTime<chrono::Utc>>,
+    ),
+    Error,
+> {
     let mut selected = HashSet::new();
     let mut cohorts = HashSet::new();
     for row in &prepared.roots {
@@ -266,25 +283,28 @@ async fn restore_entries(
         })
         .collect();
     // Existing deletion promises win over a changed deployment retention setting.
+    let mut until = None;
     for row in &restoring {
-        let until = super::restore_deadline_in(conn, &access::project(row), options)
+        let deadline = super::restore_deadline_in(conn, &access::project(row), options)
             .await?
             .ok_or(Error::Conflict)?;
-        if until <= now.get() {
+        if deadline <= now.get() {
             return Err(Error::Conflict);
         }
+        until = Some(
+            until.map_or(deadline, |current: chrono::DateTime<chrono::Utc>| {
+                current.min(deadline)
+            }),
+        );
     }
-    // Reparent the still-deleted cohort first. The old parent can be deleted when the
-    // caller explicitly restores elsewhere; no intermediate live orphan is admitted.
-    if request.to.is_some() {
-        let moved = prepare::Prepared {
-            roots: prepared.roots.clone(),
-            entries: prepared.entries.clone(),
-            destination: prepared.destination,
-            text_copy: None,
-        };
-        move_entries(conn, actor, request, &moved, now).await?;
-    }
+    Ok((restoring, until))
+}
+
+async fn restore_selected(
+    conn: &mut Conn,
+    restoring: Vec<containers::EntryRow>,
+    now: Time,
+) -> Result<Vec<Item>, Error> {
     let mut out = Vec::new();
     for row in restoring {
         if row.kind == "container" {
@@ -301,6 +321,30 @@ async fn restore_entries(
         }
         out.push(access::item(&row));
     }
+    Ok(out)
+}
+
+async fn restore_entries(
+    conn: &mut Conn,
+    actor: Actor<'_>,
+    request: &Request,
+    prepared: &prepare::Prepared,
+    now: Time,
+    options: Options,
+) -> Result<Vec<Item>, Error> {
+    let (restoring, _) = restoring_selection(conn, prepared, now, options).await?;
+    // Reparent the still-deleted cohort first. The old parent can be deleted when the
+    // caller explicitly restores elsewhere; no intermediate live orphan is admitted.
+    if request.to.is_some() {
+        let moved = prepare::Prepared {
+            roots: prepared.roots.clone(),
+            entries: prepared.entries.clone(),
+            destination: prepared.destination,
+            text_copy: None,
+        };
+        move_entries(conn, actor, request, &moved, now).await?;
+    }
+    let out = restore_selected(conn, restoring, now).await?;
     if request.to.is_some() {
         Ok(prepared.entries.iter().map(access::item).collect())
     } else {
@@ -308,7 +352,50 @@ async fn restore_entries(
     }
 }
 
-async fn apply(
+async fn insert_folder(
+    conn: &mut Conn,
+    request: &Request,
+    prepared: &prepare::Prepared,
+    identity: &access::Identity,
+    id: Id,
+    now: Time,
+) -> Result<(Vec<Item>, Vec<super::Copied>), Error> {
+    let (node, root, parent) = prepared.destination.ok_or(Error::NotFound)?;
+    containers::insert(
+        conn,
+        &containers::NewContainer {
+            id,
+            node,
+            root,
+            parent,
+            owner: identity.owner,
+            thread: identity.thread,
+            agent: identity.agent.as_deref(),
+            name: request.name.as_deref().unwrap_or_default(),
+            now: now.get(),
+        },
+    )
+    .await?;
+    create::creation_grant(conn, id, true, identity, now).await?;
+    Ok((vec![Item::Container(id)], Vec::new()))
+}
+
+fn apply(
+    conn: &mut Conn,
+    actor: Actor<'_>,
+    request: &Request,
+    prepared: &prepare::Prepared,
+    operation: Id,
+    now: Time,
+    options: Options,
+) -> impl std::future::Future<Output = Result<(Vec<Item>, Vec<super::Copied>), Error>> {
+    // An unused command branch must not enlarge every enclosing writer future.
+    Box::pin(apply_inner(
+        conn, actor, request, prepared, operation, now, options,
+    ))
+}
+
+async fn apply_inner(
     conn: &mut Conn,
     actor: Actor<'_>,
     request: &Request,
@@ -319,26 +406,8 @@ async fn apply(
 ) -> Result<(Vec<Item>, Vec<super::Copied>), Error> {
     match request.command {
         Command::CreateFolder => {
-            let (node, root, parent) = prepared.destination.ok_or(Error::NotFound)?;
             let identity = access::identity(conn, actor).await?;
-            let id = new_id();
-            containers::insert(
-                conn,
-                &containers::NewContainer {
-                    id,
-                    node,
-                    root,
-                    parent,
-                    owner: identity.owner,
-                    thread: identity.thread,
-                    agent: identity.agent.as_deref(),
-                    name: request.name.as_deref().unwrap_or_default(),
-                    now: now.get(),
-                },
-            )
-            .await?;
-            create::creation_grant(conn, id, true, &identity, now).await?;
-            Ok((vec![Item::Container(id)], Vec::new()))
+            insert_folder(conn, request, prepared, &identity, new_id(), now).await
         }
         Command::Copy => copying::copy(conn, actor, request, prepared, now, options).await,
         Command::Move => Ok((
@@ -407,21 +476,877 @@ async fn apply(
     }
 }
 
-async fn execute(
+enum TreeState {
+    Replay {
+        receipt: Receipt,
+        items: Vec<Item>,
+    },
+    New {
+        prepared: prepare::Prepared,
+        before: std::collections::HashMap<Item, std::collections::BTreeSet<Id>>,
+        operation: Id,
+    },
+}
+
+struct PreparedTree {
+    request: Request,
+    identity: access::Identity,
+    arguments: orch_types::Json,
+    state: TreeState,
+}
+
+/// Native folder-creation preparation, consumed once on its original transaction.
+/// It contains factual locked operands and replay data, never reusable authority.
+pub struct FolderCreation {
+    packet: PreparedTree,
+    transaction: String,
+}
+
+impl FolderCreation {
+    /// The native request's actual destination directory.
+    #[must_use]
+    pub fn destination(&self) -> Option<super::Directory> {
+        self.packet.request.to
+    }
+
+    /// Whether the native request already has its durable completed outcome.
+    #[must_use]
+    pub fn is_replay(&self) -> bool {
+        matches!(&self.packet.state, TreeState::Replay { .. })
+    }
+    /// Identities from the native durable outcome, even when a later purge removed its rows.
+    #[must_use]
+    pub fn replay_items(&self) -> &[Item] {
+        match &self.packet.state {
+            TreeState::Replay { items, .. } => items,
+            TreeState::New { .. } => &[],
+        }
+    }
+}
+
+async fn transaction_id(conn: &mut Conn) -> Result<String, Error> {
+    Ok(sqlx::query_scalar("SELECT pg_current_xact_id()::text")
+        .fetch_one(conn)
+        .await?)
+}
+
+/// The ordinary native locks, authority, namespace, audience and replay checks for
+/// one folder creation. Entry preparation outside a transaction is provisional;
+/// application refuses a packet from a different transaction.
+pub async fn prepare_folder_creation_in(
     conn: &mut Conn,
     actor: Actor<'_>,
     request: &Request,
-    deletion_plan: Option<&MembershipStamp>,
+    now: Time,
+) -> Result<FolderCreation, Error> {
+    if request.command != Command::CreateFolder {
+        return Err(Error::Invalid("this preparation requires folder creation"));
+    }
+    let packet = prepare_tree(conn, actor, request, None, now, None).await?;
+    Ok(FolderCreation {
+        packet,
+        transaction: transaction_id(conn).await?,
+    })
+}
+
+/// Repeats only the prepared operation's native ordinary gate with the current
+/// reader. Durable replay keeps its existing View/retained-Manage rule.
+pub async fn require_folder_creation_in(
+    conn: &mut Conn,
+    actor: Actor<'_>,
+    prepared: &FolderCreation,
+    now: Time,
+) -> Result<(), Error> {
+    match &prepared.packet.state {
+        TreeState::New { .. } => {
+            let destination = prepared.packet.request.to.ok_or(Error::NotFound)?;
+            access::require_create(conn, actor, destination, now).await?;
+        }
+        TreeState::Replay { receipt, .. } => {
+            require_replayed_entries(conn, actor, receipt, now).await?
+        }
+    }
+    Ok(())
+}
+
+/// Applies the same native folder writer with its original savepoint and receipt.
+/// The outer error is the opaque caller's check; the inner error is the unchanged
+/// native operation error. Replays do not invoke a first-effect callback.
+pub async fn apply_folder_creation_in<E, F>(
+    tx: &mut Tx,
+    actor: Actor<'_>,
+    prepared: FolderCreation,
     now: Time,
     options: Options,
+    before: F,
+) -> Result<Result<Receipt, Error>, E>
+where
+    F: FnOnce() -> Result<(), E>,
+{
+    let checked: Result<(), Error> = async {
+        if transaction_id(&mut *tx).await? != prepared.transaction {
+            return Err(Error::Stale);
+        }
+        let current = access::identity(&mut *tx, actor).await?;
+        let earlier = &prepared.packet.identity;
+        if current.kind != earlier.kind
+            || current.id != earlier.id
+            || current.owner != earlier.owner
+            || current.thread != earlier.thread
+        {
+            return Err(Error::Denied);
+        }
+        Ok(())
+    }
+    .await;
+    if let Err(error) = checked {
+        return Ok(Err(error));
+    }
+    let TreeState::New {
+        prepared: native, ..
+    } = &prepared.packet.state
+    else {
+        return Ok(finish_tree(&mut *tx, actor, &prepared.packet, now, options, None).await);
+    };
+    if let Err(error) = sqlx::query("SAVEPOINT document_folder_prepared")
+        .execute(&mut **tx)
+        .await
+    {
+        return Ok(Err(error.into()));
+    }
+    let id = new_id();
+    if let Err(error) = before() {
+        if let Err(native) = sqlx::query("RELEASE SAVEPOINT document_folder_prepared")
+            .execute(&mut **tx)
+            .await
+        {
+            return Ok(Err(native.into()));
+        }
+        return Err(error);
+    }
+    let result = async {
+        let applied = insert_folder(
+            &mut *tx,
+            &prepared.packet.request,
+            native,
+            &prepared.packet.identity,
+            id,
+            now,
+        )
+        .await?;
+        finish_tree(
+            &mut *tx,
+            actor,
+            &prepared.packet,
+            now,
+            options,
+            Some(applied),
+        )
+        .await
+    }
+    .await;
+    if result.is_err()
+        && let Err(error) = sqlx::query("ROLLBACK TO SAVEPOINT document_folder_prepared")
+            .execute(&mut **tx)
+            .await
+    {
+        return Ok(Err(error.into()));
+    }
+    if let Err(error) = sqlx::query("RELEASE SAVEPOINT document_folder_prepared")
+        .execute(&mut **tx)
+        .await
+    {
+        return Ok(Err(error.into()));
+    }
+    Ok(result)
+}
+
+/// Native single-document copy, including its exact current material and header footprint.
+/// This is a consumed transaction-bound packet, never permission or a replay capability.
+pub struct DocumentCopying {
+    packet: PreparedTree,
+    transaction: String,
+    material: Option<copying::PreparedCopy>,
+    header: Option<super::TextCreationPlan>,
+    id: Id,
+}
+
+/// Complete native copy header subjects before any source block/file material is prepared.
+/// The caller must admit these facts and current ordinary gates; this packet grants no access.
+pub struct DocumentCopySources {
+    locked: LockedTree,
+    transaction: Option<String>,
+    id: Id,
+}
+
+impl DocumentCopySources {
+    /// The actual existing destination directory.
+    #[must_use]
+    pub fn destination(&self) -> Option<super::Directory> {
+        self.locked.request.to
+    }
+    /// Actual current source members, or the genuine empty original-read set of a completed replay.
+    #[must_use]
+    pub fn sources(&self) -> &[containers::EntryRow] {
+        match &self.locked.state {
+            LockedTreeState::New(prepared) => &prepared.entries,
+            LockedTreeState::Replay { .. } => &[],
+        }
+    }
+    /// A completed actor/request reads its saved outcome rather than new original material.
+    #[must_use]
+    pub fn is_replay(&self) -> bool {
+        matches!(&self.locked.state, LockedTreeState::Replay { .. })
+    }
+}
+
+/// Lock the native actor/request and header membership without loading current block/file bytes.
+pub async fn prepare_document_copy_sources_in(
+    conn: &mut Conn,
+    actor: Actor<'_>,
+    request: &Request,
+    copy: &super::TextCopy,
+) -> Result<DocumentCopySources, Error> {
+    if request.command != Command::Copy || !matches!(request.items.as_slice(), [Item::Document(_)])
+    {
+        return Err(Error::Invalid("document copy requires one text source"));
+    }
+    let locked = lock_tree(conn, actor, request, Some(copy)).await?;
+    let transaction = if orch_db::queries::transaction_guard::in_transaction(conn) {
+        Some(transaction_id(conn).await?)
+    } else {
+        None
+    };
+    Ok(DocumentCopySources {
+        locked,
+        transaction,
+        id: copy.id,
+    })
+}
+
+impl DocumentCopying {
+    /// The native generated copy identity, including its durable replay identity.
+    #[must_use]
+    pub fn id(&self) -> Id {
+        self.id
+    }
+
+    /// The actual existing destination directory selected by the native request.
+    #[must_use]
+    pub fn destination(&self) -> Option<super::Directory> {
+        self.packet.request.to
+    }
+
+    /// Only a new copy reads original material; completed replay reads its own stored outcome.
+    #[must_use]
+    pub fn sources(&self) -> &[containers::EntryRow] {
+        match &self.packet.state {
+            TreeState::New { prepared, .. } => &prepared.entries,
+            TreeState::Replay { .. } => &[],
+        }
+    }
+
+    /// Whether the same actor/request already has its native durable outcome.
+    #[must_use]
+    pub fn is_replay(&self) -> bool {
+        matches!(&self.packet.state, TreeState::Replay { .. })
+    }
+
+    /// Original native outcome ids remain factual even when a later purge removed their rows.
+    #[must_use]
+    pub fn replay_items(&self) -> &[Item] {
+        match &self.packet.state {
+            TreeState::Replay { items, .. } => items,
+            TreeState::New { .. } => &[],
+        }
+    }
+}
+
+/// Complete the native source, destination, namespace, current material and header planning.
+pub async fn prepare_document_copy_in(
+    conn: &mut Conn,
+    actor: Actor<'_>,
+    request: &Request,
+    copy: &super::TextCopy,
+    now: Time,
+    options: Options,
+) -> Result<DocumentCopying, Error> {
+    let sources = prepare_document_copy_sources_in(conn, actor, request, copy).await?;
+    prepare_document_copy_material_in(conn, actor, sources, now, options).await
+}
+
+/// Consume only the same locked subjects, after their consuming operation has admitted them.
+pub async fn prepare_document_copy_material_in(
+    conn: &mut Conn,
+    actor: Actor<'_>,
+    sources: DocumentCopySources,
+    now: Time,
+    options: Options,
+) -> Result<DocumentCopying, Error> {
+    match (
+        &sources.transaction,
+        orch_db::queries::transaction_guard::in_transaction(conn),
+    ) {
+        (Some(original), true) if transaction_id(conn).await? == *original => {}
+        (None, false) => {}
+        _ => return Err(Error::Stale),
+    }
+    let current = access::identity(conn, actor).await?;
+    let earlier = &sources.locked.identity;
+    if current.kind != earlier.kind
+        || current.id != earlier.id
+        || current.owner != earlier.owner
+        || current.thread != earlier.thread
+    {
+        return Err(Error::Denied);
+    }
+    let packet = complete_locked_tree(conn, actor, sources.locked, None, now).await?;
+    let (material, header) = match &packet.state {
+        TreeState::New { prepared, .. } => {
+            let material =
+                copying::prepare_copy(conn, actor, &packet.request, prepared, options).await?;
+            let header = material.prepare_text_header(conn, actor, now).await?;
+            (Some(material), Some(header))
+        }
+        TreeState::Replay { .. } => (None, None),
+    };
+    Ok(DocumentCopying {
+        packet,
+        transaction: transaction_id(conn).await?,
+        material,
+        header,
+        id: sources.id,
+    })
+}
+
+/// Repeat ordinary native copy/replay gates after the completed footprint, without replanning.
+pub async fn require_document_copy_in(
+    conn: &mut Conn,
+    actor: Actor<'_>,
+    prepared: &DocumentCopying,
+    now: Time,
+) -> Result<(), Error> {
+    let parent = prepared.packet.request.to.ok_or(Error::NotFound)?;
+    let destination = access::require_create(conn, actor, parent, now).await?;
+    match &prepared.packet.state {
+        TreeState::New {
+            prepared: native, ..
+        } => {
+            if Some(destination) != native.destination {
+                return Err(Error::Stale);
+            }
+            access::require_entries(
+                conn,
+                actor,
+                &native.entries,
+                Permission::DocView,
+                now,
+                false,
+                orch_authz::Act::Use,
+            )
+            .await?;
+            create::require_text_creation_in(
+                conn,
+                actor,
+                prepared.header.as_ref().ok_or(Error::Stale)?,
+                now,
+            )
+            .await?;
+        }
+        TreeState::Replay { receipt, .. } => {
+            require_replayed_entries(conn, actor, receipt, now).await?
+        }
+    }
+    Ok(())
+}
+
+/// Apply the original header/material/audit/replay producer after its actual first-write cut.
+/// A completed native replay never calls the opaque first-effect callback.
+pub async fn apply_document_copy_in<E, F>(
+    tx: &mut Tx,
+    actor: Actor<'_>,
+    prepared: DocumentCopying,
+    now: Time,
+    options: Options,
+    before: F,
+) -> Result<Result<Receipt, Error>, E>
+where
+    F: FnOnce() -> Result<(), E>,
+{
+    let checked: Result<(), Error> = async {
+        if transaction_id(&mut *tx).await? != prepared.transaction {
+            return Err(Error::Stale);
+        }
+        let current = access::identity(&mut *tx, actor).await?;
+        let earlier = &prepared.packet.identity;
+        if current.kind != earlier.kind
+            || current.id != earlier.id
+            || current.owner != earlier.owner
+            || current.thread != earlier.thread
+        {
+            return Err(Error::Denied);
+        }
+        Ok(())
+    }
+    .await;
+    if let Err(error) = checked {
+        return Ok(Err(error));
+    }
+    if prepared.is_replay() {
+        return Ok(finish_tree(&mut *tx, actor, &prepared.packet, now, options, None).await);
+    }
+    let (Some(material), Some(header)) = (prepared.material, prepared.header) else {
+        return Ok(Err(Error::Stale));
+    };
+    if let Err(error) = sqlx::query("SAVEPOINT document_copy_prepared")
+        .execute(&mut **tx)
+        .await
+    {
+        return Ok(Err(error.into()));
+    }
+    let header = match create::apply_text_creation_in(tx, actor, header, now, before).await {
+        Err(error) => {
+            if let Err(native) = sqlx::query("RELEASE SAVEPOINT document_copy_prepared")
+                .execute(&mut **tx)
+                .await
+            {
+                return Ok(Err(native.into()));
+            }
+            return Err(error);
+        }
+        Ok(value) => value,
+    };
+    let result = async {
+        let header = header?;
+        if !header.created {
+            return Err(Error::Conflict);
+        }
+        let applied =
+            copying::apply_text_material(&mut *tx, actor, material, &header.document, now).await?;
+        finish_tree(
+            &mut *tx,
+            actor,
+            &prepared.packet,
+            now,
+            options,
+            Some(applied),
+        )
+        .await
+    }
+    .await;
+    if result.is_err()
+        && let Err(error) = sqlx::query("ROLLBACK TO SAVEPOINT document_copy_prepared")
+            .execute(&mut **tx)
+            .await
+    {
+        return Ok(Err(error.into()));
+    }
+    if let Err(error) = sqlx::query("RELEASE SAVEPOINT document_copy_prepared")
+        .execute(&mut **tx)
+        .await
+    {
+        return Ok(Err(error.into()));
+    }
+    Ok(result)
+}
+
+async fn require_replayed_entries(
+    conn: &mut Conn,
+    actor: Actor<'_>,
+    receipt: &Receipt,
+    now: Time,
+) -> Result<(), Error> {
+    let rows = reread(
+        conn,
+        &receipt
+            .entries
+            .iter()
+            .map(|entry| entry.item)
+            .collect::<Vec<_>>(),
+    )
+    .await?;
+    require_replayed_rows(conn, actor, &rows, now).await
+}
+
+async fn require_replayed_rows(
+    conn: &mut Conn,
+    actor: Actor<'_>,
+    rows: &[containers::EntryRow],
+    now: Time,
+) -> Result<(), Error> {
+    access::require_entries(
+        conn,
+        actor,
+        rows,
+        Permission::DocView,
+        now,
+        true,
+        orch_authz::Act::Use,
+    )
+    .await?;
+    let deleted: Vec<_> = rows
+        .iter()
+        .filter(|row| row.deleted_at.is_some())
+        .cloned()
+        .collect();
+    access::require_entries(
+        conn,
+        actor,
+        &deleted,
+        Permission::DocManage,
+        now,
+        true,
+        orch_authz::Act::Delete,
+    )
+    .await
+}
+
+/// Checked native movement of one stored text into a hierarchy node's docs root.
+/// The packet is factual locked input, consumed on its exact original transaction.
+pub struct DocumentMovement {
+    packet: PreparedTree,
+    transaction: String,
+}
+impl DocumentMovement {
+    /// The actual single source selected by the native request.
+    #[must_use]
+    pub fn document(&self) -> Option<Id> {
+        match self.packet.request.items.as_slice() {
+            [Item::Document(id)] => Some(*id),
+            _ => None,
+        }
+    }
+    /// The actual native requested destination directory.
+    #[must_use]
+    pub fn destination(&self) -> Option<super::Directory> {
+        self.packet.request.to
+    }
+    /// Whether this exact native request already completed and will not write again.
+    #[must_use]
+    pub fn is_replay(&self) -> bool {
+        matches!(&self.packet.state, TreeState::Replay { .. })
+    }
+}
+
+/// Preserves the original current tree scope/row/namespace/audience preparation.
+/// A new no-op is handled by the API's original no-op branch, not a false first-effect check.
+pub async fn prepare_document_movement_in(
+    conn: &mut Conn,
+    actor: Actor<'_>,
+    request: &Request,
+    now: Time,
+) -> Result<DocumentMovement, Error> {
+    if request.command != Command::Move
+        || !matches!(request.items.as_slice(), [Item::Document(_)])
+        || !matches!(request.to, Some(super::Directory::NodeDocs(_)))
+        || request.name.is_some()
+        || request.version.is_some()
+    {
+        return Err(Error::Invalid(
+            "this preparation requires one text move into a node directory",
+        ));
+    }
+    let packet = prepare_tree(conn, actor, request, None, now, None).await?;
+    if let TreeState::New { prepared, .. } = &packet.state {
+        let (node, _, parent) = prepared.destination.ok_or(Error::NotFound)?;
+        let changes = prepared
+            .entries
+            .iter()
+            .any(|row| row.node_id != node || row.parent_container_id != parent);
+        if !changes {
+            return Err(Error::Invalid(
+                "this preparation requires an actual document movement",
+            ));
+        }
+        // The same writer clears existing readme references after its document UPDATE.
+        // Its source document lock also fences new foreign-key references to that id.
+        let document = request.items[0].id();
+        sqlx::query(
+            "SELECT id FROM nodes WHERE readme_document_id=$1 AND id<>$2 ORDER BY id FOR UPDATE",
+        )
+        .bind(document)
+        .bind(node)
+        .fetch_all(&mut *conn)
+        .await?;
+    }
+    Ok(DocumentMovement {
+        packet,
+        transaction: transaction_id(conn).await?,
+    })
+}
+
+/// Applies the same native move/audience/audit/remember algorithm once. The opaque
+/// caller check runs immediately before its first UPDATE; a durable replay skips it.
+pub async fn apply_document_movement_in<E, F>(
+    tx: &mut Tx,
+    actor: Actor<'_>,
+    prepared: DocumentMovement,
+    now: Time,
+    options: Options,
+    before: F,
+) -> Result<Result<Receipt, Error>, E>
+where
+    F: FnOnce() -> Result<(), E>,
+{
+    let checked: Result<(), Error> = async {
+        if transaction_id(&mut *tx).await? != prepared.transaction {
+            return Err(Error::Stale);
+        }
+        let current = access::identity(&mut *tx, actor).await?;
+        let earlier = &prepared.packet.identity;
+        if current.kind != earlier.kind
+            || current.id != earlier.id
+            || current.owner != earlier.owner
+            || current.thread != earlier.thread
+        {
+            return Err(Error::Denied);
+        }
+        Ok(())
+    }
+    .await;
+    if let Err(error) = checked {
+        return Ok(Err(error));
+    }
+    let TreeState::New {
+        prepared: native, ..
+    } = &prepared.packet.state
+    else {
+        return Ok(finish_tree(&mut *tx, actor, &prepared.packet, now, options, None).await);
+    };
+    if let Err(error) = sqlx::query("SAVEPOINT document_move_prepared")
+        .execute(&mut **tx)
+        .await
+    {
+        return Ok(Err(error.into()));
+    }
+    if let Err(error) = before() {
+        if let Err(native) = sqlx::query("RELEASE SAVEPOINT document_move_prepared")
+            .execute(&mut **tx)
+            .await
+        {
+            return Ok(Err(native.into()));
+        }
+        return Err(error);
+    }
+    let result = async {
+        let moved = move_entries_with_identity(
+            &mut *tx,
+            &prepared.packet.identity,
+            &prepared.packet.request,
+            native,
+            now,
+        )
+        .await?;
+        finish_tree(
+            &mut *tx,
+            actor,
+            &prepared.packet,
+            now,
+            options,
+            Some((moved, Vec::new())),
+        )
+        .await
+    }
+    .await;
+    if result.is_err()
+        && let Err(error) = sqlx::query("ROLLBACK TO SAVEPOINT document_move_prepared")
+            .execute(&mut **tx)
+            .await
+    {
+        return Ok(Err(error.into()));
+    }
+    if let Err(error) = sqlx::query("RELEASE SAVEPOINT document_move_prepared")
+        .execute(&mut **tx)
+        .await
+    {
+        return Ok(Err(error.into()));
+    }
+    Ok(result)
+}
+
+/// One checked restoration into a deleted text's actual recorded directory.
+pub struct DocumentRestoration {
+    packet: PreparedTree,
+    transaction: String,
+    restoring: Vec<containers::EntryRow>,
+    until: Option<chrono::DateTime<chrono::Utc>>,
+}
+impl DocumentRestoration {
+    /// The actual single deleted text selected by this native request.
+    #[must_use]
+    pub fn document(&self) -> Option<Id> {
+        match self.packet.request.items.as_slice() {
+            [Item::Document(id)] => Some(*id),
+            _ => None,
+        }
+    }
+    /// The original retained promise, checked before its first restore update.
+    #[must_use]
+    pub fn until(&self) -> Option<chrono::DateTime<chrono::Utc>> {
+        self.until
+    }
+    /// Whether the original native request already completed and must not write again.
+    #[must_use]
+    pub fn is_replay(&self) -> bool {
+        matches!(&self.packet.state, TreeState::Replay { .. })
+    }
+}
+/// The original retained authority/parent/namespace/deadline preparation for one text restoration.
+pub async fn prepare_document_restoration_in(
+    conn: &mut Conn,
+    actor: Actor<'_>,
+    request: &Request,
+    now: Time,
+    options: Options,
+) -> Result<DocumentRestoration, Error> {
+    if request.command != Command::Restore
+        || !matches!(request.items.as_slice(), [Item::Document(_)])
+        || request.to.is_some()
+        || request.name.is_some()
+        || request.version.is_some()
+    {
+        return Err(Error::Invalid(
+            "this preparation requires one text restoration in its recorded directory",
+        ));
+    }
+    let packet = prepare_tree(conn, actor, request, None, now, None).await?;
+    let (restoring, until) = match &packet.state {
+        TreeState::New { prepared, .. } => {
+            restoring_selection(conn, prepared, now, options).await?
+        }
+        TreeState::Replay { .. } => (Vec::new(), None),
+    };
+    if matches!(&packet.state, TreeState::New { .. }) && restoring.is_empty() {
+        return Err(Error::NotFound);
+    }
+    Ok(DocumentRestoration {
+        packet,
+        transaction: transaction_id(conn).await?,
+        restoring,
+        until,
+    })
+}
+/// The same native restore/audience/audit/remember writer. Its opaque caller check
+/// runs immediately before clearing deletion, and replay skips a second update.
+pub async fn apply_document_restoration_in<E, F>(
+    tx: &mut Tx,
+    actor: Actor<'_>,
+    prepared: DocumentRestoration,
+    now: Time,
+    options: Options,
+    before: F,
+) -> Result<Result<Receipt, Error>, E>
+where
+    F: FnOnce() -> Result<(), E>,
+{
+    let checked: Result<(), Error> = async {
+        if transaction_id(&mut *tx).await? != prepared.transaction {
+            return Err(Error::Stale);
+        }
+        let current = access::identity(&mut *tx, actor).await?;
+        let earlier = &prepared.packet.identity;
+        if current.kind != earlier.kind
+            || current.id != earlier.id
+            || current.owner != earlier.owner
+            || current.thread != earlier.thread
+        {
+            return Err(Error::Denied);
+        }
+        if prepared.until.is_some_and(|until| until <= now.get()) {
+            return Err(Error::Conflict);
+        }
+        Ok(())
+    }
+    .await;
+    if let Err(error) = checked {
+        return Ok(Err(error));
+    }
+    if matches!(&prepared.packet.state, TreeState::Replay { .. }) {
+        return Ok(finish_tree(&mut *tx, actor, &prepared.packet, now, options, None).await);
+    }
+    if let Err(error) = sqlx::query("SAVEPOINT document_restore_prepared")
+        .execute(&mut **tx)
+        .await
+    {
+        return Ok(Err(error.into()));
+    }
+    if let Err(error) = before() {
+        if let Err(native) = sqlx::query("RELEASE SAVEPOINT document_restore_prepared")
+            .execute(&mut **tx)
+            .await
+        {
+            return Ok(Err(native.into()));
+        }
+        return Err(error);
+    }
+    let result = async {
+        let restored = restore_selected(&mut *tx, prepared.restoring, now).await?;
+        finish_tree(
+            &mut *tx,
+            actor,
+            &prepared.packet,
+            now,
+            options,
+            Some((restored, Vec::new())),
+        )
+        .await
+    }
+    .await;
+    if result.is_err()
+        && let Err(error) = sqlx::query("ROLLBACK TO SAVEPOINT document_restore_prepared")
+            .execute(&mut **tx)
+            .await
+    {
+        return Ok(Err(error.into()));
+    }
+    if let Err(error) = sqlx::query("RELEASE SAVEPOINT document_restore_prepared")
+        .execute(&mut **tx)
+        .await
+    {
+        return Ok(Err(error.into()));
+    }
+    Ok(result)
+}
+
+enum LockedTreeState {
+    Replay { receipt: Receipt, items: Vec<Item> },
+    New(prepare::Prepared),
+}
+
+struct LockedTree {
+    request: Request,
+    identity: access::Identity,
+    arguments: orch_types::Json,
+    state: LockedTreeState,
+}
+
+async fn prepare_tree(
+    conn: &mut Conn,
+    actor: Actor<'_>,
+    request: &Request,
+    deletion_plan: Option<super::DeletionConfirmation<'_>>,
+    now: Time,
     text_copy: Option<&super::TextCopy>,
-) -> Result<Receipt, Error> {
+) -> Result<PreparedTree, Error> {
     prepare::validate(request)?;
     if (request.command == Command::Delete) != deletion_plan.is_some() {
         return Err(Error::Invalid(
             "only deletion requires its complete confirmation plan",
         ));
     }
+    let sources = sources::prepare_with_copy(conn, actor, request, text_copy).await?;
+    sources::check_association(conn, actor, &sources).await?;
+    complete_locked_tree(conn, actor, sources.locked, deletion_plan, now).await
+}
+
+/// The native actor/request and complete header footprint, before private material or audience.
+async fn lock_tree(
+    conn: &mut Conn,
+    actor: Actor<'_>,
+    request: &Request,
+    text_copy: Option<&super::TextCopy>,
+) -> Result<LockedTree, Error> {
+    prepare::validate(request)?;
     let identity = access::identity(conn, actor).await?;
     let arguments = if let Some(copy) = text_copy {
         json!({"request":request,"text_copy":copy})
@@ -442,43 +1367,14 @@ async fn execute(
         if saved.arguments != arguments {
             return Err(Error::Conflict);
         }
-        let mut receipt: Receipt = serde_json::from_value(saved.result)?;
-        let rows = reread(
-            conn,
-            &receipt
-                .entries
-                .iter()
-                .map(|entry| entry.item)
-                .collect::<Vec<_>>(),
-        )
-        .await?;
-        access::require_entries(
-            conn,
-            actor,
-            &rows,
-            Permission::DocView,
-            now,
-            true,
-            orch_authz::Act::Use,
-        )
-        .await?;
-        let deleted: Vec<_> = rows
-            .iter()
-            .filter(|row| row.deleted_at.is_some())
-            .cloned()
-            .collect();
-        access::require_entries(
-            conn,
-            actor,
-            &deleted,
-            Permission::DocManage,
-            now,
-            true,
-            orch_authz::Act::Delete,
-        )
-        .await?;
-        receipt.entries = rows.iter().map(access::project).collect();
-        return Ok(receipt);
+        let receipt: Receipt = serde_json::from_value(saved.result)?;
+        let items = receipt.entries.iter().map(|entry| entry.item).collect();
+        return Ok(LockedTree {
+            request: request.clone(),
+            identity,
+            arguments,
+            state: LockedTreeState::Replay { receipt, items },
+        });
     }
     let mut effective = request.clone();
     if let Some(copy) = text_copy {
@@ -499,18 +1395,93 @@ async fn execute(
         }
     }
     let request = &effective;
-    let mut prepared = prepare::prepare(conn, actor, request, now).await?;
+    let mut prepared = prepare::lock(conn, request).await?;
     prepared.text_copy = text_copy.cloned();
-    if let Some(expected) = deletion_plan
-        && (expected.authority_until.is_some_and(|at| at <= now.get())
-            || *expected != prepare::stamp(conn, &prepared.entries, now).await?)
-    {
-        return Err(Error::Stale);
-    }
-    namespace(conn, request, &prepared).await?;
-    let before = audience::read(conn, actor, &prepared.entries, now).await?;
-    let operation = new_id();
-    let (items, copied) = apply(conn, actor, request, &prepared, operation, now, options).await?;
+    Ok(LockedTree {
+        request: request.clone(),
+        identity,
+        arguments,
+        state: LockedTreeState::New(prepared),
+    })
+}
+
+async fn complete_locked_tree(
+    conn: &mut Conn,
+    actor: Actor<'_>,
+    locked: LockedTree,
+    deletion_plan: Option<super::DeletionConfirmation<'_>>,
+    now: Time,
+) -> Result<PreparedTree, Error> {
+    let LockedTree {
+        request,
+        identity,
+        arguments,
+        state,
+    } = locked;
+    let state = match state {
+        LockedTreeState::Replay { mut receipt, items } => {
+            let rows = reread(
+                conn,
+                &receipt
+                    .entries
+                    .iter()
+                    .map(|entry| entry.item)
+                    .collect::<Vec<_>>(),
+            )
+            .await?;
+            require_replayed_rows(conn, actor, &rows, now).await?;
+            receipt.entries = rows.iter().map(access::project).collect();
+            TreeState::Replay { receipt, items }
+        }
+        LockedTreeState::New(prepared) => {
+            prepare::require(conn, actor, &request, &prepared, now).await?;
+            if let Some(expected) = deletion_plan {
+                let actual = prepare::stamp(conn, &prepared.entries, now).await?;
+                if !expected.matches(&actual, now)? {
+                    return Err(Error::Stale);
+                }
+            }
+            namespace(conn, &request, &prepared).await?;
+            let before = audience::read(conn, actor, &prepared.entries, now).await?;
+            TreeState::New {
+                prepared,
+                before,
+                operation: new_id(),
+            }
+        }
+    };
+    Ok(PreparedTree {
+        request,
+        identity,
+        arguments,
+        state,
+    })
+}
+
+async fn finish_tree(
+    conn: &mut Conn,
+    actor: Actor<'_>,
+    packet: &PreparedTree,
+    now: Time,
+    options: Options,
+    applied: Option<(Vec<Item>, Vec<super::Copied>)>,
+) -> Result<Receipt, Error> {
+    let (prepared, before, operation) = match &packet.state {
+        TreeState::Replay { receipt, .. } => return Ok(receipt.clone()),
+        TreeState::New {
+            prepared,
+            before,
+            operation,
+        } => (prepared, before, operation),
+    };
+    let request = &packet.request;
+    let identity = &packet.identity;
+    let arguments = packet.arguments.clone();
+    let operation = *operation;
+    let (items, copied) = match applied {
+        Some(applied) => applied,
+        None => apply(conn, actor, request, prepared, operation, now, options).await?,
+    };
     let changed = reread(conn, &items).await?;
     let until = if request.command == Command::Delete {
         Some(prepare::deadline(now, options)?)
@@ -563,7 +1534,7 @@ async fn execute(
         .await?;
     }
     let after = audience::read(conn, actor, &changed, now).await?;
-    let (gaining, losing) = audience::difference(&before, &after, &copied);
+    let (gaining, losing) = audience::difference(before, &after, &copied);
     let mut nodes: HashSet<_> = prepared.entries.iter().map(|row| row.node_id).collect();
     nodes.extend(changed.iter().map(|row| row.node_id));
     for node in nodes {
@@ -597,12 +1568,66 @@ async fn execute(
     Ok(receipt)
 }
 
+fn execute(
+    conn: &mut Conn,
+    actor: Actor<'_>,
+    request: &Request,
+    deletion_plan: Option<super::DeletionConfirmation<'_>>,
+    now: Time,
+    options: Options,
+    text_copy: Option<&super::TextCopy>,
+) -> impl std::future::Future<Output = Result<Receipt, Error>> {
+    // The operation lives on the heap beneath both savepoint facades.
+    Box::pin(execute_inner(
+        conn,
+        actor,
+        request,
+        deletion_plan,
+        now,
+        options,
+        text_copy,
+    ))
+}
+
+async fn execute_inner(
+    conn: &mut Conn,
+    actor: Actor<'_>,
+    request: &Request,
+    deletion_plan: Option<super::DeletionConfirmation<'_>>,
+    now: Time,
+    options: Options,
+    text_copy: Option<&super::TextCopy>,
+) -> Result<Receipt, Error> {
+    let packet = prepare_tree(conn, actor, request, deletion_plan, now, text_copy).await?;
+    finish_tree(conn, actor, &packet, now, options, None).await
+}
+
 /// Executes one complete operation inside the supplied transaction, rolling back its own work on any refusal.
 pub async fn execute_in(
     tx: &mut Tx,
     actor: Actor<'_>,
     request: &Request,
     deletion_plan: Option<&MembershipStamp>,
+    now: Time,
+    options: Options,
+) -> Result<Receipt, Error> {
+    execute_confirmed_in(
+        tx,
+        actor,
+        request,
+        deletion_plan.map(super::DeletionConfirmation::Membership),
+        now,
+        options,
+    )
+    .await
+}
+
+/// Execute with either representation of the exact native confirmation, through the same writer.
+pub async fn execute_confirmed_in(
+    tx: &mut Tx,
+    actor: Actor<'_>,
+    request: &Request,
+    deletion_plan: Option<super::DeletionConfirmation<'_>>,
     now: Time,
     options: Options,
 ) -> Result<Receipt, Error> {
@@ -633,7 +1658,19 @@ pub async fn copy_text_in(
     sqlx::query("SAVEPOINT document_tree_text_copy")
         .execute(&mut **tx)
         .await?;
-    let result = execute(&mut *tx, actor, request, None, now, options, Some(copy)).await;
+    let result = async {
+        let prepared =
+            prepare_document_copy_in(&mut *tx, actor, request, copy, now, options).await?;
+        match apply_document_copy_in(tx, actor, prepared, now, options, || {
+            Ok::<(), std::convert::Infallible>(())
+        })
+        .await
+        {
+            Ok(result) => result,
+            Err(never) => match never {},
+        }
+    }
+    .await;
     if result.is_err() {
         sqlx::query("ROLLBACK TO SAVEPOINT document_tree_text_copy")
             .execute(&mut **tx)

@@ -7,6 +7,7 @@
 
 mod places;
 mod support;
+use support::FullTokenReply as _;
 
 use orch_api_contract::auth::{
     ApiTokenCreateBody, MePasswordChange, MePasswordChangeBody, MeSessionDelete, MeSessionList,
@@ -22,17 +23,19 @@ async fn token(world: &World, who: &Who) -> String {
         .call(MeTokenCreate, &[])
         .token(&who.token)
         .body(&ApiTokenCreateBody {
+            rules: None,
             name: "Automation".to_owned(),
             scopes: Some(vec!["*".to_owned()]),
             node_id: None,
             expires_at: None,
-            proof: orch_api_contract::auth::SensitiveProof {
+            proof: Some(orch_api_contract::auth::SensitiveProof {
                 password: Some(support::PASSWORD.to_owned()),
                 ..Default::default()
-            },
+            }),
         })
         .send()
         .await
+        .full_token()
         .ok()
         .token
         .expect("the first answer carries the secret")
@@ -85,7 +88,7 @@ async fn an_api_token_cannot_change_its_users_password() {
         .call(MePasswordChange, &[])
         .token(&token)
         .body(&MePasswordChangeBody {
-            current_password: PASSWORD.to_owned(),
+            current_password: Some(PASSWORD.to_owned()),
             new_password: "another long password".to_owned(),
         })
         .send()

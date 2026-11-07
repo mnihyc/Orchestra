@@ -34,7 +34,7 @@ use orch_db::queries::hierarchy::{self, NodeDetail};
 use orch_types::{Id, Time};
 use serde::Serialize;
 use serde::de::DeserializeOwned;
-use std::collections::HashMap;
+use std::collections::{BTreeSet, HashMap};
 
 /// A node built for one caller.
 #[derive(Debug, Clone, PartialEq)]
@@ -115,22 +115,34 @@ async fn stand<'p>(
     ids: &[Id],
     policy: Policy,
 ) -> ApiResult<Standing<'p>> {
-    let graph = Graph::load(conn, ids).await.map_err(ApiError::internal)?;
-    let sites: Vec<Site> = graph
-        .nodes()
-        .filter_map(|node| graph.site_of(node.id))
-        .collect();
-    let wanted = every_permission(&sites);
-    let frame = Frame::load(conn, principal, policy, graph, &sites, &wanted)
-        .await
-        .map_err(ApiError::internal)?;
+    stand_with_participation(conn, principal, ids, policy, true).await
+}
+
+async fn stand_with_participation<'p>(
+    conn: &mut Conn,
+    principal: &'p Principal,
+    ids: &[Id],
+    policy: Policy,
+    participation: bool,
+) -> ApiResult<Standing<'p>> {
+    stand_with_name_sources(conn, principal, ids, policy, participation, None).await
+}
+
+/// The same standing producer with an additional trusted disclosure bound on protected node names.
+async fn stand_with_name_sources<'p>(
+    conn: &mut Conn,
+    principal: &'p Principal,
+    ids: &[Id],
+    policy: Policy,
+    participation: bool,
+    name_sources: Option<&BTreeSet<Id>>,
+) -> ApiResult<Standing<'p>> {
+    let (frame, sites) = reference_frame(conn, principal, ids, policy, participation).await?;
     let readable_threads: Vec<Id> = sites
         .iter()
         .filter(|site| {
-            site.kind == ObjectKind::Thread
-                && !principal.suspension().applies(&site.orgs)
-                && principal.caller().reaches(site.path.as_deref())
-                && !frame.ways(site, Permission::ThreadView).is_empty()
+            name_sources.is_none_or(|sources| sources.contains(&site.id))
+                && reference_display_known(&frame, principal, site)
         })
         .map(|site| site.id)
         .collect();
@@ -145,9 +157,8 @@ async fn stand<'p>(
     let refs = sites
         .iter()
         .map(|site| {
-            let known = frame.holds_any(site)
-                || (site.kind == ObjectKind::Org
-                    && site.root.is_some_and(|root| principal.is_in_tree(root)));
+            let known = name_sources.is_none_or(|sources| sources.contains(&site.id))
+                && reference_known(&frame, principal, site);
             (
                 site.id,
                 NodeRef {
@@ -164,6 +175,157 @@ async fn stand<'p>(
         frame,
         sites: sites.into_iter().map(|site| (site.id, site)).collect(),
         refs,
+    })
+}
+
+async fn reference_frame<'p>(
+    conn: &mut Conn,
+    principal: &'p Principal,
+    ids: &[Id],
+    policy: Policy,
+    participation: bool,
+) -> ApiResult<(Frame<'p>, Vec<Site>)> {
+    let graph = Graph::load(conn, ids).await.map_err(ApiError::internal)?;
+    let sites: Vec<Site> = graph
+        .nodes()
+        .filter_map(|node| graph.site_of(node.id))
+        .collect();
+    let wanted = every_permission(&sites);
+    let frame = if participation {
+        Frame::load(conn, principal, policy, graph, &sites, &wanted).await
+    } else {
+        Frame::load_with_participation(conn, principal, policy, graph, &sites, &wanted, &[]).await
+    }
+    .map_err(ApiError::internal)?;
+    Ok((frame, sites))
+}
+
+fn reference_known(frame: &Frame<'_>, principal: &Principal, site: &Site) -> bool {
+    frame.holds_any(site)
+        || (site.kind == ObjectKind::Org
+            && site.root.is_some_and(|root| principal.is_in_tree(root)))
+}
+
+fn reference_display_known(frame: &Frame<'_>, principal: &Principal, site: &Site) -> bool {
+    site.kind == ObjectKind::Thread
+        && !principal.suspension().applies(&site.orgs)
+        && principal.caller().reaches(site.path.as_deref())
+        && !frame.ways(site, Permission::ThreadView).is_empty()
+}
+
+/// The native reference producer's name and thread-display authority before formatting.
+pub(crate) struct ReferenceDisclosure {
+    pub(crate) names: BTreeSet<Id>,
+    pub(crate) displays: BTreeSet<Id>,
+}
+
+/// Preserve the same two native predicates used by refs, without constructing public metadata.
+pub(crate) async fn reference_disclosure(
+    conn: &mut Conn,
+    principal: &Principal,
+    ids: &[Id],
+    policy: Policy,
+) -> ApiResult<ReferenceDisclosure> {
+    if ids.is_empty() {
+        return Ok(ReferenceDisclosure {
+            names: BTreeSet::new(),
+            displays: BTreeSet::new(),
+        });
+    }
+    let (frame, sites) = reference_frame(conn, principal, ids, policy, false).await?;
+    Ok(ReferenceDisclosure {
+        names: sites
+            .iter()
+            .filter(|site| reference_known(&frame, principal, site))
+            .map(|site| site.id)
+            .collect(),
+        displays: sites
+            .iter()
+            .filter(|site| reference_display_known(&frame, principal, site))
+            .map(|site| site.id)
+            .collect(),
+    })
+}
+
+/// Identity-only form of the exact ordinary reference visibility predicate. Source
+/// selection needs no live display/name projection and creates no alternative ACL.
+pub(crate) async fn reference_visibility(
+    conn: &mut Conn,
+    principal: &Principal,
+    ids: &[Id],
+    policy: Policy,
+) -> ApiResult<BTreeSet<Id>> {
+    Ok(reference_disclosure(conn, principal, ids, policy)
+        .await?
+        .names)
+}
+
+/// The native reference builder's ThreadView cut, without constructing protected displays.
+pub(crate) async fn reference_thread_visibility(
+    conn: &mut Conn,
+    principal: &Principal,
+    ids: &[Id],
+    policy: Policy,
+) -> ApiResult<BTreeSet<Id>> {
+    if ids.is_empty() {
+        return Ok(BTreeSet::new());
+    }
+    let (frame, sites) = reference_frame(conn, principal, ids, policy, false).await?;
+    Ok(sites
+        .iter()
+        .filter(|site| {
+            site.kind == ObjectKind::Thread
+                && !principal.suspension().applies(&site.orgs)
+                && principal.caller().reaches(site.path.as_deref())
+                && !frame.ways(site, Permission::ThreadView).is_empty()
+        })
+        .map(|site| site.id)
+        .collect())
+}
+
+/// The ordinary native header's authority shape, without constructing a Node reply.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct ReferenceAuthority {
+    permissions: BTreeSet<Permission>,
+    owns: bool,
+    administers: bool,
+    admin: Option<(PlaceRef, bool)>,
+    role: Option<(roles::Role, PlaceRef)>,
+}
+
+impl ReferenceAuthority {
+    pub(crate) fn preserves(&self, fresh: &Self) -> bool {
+        self.permissions.is_subset(&fresh.permissions)
+            && (!self.owns || fresh.owns)
+            && (!self.administers || fresh.administers)
+            && self.admin == fresh.admin
+            && self.role == fresh.role
+    }
+}
+
+pub(crate) async fn reference_authority(
+    conn: &mut Conn,
+    principal: &Principal,
+    id: Id,
+    policy: Policy,
+) -> ApiResult<ReferenceAuthority> {
+    let (frame, sites) = reference_frame(conn, principal, &[id], policy, true).await?;
+    let site = sites
+        .iter()
+        .find(|site| site.id == id)
+        .ok_or_else(ApiError::not_found)?;
+    Ok(ReferenceAuthority {
+        permissions: frame
+            .effective(site)
+            .iter()
+            .map(|held| held.permission)
+            .collect(),
+        owns: frame.owns(site),
+        administers: frame.administers(site),
+        admin: frame
+            .admin_access(site)
+            .map(|reach| (reach.place, reach.private)),
+        role: frame.role_for(site).map(|role| (role.role, role.at)),
     })
 }
 
@@ -325,6 +487,7 @@ async fn extras(
     details: &[&NodeDetail],
     principal: &Principal,
     now: DateTime<Utc>,
+    topic_sources: Option<&crate::routes::environments::reading::TopicSummarySources>,
 ) -> ApiResult<Extras> {
     let of_kind = |kind: &str| -> Vec<Id> {
         details
@@ -352,13 +515,16 @@ async fn extras(
             .map(|facts| (facts.node_id, facts))
             .collect();
     }
-    found.defaults = orch_settings::resolver::get_at_nodes(
-        conn,
-        &topics,
-        orch_settings_contract::registry::keys::ENV_DEFAULT_ID,
-    )
-    .await
-    .map_err(ApiError::internal)?;
+    found.defaults = match topic_sources {
+        Some(sources) => sources.defaults.clone(),
+        None => orch_settings::resolver::get_at_nodes(
+            conn,
+            &topics,
+            orch_settings_contract::registry::keys::ENV_DEFAULT_ID,
+        )
+        .await
+        .map_err(ApiError::internal)?,
+    };
     if !projects.is_empty() {
         found.topic_counts = hierarchy::topic_counts(conn, &projects)
             .await?
@@ -440,13 +606,26 @@ async fn extras(
                 break;
             }
         }
-        found.environments = crate::routes::environments::reading::topic_summaries(
-            conn,
-            principal,
-            &topics,
-            Time::new(now),
-        )
-        .await?;
+        found.environments = match topic_sources {
+            Some(sources) => {
+                crate::routes::environments::reading::topic_summaries_from_sources(
+                    conn,
+                    principal,
+                    sources,
+                    Time::new(now),
+                )
+                .await?
+            }
+            None => {
+                crate::routes::environments::reading::topic_summaries(
+                    conn,
+                    principal,
+                    &topics,
+                    Time::new(now),
+                )
+                .await?
+            }
+        };
         found.topics = hierarchy::topic_facts(conn, &topics)
             .await?
             .into_iter()
@@ -471,10 +650,28 @@ pub async fn build(
     now: DateTime<Utc>,
     policy: Policy,
 ) -> ApiResult<Vec<Built>> {
+    build_with_name_sources(conn, principal, ids, now, policy, None, None, None).await
+}
+
+#[allow(
+    clippy::too_many_arguments,
+    reason = "retain the native node checkpoint and independent name, environment and README source bounds"
+)]
+async fn build_with_name_sources(
+    conn: &mut Conn,
+    principal: &Principal,
+    ids: &[Id],
+    now: DateTime<Utc>,
+    policy: Policy,
+    name_sources: Option<&BTreeSet<Id>>,
+    topic_sources: Option<&crate::routes::environments::reading::TopicSummarySources>,
+    readme_sources: Option<&BTreeSet<Id>>,
+) -> ApiResult<Vec<Built>> {
     if ids.is_empty() {
         return Ok(Vec::new());
     }
-    let standing = stand(conn, principal, ids, policy).await?;
+    let standing =
+        stand_with_name_sources(conn, principal, ids, policy, true, name_sources).await?;
     let wanted: Vec<Id> = ids
         .iter()
         .copied()
@@ -486,8 +683,17 @@ pub async fn build(
         .map(|detail| (detail.id, detail))
         .collect();
     let used: Vec<&NodeDetail> = wanted.iter().filter_map(|id| details.get(id)).collect();
-    let extras = extras(conn, &used, principal, now).await?;
-    let readmes = Box::pin(readmes_for(conn, principal, &wanted, now, policy)).await?;
+    let extras = extras(conn, &used, principal, now, topic_sources).await?;
+    let readmes = Box::pin(readmes_for(
+        conn,
+        principal,
+        &wanted,
+        now,
+        policy,
+        readme_sources,
+        name_sources,
+    ))
+    .await?;
 
     let mut people: Vec<Id> = Vec::new();
     for detail in &used {
@@ -540,7 +746,7 @@ pub async fn build(
             tags: tags_of(detail.id, &extras, &standing),
         };
         let node = match node_kind(&detail.kind) {
-            Some(NodeKind::Org) => org(common.base(OrgKind::Org), detail, &extras),
+            Some(NodeKind::Org) => org(common.base(OrgKind::Org), detail, &extras, name_sources),
             Some(NodeKind::Project) => Node::Project(Project {
                 base: common.base(ProjectKind::Project),
                 topic_count: extras.topic_counts.get(&id).copied().unwrap_or_default(),
@@ -550,11 +756,12 @@ pub async fn build(
             Some(NodeKind::Thread) => Node::Thread(
                 // The generic node reader carries this branch even when showing an org.
                 // Its binding/input/environment futures must not enlarge every node request.
-                Box::pin(crate::routes::threads::view::thread(
+                Box::pin(crate::routes::threads::view::thread_with_name_sources(
                     conn,
                     principal,
                     common.base(ThreadKind::Thread),
                     now,
+                    name_sources,
                 ))
                 .await?,
             ),
@@ -576,8 +783,13 @@ async fn readmes_for(
     ids: &[Id],
     now: DateTime<Utc>,
     policy: Policy,
+    readme_sources: Option<&BTreeSet<Id>>,
+    name_sources: Option<&BTreeSet<Id>>,
 ) -> ApiResult<HashMap<Id, DocumentRef>> {
-    let rows = orch_db::queries::documents::readmes_of(conn, ids).await?;
+    let mut rows = orch_db::queries::documents::readmes_of(conn, ids).await?;
+    if let Some(allowed) = readme_sources {
+        rows.retain(|row| allowed.contains(&row.id));
+    }
     if rows.is_empty() {
         return Ok(HashMap::new());
     }
@@ -602,8 +814,21 @@ async fn readmes_for(
             Some((row, held))
         })
         .collect();
-    let refs =
-        crate::routes::documents::build::refs(conn, principal, &readable, now, policy).await?;
+    let refs = if readme_sources.is_some() {
+        let allowed: Vec<_> = name_sources
+            .into_iter()
+            .flatten()
+            .copied()
+            .map(crate::routes::documents::build::WrittenLabelSource::Node)
+            .collect();
+        crate::routes::documents::build::ProjectedDocumentRef::capture_many_allowed(
+            conn, principal, &readable, now, policy, &allowed,
+        )
+        .await?
+        .0
+    } else {
+        crate::routes::documents::build::refs(conn, principal, &readable, now, policy).await?
+    };
     Ok(refs
         .into_iter()
         .map(|document| (document.node.id, document))
@@ -659,12 +884,28 @@ impl Common<'_> {
     }
 }
 
-fn org(base: NodeBase<OrgKind>, detail: &NodeDetail, extras: &Extras) -> Node {
+fn org(
+    base: NodeBase<OrgKind>,
+    detail: &NodeDetail,
+    extras: &Extras,
+    name_sources: Option<&BTreeSet<Id>>,
+) -> Node {
     let facts = extras.orgs.get(&detail.id);
+    // A qualified address uses the same admitted ancestor names as its native path.
+    let address = if name_sources.is_some()
+        && base
+            .path
+            .iter()
+            .any(|node| node.kind == NodeKind::Org && node.id != detail.id && node.redacted)
+    {
+        String::new()
+    } else {
+        facts.map(|facts| facts.address.clone()).unwrap_or_default()
+    };
     Node::Org(Org {
         base,
         slug: detail.slug.clone().unwrap_or_default(),
-        address: facts.map(|facts| facts.address.clone()).unwrap_or_default(),
+        address,
         depth: facts
             .and_then(|facts| u32::try_from(facts.depth).ok())
             .unwrap_or_default(),
@@ -759,6 +1000,59 @@ pub async fn visible(
         .collect())
 }
 
+/// The same batched visible-node producer with already-admitted optional reference sources.
+pub(crate) async fn visible_with_read_sources(
+    conn: &mut Conn,
+    principal: &Principal,
+    ids: &[Id],
+    now: DateTime<Utc>,
+    names: &BTreeSet<Id>,
+    readmes: &BTreeSet<Id>,
+) -> ApiResult<Vec<Node>> {
+    Ok(build_with_name_sources(
+        conn,
+        principal,
+        ids,
+        now,
+        Policy::default(),
+        Some(names),
+        None,
+        Some(readmes),
+    )
+    .await?
+    .into_iter()
+    .filter(|built| built.viewable)
+    .map(|built| built.node)
+    .collect())
+}
+
+/// The same batched native builder for already-selected visible or retained nodes.
+#[allow(
+    clippy::too_many_arguments,
+    reason = "the native producer accepts separately admitted optional sources"
+)]
+pub(crate) async fn build_with_read_sources(
+    conn: &mut Conn,
+    principal: &Principal,
+    ids: &[Id],
+    now: DateTime<Utc>,
+    policy: Policy,
+    names: &BTreeSet<Id>,
+    readmes: &BTreeSet<Id>,
+) -> ApiResult<Vec<Built>> {
+    build_with_name_sources(
+        conn,
+        principal,
+        ids,
+        now,
+        policy,
+        Some(names),
+        None,
+        Some(readmes),
+    )
+    .await
+}
+
 /// One node as the caller sees it, whether they may view it or not.
 pub async fn one(
     conn: &mut Conn,
@@ -774,6 +1068,64 @@ pub async fn one(
         .map(|built| built.node))
 }
 
+/// The ordinary view with the producer's additional bounds on current ancestor names.
+pub(crate) async fn one_with_name_sources(
+    conn: &mut Conn,
+    principal: &Principal,
+    id: Id,
+    now: DateTime<Utc>,
+    policy: Policy,
+    name_sources: &BTreeSet<Id>,
+    topic_sources: Option<&crate::routes::environments::reading::TopicSummarySources>,
+) -> ApiResult<Option<Node>> {
+    Ok(Box::pin(build_with_name_sources(
+        conn,
+        principal,
+        &[id],
+        now,
+        policy,
+        Some(name_sources),
+        topic_sources,
+        None,
+    ))
+    .await?
+    .into_iter()
+    .next()
+    .map(|built| built.node))
+}
+
+/// The same native node projection with this compound read's admitted optional
+/// README and environment sources. Ordinary callers retain the unbounded wrapper.
+#[allow(
+    clippy::too_many_arguments,
+    reason = "the same native checkpoint accepts each already-admitted source bound without changing ordinary callers"
+)]
+pub(crate) async fn one_with_read_sources(
+    conn: &mut Conn,
+    principal: &Principal,
+    id: Id,
+    now: DateTime<Utc>,
+    policy: Policy,
+    name_sources: &BTreeSet<Id>,
+    topic_sources: Option<&crate::routes::environments::reading::TopicSummarySources>,
+    readme_sources: &BTreeSet<Id>,
+) -> ApiResult<Option<Node>> {
+    Ok(Box::pin(build_with_name_sources(
+        conn,
+        principal,
+        &[id],
+        now,
+        policy,
+        Some(name_sources),
+        topic_sources,
+        Some(readme_sources),
+    ))
+    .await?
+    .into_iter()
+    .next()
+    .map(|built| built.node))
+}
+
 /// The references to the nodes on the way down to each of `ids`, root
 /// first, each by name where the caller may know it.
 pub async fn ways(
@@ -785,6 +1137,31 @@ pub async fn ways(
     Ok(ways_with_admin(conn, principal, ids, policy).await?.0)
 }
 
+/// The same ordinary path projection with a trusted operation bound on live protected names.
+pub(crate) async fn ways_with_name_sources(
+    conn: &mut Conn,
+    principal: &Principal,
+    ids: &[Id],
+    policy: Policy,
+    allowed: &BTreeSet<Id>,
+) -> ApiResult<HashMap<Id, Vec<NodeRef>>> {
+    let standing =
+        stand_with_name_sources(conn, principal, ids, policy, true, Some(allowed)).await?;
+    Ok(ids
+        .iter()
+        .filter_map(|id| {
+            let node = standing.frame.graph().get(*id)?;
+            Some((
+                *id,
+                node.path
+                    .iter()
+                    .filter_map(|place| standing.refs.get(place).cloned())
+                    .collect(),
+            ))
+        })
+        .collect())
+}
+
 /// Readable personal exception paths, using the same View and redaction supplier as node pages.
 pub(crate) async fn viewable_ways(
     conn: &mut Conn,
@@ -793,11 +1170,27 @@ pub(crate) async fn viewable_ways(
     policy: Policy,
 ) -> ApiResult<HashMap<Id, Vec<NodeRef>>> {
     let standing = stand(conn, principal, ids, policy).await?;
-    Ok(ids
-        .iter()
+    Ok(viewable_paths(&standing, ids))
+}
+
+/// The same native readable paths, with protected names bounded by the consuming operation.
+pub(crate) async fn viewable_ways_with_name_sources(
+    conn: &mut Conn,
+    principal: &Principal,
+    ids: &[Id],
+    policy: Policy,
+    allowed: &BTreeSet<Id>,
+) -> ApiResult<HashMap<Id, Vec<NodeRef>>> {
+    let standing =
+        stand_with_name_sources(conn, principal, ids, policy, true, Some(allowed)).await?;
+    Ok(viewable_paths(&standing, ids))
+}
+
+fn viewable_paths(standing: &Standing<'_>, ids: &[Id]) -> HashMap<Id, Vec<NodeRef>> {
+    ids.iter()
         .filter_map(|id| {
             let site = standing.sites.get(id)?;
-            if !viewable(&standing, site) {
+            if !viewable(standing, site) {
                 return None;
             }
             let node = standing.frame.graph().get(*id)?;
@@ -809,7 +1202,7 @@ pub(crate) async fn viewable_ways(
                     .collect(),
             ))
         })
-        .collect())
+        .collect()
 }
 
 /// The paths and native-only View marks from the very same frame, including live readers.
@@ -857,7 +1250,27 @@ pub async fn refs(
     if ids.is_empty() {
         return Ok(HashMap::new());
     }
-    let standing = stand(conn, principal, ids, policy).await?;
+    let standing = stand_with_participation(conn, principal, ids, policy, false).await?;
+    Ok(ids
+        .iter()
+        .filter_map(|id| standing.refs.get(id).map(|node| (*id, node.clone())))
+        .collect())
+}
+
+/// Uses the same actual graph identity and ordinary visibility, with a trusted operation-level
+/// set restricting names and thread-display metadata. Missing names remain typed redacted refs.
+pub(crate) async fn refs_with_name_sources(
+    conn: &mut Conn,
+    principal: &Principal,
+    ids: &[Id],
+    policy: Policy,
+    allowed: &BTreeSet<Id>,
+) -> ApiResult<HashMap<Id, NodeRef>> {
+    if ids.is_empty() {
+        return Ok(HashMap::new());
+    }
+    let standing =
+        stand_with_name_sources(conn, principal, ids, policy, false, Some(allowed)).await?;
     Ok(ids
         .iter()
         .filter_map(|id| standing.refs.get(id).map(|node| (*id, node.clone())))
@@ -874,7 +1287,7 @@ pub async fn qualified_refs(
     if ids.is_empty() {
         return Ok(HashMap::new());
     }
-    let standing = stand(conn, principal, ids, policy).await?;
+    let standing = stand_with_participation(conn, principal, ids, policy, false).await?;
     Ok(ids
         .iter()
         .filter_map(|id| qualified_of(&standing, *id).map(|node| (*id, node)))
@@ -882,14 +1295,22 @@ pub async fn qualified_refs(
 }
 
 fn qualified_of(standing: &Standing<'_>, id: Id) -> Option<NodeRef> {
-    let node = standing.frame.graph().get(id)?;
-    if node.path.iter().any(|id| {
-        standing
-            .frame
-            .graph()
-            .get(*id)
-            .is_some_and(|node| node.deleted)
-    }) {
+    qualified_from(standing.frame.graph(), &standing.refs, id)
+}
+
+/// The existing path formatter over already projected references; callers can preserve their
+/// additional name bound without performing another unbounded visibility/name lookup.
+pub(crate) fn qualified_from(
+    graph: &Graph,
+    refs: &HashMap<Id, NodeRef>,
+    id: Id,
+) -> Option<NodeRef> {
+    let node = graph.get(id)?;
+    if node
+        .path
+        .iter()
+        .any(|id| graph.get(*id).is_some_and(|node| node.deleted))
+    {
         return Some(NodeRef {
             thread_display: None,
             id,
@@ -898,15 +1319,13 @@ fn qualified_of(standing: &Standing<'_>, id: Id) -> Option<NodeRef> {
             redacted: false,
         });
     }
-    let mut named = standing.refs.get(&id)?.clone();
+    let mut named = refs.get(&id)?.clone();
     if named.name.is_some() {
         named.name = Some(
             node.path
                 .iter()
                 .map(|part| {
-                    standing
-                        .refs
-                        .get(part)
+                    refs.get(part)
                         .and_then(|part| part.name.as_deref())
                         .unwrap_or("a private place")
                 })

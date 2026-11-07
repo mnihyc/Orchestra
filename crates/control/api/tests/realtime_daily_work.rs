@@ -1,3 +1,4 @@
+#![recursion_limit = "256"]
 //! Approvals, questions, delivered inputs and renamed or newly created threads reach an already open page over its real socket.
 #![allow(
     clippy::unwrap_used,
@@ -310,7 +311,9 @@ async fn a_new_thread_enters_the_existing_tree_from_its_create_route() {
         })
         .send()
         .await
-        .ok();
+        .ok()
+        .into_full()
+        .unwrap();
     page.follow(&mut client, |page| {
         page.nodes.get(&made.base.id).is_some_and(|row| {
             row["name"] == "The new thread" && row["parent_id"] == rig.topic.to_string()

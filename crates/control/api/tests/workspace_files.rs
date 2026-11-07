@@ -9,6 +9,7 @@ mod places;
 mod support;
 mod workspace;
 
+use crate::support::FullPermissionPageReply;
 use async_trait::async_trait;
 use chrono::Duration;
 use http::StatusCode;
@@ -236,7 +237,9 @@ async fn cancelled_upload(controller_failed: bool) {
             .token(&site.ada.token)
             .send()
             .await
-            .ok();
+            .ok()
+            .into_full()
+            .expect("ordinary cancellation keeps the full job");
         assert_eq!(stopping.state, JobState::Running);
         assert!(stopping.progress.activity.unwrap().stopping);
         JobState::Cancelled
@@ -443,7 +446,9 @@ async fn a_native_write_completed_before_cancel_keeps_its_receipt_even_when_its_
         .token(&site.ada.token)
         .send()
         .await
-        .ok();
+        .ok()
+        .into_full()
+        .expect("ordinary cancellation keeps the full job");
     assert_eq!(stopping.state, JobState::Running);
     assert!(stopping.progress.activity.unwrap().stopping);
     tokio::time::timeout(workspace::PATIENCE, machine.cancelled.cancelled())
@@ -1092,6 +1097,7 @@ async fn the_environments_files_are_given_on_its_own_page_and_a_thread_named_giv
         }] }))
         .send()
         .await
+        .full_permission_page()
         .ok();
     let through_the_thread = listing(Some(site.thread), &guest.token).await.problem();
     assert_eq!(through_the_thread.code, ErrorCode::AuthzDenied);

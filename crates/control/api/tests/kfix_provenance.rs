@@ -8,6 +8,8 @@
 mod desk;
 mod places;
 mod support;
+use crate::support::FullPermissionPageReply;
+use support::FullTokenReply as _;
 
 use desk::Desk;
 use orch_api_contract::access::{
@@ -57,6 +59,7 @@ async fn the_same_permission_keeps_role_named_owner_admin_and_system_causes() {
         }]}]}))
         .send()
         .await
+        .full_permission_page()
         .ok();
     desk.world
         .app
@@ -67,6 +70,7 @@ async fn the_same_permission_keeps_role_named_owner_admin_and_system_causes() {
         }]}]}))
         .send()
         .await
+        .full_permission_page()
         .ok();
     let role_access = effective(&desk, &via_role, "nodes", desk.topic).await;
     assert_eq!(role_access.role, Some(Role::Viewer));
@@ -120,6 +124,7 @@ async fn role_sources_keep_their_identity_but_hide_a_private_or_out_of_scope_pla
         .raw_body(&json!({"whole": "private"}))
         .send()
         .await
+        .full_permission_page()
         .ok();
     let access = effective(&desk, &reader, "nodes", desk.topic).await;
     assert_eq!(access.role, Some(Role::Developer));
@@ -133,17 +138,19 @@ async fn role_sources_keep_their_identity_but_hide_a_private_or_out_of_scope_pla
         .call(MeTokenCreate, &[])
         .token(&reader.token)
         .body(&ApiTokenCreateBody {
+            rules: None,
             name: "Scoped explanation".to_owned(),
             scopes: Some(vec!["topic.view".to_owned()]),
             node_id: Some(desk.topic),
             expires_at: None,
-            proof: orch_api_contract::auth::SensitiveProof {
+            proof: Some(orch_api_contract::auth::SensitiveProof {
                 password: Some(support::PASSWORD.to_owned()),
                 ..Default::default()
-            },
+            }),
         })
         .send()
         .await
+        .full_token()
         .ok()
         .token
         .expect("the first answer carries the secret");

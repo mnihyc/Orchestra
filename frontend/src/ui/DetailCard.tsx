@@ -119,6 +119,7 @@ export function DetailCard({ label, content, passingContent, children, asChild =
   const keepParent = useKeepParentCard();
   const nested = useCardChildren(() => setChildKept(true));
   const [dismissed, setDismissed] = useState(false);
+  const pointerMayReopen = useRef(true);
   const [lastActive, setLastActive] = useState(active);
   const [choiceSide, setChoiceSide] = useState<'right' | 'top' | 'bottom'>('right');
   const [choiceGap, setChoiceGap] = useState(CARD_GAP_PX);
@@ -187,7 +188,7 @@ export function DetailCard({ label, content, passingContent, children, asChild =
     view.addEventListener('scroll', place, true);
     return () => { sizes?.disconnect(); moves?.disconnect(); if (frame !== undefined) view.cancelAnimationFrame(frame); view.removeEventListener('resize', resized); view.removeEventListener('scroll', place, true); };
   }, [choice, visible, avoidChoiceList]);
-  const close = () => { setChildKept(false); setKept(false); setShown(false); setDismissed(true); };
+  const close = () => { pointerMayReopen.current = false; setChildKept(false); setKept(false); setShown(false); setDismissed(true); };
   const closePassing = () => {
     if (!choice) { close(); return; }
     flushSync(close);
@@ -210,15 +211,19 @@ export function DetailCard({ label, content, passingContent, children, asChild =
     onPointerDown={(event) => { event.preventDefault(); event.stopPropagation(); }}
     onPointerUp={(event) => event.stopPropagation()}
     onClick={(event) => { event.preventDefault(); event.stopPropagation(); keep(); }} />;
-  return <Popover.Root open={kept} onOpenChange={(next) => { if (next) keepParent?.(); else setChildKept(false); setKept(next); setShown(false); setDismissed(!next); }}>
+  return <Popover.Root open={kept} onOpenChange={(next) => { if (!next) { close(); return; } keepParent?.(); setKept(true); setShown(false); setDismissed(false); }}>
       <HoverCard.Root open={passing} onOpenChange={(next) => {
         const node = passingCard.current;
         if (!next && passingContent !== undefined && node?.contains(node.ownerDocument.activeElement)) return;
         if (mounted.current && !kept) setShown(next);
       }}>
-      <HoverCard.Trigger asChild onPointerEnter={() => setDismissed(false)}
+      <HoverCard.Trigger asChild onPointerEnter={(event) => {
+        if (!pointerMayReopen.current || !(event.target instanceof Node) || !event.currentTarget.contains(event.target)) { event.preventDefault(); return; }
+        setDismissed(false);
+      }} onPointerLeave={() => { pointerMayReopen.current = true; }}
         // Options keep their primitive's focus handling; plain names need no delayed opening.
-        onFocus={(event) => { const target = event.currentTarget; revealFloatingFocus(target); requestAnimationFrame(() => { if (target.isConnected && document.activeElement === target) revealFloatingFocus(target); }); if (!choice) event.preventDefault(); if (!restoringFocus.current) { announceParent(true); setDismissed(false); if (!choice) setShown(true); } restoringFocus.current = false; }} onBlur={(event) => { if (!(event.relatedTarget instanceof Node && passingCard.current?.contains(event.relatedTarget))) setShown(false); }} onKeyDown={(event) => {
+        onFocus={(event) => { if (!event.currentTarget.contains(event.target)) { event.preventDefault(); return; } const target = event.currentTarget; revealFloatingFocus(target); requestAnimationFrame(() => { if (target.isConnected && document.activeElement === target) revealFloatingFocus(target); }); if (!choice) event.preventDefault(); if (!restoringFocus.current) { announceParent(true); setDismissed(false); if (!choice) setShown(true); } restoringFocus.current = false; }} onBlur={(event) => { if (event.currentTarget.contains(event.target) && !(event.relatedTarget instanceof Node && passingCard.current?.contains(event.relatedTarget))) setShown(false); }} onKeyDown={(event) => {
+          if (event.defaultPrevented || !(event.target instanceof Node) || !event.currentTarget.contains(event.target)) return;
           if (choice && event.key === 'ArrowRight') { event.preventDefault(); event.stopPropagation(); keep(); }
           if (!choice && passingContent !== undefined && passing && (event.key === 'ArrowDown' || event.key === 'Tab' && !event.shiftKey)) {
             const first = passingCard.current?.querySelector<HTMLElement>('button:not([disabled]), a[href], input:not([disabled]), select:not([disabled]), [tabindex="0"]');

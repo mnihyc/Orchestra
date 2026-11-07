@@ -147,7 +147,9 @@ async fn a_programs_reset_for_a_key_uses_its_source_without_credential_proof_or_
             .body(&body)
             .send()
             .await
-            .ok();
+            .ok()
+            .into_full()
+            .expect("a browser reset retains its full projection");
         assert_eq!(result.outcome, "Plan renewed");
         assert_eq!(
             result.provider.base.status,
@@ -294,7 +296,9 @@ async fn a_lost_control_reply_joins_the_durable_reset_request_after_the_vendor_c
         .body(&body)
         .send()
         .await
-        .ok();
+        .ok()
+        .into_full()
+        .expect("a browser reset retains its full projection");
     assert_eq!(replied.outcome, "reset");
     assert_eq!(
         replied
@@ -501,7 +505,9 @@ async fn a_confirmed_request_sent_twice_uses_one_reset_and_records_who_and_the_w
             .body(&body)
             .send()
             .await
-            .ok();
+            .ok()
+            .into_full()
+            .expect("a browser reset retains its full projection");
         assert_eq!(result.outcome, "reset");
         assert_eq!(
             result
@@ -626,4 +632,238 @@ async fn management_is_checked_again_at_the_act_after_a_runtime_read_waits() {
         .problem();
     assert_eq!(denied.code, ErrorCode::AuthzDenied);
     assert!(consumed.lock().unwrap().is_empty());
+}
+
+async fn explicit_reset_key(
+    s: &Scene,
+    user: Id,
+    provider: Id,
+    actions: Vec<orch_access_contract::key_scope::KeyAction>,
+) -> String {
+    use orch_access_contract::key_scope::{
+        KeyOperation, KeyReach, KeyRule, KeyScope, KeyTarget, KeyTargetKind,
+    };
+    use orch_access_contract::permissions::ObjectKind;
+    use orch_api_core::middleware::authentication::{API_TOKEN_PREFIX, new_token, token_hash};
+    use orch_db::queries::identity::{NewApiToken, create_api_token_scoped};
+
+    let key = new_token(API_TOKEN_PREFIX);
+    let hash = token_hash(&key);
+    let kind = KeyTargetKind::Object(ObjectKind::Provider);
+    let scope = KeyScope {
+        rules: vec![KeyRule {
+            target: KeyTarget {
+                kind,
+                id: Some(provider),
+                reach: KeyReach::SelfOnly,
+            },
+            resources: Some(vec![kind]),
+            allow: vec![KeyOperation {
+                operation: "ProviderResetConsume".to_owned(),
+                actions,
+            }],
+        }],
+        constraints: Vec::new(),
+        excluded_places: Vec::new(),
+    };
+    let policy = serde_json::to_value(scope).unwrap();
+    create_api_token_scoped(
+        &mut s.rig.db.acquire().await.unwrap(),
+        &NewApiToken {
+            id: new_id(),
+            user_id: user,
+            name: "confirmed provider reset",
+            token_hash: &hash,
+            scopes: &[],
+            node_id: None,
+            at: s.rig.world.now(),
+            expires_at: Some(s.rig.world.now() + Duration::minutes(5)),
+        },
+        Some(&policy),
+    )
+    .await
+    .unwrap();
+    key
+}
+
+#[tokio::test]
+async fn explicit_reset_keys_receive_only_the_same_operations_admitted_projection_and_replay_once()
+{
+    use orch_access_contract::key_scope::KeyAction::{Manage, Read};
+    use orch_api_contract::common::ReceiptProjection;
+    use orch_api_contract::resources::ProviderResetConsumeResponse;
+
+    for with_read in [false, true] {
+        let (s, _current, consumed) = setup().await;
+        let actions = if with_read {
+            vec![Manage, Read]
+        } else {
+            vec![Manage]
+        };
+        let key = explicit_reset_key(&s, s.ada.id(), s.on.provider, actions).await;
+        let body = confirmed();
+        for _ in 0..2 {
+            let response = s
+                .rig
+                .world
+                .app
+                .call(ProviderResetConsume, &[&s.on.provider])
+                .token(&key)
+                .body(&body)
+                .send()
+                .await
+                .ok();
+            let wire = serde_json::to_value(&response).unwrap();
+            match response {
+                ProviderResetConsumeResponse::Full(full) => {
+                    assert!(with_read);
+                    assert_eq!(full.outcome, "reset");
+                    assert_eq!(
+                        full.provider
+                            .facts
+                            .available_resets
+                            .unwrap()
+                            .available_count,
+                        2
+                    );
+                    assert_eq!(full.provider.last_reset.unwrap().user.id, s.ada.id());
+                }
+                ProviderResetConsumeResponse::Receipt(receipt) => {
+                    assert!(!with_read);
+                    assert_eq!(receipt.projection, ReceiptProjection::Receipt);
+                    assert_eq!(receipt.provider_id, s.on.provider);
+                    assert_eq!(receipt.request_id, body.request_id);
+                    assert_eq!(receipt.outcome, "reset");
+                    let mut keys: Vec<_> = wire
+                        .as_object()
+                        .unwrap()
+                        .keys()
+                        .map(String::as_str)
+                        .collect();
+                    keys.sort_unstable();
+                    assert_eq!(keys, ["outcome", "projection", "provider_id", "request_id"]);
+                }
+            }
+        }
+        assert_eq!(
+            consumed.lock().unwrap().len(),
+            1,
+            "both projections share durable idempotency"
+        );
+        let audits: i64 = sqlx::query_scalar("SELECT count(*) FROM audit_log WHERE action='provider.reset_used' AND object_id=$1 AND actor_id=$2")
+            .bind(s.on.provider).bind(s.ada.id()).fetch_one(s.rig.db.pool()).await.unwrap();
+        assert_eq!(audits, 1);
+        let stale = ProviderResetConsumeBody {
+            available_count: 99,
+            ..body
+        };
+        let refused = s
+            .rig
+            .world
+            .app
+            .call(ProviderResetConsume, &[&s.on.provider])
+            .token(&key)
+            .body(&stale)
+            .send()
+            .await
+            .problem();
+        assert_eq!(refused.code, ErrorCode::ProviderResetStale);
+        assert_eq!(
+            refused.extra.contains_key("current"),
+            with_read,
+            "the error response uses the same optional Read boundary"
+        );
+        assert!(!refused.extra.contains_key("provider"));
+        assert_eq!(consumed.lock().unwrap().len(), 1);
+    }
+}
+
+#[tokio::test]
+async fn explicit_reset_scopes_neither_replace_current_management_nor_alias_another_provider() {
+    use orch_access_contract::key_scope::KeyAction::{Manage, Read};
+
+    let (s, _current, consumed) = setup().await;
+    let other = s
+        .rig
+        .resources_named(&s.ada, &s.tree, "Other workspace")
+        .await;
+    let no_management = explicit_reset_key(&s, s.bea.id(), s.on.provider, vec![Manage]).await;
+    let wrong_target = explicit_reset_key(&s, s.ada.id(), other.provider, vec![Manage, Read]).await;
+    let read_only = explicit_reset_key(&s, s.ada.id(), s.on.provider, vec![Read]).await;
+    for key in [&no_management, &wrong_target, &read_only] {
+        let denied = s
+            .rig
+            .world
+            .app
+            .call(ProviderResetConsume, &[&s.on.provider])
+            .token(key)
+            .body(&confirmed())
+            .send()
+            .await
+            .problem();
+        assert_eq!(denied.code, ErrorCode::AuthzDenied);
+        assert!(!denied.extra.contains_key("current"));
+        assert!(consumed.lock().unwrap().is_empty());
+    }
+}
+
+#[tokio::test]
+async fn an_explicit_reset_key_still_rechecks_management_after_the_actual_runtime_read() {
+    use orch_access_contract::key_scope::KeyAction::Manage;
+    use std::sync::atomic::{AtomicUsize, Ordering};
+
+    let (s, current, consumed) = setup().await;
+    s.rig
+        .lets_use(
+            "provider",
+            s.on.provider,
+            "provider.manage",
+            &s.bea,
+            json!({}),
+        )
+        .await;
+    sqlx::query("UPDATE permission_entries SET expires_at=$3 WHERE object_kind='provider' AND object_id=$1 AND holder_id=$2 AND permission='provider.manage'")
+        .bind(s.on.provider).bind(s.bea.id()).bind(s.rig.world.now()+Duration::seconds(1))
+        .execute(s.rig.db.pool()).await.unwrap();
+    let key = explicit_reset_key(&s, s.bea.id(), s.on.provider, vec![Manage]).await;
+    let reads = Arc::new(AtomicUsize::new(0));
+    let observed = reads.clone();
+    let clock = s.rig.world.app.clock.clone();
+    s.rig
+        .machine
+        .handler
+        .on(CommandKind::ProviderRefresh, move |_| {
+            observed.fetch_add(1, Ordering::SeqCst);
+            clock.advance(Duration::seconds(2));
+            Ok(CommandResult::ProviderRefresh(ProviderRefreshResult {
+                source: None,
+                status: "ready".into(),
+                facts: serde_json::from_value(authenticated_reset_read(
+                    current.lock().unwrap().clone(),
+                    clock.time(),
+                ))
+                .unwrap(),
+            }))
+        });
+    let denied = s
+        .rig
+        .world
+        .app
+        .call(ProviderResetConsume, &[&s.on.provider])
+        .token(&key)
+        .body(&confirmed())
+        .send()
+        .await
+        .problem();
+    assert_eq!(denied.code, ErrorCode::AuthzDenied);
+    assert_eq!(
+        reads.load(Ordering::SeqCst),
+        1,
+        "admission reached the real runtime wait"
+    );
+    assert!(
+        consumed.lock().unwrap().is_empty(),
+        "lost current management cannot spend a reset"
+    );
+    assert!(!denied.extra.contains_key("current"));
 }

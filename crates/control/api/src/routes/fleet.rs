@@ -15,11 +15,23 @@ use orch_db::{Conn, DbError};
 use orch_engine::updates::{self, Target, UpdateError};
 use orch_types::{Id, Time, new_id};
 
+mod recycle_operation;
+mod update_operation;
+
 /// Binds fleet recycling and batch update requests.
 pub fn mount(registry: &mut Registry) {
     registry
-        .on(api::NodeEnvironmentRecycle, recycle)
-        .on(api::NodeEnvironmentUpdatePreflight, update_preflight)
+        .on_with_operation(
+            api::NodeEnvironmentRecycle,
+            crate::key_operations::native::effects::prepare::<recycle_operation::Recycle>,
+            recycle_operation::recycle,
+        )
+        .on_with_initial_operation(
+            api::NodeEnvironmentUpdatePreflight,
+            crate::key_operations::native::effects::initial::<update_operation::Preflight>,
+            crate::key_operations::native::effects::prepare::<update_operation::Preflight>,
+            update_operation::preflight,
+        )
         .on(api::NodeEnvironmentUpdateCreate, update_create)
         .on(api::EnvironmentUpdateBatchPreflight, update_all_preflight)
         .on(api::EnvironmentUpdateBatchCreate, update_all_create);
@@ -180,33 +192,6 @@ pub(crate) async fn recycle_ids(
         reply.candidates.push(candidate);
     }
     Ok(reply)
-}
-
-async fn recycle(ctx: Ctx, (): (), body: api::RecycleBody) -> ApiResult<api::RecycleReply> {
-    let mut conn = ctx.app.db.acquire().await?;
-    let principal = authorization::principal(&ctx, &mut conn).await?;
-    let node = ctx.id("id")?;
-    authorization::require(
-        &mut conn,
-        &principal,
-        node,
-        authorization::VIEW,
-        orch_authz::Act::Use,
-        orch_authz::Policy::default(),
-    )
-    .await?;
-    let ids = envs::environments_under(&mut conn, node).await?;
-    drop(conn);
-    recycle_ids(&ctx, &ids, &body, None).await
-}
-
-async fn update_preflight(
-    ctx: Ctx,
-    (): (),
-    body: api::NodeEnvironmentUpdatePreflightBody,
-) -> ApiResult<api::EnvironmentUpdateBatchPlan> {
-    let node = ctx.id("id")?;
-    plan_updates(ctx, body, Some(node)).await
 }
 
 async fn update_all_preflight(

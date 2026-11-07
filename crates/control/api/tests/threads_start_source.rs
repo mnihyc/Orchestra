@@ -86,6 +86,8 @@ async fn new_environment(s: &Scene) -> Id {
         .send()
         .await
         .ok()
+        .into_full()
+        .expect("ordinary directory registration retains full native content")
         .base
         .id
 }
@@ -126,7 +128,9 @@ async fn a_new_environment_and_its_source_prepare_before_the_first_message_runs_
             .body(&request(&s, environment, send_with_create))
             .send()
             .await
-            .ok();
+            .ok()
+            .into_full()
+            .unwrap();
         if !send_with_create {
             s.say(
                 &s.ada,

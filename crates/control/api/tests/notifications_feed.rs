@@ -1,3 +1,4 @@
+#![recursion_limit = "256"]
 //! A person's feed carries their Inbox live: a row that is written reaches an open screen with the two counters of the badge, and an approval that waits for them is counted in the second.
 #![allow(
     clippy::unwrap_used,

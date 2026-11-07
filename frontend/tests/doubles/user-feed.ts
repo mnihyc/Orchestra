@@ -11,6 +11,7 @@ export interface Listening {
   subscriber: Subscriber;
   id: number;
   username: string;
+  person: Person;
   last: number;
 }
 
@@ -24,6 +25,8 @@ export class UserFeed implements Part {
   private listening: Listening[] = [];
   /** The Inbox the feed carries the rows of: put there by the world once it has both. */
   inbox: InboxView | null = null;
+  /** Capture native row baselines before an admitted connection can observe later writes. */
+  onJoin?: (listener: Listening) => void;
 
   /** An event for the person's own feed. */
   tell(username: string, data: Record<string, unknown>): void {
@@ -56,7 +59,8 @@ export class UserFeed implements Part {
       const since = typeof frame.since === 'number' ? frame.since : null;
       // A number from after what the Inbox holds means it was put back: the reader loads it anew.
       const reload = since !== null && since > seq;
-      const joined: Listening = { subscriber, id, username, last: reload ? seq : (since ?? seq) };
+      const joined: Listening = { subscriber, id, username, person, last: reload ? seq : (since ?? seq) };
+      this.onJoin?.(joined);
       this.listening.push(joined);
       subscriber.send({ op: 'subscribed', id, feed: 'user', seq, mode: reload ? 'reload' : 'delta' });
       if (!reload && since !== null && since < seq && this.inbox !== null) {

@@ -298,12 +298,12 @@ export function ModelEffort({ thread, variant, open, onOpenChange, section = nul
   const mayManage = holds(thread.access, 'thread.manage');
   const trigger =
     variant === 'composer' ? (
-      <Button action="models" variant="ghost" size="sm" disabled={!bound} aria-label={t('composer.model.change', { model: label === '' ? t('composer.model.none') : label })} className={compact ? cx('w-full min-w-0 max-w-full', narrow ? 'gap-1 px-1 text-xs [&>svg]:hidden' : 'gap-2 px-2 text-sm') : 'max-w-(--chip-width-wide)'}>
-        {compact ? <><span className={cx('min-w-0 truncate text-left', !narrow && 'hidden')}>{name === '' ? t('composer.model.none') : name}</span><span className={cx('min-w-0 truncate', narrow ? 'hidden' : 'inline')}>{label === '' ? t('composer.model.none') : label}</span></> : <span className="truncate">{label === '' ? t('composer.model.none') : label}</span>}
+      <Button action="models" variant="ghost" size="sm" disabled={!bound || readOnly} aria-label={t(readOnly ? 'composer.model.current' : 'composer.model.change', { model: label === '' ? t('composer.model.none') : label })} className={compact ? cx('w-full min-w-0 max-w-full', narrow ? 'gap-1 px-1 text-xs [&>svg]:hidden' : 'gap-2 px-2 text-sm') : 'max-w-(--chip-width-wide)'}>
+        {compact && !readOnly ? <><span className={cx('min-w-0 truncate text-left', !narrow && 'hidden')}>{name === '' ? t('composer.model.none') : name}</span><span className={cx('min-w-0 truncate', narrow ? 'hidden' : 'inline')}>{label === '' ? t('composer.model.none') : label}</span></> : <span className="truncate">{label === '' ? t('composer.model.none') : label}</span>}
         <ChevronDown aria-hidden className="shrink-0" />
       </Button>
     ) : (
-      <Button action="models" variant="ghost" size="sm" disabled={!bound} aria-label={t('composer.model.change', { model: label === '' ? t('composer.model.none') : label })} className="max-w-(--chip-width)">
+      <Button action="models" variant="ghost" size="sm" disabled={!bound || readOnly} aria-label={t(readOnly ? 'composer.model.current' : 'composer.model.change', { model: label === '' ? t('composer.model.none') : label })} className="max-w-(--chip-width)">
         <span className="truncate text-text-muted">{label === '' ? t('composer.model.none') : label}</span>
         {!mayManage && <Lock className="text-text-subtle" aria-hidden />}
       </Button>
@@ -314,7 +314,7 @@ export function ModelEffort({ thread, variant, open, onOpenChange, section = nul
       trigger={<Tooltip content={label === '' ? undefined : label}>{trigger}</Tooltip>}
       side={variant === 'composer' ? 'top' : 'bottom'}
       className="max-w-[min(20rem,calc(100vw-2rem))]"
-      {...(open === undefined ? {} : { open })}
+      {...(readOnly ? { open: false } : open === undefined ? {} : { open })}
       {...(onOpenChange === undefined ? {} : { onOpenChange })}
     >
       {readOnly ? <p className="text-sm text-text-muted">{t('composer.row.readOnly')}</p> : <Choices thread={thread} section={section} />}

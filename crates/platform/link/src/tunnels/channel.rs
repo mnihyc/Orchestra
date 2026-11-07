@@ -249,6 +249,7 @@ struct RecvSide {
 
 /// The state of one channel.
 pub(crate) struct Channel {
+    admission: Option<tokio::sync::OwnedSemaphorePermit>,
     cid: Id,
     kind: TunnelKind,
     service: String,
@@ -361,6 +362,7 @@ impl Channel {
         events: mpsc::UnboundedSender<TunnelEvent>,
     ) -> Self {
         Self {
+            admission: None,
             cid,
             kind,
             service,
@@ -620,6 +622,7 @@ impl Channel {
             let _ = wire.control(number, ChannelFrame::Close { code, detail });
         }
         self.phase = Phase::Closed;
+        self.admission.take();
         self.ended = Some(how);
         self.wire = None;
         let held = self.send.buffer.len();
@@ -1077,6 +1080,7 @@ pub enum OpenError {
 
 /// A tunnel that another machine, or the system, asks to open here.
 pub struct IncomingTunnel {
+    admission: Option<tokio::sync::OwnedSemaphorePermit>,
     /// What the tunnel carries.
     pub kind: TunnelKind,
     /// The service it is to end at.
@@ -1126,6 +1130,7 @@ impl IncomingTunnel {
             &self.service,
             self.claims.port.clone(),
             None,
+            self.admission.take(),
         )
     }
 
@@ -1139,6 +1144,7 @@ impl IncomingTunnel {
             &self.service,
             self.claims.port.clone(),
             Some(inside),
+            self.admission.take(),
         )
     }
 
@@ -1172,6 +1178,9 @@ pub struct IncomingTunnels {
 }
 
 impl IncomingTunnels {
+    pub(crate) fn from_receiver(rx: mpsc::UnboundedReceiver<IncomingTunnel>) -> Self {
+        Self { rx }
+    }
     /// The next tunnel that is asked for.
     pub async fn next(&mut self) -> Option<IncomingTunnel> {
         self.rx.recv().await
@@ -1214,6 +1223,7 @@ struct HubState {
 }
 
 pub(crate) struct HubShared {
+    admission: Option<Arc<tokio::sync::Semaphore>>,
     port_control: tokio::sync::watch::Sender<bool>,
     options: TunnelOptions,
     gauge: Option<Arc<Gauge>>,
@@ -1264,8 +1274,26 @@ impl TunnelHub {
     /// A hub with other options, and a gauge of the bytes its tunnels hold.
     #[must_use]
     pub fn with_options(options: TunnelOptions, gauge: Option<Arc<Gauge>>) -> Self {
+        Self::with_admission(options, gauge, None)
+    }
+
+    /// All physical-machine carriers share the same existing channel-count allowance.
+    pub(crate) fn with_shared_budget(
+        options: TunnelOptions,
+        gauge: Option<Arc<Gauge>>,
+        admission: Arc<tokio::sync::Semaphore>,
+    ) -> Self {
+        Self::with_admission(options, gauge, Some(admission))
+    }
+
+    fn with_admission(
+        options: TunnelOptions,
+        gauge: Option<Arc<Gauge>>,
+        admission: Option<Arc<tokio::sync::Semaphore>>,
+    ) -> Self {
         let (incoming_tx, incoming_rx) = mpsc::unbounded_channel();
         let shared = Arc::new_cyclic(|weak| HubShared {
+            admission,
             port_control: tokio::sync::watch::channel(false).0,
             options,
             gauge,
@@ -1295,6 +1323,25 @@ impl TunnelHub {
             }
         });
         Self { shared }
+    }
+
+    /// Suspended and pending channels still own their bytes and protect an auxiliary.
+    pub(crate) fn has_live_channels(&self) -> bool {
+        let state = lock(&self.shared.state);
+        !state.pending.is_empty()
+            || state
+                .tunnels
+                .values()
+                .any(|channel| lock(channel).phase != Phase::Closed)
+    }
+
+    /// Explicit transport retirement resets its channels; they never move between gateways.
+    pub(crate) fn reset_all(&self) {
+        let mut state = lock(&self.shared.state);
+        for channel in state.channels.values().chain(state.tunnels.values()) {
+            lock(channel).close_with(Ended::Reset, true);
+        }
+        state.pending.clear();
     }
 
     /// The tunnels others open to this machine. Taken once.
@@ -1434,6 +1481,14 @@ impl TunnelHub {
                 self.shared.gauge.clone(),
                 events_tx,
             );
+            channel.admission = match &self.shared.admission {
+                Some(budget) => Some(
+                    Arc::clone(budget)
+                        .try_acquire_owned()
+                        .map_err(|_| OpenError::TooMany)?,
+                ),
+                None => None,
+            };
             channel.ticket = Some(ticket.to_owned());
             let budget = HubShared::udp_budget(&mut state, claims.port.as_ref());
             channel.configure_port(claims.port.clone(), None, budget);
@@ -1732,7 +1787,22 @@ impl HubShared {
             );
             return;
         };
+        let admission = match &self.admission {
+            Some(budget) => match Arc::clone(budget).try_acquire_owned() {
+                Ok(permit) => Some(permit),
+                Err(_) => {
+                    self.refuse(
+                        offer.channel,
+                        OpenErrorCode::TooManyChannels,
+                        "the machine's shared channel allowance is full",
+                    );
+                    return;
+                }
+            },
+            None => None,
+        };
         let tunnel = IncomingTunnel {
+            admission,
             kind: offer.kind,
             service: offer.service,
             from: offer.from,
@@ -1759,6 +1829,7 @@ impl HubShared {
         service: &str,
         port: Option<PortTicketClaims>,
         inside: Option<PortConnectionInside>,
+        admission: Option<tokio::sync::OwnedSemaphorePermit>,
     ) -> Result<Tunnel, OpenError> {
         if kind == TunnelKind::Port
             && (inside.is_none() || port.is_none() || !lock(&self.state).port_available)
@@ -1790,6 +1861,7 @@ impl HubShared {
             self.gauge.clone(),
             events_tx,
         );
+        channel.admission = admission;
         channel.number = Some(number);
         channel.wire = Some(Arc::clone(&wire));
         channel.phase = Phase::Open;

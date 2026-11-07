@@ -51,7 +51,9 @@ pub fn caller_of(authed: &Authed) -> ApiResult<Caller> {
             token_id,
             scopes,
             node_id,
-        } => TokenGrant::from_stored(scopes, *node_id)
+            operation_scope,
+            expires_at,
+        } => TokenGrant::from_stored_scope(scopes, *node_id, operation_scope.clone(), *expires_at)
             // A synthetic grant (the nil id) is no stored token: nothing refuses it or bounds its life.
             .map(|grant| {
                 if token_id.is_nil() {
@@ -74,7 +76,97 @@ pub async fn principal(ctx: &Ctx, conn: &mut Conn) -> ApiResult<Principal> {
             .await?
             .into_principal());
     }
+    if let Some(admitted) = ctx.admitted_caller() {
+        return admitted_principal(conn, admitted, ctx.user()?, Time::new(ctx.app.clock.now()))
+            .await;
+    }
+
     principal_of(conn, ctx.user()?, Time::new(ctx.app.clock.now())).await
+}
+
+/// Preserve the canonical typed conflict from same-credential restoration. Only an
+/// explicitly opted-in effect-free reader may replay it; this mapper never retries.
+pub(crate) fn restoration_error(error: orch_authz::Error) -> ApiError {
+    match error {
+        orch_authz::Error::Db(orch_db::DbError::Retry) => orch_db::DbError::Retry.into(),
+        other => ApiError::internal(other),
+    }
+}
+
+/// Reloads an admitted caller inside the same synchronous operation checkpoint. This never
+/// makes saved target ancestry valid for a later transaction, job or delivery.
+pub(crate) async fn admitted_principal(
+    conn: &mut Conn,
+    admitted: &Caller,
+    authed: &Authed,
+    now: Time,
+) -> ApiResult<Principal> {
+    if !same_credential_origin(authed, admitted) {
+        return Err(ApiError::internal(
+            "admitted authority changed credential origin",
+        ));
+    }
+    let current = orch_authz::CapturedCaller::capture(admitted)
+        .restore(conn, now)
+        .await
+        .map_err(restoration_error)?
+        .ok_or_else(|| {
+            ApiError::new(
+                ErrorCode::AuthInvalidToken,
+                "the admitted credential is no longer valid",
+            )
+        })?;
+    let caller = readmit_current(current, admitted)?;
+    let principal = load_principal(conn, caller, now).await?;
+    crate::sign_in::second_step::hold(conn, authed, principal).await
+}
+
+/// Reuse the producer's exact transient admission with an already refreshed actual caller.
+/// This adds no permission rule and never persists target paths or checked-empty proof.
+pub(crate) fn readmit_current(current: Caller, admitted: &Caller) -> ApiResult<Caller> {
+    let refused = || {
+        ApiError::new(
+            ErrorCode::AuthzDenied,
+            "the credential's current rules no longer admit this operation",
+        )
+    };
+    Ok(if let Some(required) = admitted.admitted_required_roles() {
+        current
+            .admit_resolved_operation(
+                admitted.admitted_operation().ok_or_else(refused)?,
+                required,
+                admitted.admitted_facets().ok_or_else(refused)?,
+            )
+            .map_err(|_| refused())?
+            .into_caller()
+    } else if let Some(required) = admitted.admitted_empty_facets() {
+        // Only the producer's exact transient checked-empty proof is reused in this
+        // synchronous checkpoint. Capture never persists emptiness or resolved paths.
+        let selection = admitted.admitted_operation().ok_or_else(refused)?;
+        current
+            .admit_empty_operation(selection, required)
+            .map_err(|_| refused())?
+            .into_caller()
+    } else if let Some(facets) = admitted.admitted_facets() {
+        current
+            .admit_facets(facets)
+            .map_err(|_| refused())?
+            .into_caller()
+    } else {
+        current
+    })
+}
+
+/// Compares authenticated origins, not merely the same account or an HTTP-supplied identity.
+pub(crate) fn same_credential_origin(authed: &Authed, caller: &Caller) -> bool {
+    caller.user() == authed.id()
+        && match (&authed.via, caller.grant()) {
+            (Via::Session { .. }, None) => caller.as_admin() == authed.as_admin,
+            (Via::Token { token_id, .. }, Some(grant)) => {
+                !caller.as_admin() && grant.token_ids().any(|id| id == *token_id)
+            }
+            _ => false,
+        }
 }
 
 pub(crate) async fn load_principal(
@@ -158,7 +250,7 @@ pub(crate) async fn note_use(ctx: &Ctx) {
 }
 
 /// What a request's path says its object is.
-enum Subject {
+pub(crate) enum Subject {
     /// A node, by its identifier.
     Node(Id),
     /// An org, by its short name or its address.
@@ -187,7 +279,7 @@ pub fn resource_kind_of(plural: &str) -> Option<ResourceKind> {
 }
 
 /// Finds the object of a request from the path it is declared with.
-fn subject(ctx: &Ctx) -> ApiResult<Subject> {
+pub(crate) fn subject(ctx: &Ctx) -> ApiResult<Subject> {
     let mut parts = ctx.route.path.trim_start_matches('/').split('/');
     match (parts.next(), parts.next()) {
         (Some("orgs"), Some("by-slug")) => Ok(Subject::Address(ctx.param("slug")?.to_owned())),
@@ -330,8 +422,16 @@ pub(crate) async fn require_on_path_in(
                     ctx.route.path
                 ))
             })?;
-            return require_resource(conn, principal, kind, id, permission, Policy::default())
-                .await;
+            return require_resource_projected(
+                conn,
+                principal,
+                kind,
+                id,
+                permission,
+                Policy::default(),
+                ctx.key_receipt_required(),
+            )
+            .await;
         }
         Subject::Document(id) => {
             let permission = name.on(ObjectKind::Document).ok_or_else(|| {
@@ -344,7 +444,16 @@ pub(crate) async fn require_on_path_in(
             return require_document(conn, principal, id, permission, Policy::default()).await;
         }
     };
-    require(conn, principal, node, name, act_of(ctx), Policy::default()).await
+    require_projected(
+        conn,
+        principal,
+        node,
+        name,
+        act_of(ctx),
+        Policy::default(),
+        ctx.key_receipt_required(),
+    )
+    .await
 }
 
 /// Requires `permission` on the node `node` of the caller, `act` being
@@ -359,13 +468,93 @@ pub async fn require(
     act: Act,
     policy: Policy,
 ) -> ApiResult<()> {
+    require_projected(conn, principal, node, permission, act, policy, false).await
+}
+
+/// The same ordinary decision, with a content-free refusal when this operation's
+/// current optional Read disclosure was not admitted. Browser callers keep the
+/// existing detailed projection; this changes neither authority nor error codes.
+pub(crate) async fn require_projected(
+    conn: &mut Conn,
+    principal: &Principal,
+    node: Id,
+    permission: PermissionName,
+    act: Act,
+    policy: Policy,
+    receipt_only: bool,
+) -> ApiResult<()> {
     match nodes::check_named(conn, principal, node, permission, act, policy).await {
         Ok(Decision::Allowed { .. }) => Ok(()),
         Ok(Decision::Refused(refusal)) => match kept_out_problem(conn, principal, node).await? {
-            Some(problem) => Err(problem),
+            Some(problem) => Err(if receipt_only {
+                problem_without_content(problem)
+            } else {
+                problem
+            }),
+            None if receipt_only => Err(ApiError::new(
+                ErrorCode::AuthzDenied,
+                "the caller lacks the required permission",
+            )
+            .with("required", refusal.required.as_str())),
             None => Err(refusals::denied(conn, refusal).await?),
         },
-        Err(error) => Err(engine_problem(conn, principal, error).await),
+        Err(error) => {
+            let problem = engine_problem(conn, principal, error).await;
+            Err(if receipt_only {
+                problem_without_content(problem)
+            } else {
+                problem
+            })
+        }
+    }
+}
+
+/// A complete Problem envelope for an error producer whose detailed form can contain
+/// existing names/state. Keep the original status, stable code and retry hint, not selected
+/// fields from its rich projection. This is only for a refused optional disclosure.
+pub(crate) fn problem_without_content(problem: ApiError) -> ApiError {
+    problem.without_content()
+}
+
+/// Limit only actual errors under the same accepted/current credential boundary.
+/// Successful writes and their acknowledgements are never re-decided after commit.
+pub(crate) fn projected_result<T>(
+    ctx: Ctx,
+    work: impl std::future::Future<Output = ApiResult<T>>,
+    content_free: bool,
+) -> impl std::future::Future<Output = ApiResult<T>> {
+    let work = Box::pin(work);
+    async move {
+        let error = match work.await {
+            Ok(value) => return Ok(value),
+            Err(error) => error,
+        };
+        let Some(accepted) = ctx.admitted_caller() else {
+            return Err(problem_without_content(error));
+        };
+        if accepted.grant().is_none() {
+            return Err(error);
+        }
+        let current = match ctx.app.db.acquire().await {
+            Ok(mut conn) => orch_authz::CapturedCaller::capture(accepted)
+                .restore(&mut conn, Time::new(ctx.app.clock.now()))
+                .await
+                .ok()
+                .flatten(),
+            Err(_) => None,
+        };
+        let Some(current) = current else {
+            return Err(problem_without_content(error));
+        };
+        if current
+            .grant()
+            .is_some_and(|grant| grant.operation_scope().is_some())
+            && (content_free || ctx.key_receipt_required())
+        {
+            Err(problem_without_content(error))
+        } else {
+            Err(error)
+        }
     }
 }
 
@@ -418,14 +607,40 @@ pub async fn require_resource(
     permission: Permission,
     policy: Policy,
 ) -> ApiResult<()> {
+    require_resource_projected(conn, principal, kind, id, permission, policy, false).await
+}
+
+/// Keep the ordinary resource decision while bounding its named refusal to the
+/// current operation's optional disclosure, as with node permission checks.
+pub(crate) async fn require_resource_projected(
+    conn: &mut Conn,
+    principal: &Principal,
+    kind: ResourceKind,
+    id: Id,
+    permission: Permission,
+    policy: Policy,
+    receipt_only: bool,
+) -> ApiResult<()> {
     let object = ObjectRef {
         kind: kind.into(),
         id,
     };
     match resources::check(conn, principal, object, permission, policy).await {
         Ok(Decision::Allowed { .. }) => Ok(()),
+        Ok(Decision::Refused(refusal)) if receipt_only => Err(ApiError::new(
+            ErrorCode::AuthzDenied,
+            "the caller lacks the required permission",
+        )
+        .with("required", refusal.required.as_str())),
         Ok(Decision::Refused(refusal)) => Err(refusals::denied(conn, refusal).await?),
-        Err(error) => Err(engine_problem(conn, principal, error).await),
+        Err(error) => {
+            let problem = engine_problem(conn, principal, error).await;
+            Err(if receipt_only {
+                problem_without_content(problem)
+            } else {
+                problem
+            })
+        }
     }
 }
 
@@ -443,5 +658,51 @@ pub async fn require_document(
         Ok(Decision::Allowed { .. }) => Ok(()),
         Ok(Decision::Refused(refusal)) => Err(refusals::denied(conn, refusal).await?),
         Err(error) => Err(engine_problem(conn, principal, error).await),
+    }
+}
+
+#[cfg(test)]
+mod projection_tests {
+    use super::*;
+
+    #[test]
+    fn limited_problem_keeps_code_and_retry_without_named_payload() {
+        let mut rich = ApiError::new(ErrorCode::NodeArchived, "private archive name")
+            .with("archived_node", serde_json::json!({"name":"Private"}))
+            .retry_after(3);
+        // A non-default transport status makes accidental replacement by the code's default visible.
+        rich.problem.status = http::StatusCode::PRECONDITION_REQUIRED.as_u16();
+        let limited = problem_without_content(rich);
+        assert_eq!(limited.code(), ErrorCode::NodeArchived);
+        assert_eq!(
+            limited.problem.status,
+            http::StatusCode::PRECONDITION_REQUIRED.as_u16()
+        );
+        assert_eq!(limited.retry_after, Some(3));
+        assert!(limited.problem.extra.is_empty());
+        assert!(!limited.problem.detail.contains("Private"));
+    }
+
+    #[test]
+    fn limited_problem_preserves_trusted_retry_without_trusting_a_public_lookalike() {
+        let trusted = ApiError::from(orch_db::DbError::Retry)
+            .with("current", serde_json::json!({"name":"Private"}))
+            .retry_after(3);
+        let mut lookalike = ApiError::new(trusted.code(), trusted.problem.detail.clone())
+            .with("current", serde_json::json!({"name":"Private"}))
+            .retry_after(3);
+        lookalike.problem.status = trusted.problem.status;
+        assert!(trusted.is_database_retry());
+        assert!(!lookalike.is_database_retry());
+
+        let trusted = problem_without_content(trusted);
+        let lookalike = problem_without_content(lookalike);
+        assert!(trusted.is_database_retry());
+        assert!(!lookalike.is_database_retry());
+        assert_eq!(trusted.problem, lookalike.problem);
+        assert_eq!(trusted.retry_after, Some(3));
+        assert_eq!(trusted.retry_after, lookalike.retry_after);
+        assert!(trusted.problem.extra.is_empty());
+        assert!(!trusted.problem.detail.contains("Private"));
     }
 }

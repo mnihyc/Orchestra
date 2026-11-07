@@ -42,6 +42,34 @@ use orch_pki::certificates::ServiceName;
 use orch_settings::Place;
 use orch_types::{Hash, Id, Json};
 
+mod template_import;
+type ArchiveDelivery =
+    crate::key_operations::native::blob_delivery::Delivery<template_import::Archives>;
+
+fn source_fault(error: crate::middleware::requests::ApiError) -> LinkFault {
+    LinkFault::new(
+        error.problem.status,
+        error.problem.code.as_str(),
+        error.problem.detail,
+    )
+}
+
+async fn archive_check(source: &Option<ArchiveDelivery>) -> Result<(), LinkFault> {
+    if let Some(source) = source {
+        source.check().await.map_err(source_fault)?;
+    }
+    Ok(())
+}
+async fn archive_response(
+    source: Option<ArchiveDelivery>,
+    response: Response,
+) -> Result<Response, LinkFault> {
+    match source {
+        Some(source) => source.response(response).await.map_err(source_fault),
+        None => Ok(response),
+    }
+}
+
 /// The header in which a gateway gives the machine it found a request to be from.
 pub const MACHINE_HEADER: &str = "x-orch-machine";
 
@@ -158,6 +186,23 @@ fn uploads(kind: CommandKind) -> bool {
 }
 
 impl Asker {
+    async fn archives(&self, app: &App, hash: Hash) -> Result<Option<ArchiveDelivery>, LinkFault> {
+        if matches!(
+            &self.command,
+            Named::Open {
+                kind: CommandKind::NodeTemplateImport,
+                ..
+            }
+        ) {
+            Ok(Some(
+                template_import::prepare(app, self.machine.id, self.command_id, hash)
+                    .await
+                    .map_err(source_fault)?,
+            ))
+        } else {
+            Ok(None)
+        }
+    }
     /// Whether the command lets the machine do `wants`; content for a download is judged apart
     /// ([`Asker::lists`]).
     fn permits(&self, wants: Wants) -> bool {
@@ -300,6 +345,7 @@ async fn probe(
     if !asker.permits(Wants::Probe) {
         return Err(denied(Wants::Probe));
     }
+    let source = asker.archives(&app, hash).await?;
     if let Some(size) = app
         .blobs
         .store()
@@ -307,20 +353,24 @@ async fn probe(
         .await
         .map_err(|e| LinkFault::internal(&e))?
     {
-        return Ok(progress_reply(
-            StatusCode::OK,
-            BlobProgress {
-                received: size,
-                complete: true,
-            },
-        ));
+        return archive_response(
+            source,
+            progress_reply(
+                StatusCode::OK,
+                BlobProgress {
+                    received: size,
+                    complete: true,
+                },
+            ),
+        )
+        .await;
     }
     let mut conn = app
         .db
         .acquire()
         .await
         .map_err(|e| LinkFault::internal(&e))?;
-    match storage::upload(&mut conn, &hash)
+    let result = match storage::upload(&mut conn, &hash)
         .await
         .map_err(|e| LinkFault::internal(&e))?
     {
@@ -336,6 +386,14 @@ async fn probe(
             "not_found",
             "the system holds none of that",
         )),
+    };
+    drop(conn);
+    match result {
+        Ok(response) => archive_response(source, response).await,
+        Err(error) => {
+            archive_check(&source).await?;
+            Err(error)
+        }
     }
 }
 
@@ -387,6 +445,7 @@ async fn download(
     if !asker.permits(Wants::Download) || !asker.lists(&app, &hash).await? {
         return Err(denied(Wants::Download));
     }
+    let source = asker.archives(&app, hash).await?;
     let transfer = app
         .blobs
         .begin_transfer(asker.machine.id)
@@ -395,6 +454,7 @@ async fn download(
     let read = match app.blobs.read(&hash, range).await {
         Ok(read) => read,
         Err(BlobError::NotFound(_)) => {
+            archive_check(&source).await?;
             return Err(LinkFault::new(
                 404,
                 "not_found",
@@ -406,9 +466,12 @@ async fn download(
             if let Ok(value) = HeaderValue::from_str(&unsatisfied_content_range(size)) {
                 response.headers_mut().insert(header::CONTENT_RANGE, value);
             }
-            return Ok(response);
+            return archive_response(source, response).await;
         }
-        Err(error) => return Err(LinkFault::internal(&error)),
+        Err(error) => {
+            archive_check(&source).await?;
+            return Err(LinkFault::internal(&error));
+        }
     };
     if let Ok(mut conn) = app.db.acquire().await
         && let Err(error) = storage::touch_blob(&mut conn, &hash, app.clock.now()).await
@@ -440,7 +503,7 @@ async fn download(
     };
     let mut response = (status, body).into_response();
     response.headers_mut().extend(response_headers);
-    Ok(response)
+    archive_response(source, response).await
 }
 
 // ---------------------------------------------------------------- PUT

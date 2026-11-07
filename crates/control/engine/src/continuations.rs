@@ -1,6 +1,8 @@
 //! Authored prompt versions retain native prefixes and select execution by one durable guarded job.
 
-pub(crate) mod admission;
+pub mod admission;
+pub mod command;
+pub mod operation;
 pub mod projection;
 pub mod recipe;
 
@@ -51,21 +53,9 @@ impl Engine {
         input: Id,
         body: ThreadPromptVersionCreateBody,
     ) -> Result<ThreadContinuationAccepted, Error> {
-        let request = recipe::Request {
-            kind: recipe::Kind::Edit,
-            source_continuation_id: body.source_continuation_id,
-            before_input_id: Some(input),
-            target_continuation_id: None,
-            expected: recipe::Expected {
-                active_continuation_id: body.expected_active_continuation_id,
-                execution_revision: body.expected_execution_revision,
-                queue_revision: body.expected_queue_revision,
-            },
-            active_turn: admission::running(body.active_turn),
-            content: Some(body.content),
-        };
+        let (client, request) = recipe::edit(input, body);
         let accepted = self
-            .accept_continuation(&mut tx, &principal, thread, &body.client_id, request)
+            .accept_continuation(&mut tx, &principal, thread, &client, request)
             .await?;
         tx.commit().await.map_err(orch_db::DbError::from)?;
         self.kick();
@@ -82,22 +72,31 @@ impl Engine {
         target: Id,
         body: ThreadContinuationActivateBody,
     ) -> Result<ThreadContinuationAccepted, Error> {
-        let request = recipe::Request {
-            kind: recipe::Kind::Activate,
-            source_continuation_id: target,
-            before_input_id: None,
-            target_continuation_id: Some(target),
-            expected: recipe::Expected {
-                active_continuation_id: body.expected_active_continuation_id,
-                execution_revision: body.expected_execution_revision,
-                queue_revision: body.expected_queue_revision,
-            },
-            active_turn: admission::running(body.active_turn),
-            content: body.content,
-        };
+        let (client, request) = recipe::activate(target, body);
         let accepted = self
-            .accept_continuation(&mut tx, &principal, thread, &body.client_id, request)
+            .accept_continuation(&mut tx, &principal, thread, &client, request)
             .await?;
+        tx.commit().await.map_err(orch_db::DbError::from)?;
+        self.kick();
+        self.wake(thread);
+        Ok(accepted)
+    }
+
+    /// Consume the existing native plan on its original transaction and first-effect seam.
+    pub async fn apply_prepared_continuation(
+        &self,
+        mut tx: orch_db::Tx,
+        principal: &Principal,
+        prepared: admission::Prepared,
+        before: impl FnOnce() -> Result<(), EngineError> + Send,
+    ) -> Result<ThreadContinuationAccepted, Error> {
+        let thread = prepared.thread();
+        let accepted = {
+            let mut unit = Unit::with_first_effect(&mut tx, self.inner.clock.now(), before);
+            let accepted = admission::apply(self, &mut unit, principal, prepared).await?;
+            unit.finish().await?;
+            accepted
+        };
         tx.commit().await.map_err(orch_db::DbError::from)?;
         self.kick();
         self.wake(thread);

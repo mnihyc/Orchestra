@@ -34,6 +34,8 @@ async fn put_file(desk: &Desk, by: &Who, document: Id, name: &str, bytes: &[u8])
         .send()
         .await
         .ok()
+        .into_full()
+        .expect("this native creation control requires its full response")
 }
 
 /// A block that shows a file of the document.

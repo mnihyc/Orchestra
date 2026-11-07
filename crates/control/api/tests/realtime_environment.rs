@@ -1,3 +1,4 @@
+#![recursion_limit = "256"]
 //! Live environment feeds on a real connector: shared watches, signals, direct-child changes and offline recovery.
 #![allow(
     clippy::unwrap_used,

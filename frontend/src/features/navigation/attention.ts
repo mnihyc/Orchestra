@@ -5,20 +5,19 @@
  * thread is unread when it has come further than they have read, and they either have a position in
  * it or follow it: a thread nobody ever opened or asked to be told of is not shouted at a newcomer.
  *
- * Both lists are read once for the org in view and then kept by the person's own feed, which says
+ * Both lists come from the admitted shell baseline and are then kept by the person's own feed, which says
  * each change made on any of their devices. That feed does not repeat what it said while the
- * connection was gone, so after every connection the lists are read again. The same feed says when
+ * connection was gone, so every connection retakes the shared shell baseline. The same feed says when
  * the person's favorites and what the interface keeps for them changed elsewhere: those are read
  * again too, so that a section folded on one device folds on the other.
  */
 import { useEffect } from 'react';
 import { create } from 'zustand';
 
-import { applyChanges, userEventChanges } from '@/api/acts';
 import { api, client, ok } from '@/api/client';
-import { isSavingSidebar } from '@/features/navigation/preferences';
 import type { SubscriptionLevel, TreeNode } from '@/generated/api-types';
-import { socket } from '@/realtime/live';
+import { ensurePersonalSource } from '@/realtime/live';
+import { onUserEvent } from '@/realtime/stores/user';
 import { queryClient } from '@/api/query';
 
 export interface Attention {
@@ -140,32 +139,17 @@ function onEvent(data: Record<string, unknown>): void {
     case 'subscription':
       if (typeof data.node_id === 'string') attentionWriter.level(data.node_id, typeof data.level === 'string' ? (data.level as SubscriptionLevel) : null);
       return;
-    case 'favorites':
-      void applyChanges(userEventChanges('favorites', data));
-      return;
-    case 'state':
-      // A change this page is sending is its own, and is already shown: reading now could bring back the value before it.
-      void applyChanges(userEventChanges('state', data).filter((change) => !isSavingSidebar() || !('key' in change && change.key[0] === 'me-state')));
-      return;
     default:
   }
 }
 
+// The session owns this admitted source even while Navigation is hidden. Keep
+// the complete bootstrap baseline current so reopening a tree needs no repair.
+for (const what of ['read_state', 'subscription']) onUserEvent(what, (data) => onEvent({ ...data, what }));
+
 function follow(): () => void {
-  const subscription = socket.subscribe('user', {
-    // The feed is listened to for its events alone; its rows belong to whoever shows the Inbox.
-    since: () => null,
-    onFrame: (frame) => {
-      if (frame.op === 'subscribed') {
-        // Events are not repeated: what they would have said while the connection was gone is read again.
-        if (wanted !== null) void load(wanted);
-        void applyChanges([...userEventChanges('favorites', {}), ...userEventChanges('state', {})]);
-      } else if (frame.op === 'event') {
-        onEvent(frame.data);
-      }
-    },
-  });
-  return () => subscription.unsubscribe();
+  void ensurePersonalSource().catch(() => undefined);
+  return () => undefined;
 }
 
 /**

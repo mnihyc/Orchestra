@@ -1,6 +1,7 @@
 //! Generic Rule routes retain the same archive and retained-restoration rules as native pages.
 
 use super::*;
+use crate::support::FullArchiveReply as _;
 use orch_api_contract::documents::{DocumentRestore, DocumentRestoreBody};
 use orch_api_contract::nodes::NodeArchive;
 use orch_types::Hash;
@@ -44,7 +45,7 @@ async fn generic_live_folder_and_document_moves_and_deletions_cannot_use_the_ret
     let mut deletions = Vec::new();
     for item in items {
         let mut body = operation(DocumentTreeCommand::Delete, vec![item], None);
-        body.deletion_plan = Some(preview(&desk, &desk.ada, &body).await.stamp);
+        body.deletion_plan = Some((preview(&desk, &desk.ada, &body).await.stamp).into());
         deletions.push(body);
     }
     desk.world
@@ -54,6 +55,7 @@ async fn generic_live_folder_and_document_moves_and_deletions_cannot_use_the_ret
         .body(&places::archive_body(&desk.world, &desk.ada.token, desk.topic, true).await)
         .send()
         .await
+        .full_archive()
         .ok();
     let before = state(&desk).await?;
     for (item, delete) in items.into_iter().zip(deletions) {
@@ -149,6 +151,7 @@ async fn actual_retained_items_keep_parent_first_and_can_restore_to_a_live_desti
         .body(&places::archive_body(&desk.world, &desk.ada.token, desk.topic, true).await)
         .send()
         .await
+        .full_archive()
         .ok();
     let restoring = operation(
         DocumentTreeCommand::Restore,

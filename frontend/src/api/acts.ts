@@ -391,6 +391,7 @@ export const ACTS: Readonly<Record<string, Entry>> = {
   'DELETE /nodes/{id}/secrets/{name}': () => kinds('secrets', 'settings'),
   'PUT /environments/{id}/secrets/{name}': (p) => [one(p('id'), 'secrets'), ...kinds('settings')],
   'DELETE /environments/{id}/secrets/{name}': (p) => [one(p('id'), 'secrets'), ...kinds('settings')],
+  'PUT /gateways': () => [{ key: ['gateway-catalogue'], exact: true }],
   'PUT /admin/settings/{key}': (p) => [...settings(), ...relatedSettings(p('key')), ...kinds('meta', 'admin'), ...(p('key').startsWith('hosts.') ? kinds('host', 'hosts') : [])],
   'DELETE /admin/settings/{key}': (p) => [...settings(), ...relatedSettings(p('key')), ...kinds('meta', 'admin'), ...(p('key').startsWith('hosts.') ? kinds('host', 'hosts') : [])],
 

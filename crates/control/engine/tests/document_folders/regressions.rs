@@ -8,6 +8,14 @@ use orch_types::{Hash, Time};
 mod archive_retention;
 #[path = "regressions/contention.rs"]
 mod contention;
+#[path = "regressions/deletion_confirmation.rs"]
+mod deletion_confirmation;
+#[path = "regressions/operation_sources.rs"]
+mod operation_sources;
+#[path = "regressions/prepared_copy.rs"]
+mod prepared_copy;
+#[path = "regressions/prepared_creation.rs"]
+mod prepared_creation;
 #[path = "regressions/replay_rollback.rs"]
 mod replay_rollback;
 

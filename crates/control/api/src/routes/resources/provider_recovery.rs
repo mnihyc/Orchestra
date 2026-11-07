@@ -7,6 +7,7 @@ use crate::{
     },
     registry::Ctx,
 };
+use orch_access_contract::decisions::ObjectRef;
 use orch_api_contract::{
     forks::{ForkCreateBody, ProviderUpdatePlan, Rollback, UpdateReason, UpdateThread},
     loss::OperationNotificationPlan,
@@ -27,6 +28,16 @@ struct Stored {
     recipe: recovery::Recipe,
     grants: Vec<orch_api_contract::loss::OperationAdminGrant>,
     audience: Vec<notifications::OperationRecipient>,
+}
+
+/// The native recovery recipe's actual retained Provider, independent of its destination.
+pub(crate) fn recipient_subject(plan: &orch_types::Json) -> ApiResult<ObjectRef> {
+    let stored: Stored =
+        serde_json::from_value(plan["provider_recovery"].clone()).map_err(ApiError::internal)?;
+    Ok(ObjectRef {
+        kind: orch_access_contract::permissions::ObjectKind::Provider,
+        id: stored.recipe.provider,
+    })
 }
 /// Whether the ordinary provider-runtime page has a declared unavailable source and no current unit.
 pub(super) async fn needed(conn: &mut Conn, id: Id) -> ApiResult<bool> {

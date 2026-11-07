@@ -1,3 +1,4 @@
+#![recursion_limit = "256"]
 //! Cached feed authority ends on time, and committed changes reach sockets before forbidden data.
 #![allow(
     clippy::unwrap_used,

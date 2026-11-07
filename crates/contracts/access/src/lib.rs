@@ -17,6 +17,7 @@
 
 pub mod audit;
 pub mod decisions;
+pub mod key_scope;
 pub mod pages;
 pub mod permissions;
 pub mod roles;

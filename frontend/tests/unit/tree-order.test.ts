@@ -2,7 +2,7 @@
 import { describe, expect, it } from 'vitest';
 
 import { arranged, choiceOf, effectiveOrder, orderOf, SHIPPED_ORDER, type TreeOrder, withChoice } from '@/features/navigation/treeOrder';
-import { buildRows } from '@/features/navigation/treeRows';
+import { buildRows, placesWithDocs } from '@/features/navigation/treeRows';
 import type { TreeNode } from '@/generated/api-types';
 import type { OrgTree } from '@/realtime/stores/tree';
 
@@ -23,6 +23,15 @@ const node = (id: string, kind: TreeNode['kind'], parent: string | null, more: P
   topic: kind === 'topic' ? { status: 'open', tag_ids: [] } : null,
   tree_seq: 1,
   ...more,
+});
+
+it('keeps a loaded document page across a node rename and rereads a changed document namespace', () => {
+  const row = node('project', 'project', null, { docs: 2, docs_seq: 7, tree_seq: 10 });
+  const snapshot = (value: TreeNode): OrgTree => ({ nodes: new Map([[value.id, value]]), lastSeq: value.tree_seq, loaded: true, error: null });
+  const held = placesWithDocs(snapshot(row), row.id, new Set());
+  expect(placesWithDocs(snapshot({ ...row, name: 'Web services', tree_seq: 11 }), row.id, new Set())).toBe(held);
+  expect(placesWithDocs(snapshot({ ...row, docs_seq: 8, tree_seq: 11 }), row.id, new Set())).not.toBe(held);
+  expect(placesWithDocs(snapshot({ ...row, docs: 3, tree_seq: 11 }), row.id, new Set())).not.toBe(held);
 });
 
 // Ids grow with time: 01 is the oldest. Bravo changed last; a department stands before the projects.

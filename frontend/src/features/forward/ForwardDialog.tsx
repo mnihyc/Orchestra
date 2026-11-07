@@ -18,7 +18,7 @@ import { EmptyState } from '@/ui/EmptyState';
 import { ThreadIdentity } from '@/features/people/ThreadIdentity';
 import { useStore } from 'zustand';
 
-import { ApiError, client } from '@/api/client';
+import { ApiError, client, ReceiptAcknowledged } from '@/api/client';
 import { nodeQuery } from '@/api/nodes';
 import { holds } from '@/lib/permissions';
 import { mentionNames } from '@/features/people/wording';
@@ -190,6 +190,13 @@ function ForwardForm({ source, onClose, onForwarded, initialDestinations }: { so
       onForwarded?.(reply);
       onClose();
     } catch (error) {
+      if (error instanceof ReceiptAcknowledged) {
+        // The atomic forward committed. Keep full-result callbacks separate from this acknowledgement;
+        // closing also prevents the original submit control from offering to repeat accepted work.
+        toast({ tone: 'success', title: t('forward.done', { count: chosen.length }) });
+        onClose();
+        return;
+      }
       setRefusal({ error, destination: error instanceof ApiError ? refusedDestination(chosen, error.problem.object) : null });
       setPending(false);
     }

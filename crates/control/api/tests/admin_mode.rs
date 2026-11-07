@@ -9,6 +9,7 @@ mod places;
 mod rig;
 mod support;
 
+use crate::support::FullPermissionPageReply;
 use orch_api_contract::access::{
     EffectiveAccessGet, EffectiveAccessGetQuery, PageChange, PermissionPageGet,
     PermissionPageUpdate, ThreadAccess,
@@ -161,10 +162,17 @@ async fn resource_marks(world: &World, by: &Who, resources: &[(&str, Id)], enabl
                 rights.contains(&json!(format!("{permission_area}.view"))),
                 "{kind}: {one}"
             );
-            assert!(
-                rights.contains(&json!(format!("{permission_area}.manage"))),
-                "{kind}: {one}"
-            );
+            if *kind == "machine" {
+                assert!(rights.contains(&json!("access.manage")), "{kind}: {one}");
+                for permission in ["machine.use", "machine.manage"] {
+                    assert!(!rights.contains(&json!(permission)), "{kind}: {one}");
+                }
+            } else {
+                assert!(
+                    rights.contains(&json!(format!("{permission_area}.manage"))),
+                    "{kind}: {one}"
+                );
+            }
             assert_eq!(one["access"]["admin_place"], marker["place"]);
         } else {
             assert!(matches!(status, 403 | 404), "{kind}: {one}");
@@ -225,6 +233,8 @@ async fn private_thread(
         .send()
         .await
         .ok()
+        .into_full()
+        .unwrap()
 }
 
 async fn change_page(world: &World, by: &Who, object: &str, id: Id, mut change: PageChange) {
@@ -243,6 +253,7 @@ async fn change_page(world: &World, by: &Who, object: &str, id: Id, mut change: 
         .body(&change)
         .send()
         .await
+        .full_permission_page()
         .ok();
 }
 
@@ -694,7 +705,9 @@ async fn opening_a_private_document_in_another_org_records_one_row_per_opening()
         })
         .send()
         .await
-        .ok();
+        .ok()
+        .into_full()
+        .unwrap();
     assert!(matches!(
         world
             .app
@@ -940,7 +953,8 @@ async fn another_browser_session_and_an_all_scopes_token_keep_their_ordinary_acc
             .await
             .status
             .as_u16(),
-        403
+        404,
+        "the key surface has no browser elevation route"
     );
     assert_eq!(
         world
@@ -952,7 +966,20 @@ async fn another_browser_session_and_an_all_scopes_token_keep_their_ordinary_acc
             .await
             .status
             .as_u16(),
-        403
+        404,
+        "a key cannot change browser elevation through an alias"
+    );
+    let foreign = world
+        .app
+        .call(MeAdminModeGet, &[])
+        .surface(orch_api_contract::surface::HttpSurface::Browser)
+        .token(&api_token)
+        .send()
+        .await
+        .problem();
+    assert_eq!(
+        foreign.code,
+        orch_api_contract::common::ErrorCode::AuthInvalidToken
     );
     mode(world, &other, true).await;
     mode(world, &by, false).await;

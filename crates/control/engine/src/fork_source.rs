@@ -55,11 +55,12 @@ async fn writable(conn: &mut Conn, environment: orch_types::Id) -> Result<bool, 
 }
 
 /// Includes the private repository's bytes in the same reviewed copy plan as its working files.
-pub(crate) async fn independent_plan(
+pub(crate) async fn independent_plan_from(
     engine: &Engine,
     environment: &EnvironmentRow,
     directory: &str,
     selection: orch_link_contract::commands::Selection,
+    preparation: Option<&crate::fork_plan::operation::Preparation>,
 ) -> Result<orch_link_contract::source::GitWorktreeCopyPlanResult, EngineError> {
     let machine = environment
         .machine_id
@@ -75,6 +76,10 @@ pub(crate) async fn independent_plan(
         },
     )
     .map_err(EngineError::from)?;
+    let command = match preparation {
+        Some(source) => source.command(engine, command).await?,
+        None => command,
+    };
     let result = tokio::time::timeout(
         engine.config().hosting.attach_wait,
         crate::commands::run(engine.inner.commands.as_ref(), command),
@@ -82,6 +87,9 @@ pub(crate) async fn independent_plan(
     .await
     .map_err(|_| EngineError::unreadable("the source worktree's repository measurement timed out"))?
     .map_err(EngineError::from)?;
+    if let Some(source) = preparation {
+        source.check(engine).await?;
+    }
     match result {
         Outcome::Succeeded(value) => serde_json::from_value(value).map_err(EngineError::from),
         _ => Err(EngineError::unreadable(
@@ -272,6 +280,7 @@ pub(crate) async fn plan(
     environment: &EnvironmentRow,
     directory: &str,
     target: Option<&EnvironmentRow>,
+    preparation: Option<&crate::fork_plan::operation::Preparation>,
 ) -> Result<Planned, PlanError> {
     if request.worktree.is_none() && request.files_at.is_none() {
         return Ok(Planned::default());
@@ -325,7 +334,15 @@ pub(crate) async fn plan(
             },
         )
         .map_err(EngineError::from)?;
-        match engine.ask_bounded(command).await? {
+        let command = match preparation {
+            Some(source) => source.command(engine, command).await?,
+            None => command,
+        };
+        let outcome = engine.ask_bounded(command).await?;
+        if let Some(source) = preparation {
+            source.check(engine).await?;
+        }
+        match outcome {
             Some(Outcome::Failed(error)) if error.code == "not_found" => {}
             Some(Outcome::Succeeded(_)) => {
                 return Ok(Planned::blocked(
@@ -441,7 +458,15 @@ pub(crate) async fn plan(
             },
         )
         .map_err(EngineError::from)?;
-        let Some(Outcome::Succeeded(value)) = engine.ask_bounded(command).await? else {
+        let command = match preparation {
+            Some(source) => source.command(engine, command).await?,
+            None => command,
+        };
+        let outcome = engine.ask_bounded(command).await?;
+        if let Some(source) = preparation {
+            source.check(engine).await?;
+        }
+        let Some(Outcome::Succeeded(value)) = outcome else {
             return Ok(Planned::blocked(
                 "git.unavailable",
                 "the worktree's repository could not be reviewed",
@@ -504,6 +529,9 @@ pub(crate) async fn plan(
             base_commit,
             changes_carried,
         });
+    }
+    if let Some(source) = preparation {
+        source.check(engine).await?;
     }
     Ok(planned)
 }

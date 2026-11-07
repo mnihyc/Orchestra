@@ -24,6 +24,9 @@ const DISCOVERY_TIMEOUT: Duration = Duration::from_secs(30);
 pub(crate) async fn on_connections(
     link: orch_link::machine::MachineLink,
     roles: Vec<std::sync::Arc<dyn crate::roles::RoleHandler>>,
+    policy: std::sync::Arc<crate::policy::PolicyStore>,
+    discovery: std::sync::Arc<crate::local_harnesses::Discovery>,
+    facts: std::sync::Arc<crate::dispatch::FactsNow>,
     stop: tokio_util::sync::CancellationToken,
 ) {
     let mut status = link.status();
@@ -36,8 +39,18 @@ pub(crate) async fn on_connections(
         if session != previous {
             previous = session;
             if let Some(session) = session {
+                discovery.refresh(&policy).await;
                 for role in &roles {
                     role.connected(session).await;
+                }
+                if let Err(error) = link
+                    .publish(
+                        &orch_link_contract::streams::Stream::Machine,
+                        &orch_link_contract::events::Event::MachineFacts(facts()),
+                    )
+                    .await
+                {
+                    tracing::warn!(%error, "discovered machine programs could not be reported");
                 }
             } else {
                 for role in &roles {
@@ -166,6 +179,7 @@ pub fn machine_facts(
     clock_offset_ms: i64,
 ) -> MachineFacts {
     MachineFacts {
+        gateway: None,
         role_management: None,
         programs: None,
         installation: None,
@@ -197,6 +211,8 @@ pub fn machine_facts(
         os_version: host.os_version.clone(),
         cpus: host.cpus,
         memory_bytes: host.memory_bytes,
+        discovered_harnesses: None,
+        searched_harness_kinds: None,
         // Local configuration can name a program before it is installed. Report only files
         // actually found; an adapter's successful descriptor probe establishes its capabilities.
         harnesses: draft

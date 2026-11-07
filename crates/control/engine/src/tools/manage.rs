@@ -1,7 +1,7 @@
-//! Shared document organization uses one atomic domain for people and agents.
+//! Shared management adapts ordinary document, thread and chat domains for agents.
 //!
-//! Only destructive deletion has a preview and confirmation capability. A word binds the exact
-//! arguments and the domain's complete membership/authority stamp for ten minutes. All other
+//! Document deletion and every thread/chat act have a preview and confirmation capability. A word binds the exact
+//! arguments and the domain's complete membership/authority stamp for ten minutes. Other document
 //! commands execute directly. The domain rechecks every descendant, destination, revision,
 //! collision and limit on the supplied transaction, with the actual calling agent's authority.
 //! Copies, current content/files/history, provenance and durable replay have one implementation.
@@ -19,6 +19,7 @@ use std::collections::HashMap;
 use std::collections::HashSet;
 
 mod containers;
+mod sessions;
 pub(crate) use containers::domain_result;
 
 /// Every affected document and folder consumes the same bounded operation budget.
@@ -39,6 +40,9 @@ enum Command {
     Delete,
     Move,
     Restore,
+    Archive,
+    Unarchive,
+    Fork,
 }
 
 impl Command {
@@ -49,6 +53,9 @@ impl Command {
             Self::Delete => "delete",
             Self::Move => "move",
             Self::Restore => "restore",
+            Self::Archive => "archive",
+            Self::Unarchive => "unarchive",
+            Self::Fork => "fork",
         }
     }
 }
@@ -61,6 +68,7 @@ struct Arguments {
     to: Option<String>,
     confirm: Option<String>,
     name: Option<String>,
+    message_id: Option<Id>,
 }
 
 /// What a plan is for: the command, the paths and the place they go to, exactly as they were given. The word of a plan
@@ -71,6 +79,7 @@ pub(crate) struct Asked {
     paths: Vec<String>,
     to: Option<String>,
     name: Option<String>,
+    message_id: Option<Id>,
 }
 
 /// Reads the arguments the schema let through, and checks what a schema cannot say: which command takes `to`.
@@ -83,9 +92,12 @@ fn asked_of(arguments: &Json) -> Result<(Asked, Option<String>), Refusal> {
         "delete" => Command::Delete,
         "move" => Command::Move,
         "restore" => Command::Restore,
+        "archive" => Command::Archive,
+        "unarchive" => Command::Unarchive,
+        "fork" => Command::Fork,
         other => {
             return Err(Refusal::invalid(format!(
-                "\"command\" is create_folder, copy, delete, move or restore; yours is \"{other}\"."
+                "\"command\" is create_folder, copy, delete, move, restore, archive, unarchive or fork; yours is \"{other}\"."
             )));
         }
     };
@@ -110,7 +122,7 @@ fn asked_of(arguments: &Json) -> Result<(Asked, Option<String>), Refusal> {
         .iter()
         .map(|path| {
             tree::parse_path(path).ok_or_else(|| {
-                Refusal::invalid("A selected id must be a complete document or folder identifier.")
+                Refusal::invalid("A selected id must be a complete shared-entry identifier.")
             })
         })
         .collect::<Result<Vec<_>, _>>()?;
@@ -153,17 +165,28 @@ fn asked_of(arguments: &Json) -> Result<(Asked, Option<String>), Refusal> {
                 "copy or move needs \"to\": an existing writable document directory.",
             ));
         }
-        (Command::CreateFolder | Command::Delete | Command::Restore, Some(_)) => {
+        (
+            Command::CreateFolder
+            | Command::Delete
+            | Command::Restore
+            | Command::Archive
+            | Command::Unarchive,
+            Some(_),
+        ) => {
             return Err(Refusal::invalid(format!(
-                "\"to\" is only for copy and move; {} does not take it.",
+                "\"to\" is only for copy, move and fork; {} does not take it.",
                 command.word()
             )));
         }
         _ => {}
     }
-    if command != Command::Delete && given.confirm.is_some() {
+    if !matches!(
+        command,
+        Command::Delete | Command::Archive | Command::Unarchive | Command::Fork
+    ) && given.confirm.is_some()
+    {
         return Err(Refusal::invalid(
-            "Only delete takes confirm. All other management commands execute directly.",
+            "Only delete, archive, unarchive and fork take confirm. Other document commands execute directly.",
         ));
     }
     if command == Command::CreateFolder && paths.len() != 1 {
@@ -172,10 +195,10 @@ fn asked_of(arguments: &Json) -> Result<(Asked, Option<String>), Refusal> {
         ));
     }
     if given.name.is_some()
-        && (!matches!(command, Command::Copy | Command::Move) || paths.len() != 1)
+        && (!matches!(command, Command::Copy | Command::Move | Command::Fork) || paths.len() != 1)
     {
         return Err(Refusal::invalid(
-            "name is only for copy or move with exactly one source.",
+            "name is only for copy, move or fork with exactly one source.",
         ));
     }
     if given.name.as_ref().is_some_and(|name| {
@@ -188,12 +211,28 @@ fn asked_of(arguments: &Json) -> Result<(Asked, Option<String>), Refusal> {
             "name must be one nonempty basename, without separators or parent steps.",
         ));
     }
+    if (matches!(
+        command,
+        Command::Archive | Command::Unarchive | Command::Fork
+    ) || given.message_id.is_some())
+        && paths.len() != 1
+    {
+        return Err(Refusal::invalid(
+            "Thread and chat management take exactly one path.",
+        ));
+    }
+    if given.message_id.is_some() && command != Command::Delete {
+        return Err(Refusal::invalid(
+            "message_id is only for deleting one chat message.",
+        ));
+    }
     Ok((
         Asked {
             command,
             paths,
             to,
             name: given.name,
+            message_id: given.message_id,
         },
         given.confirm.map(|word| word.trim().to_owned()),
     ))
@@ -207,6 +246,7 @@ pub(crate) struct Waiting {
     made: DateTime<Utc>,
     asked: Asked,
     stamp: Option<document_tree::MembershipStamp>,
+    shared_stamp: Option<Json>,
 }
 
 /// A call answered, kept so that the same call said twice is answered the same.

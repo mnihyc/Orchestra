@@ -7,8 +7,12 @@ it are + for uploads and references, the agent's binding, model and effort, the 
 the context ring that opens its breakdown. The phone row names the actual agent, the model and
 compact spacing; the full current binding, effort and ring values stay in their tooltips, open pickers
 and accessible names. Send and Stop use the same ordinary small control height as the model and mode
-pickers, retain their intrinsic width and stand at the right end. A viewer gets the watch notice with
-the access reason and no composer controls; narrow-thread bottom tabs yield to the conversation.
+pickers, retain their intrinsic width and stand at the right end. A viewer keeps that same composer:
+the box and attachment controls are disabled, the model and effort remain visible, and Send keeps its
+disabled reason. `ViewerAccessLine.tsx` names the missing access and its native givers in one compact
+row; Request access opens the existing request form with those permissions, model/effort options and
+thread prefilled. Without a giver there is no request action. Archived threads keep their archive
+line, and retained read-only inspections have no composer. Narrow-thread bottom tabs yield to the conversation.
 What is written is kept per
 thread, and on the server so that it is there on another device. Every waiting input, including the first
 and those held by Stop, a cap or files, stands once in the queue above the composer. Its author edits its

@@ -58,7 +58,7 @@ it('uses the same named shield alone in the actual navigation tree, without a ma
   const node = (id: string, parent_id: string | null, admin_access: AdminAccess | null): TreeNode => ({
     id, parent_id, kind: parent_id === null ? 'org' : 'project', name: id, address: null, color: null,
     archived: false, deleted: false, restricted: false, tree_seq: 1, topic: null, thread: null,
-    chat: { id: `chat-${id}`, seq: 0 }, docs: 0, participating: admin_access === null, admin_access,
+    chat: { id: `chat-${id}`, seq: 0 }, docs: 0, docs_seq: 0, participating: admin_access === null, admin_access,
   });
   const tree = { nodes: new Map([['root', node('root', null, null)], ['mine', node('mine', 'root', null)], ['other', node('other', 'root', reach)]]), lastSeq: 1, loaded: true, error: null };
   const shown = show(<NodeTree tree={tree} rootId="root" view={{}} expanded={new Set()} onExpandedChange={vi.fn()} currentId={null} locale="en" me="ada" />);

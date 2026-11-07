@@ -42,7 +42,7 @@ vi.mock('@/api/auth', async (original) => ({ ...await original<typeof AuthApi>()
 vi.mock('@/features/access/AddHolders', async (original) => ({ ...await original<typeof AddForm>(), AddHolders: () => null }));
 vi.mock('@/features/access/Owners', () => ({ Owners: () => null }));
 vi.mock('@/features/access/GoesWith', () => ({ GoesWith: () => null }));
-vi.mock('@/features/access/RequestCard', () => ({ WaitingRequests: () => null }));
+vi.mock('@/features/access/RequestCard', () => ({ WaitingRequests: () => null, RequestReview: () => null }));
 vi.mock('@/features/access/RowCell', () => ({ FollowMark: () => null, RowCell: () => null }));
 vi.mock('@/features/access/Reaches', () => ({ EnvironmentReachLine: () => null, ReachesLine: () => null, privateWarning: () => null }));
 vi.mock('@/features/navigation/placeLabels', () => ({ usePlaceLabel: () => (place: { name?: string | null } | null | undefined) => place?.name ?? null, useKnownPlaces: () => new Map() }));
