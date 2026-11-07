@@ -56,7 +56,7 @@ export interface WhereProps {
   onRefresh?: () => void;
 }
 
-function RegisterDirectory({ machines, loading = false, homeId, onRegistered }: { machines: readonly Machine[]; loading?: boolean; homeId: string; onRegistered: (environment: Environment) => void }) {
+function RegisterDirectory({ machines, loading = false, homeId, onRegistered }: { machines: readonly Machine[]; loading?: boolean; homeId: string; onRegistered: (environmentId: string) => void }) {
   const { t } = useTranslation();
   const actKey = useActKey();
   const online = machines.filter((machine) => machine.online);
@@ -67,7 +67,7 @@ function RegisterDirectory({ machines, loading = false, homeId, onRegistered }: 
   const register = useMutation({
     mutationFn: () => registerEnvironment(chosen, { name: name.trim() === '' ? root.trim() : name.trim(), root: root.trim(), home_id: homeId }, actKey({ chosen, root, name, homeId })),
     onSuccess: (environment) => {
-      onRegistered(environment);
+      onRegistered('environment_id' in environment ? String(environment.environment_id) : environment.id);
       setRoot('');
       setName('');
     },
@@ -218,7 +218,7 @@ export function Where({ compact = false, place, options, value, onChange, machin
           value={currentRequest?.environment.id ?? value ?? ''}
           onValueChange={(id) => {
             const row = options.environments.find((each) => each.environment.id === id);
-            if (row !== undefined && row.reason === USE_REQUIRED) {
+            if (row?.reason === USE_REQUIRED) {
               onRequestingChange(row);
               return;
             }
@@ -264,7 +264,7 @@ export function WhereOptions({ place, options, onChange, machines, machinesLoadi
           </div>
         </details>
       )}
-      <RegisterDirectory machines={machines} loading={machinesLoading} homeId={homeId} onRegistered={(environment) => onChange(environment.id)} />
+      <RegisterDirectory machines={machines} loading={machinesLoading} homeId={homeId} onRegistered={(environmentId) => onChange(environmentId)} />
       {making && <MakeEnvironmentDialog forThread home={{ id: place.id, name: place.name }} onClose={() => setMaking(false)} onMade={(environment) => onChange(environment.id)} />}
   </>;
 }

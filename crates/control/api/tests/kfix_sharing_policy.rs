@@ -10,6 +10,7 @@ mod places;
 mod resources;
 mod support;
 
+use crate::support::FullPermissionPageReply;
 use desk::Desk;
 use orch_api_contract::access::{AccessChoice, PermissionPageGet, PermissionPageUpdate};
 use orch_api_contract::admin::AdminDefaultsGet;
@@ -60,6 +61,7 @@ async fn a_nonowner_holders_home_offers_and_actual_giving_follow_shipped_true_an
             }]}))
             .send()
             .await
+            .full_permission_page()
             .ok();
     }
     for sharing in [true, false] {
@@ -103,7 +105,8 @@ async fn a_nonowner_holders_home_offers_and_actual_giving_follow_shipped_true_an
                 .raw_body(&json!({"rows": [{"permission": permission,
                     "add": [{"holder": {"kind": "user", "id": recipient.id()}}]}]}))
                 .send()
-                .await;
+                .await
+                .full_permission_page();
             if sharing {
                 result.ok();
             } else {
@@ -158,7 +161,8 @@ async fn a_system_resources_nonowner_holder_uses_the_system_policy_instead_of_an
             .raw_body(&json!({"rows": [{"permission": "agent.use",
                 "add": [{"holder": {"kind": "user", "id": recipient.id()}}]}]}))
             .send()
-            .await;
+            .await
+            .full_permission_page();
         if sharing {
             result.ok();
         } else {

@@ -20,8 +20,9 @@ use orch_api_contract::admin::{
     HarnessBuild, HarnessBuildCheck, HarnessBuildStatus, HarnessCheckStage, HarnessConformanceCase,
 };
 use orch_db::DbError;
-use orch_db::queries::resources::hosting::{self as host_rows, HostState};
+use orch_db::queries::resources::hosting::HostState;
 use orch_db::queries::resources::management;
+use orch_engine::build_checks::{Claim, Request, Work};
 use orch_link::commands::CommandFailure;
 use orch_link_contract::commands::{
     NodeToolCheck, NodeToolConformance, NodeToolConformanceResult, NodeToolEnsure, SerialKey,
@@ -158,8 +159,8 @@ pub(crate) fn lacks_native_proof(programs: &Programs, build: &HarnessBuild) -> b
 /// # Errors
 /// The database failed.
 pub async fn check(app: &App, key: &str, build: &HarnessBuild) -> Result<(), DbError> {
-    if claim(app, key).await? {
-        finish(app, key, build).await?;
+    if let Some(claim) = claim_task(app, key).await? {
+        finish(app, key, build, claim).await?;
     }
     Ok(())
 }
@@ -170,8 +171,20 @@ pub async fn check(app: &App, key: &str, build: &HarnessBuild) -> Result<(), DbE
 /// # Errors
 /// The database failed.
 pub async fn claim(app: &App, key: &str) -> Result<bool, DbError> {
-    let mut conn = app.db.acquire().await?;
-    claim_in(&mut conn, key, app.clock.now()).await
+    Ok(claim_task(app, key).await?.is_some())
+}
+
+async fn claim_task(app: &App, key: &str) -> Result<Option<Claim>, DbError> {
+    let mut tx = app.db.begin().await?;
+    orch_db::queries::transaction_guard::lock_action(&mut tx).await?;
+    let claim =
+        claim_in_before(&mut tx, key, app.clock.now(), None, || Ok::<_, DbError>(())).await?;
+    tx.commit().await.map_err(DbError::from)?;
+    Ok(claim)
+}
+
+fn native_error(error: impl std::fmt::Display) -> DbError {
+    DbError::Other(sqlx::Error::Protocol(error.to_string()))
 }
 
 /// As [`claim`], in the transaction of a request that checked its caller's authority.
@@ -183,6 +196,36 @@ pub async fn claim_in(
     key: &str,
     now: chrono::DateTime<chrono::Utc>,
 ) -> Result<bool, DbError> {
+    Ok(
+        claim_in_before(conn, key, now, None, || Ok::<_, DbError>(()))
+            .await?
+            .is_some(),
+    )
+}
+
+/// The same native claimant with its prepared original operation and actual first SQL cut.
+pub async fn claim_in_before<E: From<DbError>>(
+    conn: &mut orch_db::Conn,
+    key: &str,
+    now: chrono::DateTime<chrono::Utc>,
+    request: Option<Request>,
+    before: impl FnOnce() -> Result<(), E>,
+) -> Result<Option<Claim>, E> {
+    if !orch_db::queries::transaction_guard::in_transaction(conn) {
+        return Err(native_error("a native build claim requires its transaction").into());
+    }
+    if sqlx::query("SELECT key FROM settings WHERE node_id IS NULL AND key=$1 FOR UPDATE")
+        .bind(key)
+        .fetch_optional(&mut *conn)
+        .await
+        .map_err(DbError::from)?
+        .is_none()
+    {
+        return Ok(None);
+    }
+    let claim = Claim::prepare(conn, key, request)
+        .await
+        .map_err(native_error)?;
     let stage = timeout_setting(
         conn,
         orch_settings_contract::registry::keys::AGENTS_HARNESS_CONFORMANCE_TIMEOUT_SECS,
@@ -194,38 +237,89 @@ pub async fn claim_in(
     )
     .await?;
     let ensure = orch_link_contract::commands::CommandKind::NodeToolEnsure.deadline_secs();
-    management::claim_harness_build_check(
+    before()?;
+    let claimed = management::claim_harness_build_check(
         conn,
         key,
         now,
         now - Duration::seconds(i64::from(stage) + i64::from(interface) + i64::from(ensure)),
     )
-    .await
+    .await?;
+    if claimed {
+        claim.store(conn).await.map_err(native_error)?;
+        Ok(Some(claim))
+    } else {
+        Ok(None)
+    }
 }
 
 /// Runs the check of a build this check has claimed, and keeps what it found with the build.
 ///
 /// # Errors
 /// The database failed.
-pub async fn finish(app: &App, key: &str, build: &HarnessBuild) -> Result<(), DbError> {
+pub async fn finish(
+    app: &App,
+    key: &str,
+    build: &HarnessBuild,
+    claim: Claim,
+) -> Result<(), DbError> {
+    if !claim.owns(key, build) {
+        return Err(native_error(
+            "the supplied build differs from its native claim",
+        ));
+    }
+    let mut work = Work::new(claim);
+    let outcome = finish_work(app, key, build, &mut work).await;
+    if outcome.is_err() {
+        let mut tx = app.db.begin().await?;
+        work.claim()
+            .release(&mut tx, Time::new(app.clock.now()))
+            .await
+            .map_err(native_error)?;
+        tx.commit().await.map_err(DbError::from)?;
+    }
+    outcome
+}
+
+async fn current(app: &App, work: &Work, conn: &mut orch_db::Conn) -> Result<(), DbError> {
+    if let Some(checked) = work
+        .checkpoint(conn, app.clock.as_ref())
+        .await
+        .map_err(native_error)?
+    {
+        checked
+            .before
+            .check(app.clock.as_ref())
+            .map_err(native_error)?;
+    }
+    Ok(())
+}
+
+async fn finish_work(
+    app: &App,
+    key: &str,
+    build: &HarnessBuild,
+    work: &mut Work,
+) -> Result<(), DbError> {
     if !checksum_is_trusted(app, key, build).await? {
         let mut conn = app.db.acquire().await?;
         let check = serde_json::json!({
             "at": Time::new(app.clock.now()), "machine": null, "missing": [], "off": [],
             "error": "the build no longer has trusted checksum authority; import its vendor checksum or explicitly trust its publisher"
         });
-        management::set_harness_build_status(
-            &mut conn,
-            key,
-            "untested",
-            Some(&check),
-            app.clock.now(),
-        )
-        .await?;
+        work.claim()
+            .finish_negative(
+                &mut conn,
+                HarnessBuildStatus::Untested,
+                &check,
+                Time::new(app.clock.now()),
+            )
+            .await
+            .map_err(native_error)?;
         return Ok(());
     }
     let programs = programs_of(app).await?;
-    let (status, mut check) = run(app, &programs, key, build).await;
+    let (status, mut check) = run(app, &programs, key, build, work).await;
     if let Some(previous) = &build.check
         && let Some((_, checks)) = checks_of(&programs, &build.kind)
     {
@@ -234,9 +328,21 @@ pub async fn finish(app: &App, key: &str, build: &HarnessBuild) -> Result<(), Db
     if status != HarnessBuildStatus::Untested {
         check.stage = HarnessCheckStage::Complete;
     }
-    let mut conn = app.db.acquire().await?;
     let check = serde_json::to_value(&check)
         .map_err(|error| DbError::Other(sqlx::Error::Decode(error.into())))?;
+    let mut conn = app.db.begin().await?;
+    if matches!(
+        status,
+        HarnessBuildStatus::Untested | HarnessBuildStatus::Failed
+    ) {
+        work.claim()
+            .finish_negative(&mut conn, status, &check, Time::new(app.clock.now()))
+            .await
+            .map_err(native_error)?;
+        conn.commit().await.map_err(DbError::from)?;
+        return Ok(());
+    }
+    current(app, work, &mut conn).await?;
     management::set_harness_build_status(
         &mut conn,
         key,
@@ -245,6 +351,7 @@ pub async fn finish(app: &App, key: &str, build: &HarnessBuild) -> Result<(), Db
         app.clock.now(),
     )
     .await?;
+    conn.commit().await.map_err(DbError::from)?;
     Ok(())
 }
 
@@ -281,6 +388,7 @@ async fn run(
     programs: &Programs,
     build_key: &str,
     build: &HarnessBuild,
+    work: &mut Work,
 ) -> (HarnessBuildStatus, HarnessBuildCheck) {
     let mut found = HarnessBuildCheck {
         at: Time::new(app.clock.now()),
@@ -315,6 +423,7 @@ async fn run(
             return (HarnessBuildStatus::Untested, found);
         }
     };
+    *work = work.on_host(&host);
     found.machine = Some(host.name.clone());
     let timeouts = async {
         let mut conn = app.db.acquire().await?;
@@ -345,21 +454,22 @@ async fn run(
         Err(_) => None,
     };
     let url = crate::harness_channels::download_url(programs, build, mirror.as_deref());
-    let dispatcher = app.link.dispatcher();
     let key = SerialKey::Tool(build.kind.clone());
-    let ensured = dispatcher
-        .run(
-            host.machine_id,
-            &key,
-            &NodeToolEnsure {
-                job_id: None,
-                name: build.kind.clone(),
-                version: build.version.clone(),
-                url,
-                sha256: build.sha256.clone(),
-            },
-        )
-        .await;
+    let ensured = run_within(
+        app,
+        host.machine_id,
+        &key,
+        &NodeToolEnsure {
+            job_id: None,
+            name: build.kind.clone(),
+            version: build.version.clone(),
+            url,
+            sha256: build.sha256.clone(),
+        },
+        orch_link_contract::commands::CommandKind::NodeToolEnsure.deadline_secs(),
+        work,
+    )
+    .await;
     if let Err(error) = ensured {
         let refused = matches!(&error, RunError::Command(CommandFailure::Failed(failure))
             if failure.details.as_ref().and_then(|details| details.get("checksum")).is_some());
@@ -402,6 +512,7 @@ async fn run(
         &key,
         &probe(manifest, interface, build, print_secs),
         print_secs,
+        work,
     )
     .await;
     match checked {
@@ -419,7 +530,7 @@ async fn run(
             }
             found.stage = HarnessCheckStage::Conformance;
             let saved = async {
-                let mut conn = app.db.acquire().await?;
+                let mut conn = app.db.begin().await?;
                 let mut checking = found.clone();
                 if let Some(previous) = &build.check {
                     for feature in &previous.off {
@@ -430,14 +541,17 @@ async fn run(
                 }
                 let value = serde_json::to_value(&checking)
                     .map_err(|error| DbError::Other(sqlx::Error::Decode(error.into())))?;
-                management::set_harness_build_status(
+                current(app, work, &mut conn).await?;
+                let saved = management::set_harness_build_status(
                     &mut conn,
                     build_key,
                     "checking",
                     Some(&value),
                     app.clock.now(),
                 )
-                .await
+                .await?;
+                conn.commit().await.map_err(DbError::from)?;
+                Ok::<_, DbError>(saved)
             }
             .await;
             if let Err(error) = saved {
@@ -456,7 +570,7 @@ async fn run(
                 timeout_secs: stage_secs,
             };
             let began = std::time::Instant::now();
-            let checked = run_within(app, host.machine_id, &key, &request, stage_secs).await;
+            let checked = run_within(app, host.machine_id, &key, &request, stage_secs, work).await;
             match checked {
                 Ok(answer) => {
                     let status = conformance_verdict(checks, answer, &mut found);
@@ -565,16 +679,28 @@ async fn run_within<B: orch_link_contract::commands::CommandBody>(
     key: &SerialKey,
     request: &B,
     seconds: u32,
+    work: &Work,
 ) -> Result<B::Result, RunError> {
     let dispatcher = app.link.dispatcher();
+    let id = orch_types::new_id();
+    let outgoing = orch_engine::commands::Outgoing::new(id, machine, key.clone(), request)
+        .map_err(|_| RunError::Dispatch(crate::dispatch::DispatchError::Unavailable))?;
+    let authority = orch_engine::build_checks::CheckCommand::capture(work, &outgoing)
+        .map_err(|_| RunError::Dispatch(crate::dispatch::DispatchError::Unavailable))?;
     let issued = dispatcher
-        .issue_as(
-            orch_types::new_id(),
+        .issue_stored(crate::dispatch::StoredCommand {
+            id: Some(id),
             machine,
-            key,
-            Time::new(app.clock.now() + Duration::seconds(i64::from(seconds))),
-            request,
-        )
+            key: key.wire(),
+            kind: B::KIND.as_str().to_owned(),
+            deadline: Some(Time::new(
+                app.clock.now() + Duration::seconds(i64::from(seconds)),
+            )),
+            body: outgoing.body,
+            authority: Some(orch_engine::commands::CommandAuthority::harness_check(
+                authority,
+            )),
+        })
         .await?;
     dispatcher.wait_for::<B>(issued.id).await
 }
@@ -674,25 +800,7 @@ fn preserve_unproved_limits(
 async fn host_for(app: &App, build: &HarnessBuild) -> Result<Option<HostState>, DbError> {
     let (_, os, arch) = platform(build);
     let mut conn = app.db.acquire().await?;
-    let hosts: Vec<HostState> = host_rows::hosts(&mut conn, None)
-        .await?
-        .into_iter()
-        .filter(|host| {
-            host.online
-                && host.machine_status == "active"
-                && !host.disabled
-                && host.platform_os == os
-                && host.platform_arch == arch
-        })
-        .collect();
-    let orgs: Vec<_> = hosts.iter().filter_map(|host| host.org_id).collect();
-    let personal = management::personal_orgs(&mut conn, &orgs).await?;
-    let mut hosts: Vec<HostState> = hosts
-        .into_iter()
-        .filter(|host| host.org_id.is_none_or(|org| !personal.contains(&org)))
-        .collect();
-    hosts.sort_by_key(|host| (host.org_id.is_some(), !host.schedulable));
-    Ok(hosts.into_iter().next())
+    orch_engine::build_checks::host_for(&mut conn, &os, &arch).await
 }
 
 /// The builds a check is asked for by a system admin: every kept build of `kind` at `version`, with its key.

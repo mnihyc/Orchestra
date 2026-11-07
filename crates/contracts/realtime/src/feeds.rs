@@ -526,6 +526,14 @@ pub struct EnvData {
     /// The environment itself.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub environment: Option<Environment>,
+    /// The same Library facts as the HTTP snapshot. Omission leaves them unchanged; explicit null
+    /// retires an older projection when the reader still reaches the environment through another door.
+    #[serde(
+        default,
+        deserialize_with = "orch_api_contract::common::absent_or_null",
+        skip_serializing_if = "Option::is_none"
+    )]
+    pub library: Option<Option<orch_api_contract::resource_facts::ResourceFacts>>,
     /// The jobs about it: each whole where its reader may read it, or the current job's safe
     /// progress alone for a reader who sees the environment only through a thread, as its HTTP
     /// state gives them.
@@ -997,7 +1005,7 @@ pub enum EventData {
     Fork(ForkData),
     /// A bounded newest-first page of model requests, rechecked for this subscriber.
     Usage(orch_api_contract::common::Page<orch_api_contract::usage::UsageEvent>),
-    /// Of usage:provider:<id>:health, which carries no request log.
+    /// Of `usage:provider:<id>:health`, which carries no request log.
     UsageHealth(HealthData),
     /// Of the caller's own feed.
     User(UserEvent),
@@ -1563,6 +1571,30 @@ mod tests {
             EventData::decode(&Feed::User, json!("favorites")),
             Err(DataError::NotAnObject)
         ));
+    }
+
+    #[test]
+    fn an_environment_feed_keeps_explicit_library_retirement() {
+        let data = json!({"jobs":[job()], "library":null});
+        let SyncData::Env(read) = SyncData::decode(&Feed::Env(id()), data.clone()).unwrap() else {
+            panic!("not an environment")
+        };
+        assert_eq!(serde_json::to_value(&read).unwrap(), data);
+    }
+
+    #[test]
+    fn an_environment_feed_keeps_its_projected_library_facts() {
+        let data = json!({"jobs":[job()], "library":{
+            "subject":{"kind":"resource","object":{"kind":"environment","id":A}},
+            "as_of":AT,
+            "dependents":[{"relation":"binding","count":1,"visible":[],"hidden":1,"until":null}],
+            "dependents_complete":true,
+            "uses":null
+        }});
+        let SyncData::Env(read) = SyncData::decode(&Feed::Env(id()), data.clone()).unwrap() else {
+            panic!("not an environment")
+        };
+        assert_eq!(serde_json::to_value(&read).unwrap(), data);
     }
 
     #[test]

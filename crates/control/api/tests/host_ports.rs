@@ -1,5 +1,7 @@
 //! A host's declaration of host ports: saved only once its node accepted it under its own ceiling, never while
 //! the node is away, and a host opening reviewed from the saved declaration.
+// The engine's futures this fixture awaits are deep; the default query depth does not lay them out.
+#![recursion_limit = "256"]
 #![allow(
     clippy::unwrap_used,
     clippy::expect_used,

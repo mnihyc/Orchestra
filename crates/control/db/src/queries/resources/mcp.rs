@@ -33,6 +33,43 @@ pub struct McpRow {
     pub revision: i64,
 }
 
+/// The live server's real permission subject, before loading its public definition.
+#[derive(Debug, Clone, Copy, sqlx::FromRow)]
+pub struct ServerSubject {
+    /// The outward server identity.
+    pub id: Id,
+    /// The owning permission page when this is one environment's own server.
+    pub environment_id: Option<Id>,
+}
+
+/// Identity only; the ordinary guard and full projection remain with their existing readers.
+pub async fn subject(conn: &mut Conn, id: Id) -> Result<Option<ServerSubject>, DbError> {
+    Ok(subjects(conn, &[id]).await?.pop())
+}
+
+/// The same live native subjects in one typed batch, without loading definitions.
+pub async fn subjects(conn: &mut Conn, ids: &[Id]) -> Result<Vec<ServerSubject>, DbError> {
+    if ids.is_empty() {
+        return Ok(Vec::new());
+    }
+    Ok(sqlx::query_as(
+        "SELECT id,environment_id FROM mcp_servers WHERE id=ANY($1) AND deleted_at IS NULL ORDER BY id",
+    )
+    .bind(ids)
+    .fetch_all(conn)
+    .await?)
+}
+
+/// A recorded identity remains occupied after soft deletion, including for native-copy cleanup.
+pub async fn recorded(conn: &mut Conn, id: Id) -> Result<bool, DbError> {
+    Ok(
+        sqlx::query_scalar("SELECT EXISTS(SELECT 1 FROM mcp_servers WHERE id=$1)")
+            .bind(id)
+            .fetch_one(conn)
+            .await?,
+    )
+}
+
 /// Reads live servers by identifier.
 pub async fn servers(conn: &mut Conn, ids: &[Id]) -> Result<Vec<McpRow>, DbError> {
     Ok(sqlx::query_as("SELECT id,name,description,org_id,home_id,owner_id,machine_id,environment_id,spec,enabled,revision,imported
@@ -47,6 +84,29 @@ pub async fn lock(conn: &mut Conn, id: Id) -> Result<Option<McpRow>, DbError> {
         .bind(id).fetch_optional(conn).await?)
 }
 
+/// Complete native parent, server and preset-name serialization before a checked change.
+pub async fn lock_update(
+    conn: &mut Conn,
+    id: Id,
+    name: Option<&str>,
+) -> Result<Option<McpRow>, DbError> {
+    let Some(selected) = subject(conn, id).await? else {
+        return Ok(None);
+    };
+    lock_owned_parent(conn, selected.environment_id).await?;
+    let Some(row) = lock(conn, id).await? else {
+        return Ok(None);
+    };
+    // A different current parent needs a new native preparation, not the old parent's lock.
+    if row.environment_id != selected.environment_id {
+        return Ok(None);
+    }
+    if !row.imported && row.environment_id.is_none() {
+        lock_preset_name(conn, row.org_id, None, name.unwrap_or(&row.name)).await?;
+    }
+    Ok(Some(row))
+}
+
 /// The environment's own servers, including ones switched off.
 pub async fn own(conn: &mut Conn, environment: Id) -> Result<Vec<McpRow>, DbError> {
     Ok(sqlx::query_as("SELECT id,name,description,org_id,home_id,owner_id,machine_id,environment_id,spec,enabled,revision,imported
@@ -54,8 +114,24 @@ pub async fn own(conn: &mut Conn, environment: Id) -> Result<Vec<McpRow>, DbErro
         .bind(environment).fetch_all(conn).await?)
 }
 
+/// Serializes the exact native non-imported preset uniqueness namespace.
+/// Imported offerings and environment-owned acts retain their own native parent footprint.
+pub async fn lock_preset_name(
+    conn: &mut Conn,
+    org: Option<Id>,
+    environment: Option<Id>,
+    name: &str,
+) -> Result<(), DbError> {
+    let namespace = serde_json::json!([org, environment, name]).to_string();
+    crate::queries::chats::lock_named(conn, &format!("mcp.preset:{namespace}")).await
+}
+
 /// Creates a resource without ever persisting an imported command or secret.
 pub async fn insert(conn: &mut Conn, row: &McpRow, at: DateTime<Utc>) -> Result<(), DbError> {
+    lock_owned_parent(conn, row.environment_id).await?;
+    if !row.imported && row.environment_id.is_none() {
+        lock_preset_name(conn, row.org_id, row.environment_id, &row.name).await?;
+    }
     sqlx::query("INSERT INTO mcp_servers (id,name,description,org_id,home_id,owner_id,machine_id,environment_id,spec,enabled,created_at,updated_at,imported)
         VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$11,$12)")
         .bind(row.id).bind(&row.name).bind(&row.description).bind(row.org_id).bind(row.home_id).bind(row.owner_id)
@@ -144,6 +220,10 @@ pub async fn offer_failed(
 
 /// Changes a server after its revision has been checked under its row lock.
 pub async fn update(conn: &mut Conn, row: &McpRow, at: DateTime<Utc>) -> Result<(), DbError> {
+    lock_owned_parent(conn, row.environment_id).await?;
+    if !row.imported && row.environment_id.is_none() {
+        lock_preset_name(conn, row.org_id, None, &row.name).await?;
+    }
     sqlx::query("UPDATE mcp_servers SET name=$2,description=$3,spec=$4,enabled=$5,revision=revision+1,updated_at=$6 WHERE id=$1")
         .bind(row.id).bind(&row.name).bind(&row.description).bind(&row.spec).bind(row.enabled).bind(at).execute(conn).await?;
     Ok(())
@@ -151,6 +231,12 @@ pub async fn update(conn: &mut Conn, row: &McpRow, at: DateTime<Utc>) -> Result<
 
 /// Deletes a resource and the sealed values it alone owns.
 pub async fn delete(conn: &mut Conn, id: Id, at: DateTime<Utc>) -> Result<(), DbError> {
+    let environment: Option<Option<Id>> =
+        sqlx::query_scalar("SELECT environment_id FROM mcp_servers WHERE id=$1")
+            .bind(id)
+            .fetch_optional(&mut *conn)
+            .await?;
+    lock_owned_parent(conn, environment.flatten()).await?;
     sqlx::query("DELETE FROM secrets WHERE owner_kind='mcp_server' AND owner_id=$1")
         .bind(id)
         .execute(&mut *conn)
@@ -162,6 +248,18 @@ pub async fn delete(conn: &mut Conn, id: Id, at: DateTime<Utc>) -> Result<(), Db
     .bind(at)
     .execute(conn)
     .await?;
+    Ok(())
+}
+
+/// Owned names and their enablement share the real parent row. Native transaction
+/// callers hold it before insert/rename/delete, so creation has no late name-index wait.
+async fn lock_owned_parent(conn: &mut Conn, environment: Option<Id>) -> Result<(), DbError> {
+    if let Some(environment) = environment {
+        sqlx::query("SELECT id FROM environments WHERE id=$1 FOR UPDATE")
+            .bind(environment)
+            .fetch_optional(conn)
+            .await?;
+    }
     Ok(())
 }
 
@@ -199,10 +297,25 @@ pub async fn on_machine(conn: &mut Conn, machine: Id) -> Result<Vec<Id>, DbError
 
 /// Safe discoveries reported by this machine's environments, without reading a definition.
 pub async fn found_on_machine(conn: &mut Conn, machine: Id) -> Result<Vec<Json>, DbError> {
-    Ok(sqlx::query_scalar("SELECT items.found FROM environments e
+    Ok(found_on_machines(conn, &[machine])
+        .await?
+        .into_iter()
+        .map(|(_, found)| found)
+        .collect())
+}
+
+/// The same safe discoveries in one batch, retaining their actual physical source.
+pub async fn found_on_machines(
+    conn: &mut Conn,
+    machines: &[Id],
+) -> Result<Vec<(Id, Json)>, DbError> {
+    if machines.is_empty() {
+        return Ok(Vec::new());
+    }
+    Ok(sqlx::query_as("SELECT e.machine_id,items.found FROM environments e
         CROSS JOIN LATERAL jsonb_array_elements(COALESCE(e.facts->'mcp_found','[]'::jsonb)) AS items(found)
-        WHERE e.machine_id=$1 AND e.deleted_at IS NULL")
-        .bind(machine).fetch_all(conn).await?)
+        WHERE e.machine_id=ANY($1) AND e.deleted_at IS NULL")
+        .bind(machines).fetch_all(conn).await?)
 }
 
 /// Sealed secret references for a server, for the command writer to seal to its target machine.

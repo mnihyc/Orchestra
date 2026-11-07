@@ -7,7 +7,7 @@
 //! made by the rights of the person at that moment; what they may not make is a row of the report and nothing of it is made.
 //!
 //! **Identity.** Everything an import makes has the identifier derived from who imports, where, which package and the identifier
-//! it had ([`identity`]), so a retry makes nothing twice, and each thing is recorded in `import_origins` by the place imported into
+//! it had (`identity`), so a retry makes nothing twice, and each thing is recorded in `import_origins` by the place imported into
 //! and its source identifier, so that a later import of the same thing finds it.
 
 mod identity;
@@ -28,7 +28,8 @@ pub use open::{OpenError, open};
 pub use people::{Credit, Credits, IMPORTED_PERSON, Matched, match_people};
 pub use plan::{another_name, build, origin_kind};
 pub use report::{
-    Counts, csv_head, csv_of, csv_row, kind_word, outcome_word, row_of, stored as stored_row,
+    Counts, ReportFile, chunk as report_chunk, csv_head, csv_of, csv_row, file as report_file,
+    kind_word, outcome_word, row_of, stored as stored_row,
 };
 pub use source::{Entries, EntryFact, SourceError, Spooled, clean_path};
 
@@ -44,7 +45,7 @@ use orch_api_contract::imports::{
 use orch_api_contract::nodes::NodeRef;
 use orch_api_contract::package::PackageHeader;
 use orch_authz::{Act, Caller, Policy, Principal, nodes};
-use orch_db::queries::imports::{self as rows, ImportRow};
+use orch_db::queries::imports::{self as rows, ImportLineRow, ImportRow};
 use orch_db::queries::jobs::{self as job_rows, JobRow, NewJob, kind};
 use orch_db::queries::{shares as places, storage};
 use orch_db::{Conn, DbError, Tx};
@@ -167,7 +168,7 @@ fn time(at: DateTime<Utc>) -> Time {
 
 impl Engine {
     /// Whether the caller may view the place an import is asked of; it is not there for them otherwise.
-    async fn import_place_seen(
+    pub async fn import_place_seen(
         &self,
         conn: &mut Conn,
         principal: &Principal,
@@ -621,23 +622,33 @@ fn state_of(word: &str) -> ImportState {
     }
 }
 
-impl Engine {
-    /// The imports as the API shows them, each with the place it went into by name where its person may still see it.
-    pub async fn import_views(
-        &self,
-        conn: &mut Conn,
-        principal: &Principal,
-        list: &[ImportRow],
-    ) -> Result<Vec<Import>, ImportError> {
-        let ids: Vec<Id> = list.iter().filter_map(|row| row.node_id).collect();
-        let refs = place_refs(conn, principal, &ids).await?;
-        let mut out = Vec::with_capacity(list.len());
-        for row in list {
+/// Actual stored import rows and the native destination-name projection witness.
+pub struct PreparedImportViews {
+    rows: Vec<ImportRow>,
+    refs: PlaceRefs,
+}
+impl PreparedImportViews {
+    /// Actual stored records, never identities inferred from the formatted response.
+    pub fn rows(&self) -> &[ImportRow] {
+        &self.rows
+    }
+    /// Native eligible live names emitted by this preparation.
+    pub fn named_places(&self) -> std::collections::BTreeSet<Id> {
+        self.refs.viewable.keys().copied().collect()
+    }
+    /// Narrow the existing native names with the consuming operation's factual scope.
+    pub fn bound_names(&mut self, allowed: &std::collections::BTreeSet<Id>) {
+        self.refs.viewable.retain(|id, _| allowed.contains(id));
+    }
+    /// The original native wire shape from the immutable selected metadata.
+    pub fn render(&self) -> Result<Vec<Import>, ImportError> {
+        let mut out = Vec::with_capacity(self.rows.len());
+        for row in &self.rows {
             let request: ImportRequest =
                 serde_json::from_value(row.request.clone()).map_err(EngineError::from)?;
             out.push(Import {
                 id: row.id,
-                node: row.node_id.map(|node| refs.of(node)),
+                node: row.node_id.map(|node| self.refs.of(node)),
                 request,
                 state: state_of(&row.state),
                 job_id: row.job_id,
@@ -655,6 +666,79 @@ impl Engine {
             });
         }
         Ok(out)
+    }
+}
+
+/// The actual narrow native history rows and independently eligible destination labels.
+pub struct PreparedImportLines {
+    rows: Vec<ImportLineRow>,
+    refs: PlaceRefs,
+}
+impl PreparedImportLines {
+    /// Native owner-selected history operands, without full requests or file inventories.
+    pub fn rows(&self) -> &[ImportLineRow] {
+        &self.rows
+    }
+    /// Native destination names which this preparation will disclose.
+    pub fn named_places(&self) -> std::collections::BTreeSet<Id> {
+        self.refs.viewable.keys().copied().collect()
+    }
+    /// Narrow the native name map using the consuming operation's current source facts.
+    pub fn bound_names(&mut self, allowed: &std::collections::BTreeSet<Id>) {
+        self.refs.viewable.retain(|id, _| allowed.contains(id));
+    }
+    /// The original native history format, from the already-selected typed rows.
+    pub fn render(&self) -> Vec<ImportLine> {
+        self.rows
+            .iter()
+            .map(|row| ImportLine {
+                id: row.id,
+                node: row.node_id.map(|node| self.refs.of(node)),
+                state: state_of(&row.state),
+                job_id: row.job_id,
+                undo_job_id: row.undo_job_id,
+                first_file: row.first_file.clone(),
+                file_count: row.file_count,
+                actions: count_value::<ImportActionCounts>(row.actions.as_ref()),
+                created_at: time(row.created_at),
+                finished_at: row.finished_at.map(time),
+                undone_at: row.undone_at.map(time),
+            })
+            .collect()
+    }
+}
+
+/// The native history cursor for an actually selected row.
+pub fn history_cursor(row: &ImportLineRow) -> String {
+    write_cursor(row.created_at, row.id)
+}
+
+impl Engine {
+    /// Native stored import metadata and its current eligible destination labels before formatting.
+    pub async fn prepare_import_views(
+        &self,
+        conn: &mut Conn,
+        principal: &Principal,
+        rows: Vec<ImportRow>,
+    ) -> Result<PreparedImportViews, ImportError> {
+        let ids = rows
+            .iter()
+            .filter_map(|row| row.node_id)
+            .collect::<Vec<_>>();
+        let refs = place_refs(conn, principal, &ids).await?;
+        Ok(PreparedImportViews { rows, refs })
+    }
+
+    /// The unchanged ordinary native import view.
+    pub async fn import_views(
+        &self,
+        conn: &mut Conn,
+        principal: &Principal,
+        list: &[ImportRow],
+    ) -> Result<Vec<Import>, ImportError> {
+        self.prepare_import_views(conn, principal, list.to_vec())
+            .await?
+            .render()
     }
 
     /// An import of `user`, if it is theirs: another person's is none for them.
@@ -679,6 +763,19 @@ impl Engine {
         after: Option<&str>,
         limit: i64,
     ) -> Result<(Vec<ImportLine>, Option<String>), ImportError> {
+        let (rows, next) = self.import_line_rows(conn, user, after, limit).await?;
+        let prepared = self.prepare_import_lines(conn, principal, rows).await?;
+        Ok((prepared.render(), next))
+    }
+
+    /// The native narrow creator-only selector, before any names or wire projection.
+    pub async fn import_line_rows(
+        &self,
+        conn: &mut Conn,
+        user: Id,
+        after: Option<&str>,
+        limit: i64,
+    ) -> Result<(Vec<ImportLineRow>, Option<String>), ImportError> {
         let after = match after {
             None => None,
             Some(cursor) => Some(read_cursor(cursor).ok_or_else(|| ImportError::Invalid {
@@ -692,29 +789,23 @@ impl Engine {
             list.truncate(usize::try_from(limit).unwrap_or(usize::MAX));
         }
         let next = if more {
-            list.last().map(|row| write_cursor(row.created_at, row.id))
+            list.last().map(history_cursor)
         } else {
             None
         };
-        let ids: Vec<Id> = list.iter().filter_map(|row| row.node_id).collect();
+        Ok((list, next))
+    }
+
+    /// Native eligibility for destination labels over real narrow history operands.
+    pub async fn prepare_import_lines(
+        &self,
+        conn: &mut Conn,
+        principal: &Principal,
+        rows: Vec<ImportLineRow>,
+    ) -> Result<PreparedImportLines, ImportError> {
+        let ids: Vec<Id> = rows.iter().filter_map(|row| row.node_id).collect();
         let refs = place_refs(conn, principal, &ids).await?;
-        let lines = list
-            .into_iter()
-            .map(|row| ImportLine {
-                id: row.id,
-                node: row.node_id.map(|node| refs.of(node)),
-                state: state_of(&row.state),
-                job_id: row.job_id,
-                undo_job_id: row.undo_job_id,
-                first_file: row.first_file,
-                file_count: row.file_count,
-                actions: count_value::<ImportActionCounts>(row.actions.as_ref()),
-                created_at: time(row.created_at),
-                finished_at: row.finished_at.map(time),
-                undone_at: row.undone_at.map(time),
-            })
-            .collect();
-        Ok((lines, next))
+        Ok(PreparedImportLines { rows, refs })
     }
 
     /// The names of the files an import of `user` was made from, in their order: a page after the cursor of the
@@ -972,6 +1063,110 @@ impl Engine {
 /// How many rows of a report one fetch of the whole report reads at a time.
 const REPORT_PAGE: i64 = 1_000;
 
+/// Native persisted report operands, before formatting their optional stored place names.
+pub struct PreparedReportPage {
+    import: ImportRow,
+    entries: Vec<SavedReportEntry>,
+    next_cursor: Option<String>,
+    names: Option<std::collections::BTreeSet<Id>>,
+}
+
+struct SavedReportEntry {
+    position: i64,
+    stored: Json,
+    value: Option<orch_api_contract::imports::ImportReportRow>,
+}
+
+impl PreparedReportPage {
+    fn new(import: ImportRow, entries: Vec<(i64, Json)>, next_cursor: Option<String>) -> Self {
+        Self {
+            import,
+            entries: entries
+                .into_iter()
+                .map(|(position, stored)| SavedReportEntry {
+                    position,
+                    value: serde_json::from_value(stored.clone()).ok(),
+                    stored,
+                })
+                .collect(),
+            next_cursor,
+            names: None,
+        }
+    }
+
+    /// The actual owner-checked stored Import, not a report identifier inferred from its body.
+    pub fn import(&self) -> &ImportRow {
+        &self.import
+    }
+
+    /// The real last stored position consumed by this native piece, even for skipped records.
+    pub fn last_position(&self) -> Option<i64> {
+        self.entries.last().map(|entry| entry.position)
+    }
+
+    /// Protected place names from the typed persisted native report records.
+    pub fn named_places(&self) -> std::collections::BTreeSet<Id> {
+        self.entries
+            .iter()
+            .filter_map(|entry| entry.value.as_ref())
+            .filter_map(|entry| entry.made.as_ref())
+            .filter_map(|made| made.node.as_ref())
+            .filter(|node| {
+                node.name.is_some()
+                    && !node.redacted
+                    && self
+                        .names
+                        .as_ref()
+                        .is_none_or(|names| names.contains(&node.id))
+            })
+            .map(|node| node.id)
+            .collect()
+    }
+
+    /// Narrow the native typed reference formatter, leaving persisted records immutable.
+    pub fn bound_names(&mut self, names: std::collections::BTreeSet<Id>) {
+        self.names = Some(names);
+    }
+
+    /// The original native saved-report format and native selected-position cursor.
+    pub fn render(
+        &self,
+    ) -> (
+        Vec<orch_api_contract::imports::ImportReportRow>,
+        Option<String>,
+    ) {
+        let values = self
+            .entries
+            .iter()
+            .filter_map(|entry| entry.value.clone())
+            .map(|mut entry| {
+                if let Some(names) = &self.names
+                    && let Some(node) = entry.made.as_mut().and_then(|made| made.node.as_mut())
+                    && !names.contains(&node.id)
+                {
+                    node.name = None;
+                    node.redacted = true;
+                }
+                entry
+            })
+            .collect();
+        (values, self.next_cursor.clone())
+    }
+
+    /// A newly readable report record cannot license an older saved body at the same position.
+    pub fn preserves_entries(&self, fresh: &Self) -> bool {
+        let now: HashMap<_, _> = fresh
+            .entries
+            .iter()
+            .map(|entry| (entry.position, &entry.stored))
+            .collect();
+        self.entries.iter().all(|entry| {
+            now.get(&entry.position)
+                .is_some_and(|row| *row == &entry.stored)
+        }) && self.named_places().is_subset(&fresh.named_places())
+    }
+}
+
 impl Engine {
     /// A page of the report of an import of `user`, in the order it was written: the rows that came to what the query asks.
     pub async fn report_page(
@@ -987,7 +1182,31 @@ impl Engine {
         ),
         ImportError,
     > {
-        self.import_of(conn, user, import).await?;
+        Ok(self
+            .prepare_report_page(conn, user, import, query)
+            .await?
+            .render())
+    }
+
+    /// Select the original native saved report page with its actual owner-checked artifact.
+    pub async fn prepare_report_page(
+        &self,
+        conn: &mut Conn,
+        user: Id,
+        import: Id,
+        query: &orch_api_contract::imports::ImportReportListQuery,
+    ) -> Result<PreparedReportPage, ImportError> {
+        let import_row = self.import_of(conn, user, import).await?;
+        self.prepare_report_records(conn, import_row, query).await
+    }
+
+    /// The native report selector over the actual previously owner-selected Import row.
+    pub async fn prepare_report_records(
+        &self,
+        conn: &mut Conn,
+        import_row: ImportRow,
+        query: &orch_api_contract::imports::ImportReportListQuery,
+    ) -> Result<PreparedReportPage, ImportError> {
         let limit = i64::from(
             orch_api_contract::common::PageQuery {
                 limit: query.limit,
@@ -1011,7 +1230,7 @@ impl Engine {
             kind,
             warned: query.warned.unwrap_or(false),
         };
-        let mut found = rows::report_rows(conn, import, &filter, after, limit + 1).await?;
+        let mut found = rows::report_rows(conn, import_row.id, &filter, after, limit + 1).await?;
         let more = i64::try_from(found.len()).unwrap_or(i64::MAX) > limit;
         if more {
             found.truncate(usize::try_from(limit).unwrap_or(usize::MAX));
@@ -1021,11 +1240,49 @@ impl Engine {
         } else {
             None
         };
-        let items = found
-            .into_iter()
-            .filter_map(|(_, row)| serde_json::from_value(row).ok())
-            .collect();
-        Ok((items, next))
+        Ok(PreparedReportPage::new(import_row, found, next))
+    }
+
+    /// Refresh precisely the originally selected saved records, without moving a report cursor.
+    pub async fn refresh_report_page(
+        &self,
+        conn: &mut Conn,
+        user: Id,
+        opened: &PreparedReportPage,
+    ) -> Result<PreparedReportPage, ImportError> {
+        let import = self.import_of(conn, user, opened.import.id).await?;
+        let positions = opened
+            .entries
+            .iter()
+            .map(|entry| entry.position)
+            .collect::<Vec<_>>();
+        let entries = rows::selected_report_rows(conn, import.id, &positions).await?;
+        Ok(PreparedReportPage::new(
+            import,
+            entries,
+            opened.next_cursor.clone(),
+        ))
+    }
+
+    /// The next native streaming page, with real custody and the original fixed page allowance.
+    pub async fn prepare_report_chunk(
+        &self,
+        conn: &mut Conn,
+        user: Id,
+        import: Id,
+        after: Option<i64>,
+    ) -> Result<PreparedReportPage, ImportError> {
+        let row = self.import_of(conn, user, import).await?;
+        let entries = rows::report_rows(
+            conn,
+            import,
+            &rows::ReportFilter::default(),
+            after,
+            REPORT_PAGE,
+        )
+        .await?;
+        let next = entries.last().map(|(position, _)| position.to_string());
+        Ok(PreparedReportPage::new(row, entries, next))
     }
 
     /// The whole report of one of the caller's imports as a file, written as it is read: the pieces come a page of the rows at a time, so
@@ -1052,13 +1309,8 @@ impl Engine {
             Done,
         }
         let row = self.import_of(conn, user, import).await?;
-        let day = row.finished_at.unwrap_or(row.created_at).format("%Y-%m-%d");
-        let (media_type, name, head) = match format {
-            Format::Csv => (
-                "text/csv; charset=utf-8",
-                format!("import-report-{day}.csv"),
-                csv_head().to_owned(),
-            ),
+        let metadata = match format {
+            Format::Csv => None,
             Format::Json => {
                 let principal = Principal::load(
                     conn,
@@ -1066,22 +1318,15 @@ impl Engine {
                     Time::new(self.inner.clock.now()),
                 )
                 .await?;
-                let views = self
+                let mut views = self
                     .import_views(conn, &principal, std::slice::from_ref(&row))
                     .await?;
-                let head = serde_json::to_string(&json!({ "import": views.first() }))
-                    .map_err(EngineError::from)?;
-                // `{"import":…}` opened again for the rows: the closing brace is taken off and the member is added.
-                let head = format!("{},\"rows\":[", head.strip_suffix('}').unwrap_or(&head));
-                (
-                    "application/json",
-                    format!("import-report-{day}.json"),
-                    head,
-                )
+                views.pop()
             }
         };
+        let file = report_file(&row, format, metadata.as_ref())?;
         let engine = self.clone();
-        let stream = futures::stream::unfold(Piece::Head(head), move |piece| {
+        let stream = futures::stream::unfold(Piece::Head(file.head), move |piece| {
             let engine = engine.clone();
             async move {
                 let broken = |error: String| Some((Err(std::io::Error::other(error)), Piece::Done));
@@ -1120,25 +1365,10 @@ impl Engine {
                             };
                         };
                         let last = *last;
-                        let mut out = String::new();
-                        let mut first = first;
-                        for (_, row) in page {
-                            let Ok(row) = serde_json::from_value::<
-                                orch_api_contract::imports::ImportReportRow,
-                            >(row) else {
-                                continue;
-                            };
-                            match format {
-                                Format::Json => {
-                                    if !first {
-                                        out.push(',');
-                                    }
-                                    first = false;
-                                    out.push_str(&serde_json::to_string(&row).unwrap_or_default());
-                                }
-                                Format::Csv => out.push_str(&csv_row(&row)),
-                            }
-                        }
+                        let values = page
+                            .into_iter()
+                            .filter_map(|(_, row)| serde_json::from_value(row).ok());
+                        let (out, first) = report_chunk(format, first, values);
                         Some((
                             Ok(bytes::Bytes::from(out)),
                             Piece::Rows {
@@ -1152,6 +1382,6 @@ impl Engine {
             }
         })
         .boxed();
-        Ok((media_type, name, stream))
+        Ok((file.media_type, file.name, stream))
     }
 }

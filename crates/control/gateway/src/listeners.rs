@@ -270,6 +270,9 @@ async fn handle(
     request: Request<Incoming>,
 ) -> Response<Body> {
     let path = request.uri().path();
+    if path == orch_link_contract::gateways::PROBE_PATH {
+        return crate::probe::reply(&gateway, &request);
+    }
     if path == SESSION_PATH {
         return upgrade(gateway, kind, &tls, remote, request);
     }
@@ -349,7 +352,21 @@ fn upgrade(
             "a session is a WebSocket",
         );
     };
-    if !lists(headers, header::SEC_WEBSOCKET_PROTOCOL, SUBPROTOCOL) {
+    let purpose = if lists(
+        headers,
+        header::SEC_WEBSOCKET_PROTOCOL,
+        orch_link_contract::gateways::TUNNEL_SUBPROTOCOL,
+    ) {
+        orch_link_contract::gateways::SessionPurpose::Tunnel
+    } else {
+        orch_link_contract::gateways::SessionPurpose::Primary
+    };
+    let protocol = if purpose.is_primary() {
+        SUBPROTOCOL
+    } else {
+        orch_link_contract::gateways::TUNNEL_SUBPROTOCOL
+    };
+    if !lists(headers, header::SEC_WEBSOCKET_PROTOCOL, protocol) {
         return problem(
             StatusCode::BAD_REQUEST,
             "request.invalid",
@@ -369,6 +386,7 @@ fn upgrade(
         .map(host_of)
         .or_else(|| tls.server_name.clone());
     let peer = PeerInfo {
+        purpose,
         remote_ip: Some(client_ip(
             kind,
             remote,
@@ -411,7 +429,7 @@ fn upgrade(
     );
     headers.insert(
         header::SEC_WEBSOCKET_PROTOCOL,
-        header::HeaderValue::from_static(SUBPROTOCOL),
+        header::HeaderValue::from_static(protocol),
     );
     if let Ok(value) = header::HeaderValue::from_str(&accept) {
         headers.insert(header::SEC_WEBSOCKET_ACCEPT, value);

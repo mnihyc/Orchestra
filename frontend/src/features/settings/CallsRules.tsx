@@ -1,7 +1,7 @@
 /** Compact ordered recovery rows inside the existing inherited setting editor. */
 import { useQuery } from '@tanstack/react-query';
 import { Ellipsis, Plus } from 'lucide-react';
-import { useId, useState } from 'react';
+import { useCallback, useId, useState } from 'react';
 import { useTranslation } from 'react-i18next';
 import type { TFunction } from 'i18next';
 import { agentsQuery, providerModelsQuery, providerQuery } from '@/api/resources';
@@ -18,12 +18,13 @@ import { IconButton } from '@/ui/IconButton';
 import { Menu, type MenuEntry } from '@/ui/Menu';
 import { Select } from '@/ui/Select';
 import { Table } from '@/ui/Table';
-import { Textarea } from '@/ui/Textarea';
 import { ErrorAlert } from '@/ui/ErrorState';
 import { Combobox } from '@/ui/Combobox';
 import { SETTINGS_REGISTRY } from '@/generated/settings-registry';
 import { profilesFor } from '@/features/change/RunsOn';
 import { holds } from '@/lib/permissions';
+import { SchemaDraftState } from '@/features/resources/templates/SchemaForm';
+import { ModelRequestOptions } from '@/features/models/RequestOptions';
 import { CallModel } from '@/features/calls/Model';
 import { CallHelp } from '@/features/calls/Help';
 import { resourceChoice } from '@/features/resource-facts/ResourceFacts';
@@ -62,7 +63,7 @@ function RuleSteps({ rule }: { rule: Rule }) {
   return rule.steps.map((step, index) => <span key={index} className="inline-flex min-w-0 max-w-full items-center gap-1"><span aria-hidden>→</span>{step.type === 'failover' ? <CallModel providerId={step.candidate.provider_id} model={step.candidate.model} /> : <span>{stepSummary(step, t, format.locale)}</span>}</span>);
 }
 
-function CandidateEditor({ step, onChange }: { step: Extract<Step, { type: 'failover' }>; onChange: (step: Step) => void }) {
+function CandidateEditor({ step, onChange, purpose }: { purpose: Rule['when']['purpose']; step: Extract<Step, { type: 'failover' }>; onChange: (step: Step) => void }) {
   const { t } = useTranslation();
   const candidate = step.candidate;
   const [modelsOpen,setModelsOpen]=useState(false);
@@ -70,33 +71,26 @@ function CandidateEditor({ step, onChange }: { step: Extract<Step, { type: 'fail
   const provider=useQuery({...providerQuery(candidate.provider_id),enabled:candidate.provider_id!=='',retry:false});
   const agents=useQuery({...agentsQuery(),enabled:candidate.provider_id!=='',retry:false});
   const profiles=profilesFor(provider.data,agents.data??[]);
-  const parameterText=(value:unknown)=>typeof value==='string'?value:JSON.stringify(value===undefined?{}:value,null,2);
-  const [params, setParams] = useState(()=>parameterText(candidate.params));
-  const [seenParams,setSeenParams]=useState<unknown>(()=>candidate.params);
-  const [invalid, setInvalid] = useState(!record(candidate.params===undefined?{}:candidate.params));
-  if(seenParams!==candidate.params) {
-    setSeenParams(candidate.params);setParams(parameterText(candidate.params));setInvalid(!record(candidate.params===undefined?{}:candidate.params));
-  }
   const failure=models.error??provider.error??agents.error;
   const retry=models.error!==null?models.refetch:provider.error!==null?provider.refetch:agents.refetch;
   return <div className="flex min-w-0 flex-col gap-2">
     <ProviderDefaultChoice showLabel shape={{ type: 'text', maxLength: null, pattern: null }} value={candidate.provider_id} label={t('calls.provider')} onChange={(value) => onChange({ ...step, candidate: { ...candidate, provider_id: typeof value === 'string' ? value : '', model: '' } })} />
     <Select label={t('calls.profile')} value={candidate.agent_id??'\u0000current'} valueLabel={typeof candidate.agent_id==='string' && !profiles.some((agent)=>agent.id===candidate.agent_id)?t(agents.isFetching?'common.loading':'calls.managed'):undefined} options={[{value:'\u0000current',label:t('calls.keepProfile')},...profiles.map((agent)=>({value:agent.id,label:agent.name,...resourceChoice({kind:'agent',agent,provider:provider.data}),disabled:!holds(agent.access,'agent.use'),...(!holds(agent.access,'agent.use')?{description:t('calls.profileUseRequired')}:{})}))]} onValueChange={(agent_id)=>{const {agent_id:_old,...rest}=candidate;onChange({...step,candidate:{...rest,...(agent_id==='\u0000current'?{}:{agent_id})}});}} />
     <Combobox label={t('calls.model')} onOpenChange={setModelsOpen} query={candidate.model} onQueryChange={(model) => onChange({ ...step, candidate: { ...candidate, model } })} loading={models.isFetching} groups={[{ id: 'models', label: t('calls.model'), options: (models.data ?? []).filter((model) => model.enabled).map((model) => ({ value: model.model_name, label: model.display_name || model.model_name, text: model.display_name || model.model_name, ...resourceChoice(modelResource(model,candidate.provider_id,{usage:provider.data?.choice_usage})) })) }]} onSelect={({ value: model }) => onChange({ ...step, candidate: { ...candidate, model } })} />
-    <Textarea label={t('calls.parameters')} help={<CallHelp section="candidates" term={t('calls.parameters')} />} value={params} error={invalid ? t('calls.invalidParameters') : undefined} onChange={(event) => { const text = event.target.value; setParams(text); try { const value: unknown = JSON.parse(text); if (!record(value)) throw new Error(); setInvalid(false); setSeenParams(value); onChange({ ...step, candidate: { ...candidate, params: value } }); } catch { setInvalid(true); setSeenParams(text); onChange({ ...step, candidate: { ...candidate, params: text } }); } }} />
+    <ModelRequestOptions protocol={purpose === 'agent' || purpose === undefined ? 'native' : purpose === 'embedding' ? 'openai-embeddings' : undefined} label={t('calls.parameters')} providerId={candidate.provider_id} model={candidate.model} value={candidate.params ?? {}} onChange={(params) => onChange({ ...step, candidate: { ...candidate, params } })} />
     {failure!==null && <ErrorAlert error={failure} action={<Button size="sm" onClick={()=>void retry()}>{t('common.tryAgain')}</Button>} />}
     <Input type="number" min={1} label={t('calls.dimensions')} value={candidate.dimensions ?? ''} onChange={(event) => { const dimensions = event.target.value === '' ? undefined : Number(event.target.value); const { dimensions: _old, ...rest } = candidate; onChange({ ...step, candidate: { ...rest, ...(dimensions === undefined ? {} : { dimensions }) } }); }} />
   </div>;
 }
 
-function StepEditor({ step, onChange }: { step: Step; onChange: (step: Step) => void }) {
+function StepEditor({ step, onChange, purpose }: { purpose: Rule['when']['purpose']; step: Step; onChange: (step: Step) => void }) {
   const { t } = useTranslation();
   return <div className="flex min-w-0 flex-col gap-2">
     <Select size="sm" label={t('calls.action')} value={step.type} options={(['retry', 'continue', 'failover', 'wait'] as const).map((value) => ({ value, label: t(`calls.actions.${value}`) }))} onValueChange={(value) => onChange(defaultStep(value))} />
     {(step.type === 'retry' || step.type === 'continue') && <Input label={t('calls.times')} type="number" min={1} value={step.times} onChange={(event) => onChange({ ...step, times: Number(event.target.value) })} />}
     {step.type === 'retry' && <div className="grid min-w-0 grid-cols-2 gap-2"><Input label={t('calls.delay')} type="number" min={0} value={step.delay_secs} onChange={(event) => onChange({ ...step, delay_secs: Number(event.target.value) })} /><Input label={t('calls.backoff')} type="number" min={1} value={step.backoff} onChange={(event) => onChange({ ...step, backoff: Number(event.target.value) })} /></div>}
     {step.type === 'wait' && <Select label={t('calls.until')} value={step.until} options={(['person', 'reset'] as const).map((value) => ({ value, label: t(value === 'person' ? 'calls.waitPerson' : 'calls.waitReset') }))} onValueChange={(until) => onChange({ ...step, until })} />}
-    {step.type === 'failover' && <CandidateEditor key={step.candidate.provider_id} step={step} onChange={onChange} />}
+    {step.type === 'failover' && <CandidateEditor purpose={purpose} key={step.candidate.provider_id} step={step} onChange={onChange} />}
   </div>;
 }
 
@@ -107,6 +101,11 @@ interface Draft {index:number;rule:Rule;keys:string[];next:number}
 export function CallsRules({ value, onChange, onEdited, disabled, error }: ValueControlProps) {
   const { t } = useTranslation();
   const format = useFormatContext();
+  const [draftErrors, setDraftErrors] = useState<Record<string, boolean>>({});
+  const reportDraft = useCallback((id: string, invalid: boolean) => setDraftErrors((held) => {
+    const { [id]: _old, ...rest } = held;
+    return invalid ? { ...rest, [id]: true } : rest;
+  }), []);
   const identity=useId();
   const rules = rulesOf(value);
   const [editing, setEditing] = useState<Draft | null>(null);
@@ -115,7 +114,7 @@ export function CallsRules({ value, onChange, onEdited, disabled, error }: Value
     setEditing((held) => held?.index === index ? held : { index, rule: structuredClone(rule),keys:rule.steps.map((_,at)=>`${identity}:${index}:${at}`),next:rule.steps.length });
     setOpen(true);
   };
-  const invalid = editing === null || editing.rule.id.trim() === '' || rules.some((rule, index) => index !== editing.index && rule.id === editing.rule.id)
+  const invalid = Object.values(draftErrors).some(Boolean) || editing === null || editing.rule.id.trim() === '' || rules.some((rule, index) => index !== editing.index && rule.id === editing.rule.id)
     || editing.rule.steps.some((step) => step.type === 'failover' ? step.candidate.provider_id === '' || step.candidate.model.trim() === '' || !record(step.candidate.params===undefined?{}:step.candidate.params) || step.candidate.dimensions!==undefined && step.candidate.dimensions!==null && (!Number.isInteger(step.candidate.dimensions) || step.candidate.dimensions<=0)
       : step.type === 'retry' ? !Number.isInteger(step.times) || !Number.isInteger(step.delay_secs) || !Number.isInteger(step.backoff) || step.times <= 0 || step.delay_secs < 0 || step.backoff <= 0 : step.type === 'continue' && (!Number.isInteger(step.times) || step.times <= 0));
   const update = (rule: Rule) => { if (editing !== null) { onEdited?.(); setEditing({ ...editing, rule }); } };
@@ -153,7 +152,7 @@ export function CallsRules({ value, onChange, onEdited, disabled, error }: Value
       {id:'remove',label:t('calls.remove'),disabled:held.rule.steps.length===1?t('calls.oneStep'):false,onSelect:()=>changeSteps(held.rule.steps.filter((_,at)=>at!==index),held.keys.filter((_,at)=>at!==index),held.next)},
     ];
   };
-  return <div className="flex min-w-0 max-w-full flex-col gap-2">
+  return <SchemaDraftState.Provider value={reportDraft}><div className="flex min-w-0 max-w-full flex-col gap-2">
     <Table boundedIdentity label={t('calls.rules')} rows={rules.map((rule,index)=>({rule,index}))} rowKey={({rule})=>rule.id} rowMenu={{label:ruleLabel,entries:ruleEntries}} columns={[
       {id:'name',header:t('calls.rules'),hideHeader:true,cell:({rule,index})=><span className="flex min-w-0 flex-wrap items-center gap-1"><Button variant="ghost" size="sm" className="max-w-full justify-start" aria-label={ruleSummary(rule,t,format.locale)} disabled={disabled} onClick={()=>edit(index,rule)}><span className="truncate">{ruleSummary({...rule,steps:[]},t,format.locale)}</span></Button><RuleSteps rule={rule} /></span>},
       {id:'actions',header:t('calls.action'),hideHeader:true,align:'end',cell:(row)=><Menu label={ruleLabel(row)} entries={ruleEntries(row)} trigger={<IconButton size="sm" label={ruleLabel(row)} icon={<Ellipsis aria-hidden />} />} />},
@@ -173,10 +172,10 @@ export function CallsRules({ value, onChange, onEdited, disabled, error }: Value
         <Input label={t('calls.contains')} placeholder={t('calls.anyWords')} value={editing.rule.when.contains??''} onChange={(event)=>{const {contains:_old,...when}=editing.rule.when;update({...editing.rule,when:{...when,...(event.target.value===''?{}:{contains:event.target.value})}});}} />
         <Input label={t('calls.regex')} placeholder={t('calls.anyPattern')} value={editing.rule.when.regex??''} onChange={(event)=>{const {regex:_old,...when}=editing.rule.when;update({...editing.rule,when:{...when,...(event.target.value===''?{}:{regex:event.target.value})}});}} />
         <Table boundedIdentity label={t('calls.steps')} rows={editing.rule.steps.map((step,index)=>({step,index,key:editing.keys[index]??`${identity}:missing:${index}`}))} rowKey={({key})=>key} rowMenu={{label:stepLabel,entries:stepEntries}} columns={[
-          {id:'name',header:t('calls.steps'),cell:(row)=><div className="flex min-w-0 flex-col gap-2"><div className="flex items-center justify-between gap-2"><span className="text-sm text-text-muted">{t('calls.stepNumber',{step:formatNumber(row.index+1,format.locale)})}</span><Menu label={stepLabel(row)} entries={stepEntries(row)} trigger={<IconButton size="sm" label={stepLabel(row)} title={stepLabel(row)} icon={<Ellipsis aria-hidden />} />} /></div><StepEditor step={row.step} onChange={(next)=>update({...editing.rule,steps:editing.rule.steps.map((held,at)=>at===row.index?next:held)})} /></div>},
+          {id:'name',header:t('calls.steps'),cell:(row)=><div className="flex min-w-0 flex-col gap-2"><div className="flex items-center justify-between gap-2"><span className="text-sm text-text-muted">{t('calls.stepNumber',{step:formatNumber(row.index+1,format.locale)})}</span><Menu label={stepLabel(row)} entries={stepEntries(row)} trigger={<IconButton size="sm" label={stepLabel(row)} title={stepLabel(row)} icon={<Ellipsis aria-hidden />} />} /></div><StepEditor purpose={editing.rule.when.purpose} step={row.step} onChange={(next)=>update({...editing.rule,steps:editing.rule.steps.map((held,at)=>at===row.index?next:held)})} /></div>},
         ]} />
         <Button size="sm" variant="ghost" icon={<Plus aria-hidden />} onClick={()=>changeSteps([...editing.rule.steps,{type:'wait',until:'person'}],[...editing.keys,`${identity}:${editing.index}:${editing.next}`],editing.next+1)}>{t('calls.addStep')}</Button>
       </div>
     </Dialog>}
-  </div>;
+  </div></SchemaDraftState.Provider>;
 }

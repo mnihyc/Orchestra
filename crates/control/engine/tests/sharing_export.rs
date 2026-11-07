@@ -30,6 +30,7 @@ fn ask(
     client: &str,
 ) -> ShareWithAgents {
     ShareWithAgents {
+        viewers_read: None,
         read_first: None,
         download,
         what: ShareWhat::Document(ShareWhatDocument {

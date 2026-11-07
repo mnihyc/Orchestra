@@ -82,6 +82,9 @@ fn rate(pricing: &Value) -> Option<Rate> {
     let input = price(pricing, "prompt")?;
     let output = price(pricing, "completion")?;
     Some(Rate {
+        web_search_per_call: pricing
+            .get("web_search")
+            .and_then(|price| decimal::plain(&price.to_string())),
         cached_input_per_mtok: price(pricing, "input_cache_read").unwrap_or_else(|| input.clone()),
         cache_write_per_mtok: price(pricing, "input_cache_write"),
         input_per_mtok: input,
@@ -109,9 +112,21 @@ fn suggestion(entry: &Value) -> Option<ModelSuggestion> {
     suggestion.parameters.offered = size(entry.get("max_input_tokens"))
         .or_else(|| size(entry.get("context_length")))
         .map(|largest| Offered {
+            web_search: None,
             context_max: Some(largest),
             ..Offered::default()
         });
+    if entry
+        .pointer("/capabilities/server_tools/web_search/supported")
+        .and_then(Value::as_bool)
+        == Some(true)
+    {
+        suggestion
+            .parameters
+            .offered
+            .get_or_insert_with(Offered::default)
+            .web_search = Some(vec!["live".to_owned()]);
+    }
     suggestion.parameters.rate = entry.get("pricing").and_then(rate);
     Some(suggestion)
 }

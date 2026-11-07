@@ -1,12 +1,41 @@
 ---
 title: Register your own program
-screens: /resources/machines, /resources/agents, /resources/providers
-keywords: register, program, custom agent, adapter, provider source, command, GPU, describe, 注册, 程序, 代理适配器, 提供方数据源
+screens: /resources/machines, /resources/environments, /resources/agents, /resources/providers, /thread
+keywords: register, program, custom agent, adapter, provider source, command, GPU, describe, Codex, Claude Code, agent version, 注册, 程序, 代理适配器, 提供方数据源
 ---
 
 # Register your own program
 
+## Use an installed agent program
+
+Open the connected machine's **Programs** section. Agent programs found on that machine show
+their version and path. **Version unknown** means the program did not report a recognizable version.
+Choose **Use** to confirm a found program; its row then reads **Confirmed** and offers **Remove**.
+These actions need Manage on the machine and its local permission to manage agent programs.
+If that permission is kept locally, use the policy command shown for that machine. **Refresh**
+searches again and reads the machine's current report.
+
+Removing a confirmation keeps the program file. It stops executors using that program, and
+affected threads are checked again before they run. An unconfirmed discovery is not available
+for execution.
+
+## Allow the environment's program version
+
+On the environment's **Tools** page, **Codex tools** shows the confirmed program's version and
+path when it supplies the tools there. Its version normally must match the agent's version.
+An environment manager can switch on **Any agent version**; the current approver's name appears
+beside the switch. This allows the displayed path and version, including **Version unknown**.
+A changed path or version needs approval again. Switching it off restores version matching.
+The decision takes effect when a thread next opens a session.
+The adapter's supported versions and the environment's other rules still apply.
+
+A thread blocked by different versions links to this environment page. After a manager allows
+the current program, the thread is checked again and continues if it can run. Environments made
+from a template keep their own tools build.
+
 ## 1. Choose a machine and kind
+
+To register an adapter or provider source of your own, continue below.
 
 Open the connected machine's **Programs** section and choose **Agent adapter** or **Provider source**,
 then **Add**. The program must already be available on that machine; a path on your laptop

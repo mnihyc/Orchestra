@@ -149,6 +149,17 @@ pub async fn load(conn: &mut Conn, act: &Acting<'_>, id: Id, mode: Mode) -> Resu
         Mode::Write => rows::lock(conn, id).await?,
     };
     let row = found.ok_or(Error::NotFound)?;
+    read_selected(conn, act, row).await
+}
+
+/// The same native standing for an authoritative row already selected by a reader.
+/// Mutating callers still obtain their serialization lock through `load` with Write.
+pub async fn read_selected(
+    conn: &mut Conn,
+    act: &Acting<'_>,
+    row: ChatRow,
+) -> Result<Loaded, Error> {
+    let id = row.id;
     let members = if row.is_people_chat() {
         rows::effective_members(&rows::members(conn, id).await?, act.now)
     } else {
@@ -197,6 +208,23 @@ pub struct Opened {
     pub chat: ChatRow,
     /// Whether it was made now; a direct chat that existed is not.
     pub created: bool,
+}
+
+/// Immutable normalized operands after the existing ordinary opening checks.
+#[derive(Debug, Clone)]
+pub struct PreparedOpen {
+    root: Id,
+    actor: Id,
+    others: Vec<Id>,
+    name: Option<String>,
+}
+
+impl PreparedOpen {
+    /// The real keeping root org, never inferred from a returned Chat body.
+    #[must_use]
+    pub fn root(&self) -> Id {
+        self.root
+    }
 }
 
 fn name_of(name: Option<&str>) -> Result<Option<String>, Error> {
@@ -276,25 +304,20 @@ pub async fn open(
     users: &[Id],
     name: Option<&str>,
 ) -> Result<Opened, Error> {
-    if !rows::is_root_org(conn, root).await? {
-        return Err(Error::NotFound);
-    }
+    let prepared = prepare_open(conn, act, root, users, name).await?;
+    apply_open(conn, act, &prepared).await
+}
+
+/// Native preparation reads and validates without inserting a chat or changing personal state.
+pub async fn prepare_open(
+    conn: &mut Conn,
+    act: &Acting<'_>,
+    root: Id,
+    users: &[Id],
+    name: Option<&str>,
+) -> Result<PreparedOpen, Error> {
+    check_opening_root(conn, act, root).await?;
     let me = act.user();
-    if let Some(closing) = act.principal.suspension().closing(&[root])
-        && act.principal.is_in_tree(root)
-    {
-        return Err(Error::Suspended { org: closing.org() });
-    }
-    if !act.principal.is_in_tree(root) {
-        return Err(Error::NotFound);
-    }
-    let graph = orch_authz::engine::Graph::load(conn, &[root]).await?;
-    if let Some(node) = graph.site_of(root).and_then(|site| site.archived_node) {
-        return Err(Error::Archived { node });
-    }
-    if !direct_allowed(conn, root).await? {
-        return Err(Error::NotAllowed(Why::DirectOff));
-    }
     let name = name_of(name)?;
     let mut others: Vec<Id> = Vec::new();
     for user in users {
@@ -305,6 +328,10 @@ pub async fn open(
     if others.is_empty() {
         return Err(Error::invalid("user_ids", "name at least one other person"));
     }
+    if !rows::lock_opening_root(conn, root).await? {
+        return Err(Error::NotFound);
+    }
+    check_opening_root(conn, act, root).await?;
     let people = rows::standing(conn, root, &others).await?;
     for (at, user) in others.iter().enumerate() {
         let Some(person) = people.iter().find(|person| person.id == *user) else {
@@ -320,11 +347,83 @@ pub async fn open(
             return Err(Error::NotAllowed(Why::Closed));
         }
     }
-    let direct = others.len() == 1 && name.is_none();
-    if direct {
-        open_direct(conn, act, root, others[0]).await
+    if !(others.len() == 1 && name.is_none()) {
+        let most = group_max(conn).await?;
+        if i64::try_from(others.len() + 1).unwrap_or(i64::MAX) > most {
+            return Err(Error::NotAllowed(Why::Full));
+        }
+    }
+    Ok(PreparedOpen {
+        root,
+        actor: me,
+        others,
+        name,
+    })
+}
+
+async fn check_opening_root(conn: &mut Conn, act: &Acting<'_>, root: Id) -> Result<(), Error> {
+    if !rows::is_root_org(conn, root).await? {
+        return Err(Error::NotFound);
+    }
+    if let Some(closing) = act.principal.suspension().closing(&[root])
+        && act.principal.is_in_tree(root)
+    {
+        return Err(Error::Suspended { org: closing.org() });
+    }
+    if !act.principal.is_in_tree(root) {
+        return Err(Error::NotFound);
+    }
+    let graph = orch_authz::engine::Graph::load(conn, &[root]).await?;
+    if let Some(node) = graph.site_of(root).and_then(|site| site.archived_node) {
+        return Err(Error::Archived { node });
+    }
+    if !direct_allowed(conn, root).await? {
+        return Err(Error::NotAllowed(Why::DirectOff));
+    }
+    Ok(())
+}
+
+/// The same ordinary checks for those immutable operands at the current native boundary.
+pub async fn check_open_preparation(
+    conn: &mut Conn,
+    act: &Acting<'_>,
+    prepared: &PreparedOpen,
+) -> Result<(), Error> {
+    if act.user() != prepared.actor {
+        return Err(Error::NotFound);
+    }
+    let _ = prepare_open(
+        conn,
+        act,
+        prepared.root,
+        &prepared.others,
+        prepared.name.as_deref(),
+    )
+    .await?;
+    Ok(())
+}
+
+/// All validation is prepared; the first awaited operation attempts the native chat insertion.
+/// Callers keep their ordinary transaction and check current authority immediately before this.
+pub async fn apply_open(
+    conn: &mut Conn,
+    act: &Acting<'_>,
+    prepared: &PreparedOpen,
+) -> Result<Opened, Error> {
+    if act.user() != prepared.actor {
+        return Err(Error::NotFound);
+    }
+    if prepared.others.len() == 1 && prepared.name.is_none() {
+        open_direct(conn, act, prepared.root, prepared.others[0]).await
     } else {
-        open_group(conn, act, root, &others, name.as_deref()).await
+        open_group(
+            conn,
+            act,
+            prepared.root,
+            &prepared.others,
+            prepared.name.as_deref(),
+        )
+        .await
     }
 }
 
@@ -398,10 +497,6 @@ async fn open_group(
     name: Option<&str>,
 ) -> Result<Opened, Error> {
     let me = act.user();
-    let most = group_max(conn).await?;
-    if i64::try_from(others.len() + 1).unwrap_or(i64::MAX) > most {
-        return Err(Error::NotAllowed(Why::Full));
-    }
     let chat = rows::insert_chat(
         conn,
         &NewChat {
@@ -527,21 +622,42 @@ fn ensure_in(loaded: &Loaded, act: &Acting<'_>) -> Result<(), Error> {
     }
 }
 
-/// Gives a group a name, or names it after its members again.
-pub async fn rename(
+/// The effect-free operands of the existing group rename rule.
+#[derive(Debug, Clone)]
+pub struct PreparedRename {
+    name: Option<String>,
+    unchanged: bool,
+}
+
+/// The complete native rename prefix, with no sequence or persistent mutation.
+pub async fn prepare_rename(
     conn: &mut Conn,
     act: &Acting<'_>,
     loaded: &mut Loaded,
     name: Option<&str>,
-) -> Result<ChatRow, Error> {
+) -> Result<PreparedRename, Error> {
     ensure_group(loaded)?;
     ensure_in(loaded, act)?;
     loaded.ensure_send()?;
     let name = name_of(name)?;
     loaded.lock(conn).await?;
-    if loaded.row.name == name {
+    Ok(PreparedRename {
+        unchanged: loaded.row.name == name,
+        name,
+    })
+}
+
+/// Apply an already checked native rename; its first SQL is the sequence mutation.
+pub async fn apply_rename(
+    conn: &mut Conn,
+    act: &Acting<'_>,
+    loaded: &mut Loaded,
+    prepared: PreparedRename,
+) -> Result<ChatRow, Error> {
+    if prepared.unchanged {
         return Ok(loaded.row.clone());
     }
+    let name = prepared.name;
     let seq = take(conn, loaded.id()).await?;
     rows::rename(conn, loaded.id(), name.as_deref()).await?;
     rows::stamp_state(conn, loaded.id(), seq).await?;
@@ -573,6 +689,17 @@ pub async fn rename(
         .ok_or(Error::NotFound)?;
     loaded.row = row.clone();
     Ok(row)
+}
+
+/// Gives a group a name, or names it after its members again.
+pub async fn rename(
+    conn: &mut Conn,
+    act: &Acting<'_>,
+    loaded: &mut Loaded,
+    name: Option<&str>,
+) -> Result<ChatRow, Error> {
+    let prepared = prepare_rename(conn, act, loaded, name).await?;
+    apply_rename(conn, act, loaded, prepared).await
 }
 
 /// Puts a person in a group. A member of the root org is let in by any member
@@ -636,29 +763,64 @@ pub async fn can_add_member(
     Ok(guest)
 }
 
-/// Adds the same ordinary membership with an optional deadline. Existing live membership is never shortened.
-pub async fn add_member_until(
+/// Effect-free operands of the existing group-add rule, including duplicate outcome.
+#[derive(Debug, Clone)]
+pub struct PreparedAddMember {
+    user: Id,
+    guest: bool,
+    expires_at: Option<DateTime<Utc>>,
+    members: Vec<MemberRow>,
+    already_present: bool,
+}
+
+/// The complete ordinary add prefix, preserving validation before duplicate and capacity.
+pub async fn prepare_add_member(
     conn: &mut Conn,
     act: &Acting<'_>,
     loaded: &mut Loaded,
     user: Id,
     owners_name_outsiders: bool,
     expires_at: Option<DateTime<Utc>>,
-) -> Result<(), Error> {
+) -> Result<PreparedAddMember, Error> {
     if expires_at.is_some_and(|end| end <= act.now) {
         return Err(Error::invalid("expires_at", "must be in the future"));
     }
     let guest = can_add_member(conn, act, loaded, user, owners_name_outsiders).await?;
     loaded.lock(conn).await?;
-    let mut members = rows::effective_members(&rows::members(conn, loaded.id()).await?, act.now);
-    if members.iter().any(|row| row.user_id == user && row.is_in()) {
-        loaded.members = members;
+    let members = rows::effective_members(&rows::members(conn, loaded.id()).await?, act.now);
+    let already_present = members.iter().any(|row| row.user_id == user && row.is_in());
+    if !already_present {
+        let present = members.iter().filter(|row| row.is_in()).count();
+        if i64::try_from(present).unwrap_or(i64::MAX) >= group_max(conn).await? {
+            return Err(Error::NotAllowed(Why::Full));
+        }
+    }
+    Ok(PreparedAddMember {
+        user,
+        guest,
+        expires_at,
+        members,
+        already_present,
+    })
+}
+
+/// Apply the existing checked add; its first SQL is the sequence mutation.
+pub async fn apply_add_member(
+    conn: &mut Conn,
+    act: &Acting<'_>,
+    loaded: &mut Loaded,
+    prepared: PreparedAddMember,
+) -> Result<(), Error> {
+    if prepared.already_present {
+        loaded.members = prepared.members;
         return Ok(());
     }
-    let present = members.iter().filter(|row| row.is_in()).count();
-    if i64::try_from(present).unwrap_or(i64::MAX) >= group_max(conn).await? {
-        return Err(Error::NotAllowed(Why::Full));
-    }
+    let PreparedAddMember {
+        user,
+        guest,
+        expires_at,
+        ..
+    } = prepared;
     let seq = take(conn, loaded.id()).await?;
     rows::add_member(
         conn,
@@ -697,19 +859,60 @@ pub async fn add_member_until(
     )
     .await?;
     changed_people(conn, loaded.id(), seq, act.now, &[user]).await?;
-    members = rows::effective_members(&rows::members(conn, loaded.id()).await?, act.now);
+    let members = rows::effective_members(&rows::members(conn, loaded.id()).await?, act.now);
     loaded.members = members;
     Ok(())
 }
 
-/// Takes a person out of a group: the person themself, to leave, or the one
-/// who made the group.
-pub async fn remove_member(
+/// The same prepared native membership write with its caller's cut immediately before
+/// the sequence mutation. Duplicate native outcomes consume no first-effect check.
+pub async fn apply_add_member_before<E, F>(
+    conn: &mut Conn,
+    act: &Acting<'_>,
+    loaded: &mut Loaded,
+    prepared: PreparedAddMember,
+    before: F,
+) -> Result<(), orch_authz::pages::EffectFailure<Error, E>>
+where
+    F: FnOnce() -> Result<(), E> + Send,
+    E: Send,
+{
+    if !prepared.already_present {
+        before().map_err(orch_authz::pages::EffectFailure::BeforeEffect)?;
+    }
+    apply_add_member(conn, act, loaded, prepared)
+        .await
+        .map_err(orch_authz::pages::EffectFailure::Native)
+}
+
+/// Adds the same ordinary membership with an optional deadline. Existing live membership is never shortened.
+pub async fn add_member_until(
     conn: &mut Conn,
     act: &Acting<'_>,
     loaded: &mut Loaded,
     user: Id,
+    owners_name_outsiders: bool,
+    expires_at: Option<DateTime<Utc>>,
 ) -> Result<(), Error> {
+    let prepared =
+        prepare_add_member(conn, act, loaded, user, owners_name_outsiders, expires_at).await?;
+    apply_add_member(conn, act, loaded, prepared).await
+}
+
+/// Effect-free operands of the existing self-leave or group-removal rule.
+#[derive(Debug, Clone)]
+pub struct PreparedRemoveMember {
+    user: Id,
+    leaving: bool,
+}
+
+/// The native remove prefix; its archive-only send exception remains unchanged.
+pub async fn prepare_remove_member(
+    conn: &mut Conn,
+    act: &Acting<'_>,
+    loaded: &mut Loaded,
+    user: Id,
+) -> Result<PreparedRemoveMember, Error> {
     ensure_group(loaded)?;
     ensure_in(loaded, act)?;
     let leaving = user == act.user();
@@ -720,6 +923,17 @@ pub async fn remove_member(
         return Err(archived);
     }
     loaded.lock(conn).await?;
+    Ok(PreparedRemoveMember { user, leaving })
+}
+
+/// Apply the existing checked removal, starting at its transactional sequence mutation.
+pub async fn apply_remove_member(
+    conn: &mut Conn,
+    act: &Acting<'_>,
+    loaded: &mut Loaded,
+    prepared: PreparedRemoveMember,
+) -> Result<(), Error> {
+    let PreparedRemoveMember { user, leaving } = prepared;
     let seq = take(conn, loaded.id()).await?;
     if !rows::remove_member(conn, loaded.id(), user, seq, act.now).await? {
         return Err(Error::NotFound);
@@ -758,6 +972,17 @@ pub async fn remove_member(
     changed_people(conn, loaded.id(), seq, act.now, &[user]).await?;
     loaded.members = rows::members(conn, loaded.id()).await?;
     Ok(())
+}
+
+/// Takes a person out of a group: the person themself, to leave, or the one who made it.
+pub async fn remove_member(
+    conn: &mut Conn,
+    act: &Acting<'_>,
+    loaded: &mut Loaded,
+    user: Id,
+) -> Result<(), Error> {
+    let prepared = prepare_remove_member(conn, act, loaded, user).await?;
+    apply_remove_member(conn, act, loaded, prepared).await
 }
 
 /// What follows from a change of who is in a chat: the authorization epoch
@@ -814,7 +1039,7 @@ pub struct Listed {
 /// How many chats a list looks at in one step when it has to filter them by
 /// what the caller may read: enough that a page of mostly readable chats is
 /// one step.
-const STEP: i64 = 100;
+pub const LIST_STEP: i64 = 100;
 
 /// The chats of the root org `root` that the caller may list, `limit` of them
 /// from `after`.
@@ -825,6 +1050,35 @@ pub async fn list(
     scope: Scope,
     after: Option<After>,
     limit: i64,
+) -> Result<Listed, Error> {
+    list_matching(conn, act, root, scope, after, limit, None).await
+}
+
+/// Recheck the native list membership of an earlier selected response without substituting a newer page.
+pub async fn list_selected(
+    conn: &mut Conn,
+    act: &Acting<'_>,
+    root: Id,
+    scope: Scope,
+    participating: bool,
+    selected: &[Id],
+) -> Result<Listed, Error> {
+    let limit = i64::try_from(selected.len()).unwrap_or(i64::MAX);
+    if participating {
+        list_participating_in(conn, act, root, scope, None, limit, Some(selected)).await
+    } else {
+        list_matching(conn, act, root, scope, None, limit, Some(selected)).await
+    }
+}
+
+async fn list_matching(
+    conn: &mut Conn,
+    act: &Acting<'_>,
+    root: Id,
+    scope: Scope,
+    after: Option<After>,
+    limit: i64,
+    selected: Option<&[Id]>,
 ) -> Result<Listed, Error> {
     if !rows::is_root_org(conn, root).await? {
         return Err(Error::NotFound);
@@ -837,7 +1091,9 @@ pub async fn list(
         return Err(Error::Suspended { org: closing.org() });
     }
     let mut chats = match scope {
-        Scope::Mine => rows::mine(conn, me, root, !in_tree, after, limit + 1).await?,
+        Scope::Mine => {
+            rows::mine_selected(conn, me, root, !in_tree, after, limit + 1, selected).await?
+        }
         Scope::Others { of } => {
             let tree = rows::orgs_of_tree(conn, root).await?;
             let held = orch_authz::chats::inspection_orgs(conn, act.principal, &tree).await?;
@@ -852,10 +1108,10 @@ pub async fn list(
                 Some(of) => vec![of],
                 None => held,
             };
-            rows::others_among(conn, me, root, &orgs, after, limit + 1).await?
+            rows::others_among_selected(conn, me, root, &orgs, after, limit + 1, selected).await?
         }
         Scope::Nodes => {
-            return list_nodes(conn, act, root, after, limit).await;
+            return list_nodes(conn, act, root, after, limit, selected).await;
         }
     };
     let more = i64::try_from(chats.len()).unwrap_or(i64::MAX) > limit;
@@ -877,11 +1133,23 @@ pub async fn list_participating(
     after: Option<After>,
     limit: i64,
 ) -> Result<Listed, Error> {
+    list_participating_in(conn, act, root, scope, after, limit, None).await
+}
+
+async fn list_participating_in(
+    conn: &mut Conn,
+    act: &Acting<'_>,
+    root: Id,
+    scope: Scope,
+    after: Option<After>,
+    limit: i64,
+    selected: Option<&[Id]>,
+) -> Result<Listed, Error> {
     let wanted = usize::try_from(limit).unwrap_or(0);
     let mut kept = Vec::new();
     let mut cursor = after;
     loop {
-        let page = list(conn, act, root, scope, cursor, STEP).await?;
+        let page = list_matching(conn, act, root, scope, cursor, LIST_STEP, selected).await?;
         let access = orch_authz::chats::listed_access(conn, act.principal, &page.chats).await?;
         kept.extend(page.chats.into_iter().filter(|chat| {
             access
@@ -912,6 +1180,7 @@ async fn list_nodes(
     root: Id,
     after: Option<After>,
     limit: i64,
+    selected: Option<&[Id]>,
 ) -> Result<Listed, Error> {
     use orch_access_contract::permissions::PermissionName;
     use orch_authz::{Act, Policy, nodes};
@@ -919,8 +1188,10 @@ async fn list_nodes(
     let mut kept: Vec<ChatRow> = Vec::new();
     let mut cursor = after;
     loop {
-        let batch = rows::node_chats_with_messages(conn, root, cursor, STEP).await?;
-        let exhausted = i64::try_from(batch.len()).is_ok_and(|count| count < STEP);
+        let batch =
+            rows::node_chats_with_messages_selected(conn, root, cursor, LIST_STEP, selected)
+                .await?;
+        let exhausted = i64::try_from(batch.len()).is_ok_and(|count| count < LIST_STEP);
         let Some(last) = batch.last() else { break };
         cursor = last.last_message_at.map(|at| After { at, id: last.id });
         let ids: Vec<Id> = batch.iter().filter_map(|chat| chat.node_id).collect();

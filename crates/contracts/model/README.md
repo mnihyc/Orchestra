@@ -8,6 +8,7 @@ The contract of provider access by wire protocol: the `WireProtocol` trait (allo
 |--------|------------------------|
 | [protocol](src/protocol.rs) | WireProtocol request allowlists, authorization as an endpoint's options say, and model discovery; a plain relay per protocol. |
 | [endpoint](src/endpoint.rs) | What one endpoint may configure beyond its address: how the key is presented, fixed and secret headers, query parameters. |
+| [parameters](src/parameters.rs) | Current model defaults, explicit request options and preserved custom JSON, with routing and prompt ownership. |
 | [translator](src/translator.rs) | ProtocolTranslator seam, declared conversion losses, and the endpoint and credential fields its upstream needs; for external implementations only. |
 | [usage](src/usage.rs) | Streaming usage observation. |
 | [credentials](src/credentials.rs) | Forms issuable from an API credential. |

@@ -27,7 +27,7 @@ export function FileChip({ source, presentation, reference, onOpen, bare = false
   return <ReferenceCard {...(reference === undefined ? { source } : { reference })} label={source.name} presentation={presentation} menuEntries={menuEntries}>
     {(keep, size) => {
       const bytes = preview.data?.size ?? source.size;
-      const content = <><FileGlyph source={source} preview={preview.data} /><span className="min-w-0 truncate">{label ?? source.name}</span>{size !== 'small' && <span className="shrink-0 text-sm text-text-muted">{bytes === undefined ? '–' : <ByteSize bytes={bytes} />}</span>}</>;
+      const content = <><FileGlyph source={source} preview={preview.data} /><span data-user-content className="min-w-0 truncate">{label ?? source.name}</span>{size !== 'small' && <span className="shrink-0 text-sm text-text-muted">{bytes ===undefined ? '–' : <ByteSize bytes={bytes} />}</span>}</>;
       return source.href === undefined ? <button {...drag} type="button" aria-label={ariaLabel ?? (typeof label === 'string' ? label : source.name)} onKeyDown={(event) => { if (event.key === 'Enter' || event.key === ' ') event.stopPropagation(); }} onClick={(event) => { event.stopPropagation(); if (onOpen === undefined) keep(); else onOpen(event); }} title={source.name} className={className}>{content}</button> :
         <a {...drag} href={source.href} aria-label={ariaLabel ?? source.name} title={source.name} className={className} onClick={(event) => { if (event.button === 0 && !event.metaKey && !event.ctrlKey && !event.shiftKey && !event.altKey) { event.preventDefault(); event.stopPropagation(); if (onOpen ===undefined) keep(); else onOpen(event); } }}>{content}</a>;
     }}

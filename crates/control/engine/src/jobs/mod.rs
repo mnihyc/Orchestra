@@ -7,6 +7,7 @@ pub mod background_end;
 pub mod batch;
 pub mod capability_change;
 pub mod cleanup;
+pub(crate) mod command_identity;
 pub mod continuation;
 pub mod document_notices;
 pub mod environment_move;

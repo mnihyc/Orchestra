@@ -144,6 +144,9 @@ pub enum PlanError {
     /// A fork, switch or move holds the thread already.
     #[error("another job holds the thread")]
     Held(Id),
+    /// The requested initial agent contribution is not valid.
+    #[error("the initial agent access could not be chosen: {0}")]
+    AgentAccess(Box<crate::sharing::ShareError>),
     /// Something the engine stands on failed.
     #[error(transparent)]
     Internal(#[from] EngineError),
@@ -188,6 +191,8 @@ impl From<serde_json::Error> for PlanError {
 pub struct Draft {
     /// What was asked, with the omitted members left omitted.
     pub request: ForkRequest,
+    /// The exact choice or omitted preset captured for this new holder.
+    pub(crate) agent_access: binding::BirthAgentAccess,
     /// The plan; its identifier is nil until it is kept, and the parts that are the API's to say are
     /// empty.
     pub plan: ForkPlan,
@@ -200,6 +205,116 @@ pub struct Draft {
     pub(crate) source_scope: SourceScope,
     /// What the job does with the mounts of a new environment: those it detaches and the data it copies.
     pub mount_decisions: crate::mount_copies::MountDecisions,
+}
+
+/// The native selected binding and ordinary planning decisions, before any supplier IO.
+/// This value is created by the same native selector used by ordinary drafts and confirmation.
+#[derive(Clone)]
+pub struct PreparedFork {
+    principal: Principal,
+    source: Source,
+    target: Target,
+    request: ForkRequest,
+    history: orch_api_contract::forks::ForkHistory,
+    options: AppliedChangeOptions,
+    options_listed: Vec<binding::ArrangementOption>,
+    approval_mode: ApprovalMode,
+    blockers: Blockers,
+    reach: Reach,
+    now: DateTime<Utc>,
+    captured_agent_access: Option<binding::BirthAgentAccess>,
+}
+impl PreparedFork {
+    /// The actual stored source, including its selected history and physical execution.
+    pub fn source(&self) -> &ThreadRow {
+        &self.source.thread
+    }
+    /// The existing source environment whose native suppliers are used.
+    pub fn source_environment(&self) -> &EnvironmentRow {
+        &self.source.environment
+    }
+    /// The native selected target profile, not every candidate considered by the chooser.
+    pub fn agent(&self) -> &AgentRow {
+        &self.target.agent
+    }
+    /// The native selected target provider.
+    pub fn provider(&self) -> &ProviderRow {
+        &self.target.provider
+    }
+    /// Existing destination where selected; a new environment has no invented identity.
+    pub fn target_environment(&self) -> Option<&EnvironmentRow> {
+        match &self.target.landing {
+            Landing::Same => Some(&self.source.environment),
+            Landing::Existing(row) => Some(row),
+            Landing::New { .. } => None,
+        }
+    }
+    /// The real parent of a prospective new thread.
+    pub fn topic(&self) -> Id {
+        self.target.topic
+    }
+    /// The native request, still distinguishing omitted and explicit options.
+    pub fn request(&self) -> &ForkRequest {
+        &self.request
+    }
+    /// Actual unchanged native association at a later source checkpoint.
+    pub fn preserves(&self, fresh: &Self) -> bool {
+        SourceScope::of(&self.source.thread, self.reach)
+            == SourceScope::of(&fresh.source.thread, fresh.reach)
+            && self.source.thread.node_id == fresh.source.thread.node_id
+            && self.source.thread.topic_id == fresh.source.thread.topic_id
+            && self.source.thread.workspace_dir == fresh.source.thread.workspace_dir
+            && self.source.agent.id == fresh.source.agent.id
+            && self.source.provider.id == fresh.source.provider.id
+            && self.source.environment.id == fresh.source.environment.id
+            && self.source.environment.generation == fresh.source.environment.generation
+            && self.source.environment.machine_id == fresh.source.environment.machine_id
+            && self.source.environment.workspace_root == fresh.source.environment.workspace_root
+            && self.source.descriptor == fresh.source.descriptor
+            && self.source.settings == fresh.source.settings
+            && self.target.agent.id == fresh.target.agent.id
+            && self.target.provider.id == fresh.target.provider.id
+            && self.target.descriptor == fresh.target.descriptor
+            && self.target.model == fresh.target.model
+            && self.target.effort == fresh.target.effort
+            && self.target.arrangement == fresh.target.arrangement
+            && self.target.directory == fresh.target.directory
+            && self.target.topic == fresh.target.topic
+            && self.request == fresh.request
+            && self.history == fresh.history
+            && self.options == fresh.options
+            && self.options_listed == fresh.options_listed
+            && self.approval_mode == fresh.approval_mode
+            && self.blockers == fresh.blockers
+            && self.captured_agent_access == fresh.captured_agent_access
+            && match (&self.target.landing, &fresh.target.landing) {
+                (Landing::Same, Landing::Same) => true,
+                (Landing::Existing(a), Landing::Existing(b)) => {
+                    a.id == b.id
+                        && a.generation == b.generation
+                        && a.machine_id == b.machine_id
+                        && a.workspace_root == b.workspace_root
+                }
+                (
+                    Landing::New {
+                        name: a,
+                        host: ah,
+                        promised: ap,
+                    },
+                    Landing::New {
+                        name: b,
+                        host: bh,
+                        promised: bp,
+                    },
+                ) => {
+                    a == b
+                        && ah.as_ref().map(|h| h.host.id) == bh.as_ref().map(|h| h.host.id)
+                        && ap.offers == bp.offers
+                        && ap.colocated == bp.colocated
+                }
+                _ => false,
+            }
+    }
 }
 
 /// What a fork's new environment would be, as far as its mounts and its MCP servers go.
@@ -274,6 +389,9 @@ pub struct StoredPlan {
     pub plan: ForkPlan,
     /// The thread it is for.
     pub source: Id,
+    /// A fork must keep the creation preset shown before confirmation.
+    #[serde(default)]
+    pub(crate) agent_access: Option<binding::BirthAgentAccess>,
     /// Old plans without an actual scope must be refreshed before execution.
     #[serde(default)]
     pub(crate) source_scope: Option<SourceScope>,
@@ -301,6 +419,39 @@ pub struct StoredBatch {
     pub plan: orch_api_contract::forks::ForkBatchPlan,
     /// What each plan is for, in the order of the plans.
     pub members: Vec<StoredMember>,
+}
+
+impl StoredBatch {
+    /// The executable native members used by this batch's private audience producer.
+    #[must_use]
+    pub fn recipient_threads(&self) -> Vec<Id> {
+        self.members
+            .iter()
+            .zip(&self.plan.plans)
+            .filter(|(_, plan)| plan.blockers.is_empty())
+            .map(|(member, _)| member.thread)
+            .collect()
+    }
+
+    /// The native aggregate governor, or the individually selected executable Threads.
+    #[must_use]
+    pub fn recipient_subjects(&self) -> Vec<orch_access_contract::decisions::ObjectRef> {
+        use orch_access_contract::{decisions::ObjectRef, permissions::ObjectKind};
+        match self.body.all_of_environment {
+            Some(id) => vec![ObjectRef {
+                kind: ObjectKind::Environment,
+                id,
+            }],
+            None => self
+                .recipient_threads()
+                .into_iter()
+                .map(|id| ObjectRef {
+                    kind: ObjectKind::Thread,
+                    id,
+                })
+                .collect(),
+        }
+    }
 }
 
 // ---------------------------------------------------------------- small helpers
@@ -374,7 +525,7 @@ fn under<'a>(path: &'a str, directory: &str) -> Option<&'a str> {
 // ---------------------------------------------------------------- what the plan is made from
 
 /// The blockers of a plan as they are found.
-#[derive(Debug, Default)]
+#[derive(Debug, Clone, PartialEq, Default)]
 struct Blockers {
     list: Vec<PlanBlocker>,
     lacks: Vec<(usize, Vec<Missing>)>,
@@ -393,6 +544,7 @@ impl Blockers {
 }
 
 /// What the thread runs on now.
+#[derive(Clone)]
 struct Source {
     thread: ThreadRow,
     agent: AgentRow,
@@ -465,6 +617,7 @@ impl Promised {
 }
 
 /// What the result runs on.
+#[derive(Clone)]
 struct Target {
     agent: AgentRow,
     provider: ProviderRow,
@@ -694,6 +847,11 @@ async fn choose_host(
 ) -> Result<(Option<Box<crate::places::HostPlace>>, Promised), PlanError> {
     use crate::places::{self, Ask, IDLE_MINUTES_DEFAULT};
     use orch_db::queries::resources::hosting as host_rows;
+    if let Some(config) = &new.config {
+        crate::environments::check_initial_program_consent(config).map_err(|reason| {
+            PlanError::invalid("environment.new.config.exec.version_overrides", reason)
+        })?;
+    }
     let home = new.home_node_id.unwrap_or(topic);
     let template_id: Option<Id> = match new.template_id {
         Some(id) => Some(id),
@@ -818,8 +976,10 @@ async fn choose_agent(
     }
     candidates.dedup();
     let mut first: Option<(AgentRow, AgentDescriptor)> = None;
-    for id in candidates {
-        let Some(agent) = resources::agent(conn, id)
+    let mut program_facts = None;
+    let mut programs_loaded = false;
+    for id in &candidates {
+        let Some(agent) = resources::agent(conn, *id)
             .await?
             .filter(|agent| agent.deleted_at.is_none() && !agent.disabled)
         else {
@@ -828,6 +988,12 @@ async fn choose_agent(
         let Some(descriptor) = harnesses::current_descriptor(conn, &agent).await? else {
             continue;
         };
+        if !programs_loaded && promised.is_none() && binding::needs_machine_program(&descriptor) {
+            program_facts =
+                binding::prepare_machine_program_ids(conn, judged_in, &[provider], &candidates)
+                    .await?;
+            programs_loaded = true;
+        }
         let offers = binding::environment_offers(conn, judged_in).await?;
         let machine = binding::machine_arrangements_of(conn, provider).await?;
         let facts = Facts {
@@ -838,7 +1004,14 @@ async fn choose_agent(
             settings,
             entry: entry.clone(),
             colocated: promised.map_or(offers.colocated, |promised| promised.colocated.clone()),
-            runtime: binding::runtime_facts(conn, &agent, provider, judged_in).await?,
+            runtime: binding::runtime_facts_prepared(
+                conn,
+                &agent,
+                provider,
+                judged_in,
+                program_facts.as_ref(),
+            )
+            .await?,
         };
         let fits = match promised {
             Some(promised) => {
@@ -1131,7 +1304,7 @@ impl Engine {
         request: &ForkRequest,
     ) -> Result<Draft, PlanError> {
         let mut conn = self.inner.db.acquire().await?;
-        self.draft_in(&mut conn, caller, thread, request, Reach::Seen, None)
+        self.draft_in(&mut conn, caller, thread, request, Reach::Seen, None, None)
             .await
     }
 
@@ -1142,6 +1315,10 @@ impl Engine {
         clippy::too_many_lines,
         reason = "one plan is made from one reading of the database, in the order its parts depend on each other"
     )]
+    #[allow(
+        clippy::too_many_arguments,
+        reason = "the existing fork planner also accepts a previously captured creation choice at confirmation"
+    )]
     pub(crate) async fn draft_in(
         &self,
         conn: &mut Conn,
@@ -1150,7 +1327,38 @@ impl Engine {
         request: &ForkRequest,
         reach: Reach,
         own_batch: Option<Id>,
+        captured_agent_access: Option<binding::BirthAgentAccess>,
     ) -> Result<Draft, PlanError> {
+        let prepared = self
+            .prepare_fork_in(
+                conn,
+                caller,
+                thread_id,
+                request,
+                reach,
+                own_batch,
+                captured_agent_access,
+            )
+            .await?;
+        self.assemble_prepared_fork(conn, &prepared).await
+    }
+
+    /// Selects the native source, target binding and ordinary prerequisites without supplier IO.
+    #[allow(
+        clippy::too_many_arguments,
+        clippy::too_many_lines,
+        reason = "the existing native fork selector reads one dependent binding in its original order"
+    )]
+    pub async fn prepare_fork_in(
+        &self,
+        conn: &mut Conn,
+        caller: &Caller,
+        thread_id: Id,
+        request: &ForkRequest,
+        reach: Reach,
+        own_batch: Option<Id>,
+        captured_agent_access: Option<binding::BirthAgentAccess>,
+    ) -> Result<PreparedFork, PlanError> {
         let now = self.inner.clock.now();
         let person = caller.user();
         let principal = Principal::load(&mut *conn, caller.clone(), Time::new(now)).await?;
@@ -1247,6 +1455,12 @@ impl Engine {
         };
         let mut blockers = Blockers::default();
         let target_topic = request.topic_id.unwrap_or(source.thread.topic_id);
+        if request.result == ForkResult::Replace && request.agent_access.is_some() {
+            return Err(PlanError::invalid(
+                "agent_access",
+                "a switch keeps its existing agent contributions",
+            ));
+        }
 
         // ---- what the result runs on
         let wanted_provider = request.to.as_ref().and_then(|to| to.provider_id);
@@ -1335,7 +1549,7 @@ impl Engine {
         };
         if provider.status == "disabled" {
             blockers.add(code::PROVIDER_DISABLED, "the provider is switched off");
-        } else if provider.status != "ready" {
+        } else if !crate::providers::request_status_available(&provider.status) {
             blockers.add(
                 code::PROVIDER_NOT_READY,
                 format!("the provider {} is {}", provider.name, provider.status),
@@ -1786,20 +2000,49 @@ impl Engine {
                 "a fork or a switch holds this thread already",
             );
         }
+        if crate::background_wake::running(conn, Some(thread_id), None, None).await? {
+            blockers.add("background_tasks_running", "Review and end the running background tasks before forking or switching this session.");
+        }
 
-        self.assemble(
-            conn,
-            &principal,
-            &source,
-            &target,
-            request,
-            &history,
+        Ok(PreparedFork {
+            principal,
+            source,
+            target,
+            request: request.clone(),
+            history,
             options,
-            &options_listed,
+            options_listed,
             approval_mode,
             blockers,
             reach,
             now,
+            captured_agent_access,
+        })
+    }
+}
+
+impl Engine {
+    /// Runs the existing once-only native suppliers and assembles their plan over selected operands.
+    /// Callers own source refresh around supplier waits; retryable preparation never calls this method.
+    pub async fn assemble_prepared_fork(
+        &self,
+        conn: &mut Conn,
+        prepared: &PreparedFork,
+    ) -> Result<Draft, PlanError> {
+        self.assemble(
+            conn,
+            &prepared.principal,
+            &prepared.source,
+            &prepared.target,
+            &prepared.request,
+            &prepared.history,
+            prepared.options.clone(),
+            &prepared.options_listed,
+            prepared.approval_mode,
+            prepared.blockers.clone(),
+            prepared.reach,
+            prepared.now,
+            prepared.captured_agent_access.clone(),
         )
         .await
     }
@@ -1876,6 +2119,7 @@ impl Engine {
         mut blockers: Blockers,
         reach: Reach,
         now: DateTime<Utc>,
+        captured_agent_access: Option<binding::BirthAgentAccess>,
     ) -> Result<Draft, PlanError> {
         let thread_id = source.thread.node_id;
         let replace = request.result == ForkResult::Replace;
@@ -2749,6 +2993,7 @@ impl Engine {
             });
         }
         let plan = ForkPlan {
+            agent_access: None,
             preflight_id: Id::nil(),
             expires_at: Time::new(now + Duration::minutes(PREFLIGHT_VALID_MINUTES)),
             source: thread_ref(&source.thread),
@@ -2828,13 +3073,28 @@ impl Engine {
             turn_running: running,
             blockers: std::mem::take(&mut blockers.list),
         };
-        // The history the plan shows is the one carried out, even when the place's default changes before confirming.
+        let agent_access = if replace {
+            binding::BirthAgentAccess::nothing()
+        } else {
+            match captured_agent_access {
+                Some(choice) => choice,
+                None => binding::BirthAgentAccess::from(request.agent_access)
+                    .freeze(conn, target.topic)
+                    .await
+                    .map_err(|error| PlanError::AgentAccess(Box::new(error)))?,
+            }
+        };
+        self.check_birth_source_in(conn, principal, target.topic, &agent_access)
+            .await
+            .map_err(|error| PlanError::AgentAccess(Box::new(error)))?;
+        // History and the omitted creation preset stay as shown even if a parent changes later.
         Ok(Draft {
             request: ForkRequest {
                 history: Some(history.clone()),
                 ..request.clone()
             },
             plan,
+            agent_access,
             lacks: blockers.lacks,
             copy_worktree,
             source_scope: SourceScope::of(&source.thread, reach),
@@ -2859,6 +3119,7 @@ impl Engine {
             request: draft.request.clone(),
             plan: draft.plan.clone(),
             source: draft.plan.source.id,
+            agent_access: Some(draft.agent_access),
             source_scope: Some(draft.source_scope),
         };
         let mut conn = self.inner.db.acquire().await?;

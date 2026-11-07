@@ -10,6 +10,10 @@ mod desk;
 mod places;
 mod support;
 
+#[path = "people_notify/scopes.rs"]
+mod scopes;
+
+use crate::support::FullPermissionPageReply;
 use desk::Desk;
 use orch_api_contract::access::{
     AccessChoice, HolderInput, PageChange, PageChangeName, PermissionPageUpdate,
@@ -131,7 +135,8 @@ async fn access_and_the_requested_notice_commit_together() {
         .token(&desk.ada.token)
         .body(&invalid)
         .send()
-        .await;
+        .await
+        .full_permission_page();
     assert!(!denied.status.is_success());
     assert_eq!(count(&desk, reader.id()).await, 0);
     assert!(
@@ -158,6 +163,7 @@ async fn access_and_the_requested_notice_commit_together() {
             .body(&accepted)
             .send()
             .await
+            .full_permission_page()
             .ok();
     }
     assert_eq!(count(&desk, reader.id()).await, 1);
@@ -376,6 +382,7 @@ async fn a_node_chat_grant_does_not_open_the_place_or_its_documents() {
         })
         .send()
         .await
+        .full_permission_page()
         .ok();
     assert!(
         !room
@@ -530,7 +537,8 @@ async fn an_opted_out_notice_rolls_back_the_associated_grant() {
         .token(&desk.ada.token)
         .body(&grant(reader.id(), true))
         .send()
-        .await;
+        .await
+        .full_permission_page();
     assert!(!denied.status.is_success());
     assert!(
         !desk
@@ -708,7 +716,9 @@ async fn a_service_identity_is_not_offered_as_a_person_to_notify() {
         })
         .send()
         .await
-        .ok();
+        .ok()
+        .into_full()
+        .expect("this ordinary control requires the full native creation response");
     let mut conn = desk.world.conn().await;
     let directory =
         orch_db::queries::identity::search_users(&mut conn, desk.ada.id(), "ci-robot", None, 50)
@@ -745,6 +755,7 @@ async fn a_service_identity_is_not_offered_as_a_person_to_notify() {
         .body(&grant(service.user.id, false))
         .send()
         .await
+        .full_permission_page()
         .ok();
     let after = desk
         .world

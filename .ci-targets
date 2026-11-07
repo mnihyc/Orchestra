@@ -1,0 +1,35 @@
+# batch-7a: batch-7 (eleven lanes, seams closed centrally and by their authors) 2026-11-06
+fmt
+clippy
+doc
+contracts
+test -p orch-adapter-claude-code --test background_control --test background_wake
+test -p orch-adapter-codex --test real_corrections
+test -p orch-api-core --test hosts --test workspace_jobs_scopes --test document_file_creation_scopes --test document_version_reader_scopes --test kmounts_mcp --test mcp_delete_scopes --test workspace_snapshots --test announcement_preparation --test admin_native_scopes --test semantic_admin --test semantic_index --test access_previews --test access_requests --test access_transfer --test account_native_scopes --test agent_list_scopes --test api_surfaces --test approval_operation_scopes --test bootstrap --test browsers --test chat_message_update_scopes --test chats_forward --test chats_node --test delete_plan --test directory --test directory_native_scopes --test document_entry_metadata --test everything_operation_scopes --test exports --test first_steps --test forward_operation_scopes --test gateways --test group_join_requests --test group_operation_scopes --test history_native_scopes --test hosted_environments --test imports --test interactive_close_scopes --test interactive_ticket_scopes --test kadmin_outsiders --test karchive_delete --test kguard_nodes --test kguard_rest --test loss --test member_ending_native_scopes --test member_move_native_scopes --test members --test model_request_audience --test moves_tags --test native_resource_family_scopes --test node_creation_operation_scopes --test notifications_channels --test object_transfer_operation_scopes --test page_transfer_operation_scopes --test personal --test personal_native_scopes --test provider_managed --test real_connector --test realtime_socket --test refaccess --test reference_preview --test related_items --test removal --test request_intent_scopes --test resource_pages --test search_native_scopes --test service_accounts --test share_operation_scopes --test shares --test terminal_recording_scopes --test threads_drive --test typed_resource_operations --test usage_figures --test usage_native_scopes
+test -p orch-authz --test agent_giver_bounds --test creation_agent_access --test manage_reach --test pages --test reach --test thread_viewer_shares --test transfer
+test -p orch-config --test gateways
+test -p orch-connector-core --test chat_completions --test enrollment --test gateway_choice --test gateway_selector --test harness_tools --test orch_server_harnesses --test ports_carrier --test real_harnesses --test renewal --test tool_servers
+test -p orch-engine --test approvals --test background --test background_stop --test background_wake --test credentials --test document_folders --test folders --test input_operation_authority --test live_mounts --test manage_shared --test manage_shared_sessions --test mcp_resolution --test mount_resolution --test operation_scope --test orch_tools --test preflight --test shared_attachment_download --test shared_references --test shared_tree --test shared_write --test sharing --test sharing_export --test sharing_manage --test sharing_place --test turns --test usage_ledger
+test -p orch-gateway-core --test ports_walk --test gateway_catalogue --test gateway_probes --test presence --test sessions --test tunnel_attachments --test tunnels --test wss_observers
+test -p orch-link --test gateway_selection --test handshake --test resume_authority
+test -p orch-worker-core --test usage_jobs
+test -p orch-access-contract --lib
+test -p orch-adapter-claude-code --lib
+test -p orch-adapter-codex --lib
+test -p orch-api-contract --lib
+test -p orch-api-core --lib
+test -p orch-connector-core --lib
+test -p orch-engine --lib
+test -p orch-settings-contract --lib
+test -p orch-model-contract --test provider_ceiling --test web_search
+test -p orch-model-contract --lib
+test -p orch-provider-contract --lib
+test -p orch-agent-contract --lib provider_native_constraints_drive_both_resolution_and_projection
+test -p orch-protocol-openai-responses --test web_search
+test -p orch-protocol-anthropic-messages --test web_search
+test -p orch-connector-core --test provider_role --test provider_embed
+test -p orch-engine --test usage_ledger
+test -p orch-xtask names::tests::
+web typecheck
+web lint
+web test -- tests/component/access-request-duration.te tests/component/access-request-duration.test.tsx tests/component/access-request-recovery.test.tsx tests/component/agent-access-creation.test.tsx tests/component/agent-access-setting.test.tsx tests/component/agent-contribution-view.test tests/component/agent-contribution-view.test.tsx tests/component/agent-management-ladders.test.tsx tests/component/agent-share-choice.test.tsx tests/component/background-wake-end.test.tsx tests/component/background-wake-header.test.tsx tests/component/everything.test.tsx tests/component/gateways/bindings.test.tsx tests/component/gateways/catalogue.test.tsx tests/component/gateways/installation.test.tsx tests/component/gateways/machine.test.tsx tests/component/gateways/tunnel.test.tsx tests/component/input-queue.test.tsx tests/component/machine-enrollment-arrival.test.tsx tests/component/machine-enrollment.test.tsx tests/component/navigation-arrangements.test.tsx tests/component/program-versions.test.tsx tests/component/request-errors.test.tsx tests/component/running-live.test.tsx tests/component/search-stream.test.tsx tests/component/section-navigation-locator.test.tsx tests/component/subagent-lane.test.tsx tests/component/web-search.test.tsx tests/unit/agent-parts-double.test.ts tests/unit/catalogue-usage.test.ts tests/unit/choice-copy.test.ts tests/unit/client.test.ts tests/unit/give.test.ts tests/unit/help-content.test.ts tests/unit/help-guide.test.ts tests/unit/reading-help-content.test.ts tests/unit/request-receipt-helpers.test.ts tests/unit/resource-news-world.test.ts tests/unit/running.test.ts tests/unit/translation-keys.test.ts

@@ -378,8 +378,17 @@ fn prefs_view(row: &PrefsRow, now: chrono::DateTime<chrono::Utc>) -> Notificatio
 /// What the caller chose about being notified.
 pub async fn prefs_get(ctx: Ctx, (): (), (): ()) -> ApiResult<NotificationPrefs> {
     let mut conn = ctx.app.db.acquire().await?;
-    let row = inbox::prefs(&mut conn, ctx.user()?.id()).await?;
-    Ok(prefs_view(&row, ctx.now))
+    let principal = ctx.operation_principal(&mut conn).await?;
+    prefs_in(&mut conn, &principal).await
+}
+
+/// This admitted account's own preference row, without a new request identity.
+pub(crate) async fn prefs_in(
+    conn: &mut Conn,
+    principal: &Principal,
+) -> ApiResult<NotificationPrefs> {
+    let row = inbox::prefs(conn, principal.user()).await?;
+    Ok(prefs_view(&row, principal.now().get()))
 }
 
 /// Changes what the caller chose about being notified; what is left out stays. A change names
@@ -529,8 +538,9 @@ pub async fn push_create(ctx: Ctx, (): (), body: MePushSubscriptionCreateBody) -
 /// Takes a browser out of the caller's push subscriptions. A browser that is
 /// not theirs is left alone, and the answer is the same.
 pub async fn push_delete(ctx: Ctx, (): (), body: MePushSubscriptionDeleteBody) -> ApiResult<()> {
-    let mut conn = ctx.app.db.acquire().await?;
-    pages::remove_push_subscription_of(&mut conn, ctx.user()?.id(), body.endpoint.trim()).await?;
+    let (mut tx, guard) = crate::middleware::transaction_guard::begin(&ctx).await?;
+    pages::remove_push_subscription_of(&mut tx, guard.user().id(), body.endpoint.trim()).await?;
+    tx.commit().await.map_err(orch_db::DbError::from)?;
     Ok(())
 }
 
@@ -538,7 +548,8 @@ pub async fn push_delete(ctx: Ctx, (): (), body: MePushSubscriptionDeleteBody) -
 /// from what it said of itself and the hash a browser finds itself by.
 pub async fn push_list(ctx: Ctx, (): (), (): ()) -> ApiResult<Vec<PushDevice>> {
     let mut conn = ctx.app.db.acquire().await?;
-    Ok(pages::push_devices_of(&mut conn, ctx.user()?.id())
+    let principal = ctx.operation_principal(&mut conn).await?;
+    Ok(pages::push_devices_of(&mut conn, principal.user())
         .await?
         .into_iter()
         .map(|device| PushDevice {
@@ -566,9 +577,14 @@ pub async fn push_remove(ctx: Ctx, (): (), (): ()) -> ApiResult<()> {
 /// each ships in the caller's language.
 pub async fn notifier_list(ctx: Ctx, (): (), (): ()) -> ApiResult<Vec<Notifier>> {
     let language = ctx.user()?.user.locale.clone();
-    Ok(super::notifiers()
+    Ok(notifier_catalogue(&language))
+}
+
+/// Public driver vocabulary has no configured channel values or delivery credentials.
+pub(crate) fn notifier_catalogue(language: &str) -> Vec<Notifier> {
+    super::notifiers()
         .descriptors()
         .iter()
-        .map(|descriptor| super::views::notifier_view(descriptor, &language))
-        .collect())
+        .map(|descriptor| super::views::notifier_view(descriptor, language))
+        .collect()
 }

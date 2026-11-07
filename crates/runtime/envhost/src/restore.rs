@@ -381,6 +381,11 @@ fn apply_with_checkpoints(
         }
         journal
     } else {
+        if request.recovery_only == Some(true) {
+            return Err(HostError::NotFound(
+                "the original restore journal is unavailable".to_owned(),
+            ));
+        }
         recheck(files, states, &plan, generation, now)?;
         let observed = scan(files, &files.parse(&plan.directory)?, plan.record_policy)?;
         let undo = states.capture_explicit(
@@ -1227,6 +1232,7 @@ mod tests {
     ) -> orch_link_contract::source::FsRestore {
         orch_link_contract::source::FsRestore {
             work: None,
+            recovery_only: None,
             environment_id: request.environment_id,
             job_id: new_id(),
             snapshot_id: request.snapshot_id,
@@ -1413,6 +1419,7 @@ mod tests {
         .unwrap();
         let undo = orch_link_contract::source::FsRestore {
             work: None,
+            recovery_only: None,
             snapshot_id: restored.undo_snapshot_id,
             ..confirmation(&request, &undo_plan)
         };
@@ -1427,6 +1434,107 @@ mod tests {
                 "restore/Undo altered {path}"
             );
         }
+    }
+
+    #[test]
+    fn recovery_only_requires_the_original_journal_and_never_captures_a_fresh_undo() {
+        let (_dir, files, states, request) = fixture();
+        std::fs::write(files.root().root_path().join("code"), "current").unwrap();
+        let (_, plan) = super::plan(&files, &states, &request, 1, at()).unwrap();
+        let mut apply = confirmation(&request, &plan);
+        let normal = serde_json::to_value(&apply).unwrap();
+        assert!(
+            normal.get("recovery_only").is_none(),
+            "ordinary wire bodies stay unchanged"
+        );
+        assert_eq!(
+            serde_json::from_value::<orch_link_contract::source::FsRestore>(normal).unwrap(),
+            apply
+        );
+        apply.recovery_only = Some(true);
+        assert!(matches!(
+            super::apply(&files, &states, &apply, 1, at()),
+            Err(HostError::NotFound(_))
+        ));
+        assert_eq!(
+            std::fs::read(files.root().root_path().join("code")).unwrap(),
+            b"current"
+        );
+        assert!(!journal_path(&states, apply.job_id).exists());
+        assert!(!states.store().has_root(apply.undo_snapshot_id));
+        apply.recovery_only = None;
+        let ordinary = super::apply(&files, &states, &apply, 1, at()).unwrap();
+        assert!(!ordinary.undone);
+        assert_eq!(
+            std::fs::read(files.root().root_path().join("code")).unwrap(),
+            b"before"
+        );
+    }
+
+    #[test]
+    fn recovery_only_reconciles_the_exact_native_journal_after_restart_and_rejects_another_identity()
+     {
+        let (_dir, files, states, request) = fixture();
+        std::fs::write(files.root().root_path().join("code"), "current").unwrap();
+        let (_, plan) = super::plan(&files, &states, &request, 1, at()).unwrap();
+        let mut apply = confirmation(&request, &plan);
+        let outcome = apply_with_checkpoints(&files, &states, &apply, 1, at(), &mut |phase, _| {
+            if phase == "after_effect" {
+                return Err(HostError::Internal("simulated native restart".into()));
+            }
+            Ok(())
+        });
+        assert!(outcome.is_err());
+        assert!(journal_path(&states, apply.job_id).exists());
+        let path = states.store().root().to_owned();
+        drop(states);
+        let states = FileStates::new(ObjectStore::open(&path, files.root().root_path()).unwrap());
+        apply.recovery_only = Some(true);
+        let mut other = apply.clone();
+        other.undo_snapshot_id = new_id();
+        let before = std::fs::read(files.root().root_path().join("code")).unwrap();
+        assert!(matches!(
+            super::apply(&files, &states, &other, 1, at()),
+            Err(HostError::Changed(_))
+        ));
+        assert_eq!(
+            std::fs::read(files.root().root_path().join("code")).unwrap(),
+            before
+        );
+        let result = super::apply(&files, &states, &apply, 1, at()).unwrap();
+        assert!(!result.undone);
+        assert_eq!(result.undo_snapshot_id, apply.undo_snapshot_id);
+        assert_eq!(
+            std::fs::read(files.root().root_path().join("code")).unwrap(),
+            b"before"
+        );
+        assert_eq!(
+            super::apply(&files, &states, &apply, 1, at()).unwrap(),
+            result
+        );
+    }
+
+    #[test]
+    fn restore_undo_metadata_never_falls_back_to_recording_an_unrelated_current_baseline() {
+        let (_dir, files, states, request) = fixture();
+        let undo = orch_link_contract::source::FsRecord {
+            environment_id: request.environment_id,
+            snapshot_id: new_id(),
+            directory: request.directory,
+            kind: orch_link_contract::source::RecordKind::Restore,
+            record_days: crate::file_states::DEFAULT_RECORD_DAYS,
+            max_bytes: crate::file_states::DEFAULT_RECORD_MAX_BYTES,
+        };
+        assert!(!states.store().has_root(undo.snapshot_id));
+        assert!(matches!(
+            states.record(&files, &undo, 1, at()),
+            Err(HostError::NotFound(_))
+        ));
+        assert!(!states.store().has_root(undo.snapshot_id));
+        assert_eq!(
+            std::fs::read(files.root().root_path().join("code")).unwrap(),
+            b"before"
+        );
     }
 
     #[test]

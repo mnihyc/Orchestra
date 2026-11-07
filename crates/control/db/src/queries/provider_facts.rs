@@ -34,11 +34,14 @@ pub async fn set_sources(
     provider: Id,
     expected_revision: i64,
     sources: &Json,
-    facts_changed: bool,
+    read_due: bool,
+    facts_source_changed: bool,
     now: DateTime<Utc>,
 ) -> Result<bool, DbError> {
-    Ok(sqlx::query("UPDATE providers SET sources=$3,facts_requested_at=CASE WHEN $4 THEN NULL ELSE facts_requested_at END,revision=revision+1,updated_at=$5 WHERE id=$1 AND revision=$2 AND deleted_at IS NULL")
-        .bind(provider).bind(expected_revision).bind(sources).bind(facts_changed).bind(now).execute(conn).await?.rows_affected()>0)
+    Ok(sqlx::query("UPDATE providers SET sources=$3,facts_requested_at=CASE WHEN $4 THEN NULL ELSE facts_requested_at END,
+        credit_source_revision=CASE WHEN $6 THEN revision+1 ELSE credit_source_revision END,
+        revision=revision+1,updated_at=$5 WHERE id=$1 AND revision=$2 AND deleted_at IS NULL")
+        .bind(provider).bind(expected_revision).bind(sources).bind(read_due).bind(now).bind(facts_source_changed).execute(conn).await?.rows_affected()>0)
 }
 
 /// Keeps a learned descriptor and a scrubbed error only for the unchanged source choice.

@@ -6,7 +6,7 @@
 //! or a group chat is what lets one take that away, and somebody who reads it as an admin, without being in it,
 //! does not.
 
-use super::{Work, denied_for, load, transaction};
+use super::{denied_for, failed_projected};
 use crate::middleware::authorization::{self, exact};
 use crate::middleware::requests::{ApiError, ApiResult};
 use crate::registry::{Ctx, Registry};
@@ -23,7 +23,9 @@ use orch_authz::{Act, Policy};
 use orch_chat::chats::Mode;
 use orch_db::DbError;
 use orch_db::audit::{Actor, Entry as AuditEntry, append};
-use orch_engine::written::{self, Detail};
+use orch_engine::written;
+
+mod opening;
 use serde_json::json;
 use std::path::PathBuf;
 use std::pin::Pin;
@@ -32,7 +34,11 @@ use tokio_util::io::ReaderStream;
 
 /// Binds this module's requests.
 pub fn mount(registry: &mut Registry) {
-    registry.on_raw(ChatExportGet, export);
+    registry.on_raw_read_with_operation(
+        ChatExportGet,
+        crate::key_operations::native::effects::prepare::<opening::Export>,
+        export,
+    );
 }
 
 /// A file that is streamed to the caller and removed when the answer is over, however it ends.
@@ -74,36 +80,22 @@ fn file_name(name: &str) -> String {
     }
 }
 
-/// Exports a chat.
+/// Exports through the shared native preparation and its once-only supply/audit boundary.
 async fn export(ctx: Ctx, query: ChatExportGetQuery, _body: Body) -> ApiResult<Response> {
-    let id = ctx.id("id")?;
-    let mut tx = transaction(&ctx).await?;
-    let work = Work::begin(&ctx, &mut tx).await?;
-    let loaded = load(&mut tx, &work, id, Mode::Read).await?;
-    // Taking a chat away: a node's takes the Export row of its node; a direct or a group chat, being in it.
-    if loaded.row.is_people_chat() {
-        if !loaded.standing.export {
-            return Err(denied_for(
-                Some(id),
-                "chat.export",
-                "a direct or a group chat is taken away as a file by those who are in it",
-            ));
-        }
-    } else if let Some(node) = loaded.row.node_id {
-        authorization::require(
-            &mut tx,
-            &work.principal,
-            node,
-            exact(Permission::ChatExport),
-            Act::Use,
-            Policy::default(),
-        )
-        .await?;
-    }
+    opening::read(ctx, query).await
+}
+
+async fn supply(
+    ctx: &Ctx,
+    conn: &mut orch_db::Conn,
+    prepared: &opening::Prepared,
+) -> ApiResult<Response> {
+    let id = prepared.row.id;
+    let query = &prepared.query;
     let format = query.format.unwrap_or(ExportFormat::Markdown);
-    let range = (query.from, query.to);
+    let range = prepared.sources.range();
     let with_files = query.files == Some(ChatExportFiles::Include);
-    let title = written::chat_title(&mut tx, id)
+    let title = written::chat_title(conn, id)
         .await
         .map_err(ApiError::internal)?;
     let stem = file_name(title.strip_prefix("Chat of ").unwrap_or(&title));
@@ -111,7 +103,7 @@ async fn export(ctx: Ctx, query: ChatExportGetQuery, _body: Body) -> ApiResult<R
         let (path, size) = ctx
             .app
             .engine
-            .chat_with_files(&mut tx, id, format, range)
+            .chat_with_files_with_names(conn, id, format, range, prepared.names.as_ref())
             .await
             .map_err(ApiError::internal)?;
         let file = match tokio::fs::File::open(&path).await {
@@ -122,7 +114,7 @@ async fn export(ctx: Ctx, query: ChatExportGetQuery, _body: Body) -> ApiResult<R
             }
         };
         let streamed = Streamed {
-            inner: ReaderStream::new(file),
+            inner: ReaderStream::with_capacity(file, opening::FRAME_BYTES),
             path,
         };
         let mut response = Response::new(Body::from_stream(streamed));
@@ -138,15 +130,21 @@ async fn export(ctx: Ctx, query: ChatExportGetQuery, _body: Body) -> ApiResult<R
     } else {
         let (body, media_type, extension) = match format {
             ExportFormat::Markdown => {
-                let read = written::read_chat(&mut tx, id, &title, range, Detail::Normal, None)
-                    .await
-                    .map_err(ApiError::internal)?;
+                let read = written::read_chat_export(
+                    conn,
+                    &prepared.sources,
+                    &title,
+                    prepared.names.as_ref(),
+                )
+                .await
+                .map_err(ApiError::internal)?;
                 (read.text.into_bytes(), "text/markdown; charset=utf-8", "md")
             }
             ExportFormat::Json => {
-                let messages = written::chat_records(&mut tx, id, range)
-                    .await
-                    .map_err(ApiError::internal)?;
+                let messages =
+                    written::chat_records_with_names(conn, id, range, prepared.names.as_ref())
+                        .await
+                        .map_err(ApiError::internal)?;
                 (
                     serde_json::to_vec(&messages).map_err(ApiError::internal)?,
                     "application/json",
@@ -162,26 +160,33 @@ async fn export(ctx: Ctx, query: ChatExportGetQuery, _body: Body) -> ApiResult<R
         response
     };
     *response.status_mut() = StatusCode::OK;
-    let who = crate::routes::nodes::actor_name(&ctx)?;
+    Ok(response)
+}
+
+async fn record(
+    ctx: &Ctx,
+    conn: &mut orch_db::Conn,
+    principal: &orch_authz::Principal,
+    prepared: &opening::Prepared,
+    before: impl FnOnce() -> ApiResult<()>,
+) -> ApiResult<()> {
+    let query = &prepared.query;
+    let format = query.format.unwrap_or(ExportFormat::Markdown);
+    let who = crate::routes::nodes::actor_name(ctx)?;
     let summary = format!("{who} exported a chat.");
     let mut audit = AuditEntry::new(
-        Actor::User(work.principal.user()),
+        Actor::User(principal.user()),
         orch_db::audit::action!(AuditAction::ChatExported).as_str(),
         "chat",
-        Some(id),
+        Some(prepared.row.id),
         &summary,
     );
-    audit.node_id = loaded.row.node_id;
-    audit.org_id = Some(loaded.row.org_id);
-    audit.details = json!({
-        "format": format,
-        "files": with_files,
-        "from": query.from,
-        "to": query.to,
-    });
-    append(&mut tx, &audit, &work.origin, ctx.now).await?;
-    tx.commit().await.map_err(DbError::from)?;
-    Ok(response)
+    audit.node_id = prepared.row.node_id;
+    audit.org_id = Some(prepared.row.org_id);
+    audit.details = json!({"format":format,"files":query.files==Some(ChatExportFiles::Include),"from":query.from,"to":query.to});
+    before()?;
+    append(conn, &audit, &crate::sign_in::origin(ctx), ctx.now).await?;
+    Ok(())
 }
 
 /// Says the answer is a file to be saved under `name`.

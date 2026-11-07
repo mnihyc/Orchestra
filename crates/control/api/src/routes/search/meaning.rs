@@ -47,130 +47,46 @@ pub(super) async fn retrieve(
     query: SearchListQuery,
     mut positions: BTreeMap<orch_types::Id, Position>,
     legacy_offset: i64,
+    origin: Option<orch_authz::CapturedOperation>,
+    shown: Vec<String>,
 ) -> ApiResult<Batch> {
-    let requested = super::kinds(query.kinds.as_deref(), super::content::CONTENT_KINDS)?;
-    let item_kinds = requested
-        .iter()
-        .filter(|k| !matches!(k.as_str(), "document" | "chat_message"))
-        .cloned()
-        .collect::<Vec<_>>();
     let mut orgs = ctx
         .app
         .engine
         .semantic_orgs()
         .await
         .map_err(ApiError::internal)?;
-    let mut filter = serde_json::to_value(&query).map_err(ApiError::internal)?;
-    let source_kinds: Vec<_> = [
-        ("document", requested.iter().any(|kind| kind == "document")),
-        ("chat", requested.iter().any(|kind| kind == "chat_message")),
-        ("conversation", !item_kinds.is_empty()),
-    ]
-    .into_iter()
-    .filter_map(|(kind, enabled)| enabled.then_some(kind))
-    .collect();
-    filter["source_kinds"] = serde_json::json!(source_kinds);
-    filter["item_kinds"] = serde_json::json!(item_kinds);
-    {
-        let phase = std::time::Instant::now();
+    let prepared = if origin.is_some() {
+        let (_, _, output) = super::stream_native::read(
+            ctx.clone(),
+            super::stream_native::Query::MeaningScope {
+                query: query.clone(),
+                orgs,
+                origin: origin.clone(),
+            },
+        )
+        .await?;
+        match output {
+            super::stream_native::Output::MeaningScope(value) => value,
+            _ => {
+                return Err(ApiError::internal(
+                    "the meaning source returned another native frame",
+                ));
+            }
+        }
+    } else {
         let mut conn = ctx.app.db.begin().await?;
         rows::snapshot(&mut conn).await?;
         let mut cancellation = rows::cancel_on_drop(&ctx.app.db, &mut conn).await?;
         let principal = authorization::principal(&ctx, &mut conn).await?;
-        let advanced = super::advanced_selection(&mut conn, &principal, &query, ctx.now).await?;
-        for key in ["search_user", "search_at", "search_holders"] {
-            if let Some(value) = advanced.get(key) {
-                filter[key] = value.clone();
-            }
-        }
-        filter["credential_scope"] = serde_json::to_value(
-            principal
-                .caller()
-                .grant()
-                .and_then(orch_authz::TokenGrant::subtree),
-        )
-        .map_err(ApiError::internal)?;
-        if query.mentions_me == Some(true) {
-            filter["mentions_id"] =
-                serde_json::to_value(principal.user()).map_err(ApiError::internal)?;
-        }
-        let selected_documents: Vec<_> = query.document_id.into_iter().collect();
-        let selected_chats: Vec<_> = query.chat_id.into_iter().collect();
-        let projection = if selected_documents.is_empty() && selected_chats.is_empty() {
-            let tuning = get::<rows::candidates::Tuning>(
-                &mut conn,
-                query.scope.map_or(Place::System, Place::Node),
-                keys::SEARCH_WORD_TUNING,
-            )
-            .await
-            .map_err(ApiError::internal)?
-            .ok_or_else(|| ApiError::internal("word retrieval setting missing"))?;
-            orch_authz::everything::project_search_scope(
-                &mut conn,
-                &principal,
-                query.scope,
-                tuning.scope_candidates,
-            )
-            .await
-            .map_err(ApiError::internal)?
-        } else {
-            Some(
-                orch_authz::everything::project_search(
-                    &mut conn,
-                    &principal,
-                    query.scope,
-                    &selected_documents,
-                    &selected_chats,
-                    &[],
-                )
-                .await
-                .map_err(ApiError::internal)?,
-            )
-        };
-        filter["readable"] = projection
-            .as_ref()
-            .map(|projection| projection.search_candidates(&principal))
-            .unwrap_or_else(|| serde_json::json!({"unrestricted":true}));
-        let reachable: std::collections::HashSet<orch_types::Id> = projection
-            .as_ref()
-            .and_then(|projection| projection.grants.get("reachable"))
-            .and_then(orch_types::Json::as_array)
-            .into_iter()
-            .flatten()
-            .filter_map(orch_types::Json::as_str)
-            .filter_map(|id| id.parse().ok())
-            .collect();
-        let potential = if orgs.iter().any(|org| !reachable.contains(org)) {
-            let held = orch_authz::holders::held(
-                &mut conn,
-                principal.user(),
-                orch_types::Time::new(ctx.now),
-            )
-            .await
-            .map_err(ApiError::internal)?;
-            rows::name_roots(
-                &mut conn,
-                principal.user(),
-                principal.is_system_admin() && principal.caller().as_admin(),
-                ctx.now,
-                Some(&held.held),
-            )
-            .await?
-        } else {
-            Vec::new()
-        };
-        orgs.retain(|org| {
-            (reachable.contains(org) || potential.contains(org))
-                && !principal.suspension().applies(&[*org])
-        });
-        if let Some(scope) = query.scope {
-            let root = orch_db::queries::semantic::org_of(&mut conn, scope).await?;
-            orgs.retain(|org| Some(*org) == root);
-        }
+        let prepared = prepare_scope(&ctx, &mut conn, &principal, &query, orgs, None).await?;
         cancellation.disarm();
         conn.commit().await.map_err(orch_db::DbError::from)?;
-        tracing::debug!(target: "orch::search::timing", phase="meaning_scope", elapsed_ms=phase.elapsed().as_secs_f64()*1000.);
-    }
+        prepared
+    };
+    orgs = prepared.orgs;
+    let filter = prepared.filter;
+    let mut origins = prepared.origins;
     let eligible: HashSet<_> = orgs.iter().copied().collect();
     for (org, position) in &mut positions {
         position.done |= !eligible.contains(org);
@@ -188,20 +104,31 @@ pub(super) async fn retrieve(
             .filter(|position| !position.done)
             .map(|position| (org, position.clone()))
     });
+    let scoped = origin.is_some();
     let answers = futures::future::join_all(requests.map(|(org, position)| {
         let engine = &ctx.app.engine;
         let query = &query.q;
         let filter = filter.clone();
+        let origin = origins.remove(&org);
         async move {
+            if scoped && origin.is_none() {
+                return (
+                    org,
+                    Err(orch_engine::EngineError::BeforeEffect(Box::new(
+                        orch_engine::operation_scope::continuing::Error::Refused,
+                    ))),
+                );
+            }
             (
                 org,
                 engine
-                    .meaning_filtered(
+                    .meaning_filtered_for_origin(
                         org,
                         query,
                         position.offset,
                         position.generation,
                         Some(filter),
+                        origin,
                     )
                     .await,
             )
@@ -270,39 +197,215 @@ pub(super) async fn retrieve(
         });
     }
     ctx.now = ctx.app.clock.now();
-    let mut tx = ctx.app.db.begin().await?;
-    rows::snapshot(&mut tx).await?;
-    let mut cancellation = rows::cancel_on_drop(&ctx.app.db, &mut tx).await?;
-    let principal = authorization::principal(&ctx, &mut tx).await?;
-    let sources = |kind: &str| {
-        near.iter()
-            .filter(|part| part.kind == kind)
-            .map(|part| part.source_id)
-            .collect::<Vec<_>>()
+    let hits = if origin.is_some() {
+        let (_, _, output) = super::stream_native::read(
+            ctx.clone(),
+            super::stream_native::Query::MeaningHits {
+                query: query.clone(),
+                near,
+                shown: shown.into_iter().collect(),
+                origin,
+            },
+        )
+        .await?;
+        match output {
+            super::stream_native::Output::MeaningHits(hits) => hits,
+            _ => {
+                return Err(ApiError::internal(
+                    "the meaning parts returned another native frame",
+                ));
+            }
+        }
+    } else {
+        let mut tx = ctx.app.db.begin().await?;
+        rows::snapshot(&mut tx).await?;
+        let mut cancellation = rows::cancel_on_drop(&ctx.app.db, &mut tx).await?;
+        let principal = authorization::principal(&ctx, &mut tx).await?;
+        let found = prepare_hits(&ctx, &mut tx, &principal, &query, &near).await?;
+        let phase = std::time::Instant::now();
+        let hits = super::content::hydrate(&mut tx, &principal, &found, &query, ctx.now).await?;
+        tracing::debug!(target: "orch::search::timing", phase="meaning_payloads", elapsed_ms=phase.elapsed().as_secs_f64()*1000.);
+        cancellation.disarm();
+        tx.commit().await.map_err(orch_db::DbError::from)?;
+        hits
     };
+    let allowed: HashSet<String> = hits.iter().map(super::stream::identity).collect();
+    for list in &mut lists {
+        list.retain(|id| allowed.contains(id));
+    }
+    Ok(Batch {
+        hits,
+        ranks: lists,
+        more,
+        positions,
+        fusion_k: fusion_k.unwrap_or(super::stream::DEFAULT_FUSION_K),
+        unavailable,
+        paused,
+    })
+}
+
+/// Native semantic-source selection and filters, with no model call in the frame.
+pub(super) struct PreparedScope {
+    pub orgs: Vec<orch_types::Id>,
+    pub filter: orch_types::Json,
+    pub origins: BTreeMap<orch_types::Id, orch_engine::semantic::query_origin::QueryOrigin>,
+}
+pub(super) async fn prepare_scope(
+    ctx: &Ctx,
+    conn: &mut orch_db::Conn,
+    principal: &orch_authz::Principal,
+    query: &SearchListQuery,
+    mut orgs: Vec<orch_types::Id>,
+    readable: Option<&orch_types::Json>,
+) -> ApiResult<PreparedScope> {
+    let requested = super::kinds(query.kinds.as_deref(), super::content::CONTENT_KINDS)?;
+    let item_kinds = requested
+        .iter()
+        .filter(|k| !matches!(k.as_str(), "document" | "chat_message"))
+        .cloned()
+        .collect::<Vec<_>>();
+    let mut filter = serde_json::to_value(query).map_err(ApiError::internal)?;
+    let source_kinds: Vec<_> = [
+        ("document", requested.iter().any(|kind| kind == "document")),
+        ("chat", requested.iter().any(|kind| kind == "chat_message")),
+        ("conversation", !item_kinds.is_empty()),
+    ]
+    .into_iter()
+    .filter_map(|(kind, enabled)| enabled.then_some(kind))
+    .collect();
+    filter["source_kinds"] = serde_json::json!(source_kinds);
+    filter["item_kinds"] = serde_json::json!(item_kinds);
+    {
+        let phase = std::time::Instant::now();
+        let advanced = super::advanced_selection(conn, principal, query, ctx.now).await?;
+        for key in ["search_user", "search_at", "search_holders"] {
+            if let Some(value) = advanced.get(key) {
+                filter[key] = value.clone();
+            }
+        }
+        filter["credential_scope"] = serde_json::to_value(
+            principal
+                .caller()
+                .grant()
+                .and_then(orch_authz::TokenGrant::subtree),
+        )
+        .map_err(ApiError::internal)?;
+        if query.mentions_me == Some(true) {
+            filter["mentions_id"] =
+                serde_json::to_value(principal.user()).map_err(ApiError::internal)?;
+        }
+        let selected_documents: Vec<_> = query.document_id.into_iter().collect();
+        let selected_chats: Vec<_> = query.chat_id.into_iter().collect();
+        let projection = if selected_documents.is_empty() && selected_chats.is_empty() {
+            let tuning = get::<rows::candidates::Tuning>(
+                conn,
+                query.scope.map_or(Place::System, Place::Node),
+                keys::SEARCH_WORD_TUNING,
+            )
+            .await
+            .map_err(ApiError::internal)?
+            .ok_or_else(|| ApiError::internal("word retrieval setting missing"))?;
+            orch_authz::everything::project_search_scope(
+                conn,
+                principal,
+                query.scope,
+                tuning.scope_candidates,
+            )
+            .await
+            .map_err(ApiError::internal)?
+        } else {
+            Some(
+                orch_authz::everything::project_search(
+                    conn,
+                    principal,
+                    query.scope,
+                    &selected_documents,
+                    &selected_chats,
+                    &[],
+                )
+                .await
+                .map_err(ApiError::internal)?,
+            )
+        };
+        filter["readable"] = projection
+            .as_ref()
+            .map(|projection| projection.search_candidates(principal))
+            .unwrap_or_else(|| serde_json::json!({"unrestricted":true}));
+        if let Some(readable) = readable {
+            filter["readable"] = readable.clone();
+        }
+        let reachable: std::collections::HashSet<orch_types::Id> = projection
+            .as_ref()
+            .and_then(|projection| projection.grants.get("reachable"))
+            .and_then(orch_types::Json::as_array)
+            .into_iter()
+            .flatten()
+            .filter_map(orch_types::Json::as_str)
+            .filter_map(|id| id.parse().ok())
+            .collect();
+        let potential = if orgs.iter().any(|org| !reachable.contains(org)) {
+            let held =
+                orch_authz::holders::held(conn, principal.user(), orch_types::Time::new(ctx.now))
+                    .await
+                    .map_err(ApiError::internal)?;
+            rows::name_roots(
+                conn,
+                principal.user(),
+                principal.is_system_admin() && principal.caller().as_admin(),
+                ctx.now,
+                Some(&held.held),
+            )
+            .await?
+        } else {
+            Vec::new()
+        };
+        orgs.retain(|org| {
+            (reachable.contains(org) || potential.contains(org))
+                && !principal.suspension().applies(&[*org])
+        });
+        if let Some(scope) = query.scope {
+            let root = orch_db::queries::semantic::org_of(conn, scope).await?;
+            orgs.retain(|org| Some(*org) == root);
+        }
+        tracing::debug!(target: "orch::search::timing", phase="meaning_scope", elapsed_ms=phase.elapsed().as_secs_f64()*1000.);
+    }
+    Ok(PreparedScope {
+        orgs,
+        filter,
+        origins: BTreeMap::new(),
+    })
+}
+
+/// Reuses the native current permission and part filters for exactly these immutable identities.
+pub(super) async fn prepare_selected(
+    ctx: &Ctx,
+    conn: &mut orch_db::Conn,
+    principal: &orch_authz::Principal,
+    query: &SearchListQuery,
+    selected: &rows::CandidateSet,
+) -> ApiResult<Vec<rows::HitRow>> {
+    let requested = super::kinds(query.kinds.as_deref(), super::content::CONTENT_KINDS)?;
+    let item_kinds = requested
+        .iter()
+        .filter(|k| !matches!(k.as_str(), "document" | "chat_message"))
+        .cloned()
+        .collect::<Vec<_>>();
     let phase = std::time::Instant::now();
     let projection = orch_authz::everything::project_search(
-        &mut tx,
-        &principal,
+        conn,
+        principal,
         query.scope,
-        &sources("document"),
-        &sources("chat"),
-        &sources("conversation"),
+        &selected.documents,
+        &selected.chats,
+        &selected.nodes,
     )
     .await
     .map_err(ApiError::internal)?;
     let mut grants = projection.grants.clone();
-    grants["search_advanced"] =
-        super::advanced_selection(&mut tx, &principal, &query, ctx.now).await?;
-    tracing::debug!(target: "orch::search::timing", phase="meaning_access", elapsed_ms=phase.elapsed().as_secs_f64()*1000., parts=near.len());
-    let parts = |kind: &str| {
-        near.iter()
-            .filter(|part| part.kind == kind)
-            .filter_map(|part| part.first_part)
-            .collect::<Vec<_>>()
-    };
+    grants["search_advanced"] = super::advanced_selection(conn, principal, query, ctx.now).await?;
+    tracing::debug!(target: "orch::search::timing", phase="meaning_access", elapsed_ms=phase.elapsed().as_secs_f64()*1000., parts=selected.items.len() + selected.messages.len() + selected.blocks.len());
     let found = rows::meaning_hits(
-        &mut tx,
+        conn,
         &rows::MeaningAsk {
             user: principal.user(),
             groups: principal.groups(),
@@ -311,9 +414,9 @@ pub(super) async fn retrieve(
             at: ctx.app.clock.now(),
             scope: query.scope,
             participating: query.participating.unwrap_or(false),
-            items: &parts("conversation"),
-            messages: &parts("chat"),
-            blocks: &parts("document"),
+            items: &selected.items,
+            messages: &selected.messages,
+            blocks: &selected.blocks,
             text: &query.q,
             item_kinds: &item_kinds,
             chat_messages: requested.iter().any(|k| k == "chat_message"),
@@ -331,22 +434,32 @@ pub(super) async fn retrieve(
         },
     )
     .await?;
-    let phase = std::time::Instant::now();
-    let hits = super::content::hydrate(&mut tx, &principal, &found, &query, ctx.now).await?;
-    tracing::debug!(target: "orch::search::timing", phase="meaning_payloads", elapsed_ms=phase.elapsed().as_secs_f64()*1000.);
-    let allowed: HashSet<String> = hits.iter().map(super::stream::identity).collect();
-    for list in &mut lists {
-        list.retain(|id| allowed.contains(id));
+    Ok(found)
+}
+
+pub(super) async fn prepare_hits(
+    ctx: &Ctx,
+    conn: &mut orch_db::Conn,
+    principal: &orch_authz::Principal,
+    query: &SearchListQuery,
+    near: &[orch_engine::semantic::query::Near],
+) -> ApiResult<Vec<rows::HitRow>> {
+    let mut selected = rows::CandidateSet::default();
+    for part in near {
+        match part.kind.as_str() {
+            "document" => {
+                selected.documents.push(part.source_id);
+                selected.blocks.extend(part.first_part);
+            }
+            "chat" => {
+                selected.chats.push(part.source_id);
+                selected.messages.extend(part.first_part);
+            }
+            _ => {
+                selected.nodes.push(part.source_id);
+                selected.items.extend(part.first_part);
+            }
+        }
     }
-    cancellation.disarm();
-    tx.commit().await.map_err(orch_db::DbError::from)?;
-    Ok(Batch {
-        hits,
-        ranks: lists,
-        more,
-        positions,
-        fusion_k: fusion_k.unwrap_or(super::stream::DEFAULT_FUSION_K),
-        unavailable,
-        paused,
-    })
+    prepare_selected(ctx, conn, principal, query, &selected).await
 }

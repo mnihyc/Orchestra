@@ -618,6 +618,23 @@ async fn stream_chat(
     range: (Option<i64>, Option<i64>),
     files: &str,
 ) -> Result<i64, Stop> {
+    stream_chat_with_names(conn, archive, path, chat, format, range, files, None).await
+}
+
+#[allow(
+    clippy::too_many_arguments,
+    reason = "the existing native chat archive operands and trusted name bound"
+)]
+async fn stream_chat_with_names(
+    conn: &mut orch_db::Conn,
+    archive: &mut Archive,
+    path: &str,
+    chat: Id,
+    format: ExportFormat,
+    range: (Option<i64>, Option<i64>),
+    files: &str,
+    allowed: Option<&std::collections::HashSet<Id>>,
+) -> Result<i64, Stop> {
     let last = share_rows::chat_total(conn, chat).await?;
     let span = written::export_range(range, last);
     archive.start(path).await?;
@@ -626,13 +643,14 @@ async fn stream_chat(
             let title = written::chat_title(conn, chat).await?;
             if let Some(span) = span {
                 for (at, window) in text_windows(span).enumerate() {
-                    let read = written::read_chat_window(
+                    let read = written::read_chat_window_with_names(
                         conn,
                         chat,
                         &title,
                         window,
                         files,
                         (at == 0).then_some(span),
+                        allowed,
                     )
                     .await?;
                     archive.chunk(read.text.into_bytes()).await?;
@@ -656,8 +674,13 @@ async fn stream_chat(
             let mut comma = false;
             if let Some(span) = span {
                 for (low, high) in text_windows(span) {
-                    let records =
-                        written::chat_records(conn, chat, (Some(low), Some(high))).await?;
+                    let records = written::chat_records_with_names(
+                        conn,
+                        chat,
+                        (Some(low), Some(high)),
+                        allowed,
+                    )
+                    .await?;
                     for record in &records {
                         archive.record(record, &mut comma).await?;
                     }
@@ -1859,6 +1882,56 @@ impl Engine {
         }
     }
 
+    /// Actual numbered native rows and replies used by every standalone chat export form.
+    /// Existing archive windows bound row memory; IDs/revisions form only an immutable source
+    /// witness, never an authorization target or a replacement for the real Chat identity.
+    pub async fn chat_export_sources(
+        &self,
+        conn: &mut orch_db::Conn,
+        chat: Id,
+        range: (Option<i64>, Option<i64>),
+        format: ExportFormat,
+    ) -> Result<written::ChatExportSources, EngineError> {
+        use sha2::{Digest, Sha256};
+        let last = share_rows::chat_total(conn, chat).await?;
+        let span = written::export_range(range, last);
+        let mut digest = Sha256::new();
+        let mut names = std::collections::BTreeSet::new();
+        for window in span.into_iter().flat_map(text_windows) {
+            let numbered =
+                share_rows::chat_messages_numbered(conn, chat, window.0, window.1).await?;
+            let selected = numbered
+                .iter()
+                .map(|row| &row.row)
+                .filter(|row| format == ExportFormat::Markdown || !row.is_deleted())
+                .collect::<Vec<_>>();
+            let reply_ids = selected
+                .iter()
+                .filter_map(|row| row.reply_to_id)
+                .collect::<Vec<_>>();
+            let replies = orch_db::queries::chats::messages_by_ids(conn, chat, &reply_ids).await?;
+            let mut actual = selected
+                .into_iter()
+                .chain(replies.iter())
+                .collect::<Vec<_>>();
+            actual.sort_by_key(|row| row.id);
+            actual.dedup_by_key(|row| row.id);
+            for row in &actual {
+                digest.update(row.id.as_bytes());
+                digest.update(row.seq_updated.to_be_bytes());
+                digest.update([u8::from(row.is_deleted())]);
+            }
+            names.extend(orch_chat::views::threads_of(&actual));
+        }
+        Ok(written::ChatExportSources {
+            format,
+            chat,
+            span,
+            stamp: hex::encode(digest.finalize()),
+            names: names.into_iter().collect(),
+        })
+    }
+
     /// A chat and the files its messages carry as one zip in the scratch directory: what the export of a chat is
     /// when it is asked for with its files. The caller streams the file and removes it. Says where it is and how
     /// large it is.
@@ -1869,10 +1942,25 @@ impl Engine {
         format: ExportFormat,
         range: (Option<i64>, Option<i64>),
     ) -> Result<(PathBuf, u64), EngineError> {
+        self.chat_with_files_with_names(conn, chat, format, range, None)
+            .await
+    }
+
+    /// The same native scratch archive under a trusted current source-name bound.
+    pub async fn chat_with_files_with_names(
+        &self,
+        conn: &mut orch_db::Conn,
+        chat: Id,
+        format: ExportFormat,
+        range: (Option<i64>, Option<i64>),
+        allowed: Option<&std::collections::HashSet<Id>>,
+    ) -> Result<(PathBuf, u64), EngineError> {
         let path = self
             .scratch_dir()
             .join(format!("chat-{}.zip", orch_types::new_id().simple()));
-        let outcome = self.chat_zip(conn, chat, format, range, &path).await;
+        let outcome = self
+            .chat_zip(conn, chat, format, range, &path, allowed)
+            .await;
         if outcome.is_err() {
             let _ = std::fs::remove_file(&path);
         }
@@ -1886,6 +1974,7 @@ impl Engine {
         format: ExportFormat,
         range: (Option<i64>, Option<i64>),
         path: &Path,
+        allowed: Option<&std::collections::HashSet<Id>>,
     ) -> Result<u64, EngineError> {
         let failed = |stop: Stop| match stop {
             Stop::Failed(failure) => EngineError::unreadable(failure.message),
@@ -1897,9 +1986,18 @@ impl Engine {
             ExportFormat::Markdown => "chat.md",
             ExportFormat::Json => "chat.json",
         };
-        let last = stream_chat(conn, &mut archive, name, chat, format, range, "chat.files")
-            .await
-            .map_err(failed)?;
+        let last = stream_chat_with_names(
+            conn,
+            &mut archive,
+            name,
+            chat,
+            format,
+            range,
+            "chat.files",
+            allowed,
+        )
+        .await
+        .map_err(failed)?;
         if let Some(span) = written::export_range(range, last) {
             for (low, high) in text_windows(span) {
                 for (file, blob) in chat_file_entries(conn, chat, (Some(low), Some(high)))

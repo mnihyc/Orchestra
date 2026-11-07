@@ -74,6 +74,7 @@ async fn synthetic_capacity_access_and_successful_refusals_share_the_same_classi
             .send(
                 &p.provider_key(),
                 &ProviderComplete {
+                    model_parameters: Some(common::model::enabled_parameters()),
                     params: None,
                     provider_id: p.rig.provider,
                     purpose: CompletionPurpose::Summary,
@@ -122,6 +123,7 @@ async fn a_system_completion_uses_the_providers_key_without_a_turn_and_returns_t
             .succeed(
                 &p.provider_key(),
                 &ProviderComplete {
+                    model_parameters: Some(common::model::enabled_parameters()),
                     params: None,
                     provider_id: p.rig.provider,
                     purpose: CompletionPurpose::Summary,
@@ -175,6 +177,7 @@ async fn a_completion_does_not_return_an_upstreams_key_or_error_body() {
         .send(
             &p.provider_key(),
             &ProviderComplete {
+                model_parameters: Some(common::model::enabled_parameters()),
                 params: None,
                 provider_id: p.rig.provider,
                 purpose: CompletionPurpose::Summary,
@@ -821,6 +824,7 @@ async fn neutral_effort_reaches_the_protocol_without_replacing_routing_or_output
     ] {
         p.mock.queue("say A summary\nusage 100 5").unwrap();
         let request = ProviderComplete {
+            model_parameters: Some(common::model::enabled_parameters()),
             provider_id: p.rig.provider,
             purpose: CompletionPurpose::Summary,
             protocol: protocol.to_owned(),
@@ -851,6 +855,7 @@ async fn neutral_effort_reaches_the_protocol_without_replacing_routing_or_output
                 .send(
                     &p.provider_key(),
                     &ProviderComplete {
+                        model_parameters: Some(common::model::enabled_parameters()),
                         params: Some(params),
                         ..request.clone()
                     },
@@ -864,4 +869,296 @@ async fn neutral_effort_reaches_the_protocol_without_replacing_routing_or_output
         2,
         "invalid parameters cannot reach the model server"
     );
+}
+
+#[tokio::test]
+async fn responses_fast_options_reach_the_actual_upstream_with_unknown_json_intact() {
+    let p = ProviderRig::new().await;
+    p.start_both_providers().await;
+    let mut request = ProviderComplete {
+        model_parameters: Some(common::model::enabled_parameters()),
+        provider_id: p.rig.provider,
+        purpose: CompletionPurpose::Summary,
+        protocol: RESPONSES.to_owned(),
+        model_name: MODEL.to_owned(),
+        system: "Summarize only this material".to_owned(),
+        input: "Synthetic work".to_owned(),
+        max_output_tokens: 120,
+        params: None,
+    };
+    p.mock.queue("say A summary\nusage 100 5").unwrap();
+    p.rig.succeed(&p.provider_key(), &request).await;
+    assert_eq!(p.model_requests().len(), 1, "ordinary same-path completion");
+    let extra = json!({"enabled":true,"levels":[1,2],"reset":null});
+    request.params = Some(json!({"service_tier":"fast","future_vendor_option":extra}));
+    p.mock.queue("say A fast summary\nusage 100 5").unwrap();
+    p.rig.succeed(&p.provider_key(), &request).await;
+    let observed = p.model_requests();
+    assert_eq!(observed.len(), 2);
+    let body = &observed[1].body;
+    assert_eq!(body["service_tier"], "fast");
+    assert_eq!(body["future_vendor_option"], extra);
+    assert_eq!(body["model"], MODEL);
+    assert_eq!(body["instructions"], request.system);
+    assert_eq!(body["input"], request.input);
+    assert_eq!(body["max_output_tokens"], 120);
+    assert_eq!(body["stream"], false);
+}
+
+#[tokio::test]
+async fn messages_fast_is_speed_and_does_not_borrow_the_capacity_service_tier() {
+    let p = ProviderRig::new().await;
+    p.start_both_providers().await;
+    let mut request = ProviderComplete {
+        model_parameters: Some(common::model::enabled_parameters()),
+        provider_id: p.rig.provider,
+        purpose: CompletionPurpose::Summary,
+        protocol: MESSAGES.to_owned(),
+        model_name: MODEL.to_owned(),
+        system: "Summarize only this material".to_owned(),
+        input: "Synthetic work".to_owned(),
+        max_output_tokens: 120,
+        params: None,
+    };
+    p.mock.queue("say A summary\nusage 100 5").unwrap();
+    p.rig.succeed(&p.provider_key(), &request).await;
+    assert_eq!(p.model_requests().len(), 1, "ordinary same-path completion");
+    request.params = Some(json!({"speed":"fast","thinking":{"type":"disabled"}}));
+    p.mock.queue("say A fast summary\nusage 100 5").unwrap();
+    p.rig.succeed(&p.provider_key(), &request).await;
+    let observed = p.model_requests();
+    assert_eq!(observed.len(), 2);
+    let body = &observed[1].body;
+    assert_eq!(body["speed"], "fast");
+    assert!(body.get("service_tier").is_none(), "capacity is not speed");
+    assert_eq!(body["thinking"], json!({"type":"disabled"}));
+    assert_eq!(body["model"], MODEL);
+    assert_eq!(body["system"], request.system);
+    assert_eq!(body["messages"][0]["content"], request.input);
+    assert_eq!(body["max_tokens"], 120);
+    assert_eq!(body["stream"], false);
+}
+
+#[tokio::test]
+async fn endpoint_object_defaults_keep_nested_json_and_follow_later_explicit_requests() {
+    let p = ProviderRig::new().await;
+    p.start_both_providers().await;
+    p.open_lease(p.thread, &[MODEL], Some(RESPONSES), None)
+        .await;
+    let harness = p.harness(p.thread);
+    p.mock.queue("say Baseline\nusage 100 5").unwrap();
+    let reply = harness
+        .post("/v1/responses", &responses_request(MODEL, "baseline"))
+        .await;
+    assert_eq!(
+        reply.status,
+        200,
+        "ordinary same-path forwarding: {}",
+        reply.text()
+    );
+    let future = json!({"enabled":true,"levels":[1,2],"reset":null});
+    let started = p
+        .start_provider(&[(
+            RESPONSES,
+            p.mock.responses_base_url(),
+            json!({
+                "params":{"temperature":0.2,"future_vendor_option":future},
+                "headers":{"x-configured-feature":"test-feature"}
+            }),
+        )])
+        .await;
+    assert!(matches!(started, Progress::Succeeded(_)), "{started:?}");
+    // Keep the same real lease: request options are read from each request, not its first choice.
+    for temperature in [0.7, 0.4] {
+        let mut body = responses_request(MODEL, "configured use");
+        body["temperature"] = json!(temperature);
+        p.mock.queue("say A summary\nusage 100 5").unwrap();
+        let reply = harness.post("/v1/responses", &body).await;
+        assert_eq!(reply.status, 200, "{}", reply.text());
+        let seen = p.model_requests();
+        let last = seen.last().unwrap();
+        assert_eq!(last.body["temperature"], json!(temperature));
+        assert_eq!(last.body["future_vendor_option"], future);
+        assert_eq!(last.body["model"], body["model"]);
+        assert_eq!(last.body["input"], body["input"]);
+        assert_eq!(
+            last.headers.get("x-configured-feature").map(String::as_str),
+            Some("test-feature")
+        );
+    }
+    p.mock.queue("say Default summary\nusage 100 5").unwrap();
+    let reply = harness
+        .post("/v1/responses", &responses_request(MODEL, "default use"))
+        .await;
+    assert_eq!(reply.status, 200, "{}", reply.text());
+    assert_eq!(
+        p.model_requests().last().unwrap().body["temperature"],
+        json!(0.2)
+    );
+}
+
+#[tokio::test]
+async fn responses_processing_tier_records_actual_downgrade_and_missing_report_separately() {
+    let p = ProviderRig::new().await;
+    p.start_both_providers().await;
+    let mut request = ProviderComplete {
+        model_parameters: Some(common::model::enabled_parameters()),
+        provider_id: p.rig.provider,
+        purpose: CompletionPurpose::Summary,
+        protocol: RESPONSES.to_owned(),
+        model_name: MODEL.to_owned(),
+        system: "Summarize".to_owned(),
+        input: "Synthetic work".to_owned(),
+        max_output_tokens: 120,
+        params: None,
+    };
+    p.mock.queue("say Ordinary\nusage 100 5").unwrap();
+    p.rig.succeed(&p.provider_key(), &request).await;
+    assert_eq!(p.model_requests().len(), 1, "ordinary same-path completion");
+    request.params = Some(json!({"service_tier":"fast"}));
+    for actual in [Some("priority"), Some("default"), None] {
+        let mut response = json!({"id":"response-tier-control","status":"completed","model":MODEL,
+            "output":[{"type":"message","content":[{"type":"output_text","text":"A summary"}]}],
+            "usage":{"input_tokens":100,"output_tokens":5}});
+        if let Some(actual) = actual {
+            response["service_tier"] = json!(actual);
+        }
+        p.mock.queue(&format!("body 200 {response}")).unwrap();
+        let answer = p.rig.succeed(&p.provider_key(), &request).await;
+        assert_eq!(answer["timing"]["requested_service_tier"], "fast");
+        match actual {
+            Some(actual) => {
+                assert_eq!(answer["timing"]["reported_service_tier"]["state"], "told");
+                assert_eq!(answer["timing"]["reported_service_tier"]["value"], actual);
+            }
+            None => assert_eq!(answer["timing"]["reported_service_tier"]["state"], "empty"),
+        }
+    }
+    assert_eq!(p.model_requests().len(), 4);
+}
+
+#[tokio::test]
+async fn messages_report_inference_speed_independently_from_capacity_class() {
+    let p = ProviderRig::new().await;
+    p.start_both_providers().await;
+    let mut request = ProviderComplete {
+        model_parameters: Some(common::model::enabled_parameters()),
+        provider_id: p.rig.provider,
+        purpose: CompletionPurpose::Summary,
+        protocol: MESSAGES.to_owned(),
+        model_name: MODEL.to_owned(),
+        system: "Summarize".to_owned(),
+        input: "Synthetic work".to_owned(),
+        max_output_tokens: 120,
+        params: None,
+    };
+    p.mock.queue("say Ordinary\nusage 100 5").unwrap();
+    p.rig.succeed(&p.provider_key(), &request).await;
+    request.params = Some(json!({"speed":"fast","service_tier":"auto"}));
+    let response = json!({"id":"message-speed-control","type":"message","role":"assistant","model":MODEL,
+        "content":[{"type":"text","text":"A summary"}],"stop_reason":"end_turn",
+        "usage":{"input_tokens":100,"output_tokens":5,"speed":"fast","service_tier":"standard"}});
+    p.mock.queue(&format!("body 200 {response}")).unwrap();
+    let answer = p.rig.succeed(&p.provider_key(), &request).await;
+    assert_eq!(answer["timing"]["requested_service_tier"], "fast");
+    assert_eq!(
+        answer["timing"]["reported_service_tier"],
+        json!({"state":"told","value":"fast"})
+    );
+    let seen = p.model_requests();
+    assert_eq!(seen.last().unwrap().body["speed"], "fast");
+    assert_eq!(seen.last().unwrap().body["service_tier"], "auto");
+}
+
+#[tokio::test]
+async fn structured_completion_never_remerges_changed_runtime_defaults_into_its_snapshot() {
+    let p = ProviderRig::new().await;
+    p.start_both_providers().await;
+    let request = ProviderComplete {
+        model_parameters: Some(common::model::enabled_parameters()),
+        provider_id: p.rig.provider,
+        purpose: CompletionPurpose::Summary,
+        protocol: RESPONSES.to_owned(),
+        model_name: MODEL.to_owned(),
+        system: "Summarize".to_owned(),
+        input: "Issued material".to_owned(),
+        max_output_tokens: 120,
+        params: Some(json!({"temperature":0.4})),
+    };
+    p.mock.queue("say Original\nusage 100 5").unwrap();
+    p.rig.succeed(&p.provider_key(), &request).await;
+    let original = p.model_requests()[0].body.clone();
+    assert_eq!(
+        original["temperature"],
+        json!(0.4),
+        "ordinary structured snapshot"
+    );
+    let started = p
+        .start_provider(&[(
+            RESPONSES,
+            p.mock.responses_base_url(),
+            json!({
+                "params":{"temperature":0.2,"top_p":0.7}
+            }),
+        )])
+        .await;
+    assert!(matches!(started, Progress::Succeeded(_)), "{started:?}");
+    p.mock
+        .queue("say Same issued request\nusage 100 5")
+        .unwrap();
+    p.rig.succeed(&p.provider_key(), &request).await;
+    assert_eq!(
+        p.model_requests()[1].body,
+        original,
+        "a new runtime default cannot modify the issuer's final snapshot"
+    );
+    // A constrained command with no explicit sampling options does not pick up runtime defaults.
+    p.mock.queue("say Legacy\nusage 100 5").unwrap();
+    p.rig
+        .succeed(
+            &p.provider_key(),
+            &ProviderComplete {
+                model_parameters: Some(common::model::enabled_parameters()),
+                params: None,
+                ..request
+            },
+        )
+        .await;
+    let seen = p.model_requests();
+    assert!(seen[2].body.get("temperature").is_none());
+    assert!(seen[2].body.get("top_p").is_none());
+}
+
+#[tokio::test]
+async fn a_legacy_completion_without_ceiling_metadata_requires_explicit_reissue() {
+    let p = ProviderRig::new().await;
+    p.start_both_providers().await;
+    let request = ProviderComplete {
+        model_parameters: None,
+        provider_id: p.rig.provider,
+        purpose: CompletionPurpose::Summary,
+        protocol: RESPONSES.to_owned(),
+        model_name: MODEL.to_owned(),
+        system: "Summarize".to_owned(),
+        input: "Synthetic work".to_owned(),
+        max_output_tokens: 120,
+        params: None,
+    };
+    let result = p.rig.send(&p.provider_key(), &request).await;
+    assert!(matches!(result, Progress::Failed(_)), "{result:?}");
+    assert!(
+        p.model_requests().is_empty(),
+        "a legacy body cannot bypass a provider schema"
+    );
+    p.mock.queue("say Reissued\nusage 100 5").unwrap();
+    p.rig
+        .succeed(
+            &p.provider_key(),
+            &ProviderComplete {
+                model_parameters: Some(common::model::enabled_parameters()),
+                ..request
+            },
+        )
+        .await;
+    assert_eq!(p.model_requests().len(), 1);
 }

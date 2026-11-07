@@ -8,21 +8,47 @@ use orch_api_contract::chats::{
 
 pub(super) fn mount(registry: &mut Registry) {
     registry
-        .on(ChatMentionList, list)
-        .on(ChatMentionPreview, preview);
+        .on_with_operation(ChatMentionList, super::mention_operation::list, list)
+        .on_with_operation(
+            ChatMentionPreview,
+            super::mention_operation::preview,
+            preview,
+        );
 }
 
 async fn list(ctx: Ctx, query: ChatMentionListQuery, (): ()) -> ApiResult<ChatMentionPage> {
-    let id = ctx.id("id")?;
-    let mut tx = ctx.app.db.begin().await?;
-    let work = Work::begin(&ctx, &mut tx).await?;
-    let chat = load(&mut tx, &work, id, Mode::Read).await?;
-    let q = query.q.as_deref().unwrap_or_default().trim().to_lowercase();
-    let all = q == "@all";
-    let result = orch_chat::audiences::list(&mut tx, &work.acting(), &chat, all).await;
-    let audiences = work.refuse(&mut tx, Some(id), result).await?;
-    let current_followers = orch_chat::audiences::followers(&mut tx, &work.acting(), &chat).await;
-    let followers = work.refuse(&mut tx, Some(id), current_followers).await?;
+    crate::key_operations::snapshot_read::run(ctx, move |ctx| list_snapshot(ctx, query.clone()))
+        .await
+}
+
+async fn list_snapshot(ctx: Ctx, _query: ChatMentionListQuery) -> ApiResult<ChatMentionPage> {
+    let mut tx = ctx.app.db.begin_snapshot().await?;
+    let principal = ctx.operation_principal(&mut tx).await?;
+    let prepared = ctx.operation_data::<super::mention_operation::PreparedList>()?;
+    let work = Work {
+        projection_ctx: ctx.clone(),
+        now: principal.now().get(),
+        principal,
+        origin: origin(&ctx),
+    };
+    let page =
+        super::mention_operation::show_list(&mut tx, &work, ctx.id("id")?, &prepared).await?;
+    tx.commit().await.map_err(DbError::from)?;
+    Ok(page)
+}
+
+/// The same native audiences and offered agents, before search/pagination or source filtering.
+/// These private candidate facts establish no successful public projection or new permission.
+pub(super) async fn native_choices(
+    conn: &mut Conn,
+    work: &Work,
+    chat: &Loaded,
+    only_followers: bool,
+) -> ApiResult<ChatMentionPage> {
+    let result = orch_chat::audiences::list(conn, &work.acting(), chat, only_followers).await;
+    let audiences = super::operation::refuse(work, conn, chat.id(), result).await?;
+    let result = orch_chat::audiences::followers(conn, &work.acting(), chat).await;
+    let followers = super::operation::refuse(work, conn, chat.id(), result).await?;
     let count = i64::try_from(followers.len()).map_err(ApiError::internal)?;
     let user_ids: Vec<_> = audiences
         .iter()
@@ -31,96 +57,44 @@ async fn list(ctx: Ctx, query: ChatMentionListQuery, (): ()) -> ApiResult<ChatMe
             _ => None,
         })
         .collect();
-    let users = refusals::user_refs(&mut tx, &user_ids).await?;
-    let group_ids: Vec<_> = audiences
-        .iter()
-        .filter_map(|audience| match audience.choice.target {
-            ChatMentionTarget::Group { id } => Some(id),
-            _ => None,
-        })
-        .collect();
-    let groups = qualified_groups(&mut tx, &work.principal, &group_ids).await?;
-    let places: Vec<_> = audiences
-        .iter()
-        .filter_map(|audience| match audience.choice.target {
-            ChatMentionTarget::Role { node_id, .. } => Some(node_id),
-            _ => None,
-        })
-        .collect();
-    let places = view::qualified_refs(&mut tx, &work.principal, &places, Policy::default()).await?;
-    let mut items: Vec<MentionChoice> = audiences
+    let users = refusals::user_refs(conn, &user_ids).await?;
+    let mut items: Vec<_> = audiences
         .into_iter()
-        .map(|audience| audience.choice)
-        .map(|mut choice| {
-            match &choice.target {
-                ChatMentionTarget::User { id } => {
-                    choice.user = users.get(id).cloned();
-                }
-                ChatMentionTarget::Group { id } => {
-                    if let Some(name) = groups.get(id) {
-                        choice.name = name.clone();
-                    }
-                }
-                ChatMentionTarget::Role { node_id, .. } => {
-                    if let Some(place) = places.get(node_id).and_then(|place| place.name.as_deref())
-                    {
-                        choice.name = format!("{} of {place}", choice.name);
-                    }
-                }
-                ChatMentionTarget::Agent { .. } => {}
+        .map(|audience| {
+            let mut choice = audience.choice;
+            if let ChatMentionTarget::User { id } = choice.target {
+                choice.user = users.get(&id).cloned();
             }
             choice
         })
-        .filter(|choice| {
-            all || q.is_empty()
-                || choice.name.to_lowercase().contains(&q)
-                || choice.user.as_ref().is_some_and(|user| {
-                    user.username
-                        .to_lowercase()
-                        .contains(q.trim_start_matches('@'))
-                })
-        })
         .collect();
-    if !all {
-        let offered = orch_chat::audiences::agent_threads(&mut tx, &work.acting(), &chat).await;
-        let offered = work.refuse(&mut tx, Some(id), offered).await?;
+    if !only_followers {
+        let result = orch_chat::audiences::agent_threads(conn, &work.acting(), chat).await;
+        let offered = super::operation::refuse(work, conn, chat.id(), result).await?;
         let ids: Vec<_> = offered.iter().map(|thread| thread.node_id).collect();
-        let refs = view::refs(&mut tx, &work.principal, &ids, Policy::default()).await?;
         let names = orch_db::queries::shares::agent_names(
-            &mut tx,
+            conn,
             &offered
                 .iter()
                 .filter_map(|thread| thread.agent_id)
                 .collect::<Vec<_>>(),
         )
         .await?;
-        let starts: HashMap<_, _> = rows::posting::origin_starts(&mut tx, &ids)
+        let starts: HashMap<_, _> = rows::posting::origin_starts(conn, &ids)
             .await?
             .into_iter()
             .collect();
         let allowed = nodes::holding(
-            &mut tx,
+            conn,
             &work.principal,
             &ids,
-            orch_access_contract::permissions::PermissionName::Exact(Permission::ThreadInteract),
+            authorization::exact(Permission::ThreadInteract),
             Act::Use,
             Policy::default(),
         )
         .await
         .map_err(ApiError::internal)?;
         for thread in offered {
-            let agent = thread.agent_id.and_then(|id| names.get(&id).cloned());
-            if !q.is_empty()
-                && !thread
-                    .name
-                    .to_lowercase()
-                    .contains(q.trim_start_matches('@'))
-                && !agent
-                    .as_deref()
-                    .is_some_and(|name| name.to_lowercase().contains(q.trim_start_matches('@')))
-            {
-                continue;
-            }
             let available = allowed.iter().any(|node| node.id == thread.node_id)
                 && thread.deleted_at.is_none()
                 && thread.archived_at.is_none();
@@ -133,8 +107,8 @@ async fn list(ctx: Ctx, query: ChatMentionListQuery, (): ()) -> ApiResult<ChatMe
                 count: 0,
                 available,
                 reason: (!available).then(|| "thread.interact".to_owned()),
-                thread: refs.get(&thread.node_id).cloned(),
-                agent,
+                thread: None,
+                agent: thread.agent_id.and_then(|id| names.get(&id).cloned()),
                 state: Some(thread.state),
                 started_at: starts
                     .get(&thread.node_id)
@@ -143,6 +117,87 @@ async fn list(ctx: Ctx, query: ChatMentionListQuery, (): ()) -> ApiResult<ChatMe
             });
         }
     }
+    Ok(ChatMentionPage {
+        items,
+        next_cursor: None,
+        followers: count,
+    })
+}
+
+/// Existing picker labels: qualified role paths, qualified groups and current thread refs.
+/// A draft uses compact role labels instead; neither formatter is substituted for the other.
+pub(super) async fn name_choices(
+    conn: &mut Conn,
+    principal: &Principal,
+    items: &mut [MentionChoice],
+    allowed: Option<&names::AllowSet>,
+) -> ApiResult<names::AllowSet> {
+    let mut groups = Vec::new();
+    let mut roles = Vec::new();
+    let mut threads = Vec::new();
+    for choice in items.iter() {
+        match choice.target {
+            ChatMentionTarget::Group { id } => groups.push(id),
+            ChatMentionTarget::Role { node_id, .. } => roles.push(node_id),
+            ChatMentionTarget::Agent { thread_id } => threads.push(thread_id),
+            ChatMentionTarget::User { .. } => {}
+        }
+    }
+    let captured = names::lookups(conn, principal, &[], &threads, &groups, &roles, allowed).await?;
+    for choice in items {
+        match choice.target {
+            ChatMentionTarget::Group { id } => {
+                if let Some(name) = captured.lookups.groups.get(&id) {
+                    choice.name = name.clone();
+                }
+            }
+            ChatMentionTarget::Role { node_id, .. } => {
+                if let Some(place) = captured
+                    .lookups
+                    .nodes
+                    .get(&node_id)
+                    .and_then(|node| node.name.as_deref())
+                {
+                    choice.name = format!("{} of {place}", choice.name);
+                }
+            }
+            ChatMentionTarget::Agent { thread_id } => {
+                choice.thread = captured.lookups.nodes.get(&thread_id).cloned();
+            }
+            ChatMentionTarget::User { .. } => {}
+        }
+    }
+    Ok(captured.sources)
+}
+
+/// Search and the native numeric cursor see only the current projected candidate set.
+pub(super) fn page(
+    mut page: ChatMentionPage,
+    query: &ChatMentionListQuery,
+) -> ApiResult<ChatMentionPage> {
+    let q = query.q.as_deref().unwrap_or_default().trim().to_lowercase();
+    let all = q == "@all";
+    page.items.retain(|choice| {
+        if matches!(choice.target, ChatMentionTarget::Agent { .. }) {
+            q.is_empty()
+                || choice
+                    .name
+                    .to_lowercase()
+                    .contains(q.trim_start_matches('@'))
+                || choice
+                    .agent
+                    .as_ref()
+                    .is_some_and(|agent| agent.to_lowercase().contains(q.trim_start_matches('@')))
+        } else {
+            all || q.is_empty()
+                || choice.name.to_lowercase().contains(&q)
+                || choice.user.as_ref().is_some_and(|user| {
+                    user.username
+                        .to_lowercase()
+                        .contains(q.trim_start_matches('@'))
+                })
+        }
+    });
     let offset = query
         .cursor
         .as_deref()
@@ -158,50 +213,34 @@ async fn list(ctx: Ctx, query: ChatMentionListQuery, (): ()) -> ApiResult<ChatMe
         .limit(),
     )
     .map_err(|_| ApiError::invalid("limit", "does not fit a mention page"))?;
-    let end = offset.saturating_add(limit).min(items.len());
-    let next_cursor = (end < items.len()).then(|| end.to_string());
-    items = if offset < items.len() {
-        items.drain(offset..end).collect()
+    let end = offset.saturating_add(limit).min(page.items.len());
+    page.next_cursor = (end < page.items.len()).then(|| end.to_string());
+    page.items = if offset < page.items.len() {
+        page.items.drain(offset..end).collect()
     } else {
         Vec::new()
     };
-    tx.commit().await.map_err(DbError::from)?;
-    Ok(ChatMentionPage {
-        items,
-        next_cursor,
-        followers: count,
-    })
+    Ok(page)
 }
 
-pub(super) async fn qualified_groups(
-    conn: &mut Conn,
-    principal: &Principal,
-    ids: &[Id],
-) -> ApiResult<HashMap<Id, String>> {
-    let mut names = orch_chat::audiences::visible_group_names(conn, principal, ids)
-        .await
-        .map_err(ApiError::internal)?;
-    let rows =
-        orch_db::queries::access::groups_full(conn, &names.keys().copied().collect::<Vec<_>>())
-            .await?;
-    let places: Vec<_> = rows.iter().map(|group| group.org_id).collect();
-    let places = view::qualified_refs(conn, principal, &places, Policy::default()).await?;
-    for group in rows {
-        if let Some(place) = places
-            .get(&group.org_id)
-            .and_then(|place| place.name.as_deref())
-        {
-            names.insert(group.id, format!("{}, {place}", group.name));
-        }
-    }
-    Ok(names)
-}
-
-pub(super) async fn draft_names(
+/// The same private-draft labels, within the opening's admitted live name sources.
+pub(super) async fn draft_names_bounded(
     conn: &mut Conn,
     principal: &Principal,
     draft: &mut ChatDraft,
+    allowed: Option<&names::AllowSet>,
 ) -> ApiResult<()> {
+    draft_names_with_sources(conn, principal, draft, allowed).await?;
+    Ok(())
+}
+
+/// The native compact draft labels together with the current sources actually retained.
+pub(super) async fn draft_names_with_sources(
+    conn: &mut Conn,
+    principal: &Principal,
+    draft: &mut ChatDraft,
+    allowed: Option<&names::AllowSet>,
+) -> ApiResult<names::AllowSet> {
     let targets: Vec<_> = draft
         .parts
         .iter()
@@ -221,9 +260,9 @@ pub(super) async fn draft_names(
             ChatMentionTarget::Agent { thread_id } => nodes.push(*thread_id),
         }
     }
-    let names = lookups(conn, principal, &people, &nodes, &groups).await?;
-    draft.mention_names = views::mention_names(&targets, &names);
-    Ok(())
+    let names = names::lookups(conn, principal, &people, &nodes, &groups, &[], allowed).await?;
+    draft.mention_names = views::mention_names(&targets, &names.lookups);
+    Ok(names.sources)
 }
 
 async fn preview(
@@ -231,32 +270,49 @@ async fn preview(
     (): (),
     body: ChatMentionPreviewBody,
 ) -> ApiResult<ChatMentionPreviewReply> {
+    let caller = ctx
+        .admitted_caller()
+        .cloned()
+        .ok_or_else(|| ApiError::internal("the mention preview has no admitted caller"))?;
+    match preview_once(ctx.clone(), body).await {
+        Ok(value) => Ok(value),
+        Err(error) => {
+            let mut conn = ctx.app.db.acquire().await?;
+            // An ordinary provider/model-use refusal can contain labels outside
+            // this Read result. Reuse the same current-caller Problem boundary;
+            // no restored caller is loaned back into the native trial.
+            super::operation::project_current_result(&ctx, &mut conn, &caller, Err(error)).await
+        }
+    }
+}
+
+async fn preview_once(
+    mut ctx: Ctx,
+    body: ChatMentionPreviewBody,
+) -> ApiResult<ChatMentionPreviewReply> {
     let id = ctx.id("id")?;
-    let (ctx, mut tx, principal) = crate::routes::nodes::action(&ctx).await?;
-    let work = Work {
-        principal,
-        origin: origin(&ctx),
-        now: ctx.now,
-    };
-    let mut chat = load(&mut tx, &work, id, Mode::Read).await?;
-    work.refuse(&mut tx, Some(id), chat.ensure_send()).await?;
-    work.refuse(&mut tx, Some(id), messages::check_parts(&body.parts, None))
-        .await?;
+    let (mut tx, mut guard) = transaction_guard::begin(&ctx).await?;
     let targets = asking::targets(&body.parts)?;
     if !targets.is_empty() {
         asking::lock_threads(&mut tx, &asking::locks(&body.parts, &targets)).await?;
-        chat.lock(&mut tx).await.map_err(ApiError::internal)?;
+        rows::lock(&mut tx, id)
+            .await?
+            .ok_or_else(ApiError::not_found)?;
+        // The same operation, current source paths and current ordinary actor
+        // are resolved after the actual sorted recipient/quote/Chat waits.
+        ctx.now = ctx.app.clock.now();
+        guard = transaction_guard::check_conn(&ctx, &mut tx).await?;
     }
-    let result = orch_chat::mentions::resolve(
-        &mut tx,
-        &work.acting(),
-        &chat,
-        &body.parts,
-        Some(work.principal.user()),
-    )
-    .await;
-    let named = work.refuse(&mut tx, Some(id), result).await?;
-    let count = i64::try_from(named.users.len()).map_err(ApiError::internal)?;
+    let sources = guard.operation_data::<super::mention_operation::PreviewSources>()?;
+    let work = Work {
+        projection_ctx: ctx.clone(),
+        principal: guard.principal().clone(),
+        now: guard.now().get(),
+        origin: origin(&ctx),
+    };
+    let loaded = chats::load(&mut tx, &work.acting(), id, Mode::Read).await;
+    let mut chat = super::operation::refuse(&work, &mut tx, id, loaded).await?;
+    let count = sources.count;
     if !targets.is_empty() {
         let review = asking::review(
             &mut tx,
@@ -268,21 +324,30 @@ async fn preview(
         )
         .await?;
         let masking = redactor(&mut tx, &work, &chat).await?;
-        let written = messages::post(
+        rows::begin_mention_preview(&mut tx).await?;
+        let written = messages::post_with_blob_origins(
             &mut tx,
             &work.acting(),
             &mut chat,
             Post {
-                parts: body.parts,
+                parts: body.parts.clone(),
                 reply_to: body.reply_to,
                 client_id: format!("agent-preview:{}", orch_types::new_id()),
             },
             &masking,
+            &sources.blobs,
         )
         .await;
-        let written = work.refuse(&mut tx, Some(id), written).await?;
-        let done =
-            asking::forward_message(&ctx, &mut tx, &work, &written.message, &targets).await?;
+        let written = super::operation::refuse(&work, &mut tx, id, written).await?;
+        let done = asking::forward_message(
+            &ctx,
+            &mut tx,
+            &work,
+            &written.message,
+            &targets,
+            Some(&sources.names),
+        )
+        .await?;
         let agent_asks = review
             .receivers
             .into_iter()
@@ -301,8 +366,32 @@ async fn preview(
                 })
             })
             .collect::<ApiResult<Vec<_>>>()?;
-        // The actual normal producer validated this input; none of its writes or wakes survive a preview.
-        tx.rollback().await.map_err(DbError::from)?;
+        // The trial must not become its own fresh byte/custody source during
+        // final admission. Remove all of it before repeating the current Read.
+        rows::discard_mention_preview(&mut tx).await?;
+        ctx.now = ctx.app.clock.now();
+        let current = transaction_guard::check_conn(&ctx, &mut tx).await?;
+        let current_sources =
+            current.operation_data::<super::mention_operation::PreviewSources>()?;
+        let current_review = asking::review(
+            &mut tx,
+            current.principal(),
+            id,
+            &body.parts,
+            body.reply_to,
+            &targets,
+        )
+        .await?;
+        if !sources.names.is_subset(&current_sources.names)
+            || sources.blobs != current_sources.blobs
+            || review.fingerprint != current_review.fingerprint
+        {
+            return Err(DbError::Retry.into());
+        }
+        // Only outer read/authority bookkeeping commits through its normal epoch
+        // fence. No post/input/pin/audit/outbox/notification or wake survives;
+        // the native writer's Finished value is never handed to after_forward.
+        tx.commit().await.map_err(DbError::from)?;
         return Ok(ChatMentionPreviewReply {
             count,
             agent_asks,

@@ -7,6 +7,12 @@
 //! written and is counted in `index.md`. The images and files that a chat or a document carries are not part of
 //! what is made here: they are bytes of the blob store.
 
+mod scope;
+use crate::operation_scope::targets;
+use orch_authz::engine::Graph;
+use scope::record;
+pub use scope::{PreparedCopy, PreparedWritings, Scope, SourceBinding};
+
 use crate::error::EngineError;
 use crate::sharing::{Found, ShareError, Subject};
 use crate::tools::read::document_written;
@@ -72,6 +78,9 @@ struct Surroundings {
     chats: HashMap<Id, (Id, i64)>,
     documents: HashMap<Id, Vec<(Id, String)>>,
     cut_short: bool,
+    scoped: bool,
+    names: HashMap<Id, SourceBinding>,
+    content: Vec<SourceBinding>,
 }
 
 /// Lays `bytes` out as a file and lists it.
@@ -127,6 +136,49 @@ impl crate::engine::Engine {
         include: &ShareParts,
         as_of: Time,
     ) -> Result<Files, ShareError> {
+        Ok(self
+            .files_of_copy_in(conn, principal, found, include, as_of, None)
+            .await?
+            .files)
+    }
+
+    /// The same copy walk, restricted before any body or output name is materialized.
+    pub async fn files_of_copy_scoped(
+        &self,
+        conn: &mut Conn,
+        principal: &Principal,
+        found: &Found,
+        include: &ShareParts,
+        as_of: Time,
+        scope: Scope<'_>,
+    ) -> Result<PreparedCopy, ShareError> {
+        self.files_of_copy_in(conn, principal, found, include, as_of, Some(scope))
+            .await
+    }
+
+    #[allow(
+        clippy::too_many_arguments,
+        reason = "the existing copy inputs plus one trusted operation boundary"
+    )]
+    async fn files_of_copy_in(
+        &self,
+        conn: &mut Conn,
+        principal: &Principal,
+        found: &Found,
+        include: &ShareParts,
+        as_of: Time,
+        scope: Option<Scope<'_>>,
+    ) -> Result<PreparedCopy, ShareError> {
+        let mut sources = Vec::new();
+        // A requested root is required, unlike optional descendants. Parent admission uses the
+        // same current source identity; this also prevents a raw root title entering the index.
+        if let Some(scope) = scope {
+            let root = scope
+                .subject(conn, found.subject)
+                .await?
+                .ok_or(ShareError::NotFound)?;
+            record(&mut sources, &root);
+        }
         let mut out = Files::default();
         let mut listed: Vec<Listed> = Vec::new();
         let mut cut_short = false;
@@ -172,16 +224,16 @@ impl crate::engine::Engine {
                 } else {
                     "chat.md".to_owned()
                 };
-                let read = written::read_chat_in(
-                    conn,
-                    chat,
-                    &title,
-                    (None, None),
-                    Detail::Normal,
-                    None,
-                    Some(&written::files_beside(&name)),
-                )
-                .await?;
+                let read = self
+                    .copy_chat(
+                        conn,
+                        chat,
+                        &title,
+                        Some(&written::files_beside(&name)),
+                        scope,
+                        &mut sources,
+                    )
+                    .await?;
                 put(
                     &mut out,
                     &mut listed,
@@ -191,7 +243,12 @@ impl crate::engine::Engine {
                 );
             }
             Subject::Node(node) => {
-                let around = self.surroundings(conn, principal, node, include).await?;
+                let around = self
+                    .surroundings(conn, principal, node, include, scope)
+                    .await?;
+                for source in &around.content {
+                    record(&mut sources, source);
+                }
                 cut_short = around.cut_short;
                 let root = around
                     .places
@@ -213,6 +270,8 @@ impl crate::engine::Engine {
                     &tree_name(root.slug.as_deref().unwrap_or(&root.name)),
                     &mut out,
                     &mut listed,
+                    &mut sources,
+                    scope,
                 )
                 .await?;
                 out.left_out = around_left_out(&around, include, conn).await?;
@@ -233,7 +292,55 @@ impl crate::engine::Engine {
             path: INDEX.to_owned(),
             bytes: index.into_bytes(),
         });
-        Ok(out)
+        Ok(PreparedCopy {
+            files: out,
+            sources,
+        })
+    }
+
+    async fn copy_chat(
+        &self,
+        conn: &mut Conn,
+        chat: Id,
+        title: &str,
+        files: Option<&str>,
+        scope: Option<Scope<'_>>,
+        sources: &mut Vec<SourceBinding>,
+    ) -> Result<written::Read, ShareError> {
+        let Some(scope) = scope else {
+            return Ok(written::read_chat_in(
+                conn,
+                chat,
+                title,
+                (None, None),
+                Detail::Normal,
+                None,
+                files,
+            )
+            .await?);
+        };
+        let ids = written::chat_name_sources(conn, chat).await?;
+        let mut permitted = HashMap::new();
+        if !ids.is_empty() {
+            let graph = Graph::load(conn, &ids).await?;
+            for id in ids {
+                if let Some(site) = graph.site_of(id)
+                    && let Some(target) = targets::from_site(&graph, &site)
+                    && let Some(binding) = scope.binding(target)?
+                {
+                    permitted.insert(id, binding);
+                }
+            }
+        }
+        let allowed = permitted.keys().copied().collect();
+        let (read, used) =
+            written::read_copy_chat_with_names(conn, chat, title, files, &allowed).await?;
+        for id in used {
+            if let Some(binding) = permitted.get(&id) {
+                record(sources, binding);
+            }
+        }
+        Ok(read)
     }
 
     /// The places of a copy and what the person may read in them.
@@ -243,6 +350,7 @@ impl crate::engine::Engine {
         principal: &Principal,
         node: Id,
         include: &ShareParts,
+        scope: Option<Scope<'_>>,
     ) -> Result<Surroundings, ShareError> {
         let root = rows::places(conn, &[node])
             .await
@@ -257,6 +365,32 @@ impl crate::engine::Engine {
         let mut places = vec![root];
         places.extend(below);
         let ids: Vec<Id> = places.iter().map(|place| place.id).collect();
+        let mut graph = if scope.is_some() {
+            Some(Graph::load(conn, &ids).await?)
+        } else {
+            None
+        };
+        let mut names = HashMap::new();
+        let mut content = Vec::new();
+        if let (Some(scope), Some(graph)) = (scope, graph.as_ref()) {
+            for place in &mut places {
+                let binding = graph
+                    .site_of(place.id)
+                    .and_then(|site| targets::from_site(graph, &site))
+                    .map(|target| scope.binding(target))
+                    .transpose()?
+                    .flatten();
+                if let Some(binding) = binding {
+                    names.insert(place.id, binding);
+                } else {
+                    // Directory structure can lead to an explicitly permitted descendant. Its
+                    // ungranted labels contribute only a stable opaque identity, never its name/slug.
+                    place.name = place.id.to_string();
+                    place.slug = None;
+                    place.description.clear();
+                }
+            }
+        }
         let mut readable_threads: HashSet<Id> = HashSet::new();
         if include.timeline.is_some() {
             let threads: Vec<Id> = places
@@ -290,6 +424,12 @@ impl crate::engine::Engine {
             .map(|listed| listed.id)
             .collect();
             readable_threads.retain(|thread| exportable.contains(thread));
+            if scope.is_some() {
+                readable_threads.retain(|thread| names.contains_key(thread));
+                for thread in &readable_threads {
+                    record(&mut content, &names[thread]);
+                }
+            }
         }
         let mut chats: HashMap<Id, (Id, i64)> = HashMap::new();
         if include.chat.is_some() {
@@ -323,6 +463,26 @@ impl crate::engine::Engine {
                 .map_err(EngineError::from)?
             {
                 if chat.messages > 0 && readable.contains(&chat.node_id) {
+                    if let (Some(scope), Some(graph)) = (scope, graph.as_ref()) {
+                        let Some(site) = graph.site_of(chat.node_id) else {
+                            continue;
+                        };
+                        let Some(mut target) = targets::from_site(graph, &site) else {
+                            continue;
+                        };
+                        // The relationship is the actual row returned by chats_of_nodes, not the
+                        // node's identity substituted for the chat.
+                        target.object = orch_access_contract::key_scope::KeyObjectRef {
+                            kind: orch_access_contract::key_scope::KeyTargetKind::Identity(
+                                orch_access_contract::key_scope::KeyIdentityKind::Chat,
+                            ),
+                            id: Some(chat.chat_id),
+                        };
+                        let Some(binding) = scope.binding(target)? else {
+                            continue;
+                        };
+                        record(&mut content, &binding);
+                    }
                     chats.insert(chat.node_id, (chat.chat_id, chat.messages));
                 }
             }
@@ -334,10 +494,35 @@ impl crate::engine::Engine {
                 .map_err(EngineError::from)?;
             let listed =
                 document_access::listed(conn, principal, &beside, Policy::default()).await?;
+            // Reuse one factual graph/document ancestry batch for every candidate.
+            let document_facts = if let Some(graph) = graph.as_mut() {
+                document_access::read_into(conn, graph, &beside)
+                    .await?
+                    .into_iter()
+                    .map(|document| (document.id, document))
+                    .collect::<HashMap<_, _>>()
+            } else {
+                HashMap::new()
+            };
             for each in listed
                 .into_iter()
                 .filter(|each| each.holds(Permission::DocView) && each.holds(Permission::DocExport))
             {
+                if let (Some(scope), Some(graph)) = (scope, graph.as_ref()) {
+                    let Some(document) = document_facts.get(&each.document.id) else {
+                        continue;
+                    };
+                    let Some(site) = document_access::site_of(graph, document) else {
+                        continue;
+                    };
+                    let Some(target) = targets::from_site(graph, &site) else {
+                        continue;
+                    };
+                    let Some(binding) = scope.binding(target)? else {
+                        continue;
+                    };
+                    record(&mut content, &binding);
+                }
                 if let Some(row) = document_rows::get(conn, each.document.id)
                     .await
                     .map_err(EngineError::from)?
@@ -355,6 +540,9 @@ impl crate::engine::Engine {
             chats,
             documents,
             cut_short,
+            scoped: scope.is_some(),
+            names,
+            content,
         })
     }
 
@@ -372,9 +560,12 @@ impl crate::engine::Engine {
         directory: &'a str,
         out: &'a mut Files,
         listed: &'a mut Vec<Listed>,
+        sources: &'a mut Vec<SourceBinding>,
+        scope: Option<Scope<'a>>,
     ) -> std::pin::Pin<Box<dyn std::future::Future<Output = Result<(), ShareError>> + Send + 'a>>
     {
         Box::pin(async move {
+            let before = out.files.len();
             if place.kind == "thread" && around.readable_threads.contains(&place.id) {
                 let read =
                     written::read_conversation(conn, place.id, (None, None), Detail::Normal, None)
@@ -389,15 +580,9 @@ impl crate::engine::Engine {
                 );
             }
             if let Some((chat, _)) = around.chats.get(&place.id) {
-                let read = written::read_chat(
-                    conn,
-                    *chat,
-                    &place.name,
-                    (None, None),
-                    Detail::Normal,
-                    None,
-                )
-                .await?;
+                let read = self
+                    .copy_chat(conn, *chat, &place.name, None, scope, sources)
+                    .await?;
                 put(
                     out,
                     listed,
@@ -450,8 +635,15 @@ impl crate::engine::Engine {
                         &format!("{directory}/{name}"),
                         out,
                         listed,
+                        sources,
+                        scope,
                     )
                     .await?;
+                }
+            }
+            if around.scoped && out.files.len() > before {
+                if let Some(binding) = around.names.get(&place.id) {
+                    record(sources, binding);
                 }
             }
             Ok(())
@@ -586,6 +778,61 @@ impl crate::engine::Engine {
             .flat_map(orch_documents::references::typed_in)
             .collect();
         Ok(self.writings_for(conn, thread, &wanted).await?)
+    }
+
+    /// Resolves only reference identities and path-name sources permitted by the same operation,
+    /// then applies the recipient's unchanged normal reach. No name/path is scrubbed after lookup.
+    pub async fn copy_writings_scoped(
+        &self,
+        conn: &mut Conn,
+        thread: Id,
+        original: &Files,
+        scope: Scope<'_>,
+    ) -> Result<PreparedWritings, ShareError> {
+        if !scope.restricted() {
+            return Ok(PreparedWritings {
+                writings: self.copy_writings(conn, thread, original).await?,
+                sources: Vec::new(),
+            });
+        }
+        let topic = orch_db::queries::threads::thread(conn, thread)
+            .await
+            .map_err(EngineError::from)?
+            .map(|row| row.topic_id);
+        let wanted: Vec<_> = original
+            .files
+            .iter()
+            .filter(|file| file.path.ends_with(".md"))
+            .filter_map(|file| std::str::from_utf8(&file.bytes).ok())
+            .flat_map(orch_documents::references::typed_in)
+            .collect();
+        let mut seen = HashSet::new();
+        let mut permitted = Vec::new();
+        let mut bindings = HashMap::new();
+        for typed in wanted {
+            if seen.len() >= crate::tools::references::WRITTEN_MAX {
+                break;
+            }
+            if !seen.insert(typed.clone()) {
+                continue;
+            }
+            if let Some(sources) = scope.reference(conn, &typed, topic).await? {
+                bindings.insert(typed.clone(), sources);
+                permitted.push(typed);
+            }
+        }
+        let writings = self.writings_for(conn, thread, &permitted).await?;
+        let mut sources = Vec::new();
+        for (typed, writing) in &writings {
+            if matches!(writing, orch_documents::references::Writing::Link { .. })
+                && let Some(used) = bindings.get(typed)
+            {
+                for binding in used {
+                    record(&mut sources, binding);
+                }
+            }
+        }
+        Ok(PreparedWritings { writings, sources })
     }
 
     /// A snapshot measured or read in one recipient's namespace.

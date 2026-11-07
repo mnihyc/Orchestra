@@ -247,14 +247,16 @@ next; a held input remains in the queue.
 Whoever holds permission to make a limit exception may confirm one turn after reading its
 current use. That named human act is counted and recorded. An agent or an
 automatic input cannot give itself a limit exception. A provider reset is a separate
-vendor action: only its managers can request it, in a browser session, after
-the confirmation names the available reset being consumed.
+vendor action: its managers request it after the confirmation names the available
+reset being consumed. An automation key needs that same reset operation explicitly
+selected for the provider and must supply the same confirmation.
 
 ## Tokens and security
 
-Your security page manages sign-in and API tokens. Token scopes and place
-boundaries restrict requests; a token does not carry browser-only system-admin
-authority. Refuse here blocks it at the current place. Take out everywhere here
+Your security page manages sign-in and automation keys. Bound operation/action/target
+rules restrict each key, together with your current permissions. Ordinary administration
+requires an explicit operation selection and current standing; the browser's private-access
+override remains unavailable to keys. Refuse here blocks it at the current place. Take out everywhere here
 has the broader scope stated by the confirmation. Suspensions end access at
 their scope and are reversible; they do not transfer ownership by themselves.
 

@@ -122,6 +122,7 @@ struct Plan {
     environment: Id,
     include: Vec<String>,
     exclude: Vec<String>,
+    origin: Option<crate::commands::SnapshotRequest>,
 }
 
 impl Plan {
@@ -146,11 +147,29 @@ impl Plan {
                 })
                 .unwrap_or_default()
         };
+        let origin = crate::commands::SnapshotRequest::from_job(job)?;
+        let (snapshot, environment, include, exclude) = if let Some(source) = &origin {
+            // Invalid mutable recipe fields must not redirect native undo to another Snapshot.
+            (
+                source.snapshot_for(job.id)?,
+                source.environment(),
+                source.selection().include.clone(),
+                source.selection().exclude.clone(),
+            )
+        } else {
+            (
+                id("snapshot_id")?,
+                id("environment_id")?,
+                list("include"),
+                list("exclude"),
+            )
+        };
         Ok(Self {
-            snapshot: id("snapshot_id")?,
-            environment: id("environment_id")?,
-            include: list("include"),
-            exclude: list("exclude"),
+            snapshot,
+            environment,
+            include,
+            exclude,
+            origin,
         })
     }
 }
@@ -163,54 +182,73 @@ impl Engine {
         conn: &mut Conn,
         asked: &Asked,
     ) -> Result<Begun, EngineError> {
+        self.begin_snapshot_before(conn, asked, None, || Ok(()))
+            .await
+    }
+
+    /// The same native creator with immutable original provenance and its actual first INSERT cut.
+    pub async fn begin_snapshot_before(
+        &self,
+        conn: &mut Conn,
+        asked: &Asked,
+        origin: Option<&crate::commands::SnapshotRequest>,
+        before: impl FnOnce() -> Result<(), Box<dyn std::error::Error + Send + Sync>>,
+    ) -> Result<Begun, EngineError> {
         let now = self.inner.clock.now();
         let snapshot = new_id();
+        let job_id = new_id();
         let selection = json!({ "include": asked.include, "exclude": asked.exclude });
-        storage::begin_snapshot(
-            conn,
-            &NewSnapshot {
-                id: snapshot,
-                thread_id: asked.thread,
-                environment_id: asked.environment,
-                env_generation: asked.generation,
-                label: &asked.label,
-                selection: &selection,
-                created_by: asked.created_by,
-                at: now,
-            },
-        )
-        .await?;
-        let plan = json!({
+        let mut plan = json!({
             "snapshot_id": snapshot,
             "environment_id": asked.environment,
             "thread_id": asked.thread,
             "workspace_export": asked.thread.is_none(),
             "selection": selection,
         });
-        let progress = serde_json::to_value(initial_progress(&PHASES))?;
-        let job = rows::insert(
-            conn,
-            &NewJob {
-                id: new_id(),
-                kind: kind::SNAPSHOT,
-                node_id: asked.thread,
-                environment_id: Some(asked.environment),
-                provider_id: None,
-                plan: &plan,
-                progress: &progress,
-                created_by: asked.created_by,
-            },
-            now,
-        )
-        .await?;
-        // The sweep looks once the caller's transaction has had time to commit: before that it would
-        // find nothing and wait out its whole interval.
-        let engine = self.clone();
-        tokio::spawn(async move {
-            tokio::time::sleep(engine.inner.config.post_commit_grace).await;
-            engine.kick();
-        });
-        Ok(Begun { job, snapshot })
+        crate::commands::snapshot_origin::with_origin(&mut plan, asked, origin, snapshot, job_id)?;
+        before().map_err(EngineError::BeforeEffect)?;
+        let result: Result<Begun, EngineError> = async {
+            storage::begin_snapshot(
+                conn,
+                &NewSnapshot {
+                    id: snapshot,
+                    thread_id: asked.thread,
+                    environment_id: asked.environment,
+                    env_generation: asked.generation,
+                    label: &asked.label,
+                    selection: &selection,
+                    created_by: asked.created_by,
+                    at: now,
+                },
+            )
+            .await?;
+            let progress = serde_json::to_value(initial_progress(&PHASES))?;
+            let job = rows::insert(
+                conn,
+                &NewJob {
+                    id: job_id,
+                    kind: kind::SNAPSHOT,
+                    node_id: asked.thread,
+                    environment_id: Some(asked.environment),
+                    provider_id: None,
+                    plan: &plan,
+                    progress: &progress,
+                    created_by: asked.created_by,
+                },
+                now,
+            )
+            .await?;
+            // The sweep looks once the caller's transaction has had time to commit: before that it would
+            // find nothing and wait out its whole interval.
+            let engine = self.clone();
+            tokio::spawn(async move {
+                tokio::time::sleep(engine.inner.config.post_commit_grace).await;
+                engine.kick();
+            });
+            Ok(Begun { job, snapshot })
+        }
+        .await;
+        result
     }
 }
 
@@ -278,9 +316,18 @@ impl Snapshotting {
                 .acquire()
                 .await
                 .map_err(EngineError::from)?;
-            match environment_rows::environment(&mut conn, self.plan.environment).await? {
-                Some(environment) if environment.deleted_at.is_none() => environment.machine_id,
-                _ => None,
+            if let Some(machine) = self
+                .plan
+                .origin
+                .as_ref()
+                .and_then(crate::commands::SnapshotRequest::machine)
+            {
+                Some(machine)
+            } else {
+                match environment_rows::environment(&mut conn, self.plan.environment).await? {
+                    Some(environment) if environment.deleted_at.is_none() => environment.machine_id,
+                    _ => None,
+                }
             }
         };
         let Some(machine) = machine else {
@@ -304,6 +351,23 @@ impl Snapshotting {
             },
         )
         .map_err(|error| Stop::Failed(Failure::new(INTERNAL, error.to_string())))?;
+        let mut command = job.prepare_command(command).await?;
+        if let Some(origin) = &self.plan.origin {
+            let row = job.row().await?;
+            let mut conn = self
+                .engine
+                .inner
+                .db
+                .acquire()
+                .await
+                .map_err(EngineError::from)?;
+            let authority =
+                crate::commands::SnapshotCommand::capture(&mut conn, &row, origin, &command)
+                    .await?;
+            command.authority = Some(crate::commands::CommandAuthority::snapshot_creation(
+                authority,
+            ));
+        }
         let answer = job.command(command).await?;
         let taken: FsSnapshotResult = serde_json::from_value(answer)
             .map_err(|error| Stop::Failed(Failure::new(INTERNAL, error.to_string())))?;

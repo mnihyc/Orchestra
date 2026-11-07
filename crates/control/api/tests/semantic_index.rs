@@ -152,6 +152,8 @@ async fn document(s: &Scene, title: &str, markdown: &str) -> Id {
         .send()
         .await
         .ok()
+        .into_full()
+        .unwrap()
         .base
         .id
 }
@@ -895,3 +897,6 @@ async fn switching_off_an_embeddings_provider_stops_its_batch_and_keeps_stored_s
     );
     assert_eq!(s.rig.commands.issued_of("provider.embed"), before);
 }
+
+#[path = "semantic_index/administration.rs"]
+mod administration;

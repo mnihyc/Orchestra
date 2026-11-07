@@ -166,7 +166,7 @@ async fn granted_pages_keep_ancestors_and_subtrees_and_names_do_not_change_when_
 }
 
 #[tokio::test]
-async fn project_policy_expands_only_that_project_and_conversation_age_uses_maintained_thread_activity()
+async fn a_project_share_reaches_only_that_project_and_conversation_age_uses_maintained_thread_activity()
  {
     let world = a_world_whose_agent_takes_tools().await;
     let mine = world.thread("Reader").await;
@@ -175,9 +175,7 @@ async fn project_policy_expands_only_that_project_and_conversation_age_uses_main
     let far_project = world.project_in_root("Other project").await;
     let far_topic = world.topic_in(far_project, "Outside").await;
     let far = thread_in_topic(&world, far_topic, "Far peer").await;
-    world
-        .set(world.topic, "sharing.agent_reach", json!("project"))
-        .await;
+    share_threads_inside(&world, world.project, mine, false).await;
     let visible = ok(call(
         &world,
         mine,
@@ -231,7 +229,7 @@ async fn project_policy_expands_only_that_project_and_conversation_age_uses_main
 async fn a_reachable_subtree_follows_its_raw_pages_and_keeps_both_ends_of_the_old_limit() {
     let world = a_world_whose_agent_takes_tools().await;
     let mine = world.thread("Reader").await;
-    // One beyond the former candidate cap, all genuinely inside the implicit topic.
+    // One beyond the former candidate cap, all inside the explicitly shared topic.
     const COUNT: i64 = 20_001;
     let mut conn = world.pool.acquire().await.unwrap();
     sqlx::query("INSERT INTO nodes(id,kind,parent_id,org_id,path,name,owner_id,created_by,created_at,updated_at)
@@ -252,6 +250,7 @@ async fn a_reachable_subtree_follows_its_raw_pages_and_keeps_both_ends_of_the_ol
             .all(|pair| (pair[0].created_at, pair[0].id) > (pair[1].created_at, pair[1].id))
     );
     drop(conn);
+    share_threads_inside(&world, world.topic, mine, false).await;
     let newest = ok(call(&world, mine, OrchTool::ListShared,
         json!({"path":format!("id:{}",world.topic),"names":"Bound *","depth":1,"limit":1,"sort":"changed"})).await);
     assert_eq!(newest["entries"][0]["name"], "Bound 20001");

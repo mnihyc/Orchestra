@@ -474,14 +474,7 @@ async fn apply_with_tree(
         return Ok(Outcome::Gone);
     };
     if let (Writer::User(author), Some(client)) = (writer, client_id) {
-        let seen: Option<i64> = sqlx::query_scalar(
-            "SELECT seq FROM document_ops WHERE document_id = $1 AND author_id = $2 AND client_id = $3",
-        )
-        .bind(document)
-        .bind(author)
-        .bind(client)
-        .fetch_optional(&mut *conn)
-        .await?;
+        let seen = repeated_seq(conn, document, *author, client).await?;
         if let Some(seq) = seen {
             return Ok(Outcome::Repeated { seq });
         }
@@ -664,6 +657,24 @@ async fn refused(conn: &mut Conn, document: Id, refusal: Refusal) -> Result<Outc
             format!("the block {id} could not be read"),
         )]),
     })
+}
+
+/// The ordinary batch's exact person/client receipt. A repeated request executes none of its new
+/// operations, so operation preparation must not treat replacement-body references as fresh reads.
+pub async fn repeated_seq(
+    conn: &mut Conn,
+    document: Id,
+    author: Id,
+    client: Id,
+) -> Result<Option<Seq>, DbError> {
+    Ok(sqlx::query_scalar(
+        "SELECT seq FROM document_ops WHERE document_id=$1 AND author_id=$2 AND client_id=$3",
+    )
+    .bind(document)
+    .bind(author)
+    .bind(client)
+    .fetch_optional(conn)
+    .await?)
 }
 
 /// The blocks stamped with exactly `seq`: what the batch that led to it touched,

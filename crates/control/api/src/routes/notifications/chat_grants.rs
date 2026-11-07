@@ -23,8 +23,14 @@ use orch_types::Id;
 
 use super::person;
 
+mod operation;
+
 pub(super) fn mount(registry: &mut Registry) {
-    registry.on(ChatPersonGrant, grant);
+    registry.on_with_operation(
+        ChatPersonGrant,
+        crate::key_operations::native::effects::prepare::<operation::Grant>,
+        grant,
+    );
 }
 
 /// What the sender may grant to this non-reader without widening the chat's reach.
@@ -139,6 +145,7 @@ async fn give_node_chat(
     node: Id,
     user: Id,
     choice: AccessChoice,
+    boundary: &operation::Boundary<'_>,
 ) -> ApiResult<()> {
     let mut rows = vec![row(Permission::ChatView, user)];
     if choice == AccessChoice::FullInteract {
@@ -152,18 +159,22 @@ async fn give_node_chat(
         .await?
         .map(|thread| thread.owner_id);
     let policy = policy_at(conn, node).await?;
-    let changed = match pages::change(
+    let changed = match pages::change_fenced(
         conn,
         principal,
         Target::Live(node),
         &change,
         policy,
         &origin(ctx),
+        || boundary.check(),
     )
     .await
     {
         Ok(value) => value,
-        Err(error) => return Err(refusals::change_failed(conn, error).await),
+        Err(pages::EffectFailure::BeforeEffect(error)) => return Err(error),
+        Err(pages::EffectFailure::Native(error)) => {
+            return Err(refusals::change_failed(conn, error).await);
+        }
     };
     if changed.changed {
         hierarchy::stamp(conn, node).await?;
@@ -192,6 +203,7 @@ async fn give_group_chat(
     chat: &rows::ChatRow,
     user: Id,
     choice: AccessChoice,
+    boundary: &operation::Boundary<'_>,
 ) -> ApiResult<()> {
     if choice != AccessChoice::FullInteract {
         return Err(invalid("choice", "a group member may participate"));
@@ -212,30 +224,33 @@ async fn give_group_chat(
         .await
         .map_err(ApiError::internal)?
         .unwrap_or(true);
-    match chats::add_member(conn, &act, &mut loaded, user, outsiders).await {
-        Ok(()) => Ok(()),
+    let prepared = match chats::prepare_add_member(conn, &act, &mut loaded, user, outsiders, None)
+        .await
+    {
+        Ok(prepared) => prepared,
         Err(error) => {
+            return Err(crate::routes::chats::failed(conn, principal, Some(chat.id), error).await);
+        }
+    };
+    match chats::apply_add_member_before(conn, &act, &mut loaded, prepared, || boundary.check())
+        .await
+    {
+        Ok(()) => Ok(()),
+        Err(pages::EffectFailure::BeforeEffect(error)) => Err(error),
+        Err(pages::EffectFailure::Native(error)) => {
             Err(crate::routes::chats::failed(conn, principal, Some(chat.id), error).await)
         }
     }
 }
 
-async fn grant(mut ctx: Ctx, (): (), body: ChatPersonGrantBody) -> ApiResult<()> {
-    if !matches!(
-        body.choice,
-        AccessChoice::FullView | AccessChoice::FullInteract
-    ) {
-        return Err(invalid("choice", "is view or edit"));
-    }
-    let (id, user) = (ctx.id("id")?, ctx.id("user_id")?);
-    let (mut tx, guard) = transaction_guard::begin(&ctx).await?;
-    ctx.now = guard.now().get();
-    let principal = guard.principal();
-    person::lock_sender(&mut tx, principal.user()).await?;
-    let target = person::target(&mut tx, "chats", id).await?;
-    if !person::reads(&mut tx, principal, &target).await? {
-        return Err(ApiError::not_found());
-    }
+async fn replayed(
+    ctx: &Ctx,
+    conn: &mut Conn,
+    principal: &Principal,
+    body: &ChatPersonGrantBody,
+    id: Id,
+    user: Id,
+) -> ApiResult<bool> {
     let key = ctx
         .headers
         .get(IDEMPOTENCY_HEADER)
@@ -243,12 +258,12 @@ async fn grant(mut ctx: Ctx, (): (), body: ChatPersonGrantBody) -> ApiResult<()>
         .map(str::trim)
         .filter(|value| !value.is_empty());
     let path = format!("/chats/{id}/permissions/people/{user}");
-    let written = serde_json::to_value(&body).map_err(ApiError::internal)?;
+    let written = serde_json::to_value(body).map_err(ApiError::internal)?;
     if let Some(key) = key {
         let hours =
             i64::try_from(ctx.app.config.api.idempotency_ttl_hours).map_err(ApiError::internal)?;
         if let Some(previous) = orch_db::idempotency::find(
-            &mut tx,
+            conn,
             principal.user(),
             key,
             ctx.now - chrono::Duration::hours(hours),
@@ -261,46 +276,69 @@ async fn grant(mut ctx: Ctx, (): (), body: ChatPersonGrantBody) -> ApiResult<()>
                     "the key was used for another request",
                 ));
             }
-            tx.commit().await.map_err(DbError::from)?;
-            return Ok(());
+            return Ok(true);
         }
     }
-    person::destination(&mut tx, &target, body.anchor).await?;
-    let chat = rows::chat(&mut tx, id)
-        .await?
-        .ok_or_else(ApiError::not_found)?;
-    orch_db::queries::transaction_guard::watch_standing(&mut tx).await?;
-    let can_read = person::person_reads(&mut tx, &target, user, principal.now()).await?;
-    let human = orch_db::queries::identity::user_by_id(&mut tx, user)
+    Ok(false)
+}
+
+async fn grant_on(
+    ctx: &Ctx,
+    conn: &mut Conn,
+    principal: &Principal,
+    value: &operation::Value,
+    boundary: &operation::Boundary<'_>,
+) -> ApiResult<()> {
+    if value.replay {
+        return Ok(());
+    }
+    let (id, user) = (value.chat.id, value.user);
+    let body = &value.body;
+    let target = person::Target::Chat(value.chat.clone());
+    let key = ctx
+        .headers
+        .get(IDEMPOTENCY_HEADER)
+        .and_then(|value| value.to_str().ok())
+        .map(str::trim)
+        .filter(|value| !value.is_empty());
+    let path = format!("/chats/{id}/permissions/people/{user}");
+    let written = serde_json::to_value(body).map_err(ApiError::internal)?;
+    person::destination(conn, &target, body.anchor).await?;
+    let chat = &value.chat;
+    orch_db::queries::transaction_guard::watch_standing(conn).await?;
+    let can_read = person::person_reads(conn, &target, user, principal.now()).await?;
+    let human = orch_db::queries::identity::user_by_id(conn, user)
         .await?
         .is_some_and(|row| row.kind == "human" && row.status == "active");
-    let (_, choices) = choices(&ctx, &mut tx, principal, &chat, user, can_read, human).await?;
+    let (_, choices) = choices(ctx, conn, principal, chat, user, can_read, human).await?;
     if !choices.contains(&body.choice) {
         return Err(invalid("choice", "is not available for this person"));
     }
     if let Some(node) = chat.node_id {
-        give_node_chat(&ctx, &mut tx, principal, node, user, body.choice).await?;
+        give_node_chat(ctx, conn, principal, node, user, body.choice, boundary).await?;
     } else if chat.kind == "group" {
-        give_group_chat(&ctx, &mut tx, principal, &chat, user, body.choice).await?;
+        give_group_chat(ctx, conn, principal, chat, user, body.choice, boundary).await?;
     } else {
         return Err(invalid("choice", "a direct chat cannot add another person"));
     }
     if body.notify {
-        person::tell(
-            &ctx,
-            &mut tx,
+        person::tell_before(
+            ctx,
+            conn,
             principal,
             "chats",
             id,
             &[user],
             body.anchor,
             None,
+            || boundary.check(),
         )
         .await?;
     }
     if let Some(key) = key {
+        boundary.check()?;
         orch_db::idempotency::keep(
-            &mut tx,
+            conn,
             principal.user(),
             key,
             &orch_db::idempotency::Replay {
@@ -313,6 +351,37 @@ async fn grant(mut ctx: Ctx, (): (), body: ChatPersonGrantBody) -> ApiResult<()>
         )
         .await?;
     }
-    tx.commit().await.map_err(DbError::from)?;
     Ok(())
+}
+
+async fn grant(ctx: Ctx, (): (), body: ChatPersonGrantBody) -> ApiResult<()> {
+    if !matches!(
+        body.choice,
+        AccessChoice::FullView | AccessChoice::FullInteract
+    ) {
+        return Err(invalid("choice", "is view or edit"));
+    }
+    let keyed = crate::middleware::authorization::caller_of(ctx.user()?)?
+        .grant()
+        .is_some();
+    let result: ApiResult<()> = async {
+        let (mut tx, _) = transaction_guard::begin(&ctx).await?;
+        let completed =
+            crate::key_operations::native::effects::apply::<operation::Grant>(&ctx, &mut tx)
+                .await?;
+        tx.commit().await.map_err(DbError::from)?;
+        Ok(completed.output)
+    }
+    .await;
+    if !keyed
+        || result
+            .as_ref()
+            .err()
+            .is_some_and(|error: &ApiError| error.code() == ErrorCode::RequestInvalid)
+    {
+        return result;
+    }
+    // This native empty acknowledgement has no existing-content error projection.
+    // Copied-subject Read cannot lend authority to named permission-page advice.
+    crate::middleware::authorization::projected_result(ctx, async move { result }, true).await
 }

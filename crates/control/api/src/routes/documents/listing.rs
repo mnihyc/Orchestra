@@ -1,9 +1,9 @@
 //! The private documents administered beside a place, paged by name without content.
 
 use orch_access_contract::permissions::Permission;
-use orch_api_contract::common::{HiddenItem, Listed, Page};
+use orch_api_contract::common::{HiddenItem, Listed};
 use orch_api_contract::documents::DocumentRef;
-use orch_authz::{Policy, Principal};
+use orch_authz::Policy;
 use orch_db::Conn;
 use orch_db::queries::documents as rows;
 use orch_types::Id;
@@ -42,12 +42,17 @@ pub(super) struct PrivateList {
 }
 
 /// Fills the room left by readable rows with minimal rows, under the same bounded scan as the readable list.
-pub(super) async fn append(
+pub(super) struct PrivateRows {
+    pub rows: Vec<rows::DocumentNameRow>,
+    pub next_cursor: Option<String>,
+}
+
+pub(super) async fn select(
     conn: &mut Conn,
-    principal: &Principal,
+    reader: &mut super::list_read::Reader<'_>,
     request: PrivateList,
-    mut items: Vec<Listed<DocumentRef>>,
-) -> ApiResult<Page<Listed<DocumentRef>>> {
+    shown: usize,
+) -> ApiResult<PrivateRows> {
     let mut offset = request.offset;
     let mut exhausted = false;
     let mut more = false;
@@ -58,19 +63,23 @@ pub(super) async fn append(
                 .await?;
         exhausted = i64::try_from(found.len()).unwrap_or(i64::MAX) <= request.limit;
         let ids: Vec<Id> = found.iter().map(|row| row.id).collect();
-        let standing = orch_authz::documents::listed(conn, principal, &ids, Policy::default())
-            .await
-            .map_err(ApiError::internal)?
-            .into_iter()
-            .map(|held| (held.document.id, held))
-            .collect::<std::collections::HashMap<_, _>>();
+        let allowed = reader.accept(conn, &ids).await?;
+        let ids: Vec<_> = ids.into_iter().filter(|id| allowed.contains(id)).collect();
+        let standing = if ids.is_empty() {
+            std::collections::HashMap::new()
+        } else {
+            orch_authz::documents::listed(conn, reader.principal()?, &ids, Policy::default())
+                .await
+                .map_err(ApiError::internal)?
+                .into_iter()
+                .map(|held| (held.document.id, held))
+                .collect()
+        };
         for row in found {
             let private = standing.get(&row.id).is_some_and(|held| {
                 !held.holds(Permission::DocView) && held.holds(Permission::AccessManage)
             });
-            if private
-                && i64::try_from(items.len() + hidden.len()).unwrap_or(i64::MAX) == request.limit
-            {
+            if private && i64::try_from(shown + hidden.len()).unwrap_or(i64::MAX) == request.limit {
                 more = true;
                 break;
             }
@@ -85,19 +94,31 @@ pub(super) async fn append(
             break;
         }
     }
+    Ok(PrivateRows {
+        rows: hidden,
+        next_cursor: (more || !exhausted).then(|| format!("{PRIVATE_CURSOR}{offset}")),
+    })
+}
+
+/// The existing minimal private-row renderer, without content or activity facts.
+pub(super) async fn render(
+    conn: &mut Conn,
+    hidden: &[rows::DocumentNameRow],
+) -> ApiResult<Vec<Listed<DocumentRef>>> {
     let owners: Vec<Id> = hidden.iter().map(|row| row.owner_id).collect();
     let owners = refusals::user_refs(conn, &owners).await?;
-    items.extend(hidden.into_iter().map(|row| {
-        Listed::hidden(HiddenItem {
-            id: row.id,
-            parent_id: Some(row.node_id),
-            kind: "document".to_owned(),
-            name: row.title,
-            owner: owners.get(&row.owner_id).cloned(),
-            content_hidden: true,
-            private: true,
+    Ok(hidden
+        .iter()
+        .map(|row| {
+            Listed::hidden(HiddenItem {
+                id: row.id,
+                parent_id: Some(row.node_id),
+                kind: "document".to_owned(),
+                name: row.title.clone(),
+                owner: owners.get(&row.owner_id).cloned(),
+                content_hidden: true,
+                private: true,
+            })
         })
-    }));
-    let next_cursor = (more || !exhausted).then(|| format!("{PRIVATE_CURSOR}{offset}"));
-    Ok(Page { items, next_cursor })
+        .collect())
 }

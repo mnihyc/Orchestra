@@ -56,6 +56,12 @@ use orch_settings::{Place, Snapshot, Target, Wanted};
 use orch_settings_contract::registry::{self, keys};
 use orch_types::{Id, Json, Seq, Time, new_id};
 use serde_json::json;
+use std::sync::Arc;
+
+mod agent_access;
+mod machine_programs;
+pub use agent_access::BirthAgentAccess;
+pub use machine_programs::read::Prepared as MachineProgramFacts;
 
 /// Keeps an offered preference, otherwise uses the program's first ordinary mode.
 pub(crate) fn offered_approval_mode(
@@ -197,6 +203,8 @@ pub struct RuntimeFacts {
     pub environment_problem: Option<String>,
     /// A connected profile stays on the machine it was registered from.
     pub agent_machine: Option<Id>,
+    /// Current program and actual runtime builds, prepared once before comparing candidates.
+    pub machine_program: Option<Arc<MachineProgramFacts>>,
 }
 
 /// Whether a machine's report contains the harness it is allowed to run.
@@ -329,6 +337,28 @@ pub async fn runtime_facts(
     provider: &ProviderRow,
     environment: &EnvironmentRow,
 ) -> Result<RuntimeFacts, EngineError> {
+    runtime_facts_in(conn, agent, provider, environment, None, true).await
+}
+
+/// Options that already loaded program builds in one batch never query them per candidate.
+pub async fn runtime_facts_prepared(
+    conn: &mut orch_db::Conn,
+    agent: &AgentRow,
+    provider: &ProviderRow,
+    environment: &EnvironmentRow,
+    programs: Option<&Arc<MachineProgramFacts>>,
+) -> Result<RuntimeFacts, EngineError> {
+    runtime_facts_in(conn, agent, provider, environment, programs, false).await
+}
+
+async fn runtime_facts_in(
+    conn: &mut orch_db::Conn,
+    agent: &AgentRow,
+    provider: &ProviderRow,
+    environment: &EnvironmentRow,
+    programs: Option<&Arc<MachineProgramFacts>>,
+    load_program: bool,
+) -> Result<RuntimeFacts, EngineError> {
     let provider_machine = match leases::machine_of(provider) {
         Some(id) => resources::machine_place(conn, id).await?,
         None => None,
@@ -396,6 +426,28 @@ pub async fn runtime_facts(
         .transpose()?
         .flatten()
         .map(|descriptor| descriptor.credentials.issues);
+    let machine_program = if let Some(programs) = programs {
+        Some(Arc::clone(programs))
+    } else if load_program
+        && environment.placement == "connected"
+        && let Some(machine) = &environment_machine
+        && harnesses::descriptor_of(agent)?
+            .is_some_and(|descriptor| machine_programs::needed(&descriptor))
+    {
+        machine_programs::read::load(
+            conn,
+            environment,
+            machine,
+            &[(
+                provider.id,
+                agent.id,
+                harnesses::machine_of(Some("separated"), provider, environment.machine_id),
+            )],
+        )
+        .await?
+    } else {
+        None
+    };
     Ok(RuntimeFacts {
         agent_id: Some(agent.id),
         issuer_forms,
@@ -403,7 +455,66 @@ pub async fn runtime_facts(
         provider_problem,
         environment_problem,
         agent_machine: agent.machine_id,
+        machine_program,
     })
+}
+
+/// Prepares the local-program comparison once for a complete options or fork candidate set.
+pub async fn prepare_machine_programs(
+    conn: &mut orch_db::Conn,
+    environment: &EnvironmentRow,
+    providers: &[&ProviderRow],
+    agents: &[(&AgentRow, &AgentDescriptor)],
+) -> Result<Option<Arc<MachineProgramFacts>>, EngineError> {
+    if environment.placement != "connected" || providers.is_empty() {
+        return Ok(None);
+    }
+    let agents: Vec<_> = agents
+        .iter()
+        .filter(|(_, descriptor)| machine_programs::needed(descriptor))
+        .map(|(agent, _)| agent.id)
+        .collect();
+    prepare_machine_program_ids(conn, environment, providers, &agents).await
+}
+
+/// Whether evaluating this declaration needs current machine-program availability and build checks.
+#[must_use]
+pub fn needs_machine_program(descriptor: &AgentDescriptor) -> bool {
+    machine_programs::needed(descriptor)
+}
+
+/// The fork chooser retains lazy profile/error ordering while loading all exact build keys once.
+pub async fn prepare_machine_program_ids(
+    conn: &mut orch_db::Conn,
+    environment: &EnvironmentRow,
+    providers: &[&ProviderRow],
+    agents: &[Id],
+) -> Result<Option<Arc<MachineProgramFacts>>, EngineError> {
+    if environment.placement != "connected" || providers.is_empty() {
+        return Ok(None);
+    }
+    if agents.is_empty() {
+        return Ok(None);
+    }
+    let Some(machine_id) = environment.machine_id else {
+        return Ok(None);
+    };
+    let Some(machine) = resources::machine_place(conn, machine_id).await? else {
+        return Ok(None);
+    };
+    let keys: Vec<_> = providers
+        .iter()
+        .flat_map(|provider| {
+            agents.iter().map(move |agent| {
+                (
+                    provider.id,
+                    *agent,
+                    harnesses::machine_of(Some("separated"), provider, environment.machine_id),
+                )
+            })
+        })
+        .collect();
+    machine_programs::read::load(conn, environment, &machine, &keys).await
 }
 
 /// What the environment's facts list, where they were reported.
@@ -648,6 +759,8 @@ pub struct NewThread {
 /// How a new thread is born besides what it is made of.
 #[derive(Debug, Clone, Default, PartialEq)]
 pub struct Birth {
+    /// The initial pure privilege gift, resolved only for this new holder.
+    pub agent_access: BirthAgentAccess,
     /// The optional first authored message, accepted in the same transaction as the thread.
     /// Refusal rolls back the thread, its page, source and settings too.
     pub first_input: Option<orch_api_contract::nodes::FirstInput>,
@@ -683,6 +796,9 @@ pub struct CreatedThread {
 /// Why a thread could not be created.
 #[derive(Debug, thiserror::Error)]
 pub enum CreateThreadError {
+    /// The original creator operation does not cover its actual effect targets.
+    #[error("the key does not allow the complete creator operation")]
+    OperationScope,
     /// There is no such topic, or it is deleted.
     #[error("there is no such topic")]
     NoSuchTopic,
@@ -731,6 +847,9 @@ pub enum CreateThreadError {
     /// The page the creator asked the thread to start with could not be set.
     #[error("the page of the thread could not be set: {0}")]
     Page(String),
+    /// The confirmed initial agent contribution was refused.
+    #[error("the initial agent access could not be given: {0}")]
+    AgentAccess(Box<crate::sharing::ShareError>),
     /// The first message was refused; the whole creation transaction is rolled back.
     #[error("the first message could not be accepted: {error}")]
     FirstInput {
@@ -765,6 +884,24 @@ pub fn directory_is_valid(directory: &str) -> bool {
             && directory
                 .split('/')
                 .all(|step| !step.is_empty() && step != ".." && step != "."))
+}
+
+async fn creation_name<'a>(
+    conn: &mut orch_db::Conn,
+    new: &'a NewThread,
+) -> Result<&'a str, CreateThreadError> {
+    let name = new.name.trim();
+    if name.is_empty() || name.chars().count() > NAME_MAX_CHARS {
+        return Err(CreateThreadError::InvalidName);
+    }
+    if !directory_is_valid(&new.directory) {
+        return Err(CreateThreadError::InvalidDirectory);
+    }
+    let characters = crate::sessions::standing_characters(conn, new.topic).await?;
+    if characters > crate::sessions::STANDING_LIMIT {
+        return Err(CreateThreadError::InstructionsTooLarge(characters));
+    }
+    Ok(name)
 }
 
 impl Engine {
@@ -916,7 +1053,9 @@ impl Engine {
         new: NewThread,
         birth: Birth,
     ) -> Result<CreatedThread, CreateThreadError> {
-        self.create_thread_as(caller, new, birth, None).await
+        // The default creator and its callers must not retain this entire creation
+        // pipeline by value through every delegating async frame.
+        Box::pin(self.create_thread_as(caller, new, birth, None)).await
     }
 
     /// As [`Engine::create_thread_with`], under an identifier chosen beforehand: a fork names the thread it
@@ -975,20 +1114,100 @@ impl Engine {
         id: Id,
         now: DateTime<Utc>,
     ) -> Result<CreatedThread, CreateThreadError> {
-        let name = new.name.trim();
-        if name.is_empty() || name.chars().count() > NAME_MAX_CHARS {
-            return Err(CreateThreadError::InvalidName);
-        }
-        if !directory_is_valid(&new.directory) {
-            return Err(CreateThreadError::InvalidDirectory);
-        }
-        let characters = crate::sessions::standing_characters(tx, new.topic).await?;
-        if characters > crate::sessions::STANDING_LIMIT {
-            return Err(CreateThreadError::InstructionsTooLarge(characters));
-        }
+        let name = creation_name(tx, new).await?;
         let principal = Principal::load(tx, caller.clone(), Time::new(now)).await?;
-        self.create_in(tx, &principal, new, name, birth, Some(id), None, now)
+        self.create_in(tx, &principal, new, name, birth, Some(id), None, now, None)
             .await
+    }
+
+    /// The same native creator and actual held principal, retaining a real adopted session.
+    pub async fn create_thread_taking_in_transaction(
+        &self,
+        conn: &mut orch_db::Conn,
+        principal: &Principal,
+        new: &NewThread,
+        birth: &Birth,
+        id: Id,
+        adopted: &str,
+    ) -> Result<CreatedThread, CreateThreadError> {
+        let name = creation_name(conn, new).await?;
+        self.create_in(
+            conn,
+            principal,
+            new,
+            name,
+            birth,
+            Some(id),
+            Some(adopted),
+            principal.now().get(),
+            None,
+        )
+        .await
+    }
+
+    /// The canonical creator's rollbackable prefix uses the same writer and must
+    /// complete every required current target before its actual birth effects.
+    pub async fn create_thread_staged_in_transaction(
+        &self,
+        conn: &mut orch_db::Conn,
+        prefix: crate::operation_scope::creators::Prefix,
+        new: &NewThread,
+        birth: &Birth,
+        id: Id,
+        now: DateTime<Utc>,
+    ) -> Result<(CreatedThread, crate::operation_scope::creators::Completed), CreateThreadError>
+    {
+        self.create_staged_on(conn, prefix, new, birth, id, now, None)
+            .await
+    }
+
+    /// The same rollbackable creator with the native reference actually discovered for adoption.
+    pub async fn create_thread_staged_taking_in_transaction(
+        &self,
+        conn: &mut orch_db::Conn,
+        prefix: crate::operation_scope::creators::Prefix,
+        new: &NewThread,
+        birth: &Birth,
+        id: Id,
+        adopted: &str,
+    ) -> Result<(CreatedThread, crate::operation_scope::creators::Completed), CreateThreadError>
+    {
+        let now = prefix.principal().now().get();
+        self.create_staged_on(conn, prefix, new, birth, id, now, Some(adopted))
+            .await
+    }
+
+    #[allow(
+        clippy::too_many_arguments,
+        reason = "the one native creator keeps its original timestamp and optional adopted reference"
+    )]
+    async fn create_staged_on(
+        &self,
+        conn: &mut orch_db::Conn,
+        mut prefix: crate::operation_scope::creators::Prefix,
+        new: &NewThread,
+        birth: &Birth,
+        id: Id,
+        now: DateTime<Utc>,
+        adopted: Option<&str>,
+    ) -> Result<(CreatedThread, crate::operation_scope::creators::Completed), CreateThreadError>
+    {
+        let principal = prefix.principal().clone();
+        let name = creation_name(conn, new).await?;
+        let created = self
+            .create_in(
+                conn,
+                &principal,
+                new,
+                name,
+                birth,
+                Some(id),
+                adopted,
+                now,
+                Some(&mut prefix),
+            )
+            .await?;
+        Ok((created, prefix.finish()?))
     }
 
     async fn create_thread_from(
@@ -1034,7 +1253,9 @@ impl Engine {
                 return Err(CreateThreadError::InstructionsTooLarge(characters));
             }
             match self
-                .create_in(&mut tx, &principal, &new, name, &birth, id, adopted, now)
+                .create_in(
+                    &mut tx, &principal, &new, name, &birth, id, adopted, now, None,
+                )
                 .await
             {
                 Ok(created) => {
@@ -1077,9 +1298,9 @@ impl Engine {
         id: Option<Id>,
         adopted: Option<&str>,
         now: DateTime<Utc>,
+        mut creator: Option<&mut crate::operation_scope::creators::Prefix>,
     ) -> Result<CreatedThread, CreateThreadError> {
         let conn: &mut orch_db::Conn = &mut *tx;
-        let caller = principal.caller();
         let person = principal.user();
         let decision = nodes::check(
             &mut *conn,
@@ -1399,6 +1620,25 @@ impl Engine {
             .await
             .map_err(|error| CreateThreadError::Page(error.to_string()))?;
         }
+        // All preceding creation work is a rollbackable database prefix. The actual
+        // Thread now exists, so its self contribution and new Environment sources can
+        // pass the exact original operation before any birth/source/input effect.
+        let staged = if let Some(creator) = creator.as_deref_mut() {
+            Some(creator.complete(unit.conn, new, birth, thread).await?)
+        } else {
+            None
+        };
+        let principal = staged
+            .as_ref()
+            .map_or(principal, |(principal, _)| principal);
+        let caller = principal.caller();
+        let agent_access_choice = staged
+            .as_ref()
+            .map_or(&birth.agent_access, |(_, choice)| choice);
+        let agent_access = self
+            .give_birth_access(unit.conn, principal, thread, new.topic, agent_access_choice)
+            .await
+            .map_err(|error| CreateThreadError::AgentAccess(Box::new(error)))?;
         crate::jobs::source::freeze(
             &mut unit,
             caller,
@@ -1422,6 +1662,7 @@ impl Engine {
                 entry.history = AuditAction::ThreadCreated.is_history_line();
                 entry.node_id = Some(thread);
                 entry.environment_id = Some(environment.id);
+                entry.details = json!({ "agent_access": agent_access });
                 entry
             },
             &Origin::default(),
@@ -1569,6 +1810,66 @@ pub fn choose_with_machine(
     choose_placed(facts, &place, machine, requested)
 }
 
+fn local_program<'a>(facts: &'a Facts<'_>, place: &PlaceSide) -> Option<&'a MachineProgramFacts> {
+    let program = facts.runtime.machine_program.as_deref()?;
+    (program.environment == facts.environment.id && place.environment_id == facts.environment.id)
+        .then_some(program)
+}
+
+fn reported_program_agent_version<'a>(
+    facts: &Facts<'_>,
+    program: &'a MachineProgramFacts,
+) -> Option<&'a str> {
+    program.agent_version(
+        facts.provider.id,
+        facts.runtime.agent_id?,
+        harnesses::machine_of(
+            Some("separated"),
+            facts.provider,
+            facts.environment.machine_id,
+        ),
+    )
+}
+
+/// The exact local Same comparison prevented this binding, after all other candidates were tried.
+pub fn machine_program_mismatch(facts: &Facts<'_>, why: &Incompatible) -> Option<String> {
+    if !matches!(why, Incompatible::ExecutorMissing { .. }) {
+        return None;
+    }
+    let (provider, place) = sides(facts);
+    let program = local_program(facts, &place)?;
+    let reported = reported_program_agent_version(facts, program);
+    let candidates = machine_programs::candidates(
+        facts.descriptor,
+        &provider,
+        &place,
+        &program.programs,
+        reported,
+        &program.overrides,
+    );
+    let (_, candidate) = candidates
+        .iter()
+        .find(|(kind, _)| *kind == ArrangementType::Separated)?;
+    if runtime_problem(
+        facts,
+        &place,
+        ArrangementType::Separated,
+        candidate.as_ref().ok(),
+    )
+    .is_some()
+    {
+        return None;
+    }
+    machine_programs::mismatch(
+        facts.descriptor,
+        &program.machine,
+        &program.programs,
+        reported,
+        &program.overrides,
+        candidate,
+    )
+}
+
 /// As [`choose_with_machine`], on a place that is handed over instead of read from the facts. The part that
 /// forks and switches judges an environment that is not made yet by what its template promises, and the
 /// environment in the facts is the one the thread leaves.
@@ -1614,7 +1915,20 @@ pub fn options_placed(
 ) -> Vec<ArrangementOption> {
     let (provider, _) = sides(facts);
     let policy = policy_with_machine(facts, machine);
-    let mut all = arrangement::candidates(facts.descriptor, &provider, place);
+    let program = local_program(facts, place);
+    let reported = program.and_then(|program| reported_program_agent_version(facts, program));
+    let mut all = if let Some(program) = program {
+        machine_programs::candidates(
+            facts.descriptor,
+            &provider,
+            place,
+            &program.programs,
+            reported,
+            &program.overrides,
+        )
+    } else {
+        arrangement::candidates(facts.descriptor, &provider, place)
+    };
     all.sort_by_key(|(kind, _)| {
         policy
             .prefer
@@ -1633,6 +1947,9 @@ pub fn options_placed(
                 Ok(chosen)
             })} else {candidate};
             let problem = runtime_problem(facts, place, kind, candidate.as_ref().ok());
+            let version_detail = if kind == ArrangementType::Separated && problem.is_none() {
+                program.and_then(|program| machine_programs::mismatch(facts.descriptor,&program.machine,&program.programs,reported,&program.overrides,&candidate))
+            } else { None };
             let (candidate, detail) = match (candidate, problem) {
                 (Ok(_), Some(detail)) => (Err(Incompatible::AgentNotOnThatMachine), Some(detail)),
                 (Err(Incompatible::AgentNotOnThatMachine), detail) => {
@@ -1657,7 +1974,7 @@ pub fn options_placed(
                         .map(|by| Incompatible::ArrangementNotAllowed { by })
                 }),
                 rank: 0,
-                detail:detail.or_else(||needs_copy.then(||"This native harness needs a credential copy at its selected runtime; a shared form and credential_shared permission are required.".into())),
+                detail:detail.or(version_detail).or_else(||needs_copy.then(||"This native harness needs a credential copy at its selected runtime; a shared form and credential_shared permission are required.".into())),
             }
         })
         .collect();
@@ -1950,6 +2267,26 @@ pub struct Rebound {
     pub seq: Seq,
 }
 
+/// Fresh native operands for placing a thread without history; no new environment is invented.
+pub struct PreparedPlacement {
+    thread: threads::ThreadRow,
+    environment: EnvironmentRow,
+    binding: Option<(AgentRow, ProviderRow, Arrangement)>,
+    directory: String,
+    person: Id,
+    now: DateTime<Utc>,
+}
+impl PreparedPlacement {
+    /// The actual source thread, including its previous environment when present.
+    pub fn thread(&self) -> &threads::ThreadRow {
+        &self.thread
+    }
+    /// The actual existing destination environment.
+    pub fn environment(&self) -> &EnvironmentRow {
+        &self.environment
+    }
+}
+
 /// Why a thread could not be put on something else.
 #[derive(Debug, thiserror::Error)]
 pub enum RebindError {
@@ -2054,7 +2391,20 @@ impl Engine {
         principal: &Principal,
         thread: Id,
     ) -> Result<threads::ThreadRow, RebindError> {
-        let row = threads::lock(&mut *conn, thread)
+        threads::lock(&mut *conn, thread)
+            .await?
+            .ok_or(RebindError::NoSuchThread)?;
+        self.checking_for_binding(conn, principal, thread).await
+    }
+
+    /// The native ordinary/lifecycle/history gate, without acquiring a writer lock.
+    async fn checking_for_binding(
+        &self,
+        conn: &mut orch_db::Conn,
+        principal: &Principal,
+        thread: Id,
+    ) -> Result<threads::ThreadRow, RebindError> {
+        let row = threads::thread(&mut *conn, thread)
             .await?
             .filter(|row| row.deleted_at.is_none())
             .ok_or(RebindError::NoSuchThread)?;
@@ -2385,11 +2735,28 @@ impl Engine {
         thread_id: Id,
         to: &Replace,
     ) -> Result<Rebound, RebindError> {
-        let conn: &mut orch_db::Conn = &mut *tx;
+        threads::lock(&mut *tx, thread_id)
+            .await?
+            .ok_or(RebindError::NoSuchThread)?;
+        let prepared = self
+            .preparing_placement(&mut *tx, principal, thread_id, to)
+            .await?;
+        self.write_placement_before(&mut *tx, &prepared, || Ok(()))
+            .await
+    }
+
+    /// The existing placement decision with no mutation, native dispatch or writer lock.
+    pub async fn preparing_placement(
+        &self,
+        conn: &mut orch_db::Conn,
+        principal: &Principal,
+        thread_id: Id,
+        to: &Replace,
+    ) -> Result<PreparedPlacement, RebindError> {
         let person = principal.user();
         let now = principal.now().get();
         let thread = self
-            .lock_for_binding(&mut *conn, principal, thread_id)
+            .checking_for_binding(conn, principal, thread_id)
             .await?;
         if let Some(directory) = to.directory.as_deref()
             && !directory_is_valid(directory)
@@ -2437,82 +2804,145 @@ impl Engine {
                 default_directory(&topic_name, uses.first())
             }
         };
-        let (Some(agent_id), Some(provider_id)) = (thread.agent_id, thread.provider_id) else {
-            // A thread that is bound to nothing is put in the environment, and waits for a binding.
-            let mut unit = Unit::new(&mut *conn, now);
-            let seq = unit.stamp(thread_id).await?;
-            threads::set_environment(&mut *unit.conn, thread_id, environment.id, &directory, seq)
-                .await?;
-            unit.finish().await?;
-            return Ok(Rebound {
-                thread: thread_id,
-                arrangement: None,
-                directory,
-                seq,
-            });
-        };
-        let agent = resources::agent(&mut *conn, agent_id)
-            .await?
-            .filter(|agent| agent.deleted_at.is_none())
-            .ok_or(RebindError::AgentUnavailable)?;
-        let provider = resources::provider(&mut *conn, provider_id)
-            .await?
-            .filter(|provider| provider.deleted_at.is_none())
-            .ok_or(RebindError::ProviderUnavailable)?;
-        let descriptor = harnesses::descriptor_of(&agent)?.ok_or(RebindError::AgentNotReported)?;
-        let settings = resolved::load(&mut *conn, thread_id).await?;
-        let place = environment_offers(&mut *conn, &environment).await?;
-        let machine = machine_arrangements_of(&mut *conn, &provider).await?;
-        // Whoever asked of the provider was checked when the thread was put on it; what the
-        // entry they used then narrowed to is kept in what the provider's owner allows now.
-        let facts = Facts {
-            descriptor: &descriptor,
-            provider: &provider,
-            environment: &environment,
-            offers: place.offers,
-            settings: &settings,
-            entry: None,
-            colocated: place.colocated,
-            runtime: runtime_facts(conn, &agent, &provider, &environment).await?,
-        };
-        let kept = parse(thread.arrangement.as_deref().unwrap_or_default());
-        let arrangement = match choose_with_machine(&facts, machine.clone(), kept) {
-            Ok(found) => found,
-            Err(_) => {
-                choose_with_machine(&facts, machine, None).map_err(RebindError::Incompatible)?
-            }
-        };
-        let mut unit = Unit::new(&mut *conn, now);
-        let seq = unit.stamp(thread_id).await?;
-        threads::set_environment(&mut *unit.conn, thread_id, environment.id, &directory, seq)
+        let binding =
+            if let (Some(agent_id), Some(provider_id)) = (thread.agent_id, thread.provider_id) {
+                let agent = resources::agent(&mut *conn, agent_id)
+                    .await?
+                    .filter(|agent| agent.deleted_at.is_none())
+                    .ok_or(RebindError::AgentUnavailable)?;
+                let provider = resources::provider(&mut *conn, provider_id)
+                    .await?
+                    .filter(|provider| provider.deleted_at.is_none())
+                    .ok_or(RebindError::ProviderUnavailable)?;
+                let descriptor =
+                    harnesses::descriptor_of(&agent)?.ok_or(RebindError::AgentNotReported)?;
+                let settings = resolved::load(&mut *conn, thread_id).await?;
+                let place = environment_offers(&mut *conn, &environment).await?;
+                let machine = machine_arrangements_of(&mut *conn, &provider).await?;
+                // Whoever asked of the provider was checked when the thread was put on it; what the
+                // entry they used then narrowed to is kept in what the provider's owner allows now.
+                let facts = Facts {
+                    descriptor: &descriptor,
+                    provider: &provider,
+                    environment: &environment,
+                    offers: place.offers,
+                    settings: &settings,
+                    entry: None,
+                    colocated: place.colocated,
+                    runtime: runtime_facts(conn, &agent, &provider, &environment).await?,
+                };
+                let kept = parse(thread.arrangement.as_deref().unwrap_or_default());
+                let arrangement = match choose_with_machine(&facts, machine.clone(), kept) {
+                    Ok(found) => found,
+                    Err(_) => choose_with_machine(&facts, machine, None)
+                        .map_err(RebindError::Incompatible)?,
+                };
+                Some((agent, provider, arrangement))
+            } else {
+                None
+            };
+        Ok(PreparedPlacement {
+            thread,
+            environment,
+            binding,
+            directory,
+            person,
+            now,
+        })
+    }
+
+    /// The same current ordinary source/destination prerequisites on retained native operands.
+    pub async fn require_placement(
+        &self,
+        conn: &mut orch_db::Conn,
+        principal: &Principal,
+        prepared: &PreparedPlacement,
+    ) -> Result<(), RebindError> {
+        let current = self
+            .checking_for_binding(conn, principal, prepared.thread.node_id)
             .await?;
-        write_binding(
-            &mut unit,
-            &thread,
-            &agent,
-            &provider,
-            &environment,
-            &arrangement,
-            person,
-            seq,
+        if principal.user() != prepared.person
+            || current.topic_id != prepared.thread.topic_id
+            || current.environment_id != prepared.thread.environment_id
+            || current.agent_id != prepared.thread.agent_id
+            || current.provider_id != prepared.thread.provider_id
+            || current.arrangement != prepared.thread.arrangement
+            || current.workspace_dir != prepared.thread.workspace_dir
+        {
+            return Err(RebindError::NoSuchThread);
+        }
+        let decision = orch_authz::environments::check_move(
+            conn,
+            principal,
+            &orch_authz::environments::Moving {
+                thread: Some(current.node_id),
+                from: current.environment_id,
+                to: Some(prepared.environment.id),
+                all_of_the_environment: false,
+            },
+            orch_authz::Policy::default(),
         )
         .await?;
-        record_bound(
-            &mut unit,
+        if let Decision::Refused(refusal) = decision {
+            return Err(RebindError::Denied(Box::new(refusal)));
+        }
+        Ok(())
+    }
+
+    /// Consume exactly the native prepared placement, checking at Unit's first actual mutation.
+    pub async fn write_placement_before<'a, F>(
+        &self,
+        conn: &'a mut orch_db::Conn,
+        prepared: &PreparedPlacement,
+        before: F,
+    ) -> Result<Rebound, RebindError>
+    where
+        F: FnOnce() -> Result<(), EngineError> + Send + 'a,
+    {
+        let PreparedPlacement {
+            thread,
+            environment,
+            binding,
+            directory,
             person,
-            &thread,
-            &agent,
-            &provider,
-            &environment,
-            &arrangement,
-            (None, None),
-        )
-        .await?;
+            now,
+        } = prepared;
+        let thread_id = thread.node_id;
+        let mut unit = Unit::with_first_effect(conn, *now, before);
+        let seq = unit.stamp(thread_id).await?;
+        threads::set_environment(&mut *unit.conn, thread_id, environment.id, directory, seq)
+            .await?;
+        if let Some((agent, provider, arrangement)) = binding {
+            write_binding(
+                &mut unit,
+                thread,
+                agent,
+                provider,
+                environment,
+                arrangement,
+                *person,
+                seq,
+            )
+            .await?;
+            record_bound(
+                &mut unit,
+                *person,
+                thread,
+                agent,
+                provider,
+                environment,
+                arrangement,
+                (None, None),
+            )
+            .await?;
+        }
         let finished = unit.finish().await?;
         Ok(Rebound {
             thread: thread_id,
-            arrangement: Some(arrangement),
-            directory,
+            arrangement: binding
+                .as_ref()
+                .map(|(_, _, arrangement)| arrangement.clone()),
+            directory: directory.clone(),
             seq: finished.touched.get(&thread_id).copied().unwrap_or(seq),
         })
     }

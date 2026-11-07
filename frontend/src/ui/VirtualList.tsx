@@ -324,18 +324,20 @@ export function VirtualList({
       onScroll={check}
       className={className}
     >
-      <div style={{ height: total, position: 'relative', width: '100%' }}>
+      <ol role="list" className="m-0 list-none p-0" style={{ height: total, position: 'relative', width: '100%' }}>
         {virtualizer.getVirtualItems().map((row) => (
-          <div
+          <li
             key={row.key}
             data-index={row.index}
+            aria-posinset={row.index + 1}
+            aria-setsize={count}
             ref={virtualizer.measureElement}
             style={{ position: 'absolute', top: 0, left: 0, width: '100%', transform: `translateY(${row.start}px)` }}
           >
             {render(row.index)}
-          </div>
+          </li>
         ))}
-      </div>
+      </ol>
     </div>
   );
 }

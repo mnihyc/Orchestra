@@ -1,5 +1,5 @@
 /** The shared question opens its exact localized guide section without sending a draft. */
-import { fireEvent, screen } from '@testing-library/react';
+import { fireEvent, screen, waitFor, within } from '@testing-library/react';
 import { afterEach, expect, it, vi } from 'vitest';
 import { UploadHelp } from '@/features/composer/UploadHelp';
 import { UPLOAD_HELP, uploadHelpHeading, type UploadHelpTopic } from '@/help/uploads';
@@ -20,3 +20,17 @@ for (const language of ['en', 'zh-CN'] as const) for (const topic of Object.keys
     expect(opened).toHaveBeenCalledExactlyOnceWith('paste-and-upload', uploadHelpHeading(topic));
   });
 }
+
+it.each(['en', 'zh-CN'] as const)('keeps one attachment guide across visible composers and promotes the next owner (%s)', async (language) => {
+  await setLocale(language);
+  const view = show(<><section data-testid="first"><UploadHelp topic="message-files" /></section><section data-testid="second"><UploadHelp topic="message-files" /></section></>);
+  const name = i18n.t('help.hint.label', { term: i18n.t(UPLOAD_HELP['message-files'].title) });
+  await waitFor(() => expect(screen.getAllByRole('button', { name })).toHaveLength(1));
+  expect(within(screen.getByTestId('first')).getByRole('button', { name })).toBeVisible();
+  view.rerender(<><section data-testid="first" hidden><UploadHelp topic="message-files" /></section><section data-testid="second"><UploadHelp topic="message-files" /></section></>);
+  await waitFor(() => expect(within(screen.getByTestId('second')).getByRole('button', { name })).toBeVisible());
+  expect(screen.getAllByRole('button', { name })).toHaveLength(1);
+  fireEvent.click(screen.getByRole('button', { name }));
+  fireEvent.click(await screen.findByRole('button', { name: i18n.t('help.hint.more') }));
+  expect(opened).toHaveBeenCalledExactlyOnceWith('paste-and-upload', uploadHelpHeading('message-files'));
+});

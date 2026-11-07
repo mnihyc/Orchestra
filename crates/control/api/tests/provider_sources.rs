@@ -371,3 +371,126 @@ async fn member_states_distinguish_unsupported_empty_and_told_and_public_facts_u
         );
     }
 }
+
+#[tokio::test]
+async fn a_disabled_profile_keeps_its_source_declaration_but_not_its_selected_home() {
+    use orch_api_contract::resources::{AgentGet, AgentUpdate, AgentUpdateBody};
+    use orch_driver_contract::runtime::EnvironmentDataSource;
+
+    let s = scene().await;
+    // A fresh source declaration must come from the profile, not an already cached source choice.
+    sqlx::query("UPDATE providers SET sources=jsonb_set(sources,'{facts}',$2),runtime_config=runtime_config-'runtime.home' WHERE id=$1")
+        .bind(s.on.provider).bind(json!({"by":"builtin","name":"adapter"}))
+        .execute(s.rig.db.pool()).await.unwrap();
+    let agent = s
+        .rig
+        .world
+        .app
+        .call(AgentGet, &[&s.on.agent])
+        .token(&s.ada.token)
+        .send()
+        .await
+        .ok();
+    let home = json!({"kind":"existing_directory","path":"/fixture/borrowed-profile-home"});
+    let mut profile = agent.profile.clone();
+    profile["attach"] = json!({"home":home});
+    let configured = s
+        .rig
+        .world
+        .app
+        .call(AgentUpdate, &[&s.on.agent])
+        .token(&s.ada.token)
+        .body(&AgentUpdateBody {
+            name: None,
+            profile: Some(profile),
+            descriptor_overrides: None,
+            disabled: None,
+            expected_revision: agent.revision,
+        })
+        .send()
+        .await
+        .ok();
+    let active = shown(&s).await;
+    let declared = active
+        .sources
+        .facts
+        .descriptor
+        .clone()
+        .expect("the actual profile declares its source");
+    assert_ne!(
+        declared.title, "Harness adapter",
+        "a generic missing-profile fallback cannot satisfy this control"
+    );
+    let borrowed: EnvironmentDataSource = serde_json::from_value(home.clone()).unwrap();
+    assert_eq!(
+        active
+            .runtime_support
+            .as_ref()
+            .and_then(|runtime| runtime.home.as_ref()),
+        Some(&borrowed)
+    );
+
+    let off = s
+        .rig
+        .world
+        .app
+        .call(AgentUpdate, &[&s.on.agent])
+        .token(&s.ada.token)
+        .body(&AgentUpdateBody {
+            name: None,
+            profile: None,
+            descriptor_overrides: None,
+            disabled: Some(true),
+            expected_revision: configured.revision,
+        })
+        .send()
+        .await
+        .ok();
+    assert!(off.base.disabled);
+    assert_eq!(
+        off.profile["attach"]["home"], home,
+        "switching off preserves the stored profile"
+    );
+    let disabled = shown(&s).await;
+    assert_eq!(
+        disabled.sources.facts.descriptor.as_ref(),
+        Some(&declared),
+        "disabled profiles still declare their provider sources"
+    );
+    assert_eq!(
+        disabled
+            .runtime_support
+            .as_ref()
+            .and_then(|runtime| runtime.home.as_ref()),
+        Some(&EnvironmentDataSource::MadeByOrch),
+        "a disabled profile's borrowed home does not select the provider home"
+    );
+
+    s.rig
+        .world
+        .app
+        .call(AgentUpdate, &[&s.on.agent])
+        .token(&s.ada.token)
+        .body(&AgentUpdateBody {
+            name: None,
+            profile: None,
+            descriptor_overrides: None,
+            disabled: Some(false),
+            expected_revision: off.revision,
+        })
+        .send()
+        .await
+        .ok();
+    let active_again = shown(&s).await;
+    assert_eq!(
+        active_again.sources.facts.descriptor.as_ref(),
+        Some(&declared)
+    );
+    assert_eq!(
+        active_again
+            .runtime_support
+            .as_ref()
+            .and_then(|runtime| runtime.home.as_ref()),
+        Some(&borrowed)
+    );
+}

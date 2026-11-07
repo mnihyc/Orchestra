@@ -23,7 +23,7 @@ const calls = vi.hoisted(() => ({
 }));
 const topic: TopicNode = {
   ...org('login', 'acme.login', 'login', userRef(me(1, 'ada', 'Ada')), {
-    access: { ...memberAccess, owns: true, permissions: ['topic.view', 'topic.interact', 'topic.manage'] },
+    access: { ...memberAccess, owns: true, permissions: ['topic.view', 'topic.interact', 'topic.manage', 'topic.start_threads'] },
   }),
   kind: 'topic', org_id: 'acme', parent_id: 'general-project', status: 'open', done_at: null, thread_display_state: null,
   environments: [], default_environment_id: null, thread_count: 0,
@@ -98,7 +98,7 @@ for (const [locale, theme] of modes) {
     expect(screen.getByText('M1')).toBeVisible();
     expect(screen.getByText(i18n.t('choiceCatalog.effort.low.name'))).toBeVisible();
     expect(screen.getByRole('link', { name: i18n.t('topicAgents.defaults') })).toHaveAttribute('href', '/topic/login?tab=settings&section=policies');
-    expect(screen.queryByText(i18n.t('people.documentsPolicy'))).not.toBeInTheDocument();
+    expect(screen.queryByText(locale === 'zh-CN' ? '此主题旁的文档' : 'Documents beside this topic')).not.toBeInTheDocument();
     expect(calls.shares).not.toHaveBeenCalled();
     expect(calls.read).toHaveBeenCalledExactlyOnceWith(topic.id, null);
   });
@@ -112,10 +112,14 @@ for (const [locale, theme] of modes) {
         models: [model('m1', ['low', 'high'])] }),
       provider('exhausted', { status: 'exhausted', agents: [agent('quota')] }),
       provider('denied', { usable: false, reason: 'no_use', agents: [agent('private')] }),
+      provider('quota-denied', { status: 'exhausted', usable: false, reason: 'no_use', agents: [agent('quota-private')] }),
+      provider('quota-model-denied', { status: 'exhausted', models: [{...model('m1'),allowed:false,reason:'excluded_by_policy'}], agents: [agent('quota-model')] }),
     ] }));
     const view = show(<TopicAgents topic={topic} />);
     expect(await screen.findByRole('link', { name: 'Agent a2' })).toBeVisible();
-    for (const name of ['blocked', 'unreported', 'closed', 'disabled', 'quota', 'private']) expect(screen.queryByRole('link', { name: `Agent ${name}` })).not.toBeInTheDocument();
+    expect(screen.getByRole('link', { name: 'Agent quota' })).toBeVisible();
+    expect(screen.getByRole('link', { name: 'Provider exhausted' })).toBeVisible();
+    for (const name of ['blocked', 'unreported', 'closed', 'disabled', 'private', 'quota-private', 'quota-model']) expect(screen.queryByRole('link', { name: `Agent ${name}` })).not.toBeInTheDocument();
     expect(screen.queryByText(i18n.t('topicAgents.defaultAgent'))).not.toBeInTheDocument();
     expect(screen.getByText(i18n.t('topicAgents.incomplete'))).toBeVisible();
     expect(view.container).not.toHaveTextContent('harness_unreported');

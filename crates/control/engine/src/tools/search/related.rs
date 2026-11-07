@@ -12,7 +12,6 @@ use crate::{
 };
 use base64::{Engine as _, engine::general_purpose::URL_SAFE_NO_PAD};
 use orch_api_contract::search::RelatedKind;
-use orch_authz::reach::{AgentReach, DocumentPolicy};
 use orch_db::queries::{related as rows, search::CandidateSet, threads::ThreadRow};
 use orch_db::{Conn, DbError};
 use orch_types::{Hash, Id, Json};
@@ -84,12 +83,7 @@ impl Engine {
         let mut scopes = vec![thread.node_id];
         let mut documents = vec![document];
         let mut chats: Vec<Id> = Vec::new();
-        if asking.documents_policy != DocumentPolicy::None || asking.policy == AgentReach::Topic {
-            scopes.push(asking.agent.topic);
-        }
-        if asking.policy == AgentReach::Project {
-            scopes.extend(asking.agent.project);
-        }
+
         let budget = orch_settings::get::<i64>(
             &mut conn,
             orch_settings::Place::Node(source.node_id),

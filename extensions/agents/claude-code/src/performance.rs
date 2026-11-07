@@ -44,6 +44,13 @@ fn parts(usage: &Json) -> TokensReportedApart {
     }
 }
 
+fn search_count(usage: &Json) -> Option<i64> {
+    usage
+        .pointer("/server_tool_use/web_search_requests")
+        .and_then(Json::as_i64)
+        .filter(|count| *count >= 0)
+}
+
 fn counts(usage: &Json) -> RequestTokens {
     // Reuse the existing shared normalization of Claude's uncached-input parts,
     // retaining absence instead of publishing that normalizer's numeric defaults.
@@ -183,6 +190,7 @@ impl Requests {
                         .get("model")
                         .and_then(Json::as_str)
                         .map(str::to_owned);
+                    raw.web_searches = search_count(message.get("usage").unwrap_or(&Json::Null));
                     raw.subagent = parent.is_some();
                     raw.first_output = parent.is_none().then_some(at);
                     raw.output_streamed = Some(parent.is_none());
@@ -225,6 +233,11 @@ impl Requests {
                 }
                 "message_delta" => {
                     if let Some(open) = self.open.get_mut(&stream) {
+                        if let Some(searches) =
+                            search_count(event.get("usage").unwrap_or(&Json::Null))
+                        {
+                            open.request.web_searches = Some(searches);
+                        }
                         if let Some(output) =
                             event.pointer("/usage/output_tokens").and_then(Json::as_i64)
                         {
@@ -276,6 +289,7 @@ impl Requests {
                             .get("model")
                             .and_then(Json::as_str)
                             .map(str::to_owned),
+                        web_searches: search_count(message.get("usage").unwrap_or(&Json::Null)),
                         tokens: counts(message.get("usage").unwrap_or(&Json::Null)),
                         output_streamed: Some(false),
                         ..UsageRequest::default()
@@ -287,7 +301,16 @@ impl Requests {
             Some("result") => {
                 let (code, message) = outcome.unwrap_or(("done", None));
                 let mut ended = Vec::new();
-                for (_, mut open) in self.open.drain() {
+                let closing: Vec<_> = self
+                    .open
+                    .keys()
+                    .filter(|stream| stream.as_str() == "main")
+                    .cloned()
+                    .collect();
+                for stream in closing {
+                    let Some(mut open) = self.open.remove(&stream) else {
+                        continue;
+                    };
                     // A result without message_stop has no proven last-output boundary.
                     open.request.tokens = open.counts;
                     open.request.reasoning_hidden = (open.thinking
@@ -299,6 +322,7 @@ impl Requests {
                 let prior = self.finished.iter().any(|id| id.starts_with("main:"));
                 if let Some(mut raw) = self.pending.take() {
                     if !prior {
+                        raw.web_searches = search_count(frame.get("usage").unwrap_or(&Json::Null));
                         raw.tokens = counts(frame.get("usage").unwrap_or(&Json::Null));
                     }
                     raw.finish(code, message, None);
@@ -306,6 +330,7 @@ impl Requests {
                 } else if ended.is_empty() && !prior {
                     let mut raw = UsageRequest {
                         id: format!("turn:{}", self.serial),
+                        web_searches: search_count(frame.get("usage").unwrap_or(&Json::Null)),
                         tokens: if prior {
                             RequestTokens::default()
                         } else {
@@ -321,5 +346,38 @@ impl Requests {
             _ => {}
         }
         Vec::new()
+    }
+}
+
+#[cfg(test)]
+mod native_search_tests {
+    #![allow(clippy::expect_used, reason = "a test fails by panicking")]
+    use super::*;
+    use serde_json::json;
+
+    #[test]
+    fn native_search_reports_keep_the_vendor_cumulative_count() {
+        let at = "2026-10-01T00:00:00Z".parse().expect("a fixed timestamp");
+        let mut requests = Requests::default();
+        let _ = requests.asked(at);
+        let start = Frame::from_value(json!({"type":"stream_event","event":{
+            "type":"message_start","message":{"id":"search-message","model":"chosen","usage":{
+                "input_tokens":10,"cache_read_input_tokens":0,"cache_creation_input_tokens":0,"output_tokens":1
+            }}
+        }}));
+        let _ = requests.observe(&start, at, None);
+        let delta = Frame::from_value(json!({"type":"stream_event","event":{
+            "type":"message_delta","delta":{"stop_reason":"end_turn"},"usage":{
+                "output_tokens":5,"server_tool_use":{"web_search_requests":2}
+            }
+        }}));
+        let _ = requests.observe(&delta, at, None);
+        let _ = requests.observe(&delta, at, None);
+        let stop =
+            Frame::from_value(json!({"type":"stream_event","event":{"type":"message_stop"}}));
+        let ended = requests.observe(&stop, at, None);
+        assert_eq!(ended.len(), 1);
+        assert_eq!(ended[0].web_searches, Some(2));
+        assert_eq!(ended[0].measured().web_searches.value(), Some(&2));
     }
 }
