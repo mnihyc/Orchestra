@@ -5,6 +5,12 @@
     reason = "a test fails by panicking"
 )]
 
+#[path = "kmounts_mcp/create_scopes.rs"]
+mod create_scopes;
+#[path = "kmounts_mcp/import_scopes.rs"]
+mod import_scopes;
+#[path = "kmounts_mcp/import_source.rs"]
+mod import_source;
 mod places;
 mod resources;
 mod support;
@@ -478,7 +484,9 @@ async fn only_an_environment_manager_can_queue_one_server_restart_and_the_list_s
         })
         .send()
         .await
-        .ok();
+        .ok()
+        .into_full()
+        .unwrap();
     sqlx::query("UPDATE environments SET status='running',facts=jsonb_set(facts,'{mcp_servers}',$2) WHERE id=$1").bind(env).bind(json!([{"name":"flaky","state":"failed","reason":"The server ended (exit status: 7): [masked]","revision":3}])).execute(&world.db.pool).await.unwrap();
     sqlx::query("UPDATE machines SET online=true WHERE id=$1")
         .bind(machine)
@@ -602,7 +610,9 @@ async fn an_environment_server_takes_local_policy_and_never_returns_a_secret() {
         .body(&body)
         .send()
         .await
-        .ok();
+        .ok()
+        .into_full()
+        .unwrap();
     assert_eq!(made.environment.as_ref().unwrap().id, env);
     assert!(
         !serde_json::to_string(&made)
@@ -748,7 +758,9 @@ async fn imports_and_reimports_store_only_safe_origin_and_forgetting_removes_the
         .body(&body)
         .send()
         .await
-        .ok();
+        .ok()
+        .into_full()
+        .expect("ordinary import keeps its native full result");
     replied.await.unwrap();
     assert_eq!(imported.spec, json!({"transport":"stdio"}));
     assert_eq!(imported.machine.as_ref().unwrap().id, machine);
@@ -807,7 +819,9 @@ async fn imports_and_reimports_store_only_safe_origin_and_forgetting_removes_the
         .body(&project)
         .send()
         .await
-        .ok();
+        .ok()
+        .into_full()
+        .expect("ordinary import keeps its native full result");
     replied.await.unwrap();
     let mut disable = change(folder.revision);
     disable.enabled = Some(false);
@@ -931,7 +945,9 @@ async fn selecting_a_different_found_definition_needs_both_server_management_and
         })
         .send()
         .await
-        .ok();
+        .ok()
+        .into_full()
+        .expect("ordinary import keeps its native full result");
     replied.await.unwrap();
     let mut conn = world.conn().await;
     let machine = orch_db::queries::resources::access_fixtures::insert_persons_machine(

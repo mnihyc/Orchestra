@@ -30,6 +30,7 @@ import { useCurrentHeading, useRouteHeading } from '@/shell/screen';
 import { useSettingsTabTitle } from '@/features/workbench/settingsTabTitle';
 import { sectionLabel } from '@/features/settings/sectionLabels';
 import { settingsNavigation } from '@/features/settings/navigation';
+import { useDefaultsOpening } from '@/features/settings/defaultsOpening';
 import { orgPageTitle } from '@/features/org/title';
 
 function ThreadContext({ id, continuation }: { id: string; continuation: string | null }) {
@@ -59,7 +60,8 @@ function NodeContext({ id, kind, settings, settingsSection = 'general' }: { id: 
   const { t } = useTranslation();
   const user = useStore(client.session, (state) => state.userId);
   const focusedContent = useContentFocused();
-  const query = useQuery(nodeQuery(id));
+  const opening = useDefaultsOpening(id);
+  const query = useQuery({ ...nodeQuery(id), enabled: !opening.waiting });
   const node = !query.isError && query.data?.kind === kind ? query.data : undefined;
   const tabTitle = useSettingsTabTitle(sectionLabel(settingsSection, t), settings ? node : undefined);
   useRouteHeading({ title: settings ? t('screens.sections.settings') : node?.kind === 'org' ? orgPageTitle(node, t) : node?.name ?? t(`screens.${kind}.title`),

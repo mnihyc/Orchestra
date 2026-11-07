@@ -221,7 +221,10 @@ impl Lab {
             Err(error) => panic!("the driver could not connect: {error}"),
         };
         let docker = Docker::connect_with_socket(&config.socket, 120, bollard::API_DEFAULT_VERSION)
-            .expect("a second handle on the daemon");
+            .expect("a second handle on the daemon")
+            .negotiate_version()
+            .await
+            .expect("the fixture negotiates with the same daemon as the driver");
         let blobs = Arc::new(MemoryBlobs::default());
         let driver = driver.with_blob_source(blobs.clone());
         let lab = Self {

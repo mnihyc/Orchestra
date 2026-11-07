@@ -24,8 +24,14 @@ The place's allowed modes and the environment's boundaries still apply.
 proves its model, permissions and behavior for that program and provider. An
 allowed action runs; a denied one does not, and the reported review shows its
 model and outcome in the thread. Auto is never the default. Its reviewer may
-use another model and consume provider use; separately reported use belongs
-to the thread, and otherwise remains inside the agent program's totals.
+use another model and consume provider use. Separately reported review usage
+belongs to the thread. When it is not reported separately, displayed totals are
+those reported by the agent program; they do not establish the reviewer's usage.
+
+Codex 0.165.0 offers Auto when its installed build passes the native compatibility
+check and your provider access permits `codex-auto-review`. Codex selects that
+reviewer; Orch does not substitute the thread's model. An action that needs no
+approval runs without an extra review. Claude Code's Auto remains unavailable.
 
 **Bypass** lets the agent do anything in its environment without asking; whoever chooses it answers for it.
 It requires another boundary that confines the agent and a program running without

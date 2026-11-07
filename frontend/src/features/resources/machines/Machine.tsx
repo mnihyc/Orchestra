@@ -11,6 +11,7 @@ import { Laptop } from 'lucide-react';
 import { useTranslation } from 'react-i18next';
 
 import { machineQuery } from '@/api/resources';
+import { MachineGatewayStatus } from '@/features/gateways/MachineGatewayStatus';
 import { MachineProgramsTab } from '@/features/resources/machines/Programs';
 import { Installation,installationOf } from '@/features/resources/machines/Installation';
 import { UpdateNotice } from '@/features/resources/ComponentUpdate';
@@ -136,6 +137,8 @@ function Overview({ machine }: { machine: MachineRow }) {
         />
         {slow && <p className="text-sm text-text-muted">{t('machines.overview.slowWhy', { ms: SLOW_LINK_MS })}</p>}
       </Section>
+
+      <MachineGatewayStatus machineId={machine.id} online={machine.online} />
 
       <ResourceDetails><JsonTree value={machine.facts} label={t('machines.overview.about')} /></ResourceDetails>
 

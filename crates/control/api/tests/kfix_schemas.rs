@@ -9,6 +9,7 @@ mod places;
 mod resources;
 mod rig;
 mod support;
+use support::FullSettingReply;
 
 use orch_api_contract::common::ErrorCode;
 use orch_api_contract::resources::*;
@@ -256,6 +257,7 @@ async fn node_and_system_summarizer_settings_validate_nested_declared_configurat
         })
         .send()
         .await
+        .full_setting()
         .ok();
     let revision = made.own.as_ref().unwrap().revision;
     for invalid in [
@@ -273,6 +275,7 @@ async fn node_and_system_summarizer_settings_validate_nested_declared_configurat
             })
             .send()
             .await
+            .full_setting()
             .problem();
         assert_eq!(refused.code, ErrorCode::RequestInvalid);
         assert!(
@@ -312,6 +315,7 @@ async fn node_and_system_summarizer_settings_validate_nested_declared_configurat
         })
         .send()
         .await
+        .full_setting()
         .problem();
     assert_eq!(unavailable.code, ErrorCode::SourceOffline);
     assert!(
@@ -418,6 +422,8 @@ async fn subscription_option_schemas_validate_nested_values_without_partially_ch
         .send()
         .await
         .ok()
+        .into_full()
+        .expect("a full provider reply")
         .provider;
     for config in [
         json!({"routing":{"region":false}}),

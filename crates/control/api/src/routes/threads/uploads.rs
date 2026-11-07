@@ -32,6 +32,9 @@ use orch_blob_contract::range::BlobMeta;
 use orch_db::queries::storage;
 use orch_types::Hash;
 
+mod blob_source;
+mod custody;
+
 /// The kinds of image the agents take, as a request states them.
 const IMAGE_TYPES: [&str; 4] = ["image/png", "image/jpeg", "image/webp", "image/gif"];
 
@@ -45,14 +48,30 @@ const ATTACHMENTS_DIR: &str = ".orch/attachments";
 pub fn mount(registry: &mut Registry) {
     registry
         .on_raw(UploadCreate, create)
-        .on_raw(UploadBlobGet, upload_get)
+        .on_raw_read_with_optional_operation(
+            UploadBlobGet,
+            crate::key_operations::native::selected::<blob_source::Blobs>,
+            upload_get,
+        )
         .on(UploadSessionCreate, session_create)
         .on_raw(UploadSessionPut, session_put)
-        .on(UploadSessionComplete, session_complete)
-        .on(UploadSessionDelete, session_delete)
-        .on(UploadBlobDelete, blob_delete)
+        .on_with_optional_operation(
+            UploadSessionComplete,
+            crate::key_operations::native::stored::<uploads::session_operation::Sessions, _, _>,
+            session_complete,
+        )
+        .on_with_optional_operation(
+            UploadSessionDelete,
+            crate::key_operations::native::stored::<uploads::session_operation::Sessions, _, _>,
+            session_delete,
+        )
+        .on_with_optional_operation(
+            UploadBlobDelete,
+            crate::key_operations::native::stored_query::<custody::Custody, _>,
+            blob_delete,
+        )
         .on_raw(ThreadAttachmentCreate, attach)
-        .on_raw(ThreadBlobGet, blob_get);
+        .on_raw_read_with_operation(ThreadBlobGet, super::read_operation::prepare, blob_get);
 }
 
 /// The name a request gives the file in its body: the header's text, with the escapes a browser
@@ -167,39 +186,23 @@ async fn session_delete(ctx: Ctx, (): (), (): ()) -> ApiResult<()> {
 }
 
 async fn blob_delete(ctx: Ctx, query: UploadBlobDeleteQuery, (): ()) -> ApiResult<()> {
-    let hash = ctx
-        .param("hash")?
-        .parse::<Hash>()
-        .map_err(|_| ApiError::not_found())?;
-    if query.thread.is_some() != query.path.is_some() {
-        return Err(ApiError::invalid(
-            "path",
-            "an attachment release names both its thread and path",
-        ));
-    }
-    let (mut tx, guard) = transaction_guard::begin(&ctx).await?;
+    let asked = custody::input(&ctx, query)?;
+    let (mut tx, _initial) = transaction_guard::begin(&ctx).await?;
     // Retention takes the same lock, keeping another private copy safe while unused bytes are released.
-    orch_db::queries::uploads::lock_blobs(&mut tx, &[hash]).await?;
-    let content = serde_json::json!([{ "blob": hash.to_string() }]);
-    let images = serde_json::json!([{ "images": [{ "blob": hash.to_string() }] }]);
-    let attachments = serde_json::json!([{ "attachments": [{ "blob": hash.to_string() }] }]);
-    sqlx::query("DELETE FROM thread_attachment_uploads WHERE created_by=$1 AND blob=$2 AND thread_id=$3 AND path=$4")
-        .bind(guard.user().id()).bind(hash.as_bytes().as_slice()).bind(query.thread).bind(query.path)
-        .execute(&mut *tx).await.map_err(orch_db::DbError::from)?;
-    sqlx::query(
-        "DELETE FROM completed_uploads WHERE user_id=$1 AND hash=$2
-      AND NOT EXISTS(SELECT 1 FROM thread_attachment_uploads WHERE created_by=$1 AND blob=$2)
-      AND NOT EXISTS(SELECT 1 FROM drafts WHERE user_id=$1 AND (content @> $3 OR content @> $4 OR content @> $5))
-      AND NOT EXISTS(SELECT 1 FROM chat_states WHERE user_id=$1 AND (draft @> $3 OR draft @> $4 OR draft @> $5))",
-    )
-    .bind(guard.user().id())
-    .bind(hash.as_bytes().as_slice())
-    .bind(&content)
-    .bind(&images)
-    .bind(&attachments)
-    .execute(&mut *tx)
-    .await
-    .map_err(orch_db::DbError::from)?;
+    orch_db::queries::uploads::lock_blobs(&mut tx, &[asked.hash]).await?;
+    let (ctx, guard) = transaction_guard::after_wait(&ctx, &mut tx).await?;
+    let prepared = if crate::key_operations::native::modern(guard.principal().caller()) {
+        Some(guard.operation_data::<crate::key_operations::native::Prepared<custody::Release>>()?)
+    } else {
+        None
+    };
+    let value = prepared.as_ref().map_or(&asked, |ready| &ready.value);
+    if value.hash != asked.hash {
+        return Err(ApiError::internal("the locked upload hash changed"));
+    }
+    custody::require(&ctx, guard.principal(), value)?;
+    guard.check_deadline(&ctx)?;
+    custody::release(&mut tx, value).await?;
     tx.commit().await.map_err(orch_db::DbError::from)?;
     Ok(())
 }
@@ -363,6 +366,7 @@ async fn blob_get(ctx: Ctx, query: ThreadBlobGetQuery, _: Body) -> ApiResult<Res
         .parse()
         .map_err(|_| ApiError::not_found())?;
     let mut conn = ctx.app.db.acquire().await?;
+    super::read_operation::require_current(&ctx, &mut conn).await?;
     let carrying = storage::input_carrying(&mut conn, thread, &hash).await?;
     let described = carrying
         .clone()
@@ -472,15 +476,15 @@ async fn blob_get(ctx: Ctx, query: ThreadBlobGetQuery, _: Body) -> ApiResult<Res
 
 /// A private draft reads only a hash the caller independently holds, never somebody else's unfinished input.
 async fn upload_get(ctx: Ctx, query: UploadBlobGetQuery, _: Body) -> ApiResult<Response> {
-    let hash: Hash = ctx
-        .param("hash")?
-        .parse()
-        .map_err(|_| ApiError::not_found())?;
-    let name = uploads::clean_name("name", &query.name)?;
-    let mut conn = ctx.app.db.acquire().await?;
-    let principal = crate::middleware::authorization::principal(&ctx, &mut conn).await?;
-    attachments::require(&mut conn, &principal, &hash).await?;
-    drop(conn);
+    let selected = crate::key_operations::native::selected_read::<blob_source::Blobs>(
+        ctx.clone(),
+        query.clone(),
+        (),
+    )
+    .await?;
+    blob_source::retain(&ctx, &selected)?;
+    let hash = selected.hash;
+    let name = selected.name.clone();
     let media = crate::media::media_type(&name, &[]);
     if query.archive == Some(true) {
         let size = ctx

@@ -637,9 +637,12 @@ async fn preflight(
             .caller()
             .grant()
             .and_then(|grant| grant.token()),
+        creator_origin: None,
+        scheduled_input: None,
         action: Action::Restore {
             body: FsRestore {
                 work: None,
+                recovery_only: None,
                 environment_id: environment,
                 job_id: new_id(),
                 snapshot_id: snapshot.id,

@@ -88,6 +88,18 @@ pub struct Request<'a> {
     pub config: &'a Json,
 }
 
+/// Program consent belongs to an existing environment and is recorded by its manager's PATCH.
+/// Creating or copying a configuration cannot carry an earlier environment's decision with it.
+pub fn check_initial_program_consent(config: &Json) -> Result<(), &'static str> {
+    if config
+        .get(keys::EXEC_VERSION_OVERRIDES)
+        .is_some_and(|value| value.as_object().is_none_or(|entries| !entries.is_empty()))
+    {
+        return Err("allow a machine program on the environment's page after creating it");
+    }
+    Ok(())
+}
+
 /// Why an environment could not be made.
 #[derive(Debug, thiserror::Error)]
 pub enum CreateError {
@@ -153,6 +165,8 @@ pub async fn create(
     principal: &Principal,
     request: &Request<'_>,
 ) -> Result<Made, CreateError> {
+    check_initial_program_consent(request.config)
+        .map_err(|reason| CreateError::Runtime(reason.to_owned()))?;
     let template_id: Id = match request.template {
         Some(id) => id,
         None => setting(
@@ -353,6 +367,7 @@ pub async fn create(
     let job = match provision::queue(conn, now, &state, Mode::Make, Some(request.owner)).await {
         Ok(job) => job,
         Err(MakeError::Db(error)) => return Err(error.into()),
+        Err(MakeError::Internal(error)) => return Err(error.into()),
         Err(other) => {
             return Err(CreateError::Internal(EngineError::unreadable(format!(
                 "a job for a new environment could not be queued: {other}"
@@ -492,6 +507,7 @@ pub async fn start(
         Err(MakeError::Running(job)) => Ok(Starting::Job(job)),
         Err(MakeError::NoEnvironment) => Err(StartError::NotFound),
         Err(MakeError::Db(error)) => Err(error.into()),
+        Err(MakeError::Internal(error)) => Err(error.into()),
     }
 }
 
@@ -1563,6 +1579,9 @@ pub async fn idle_stop_at(
     {
         return Ok(None);
     }
+    if crate::background_wake::running(conn, None, None, Some(state.id)).await? {
+        return Ok(None);
+    }
     let minutes: i64 = setting(
         conn,
         SettingsPlace::Environment(state.id),
@@ -1580,6 +1599,22 @@ pub async fn idle_stop_at(
 #[cfg(test)]
 mod storage_tests {
     use super::*;
+    #[test]
+    fn creation_cannot_copy_program_consent_from_another_environment() {
+        assert!(check_initial_program_consent(&json!({})).is_ok());
+        assert!(check_initial_program_consent(&json!({(keys::EXEC_VERSION_OVERRIDES):{}})).is_ok());
+        assert!(
+            check_initial_program_consent(&json!({(keys::EXEC_VERSION_OVERRIDES):{"codex":{
+                "path":"/codex","version":"unknown","by":orch_types::new_id(),
+                "at":"2026-10-31T00:00:00.000Z"
+            }}}))
+            .is_err()
+        );
+        assert!(
+            check_initial_program_consent(&json!({(keys::EXEC_VERSION_OVERRIDES):null})).is_err()
+        );
+    }
+
     #[test]
     fn attaching_owned_data_carries_its_named_storage_choice_to_the_machine() {
         let id = orch_types::new_id();

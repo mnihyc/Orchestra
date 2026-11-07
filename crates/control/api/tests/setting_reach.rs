@@ -8,6 +8,7 @@
 mod places;
 mod support;
 
+use crate::support::FullPermissionPageReply;
 use orch_api_contract::access::{PageChange, PermissionPageUpdate};
 use orch_api_contract::admin::AdminSettingReachGet;
 use orch_api_contract::common::{ErrorCode, PageQuery};
@@ -113,6 +114,7 @@ async fn a_viewer_can_inspect_reach_and_a_private_branch_leaks_neither_its_name_
         .body(&serde_json::from_value::<PageChange>(json!({"whole":"private"})).unwrap())
         .send()
         .await
+        .full_permission_page()
         .ok();
     let shown = reach(
         &world,

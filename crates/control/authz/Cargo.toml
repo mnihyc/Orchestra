@@ -13,8 +13,10 @@ chrono.workspace = true
 orch-access-contract.workspace = true
 orch-agent-contract.workspace = true
 orch-db.workspace = true
+orch-settings.workspace = true
 orch-types.workspace = true
 serde_json.workspace = true
+serde.workspace = true
 thiserror.workspace = true
 tracing.workspace = true
 

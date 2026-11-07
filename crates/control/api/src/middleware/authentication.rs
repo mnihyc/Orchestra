@@ -10,18 +10,19 @@ use super::requests::{ApiError, ApiResult};
 use crate::state::AppState;
 use chrono::{DateTime, Utc};
 use http::{HeaderMap, header};
+use orch_access_contract::key_scope::KeyScope;
 use orch_api_contract::common::ErrorCode;
 use orch_db::queries::identity::{self, UserRow};
-use orch_types::Id;
+use orch_types::{Id, Json, Time};
 use sha2::{Digest, Sha256};
 use std::sync::Arc;
 
 /// What an access token begins with.
-pub const ACCESS_TOKEN_PREFIX: &str = "oat_";
+pub const ACCESS_TOKEN_PREFIX: &str = orch_api_contract::surface::BROWSER_TOKEN_PREFIX;
 /// What a session cookie's value begins with.
 pub const SESSION_PREFIX: &str = "ors_";
 /// What an API token begins with.
-pub const API_TOKEN_PREFIX: &str = "opat_";
+pub const API_TOKEN_PREFIX: &str = orch_api_contract::surface::KEY_TOKEN_PREFIX;
 
 /// How a caller proved who they are.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -39,7 +40,26 @@ pub enum Via {
         scopes: Vec<String>,
         /// The node it is confined to, with everything below.
         node_id: Option<Id>,
+        /// Explicit operation policy, including retained issuance ceilings; None is legacy.
+        operation_scope: Option<KeyScope>,
+        /// Current deadline retained by accepted-work capture.
+        expires_at: Option<Time>,
     },
+}
+
+/// Decodes only credential restriction data. Invalid stored policy is never a legacy fallback.
+pub(crate) fn operation_scope(raw: Option<Json>) -> ApiResult<Option<KeyScope>> {
+    let scope: Option<KeyScope> = raw
+        .map(serde_json::from_value)
+        .transpose()
+        .map_err(|_| invalid_token())?;
+    if scope
+        .as_ref()
+        .is_some_and(|scope| !scope.validate().is_empty())
+    {
+        return Err(invalid_token());
+    }
+    Ok(scope)
 }
 
 /// A signed-in caller.
@@ -123,6 +143,36 @@ pub fn cookie<'a>(headers: &'a HeaderMap, name: &str) -> Option<&'a str> {
         .find_map(|(key, value)| (key == name).then_some(value))
 }
 
+/// Rejects a foreign credential kind before any public/cookie shortcut or business effect.
+/// Ticket bodies, enrollment proofs and the port-host protocol are not bearer credentials here.
+pub fn on_surface(
+    surface: orch_api_contract::surface::HttpSurface,
+    headers: &HeaderMap,
+) -> ApiResult<()> {
+    use orch_api_contract::surface::HttpSurface;
+    // Keep the existing resolver's classification: opat_ names a key; other bearers
+    // must still resolve as actual session access tokens. This is not a new token-format rule.
+    if bearer(headers)
+        .is_some_and(|token| (surface == HttpSurface::Key) != token.starts_with(API_TOKEN_PREFIX))
+        || (surface == HttpSurface::Key
+            && cookie(headers, orch_api_contract::common::SESSION_COOKIE).is_some())
+    {
+        return Err(invalid_token());
+    }
+    Ok(())
+}
+
+/// The same credential resolver, restricted to the surface selected by the server's mount.
+pub async fn authenticate_on(
+    surface: orch_api_contract::surface::HttpSurface,
+    app: &AppState,
+    headers: &HeaderMap,
+    now: DateTime<Utc>,
+) -> ApiResult<Caller> {
+    on_surface(surface, headers)?;
+    authenticate(app, headers, now).await
+}
+
 /// Finds out who makes a request from its headers. No token is nobody; a
 /// token that is unknown, expired or revoked is refused, and so is a user
 /// who is suspended.
@@ -140,12 +190,23 @@ pub async fn authenticate(
         let row = identity::api_token_by_hash(&mut conn, &hash, now)
             .await?
             .ok_or_else(invalid_token)?;
+        let scope = operation_scope(row.operation_scope)?;
+        let expires_at = row.expires_at.map(Time::new);
+        let _ = orch_authz::TokenGrant::from_stored_scope(
+            &row.scopes,
+            row.node_id,
+            scope.clone(),
+            expires_at,
+        )
+        .map_err(|_| invalid_token())?;
         (
             row.user_id,
             Via::Token {
                 token_id: row.id,
                 scopes: row.scopes,
                 node_id: row.node_id,
+                operation_scope: scope,
+                expires_at,
             },
             false,
         )
@@ -187,6 +248,32 @@ fn invalid_token() -> ApiError {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn surface_headers_reject_foreign_kinds_before_public_and_cookie_shortcuts() {
+        use orch_api_contract::surface::HttpSurface;
+        for (token, origin, foreign) in [
+            ("oat_synthetic", HttpSurface::Browser, HttpSurface::Key),
+            ("opat_synthetic", HttpSurface::Key, HttpSurface::Browser),
+        ] {
+            let mut headers = HeaderMap::new();
+            headers.insert(
+                header::AUTHORIZATION,
+                format!("Bearer {token}").parse().unwrap(),
+            );
+            assert!(on_surface(origin, &headers).is_ok());
+            assert!(on_surface(foreign, &headers).is_err());
+        }
+        let mut cookie = HeaderMap::new();
+        cookie.insert(
+            header::COOKIE,
+            "orch_session=ors_synthetic".parse().unwrap(),
+        );
+        assert!(on_surface(HttpSurface::Browser, &cookie).is_ok());
+        assert!(on_surface(HttpSurface::Key, &cookie).is_err());
+        // No bearer is needed for the already authorized ticket/public protocols.
+        assert!(on_surface(HttpSurface::Key, &HeaderMap::new()).is_ok());
+    }
 
     #[test]
     fn a_cookie_is_found_among_others() {

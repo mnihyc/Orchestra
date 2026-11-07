@@ -13,22 +13,24 @@ use orch_api_contract::{
     storage::{self as api, CleanupChoice, CleanupItem},
     workspace::Job,
 };
-use orch_db::{
-    Conn, DbError,
-    queries::jobs::{self, forks::PreflightRow},
-};
+use orch_db::{DbError, queries::jobs};
 use orch_engine::jobs::{
     cleanup::{self, Recipe, Target, Work},
     runner::initial_progress,
 };
-use orch_types::{Id, Json, Time, new_id};
+use orch_types::{Id, Json, new_id};
 use serde_json::json;
-use std::collections::{HashMap, HashSet};
+use std::collections::HashMap;
 
 /// Binds one preview and one confirmation for every scoped cleanup.
 pub fn mount(registry: &mut Registry) {
     registry
-        .on(api::StorageCleanupPreflight, preflight)
+        .on_with_initial_operation(
+            api::StorageCleanupPreflight,
+            native::effects::initial::<preview::Preview>,
+            native::effects::prepare::<preview::Preview>,
+            preview::run,
+        )
         .on(api::StorageCleanupCreate, start);
 }
 
@@ -64,123 +66,15 @@ fn deliberate_stop(row: &mut api::KeptRecord) -> bool {
     allowed
 }
 
-async fn targets(conn: &mut Conn, rows: &[api::KeptRecord]) -> ApiResult<HashMap<String, Target>> {
-    let hosts: Vec<_> = rows
-        .iter()
-        .filter_map(|row| row.host.as_ref().map(|host| host.id))
-        .collect();
-    let saved: Vec<(Id, Option<Json>)> =
-        sqlx::query_as("SELECT id,resource_inventory FROM hosts WHERE id=ANY($1)")
-            .bind(hosts)
-            .fetch_all(&mut *conn)
-            .await
-            .map_err(DbError::from)?;
-    let inventories: HashMap<_, _> = saved
-        .into_iter()
-        .filter_map(|(id, value)| {
-            value
-                .and_then(|value| {
-                    serde_json::from_value::<orch_driver_contract::resources::ResourceInventory>(
-                        value,
-                    )
-                    .ok()
-                })
-                .map(|inventory| (id, inventory))
-        })
-        .collect();
-    let environments: Vec<_> = rows
-        .iter()
-        .filter_map(|row| {
-            row.id
-                .strip_prefix("environment:")
-                .and_then(|id| id.parse::<Id>().ok())
-        })
-        .collect();
-    let revisions: HashMap<Id, i64> =
-        sqlx::query_as("SELECT id,removal_revision FROM environments WHERE id=ANY($1)")
-            .bind(environments)
-            .fetch_all(&mut *conn)
-            .await
-            .map_err(DbError::from)?
-            .into_iter()
-            .collect();
-    let mut result = HashMap::new();
-    for row in rows {
-        if let Some(host) = &row.host
-            && let Some(native) = inventories
-                .get(&host.id)
-                .and_then(|inventory| orch_engine::storage::node_object(host, inventory, &row.id))
-        {
-            result.insert(
-                row.id.clone(),
-                Target::Native {
-                    host: host.id,
-                    resource: native.resource.clone(),
-                    last_used_at: native.last_used_at,
-                },
-            );
-            continue;
-        }
-        if let Some((environment, revision)) = row
-            .id
-            .strip_prefix("environment:")
-            .and_then(|id| id.parse::<Id>().ok())
-            .and_then(|id| revisions.get(&id).map(|revision| (id, *revision)))
-        {
-            result.insert(
-                row.id.clone(),
-                Target::Environment {
-                    environment,
-                    revision,
-                },
-            );
-        }
-        if let Some(version) = row
-            .id
-            .strip_prefix("skill-version:")
-            .and_then(|id| id.parse::<Id>().ok())
-            && let Some(object) = row.resource
-        {
-            result.insert(
-                row.id.clone(),
-                Target::SkillVersion {
-                    skill: object.id,
-                    version,
-                },
-            );
-        }
-        if let Some(kept) = row
-            .id
-            .strip_prefix("mount:")
-            .and_then(|id| id.parse::<Id>().ok())
-            && let Some(object) = row.resource
-        {
-            result.insert(
-                row.id.clone(),
-                Target::MountData {
-                    mount: object.id,
-                    kept,
-                },
-            );
-        }
-    }
-    Ok(result)
-}
+mod preview;
+use crate::key_operations::native;
 
-async fn preflight(
-    mut ctx: Ctx,
-    (): (),
-    request: api::CleanupRequest,
-) -> ApiResult<api::CleanupPlan> {
-    let (mut tx, guard) = transaction_guard::begin(&ctx).await?;
-    ctx.now = guard.now().get();
-    let (_, mut rows, _) =
-        super::records(&ctx, &mut tx, guard.principal(), &query(&request)).await?;
-    let selected: HashSet<_> = request.items.iter().collect();
-    if !selected.is_empty() {
-        rows.retain(|row| selected.contains(&row.id));
-    }
-    let mut resolved = targets(&mut tx, &rows).await?;
+/// The existing native choice/default planner consumes its prepared records and exact raw targets.
+fn plan_items(
+    ctx: &Ctx,
+    rows: Vec<api::KeptRecord>,
+    mut resolved: HashMap<String, Target>,
+) -> (Vec<CleanupItem>, HashMap<String, Target>) {
     let mut targets = HashMap::new();
     let mut items = Vec::new();
     for mut row in rows {
@@ -229,49 +123,7 @@ async fn preflight(
             selected,
         });
     }
-    let name = if let Some(object) = request.resource {
-        orch_engine::resource_facts::authorities(&mut tx, guard.principal(), &[object.id])
-            .await
-            .map_err(ApiError::internal)?
-            .into_iter()
-            .find(|row| row.resource.object() == object && row.manageable)
-            .map(|row| row.resource.name)
-            .ok_or_else(ApiError::not_found)?
-    } else if let Some(host) = items
-        .iter()
-        .find_map(|item| item.record.host.as_ref())
-        .filter(|_| request.scope.starts_with("host:"))
-    {
-        host.name.clone()
-    } else {
-        "Storage".into()
-    };
-    let id = new_id();
-    let plan = api::CleanupPlan {
-        id,
-        expires_at: Time::new(orch_engine::updates::expires(ctx.now)),
-        confirmation_name: name,
-        items,
-        people: Vec::new(),
-        other_people: 0,
-        notify: false,
-    };
-    jobs::forks::save_preflight(
-        &mut tx,
-        &PreflightRow {
-            id,
-            kind: cleanup::KIND.into(),
-            node_id: None,
-            environment_id: None,
-            created_by: guard.principal().user(),
-            plan: json!({"request":request,"preview":plan,"targets":targets}),
-            expires_at: plan.expires_at.get(),
-            created_at: ctx.now,
-        },
-    )
-    .await?;
-    tx.commit().await.map_err(DbError::from)?;
-    Ok(plan)
+    (items, targets)
 }
 
 async fn start(mut ctx: Ctx, (): (), body: api::CleanupStart) -> ApiResult<Job> {

@@ -209,7 +209,7 @@ export default function ResourceCard({ subject }: { subject: ResourceSubject }) 
         : resolved.kind === 'agent' ? resolved.agent : resolved.kind === 'skill' ? resolved.skill : null;
   const home = named !== null && 'home' in named ? named.home : null;
   return <div className="flex w-[min(20rem,calc(100vw-2rem))] max-w-full flex-col gap-3 p-3" data-resource-card={subject.kind}>
-    <div className="flex min-w-0 flex-col gap-1"><div className="flex min-w-0 items-center gap-1"><h3 className="min-w-0 text-base font-semibold wrap-anywhere"><a href={resourceAddress(resolved)} className="hover:underline">{resourceName(resolved)}</a></h3><Hint id="resource-facts" popover /></div><ResourceHint subject={resolved} /></div>
+    <div className="flex min-w-0 flex-col gap-1"><div className="flex min-w-0 items-center gap-1"><h3 className="min-w-0 text-base font-semibold wrap-anywhere"><a href={resourceAddress(resolved)} className="hover:underline">{resourceName(resolved)}</a></h3><Hint id="resource-facts" popover /></div><ResourceHint subject={resolved} wrap /></div>
     {home?.name !== undefined && home.name !== null && <p className="text-sm text-text-muted wrap-anywhere">{home.name}</p>}
     {content}
   </div>;

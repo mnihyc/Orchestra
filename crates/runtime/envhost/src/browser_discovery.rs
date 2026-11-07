@@ -247,7 +247,7 @@ pub async fn discover(
     #[cfg(windows)]
     for root in ["PROGRAMFILES", "PROGRAMFILES(X86)", "LOCALAPPDATA"]
         .iter()
-        .filter_map(|key| std::env::var_os(key))
+        .filter_map(std::env::var_os)
     {
         for (name, path) in [
             ("google-chrome", "Google/Chrome/Application/chrome.exe"),

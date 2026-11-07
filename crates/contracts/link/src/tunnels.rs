@@ -304,6 +304,9 @@ pub struct TicketClaims {
     /// The generation of that environment when the tool ticket was issued.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub tool_environment_generation: Option<i64>,
+    /// The executor build admitted to this tool channel; absent on older or other tickets.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub tool_executor_version: Option<String>,
     /// Port admission facts, absent from every other tunnel kind.
     #[serde(flatten, default, skip_serializing_if = "Option::is_none")]
     pub port: Option<crate::ports::PortTicketClaims>,
@@ -426,6 +429,9 @@ impl Ticket {
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize, JsonSchema)]
 #[serde(rename_all = "snake_case")]
 pub enum OpenErrorCode {
+    /// No configured common gateway could admit both ends; the detail names safe labels.
+    #[serde(rename = "tunnel.gateway_unreachable")]
+    GatewayUnreachable,
     /// The ticket is not one, is not signed by the system, or is not
     /// its presenter's.
     BadTicket,
@@ -1085,6 +1091,7 @@ mod tests {
             tool_set: None,
             tool_environment_id: None,
             tool_environment_generation: None,
+            tool_executor_version: None,
             port: None,
             exp: 1_791_500_000,
         }

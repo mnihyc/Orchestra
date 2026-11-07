@@ -9,9 +9,12 @@
 use crate::middleware::authorization::{self, refusals};
 use crate::middleware::requests::{ApiError, ApiResult};
 use crate::registry::{Ctx, Registry};
+use crate::routes::access::page::{NameBounds, NameSources};
 use crate::routes::nodes::{actor_name, invalid, placed, policy_at, view as node_view};
 use crate::routes::resources::providers::{home_policies, refused_making};
-use crate::routes::resources::view::{Holding, accesses, addresses, parse};
+use crate::routes::resources::view::{
+    Holding, PreparedAccess, accesses, accesses_prepared, addresses, parse, prepare_accesses,
+};
 use crate::routes::resources::{Home, LIST_LIMIT, begin_mutation, clean_name, record, require};
 use orch_access_contract::audit::AuditAction;
 use orch_access_contract::decisions::{Held, ObjectRef};
@@ -20,7 +23,6 @@ use orch_api_contract::access::NewResourceAccess;
 use orch_api_contract::common::ErrorCode;
 use orch_api_contract::nodes::NodeKind;
 use orch_api_contract::resources::{self as api, Template, UnitKind};
-use orch_authz::nodes::Page;
 use orch_authz::ownership::{self, Basis, Making, NewAccess};
 use orch_authz::{Policy, Principal, resources};
 use orch_db::queries::resources::binding as binding_rows;
@@ -37,18 +39,28 @@ use std::collections::{BTreeMap, HashMap};
 /// The longest a driver's name is: the name of a program's driver.
 const DRIVER_MAX_CHARS: usize = 32;
 
+mod collection_read;
 mod import;
+mod read;
 
 /// Binds this module's requests.
 pub fn mount(registry: &mut Registry) {
     registry
-        .on(api::TemplateList, list)
+        .on_with_operation(
+            api::TemplateList,
+            collection_read::prepare,
+            collection_read::get,
+        )
         .on(api::TemplateCreate, create)
         .on(api::TemplateImport, import::import)
         .on(api::TemplateCheck, check)
-        .on(api::TemplateGet, get)
+        .on_with_optional_operation(api::TemplateGet, read::prepare, read::get)
         .on(api::TemplateUpdate, update)
-        .on(api::TemplateDelete, delete)
+        .on_with_operation(
+            api::TemplateDelete,
+            crate::key_operations::direct::declared,
+            delete,
+        )
         .on(api::CapabilityList, capabilities)
         .on(api::DriverList, drivers);
 }
@@ -197,18 +209,58 @@ async fn check(
     check_spec(&mut conn, &driver, unit_word(body.kind), &body.spec).await
 }
 
+pub(crate) struct PreparedListProjection {
+    rows: Vec<TemplateRow>,
+    standing: HashMap<Id, Standing>,
+    access: PreparedAccess,
+    sources: NameSources,
+    bounds: NameBounds,
+}
+
+impl PreparedListProjection {
+    pub(crate) fn name_sources(&self) -> &NameSources {
+        &self.sources
+    }
+
+    pub(crate) fn bound_names(&mut self, bounds: NameBounds) {
+        self.bounds = bounds;
+    }
+}
+
 async fn template_views(
     conn: &mut Conn,
     principal: &Principal,
     rows: Vec<TemplateRow>,
     standing: &HashMap<Id, Standing>,
 ) -> ApiResult<Vec<Template>> {
+    template_views_prepared(conn, principal, rows, standing, None).await
+}
+
+async fn template_views_prepared(
+    conn: &mut Conn,
+    principal: &Principal,
+    rows: Vec<TemplateRow>,
+    standing: &HashMap<Id, Standing>,
+    prepared: Option<&PreparedListProjection>,
+) -> ApiResult<Vec<Template>> {
     let ids: Vec<Id> = rows.iter().map(|row| row.id).collect();
     let addresses = addresses(conn, &ids).await?;
     let people: Vec<Id> = rows.iter().filter_map(|row| row.owner_id).collect();
     let people = refusals::user_refs(conn, &people).await?;
     let homes: Vec<Id> = rows.iter().filter_map(|row| row.home_id).collect();
-    let homes = node_view::refs(conn, principal, &homes, Policy::default()).await?;
+    let homes = match prepared {
+        Some(prepared) if prepared.bounds.limited => {
+            node_view::refs_with_name_sources(
+                conn,
+                principal,
+                &homes,
+                Policy::default(),
+                &prepared.bounds.nodes,
+            )
+            .await?
+        }
+        _ => node_view::refs(conn, principal, &homes, Policy::default()).await?,
+    };
     let holdings: Vec<Holding<'_>> = rows
         .iter()
         .filter_map(|row| {
@@ -224,7 +276,19 @@ async fn template_views(
             })
         })
         .collect();
-    let access = accesses(conn, principal, &holdings).await?;
+    let access = match prepared {
+        Some(prepared) => {
+            accesses_prepared(
+                conn,
+                principal,
+                &holdings,
+                &prepared.access,
+                Some(&prepared.bounds),
+            )
+            .await?
+        }
+        None => accesses(conn, principal, &holdings).await?,
+    };
     rows.into_iter()
         .map(|row| {
             Ok(Template {
@@ -277,7 +341,86 @@ pub(crate) async fn inventory(
     template_views(conn, principal, rows, &standing).await
 }
 
-pub(crate) async fn show(conn: &mut Conn, principal: &Principal, id: Id) -> ApiResult<Template> {
+pub(crate) async fn prepare_list_projection(
+    conn: &mut Conn,
+    seen: &[resources::Seen],
+) -> ApiResult<PreparedListProjection> {
+    let ids: Vec<_> = seen.iter().map(|each| each.resource.id).collect();
+    let rows = queries::templates(conn, &ids).await?;
+    let standing: HashMap<_, _> = seen
+        .iter()
+        .map(|each| {
+            (
+                each.resource.id,
+                Standing {
+                    admin_access: each.admin_access,
+                    admin_place: each.admin_place,
+                    participating: each.participating,
+                    admin_only: each.admin_only.clone(),
+                    owner: each.owner,
+                    administers: each.administers,
+                    held: each.held.clone(),
+                },
+            )
+        })
+        .collect();
+    prepare_rows_projection(conn, rows, standing).await
+}
+
+async fn prepare_rows_projection(
+    conn: &mut Conn,
+    rows: Vec<TemplateRow>,
+    standing: HashMap<Id, Standing>,
+) -> ApiResult<PreparedListProjection> {
+    let holdings: Vec<_> = rows
+        .iter()
+        .filter_map(|row| {
+            standing.get(&row.id).map(|each| Holding {
+                id: row.id,
+                admin_access: each.admin_access,
+                admin_place: each.admin_place,
+                participating: each.participating,
+                admin_only: &each.admin_only,
+                owner: each.owner,
+                administers: each.administers,
+                held: &each.held,
+            })
+        })
+        .collect();
+    let access = prepare_accesses(conn, &holdings).await?;
+    let mut sources = access.names.clone();
+    sources
+        .nodes
+        .extend(rows.iter().filter_map(|row| row.home_id));
+    Ok(PreparedListProjection {
+        rows,
+        standing,
+        access,
+        sources,
+        bounds: NameBounds::default(),
+    })
+}
+
+pub(crate) async fn show_list_prepared(
+    conn: &mut Conn,
+    principal: &Principal,
+    prepared: &PreparedListProjection,
+) -> ApiResult<Vec<Template>> {
+    template_views_prepared(
+        conn,
+        principal,
+        prepared.rows.clone(),
+        &prepared.standing,
+        Some(prepared),
+    )
+    .await
+}
+
+async fn single_rows(
+    conn: &mut Conn,
+    principal: &Principal,
+    id: Id,
+) -> ApiResult<(Vec<TemplateRow>, HashMap<Id, Standing>)> {
     let row = queries::templates(conn, &[id])
         .await?
         .pop()
@@ -301,10 +444,24 @@ pub(crate) async fn show(conn: &mut Conn, principal: &Principal, id: Id) -> ApiR
             held: effective.held,
         },
     )]);
-    template_views(conn, principal, vec![row], &standing)
+    Ok((vec![row], standing))
+}
+
+pub(crate) async fn show(conn: &mut Conn, principal: &Principal, id: Id) -> ApiResult<Template> {
+    let (rows, standing) = single_rows(conn, principal, id).await?;
+    template_views(conn, principal, rows, &standing)
         .await?
         .pop()
         .ok_or_else(|| ApiError::internal("a template was read and is not shown"))
+}
+
+pub(crate) async fn prepare_projection(
+    conn: &mut Conn,
+    principal: &Principal,
+    id: Id,
+) -> ApiResult<PreparedListProjection> {
+    let (rows, standing) = single_rows(conn, principal, id).await?;
+    prepare_rows_projection(conn, rows, standing).await
 }
 
 fn home_of(row: &TemplateRow) -> Home {
@@ -314,95 +471,21 @@ fn home_of(row: &TemplateRow) -> Home {
     }
 }
 
-/// The templates the caller may use or manage.
-async fn list(
-    ctx: Ctx,
-    query: api::TemplateListQuery,
-    (): (),
-) -> ApiResult<Vec<orch_api_contract::common::Listed<Template>>> {
-    let mut conn = ctx.app.db.acquire().await?;
-    let principal = authorization::principal(&ctx, &mut conn).await?;
-    let page = Page {
-        after: None,
-        limit: LIST_LIMIT,
-    };
-    let seen = resources::visible(
-        &mut conn,
-        &principal,
-        ResourceKind::Template,
-        page,
-        Policy::default(),
-    )
-    .await
-    .map_err(ApiError::internal)?;
-    let mut seen: Vec<_> = seen
-        .items
-        .into_iter()
-        .filter(|each| {
-            each.administers
-                || each.held.iter().any(|held| {
-                    matches!(
-                        held.permission,
-                        Permission::TemplateView
-                            | Permission::TemplateUse
-                            | Permission::TemplateManage
-                            | Permission::AccessManage
-                    )
-                })
-        })
-        .collect();
-    if let Some(org) = query.org_id {
-        let homes: Vec<Id> = seen.iter().filter_map(|each| each.resource.home).collect();
-        let inside = queries::homes_under(&mut conn, org, &homes).await?;
-        seen.retain(|each| each.resource.home.is_none_or(|home| inside.contains(&home)));
-    }
-    let private = super::hidden_items(&mut conn, &principal, &mut seen).await?;
-    let ids: Vec<Id> = seen.iter().map(|each| each.resource.id).collect();
-    let mut rows = queries::templates(&mut conn, &ids).await?;
-    if let Some(kind) = query.kind {
-        rows.retain(|row| row.kind == unit_word(kind));
-    }
-    let standing: HashMap<Id, Standing> = seen
-        .into_iter()
-        .map(|each| {
-            (
-                each.resource.id,
-                Standing {
-                    admin_access: each.admin_access,
-                    admin_place: each.admin_place,
-                    participating: each.participating,
-                    admin_only: each.admin_only,
-                    owner: each.owner,
-                    administers: each.administers,
-                    held: each.held,
-                },
-            )
-        })
-        .collect();
-    Ok(super::listed(
-        template_views(&mut conn, &principal, rows, &standing).await?,
-        private,
-    ))
-}
-
 /// Reads a template: whoever holds any permission on it.
-async fn get(ctx: Ctx, (): (), (): ()) -> ApiResult<Template> {
-    let id = ctx.id("id")?;
-    let mut conn = ctx.app.db.acquire().await?;
-    let principal = authorization::principal(&ctx, &mut conn).await?;
-    queries::templates(&mut conn, &[id])
+async fn require_read(conn: &mut Conn, principal: &Principal, id: Id) -> ApiResult<()> {
+    queries::templates(conn, &[id])
         .await?
         .pop()
         .ok_or_else(ApiError::not_found)?;
     require(
-        &mut conn,
-        &principal,
+        conn,
+        principal,
         ResourceKind::Template,
         id,
         Permission::TemplateView,
     )
     .await?;
-    show(&mut conn, &principal, id).await
+    Ok(())
 }
 
 /// The same creation and restricted-driver checks for a proposal and a saved template.
@@ -630,11 +713,15 @@ async fn delete(ctx: Ctx, (): (), (): ()) -> ApiResult<()> {
         .pop()
         .ok_or_else(ApiError::not_found)?;
     if row.units > 0 {
-        return Err(ApiError::new(
+        let problem = ApiError::new(
             ErrorCode::ResourceInUse,
             "units were made from this template and still stand",
-        )
-        .with("units", row.units));
+        );
+        return Err(if ctx.key_receipt_required() {
+            authorization::problem_without_content(problem)
+        } else {
+            problem.with("units", row.units)
+        });
     }
     queries::delete_template(&mut tx, id, ctx.now).await?;
     let who = actor_name(&ctx)?;

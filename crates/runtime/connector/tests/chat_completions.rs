@@ -137,11 +137,13 @@ async fn a_chat_turn(stream: bool) {
     let seen = server.seen.lock().unwrap().clone();
     assert_eq!(seen.len(), 1);
     assert_eq!(seen[0].0["authorization"], format!("Bearer {}", p.key));
+    // Omission resolves to the ordinary tier locally, keeping account defaults
+    // inside the lease's provider ceiling. Other request members stay exact.
     assert_eq!(
         seen[0].1,
         json!({"model":MODEL,"messages":[{"role":"user","content":"Hello"}],"stream":stream,
         "stream_options":{"include_usage":true},"tools":[{"type":"function","function":{"name":"local_tool","parameters":{"type":"object","properties":{}}}}],
-        "vendor_option":{"keep":"unchanged"}})
+        "vendor_option":{"keep":"unchanged"},"service_tier":"default"})
     );
     assert!(!p.given.lock().unwrap().join("\n").contains(&p.key));
     let usage = p.wait_provider_event("lease.usage", 1).await;

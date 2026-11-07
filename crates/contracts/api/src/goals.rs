@@ -5,6 +5,11 @@
 //! any input passes. The agent reports with its `goal` tool; a report of "met" is checked against the condition by the
 //! place's helper model where there is one. The limits default to none and follow the settings of the place.
 
+use crate::operations::{OperationSpec as Op, TargetResolver as Target};
+use orch_access_contract::key_scope::KeyAction::{Read, Write};
+use orch_access_contract::key_scope::KeyTargetKind::Object;
+use orch_access_contract::permissions::ObjectKind as K;
+
 use crate::routes::Access::{Permission, Rule};
 use crate::users::UserRef;
 use orch_types::{Id, Time};
@@ -215,6 +220,28 @@ pub struct ThreadGoal {
     pub ended_at: Option<Time>,
 }
 
+/// A goal was accepted without reading its existing state, budgets or report.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+pub struct ThreadGoalReceipt {
+    /// The native acceptance has no full goal projection.
+    pub projection: crate::common::ReceiptProjection,
+    /// The actual thread that accepted it.
+    pub thread_id: Id,
+    /// The created goal.
+    pub goal_id: Id,
+}
+
+crate::common::full_or_receipt! {
+    /// The native goal reply or the same accepted goal's content-free receipt.
+    #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+    pub enum ThreadGoalCreateResponse {
+        /// The unchanged native full goal projection.
+        Full(ThreadGoal),
+        /// The goal was accepted without stored content readback.
+        Receipt(ThreadGoalReceipt),
+    }
+}
+
 /// What the input of a goal's loop says of its goal, for the block the timeline shows in its place.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
 pub struct GoalInputFacts {
@@ -371,13 +398,17 @@ pub struct MarkerGoalCleared {
 
 crate::endpoints! {
     /// Reads the thread's goal: the one under way, else the last that ended and was not cleared.
-    ThreadGoalGet: GET "/threads/{id}/goal", Permission("thread.view"), none, none, json Option<ThreadGoal>, 200;
+    ThreadGoalGet: GET "/threads/{id}/goal", Permission("thread.view"), none, none, json Option<ThreadGoal>, 200,
+        operation Op::single(Read, &[Object(K::Thread)], Target::TypedPath { parameter: "id", kind: Object(K::Thread) });
     /// Sets a goal on a thread, in the caller's name: Orch then keeps the thread working on it, queuing each next input as the caller's.
-    ThreadGoalCreate: POST "/threads/{id}/goal", Rule("thread.interact on the thread, and the caller's own use of the model it runs on"), none, json ThreadGoalCreateBody, json ThreadGoal, 201;
+    ThreadGoalCreate: POST "/threads/{id}/goal", Rule("thread.interact on the thread, and the caller's own use of the model it runs on"), none, json ThreadGoalCreateBody, json ThreadGoalCreateResponse, 201,
+        operation Op::receipt(&Op::returning(Write, &[Object(K::Thread)], Target::Path("id")));
     /// Edits a goal, pauses it, or sets it going again.
-    ThreadGoalUpdate: PATCH "/threads/{id}/goal", Permission("thread.interact"), none, json ThreadGoalUpdateBody, json ThreadGoal, 200;
+    ThreadGoalUpdate: PATCH "/threads/{id}/goal", Permission("thread.interact"), none, json ThreadGoalUpdateBody, json ThreadGoal, 200,
+        operation Op::returning(Write, &[Object(K::Thread)], Target::PermissionObject);
     /// Takes the thread's goal away; what it did stays.
-    ThreadGoalClear: DELETE "/threads/{id}/goal", Permission("thread.interact"), none, none, json ThreadGoal, 200;
+    ThreadGoalClear: DELETE "/threads/{id}/goal", Permission("thread.interact"), none, none, json ThreadGoal, 200,
+        operation Op::returning(Write, &[Object(K::Thread)], Target::PermissionObject);
 }
 
 #[cfg(test)]

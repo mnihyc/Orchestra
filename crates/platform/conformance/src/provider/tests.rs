@@ -326,3 +326,39 @@ async fn a_missing_disposable_fixture_verifies_no_reads_exchanges_or_resets() {
         Some(crate::report::Outcome::Skipped(_))
     ));
 }
+
+#[test]
+fn paid_amounts_accept_canonical_decimals_and_legacy_numbers_without_changing_percent() {
+    let extra = |used: Json, limit: Json, percent: Json| json!({"extra_usage":{"enabled":true,"used":used,"limit":limit,"used_percent":percent,"unit":"points","decimal_places":2,"disabled_reason":null,"limit_reached":null}});
+    for amount in [
+        json!("9007199254740993.1250"),
+        json!("0"),
+        json!(123.25),
+        Json::Null,
+    ] {
+        assert!(facts_shape(&extra(amount.clone(), amount, json!(20))).is_ok());
+    }
+    for amount in [
+        json!("1e3"),
+        json!("not money"),
+        json!("9".repeat(41)),
+        json!(true),
+        json!(1e100),
+    ] {
+        assert!(facts_shape(&extra(amount, Json::Null, json!(20))).is_err());
+    }
+    assert!(facts_shape(&extra(json!("1.25"), json!("10"), json!("12.5"))).is_err());
+}
+
+#[test]
+fn a_legacy_numeric_provider_report_normalizes_without_changing_its_conformance_or_amount_values() {
+    let legacy = json!({"extra_usage":{"enabled":true,"used":123.0,"limit":5000.0,"used_percent":2.46,"unit":"USD","decimal_places":null,"disabled_reason":null,"limit_reached":null}});
+    assert!(facts_shape(&legacy).is_ok());
+    let mut facts: orch_provider_contract::facts::ProviderFacts =
+        serde_json::from_value(legacy).unwrap();
+    orch_provider_contract::facts::normalize(&mut facts);
+    let written = serde_json::to_value(facts).unwrap();
+    assert_eq!(written["extra_usage"]["used"], "123.0");
+    assert_eq!(written["extra_usage"]["limit"], "5000.0");
+    assert!(facts_shape(&written).is_ok());
+}

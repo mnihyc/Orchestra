@@ -633,6 +633,12 @@ pub(crate) async fn decide(
         }
         None => None,
     };
+    let approval =
+        crate::routes::approvals::views(&mut tx, &principal, &[settled], ctx.now, &ctx.app.engine)
+            .await?
+            .into_iter()
+            .next()
+            .ok_or_else(ApiError::not_found)?;
     let readers = core::port_deciders(&mut tx, env.id, principal.user(), now)
         .await
         .map_err(ApiError::internal)?;
@@ -642,18 +648,6 @@ pub(crate) async fn decide(
     if decided_opening.kind == "host" && decided_opening.host_allocated {
         crate::host_ports::publish_in_background(&ctx.app, decided_opening.id);
     }
-    let mut conn = ctx.app.db.acquire().await?;
-    let approval = crate::routes::approvals::views(
-        &mut conn,
-        &principal,
-        &[settled],
-        ctx.now,
-        &ctx.app.engine,
-    )
-    .await?
-    .into_iter()
-    .next()
-    .ok_or_else(ApiError::not_found)?;
     Ok(ApprovalDecisionReply {
         approval,
         opening_result: Some(PortOpenReply {

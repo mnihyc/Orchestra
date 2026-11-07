@@ -9,6 +9,7 @@ mod places;
 mod resources;
 mod support;
 
+use crate::support::FullPermissionPageReply;
 use orch_access_contract::decisions::ObjectRef;
 use orch_access_contract::permissions::ResourceKind;
 use orch_api_contract::access::NewResourceAccess;
@@ -2112,6 +2113,7 @@ async fn one_node_serves_two_orgs_through_its_one_hosts_access_page_without_shar
         .body(&share)
         .send()
         .await
+        .full_permission_page()
         .ok();
     assert_eq!(
         page.rows
@@ -2272,7 +2274,9 @@ async fn cleanup_previews_blocked_items_requires_the_typed_data_name_and_repeats
         .body(&request)
         .send()
         .await
-        .ok();
+        .ok()
+        .into_full()
+        .expect("the ordinary cleanup preview keeps its full body");
     assert_eq!(
         plan.items.len(),
         2,
@@ -2470,7 +2474,9 @@ async fn operator_storage_uses_admin_mode_shared_dependencies_and_commands_witho
         })
         .send()
         .await
-        .ok();
+        .ok()
+        .into_full()
+        .expect("the ordinary cleanup preview keeps its full body");
     assert_eq!(plan.items.len(), 1);
     let item = &plan.items[0];
     assert_eq!(
@@ -2576,7 +2582,9 @@ async fn a_running_unrecorded_unit_needs_an_explicit_typed_stop_and_a_dependent_
         .body(&request)
         .send()
         .await
-        .ok();
+        .ok()
+        .into_full()
+        .expect("the ordinary cleanup preview keeps its full body");
     assert_eq!(plan.items.len(), 1);
     let item = &plan.items[0];
     assert_eq!(
@@ -2642,7 +2650,9 @@ async fn a_running_unrecorded_unit_needs_an_explicit_typed_stop_and_a_dependent_
         .body(&request)
         .send()
         .await
-        .ok();
+        .ok()
+        .into_full()
+        .expect("the ordinary cleanup preview keeps its full body");
     let needed = plan
         .items
         .iter()
@@ -2654,3 +2664,6 @@ async fn a_running_unrecorded_unit_needs_an_explicit_typed_stop_and_a_dependent_
         "another unit's dependency blocks stopping, before any native effect"
     );
 }
+
+#[path = "hosts/storage_scopes.rs"]
+mod storage_scopes;

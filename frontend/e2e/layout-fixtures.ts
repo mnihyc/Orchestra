@@ -1,34 +1,128 @@
-/** The resource kinds not yet implemented by the HTTP double use the same typed fixtures as its browser proofs. */
+/** Routes not implemented by the HTTP double reuse the typed data of their existing browser proofs. */
 import type { Page } from '@playwright/test';
-import type { Skill, SkillVersion, SkillVersionInfo, SkillVersionInfoPage } from '../src/generated/api-types.ts';
-import { ACME, RUNS_ON } from '../tests/doubles/fixtures.ts';
-import { ADA } from '../tests/doubles/thread-scenes.ts';
-import { SKILL_ID } from './layout-routes.ts';
+import { readStorageSearch, storageRequest } from '../src/features/storage/search.ts';
+import { storageReport } from '../tests/doubles/storage-report.ts';
+import { expect } from '@playwright/test';
+import type { LayoutRoute, SCREEN_PRESENTATIONS } from './layout-routes.ts';
+import { documentTreeFixture } from '../tests/e2e/document-tree-support.ts';
+import { replySent, signIn } from '../tests/e2e/support.ts';
+import { asAdmin } from '../tests/e2e/admin-mode-support.ts';
+import { caption } from './capture/open.ts';
+import { showWorkbenchView } from '../tests/e2e/workbench-support.ts';
+
+/** Persist the requested appearance before the measured document has any client cache. */
+export async function signInScreenRoute(page: Page, mode: (typeof SCREEN_PRESENTATIONS)[number]): Promise<void> {
+  await page.setViewportSize({ width: mode.width, height: 900 });
+  await page.emulateMedia({ colorScheme: mode.theme, reducedMotion: 'reduce' });
+  const login = page.waitForResponse((response) => response.request().method() === 'POST' && new URL(response.url()).pathname.endsWith('/auth/login')).then(replySent);
+  await signIn(page); const auth: unknown = await login;
+  if (typeof auth !== 'object' || auth === null || !('access_token' in auth) || typeof auth.access_token !== 'string') throw new Error('The screen fixture needs its fake sign-in result.');
+  await asAdmin(page, true);
+  expect((await page.request.patch('/api/v1/me', { headers: { Authorization: `Bearer ${auth.access_token}` }, data: { theme: mode.theme, locale: mode.locale } })).ok()).toBe(true);
+}
+
+/** Install state before navigation; browser reads still pass through the ordinary fake API. */
+export async function prepareLayoutRoute(page: Page, row: LayoutRoute): Promise<void> {
+  if (row.fixture === 'document-tree') { await documentTreeFixture(page); return; }
+  if (row.fixture === undefined) return;
+  const response = await page.request.post(`http://127.0.0.1:${process.env.ORCH_DOUBLE_PORT ?? '41871'}/__double/screen-gate`, { data: { name: row.fixture } });
+  expect(response.ok(), `Install ${row.fixture}`).toBe(true);
+}
+
+/** Assert the requested state exists, so an empty/loading/error screen cannot satisfy the gate. */
+export async function openLayoutRoute(page: Page, row: LayoutRoute): Promise<void> {
+  const locale = await page.locator('html').getAttribute('lang') === 'zh-CN' ? 'zh-CN' : 'en';
+  const words = (key: string) => caption(`@${key}`, locale);
+  if (row.fixture === 'thread-options-allowed' || row.fixture === 'thread-options-fixed') {
+    await showWorkbenchView(page, 'Parameters');
+    const parameters = page.getByTestId('parameters-panel');
+    await expect(parameters.getByRole('combobox', { name: words('webSearch.title'), exact: true })).toHaveValue(words('choiceCatalog.webSearch.live.name'));
+    if (row.fixture === 'thread-options-fixed') {
+      await expect(parameters.getByRole('textbox', { name: 'Verbosity', exact: true })).toBeDisabled();
+      await expect(parameters).toContainText(words('providerOptions.fixedByProvider'));
+    } else await expect(parameters.getByRole('combobox', { name: 'Verbosity', exact: true })).toHaveValue('normal');
+  } else if (row.fixture === 'provider-search-models' || row.fixture === 'provider-search-editor') {
+    await expect(page.getByRole('row').filter({ has: page.getByText('Screen model', { exact: true }) })).toBeVisible();
+    if (row.fixture === 'provider-search-editor') {
+      await page.getByRole('button', { name: words('providers.models.menuOf').replace('{{name}}', 'Screen model'), exact: true }).click();
+      await page.getByRole('menuitem', { name: words('models.list.edit'), exact: true }).click();
+      const editor = page.getByRole('dialog', { name: words('models.editor.title'), exact: true });
+      await expect(editor.getByRole('group', { name: words('webSearch.title'), exact: true }).getByRole('switch', { name: words('choiceCatalog.webSearch.live.name'), exact: true })).toBeChecked();
+      await expect(editor.getByRole('textbox', { name: words('providerOptions.schemaTitle'), exact: true })).toHaveValue(/"native"/u);
+      await expect(editor.getByRole('textbox', { name: `${words('webSearch.price')} ${words('ui.field.optional')}`, exact: true })).toHaveValue('0.01');
+    }
+  } else if (row.fixture === 'agent-share-ladders' || row.fixture === 'agent-access-ladders') {
+    await page.locator('[data-thread-header]').getByRole('button', { name: words('actions.share.label'), exact: true }).click();
+    const access = page.getByRole('dialog').filter({ has: page.locator('[data-tutorial-target="permission-page"]') });
+    await access.getByRole('tab', { name: words('access.tabs.agents'), exact: true }).click();
+    const recorded = access.getByRole('list', { name: words('access.agents.shared'), exact: true });
+    await expect(recorded.getByRole('combobox', { name: words('access.agents.area.timeline'), exact: true })).toContainText(words('choiceCatalog.agentStep.manage.name'));
+    if (row.fixture === 'agent-access-ladders') {
+      await recorded.getByText(words('access.advanced.title'), { exact: true }).click();
+      await expect(recorded.getByRole('checkbox', { name: words('access.agents.fork'), exact: true })).toBeChecked();
+      await expect(recorded.getByRole('checkbox', { name: words('access.agents.archive'), exact: true })).toBeChecked();
+    } else {
+      await access.getByRole('button', { name: words('access.agents.share'), exact: true }).click();
+      const form = page.getByRole('dialog').filter({ has: page.getByRole('button', { name: words('access.agents.dialog.byArea'), exact: true }) });
+      await form.getByRole('button', { name: words('access.agents.dialog.byArea'), exact: true }).click();
+      for (const area of ['timeline', 'chat', 'documents']) {
+        await form.getByRole('combobox', { name: words(`access.agents.area.${area}`), exact: true }).click();
+        await page.getByRole('option', { name: words('choiceCatalog.agentStep.manage.name'), exact: true }).click();
+      }
+      await form.getByText(words('access.advanced.title'), { exact: true }).click();
+      await expect(form.getByRole('checkbox', { name: words('access.agents.fork'), exact: true })).toBeChecked();
+      await expect(form.getByRole('checkbox', { name: words('access.agents.archive'), exact: true })).toBeChecked();
+    }
+  } else if (row.fixture?.startsWith('gateways-')) {
+    const catalogue = page.getByRole('region', { name: words('regionalGateways.title'), exact: true });
+    await expect(catalogue).toContainText('Europe gateway');
+    await expect(catalogue).toContainText('Asia tools');
+    if (row.fixture === 'gateways-edit') {
+      await catalogue.getByRole('button', { name: words('regionalGateways.edit'), exact: true }).click();
+      await expect(page.getByRole('dialog', { name: words('regionalGateways.editTitle'), exact: true })).toBeVisible();
+    }
+  } else if (row.fixture?.startsWith('gateway-')) {
+    const card = page.getByRole('region', { name: words('regionalGateways.connector'), exact: true });
+    await expect(card).toBeVisible();
+    if (row.fixture === 'gateway-automatic') await expect(card.getByRole('list', { name: words('regionalGateways.measurements') })).toContainText('Europe gateway');
+    if (row.fixture === 'gateway-offline') await expect(card).toContainText(words('regionalGateways.offline'));
+    if (row.fixture === 'gateway-unreported') await expect(card).toContainText(words('regionalGateways.notReported'));
+  } else if (row.fixture === 'tunnel-attached') {
+    await expect(page.locator('[data-screen="thread"]').getByLabel(words('regionalGateways.tunnel'), { exact: true })).toContainText('Asia tools');
+  } else if (row.fixture === 'tunnel-unavailable') {
+    await expect(page.getByRole('list', { name: words('regionalGateways.attempted') })).toContainText('Europe gateway');
+  }
+  if (row.fixture?.startsWith('background-')) {
+    const header = page.locator('[data-thread-header]');
+    await expect(header).toBeVisible();
+    if (row.fixture === 'background-finished') await expect(page.locator('[data-background-wake="admitted"]')).toContainText('Build web');
+    else if (row.fixture === 'background-held') await expect(page.locator('[data-background-wake="held"]')).toContainText('Build web');
+    else {
+      await expect(header.locator('[data-background-task]')).toHaveCount(1);
+      await expect(header.locator('[data-background-subagent]')).toHaveCount(1);
+      await expect(header.locator('[data-background-wake-notice]')).toBeVisible();
+      await expect(header.locator('[data-background-wake-notice]')).toContainText(words(row.fixture === 'background-off' ? 'backgroundWake.nextInput' : row.fixture === 'background-lost' ? 'backgroundWake.lost' : 'backgroundWake.willWake'));
+      if (row.fixture === 'background-lost') await expect(header.locator('[data-background-task]')).toHaveAttribute('data-background-state', 'lost');
+    }
+  }
+}
+
+/** Healthy read-only report pages; writes and other paths keep the ordinary HTTP double. */
+export async function personalReportFixtures(page: Page): Promise<void> {
+  await page.route(/\/api\/v1\/storage(?:\?|$)/u, async (read) => {
+    if (read.request().method() !== 'GET') { await read.fallback(); return; }
+    const query = storageRequest(readStorageSearch(Object.fromEntries(new URL(read.request().url()).searchParams)));
+    await read.fulfill({ status: 200, json: storageReport(query) });
+  });
+  await page.route(/\/api\/v1\/me\/imports(?:\?|$)/u, async (read) => {
+    if (read.request().method() !== 'GET') { await read.fallback(); return; }
+    await read.fulfill({ status: 200, json: { items: [], next_cursor: null } });
+  });
+}
 
 export async function resourceFixtures(page: Page): Promise<void> {
-  // HTTP and live reads use the same native MCP/mount records and current-reader checks.
+  await personalReportFixtures(page);
+  // HTTP, aggregate and live reads share the native records and current-reader checks.
   const native = await page.request.post('http://127.0.0.1:' + (process.env.ORCH_DOUBLE_PORT ?? '41871') + '/__double/request-feeds/fixtures');
   if (!native.ok()) throw new Error('The native resource fixtures were not installed.');
-  const home = { id: ACME.org, kind: 'org' as const, name: 'Acme', redacted: false };
-  const origin = { kind: 'git' as const, repository: 'https://git.example.test/acme/skills.git', reference: 'main',
-    commit: '0123456789abcdef0123456789abcdef01234567', folder: 'pdf-tools', host_id: RUNS_ON.buildHost };
-  const latest: SkillVersionInfo = { id: '0199d1a8-7f3c-7a1e-8b3a-1c2d3e4f5a63', number: 2, name: 'pdf-tools', description: 'Reads and fills PDF forms.',
-    size: 2048, file_count: 2, archive: { blob: 'ab'.repeat(32), size: 1024 }, origin, created_by: ADA, created_at: '2026-10-14T08:00:00Z' };
-  const skill: Skill = { id: SKILL_ID, name: 'pdf-tools', description: 'Reads and fills PDF forms.', org_id: ACME.org, owner: ADA, home,
-    address: 'acme.pdf-tools', enabled: true, latest, versions: 2, origin, draft: null, revision: 1,
-    access: { admin_only: [], participating: true, permissions: ['skill.view', 'skill.use', 'skill.manage'], administers: false, through: [{ kind: 'owner' }] } };
-  const files: SkillVersion = { version: latest, files: [
-    { path: 'SKILL.md', size: 1536, sha256: 'cd'.repeat(32), executable: false },
-    { path: 'scripts/fill.py', size: 512, sha256: 'ef'.repeat(32), executable: true }] };
-  const versions: SkillVersionInfoPage = { items: [latest], next_cursor: null };
-  await page.route('**/api/v1/skills**', async (route) => {
-    if (route.request().method() !== 'GET') throw new Error('A layout walk must not change skills.');
-    const path = new URL(route.request().url()).pathname;
-    if (path.endsWith('/file')) {
-      await route.fulfill({ contentType: 'text/plain; charset=utf-8', body: '---\nname: pdf-tools\ndescription: Reads and fills PDF forms.\n---\n\n# PDF tools\n' });
-      return;
-    }
-    await route.fulfill({ json: path.endsWith('/skills') ? [{ ...skill, content_hidden: false }] : path.endsWith('/versions') ? versions
-      : path.includes('/versions/') ? files : skill });
-  });
 }

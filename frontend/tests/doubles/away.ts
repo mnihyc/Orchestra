@@ -2,7 +2,7 @@
 import { createHash, randomUUID } from 'node:crypto';
 import type { IncomingMessage } from 'node:http';
 
-import type { NodeRef, Notification, NotificationChannel, NotificationPrefs, NotificationRoute } from '../../src/generated/api-types.ts';
+import type { NodeRef, Notification, NotificationChannel, NotificationPrefs, NotificationRoute, NotificationSummaryGetReply, OutsideStatus } from '../../src/generated/api-types.ts';
 import type { AwayNotification, AwayPrefs, AwayRoute, NotificationGroup, PushDevice, ReadResult } from '../../src/features/settings/personal/away/types.ts';
 import { type Answer, type Part, type Person, Refusal, type World } from './world.ts';
 
@@ -118,6 +118,11 @@ export class AwayWorld implements Part {
     const retained = [...this.outcomes].filter(([key, route]) => key.startsWith(`${person.me.username}:`) && route.health === 'channel_removed').map(([, route]) => ({ ...route, waiting_count: this.projection(person, new URLSearchParams('unread=true')).filter((row) => row.kind !== 'notification.route_attention').length }));
     return [...live, ...retained];
   }
+  /** The same scoped status supplies both the native summary and setup observations. */
+  outsideFor(person: Person, scope: string): OutsideStatus {
+    return (this.summary(person, scope).body as NotificationSummaryGetReply).outside;
+  }
+
   private summary(person: Person, scope?: string | null): Answer {
     if (scope !== undefined && scope !== null && !this.readable(person, scope)) throw new Refusal(403, 'authz.denied', 'View is required here', { required: 'node.view', missing: [], requestable: false });
     const prefs = this.prefs(person);

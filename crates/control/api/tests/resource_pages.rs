@@ -9,6 +9,7 @@ mod places;
 mod resources;
 mod support;
 
+use crate::support::FullPermissionPageReply;
 use orch_access_contract::decisions::ObjectRef;
 use orch_access_contract::permissions::ResourceKind;
 use orch_api_contract::access::{
@@ -61,6 +62,8 @@ async fn provider(world: &World, by: &Who, home: Id) -> Provider {
         .send()
         .await
         .ok()
+        .into_full()
+        .unwrap()
         .provider
 }
 
@@ -150,6 +153,7 @@ async fn naming_somebody_on_the_page_of_a_provider_lets_them_in_and_is_audited()
         })
         .send()
         .await
+        .full_permission_page()
         .ok();
     assert!(changed.revision > before.revision);
     let use_row = changed
@@ -212,6 +216,7 @@ async fn the_page_of_a_provider_is_changed_by_those_who_hold_access_manage_on_it
         .body(&making_an_owner)
         .send()
         .await
+        .full_permission_page()
         .problem();
     assert_eq!(refused.code, ErrorCode::AuthzDenied);
     assert_eq!(refused.extra["required"], "access.manage");
@@ -223,6 +228,7 @@ async fn the_page_of_a_provider_is_changed_by_those_who_hold_access_manage_on_it
         .body(&naming(c.stranger.id(), AccessChoice::FullView))
         .send()
         .await
+        .full_permission_page()
         .problem();
     assert_eq!(outsider.code, ErrorCode::SharingExternalForbidden);
     let stranger = world
@@ -232,6 +238,7 @@ async fn the_page_of_a_provider_is_changed_by_those_who_hold_access_manage_on_it
         .body(&naming(c.stranger.id(), AccessChoice::FullView))
         .send()
         .await
+        .full_permission_page()
         .problem();
     assert_eq!(stranger.code, ErrorCode::AuthzDenied);
     let page = read(&world, &c.boss, "providers", id).await.ok();
@@ -252,6 +259,7 @@ async fn a_change_of_a_page_made_against_an_old_revision_is_refused_with_the_pag
         .body(&naming(c.viewer.id(), AccessChoice::FullView))
         .send()
         .await
+        .full_permission_page()
         .ok();
     let stale = world
         .app
@@ -263,6 +271,7 @@ async fn a_change_of_a_page_made_against_an_old_revision_is_refused_with_the_pag
         })
         .send()
         .await
+        .full_permission_page()
         .problem();
     assert_eq!(stale.code, ErrorCode::ConflictStaleRevision);
     assert!(stale.extra["current"]["rows"].is_array());
@@ -329,6 +338,7 @@ async fn nobody_else_is_named_in_the_use_row_of_a_subscription_its_home_keeps_to
         .body(&naming(c.viewer.id(), AccessChoice::FullInteract))
         .send()
         .await
+        .full_permission_page()
         .problem();
     assert_eq!(refused.code, ErrorCode::ProviderSubscriptionNotShared);
     assert_eq!(refused.extra["harness_kind"], "codex");
@@ -339,7 +349,8 @@ async fn nobody_else_is_named_in_the_use_row_of_a_subscription_its_home_keeps_to
         .token(&c.boss.token)
         .body(&naming(c.viewer.id(), AccessChoice::FullView))
         .send()
-        .await;
+        .await
+        .full_permission_page();
     assert!(
         looked.body.is_ok() || looked.status == 403,
         "{:?}",

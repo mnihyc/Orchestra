@@ -8,7 +8,7 @@ use orch_api_contract::storage::{
     KeptRecord, KeptWhy, StorageAvailability, StorageBreakdown, StorageBreakdownRow,
     StorageDimension, StorageKind, StorageQuery, StorageTotals,
 };
-use orch_driver_contract::resources::{Resource, ResourceInventory, ResourceKind};
+use orch_driver_contract::resources::{Resource, ResourceInventory, ResourceKind, ResourceRef};
 use orch_types::Time;
 
 /// Seven days is the shipped cache window; thirty days gives the next calendar-scale report group.
@@ -67,6 +67,12 @@ pub const fn node_kind(kind: ResourceKind) -> StorageKind {
     }
 }
 
+/// The common opaque key of one actual native inventory object.
+#[must_use]
+pub fn node_record_key(host: orch_types::Id, resource: &ResourceRef) -> String {
+    format!("host:{}:{:?}:{}", host, resource.kind, resource.id)
+}
+
 /// Every native object uses the same retention fields; logical owners may enrich the facts afterwards.
 #[must_use]
 pub fn node_records(
@@ -74,6 +80,18 @@ pub fn node_records(
     inventory: &ResourceInventory,
     days: i64,
     online: bool,
+) -> Vec<KeptRecord> {
+    node_records_selected(host, inventory, days, online, None)
+}
+
+/// Format selected native candidates while every native dependency still contributes safety facts.
+#[must_use]
+pub fn node_records_selected(
+    host: &HostRef,
+    inventory: &ResourceInventory,
+    days: i64,
+    online: bool,
+    selected: Option<&BTreeSet<ResourceRef>>,
 ) -> Vec<KeptRecord> {
     let used: BTreeSet<_> = inventory
         .resources
@@ -83,12 +101,10 @@ pub fn node_records(
     inventory
         .resources
         .iter()
+        .filter(|item| selected.is_none_or(|selected| selected.contains(&item.resource)))
         .map(|item| {
             let mut row = record(
-                format!(
-                    "host:{}:{:?}:{}",
-                    host.id, item.resource.kind, item.resource.id
-                ),
+                node_record_key(host.id, &item.resource),
                 node_kind(item.resource.kind),
                 item.name.clone(),
                 inventory.observed_at,
@@ -138,12 +154,10 @@ pub fn node_object<'a>(
     inventory: &'a ResourceInventory,
     id: &str,
 ) -> Option<&'a Resource> {
-    inventory.resources.iter().find(|item| {
-        format!(
-            "host:{}:{:?}:{}",
-            host.id, item.resource.kind, item.resource.id
-        ) == id
-    })
+    inventory
+        .resources
+        .iter()
+        .find(|item| node_record_key(host.id, &item.resource) == id)
 }
 
 /// Counts shared content once, and only while the larger enclosing record is absent from this subset.
@@ -352,4 +366,61 @@ pub fn breakdowns(records: &[KeptRecord], at: Time) -> Vec<StorageBreakdown> {
         StorageBreakdown { by, rows }
     })
     .collect()
+}
+
+#[cfg(test)]
+#[allow(clippy::unwrap_used, reason = "a test fails by panicking")]
+mod tests {
+    use super::*;
+    use orch_types::Id;
+
+    #[test]
+    fn selected_records_keep_dependencies_of_unselected_native_units() {
+        let at = Time::new("2026-10-01T12:00:00Z".parse().unwrap());
+        let volume = ResourceRef {
+            kind: ResourceKind::Volume,
+            id: "kept-volume".into(),
+        };
+        let inventory = ResourceInventory {
+            observed_at: at,
+            unavailable: Vec::new(),
+            resources: vec![
+                Resource {
+                    resource: volume.clone(),
+                    name: "Kept data".into(),
+                    size_bytes: Some(11),
+                    labels: Default::default(),
+                    depends_on: Vec::new(),
+                    aliases: Vec::new(),
+                    last_used_at: Some(at),
+                    busy: false,
+                },
+                Resource {
+                    resource: ResourceRef {
+                        kind: ResourceKind::Unit,
+                        id: "unselected-user".into(),
+                    },
+                    name: "Unselected dependent".into(),
+                    size_bytes: Some(2),
+                    labels: Default::default(),
+                    depends_on: vec![volume.clone()],
+                    aliases: Vec::new(),
+                    last_used_at: Some(at),
+                    busy: false,
+                },
+            ],
+        };
+        let host = HostRef {
+            id: Id::from_u128(1),
+            name: "Host".into(),
+            address: String::new(),
+        };
+        let selected = BTreeSet::from([volume]);
+        let rows = node_records_selected(&host, &inventory, 7, true, Some(&selected));
+        assert_eq!(rows.len(), 1);
+        assert_eq!(rows[0].name, "Kept data");
+        assert_eq!(rows[0].why, KeptWhy::InUse);
+        assert_eq!(rows[0].blocker.as_deref(), Some("in_use"));
+        assert_eq!(rows[0], node_records(&host, &inventory, 7, true)[0]);
+    }
 }

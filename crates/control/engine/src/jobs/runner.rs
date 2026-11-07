@@ -537,6 +537,18 @@ pub enum MakeError {
     /// The database failed.
     #[error(transparent)]
     Db(#[from] orch_db::DbError),
+    /// Existing native preparation failed before this job could be inserted.
+    #[error(transparent)]
+    Internal(EngineError),
+}
+
+impl From<EngineError> for MakeError {
+    fn from(error: EngineError) -> Self {
+        match error {
+            EngineError::Db(error) => Self::Db(error),
+            other => Self::Internal(other),
+        }
+    }
 }
 
 /// A job to make.
@@ -746,6 +758,42 @@ pub(crate) async fn report_progress(
         kept = Some(log.to_owned());
     }
     rows::save_progress(conn, job, &stored(&progress, kept.as_deref()), at).await?;
+    Ok(())
+}
+
+fn preserve_creator_report(
+    command: &mut Outgoing,
+    retained: &crate::commands::RetainedCommand,
+) -> Result<(), Stop> {
+    use orch_link_contract::commands::WorkReport;
+    let Some(original) = retained.body.get("work").filter(|work| !work.is_null()) else {
+        return Ok(());
+    };
+    let Some(current) = command.body.get("work").filter(|work| !work.is_null()) else {
+        return Ok(());
+    };
+    let original: WorkReport =
+        serde_json::from_value(original.clone()).map_err(EngineError::from)?;
+    let mut current: WorkReport =
+        serde_json::from_value(current.clone()).map_err(EngineError::from)?;
+    current.timeout_secs = original.timeout_secs;
+    let mut old_effect = retained.body.clone();
+    let mut new_effect = command.body.clone();
+    if let Some(body) = old_effect.as_object_mut() {
+        let _ = body.remove("work");
+    }
+    if let Some(body) = new_effect.as_object_mut() {
+        let _ = body.remove("work");
+    }
+    if command.machine != retained.machine || old_effect != new_effect || original != current {
+        return Err(Stop::Failed(Failure::new(
+            "creator_authority",
+            "The retained creator command recipe changed.",
+        )));
+    }
+    // Same-ID issue has always replayed its retained body and deadline. A later setting edit
+    // cannot rewrite that budget; the immutable journal still checks its kind/key/whole body.
+    command.body = retained.body.clone();
     Ok(())
 }
 
@@ -1043,7 +1091,13 @@ impl Job {
 
     /// Sends a command and waits for its end, cancelling it if the job is cancelled meanwhile. A
     /// failure of the command is the job's failure, with the code the machine gave.
-    pub async fn command(&self, mut command: Outgoing) -> Result<Json, Stop> {
+    pub async fn command(&self, command: Outgoing) -> Result<Json, Stop> {
+        let command = self.prepare_command(command).await?;
+        self.run_command(command, true).await
+    }
+
+    /// The native immutable work report and retained deadline, before original-source capture.
+    pub async fn prepare_command(&self, mut command: Outgoing) -> Result<Outgoing, Stop> {
         use orch_link_contract::commands::{CommandKind, WorkReport};
         if matches!(
             command.kind,
@@ -1100,7 +1154,7 @@ impl Job {
                 }
             }
         }
-        self.run_command(command, true).await
+        Ok(command)
     }
 
     /// Gives one command its own part of a phase, so a source read cannot fill the target's copy bar.
@@ -1263,14 +1317,28 @@ impl Job {
 
     async fn run_command_once(
         &self,
-        command: Outgoing,
+        mut command: Outgoing,
         respect_cancel: bool,
     ) -> Result<Ended, Stop> {
         self.check_with(respect_cancel)?;
         let commands = Arc::clone(&self.engine.inner.commands);
         let id = command.id;
+        let mut creator_effect = false;
+        let mut provider_receipt_identity = false;
         if respect_cancel {
             let row = self.row().await?;
+            let provider_recreate_effect = super::recreate::batch_authority::applies(&row);
+            provider_receipt_identity =
+                super::recreate::batch_authority::has_receipt_identity(&row, id);
+            creator_effect = row.plan.get("creator_provision").is_some()
+                || row.plan.get("provider_creator").is_some()
+                || provider_recreate_effect
+                || super::source::publication_authority::is_restricted(&row)
+                || row
+                    .plan
+                    .get("initial_files")
+                    .and_then(|plan| plan.get("creator_origin"))
+                    .is_some();
             if row.cancel_requested() {
                 self.flags.cancelled.store(true, Ordering::SeqCst);
                 return Err(Stop::Cancelled);
@@ -1293,6 +1361,127 @@ impl Job {
             self.remember(&json!({"active_command":{"id":id,"machine":command.machine,"kind":command.kind.as_str(),"reported":reported,"phase":read_progress(&row).0.phase,"span":span}})).await?;
         }
         self.check_with(respect_cancel)?;
+        if creator_effect {
+            let prior = commands.status(id).await.map_err(commands_stop)?;
+            if prior.as_ref().is_some_and(|info| {
+                matches!(
+                    info.stage,
+                    crate::commands::Stage::Accepted | crate::commands::Stage::Over
+                )
+            }) {
+                if provider_receipt_identity {
+                    super::recreate::batch_authority::require_receipt_identity(self, &command)
+                        .await?;
+                }
+                super::source::publication_authority::require_receipt_identity(self, &command)
+                    .await?;
+            } else {
+                if prior.is_some()
+                    && let Some(retained) =
+                        commands.retained_command(id).await.map_err(commands_stop)?
+                {
+                    preserve_creator_report(&mut command, &retained)?;
+                }
+                // The outgoing command is now canonical, including its WorkReport/retry ID.
+                // Both gates are no-ops outside their retained creator work; initial-file Read
+                // and target provision HomeWrite remain independent conjunctive boundaries.
+                super::provision::remember_creator_command(self, &command).await?;
+                super::provider_provision::remember_creator_command(self, &command).await?;
+                crate::initial_files::remember_creator_command(self, &command).await?;
+                if let Err(stop) =
+                    super::recreate::batch_authority::remember_command(self, &command).await
+                {
+                    // The ACK may have arrived during the new batch's current-origin check.
+                    // It is an existing native receipt, never authorization for another ID.
+                    let authority_refused =
+                        matches!(&stop,Stop::Failed(failure) if failure.code=="access.denied");
+                    let direction = self.row().await?;
+                    let still_forward =
+                        !direction.cancel_requested() && abort_reason(&direction)?.is_none();
+                    if !authority_refused
+                        || !still_forward
+                        || !commands
+                            .status(id)
+                            .await
+                            .map_err(commands_stop)?
+                            .is_some_and(|info| {
+                                matches!(
+                                    info.stage,
+                                    crate::commands::Stage::Accepted | crate::commands::Stage::Over
+                                )
+                            })
+                    {
+                        return Err(stop);
+                    }
+                    if provider_receipt_identity
+                        || super::recreate::batch_authority::has_receipt_identity(&direction, id)
+                    {
+                        super::recreate::batch_authority::require_receipt_identity(self, &command)
+                            .await?;
+                    }
+                }
+                if let Err(stop) =
+                    super::source::publication_authority::remember_command(self, &command).await
+                {
+                    // A real ACK arriving during the current-origin check is a receipt for
+                    // this exact owned native frame. It authorizes no replacement command.
+                    let authority_refused =
+                        matches!(&stop,Stop::Failed(failure) if failure.code=="access.denied");
+                    let direction = self.row().await?;
+                    let still_forward =
+                        !direction.cancel_requested() && abort_reason(&direction)?.is_none();
+                    if !authority_refused
+                        || !still_forward
+                        || !commands
+                            .status(id)
+                            .await
+                            .map_err(commands_stop)?
+                            .is_some_and(|info| {
+                                matches!(
+                                    info.stage,
+                                    crate::commands::Stage::Accepted | crate::commands::Stage::Over
+                                )
+                            })
+                    {
+                        return Err(stop);
+                    }
+                    super::source::publication_authority::require_receipt_identity(self, &command)
+                        .await?;
+                }
+            }
+        }
+        if command.kind == orch_link_contract::commands::CommandKind::NodeCapabilitiesApply {
+            super::capability_change::authority::before_issue(self, &command, respect_cancel)
+                .await?;
+        }
+        if respect_cancel
+            && matches!(
+                &command.authority,
+                Some(crate::commands::CommandAuthority::SourcePreparation(_))
+            )
+        {
+            if let Some(retained) = commands.retained_command(id).await.map_err(commands_stop)? {
+                preserve_creator_report(&mut command, &retained)?;
+            }
+            super::source::operation::decorate(self, &mut command).await?;
+        }
+        if respect_cancel
+            && (command.kind == orch_link_contract::commands::CommandKind::FsSnapshot
+                || matches!(
+                    &command.authority,
+                    Some(crate::commands::CommandAuthority::SnapshotCreation(_))
+                ))
+            && (crate::commands::snapshot_origin::has_origin(&self.row().await?)
+                || matches!(
+                    &command.authority,
+                    Some(crate::commands::CommandAuthority::SnapshotCreation(_))
+                ))
+        {
+            if let Some(retained) = commands.retained_command(id).await.map_err(commands_stop)? {
+                preserve_creator_report(&mut command, &retained)?;
+            }
+            crate::commands::snapshot_origin::decorate(self, &mut command).await?;
+        }
         commands.issue(command).await.map_err(commands_stop)?;
         let waiting = commands.wait(id);
         tokio::pin!(waiting);
@@ -1301,7 +1490,13 @@ impl Job {
             tokio::select! {
                 ended = &mut waiting => {
                     let ended = ended.map_err(commands_stop)?;
-                    if respect_cancel && !matches!(ended, Ended::Cancelled | Ended::Expired) {
+                    // A controller failure is not a receipt that its writer stopped.
+                    // Keep ownership for undo's existing stop fence; already stopped
+                    // failures and commands that never started need no further wait.
+                    if respect_cancel
+                        && (matches!(&ended, Ended::Succeeded(_))
+                            || commands.stopped(id).await.unwrap_or(false))
+                    {
                         self.remember(&json!({"active_command":null})).await?;
                     }
                     return Ok(ended);
@@ -2104,6 +2299,62 @@ impl Engine {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn retained_creator_report_keeps_the_original_budget_but_never_a_changed_effect() {
+        use crate::commands::RetainedCommand;
+        use orch_link_contract::commands::{FsSnapshot, Selection, SerialKey, WorkReport};
+        let (job, environment, machine) = (new_id(), new_id(), new_id());
+        let command = Outgoing::new(
+            new_id(),
+            machine,
+            SerialKey::Environment(environment),
+            &FsSnapshot {
+                environment_id: environment,
+                job_id: job,
+                selection: Selection {
+                    include: vec!["web".into()],
+                    exclude: vec![],
+                },
+                work: Some(WorkReport {
+                    files_total: Some(2),
+                    bytes_total: Some(32),
+                    job_id: job,
+                    phase: "files".into(),
+                    timeout_secs: 60,
+                }),
+            },
+        )
+        .unwrap();
+        let retained = RetainedCommand {
+            machine,
+            kind: command.kind.as_str().to_owned(),
+            key: command.key.wire(),
+            body: command.body.clone(),
+        };
+        let mut after_setting_edit = command.clone();
+        after_setting_edit.body["work"]["timeout_secs"] = json!(120);
+        preserve_creator_report(&mut after_setting_edit, &retained).unwrap();
+        assert_eq!(
+            after_setting_edit.body, command.body,
+            "a queued same-ID retry must keep its actual originally issued WorkReport"
+        );
+        for path in ["effect", "phase", "job", "totals", "machine"] {
+            let mut changed = command.clone();
+            match path {
+                "effect" => changed.body["selection"]["include"] = json!(["other"]),
+                "phase" => changed.body["work"]["phase"] = json!("other"),
+                "job" => changed.body["work"]["job_id"] = json!(new_id()),
+                "totals" => changed.body["work"]["files_total"] = json!(7),
+                "machine" => changed.machine = new_id(),
+                _ => unreachable!(),
+            }
+            assert!(
+                preserve_creator_report(&mut changed, &retained).is_err(),
+                "{path}"
+            );
+        }
+    }
 
     #[test]
     fn job_database_diagnostics_distinguish_a_known_missing_column_without_exposing_error_text() {

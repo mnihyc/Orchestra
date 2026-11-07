@@ -9,7 +9,6 @@ repository.workspace = true
 publish.workspace = true
 
 [dependencies]
-jsonschema.workspace = true
 orch-agent-contract.workspace = true
 orch-agent-programs.workspace = true
 orch-driver-contract.workspace = true

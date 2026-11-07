@@ -401,6 +401,7 @@ impl World {
         let pinned_port = reserve_port();
         let edge_port = reserve_port();
         let mut config = ServerConfig::default();
+        config.gateway.gateway_id = "test-gateway".to_owned();
         config.gateway.endpoints = vec![
             orch_config::server::GatewayEndpoint {
                 url: format!("wss://127.0.0.1:{pinned_port}"),
@@ -621,9 +622,19 @@ impl World {
             Arc::clone(&self.clock),
         )
         .unwrap();
-        let dialer = TlsDialer::new(Some(self.pinned_config(enrolled)), Some(public));
+        let pinned = self.pinned_config(enrolled);
+        let prober = orch_connector_core::gateway_selection::HttpsGatewayProber::new(
+            Arc::clone(&pinned),
+            Arc::clone(&public),
+            &self.secrets.ca_certificate(),
+            Arc::clone(&self.clock),
+        )
+        .unwrap();
+        let dialer =
+            TlsDialer::new(Some(pinned), Some(public)).with_gateway_prober(Arc::new(prober));
         let link = MachineLink::start(
             MachineConfig {
+                gateway: Default::default(),
                 hosted_endpoints: None,
                 follow_system_endpoints: false,
                 machine_id: enrolled.identity.machine_id,

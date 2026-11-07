@@ -262,6 +262,7 @@ impl Phased for Measuring {
         }
         let result = job
             .command(Outgoing {
+                authority: None,
                 id: crate::ids::derived("measurement", &[job.id().as_bytes()]),
                 machine,
                 kind,
@@ -313,6 +314,7 @@ async fn fingerprint_phase(
         + Duration::seconds(i64::try_from(timeout_secs).unwrap_or(i64::MAX));
     let result = job
         .command(Outgoing {
+            authority: None,
             id: crate::ids::derived(phase, &[job.id().as_bytes()]),
             machine,
             kind: CommandKind::NodeMountFingerprint,

@@ -908,6 +908,44 @@ pub async fn set_node_tags(
     Ok(())
 }
 
+/// The actual rows changed by `move_under`, before its caller's final authority
+/// checkpoint. Retained descendants are included because the native path UPDATE
+/// includes them too. This resolves no permission and changes no hierarchy state.
+pub async fn lock_move_rows(conn: &mut Conn, node: Id, parent: Id) -> Result<bool, DbError> {
+    if !lock(conn, node).await? {
+        return Ok(false);
+    }
+    // Root is already owned in the native order. Acquire the remaining exact
+    // source-path Node set in id order before the bulk UPDATE can wait on it.
+    sqlx::query_scalar::<_, Id>(
+        "SELECT id FROM nodes WHERE $1=ANY(path) AND id<>$1 ORDER BY id FOR UPDATE",
+    )
+    .bind(node)
+    .fetch_all(&mut *conn)
+    .await?;
+    if !crate::queries::transaction_guard::lock_parent(conn, parent).await? {
+        return Ok(false);
+    }
+    let org: Option<Id> =
+        sqlx::query_scalar("SELECT node_id FROM orgs WHERE node_id=$1 FOR UPDATE")
+            .bind(node)
+            .fetch_optional(&mut *conn)
+            .await?;
+    if org.is_some() {
+        // The final native org-parent UPDATE takes this same FK row. Other node
+        // kinds have no org row and gain no additional organization prerequisite.
+        let parent_org: Option<Id> =
+            sqlx::query_scalar("SELECT node_id FROM orgs WHERE node_id=$1 FOR KEY SHARE")
+                .bind(parent)
+                .fetch_optional(&mut *conn)
+                .await?;
+        if parent_org.is_none() {
+            return Ok(false);
+        }
+    }
+    Ok(true)
+}
+
 /// Moves `node` under `parent`: its path and everything under it is
 /// rewritten, an org's own parent follows, and the move counts as a change
 /// of the node. The caller has checked that both lie in one tree and that
@@ -1849,6 +1887,81 @@ pub async fn deleted_orgs_of(
 /// Brings back the node `node` and what was deleted with it, at the moment
 /// `deleted_at` that took them: it comes back archived by `by`. The answer
 /// is how many nodes came back.
+/// The exact native group selected for restoration, held until its caller commits.
+#[derive(Debug)]
+pub struct PreparedRestoration {
+    pub root: Id,
+    pub group: Option<Id>,
+    pub nodes: Vec<NodeRow>,
+    pub documents: Vec<Id>,
+}
+
+/// Locks the same group and document/audit rows that the native restore writer changes.
+pub async fn prepare_restoration(
+    conn: &mut Conn,
+    node: Id,
+) -> Result<PreparedRestoration, DbError> {
+    let group = super::trace::node_deletion(conn, node).await?;
+    let ids: Vec<Id> = sqlx::query_scalar("SELECT id FROM nodes WHERE $1=ANY(path) AND deleted_at IS NOT NULL AND (($2::uuid IS NULL AND id=$1) OR deletion_id=$2) ORDER BY id FOR UPDATE")
+        .bind(node).bind(group).fetch_all(&mut *conn).await?;
+    let selected = ids
+        .iter()
+        .copied()
+        .collect::<std::collections::HashSet<_>>();
+    let nodes = with_ancestors(conn, &ids)
+        .await?
+        .into_iter()
+        .filter(|row| selected.contains(&row.id))
+        .collect();
+    let documents = if let Some(group) = group {
+        let documents: Vec<Id> = sqlx::query_scalar("SELECT d.id FROM documents d JOIN audit_object_state s ON s.object_kind='document' AND s.object_id=d.id WHERE s.deletion_id=$1 AND d.node_id=ANY($2) ORDER BY d.id FOR UPDATE OF d")
+            .bind(group).bind(&ids).fetch_all(&mut *conn).await?;
+        sqlx::query("SELECT object_id FROM audit_object_state WHERE deletion_id=$1 AND ((object_kind='node' AND object_id=ANY($2)) OR (object_kind='document' AND home_node_id=ANY($2))) ORDER BY object_kind,object_id FOR UPDATE")
+            .bind(group).bind(&ids).fetch_all(&mut *conn).await?;
+        documents
+    } else {
+        Vec::new()
+    };
+    Ok(PreparedRestoration {
+        root: node,
+        group,
+        nodes,
+        documents,
+    })
+}
+
+/// Applies only those native prepared rows; a new group cannot join an already admitted restore.
+pub async fn restore_prepared_subtree(
+    conn: &mut Conn,
+    prepared: &PreparedRestoration,
+    by: Id,
+    at: DateTime<Utc>,
+) -> Result<i64, DbError> {
+    restore_prepared_subtree_before(conn, prepared, by, at, || Ok(())).await
+}
+
+/// The actual first mutating SQL consumes its caller's opaque boundary after all native locks.
+pub async fn restore_prepared_subtree_before<E: From<DbError>>(
+    conn: &mut Conn,
+    prepared: &PreparedRestoration,
+    by: Id,
+    at: DateTime<Utc>,
+    before: impl FnOnce() -> Result<(), E>,
+) -> Result<i64, E> {
+    let ids = prepared.nodes.iter().map(|row| row.id).collect::<Vec<_>>();
+    before()?;
+    let restored: Vec<Id> = sqlx::query_scalar("UPDATE nodes SET deleted_at=NULL,deleted_by=NULL,deletion_id=NULL,updated_at=$3,archived_at=CASE WHEN id=$1 THEN COALESCE(archived_at,$3) ELSE archived_at END,archived_by=CASE WHEN id=$1 THEN COALESCE(archived_by,$4) ELSE archived_by END WHERE id=ANY($5) AND deleted_at IS NOT NULL AND (($2::uuid IS NULL AND id=$1) OR deletion_id=$2) RETURNING id")
+        .bind(prepared.root).bind(prepared.group).bind(at).bind(by).bind(&ids).fetch_all(&mut *conn).await.map_err(DbError::from)?;
+    if let Some(group) = prepared.group {
+        sqlx::query("UPDATE documents d SET deleted_at=NULL,deleted_by=NULL,updated_at=$2 FROM audit_object_state s WHERE s.object_kind='document' AND s.object_id=d.id AND s.deletion_id=$1 AND d.node_id=ANY($3) AND d.id=ANY($4)")
+            .bind(group).bind(at).bind(&restored).bind(&prepared.documents).execute(&mut *conn).await.map_err(DbError::from)?;
+        sqlx::query("UPDATE audit_object_state SET deletion_id=NULL,deleted_at=NULL,deleted_by=NULL,purge_at=NULL WHERE deletion_id=$1 AND ((object_kind='node' AND object_id=ANY($2)) OR (object_kind='document' AND home_node_id=ANY($2)))")
+            .bind(group).bind(&restored).execute(&mut *conn).await.map_err(DbError::from)?;
+    }
+    Ok(i64::try_from(restored.len()).unwrap_or(i64::MAX))
+}
+
+/// The original native restoration uses that same exact preparation and writer.
 pub async fn restore_subtree(
     conn: &mut Conn,
     node: Id,
@@ -1856,14 +1969,8 @@ pub async fn restore_subtree(
     by: Id,
     at: DateTime<Utc>,
 ) -> Result<i64, DbError> {
-    let group = super::trace::node_deletion(conn, node).await?;
-    let restored:Vec<Id>=sqlx::query_scalar("UPDATE nodes SET deleted_at=NULL,deleted_by=NULL,deletion_id=NULL,updated_at=$3,archived_at=CASE WHEN id=$1 THEN COALESCE(archived_at,$3) ELSE archived_at END,archived_by=CASE WHEN id=$1 THEN COALESCE(archived_by,$4) ELSE archived_by END WHERE $1=ANY(path) AND deleted_at IS NOT NULL AND (($2::uuid IS NULL AND id=$1) OR deletion_id=$2) RETURNING id")
-        .bind(node).bind(group).bind(at).bind(by).fetch_all(&mut *conn).await?;
-    if let Some(group) = group {
-        sqlx::query("UPDATE documents d SET deleted_at=NULL,deleted_by=NULL,updated_at=$2 FROM audit_object_state s WHERE s.object_kind='document' AND s.object_id=d.id AND s.deletion_id=$1 AND d.node_id=ANY($3)").bind(group).bind(at).bind(&restored).execute(&mut *conn).await?;
-        sqlx::query("UPDATE audit_object_state SET deletion_id=NULL,deleted_at=NULL,deleted_by=NULL,purge_at=NULL WHERE deletion_id=$1 AND ((object_kind='node' AND object_id=ANY($2)) OR (object_kind='document' AND home_node_id=ANY($2)))").bind(group).bind(&restored).execute(&mut *conn).await?;
-    }
-    Ok(i64::try_from(restored.len()).unwrap_or(i64::MAX))
+    let prepared = prepare_restoration(conn, node).await?;
+    restore_prepared_subtree(conn, &prepared, by, at).await
 }
 
 /// Moves the members whose domain is the org `org` or an org inside it to
@@ -2689,6 +2796,19 @@ pub async fn set_org_limits(
     flat: Option<bool>,
     at: DateTime<Utc>,
 ) -> Result<(), DbError> {
+    set_org_limits_before(conn, id, closed, flat, at, || Ok::<(), DbError>(())).await
+}
+
+/// The native limits writer's first mutation, after its caller acquired the organization/node footprint.
+pub async fn set_org_limits_before<E: From<DbError>>(
+    conn: &mut Conn,
+    id: Id,
+    closed: Option<bool>,
+    flat: Option<bool>,
+    at: DateTime<Utc>,
+    before: impl FnOnce() -> Result<(), E>,
+) -> Result<(), E> {
+    before()?;
     sqlx::query(
         "UPDATE orgs SET closed = COALESCE($2, closed), flat = COALESCE($3, flat) WHERE node_id = $1",
     )
@@ -2696,12 +2816,13 @@ pub async fn set_org_limits(
     .bind(closed)
     .bind(flat)
     .execute(&mut *conn)
-    .await?;
+    .await.map_err(DbError::from)?;
     sqlx::query("UPDATE nodes SET revision = revision + 1, updated_at = $2 WHERE id = $1")
         .bind(id)
         .bind(at)
         .execute(conn)
-        .await?;
+        .await
+        .map_err(DbError::from)?;
     Ok(())
 }
 

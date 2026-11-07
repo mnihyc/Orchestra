@@ -1,9 +1,7 @@
 //! Explicit historical turn and segment pages, projected with only their required references.
 
-use crate::middleware::{
-    authorization,
-    requests::{ApiError, ApiResult},
-};
+use super::read_operation::{prepare, require_current};
+use crate::middleware::requests::{ApiError, ApiResult};
 use crate::registry::{Ctx, Registry};
 use orch_api_contract::threads::{
     ITEMS_DEFAULT_LIMIT, ITEMS_MAX_LIMIT, ThreadHistoryListQuery, ThreadSegmentList,
@@ -13,8 +11,8 @@ use orch_db::queries::{feeds, thread_continuations as continuation_rows, threads
 
 pub(super) fn mount(registry: &mut Registry) {
     registry
-        .on(ThreadSegmentList, segments)
-        .on(ThreadTurnList, turns);
+        .on_with_operation(ThreadSegmentList, prepare, segments)
+        .on_with_operation(ThreadTurnList, prepare, turns);
 }
 
 fn limit(query: &ThreadHistoryListQuery) -> ApiResult<i64> {
@@ -35,6 +33,7 @@ async fn segments(ctx: Ctx, query: ThreadHistoryListQuery, (): ()) -> ApiResult<
     let limit = limit(&query)?;
     let thread = ctx.id("id")?;
     let mut tx = feeds::begin_reading(&ctx.app.db).await?;
+    require_current(&ctx, &mut tx).await?;
     let head = threads::thread(&mut tx, thread)
         .await?
         .ok_or_else(ApiError::not_found)?;
@@ -72,7 +71,13 @@ async fn segments(ctx: Ctx, query: ThreadHistoryListQuery, (): ()) -> ApiResult<
         .await
         .map_err(super::read_failed)?;
     tx.commit().await.map_err(orch_db::DbError::from)?;
-    authorization::require_on_path(&ctx, "thread.view").await?;
+    #[cfg(test)]
+    crate::realtime::history_read_tests::pause(
+        crate::realtime::history_read_tests::Cut::HttpHistoryRows,
+    )
+    .await;
+    let mut current = ctx.app.db.acquire().await?;
+    require_current(&ctx, &mut current).await?;
     Ok(ThreadSegmentPage {
         projection: Some(orch_engine::continuations::projection::scope(&projection)),
         segments,
@@ -85,6 +90,7 @@ async fn turns(ctx: Ctx, query: ThreadHistoryListQuery, (): ()) -> ApiResult<Thr
     let limit = limit(&query)?;
     let thread = ctx.id("id")?;
     let mut tx = feeds::begin_reading(&ctx.app.db).await?;
+    require_current(&ctx, &mut tx).await?;
     let head = threads::thread(&mut tx, thread)
         .await?
         .ok_or_else(ApiError::not_found)?;
@@ -130,7 +136,13 @@ async fn turns(ctx: Ctx, query: ThreadHistoryListQuery, (): ()) -> ApiResult<Thr
         .await
         .map_err(super::read_failed)?;
     tx.commit().await.map_err(orch_db::DbError::from)?;
-    authorization::require_on_path(&ctx, "thread.view").await?;
+    #[cfg(test)]
+    crate::realtime::history_read_tests::pause(
+        crate::realtime::history_read_tests::Cut::HttpHistoryRows,
+    )
+    .await;
+    let mut current = ctx.app.db.acquire().await?;
+    require_current(&ctx, &mut current).await?;
     Ok(ThreadTurnPage {
         projection: Some(orch_engine::continuations::projection::scope(&projection)),
         turns,

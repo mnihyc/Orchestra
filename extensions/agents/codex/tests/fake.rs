@@ -131,6 +131,7 @@ async fn resuming_or_adopting_does_not_report_a_successful_first_turn_as_an_erro
             assert_eq!(opened.native_session_ref, "thr_1");
             assert!(setup.fake.state.calls("turn/start").is_empty());
             let turn = TurnStart {
+                native_wake: None,
                 plan: false,
                 thread_id: thread,
                 turn_id: new_id(),
@@ -210,6 +211,7 @@ async fn a_plan_turn_plans_read_only_and_the_turn_after_it_goes_back_to_the_defa
     );
     for (n, plan) in [(1, true), (2, false), (3, false)] {
         let turn = TurnStart {
+            native_wake: None,
             plan,
             turn_id: new_id(),
             ..first.clone()
@@ -314,6 +316,7 @@ async fn a_resumed_session_explains_pinned_instructions_once_without_reporting_a
         setup
             .adapter
             .start_turn(TurnStart {
+                native_wake: None,
                 plan: false,
                 thread_id: thread,
                 turn_id: turn,
@@ -397,6 +400,7 @@ async fn running_turn_in_mode(
     );
     setup.adapter.open_session(spec).await.unwrap();
     let turn = TurnStart {
+        native_wake: None,
         plan,
         thread_id: thread,
         turn_id: new_id(),
@@ -1417,6 +1421,7 @@ async fn the_frames_of_a_session_are_kept_as_raw_frames_when_it_asks_for_them() 
         json!({ "threadId": "thr_1", "anything": [1, 2, 3] }),
     );
     let turn = TurnStart {
+        native_wake: None,
         plan: false,
         thread_id: thread,
         turn_id: new_id(),
@@ -1915,6 +1920,7 @@ async fn a_remote_session_resolves_its_executor_before_opening_and_before_sendin
     setup
         .adapter
         .start_turn(TurnStart {
+            native_wake: None,
             plan: false,
             thread_id: thread,
             turn_id: new_id(),
@@ -2050,6 +2056,7 @@ async fn a_lost_executor_keeps_input_unsent_and_its_session_can_retry_after_reco
     spec.exec.executor = Some("codex-exec-server".to_owned());
     setup.adapter.open_session(spec).await.unwrap();
     let turn = TurnStart {
+        native_wake: None,
         plan: false,
         thread_id: thread,
         turn_id: new_id(),
