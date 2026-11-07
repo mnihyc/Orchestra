@@ -41,11 +41,30 @@ impl HostServices for Unanswered {
 #[tokio::test]
 async fn a_provider_whose_new_unit_never_answers_is_read_and_listed_in_under_a_hundred_milliseconds()
  {
-    if std::env::var_os("ORCH_TEST_SQL_TIMINGS").is_some() {
+    let diagnosing = std::env::var_os("ORCH_TEST_SQL_TIMINGS").is_some();
+    if diagnosing {
         support::Statements::now();
     }
-    let s = rig::Scene::new().await;
+    let s = rig::Scene::for_requests().await;
     s.rig.engine.stop(); // Isolate the read from the ordinary background lifecycle scheduler.
+    for db in [&s.rig.world.app.app.db, s.rig.engine.db()] {
+        assert_eq!(
+            db.pool().options().get_max_connections(),
+            s.rig.world.db.pool.options().get_max_connections(),
+            "the request profile retains the fixture's serving width"
+        );
+        let settings: (String, String, String) = sqlx::query_as(
+            "SELECT current_setting('jit'), current_setting('statement_timeout'),
+                    current_setting('idle_in_transaction_session_timeout')",
+        )
+        .fetch_one(db.pool())
+        .await
+        .unwrap();
+        assert_eq!(
+            settings,
+            ("off".to_owned(), "15s".to_owned(), "10s".to_owned())
+        );
+    }
     s.rig.engine.attach_host_services(Arc::new(Unanswered));
     for kind in [
         CommandKind::AgentStart,
@@ -82,30 +101,33 @@ async fn a_provider_whose_new_unit_never_answers_is_read_and_listed_in_under_a_h
         .bind(s.on.provider).execute(&mut *conn).await.unwrap();
     drop(conn);
     let before = s.rig.commands.issued_total();
+    let mut missed_budgets = Vec::new();
     let request = s
         .rig
         .world
         .app
         .call(ProviderGet, &[&s.on.provider])
         .token(&s.ada.token);
-    let read = if std::env::var_os("ORCH_TEST_SQL_TIMINGS").is_some() {
+    let read = if diagnosing {
         eprintln!("provider timed GET begins");
         let began = std::time::Instant::now();
         let mut pending = Box::pin(request.send());
-        match tokio::time::timeout(Duration::from_millis(100), &mut pending).await {
-            Ok(reply) => reply.ok(),
+        let reply = match tokio::time::timeout(Duration::from_millis(100), &mut pending).await {
+            Ok(reply) => reply,
             Err(_) => {
-                // Retain the violated budget, then diagnose where that same request eventually
-                // finishes. A late answer never turns this failed budget into a pass.
-                let late = tokio::time::timeout(rig::PATIENCE, pending).await;
-                eprintln!(
-                    "provider late read elapsed={:?} status={:?}",
-                    began.elapsed(),
-                    late.as_ref().map(|reply| reply.status)
-                );
-                panic!("a provider GET exceeded its original 100 ms budget");
+                missed_budgets.push("GET");
+                // Finish this same request within the existing bound, then observe the list too.
+                tokio::time::timeout(rig::PATIENCE, pending)
+                    .await
+                    .expect("the diagnostic provider GET did not finish")
             }
-        }
+        };
+        eprintln!(
+            "provider timed GET completed elapsed={:?} status={}",
+            began.elapsed(),
+            reply.status
+        );
+        reply.ok()
     } else {
         tokio::time::timeout(Duration::from_millis(100), request.send())
             .await
@@ -117,22 +139,54 @@ async fn a_provider_whose_new_unit_never_answers_is_read_and_listed_in_under_a_h
         read.runtime.as_ref().map(|runtime| runtime.state.as_str()),
         Some("creating")
     );
-    let listed = tokio::time::timeout(
-        Duration::from_millis(100),
-        s.rig
-            .world
-            .app
-            .call(ProviderList, &[])
-            .token(&s.ada.token)
-            .query(&ProviderListQuery {
-                scope: Some(ProviderListScope::Mine),
-                ..ProviderListQuery::default()
-            })
-            .send(),
-    )
-    .await
-    .expect("a provider list must not resolve the unit or release payload")
-    .ok();
+    let listed = if diagnosing {
+        eprintln!("provider timed LIST begins");
+        let began = std::time::Instant::now();
+        let mut pending = Box::pin(
+            s.rig
+                .world
+                .app
+                .call(ProviderList, &[])
+                .token(&s.ada.token)
+                .query(&ProviderListQuery {
+                    scope: Some(ProviderListScope::Mine),
+                    ..ProviderListQuery::default()
+                })
+                .send(),
+        );
+        let reply = match tokio::time::timeout(Duration::from_millis(100), &mut pending).await {
+            Ok(reply) => reply,
+            Err(_) => {
+                missed_budgets.push("LIST");
+                tokio::time::timeout(rig::PATIENCE, pending)
+                    .await
+                    .expect("the diagnostic provider list did not finish")
+            }
+        };
+        eprintln!(
+            "provider timed LIST completed elapsed={:?} status={}",
+            began.elapsed(),
+            reply.status
+        );
+        reply.ok()
+    } else {
+        tokio::time::timeout(
+            Duration::from_millis(100),
+            s.rig
+                .world
+                .app
+                .call(ProviderList, &[])
+                .token(&s.ada.token)
+                .query(&ProviderListQuery {
+                    scope: Some(ProviderListScope::Mine),
+                    ..ProviderListQuery::default()
+                })
+                .send(),
+        )
+        .await
+        .expect("a provider list must not resolve the unit or release payload")
+        .ok()
+    };
     assert!(
         listed
             .items
@@ -144,5 +198,13 @@ async fn a_provider_whose_new_unit_never_answers_is_read_and_listed_in_under_a_h
         s.rig.commands.issued_total(),
         before,
         "stored reads issue no native command"
+    );
+    // The serving pool is separate from the raw fixture pool.
+    tokio::time::timeout(rig::PATIENCE, s.rig.db.pool().close())
+        .await
+        .expect("the request-profile fixture pool closes");
+    assert!(
+        missed_budgets.is_empty(),
+        "provider reads exceeded their original 100 ms budgets: {missed_budgets:?}"
     );
 }

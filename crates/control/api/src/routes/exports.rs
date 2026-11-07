@@ -32,15 +32,35 @@ use orch_db::Conn;
 use orch_engine::exports::{Blocked, DocumentForm, DocumentHow, ExportError, Forms, FormsFault};
 use orch_types::Id;
 
+mod byte_sources;
+mod read_sources;
+mod removal_sources;
+
 /// Binds this module's requests.
 pub fn mount(registry: &mut Registry) {
     registry
         .on(NodeExportPreflight, preflight)
         .on(NodeExportCreate, create)
-        .on(MeExportList, list)
-        .on(ExportGet, get)
-        .on_raw(ExportDownload, download)
-        .on(ExportDelete, delete);
+        .on_snapshot_read_with_optional_operation(
+            MeExportList,
+            crate::key_operations::native::selected::<read_sources::Archives>,
+            crate::key_operations::native::selected_read::<read_sources::Archives>,
+        )
+        .on_snapshot_read_with_optional_operation(
+            ExportGet,
+            crate::key_operations::native::selected::<read_sources::Archive>,
+            crate::key_operations::native::selected_read::<read_sources::Archive>,
+        )
+        .on_raw_read_with_operation(
+            ExportDownload,
+            crate::key_operations::native::effects::prepare::<byte_sources::Open>,
+            byte_sources::download,
+        )
+        .on_with_operation(
+            ExportDelete,
+            crate::key_operations::native::effects::prepare::<removal_sources::Delete>,
+            delete,
+        );
 }
 
 // ---------------------------------------------------------------- what only this layer writes
@@ -165,47 +185,6 @@ async fn create(ctx: Ctx, (): (), body: ExportRequest) -> ApiResult<Job> {
     }
 }
 
-/// The caller's own archives, newest first.
-async fn list(ctx: Ctx, query: PageQuery, (): ()) -> ApiResult<Page<Export>> {
-    let user = ctx.user()?.id();
-    let mut conn = ctx.app.db.acquire().await?;
-    let principal = authorization::principal(&ctx, &mut conn).await?;
-    let engine = &ctx.app.engine;
-    let (rows, next_cursor) = match engine
-        .exports_of(
-            &mut conn,
-            user,
-            query.cursor.as_deref(),
-            i64::from(query.limit()),
-        )
-        .await
-    {
-        Ok(found) => found,
-        Err(error) => return Err(failed(&mut conn, error).await),
-    };
-    match engine.export_views(&mut conn, &principal, &rows).await {
-        Ok(items) => Ok(Page { items, next_cursor }),
-        Err(error) => Err(failed(&mut conn, error).await),
-    }
-}
-
-/// One of the caller's archives.
-async fn get(ctx: Ctx, (): (), (): ()) -> ApiResult<Export> {
-    let id = ctx.id("id")?;
-    let user = ctx.user()?.id();
-    let mut conn = ctx.app.db.acquire().await?;
-    let principal = authorization::principal(&ctx, &mut conn).await?;
-    let engine = &ctx.app.engine;
-    let row = match engine.export_of(&mut conn, user, id).await {
-        Ok(row) => row,
-        Err(error) => return Err(failed(&mut conn, error).await),
-    };
-    match engine.export_views(&mut conn, &principal, &[row]).await {
-        Ok(mut views) => views.pop().ok_or_else(ApiError::not_found),
-        Err(error) => Err(failed(&mut conn, error).await),
-    }
-}
-
 /// A name that can be put in a header: the characters a header takes, the rest an underscore, and the name as the
 /// browser should save it in the form that carries any character.
 fn attachment(name: &str) -> String {
@@ -225,41 +204,10 @@ fn attachment(name: &str) -> String {
     format!("attachment; filename=\"{plain}\"; filename*=UTF-8''{encoded}")
 }
 
-/// Fetches an archive. It is not used up: it can be fetched again until it is removed.
-async fn download(ctx: Ctx, (): (), _body: Body) -> ApiResult<Response> {
-    let id = ctx.id("id")?;
-    let user = ctx.user()?.id();
-    let engine = &ctx.app.engine;
-    let opened = engine.open_export(&origin(&ctx), user, id).await;
-    let mut conn = ctx.app.db.acquire().await?;
-    let (row, read) = match opened {
-        Ok(opened) => opened,
-        Err(error) => return Err(failed(&mut conn, error).await),
-    };
-    let name = match engine.export_file_name(&mut conn, &row).await {
-        Ok(name) => name,
-        Err(error) => return Err(failed(&mut conn, error).await),
-    };
-    Response::builder()
-        .status(StatusCode::OK)
-        .header(header::CONTENT_TYPE, "application/zip")
-        .header(header::CONTENT_DISPOSITION, attachment(&name))
-        .header(header::CONTENT_LENGTH, read.meta.size)
-        .header(header::X_CONTENT_TYPE_OPTIONS, "nosniff")
-        .header(header::CACHE_CONTROL, "private, no-store")
-        .body(Body::from_stream(read.body))
-        .map_err(ApiError::internal)
-}
-
 /// Removes an archive now; a job still writing it is cancelled.
 async fn delete(ctx: Ctx, (): (), (): ()) -> ApiResult<()> {
-    let id = ctx.id("id")?;
-    let user = ctx.user()?.id();
-    match ctx.app.engine.remove_export(user, id).await {
-        Ok(()) => Ok(()),
-        Err(error) => {
-            let mut conn = ctx.app.db.acquire().await?;
-            Err(failed(&mut conn, error).await)
-        }
-    }
+    let (tx, _guard) = crate::middleware::transaction_guard::begin(&ctx).await?;
+    crate::key_operations::native::effects::apply_owned::<removal_sources::Delete>(&ctx, tx)
+        .await?;
+    Ok(())
 }

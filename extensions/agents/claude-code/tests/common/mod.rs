@@ -456,6 +456,7 @@ impl Rig {
                 instructions: String::new(),
                 available_models: vec!["mock-large".to_owned()],
                 subagent_limits: Default::default(),
+                background_wake: true,
                 memory: None,
                 arrangement: ArrangementType::KeySeparated,
                 orch_tools: Vec::new(),
@@ -504,6 +505,7 @@ impl Rig {
     /// A turn with the given text, in the mode ask.
     pub fn turn(&self, text: &str) -> TurnStart {
         TurnStart {
+            native_wake: None,
             plan: false,
             thread_id: self.thread,
             turn_id: new_id(),

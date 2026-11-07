@@ -236,6 +236,7 @@ pub fn full_capabilities(memory: MemoryKind) -> Capabilities {
         steer: true,
         interrupt: true,
         background_commands: true,
+        turn_changes_require_restart: false,
         approvals: vec![
             HarnessRequestKind::Command,
             HarnessRequestKind::FileChange,
@@ -275,6 +276,7 @@ pub fn full_capabilities(memory: MemoryKind) -> Capabilities {
             ProviderFactKind::Windows,
             ProviderFactKind::PlanCredits,
         ],
+        provider_fact_fields: Default::default(),
         model_discovery: true,
         title: true,
         auxiliary_models: AuxiliaryModels::Pinned,
@@ -490,6 +492,7 @@ pub fn models() -> Vec<ModelSuggestion> {
                 // The large model has a faster speed, an access program and a larger context to offer, none
                 // of which is open until a manager of the provider opens it.
                 offered: (*name == "fake-large").then(|| Offered {
+                    web_search: None,
                     service_tiers: Some(vec![ServiceTier {
                         id: "fast".to_owned(),
                         label: "Fast".to_owned(),

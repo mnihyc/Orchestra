@@ -74,6 +74,8 @@ struct Probe<'a> {
 /// The members of a usage object that matter here.
 #[derive(Deserialize)]
 struct UsageView {
+    server_tool_use: Option<Value>,
+    speed: Option<Value>,
     input_tokens: Option<Value>,
     output_tokens: Option<Value>,
     cache_creation_input_tokens: Option<Value>,
@@ -130,6 +132,7 @@ fn replace(slot: &mut Option<i64>, new: Option<i64>) {
 /// What the vendor has said of the counts so far; each member is the latest word on it.
 #[derive(Debug, Clone, Default)]
 struct Figures {
+    web_searches: Option<i64>,
     input: Option<i64>,
     cache_read: Option<i64>,
     cache_write: Option<i64>,
@@ -141,6 +144,15 @@ struct Figures {
 impl Figures {
     /// Takes in a usage object: every member it carries replaces what was known of that member.
     fn take(&mut self, usage: &UsageView) {
+        replace(
+            &mut self.web_searches,
+            usage
+                .server_tool_use
+                .as_ref()
+                .and_then(|usage| usage.get("web_search_requests"))
+                .and_then(Value::as_i64)
+                .filter(|count| *count >= 0),
+        );
         replace(&mut self.input, count(usage.input_tokens.as_ref()));
         replace(
             &mut self.cache_read,
@@ -188,6 +200,7 @@ impl Figures {
 struct Seen {
     id: Option<String>,
     model: Option<String>,
+    service_tier: Option<String>,
     figures: Figures,
 }
 
@@ -195,6 +208,9 @@ impl Seen {
     /// Takes in a usage object given as raw text.
     fn take_usage(&mut self, raw: &RawValue) {
         if let Ok(usage) = serde_json::from_str::<UsageView>(raw.get()) {
+            if let Some(speed) = text(usage.speed.clone()) {
+                self.service_tier = Some(speed);
+            }
             self.figures.take(&usage);
         }
     }
@@ -247,6 +263,8 @@ impl Seen {
     /// What was seen, if it holds figures.
     fn observed(&self) -> Option<ObservedUsage> {
         Some(ObservedUsage {
+            web_searches: self.figures.web_searches,
+            service_tier: self.service_tier.clone(),
             model: self.model.clone(),
             tokens: self.figures.tokens()?,
             cost: self.figures.cost.clone(),

@@ -5,7 +5,11 @@
     reason = "a test fails by panicking"
 )]
 
+#[path = "workspace_snapshots/scope_helpers.rs"]
+mod keys;
 mod places;
+#[path = "workspace_source/restore_scopes.rs"]
+mod restore_scopes;
 mod support;
 mod workspace;
 
@@ -57,13 +61,7 @@ impl orch_api_core::testing::Machine for RestoreReader {
     }
 }
 
-#[tokio::test]
-async fn restore_preflight_shows_unknown_later_changes_and_rechecks_generation_and_expiry_before_any_apply()
- {
-    use orch_api_contract::source::{
-        EnvironmentFilesRestore, EnvironmentFilesRestoreBody, EnvironmentRestorePreflight,
-        EnvironmentRestorePreflightBody,
-    };
+async fn restore_fixture() -> (Site, orch_types::Id, std::sync::Arc<RestoreReader>) {
     use orch_blob_contract::store::stream_of;
     use orch_db::queries::{source, storage};
     use orch_link_contract::source::{FsRecordResult, RecordState};
@@ -150,6 +148,18 @@ async fn restore_preflight_shows_unknown_later_changes_and_rechecks_generation_a
         reads: std::sync::atomic::AtomicUsize::new(0),
     });
     site.power_on_with(reader.clone());
+    (site, snapshot, reader)
+}
+
+#[tokio::test]
+async fn restore_preflight_shows_unknown_later_changes_and_rechecks_generation_and_expiry_before_any_apply()
+ {
+    use orch_api_contract::source::{
+        EnvironmentFilesRestore, EnvironmentFilesRestoreBody, EnvironmentRestorePreflight,
+        EnvironmentRestorePreflightBody,
+    };
+    let (site, snapshot, reader) = restore_fixture().await;
+    let now = site.world.now();
     let request = EnvironmentRestorePreflightBody {
         snapshot_id: snapshot,
         options: None,
@@ -177,7 +187,9 @@ async fn restore_preflight_shows_unknown_later_changes_and_rechecks_generation_a
         .body(&request)
         .send()
         .await
-        .ok();
+        .ok()
+        .into_full()
+        .unwrap();
     assert_eq!(plan.snapshot.id, snapshot);
     assert_eq!(plan.directory, "web");
     assert!(plan.undo_available);
@@ -292,6 +304,8 @@ async fn source_retry_keeps_the_original_repository_branch_native_identity_and_d
         thread: Some(site.thread),
         caller: site.ada.id(),
         token: None,
+        creator_origin: None,
+        scheduled_input: None,
         action: Action::Prepare {
             directory: thread.workspace_dir,
             source: frozen.clone(),

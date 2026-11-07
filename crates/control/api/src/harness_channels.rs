@@ -343,30 +343,13 @@ pub async fn read_exact_configured(
 
 /// Whether the operator deliberately trusts the configured mirror as a checksum publisher.
 pub async fn trusts_mirror(conn: &mut Conn) -> Result<bool, orch_db::DbError> {
-    orch_settings::get::<bool>(
-        conn,
-        orch_settings::Place::System,
-        orch_settings_contract::registry::keys::AGENTS_HARNESS_TRUST_MIRROR,
-    )
-    .await
-    .map(|value| value.unwrap_or(false))
-    .map_err(|error| orch_db::DbError::Other(sqlx::Error::Protocol(error.to_string())))
+    orch_engine::build_checks::trusts_mirror(conn).await
 }
 
 /// Whether a kept executable has independently established checksum authority.
 #[must_use]
 pub fn checksum_trusted(value: &Json, trust_mirror: bool) -> bool {
-    match value.get("source").and_then(Json::as_str) {
-        Some("admin") => matches!(
-            value.get("checksum_origin").and_then(Json::as_str),
-            Some("admin" | "vendor")
-        ),
-        Some("channel") => value.get("checksum_origin").and_then(Json::as_str) == Some("vendor"),
-        Some("mirror") => {
-            trust_mirror && value.get("checksum_origin").and_then(Json::as_str) == Some("mirror")
-        }
-        _ => false,
-    }
+    orch_engine::build_checks::checksum_trusted(value, trust_mirror)
 }
 
 /// Reads requested program channels without granting a mirror checksum authority.
@@ -479,6 +462,16 @@ pub async fn keep(
     builds: &[HarnessBuild],
     at: DateTime<Utc>,
 ) -> Result<usize, orch_db::DbError> {
+    keep_before(conn, builds, at, || Ok::<_, orch_db::DbError>(())).await
+}
+
+/// The same native checksum writer with the once-only operation cut at an actual SQL effect.
+pub async fn keep_before<E: From<orch_db::DbError>>(
+    conn: &mut Conn,
+    builds: &[HarnessBuild],
+    at: DateTime<Utc>,
+    mut before: impl FnMut() -> Result<(), E>,
+) -> Result<usize, E> {
     let mut new = 0;
     for build in builds {
         let mut value = serde_json::to_value(build)
@@ -496,6 +489,7 @@ pub async fn keep(
                 || (old.value["checksum_origin"] == "mirror"
                     && build.source == HarnessBuildSource::Channel)
             {
+                before()?;
                 let written = orch_db::queries::settings::put(
                     conn,
                     None,
@@ -515,7 +509,7 @@ pub async fn keep(
             }
             continue;
         }
-        if management::put_channel_build(conn, &key, &value, at).await? {
+        if management::put_channel_build_before(conn, &key, &value, at, &mut before).await? {
             new += 1;
         }
     }

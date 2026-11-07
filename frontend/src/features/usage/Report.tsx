@@ -81,7 +81,7 @@ import { UsageVisibility } from './Visibility';
 import { USAGE_VIEWS } from '@/features/usage/navigation';
 
 import { useUsageChoices, type SearchPatch } from './choices';
-import { Plan,usePlanUsage } from './Plan';
+import { Plan,usePlanUsage,useCreditUsage,selectedProviderMetric } from './Plan';
 
 export interface ReportProps {
   providerData?:Provider | undefined;
@@ -117,20 +117,21 @@ function Skeletons({plan}:{plan?:ReactNode}={}) {
 }
 
 /** The label of a filter that is set, found among the rows of the table it narrows. */
-function labelOfFilter(analytics: UsageAnalytics | undefined, records:readonly UsageEvent[], name: FilterName, value: string, t: TFunction, locale: string): string {
+function labelOfFilter(analytics: UsageAnalytics | undefined, records:readonly UsageEvent[], name: FilterName, value: string | boolean, t: TFunction, locale: string): string {
+  if (typeof value === 'boolean') return t(value ? 'usage.key.actualTierNotReported' : 'usage.key.knownTier');
   if (name === 'turn') return t('usagePerf.selectedTurn');
   if(name==='outcome') return t(`usagePerf.choices.outcomes.${readOutcome(value) ?? 'all'}.name` as 'usagePerf.choices.outcomes.done.name');
   const dimension = FILTER_DIMENSION[name];
-  if (dimension === undefined) return t(`usage.chip.${name}`);
+  if (dimension === undefined) return t(`usage.chip.${name === 'tier_unknown' ? 'tier' : name}`);
   const found = analytics?.breakdowns.find((table) => table.by === dimension)?.rows.find((row) => filterValue(dimension, row.key) === value);
   if (found !== undefined) return keyLabel(dimension, found.key, t);
   for(const row of records) {
-    const key:UsageKey={person:row.user,model:row.model,model_display:row.model_display,provider:row.provider,agent:row.harness_kind===null?null:{kind:row.harness_kind,name:programNameIn(row,locale) ?? programNameIn(row.agent,locale) ?? t('resources.harnessNameUnknown')},environment:row.environment_kind,project:row.project,topic:row.topic,thread:row.thread,effort:row.effort,tier:row.tier,program:row.access_program};
+    const key:UsageKey={person:row.user,model:row.model,model_display:row.model_display,provider:row.provider,agent:row.harness_kind===null?null:{kind:row.harness_kind,name:programNameIn(row,locale) ?? programNameIn(row.agent,locale) ?? t('resources.harnessNameUnknown')},environment:row.environment_kind,project:row.project,topic:row.topic,thread:row.thread,effort:row.effort,tier:row.tier,tier_unknown:row.tier_unknown ?? false,program:row.access_program};
     if(filterValue(dimension,key)===value) return keyLabel(dimension,key,t);
   }
   if (name === 'environment') return value === 'managed' ? t('usage.key.managed') : t('usage.key.connected');
   if (name === 'program') return value === 'none' ? t('usagePerf.noProgram') : accessProgramDisplayName(value, t);
-  return t(`usage.chip.${name}`);
+  return t(`usage.chip.${name === 'tier_unknown' ? 'tier' : name}`);
 }
 
 export function Report({ scope: givenScope, search: given, onSearch, embedded = false,providerData:givenProvider,limitsSlot }: ReportProps) {
@@ -158,7 +159,9 @@ export function Report({ scope: givenScope, search: given, onSearch, embedded = 
   const place = useQuery({ ...nodeQuery(scope.kind === 'node' ? scope.id : ''), enabled: scope.kind === 'node' });
   const provider = useQuery({ ...providerQuery(scope.kind === 'provider' ? scope.id : ''), enabled: scope.kind === 'provider' && givenProvider===undefined });
   const providerData=givenProvider ?? provider.data;
-  usePlanUsage(scope.kind==='provider' ? providerData : undefined,span,search.plan_bucket,view==='usage');
+  const providerMetric=providerData===undefined ? 'subscription' : selectedProviderMetric(providerData,search.plan_metric);
+  usePlanUsage(scope.kind==='provider' ? providerData : undefined,span,search.plan_bucket,view==='usage' && providerMetric==='subscription');
+  useCreditUsage(scope.kind==='provider' ? providerData : undefined,span,search.plan_bucket,view==='usage' && providerMetric==='credits');
   const placeName = scope.kind === 'node' ? (place.data?.name ?? null) : scope.kind === 'provider' ? (providerData?.name ?? null) : null;
 
   const offered = useMemo(() => {
@@ -238,7 +241,7 @@ export function Report({ scope: givenScope, search: given, onSearch, embedded = 
   const period = <Period span={span} onSearch={change} now={now} />;
   const exportAction = <Export scope={scope} span={span} figures={params} records={recordParams} />;
   const chooseScope = (next: string) => change({ scope: next, by: undefined, more: undefined, ...Object.fromEntries(activeFilters(search).map(({ name }) => [name, undefined])) });
-  const planSection=scope.kind==='provider' && providerData!==undefined ? <Plan key={JSON.stringify([providerData.id,providerData.facts_at,span.from,span.to,search.plan_bucket])} provider={providerData} span={span} mode={search.plan ?? 'current'} bucket={search.plan_bucket} onMode={(plan)=>change({plan})} onBucket={(plan_bucket)=>change({plan_bucket})} /> : null;
+  const planSection=scope.kind==='provider' && providerData!==undefined ? <Plan key={JSON.stringify([providerData.id,providerData.facts_at,span.from,span.to,search.plan_bucket])} provider={providerData} span={span} mode={search.plan ?? 'current'} metric={providerMetric} onMetric={(plan_metric)=>change({plan_metric})} bucket={search.plan_bucket} onMode={(plan)=>change({plan})} onBucket={(plan_bucket)=>change({plan_bucket})} /> : null;
 
   const body = (
     <div className="flex min-w-0 flex-col gap-4">
@@ -253,7 +256,7 @@ export function Report({ scope: givenScope, search: given, onSearch, embedded = 
       {filters.length > 0 && (
         <div role="group" aria-label={t('usage.chip.list')} className="flex flex-wrap items-center gap-2">
           {filters.map(({ name, value }) => {
-            const label=labelOfFilter(analytics,records,name,value,t,i18n.resolvedLanguage ?? i18n.language);const what=t(`usage.chip.${name}`);const named=label!==what;
+            const label=labelOfFilter(analytics,records,name,value,t,i18n.resolvedLanguage ?? i18n.language);const what=t(`usage.chip.${name === 'tier_unknown' ? 'tier' : name}`);const named=label!==what;
             return (
               <Button key={name} size="sm" className="max-w-full" icon={<X aria-hidden />}
                 aria-label={named?t('usage.chip.removeValue',{what,value:label}):t('usage.chip.removeUnknown',{what})}

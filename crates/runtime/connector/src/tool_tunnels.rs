@@ -40,6 +40,7 @@ use orch_envhost::environment::EnvHost;
 use orch_envhost::executors::MCP_SERVER_NAME;
 use orch_envhost::mcp_host::MCP_PATH;
 use orch_executor_contract::descriptor::ExecutorProtocol;
+use orch_executor_contract::executor::ExecutorEndpoint;
 use orch_link::machine::MachineLink;
 use orch_link::tunnels::channel::{IncomingTunnel, Tunnel};
 use orch_link_contract::commands::SandboxMode;
@@ -200,6 +201,8 @@ pub struct Target {
     pub token: Option<String>,
     /// Whether it is an executor that takes the session in a header.
     pub takes_session: bool,
+    /// The exact running native executor this exchange captured, absent for MCP servers.
+    pub registered_executor: Option<ExecutorEndpoint>,
 }
 
 /// An address an executor was started at, taken apart: where it listens and the path it answers at.
@@ -307,6 +310,7 @@ impl ToolRelay {
                     name,
                     address,
                     path,
+                    registered_executor: Some(endpoint.clone()),
                     token: endpoint.token.map(|token| token.expose().to_owned()),
                     takes_session: false,
                 })
@@ -348,6 +352,7 @@ impl ToolRelay {
                         path,
                         token: endpoint.token.map(|token| token.expose().to_owned()),
                         takes_session: true,
+                        registered_executor: None,
                     })
                 })
                 .collect();
@@ -363,6 +368,7 @@ impl ToolRelay {
                 path: MCP_PATH.to_owned(),
                 token: Some(endpoint.token),
                 takes_session: false,
+                registered_executor: None,
             })
             .collect()
     }
@@ -565,17 +571,121 @@ impl ToolRelay {
     /// The executor of a target started again, where it was there once and no longer answers.
     pub async fn restarted(&self, target: &Target) -> Option<Target> {
         let host = self.host.as_ref()?;
-        let endpoint = host
-            .executor_ensure(target.environment_id, &target.name)
+        let local = host
+            .executor_uses_local_program(target.environment_id, &target.name)
+            .await;
+        let endpoint = match host
+            .executor_ensure_at_version(
+                target.environment_id,
+                &target.name,
+                target
+                    .registered_executor
+                    .as_ref()
+                    .map(|endpoint| endpoint.version.as_str()),
+                target.registered_executor.as_ref(),
+            )
             .await
-            .ok()?;
+        {
+            Ok(endpoint) => endpoint,
+            Err(_) => {
+                if local {
+                    self.refresh_programs().await;
+                }
+                return None;
+            }
+        };
         let (address, path) = parse_address(&endpoint.address, &target.path)?;
         Some(Target {
             address,
             path,
+            registered_executor: target
+                .registered_executor
+                .as_ref()
+                .map(|_| endpoint.clone()),
             token: endpoint.token.map(|token| token.expose().to_owned()),
             ..target.clone()
         })
+    }
+
+    async fn refresh_programs(&self) {
+        self.services
+            .local_harnesses
+            .refresh(&self.services.policy)
+            .await;
+    }
+
+    async fn target_current(&self, target: &Target) -> bool {
+        let Some(expected) = &target.registered_executor else {
+            return true;
+        };
+        let Some(host) = &self.host else {
+            return false;
+        };
+        host.executor_endpoint(target.environment_id, &target.name)
+            .await
+            .as_ref()
+            == Some(expected)
+    }
+
+    pub(crate) async fn prepare_exec(
+        &self,
+        environment: Id,
+        executor: &str,
+        version: Option<&str>,
+    ) -> Result<bool, String> {
+        let Some(host) = &self.host else {
+            return Ok(false);
+        };
+        if !host
+            .executor_uses_local_program(environment, executor)
+            .await
+        {
+            return Ok(false);
+        }
+        let Some(version) = version.filter(|version| !version.is_empty()) else {
+            self.refresh_programs().await;
+            return Err("the ticket does not name its admitted executor build".into());
+        };
+        match host
+            .executor_ensure_at_version(environment, executor, Some(version), None)
+            .await
+        {
+            Ok(_) => Ok(true),
+            Err(error) => {
+                self.refresh_programs().await;
+                Err(error.to_string())
+            }
+        }
+    }
+
+    /// Both local sessions and tunneled channels must still reach their admitted native build.
+    pub(crate) async fn check_exec_target(
+        &self,
+        target: &Target,
+        version: Option<&str>,
+        was_local: bool,
+    ) -> Result<(), String> {
+        let local = was_local
+            || if let Some(host) = &self.host {
+                host.executor_uses_local_program(target.environment_id, &target.name)
+                    .await
+            } else {
+                false
+            };
+        if local
+            && target
+                .registered_executor
+                .as_ref()
+                .map(|endpoint| endpoint.version.as_str())
+                != version
+        {
+            self.refresh_programs().await;
+            return Err("the running executor is not the ticket's admitted build".into());
+        }
+        if !self.target_current(target).await {
+            return Err("the executor was retired before this channel opened".into());
+        }
+        Ok(())
     }
 
     /// One exchange that came through a tunnel to `mcp/<server>`.
@@ -848,6 +958,20 @@ async fn serve_exec(relay: &Arc<ToolRelay>, incoming: IncomingTunnel, executor: 
         serve_mcp(relay, incoming, MCP_SERVER_NAME.to_owned()).await;
         return;
     }
+    let local_program = match relay
+        .prepare_exec(
+            environment,
+            &executor,
+            incoming.claims.tool_executor_version.as_deref(),
+        )
+        .await
+    {
+        Ok(local) => local,
+        Err(error) => {
+            incoming.refuse(OpenErrorCode::BadTicket, &error);
+            return;
+        }
+    };
     let targets = relay.exec_targets(&executor).await;
     let Some(target) = ToolRelay::pick(targets, environment) else {
         incoming.refuse(
@@ -856,13 +980,13 @@ async fn serve_exec(relay: &Arc<ToolRelay>, incoming: IncomingTunnel, executor: 
         );
         return;
     };
-    let socket = match connect_websocket(&target).await {
-        Ok(socket) => socket,
+    let (socket, target) = match connect_websocket(&target).await {
+        Ok(socket) => (socket, target),
         Err(first) => {
             let again = relay.restarted(&target).await;
             match again {
                 Some(again) => match connect_websocket(&again).await {
-                    Ok(socket) => socket,
+                    Ok(socket) => (socket, again),
                     Err(error) => {
                         incoming.refuse(OpenErrorCode::Refused, &error);
                         return;
@@ -877,6 +1001,17 @@ async fn serve_exec(relay: &Arc<ToolRelay>, incoming: IncomingTunnel, executor: 
     };
     if !relay.environment_matches(environment, generation) {
         incoming.refuse(OpenErrorCode::BadTicket, "the environment was made anew");
+        return;
+    }
+    if let Err(error) = relay
+        .check_exec_target(
+            &target,
+            incoming.claims.tool_executor_version.as_deref(),
+            local_program,
+        )
+        .await
+    {
+        incoming.refuse(OpenErrorCode::BadTicket, &error);
         return;
     }
     match incoming.accept() {

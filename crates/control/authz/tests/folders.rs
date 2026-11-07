@@ -10,7 +10,7 @@ mod support;
 use orch_access_contract::pages::Holder;
 use orch_access_contract::permissions::{Permission as P, Profile};
 use orch_access_contract::roles::Role;
-use orch_authz::reach::{Agent, AgentReach, Reach, Things};
+use orch_authz::reach::{Agent, Reach, Things};
 use orch_authz::{Act, Caller, Error, Policy, nodes};
 use orch_db::queries::hierarchy::archive;
 use orch_types::Id;
@@ -353,13 +353,9 @@ async fn what_is_made_private_below_a_project_is_told_from_what_follows_it() {
 }
 
 #[tokio::test]
-async fn the_project_of_a_thread_is_the_nearest_and_the_project_policy_reaches_the_folders_inside_it_and_not_those_above()
- {
+async fn the_nearest_project_share_reaches_its_folders_and_not_projects_above_or_beside_it() {
     let w = World::new().await;
     let f = w.folders().await;
-    // A topic in a folder inside Payments, with a thread; a thread beside the agent's, in its topic;
-    // a thread in Cart, which lies in Checkout above Payments; one in Plan, in Web above that; one in
-    // Notes, in a folder beside Checkout.
     let cards = w.node("project", f.payments, "Cards").await;
     let swipes = w.node("topic", cards, "Swipes").await;
     let inside = w.node("thread", swipes, "Terminal").await;
@@ -367,16 +363,14 @@ async fn the_project_of_a_thread_is_the_nearest_and_the_project_policy_reaches_t
     let above = w.node("thread", f.cart, "Basket").await;
     let higher = w.node("thread", f.plan, "Draft").await;
     let across = w.node("thread", f.notes, "Wiki").await;
-
-    let reach_of = |thread: Id, policy: AgentReach, things: Vec<Id>| {
+    let reach_of = |thread: Id, things: Vec<Id>| {
         let w = &w;
         async move {
             let mut conn = w.conn().await;
             let agent = Agent::of(&mut conn, thread).await.unwrap().unwrap();
-            Reach::load(
+            Reach::load_current(
                 &mut conn,
                 agent,
-                policy,
                 w.now,
                 &Things {
                     nodes: things,
@@ -387,6 +381,30 @@ async fn the_project_of_a_thread_is_the_nearest_and_the_project_policy_reaches_t
             .unwrap()
         }
     };
+    async fn grant(w: &World, source: Id, holder: Id) -> Vec<Id> {
+        let mut entries = Vec::new();
+        for profile in ["managed", "connected"] {
+            entries.push(
+                w.agent_entry(
+                    &orch_db::queries::access::PageKey::new("node", source, "defaults"),
+                    profile,
+                    P::ThreadView,
+                    holder,
+                    None,
+                )
+                .await,
+            );
+        }
+        entries
+    }
+    async fn revoke(w: &World, entries: Vec<Id>) {
+        let mut conn = w.conn().await;
+        for entry in entries {
+            orch_db::queries::access::remove_entry(&mut conn, entry, w.boss, w.now.get())
+                .await
+                .unwrap();
+        }
+    }
     let agent = {
         let mut conn = w.conn().await;
         Agent::of(&mut conn, f.thread).await.unwrap().unwrap()
@@ -394,12 +412,12 @@ async fn the_project_of_a_thread_is_the_nearest_and_the_project_policy_reaches_t
     assert_eq!(
         agent.project,
         Some(f.payments),
-        "the project of a thread is the one its topic lies in"
+        "the project is the nearest enclosing one"
     );
     assert_eq!(agent.topic, f.refunds);
-
     let all = vec![inside, beside, above, higher, across];
-    let by_project = reach_of(f.thread, AgentReach::Project, all.clone()).await;
+    let project_grants = grant(&w, f.payments, f.thread).await;
+    let by_project = reach_of(f.thread, all.clone()).await;
     for (what, thread, expected) in [
         ("another thread of its topic", beside, true),
         ("a thread of a folder inside its project", inside, true),
@@ -410,28 +428,28 @@ async fn the_project_of_a_thread_is_the_nearest_and_the_project_policy_reaches_t
         assert_eq!(
             by_project.conversation(thread, false).read.is_some(),
             expected,
-            "with the policy project, {what}"
+            "with the explicit project share, {what}"
         );
     }
-    let by_topic = reach_of(f.thread, AgentReach::Topic, all.clone()).await;
-    assert!(by_topic.conversation(beside, false).read.is_some());
+    revoke(&w, project_grants).await;
+    let topic_grants = grant(&w, f.refunds, f.thread).await;
+    let by_topic = reach_of(f.thread, all.clone()).await;
+    assert!(by_topic.conversation(beside, false).reads());
     assert!(
-        by_topic.conversation(inside, false).read.is_none(),
-        "the policy topic reaches its own topic alone"
+        !by_topic.conversation(inside, false).reads(),
+        "a topic share covers that topic alone"
     );
-    let by_none = reach_of(f.thread, AgentReach::None, all).await;
-    assert!(by_none.conversation(inside, false).read.is_none());
-
-    // From the thread in Cart, whose project is Checkout, the whole of Checkout is reached down to
-    // Payments and Cards; Plan above and Notes beside are not.
-    let from_cart = reach_of(
-        above,
-        AgentReach::Project,
-        vec![f.thread, inside, higher, across],
-    )
-    .await;
-    assert!(from_cart.conversation(f.thread, false).read.is_some());
-    assert!(from_cart.conversation(inside, false).read.is_some());
-    assert!(from_cart.conversation(higher, false).read.is_none());
-    assert!(from_cart.conversation(across, false).read.is_none());
+    revoke(&w, topic_grants).await;
+    assert!(
+        !reach_of(f.thread, all)
+            .await
+            .conversation(inside, false)
+            .reads()
+    );
+    let _cart_grants = grant(&w, f.checkout, above).await;
+    let from_cart = reach_of(above, vec![f.thread, inside, higher, across]).await;
+    assert!(from_cart.conversation(f.thread, false).reads());
+    assert!(from_cart.conversation(inside, false).reads());
+    assert!(!from_cart.conversation(higher, false).reads());
+    assert!(!from_cart.conversation(across, false).reads());
 }

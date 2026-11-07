@@ -9,6 +9,7 @@ mod places;
 mod resources;
 mod rig;
 mod support;
+use support::FullSettingReply;
 
 use orch_api_contract::common::ErrorCode;
 use orch_api_contract::resources::*;
@@ -60,7 +61,9 @@ async fn a_nested_template_saves_and_an_invalid_update_changes_neither_name_revi
         .body(&body(c.acme, valid.clone()))
         .send()
         .await
-        .ok();
+        .ok()
+        .into_full()
+        .unwrap();
     for spec in [
         json!({"source":{"image":false},"memory":256}),
         json!({"source":{"image":"base","unknown":"value-never-echoed"}}),
@@ -159,7 +162,9 @@ async fn profile_envelopes_validate_nested_attach_and_environment_values_before_
         })
         .send()
         .await
-        .ok();
+        .ok()
+        .into_full()
+        .unwrap();
     let change = AgentUpdateBody {
         name: Some("Must not save".into()),
         profile: Some(json!({"env":{"MODE":{"private":"never-echo-this"}}})),
@@ -256,6 +261,7 @@ async fn node_and_system_summarizer_settings_validate_nested_declared_configurat
         })
         .send()
         .await
+        .full_setting()
         .ok();
     let revision = made.own.as_ref().unwrap().revision;
     for invalid in [
@@ -273,6 +279,7 @@ async fn node_and_system_summarizer_settings_validate_nested_declared_configurat
             })
             .send()
             .await
+            .full_setting()
             .problem();
         assert_eq!(refused.code, ErrorCode::RequestInvalid);
         assert!(
@@ -312,6 +319,7 @@ async fn node_and_system_summarizer_settings_validate_nested_declared_configurat
         })
         .send()
         .await
+        .full_setting()
         .problem();
     assert_eq!(unavailable.code, ErrorCode::SourceOffline);
     assert!(
@@ -418,6 +426,8 @@ async fn subscription_option_schemas_validate_nested_values_without_partially_ch
         .send()
         .await
         .ok()
+        .into_full()
+        .expect("a full provider reply")
         .provider;
     for config in [
         json!({"routing":{"region":false}}),

@@ -69,6 +69,20 @@ async fn a_connector_owned_home_uses_native_methods_and_a_persons_home_needs_the
             "profile":{"config":{},"env":{},"attach":attach},"home":null}),
         )
         .unwrap();
+        if borrowed && !cfg!(target_os = "linux") {
+            assert_eq!(rig.fail(&rig.harness_key(), &start).await, "unsupported");
+            assert!(
+                rig.connector
+                    .as_ref()
+                    .unwrap()
+                    .hosting()
+                    .unwrap()
+                    .process(rig.provider, rig.agent)
+                    .is_err()
+            );
+            rig.kill().await;
+            continue;
+        }
         rig.succeed(&rig.harness_key(), &start).await;
         let hosting = rig.connector.as_ref().unwrap().hosting().unwrap();
         assert_eq!(
@@ -144,6 +158,20 @@ async fn deletion_stops_the_harness_even_when_its_borrowed_home_refuses_native_s
             "profile":{"config":{},"env":{},"attach":attach},"home":null}),
         )
         .unwrap();
+        if borrowed && !cfg!(target_os = "linux") {
+            assert_eq!(rig.fail(&rig.harness_key(), &start).await, "unsupported");
+            assert!(
+                rig.connector
+                    .as_ref()
+                    .unwrap()
+                    .hosting()
+                    .unwrap()
+                    .process(rig.provider, rig.agent)
+                    .is_err()
+            );
+            rig.kill().await;
+            continue;
+        }
         rig.succeed(&rig.harness_key(), &start).await;
         rig.succeed(&rig.harness_key(), &login(&rig)).await;
         let hosting = rig.connector.as_ref().unwrap().hosting().unwrap();
@@ -182,6 +210,7 @@ async fn deletion_stops_the_harness_even_when_its_borrowed_home_refuses_native_s
     }
 }
 
+#[cfg(target_os = "linux")]
 #[tokio::test]
 async fn taking_back_the_machine_switch_prevents_logout_and_renewal_without_hiding_read_only_facts()
 {

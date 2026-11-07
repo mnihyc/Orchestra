@@ -187,7 +187,9 @@ async fn visible_and_private(
         })
         .send()
         .await
-        .ok();
+        .ok()
+        .into_full()
+        .expect("ordinary directory registration retains full native content");
     assert_eq!(registered.base.name, format!("Work {machine}"));
     assert_eq!(registered.machine.as_ref().unwrap().id, machine);
 }

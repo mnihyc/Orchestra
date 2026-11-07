@@ -57,6 +57,7 @@ pub const DAEMON_SETTINGS_FILE: &str = "settings.json";
 // These helpers can act outside an issued turn; Orch supplies their supervised equivalents.
 const MANAGED_OFF_FEATURES: &[&str] = &[
     "daemon_auto_start",
+    "wake_on_agent_messages",
     "goals",
     "hooks",
     "codex_hooks",

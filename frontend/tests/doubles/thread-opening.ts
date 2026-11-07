@@ -25,5 +25,8 @@ export async function threadOpening(world: World, person: Person, threadId: stri
     outline: parent === undefined
       ? await read(`/threads/${threadId}/outline`, new URLSearchParams({ limit: String(limit) })) as ThreadOpening['outline']
       : world.workspace.outlineSnapshot(sync, new URLSearchParams({ limit: String(limit) })),
+    gateway: sync.projection?.follows_active === false ? null : {
+      status: 'ready', data: await read(`/threads/${threadId}/gateway`) as NonNullable<Extract<NonNullable<ThreadOpening['gateway']>, { status: 'ready' }>['data']>,
+    },
   };
 }

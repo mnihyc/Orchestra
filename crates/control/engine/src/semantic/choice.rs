@@ -11,10 +11,10 @@ use orch_db::queries::settings as stored;
 use orch_settings::{Place, get, resolve};
 use orch_settings_contract::registry::keys;
 use orch_types::Id;
-use serde::Deserialize;
+use serde::{Deserialize, Serialize};
 
 /// The ordering mode of a broad iterative graph scan.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Deserialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Deserialize, Serialize)]
 #[serde(rename_all = "snake_case")]
 pub enum IterativeScan {
     /// Preserve exact distance ordering while the graph continues.
@@ -39,7 +39,7 @@ impl IterativeScan {
 }
 
 /// How search by meaning cuts, sends, finds and joins, as `search.semantic.tuning` says.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Deserialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Deserialize, Serialize)]
 pub struct Tuning {
     /// The estimated tokens of one piece.
     pub chunk_tokens: i64,

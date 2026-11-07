@@ -15,6 +15,34 @@ use orch_agent_contract::descriptor::ArrangementType;
 use orch_db::Conn;
 use orch_types::Id;
 
+/// The ordinary resource-use policy at its actual home, shared by native and HTTP consumers.
+pub async fn resource_policies(
+    conn: &mut Conn,
+    resource: Id,
+) -> Result<orch_authz::usable::Policies, crate::EngineError> {
+    let facts = orch_db::queries::resources::resource_facts(conn, &[resource]).await?;
+    let home = facts.first().and_then(|facts| facts.home_id);
+    let place = home.map_or(orch_settings::Place::System, orch_settings::Place::Node);
+    let shared = orch_settings::get(
+        conn,
+        place,
+        orch_settings_contract::registry::keys::PROVIDERS_SUBSCRIPTION_SHARING,
+    )
+    .await?;
+    let outsiders: Option<bool> = orch_settings::get(
+        conn,
+        place,
+        orch_settings_contract::registry::keys::SHARING_ALLOW_EXTERNAL,
+    )
+    .await?;
+    Ok(orch_authz::usable::Policies::everywhere(
+        orch_authz::usable::ResourcePolicy {
+            owners_name_outsiders: outsiders.unwrap_or(false),
+            shared_subscriptions: shared,
+        },
+    ))
+}
+
 /// The resource side of the access engine could not answer.
 #[derive(Debug, Clone, PartialEq, Eq, thiserror::Error)]
 pub enum AccessFault {
@@ -74,7 +102,8 @@ pub struct ProviderUse<'a> {
 /// A limit that stands in the way of a turn, which somebody may let it past.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Limit {
-    /// The provider's own limit, as its vendor reported it.
+    /// Legacy provider bypass-permission query, retained for implementer compatibility.
+    /// Current inputs bypass only configured caps; vendor quota is not a gate.
     ProviderLimit {
         /// The provider.
         provider: Id,

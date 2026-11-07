@@ -168,9 +168,7 @@ async fn hosted_turn(harness: Harness) {
         inspected.contains(harness.token_variable()),
         "the harness is given the token of the listener in its environment: {inspected}"
     );
-    p.rig
-        .wait_for(p.thread, p.segment, "turn.completed", 1)
-        .await;
+    p.wait_for_turn_event("turn.completed", 1).await;
 
     // Events arrived in order, and the controller saw no gap or repeat.
     let kinds = p.rig.kinds(p.thread, p.segment);
@@ -187,7 +185,7 @@ async fn hosted_turn(harness: Harness) {
     let first_item = kinds
         .iter()
         .position(|kind| kind.starts_with("item."))
-        .unwrap();
+        .unwrap_or_else(|| panic!("the native turn produced no item: {}", p.turn_diagnostics()));
     let started_at = kinds
         .iter()
         .position(|kind| kind == "turn.started")

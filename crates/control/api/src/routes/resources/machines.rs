@@ -7,7 +7,11 @@
 
 use crate::backplane::RATE_WEIGHT;
 pub(crate) mod enrollment;
+mod individual;
+mod mutations;
 mod programs;
+mod read;
+mod read_operation;
 mod roles;
 use crate::certificates::{TokenFor, TokenRequest};
 use crate::dispatch::RunError;
@@ -15,10 +19,13 @@ use crate::middleware::authentication::Authed;
 use crate::middleware::authorization::{self, refusals};
 use crate::middleware::requests::{ApiError, ApiResult};
 use crate::registry::{Ctx, Registry};
+use crate::routes::access::page::{NameBounds, NameSources};
 use crate::routes::nodes::{actor_name, invalid, placed, policy_at};
 use crate::routes::resources::providers::{home_policies, refused_making};
 use crate::routes::resources::view::{
-    agent_refs, environment_refs, is_online, machine_refs, parse, provider_refs,
+    PreparedAccess, accesses_prepared, agent_refs_from_rows_with_names,
+    environment_refs_from_rows_with_names, is_online, machine_refs, parse, prepare_accesses,
+    provider_refs_from_rows_with_names,
 };
 use crate::sign_in::origin;
 use orch_access_contract::audit::AuditAction;
@@ -57,15 +64,27 @@ pub fn mount(registry: &mut Registry) {
     reenrollment::mount(registry);
     enrollment::mount(registry);
     registry
-        .on(api::MachineList, list)
+        .on_snapshot_read_with_optional_operation(
+            api::MachineList,
+            crate::key_operations::native::selected::<read::Machines>,
+            read::list,
+        )
         .on(api::MachineEnrollmentTokenCreate, token_create)
-        .on(api::MachineGet, get)
+        .on_snapshot_read_with_optional_operation(
+            api::MachineGet,
+            crate::key_operations::native::selected::<individual::MachineRead>,
+            individual::get,
+        )
         .on(api::MachineEnrollmentInfoGet, enrollment_info)
-        .on(api::MachineUpdate, update)
+        .on_with_optional_operation(
+            api::MachineUpdate,
+            crate::key_operations::native::stored_deferred::<mutations::Machines, _, _>,
+            mutations::update,
+        )
         .on(api::MachineUpdateNow, update_now)
         .on(api::MachineRevoke, revoke)
         .on(api::MachineProbe, probe)
-        .on(api::MachinePolicyGet, policy_get)
+        .on_with_operation(api::MachinePolicyGet, read_operation::prepare, policy_get)
         .on(api::MachinePolicyUpdate, policy_update);
     programs::register(registry);
     roles::register(registry);
@@ -82,12 +101,23 @@ pub fn is_owner(authed: &Authed, machine: &MachineRow) -> bool {
 /// The machine `id` through its current View permission, or its host's facade.
 /// An unreadable or deleted machine is not there for the caller.
 pub(crate) async fn own_machine(ctx: &Ctx, conn: &mut Conn, id: Id) -> ApiResult<MachineRow> {
-    let row = rows::machine(conn, id)
-        .await?
-        .filter(|row| row.deleted_at.is_none())
-        .ok_or_else(ApiError::not_found)?;
+    let row = live_machine(conn, id).await?;
     let principal = authorization::principal(ctx, conn).await?;
     require_machine(conn, &principal, id, Permission::MachineView).await?;
+    Ok(row)
+}
+
+async fn live_machine(conn: &mut Conn, id: Id) -> ApiResult<MachineRow> {
+    rows::machine(conn, id)
+        .await?
+        .filter(|row| row.deleted_at.is_none())
+        .ok_or_else(ApiError::not_found)
+}
+
+/// The same stored row and ordinary View gate, using this read's current admitted principal.
+async fn own_machine_on(conn: &mut Conn, principal: &Principal, id: Id) -> ApiResult<MachineRow> {
+    let row = live_machine(conn, id).await?;
+    require_machine(conn, principal, id, Permission::MachineView).await?;
     Ok(row)
 }
 
@@ -109,19 +139,19 @@ pub(crate) async fn require_machine(
     }
 }
 
-/// Registering a directory, profile or runtime uses the machine's shared Use entry.
-pub(crate) async fn registrable_machine(
-    ctx: &Ctx,
+/// The same native registration door with this source's current admitted principal.
+pub(crate) async fn registrable_machine_on(
     conn: &mut Conn,
+    principal: &Principal,
     id: Id,
 ) -> ApiResult<MachineRow> {
-    let row = own_machine(ctx, conn, id).await?;
-    let principal = authorization::principal(ctx, conn).await?;
-    require_machine(conn, &principal, id, Permission::MachineUse).await?;
+    let row = own_machine_on(conn, principal, id).await?;
+    require_machine(conn, principal, id, Permission::MachineUse).await?;
     Ok(row)
 }
 
 fn installation_info(config: &ServerConfig) -> api::MachineEnrollmentInfo {
+    let endpoints = config.gateway.advertised_endpoints();
     let public_url = config.system.public_url.trim_end_matches('/').to_owned();
     // Installers accept HTTPS and loopback HTTP for local development.
     let secure = url::Url::parse(&public_url).ok().is_some_and(|url| {
@@ -137,8 +167,8 @@ fn installation_info(config: &ServerConfig) -> api::MachineEnrollmentInfo {
     let secure = secure && installer_syntax(&public_url);
     let configure = if !secure || example_address(&public_url, false) {
         Some("public_url".to_owned())
-    } else if config.gateway.endpoints.is_empty()
-        || config.gateway.endpoints.iter().any(|endpoint| {
+    } else if endpoints.is_empty()
+        || endpoints.iter().any(|endpoint| {
             example_address(&endpoint.url, true)
                 || !installer_syntax(&endpoint.url)
                 || !url::Url::parse(&endpoint.url)
@@ -168,7 +198,29 @@ fn example_address(address: &str, machine: bool) -> bool {
 }
 
 async fn enrollment_info(ctx: Ctx, (): (), (): ()) -> ApiResult<api::MachineEnrollmentInfo> {
-    Ok(installation_info(&ctx.app.config))
+    Ok(installation_info(&installation_config(&ctx)))
+}
+
+/// Commands and readiness use the same effective catalogue as enrollment, including an admin override.
+pub(crate) fn installation_config(ctx: &Ctx) -> ServerConfig {
+    let mut config = (*ctx.app.config).clone();
+    config.gateway.instances.clear();
+    config.gateway.endpoints = ctx
+        .app
+        .link
+        .certificates()
+        .advertised_endpoints()
+        .into_iter()
+        .map(|endpoint| orch_config::server::GatewayEndpoint {
+            url: endpoint.url,
+            trust: match endpoint.trust {
+                orch_link_contract::enrollment::Trust::Pinned => "pinned",
+                orch_link_contract::enrollment::Trust::Public => "public",
+            }
+            .into(),
+        })
+        .collect();
+    config
 }
 
 /// Never mint a secret for a command the shipped installer will refuse.
@@ -311,35 +363,268 @@ pub async fn machine_views(
     conn: &mut Conn,
     found: Vec<MachineRow>,
 ) -> ApiResult<Vec<Machine>> {
+    let principal = authorization::principal(ctx, conn).await?;
+    machine_views_as(ctx, conn, &principal, found).await
+}
+
+/// The same ordinary projection with the current consumed preparation principal.
+/// This does not reconstruct a caller or establish final operation admission.
+pub(super) async fn machine_views_as(
+    ctx: &Ctx,
+    conn: &mut Conn,
+    principal: &Principal,
+    found: Vec<MachineRow>,
+) -> ApiResult<Vec<Machine>> {
+    let prepared = prepare_inventory(conn, principal, found).await?;
+    show_inventory_prepared(ctx, conn, principal, &prepared).await
+}
+
+/// Native physical-machine/facade facts; minimal registered refs remain this inventory's content.
+pub(crate) struct PreparedInventory {
+    found: Vec<MachineRow>,
+    hosts: Vec<(Id, Id, String)>,
+    effective: Vec<orch_authz::resources::Effective>,
+    access: PreparedAccess,
+    sources: NameSources,
+    bounds: NameBounds,
+    registered: Registered,
+}
+
+struct Registered {
+    providers: Vec<queries::ProviderRefRow>,
+    agents: Vec<queries::AgentRefRow>,
+    environments: Vec<queries::EnvironmentRefRow>,
+    sources: Vec<ObjectRef>,
+}
+
+impl Registered {
+    fn associations(&self) -> BTreeMap<(ObjectKind, Id), Option<Id>> {
+        self.providers
+            .iter()
+            .map(|row| ((ObjectKind::Provider, row.id), row.machine_id))
+            .chain(
+                self.agents
+                    .iter()
+                    .map(|row| ((ObjectKind::Agent, row.id), row.machine_id)),
+            )
+            .chain(
+                self.environments
+                    .iter()
+                    .map(|row| ((ObjectKind::Environment, row.id), row.machine_id)),
+            )
+            .collect()
+    }
+
+    async fn load(conn: &mut Conn, machines: &[Id]) -> ApiResult<Self> {
+        if machines.is_empty() {
+            return Ok(Self {
+                providers: Vec::new(),
+                agents: Vec::new(),
+                environments: Vec::new(),
+                sources: Vec::new(),
+            });
+        }
+        let providers = queries::providers_among(conn, &[], machines).await?;
+        let agents = queries::agents_among(conn, &[], machines).await?;
+        let environments = queries::environments_among(conn, &[], machines).await?;
+        let mut sources: Vec<_> = providers
+            .iter()
+            .map(|row| ObjectRef {
+                kind: ObjectKind::Provider,
+                id: row.id,
+            })
+            .chain(agents.iter().map(|row| ObjectRef {
+                kind: ObjectKind::Agent,
+                id: row.id,
+            }))
+            .chain(environments.iter().map(|row| ObjectRef {
+                kind: ObjectKind::Environment,
+                id: row.id,
+            }))
+            .collect();
+        sources.sort_unstable_by_key(|source| (source.kind, source.id));
+        sources.dedup();
+        Ok(Self {
+            providers,
+            agents,
+            environments,
+            sources,
+        })
+    }
+}
+
+/// Actual registered reference identities from the native selectors, before API conversion.
+pub(crate) async fn registered_sources(
+    conn: &mut Conn,
+    machines: &[Id],
+) -> ApiResult<Vec<ObjectRef>> {
+    Ok(Registered::load(conn, machines).await?.sources)
+}
+
+impl PreparedInventory {
+    pub(crate) fn preserves_sources(&self, fresh: &Self) -> bool {
+        let registrations = fresh.registered.associations();
+        self.access.preserves_authority(&fresh.access)
+            && self
+                .found
+                .iter()
+                .all(|row| fresh.found.iter().any(|current| current.id == row.id))
+            && self.hosts.iter().all(|(machine, host, _)| {
+                fresh
+                    .hosts
+                    .iter()
+                    .any(|(current_machine, current_host, _)| {
+                        current_machine == machine && current_host == host
+                    })
+            })
+            && self
+                .registered
+                .associations()
+                .iter()
+                .all(|(source, machine)| registrations.get(source) == Some(machine))
+    }
+
+    pub(crate) fn name_sources(&self) -> &NameSources {
+        &self.sources
+    }
+    pub(crate) fn reference_sources(&self) -> &[ObjectRef] {
+        &self.registered.sources
+    }
+    pub(crate) fn bound_names(&mut self, bounds: NameBounds) {
+        self.bounds = bounds;
+    }
+}
+
+pub(crate) async fn prepare_inventory(
+    conn: &mut Conn,
+    principal: &Principal,
+    found: Vec<MachineRow>,
+) -> ApiResult<PreparedInventory> {
+    prepare_inventory_for(conn, principal, found, false).await
+}
+
+/// The original Machine/Host View predicate, applied before registration/name projection.
+pub(crate) async fn prepare_list_inventory(
+    conn: &mut Conn,
+    principal: &Principal,
+    found: Vec<MachineRow>,
+) -> ApiResult<PreparedInventory> {
+    prepare_inventory_for(conn, principal, found, true).await
+}
+
+async fn prepare_inventory_for(
+    conn: &mut Conn,
+    principal: &Principal,
+    mut found: Vec<MachineRow>,
+    readable_only: bool,
+) -> ApiResult<PreparedInventory> {
     let ids: Vec<Id> = found.iter().map(|row| row.id).collect();
-    let software_updates = crate::component_updates::views(&ctx.app.link, conn, &ids).await?;
-    let hosts = rows::hosting::machine_hosts(conn, &ids).await?;
+    let mut hosts = rows::hosting::machine_hosts(conn, &ids).await?;
     let mut resource_ids = ids.clone();
     resource_ids.extend(hosts.iter().map(|(_, host, _)| *host));
-    let principal = authorization::principal(ctx, conn).await?;
-    let effective =
-        orch_authz::resources::effective_among(conn, &principal, &resource_ids, Policy::default())
+    let mut effective =
+        orch_authz::resources::effective_among(conn, principal, &resource_ids, Policy::default())
             .await
             .map_err(ApiError::internal)?;
+    if readable_only {
+        let facades: BTreeMap<_, _> = hosts
+            .iter()
+            .map(|(machine, host, _)| (*machine, *host))
+            .collect();
+        let visible: BTreeMap<_, _> = effective
+            .iter()
+            .map(|held| {
+                (
+                    held.object.id,
+                    held.held.iter().any(|permission| {
+                        matches!(
+                            permission.permission,
+                            Permission::MachineView | Permission::HostView
+                        )
+                    }),
+                )
+            })
+            .collect();
+        found.retain(|row| visible.get(facades.get(&row.id).unwrap_or(&row.id)) == Some(&true));
+        let physical: std::collections::BTreeSet<_> = found.iter().map(|row| row.id).collect();
+        hosts.retain(|(machine, _, _)| physical.contains(machine));
+        let retained: std::collections::BTreeSet<_> = physical
+            .iter()
+            .copied()
+            .chain(hosts.iter().map(|(_, host, _)| *host))
+            .collect();
+        effective.retain(|held| retained.contains(&held.object.id));
+    }
     let holdings: Vec<_> = effective
         .iter()
-        .map(|each| super::view::Holding {
-            id: each.object.id,
-            owner: each.owner,
-            administers: each.administers,
-            admin_access: each.admin_access,
-            admin_place: each.admin_place,
-            admin_only: &each.admin_only,
-            participating: each.participating,
-            held: &each.held,
-        })
+        .map(super::view::Holding::from_effective)
         .collect();
-    let access = super::view::accesses(conn, &principal, &holdings).await?;
+    let access = prepare_accesses(conn, &holdings).await?;
+    let mut sources = access.names.clone();
+    let selected: Vec<_> = found.iter().map(|row| row.id).collect();
+    let registered = Registered::load(conn, &selected).await?;
+    sources.nodes.extend(
+        orch_authz::resources::address_name_sources(
+            conn,
+            &registered
+                .sources
+                .iter()
+                .map(|source| source.id)
+                .collect::<Vec<_>>(),
+        )
+        .await
+        .map_err(authorization::restoration_error)?,
+    );
+    Ok(PreparedInventory {
+        found,
+        hosts,
+        effective,
+        access,
+        sources,
+        bounds: NameBounds::default(),
+        registered,
+    })
+}
+
+pub(crate) async fn show_inventory_prepared(
+    ctx: &Ctx,
+    conn: &mut Conn,
+    principal: &Principal,
+    prepared: &PreparedInventory,
+) -> ApiResult<Vec<Machine>> {
+    let found = prepared.found.clone();
+    let hosts = &prepared.hosts;
+    let ids: Vec<_> = found.iter().map(|row| row.id).collect();
+    let software_updates = crate::component_updates::views(&ctx.app.link, conn, &ids).await?;
+    let holdings: Vec<_> = prepared
+        .effective
+        .iter()
+        .map(super::view::Holding::from_effective)
+        .collect();
+    let access = accesses_prepared(
+        conn,
+        principal,
+        &holdings,
+        &prepared.access,
+        prepared.bounds.limited.then_some(&prepared.bounds),
+    )
+    .await?;
     let owners: Vec<Id> = found.iter().filter_map(|row| row.owner_id).collect();
     let owners = refusals::user_refs(conn, &owners).await?;
-    let providers = provider_refs(conn, &[], &ids).await?;
-    let agents = agent_refs(&ctx.app, conn, &[], &ids).await?;
-    let environments = environment_refs(conn, &[], &ids, orch_types::Time::new(ctx.now)).await?;
+    let names = prepared.bounds.limited.then_some(&prepared.bounds);
+    let providers =
+        provider_refs_from_rows_with_names(conn, prepared.registered.providers.clone(), names)
+            .await?;
+    let agents =
+        agent_refs_from_rows_with_names(&ctx.app, conn, prepared.registered.agents.clone(), names)
+            .await?;
+    let environments = environment_refs_from_rows_with_names(
+        conn,
+        prepared.registered.environments.clone(),
+        orch_types::Time::new(ctx.now),
+        names,
+    )
+    .await?;
     found
         .into_iter()
         .map(|row| {
@@ -439,24 +724,6 @@ fn clean_name(path: &str, name: &str) -> ApiResult<String> {
     Ok(name.to_owned())
 }
 
-/// Physical machines whose resource page the caller may view.
-async fn list(ctx: Ctx, (): (), (): ()) -> ApiResult<Vec<Machine>> {
-    let mut conn = ctx.app.db.acquire().await?;
-    let found = queries::physical_machines(&mut conn).await?;
-    Ok(machine_views(&ctx, &mut conn, found)
-        .await?
-        .into_iter()
-        .filter(|m| {
-            m.access.as_ref().is_some_and(|a| {
-                a.permissions.iter().any(|permission| {
-                    permission == Permission::MachineView.as_str()
-                        || permission == Permission::HostView.as_str()
-                })
-            })
-        })
-        .collect())
-}
-
 /// Which program a token's commands install.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) enum Installer {
@@ -496,7 +763,7 @@ fn ps_word(text: &str) -> String {
 fn node_endpoint(config: &ServerConfig) -> String {
     config
         .gateway
-        .endpoints
+        .advertised_endpoints()
         .first()
         .map(|endpoint| endpoint.url.clone())
         .unwrap_or_default()
@@ -626,7 +893,8 @@ async fn token_create(
     (): (),
     body: api::MachineEnrollmentTokenCreateBody,
 ) -> ApiResult<EnrollmentToken> {
-    require_installable(&ctx.app.config)?;
+    let installation = installation_config(&ctx);
+    require_installable(&installation)?;
     let authed = ctx.user()?;
     if !authorization::caller_of(authed)?.reaches(None) {
         return Err(ApiError::not_found());
@@ -701,25 +969,13 @@ async fn token_create(
     Ok(EnrollmentToken {
         receipt: Some(made.receipt),
         commands: if explicit {
-            enrollment_commands_choices(
-                &ctx.app.config,
-                &made.token,
-                Installer::Connector,
-                &choices,
-            )
+            enrollment_commands_choices(&installation, &made.token, Installer::Connector, &choices)
         } else {
-            enrollment_commands(&ctx.app.config, &made.token, Installer::Connector)
+            enrollment_commands(&installation, &made.token, Installer::Connector)
         },
         token: made.token,
         expires_at: made.expires_at,
     })
-}
-
-/// Reads a machine.
-async fn get(ctx: Ctx, (): (), (): ()) -> ApiResult<Machine> {
-    let mut conn = ctx.app.db.acquire().await?;
-    let row = own_machine(&ctx, &mut conn, ctx.id("id")?).await?;
-    machine_with_readiness(&ctx, &mut conn, row).await
 }
 
 /// The same stored projection for a read and an acknowledged machine-policy mutation.
@@ -728,25 +984,11 @@ pub(crate) async fn machine_with_readiness(
     conn: &mut Conn,
     row: MachineRow,
 ) -> ApiResult<Machine> {
-    let mut machine = machine_view(ctx, conn, row).await?;
     let principal = authorization::principal(ctx, conn).await?;
-    let hosted =
-        orch_db::queries::environment_facts::hosted_resources(conn, machine.base.id).await?;
-    let mut environments = machine.environments.clone();
-    if !hosted.is_empty() {
-        for (_, environment) in environment_refs(conn, &hosted, &[], Time::new(ctx.now)).await? {
-            if !environments.iter().any(|known| known.id == environment.id) {
-                environments.push(environment);
-            }
-        }
-    }
-    for environment in environments {
-        machine.environment_sandboxes.push(
-            crate::sandbox_readiness::environment(conn, &principal, environment, None, None, None)
-                .await?,
-        );
-    }
-    Ok(machine)
+    individual::Prepared::load(conn, &principal, row)
+        .await?
+        .render(ctx, conn, &principal)
+        .await
 }
 
 /// Update now on either facade holds the same physical drain fence and writes the person's audit.
@@ -814,32 +1056,6 @@ pub(crate) async fn request_update_on(ctx: &Ctx, machine: Id) -> ApiResult<api::
 
 async fn update_now(ctx: Ctx, (): (), (): ()) -> ApiResult<api::ComponentUpdate> {
     request_update_on(&ctx, ctx.id("id")?).await
-}
-
-/// Renames a machine.
-async fn update(ctx: Ctx, (): (), body: api::MachineUpdateBody) -> ApiResult<Machine> {
-    let name = clean_name("name", &body.name)?;
-    let mut tx = ctx.app.db.begin().await?;
-    let row = own_machine(&ctx, &mut tx, ctx.id("id")?).await?;
-    let principal = authorization::principal(&ctx, &mut tx).await?;
-    require_machine(&mut tx, &principal, row.id, Permission::MachineManage).await?;
-    queries::rename_machine(&mut tx, row.id, &name).await?;
-    let who = actor_name(&ctx)?;
-    audit_machine(
-        &ctx,
-        &mut tx,
-        orch_db::audit::action!(AuditAction::MachineRenamed),
-        row.id,
-        &format!("{who} renamed the machine {} to {name}", row.name),
-        json!({ "machine": row.id, "from": row.name, "to": name }),
-    )
-    .await?;
-    let renamed = rows::machine(&mut tx, row.id)
-        .await?
-        .ok_or_else(|| ApiError::internal("a machine was renamed and is not there"))?;
-    tx.commit().await.map_err(DbError::from)?;
-    let mut conn = ctx.app.db.acquire().await?;
-    machine_view(&ctx, &mut conn, renamed).await
 }
 
 /// Writes the audit row of an act on a machine, in the caller's transaction. A machine lies in no
@@ -926,13 +1142,18 @@ async fn probe(ctx: Ctx, (): (), (): ()) -> ApiResult<Machine> {
     require_machine(&mut conn, &principal, row.id, Permission::MachineManage).await?;
     require_online(&ctx, &row)?;
     drop(conn);
-    let facts: MachineFacts = ctx
-        .app
-        .link
-        .dispatcher()
-        .run(row.id, &SerialKey::Machine, &MachineProbe {})
-        .await
-        .map_err(|error| command_failed(row.id, error))?;
+    let run = async {
+        ctx.app
+            .link
+            .dispatcher()
+            .run(row.id, &SerialKey::Machine, &MachineProbe {})
+            .await
+    };
+    #[cfg(feature = "test-observers")]
+    let outcome = orch_link::test_observers::probe_request(row.id, &ctx.request_id, run).await;
+    #[cfg(not(feature = "test-observers"))]
+    let outcome = run.await;
+    let facts: MachineFacts = outcome.map_err(|error| command_failed(row.id, error))?;
     let written = serde_json::to_value(&facts).map_err(ApiError::internal)?;
     let (mut tx, guard) = crate::middleware::transaction_guard::begin(&ctx).await?;
     require_machine(
@@ -1230,10 +1451,19 @@ async fn policy_of(
 
 /// Reads the local policy of a machine as it last reported it.
 async fn policy_get(ctx: Ctx, (): (), (): ()) -> ApiResult<MachinePolicy> {
-    let mut conn = ctx.app.db.acquire().await?;
-    let principal = authorization::principal(&ctx, &mut conn).await?;
-    let row = machine_for_policy(&ctx, &mut conn, &principal, ctx.id("id")?).await?;
-    policy_of(&ctx, &mut conn, &principal, &row).await
+    // This stored read has no native command or response bookkeeping to replay.
+    crate::key_operations::snapshot_read::run(ctx, policy_snapshot).await
+}
+
+async fn policy_snapshot(ctx: Ctx) -> ApiResult<MachinePolicy> {
+    let mut tx = ctx.app.db.begin_snapshot().await?;
+    let principal = ctx.operation_principal(&mut tx).await?;
+    // Environment/provider managers retain their existing section-only access. A new
+    // MachineView prerequisite here would deny an ordinary supported policy reader.
+    let row = machine_for_policy(&ctx, &mut tx, &principal, ctx.id("id")?).await?;
+    let shown = policy_of(&ctx, &mut tx, &principal, &row).await?;
+    tx.commit().await.map_err(DbError::from)?;
+    Ok(shown)
 }
 
 /// Checks changed connection objects against schemas this host actually reported.

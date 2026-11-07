@@ -6,20 +6,20 @@
 //! (whether its owners may name somebody from outside its root org, and whether the subscription it
 //! may be is kept to its first owner) are the settings of that org.
 
-use crate::middleware::authorization::{self, refusals, resource_kind_of};
+use crate::middleware::authorization::{refusals, resource_kind_of};
 use crate::middleware::requests::{ApiError, ApiResult};
 use crate::registry::Ctx;
-use crate::routes::access::page::permission_page;
+use crate::routes::access::page_operations;
 use crate::routes::resources::providers::home_policies;
 use crate::sign_in::origin;
 use orch_access_contract::decisions::ObjectRef;
 use orch_access_contract::permissions::ResourceKind;
 use orch_api_contract::access as api;
-use orch_authz::pages::{self, ChangeError, Target};
+use orch_authz::pages::{self, ChangeError};
 use orch_authz::usable::ResourcePolicy;
-use orch_authz::{Policy, Principal, resources};
+use orch_authz::{Policy, resources};
 use orch_db::{Conn, DbError};
-use orch_types::{Id, Time};
+use orch_types::Id;
 
 /// The resource a `{object}/{id}` path names.
 fn named(ctx: &Ctx) -> ApiResult<(ResourceKind, Id)> {
@@ -53,51 +53,21 @@ async fn policy_of(
     ))
 }
 
-async fn read(
-    ctx: &Ctx,
-    conn: &mut Conn,
-    principal: &Principal,
-    object: ObjectRef,
-    root: Option<Id>,
-    policy: Policy,
-) -> ApiResult<api::PermissionPage> {
-    let page = pages::read(conn, principal, Target::Resource(object), policy)
-        .await
-        .map_err(ApiError::internal)?;
-    permission_page(conn, principal, &page, root, Time::new(ctx.now)).await
-}
-
 /// Reads the page of a resource: whoever holds any permission on it.
 pub async fn get(ctx: &Ctx) -> ApiResult<api::PermissionPage> {
-    let (kind, id) = named(ctx)?;
-    let mut conn = ctx.app.db.acquire().await?;
-    let principal = authorization::principal(ctx, &mut conn).await?;
-    let object = ObjectRef {
-        kind: kind.into(),
-        id,
-    };
-    let (_, resource, _) =
-        resources::site(&mut conn, object)
-            .await
-            .map_err(|error| match error {
-                orch_authz::Error::NotFound(_) => ApiError::not_found(),
-                other => ApiError::internal(other),
-            })?;
-    if resource.deleted {
-        return Err(ApiError::not_found());
-    }
-    let (sharing, _) = policy_of(&mut conn, resource.home, kind).await?;
-    crate::routes::access::subject::require_resource_reader(&mut conn, &principal, object, sharing)
-        .await?;
-    read(ctx, &mut conn, &principal, object, resource.root, sharing).await
+    crate::routes::access::operations::read_page(ctx).await
 }
 
 /// Changes the page of a resource, as a whole or not at all: the one change that names owners and
 /// holders at a choice. Who may is the engine's, and it was asked before this ran.
-pub async fn update(ctx: &Ctx, body: &api::PageChange) -> ApiResult<api::PermissionPage> {
+pub async fn update(
+    ctx: &Ctx,
+    body: &api::PageChange,
+) -> ApiResult<api::PermissionPageWriteResponse> {
     let (kind, id) = named(ctx)?;
     let (change, people) = crate::routes::notifications::person::page_change(body)?;
-    let (ctx, mut tx, principal) = super::begin_mutation(ctx).await?;
+    let (ctx, mut tx, guard) = page_operations::action(ctx).await?;
+    let principal = guard.principal().clone();
     let object = ObjectRef {
         kind: kind.into(),
         id,
@@ -120,11 +90,20 @@ pub async fn update(ctx: &Ctx, body: &api::PageChange) -> ApiResult<api::Permiss
             sharing,
         )
         .await?;
-        let page = read(&ctx, &mut tx, &principal, object, resource.root, sharing).await?;
+        let view = pages::read(
+            &mut tx,
+            &principal,
+            orch_authz::things::Thing::Other(object).target(),
+            sharing,
+        )
+        .await
+        .map_err(ApiError::internal)?;
+        let receipt = page_operations::acknowledged(&ctx, view.revision)?;
         tx.commit().await.map_err(DbError::from)?;
-        return Ok(page);
+        return page_operations::reply(&ctx, &principal, receipt).await;
     }
-    match pages::change_resource_under(
+    let accepted_revision;
+    match pages::change_resource_under_fenced(
         &mut tx,
         &principal,
         object,
@@ -132,22 +111,28 @@ pub async fn update(ctx: &Ctx, body: &api::PageChange) -> ApiResult<api::Permiss
         sharing,
         &policy,
         &origin(&ctx),
+        || guard.check_deadline(&ctx),
     )
     .await
     {
-        Ok(_) => {}
-        Err(ChangeError::Stale { current }) => {
-            let page = read(&ctx, &mut tx, &principal, object, resource.root, sharing).await?;
-            return Err(
-                refusals::change_failed(&mut tx, ChangeError::Stale { current })
-                    .await
-                    .with("current", page),
-            );
+        Ok(outcome) => {
+            accepted_revision = outcome.revision;
         }
-        Err(ChangeError::SubscriptionNotShared) => {
+        Err(pages::ChangeFailure::Native(ChangeError::Stale { current })) => {
+            let page = page_operations::current(&ctx, &mut tx, &principal).await?;
+            let mut error = refusals::change_failed(&mut tx, ChangeError::Stale { current }).await;
+            if let Some(page) = page {
+                error = error.with("current", page);
+            }
+            return Err(error);
+        }
+        Err(pages::ChangeFailure::Native(ChangeError::SubscriptionNotShared)) => {
             return Err(subscription_not_shared(&resource));
         }
-        Err(error) => return Err(refusals::change_failed(&mut tx, error).await),
+        Err(pages::ChangeFailure::Native(error)) => {
+            return Err(refusals::change_failed(&mut tx, error).await);
+        }
+        Err(pages::ChangeFailure::BeforeEffect(error)) => return Err(error),
     }
     if !people.is_empty() {
         crate::routes::notifications::person::tell(
@@ -162,10 +147,10 @@ pub async fn update(ctx: &Ctx, body: &api::PageChange) -> ApiResult<api::Permiss
         )
         .await?;
     }
-    let page = read(&ctx, &mut tx, &principal, object, resource.root, sharing).await?;
+    let receipt = page_operations::acknowledged(&ctx, accepted_revision)?;
     crate::routes::notifications::person::keep_page(&ctx, &mut tx, &principal, body).await?;
     tx.commit().await.map_err(DbError::from)?;
-    Ok(page)
+    page_operations::reply(&ctx, &principal, receipt).await
 }
 
 /// The refusal to name anybody in the Use row of a subscription that its home keeps to its first

@@ -13,7 +13,8 @@
 import { treeWriter } from '@/realtime/stores/tree';
 import { infiniteQueryOptions, queryOptions, type QueryClient } from '@tanstack/react-query';
 
-import { api, client, done, ok, repeatable } from '@/api/client';
+import { ApiError, api, client, done, ok, repeatable } from '@/api/client';
+import { threadGatewayQuery } from '@/api/gateways';
 import { applyThread, isCompleteThread } from '@/api/cache';
 import { queryClient } from '@/api/query';
 import { settingsKey } from '@/api/settings';
@@ -85,6 +86,15 @@ export function hydrateThreadOpening(cache: QueryClient, opening: ThreadOpening,
   else cache.removeQueries({ queryKey: [...threadKeys.limits(id), null], exact: true });
   cache.setQueryData(settingsKey(id), opening.settings);
   cache.setQueryData(outlineKey ?? threadKeys.outline(id), { pages: [opening.outline], pageParams: [null] });
+  const gateway = opening.gateway;
+  if (gateway?.status === 'ready') {
+    cache.setQueryData(threadGatewayQuery(id, opening.sync.thread.execution_revision).queryKey, gateway.data);
+  } else if (gateway?.status === 'failed') {
+    cache.getQueryCache().build(cache, { queryKey: threadGatewayQuery(id, opening.sync.thread.execution_revision).queryKey }).setState({
+      data: undefined, status: 'error', fetchStatus: 'idle',
+      error: new ApiError(gateway.problem, gateway.retry_after === null || gateway.retry_after === undefined ? null : new Date(Date.now() + gateway.retry_after * 1000)),
+    });
+  }
   if (opening.sync.projection === undefined || opening.sync.projection === null || opening.sync.projection.follows_active) {
     applyThread(cache, opening.sync.thread);
   }

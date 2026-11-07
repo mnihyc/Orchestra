@@ -32,7 +32,9 @@ import { PersonThingProvider } from '@/features/people/personContext';
 import { useSelection } from '@/features/forward/Selection';
 import { LocalAddresses } from '@/features/ports/LocalAddresses';
 import { BindingSummary } from '@/features/thread/BindingSummary';
+import { ThreadGatewayStatus } from '@/features/gateways/ThreadGatewayStatus';
 import { BlockedBanner } from '@/features/thread/BlockedBanner';
+import { threadSwitchRecovery } from '@/features/thread/switchRecovery';
 import { ConnectionBanner } from '@/features/thread/ConnectionBanner';
 import { SourcePreparation } from '@/features/source/Preparation';
 import { ReviewTray } from '@/features/source/Review';
@@ -189,7 +191,10 @@ export function ThreadScreen({ threadId, item, items = null, turn, continuation 
 
   return (
     <PersonThingProvider thing={{ kind: 'thread', id: threadId }}><div ref={root} className="flex h-full min-h-0 flex-col overflow-x-hidden overflow-y-auto" data-screen="thread">
-      <ThreadHeader thread={thread} onRevealItem={(id) => timeline.current?.scrollToItem(id)} />
+      <ThreadHeader thread={thread} recoverySwitchVisible={threadSwitchRecovery(thread, reading.readOnly) !== undefined} onRevealItem={(id) => timeline.current?.scrollToItem(id)} />
+      {!reading.readOnly && thread.environment !== null && thread.binding !== null && <div className="min-w-0 px-4 pt-1">
+        <ThreadGatewayStatus threadId={threadId} executionRevision={thread.execution_revision} line />
+      </div>}
       {linkedTurn.isError && <ErrorAlert error={linkedTurn.error} />}
       <FindInConversation threadId={threadId} timeline={timeline} root={root} />
       {/* The thread's README stands above its conversation, folded to one line once it was read. */}

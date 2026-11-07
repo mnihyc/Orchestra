@@ -126,6 +126,23 @@ pub async fn is_member(
         .any(|member| member.user_id == person && member.active_at(at.get())))
 }
 
+/// Only the existing native group request's materialized facts, never serialized or accepted as credentials.
+pub struct PreparedJoinRequest {
+    requester: Id,
+    now: Time,
+    chat: Id,
+    org: Id,
+    eligible: Vec<Id>,
+    people: Vec<Id>,
+    end: chrono::DateTime<chrono::Utc>,
+    batch: Id,
+    approval: Id,
+    request: serde_json::Value,
+    title: &'static str,
+    reason: String,
+    requested_expires_at: Option<Time>,
+}
+
 impl Engine {
     /// Raises a membership request in the caller's guarded transaction, with the ordinary access-request limits.
     #[expect(
@@ -142,47 +159,109 @@ impl Engine {
         requested_expires_at: Option<Time>,
         origin: &Origin,
     ) -> Result<Raised, RaiseError> {
-        let now = principal.now();
-        access::lock_requester(&mut tx, principal.user()).await?;
-        let row = rows::chat(&mut tx, chat)
+        self.prepare_join_request_prefix(&mut tx, principal.user(), chat)
+            .await?;
+        let prepared = self
+            .prepare_join_request(
+                &mut tx,
+                &principal,
+                chat,
+                reason,
+                label,
+                requested_expires_at,
+            )
+            .await?;
+        self.raise_prepared_join_request(tx, prepared, origin).await
+    }
+
+    /// Existing requester serialization and old-card expiry are staged maintenance before
+    /// accepting a new ask. HTTP rechecks its complete Guard after these actual waits.
+    pub async fn prepare_join_request_prefix(
+        &self,
+        conn: &mut Conn,
+        requester: Id,
+        chat: Id,
+    ) -> Result<(), RaiseError> {
+        access::lock_requester(conn, requester).await?;
+        let now = self.inner.clock.time();
+        let row = rows::chat(conn, chat)
             .await?
             .filter(|row| row.kind == rows::KIND_GROUP)
             .ok_or(RaiseError::Item {
                 index: 0,
                 error: orch_authz::requests::AskError::NotFound,
             })?;
-        if is_member(&mut tx, chat, principal.user(), now).await? {
+        if is_member(conn, row.id, requester, now).await? {
             return Err(RaiseError::Item {
                 index: 0,
                 error: orch_authz::requests::AskError::Held,
             });
         }
-        let lapsed:Vec<Id>=sqlx::query_scalar("SELECT id FROM approvals WHERE kind='access' AND object_kind='chat' AND object_id=$1 AND requester_user_id=$2 AND state='pending' AND expires_at<=$3").bind(chat).bind(principal.user()).bind(now.get()).fetch_all(&mut *tx).await.map_err(orch_db::DbError::from)?;
-        for id in lapsed {
-            if access::expire(&mut tx, id, now.get()).await? {
-                orch_db::queries::notifications::inbox::settle_approval(&mut tx, id, now.get())
+        for id in access::expired_join_requests(conn, chat, requester, now.get()).await? {
+            if access::expire(conn, id, now.get()).await? {
+                orch_db::queries::notifications::inbox::settle_approval(conn, id, now.get())
                     .await?;
             }
         }
+        Ok(())
+    }
+
+    /// Current native group/giver/body preparation; no new request is inserted here.
+    pub async fn prepare_join_request(
+        &self,
+        conn: &mut Conn,
+        principal: &Principal,
+        chat: Id,
+        reason: &str,
+        label: Option<&str>,
+        requested_expires_at: Option<Time>,
+    ) -> Result<PreparedJoinRequest, RaiseError> {
+        let current =
+            Principal::load(conn, principal.caller().clone(), self.inner.clock.time()).await?;
+        let current = match principal.second_step_hold() {
+            Some(hold) => current.held_for_second_step(hold.clone()),
+            None => current,
+        };
+        let principal = &current;
+        let now = principal.now();
+        let row = rows::chat(&mut *conn, chat)
+            .await?
+            .filter(|row| row.kind == rows::KIND_GROUP)
+            .ok_or(RaiseError::Item {
+                index: 0,
+                error: orch_authz::requests::AskError::NotFound,
+            })?;
+        if is_member(&mut *conn, chat, principal.user(), now).await? {
+            return Err(RaiseError::Item {
+                index: 0,
+                error: orch_authz::requests::AskError::Held,
+            });
+        }
+        if !access::expired_join_requests(conn, chat, principal.user(), now.get())
+            .await?
+            .is_empty()
+        {
+            return Err(orch_db::DbError::Retry.into());
+        }
         if let Some(waiting) =
-            access::pending_for_person(&mut tx, principal.user(), chat, now.get()).await?
+            access::pending_for_person(&mut *conn, principal.user(), chat, now.get()).await?
         {
             return Err(RaiseError::AlreadyWaiting {
                 approval: waiting.id,
             });
         }
-        let most = get::<i64>(&mut tx, Place::System, keys::ACCESS_MAX_PENDING_REQUESTS)
+        let most = get::<i64>(&mut *conn, Place::System, keys::ACCESS_MAX_PENDING_REQUESTS)
             .await
             .map_err(EngineError::from)?
             .unwrap_or(crate::approvals::access::MOST_WAITING);
-        let waiting = access::waiting_batches(&mut tx, principal.user(), now.get()).await?;
+        let waiting = access::waiting_batches(&mut *conn, principal.user(), now.get()).await?;
         if waiting >= most {
             return Err(RaiseError::Waiting {
                 limit: most,
                 waiting,
             });
         }
-        let eligible = deciders(&mut tx, chat, principal.user(), now).await?;
+        let eligible = deciders(&mut *conn, chat, principal.user(), now).await?;
         if eligible.is_empty() {
             return Err(RaiseError::Item {
                 index: 0,
@@ -190,7 +269,7 @@ impl Engine {
             });
         }
         let people = orch_authz::approvals::owners_to_tell_beside(
-            &mut tx,
+            &mut *conn,
             orch_db::queries::access::PageKey::new("chat", chat, "live"),
             ObjectRef {
                 kind: ObjectKind::Org,
@@ -200,7 +279,7 @@ impl Engine {
             now,
         )
         .await?;
-        let days = get::<i64>(&mut tx, Place::System, keys::ACCESS_REQUEST_EXPIRY_DAYS)
+        let days = get::<i64>(&mut *conn, Place::System, keys::ACCESS_REQUEST_EXPIRY_DAYS)
             .await
             .map_err(EngineError::from)?
             .unwrap_or(crate::approvals::access::EXPIRY_DAYS);
@@ -208,18 +287,57 @@ impl Engine {
             .and_then(|span| now.get().checked_add_signed(span))
             .ok_or_else(|| EngineError::unreadable("the request expiry does not fit a date"))?;
         let batch = new_id();
-        let request = json!({"membership":true,"label":label,"permissions":[],"holder":{"kind":"user","user":crate::views::user_ref_json(&mut tx,principal.user()).await?},"reason":reason,"for_thread":null});
+        let request = json!({"membership":true,"label":label,"permissions":[],"holder":{"kind":"user","user":crate::views::user_ref_json(&mut *conn,principal.user()).await?},"reason":reason,"for_thread":null});
         let title = "A person asks to join a group chat";
+        Ok(PreparedJoinRequest {
+            requester: principal.user(),
+            now,
+            chat,
+            org: row.org_id,
+            eligible,
+            people,
+            end,
+            batch,
+            approval: new_id(),
+            request,
+            title,
+            reason: reason.to_owned(),
+            requested_expires_at,
+        })
+    }
+
+    /// Consumes the same native facts; its first await inserts the actual new approval.
+    pub async fn raise_prepared_join_request(
+        &self,
+        mut tx: Tx,
+        prepared: PreparedJoinRequest,
+        origin: &Origin,
+    ) -> Result<Raised, RaiseError> {
+        let PreparedJoinRequest {
+            requester,
+            now,
+            chat,
+            org,
+            eligible,
+            people,
+            end,
+            batch,
+            approval: id,
+            request,
+            title,
+            reason,
+            requested_expires_at,
+        } = prepared;
         let approval = access::insert(
             &mut tx,
             &access::NewAccessApproval {
-                id: new_id(),
+                id,
                 batch_id: batch,
-                node_id: Some(row.org_id),
+                node_id: Some(org),
                 object_kind: Some("chat"),
                 object_id: Some(chat),
                 thread_id: None,
-                requester: principal.user(),
+                requester,
                 title,
                 request: &request,
                 required_permission: orch_access_contract::permissions::Permission::ChatInteract
@@ -231,13 +349,13 @@ impl Engine {
         )
         .await?;
         let mut audit = Entry::new(
-            Actor::User(principal.user()),
+            Actor::User(requester),
             orch_db::audit::action!(AuditAction::AccessRequested).as_str(),
             "access",
             Some(approval.id),
             "asked to join a group chat",
         );
-        audit.org_id = Some(row.org_id);
+        audit.org_id = Some(org);
         audit.details = json!({"chat_id":chat,"approval_id":approval.id,"batch_id":batch,"reason":reason,"requested_expires_at":requested_expires_at});
         audit::append(&mut tx, &audit, origin, now.get()).await?;
         let event = Event {
@@ -249,10 +367,10 @@ impl Engine {
             body: reason.to_owned(),
             data: json!({"approval_id":approval.id,"batch_id":batch,"requested_expires_at":requested_expires_at,"path":"/approvals"}),
             source: approval.id.to_string(),
-            actor: Some(principal.user()),
+            actor: Some(requester),
             at: now.get(),
         };
-        notifications::tell(&mut tx, &event, &people, Some(row.org_id)).await?;
+        notifications::tell(&mut tx, &event, &people, Some(org)).await?;
         tx.commit().await.map_err(orch_db::DbError::from)?;
         self.inner.live.approvals_changed(&eligible);
         Ok(Raised {

@@ -6,7 +6,7 @@ use std::sync::Arc;
 use super::server::Connection;
 use super::subscriptions::{self, Access};
 use super::{Fail, Inner};
-use crate::middleware::authentication::{Authed, Caller, Via};
+use crate::middleware::authentication::Caller;
 use crate::registry::Ctx;
 use crate::routes::{browsers, displays, ports, terminals};
 use orch_access_contract::permissions::Permission;
@@ -176,8 +176,8 @@ async fn project_rows(
         return Ok(None);
     };
     let mut conn = inner.db.acquire().await?;
-    let Some(principal) =
-        subscriptions::principal_for_connection(inner, &mut conn, connection).await?
+    let Some((principal, authed)) =
+        subscriptions::reader_for_connection(inner, &mut conn, connection).await?
     else {
         return Ok(None);
     };
@@ -220,22 +220,17 @@ async fn project_rows(
     #[cfg(test)]
     super::epoch_handoff_tests::after_projection(super::epoch_handoff_tests::Cut::MachineAdmitted)
         .await;
-    let Some(user) = orch_db::queries::identity::user_by_id(&mut conn, connection.user).await?
-    else {
-        return Ok(None);
+    let route = match feed {
+        Feed::EnvTerminals(_) => orch_api_contract::terminals::EnvironmentTerminalList::ROUTE,
+        Feed::EnvPorts(_) => EnvironmentPortList::ROUTE,
+        Feed::EnvGit { .. } | Feed::ThreadGit(_) => {
+            orch_api_contract::workspace::EnvironmentGitStatusGet::ROUTE
+        }
+        _ => return Ok(None),
     };
-    let ctx = Ctx::for_tool(
-        app,
-        Caller::User(Arc::new(Authed {
-            as_admin: principal.caller().as_admin(),
-            user,
-            via: Via::Session {
-                session_id: connection.session(),
-            },
-        })),
-        EnvironmentPortList::ROUTE,
-        environment,
-    );
+    let ctx = Ctx::for_tool(app, Caller::User(Arc::new(authed)), route, environment)
+        .with_admitted_caller(principal.caller().clone())
+        .map_err(Fail::other)?;
     let view = match feed {
         Feed::EnvTerminals(_) => {
             // The first native snapshot arrives as soon as watch.set starts; never turn a live

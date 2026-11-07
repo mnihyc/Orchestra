@@ -5,14 +5,18 @@
 //! archive outside any transaction, and the version is then recorded, with the caller's right asked
 //! again, in the transaction that writes it.
 
+mod read;
 mod source_url;
 
 use crate::middleware::authorization::{self, refusals};
 use crate::middleware::requests::{ApiError, ApiResult};
 use crate::registry::{Ctx, Registry};
+use crate::routes::access::page::{NameBounds, NameSources};
 use crate::routes::nodes::{invalid, placed, policy_at, view as node_view};
 use crate::routes::resources::providers::{home_policies, refused_making};
-use crate::routes::resources::view::{Holding, accesses, addresses};
+use crate::routes::resources::view::{
+    Holding, PreparedAccess, accesses, accesses_prepared, addresses, prepare_accesses,
+};
 use crate::routes::resources::{Home, begin_mutation, record, require};
 use crate::routes::workspace::live;
 use crate::routes::workspace::paths;
@@ -90,20 +94,35 @@ async fn abandon_source(ctx: &Ctx, skill: Id, staged: Option<&SecretName>) {
 
 /// Binds the skills' requests.
 pub fn mount(registry: &mut Registry) {
+    read::mount(registry);
     registry
-        .on(api::SkillList, list)
         .on(api::SkillCreate, create)
-        .on(api::SkillGet, get)
         .on(api::SkillUpdate, update)
-        .on(api::SkillDelete, delete)
-        .on(api::SkillVersionList, version_list)
-        .on(api::SkillVersionGet, version_get)
+        .on_with_operation(
+            api::SkillDelete,
+            crate::key_operations::direct::declared,
+            delete,
+        )
+        .on_with_operation(
+            api::SkillVersionList,
+            crate::key_operations::direct::declared,
+            version_list,
+        )
+        .on_with_operation(
+            api::SkillVersionGet,
+            crate::key_operations::direct::declared,
+            version_get,
+        )
         .on_raw(api::SkillVersionFileGet, version_file)
         .on(api::SkillVersionCreate, version_create)
         .on(api::SkillReimport, reimport)
         .on(api::SkillDraftGet, draft_get)
         .on(api::SkillDraftCreate, draft_create)
-        .on(api::SkillDraftDelete, draft_delete)
+        .on_with_operation(
+            api::SkillDraftDelete,
+            crate::key_operations::direct::declared,
+            draft_delete,
+        )
         .on_raw(api::SkillDraftFileGet, draft_file_get)
         .on(api::SkillDraftFilePut, draft_file_put)
         .on(api::SkillDraftFileDelete, draft_file_delete)
@@ -154,8 +173,67 @@ pub(crate) async fn views(
     principal: &Principal,
     holdings: &[Holding<'_>],
 ) -> ApiResult<Vec<Skill>> {
-    let ids: Vec<Id> = holdings.iter().map(|holding| holding.id).collect();
+    views_prepared(conn, principal, holdings, None).await
+}
+
+pub(crate) struct PreparedInventory {
+    seen: Vec<resources::Seen>,
+    skills: Vec<SkillRow>,
+    access: PreparedAccess,
+    sources: NameSources,
+    bounds: NameBounds,
+}
+
+impl PreparedInventory {
+    pub(crate) fn name_sources(&self) -> &NameSources {
+        &self.sources
+    }
+    pub(crate) fn bound_names(&mut self, bounds: NameBounds) {
+        self.bounds = bounds;
+    }
+}
+
+pub(crate) async fn prepare_inventory(
+    conn: &mut Conn,
+    seen: &[resources::Seen],
+) -> ApiResult<PreparedInventory> {
+    let holdings: Vec<_> = seen.iter().map(Holding::from_seen).collect();
+    let ids: Vec<_> = holdings.iter().map(|holding| holding.id).collect();
     let skills = rows::skills(conn, &ids).await?;
+    let access = prepare_accesses(conn, &holdings).await?;
+    let mut sources = access.names.clone();
+    sources
+        .nodes
+        .extend(skills.iter().map(|skill| skill.home_id));
+    Ok(PreparedInventory {
+        seen: seen.to_vec(),
+        skills,
+        access,
+        sources,
+        bounds: NameBounds::default(),
+    })
+}
+
+pub(crate) async fn show_inventory_prepared(
+    conn: &mut Conn,
+    principal: &Principal,
+    prepared: &PreparedInventory,
+) -> ApiResult<Vec<Skill>> {
+    let holdings: Vec<_> = prepared.seen.iter().map(Holding::from_seen).collect();
+    views_prepared(conn, principal, &holdings, Some(prepared)).await
+}
+
+async fn views_prepared(
+    conn: &mut Conn,
+    principal: &Principal,
+    holdings: &[Holding<'_>],
+    prepared: Option<&PreparedInventory>,
+) -> ApiResult<Vec<Skill>> {
+    let ids: Vec<Id> = holdings.iter().map(|holding| holding.id).collect();
+    let skills = match prepared {
+        Some(prepared) => prepared.skills.clone(),
+        None => rows::skills(conn, &ids).await?,
+    };
     let latest: Vec<Id> = skills
         .iter()
         .filter_map(|skill| skill.latest_version_id)
@@ -188,15 +266,25 @@ pub(crate) async fn views(
     people.extend(latest.values().filter_map(|row| row.created_by));
     people.extend(drafts.values().map(|row| row.updated_by));
     let people = refusals::user_refs(conn, &people).await?;
-    let homes = node_view::refs(
-        conn,
-        principal,
-        &skills.iter().map(|skill| skill.home_id).collect::<Vec<_>>(),
-        Policy::default(),
-    )
-    .await?;
+    let home_ids: Vec<_> = skills.iter().map(|skill| skill.home_id).collect();
+    let homes = match prepared {
+        Some(prepared) => prepared.bounds.refs(conn, principal, &home_ids).await?,
+        None => node_view::refs(conn, principal, &home_ids, Policy::default()).await?,
+    };
     let addresses = addresses(conn, &ids).await?;
-    let access = accesses(conn, principal, holdings).await?;
+    let access = match prepared {
+        Some(prepared) => {
+            accesses_prepared(
+                conn,
+                principal,
+                holdings,
+                &prepared.access,
+                Some(&prepared.bounds),
+            )
+            .await?
+        }
+        None => accesses(conn, principal, holdings).await?,
+    };
     let enabled_places: HashMap<Id, i64> = sqlx::query_as::<_, (Id, i64)>(
         "SELECT wanted.id, count(s.node_id) FROM unnest($1::uuid[]) wanted(id)
          LEFT JOIN settings s ON s.key='agents.skills' AND s.node_id IN (SELECT id FROM nodes WHERE deleted_at IS NULL)
@@ -260,24 +348,21 @@ pub(crate) async fn inventory(
     principal: &Principal,
     seen: &[resources::Seen],
 ) -> ApiResult<Vec<Skill>> {
-    let holdings: Vec<Holding<'_>> = seen
-        .iter()
-        .map(|each| Holding {
-            admin_only: &each.admin_only,
-            admin_access: each.admin_access,
-            admin_place: each.admin_place,
-            participating: each.participating,
-            id: each.resource.id,
-            owner: each.owner,
-            administers: each.administers,
-            held: &each.held,
-        })
-        .collect();
+    let holdings: Vec<_> = seen.iter().map(Holding::from_seen).collect();
     views(conn, principal, &holdings).await
 }
 
 /// One skill as the caller may read it, with what they hold on it.
-pub(crate) async fn show(conn: &mut Conn, principal: &Principal, id: Id) -> ApiResult<Skill> {
+pub(crate) async fn prepare_single_projection(
+    conn: &mut Conn,
+    principal: &Principal,
+    id: Id,
+) -> ApiResult<PreparedInventory> {
+    let seen = single_seen(conn, principal, id).await?;
+    prepare_inventory(conn, &[seen]).await
+}
+
+async fn single_seen(conn: &mut Conn, principal: &Principal, id: Id) -> ApiResult<resources::Seen> {
     require(
         conn,
         principal,
@@ -286,77 +371,38 @@ pub(crate) async fn show(conn: &mut Conn, principal: &Principal, id: Id) -> ApiR
         Permission::SkillView,
     )
     .await?;
-    source_url::migrate_many(conn, &[id], principal.now().get()).await?;
     let found = resources::effective_among(conn, principal, &[id], Policy::default())
         .await
         .map_err(ApiError::internal)?;
-    let holdings: Vec<Holding<'_>> = found
-        .iter()
-        .map(|each| Holding {
-            admin_only: &each.admin_only,
-            admin_access: each.admin_access,
-            admin_place: each.admin_place,
-            participating: each.participating,
-            id: each.object.id,
-            owner: each.owner,
-            administers: each.administers,
-            held: &each.held,
-        })
-        .collect();
-    views(conn, principal, &holdings)
+    let effective = found.into_iter().next().ok_or_else(ApiError::not_found)?;
+    let (_, resource, _) = resources::site(
+        conn,
+        ObjectRef {
+            kind: ResourceKind::Skill.into(),
+            id,
+        },
+    )
+    .await
+    .map_err(ApiError::internal)?;
+    Ok(resources::Seen {
+        resource,
+        admin_only: effective.admin_only,
+        admin_access: effective.admin_access,
+        admin_place: effective.admin_place,
+        participating: effective.participating,
+        owner: effective.owner,
+        administers: effective.administers,
+        held: effective.held,
+    })
+}
+
+/// One skill uses the same native preparation and renderer as compound individual reads.
+pub(crate) async fn show(conn: &mut Conn, principal: &Principal, id: Id) -> ApiResult<Skill> {
+    let prepared = prepare_single_projection(conn, principal, id).await?;
+    show_inventory_prepared(conn, principal, &prepared)
         .await?
         .pop()
         .ok_or_else(ApiError::not_found)
-}
-
-async fn list(ctx: Ctx, query: api::SkillListQuery, (): ()) -> ApiResult<Vec<Listed<Skill>>> {
-    let mut conn = ctx.app.db.acquire().await?;
-    let principal = authorization::principal(&ctx, &mut conn).await?;
-    let mut seen = Vec::new();
-    let mut after = None;
-    loop {
-        let page = resources::visible(
-            &mut conn,
-            &principal,
-            ResourceKind::Skill,
-            orch_authz::nodes::Page {
-                after,
-                limit: super::LIST_LIMIT,
-            },
-            Policy::default(),
-        )
-        .await
-        .map_err(ApiError::internal)?;
-        seen.extend(page.items);
-        after = page.next;
-        if after.is_none() {
-            break;
-        }
-    }
-    if let Some(org) = query.org_id {
-        let homes: Vec<_> = seen.iter().filter_map(|each| each.resource.home).collect();
-        let inside =
-            orch_db::queries::resources::routes::homes_under(&mut conn, org, &homes).await?;
-        seen.retain(|each| {
-            each.resource
-                .home
-                .is_some_and(|home| inside.contains(&home))
-        });
-    }
-    let private = super::hidden_items(&mut conn, &principal, &mut seen).await?;
-    let ids: Vec<_> = seen.iter().map(|each| each.resource.id).collect();
-    source_url::migrate_many(&mut conn, &ids, ctx.now).await?;
-    Ok(super::listed(
-        inventory(&mut conn, &principal, &seen).await?,
-        private,
-    ))
-}
-
-async fn get(ctx: Ctx, (): (), (): ()) -> ApiResult<Skill> {
-    let id = ctx.id("id")?;
-    let mut conn = ctx.app.db.acquire().await?;
-    let principal = authorization::principal(&ctx, &mut conn).await?;
-    show(&mut conn, &principal, id).await
 }
 
 /// The answer to a version that was not made.
@@ -934,6 +980,7 @@ async fn update(ctx: Ctx, (): (), body: api::SkillUpdateBody) -> ApiResult<Skill
     let row = rows::lock(&mut tx, id)
         .await?
         .ok_or_else(ApiError::not_found)?;
+    source_url::migrate_many(&mut tx, &[id], ctx.now).await?;
     if row.revision != body.expected_revision {
         return Err(ApiError::new(
             ErrorCode::ConflictStaleRevision,
@@ -1013,6 +1060,15 @@ async fn version_list(
         })
         .transpose()?;
     let mut conn = ctx.app.db.acquire().await?;
+    let principal = ctx.operation_principal(&mut conn).await?;
+    require(
+        &mut conn,
+        &principal,
+        ResourceKind::Skill,
+        id,
+        Permission::SkillView,
+    )
+    .await?;
     source_url::migrate_many(&mut conn, &[id], ctx.now).await?;
     let found = rows::versions(&mut conn, id, before, i64::from(limit) + 1).await?;
     let more = found.len() > limit as usize;
@@ -1051,6 +1107,15 @@ async fn version_of(conn: &mut Conn, skill: Id, version: Id) -> ApiResult<Versio
 async fn version_get(ctx: Ctx, (): (), (): ()) -> ApiResult<SkillVersion> {
     let (id, version) = (ctx.id("id")?, ctx.id("version_id")?);
     let mut conn = ctx.app.db.acquire().await?;
+    let principal = ctx.operation_principal(&mut conn).await?;
+    require(
+        &mut conn,
+        &principal,
+        ResourceKind::Skill,
+        id,
+        Permission::SkillView,
+    )
+    .await?;
     source_url::migrate_many(&mut conn, &[id], ctx.now).await?;
     let row = version_of(&mut conn, id, version).await?;
     let creators =

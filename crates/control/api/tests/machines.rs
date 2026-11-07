@@ -8,6 +8,7 @@
 mod places;
 mod support;
 
+use crate::support::FullPermissionPageReply;
 use orch_api_contract::common::ErrorCode;
 use orch_api_contract::resources::{
     MachineEnrollmentTokenCreate, MachineEnrollmentTokenCreateBody, MachineGet, MachineList,
@@ -659,7 +660,9 @@ async fn a_machine_is_renamed_by_its_owner_and_the_change_is_audited() {
         })
         .send()
         .await
-        .ok();
+        .ok()
+        .into_full()
+        .unwrap();
     assert_eq!(renamed.base.name, "Ada's laptop");
     let audited: Vec<(String, String, Option<Id>)> = sqlx::query_as(
         "SELECT action, object_kind, object_id FROM audit_log WHERE action = 'machine.renamed'",
@@ -711,6 +714,11 @@ async fn a_machine_is_renamed_by_its_owner_and_the_change_is_audited() {
 
 #[tokio::test]
 async fn a_machine_is_revoked_by_its_owner_or_a_system_admin_and_by_nobody_else() {
+    use orch_api_contract::access::{
+        Holder, HolderInput, PageChange, PageChangeAdd, PageChangeRow, PermissionPageGet,
+        PermissionPagePreview, PermissionPageUpdate,
+    };
+
     let world = World::new().await;
     let ada = person(&world, "ada").await;
     let bea = person(&world, "bea").await;
@@ -734,6 +742,90 @@ async fn a_machine_is_revoked_by_its_owner_or_a_system_admin_and_by_nobody_else(
         .ok();
     assert_eq!(by_owner.status, MachineStatus::Revoked);
     assert!(!by_owner.base.online);
+    // A personal machine needs the existing confirmed, named, audited page grant.
+    let page = world
+        .app
+        .call(PermissionPageGet, &[&"machines", &second])
+        .token(&root.token)
+        .send()
+        .await
+        .ok();
+    let change = PageChange {
+        expected_revision: Some(page.revision),
+        rows: Some(vec![PageChangeRow {
+            permission: "machine.manage".into(),
+            profile: None,
+            inherit: None,
+            locked: None,
+            add: Some(vec![PageChangeAdd {
+                holder: HolderInput::User { id: root.id() },
+                options: None,
+                expires_at: None,
+                note: None,
+            }]),
+            update: None,
+            remove: None,
+        }]),
+        ..PageChange::default()
+    };
+    world
+        .app
+        .call(PermissionPagePreview, &[&"machines", &second])
+        .token(&root.token)
+        .body(&change)
+        .send()
+        .await
+        .ok();
+    let ungranted = world
+        .app
+        .call(MachineRevoke, &[&second])
+        .token(&root.token)
+        .send()
+        .await
+        .problem();
+    assert_eq!(
+        ungranted.code,
+        ErrorCode::NotFound,
+        "an enabled admin must be named before managing a personal machine"
+    );
+    let before: i64 = sqlx::query_scalar(
+        "SELECT count(*) FROM audit_log WHERE details->'object'->>'id'=$1 AND override",
+    )
+    .bind(second.to_string())
+    .fetch_one(&world.db.pool)
+    .await
+    .unwrap();
+    assert_eq!(before, 0, "reviewing an override grants nothing");
+    let page = world
+        .app
+        .call(PermissionPageUpdate, &[&"machines", &second])
+        .token(&root.token)
+        .body(&change)
+        .send()
+        .await
+        .full_permission_page()
+        .ok();
+    let row = page
+        .rows
+        .iter()
+        .find(|row| row.permission == "machine.manage")
+        .unwrap();
+    let named = row
+        .entries
+        .iter()
+        .find(|entry| matches!(&entry.holder, Holder::User { user } if user.id == root.id()))
+        .expect("the machine's page names the administrator");
+    let marked: (bool, bool, serde_json::Value, String) = sqlx::query_as("SELECT override,as_admin,details->'object',details->>'permission' FROM audit_log WHERE object_id=$1 AND actor_id=$2 AND action='permission.added'")
+        .bind(named.id).bind(root.id()).fetch_one(&world.db.pool).await.unwrap();
+    assert_eq!(
+        marked,
+        (
+            true,
+            true,
+            json!({"kind":"machine","id":second}),
+            "machine.manage".into()
+        )
+    );
     let by_admin = world
         .app
         .call(MachineRevoke, &[&second])
@@ -1011,7 +1103,9 @@ async fn a_shared_machine_manager_can_read_rename_and_change_delegated_keys() {
         })
         .send()
         .await
-        .ok();
+        .ok()
+        .into_full()
+        .unwrap();
     assert_eq!(renamed.base.name, "Team workstation");
     assert!(
         renamed
@@ -1448,6 +1542,7 @@ async fn enrollment_information_is_read_only_and_a_nonloopback_http_system_never
         .await
         .ok();
     assert!(!info.secure);
+    assert_eq!(info.configure.as_deref(), Some("public_url"));
     assert_eq!(info.public_url, "http://orch.test:3000");
     let refused = world
         .app
@@ -1457,31 +1552,17 @@ async fn enrollment_information_is_read_only_and_a_nonloopback_http_system_never
         .send()
         .await
         .problem();
-    // The detail is the code's sentence; the fault names the system's address and why.
+    // The setting is structured; shared installation diagnostics need not use one English phrase.
     assert_eq!(refused.code, ErrorCode::RequestInvalid);
     assert_eq!(refused.extra["errors"][0]["path"], "public_url");
     assert!(
         refused.extra["errors"][0]["message"]
             .as_str()
-            .is_some_and(|message| message.contains("HTTPS")),
+            .is_some_and(|message| !message.trim().is_empty()),
         "{refused:?}"
     );
     let machine = machine_with_policy(&world, &ada, &[]).await;
-    // This test uses a canonical owned resource, as actual enrollment creates it.
-    let mut conn = world.conn().await;
-    orch_authz::ownership::start_resource(
-        &mut conn,
-        orch_access_contract::decisions::ObjectRef {
-            kind: orch_access_contract::permissions::ResourceKind::Machine.into(),
-            id: machine,
-        },
-        ada.id(),
-        orch_authz::ownership::NewAccess::Defaults,
-        orch_types::Time::new(world.now()),
-    )
-    .await
-    .unwrap();
-    drop(conn);
+    // The helper already establishes the canonical owner and private Use row.
     let again = world
         .app
         .call(
@@ -1493,6 +1574,7 @@ async fn enrollment_information_is_read_only_and_a_nonloopback_http_system_never
         .await
         .problem();
     assert_eq!(again.code, ErrorCode::RequestInvalid);
+    assert_eq!(again.extra["errors"][0]["path"], "public_url");
     let tokens: i64 = sqlx::query_scalar("SELECT count(*) FROM enrollment_tokens")
         .fetch_one(&world.db.pool)
         .await
@@ -1634,7 +1716,9 @@ async fn programs_reads_are_stored_and_the_native_acknowledgement_updates_the_re
         })
         .send()
         .await
-        .ok();
+        .ok()
+        .into_full()
+        .expect("this native creation control requires its full response");
     assert_eq!(profile.base.harness_kind, "my-agent");
     assert_eq!(profile.base.machine.as_ref().unwrap().id, machine);
 
@@ -1963,4 +2047,178 @@ async fn a_loopback_http_system_only_mints_a_token_when_its_local_command_is_req
         .await
         .unwrap();
     assert_eq!(after, 1);
+}
+
+#[tokio::test]
+async fn a_machine_manager_confirms_and_removes_a_harness_with_its_acknowledged_version_in_audit() {
+    use orch_api_contract::machine_programs::MachineProgramsCommand;
+    use orch_api_contract::resources::MachineProgramsChange;
+    let world = World::new().await;
+    let owner = person(&world, "ada").await;
+    let reader = person(&world, "bea").await;
+    let machine = machine_with_policy(&world, &owner, &["agent.harnesses"]).await;
+    let mut conn = world.conn().await;
+    orch_db::queries::access::testing::add_entry(
+        &mut conn,
+        &orch_db::queries::access::PageKey::new("machine", machine, "live"),
+        "any",
+        "machine.view",
+        ("user", Some(reader.id()), None),
+        None,
+        world.now(),
+    )
+    .await
+    .unwrap();
+    drop(conn);
+    online(&world, machine).await;
+    world
+        .app
+        .call(MachineGet, &[&machine])
+        .token(&reader.token)
+        .send()
+        .await
+        .ok();
+    let request = |action| {
+        serde_json::from_value::<MachineProgramsCommand>(json!({
+            "action":action,"kind":"codex","path":"/controlled/bin/codex"
+        }))
+        .unwrap()
+    };
+    for action in ["confirm_harness", "remove_harness"] {
+        assert_eq!(
+            world
+                .app
+                .call(MachineProgramsChange, &[&machine])
+                .token(&reader.token)
+                .body(&request(action))
+                .send()
+                .await
+                .problem()
+                .code,
+            ErrorCode::NotFound
+        );
+    }
+    let issued: i64 = sqlx::query_scalar("SELECT count(*) FROM commands")
+        .fetch_one(&world.db.pool)
+        .await
+        .unwrap();
+    assert_eq!(
+        issued, 0,
+        "seeing the machine does not authorize a program change"
+    );
+    let item =
+        json!({"kind":"codex","path":"/controlled/bin/codex","version":"0.165.0","daemon":false});
+    let mut policy = LocalPolicy {
+        policy_delegated: vec!["agent.harnesses".into()],
+        ..LocalPolicy::default()
+    };
+    policy
+        .agent_harnesses
+        .push(orch_link_contract::policy::PolicyHarness {
+            kind: "codex".into(),
+            path: "/controlled/bin/codex".into(),
+        });
+    let facts = |policy: &LocalPolicy, installed: Json, found: Json| {
+        json!({
+            "hostname":"laptop","os_version":"controlled","cpus":1,"memory_bytes":1024,
+            "harnesses":installed,"discovered_harnesses":found,"searched_harness_kinds":["codex"],
+            "adapters":[],"plugins":[],"policy":policy,
+            "rates":{"up_bps":0,"down_bps":0,"round_trip_ms":0},"clock_offset_ms":0
+        })
+    };
+    let ack = answer(
+        &world,
+        machine,
+        facts(&policy, json!([item.clone()]), json!([])),
+    );
+    let confirmed = world
+        .app
+        .call(MachineProgramsChange, &[&machine])
+        .token(&owner.token)
+        .body(&request("confirm_harness"))
+        .send()
+        .await
+        .ok();
+    ack.await.unwrap();
+    assert_eq!(confirmed.machine_view.unwrap().facts["harnesses"][0], item);
+    policy.agent_harnesses.clear();
+    let ack = answer(
+        &world,
+        machine,
+        facts(&policy, json!([]), json!([item.clone()])),
+    );
+    let removed = world
+        .app
+        .call(MachineProgramsChange, &[&machine])
+        .token(&owner.token)
+        .body(&request("remove_harness"))
+        .send()
+        .await
+        .ok();
+    ack.await.unwrap();
+    let shown = removed.machine_view.unwrap();
+    assert_eq!(shown.facts["harnesses"], json!([]));
+    assert_eq!(shown.facts["discovered_harnesses"], json!([item]));
+    let audit: Vec<Json> =
+        sqlx::query_scalar("SELECT details FROM audit_log WHERE action='machine.programs_changed'")
+            .fetch_all(&world.db.pool)
+            .await
+            .unwrap();
+    assert_eq!(audit.len(), 2);
+    for operation in ["confirmed", "unconfirmed"] {
+        let entry = audit
+            .iter()
+            .find(|entry| entry["operation"] == operation)
+            .unwrap();
+        assert_eq!(entry["kind"], "codex");
+        assert_eq!(entry["path"], "/controlled/bin/codex");
+        assert_eq!(entry["version"], "0.165.0");
+    }
+}
+
+#[tokio::test]
+async fn a_native_harness_delegation_refusal_keeps_its_policy_key_and_writes_no_success_audit() {
+    use orch_api_contract::machine_programs::MachineProgramsCommand;
+    use orch_api_contract::resources::MachineProgramsChange;
+    let world = World::new().await;
+    let owner = person(&world, "ada").await;
+    // Stored facts still say delegated; the actual native decision must prevail.
+    let machine = machine_with_policy(&world, &owner, &["agent.harnesses"]).await;
+    online(&world, machine).await;
+    let request: MachineProgramsCommand = serde_json::from_value(json!({
+        "action":"confirm_harness","kind":"codex","path":"/controlled/bin/codex"
+    }))
+    .unwrap();
+    let pool = world.db.pool.clone();
+    let native = tokio::spawn(async move {
+        for _ in 0..400 {
+            let changed = sqlx::query("UPDATE commands SET state='failed',error=$2 WHERE machine_id=$1 AND kind='machine.programs' AND state IN ('queued','sent','accepted')")
+                .bind(machine).bind(json!({"code":"unsupported","detail":"agent.harnesses is kept locally","retryable":false,
+                    "details":{"policy_key":"agent.harnesses","decides":"machine"}}))
+                .execute(&pool).await.unwrap().rows_affected();
+            if changed > 0 {
+                return changed;
+            }
+            tokio::time::sleep(Duration::from_millis(25)).await;
+        }
+        panic!("no native program command was admitted");
+    });
+    let refused = world
+        .app
+        .call(MachineProgramsChange, &[&machine])
+        .token(&owner.token)
+        .body(&request)
+        .send()
+        .await
+        .problem();
+    assert_eq!(native.await.unwrap(), 1);
+    assert_eq!(refused.code, ErrorCode::PolicyNotDelegated);
+    assert_eq!(refused.extra["keys"], json!(["agent.harnesses"]));
+    let audits: i64 = sqlx::query_scalar(
+        "SELECT count(*) FROM audit_log WHERE action='machine.programs_changed'",
+    )
+    .fetch_one(&world.db.pool)
+    .await
+    .unwrap();
+    assert_eq!(audits, 0);
 }

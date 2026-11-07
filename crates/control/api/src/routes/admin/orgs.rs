@@ -6,21 +6,28 @@
 //! of its root), and it is the system, never the org's own owners, that sets them: a limit that its
 //! subject could lift would be none.
 
-use super::{SECONDS_PER_DAY, admin_of, invalid, page_size, read_ahead};
-use crate::middleware::authorization::{self, refusals};
+use super::{SECONDS_PER_DAY, invalid, page_size, read_ahead};
+use crate::key_operations::native::{effects, reply};
+use crate::key_operations::{native, publication, targets};
+use crate::middleware::authorization::refusals;
 use crate::middleware::requests::{ApiError, ApiResult};
-use crate::middleware::transaction_guard;
 use crate::registry::{Ctx, Registry};
-use crate::routes::nodes::{Placed, record, view};
+use crate::routes::nodes::{Placed, record};
 use chrono::{DateTime, Duration, Utc};
+use futures::future::BoxFuture;
 use orch_access_contract::audit::AuditAction;
-use orch_api_contract::admin::{AdminOrgList, AdminOrgListQuery, AdminOrgUpdate, OrgLimitsChange};
+use orch_api_contract::admin::{
+    AdminOrgList, AdminOrgListQuery, AdminOrgUpdate, OrgLimitsChange, OrgLimitsReceipt,
+    OrgLimitsResponse,
+};
+use orch_api_contract::admin_sources::{self as sources, Source};
 use orch_api_contract::common::{Page, SubscriptionLevel};
 use orch_api_contract::documents::DeletedFilter;
 use orch_api_contract::nodes::{
-    Access, FieldSource, Node, NodeBase, NodeKind, NodeRef, Org, OrgKind, OrgType, PageState,
+    Access, FieldSource, NodeBase, NodeKind, NodeRef, Org, OrgKind, OrgType, PageState,
 };
-use orch_authz::Policy;
+use orch_api_contract::operation_sources::Declaration;
+use orch_authz::{Caller, Principal};
 use orch_db::queries::hierarchy::{self, DeletedRow};
 use orch_db::{Conn, DbError};
 use orch_types::{Id, Time};
@@ -29,7 +36,13 @@ use std::collections::HashMap;
 
 /// Binds this module's requests.
 pub fn mount(registry: &mut Registry) {
-    registry.on(AdminOrgList, list).on(AdminOrgUpdate, update);
+    registry
+        .on_snapshot_read_with_optional_operation(
+            AdminOrgList,
+            native::selected::<Organizations>,
+            list,
+        )
+        .on_with_operation(AdminOrgUpdate, effects::prepare::<Limits>, update);
 }
 
 /// What a cursor of the list of live orgs holds: the org the page before ended with, by its
@@ -71,48 +84,184 @@ fn parse_deleted_cursor(text: &str) -> ApiResult<(DateTime<Utc>, Id)> {
 /// Every org of the system, by name; with `deleted=only`, the root orgs that were deleted and
 /// are not purged yet, as a person who deleted one sees theirs, the latest first.
 async fn list(ctx: Ctx, query: AdminOrgListQuery, (): ()) -> ApiResult<Page<Org>> {
-    admin_of(&ctx)?;
+    native::selected_read::<Organizations>(ctx, query, ()).await
+}
+
+struct Organizations;
+struct PreparedOrganizations {
+    page: Page<Org>,
+    selected: Vec<Id>,
+}
+impl native::Selected for Organizations {
+    type Source = Source;
+    type Query = AdminOrgListQuery;
+    type Value = PreparedOrganizations;
+    type Reply = Page<Org>;
+    const DECLARATION: &'static Declaration<Source> = &sources::ORGS;
+    fn select<'a>(
+        ctx: &'a Ctx,
+        conn: &'a mut Conn,
+        caller: &'a Caller,
+        query: &'a Self::Query,
+    ) -> BoxFuture<'a, ApiResult<(Self::Value, Vec<native::Facts<Source>>)>> {
+        Box::pin(select_organizations(ctx, conn, caller, query))
+    }
+    fn require<'a>(
+        ctx: &'a Ctx,
+        _conn: &'a mut Conn,
+        principal: &'a Principal,
+    ) -> BoxFuture<'a, ApiResult<()>> {
+        Box::pin(async move { super::native::require(ctx, principal) })
+    }
+    fn render<'a>(
+        _ctx: &'a Ctx,
+        _conn: &'a mut Conn,
+        _principal: &'a Principal,
+        value: &'a Self::Value,
+    ) -> BoxFuture<'a, ApiResult<Self::Reply>> {
+        Box::pin(async move { Ok(value.page.clone()) })
+    }
+    fn check_opened<'a>(
+        _ctx: &'a Ctx,
+        _conn: &'a mut Conn,
+        _principal: &'a Principal,
+        _query: &'a Self::Query,
+        opened: &'a Self::Value,
+        fresh: &'a Self::Value,
+    ) -> BoxFuture<'a, ApiResult<bool>> {
+        Box::pin(async move {
+            Ok(opened.selected.iter().all(|id| fresh.selected.contains(id))
+                && opened.page.items.iter().all(|org| {
+                    fresh
+                        .page
+                        .items
+                        .iter()
+                        .any(|row| row.base.id == org.base.id)
+                }))
+        })
+    }
+}
+async fn select_organizations(
+    ctx: &Ctx,
+    conn: &mut Conn,
+    caller: &Caller,
+    query: &AdminOrgListQuery,
+) -> ApiResult<(PreparedOrganizations, Vec<native::Facts<Source>>)> {
     let size = page_size(query.limit);
     let q = query.q.as_deref().map(str::trim).filter(|q| !q.is_empty());
-    let mut conn = ctx.app.db.acquire().await?;
+    let mut selected = Vec::new();
+    let mut facts = Vec::new();
     if query.deleted == Some(DeletedFilter::Only) {
-        return deleted(&ctx, &mut conn, q, query.cursor.as_deref(), size).await;
+        let mut after = query
+            .cursor
+            .as_deref()
+            .map(parse_deleted_cursor)
+            .transpose()?;
+        let purged_before = ctx.now - kept_for(ctx.app.config.retention.soft_delete_days);
+        let mut rows = Vec::new();
+        'pages: loop {
+            let batch =
+                hierarchy::deleted_root_orgs(conn, purged_before, q, after, read_ahead(size))
+                    .await?;
+            let exhausted = batch.len() < size.saturating_add(1);
+            for row in batch {
+                after = Some((row.deleted_at, row.id));
+                let target = targets::node_identity(conn, row.id).await?;
+                if super::native::permits(
+                    ctx,
+                    &sources::ORGS,
+                    caller,
+                    Source::Results,
+                    target.object.kind,
+                    &target,
+                )? {
+                    selected.push(row.id);
+                    facts.push((target.object.kind, target));
+                    rows.push(row);
+                    if rows.len() > size {
+                        break 'pages;
+                    }
+                }
+            }
+            if exhausted {
+                break;
+            }
+        }
+        let more = rows.len() > size;
+        rows.truncate(size);
+        let page = deleted_views(ctx, conn, &rows, more).await?;
+        return Ok((
+            PreparedOrganizations { page, selected },
+            vec![
+                super::native::collection(Source::Results, facts),
+                super::native::collection(Source::Names, Vec::new()),
+            ],
+        ));
     }
-    let after = query.cursor.as_deref().map(parse_org_cursor).transpose()?;
+    let mut after = query.cursor.as_deref().map(parse_org_cursor).transpose()?;
     let org_kind = query.org_kind.map(|kind| match kind {
         OrgType::Personal => "personal",
         OrgType::Team => "team",
     });
-    let mut rows = hierarchy::orgs_by_name(
-        &mut conn,
-        q,
-        org_kind,
-        after
-            .as_ref()
-            .map(|(personal, id, name)| (*personal, name.as_str(), *id)),
-        read_ahead(size),
-    )
-    .await?;
+    let mut rows = Vec::new();
+    'pages: loop {
+        let batch = hierarchy::orgs_by_name(
+            conn,
+            q,
+            org_kind,
+            after
+                .as_ref()
+                .map(|(personal, id, name)| (*personal, name.as_str(), *id)),
+            read_ahead(size),
+        )
+        .await?;
+        let exhausted = batch.len() < size.saturating_add(1);
+        for (id, name, personal) in batch {
+            after = Some((personal, id, name.clone()));
+            let target = targets::node(conn, id).await?;
+            if super::native::permits(
+                ctx,
+                &sources::ORGS,
+                caller,
+                Source::Results,
+                target.object.kind,
+                &target,
+            )? {
+                selected.push(id);
+                facts.push((target.object.kind, target));
+                rows.push((id, name, personal));
+                if rows.len() > size {
+                    break 'pages;
+                }
+            }
+        }
+        if exhausted {
+            break;
+        }
+    }
     let more = rows.len() > size;
     rows.truncate(size);
-    let principal = authorization::principal(&ctx, &mut conn).await?;
-    let ids: Vec<Id> = rows.iter().map(|(id, _, _)| *id).collect();
-    let nodes = view::visible(&mut conn, &principal, &ids, ctx.now, Policy::default()).await?;
-    Ok(Page {
-        next_cursor: more
-            .then(|| {
-                rows.last()
-                    .map(|(id, name, personal)| cursor_of_org(*personal, *id, name))
-            })
-            .flatten(),
-        items: nodes
-            .into_iter()
-            .filter_map(|node| match node {
-                Node::Org(org) => Some(org),
-                _ => None,
-            })
-            .collect(),
-    })
+    let results = super::native::collection(Source::Results, facts);
+    let plan = native::bind_known(ctx, &sources::ORGS, std::slice::from_ref(&results))?;
+    let principal = native::preparation_principal(ctx, conn, caller, &plan).await?;
+    let ids = rows.iter().map(|(id, _, _)| *id).collect::<Vec<_>>();
+    let (items, names) =
+        super::native::org_content(ctx, conn, &principal, caller, &sources::ORGS, &ids).await?;
+    Ok((
+        PreparedOrganizations {
+            selected,
+            page: Page {
+                next_cursor: more
+                    .then(|| {
+                        rows.last()
+                            .map(|(id, name, personal)| cursor_of_org(*personal, *id, name))
+                    })
+                    .flatten(),
+                items,
+            },
+        },
+        vec![results, names],
+    ))
 }
 
 /// How long a deleted org is kept before it is purged.
@@ -123,19 +272,12 @@ fn kept_for(days: u64) -> Duration {
 /// The root orgs that were deleted and not purged yet. The org of the engine's views is a live
 /// one; these are built from what is stored, with nothing held on them but the way back, which
 /// is the restore.
-async fn deleted(
+async fn deleted_views(
     ctx: &Ctx,
     conn: &mut Conn,
-    q: Option<&str>,
-    cursor: Option<&str>,
-    size: usize,
+    rows: &[DeletedRow],
+    more: bool,
 ) -> ApiResult<Page<Org>> {
-    let after = cursor.map(parse_deleted_cursor).transpose()?;
-    let purged_before = ctx.now - kept_for(ctx.app.config.retention.soft_delete_days);
-    let mut rows =
-        hierarchy::deleted_root_orgs(conn, purged_before, q, after, read_ahead(size)).await?;
-    let more = rows.len() > size;
-    rows.truncate(size);
     let ids: Vec<Id> = rows.iter().map(|row| row.id).collect();
     let details = hierarchy::details(conn, &ids, ctx.now).await?;
     let facts: HashMap<Id, hierarchy::OrgFacts> = hierarchy::org_facts(conn, &ids, ctx.now)
@@ -147,7 +289,7 @@ async fn deleted(
     people.extend(details.iter().filter_map(|detail| detail.archived_by));
     let people = refusals::user_refs(conn, &people).await?;
     let mut items = Vec::new();
-    for row in &rows {
+    for row in rows {
         let Some(detail) = details.iter().find(|detail| detail.id == row.id) else {
             continue;
         };
@@ -254,50 +396,214 @@ fn limits_summary(who: &str, name: &str, closed: Option<bool>, flat: Option<bool
 
 /// Sets the limits of a root org. What is asked for and already so changes nothing and leaves no
 /// line.
-async fn update(mut ctx: Ctx, (): (), body: OrgLimitsChange) -> ApiResult<Org> {
-    admin_of(&ctx)?;
-    let id = ctx.id("id")?;
-    let (mut tx, guard) = transaction_guard::begin(&ctx).await?;
-    ctx.now = guard.now().get();
-    let org = hierarchy::lock_live_org(&mut tx, id)
-        .await?
-        .ok_or_else(ApiError::not_found)?;
-    if org.parent_id.is_some() {
-        return Err(invalid(
-            "id",
-            "an org that lies in another has no limits of its own: they are its root org's",
-        ));
-    }
-    let closed = body.closed.filter(|asked| *asked != org.closed);
-    let flat = body.flat.filter(|asked| *asked != org.flat);
-    if closed.is_some() || flat.is_some() {
-        hierarchy::set_org_limits(&mut tx, id, closed, flat, ctx.now).await?;
-        let name = hierarchy::with_ancestors(&mut tx, &[id])
-            .await?
-            .into_iter()
-            .find(|row| row.id == id)
-            .map(|row| row.name)
-            .ok_or_else(ApiError::not_found)?;
-        let who = guard.user().user.display_name.clone();
-        record(
-            &ctx,
-            &mut tx,
-            orch_db::audit::action!(AuditAction::OrgLimitsChanged),
-            Placed { id, org: id },
-            &limits_summary(&who, &name, closed, flat),
-            json!({
-                "closed": { "was": org.closed, "now": closed.unwrap_or(org.closed) },
-                "flat": { "was": org.flat, "now": flat.unwrap_or(org.flat) },
-            }),
-        )
-        .await?;
-        hierarchy::stamp(&mut tx, id).await?;
-    }
-    let shown = view::one(&mut tx, guard.principal(), id, ctx.now, Policy::default()).await?;
+async fn update(ctx: Ctx, (): (), _body: OrgLimitsChange) -> ApiResult<OrgLimitsResponse> {
+    let (mut tx, _) = crate::middleware::transaction_guard::begin(&ctx).await?;
+    let done = effects::apply::<Limits>(&ctx, &mut tx).await?;
     tx.commit().await.map_err(DbError::from)?;
-    match shown {
-        Some(Node::Org(org)) => Ok(org),
-        _ => Err(ApiError::not_found()),
+    let receipt = OrgLimitsResponse::Receipt(OrgLimitsReceipt {
+        projection: orch_api_contract::common::ReceiptProjection::Receipt,
+        id: done.output.id,
+        revision: done.output.revision,
+    });
+    publication::receipt(&done.ctx, &receipt)?;
+    Ok(
+        reply::render::<LimitsContent>(&done.ctx, &done.accepted, done.output)
+            .await?
+            .map_or(receipt, OrgLimitsResponse::full),
+    )
+}
+struct Limits;
+struct PreparedLimits {
+    org: hierarchy::OrgRow,
+    name: String,
+    closed: Option<bool>,
+    flat: Option<bool>,
+}
+struct AcceptedLimits {
+    id: Id,
+    revision: orch_types::Revision,
+}
+impl effects::Effect for Limits {
+    type Source = Source;
+    type Query = ();
+    type Body = OrgLimitsChange;
+    type Value = PreparedLimits;
+    type Output = AcceptedLimits;
+    fn declaration(_value: &Self::Value) -> &'static Declaration<Source> {
+        &sources::ORG_UPDATE
+    }
+    fn prepare<'a>(
+        ctx: &'a Ctx,
+        conn: &'a mut Conn,
+        _caller: &'a Caller,
+        _query: (),
+        body: OrgLimitsChange,
+    ) -> BoxFuture<'a, ApiResult<(Self::Value, Vec<native::Facts<Source>>)>> {
+        Box::pin(async move {
+            let id = ctx.id("id")?;
+            let org = hierarchy::lock_live_org(conn, id)
+                .await?
+                .ok_or_else(ApiError::not_found)?;
+            if org.parent_id.is_some() {
+                return Err(invalid(
+                    "id",
+                    "an org that lies in another has no limits of its own: they are its root org's",
+                ));
+            }
+            // Both rows touched by the native writer belong to this preparation footprint.
+            sqlx::query("SELECT id FROM nodes WHERE id=$1 FOR UPDATE")
+                .bind(id)
+                .fetch_one(&mut *conn)
+                .await
+                .map_err(DbError::from)?;
+            let name = hierarchy::with_ancestors(conn, &[id])
+                .await?
+                .into_iter()
+                .find(|row| row.id == id)
+                .map(|row| row.name)
+                .ok_or_else(ApiError::not_found)?;
+            let target = targets::node(conn, id).await?;
+            let closed = body.closed.filter(|asked| *asked != org.closed);
+            let flat = body.flat.filter(|asked| *asked != org.flat);
+            Ok((
+                PreparedLimits {
+                    org,
+                    name,
+                    closed,
+                    flat,
+                },
+                vec![native::Facts::one(Source::Org, target.object.kind, target)],
+            ))
+        })
+    }
+    fn require<'a>(
+        ctx: &'a Ctx,
+        _conn: &'a mut Conn,
+        principal: &'a Principal,
+        _value: &'a Self::Value,
+    ) -> BoxFuture<'a, ApiResult<()>> {
+        Box::pin(async move { super::native::require(ctx, principal) })
+    }
+}
+impl effects::Apply for Limits {
+    fn apply<'a>(
+        ctx: &'a Ctx,
+        conn: &'a mut Conn,
+        _principal: &'a Principal,
+        value: &'a Self::Value,
+        before: effects::FirstEffect<'a>,
+    ) -> BoxFuture<'a, ApiResult<effects::Outcome<Self::Output>>> {
+        Box::pin(async move {
+            let id = value.org.node_id;
+            let changed = value.closed.is_some() || value.flat.is_some();
+            if changed {
+                hierarchy::set_org_limits_before(
+                    conn,
+                    id,
+                    value.closed,
+                    value.flat,
+                    ctx.now,
+                    move || before.check(),
+                )
+                .await?;
+                let who = ctx.user()?.user.display_name.clone();
+                record(ctx,conn,orch_db::audit::action!(AuditAction::OrgLimitsChanged),Placed {id,org:id},
+                    &limits_summary(&who,&value.name,value.closed,value.flat),json!({
+                        "closed":{"was":value.org.closed,"now":value.closed.unwrap_or(value.org.closed)},
+                        "flat":{"was":value.org.flat,"now":value.flat.unwrap_or(value.org.flat)},
+                    })).await?;
+                hierarchy::stamp(conn, id).await?;
+            }
+            let revision = sqlx::query_scalar("SELECT revision FROM nodes WHERE id=$1")
+                .bind(id)
+                .fetch_one(&mut *conn)
+                .await
+                .map_err(DbError::from)?;
+            let accepted = AcceptedLimits { id, revision };
+            Ok(if changed {
+                effects::Outcome::Applied(accepted)
+            } else {
+                effects::Outcome::Unchanged(accepted)
+            })
+        })
+    }
+}
+struct LimitsContent;
+impl reply::Projection for LimitsContent {
+    type Source = Source;
+    type Input = AcceptedLimits;
+    type Subject = Id;
+    type Value = Org;
+    type Reply = Org;
+    const READ_SOURCE: Source = Source::Content;
+    fn declaration(_input: &Self::Input) -> &'static Declaration<Source> {
+        &sources::ORG_UPDATE
+    }
+    fn subject<'a>(
+        _ctx: &'a Ctx,
+        conn: &'a mut Conn,
+        input: &'a Self::Input,
+    ) -> BoxFuture<'a, ApiResult<(Id, Vec<native::Facts<Source>>)>> {
+        Box::pin(async move {
+            let target = targets::node(conn, input.id).await?;
+            Ok((
+                input.id,
+                vec![
+                    native::Facts::one(Source::Org, target.object.kind, target.clone()),
+                    native::Facts::one(Source::Content, target.object.kind, target),
+                ],
+            ))
+        })
+    }
+    fn require<'a>(
+        ctx: &'a Ctx,
+        _conn: &'a mut Conn,
+        principal: &'a Principal,
+        _input: &'a Self::Input,
+        _subject: &'a Id,
+    ) -> BoxFuture<'a, ApiResult<()>> {
+        Box::pin(async move { super::native::standing(ctx, principal) })
+    }
+    fn prepare<'a>(
+        ctx: &'a Ctx,
+        conn: &'a mut Conn,
+        principal: &'a Principal,
+        _input: &'a Self::Input,
+        subject: &'a Id,
+    ) -> BoxFuture<'a, ApiResult<(Org, Vec<native::Facts<Source>>)>> {
+        Box::pin(async move {
+            let (mut orgs, names) = super::native::org_content(
+                ctx,
+                conn,
+                principal,
+                principal.caller(),
+                &sources::ORG_UPDATE,
+                &[*subject],
+            )
+            .await?;
+            Ok((orgs.pop().ok_or_else(ApiError::not_found)?, vec![names]))
+        })
+    }
+    fn render<'a>(
+        _ctx: &'a Ctx,
+        _conn: &'a mut Conn,
+        _principal: &'a Principal,
+        _input: &'a Self::Input,
+        prepared: &'a reply::Prepared<Self>,
+    ) -> BoxFuture<'a, ApiResult<Org>> {
+        Box::pin(async move { Ok(prepared.value.clone()) })
+    }
+    fn check_opened<'a>(
+        _ctx: &'a Ctx,
+        _conn: &'a mut Conn,
+        _principal: &'a Principal,
+        _input: &'a Self::Input,
+        old: &'a reply::Prepared<Self>,
+        fresh: &'a reply::Prepared<Self>,
+    ) -> BoxFuture<'a, ApiResult<bool>> {
+        Box::pin(async move {
+            Ok(old.subject == fresh.subject && old.value.base.id == fresh.value.base.id)
+        })
     }
 }
 

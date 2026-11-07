@@ -48,7 +48,7 @@ export function useFieldWords(driver: string) {
 interface Props { root: Schema; schema: unknown; value: unknown; parts: string[]; disabled: boolean; problems: readonly SpecProblem[]; driver: string; onChange: (value: unknown) => void; embedded?: boolean; hideHeading?: boolean }
 
 /** Raw values with no form shape remain editable, including allowed plugin extensions. */
-export function OtherJson({ value, disabled, onChange, objectOnly = false }: { value: unknown; disabled: boolean; onChange: (value: unknown) => void; objectOnly?: boolean }) {
+export function OtherJson({ value, disabled, onChange, objectOnly = false, label }: { label?: string; value: unknown; disabled: boolean; onChange: (value: unknown) => void; objectOnly?: boolean }) {
   const { t } = useTranslation();
   const [draft, setDraft] = useState<string | null>(null);
   const [error, setError] = useState<string>();
@@ -56,7 +56,7 @@ export function OtherJson({ value, disabled, onChange, objectOnly = false }: { v
   const reportDraft = useContext(SchemaDraftState);
   const technicalDetails = useContext(SchemaTechnicalDetails);
   useEffect(() => () => reportDraft(id, false), [reportDraft, id]);
-  const editor = <Textarea label={t('templates.editor.other')} rows={5} className="font-mono" value={draft ?? JSON.stringify(value ?? {}, null, 2)} disabled={disabled} error={error} onChange={(event) => {
+  const editor = <Textarea label={label ?? t('templates.editor.other')} rows={5} className="font-mono" value={draft ?? JSON.stringify(value ?? {}, null, 2)} disabled={disabled} error={error} onChange={(event) => {
     const typed = event.target.value;
     setDraft(typed);
     try {
@@ -91,6 +91,9 @@ export function SchemaInput({ root, schema: given, value, parts, disabled, probl
   const help = embedded ? undefined : <HelpHint term={label} what={hints} />;
   const child = (name: string, field: unknown, childValue: unknown, change: (next: unknown) => void) => <SchemaInput key={name} root={root} schema={field} value={childValue} parts={[...parts, name]} disabled={disabled} problems={problems} driver={driver} onChange={change} embedded={embedded} />;
 
+  if (given === false || schema['x-orch-hidden'] === true || Array.isArray(schema.enum) && schema.enum.length === 0) return null;
+  if (Object.hasOwn(schema, 'const')) return <div className="flex min-w-0 flex-col gap-1"><Input label={label} value={printable(schema.const)} disabled readOnly /><p className="text-xs text-text-muted">{t(schema['x-orch-source'] === 'provider' ? 'providerOptions.fixedByProvider' : 'providerOptions.fixedValue')}</p></div>;
+
   if (schema.properties !== undefined || schema.type === 'object') {
     const properties = record(schema.properties);
     const current = record(value);
@@ -111,7 +114,7 @@ export function SchemaInput({ root, schema: given, value, parts, disabled, probl
     return <fieldset className="min-w-0 flex flex-col gap-3 rounded-lg border border-border p-3" disabled={disabled} aria-label={label} aria-describedby={error ? errorId : undefined}>
       {!hideHeading && <legend className="px-1"><span className="inline-flex items-center gap-1 font-medium">{label}{help}{reset}</span></legend>}
       {alternatives.length > 1 && <ChoiceLocator label={t('templates.editor.shape')} value={String(Math.max(0, alternatives.findIndex((variant) => variant.properties === schema.properties)))} options={alternatives.map((variant, index) => ({value:String(index),searchText:'',...variantWords(variant)}))} onValueChange={(index) => onChange(newValue(root, alternatives[Number(index)]))} disabled={disabled} />}
-      {Object.entries(properties).map(([name, field]) => child(name, field, current[name], (next) => { const updated = replaceMember(current, name, next); onChange(Object.keys(updated).length === 0 ? undefined : updated); }))}
+      {Object.entries(properties).filter(([, field]) => field !== false).map(([name, field]) => child(name, field, current[name], (next) => { const updated = replaceMember(current, name, next); onChange(Object.keys(updated).length === 0 ? undefined : updated); }))}
       {stringMap ? <div className="flex flex-col gap-3">{Object.entries(current).map(([name, entry], index) => <div key={index} className="flex flex-col gap-2 rounded-lg border border-border p-2">
         <Input label={t('templates.editor.key')} value={name} error={Object.hasOwn(current, '') && name === '' ? t('templates.editor.keyRequired') : undefined} onChange={(event) => {
           if (event.target.value !== name && Object.hasOwn(current, event.target.value)) return;
@@ -119,7 +122,7 @@ export function SchemaInput({ root, schema: given, value, parts, disabled, probl
         }} />
         {child(name, { ...additional, title: t('templates.editor.value') }, entry, (next) => onChange(replaceMember(current, name, next)))}
         <Button size="sm" variant="ghost" onClick={() => onChange(replaceMember(current, name, undefined))}>{t('templates.editor.remove')}</Button>
-      </div>)}<Button size="sm" disabled={disabled || Object.hasOwn(current, '')} onClick={() => onChange({ ...current, '': '' })}>{t('templates.editor.addPair')}</Button></div> : (Object.keys(unknown).length > 0 || Object.keys(properties).length === 0) && <OtherJson objectOnly value={Object.keys(properties).length === 0 ? value : unknown} disabled={disabled} onChange={(next) => {
+      </div>)}<Button size="sm" disabled={disabled || Object.hasOwn(current, '')} onClick={() => onChange({ ...current, '': '' })}>{t('templates.editor.addPair')}</Button></div> : schema.additionalProperties !== false && (Object.keys(unknown).length > 0 || Object.keys(properties).length === 0) && <OtherJson objectOnly value={Object.keys(properties).length === 0 ? value : unknown} disabled={disabled} onChange={(next) => {
         if (Object.keys(properties).length === 0) onChange(next);
         else onChange({ ...Object.fromEntries(Object.entries(current).filter(([key]) => Object.hasOwn(properties, key))), ...Object.fromEntries(Object.entries(record(next)).filter(([key]) => !Object.hasOwn(properties, key))) });
       }} />}
@@ -141,7 +144,7 @@ export function SchemaInput({ root, schema: given, value, parts, disabled, probl
   const choices: unknown[] | undefined = Array.isArray(schema.enum) ? schema.enum : undefined;
   const selectedChoice=choices?.findIndex((entry)=>entry===value)??-1;
   return <div className="flex flex-col gap-1">
-    {schema.type === 'boolean' ? <><div className="flex flex-wrap items-center gap-1"><Switch name={label} description={description} checked={typeof value === 'boolean' ? value : defaultValue === true} disabled={disabled} onCheckedChange={onChange} />{help}{reset}</div>{error && <p role="status" className="text-sm text-danger-text">{error}</p>}</> :
+    {schema.type === 'boolean' && choices === undefined ? <><div className="flex flex-wrap items-center gap-1"><Switch name={label} description={description} checked={typeof value === 'boolean' ? value : defaultValue === true} disabled={disabled} onCheckedChange={onChange} />{help}{reset}</div>{error && <p role="status" className="text-sm text-danger-text">{error}</p>}</> :
       choices !== undefined ? <ChoiceLocator {...common} value={selectedChoice<0?'':String(selectedChoice)} valueLabel={selectedChoice < 0 && value !== undefined ? printable(value) : undefined} options={choices.map((entry,index) => ({value:String(index),searchText:printable(entry),...enumWords(parts,entry,schema)}))} onValueChange={(next) => onChange(choices[Number(next)])} /> :
       schema.type === 'number' || schema.type === 'integer' ? <Input {...common} type="number" value={typeof value === 'number' ? value : ''} min={typeof schema.minimum === 'number' ? schema.minimum : undefined} max={typeof schema.maximum === 'number' ? schema.maximum : undefined} step={schema.type === 'integer' ? 1 : 'any'} trailing={unit && <span className="text-xs text-text-muted">{unit}</span>} onChange={(event) => onChange(event.target.value === '' ? undefined : Number(event.target.value))} /> :
       schema['x-multiline'] === true ? <Textarea {...common} rows={8} value={typeof value === 'string' ? value : ''} onChange={(event) => onChange(event.target.value === '' ? undefined : event.target.value)} /> :

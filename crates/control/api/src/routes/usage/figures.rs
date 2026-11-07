@@ -10,7 +10,6 @@
 use super::csv::{self, json_response};
 use super::names::Names;
 use super::scope::{self, Scope, Wanted};
-use crate::middleware::authorization;
 use crate::middleware::requests::{ApiError, ApiResult};
 use crate::registry::Ctx;
 use axum::body::Body;
@@ -193,12 +192,14 @@ fn ranked(
             };
             return value(b)
                 .total_cmp(&value(a))
-                .then_with(|| a.key.cmp(&b.key));
+                .then_with(|| a.key.cmp(&b.key))
+                .then_with(|| a.tier_unknown.cmp(&b.tier_unknown));
         }
         credits_of(&b.figures)
             .cmp(&credits_of(&a.figures))
             .then_with(|| b.figures.total_tokens.cmp(&a.figures.total_tokens))
             .then_with(|| a.key.cmp(&b.key))
+            .then_with(|| a.tier_unknown.cmp(&b.tier_unknown))
     });
     cells
 }
@@ -233,11 +234,41 @@ fn added(all: &[&Figures]) -> Figures {
 }
 
 /// Reads usage over a span.
-pub async fn get(ctx: Ctx, query: UsageGetQuery, _body: Body) -> ApiResult<Response> {
-    let mut conn = ctx.app.db.acquire().await?;
-    let principal = authorization::principal(&ctx, &mut conn).await?;
+pub async fn get(ctx: Ctx, query: UsageGetQuery, body: Body) -> ApiResult<Response> {
+    crate::key_operations::native::selected_raw::<Analytics>(ctx, query, body).await
+}
+
+/// The composite opening shares the same arithmetic and retains its native disclosure cut.
+pub(crate) async fn read_in(
+    ctx: &Ctx,
+    conn: &mut orch_db::Conn,
+    principal: &orch_authz::Principal,
+    query: UsageGetQuery,
+    reading: Option<&crate::routes::nodes::overview::Reading<'_>>,
+) -> ApiResult<UsageAnalytics> {
+    let (answer, names, opened) = materialize(ctx, conn, principal, &query, reading).await?;
+    super::native::Disclosure {
+        scope: scope::parse(&query.scope)?,
+        depth: opened.depth,
+        names,
+        records: Vec::new(),
+    }
+    .require(conn, principal)
+    .await?;
+    Ok(answer)
+}
+
+/// The same native arithmetic and reader-specific name projection, on the adapter's snapshot.
+async fn materialize(
+    ctx: &Ctx,
+    conn: &mut orch_db::Conn,
+    principal: &orch_authz::Principal,
+    query: &UsageGetQuery,
+    reading: Option<&crate::routes::nodes::overview::Reading<'_>>,
+) -> ApiResult<(UsageAnalytics, super::names::Cut, scope::Opened)> {
+    let mut cut = super::names::Cut::default();
     let asked = scope::parse(&query.scope)?;
-    let opened = scope::open(&mut conn, &principal, asked).await?;
+    let opened = scope::open(conn, principal, asked).await?;
     let from = scope::parse_day("from", &query.from)?;
     let to = scope::parse_day("to", &query.to)?;
     if to < from {
@@ -262,8 +293,7 @@ pub async fn get(ctx: Ctx, query: UsageGetQuery, _body: Body) -> ApiResult<Respo
         None => default_breakdowns(asked),
     };
     for dimension in query.series_by.iter().chain(breakdowns.iter()) {
-        scope::require_dimension(&mut conn, &principal, &opened, *dimension, "this dimension")
-            .await?;
+        scope::require_dimension(conn, principal, &opened, *dimension, "this dimension").await?;
     }
     let wanted = Wanted {
         user_id: query.user_id,
@@ -275,16 +305,17 @@ pub async fn get(ctx: Ctx, query: UsageGetQuery, _body: Body) -> ApiResult<Respo
         topic_id: query.topic_id,
         thread_id: query.thread_id,
     };
-    let mut filter = scope::filter(&mut conn, &principal, &opened, &wanted, false).await?;
+    let mut filter = scope::filter(conn, principal, &opened, &wanted, false).await?;
     filter.effort = query.effort.clone();
     filter.tier = query.tier.clone();
+    filter.tier_unknown = query.tier_unknown;
     filter.program = query.program.clone();
     filter.outcome = query.outcome;
     filter.org = query.org_id;
     if query.turn_id.is_some() {
         scope::require_dimension(
-            &mut conn,
-            &principal,
+            conn,
+            principal,
             &opened,
             UsageDimension::Thread,
             "the use of one turn",
@@ -309,20 +340,20 @@ pub async fn get(ctx: Ctx, query: UsageGetQuery, _body: Body) -> ApiResult<Respo
         under,
     };
 
-    let totals = rollup::read(&mut conn, &read(None, None))
+    let totals = rollup::read(conn, &read(None, None))
         .await?
         .into_iter()
         .next()
         .map(|cell| cell.figures)
         .unwrap_or_default();
-    let points = rollup::read(&mut conn, &read(Some(bucket), None)).await?;
+    let points = rollup::read(conn, &read(Some(bucket), None)).await?;
     let own_part = if opened.has_own_part {
         let own = orch_db::usage::rollup::Filter {
             person: Some(opened.caller),
             ..filter.clone()
         };
         let cells = rollup::read(
-            &mut conn,
+            conn,
             &Read {
                 from,
                 to,
@@ -348,19 +379,29 @@ pub async fn get(ctx: Ctx, query: UsageGetQuery, _body: Body) -> ApiResult<Respo
     let split = match query.series_by {
         Some(dimension) => {
             let over_span = ranked(
-                rollup::read(&mut conn, &read(None, Some(dimension))).await?,
+                rollup::read(conn, &read(None, Some(dimension))).await?,
                 query.measure,
             );
-            let per_bucket = rollup::read(&mut conn, &read(Some(bucket), Some(dimension))).await?;
+            let per_bucket = rollup::read(conn, &read(Some(bucket), Some(dimension))).await?;
             let keep = usize::try_from(USAGE_SERIES_KEYS_MAX).unwrap_or(usize::MAX);
-            let kept: Vec<Option<String>> = over_span
+            let kept: Vec<(Option<String>, bool)> = over_span
                 .iter()
                 .take(keep)
-                .map(|cell| cell.key.clone())
+                .map(|cell| (cell.key.clone(), cell.tier_unknown))
                 .collect();
             let values: Vec<Option<String>> =
                 over_span.iter().map(|cell| cell.key.clone()).collect();
-            let names = Names::for_dimension(&mut conn, &principal, dimension, &values).await?;
+            let names =
+                Names::for_dimension_in(conn, principal, dimension, &values, reading).await?;
+            cut.extend(
+                names.cut_for_dimension(
+                    dimension,
+                    &kept
+                        .iter()
+                        .map(|(value, _)| value.clone())
+                        .collect::<Vec<_>>(),
+                ),
+            );
             Some((dimension, kept, per_bucket, names, over_span.len() > keep))
         }
         None => None,
@@ -378,12 +419,12 @@ pub async fn get(ctx: Ctx, query: UsageGetQuery, _body: Body) -> ApiResult<Respo
                     .collect();
                 let mut by: Vec<UsageSplit> = kept
                     .iter()
-                    .map(|key| UsageSplit {
-                        key: names.key(*dimension, key.as_deref()),
+                    .map(|(key, tier_unknown)| UsageSplit {
+                        key: names.key(*dimension, key.as_deref(), *tier_unknown),
                         figures: figures(
                             &in_bucket
                                 .iter()
-                                .find(|cell| &cell.key == key)
+                                .find(|cell| &cell.key == key && cell.tier_unknown == *tier_unknown)
                                 .map(|cell| cell.figures.clone())
                                 .unwrap_or_default(),
                         ),
@@ -392,7 +433,7 @@ pub async fn get(ctx: Ctx, query: UsageGetQuery, _body: Body) -> ApiResult<Respo
                 if *has_rest {
                     let rest: Vec<&Figures> = in_bucket
                         .iter()
-                        .filter(|cell| !kept.contains(&cell.key))
+                        .filter(|cell| !kept.contains(&(cell.key.clone(), cell.tier_unknown)))
                         .map(|cell| &cell.figures)
                         .collect();
                     by.push(UsageSplit {
@@ -415,17 +456,27 @@ pub async fn get(ctx: Ctx, query: UsageGetQuery, _body: Body) -> ApiResult<Respo
     let mut tables: Vec<UsageBreakdown> = Vec::new();
     for dimension in breakdowns {
         let cells = ranked(
-            rollup::read(&mut conn, &read(None, Some(dimension))).await?,
+            rollup::read(conn, &read(None, Some(dimension))).await?,
             query.measure,
         );
         let values: Vec<Option<String>> = cells.iter().map(|cell| cell.key.clone()).collect();
-        let names = Names::for_dimension(&mut conn, &principal, dimension, &values).await?;
+        let names = Names::for_dimension_in(conn, principal, dimension, &values, reading).await?;
+        cut.extend(
+            names.cut_for_dimension(
+                dimension,
+                &cells
+                    .iter()
+                    .take(limit)
+                    .map(|cell| cell.key.clone())
+                    .collect::<Vec<_>>(),
+            ),
+        );
         let more = i64::try_from(cells.len().saturating_sub(limit)).unwrap_or(i64::MAX);
         let rows = cells
             .iter()
             .take(limit)
             .map(|cell| UsageRow {
-                key: names.key(dimension, cell.key.as_deref()),
+                key: names.key(dimension, cell.key.as_deref(), cell.tier_unknown),
                 share: if total_credits > Micros::ZERO {
                     credits_of(&cell.figures).share_of(total_credits)
                 } else {
@@ -443,7 +494,7 @@ pub async fn get(ctx: Ctx, query: UsageGetQuery, _body: Body) -> ApiResult<Respo
     }
 
     let previous = rollup::read(
-        &mut conn,
+        conn,
         &Read {
             from: from - Duration::days(days),
             to: from - Duration::days(1),
@@ -460,12 +511,12 @@ pub async fn get(ctx: Ctx, query: UsageGetQuery, _body: Body) -> ApiResult<Respo
     let answer = UsageAnalytics {
         figures_before: Some(previous.clone()),
         degradation: if query.health == Some(true) && matches!(asked, Scope::Provider(_)) {
-            Some(provider_health(&mut conn, &opened.base, ctx.app.clock.now()).await?)
+            Some(provider_health(conn, &opened.base, ctx.app.clock.now()).await?)
         } else {
             None
         },
         performance_before: previous.performance,
-        comparison: rollup::comparison(&mut conn, from, to, &filter).await?,
+        comparison: rollup::comparison(conn, from, to, &filter).await?,
         scope: opened.scope.clone(),
         from: query.from.clone(),
         to: query.to.clone(),
@@ -476,10 +527,83 @@ pub async fn get(ctx: Ctx, query: UsageGetQuery, _body: Body) -> ApiResult<Respo
         breakdowns: tables,
         me: own_part.as_ref().map(figures),
     };
-    if scope::wants_csv(&ctx.headers) {
-        return Ok(csv::response(series_csv(&answer)));
+    Ok((answer, cut, opened))
+}
+
+pub(super) struct Analytics;
+impl crate::key_operations::native::Selected for Analytics {
+    type Source = orch_api_contract::usage_sources::Source;
+    type Query = UsageGetQuery;
+    type Value = super::native::Report<UsageAnalytics>;
+    type Reply = Response;
+    const DECLARATION: &'static orch_api_contract::operation_sources::Declaration<Self::Source> =
+        &orch_api_contract::usage_sources::ANALYTICS;
+    fn select<'a>(
+        ctx: &'a Ctx,
+        conn: &'a mut orch_db::Conn,
+        caller: &'a orch_authz::Caller,
+        query: &'a Self::Query,
+    ) -> futures::future::BoxFuture<
+        'a,
+        ApiResult<(
+            Self::Value,
+            Vec<crate::key_operations::native::Facts<Self::Source>>,
+        )>,
+    > {
+        Box::pin(async move {
+            let (principal, facts) =
+                super::native::report_reader(ctx, conn, caller, Self::DECLARATION, &query.scope)
+                    .await?;
+            let (answer, names, opened) = materialize(ctx, conn, &principal, query, None).await?;
+            Ok((
+                super::native::Report {
+                    answer,
+                    disclosure: super::native::Disclosure {
+                        scope: scope::parse(&query.scope)?,
+                        depth: opened.depth,
+                        names,
+                        records: Vec::new(),
+                    },
+                },
+                facts,
+            ))
+        })
     }
-    json_response(&answer, StatusCode::OK)
+    fn require<'a>(
+        _ctx: &'a Ctx,
+        _conn: &'a mut orch_db::Conn,
+        _principal: &'a orch_authz::Principal,
+    ) -> futures::future::BoxFuture<'a, ApiResult<()>> {
+        Box::pin(async { Ok(()) })
+    }
+    fn render<'a>(
+        ctx: &'a Ctx,
+        conn: &'a mut orch_db::Conn,
+        principal: &'a orch_authz::Principal,
+        value: &'a Self::Value,
+    ) -> futures::future::BoxFuture<'a, ApiResult<Response>> {
+        Box::pin(async move {
+            value.disclosure.require(conn, principal).await?;
+            if scope::wants_csv(&ctx.headers) {
+                Ok(csv::response(series_csv(&value.answer)))
+            } else {
+                json_response(&value.answer, StatusCode::OK)
+            }
+        })
+    }
+    fn check_opened<'a>(
+        _ctx: &'a Ctx,
+        conn: &'a mut orch_db::Conn,
+        principal: &'a orch_authz::Principal,
+        _query: &'a Self::Query,
+        opened: &'a Self::Value,
+        _fresh: &'a Self::Value,
+    ) -> futures::future::BoxFuture<'a, ApiResult<bool>> {
+        Box::pin(async move {
+            opened.disclosure.require(conn, principal).await?;
+            Ok(true)
+        })
+    }
 }
 
 /// The status bar reads only a fifteen-minute indexed window and one seven-day aggregate.
@@ -488,15 +612,19 @@ pub async fn health(
     query: orch_api_contract::usage::UsageHealthGetQuery,
     (): (),
 ) -> ApiResult<orch_api_contract::usage::UsageDegradation> {
-    let mut conn = ctx.app.db.acquire().await?;
-    let principal = authorization::principal(&ctx, &mut conn).await?;
-    health_for(
-        &mut conn,
-        &principal,
-        query.provider_id,
-        ctx.app.clock.now(),
-    )
-    .await
+    let provider = query.provider_id;
+    let (reply, accepted) =
+        crate::key_operations::native::read(ctx.clone(), move |ctx, conn, principal| {
+            Box::pin(async move {
+                Ok((
+                    health_for(conn, principal, provider, ctx.app.clock.now()).await?,
+                    principal.caller().clone(),
+                ))
+            })
+        })
+        .await?;
+    super::native::retain_health(&ctx, &accepted, provider)?;
+    Ok(reply)
 }
 
 /// The HTTP reader and live provider status share the same authority and bounded aggregates.

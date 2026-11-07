@@ -1059,20 +1059,48 @@ impl Browsers {
         origin: &Origin,
     ) -> Result<Option<BrowserRow>, BrowserFailure> {
         let mut tx = self.engine.inner.db.begin().await?;
-        let Some(before) = rows::get(&mut tx, id).await? else {
+        let closed = self
+            .close_in(&mut tx, id, reason, requester, origin, None)
+            .await?;
+        tx.commit().await.map_err(orch_db::DbError::from)?;
+        match closed {
+            Some((row, site)) => {
+                self.finish_close(id, &site, row.is_some()).await;
+                Ok(row)
+            }
+            None => Ok(None),
+        }
+    }
+
+    /// The same close writer on the caller's guarded connection; no native I/O runs here.
+    pub async fn close_in(
+        &self,
+        conn: &mut orch_db::Conn,
+        id: Id,
+        reason: &str,
+        requester: Requester,
+        origin: &Origin,
+        expected_environment: Option<Id>,
+    ) -> Result<Option<(Option<BrowserRow>, Site)>, BrowserFailure> {
+        let Some(before) = rows::get(conn, id).await? else {
             return Ok(None);
         };
-        let site = rows::site(&mut tx, before.environment_id)
+        // API guards bind this exact stored Environment before entering the writer.
+        // Other existing lifecycle/tool callers keep their ordinary unbound writer contract.
+        if expected_environment.is_some_and(|environment| environment != before.environment_id) {
+            return Err(BrowserFailure::NotFound);
+        }
+        let site = rows::site(conn, before.environment_id)
             .await?
             .ok_or(BrowserFailure::NotFound)?;
         if !matches!(requester, Requester::System) {
-            self.check(&mut tx, &site, &requester, Permission::BrowserManage)
+            self.check(conn, &site, &requester, Permission::BrowserManage)
                 .await?;
         }
-        let row = rows::close(&mut tx, id, reason, self.engine.inner.clock.now()).await?;
+        let row = rows::close(conn, id, reason, self.engine.inner.clock.now()).await?;
         if let Some(row) = &row {
             history(
-                &mut tx,
+                conn,
                 &site,
                 &requester,
                 audit::name!("browser.closed"),
@@ -1085,15 +1113,18 @@ impl Browsers {
             )
             .await?;
         }
-        tx.commit().await.map_err(orch_db::DbError::from)?;
+        Ok(Some((row, site)))
+    }
+
+    /// Complete the already committed close using its actual captured site and ordinary cleanup.
+    pub async fn finish_close(&self, id: Id, site: &Site, changed: bool) {
         self.memory().closed_profile(id);
-        if row.is_some() && site.machine_online == Some(true) {
+        if changed && site.machine_online == Some(true) {
             let _ = self
-                .ask(&site, new_id(), &BrowserClose { browser_id: id })
+                .ask(site, new_id(), &BrowserClose { browser_id: id })
                 .await;
         }
         self.changed(site.id).await;
-        Ok(row)
     }
 
     /// Changes a profile on the host and writes one line after it succeeds.

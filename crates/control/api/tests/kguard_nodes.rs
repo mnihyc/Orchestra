@@ -91,7 +91,9 @@ impl Scenario {
             })
             .send()
             .await
-            .ok();
+            .ok()
+            .into_full()
+            .unwrap();
         let topic = make_topic(&world, &owner, project.base.id, "Topic").await;
         Self {
             world,

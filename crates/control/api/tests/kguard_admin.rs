@@ -1149,3 +1149,120 @@ async fn invitation_acceptance_uses_the_current_address_session_and_invitation_l
         }
     }
 }
+
+#[tokio::test]
+async fn rebuilding_search_checks_system_administration_after_the_database_wait() {
+    const EFFECTS: &str = "SELECT jsonb_build_object(
+        'generation', (SELECT to_jsonb(g) FROM search_generations g WHERE g.id = $2),
+        'index', (SELECT to_jsonb(i) FROM search_indexes i WHERE i.org_id = $1))";
+    for demote in [false, true] {
+        let world = World::new().await;
+        let owner = admin(&world, "owner").await;
+        let writer = admin(&world, "writer").await;
+        let org = make_org(&world, &owner, "Office", "office").await.base.id;
+        let generation = orch_types::new_id();
+        sqlx::query(
+            "INSERT INTO search_generations
+            (id,org_id,provider_id,model_name,dimensions,chunking,state,created_at)
+            VALUES ($1,$2,$3,'owned-test-model',8,'parts-v1:64','active',$4)",
+        )
+        .bind(generation)
+        .bind(org)
+        .bind(orch_types::new_id())
+        .bind(world.now())
+        .execute(&world.db.pool)
+        .await
+        .unwrap();
+        sqlx::query(
+            "INSERT INTO search_indexes (org_id,state,reason,detail,updated_at)
+            VALUES ($1,'waiting','choice','the current model is kept',$2)",
+        )
+        .bind(org)
+        .bind(world.now())
+        .execute(&world.db.pool)
+        .await
+        .unwrap();
+        let before: Json = sqlx::query_scalar(EFFECTS)
+            .bind(org)
+            .bind(generation)
+            .fetch_one(&world.db.pool)
+            .await
+            .unwrap();
+        let mut held = world.db.pool.begin().await.unwrap();
+        orch_db::queries::transaction_guard::lock_person(&mut held, writer.id())
+            .await
+            .unwrap();
+        sqlx::query("SELECT id FROM search_generations WHERE id = $1 FOR UPDATE")
+            .bind(generation)
+            .execute(&mut *held)
+            .await
+            .unwrap();
+        sqlx::query("SELECT org_id FROM search_indexes WHERE org_id = $1 FOR UPDATE")
+            .bind(org)
+            .execute(&mut *held)
+            .await
+            .unwrap();
+        let holder: i32 = sqlx::query_scalar("SELECT pg_backend_pid()")
+            .fetch_one(&mut *held)
+            .await
+            .unwrap();
+        let route = router(&world);
+        let request = request(
+            &writer,
+            "POST",
+            &format!("/admin/semantic-search/{org}/rebuild"),
+            Body::empty(),
+        );
+        let action = tokio::spawn(async move { route.oneshot(request).await.unwrap() });
+        waiting_on(&world.db.pool, holder).await;
+        assert!(
+            !action.is_finished(),
+            "the rebuild reached a real database wait"
+        );
+        if demote {
+            // The same standing producer used by the admin request records the revoke and epoch.
+            revoke_admin(&mut held, writer.id(), owner.id(), world.now()).await;
+        }
+        held.commit().await.unwrap();
+        let is_admin: bool = sqlx::query_scalar("SELECT is_system_admin FROM users WHERE id = $1")
+            .bind(writer.id())
+            .fetch_one(&world.db.pool)
+            .await
+            .unwrap();
+        assert_eq!(is_admin, !demote);
+        let response = reply(
+            tokio::time::timeout(REQUEST_BOUND, action)
+                .await
+                .expect("the rebuild completes after the database wait")
+                .unwrap(),
+        )
+        .await;
+        let after: Json = sqlx::query_scalar(EFFECTS)
+            .bind(org)
+            .bind(generation)
+            .fetch_one(&world.db.pool)
+            .await
+            .unwrap();
+        if demote {
+            assert_eq!(
+                (response.status, &after),
+                (StatusCode::FORBIDDEN, &before),
+                "a revoked admin cannot delete the generation or reset its index: {}",
+                response.body
+            );
+            denied(&response, "system.admin");
+        } else {
+            let mut rebuilt = before.clone();
+            rebuilt["generation"] = Json::Null;
+            rebuilt["index"]["state"] = json!("idle");
+            rebuilt["index"]["reason"] = Json::Null;
+            rebuilt["index"]["detail"] = Json::Null;
+            assert_eq!(
+                (response.status, &after),
+                (StatusCode::OK, &rebuilt),
+                "an unchanged admin can rebuild after the same wait: {}",
+                response.body
+            );
+        }
+    }
+}

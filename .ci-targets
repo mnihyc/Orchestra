@@ -1,0 +1,3 @@
+test -p orch-api-core --test hosted_environments
+test -p orch-api-core --test runtime_updates
+test -p orch-api-core --test threads_adopt

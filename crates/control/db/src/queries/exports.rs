@@ -120,6 +120,24 @@ pub async fn get(conn: &mut Conn, id: Id) -> Result<Option<ExportRow>, DbError> 
     .await?)
 }
 
+/// Actual creator-owned archive rows retained from an earlier native metadata selection.
+pub async fn selected_of_user(
+    conn: &mut Conn,
+    user: Id,
+    selected: &[Id],
+) -> Result<Vec<ExportRow>, DbError> {
+    if selected.is_empty() {
+        return Ok(Vec::new());
+    }
+    Ok(sqlx::query_as(sqlx::AssertSqlSafe(format!(
+        "SELECT {COLUMNS} FROM exports WHERE user_id=$1 AND id=ANY($2)"
+    )))
+    .bind(user)
+    .bind(selected)
+    .fetch_all(conn)
+    .await?)
+}
+
 /// An archive, locked until the transaction ends.
 pub async fn lock(conn: &mut Conn, id: Id) -> Result<Option<ExportRow>, DbError> {
     Ok(sqlx::query_as(sqlx::AssertSqlSafe(format!(
@@ -236,11 +254,17 @@ pub async fn expire(conn: &mut Conn, id: Id) -> Result<Option<Option<String>>, D
     if state == "expired" {
         return Ok(None);
     }
+    expire_locked(conn, id).await?;
+    Ok(Some(blob))
+}
+
+/// The native first mutation after the caller has locked and validated this archive row.
+pub async fn expire_locked(conn: &mut Conn, id: Id) -> Result<(), DbError> {
     sqlx::query("UPDATE exports SET state = 'expired', blob = NULL, expires_at = COALESCE(expires_at, now()) WHERE id = $1")
         .bind(id)
         .execute(conn)
         .await?;
-    Ok(Some(blob))
+    Ok(())
 }
 
 /// Records that an archive was fetched, and says whether that was the first time.

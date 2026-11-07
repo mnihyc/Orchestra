@@ -483,6 +483,9 @@ fn wildcard_matches(pattern: &str, text: &str) -> bool {
 /// The prices a gateway's list gives for a model: US dollars for one token, as decimal strings.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
 pub struct GatewayPricing {
+    /// Dollars for one native web search, where the gateway lists it.
+    #[serde(default)]
+    pub web_search: Option<String>,
     /// A token of input.
     pub prompt: String,
     /// A token of output.
@@ -529,6 +532,17 @@ impl Decimal {
             mantissa: self.mantissa.checked_mul(other.mantissa)?,
             scale: self.scale.checked_add(other.scale)?,
         })
+    }
+
+    /// The decimal currency amount, without changing its per-call unit.
+    fn text(self) -> Option<String> {
+        // Offset the six decimal places applied by the existing per-million formatter.
+        const MILLION_DIGITS: u32 = 6;
+        Self {
+            mantissa: self.mantissa,
+            scale: self.scale.checked_add(MILLION_DIGITS)?,
+        }
+        .per_million()
     }
 
     /// This number times a million, as a decimal string without trailing zeros.
@@ -581,6 +595,14 @@ pub fn pricing_to_rate(pricing: &GatewayPricing, scale: &str) -> Option<Rate> {
         None => None,
     };
     Some(Rate {
+        web_search_per_call: match &pricing.web_search {
+            Some(price) => Some(
+                Decimal::parse(price)?
+                    .times(Decimal::parse(scale)?)?
+                    .text()?,
+            ),
+            None => None,
+        },
         input_per_mtok: input,
         cached_input_per_mtok: cached,
         output_per_mtok: per_token_to_per_mtok(&pricing.completion, scale)?,
@@ -974,16 +996,19 @@ mod tests {
         let rate = pricing_to_rate(&pricing, "1").unwrap();
         assert_eq!(rate.input_per_mtok, "0.1");
         assert_eq!(rate.output_per_mtok, "0.5");
+        assert_eq!(rate.web_search_per_call.as_deref(), Some("0.01"));
         assert_eq!(rate.cached_input_per_mtok, "0.01");
         assert_eq!(rate.cache_write_per_mtok.as_deref(), Some("0.125"));
         let in_credits = pricing_to_rate(&pricing, "100").unwrap();
         assert_eq!(in_credits.input_per_mtok, "10");
         assert_eq!(in_credits.output_per_mtok, "50");
+        assert_eq!(in_credits.web_search_per_call.as_deref(), Some("1"));
     }
 
     #[test]
     fn a_free_variant_is_rated_at_nothing_and_a_missing_cache_price_counts_as_input() {
         let free = GatewayPricing {
+            web_search: None,
             prompt: "0".into(),
             completion: "0".into(),
             input_cache_read: None,
@@ -995,6 +1020,7 @@ mod tests {
             ("0", "0")
         );
         let plain = GatewayPricing {
+            web_search: None,
             prompt: "0.0000025".into(),
             completion: "0.00001".into(),
             input_cache_read: None,

@@ -1,5 +1,12 @@
 //! Browsers of an environment, their named profiles, and tickets to watch or drive them.
 
+use crate::operations::{
+    FacetSpec as Facet, OperationSpec as Op, TargetResolver as Target, VariantSpec as Variant,
+};
+use orch_access_contract::key_scope::KeyAction::{Manage, Read};
+use orch_access_contract::key_scope::KeyTargetKind::Object;
+use orch_access_contract::permissions::ObjectKind as K;
+
 use orch_types::{Id, Time};
 use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
@@ -240,21 +247,81 @@ pub struct BrowserProfileDeleteQuery {
     pub confirm: String,
 }
 
+/// The completed close without the existing browser's private metadata.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+pub struct BrowserCloseReceipt {
+    /// This acknowledgement carries no existing session content.
+    pub projection: crate::common::ReceiptProjection,
+    /// The browser named by this close.
+    pub browser_id: Id,
+    /// The actual environment whose close operation was admitted.
+    pub environment_id: Id,
+    /// The row is closed, including an idempotent repeated close.
+    pub closed: bool,
+}
+
+crate::common::full_or_receipt! {
+    /// The ordinary full projection or this same close operation's restricted receipt.
+    #[derive(Debug, Clone, PartialEq, Serialize, Deserialize, JsonSchema)]
+    pub enum BrowserCloseResponse {
+        /// Existing content when this operation currently admits its Read facet.
+        Full(Browser),
+        /// Identifiers and safe completed outcome only.
+        Receipt(BrowserCloseReceipt),
+    }
+}
+
 crate::endpoints! {
     /// Lists an environment's browsers and profiles and optionally looks again for its programs.
     EnvironmentBrowserList: GET "/environments/{id}/browsers", Permission("browser.view"), query EnvironmentBrowserListQuery, none, json EnvironmentBrowsers, 200;
     /// Starts a browser, or joins the one already running on its profile.
-    EnvironmentBrowserCreate: POST "/environments/{id}/browsers", Permission("browser.manage"), query ThroughThreadQuery, json EnvironmentBrowserCreateBody, json Browser, 201;
+    EnvironmentBrowserCreate: POST "/environments/{id}/browsers", Permission("browser.manage"), query ThroughThreadQuery, json EnvironmentBrowserCreateBody, json Browser, 201,
+        operation Op::returning(Manage, &[Object(K::Environment)], Target::PermissionObject);
     /// Asks a browser to quit, keeping its profile.
-    BrowserClose: DELETE "/browsers/{browser_id}", Rule("browser.manage on its environment"), none, none, json Browser, 200;
+    BrowserClose: DELETE "/browsers/{browser_id}", Rule("browser.manage on its environment"), none, none, json BrowserCloseResponse, 200,
+        operation Op::receipt(&Op::facets(&[
+            Facet::required(Manage, &[Object(K::Environment)], Target::Resolved("session_environment")),
+            Facet::response_content(&[Object(K::Environment)], Target::Resolved("session_environment")),
+            Facet::response_content(&[Object(K::Thread)], Target::ResolvedCollection("close_threads")),
+        ]));
     /// Gives a ticket to watch a browser, or with Manage to drive it.
-    BrowserTicketCreate: POST "/browsers/{browser_id}/ticket", Rule("browser.view on its environment; control also needs browser.manage"), none, json BrowserTicketCreateBody, json BrowserTicketCreateReply, 200;
+    BrowserTicketCreate: POST "/browsers/{browser_id}/ticket", Rule("browser.view on its environment; control also needs browser.manage"), none, json BrowserTicketCreateBody, json BrowserTicketCreateReply, 200,
+        operation Op::variants(&[
+            Variant {
+                name: "view",
+                selector: "control is false",
+                facets: &[Facet::required(
+                    Read,
+                    &[Object(K::Environment)],
+                    Target::Resolved("session_environment"),
+                )],
+            },
+            Variant {
+                name: "control",
+                selector: "control is true",
+                facets: &[
+                    Facet::required(
+                        Read,
+                        &[Object(K::Environment)],
+                        Target::Resolved("session_environment"),
+                    ),
+                    Facet::required(
+                        Manage,
+                        &[Object(K::Environment)],
+                        Target::Resolved("session_environment"),
+                    ),
+                ],
+            },
+        ]);
     /// Watches and, on a control ticket, drives a browser through a socket.
-    BrowserAttach: GET "/ws/browsers/{browser_id}", Public, query BrowserAttachQuery, none, raw, 101;
+    BrowserAttach: GET "/ws/browsers/{browser_id}", Public, query BrowserAttachQuery, none, raw, 101,
+        operation Op::protocol();
     /// Creates a named empty profile outside the workspace.
-    BrowserProfileCreate: POST "/environments/{id}/browser-profiles", Permission("browser.manage"), none, json BrowserProfileCreateBody, json BrowserProfile, 201;
+    BrowserProfileCreate: POST "/environments/{id}/browser-profiles", Permission("browser.manage"), none, json BrowserProfileCreateBody, json BrowserProfile, 201,
+        operation Op::returning(Manage, &[Object(K::Environment)], Target::PermissionObject);
     /// Renames a profile that no browser runs on.
-    BrowserProfileUpdate: PATCH "/environments/{id}/browser-profiles/{name}", Permission("browser.manage"), none, json BrowserProfileUpdateBody, json BrowserProfile, 200;
+    BrowserProfileUpdate: PATCH "/environments/{id}/browser-profiles/{name}", Permission("browser.manage"), none, json BrowserProfileUpdateBody, json BrowserProfile, 200,
+        operation Op::returning(Manage, &[Object(K::Environment)], Target::PermissionObject);
     /// Removes a profile and its sign-ins after its name is confirmed.
     BrowserProfileDelete: DELETE "/environments/{id}/browser-profiles/{name}", Permission("browser.manage"), query BrowserProfileDeleteQuery, none, none, 204;
 }
