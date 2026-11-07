@@ -38,7 +38,7 @@ const administrator = me(99, 'admin', 'Current administrator', { is_system_admin
 function page(): PermissionPage {
   return { object: { kind: 'machine', id: 'personal', name: 'build-vm' }, page: 'live', owner: null, owners: [], owners_writable: false,
     external: true, admins: { count: 1, of: ['system'] }, rows: [], state: 'follows', followers: null,
-    gives: { choices: [], roles: [], agents: [], holders_share: true }, covers: null, depends: [], reaches: null, revision: 7 };
+    gives: { choices: [], roles: [], agents: [], agent_parts: {}, holders_share: true }, covers: null, depends: [], reaches: null, revision: 7 };
 }
 function machine(): Machine {
   return { ...enrollmentMachine('personal', false), access: { administers: true, permissions: ['machine.view', 'access.manage'], through: [], admin_only: ['machine.view', 'access.manage'], admin_place: 'system' } };

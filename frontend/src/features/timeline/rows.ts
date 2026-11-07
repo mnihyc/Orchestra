@@ -203,6 +203,10 @@ export function buildRows(view: ThreadView, options: RowOptions): Row[] {
       // still stands as work detail when ordinary history lines are hidden.
       flushMarkers();
       if (item.turn_id === null) rows.push({ kind: 'item', key: id, id });
+    } else if (item.kind === 'marker' && item.payload.marker === 'background_wake') {
+      // A turn's recorded cause precedes its output even when ordinary lifecycle history is hidden.
+      flushMarkers();
+      rows.push({ kind: 'item', key: id, id });
     } else if (item.kind === 'marker') {
       if (!options.hideHistory) {
         const last = pendingMarkers.length > 0 ? items.get(pendingMarkers[pendingMarkers.length - 1] ?? '') : undefined;

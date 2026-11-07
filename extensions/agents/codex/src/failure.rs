@@ -271,6 +271,9 @@ fn neutral_code(code: &str) -> &'static str {
         "model_refused" => turn_error::MODEL_REFUSED,
         "context_overflow" => turn_error::CONTEXT_OVERFLOW,
         "provider_busy" => turn_error::PROVIDER_BUSY,
+        "rate_limited" => turn_error::RATE_LIMITED,
+        "overloaded" => turn_error::OVERLOADED,
+        "stream_interrupted" => turn_error::STREAM_INTERRUPTED,
         "provider_unreachable" => turn_error::PROVIDER_UNREACHABLE,
         _ => turn_error::HARNESS_ERROR,
     }
@@ -695,29 +698,29 @@ mod tests {
         };
         assert_eq!(
             code(json!("serverOverloaded"), "Selected model is at capacity."),
-            "provider_busy"
+            "overloaded"
         );
         assert_eq!(
             code(json!("internalServerError"), "high demand"),
-            "provider_busy"
+            "overloaded"
         );
         assert_eq!(
             code(json!("rateLimitExceeded"), "rate limit exceeded"),
-            "provider_busy"
+            "rate_limited"
         );
         assert_eq!(
             code(
                 json!({ "responseTooManyFailedAttempts": { "httpStatusCode": 429 } }),
                 "exceeded retry limit, last status: 429 Too Many Requests"
             ),
-            "provider_busy"
+            "rate_limited"
         );
         assert_eq!(
             code(
                 json!({ "httpConnectionFailed": { "httpStatusCode": 502 } }),
                 "unexpected status 502 Bad Gateway"
             ),
-            "provider_busy"
+            "overloaded"
         );
         assert_eq!(
             code(
@@ -827,7 +830,7 @@ mod tests {
         let got = classify(&failure, &notes, None, now, &Utc);
         assert_eq!(
             (got.code.as_str(), got.incomplete, got.retryable),
-            ("provider_unreachable", true, true)
+            ("stream_interrupted", true, true)
         );
         assert!(
             got.said
@@ -853,7 +856,7 @@ mod stopped_retries {
     #[test]
     fn the_native_retry_deadline_retains_the_cause_for_the_recovery_rule() {
         for (message, kind, reason) in [
-            ("Model at capacity, please retry", "provider_busy", None),
+            ("Model at capacity, please retry", "overloaded", None),
             (
                 "flagged for possible cybersecurity risk",
                 "model_refused",

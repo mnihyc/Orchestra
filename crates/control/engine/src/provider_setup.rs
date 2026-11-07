@@ -31,6 +31,11 @@
 //!   provider's managers (`provider.attention`) before a thread needs it. A token's end is read from the
 //!   facts, and told `providers.expiry_notice_days` ahead and when it has passed (`Engine::watch_token_ends`).
 
+mod login_authority;
+pub use login_authority::{
+    LoginAuthority, LoginCommandAuthority, login_operation, provider_login_authorized,
+};
+
 use crate::commands::{Outcome, Outgoing};
 use crate::engine::Engine;
 use crate::error::EngineError;
@@ -148,6 +153,30 @@ impl Engine {
         provider: Id,
         environment: Option<Id>,
     ) -> Result<Learning, EngineError> {
+        self.learn_descriptor_with_preparation(agent, provider, environment, None)
+            .await
+    }
+
+    /// Learn through the same native startup with the exact parent source and operation.
+    pub async fn learn_descriptor_with_preparation(
+        &self,
+        agent: Id,
+        provider: Id,
+        environment: Option<Id>,
+        preparation: Option<&crate::harnesses::preparation::Preparation>,
+    ) -> Result<Learning, EngineError> {
+        if let Some(source) = preparation {
+            source
+                .check_selection(
+                    self,
+                    crate::harnesses::preparation::Target::Descriptor {
+                        provider,
+                        agent,
+                        environment,
+                    },
+                )
+                .await?;
+        }
         let mut conn = self.inner.db.acquire().await?;
         let Some(profile) = resources::agent(&mut conn, agent)
             .await?
@@ -177,8 +206,12 @@ impl Engine {
         for (index, machine) in places.into_iter().enumerate() {
             // Learning is asked for on the way to something else: a machine that cannot be reached is
             // told as the reason, and the caller's own request says what it comes to.
-            let learned = match self.start_to_learn(&profile, provider, machine).await {
+            let learned = match self
+                .start_to_learn(&profile, provider, machine, preparation)
+                .await
+            {
                 Ok(learned) => learned,
+                Err(error) if preparation.is_some() => return Err(error),
                 Err(error) => Learning::Unknown(Unlearned::Failed(error.to_string())),
             };
             match learned {
@@ -198,6 +231,7 @@ impl Engine {
         profile: &AgentRow,
         provider: Id,
         machine: Id,
+        preparation: Option<&crate::harnesses::preparation::Preparation>,
     ) -> Result<Learning, EngineError> {
         let mut conn = self.inner.db.acquire().await?;
         let Some(place) = resources::machine_place(&mut conn, machine).await? else {
@@ -221,6 +255,26 @@ impl Engine {
         // the machine answers a harness that runs with the descriptor it declared.
         if self.harness_is_online(key).await? {
             let mut tx = self.inner.db.begin().await?;
+            let target = crate::harnesses::preparation::Target::Harness(key);
+            let check = if let Some(source) = preparation {
+                let _ = source
+                    .checkpoint(&mut tx, self.inner.clock.as_ref(), target)
+                    .await?;
+                harnesses::claim_lock(&mut tx, key).await?;
+                let _ = sqlx::query("SELECT provider_id FROM harnesses WHERE provider_id=$1 AND agent_id=$2 AND machine_id=$3 FOR UPDATE")
+                    .bind(provider).bind(profile.id).bind(machine).fetch_optional(&mut *tx).await.map_err(orch_db::DbError::from)?;
+                Some(
+                    source
+                        .checkpoint(&mut tx, self.inner.clock.as_ref(), target)
+                        .await?,
+                )
+            } else {
+                None
+            };
+            let deadline = check.as_ref().map(|check| check.deadline());
+            if let Some(check) = check {
+                check.check(self.inner.clock.as_ref())?;
+            }
             resources::set_harness_status(
                 &mut tx,
                 provider,
@@ -235,6 +289,9 @@ impl Engine {
                 self.inner.clock.now(),
             )
             .await?;
+            if let Some(deadline) = deadline {
+                deadline.check(self.inner.clock.as_ref())?;
+            }
             tx.commit().await.map_err(orch_db::DbError::from)?;
         }
         // A new identifier each time: the machine starts a harness that runs already by answering with
@@ -242,7 +299,7 @@ impl Engine {
         let command = new_id();
         let started = tokio::time::timeout(
             self.inner.config.start_timeout,
-            self.ensure_harness(key, profile, command),
+            self.ensure_harness_with_preparation(key, profile, command, preparation),
         )
         .await;
         match started {
@@ -311,7 +368,7 @@ impl Engine {
         // Requests, completed sign-ins and renewal share one observation lifetime.
         // Construct its state before polling so supervisor callers do not embed it.
         // Allocating here also breaks the startup/renewal future cycle.
-        Box::pin(self.read_provider_facts_inner(provider, force, renew))
+        Box::pin(self.read_provider_facts_inner(provider, force, renew, None))
     }
 
     async fn read_provider_facts_inner(
@@ -319,6 +376,7 @@ impl Engine {
         provider: Id,
         force: bool,
         renew: bool,
+        login: Option<LoginAuthority>,
     ) -> Result<Refreshed, EngineError> {
         // One observation of a provider at a time, held by a lease row: no transaction stays open while the
         // machine answers. An ordinary reader that finds one in flight answers with the facts there
@@ -342,7 +400,7 @@ impl Engine {
             tokio::time::sleep(std::time::Duration::from_millis(250)).await;
         };
         let observed = self
-            .observe_provider_facts(provider, force, renew, admitted)
+            .observe_provider_facts(provider, force, renew, admitted, login)
             .await;
         if admitted {
             let mut conn = self.inner.db.acquire().await?;
@@ -357,7 +415,22 @@ impl Engine {
         force: bool,
         renew: bool,
         admitted: bool,
+        login: Option<LoginAuthority>,
     ) -> Result<Refreshed, EngineError> {
+        if let Some(login) = &login {
+            if !login
+                .authorized(
+                    &mut *self.inner.db.acquire().await?,
+                    provider,
+                    Time::new(self.inner.clock.now()),
+                )
+                .await?
+            {
+                return Ok(Refreshed::Failed(
+                    "the accepted sign-in authority is no longer available".into(),
+                ));
+            }
+        }
         let mut observing =
             orch_db::queries::transaction_guard::scope(false, self.inner.db.begin()).await?;
         let Some(row) = resources::provider(&mut observing, provider)
@@ -546,6 +619,23 @@ impl Engine {
                 facts: facts_source,
             },
         )?;
+        let command = if let Some(login) = login {
+            if !login
+                .authorized(
+                    &mut *self.inner.db.acquire().await?,
+                    provider,
+                    Time::new(self.inner.clock.now()),
+                )
+                .await?
+            {
+                return Ok(Refreshed::Failed(
+                    "the accepted sign-in authority is no longer available".into(),
+                ));
+            }
+            command.with_login_authority(LoginCommandAuthority::refresh(provider, login))
+        } else {
+            command
+        };
         let asked = tokio::time::timeout(
             self.inner.config.start_timeout,
             crate::commands::run(self.inner.commands.as_ref(), command),
@@ -677,7 +767,7 @@ impl Engine {
         let may_verify = previous.as_ref().is_some_and(|row| {
             crate::provider_fact_reads::source_can_verify(&row.sources, row.agent_id.is_some())
         });
-        // Admission facts may hold otherwise ready access, regardless of credential kind or role.
+        // Preserve reported vendor quota as observational status, not a gate on work.
         // A missing sign-in keeps the keeper's reported state.
         // Balances and spend are information; neither closes a provider.
         let observed_status = if result.status == "ready"
@@ -1067,7 +1157,7 @@ impl From<&SignInValue> for Kept {
 }
 
 /// A sign-in that waits for the runtime: the method, what was given, and who began it.
-#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[derive(Clone, PartialEq, Serialize, Deserialize)]
 pub struct Pending {
     /// The adapter's own name for the way of signing in.
     pub method: String,
@@ -1080,6 +1170,17 @@ pub struct Pending {
     /// not.
     #[serde(default)]
     pub attempt: Id,
+    /// Exact accepted operation and credential, never target paths or reusable admission.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub authority: Option<orch_authz::CapturedOperation>,
+}
+
+impl std::fmt::Debug for Pending {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("Pending")
+            .field("attempt", &self.attempt)
+            .finish_non_exhaustive()
+    }
 }
 
 impl Pending {
@@ -1094,7 +1195,40 @@ impl Pending {
                 .collect(),
             by: Some(by),
             attempt: new_id(),
+            authority: None,
         }
+    }
+
+    /// Retains an operation already admitted by the shared producer.
+    pub fn with_authority(mut self, caller: &orch_authz::Caller) -> Result<Self, EngineError> {
+        // Inline creation is deferred owner work, as its Make job was before this
+        // boundary was retained. Browser As-admin is not lent to that continuation.
+        let caller = if caller.admitted_operation() == Some("ProviderCreate") {
+            caller.clone().with_admin_mode(false)
+        } else {
+            caller.clone()
+        };
+        let origin =
+            orch_authz::CapturedOperation::capture(&caller).map_err(EngineError::unreadable)?;
+        if !matches!(
+            origin.operation(),
+            "ProviderLoginStart.interactive" | "ProviderLoginStart.import" | "ProviderCreate"
+        ) || self.by != Some(origin.user())
+        {
+            return Err(EngineError::unreadable(
+                "a sign-in needs its actual start origin",
+            ));
+        }
+        self.authority = Some(origin);
+        Ok(self)
+    }
+
+    /// Private active origin, retained after the pending secret references are consumed.
+    pub fn authority_state(&self) -> Result<Option<Json>, EngineError> {
+        Ok(Some(serde_json::to_value(LoginAuthority {
+            attempt: self.attempt,
+            origin: self.authority.clone(),
+        })?))
     }
 
     /// The form it is kept in.
@@ -1200,17 +1334,27 @@ impl Engine {
 
     /// Ends a sign-in that cannot go on: what waited is forgotten with its secrets, and the state says
     /// why.
-    async fn give_up_sign_in(&self, provider: Id, why: &str) -> Result<(), EngineError> {
+    async fn give_up_sign_in(
+        &self,
+        provider: Id,
+        attempt: Option<Id>,
+        why: &str,
+    ) -> Result<(), EngineError> {
         let now = self.inner.clock.now();
         let mut tx = self.inner.db.begin().await?;
-        let method = match runtime_rows::lock(&mut tx, provider).await? {
-            Some(state) => state
-                .login_pending
-                .as_deref()
-                .and_then(|bytes| serde_json::from_slice::<Pending>(bytes).ok())
-                .map(|pending| pending.method),
-            None => None,
-        };
+        let pending = runtime_rows::lock(&mut tx, provider)
+            .await?
+            .and_then(|state| state.login_pending)
+            .map(|bytes| serde_json::from_slice::<Pending>(&bytes))
+            .transpose()?;
+        if attempt.is_some_and(|attempt| {
+            pending
+                .as_ref()
+                .is_none_or(|pending| pending.attempt != attempt)
+        }) {
+            return Ok(());
+        }
+        let method = pending.map(|pending| pending.method);
         runtime_rows::delete_login_secrets(&mut tx, provider, runtime_rows::LOGIN_SECRET_PREFIX)
             .await?;
         runtime_rows::clear_pending(&mut tx, provider).await?;
@@ -1221,6 +1365,71 @@ impl Engine {
         runtime_rows::set_login_state(&mut tx, provider, &heard(&failed, now), now).await?;
         tx.commit().await.map_err(orch_db::DbError::from)?;
         Ok(())
+    }
+
+    async fn note_pending_login(
+        &self,
+        provider: Id,
+        pending: &Pending,
+        state: &Json,
+    ) -> Result<bool, EngineError> {
+        let mut tx = self.inner.db.begin().await?;
+        runtime_rows::lock(&mut tx, provider).await?;
+        if !login_authority::pending_current(&mut tx, provider, pending).await? {
+            return Ok(false);
+        }
+        let now = self.inner.clock.now();
+        runtime_rows::set_login_state(&mut tx, provider, &heard(state, now), now).await?;
+        tx.commit().await.map_err(orch_db::DbError::from)?;
+        Ok(true)
+    }
+
+    async fn pending_sign_in_authorized(
+        &self,
+        provider: Id,
+        pending: &Pending,
+    ) -> Result<bool, EngineError> {
+        let mut conn = self.inner.db.acquire().await?;
+        if !login_authority::pending_current(&mut conn, provider, pending).await? {
+            return Ok(false);
+        }
+        if let Some(origin) = &pending.authority {
+            let active = LoginAuthority {
+                attempt: pending.attempt,
+                origin: Some(origin.clone()),
+            };
+            return active
+                .authorized(&mut conn, provider, Time::new(self.inner.clock.now()))
+                .await;
+        }
+        Ok(true)
+    }
+
+    async fn sign_in_origins_authorized(
+        &self,
+        conn: &mut orch_db::Conn,
+        provider: Id,
+        active: Option<&LoginAuthority>,
+        input: Option<&orch_authz::CapturedOperation>,
+    ) -> Result<bool, EngineError> {
+        if !orch_settings::provider_sign_in(conn, provider)
+            .await?
+            .allowed
+        {
+            return Ok(false);
+        }
+        let now = Time::new(self.inner.clock.now());
+        if let Some(active) = active {
+            if !active.authorized(conn, provider, now).await? {
+                return Ok(false);
+            }
+        }
+        if let Some(input) = input {
+            if !provider_login_authorized(conn, provider, input, now).await? {
+                return Ok(false);
+            }
+        }
+        Ok(true)
     }
 
     /// Gives the sign-in that waits to the harness of the provider's profile in its runtime, starting
@@ -1242,18 +1451,26 @@ impl Engine {
         else {
             return Ok(Delivered::Nothing);
         };
+        if !self.pending_sign_in_authorized(provider, &pending).await? {
+            let why = "the accepted sign-in authority is no longer available";
+            self.give_up_sign_in(provider, Some(pending.attempt), why)
+                .await?;
+            return Ok(Delivered::Refused(why.into()));
+        }
         let permitted =
             orch_settings::provider_sign_in(&mut *self.inner.db.acquire().await?, provider)
                 .await?
                 .allowed;
         if !permitted {
             let why = "provider.signin: the credential keeper has not permitted changes in the selected existing harness home";
-            self.give_up_sign_in(provider, why).await?;
+            self.give_up_sign_in(provider, Some(pending.attempt), why)
+                .await?;
             return Ok(Delivered::Refused(why.into()));
         }
         let Some(agent_id) = state.agent_id else {
             let why = "an API provider has no sign-in".to_owned();
-            self.give_up_sign_in(provider, &why).await?;
+            self.give_up_sign_in(provider, Some(pending.attempt), &why)
+                .await?;
             return Ok(Delivered::Refused(why));
         };
         let Some(machine) = self.runtime_machine(&state).await? else {
@@ -1261,8 +1478,8 @@ impl Engine {
                 Ok(started) => {
                     // The sign-in has begun, though the harness is not there to be told: the page shows
                     // it as starting while the runtime comes up.
-                    self.note_login(
-                        provider,
+                    self.note_pending_login(
+                        provider, &pending,
                         &serde_json::json!({
                             "state": "starting", "method": pending.method, "shows": [], "asks": null,
                             "expires_at": null, "error": null,
@@ -1277,7 +1494,8 @@ impl Engine {
                 Err(crate::provider_runtime::RuntimeError::Internal(error)) => Err(error),
                 Err(other) => {
                     let why = other.to_string();
-                    self.give_up_sign_in(provider, &why).await?;
+                    self.give_up_sign_in(provider, Some(pending.attempt), &why)
+                        .await?;
                     Ok(Delivered::Refused(why))
                 }
             };
@@ -1288,7 +1506,8 @@ impl Engine {
         };
         let Some(profile) = profile else {
             let why = "the profile whose harness holds the sign-in is not there".to_owned();
-            self.give_up_sign_in(provider, &why).await?;
+            self.give_up_sign_in(provider, Some(pending.attempt), &why)
+                .await?;
             return Ok(Delivered::Refused(why));
         };
         let key = HarnessKey {
@@ -1306,13 +1525,15 @@ impl Engine {
         match started {
             Err(_elapsed) => {
                 let why = "the harness did not start in time".to_owned();
-                self.give_up_sign_in(provider, &why).await?;
+                self.give_up_sign_in(provider, Some(pending.attempt), &why)
+                    .await?;
                 return Ok(Delivered::Refused(why));
             }
             Ok(Err(error)) => return Err(error),
             Ok(Ok(Started::Failed(outcome))) => {
                 let why = format!("the harness did not start: {}", failure_text(&outcome));
-                self.give_up_sign_in(provider, &why).await?;
+                self.give_up_sign_in(provider, Some(pending.attempt), &why)
+                    .await?;
                 return Ok(Delivered::Refused(why));
             }
             Ok(Ok(Started::Up)) => {}
@@ -1324,17 +1545,29 @@ impl Engine {
                 .unwrap_or(profile)
         };
         if let Err(why) = check_pending(&profile, &pending) {
-            self.give_up_sign_in(provider, &why).await?;
+            self.give_up_sign_in(provider, Some(pending.attempt), &why)
+                .await?;
             return Ok(Delivered::Refused(why));
         }
-        self.note_login(
-            provider,
-            &serde_json::json!({
-                "state": "starting", "method": pending.method, "shows": [], "asks": null,
-                "expires_at": null, "error": null,
-            }),
-        )
-        .await?;
+        if !self.pending_sign_in_authorized(provider, &pending).await? {
+            let why = "the accepted sign-in authority is no longer available";
+            self.give_up_sign_in(provider, Some(pending.attempt), why)
+                .await?;
+            return Ok(Delivered::Refused(why.into()));
+        }
+        if !self
+            .note_pending_login(
+                provider,
+                &pending,
+                &serde_json::json!({
+                    "state": "starting", "method": pending.method, "shows": [], "asks": null,
+                    "expires_at": null, "error": null,
+                }),
+            )
+            .await?
+        {
+            return Ok(Delivered::Nothing);
+        }
         let command = Outgoing::new(
             ids::derived(
                 "provider.login.start",
@@ -1356,33 +1589,34 @@ impl Engine {
                 config: state.config.clone(),
             },
         )?;
+        let command =
+            command.with_login_authority(LoginCommandAuthority::start(provider, &pending));
         let outcome = crate::commands::run(self.inner.commands.as_ref(), command).await?;
         // The harness has what it was given, or has refused it: either way nothing is kept.
         {
             let mut tx = self.inner.db.begin().await?;
+            runtime_rows::lock(&mut tx, provider).await?;
+            if !login_authority::pending_current(&mut tx, provider, &pending).await? {
+                return Ok(Delivered::Nothing);
+            }
             runtime_rows::delete_login_secrets(
                 &mut tx,
                 provider,
                 runtime_rows::LOGIN_SECRET_PREFIX,
             )
             .await?;
+            if !matches!(&outcome, Outcome::Succeeded(_)) {
+                let now = self.inner.clock.now();
+                let failed = serde_json::json!({"state":"failed", "method":pending.method,
+                    "shows":[], "asks":null, "expires_at":null, "error":failure_text(&outcome)});
+                runtime_rows::set_login_state(&mut tx, provider, &heard(&failed, now), now).await?;
+            }
             runtime_rows::clear_pending(&mut tx, provider).await?;
             tx.commit().await.map_err(orch_db::DbError::from)?;
         }
         match outcome {
             Outcome::Succeeded(_) => Ok(Delivered::Sent),
-            other => {
-                let why = failure_text(&other);
-                self.note_login(
-                    provider,
-                    &serde_json::json!({
-                        "state": "failed", "method": pending.method, "shows": [], "asks": null,
-                        "expires_at": null, "error": why,
-                    }),
-                )
-                .await?;
-                Ok(Delivered::Refused(why))
-            }
+            other => Ok(Delivered::Refused(failure_text(&other))),
         }
     }
 
@@ -1392,6 +1626,35 @@ impl Engine {
         &self,
         provider: Id,
         values: &BTreeMap<String, SignInValue>,
+    ) -> Result<Asked, EngineError> {
+        let active = LoginAuthority::load(&mut *self.inner.db.acquire().await?, provider).await?;
+        self.send_login_input_with_authority(provider, values, None, active)
+            .await
+    }
+
+    /// A request's actual Input origin stays separate from the original Start credential.
+    pub async fn send_login_input_authorized(
+        &self,
+        provider: Id,
+        values: &BTreeMap<String, SignInValue>,
+        origin: orch_authz::CapturedOperation,
+        active: Option<LoginAuthority>,
+    ) -> Result<Asked, EngineError> {
+        if origin.operation() != "ProviderLoginInput" {
+            return Ok(Asked::Refused(
+                "a sign-in answer needs its actual input origin".into(),
+            ));
+        }
+        self.send_login_input_with_authority(provider, values, Some(origin), active)
+            .await
+    }
+
+    async fn send_login_input_with_authority(
+        &self,
+        provider: Id,
+        values: &BTreeMap<String, SignInValue>,
+        origin: Option<orch_authz::CapturedOperation>,
+        active: Option<LoginAuthority>,
     ) -> Result<Asked, EngineError> {
         if !orch_settings::provider_sign_in(&mut *self.inner.db.acquire().await?, provider)
             .await?
@@ -1418,6 +1681,24 @@ impl Engine {
                 )
             })
             .collect();
+        // All target/harness waits have completed. Recheck each exact origin independently.
+        {
+            let mut conn = self.inner.db.acquire().await?;
+            if LoginAuthority::load(&mut conn, provider).await? != active
+                || !self
+                    .sign_in_origins_authorized(
+                        &mut conn,
+                        provider,
+                        active.as_ref(),
+                        origin.as_ref(),
+                    )
+                    .await?
+            {
+                return Ok(Asked::Refused(
+                    "the accepted sign-in authority is no longer available".into(),
+                ));
+            }
+        }
         let command = Outgoing::new(
             new_id(),
             machine,
@@ -1431,10 +1712,25 @@ impl Engine {
                 values: given,
             },
         )?;
+        let command = command.with_login_authority(LoginCommandAuthority::input(
+            provider,
+            active.clone(),
+            origin.clone(),
+        ));
         let outcome = crate::commands::run(self.inner.commands.as_ref(), command).await?;
-        let mut conn = self.inner.db.acquire().await?;
-        runtime_rows::delete_login_secrets(&mut conn, provider, runtime_rows::LOGIN_SECRET_PREFIX)
-            .await?;
+        let mut tx = self.inner.db.begin().await?;
+        runtime_rows::lock(&mut tx, provider).await?;
+        if LoginAuthority::load(&mut tx, provider).await? == active {
+            let refs: Vec<Id> = values
+                .values()
+                .filter_map(|value| match value {
+                    SignInValue::Secret(id) => Some(*id),
+                    SignInValue::Text(_) => None,
+                })
+                .collect();
+            runtime_rows::delete_login_secret_refs(&mut tx, provider, &refs).await?;
+        }
+        tx.commit().await.map_err(orch_db::DbError::from)?;
         Ok(match outcome {
             Outcome::Succeeded(_) => Asked::Done,
             other => Asked::Refused(failure_text(&other)),
@@ -1443,8 +1739,41 @@ impl Engine {
 
     /// Gives a sign-in up: what waited is forgotten, and a running one is told to stop.
     pub async fn cancel_sign_in(&self, provider: Id) -> Result<Asked, EngineError> {
+        self.cancel_sign_in_with_authority(provider, None).await
+    }
+
+    pub(crate) async fn cancel_sign_in_authorized(
+        &self,
+        provider: Id,
+        origin: orch_authz::CapturedOperation,
+    ) -> Result<Asked, EngineError> {
+        self.cancel_sign_in_with_authority(provider, Some(origin))
+            .await
+    }
+
+    async fn cancel_sign_in_with_authority(
+        &self,
+        provider: Id,
+        origin: Option<orch_authz::CapturedOperation>,
+    ) -> Result<Asked, EngineError> {
         {
             let mut tx = self.inner.db.begin().await?;
+            runtime_rows::lock(&mut tx, provider).await?;
+            if let Some(origin) = &origin {
+                if origin.operation() != "ProviderLoginCancel"
+                    || !provider_login_authorized(
+                        &mut tx,
+                        provider,
+                        origin,
+                        Time::new(self.inner.clock.now()),
+                    )
+                    .await?
+                {
+                    return Ok(Asked::Refused(
+                        "the cancellation authority is no longer available".into(),
+                    ));
+                }
+            }
             runtime_rows::delete_login_secrets(
                 &mut tx,
                 provider,
@@ -1452,6 +1781,7 @@ impl Engine {
             )
             .await?;
             runtime_rows::clear_pending(&mut tx, provider).await?;
+            runtime_rows::keep_login_authority(&mut tx, provider, None).await?;
             tx.commit().await.map_err(orch_db::DbError::from)?;
         }
         let (state, machine) = match self.sign_in_target(provider).await? {
@@ -1472,6 +1802,32 @@ impl Engine {
         let Some(agent_id) = state.agent_id else {
             return Ok(Asked::Done);
         };
+        {
+            let mut conn = self.inner.db.acquire().await?;
+            if LoginAuthority::load(&mut conn, provider).await?.is_some()
+                || runtime_rows::state(&mut conn, provider)
+                    .await?
+                    .is_some_and(|state| state.login_pending.is_some())
+            {
+                return Ok(Asked::Refused(
+                    "another sign-in replaced the cancelled attempt".into(),
+                ));
+            }
+            if let Some(origin) = &origin {
+                if !provider_login_authorized(
+                    &mut conn,
+                    provider,
+                    origin,
+                    Time::new(self.inner.clock.now()),
+                )
+                .await?
+                {
+                    return Ok(Asked::Refused(
+                        "the cancellation authority is no longer available".into(),
+                    ));
+                }
+            }
+        }
         let command = Outgoing::new(
             new_id(),
             machine,
@@ -1484,6 +1840,8 @@ impl Engine {
                 agent_id,
             },
         )?;
+        let command =
+            command.with_login_authority(LoginCommandAuthority::cancel(provider, origin.clone()));
         let outcome = crate::commands::run(self.inner.commands.as_ref(), command).await?;
         Ok(match outcome {
             Outcome::Succeeded(_) => Asked::Done,
@@ -1610,6 +1968,7 @@ impl Engine {
         for provider in overdue {
             self.give_up_sign_in(
                 provider,
+                None,
                 "the sign-in waited too long for the provider's runtime and was given up",
             )
             .await?;
@@ -1668,10 +2027,30 @@ impl Engine {
 
     /// Asks the harness what it holds after a sign-in completed, and notes that it was looked at.
     pub async fn look_at_completed_sign_in(&self, provider: Id) -> Result<Refreshed, EngineError> {
-        let looked = self.refresh_provider_now(provider).await?;
+        let active = LoginAuthority::load(&mut *self.inner.db.acquire().await?, provider).await?;
+        if let Some(active) = &active {
+            if !active
+                .authorized(
+                    &mut *self.inner.db.acquire().await?,
+                    provider,
+                    Time::new(self.inner.clock.now()),
+                )
+                .await?
+            {
+                return Ok(Refreshed::Failed(
+                    "the accepted sign-in authority is no longer available".into(),
+                ));
+            }
+        }
+        let looked =
+            Box::pin(self.read_provider_facts_inner(provider, true, false, active.clone())).await?;
         let now = self.inner.clock.now();
-        let mut conn = self.inner.db.acquire().await?;
-        runtime_rows::mark_looked_at(&mut conn, provider, now).await?;
+        let mut tx = self.inner.db.begin().await?;
+        runtime_rows::lock(&mut tx, provider).await?;
+        if LoginAuthority::load(&mut tx, provider).await? == active {
+            runtime_rows::mark_looked_at(&mut tx, provider, now).await?;
+        }
+        tx.commit().await.map_err(orch_db::DbError::from)?;
         Ok(looked)
     }
 
@@ -1928,6 +2307,15 @@ fn check_pending(profile: &AgentRow, pending: &Pending) -> Result<(), String> {
             pending.method
         ));
     };
+    if let Some(origin) = &pending.authority {
+        let expected = match method.kind {
+            orch_agent_contract::login::LoginKind::Import => "ProviderLoginStart.import",
+            orch_agent_contract::login::LoginKind::Interactive => "ProviderLoginStart.interactive",
+        };
+        if origin.operation() != "ProviderCreate" && origin.operation() != expected {
+            return Err("the declared sign-in method changed its operation".into());
+        }
+    }
     for name in pending.values.keys() {
         if !method.fields.iter().any(|field| &field.name == name) {
             return Err(format!("{name} is not asked for by this way of signing in"));

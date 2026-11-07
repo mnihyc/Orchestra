@@ -1,4 +1,5 @@
 //! The end of an entry closes the feed it gave before further content is sent.
+#![recursion_limit = "256"]
 #![allow(
     clippy::unwrap_used,
     clippy::expect_used,

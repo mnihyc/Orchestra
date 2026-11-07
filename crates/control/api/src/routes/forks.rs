@@ -13,7 +13,6 @@ use crate::middleware::requests::{ApiError, ApiResult};
 use crate::middleware::transaction_guard;
 use crate::registry::{Ctx, Registry};
 use crate::routes::environments::jobs as job_view;
-use crate::routes::nodes::view as node_view;
 use orch_access_contract::permissions::{ObjectKind, Permission, Profile};
 use orch_api_contract::access::PageProfile;
 use orch_api_contract::common::ErrorCode;
@@ -23,8 +22,7 @@ use orch_api_contract::forks::{
     ForkPlan, ForkRequest, ForkResult, ThreadForkCreate, ThreadForkNow, ThreadForkPreflight,
 };
 use orch_api_contract::threads::{
-    SideState, Thread, ThreadSideCreate, ThreadSideCreateBody, ThreadSideCreateReply,
-    ThreadSideList, ThreadSideListQuery,
+    SideState, Thread, ThreadSideCreate, ThreadSideList, ThreadSideListQuery,
 };
 use orch_api_contract::workspace::Job;
 use orch_authz::{Act, Policy, Principal, nodes};
@@ -36,17 +34,65 @@ use orch_engine::jobs::batch::{BatchDraft, counts_of, percent_of_batch};
 use orch_engine::side_threads::SideError;
 use orch_types::Id;
 
+mod batch_cancel;
+mod batch_confirmation;
+mod batch_preparation;
+mod batch_read;
+mod batch_reply;
+mod confirmation;
+mod immediate;
+mod job_reply;
+mod preparation;
+mod side_operation;
+
 /// Binds this module's requests.
 pub fn mount(registry: &mut Registry) {
     registry
-        .on(ThreadForkPreflight, preflight)
-        .on(ThreadForkCreate, create)
-        .on(ThreadForkNow, now)
-        .on(ForkBatchPreflight, batch_preflight)
-        .on(ForkBatchCreate, batch_create)
-        .on(ForkBatchGet, batch_get)
-        .on(ForkBatchCancel, batch_cancel)
-        .on(ThreadSideCreate, side_create)
+        .on_with_initial_operation(
+            ThreadForkPreflight,
+            crate::key_operations::native::effects::initial::<preparation::Preview>,
+            preparation::prepare,
+            preparation::run,
+        )
+        .on_with_initial_operation(
+            ThreadForkCreate,
+            crate::key_operations::native::effects::initial::<confirmation::Create>,
+            confirmation::prepare,
+            confirmation::run,
+        )
+        .on_with_initial_operation(
+            ThreadForkNow,
+            crate::key_operations::native::effects::initial::<immediate::Now>,
+            immediate::prepare,
+            immediate::run,
+        )
+        .on_with_initial_operation(
+            ForkBatchPreflight,
+            crate::key_operations::native::effects::initial::<batch_preparation::Preview>,
+            batch_preparation::prepare,
+            batch_preparation::run,
+        )
+        .on_with_initial_operation(
+            ForkBatchCreate,
+            crate::key_operations::native::effects::initial::<batch_confirmation::Create>,
+            batch_confirmation::prepare,
+            batch_confirmation::run,
+        )
+        .on_snapshot_read_with_optional_operation(
+            ForkBatchGet,
+            crate::key_operations::native::selected::<batch_read::Batch>,
+            crate::key_operations::native::selected_read::<batch_read::Batch>,
+        )
+        .on_with_optional_operation(
+            ForkBatchCancel,
+            crate::key_operations::native::stored_deferred::<batch_cancel::Cancel, (), ()>,
+            batch_cancel::run,
+        )
+        .on_with_operation(
+            ThreadSideCreate,
+            crate::key_operations::native::effects::prepare::<side_operation::Create>,
+            side_operation::run,
+        )
         .on(ThreadSideList, side_list);
 }
 
@@ -105,6 +151,7 @@ async fn plan_failed(conn: &mut Conn, error: PlanError) -> ApiError {
             )
             .with("blockers", &draft.plan.blockers)
         }
+        PlanError::AgentAccess(error) => crate::routes::share::failed(conn, *error).await,
         PlanError::Internal(error) => ApiError::engine(error),
     }
 }
@@ -167,161 +214,79 @@ async fn complete(
         },
     )
     .collect();
-    Ok(())
-}
-
-/// Plans a fork or a switch of a thread, and keeps the plan for the minutes it is good for.
-async fn preflight(ctx: Ctx, (): (), request: ForkRequest) -> ApiResult<ForkPlan> {
-    let thread = ctx.id("id")?;
-    let caller = authorization::caller_of(ctx.user()?)?;
-    let drafted = ctx.app.engine.draft_fork(&caller, thread, &request).await;
-    let mut conn = ctx.app.db.acquire().await?;
-    let mut draft = match drafted {
-        Ok(draft) => draft,
-        Err(error) => return Err(plan_failed(&mut conn, error).await),
-    };
-    let principal = authorization::principal(&ctx, &mut conn).await?;
-    let topic = thread_rows::thread(&mut conn, thread)
-        .await?
-        .map(|row| row.topic_id)
-        .ok_or_else(ApiError::not_found)?;
-    complete(&mut conn, &principal, &mut draft, topic).await?;
-    drop(conn);
-    ctx.app
-        .engine
-        .keep_fork_plan(&caller, draft)
-        .await
-        .map_err(ApiError::internal)
-}
-
-/// Carries out a plan: the job is made and, for a switch, the thread is held, in one transaction.
-async fn create(ctx: Ctx, (): (), body: ForkCreateBody) -> ApiResult<Job> {
-    let thread = ctx.id("id")?;
-    // The plan is confirmed in the transaction of the action guard, which asked the caller again.
-    let (tx, guard) = transaction_guard::begin(&ctx).await?;
-    let made = ctx
-        .app
-        .engine
-        .confirm_fork_guarded(tx, guard.into_principal(), thread, &body)
-        .await;
-    let mut conn = ctx.app.db.acquire().await?;
-    match made {
-        Ok(row) => job_view::view(&mut conn, &row).await,
-        Err(error) => Err(plan_failed(&mut conn, error).await),
+    if draft.plan.result == ForkResult::New {
+        let destination = draft.request.topic_id.unwrap_or(topic);
+        let copy_from = orch_engine::jobs::fork::fork_page_source(
+            draft.plan.source.id,
+            draft.request.access.as_ref(),
+        );
+        if let Some(source) = copy_from.filter(|source| *source != draft.plan.source.id) {
+            // The ordinary planner requires ThreadManage to carry another thread's page.
+            // A blocked plan may still be shown, but cannot reveal bounds derived from
+            // that unadmitted page through this optional metadata.
+            match nodes::check(
+                conn,
+                principal,
+                source,
+                Permission::ThreadManage,
+                Act::Use,
+                Policy::default(),
+            )
+            .await
+            {
+                Ok(decision) if decision.is_allowed() => {}
+                Ok(_) => return Ok(()),
+                Err(error) => {
+                    return Err(authorization::engine_problem(conn, principal, error).await);
+                }
+            }
+        }
+        let page = orch_engine::jobs::fork::fork_page(draft.request.access.as_ref());
+        let environment = match &draft.plan.to.environment {
+            orch_api_contract::forks::ForkPlanTarget::Existing(environment) => Some(
+                orch_db::queries::environments::thread_engine::environment(conn, environment.id)
+                    .await?
+                    .ok_or_else(ApiError::not_found)?,
+            ),
+            // The normal fork plan's new hosted environment has the managed placement.
+            orch_api_contract::forks::ForkPlanTarget::Made { .. } => None,
+        };
+        draft.plan.agent_access = Some(
+            super::threads::binding::creation::existing_topic(
+                conn,
+                principal,
+                destination,
+                page.as_ref(),
+                copy_from,
+                environment.as_ref(),
+            )
+            .await?,
+        );
     }
-}
-
-/// Forks a thread with nothing to choose, in one request: planned with the source's topic, environment,
-/// provider, profile and model and all of its history (or the history up to a turn, from a message), and carried
-/// out at once. A plan that something stops is refused as it would be on confirmation, and the person plans it
-/// instead.
-async fn now(ctx: Ctx, (): (), body: ForkNowBody) -> ApiResult<ForkNowReply> {
-    let thread = ctx.id("id")?;
-    let caller = authorization::caller_of(ctx.user()?)?;
-    let request = ForkRequest {
-        result: ForkResult::New,
-        topic_id: None,
-        name: body.name,
-        access: None,
-        history: body
-            .to_turn
-            .map(|to_turn| orch_api_contract::forks::ForkHistory {
-                mode: orch_api_contract::forks::HistoryMode::Range,
-                from_turn: None,
-                to_turn: Some(to_turn),
-            }),
-        to: None,
-        environment: None,
-        worktree: None,
-        files_at: None,
-        memory: None,
-        directory: None,
-        cwd: None,
-        options: None,
-        check_fingerprints: None,
-        fingerprint_request_id: None,
-        mounts: None,
-    };
-    let drafted = ctx.app.engine.draft_fork(&caller, thread, &request).await;
-    let mut conn = ctx.app.db.acquire().await?;
-    let mut draft = match drafted {
-        Ok(draft) => draft,
-        Err(error) => return Err(plan_failed(&mut conn, error).await),
-    };
-    let principal = authorization::principal(&ctx, &mut conn).await?;
-    let topic = thread_rows::thread(&mut conn, thread)
-        .await?
-        .map(|row| row.topic_id)
-        .ok_or_else(ApiError::not_found)?;
-    complete(&mut conn, &principal, &mut draft, topic).await?;
-    drop(conn);
-    let plan = ctx
-        .app
-        .engine
-        .keep_fork_plan(&caller, draft)
-        .await
-        .map_err(ApiError::internal)?;
-    let (tx, guard) = transaction_guard::begin(&ctx).await?;
-    let made = ctx
-        .app
-        .engine
-        .confirm_fork_guarded(
-            tx,
-            guard.into_principal(),
-            thread,
-            &ForkCreateBody {
-                notify: None,
-                preflight_id: plan.preflight_id,
-                options: None,
-            },
-        )
-        .await;
-    let mut conn = ctx.app.db.acquire().await?;
-    let row = match made {
-        Ok(row) => row,
-        Err(error) => return Err(plan_failed(&mut conn, error).await),
-    };
-    let thread_id = row
-        .plan
-        .get("new_thread")
-        .and_then(|id| id.as_str())
-        .and_then(|id| id.parse::<Id>().ok())
-        .ok_or_else(|| ApiError::internal("a fork's job names no thread it makes"))?;
-    Ok(ForkNowReply {
-        job: job_view::view(&mut conn, &row).await?,
-        thread_id,
-    })
+    Ok(())
 }
 
 // ---------------------------------------------------------------- several
 
 /// Plans a switch of several threads together, and keeps the plan.
-async fn batch_preflight(
-    ctx: Ctx,
-    (): (),
-    body: ForkBatchPreflightBody,
-) -> ApiResult<ForkBatchPlan> {
-    let caller = authorization::caller_of(ctx.user()?)?;
-    let drafted = ctx.app.engine.draft_batch(&caller, &body).await;
-    let mut conn = ctx.app.db.acquire().await?;
-    let mut draft: BatchDraft = match drafted {
-        Ok(draft) => draft,
-        Err(error) => return Err(plan_failed(&mut conn, error).await),
-    };
-    let principal = authorization::principal(&ctx, &mut conn).await?;
+async fn complete_batch(
+    conn: &mut Conn,
+    principal: &Principal,
+    draft: &mut BatchDraft,
+) -> ApiResult<()> {
     // The page of the result is told once for each place and profile.
     let mut summaries: Vec<((Id, PageProfile), orch_api_contract::access::AccessSummary)> =
         Vec::new();
     for (index, plan) in draft.plan.plans.iter_mut().enumerate() {
         for (blocker_index, missing) in draft.lacks.get(index).cloned().unwrap_or_default() {
-            let named = refusals::missing_access(&mut conn, &missing).await?;
+            let named = refusals::missing_access(conn, &missing).await?;
             if let Some(blocker) = plan.blockers.get_mut(blocker_index) {
                 blocker.missing = Some(named);
             }
         }
         let thread = draft.members.get(index).map(|member| member.thread);
         let Some(thread) = thread else { continue };
-        let topic = thread_rows::thread(&mut conn, thread)
+        let topic = thread_rows::thread(conn, thread)
             .await?
             .map(|row| row.topic_id)
             .ok_or_else(ApiError::not_found)?;
@@ -334,8 +299,8 @@ async fn batch_preflight(
                     PageProfile::Connected => Profile::Connected,
                 };
                 let summary = super::threads::binding::summary_of(
-                    &mut conn,
-                    &principal,
+                    conn,
+                    principal,
                     topic,
                     ObjectKind::Thread,
                     profile,
@@ -347,12 +312,7 @@ async fn batch_preflight(
         };
         plan.access.summary = summary;
     }
-    drop(conn);
-    ctx.app
-        .engine
-        .keep_batch_plan(&caller, draft)
-        .await
-        .map_err(ApiError::internal)
+    Ok(())
 }
 
 /// The batch as the caller sees it: the jobs of the threads they may view, and a count of the others.
@@ -365,65 +325,15 @@ async fn batch_view(
         .first()
         .and_then(|row| row.batch_id)
         .ok_or_else(ApiError::not_found)?;
-    let mut jobs = Vec::new();
-    let mut hidden = 0_i64;
-    for row in rows {
-        let Some(thread) = row.node_id else {
-            continue;
-        };
-        let may_view = matches!(
-            nodes::check(
-                conn,
-                principal,
-                thread,
-                Permission::ThreadView,
-                Act::Use,
-                Policy::default(),
-            )
-            .await,
-            Ok(orch_access_contract::decisions::Decision::Allowed { .. })
-                | Err(orch_authz::Error::Archived { .. })
-        );
-        if !may_view {
-            hidden += 1;
-            continue;
-        }
-        let named = node_view::refs(conn, principal, &[thread], Policy::default()).await?;
-        let Some(thread) = named.get(&thread).cloned() else {
-            hidden += 1;
-            continue;
-        };
-        jobs.push(ForkBatchJob {
-            thread,
-            job: job_view::view(conn, row).await?,
-        });
-    }
-    Ok(ForkBatch {
+    batch_read::view(
+        conn,
+        principal,
         batch_id,
-        jobs,
-        percent: percent_of_batch(rows),
-        hidden,
-        counts: counts_of(rows),
-    })
-}
-
-/// Carries out the plan of a batch: one job for each plan without blockers, all locked at once.
-async fn batch_create(ctx: Ctx, (): (), body: ForkCreateBody) -> ApiResult<ForkBatch> {
-    let caller = authorization::caller_of(ctx.user()?)?;
-    let made = ctx.app.engine.confirm_batch(&caller, &body).await;
-    let mut conn = ctx.app.db.acquire().await?;
-    let (batch, _) = match made {
-        Ok(made) => made,
-        Err(error) => return Err(plan_failed(&mut conn, error).await),
-    };
-    let rows = ctx
-        .app
-        .engine
-        .batch_jobs(batch)
-        .await
-        .map_err(ApiError::internal)?;
-    let principal = authorization::principal(&ctx, &mut conn).await?;
-    batch_view(&mut conn, &principal, &rows).await
+        rows,
+        &crate::routes::access::page::NameBounds::default(),
+        None,
+    )
+    .await
 }
 
 /// Whether the caller may read a batch: they made it, or manage a thread it lists.
@@ -454,14 +364,6 @@ async fn may_read_batch(conn: &mut Conn, principal: &Principal, rows: &[JobRow])
     Err(ApiError::not_found())
 }
 
-/// Reads where a batch stands.
-async fn batch_get(ctx: Ctx, (): (), (): ()) -> ApiResult<ForkBatch> {
-    let batch = ctx.id("batch_id")?;
-    let mut conn = ctx.app.db.acquire().await?;
-    let principal = authorization::principal(&ctx, &mut conn).await?;
-    read_batch_for(&mut conn, &principal, batch).await
-}
-
 /// The batch's creator/manager admission and visible members, shared by HTTP and live delivery.
 pub(crate) async fn read_batch_for(
     conn: &mut Conn,
@@ -474,32 +376,6 @@ pub(crate) async fn read_batch_for(
     }
     may_read_batch(conn, principal, &rows).await?;
     batch_view(conn, principal, &rows).await
-}
-
-/// Cancels the jobs of a batch that have not passed their commit; its creator's alone.
-async fn batch_cancel(ctx: Ctx, (): (), (): ()) -> ApiResult<ForkBatch> {
-    let batch = ctx.id("batch_id")?;
-    let rows = ctx
-        .app
-        .engine
-        .batch_jobs(batch)
-        .await
-        .map_err(ApiError::internal)?;
-    let mut conn = ctx.app.db.acquire().await?;
-    let principal = authorization::principal(&ctx, &mut conn).await?;
-    if !rows
-        .first()
-        .is_some_and(|row| row.created_by == Some(principal.user()))
-    {
-        return Err(ApiError::not_found());
-    }
-    let rows = ctx
-        .app
-        .engine
-        .cancel_batch(principal.user(), batch)
-        .await
-        .map_err(ApiError::internal)?;
-    batch_view(&mut conn, &principal, &rows).await
 }
 
 // ---------------------------------------------------------------- side threads
@@ -547,33 +423,7 @@ async fn side_failed(conn: &mut Conn, parent: Id, error: SideError) -> ApiError 
     }
 }
 
-/// Starts a side thread of a thread with a message queued in it, in one transaction.
-async fn side_create(
-    ctx: Ctx,
-    (): (),
-    body: ThreadSideCreateBody,
-) -> ApiResult<ThreadSideCreateReply> {
-    let parent = ctx.id("id")?;
-    let caller = authorization::caller_of(ctx.user()?)?;
-    let started = ctx
-        .app
-        .engine
-        .start_side_thread(&caller, parent, body.content, body.client_id, body.to_turn)
-        .await;
-    let mut conn = ctx.app.db.acquire().await?;
-    let started = match started {
-        Ok(started) => started,
-        Err(error) => return Err(side_failed(&mut conn, parent, error).await),
-    };
-    let thread: Thread = one(&ctx, &mut conn, started.thread).await?;
-    Ok(ThreadSideCreateReply {
-        thread,
-        input: started.submitted.input,
-        seq: started.submitted.seq,
-    })
-}
-
-/// Lists the side threads of a thread, oldest first.
+/// Lists the actual native side threads as the caller sees them.
 async fn side_list(ctx: Ctx, query: ThreadSideListQuery, (): ()) -> ApiResult<Vec<Thread>> {
     let parent = ctx.id("id")?;
     let closed = matches!(query.state, Some(SideState::Closed));

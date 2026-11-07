@@ -56,13 +56,23 @@ async fn set_limits(
     closed: Option<bool>,
     flat: Option<bool>,
 ) -> orch_api_core::testing::Reply<Org> {
-    world
+    let reply = world
         .app
         .call(AdminOrgUpdate, &[&org])
         .token(&by.token)
         .body(&OrgLimitsChange { closed, flat })
         .send()
-        .await
+        .await;
+    orch_api_core::testing::Reply {
+        status: reply.status,
+        headers: reply.headers,
+        raw: reply.raw,
+        body: reply.body.map(|value| {
+            value
+                .into_full()
+                .expect("ordinary administrative organization content")
+        }),
+    }
 }
 
 #[tokio::test]

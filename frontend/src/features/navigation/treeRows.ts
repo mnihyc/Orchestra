@@ -531,9 +531,9 @@ export function firstExpanded(tree: OrgTree): string[] {
 }
 
 /**
- * The places that are open and say they hold documents, each with how many and the stamp of its row, as `id:count:seq`,
+ * The places that are open and say they hold documents, each with how many and its document namespace stamp, as `id:count:seq`,
  * sorted: what the tree asks the documents of. A document made, renamed, moved or deleted stamps its place, so a new
- * stamp reads them again even where the count stays. The place the tree begins at is always among them where it holds
+ * namespace stamp reads them again even where the count stays. The place the tree begins at is always among them where it holds
  * any: it is no row, and its documents stand at the tree's own level.
  */
 export function placesWithDocs(tree: OrgTree, rootId: string, expanded: ReadonlySet<string>, threads = true): string {
@@ -541,7 +541,7 @@ export function placesWithDocs(tree: OrgTree, rootId: string, expanded: Readonly
   for (const id of new Set([rootId, ...expanded])) {
     const node = tree.nodes.get(id);
     // A thread that is out of the tree shows no documents either.
-    if (node !== undefined && !node.deleted && node.docs > 0 && (threads || node.kind !== 'thread')) wanted.push(`${id}:${node.docs}:${node.tree_seq}`);
+    if (node !== undefined && !node.deleted && node.docs > 0 && (threads || node.kind !== 'thread')) wanted.push(`${id}:${node.docs}:${node.docs_seq}`);
   }
   return wanted.sort().join(',');
 }

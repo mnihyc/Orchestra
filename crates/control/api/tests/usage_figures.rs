@@ -28,6 +28,7 @@ fn query(scope: &str) -> UsageGetQuery {
         measure: None,
         effort: None,
         tier: None,
+        tier_unknown: None,
         program: None,
         outcome: None,
         scope: scope.to_owned(),
@@ -54,6 +55,7 @@ fn events_query(scope: &str) -> UsageEventListQuery {
         org_id: None,
         effort: None,
         tier: None,
+        tier_unknown: None,
         program: None,
         outcome: None,
         include_running: None,
@@ -106,6 +108,33 @@ async fn measured_spend_at(
     at: chrono::DateTime<Utc>,
 ) {
     use orch_api_contract::usage::{RequestSample, UsageMeasurement};
+    let first_at = first.map(|ms| orch_types::Time::new(at + Duration::milliseconds(ms)));
+    let end = first_at
+        .zip(generation)
+        .map(|(first, ms)| orch_types::Time::new(first.get() + Duration::milliseconds(ms)));
+    let timing = orch_api_contract::performance::request_timing(&RequestSample {
+        asked: Some(at.into()),
+        first_output: first_at,
+        end,
+        output_tokens: Some(output),
+        output_streamed: generation.map(|_| true),
+        outcome: UsageMeasurement::Told {
+            value: outcome.into(),
+        },
+        error_message: (outcome == "provider_busy").then(|| "Rate limited".into()),
+        vendor_words: (outcome == "provider_busy").then(|| "Too many requests".into()),
+        ..Default::default()
+    });
+    record_measured_spend(world, team, output, at, timing).await;
+}
+
+async fn record_measured_spend(
+    world: &World,
+    team: &Team,
+    output: i64,
+    at: chrono::DateTime<Utc>,
+    timing: orch_api_contract::usage::RequestTiming,
+) {
     use orch_db::usage::ledger::{self, Attribution, NewEvent, Tokens};
     let attribution = Attribution {
         org_id: team.acme,
@@ -126,23 +155,6 @@ async fn measured_spend_at(
         effort: Some("high".into()),
         params: serde_json::json!({"cyber_access_program":"research"}),
     };
-    let first_at = first.map(|ms| orch_types::Time::new(at + Duration::milliseconds(ms)));
-    let end = first_at
-        .zip(generation)
-        .map(|(first, ms)| orch_types::Time::new(first.get() + Duration::milliseconds(ms)));
-    let timing = orch_api_contract::performance::request_timing(&RequestSample {
-        asked: Some(at.into()),
-        first_output: first_at,
-        end,
-        output_tokens: Some(output),
-        output_streamed: generation.map(|_| true),
-        outcome: UsageMeasurement::Told {
-            value: outcome.into(),
-        },
-        error_message: (outcome == "provider_busy").then(|| "Rate limited".into()),
-        vendor_words: (outcome == "provider_busy").then(|| "Too many requests".into()),
-        ..Default::default()
-    });
     let mut conn = world.conn().await;
     ledger::record_program(
         &mut conn,
@@ -156,9 +168,21 @@ async fn measured_spend_at(
             model: "perf-model",
             tier: Some("fast"),
             tokens: Tokens {
-                input: 100,
-                cached_input: 0,
-                cache_write: 0,
+                input: timing
+                    .reported_tokens
+                    .as_ref()
+                    .and_then(|tokens| tokens.input_tokens)
+                    .unwrap_or(100),
+                cached_input: timing
+                    .reported_tokens
+                    .as_ref()
+                    .and_then(|tokens| tokens.cached_input_tokens)
+                    .unwrap_or(0),
+                cache_write: timing
+                    .reported_tokens
+                    .as_ref()
+                    .and_then(|tokens| tokens.cache_write_tokens)
+                    .unwrap_or(0),
                 output,
                 reasoning: 0,
                 total: 100 + output,
@@ -1406,4 +1430,110 @@ async fn provider_totals_include_hidden_places_while_only_managers_can_list_thei
             .is_some_and(|thread| thread.redacted && thread.name.is_none())),
         "nothing of where the use was is shown to somebody who cannot see it"
     );
+}
+
+#[tokio::test]
+async fn refined_failure_filters_and_csv_keep_original_request_facts() {
+    use orch_api_contract::usage::{
+        RequestTiming, RequestTokens, UsageMeasurement, UsageOutcomeFilter,
+    };
+    let world = World::new().await;
+    let team = team(&world).await;
+    let at = world.now() - Duration::hours(1);
+    for (code, status, reason) in [
+        ("rate_limited", 429, None),
+        ("overloaded", 503, None),
+        ("stream_interrupted", 200, None),
+        ("model_refused", 403, Some("cyber")),
+    ] {
+        let timing = RequestTiming {
+            outcome: UsageMeasurement::Told { value: code.into() },
+            upstream_status: Some(status),
+            attempt: Some(3),
+            error_reason: reason.map(str::to_owned),
+            provider_request_id: Some(format!("provider-{code}")),
+            reported_tokens: Some(RequestTokens {
+                input_tokens: Some(100),
+                cached_input_tokens: Some(20),
+                cache_write_tokens: Some(10),
+                output_tokens: Some(10),
+                total_tokens: Some(110),
+                ..Default::default()
+            }),
+            web_searches: UsageMeasurement::Told { value: 2 },
+            requested_service_tier: Some("priority".into()),
+            reported_service_tier: UsageMeasurement::Told {
+                value: "default".into(),
+            },
+            ..Default::default()
+        };
+        record_measured_spend(&world, &team, 10, at, timing).await;
+    }
+    for outcome in [
+        UsageOutcomeFilter::RateLimited,
+        UsageOutcomeFilter::Overloaded,
+        UsageOutcomeFilter::StreamInterrupted,
+        UsageOutcomeFilter::ModelRefused,
+    ] {
+        let mut asked = events_query(&format!("node:{}", team.project));
+        asked.outcome = Some(outcome);
+        let page = world
+            .app
+            .call(UsageEventList, &[])
+            .token(&team.admin.token)
+            .query(&asked)
+            .send()
+            .await
+            .ok();
+        assert_eq!(page.items.len(), 1);
+        assert_eq!(
+            page.items[0].timing.outcome.value().map(String::as_str),
+            outcome.code()
+        );
+    }
+    let response = world
+        .app
+        .call(UsageEventList, &[])
+        .token(&team.admin.token)
+        .header("accept", "text/csv")
+        .query(&events_query(&format!("node:{}", team.project)))
+        .send_bytes()
+        .await;
+    let csv = String::from_utf8(response.raw.to_vec()).unwrap();
+    let lines: Vec<_> = csv.lines().collect();
+    let columns: Vec<_> = lines[0].split(',').collect();
+    let index = |name| columns.iter().position(|column| *column == name).unwrap();
+    for name in [
+        "error_reason",
+        "upstream_status",
+        "attempt",
+        "provider_request_id",
+        "thread_owner_id",
+        "cache_write_tokens",
+        "uncached_input_tokens",
+        "web_searches",
+        "requested_service_tier",
+        "reported_service_tier",
+        "tool_calls",
+        "tool_ms",
+    ] {
+        index(name);
+    }
+    let line = lines
+        .iter()
+        .skip(1)
+        .find(|line| line.split(',').nth(index("outcome")) == Some("model_refused"))
+        .unwrap();
+    let value = |name| line.split(',').nth(index(name)).unwrap();
+    assert_eq!(value("error_reason"), "cyber");
+    assert_eq!(value("upstream_status"), "403");
+    assert_eq!(value("attempt"), "3");
+    assert_eq!(value("provider_request_id"), "provider-model_refused");
+    assert_eq!(value("cache_write_tokens"), "10");
+    assert_eq!(value("uncached_input_tokens"), "70");
+    assert_eq!(value("web_searches"), "2");
+    assert_eq!(value("requested_service_tier"), "priority");
+    assert_eq!(value("reported_service_tier"), "default");
+    assert_eq!(value("tool_calls"), "");
+    assert_eq!(value("tool_ms"), "");
 }

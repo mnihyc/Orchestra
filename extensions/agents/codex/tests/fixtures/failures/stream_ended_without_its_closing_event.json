@@ -49,5 +49,5 @@
   {"method":"error","params":{"error":{"message":"stream disconnected before completion: stream closed before response.completed","codexErrorInfo":"other","additionalDetails":null,"misalignment":null},"willRetry":false,"threadId":"01a12f91-3e33-74c1-b6d7-f4c50a6b2180","turnId":"01a12f91-3e70-7371-be77-4d2f285052b4"},"emittedAtMs":1791799416921},
   {"method":"turn/completed","params":{"threadId":"01a12f91-3e33-74c1-b6d7-f4c50a6b2180","turn":{"id":"01a12f91-3e70-7371-be77-4d2f285052b4","rootTurnId":"01a12f91-3e70-7371-be77-4d2f285052b4","items":[],"itemsView":"notLoaded","status":"failed","error":{"message":"stream disconnected before completion: stream closed before response.completed","codexErrorInfo":"other","additionalDetails":null,"misalignment":null},"startedAt":1791799410,"completedAt":1791799416,"durationMs":6619}},"emittedAtMs":1791799416928}
  ],
- "expect": {"outcome": "failed", "code": "provider_unreachable", "retryable": true, "incomplete": true, "resets_at": null, "row": "out_of_reach", "said_contains": "stream closed before response.completed"}
+ "expect": {"outcome": "failed", "code": "stream_interrupted", "retryable": true, "incomplete": true, "resets_at": null, "row": "out_of_reach", "said_contains": "stream closed before response.completed"}
 }

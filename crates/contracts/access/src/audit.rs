@@ -427,6 +427,11 @@ audit_actions! {
         ShareFileDownloaded = "share.file_downloaded", trail, "An agent fetched a file of what was shared with it.";
         ChatPostedByAgent = "chat.posted_by_agent", trail, "An agent wrote in a chat.";
         ThreadSentByAgent = "thread.sent_by_agent", trail, "An agent sent a message to another thread.";
+        ThreadArchivedByAgent = "thread.archived_by_agent", line, "An agent archived a thread.";
+        ThreadUnarchivedByAgent = "thread.unarchived_by_agent", line, "An agent brought a thread back from the archive.";
+        ThreadForkedByAgent = "thread.forked_by_agent", line, "An agent forked a thread for its giver.";
+        ThreadDeletedByAgent = "thread.deleted_by_agent", line, "An agent deleted a thread.";
+        ChatMessageDeletedByAgent = "chat.message_deleted_by_agent", line, "An agent deleted a chat message.";
         ChatAgentPostingAllowed = "chat.agent_posting_allowed", line, "The act chat agent posting allowed was recorded.";
         ChatAgentPostingStopped = "chat.agent_posting_stopped", line, "The act chat agent posting stopped was recorded.";
     }
@@ -487,6 +492,7 @@ impl AuditAction {
             | Self::TemplateCreated
             | Self::ThreadCreated
             | Self::ThreadForked
+            | Self::ThreadForkedByAgent
             | Self::ThreadGoalSet
             | Self::UsageCapCreated
             | Self::UserRegistered
@@ -553,6 +559,8 @@ impl AuditAction {
             | Self::TemplateUpdated
             | Self::ThreadLinksChanged
             | Self::ThreadMoved
+            | Self::ThreadArchivedByAgent
+            | Self::ThreadUnarchivedByAgent
             | Self::ThreadGoalChanged
             | Self::TopicStatusChanged
             | Self::UsageCapUpdated
@@ -563,6 +571,8 @@ impl AuditAction {
             | Self::BrowserProfileDeleted
             | Self::ChannelDeleted
             | Self::ChatMessageDeleted
+            | Self::ChatMessageDeletedByAgent
+            | Self::ThreadDeletedByAgent
             | Self::DestinationDeleted
             | Self::DocumentCommentDeleted
             | Self::DocumentDeleted
@@ -787,7 +797,12 @@ impl AuditAction {
             | Self::ShareSearchedByAgent
             | Self::ShareFileDownloaded
             | Self::ChatPostedByAgent
-            | Self::ThreadSentByAgent => Some(ActorKind::Agent),
+            | Self::ThreadSentByAgent
+            | Self::ThreadArchivedByAgent
+            | Self::ThreadUnarchivedByAgent
+            | Self::ThreadForkedByAgent
+            | Self::ThreadDeletedByAgent
+            | Self::ChatMessageDeletedByAgent => Some(ActorKind::Agent),
             Self::UsageCapReached | Self::ThreadGoalEnded => Some(ActorKind::System),
             _ => None,
         }

@@ -22,7 +22,7 @@ vi.mock('@/ui/UserChip',()=>({UserChip:({user}:{user:{display_name:string}})=><s
 const mount=():Mount=>({id:'notes',name:'shared-notes',address:'team.shared-notes',description:'A host directory, read-only',org_id:'org',home:null,owner:null,
   target:'/mnt/notes',read_only:true,enabled:true,default_fate:'as_is',locations:[],locations_hidden:0,kept:[],revision:1,
   access:{permissions:['mount.view'],administers:false,participating:true,admin_only:[],through:[]}});
-const machine=(id:string,name:string,permissions:string[]):Machine=>({id,name,placement:'connected',online:true,platform_os:'linux',owner:null,
+const machine=(id:string,name:string,permissions:string[]):Machine=>({revision:1,id,name,placement:'connected',online:true,platform_os:'linux',owner:null,
   platform_arch:'x86_64',connector_version:'1.0.0',protocol_version:1,roles:['environment'],status:'active',last_seen_at:null,last_ip:null,
   cert_not_after:'2027-01-01T00:00:00Z',facts:{environment_descriptor:{data_storage:{made_by_orch:'directory',existing_directory:true,reason:null}}},providers:[],agents:[],environments:[],environment_sandboxes:[],
   access:{permissions,administers:false,participating:true,admin_only:[],through:[]}});

@@ -290,6 +290,7 @@ impl Scripted {
         self.turns += 1;
         self.adapter
             .start_turn(TurnStart {
+                native_wake: None,
                 plan: false,
                 thread_id: self.thread,
                 turn_id: id,

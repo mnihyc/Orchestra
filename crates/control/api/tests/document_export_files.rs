@@ -43,6 +43,8 @@ async fn put_file(desk: &Desk, by: &Who, document: Id, name: &str, bytes: &[u8])
         .send()
         .await
         .ok()
+        .into_full()
+        .expect("this native creation control requires its full response")
 }
 
 /// A document that shows a picture and names a file of notes.

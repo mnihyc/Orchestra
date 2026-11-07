@@ -179,7 +179,7 @@ mount -o loop,noatime "$file" "$data"
 pub struct Ran {
     /// The program's exit status.
     pub status: i64,
-    /// What it printed, both streams, cut to [`OUTPUT_BYTES`].
+    /// What it printed, both streams, cut to `OUTPUT_BYTES`.
     pub output: String,
 }
 

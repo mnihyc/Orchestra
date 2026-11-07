@@ -1,5 +1,6 @@
 //! Accepted native ends are atomic core state; frozen usage/notifications replay independently.
 
+#![recursion_limit = "256"]
 mod realtime_support;
 mod terminal_work_diagnostics;
 mod thread_history_observation;
@@ -17,6 +18,23 @@ use thread_history_support::{
 
 const FOLLOWUP_FAILED: &str = "The last turn ended, but its usage and notifications could not be saved. Check the agent profile or storage.";
 const OTHER_BLOCK: &str = "Synthetic manual review is required before another turn.";
+
+async fn without_call_recovery(rig: &Rig, http: &reqwest::Client) -> Proof {
+    // These cases isolate terminal accounting; configured call-recovery waits are tested separately.
+    body(
+        http.put(url(
+            rig,
+            &format!("/nodes/{}/settings/calls.rules", rig.topic),
+        ))
+        .bearer_auth(&rig.token)
+        .json(&json!({"value":[]}))
+        .send()
+        .await?,
+        PAGE_BYTES,
+    )
+    .await?;
+    Ok(())
+}
 
 async fn agent_patch(
     rig: &Rig,
@@ -544,6 +562,7 @@ async fn completed_failed_and_interrupted_native_turns_clear_running_before_bad_
         native(&rig).await?;
         let http = reqwest::Client::builder().timeout(PATIENCE).build()?;
         let thread = rig.thread("Synthetic terminal recovery").await;
+        without_call_recovery(&rig, &http).await?;
         let diagnostics = terminal_work_diagnostics::Watch::new(thread)?;
         let before = get(
             &rig,
@@ -809,6 +828,7 @@ async fn a_notification_write_failure_rolls_back_accounting_and_retries_one_froz
     native(&rig).await?;
     let http = reqwest::Client::builder().timeout(PATIENCE).build()?;
     let thread = rig.thread("Synthetic notification failure").await;
+    without_call_recovery(&rig, &http).await?;
     let before = get(
         &rig,
         &http,

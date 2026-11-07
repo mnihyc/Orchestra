@@ -12,8 +12,12 @@ use serde::{Deserialize, Deserializer, Serialize};
 
 pub use orch_types::{Hash, Id, Revision, Seq, Time};
 
-/// Where every route lives.
-pub const BASE_PATH: &str = "/api/v1";
+/// Browser HTTP and the existing public protocol paths.
+pub const BROWSER_BASE_PATH: &str = "/api/v1";
+/// Account-key business HTTP and origin-bound key continuations.
+pub const KEY_BASE_PATH: &str = "/openapi/v1";
+/// The existing browser/public base, retained for callback and download URL producers.
+pub const BASE_PATH: &str = BROWSER_BASE_PATH;
 /// The header every response carries, and an error repeats in its body.
 pub const REQUEST_ID_HEADER: &str = "x-request-id";
 /// The header a request that is authenticated by a cookie alone must carry.
@@ -78,6 +82,86 @@ mod listed_tests {
         );
     }
 }
+
+/// Identifies a committed mutation acknowledgement without existing resource content.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+#[serde(rename_all = "snake_case")]
+pub enum ReceiptProjection {
+    /// Identifiers, revision and safe operation outcome only.
+    Receipt,
+}
+
+// Full projections grow with their resource DTOs. Keep that branch on the heap so a
+// content-free receipt never reserves the largest projection inline. Serde and
+// JsonSchema treat Box transparently: names, untagged alternatives and JSON stay
+// unchanged. All named full-or-receipt responses use this same representation.
+macro_rules! full_or_receipt {
+    (
+        $(#[$meta:meta])*
+        $vis:vis enum $name:ident {
+            $(#[$full_meta:meta])*
+            Full($full:ty),
+            $(#[$receipt_meta:meta])*
+            Receipt($receipt:ty),
+        }
+    ) => {
+        $crate::common::full_or_receipt! {
+            @define
+            [$(#[$meta])*] $vis enum $name {
+                $(#[$full_meta])*
+                Full(Box<$full>),
+                $(#[$receipt_meta])*
+                Receipt($receipt),
+            }
+            $full, $receipt
+        }
+    };
+    (
+        $(#[$meta:meta])*
+        $vis:vis enum $name:ident {
+            $(#[$receipt_meta:meta])*
+            Receipt($receipt:ty),
+            $(#[$full_meta:meta])*
+            Full($full:ty),
+        }
+    ) => {
+        $crate::common::full_or_receipt! {
+            @define
+            [$(#[$meta])*] $vis enum $name {
+                $(#[$receipt_meta])*
+                Receipt($receipt),
+                $(#[$full_meta])*
+                Full(Box<$full>),
+            }
+            $full, $receipt
+        }
+    };
+    (
+        @define
+        [$(#[$meta:meta])*] $vis:vis enum $name:ident { $($variants:tt)* }
+        $full:ty, $receipt:ty
+    ) => {
+        $(#[$meta])*
+        #[serde(untagged)]
+        $vis enum $name { $($variants)* }
+        impl $name {
+            /// Carries the unchanged full projection without storing it inline.
+            #[must_use]
+            pub fn full(value: $full) -> Self {
+                Self::Full(Box::new(value))
+            }
+
+            /// Takes full content only when this response actually supplied it.
+            pub fn into_full(self) -> Result<$full, $receipt> {
+                match self {
+                    Self::Full(value) => Ok(*value),
+                    Self::Receipt(value) => Err(value),
+                }
+            }
+        }
+    };
+}
+pub(crate) use full_or_receipt;
 
 /// One page of a list that can grow. The order is stated by each list and
 /// is stable.
@@ -342,6 +426,7 @@ error_codes! {
     PortsNotListening = 409, "ports.not_listening", "No owned service is listening";
     PortsDomainMissing = 409, "ports.domain_missing", "A browser ports domain is needed";
     PortsUnavailable = 503, "ports.unavailable", "The current port service is unavailable";
+    TunnelGatewayUnreachable = 503, "tunnel.gateway_unreachable", "Gateway unreachable";
     ChatNotAllowed = 403, "chat.not_allowed", "This chat is not allowed";
     PolicyMcpImportDisabled = 403, "policy.mcp_import_disabled", "This machine lets no tool server be imported";
     PolicyMcpAddDisabled = 403, "policy.mcp_add_disabled", "This machine takes no tool server from here";
@@ -513,6 +598,80 @@ impl Problem {
 mod tests {
     use super::*;
     use serde_json::json;
+
+    #[test]
+    fn full_or_receipt_keeps_wire_values_and_owned_results_without_inline_full_storage() {
+        #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+        struct FullBody {
+            // One KiB makes storing this fixed payload inline distinguishable from its receipt.
+            payload: [[u64; 4]; 32],
+        }
+        #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+        struct Receipt {
+            projection: ReceiptProjection,
+            accepted: bool,
+        }
+        crate::common::full_or_receipt! {
+            #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+            enum Reply {
+                Full(FullBody),
+                Receipt(Receipt),
+            }
+        }
+        assert!(std::mem::size_of::<Reply>() < std::mem::size_of::<FullBody>());
+        let full = FullBody {
+            payload: [[7; 4]; 32],
+        };
+        let wire = serde_json::to_value(&full).unwrap();
+        assert_eq!(
+            serde_json::to_value(Reply::full(full.clone())).unwrap(),
+            wire
+        );
+        let decoded: Reply = serde_json::from_value(wire).unwrap();
+        assert_eq!(decoded.into_full(), Ok(full));
+        let receipt = Receipt {
+            projection: ReceiptProjection::Receipt,
+            accepted: true,
+        };
+        let wire = json!({"projection":"receipt","accepted":true});
+        assert_eq!(
+            serde_json::to_value(Reply::Receipt(receipt.clone())).unwrap(),
+            wire
+        );
+        let decoded: Reply = serde_json::from_value(wire).unwrap();
+        assert_eq!(decoded.into_full(), Err(receipt));
+    }
+
+    #[test]
+    fn receipt_first_responses_keep_the_discriminator_ahead_of_an_ambiguous_full_shape() {
+        #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+        struct FullBody {
+            jobs: Vec<Id>,
+        }
+        #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+        struct Receipt {
+            projection: ReceiptProjection,
+            jobs: Vec<Id>,
+        }
+        crate::common::full_or_receipt! {
+            #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+            enum Reply {
+                Receipt(Receipt),
+                Full(FullBody),
+            }
+        }
+        let wire = json!({"projection":"receipt","jobs":[]});
+        let decoded: Reply = serde_json::from_value(wire.clone()).unwrap();
+        let receipt = decoded
+            .into_full()
+            .expect_err("the explicit receipt stays a receipt");
+        assert_eq!(serde_json::to_value(Reply::Receipt(receipt)).unwrap(), wire);
+        let full = FullBody { jobs: Vec::new() };
+        assert_eq!(
+            serde_json::to_value(Reply::full(full)).unwrap(),
+            json!({"jobs":[]})
+        );
+    }
 
     #[test]
     fn a_problem_is_written_flat_with_what_its_code_adds() {

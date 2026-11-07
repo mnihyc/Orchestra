@@ -22,6 +22,9 @@ import { InlineAlert } from '@/ui/InlineAlert';
 import { Skeleton } from '@/ui/Skeleton';
 import { Textarea } from '@/ui/Textarea';
 
+import { NewAudienceSummary } from '@/features/access/NewPage';
+import { CreationAgentAccess } from './AgentAccess';
+import { useOfferedAgentAccess } from './agentAccessOffer';
 import { NewThreadDialog } from './BindingDialog';
 import { type Mode, NO_PICKS, type Picks, settingsToKeep } from './choices';
 import { MissingDefault, useScopes, widestScope } from './MissingDefault';
@@ -49,18 +52,22 @@ function Composer({ node }: { node: Topic | Project }) {
   const [keepChosen, setKeepChosen] = useState<string | null | undefined>(undefined);
   const [changing, setChanging] = useState(false);
   const { options, resolved, loading, failed, refreshing, retry } = useStartOptions(node.id, picks, QUICK_SETUP);
-  const scopes = useScopes(node);
+  // This same options failure is already rendered once beneath the composer.
+  const agentAccess = useOfferedAgentAccess({ at: node.id, offer: options?.agent_access, pending: loading || refreshing, retry });
+  const kept = options !== null && resolved !== null && resolved.missing.length === 0 && (picks.provider !== null || picks.agent !== null || picks.model !== null) && settingsToKeep(options, resolved).length > 0;
+  const scopes = useScopes(node, kept || (resolved?.missing.length ?? 0) > 0);
+  const checkingScopes = kept && scopes.some((scope) => scope.pending === true);
   const keepAt = keepChosen === undefined ? (widestScope(scopes)?.id ?? null) : keepChosen;
   const make = useStart(() => {
     setText('');
     setPicks(NO_PICKS);
     setKeepChosen(undefined);
+    agentAccess.reset();
   });
 
   const message = text.trim();
   // A choice that was made here for the thread stays in view with the way to keep it, until it has been kept or the thread has started.
-  const kept = options !== null && resolved !== null && resolved.missing.length === 0 && (picks.provider !== null || picks.agent !== null || picks.model !== null) && settingsToKeep(options, resolved).length > 0;
-  const ready = options !== null && resolved !== null && resolved.missing.length === 0 && !refreshing && !resolved.settling;
+  const ready = options !== null && resolved !== null && resolved.missing.length === 0 && !refreshing && !resolved.settling && !checkingScopes && agentAccess.ready;
   const send = () => {
     if (!ready || message === '' || make.pending) return;
     make.start({
@@ -70,6 +77,9 @@ function Composer({ node }: { node: Topic | Project }) {
       name: '',
       directory: '',
       privately: false,
+      generalAccess: 'defaults',
+      letIntoEnvironment: false,
+      agentAccess: agentAccess.value,
       message,
     });
   };
@@ -81,7 +91,7 @@ function Composer({ node }: { node: Topic | Project }) {
     send();
   };
 
-  const why = ready ? null : loading || refreshing ? t('start.quick.checking') : resolved?.missing[0] !== undefined ? t('start.quick.missingWhy') : null;
+  const why = ready ? null : loading || refreshing || checkingScopes ? t('start.quick.checking') : resolved?.missing[0] !== undefined ? t('start.quick.missingWhy') : null;
   const kindKey = node.kind === 'topic' ? 'topic' : 'project';
   return (
     <section aria-label={t(`start.quick.label.${kindKey}`)} className="flex flex-col gap-2" data-quick-start>
@@ -131,6 +141,11 @@ function Composer({ node }: { node: Topic | Project }) {
         </>
       )}
 
+      {options !== null && resolved !== null && <NewAudienceSummary place={node.kind === 'project' ? t('places.project.newTopic') : place.name}
+        summary={resolved.environment?.environment.placement === 'connected' ? options.access.connected : options.access.managed}
+         />}
+      <CreationAgentAccess access={agentAccess} disabled={make.pending} />
+
       {make.error !== null && (
         <div className="flex flex-col gap-2">
           <ErrorAlert error={make.error} message={bindingReason(make.error, t) ?? undefined} action={<Button action="retry" size="sm" disabled={!ready} onClick={send}>{t('startRecovery.retry')}</Button>} />
@@ -144,7 +159,7 @@ function Composer({ node }: { node: Topic | Project }) {
           )}
         </div>
       )}
-      {changing && <NewThreadDialog parent={place} open onClose={() => setChanging(false)} draft={{ picks, message: text }} />}
+      {changing && <NewThreadDialog parent={place} open onClose={() => setChanging(false)} draft={{ picks, message: text, agentAccess: agentAccess.value, generalAccess: 'defaults', letIntoEnvironment: false }} />}
     </section>
   );
 }

@@ -1,4 +1,5 @@
 //! An environment's live feed tells its readers what its HTTP state tells them, from the number they hold, and nobody else.
+#![recursion_limit = "256"]
 #![allow(
     clippy::unwrap_used,
     clippy::expect_used,
@@ -58,7 +59,7 @@ async fn recreation_asked(rig: &Rig) -> Id {
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn a_job_about_an_environment_reaches_its_reader_as_its_http_state_says_and_a_late_reader_catches_up()
  {
-    let rig = Rig::with_time_held().await;
+    let rig = Rig::with_unstarted_engine_and_time_held().await;
     let mut registry = Registry::new();
     orch_api_core::routes::mount(&mut registry);
     let app = TestApp::over(
@@ -67,7 +68,6 @@ async fn a_job_about_an_environment_reaches_its_reader_as_its_http_state_says_an
         registry,
     );
     // Nothing takes the job up: what the feed says of it is what was asked.
-    rig.server.engine.stop();
     let before = env_seq(&rig).await;
     let feed = format!("env:{}", rig.environment);
     let mut ada = Client::signed_in(rig.server.addr, &rig.token).await;
@@ -78,21 +78,32 @@ async fn a_job_about_an_environment_reaches_its_reader_as_its_http_state_says_an
     let job = recreation_asked(&rig).await;
 
     let frame = next_sync(&mut ada).await;
-    let http = app
+    let response = app
         .call(EnvironmentSyncGet, &[&rig.environment])
         .token(&rig.token)
         .query(&EnvironmentSyncGetQuery {
             since: Some(before),
         })
         .send()
-        .await
-        .ok();
+        .await;
+    let wire: Value = serde_json::from_slice(&response.raw).unwrap();
+    let http = response.ok();
+    assert!(wire.get("library").is_some_and(Value::is_object), "{wire}");
+    let expected = app
+        .call(orch_api_contract::library::ResourceLibraryRead, &[])
+        .token(&rig.token)
+        .raw_body(&json!({"targets":[{"object":{"kind":"environment","id":rig.environment},"version_id":null}]}))
+        .send_bytes()
+        .await;
+    assert!(expected.status.is_success());
+    let expected: Value = serde_json::from_slice(&expected.raw).unwrap();
+    assert_eq!(wire["library"], expected[0]["facts"]);
     assert!(http.seq > before, "the job moved the environment's feed");
     assert_eq!(frame["prev"], before);
     assert_eq!(frame["seq"], http.seq);
     assert_eq!(
         frame["data"],
-        json!({ "environment": http.environment, "jobs": http.jobs }),
+        json!({ "environment": http.environment, "jobs": http.jobs, "library": wire["library"] }),
         "the socket and the request say the same"
     );
     assert_eq!(frame["data"]["environment"]["name"], "Workspace");
@@ -132,4 +143,59 @@ async fn somebody_who_may_not_read_an_environment_may_not_follow_its_feed() {
     cyd.sub(5, &format!("env:{}", new_id()), None).await;
     let missing = cyd.expect("error").await;
     assert_eq!(missing["code"], "not_found", "{missing}");
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_door_only_reader_gets_explicit_null_library_facts_on_http_and_the_environment_feed() {
+    let rig = Rig::with_unstarted_engine_and_time_held().await;
+    let (reader, token) = rig.person("terminal-reader").await;
+    orch_db::queries::access::testing::add_entry(
+        &mut rig.pool.acquire().await.unwrap(),
+        &orch_db::queries::access::PageKey::new("environment", rig.environment, "live"),
+        "any",
+        "terminal.view",
+        ("user", Some(reader), None),
+        None,
+        rig.clock.now(),
+    )
+    .await
+    .unwrap();
+    let mut registry = Registry::new();
+    orch_api_core::routes::mount(&mut registry);
+    let app = TestApp::over(
+        rig.server.app.clone(),
+        orch_testkit::clock::manual(),
+        registry,
+    );
+    let refused = app.call(orch_api_contract::library::ResourceLibraryRead, &[])
+        .token(&token)
+        .raw_body(&json!({"targets":[{"object":{"kind":"environment","id":rig.environment},"version_id":null}]}))
+        .send_bytes().await;
+    assert_eq!(
+        refused.problem().code,
+        orch_api_contract::common::ErrorCode::NotFound
+    );
+    let before = env_seq(&rig).await;
+    let mut client = Client::signed_in(rig.server.addr, &token).await;
+    client
+        .sub(1, &format!("env:{}", rig.environment), Some(before))
+        .await;
+    assert_eq!(client.expect("subscribed").await["mode"], "delta");
+    let job = recreation_asked(&rig).await;
+    let frame = next_sync(&mut client).await;
+    let response = app
+        .call(EnvironmentSyncGet, &[&rig.environment])
+        .token(&token)
+        .query(&EnvironmentSyncGetQuery {
+            since: Some(before),
+        })
+        .send_bytes()
+        .await;
+    assert!(response.status.is_success());
+    let http: Value = serde_json::from_slice(&response.raw).unwrap();
+    assert_eq!(http["jobs"][0]["id"], job.to_string());
+    assert_eq!(http.get("library"), Some(&Value::Null));
+    assert_eq!(frame["data"].get("library"), Some(&Value::Null));
+    assert_eq!(frame["data"]["environment"], http["environment"]);
+    assert_eq!(frame["data"]["jobs"], http["jobs"]);
 }

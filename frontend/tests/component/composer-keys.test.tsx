@@ -12,7 +12,7 @@ import type * as Draft from '@/features/composer/Draft';
 import { Composer } from '@/features/composer/Composer';
 import { useComposerStore } from '@/features/composer/Draft';
 import { client } from '@/api/client';
-import type { ResolvedSetting, Thread, ThreadContext, ThreadParameters } from '@/generated/api-types';
+import type { ResolvedSetting, Thread, ThreadContext, ThreadParameters, ThreadLimits, LimitReached } from '@/generated/api-types';
 import type { PastedTextPart } from '@/lib/pastedText';
 import { rememberPaste } from '@/lib/pastedText';
 import type { CodeViewProps } from '@/ui/CodeView';
@@ -24,14 +24,18 @@ import { ACME, meta } from '../doubles/fixtures';
 import { turn } from '../doubles/thread-rows';
 import { harnessName } from '../doubles/harness-names';
 import { World } from '../doubles/world';
+import { choiceCap } from '../unit/resource-facts-fixtures';
 import { show } from './support';
 
-const server = vi.hoisted(() => ({ submit: vi.fn<typeof Draft.submitInput>(), context: vi.fn<() => Promise<ThreadContext>>(), cancelUpload: vi.fn<() => Promise<void>>(), live: true }));
+const server = vi.hoisted(() => {
+  const limits: ThreadLimits = { reached: [], bypass_all: false };
+  return { submit: vi.fn<typeof Draft.submitInput>(), context: vi.fn<() => Promise<ThreadContext>>(), cancelUpload: vi.fn<() => Promise<void>>(), live: true, limits };
+});
 vi.mock('@/features/composer/Draft', async (load) => ({ ...await load<typeof Draft>(), useDraftSync: () => 'idle', submitInput: server.submit }));
 vi.mock('@/realtime/live', async (load) => ({ ...await load<typeof Live>(), useSocketStatus: () => ({ phase: server.live ? 'ready' : 'reconnecting' }) }));
 vi.mock('@/api/threads', async (load) => ({ ...await load<typeof ThreadsApi>(),
   parametersQuery: (id: string) => ({ queryKey: ['keyboard-parameters', id], queryFn: () => Promise.resolve(parameters) }),
-  limitsQuery: (id: string) => ({ queryKey: ['keyboard-limits', id], queryFn: () => Promise.resolve({ reached: [] }) }),
+  limitsQuery: (id: string) => ({ queryKey: ['keyboard-limits', id], initialData: server.limits, queryFn: () => Promise.resolve(server.limits) }),
 }));
 vi.mock('@/api/settings', async (load) => ({ ...await load<typeof SettingsApi>(), settingsQuery: (id: string) => ({ queryKey: ['keyboard-settings', id], queryFn: () => Promise.resolve(settings) }) }));
 vi.mock('@/api/auth', async (load) => ({ ...await load<typeof AuthApi>(), metaQuery: { queryKey: ['keyboard-meta'], queryFn: () => Promise.resolve(meta()) } }));
@@ -57,7 +61,7 @@ let theme: string | null = null;
 let signedIn: string | null = null;
 beforeEach(() => {
   locale = currentLocale(); theme = document.documentElement.getAttribute('data-theme'); signedIn = client.session.getState().userId;
-  server.submit.mockReset(); server.live = true;
+  server.submit.mockReset(); server.live = true; server.limits = { reached: [], bypass_all: false };
   server.cancelUpload.mockReset().mockResolvedValue(undefined);
   server.context.mockReset(); server.context.mockResolvedValue({ harness_kind: null, harness: null, reports: { tokens: false, context: false, breakdown: false }, fill: null, turn_id: null, shortened: null, can_count: false });
   parameters.model.options = [];
@@ -264,4 +268,47 @@ for (const language of ['en', 'zh-CN'] as const) it(`uses the reported program n
   expect(await screen.findByText(reason)).toBeVisible();
   expect(screen.getByRole('button', { name: i18n.t('composer.send') })).toBeDisabled();
   expect(document.body).not.toHaveTextContent('research-agent');
+});
+
+
+function cachedVendorLimit(): LimitReached {
+  if (native.binding === null) throw new Error('Quota controls need the existing provider binding');
+  return { cap: null, provider_limit: { provider: native.binding.provider, as_of: '2026-10-25T12:00:00Z', resets_at: null, window: 'weekly' }, can_bypass: false, passed_by: null, ask: [], ask_more: 0 };
+}
+
+for (const stalePass of [false, true, 'null_caps'] as const) it(`sends once without a bypass prompt for cached vendor quota (old pass=${stalePass})`, async () => {
+  native = { ...native, state: 'idle', current_turn_id: null };
+  threadWriter.reset(native.id, { thread: native, turns: [] }, false);
+  server.limits = { reached: [cachedVendorLimit()], bypass_all: false };
+  if (stalePass) useComposerStore.setState({ passNext: { [native.id]: stalePass === 'null_caps' ? { provider_limit: true, caps: null } : { provider_limit: true } } });
+  show(<Composer thread={native} />);
+  const user = userEvent.setup();
+  const box = screen.getByRole('textbox');
+  await user.type(box, 'Use available paid credits');
+  await waitFor(() => expect(screen.getByRole('button', { name: i18n.t('composer.send') })).toBeEnabled());
+  fireEvent.keyDown(box, { key: 'Enter' });
+  expect(server.submit).toHaveBeenCalledExactlyOnceWith(defaultThreadRead(native.id), [{ type: 'text', text: 'Use available paid credits' }], 'queue', undefined, undefined, false);
+  expect(screen.queryByRole('dialog')).not.toBeInTheDocument();
+  fireEvent.keyDown(box, { key: 'Enter' });
+  expect(server.submit).toHaveBeenCalledTimes(1);
+});
+
+it('still prompts for a configured provider cap alongside cached vendor quota', async () => {
+  native = { ...native, state: 'idle', current_turn_id: null };
+  threadWriter.reset(native.id, { thread: native, turns: [] }, false);
+  const vendor = cachedVendorLimit();
+  const cap = choiceCap({ state: 'reached' });
+  cap.cap.provider = vendor.provider_limit!.provider;
+  server.limits = { reached: [vendor, { ...vendor, cap, provider_limit: null, can_bypass: true }], bypass_all: false };
+  show(<Composer thread={native} />);
+  const user = userEvent.setup();
+  const box = screen.getByRole('textbox');
+  await user.type(box, 'Explicit cap approval');
+  await waitFor(() => expect(screen.getByRole('button', { name: i18n.t('composer.send') })).toBeEnabled());
+  fireEvent.keyDown(box, { key: 'Enter' });
+  expect(server.submit).not.toHaveBeenCalled();
+  const dialog = await screen.findByRole('dialog', { name: i18n.t('ui.limit.title') });
+  expect(dialog).not.toHaveTextContent('weekly');
+  await user.click(screen.getByRole('button', { name: i18n.t('ui.limit.proceed') }));
+  expect(server.submit).toHaveBeenCalledExactlyOnceWith(native.id, [{ type: 'text', text: 'Explicit cap approval' }], 'queue', { caps: [cap.cap.id] }, undefined, false);
 });

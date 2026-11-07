@@ -52,10 +52,10 @@ def assemble_checked(inputs, out, base_url):
         raise ValueError("a release requires both Linux server architectures")
     # Verify downloaded artifacts against their original hashes before the combined manifest is rewritten.
     for manifest in manifests:
-        subprocess.run(["cargo", "xtask", "package", "--out", str(manifest.parent.resolve()), "--check", "--require-all-connectors"], check=True)
+        subprocess.run(["cargo", "xtask", "package", "--out", str(manifest.parent.resolve()), "--check", "--check-source", "--require-all-connectors"], check=True)
     assemble(inputs, out)
     subprocess.run(["cargo", "xtask", "package", "--out", str(out.resolve()), "--manifest-only", "--base-url", base_url], check=True)
-    subprocess.run(["cargo", "xtask", "package", "--out", str(out.resolve()), "--check", "--require-all-connectors"], check=True)
+    subprocess.run(["cargo", "xtask", "package", "--out", str(out.resolve()), "--check", "--check-source", "--require-all-connectors"], check=True)
 
 
 def main():

@@ -81,7 +81,7 @@ const LEASE_OPEN_ATTEMPTS: u32 = 1;
 /// How many times the session of one turn is opened at most: once, and again
 /// after each repair. The identifiers of the commands that open it are told
 /// apart by turn and by attempt, so each turn reserves this many.
-const SESSION_ATTEMPTS: u32 = SESSION_REPAIRS + 1;
+pub(crate) const SESSION_ATTEMPTS: u32 = SESSION_REPAIRS + 1;
 
 /// What becomes of the input of a turn that ended before the harness took it.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -436,6 +436,19 @@ impl Engine {
 
     /// Says what a starting thread waits for.
     pub(crate) async fn set_step(&self, thread: Id, step: &str) -> Result<(), EngineError> {
+        self.set_step_with_preparation(thread, step, None).await
+    }
+
+    /// Source-aware sibling over the same native status writer, on its actual transaction.
+    pub(crate) async fn set_step_with_preparation(
+        &self,
+        thread: Id,
+        step: &str,
+        preparation: Option<(
+            &crate::harnesses::preparation::Preparation,
+            crate::harnesses::preparation::Target,
+        )>,
+    ) -> Result<(), EngineError> {
         let mut conn = self.inner.db.acquire().await?;
         let row = threads::thread(&mut conn, thread).await?;
         if row.as_ref().is_none_or(|row| {
@@ -445,6 +458,12 @@ impl Engine {
         }
         drop(conn);
         let mut tx = self.inner.db.begin().await?;
+        if let Some((source, target)) = preparation {
+            let _ = source
+                .checkpoint(&mut tx, self.inner.clock.as_ref(), target)
+                .await?;
+        }
+        let mut deadline = None;
         let finished = {
             let mut unit = Unit::new(&mut tx, self.inner.clock.now());
             // The thread is looked at again under its lock: a number is spent
@@ -453,11 +472,24 @@ impl Engine {
                 && locked.state == thread_state::STARTING
                 && locked.starting_step.as_deref() != Some(step)
             {
+                if let Some((source, target)) = preparation {
+                    let check = source
+                        .checkpoint(&mut *unit.conn, self.inner.clock.as_ref(), target)
+                        .await?;
+                    deadline = Some(check.deadline());
+                    check.check(self.inner.clock.as_ref())?;
+                }
                 let seq = unit.stamp(thread).await?;
+                if let Some(deadline) = &deadline {
+                    deadline.check(self.inner.clock.as_ref())?;
+                }
                 threads::set_starting_step(&mut *unit.conn, thread, Some(step), seq).await?;
             }
             unit.finish().await?
         };
+        if let Some(deadline) = &deadline {
+            deadline.check(self.inner.clock.as_ref())?;
+        }
         self.commit(tx, finished).await?;
         Ok(())
     }
@@ -466,6 +498,11 @@ impl Engine {
     /// the session, then `turn.start`. Every step looks at the database
     /// again first, so it is safe to call at any time and from any process;
     /// it returns when the turn has been handed to the harness, or has failed.
+    // A repair raises `repairs` and continues the outer `'driving` loop, which starts a new range from it.
+    #[allow(
+        clippy::mut_range_bound,
+        reason = "the outer driving loop rebuilds the range after a state change"
+    )]
     pub(crate) async fn drive_start(&self, thread_id: Id) -> Result<(), EngineError> {
         let mut repairs: u32 = 0;
         'driving: loop {
@@ -691,6 +728,10 @@ impl Engine {
             let mcp_revision = self.mcp_revision(snap.environment.id).await?;
             let orch_tools_revision = snap.orch_tools_revision();
             let configuration = snap.session_configuration();
+            let native_wake =
+                crate::background_wake::of_input(&mut *self.db().acquire().await?, &snap.input)
+                    .await?
+                    .and_then(|wake| wake.native_wake);
             // The skills the thread is given now. A program takes its skills when its session opens, so a change
             // reaches the thread by opening its session anew before this turn.
             let mut skills = self.skills_for_thread(thread_id).await?;
@@ -703,9 +744,42 @@ impl Engine {
             let skills_fingerprint = crate::skills::fingerprint(&skills);
             let side_unverified = !own_side_recovery
                 && crate::side_threads::history::needs_verification(self, &snap).await?;
-            let open = {
+            let background_running = crate::background_wake::running(
+                &mut *self.db().acquire().await?,
+                Some(thread_id),
+                None,
+                None,
+            )
+            .await?;
+            let (configuration_known, mut configuration_changed) = {
                 let sessions = lock(&self.inner.sessions);
-                snap.segment.native_session_ref.is_none()
+                (
+                    sessions.configuration_known(snap.segment.id),
+                    sessions.configuration_changed(snap.segment.id, &configuration),
+                )
+            };
+            if background_running && !configuration_known {
+                let accepted: Option<Json> = sqlx::query_scalar::<_, Option<Json>>(
+                    "SELECT session_configuration FROM segments WHERE id=$1",
+                )
+                .bind(snap.segment.id)
+                .fetch_optional(&mut *self.db().acquire().await?)
+                .await
+                .map_err(orch_db::DbError::from)?
+                .flatten();
+                configuration_changed = accepted.as_ref().is_some_and(|accepted| {
+                    Some(accepted) != serde_json::to_value(&configuration).ok().as_ref()
+                });
+            }
+            if background_running && native_wake.is_none() && configuration_changed {
+                self.defer_background_refresh(&snap).await?;
+                return Ok(());
+            }
+            let open = !background_running
+                && native_wake.is_none()
+                && {
+                    let sessions = lock(&self.inner.sessions);
+                    snap.segment.native_session_ref.is_none()
                     || side_unverified
                     || !sessions.is_open(snap.segment.id, snap.key)
                     || sessions.instructions_changed(snap.segment.id, &snap.instructions().text)
@@ -719,7 +793,7 @@ impl Engine {
                     || (snap.descriptor.capabilities.session_reload
                         == orch_agent_contract::descriptor::SessionReload::Turn
                         && snap.thread.executor.is_none())
-            };
+                };
             if open {
                 self.set_step(thread_id, "session").await?;
                 // A session that exists already (a person began it by hand) is opened as one that was adopted
@@ -902,6 +976,9 @@ impl Engine {
                             result.approval_reviewer.as_ref(),
                         )
                         .await?;
+                        sqlx::query("UPDATE segments SET background_wake=$2,session_configuration=$3 WHERE id=$1")
+                            .bind(snap.segment.id).bind(accepted_configuration.background_wake).bind(serde_json::to_value(&accepted_configuration)?)
+                            .execute(&mut *self.db().acquire().await?).await.map_err(orch_db::DbError::from)?;
                         let mut sessions = lock(&self.inner.sessions);
                         sessions.mcp_requested(snap.segment.id, mcp_revision);
                         sessions.orch_tools_requested(snap.segment.id, orch_tools_revision);
@@ -960,6 +1037,25 @@ impl Engine {
                         .await;
                 }
             }
+            if !open
+                && snap
+                    .lease
+                    .as_ref()
+                    .is_some_and(|lease| lease.mode == "forwarded")
+            {
+                let mut body = sessions::session_open_body(&snap, SessionMode::Resume)?;
+                body.transport_only = true;
+                let command = Outgoing::new(
+                    ids::derived("background.transport", &[snap.turn.id.as_bytes()]),
+                    snap.key.machine,
+                    SerialKey::Thread(thread_id),
+                    &body,
+                )?;
+                let outcome = self.inner.commands.observe(command).await?;
+                if !matches!(outcome, Outcome::Succeeded(_)) {
+                    return self.fail_start(&snap, &outcome).await;
+                }
+            }
             if !self.revalidate_native_start(&snap, false).await? {
                 return Ok(());
             }
@@ -993,9 +1089,21 @@ impl Engine {
             self.scope_agent_history_notices(&mut snap).await?;
             let (text, blocks) = self.turn_text(&snap, &placement).await?;
             let body = TurnStart {
+                native_wake,
                 thread_id,
                 turn_id: snap.turn.id,
-                text: text.text,
+                text: if crate::background_wake::is_wake(&snap.input) {
+                    snap.input
+                        .content
+                        .as_array()
+                        .and_then(|parts| parts.first())
+                        .and_then(|part| part.get("text"))
+                        .and_then(Json::as_str)
+                        .unwrap_or(&text.text)
+                        .to_owned()
+                } else {
+                    text.text
+                },
                 images: text.images,
                 model: snap.turn.model.clone(),
                 effort: snap.turn.effort.clone(),
@@ -1199,6 +1307,7 @@ impl Engine {
             + chrono::Duration::from_std(self.inner.config.start_timeout)
                 .unwrap_or_else(|_| chrono::Duration::zero());
         let command = Outgoing {
+            authority: None,
             id,
             machine: row.machine_id,
             key,
@@ -1357,7 +1466,13 @@ impl Engine {
             return Ok(false);
         };
         if !rejected
-            && !crate::native_actions::hold_invalid(&mut unit, thread.node_id, &input).await?
+            && !crate::native_actions::hold_invalid(
+                &mut unit,
+                thread.node_id,
+                &input,
+                self.inner.clock.as_ref(),
+            )
+            .await?
         {
             let finished = unit.finish().await?;
             self.commit(tx, finished).await?;
@@ -1654,6 +1769,7 @@ impl Engine {
             let mut unit = Unit::new(&mut tx, self.inner.clock.now());
             let thread_id = snap.thread.node_id;
             if let Some(thread) = threads::lock(&mut *unit.conn, thread_id).await? {
+                crate::background_wake::lost(&mut unit, thread_id, snap.segment.id).await?;
                 let seq = unit.stamp(thread_id).await?;
                 let now = unit.now();
                 if threads::end_segment(&mut *unit.conn, snap.segment.id, "error", now, seq).await?
@@ -1907,7 +2023,14 @@ impl Engine {
             orch_db::queries::transaction_guard::lock_authority(&mut tx).await?;
             let mut unit = Unit::new(&mut tx, self.inner.clock.now());
             threads::lock(&mut *unit.conn, thread_id).await?;
-            if crate::native_actions::hold_invalid(&mut unit, thread_id, input).await? {
+            if crate::native_actions::hold_invalid(
+                &mut unit,
+                thread_id,
+                input,
+                self.inner.clock.as_ref(),
+            )
+            .await?
+            {
                 let seq = unit.stamp(thread_id).await?;
                 threads::return_input_in_place(
                     &mut *unit.conn,
@@ -2080,12 +2203,10 @@ impl Engine {
         let id = ids::turn_steer(input.id);
         self.inner
             .commands
-            .issue(Outgoing::new(
-                id,
-                machine,
-                SerialKey::Thread(thread_id),
-                &body,
-            )?)
+            .issue(
+                Outgoing::new(id, machine, SerialKey::Thread(thread_id), &body)?
+                    .with_authority(crate::commands::CommandAuthority::input_steer(input.id)),
+            )
             .await?;
         let outcome = self.inner.commands.wait(id).await?;
         self.settle_model_input(thread_id, record, sent_of(&outcome))
@@ -2236,17 +2357,22 @@ impl Engine {
         {
             return Ok(false);
         }
-        let Some(caller) = crate::inputs::input_caller(unit, thread, input).await? else {
+        let Some(authority) =
+            crate::inputs::input_caller(unit, thread, input, self.inner.clock.as_ref()).await?
+        else {
             return Ok(false);
         };
-        match self
-            .check_sender_for_turn(unit, &caller, thread, true, Some(turn))
-            .await
-        {
-            Ok(()) => Ok(true),
-            Err(crate::inputs::InputError::Internal(error)) => Err(error),
-            Err(_) => Ok(false),
+        for caller in authority.callers() {
+            match self
+                .check_sender_for_turn(unit, caller, thread, true, Some(turn))
+                .await
+            {
+                Ok(()) => {}
+                Err(crate::inputs::InputError::Internal(error)) => return Err(error),
+                Err(_) => return Ok(false),
+            }
         }
+        Ok(true)
     }
 
     /// Keeps a steer's words in the timeline before sending, under the thread's lock.
@@ -2273,8 +2399,14 @@ impl Engine {
                 let seq = unit.stamp(thread_id).await?;
                 // Once this fence was crossed, a replay must keep the original
                 // decision: the command may already have reached the harness.
+                let background_wait = input.state_detail.as_deref() != Some("steering")
+                    && crate::background_wake::other_author(unit.conn, thread_id, input.answers())
+                        .await?
+                        .is_some();
                 let allowed = input.state_detail.as_deref() == Some("steering")
-                    || Box::pin(self.steer_authorized(&mut unit, &thread, turn, &input)).await?;
+                    || !background_wait
+                        && Box::pin(self.steer_authorized(&mut unit, &thread, turn, &input))
+                            .await?;
                 if allowed {
                     sqlx::query(
                         "UPDATE thread_inputs SET state_detail='steering',seq_updated=$2 WHERE id=$1",
@@ -2301,6 +2433,10 @@ impl Engine {
                         seq,
                     )
                     .await?;
+                    if background_wait {
+                        threads::hold_input(unit.conn, input.id, Some("background_author"), seq)
+                            .await?;
+                    }
                     unit.wake(thread_id);
                 }
             }
@@ -2410,6 +2546,8 @@ impl Engine {
                     });
                 }
                 self.hold_queue(&mut unit, &thread, caller.user()).await?;
+                self.hold_background_wakes(&mut unit, &thread, turn.id)
+                    .await?;
                 let finished = unit.finish().await?;
                 self.commit(tx, finished).await?;
                 let mut conn = self.inner.db.acquire().await?;
@@ -2418,6 +2556,8 @@ impl Engine {
             }
             // Stop holds what waits before the harness is asked to stop, in this transaction.
             self.hold_queue(&mut unit, &thread, caller.user()).await?;
+            self.hold_background_wakes(&mut unit, &thread, turn.id)
+                .await?;
             let seq = unit.stamp(thread_id).await?;
             // What cut the turn, for the line its next input is told (T8): a person's Stop.
             threads::set_interrupt_cause(&mut *unit.conn, turn.id, "person").await?;
@@ -2531,7 +2671,7 @@ impl Engine {
     }
 
     /// The machine the harness of a thread runs on.
-    pub(crate) async fn harness_machine_of(
+    pub async fn harness_machine_of(
         &self,
         conn: &mut orch_db::Conn,
         thread_id: Id,
@@ -2690,6 +2830,7 @@ impl Engine {
             self.restore_after_offline(thread_id).await?;
             self.wake(thread_id);
         }
+        self.resume_session_loss_recoveries(machine).await?;
         Ok(())
     }
 
@@ -3127,6 +3268,8 @@ pub struct OwnUse<'a> {
     pub person: Option<Id>,
     /// The model, by the name that was sent.
     pub model: &'a str,
+    /// The original request's wire format, where retained; used only for documented price aliases.
+    pub protocol: Option<&'a str>,
     /// What it used.
     pub tokens: orch_db::usage::ledger::Tokens,
     /// The upstream's own name for the request.
@@ -3166,16 +3309,30 @@ impl Engine {
         };
         let rate = crate::caps::own_rate(conn, own.provider, own.model).await?;
         let book = crate::rates::RateBook::load(conn, own.thread.unwrap_or(own.topic)).await?;
-        let priced = book
-            .price(
+        let observed = own.timing.cloned().unwrap_or_default();
+        let (tier, mut priced) = book
+            .price_observed(
                 conn,
                 rate.as_ref(),
                 own.model,
                 &own.tokens,
-                Some(own.tokens.input),
-                None,
+                (own.tokens.input, own.tokens.input),
+                &observed,
+                own.protocol,
             )
             .await?;
+        if own.timing.is_some_and(|timing| {
+            timing
+                .reported_tokens
+                .as_ref()
+                .is_none_or(|tokens| tokens.is_empty())
+                && timing
+                    .outcome
+                    .value()
+                    .is_some_and(|outcome| outcome != "done")
+        }) {
+            priced.credits = None;
+        }
         let rate_json = priced
             .found
             .as_ref()
@@ -3196,7 +3353,7 @@ impl Engine {
                     user_id: own.person,
                 },
                 model: own.model,
-                tier: None,
+                tier: tier.as_deref(),
                 tokens: own.tokens,
                 context_tokens: Some(own.tokens.input),
                 request_ref: own.request_ref,
@@ -3208,7 +3365,7 @@ impl Engine {
         )
         .await?;
         if written && let Some(timing) = own.timing {
-            crate::providers::record_model_metrics(own.model, None, timing);
+            crate::providers::record_model_metrics(own.model, tier.as_deref(), timing);
         }
         Ok(written)
     }

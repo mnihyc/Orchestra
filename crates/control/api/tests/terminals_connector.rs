@@ -174,6 +174,7 @@ impl System {
             notices: Some(notices),
         });
         Ok(EnrollReply {
+            gateways: Vec::new(),
             machine_id: enrolled.machine_id,
             certificate_pem: enrolled.certificate.pem(),
             ca_pem: self.pki.authority().certificate_pem(),
@@ -533,8 +534,15 @@ fn outcome_of(progress: &Progress) -> Option<Outcome> {
 
 #[async_trait]
 impl Commands for LinkCommands {
-    async fn issue(&self, command: Outgoing) -> Result<(), CommandsError> {
+    async fn issue_prepared(
+        &self,
+        command: Outgoing,
+        before: Option<orch_engine::commands::BeforeCommand<'_>>,
+    ) -> Result<(), CommandsError> {
         if lock(&self.sent).contains_key(&command.id) {
+            if let Some(check) = before {
+                check().map_err(CommandsError::BeforeEffect)?;
+            }
             return Ok(());
         }
         let link = lock(&self.link)
@@ -546,6 +554,9 @@ impl Commands for LinkCommands {
                 now + chrono::Duration::seconds(i64::from(command.kind.deadline_secs())),
             )
         });
+        if let Some(check) = before {
+            check().map_err(CommandsError::BeforeEffect)?;
+        }
         let handle = link.commands().issue(Cmd {
             id: command.id,
             kind: command.kind.as_str().to_owned(),
@@ -859,6 +870,8 @@ impl Plant {
             .send()
             .await
             .ok()
+            .into_full()
+            .expect("ordinary connector shell creation retains the full native result")
     }
 
     async fn ticket(&self, shell: Id) -> String {

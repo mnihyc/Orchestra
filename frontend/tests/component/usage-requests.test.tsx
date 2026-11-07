@@ -110,7 +110,7 @@ it('names an error in words and preserves the vendor sentence once without a raw
   fake.rows=[requestRow({timing:timingFixture({outcome:{state:'told',value:'provider_busy'},error_message:'Please retry later',vendor_words:'Please retry later'})})];
   show(<Requests scope={{kind:'me'}} search={{}} span={span} onSearch={()=>undefined}/>);
   const words=await screen.findByText('Please retry later');
-  expect(words).toBeVisible();expect(screen.getByText('Rate limited',{exact:true})).toBeVisible();
+  expect(words).toBeVisible();expect(screen.getByText('Provider busy',{exact:true})).toBeVisible();
   expect(screen.queryByText(/provider_busy/)).not.toBeInTheDocument();
   expect(words.textContent.match(/Please retry later/g)).toHaveLength(1);
 });
@@ -176,4 +176,30 @@ it('recovers requests between bounded snapshots by cursor while keeping a paused
   await user.click(screen.getByRole('button', {name:'Resume'}));
   expect(await screen.findByText('Middle model')).toBeInTheDocument();
   expect(screen.getByText('Newest model')).toBeInTheDocument();
+});
+
+
+for (const locale of ['en','zh-CN'] as const) for (const theme of ['light','dark'] as const) for (const phone of [false,true])
+it(`keeps cached/cold counts and failure facts visible (${locale}/${theme}/phone:${phone})`, async () => {
+  await setLocale(locale); useAppearance.setState({locale,theme}); document.documentElement.dataset.theme=theme; fake.narrow=phone;
+  fake.rows=[requestRow({tool_calls:2,tool_ms:400,timing:timingFixture({
+    reported_tokens:{input_tokens:100,cached_input_tokens:20,cache_write_tokens:10,output_tokens:64,reasoning_tokens:0,total_tokens:164},
+    outcome:{state:'told',value:'model_refused'},error_reason:'cyber',upstream_status:403,attempt:3,
+  })})];
+  show(<Requests scope={{kind:'me'}} search={{}} span={span} onSearch={()=>undefined}/>);
+  const table=await screen.findByRole('table',{name:i18n.t('usagePerf.requestsView')});
+  for (const label of ['uncached','cached','cacheWrite','reason','status','attempt','tools','toolTime'] as const) expect(within(table).getByText(i18n.t(`usageRequest.${label}`))).toBeVisible();
+  for (const value of ['70','20','10','403','3']) expect(within(table).getByText(value,{exact:true})).toBeVisible();
+  expect(within(table).getByText(i18n.t('usageRequest.reasons.cyber'))).toBeVisible();
+  expect(within(table).getByText(i18n.t('usagePerf.outcomes.model_refused'))).toBeVisible();
+  expect(table).toHaveTextContent('64');
+  expect(fake.reads).toBe(1);expect(fake.cursors).toEqual([]);
+});
+
+for (const outcome of ['rate_limited','overloaded','stream_interrupted'] as const)
+it(`filters the refined ${outcome} class by its original wire value`, async () => {
+  const changed=vi.fn();show(<Requests scope={{kind:'me'}} search={{}} span={span} onSearch={changed}/>);
+  await screen.findByText(/Model A/);await userEvent.click(screen.getByRole('combobox',{name:i18n.t('usagePerf.outcome')}));
+  await userEvent.click(screen.getByRole('option',{name:i18n.t(`usagePerf.choices.outcomes.${outcome}.name`)}));
+  expect(changed).toHaveBeenCalledWith({outcome});expect(fake.reads).toBe(1);
 });

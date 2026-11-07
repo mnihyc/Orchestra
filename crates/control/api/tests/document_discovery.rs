@@ -1,10 +1,12 @@
 //! Folder-only grants are discoverable without knowing or viewing their hierarchy parents.
 
+#![recursion_limit = "256"]
 mod desk;
 mod places;
 mod reader_diagnostics;
 mod support;
 
+use crate::support::FullPermissionPageReply;
 use desk::Desk;
 use orch_api_contract::access::{
     AccessChoice, HolderInput, PageChange, PageChangeName, PageChangeWhole, PermissionPageUpdate,
@@ -42,7 +44,9 @@ async fn folder(desk: &Desk, parent: Option<Id>, name: &str) -> TestResult<Id> {
         })
         .send()
         .await
-        .ok();
+        .ok()
+        .into_full()
+        .unwrap();
     match made.entries.first().map(|entry| entry.item) {
         Some(DocumentTreeItem::Container(id)) => Ok(id),
         _ => Err("a new folder must have a typed container identity".into()),
@@ -61,6 +65,7 @@ async fn private_parent(desk: &Desk) -> TestResult<Id> {
         })
         .send()
         .await
+        .full_permission_page()
         .ok();
     folder(desk, Some(parent), "Never reveal sibling").await?;
     Ok(parent)
@@ -84,6 +89,7 @@ async fn give(desk: &Desk, id: Id, holder: HolderInput, expires_at: Option<Time>
         })
         .send()
         .await
+        .full_permission_page()
         .ok();
 }
 
@@ -221,7 +227,9 @@ async fn add_child(desk: &Desk, parent: Id) {
         .body(&body)
         .send()
         .await
-        .ok();
+        .ok()
+        .into_full()
+        .unwrap();
 }
 
 #[tokio::test]
@@ -285,13 +293,22 @@ async fn a_real_group_grant_discovers_the_folder_without_a_surrounding_place_gra
         })
         .send()
         .await
-        .ok();
+        .ok()
+        .into_full()
+        .map_err(|_| {
+            std::io::Error::other(
+                "this ordinary control requires the full native creation response",
+            )
+        })?;
     assert_eq!(
         desk.world
             .app
             .call(GroupHolderAdd, &[&group.id])
             .token(&desk.ada.token)
-            .body(&HolderInput::User { id: reader.id() })
+            .body(&orch_api_contract::directory::GroupHolderAddBody {
+                holder: HolderInput::User { id: reader.id() },
+                expected_revision: None
+            })
             .send()
             .await
             .status,
@@ -368,6 +385,7 @@ async fn expired_and_revoked_folder_grants_disappear_from_both_discovery_routes(
         .raw_body(&json!({"rows":[{"permission":"doc.view","remove":[entry]}]}))
         .send()
         .await
+        .full_permission_page()
         .ok();
     assert!(shared(&desk, &reader).await.is_empty());
     assert!(
@@ -399,7 +417,7 @@ async fn a_hidden_candidate_produces_an_empty_continuable_page_not_the_end_of_sh
     give(&desk, visible, HolderInput::User { id: reader.id() }, None).await;
     desk.world.app.call(PermissionPageUpdate,&[&"document-containers",&hidden]).token(&desk.ada.token)
         .raw_body(&json!({"rows":[{"permission":"access.manage","add":[{"holder":{"kind":"user","id":reader.id()}}]}]}))
-        .send().await.ok();
+        .send().await.full_permission_page().ok();
     // Creation order is fixture metadata, chosen explicitly rather than relying on random UUID ties.
     sqlx::query("UPDATE document_containers SET created_at=$2 WHERE id=$1")
         .bind(visible)
@@ -480,7 +498,7 @@ async fn admin_only_name_visibility_never_invents_participation_or_an_ordinary_s
     );
     desk.world.app.call(PermissionPageUpdate,&[&"document-containers",&id]).token(&desk.ada.token)
         .raw_body(&json!({"rows":[{"permission":"access.manage","add":[{"holder":{"kind":"user","id":reader.id()}}]}]}))
-        .send().await.ok();
+        .send().await.full_permission_page().ok();
     let rows = shared(&desk, &reader).await;
     assert!(
         matches!(rows.as_slice(),[SharedListItem::DocumentContainer {folder,admin_access:Some(_),..}] if folder.id==id),
@@ -500,7 +518,7 @@ async fn merged_pages_preserve_node_json_and_accept_the_existing_node_cursor() -
     let topic = desk.another_topic("A shared topic").await;
     desk.world.app.call(PermissionPageUpdate,&[&"nodes",&topic]).token(&desk.ada.token)
         .raw_body(&json!({"name":[{"holders":[{"kind":"user","id":reader.id()}],"choice":"full_view"}]}))
-        .send().await.ok();
+        .send().await.full_permission_page().ok();
     sqlx::query("UPDATE document_containers SET created_at=$2 WHERE id=$1").bind(id)
         .bind(desk.world.now()-chrono::Duration::seconds(1)).execute(&desk.world.db.pool).await?;
     let reply = desk.world.app.call(SharedList,&[]).token(&reader.token)
@@ -562,8 +580,10 @@ async fn soft_deleted_folders_leave_shared_and_names_while_owners_still_use_nati
         .body(&body)
         .send()
         .await
-        .ok();
-    body.deletion_plan = Some(preview.stamp);
+        .ok()
+        .into_full()
+        .expect("this native creation control requires its full response");
+    body.deletion_plan = Some((preview.stamp).into());
     desk.world
         .app
         .call(DocumentTreeOperate, &[])
@@ -571,7 +591,9 @@ async fn soft_deleted_folders_leave_shared_and_names_while_owners_still_use_nati
         .body(&body)
         .send()
         .await
-        .ok();
+        .ok()
+        .into_full()
+        .expect("this native tree control requires its full response");
     assert!(shared(&desk, &reader).await.is_empty());
     assert!(
         names(&desk, &reader, Some("document_container"))
@@ -675,6 +697,7 @@ async fn an_absent_supplied_template_does_not_rollback_a_real_place_share_or_rel
         )
         .send()
         .await
+        .full_permission_page()
         .ok();
     assert!(changed.revision > before.revision);
     assert!(changed.depends.is_empty());
@@ -804,6 +827,7 @@ async fn deleting_an_unused_builtin_template_removes_only_its_live_dependency_fr
         )
         .send()
         .await
+        .full_permission_page()
         .ok();
     assert_eq!(changed.depends[0].object.id, template);
 
@@ -889,6 +913,7 @@ async fn deleting_an_unused_builtin_template_removes_only_its_live_dependency_fr
         .raw_body(&json!({"rows":[{"permission":"topic.view","remove":[entry]}]}))
         .send()
         .await
+        .full_permission_page()
         .ok();
     assert!(committed.revision > after.revision && committed.depends.is_empty());
     assert_eq!(
@@ -930,6 +955,7 @@ async fn shared_documents_page_with_places_and_folders_then_expire_without_expos
         })
         .send()
         .await
+        .full_permission_page()
         .ok();
     let folder_id = folder(&desk, None, "Shared folder").await?;
     give(
@@ -949,6 +975,7 @@ async fn shared_documents_page_with_places_and_folders_then_expire_without_expos
         )
         .send()
         .await
+        .full_permission_page()
         .ok();
     sqlx::query("UPDATE documents SET created_at=$2 WHERE id=$1")
         .bind(document.base.id)

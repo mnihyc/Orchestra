@@ -6,6 +6,7 @@
  */
 import { createHash, randomUUID } from 'node:crypto';
 import type { IncomingMessage } from 'node:http';
+import { treeNode, treeThread, type TreeChange } from './tree-node.ts';
 
 import type {
   AuthResult,
@@ -337,6 +338,7 @@ export class World {
     this.away.reset();
     this.firstSteps = new FirstStepsWorld(this);
     this.users.inbox = this.notifications;
+    this.users.onJoin = (listener) => this.requestFeeds.prime(listener);
     this.outbox = [];
     this.delayMs = scenario.delayMs ?? 0;
     this.confirmAddresses = scenario.confirmAddresses ?? false;
@@ -1075,7 +1077,7 @@ export class World {
    * is stamped with the next sequence, and whoever follows the tree is sent the rows, unless the
    * frame is to be "lost".
    */
-  changeTree(orgId: string, changes: (Partial<TreeNode> & { id: string })[], lose = false): number {
+  changeTree(orgId: string, changes: TreeChange[], lose = false): number {
     const tree = this.trees.get(orgId);
     if (tree === undefined) return 0;
     const prev = tree.seq;
@@ -1085,27 +1087,20 @@ export class World {
       const base: TreeNode | undefined =
         held ??
         (change.kind !== undefined && change.name !== undefined
-          ? {
+          ? treeNode({
               id: change.id,
               kind: change.kind,
               name: change.name,
-              address: null,
               parent_id: orgId,
-              color: null,
-              docs: 0,
-              archived: false,
-              deleted: false,
-              restricted: false,
-              participating: true,
               chat: { id: randomUUID(), seq: 0 },
-              thread: null,
-              topic: null,
-              tree_seq: 0,
-            }
+            })
           : undefined);
       if (base === undefined) continue;
       tree.seq += 1;
-      const row: TreeNode = { ...base, ...change, tree_seq: tree.seq };
+      const row: TreeNode = {
+        ...base, ...change, tree_seq: tree.seq,
+        thread: change.thread === undefined ? base.thread : change.thread === null ? null : treeThread(change.thread),
+      };
       tree.nodes.set(row.id, row);
       rows.push(row);
     }

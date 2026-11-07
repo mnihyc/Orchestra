@@ -931,7 +931,51 @@ pub async fn rename(
     writer: &Writer,
     now: DateTime<Utc>,
 ) -> Result<Option<Seq>, DbError> {
-    containers::lock_document_scope(conn, document).await?;
+    match rename_checked(conn, document, title, writer, now, || {
+        Ok::<(), std::convert::Infallible>(())
+    })
+    .await
+    {
+        Ok(result) => result,
+        Err(never) => match never {},
+    }
+}
+
+/// The same native rename, with the caller's once-only cut after its scope/document waits.
+pub async fn rename_checked<E, F>(
+    conn: &mut Conn,
+    document: Id,
+    title: &str,
+    writer: &Writer,
+    now: DateTime<Utc>,
+    before: F,
+) -> Result<Result<Option<Seq>, DbError>, E>
+where
+    F: FnOnce() -> Result<(), E>,
+{
+    let ready: Result<bool, DbError> = async {
+        containers::lock_document_scope(conn, document).await?;
+        Ok(lock(conn, document)
+            .await?
+            .is_some_and(|row| row.deleted_at.is_none()))
+    }
+    .await;
+    match ready {
+        Err(error) => return Ok(Err(error)),
+        Ok(false) => return Ok(Ok(None)),
+        Ok(true) => {}
+    }
+    before()?;
+    Ok(rename_locked(conn, document, title, writer, now).await)
+}
+
+async fn rename_locked(
+    conn: &mut Conn,
+    document: Id,
+    title: &str,
+    writer: &Writer,
+    now: DateTime<Utc>,
+) -> Result<Option<Seq>, DbError> {
     let Some(seq) = next_seq(conn, document).await? else {
         return Ok(None);
     };
@@ -1261,8 +1305,23 @@ pub async fn maintenance_page(
     after: Option<Id>,
     limit: i64,
 ) -> Result<Vec<(Id, Id)>, DbError> {
-    Ok(sqlx::query_as("SELECT id,node_id FROM documents WHERE ($1::uuid IS NULL OR id>$1) ORDER BY id LIMIT $2 FOR UPDATE")
-        .bind(after).bind(limit).fetch_all(conn).await?)
+    Ok(match after {
+        Some(after) => {
+            sqlx::query_as(
+                "SELECT id,node_id FROM documents WHERE id>$1 ORDER BY id LIMIT $2 FOR UPDATE",
+            )
+            .bind(after)
+            .bind(limit)
+            .fetch_all(conn)
+            .await?
+        }
+        None => {
+            sqlx::query_as("SELECT id,node_id FROM documents ORDER BY id LIMIT $1 FOR UPDATE")
+                .bind(limit)
+                .fetch_all(conn)
+                .await?
+        }
+    })
 }
 
 /// The files nothing names any more, each with its document: no block of the document names it,
@@ -2055,4 +2114,30 @@ pub async fn describe_automatically(
         tree::stamp(conn, document).await?;
     }
     Ok(seq)
+}
+
+/// One bounded oldest-first unnamed-file page after the durable purge supplier.
+pub async fn unnamed_files_page(
+    conn: &mut Conn,
+    before: DateTime<Utc>,
+    after: Option<(DateTime<Utc>, Id)>,
+    limit: i64,
+) -> Result<Vec<(Id, Id, DateTime<Utc>)>, DbError> {
+    let seek = if after.is_some() {
+        " AND (f.added_at,f.id)>($3,$4)"
+    } else {
+        ""
+    };
+    let sql=format!("SELECT f.document_id,f.id,f.added_at FROM document_files f
+      WHERE f.added_at<$1 {seek}
+        AND NOT EXISTS(SELECT 1 FROM document_blocks b WHERE b.document_id=f.document_id AND b.props->>'file_id'=f.id::text)
+        AND NOT EXISTS(SELECT 1 FROM document_versions v WHERE v.document_id=f.document_id AND strpos(COALESCE(v.whole,v.change)::text,f.id::text)>0)
+      ORDER BY f.added_at,f.id LIMIT $2");
+    let mut query = sqlx::query_as(sqlx::AssertSqlSafe(sql))
+        .bind(before)
+        .bind(limit);
+    if let Some((at, id)) = after {
+        query = query.bind(at).bind(id);
+    }
+    Ok(query.fetch_all(conn).await?)
 }

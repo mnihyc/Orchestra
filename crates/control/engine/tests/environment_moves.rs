@@ -1303,10 +1303,41 @@ async fn a_move_offers_each_mount_detach_as_is_or_copy_and_asks_before_a_copy_la
     assert!(made.location.made);
     let name = made.location.source.unwrap();
     let machine = f.target.machine.simple().to_string();
-    assert_eq!(
-        name,
-        format!("orch-mount-{data}-{}", &machine[machine.len() - 12..]),
-        "a new location has a name of the machine's own"
+    let prefix = format!("orch-mount-{data}-{}-", &machine[machine.len() - 12..]);
+    let suffix = name
+        .strip_prefix(&prefix)
+        .expect("a new location has the exact mount and machine prefix");
+    assert!(
+        !suffix.is_empty(),
+        "each new location has its own destination"
+    );
+    let another = plan_with(
+        &f,
+        Some(vec![
+            MountChoice {
+                mount_id: data,
+                fate: MountFate::Copy,
+                into: Some(CopyInto::NewLocation),
+            },
+            MountChoice {
+                mount_id: notes,
+                fate: MountFate::Detach,
+                into: None,
+            },
+        ]),
+    )
+    .await;
+    let other = row(&another, data).copy.unwrap();
+    assert!(other.location.made);
+    let other_name = other.location.source.unwrap();
+    assert!(
+        other_name
+            .strip_prefix(&prefix)
+            .is_some_and(|suffix| !suffix.is_empty())
+    );
+    assert_ne!(
+        name, other_name,
+        "two new-location plans have distinct destinations before either is published"
     );
     let off = row(&both, notes);
     assert_eq!(off.detached_because, Some(MountDetachedBecause::Asked));
@@ -2118,5 +2149,122 @@ async fn a_move_that_brings_the_home_tells_no_machine_of_any_thread_whatever_the
     assert_eq!(
         kinds_of[0], kinds_of[1],
         "the move gives the machines the same kinds of command for 2 threads and for 12"
+    );
+}
+
+#[tokio::test]
+async fn the_native_hosted_destination_selector_runs_before_measurements_and_rejects_foreign_recipe_identity()
+ {
+    let f = fixture().await;
+    let mut conn = f.world.pool.acquire().await.unwrap();
+    let principal = Principal::load(
+        &mut conn,
+        Caller::session(f.world.ada),
+        f.world.clock.time(),
+    )
+    .await
+    .unwrap();
+    let common = f
+        .world
+        .engine()
+        .draft_update(
+            &mut conn,
+            &principal,
+            Target::Environment(f.environment),
+            UpdatePreflightReason::Recreate,
+            None,
+        )
+        .await
+        .unwrap();
+    let before = (
+        f.source.count(CommandKind::NodeRuntimeVolumesMeasure),
+        f.source_unit.count(CommandKind::FsManifest),
+        f.target.count(CommandKind::NodeVolumeCarryCheck),
+    );
+    let body = EnvironmentMovePreflightBody {
+        host_id: Some(f.target.id),
+        ..Default::default()
+    };
+    let selected = orch_engine::jobs::environment_move::select_destination(
+        &mut conn,
+        &principal,
+        f.environment,
+        &common.recipe,
+        &body,
+        f.world.clock.time(),
+    )
+    .await
+    .unwrap();
+    assert_eq!(selected.state.id, f.environment);
+    assert_eq!(selected.old.id, f.old);
+    assert_eq!(selected.destination.host.id, f.target.id);
+    assert_ne!(
+        selected.destination.host.id, selected.old.host_id,
+        "one real selected host, not a candidate union"
+    );
+    assert_eq!(
+        selected.kept_image,
+        envs::runtime(&mut conn, f.old)
+            .await
+            .unwrap()
+            .unwrap()
+            .kept_image
+            .map(
+                |value| serde_json::from_value::<orch_driver_contract::kept::KeptImage>(value)
+                    .unwrap()
+            )
+    );
+    let automatic = orch_engine::jobs::environment_move::select_destination(
+        &mut conn,
+        &principal,
+        f.environment,
+        &common.recipe,
+        &Default::default(),
+        f.world.clock.time(),
+    )
+    .await
+    .unwrap();
+    assert_eq!(
+        automatic.destination.host.id, f.target.id,
+        "the ordinary automatic scheduler chooses the same permitted other host"
+    );
+    let mut foreign = common.recipe.clone();
+    foreign.target = Target::Environment(new_id());
+    assert!(matches!(
+        orch_engine::jobs::environment_move::select_destination(
+            &mut conn,
+            &principal,
+            f.environment,
+            &foreign,
+            &body,
+            f.world.clock.time()
+        )
+        .await,
+        Err(orch_engine::updates::UpdateError::Denied)
+    ));
+    let wrong_template = EnvironmentMovePreflightBody {
+        template_id: Some(new_id()),
+        ..body.clone()
+    };
+    assert!(matches!(
+        orch_engine::jobs::environment_move::select_destination(
+            &mut conn,
+            &principal,
+            f.environment,
+            &common.recipe,
+            &wrong_template,
+            f.world.clock.time()
+        )
+        .await,
+        Err(orch_engine::updates::UpdateError::Invalid(_))
+    ));
+    assert_eq!(
+        (
+            f.source.count(CommandKind::NodeRuntimeVolumesMeasure),
+            f.source_unit.count(CommandKind::FsManifest),
+            f.target.count(CommandKind::NodeVolumeCarryCheck)
+        ),
+        before,
+        "native selection starts no count, fingerprint, workspace listing or carry probe"
     );
 }

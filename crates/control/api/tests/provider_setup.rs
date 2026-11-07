@@ -50,7 +50,9 @@ async fn agent_with_descriptor(world: &World, by: &Who, org: Id) -> Id {
         })
         .send()
         .await
-        .ok();
+        .ok()
+        .into_full()
+        .unwrap();
     sqlx::query("UPDATE agents SET descriptor = $2 WHERE id = $1")
         .bind(made.base.id)
         .bind(descriptor())

@@ -103,8 +103,8 @@ export const machineQuery = (id: string) =>
   });
 
 /** The native acknowledgement precedes a supervised reconnect; active roles arrive over the live row. */
-export function setMachineRoles(id:string,roles:readonly string[]):Promise<MachineRolesChange> {
-  return ok(api.PUT('/machines/{id}/roles',{params:{path:{id}},body:{roles:[...roles]}}));
+export function setMachineRoles(id:string,roles:readonly string[],expectedRevision?:number):Promise<MachineRolesChange> {
+  return ok(api.PUT('/machines/{id}/roles',{params:{path:{id}},body:{roles:[...roles],...(expectedRevision===undefined?{}:{expected_revision:expectedRevision})}}));
 }
 
 /** The local policy of a machine as it last reported it, and which keys this caller may change. */

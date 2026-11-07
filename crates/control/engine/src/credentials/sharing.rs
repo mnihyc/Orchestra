@@ -90,6 +90,9 @@ impl Engine {
             LeaseMode::Shared
         };
         let body = LeaseOpen {
+            model_parameters: self
+                .lease_model_parameters(lease.provider_id, &lease.allowed_models)
+                .await?,
             lease_id: lease.id,
             provider_id: lease.provider_id,
             thread_id: lease.thread_id,

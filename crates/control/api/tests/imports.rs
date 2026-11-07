@@ -1,4 +1,5 @@
 //! Importing over HTTP: an Orch package that an export wrote is planned (nothing is made), brought as a job, found again by a later import of the same things, replaced in place when its source changed, taken back as a whole, and refused where the person may not or the limits say no; the report says what became of each object.
+#![recursion_limit = "256"]
 #![allow(
     clippy::unwrap_used,
     clippy::expect_used,
@@ -10,6 +11,10 @@ mod places;
 mod rig;
 mod support;
 
+#[path = "imports/scopes.rs"]
+mod scoped_readers;
+
+use crate::support::FullPermissionPageReply;
 use archive_world::{Office, entry, everything, kept};
 use orch_api_contract::common::ErrorCode;
 use orch_api_contract::common::PageQuery;
@@ -524,7 +529,7 @@ async fn taking_an_import_back_deletes_what_it_made_and_leaves_what_was_there() 
             .send()
             .await;
     assert_eq!(job.status, 202, "{:?}", job.body);
-    let job = o.ended(ada, job.ok().id).await;
+    let job = o.ended(ada, job.ok().into_full().unwrap().id).await;
     assert_eq!(job.state, JobState::Succeeded, "{:?}", job.error);
     assert_eq!(read(&o, ada, done.id).await.state, ImportState::Undone);
     assert_eq!(
@@ -625,7 +630,7 @@ async fn an_undone_package_can_be_imported_again_without_overwriting_its_removed
                 .send()
                 .await;
         assert_eq!(undo.status, 202, "{:?}", undo.body);
-        let job = o.ended(ada, undo.ok().id).await;
+        let job = o.ended(ada, undo.ok().into_full().unwrap().id).await;
         assert_eq!(job.state, JobState::Succeeded, "{:?}", job.error);
         assert_eq!(read(&o, ada, done.id).await.state, ImportState::Undone);
         assert_eq!(places::children(&o.s.rig.world, ada, project).await, before);
@@ -908,7 +913,7 @@ async fn all_five_import_routes_serve_through_the_debug_registry_with_reviewed_a
         .send()
         .await;
     assert_eq!(reply.status, 202, "Undo: {:?}", reply.body);
-    let undo = reply.ok();
+    let undo = reply.ok().into_full().unwrap();
     assert_ne!(undo.id, created.id);
     let mut conn = world.conn().await;
     let recorded = rows::get(&mut conn, import.id).await.unwrap().unwrap();
@@ -1434,6 +1439,7 @@ async fn check_document_authorship(mode: &str) {
     }
     let mut export_request = everything();
     export_request.package = Some(true);
+    export_request.versions = Some(true);
     let export = o.made(ada, o.topic(), &export_request).await;
     let held = o.contents(ada, &export).await;
     let exported_versions: Vec<Value> = held
@@ -1632,6 +1638,8 @@ async fn document_beside(o: &Office, by: &Who, node: Id, title: &str, private: b
         .send()
         .await
         .ok()
+        .into_full()
+        .unwrap()
         .base
         .id
 }
@@ -1682,7 +1690,7 @@ async fn taking_an_import_back_leaves_what_people_added_since_and_what_holds_it_
             .body(&ImportUndoBody::default())
             .send()
             .await;
-    let job = o.ended(ada, job.ok().id).await;
+    let job = o.ended(ada, job.ok().into_full().unwrap().id).await;
     assert_eq!(job.state, JobState::Succeeded, "{:?}", job.error);
 
     // What the import made and nobody touched is gone; what Dan wrote stays, and so does the topic that holds it.
@@ -1754,7 +1762,7 @@ async fn a_document_somebody_else_changed_since_the_import_stays_when_it_is_take
             .body(&ImportUndoBody::default())
             .send()
             .await;
-    let job = o.ended(ada, job.ok().id).await;
+    let job = o.ended(ada, job.ok().into_full().unwrap().id).await;
     assert_eq!(job.state, JobState::Succeeded, "{:?}", job.error);
     let after =
         o.s.rig
@@ -1788,6 +1796,10 @@ async fn plain(o: &Office, by: &Who, client: &str, names: &[&str]) -> ImportRequ
 #[tokio::test]
 async fn a_folder_the_person_may_not_add_to_is_no_folder_of_this_place_to_them_and_one_they_may_is()
 {
+    use orch_api_contract::access::{
+        AccessChoice, HolderInput, PageChange, PageChangeName, PageChangeWhole,
+        PermissionPageUpdate,
+    };
     let o = Office::new().await;
     let (ada, cai, dan) = (&o.s.ada, &o.s.cai, &o.s.dan);
     let topic = o.topic();
@@ -1805,6 +1817,51 @@ async fn a_folder_the_person_may_not_add_to_is_no_folder_of_this_place_to_them_a
         .as_ref()
         .unwrap()
         .id;
+
+    // The shipped viewer role can create documents; set up a read-only share explicitly.
+    o.s.rig
+        .world
+        .app
+        .call(PermissionPageUpdate, &[&"document-containers", &folder])
+        .token(&ada.token)
+        .body(&PageChange {
+            whole: Some(PageChangeWhole::Private),
+            ..Default::default()
+        })
+        .send()
+        .await
+        .full_permission_page()
+        .ok();
+    o.s.rig
+        .world
+        .app
+        .call(PermissionPageUpdate, &[&"document-containers", &folder])
+        .token(&ada.token)
+        .body(&PageChange {
+            name: Some(vec![
+                PageChangeName {
+                    holders: vec![HolderInput::User { id: cai.id() }],
+                    choice: AccessChoice::FullView,
+                    options: None,
+                    expires_at: None,
+                    note: None,
+                    export: None,
+                },
+                PageChangeName {
+                    holders: vec![HolderInput::User { id: dan.id() }],
+                    choice: AccessChoice::FullInteract,
+                    options: None,
+                    expires_at: None,
+                    note: None,
+                    export: None,
+                },
+            ]),
+            ..Default::default()
+        })
+        .send()
+        .await
+        .full_permission_page()
+        .ok();
 
     // Cai may read but not add: the folder is not one he may bring files into, with the answer that a folder that is not there gets.
     let mut asked_by_cai = plain(&o, cai, "cai", &["more.md"]).await;

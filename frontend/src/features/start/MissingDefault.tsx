@@ -42,6 +42,8 @@ export interface Scope {
   kind: 'topic' | 'project' | 'org';
   name: string;
   may: boolean;
+  /** A displayed default destination is still being admitted. */
+  pending?: boolean;
 }
 
 /**
@@ -49,15 +51,15 @@ export interface Scope {
  * the project a topic lies in, and the org it lies in; each with whether the person may write there. Writing a default is a
  * parameter of the place, which is its manager's to set.
  */
-export function useScopes(node: Topic | Project): Scope[] {
+export function useScopes(node: Topic | Project, needed = true): Scope[] {
   const org = [...node.path].reverse().find((entry) => entry.kind === 'org') ?? null;
   const project = node.kind === 'topic' ? node.parent_id : null;
-  const above = useQuery({ ...nodeQuery(project ?? ''), enabled: project !== null });
-  const orgNode = useQuery({ ...nodeQuery(org?.id ?? ''), enabled: org !== null });
+  const above = useQuery({ ...nodeQuery(project ?? ''), enabled: needed && project !== null });
+  const orgNode = useQuery({ ...nodeQuery(org?.id ?? ''), enabled: needed && org !== null });
   return [
     { id: node.id, kind: node.kind, name: node.name, may: holds(node.access, `${node.kind}.manage`) },
-    ...(project === null ? [] : [{ id: project, kind: 'project' as const, name: above.data?.name ?? '', may: holds(above.data?.access, 'project.manage') }]),
-    ...(org === null ? [] : [{ id: org.id, kind: 'org' as const, name: org.name ?? '', may: holds(orgNode.data?.access, 'org.manage') }]),
+    ...(project === null ? [] : [{ id: project, kind: 'project' as const, name: above.data?.name ?? '', may: holds(above.data?.access, 'project.manage'), pending: needed && above.isPending }]),
+    ...(org === null ? [] : [{ id: org.id, kind: 'org' as const, name: org.name ?? '', may: holds(orgNode.data?.access, 'org.manage'), pending: needed && orgNode.isPending }]),
   ];
 }
 

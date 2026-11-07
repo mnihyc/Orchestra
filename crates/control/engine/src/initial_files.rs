@@ -10,7 +10,7 @@ use crate::{
 use orch_access_contract::decisions::{Decision, ObjectRef, Refusal};
 use orch_access_contract::permissions::{ObjectKind, Permission};
 use orch_api_contract::{binding::NewEnvironmentFiles, forks::FileSelection};
-use orch_authz::{Act, Policy, Principal};
+use orch_authz::{Act, Caller, CapturedOperation, Policy, Principal};
 use orch_db::{
     Conn,
     queries::{
@@ -42,6 +42,101 @@ pub struct Plan {
     snapshot: Option<Id>,
     manifest: Option<Hash>,
     local: bool,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    creator_origin: Option<CapturedOperation>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    creator_thread: Option<Id>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    creator_job: Option<Id>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    target_environment: Option<Id>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    target_generation: Option<i32>,
+}
+
+impl Plan {
+    /// The actual source Thread resolved by the ordinary initial-file planner.
+    #[must_use]
+    pub fn source_thread(&self) -> Id {
+        self.thread
+    }
+
+    /// The recorded source Environment, including for a saved snapshot.
+    #[must_use]
+    pub fn source_environment(&self) -> Id {
+        self.environment
+    }
+
+    /// Attach the creator's full admission at its last rollbackable checkpoint. The shared
+    /// capture retains every credential boundary, rather than choosing a representative token.
+    pub fn capture_creator(
+        &mut self,
+        caller: &Caller,
+        created_thread: Id,
+        target_environment: Id,
+        target_generation: i32,
+    ) -> Result<(), EngineError> {
+        let origin = CapturedOperation::capture(&caller.clone().with_admin_mode(false))
+            .map_err(EngineError::unreadable)?;
+        if caller.user() != self.caller
+            || !matches!(
+                origin.operation(),
+                "ThreadCreate" | "TopicCreate.with_thread"
+            )
+            || target_generation < 0
+            || self
+                .creator_origin
+                .as_ref()
+                .is_some_and(|old| old != &origin)
+            || self.creator_thread.is_some_and(|old| old != created_thread)
+            || self
+                .target_environment
+                .is_some_and(|old| old != target_environment)
+            || self
+                .target_generation
+                .is_some_and(|old| old != target_generation)
+        {
+            return Err(EngineError::unreadable(
+                "the initial-file plan does not belong to this admitted creator",
+            ));
+        }
+        self.creator_origin = Some(origin);
+        self.creator_thread = Some(created_thread);
+        self.target_environment = Some(target_environment);
+        self.target_generation = Some(target_generation);
+        Ok(())
+    }
+    /// A standalone Environment has an actual provision job and no created Thread.
+    pub fn capture_environment_creator(
+        &mut self,
+        caller: &Caller,
+        job: Id,
+        target: Id,
+        generation: i32,
+    ) -> Result<(), EngineError> {
+        let origin = CapturedOperation::capture(caller).map_err(EngineError::unreadable)?;
+        if origin.operation() != orch_api_contract::environment_sources::CREATE.operation
+            || origin.user() != self.caller
+            || generation < 0
+            || self.creator_thread.is_some()
+            || self
+                .creator_origin
+                .as_ref()
+                .is_some_and(|old| old != &origin)
+            || self.creator_job.is_some_and(|old| old != job)
+            || self.target_environment.is_some_and(|old| old != target)
+            || self.target_generation.is_some_and(|old| old != generation)
+        {
+            return Err(EngineError::unreadable(
+                "the initial copy has another native standalone creator",
+            ));
+        }
+        self.creator_origin = Some(origin);
+        self.creator_job = Some(job);
+        self.target_environment = Some(target);
+        self.target_generation = Some(generation);
+        Ok(())
+    }
 }
 
 /// Why no initial-file plan was accepted; refusal precedes any environment or job creation.
@@ -120,6 +215,31 @@ async fn rights(
     Ok(())
 }
 
+/// Resolve only the declared source's canonical identities. This performs no permission check
+/// or effects: the creator binds these facts before the ordinary planner checks its caller.
+pub async fn source_identity(
+    conn: &mut Conn,
+    requested: &NewEnvironmentFiles,
+) -> Result<(Id, Id), Error> {
+    match requested {
+        NewEnvironmentFiles::FromThread { from_thread, .. } => {
+            let thread = threads::thread(conn, *from_thread)
+                .await?
+                .ok_or(Error::NotFound)?;
+            Ok((*from_thread, thread.environment_id.ok_or(Error::NotFound)?))
+        }
+        NewEnvironmentFiles::Snapshot { snapshot_id } => {
+            let row = storage::snapshot(conn, *snapshot_id)
+                .await?
+                .ok_or(Error::NotFound)?;
+            let thread = row.thread_id.ok_or_else(|| Error::Invalid(
+                "a workspace export is for download; choose a thread snapshot to copy initial files".into(),
+            ))?;
+            Ok((thread, row.environment_id))
+        }
+    }
+}
+
 /// Authorizes the declared source, normalizes only its selection, and freezes no arbitrary blob claim.
 pub async fn plan(
     conn: &mut Conn,
@@ -128,6 +248,7 @@ pub async fn plan(
 ) -> Result<Plan, Error> {
     let caller = principal.user();
     let token = principal.caller().grant().and_then(|grant| grant.token());
+    let (source_thread, source_environment) = source_identity(conn, requested).await?;
     match requested {
         NewEnvironmentFiles::FromThread {
             from_thread,
@@ -136,7 +257,10 @@ pub async fn plan(
             let thread = threads::thread(conn, *from_thread)
                 .await?
                 .ok_or(Error::NotFound)?;
-            let environment = thread.environment_id.ok_or(Error::NotFound)?;
+            let environment = thread
+                .environment_id
+                .filter(|id| *id == source_environment)
+                .ok_or(Error::NotFound)?;
             rights(conn, principal, *from_thread, environment).await?;
             let env = environments::environment(conn, environment)
                 .await?
@@ -197,13 +321,22 @@ pub async fn plan(
                 snapshot: None,
                 manifest: None,
                 local: false,
+                creator_origin: None,
+                creator_thread: None,
+                creator_job: None,
+                target_environment: None,
+                target_generation: None,
             })
         }
         NewEnvironmentFiles::Snapshot { snapshot_id } => {
             let row = storage::snapshot(conn, *snapshot_id)
                 .await?
                 .ok_or(Error::NotFound)?;
-            let thread=row.thread_id.ok_or_else(||Error::Invalid("a workspace export is for download; choose a thread snapshot to copy initial files".into()))?;
+            let thread = row
+                .thread_id
+                .filter(|id| *id == source_thread)
+                .filter(|_| row.environment_id == source_environment)
+                .ok_or(Error::NotFound)?;
             rights(conn, principal, thread, row.environment_id).await?;
             if row.state != "complete"
                 || row.missing_count != 0
@@ -235,6 +368,11 @@ pub async fn plan(
                 snapshot: Some(row.id),
                 manifest: row.manifest_blob,
                 local: row.storage == "environment",
+                creator_origin: None,
+                creator_thread: None,
+                creator_job: None,
+                target_environment: None,
+                target_generation: None,
             })
         }
     }
@@ -244,27 +382,98 @@ fn failure(message: impl Into<String>) -> Stop {
     Failure::new("initial_files_unavailable", message).into()
 }
 
-async fn current(job: &Job, plan: &Plan) -> Result<environments::EnvironmentRow, Stop> {
-    let mut tx = transaction_guard::scope(false, job.engine().db().begin()).await?;
-    transaction_guard::lock_action(&mut tx).await?;
-    let principal =
-        crate::jobs::source::load_principal(&mut tx, job, plan.caller, plan.token).await?;
-    rights(&mut tx, &principal, plan.thread, plan.environment)
+async fn current_at(
+    conn: &mut Conn,
+    plan: &Plan,
+    now: Time,
+) -> Result<environments::EnvironmentRow, Stop> {
+    let principal = if let Some(origin) = &plan.creator_origin {
+        if origin.operation() == orch_api_contract::environment_sources::CREATE.operation {
+            let job = plan
+                .creator_job
+                .ok_or_else(|| failure("the standalone initial copy has no provision"))?;
+            let owner = jobs::job(conn, job)
+                .await?
+                .ok_or_else(|| failure("the standalone provision disappeared"))?;
+            if plan.creator_thread.is_some()
+                || plan.target_environment != owner.environment_id
+                || plan.target_generation != Some(0)
+                || origin.user() != plan.caller
+                || owner.plan.pointer("/creator_provision/origin") != Some(&json!(origin))
+            {
+                return Err(failure(
+                    "the standalone initial copy lost its native provision association",
+                ));
+            }
+            crate::environment_creation::principal_at(conn, &owner, now).await?
+        } else {
+            let (Some(thread), Some(target), Some(_)) = (
+                plan.creator_thread,
+                plan.target_environment,
+                plan.target_generation,
+            ) else {
+                return Err(failure("the initial file creator evidence is incomplete"));
+            };
+            if origin.user() != plan.caller {
+                return Err(failure("the initial file creator identity changed"));
+            }
+            let caller = crate::operation_scope::creators::restore_initial_files(
+                conn,
+                origin,
+                thread,
+                target,
+                plan.thread,
+                plan.environment,
+                now,
+            )
+            .await?
+            .ok_or_else(|| failure("the accepted creator no longer permits this initial copy"))?;
+            Principal::load(conn, caller, now)
+                .await
+                .map_err(EngineError::from)?
+        }
+    } else {
+        if plan.creator_job.is_some()
+            || plan.creator_thread.is_some()
+            || plan.target_environment.is_some()
+            || plan.target_generation.is_some()
+        {
+            return Err(failure("the initial file creator evidence is incomplete"));
+        }
+        let principal =
+            crate::jobs::source::load_principal_at(conn, plan.caller, plan.token, now).await?;
+        // Old plans remain readable, but a current modern key can never be reconstructed
+        // through its legacy scopes after losing the creator's accepted operation.
+        if let Some(token) = plan.token {
+            let scoped =
+                orch_db::queries::identity::api_token_is_operation_scoped(conn, token, plan.caller)
+                    .await?;
+            if scoped != Some(false) {
+                return Err(failure(
+                    "the scoped initial copy has no accepted creator origin",
+                ));
+            }
+        }
+        principal
+    };
+    rights(conn, &principal, plan.thread, plan.environment)
         .await
         .map_err(|error| failure(error.to_string()))?;
-    let source = environments::environment(&mut tx, plan.environment)
+    let source = environments::environment(conn, plan.environment)
         .await?
         .ok_or_else(|| failure("the initial file source disappeared"))?;
     if let Some(snapshot) = plan.snapshot {
-        let row = storage::snapshot(&mut tx, snapshot)
+        let row = storage::snapshot(conn, snapshot)
             .await?
             .filter(|row| {
                 row.thread_id == Some(plan.thread)
                     && row.environment_id == plan.environment
+                    && row.env_generation == plan.generation
+                    && row.directory == plan.directory
                     && row.state == "complete"
                     && row.missing_count == 0
                     && row.manifest_blob == plan.manifest
-                    && !row.expires_at.is_some_and(|at| at <= job.now())
+                    && !row.expires_at.is_some_and(|at| at <= now.get())
             })
             .ok_or_else(|| {
                 failure("the initial file snapshot changed or is no longer available")
@@ -273,7 +482,7 @@ async fn current(job: &Job, plan: &Plan) -> Result<environments::EnvironmentRow,
             return Err(failure("the initial file snapshot changed its storage"));
         }
     } else {
-        let thread = threads::thread(&mut tx, plan.thread)
+        let thread = threads::thread(conn, plan.thread)
             .await?
             .filter(|thread| {
                 thread.environment_id == Some(plan.environment)
@@ -293,8 +502,78 @@ async fn current(job: &Job, plan: &Plan) -> Result<environments::EnvironmentRow,
             "the original source generation is no longer running",
         ));
     }
+    Ok(source)
+}
+
+async fn current(job: &Job, plan: &Plan) -> Result<environments::EnvironmentRow, Stop> {
+    let mut tx = transaction_guard::scope(false, job.engine().db().begin()).await?;
+    transaction_guard::lock_action(&mut tx).await?;
+    let owner = job.lock_owned(&mut tx).await?.ok_or(Stop::Lost)?;
+    if let Some(reason) = crate::jobs::runner::abort_reason(&owner)? {
+        return Err(reason);
+    }
+    target_at(&mut tx, &owner, plan).await?;
+    let source = current_at(&mut tx, plan, Time::new(job.now())).await?;
     tx.commit().await.map_err(orch_db::DbError::from)?;
     Ok(source)
+}
+
+// A new Environment has not published its connector yet. Only the owning provisioning
+// job's actual enrolled candidate can receive this copy; no future generation is inferred.
+async fn target_at(
+    conn: &mut Conn,
+    owner: &jobs::JobRow,
+    plan: &Plan,
+) -> Result<Option<(environments::EnvironmentRow, Id, Id)>, Stop> {
+    let Some(target) = plan.target_environment else {
+        return Ok(None);
+    };
+    let generation = plan
+        .target_generation
+        .ok_or_else(|| failure("the initial file target generation is absent"))?;
+    if plan.creator_job.is_some_and(|id| id != owner.id)
+        || !owner.is_open()
+        || owner.cancel_requested()
+        || owner.kind != jobs::kind::ENVIRONMENT_PROVISION
+        || owner.environment_id != Some(target)
+        || owner.plan.get("mode").and_then(Json::as_str) != Some("make")
+        || owner.plan.get("generation").and_then(Json::as_i64) != Some(i64::from(generation))
+        || owner.plan.get("initial_files") != Some(&json!(plan))
+    {
+        return Err(failure(
+            "the initial file target no longer belongs to this provisioning",
+        ));
+    }
+    let runtime = owner
+        .plan
+        .get("runtime")
+        .and_then(Json::as_str)
+        .and_then(|id| id.parse::<Id>().ok())
+        .ok_or_else(|| failure("the initial file target has no enrolled runtime"))?;
+    let candidate = orch_db::queries::environments::hosting::runtime(conn, runtime)
+        .await?
+        .ok_or_else(|| failure("the initial file target runtime disappeared"))?;
+    let machine = candidate
+        .machine_id
+        .ok_or_else(|| failure("the initial file target connector has not enrolled"))?;
+    let current = environments::environment(conn, target)
+        .await?
+        .filter(|env| env.generation == generation)
+        .ok_or_else(|| failure("the accepted initial file target generation changed"))?;
+    if crate::jobs::source::matching_provision_target(
+        conn,
+        owner,
+        target,
+        machine,
+        candidate.generation,
+        runtime,
+    )
+    .await?
+    .is_none()
+    {
+        return Err(failure("the initial file target runtime changed"));
+    }
+    Ok(Some((current, runtime, machine)))
 }
 
 fn safe_link(path: &str, target: &str) -> bool {
@@ -319,6 +598,247 @@ fn safe_link(path: &str, target: &str) -> bool {
         }
     }
     true
+}
+
+fn snapshot_selection(plan: &Plan) -> Selection {
+    let directory = plan.directory.as_deref().unwrap_or("");
+    let below = |path: &str| {
+        if directory.is_empty() {
+            path.to_owned()
+        } else if path.is_empty() {
+            directory.to_owned()
+        } else {
+            format!("{directory}/{path}")
+        }
+    };
+    plan.selection.as_ref().map_or_else(
+        || Selection {
+            include: vec![directory.to_owned()],
+            exclude: vec![],
+        },
+        |selection| Selection {
+            include: selection.include.iter().map(|path| below(path)).collect(),
+            exclude: selection.exclude.iter().map(|path| below(path)).collect(),
+        },
+    )
+}
+
+/// The ordinary runner calls this after its WorkReport/deadline augmentation and active
+/// command reservation. Retain that canonical body once, before issuing this native command.
+pub(crate) async fn remember_creator_command(job: &Job, outgoing: &Outgoing) -> Result<(), Stop> {
+    if !matches!(
+        outgoing.kind.as_str(),
+        "fs.snapshot" | "fs.record.read" | "fs.materialize"
+    ) {
+        return Ok(());
+    }
+    let mut tx = transaction_guard::scope(false, job.engine().db().begin()).await?;
+    transaction_guard::lock_action(&mut tx).await?;
+    let owner = job.lock_owned(&mut tx).await?.ok_or(Stop::Lost)?;
+    let Some(value) = owner.plan.get("initial_files") else {
+        return Ok(());
+    };
+    let plan: Plan = serde_json::from_value(value.clone()).map_err(EngineError::from)?;
+    if plan.creator_origin.is_none() {
+        return Ok(());
+    }
+    let known = [
+        "initial-files.snapshot",
+        "initial-files.export",
+        "initial-files.materialize",
+    ]
+    .into_iter()
+    .any(|phase| outgoing.id == ids::derived(phase, &[owner.id.as_bytes()]));
+    if !known {
+        return Ok(());
+    }
+    if let Some(reason) = crate::jobs::runner::abort_reason(&owner)? {
+        return Err(reason);
+    }
+    current_at(&mut tx, &plan, Time::new(job.now())).await?;
+    let (_, runtime, _) = target_at(&mut tx, &owner, &plan)
+        .await?
+        .ok_or_else(|| failure("the initial copy has no accepted target"))?;
+    let native = json!({
+        "id": outgoing.id, "runtime": runtime, "machine": outgoing.machine,
+        "kind": outgoing.kind.as_str(), "key": outgoing.key.wire(), "body": outgoing.body,
+    });
+    let mut journal = owner
+        .plan
+        .get("initial_files_commands")
+        .cloned()
+        .unwrap_or_else(|| json!({}));
+    let entries = journal
+        .as_object_mut()
+        .ok_or_else(|| failure("the initial file command journal is invalid"))?;
+    if entries
+        .get(&outgoing.id.to_string())
+        .is_some_and(|old| old != &native)
+    {
+        return Err(failure("the accepted initial file command recipe changed"));
+    }
+    // There are only three stable phase IDs, none a Busy-retry kind. Retaining earlier
+    // phases prevents late queued commands becoming ordinary when active_command moves.
+    entries.insert(outgoing.id.to_string(), native);
+    jobs::merge_plan(
+        &mut tx,
+        job.id(),
+        &json!({"initial_files_commands": journal}),
+        job.now(),
+    )
+    .await?;
+    tx.commit().await.map_err(orch_db::DbError::from)?;
+    Ok(())
+}
+
+/// Recheck a queued initial copy at the dispatcher's existing first-send action barrier.
+/// No matching initial-file job means an unrelated ordinary command. Present creator evidence
+/// must match the exact owner, active command, accepted recipe and currently enrolled runtime.
+pub async fn command_authorized(
+    conn: &mut Conn,
+    command: Id,
+    machine: Id,
+    key: Option<&str>,
+    kind: &str,
+    body: &Json,
+    now: Time,
+) -> Result<bool, EngineError> {
+    let owners = jobs::lock_initial_files_command_owners(conn, command).await?;
+    if owners.is_empty() {
+        return Ok(true);
+    }
+    if owners.len() != 1 {
+        return Ok(false);
+    }
+    let Some(owner) = jobs::job(conn, owners[0]).await? else {
+        return Ok(false);
+    };
+    let plan: Plan = serde_json::from_value(owner.plan["initial_files"].clone())?;
+    if plan.creator_origin.is_none()
+        && owner
+            .plan
+            .get("initial_files_commands")
+            .is_some_and(|value| !value.is_null())
+    {
+        return Ok(false);
+    }
+    let checked = async {
+        let source = current_at(conn, &plan, now).await?;
+        if plan.creator_origin.is_none() {
+            // Current legacy callers keep their existing path. current_at rejects a modern
+            // credential whose old plan lacks the fully admitted creator origin.
+            return Ok::<bool, Stop>(true);
+        }
+        let Some((target, runtime, target_machine)) = target_at(conn, &owner, &plan).await? else {
+            return Ok(false);
+        };
+        let Some(native) = owner
+            .plan
+            .get("initial_files_commands")
+            .and_then(|commands| commands.get(command.to_string()))
+        else {
+            return Ok(false);
+        };
+        if native.get("id") != Some(&json!(command))
+            || native.get("runtime") != Some(&json!(runtime))
+            || native.get("machine") != Some(&json!(machine))
+            || native.get("kind").and_then(Json::as_str) != Some(kind)
+            || native.get("key") != Some(&json!(key))
+            || owner.plan.pointer("/active_command/id") != Some(&json!(command))
+            || owner.plan.pointer("/active_command/machine") != Some(&json!(machine))
+            || owner
+                .plan
+                .pointer("/active_command/kind")
+                .and_then(Json::as_str)
+                != Some(kind)
+            || owner
+                .plan
+                .pointer("/active_command/phase")
+                .and_then(Json::as_str)
+                != Some("files")
+            || owner.plan.get("initial_files_done").and_then(Json::as_bool) == Some(true)
+        {
+            return Ok(false);
+        }
+        let (expected_id, expected_machine, expected_environment, expected) = match kind {
+            "fs.snapshot" if plan.snapshot.is_none() && !plan.empty => (
+                ids::derived("initial-files.snapshot", &[owner.id.as_bytes()]),
+                source
+                    .machine_id
+                    .ok_or_else(|| failure("the initial source connector disappeared"))?,
+                source.id,
+                json!(FsSnapshot {
+                    work: None,
+                    environment_id: source.id,
+                    job_id: owner.id,
+                    selection: snapshot_selection(&plan)
+                }),
+            ),
+            "fs.record.read" if plan.local && plan.manifest.is_some() => (
+                ids::derived("initial-files.export", &[owner.id.as_bytes()]),
+                source
+                    .machine_id
+                    .ok_or_else(|| failure("the initial source connector disappeared"))?,
+                source.id,
+                json!(FsRecordRead {
+                    environment_id: source.id,
+                    snapshot_id: plan
+                        .snapshot
+                        .ok_or_else(|| failure("the initial snapshot disappeared"))?,
+                    path: None,
+                    export: true
+                }),
+            ),
+            "fs.materialize" if !plan.empty => (
+                ids::derived("initial-files.materialize", &[owner.id.as_bytes()]),
+                target_machine,
+                target.id,
+                json!(FsMaterialize {
+                    work: None,
+                    environment_id: target.id,
+                    job_id: Some(owner.id),
+                    manifest_blob: serde_json::from_value::<Hash>(
+                        owner.plan["initial_files_manifest"].clone()
+                    )
+                    .map_err(EngineError::from)?,
+                    target_root: target.workspace_root,
+                    purpose: MaterializePurpose::Move
+                }),
+            ),
+            _ => return Ok(false),
+        };
+        if command != expected_id
+            || machine != expected_machine
+            || SerialKey::Environment(expected_environment)
+                .wire()
+                .as_deref()
+                != key
+            || native.get("body") != Some(body)
+        {
+            return Ok(false);
+        }
+        let mut actual = body.clone();
+        if matches!(kind, "fs.snapshot" | "fs.materialize") {
+            let work: orch_link_contract::commands::WorkReport =
+                serde_json::from_value(actual.get("work").cloned().unwrap_or(Json::Null))
+                    .map_err(EngineError::from)?;
+            if work.job_id != owner.id || work.phase != "files" {
+                return Ok(false);
+            }
+            if let Some(fields) = actual.as_object_mut() {
+                fields.remove("work");
+            }
+        }
+        Ok(actual == expected)
+    }
+    .await;
+    match checked {
+        Ok(allowed) => Ok(allowed),
+        Err(Stop::Failed(error)) if error.code == crate::jobs::runner::INTERNAL => Err(
+            EngineError::unreadable("initial copy authority could not be checked"),
+        ),
+        Err(Stop::Failed(_) | Stop::Cancelled | Stop::Lost) => Ok(false),
+    }
 }
 
 /// Writes the selected contents at the new workspace root, before source init and running publication.
@@ -370,26 +890,7 @@ pub async fn deliver(job: &Job, environment: Id, machine: Id) -> Result<Option<D
             }
             hash
         } else {
-            let directory = plan.directory.as_deref().unwrap_or("");
-            let below = |path: &str| {
-                if directory.is_empty() {
-                    path.to_owned()
-                } else if path.is_empty() {
-                    directory.to_owned()
-                } else {
-                    format!("{directory}/{path}")
-                }
-            };
-            let selection = plan.selection.as_ref().map_or_else(
-                || Selection {
-                    include: vec![directory.to_owned()],
-                    exclude: vec![],
-                },
-                |selection| Selection {
-                    include: selection.include.iter().map(|path| below(path)).collect(),
-                    exclude: selection.exclude.iter().map(|path| below(path)).collect(),
-                },
-            );
+            let selection = snapshot_selection(&plan);
             let value = job
                 .command(
                     Outgoing::new(
@@ -459,6 +960,12 @@ pub async fn deliver(job: &Job, environment: Id, machine: Id) -> Result<Option<D
         };
         let mut tx = transaction_guard::scope(false, job.engine().db().begin()).await?;
         transaction_guard::lock_action(&mut tx).await?;
+        let owner = job.lock_owned(&mut tx).await?.ok_or(Stop::Lost)?;
+        if let Some(reason) = crate::jobs::runner::abort_reason(&owner)? {
+            return Err(reason);
+        }
+        target_at(&mut tx, &owner, &plan).await?;
+        current_at(&mut tx, &plan, Time::new(job.now())).await?;
         let hash = if let Some(base) = base {
             crate::selection::rebase_manifest(job.engine(), &mut tx, &hash, &base).await?
         } else {
@@ -611,4 +1118,80 @@ pub(crate) async fn release(conn: &mut Conn, job: Id, now: Time) -> Result<(), E
     storage::unpin_blobs(conn, &hashes, now.get()).await?;
     jobs::merge_plan(conn, job, &json!({"initial_files_pins":null}), now.get()).await?;
     Ok(())
+}
+
+/// Live first-send identity/time export around the unchanged immutable copy validator.
+pub async fn command_current_callers(
+    conn: &mut Conn,
+    command: Id,
+    machine: Id,
+    key: Option<&str>,
+    kind: &str,
+    body: &Json,
+    clock: &dyn orch_types::Clock,
+) -> Result<Option<Vec<(Option<Caller>, Option<Time>)>>, EngineError> {
+    if !command_authorized(conn, command, machine, key, kind, body, clock.time()).await? {
+        return Ok(None);
+    }
+    let owners = jobs::lock_initial_files_command_owners(conn, command).await?;
+    if owners.is_empty() {
+        return Ok(Some(Vec::new()));
+    }
+    if owners.len() != 1 {
+        return Ok(None);
+    }
+    let Some(owner) = jobs::job(conn, owners[0]).await? else {
+        return Ok(None);
+    };
+    let plan: Plan = serde_json::from_value(owner.plan["initial_files"].clone())?;
+    let caller = if let Some(origin) = &plan.creator_origin {
+        if origin.operation() == orch_api_contract::environment_sources::CREATE.operation {
+            match crate::environment_creation::principal_current(conn, &owner, clock, None).await {
+                Ok(principal) => principal.caller().clone(),
+                Err(EngineError::Unreadable(_)) => return Ok(None),
+                Err(error) => return Err(error),
+            }
+        } else {
+            let Some(caller) = origin.restore_current(conn, clock).await? else {
+                return Ok(None);
+            };
+            caller
+        }
+    } else {
+        let principal = match crate::jobs::source::load_principal_at(
+            conn,
+            plan.caller,
+            plan.token,
+            clock.time(),
+        )
+        .await
+        {
+            Ok(principal) => principal,
+            Err(Stop::Failed(failure)) if failure.code == crate::jobs::runner::INTERNAL => {
+                return Err(EngineError::unreadable(
+                    "initial copy authority could not be checked",
+                ));
+            }
+            Err(_) => return Ok(None),
+        };
+        let Some(caller) = orch_authz::CapturedCaller::capture(principal.caller())
+            .restore_current(conn, clock)
+            .await?
+        else {
+            return Ok(None);
+        };
+        caller
+    };
+    let deadline = if let Some(snapshot) = plan.snapshot {
+        let Some(row) = storage::snapshot(conn, snapshot).await? else {
+            return Ok(None);
+        };
+        if row.expires_at.is_some_and(|end| end <= clock.now()) {
+            return Ok(None);
+        }
+        row.expires_at.map(Time::new)
+    } else {
+        None
+    };
+    Ok(Some(vec![(Some(caller), deadline)]))
 }

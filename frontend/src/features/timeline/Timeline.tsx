@@ -76,7 +76,7 @@ function StoredHistory({ snapshot, read }: { snapshot: ThreadSync; read: ThreadR
   const context: TimelineContext = { threadId: key, threadName: snapshot.thread.name,
     inspection: { threadId: snapshot.thread.id, ...(snapshot.projection === undefined || snapshot.projection === null ? {} : { continuationId: snapshot.projection.viewed_continuation_id }) },
     detail: preferences.detail, recent: recentTurns(view.turns), layout: preferences.layout, setLayout: preferences.setLayout, meId: null, canInteract: false, canManage: false, live: false, lit: null, selection: NOT_PICKING };
-  return <TimelineContextValue.Provider value={context}><div className="mx-auto flex w-full max-w-(--reading-width) flex-col gap-6 px-2 py-4" data-stored-timeline>{rows.map((row) => <RowView key={row.key} row={row} />)}</div></TimelineContextValue.Provider>;
+  return <TimelineContextValue.Provider value={context}><ol role="list" className="mx-auto flex w-full max-w-(--reading-width) list-none flex-col gap-6 px-2 py-4" data-stored-timeline>{rows.map((row) => <li key={row.key}><RowView row={row} /></li>)}</ol></TimelineContextValue.Provider>;
 }
 
 export interface TimelineHandle {

@@ -12,14 +12,19 @@ use orch_api_contract::calls::{
 /// Binds recovery requests to their contract declarations.
 pub fn mount(registry: &mut Registry) {
     registry
-        .on(ThreadCallRecoveryGet, read)
+        .on_with_operation(
+            ThreadCallRecoveryGet,
+            crate::key_operations::direct::declared,
+            read,
+        )
         .on(ThreadCallRecoveryUpdate, update);
 }
 
 async fn read(ctx: Ctx, (): (), (): ()) -> ApiResult<ThreadCallRecoveryReply> {
     let node = ctx.id("id")?;
     let mut conn = ctx.app.db.acquire().await?;
-    authorization::principal(&ctx, &mut conn).await?;
+    let principal = ctx.operation_principal(&mut conn).await?;
+    authorization::require_on_path_in(&ctx, &mut conn, &principal, "thread.view").await?;
     Ok(ThreadCallRecoveryReply {
         recovery: orch_engine::calls::view(&mut conn, node)
             .await

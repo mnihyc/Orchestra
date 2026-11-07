@@ -1,4 +1,5 @@
 //! A display opens a real screen, preserves safe history and never grants credentials to its readers.
+#![recursion_limit = "256"]
 #![cfg(unix)]
 #![allow(
     clippy::unwrap_used,

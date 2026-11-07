@@ -84,6 +84,16 @@ pub fn instruction_chain(root: &str, cwd: &str) -> Result<Vec<std::path::PathBuf
 /// derived from this bound.
 pub const PROJECT_DOC_BUDGET: u64 = 32 * 1024;
 
+/// The actual model returned by the native start, resume or fork response.
+/// Missing, malformed or blank metadata is no evidence of a different model.
+#[must_use]
+pub fn reported_model(opened: &Json) -> Option<&str> {
+    opened
+        .get("model")
+        .and_then(Json::as_str)
+        .filter(|model| !model.trim().is_empty())
+}
+
 /// The instruction files a session reads, as the harness reported them in the answer to `thread/start`,
 /// `thread/resume` or `thread/fork` (`instructionSources`), in its order. A file of the harness's home is named, not
 /// located and not read. The project's are measured here where the session works on this machine, each with what
@@ -423,6 +433,18 @@ pub fn thread_config(
     switched_off: &BTreeMap<String, Json>,
 ) -> Result<Json, AdapterError> {
     let mut config = Map::new();
+    // State the mode even when disabled so the shared home cannot enable paid search.
+    config.insert(
+        "web_search".to_owned(),
+        json!(
+            spec.settings
+                .params
+                .get("web_search")
+                .and_then(Json::as_str)
+                .filter(|mode| matches!(*mode, "cached" | "live"))
+                .unwrap_or("disabled")
+        ),
+    );
     config.insert(
         "agents.max_concurrent_threads_per_session".to_owned(),
         json!(spec.settings.subagent_limits.at_once),
@@ -435,6 +457,8 @@ pub fn thread_config(
     config.insert("features.multi_agent_v2".to_owned(), json!(false));
     // Goal mode is Orch's own: the harness's would start turns that Orch did not check.
     config.insert("features.goals".to_owned(), json!(false));
+    // Completions are admitted by the controller; the harness has no independent wake path.
+    config.insert("features.wake_on_agent_messages".to_owned(), json!(false));
     // Codex's own skills that write skills into its home are off for the thread: the home is shared by the
     // threads of its provider, and the skills a thread is given are Orch's to govern. Verified on 0.162.1 with
     // the model's request recorded: the thread's request no longer lists them, another thread's still does.
@@ -704,6 +728,25 @@ mod tests {
     use orch_agent_contract::descriptor::{ApprovalMode, ArrangementType, SandboxMode};
 
     #[test]
+    fn only_a_concrete_native_open_answer_names_the_effective_model() {
+        assert_eq!(
+            reported_model(&json!({"model":"gpt-6-sol-safe"})),
+            Some("gpt-6-sol-safe")
+        );
+        for opened in [
+            json!({}),
+            json!({"model":null}),
+            json!({"model":false}),
+            json!({"model":{}}),
+            json!({"model":""}),
+            json!({"model":"  "}),
+            json!({"thread":{"model":"stale-history-model"}}),
+        ] {
+            assert_eq!(reported_model(&opened), None, "{opened}");
+        }
+    }
+
+    #[test]
     fn reported_sources_name_a_home_file_and_measure_the_projects_against_their_budget() {
         let root =
             std::env::temp_dir().join(format!("orch-codex-sources-{}", orch_types::new_id()));
@@ -784,6 +827,7 @@ mod tests {
                 instructions: "You are working inside Orch.".into(),
                 available_models: vec!["gpt-6-sol".to_owned()],
                 subagent_limits: Default::default(),
+                background_wake: true,
                 memory: None,
                 arrangement: ArrangementType::KeySeparated,
                 orch_tools: OrchTool::ALL.to_vec(),
@@ -993,6 +1037,19 @@ mod tests {
     }
 
     #[test]
+    fn native_message_wakes_are_off_for_every_owned_session_preference() {
+        for enabled in [false, true] {
+            let mut session = spec(SessionMode::New);
+            session.settings.background_wake = enabled;
+            let plan = open_plan(&session, &loopback(), &OpenContext::default()).unwrap();
+            assert_eq!(
+                plan.params["config"]["features.wake_on_agent_messages"],
+                false
+            );
+        }
+    }
+
+    #[test]
     fn subagents_always_receive_the_places_limits_in_the_agents_table_without_the_legacy_alias() {
         let mut session = spec(SessionMode::New);
         for (at_once, depth) in [(8, 1), (3, 2), (64, 5)] {
@@ -1158,5 +1215,16 @@ mod tests {
         )
         .unwrap();
         assert!(plan.params.get("daybreakEnabled").is_none());
+    }
+    #[test]
+    fn native_search_mode_is_explicit_in_every_session_config() {
+        for mode in ["disabled", "cached", "live"] {
+            let mut session = spec(SessionMode::New);
+            session.settings.params = json!({"web_search":mode});
+            let config = thread_config(&session, &loopback(), &BTreeMap::new()).unwrap();
+            assert_eq!(config["web_search"], mode);
+        }
+        let config = thread_config(&spec(SessionMode::New), &loopback(), &BTreeMap::new()).unwrap();
+        assert_eq!(config["web_search"], "disabled");
     }
 }

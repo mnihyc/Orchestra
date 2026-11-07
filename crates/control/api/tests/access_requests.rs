@@ -8,7 +8,11 @@
 mod desk;
 mod places;
 mod support;
+use crate::support::FullTransferReply;
+use support::FullApprovalReply;
+use support::FullRequestReply;
 
+use crate::support::FullPermissionPageReply;
 use chrono::Duration;
 use desk::Desk;
 use orch_api_contract::access::{
@@ -68,6 +72,7 @@ async fn firm() -> Firm {
         })
         .send()
         .await
+        .full_transfer()
         .ok();
     Firm {
         desk,
@@ -111,6 +116,7 @@ async fn ask(
         })
         .send()
         .await
+        .full_request()
 }
 
 fn approve() -> AccessDecision {
@@ -186,6 +192,7 @@ async fn decide(
         .body(&ApprovalDecision::Access(decision))
         .send()
         .await
+        .full_approval()
 }
 
 async fn waiting_for(firm: &Firm, by: &Who, all: bool) -> Vec<Id> {
@@ -344,6 +351,7 @@ async fn a_requested_end_is_visible_and_each_approver_can_keep_change_or_clear_i
         })
         .send()
         .await
+        .full_request()
         .problem();
     assert_eq!(past.code, ErrorCode::RequestInvalid);
     let made = f
@@ -355,6 +363,7 @@ async fn a_requested_end_is_visible_and_each_approver_can_keep_change_or_clear_i
         .body(&body)
         .send()
         .await
+        .full_request()
         .ok();
     assert_eq!(made.approvals.len(), 3);
     let reread = f
@@ -713,6 +722,8 @@ async fn an_approver_may_give_fewer_permissions_narrower_options_and_an_end() {
         .send()
         .await
         .ok()
+        .into_full()
+        .unwrap()
         .provider
         .base
         .id;
@@ -1082,6 +1093,7 @@ async fn a_person_may_have_only_so_many_batches_waiting_and_a_batch_counts_once(
         .token(&firm.rae.token)
         .send()
         .await
+        .full_approval()
         .ok();
     let still = ask(
         &firm,
@@ -1102,6 +1114,7 @@ async fn a_person_may_have_only_so_many_batches_waiting_and_a_batch_counts_once(
         .token(&firm.rae.token)
         .send()
         .await
+        .full_approval()
         .ok();
     ask(
         &firm,
@@ -1217,6 +1230,7 @@ async fn what_is_held_what_is_closed_and_what_is_made_up_is_not_sent() {
         })
         .send()
         .await
+        .full_permission_page()
         .ok();
     let closed = ask(
         &firm,
@@ -1310,6 +1324,7 @@ async fn nobody_decides_their_own_request_and_the_work_in_a_place_is_asked_for_o
         .token(&firm.rae.token)
         .send()
         .await
+        .full_approval()
         .ok();
     assert_eq!(withdrawn.state, ApprovalState::Cancelled);
     let mut work = item("project", firm.project, &["project.interact"]);
@@ -1361,6 +1376,7 @@ async fn a_request_taken_back_is_read_by_those_it_was_sent_to_and_cannot_be_deci
         .token(&firm.rae.token)
         .send()
         .await
+        .full_approval()
         .ok();
     assert_eq!(back.state, ApprovalState::Cancelled);
     let late = decide(&firm, &firm.pam, approval.id, approve())
@@ -1460,7 +1476,8 @@ async fn a_request_for_a_document_goes_to_the_people_who_may_change_its_page() {
         .token(&firm.sam.token)
         .body(&PageChange::default())
         .send()
-        .await;
+        .await
+        .full_permission_page();
     assert!(
         page.body.is_err(),
         "viewing a document is not changing its page"
@@ -1488,6 +1505,7 @@ async fn nobody_who_is_not_signed_in_asks_reads_or_decides() {
         })
         .send()
         .await
+        .full_request()
         .problem();
     assert_eq!(asked.code, ErrorCode::AuthRequired);
     let read = app
@@ -1501,6 +1519,7 @@ async fn nobody_who_is_not_signed_in_asks_reads_or_decides() {
         .body(&ApprovalDecision::Access(approve()))
         .send()
         .await
+        .full_approval()
         .problem();
     assert_eq!(decided.code, ErrorCode::AuthRequired);
 }
@@ -1546,6 +1565,7 @@ async fn somebody_who_manages_the_page_decides_only_what_they_could_have_given_t
         })
         .send()
         .await
+        .full_permission_page()
         .ok();
     let approval = ask(
         &firm,

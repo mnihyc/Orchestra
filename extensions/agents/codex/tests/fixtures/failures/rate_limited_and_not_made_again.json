@@ -14,5 +14,5 @@
   {"method":"error","params":{"error":{"message":"exceeded retry limit, last status: 429 Too Many Requests","codexErrorInfo":{"responseTooManyFailedAttempts":{"httpStatusCode":429}},"additionalDetails":null,"misalignment":null},"willRetry":false,"threadId":"01a12f90-7a93-7441-975e-760cb56e6325","turnId":"01a12f90-7b14-7950-820f-ab38436cd975"},"emittedAtMs":1791799360652},
   {"method":"turn/completed","params":{"threadId":"01a12f90-7a93-7441-975e-760cb56e6325","turn":{"id":"01a12f90-7b14-7950-820f-ab38436cd975","rootTurnId":"01a12f90-7b14-7950-820f-ab38436cd975","items":[],"itemsView":"notLoaded","status":"failed","error":{"message":"exceeded retry limit, last status: 429 Too Many Requests","codexErrorInfo":{"responseTooManyFailedAttempts":{"httpStatusCode":429}},"additionalDetails":null,"misalignment":null},"startedAt":1791799360,"completedAt":1791799360,"durationMs":377}},"emittedAtMs":1791799360662}
  ],
- "expect": {"outcome": "failed", "code": "provider_busy", "retryable": true, "incomplete": false, "resets_at": null, "row": "busy", "said_contains": "exceeded retry limit, last status: 429"}
+ "expect": {"outcome": "failed", "code": "rate_limited", "retryable": true, "incomplete": false, "resets_at": null, "row": "busy", "said_contains": "exceeded retry limit, last status: 429"}
 }

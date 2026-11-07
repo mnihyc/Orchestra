@@ -1,6 +1,7 @@
 //! The complete authorized hierarchy for every signed-in person, with a whole-system scope for administrators.
 
 pub(crate) mod library;
+pub(crate) mod operation;
 mod resources;
 
 use base64::{Engine, engine::general_purpose::URL_SAFE_NO_PAD};
@@ -17,7 +18,7 @@ use orch_api_contract::{
 use orch_authz::everything::Projection;
 use orch_db::queries::{
     everything::{self as rows, Cursor, Grant},
-    identity, search, settings,
+    identity, settings,
 };
 use orch_settings::merge::{Link, OwnValues, Rows, Stack, resolve_key};
 use orch_settings_contract::registry::{self, Scope, keys};
@@ -26,7 +27,7 @@ use serde::{Deserialize, Serialize};
 
 use crate::{
     middleware::{
-        authorization::{self, refusals},
+        authorization::refusals,
         requests::{ApiError, ApiResult},
     },
     registry::{Ctx, Registry},
@@ -41,24 +42,33 @@ const BYTES_PER_GIB: i64 = 1 << 30;
 
 /// Binds the reader's inventory.
 pub fn mount(registry: &mut Registry) {
-    registry.on(EverythingList, list);
-    registry.on(ResourcesSummaryGet, summary);
+    registry.on_with_optional_operation(EverythingList, operation::list, list);
+    registry.on_with_optional_operation(ResourcesSummaryGet, operation::summary, summary);
 }
 
 async fn summary(ctx: Ctx, (): (), (): ()) -> ApiResult<ResourceCounts> {
-    let mut tx = ctx.app.db.begin().await?;
-    search::snapshot(&mut tx).await?;
-    let principal = authorization::principal(&ctx, &mut tx).await?;
-    let projection = orch_authz::everything::project(&mut tx, &principal, None)
-        .await
-        .map_err(ApiError::internal)?;
-    let counts: std::collections::HashMap<_, _> =
-        rows::resource_counts(&mut tx, &projection.grants)
-            .await?
-            .into_iter()
-            .collect();
+    crate::key_operations::snapshot_read::run(ctx, summary_snapshot).await
+}
+
+async fn summary_snapshot(ctx: Ctx) -> ApiResult<ResourceCounts> {
+    let mut tx = ctx.app.db.begin_snapshot().await?;
+    let principal = ctx.operation_principal(&mut tx).await?;
+    let answer = if operation::scoped(principal.caller()) {
+        operation::read::<ResourceCounts>(&ctx, &mut tx, &principal).await?
+    } else {
+        let projection = orch_authz::everything::project(&mut tx, &principal, None)
+            .await
+            .map_err(ApiError::internal)?;
+        summary_counts(rows::resource_counts(&mut tx, &projection.grants).await?)
+    };
+    tx.commit().await.map_err(orch_db::DbError::from)?;
+    Ok(answer)
+}
+
+fn summary_counts(rows: impl IntoIterator<Item = (String, i64)>) -> ResourceCounts {
+    let counts: std::collections::HashMap<_, _> = rows.into_iter().collect();
     let count = |kind: &str| counts.get(kind).copied().unwrap_or(0);
-    let answer = ResourceCounts {
+    ResourceCounts {
         providers: count("provider"),
         agents: count("agent"),
         machines: count("machine"),
@@ -68,9 +78,7 @@ async fn summary(ctx: Ctx, (): (), (): ()) -> ApiResult<ResourceCounts> {
         mcp: count("mcp_server"),
         mounts: count("mount"),
         skills: count("skill"),
-    };
-    tx.commit().await.map_err(orch_db::DbError::from)?;
-    Ok(answer)
+    }
 }
 
 /// A cursor is kept with its filters so changing an order cannot silently skip rows.
@@ -316,7 +324,28 @@ fn person(value: Option<orch_types::Json>) -> ApiResult<Option<orch_api_contract
         .transpose()
 }
 
-async fn list(ctx: Ctx, query: EverythingListQuery, (): ()) -> ApiResult<Page<EverythingRow>> {
+#[derive(Clone)]
+struct ListRows {
+    found: Vec<rows::Row>,
+    grants: Vec<Grant>,
+    continuation: Option<String>,
+    kinds: Vec<String>,
+    details: bool,
+    facts: Vec<(orch_access_contract::key_scope::KeyTargetKind, Id)>,
+}
+
+#[derive(Clone)]
+struct ListSelection {
+    limit: u32,
+    kinds: Vec<String>,
+    details: bool,
+    parent: Option<String>,
+    access_parent: Option<Id>,
+    after: Option<Cursor>,
+    system: bool,
+}
+
+fn list_selection(query: &EverythingListQuery) -> ApiResult<ListSelection> {
     let limit = query.limit.unwrap_or(EVERYTHING_LIMIT_DEFAULT);
     if limit == 0 || limit > EVERYTHING_LIMIT_MAX {
         return Err(ApiError::invalid("limit", "Choose between 1 and 200 rows."));
@@ -375,7 +404,7 @@ async fn list(ctx: Ctx, query: EverythingListQuery, (): ()) -> ApiResult<Page<Ev
             "Open the resource list to request its columns.",
         ));
     }
-    library::validate(&query, &kinds)?;
+    library::validate(query, &kinds)?;
     if query.harness.is_some() && kinds.first().map(String::as_str) != Some("agent") {
         return Err(ApiError::invalid(
             "harness",
@@ -422,31 +451,117 @@ async fn list(ctx: Ctx, query: EverythingListQuery, (): ()) -> ApiResult<Page<Ev
     } else {
         None
     };
-    let after = after(&query)?;
-    let mut tx = ctx.app.db.begin().await?;
-    search::snapshot(&mut tx).await?;
-    let principal = authorization::principal(&ctx, &mut tx).await?;
-    let system = query.scope.unwrap_or_default() == EverythingScope::System;
+    let after = after(query)?;
+    Ok(ListSelection {
+        limit,
+        kinds,
+        details,
+        parent,
+        access_parent,
+        after,
+        system: query.scope.unwrap_or_default() == EverythingScope::System,
+    })
+}
+
+fn system_scope(principal: &orch_authz::Principal, system: bool) -> ApiResult<()> {
     if system && !principal.is_system_admin() {
         return Err(ApiError::new(
             ErrorCode::AuthzDenied,
             "Only a system administrator may open the whole system.",
         ));
     }
-    let mut projection = orch_authz::everything::project(&mut tx, &principal, access_parent)
-        .await
-        .map_err(ApiError::internal)?;
-    resources::prepare(&mut tx, &query, &mut projection).await?;
-    library::prepare(
-        &mut tx,
-        &principal,
-        &query,
-        &mut projection,
-        Time::new(ctx.now),
-    )
-    .await?;
+    Ok(())
+}
+
+async fn list(ctx: Ctx, query: EverythingListQuery, (): ()) -> ApiResult<Page<EverythingRow>> {
+    // Keep the original validation before opening a database snapshot.
+    let selected = list_selection(&query)?;
+    crate::key_operations::snapshot_read::run(ctx, move |ctx| {
+        list_snapshot(ctx, query.clone(), selected.clone())
+    })
+    .await
+}
+
+async fn list_snapshot(
+    ctx: Ctx,
+    query: EverythingListQuery,
+    selected: ListSelection,
+) -> ApiResult<Page<EverythingRow>> {
+    let mut tx = ctx.app.db.begin_snapshot().await?;
+    let principal = ctx.operation_principal(&mut tx).await?;
+    system_scope(&principal, selected.system)?;
+    let page = if operation::scoped(principal.caller()) {
+        operation::list_read(&ctx, &mut tx, &principal).await?
+    } else {
+        let mut read_ctx = ctx.clone();
+        read_ctx.now = principal.now().get();
+        let mut projection =
+            orch_authz::everything::project(&mut tx, &principal, selected.access_parent)
+                .await
+                .map_err(ApiError::internal)?;
+        let rows = list_rows(
+            &read_ctx,
+            &mut tx,
+            &principal,
+            &query,
+            &selected,
+            &mut projection,
+        )
+        .await?;
+        render_rows(
+            &read_ctx,
+            &mut tx,
+            &principal,
+            rows,
+            &projection,
+            None,
+            None,
+        )
+        .await?
+    };
+    tx.commit().await.map_err(orch_db::DbError::from)?;
+    Ok(page)
+}
+
+fn row_fact(
+    row: &rows::Row,
+    grant: &Grant,
+) -> ApiResult<Option<(orch_access_contract::key_scope::KeyTargetKind, Id)>> {
+    if row.kind == "group" || !(grant.view || grant.listed || grant.named) {
+        return Ok(None);
+    }
+    let family = if row.kind == "chat" {
+        orch_access_contract::key_scope::KeyTargetKind::Identity(
+            orch_access_contract::key_scope::KeyIdentityKind::Chat,
+        )
+    } else {
+        orch_access_contract::key_scope::KeyTargetKind::Object(
+            crate::routes::access::subject::kind_of_word(&row.kind).ok_or_else(|| {
+                ApiError::internal("the native inventory row has an unknown family")
+            })?,
+        )
+    };
+    Ok(Some((family, row.id.parse().map_err(ApiError::internal)?)))
+}
+
+async fn list_rows(
+    ctx: &Ctx,
+    conn: &mut orch_db::Conn,
+    principal: &orch_authz::Principal,
+    query: &EverythingListQuery,
+    selected: &ListSelection,
+    projection: &mut Projection,
+) -> ApiResult<ListRows> {
+    let limit = selected.limit;
+    let kinds = &selected.kinds;
+    let details = selected.details;
+    let parent = &selected.parent;
+    let after = &selected.after;
+    let system = selected.system;
+    resources::prepare(conn, query, projection).await?;
+    library::prepare(conn, principal, query, projection, Time::new(ctx.now)).await?;
     let mut found = rows::level(
-        &mut tx,
+        conn,
         &rows::Query {
             navigation: rows::NavigationFilter {
                 recent: query.recent.map(|recent| match recent {
@@ -475,7 +590,7 @@ async fn list(ctx: Ctx, query: EverythingListQuery, (): ()) -> ApiResult<Page<Ev
             parent: parent.as_deref(),
             system,
             text: query.q.as_deref().unwrap_or_default().trim(),
-            kinds: &kinds,
+            kinds,
             owner: query.owner,
             created_from: query.created_from.map(Time::get),
             created_to: query.created_to.map(Time::get),
@@ -497,11 +612,24 @@ async fn list(ctx: Ctx, query: EverythingListQuery, (): ()) -> ApiResult<Page<Ev
     )
     .await?;
     let more = found.len() > limit as usize;
+    let lookahead = if operation::scoped(principal.caller()) {
+        found
+            .get(limit as usize)
+            .map(|row| {
+                let grant =
+                    serde_json::from_value(row.grant.clone()).map_err(ApiError::internal)?;
+                row_fact(row, &grant)
+            })
+            .transpose()?
+            .flatten()
+    } else {
+        None
+    };
     found.truncate(limit as usize);
     let continuation = if more {
         found
             .last()
-            .map(|row| next(&query, row.cursor()))
+            .map(|row| next(query, row.cursor()))
             .transpose()?
     } else {
         None
@@ -510,28 +638,84 @@ async fn list(ctx: Ctx, query: EverythingListQuery, (): ()) -> ApiResult<Page<Ev
         .iter()
         .map(|row| serde_json::from_value(row.grant.clone()).map_err(ApiError::internal))
         .collect::<ApiResult<_>>()?;
+    let mut facts = found
+        .iter()
+        .zip(&grants)
+        .filter_map(|(row, grant)| row_fact(row, grant).transpose())
+        .collect::<ApiResult<Vec<_>>>()?;
+    facts.extend(lookahead);
+    if operation::scoped(principal.caller()) {
+        let mut names = super::nodes::read_sources::Sources::default();
+        for (row, grant) in found.iter().zip(&grants) {
+            for node in path(row, projection, grant)? {
+                names.node(&node);
+            }
+            if grant.view {
+                let tags: Vec<orch_api_contract::nodes::Tag> =
+                    serde_json::from_value(row.tags.clone()).map_err(ApiError::internal)?;
+                for tag in tags {
+                    names.node(&tag.node);
+                }
+            }
+        }
+        facts.extend(names.objects().map(|object| {
+            (
+                orch_access_contract::key_scope::KeyTargetKind::Object(object.kind),
+                object.id,
+            )
+        }));
+    }
+    facts.sort_unstable();
+    facts.dedup();
+    Ok(ListRows {
+        found,
+        grants,
+        continuation,
+        kinds: kinds.clone(),
+        details,
+        facts,
+    })
+}
+
+async fn render_rows(
+    ctx: &Ctx,
+    conn: &mut orch_db::Conn,
+    principal: &orch_authz::Principal,
+    rows: ListRows,
+    projection: &Projection,
+    prepared: Option<&resources::scoped::Prepared>,
+    prepared_library: Option<&library::Prepared>,
+) -> ApiResult<Page<EverythingRow>> {
+    let ListRows {
+        found,
+        grants,
+        continuation,
+        kinds,
+        details,
+        facts: _,
+    } = rows;
     let mut resource_views = if details {
-        resources::page(
-            &ctx,
-            &mut tx,
-            &principal,
-            &kinds[0],
-            &found,
-            &grants,
-            &projection,
-        )
-        .await?
+        match prepared {
+            Some(prepared) => prepared.render(ctx, conn, principal).await?,
+            None => {
+                resources::page(ctx, conn, principal, &kinds[0], &found, &grants, projection)
+                    .await?
+            }
+        }
     } else {
         std::collections::HashMap::new()
     };
     let mut library_facts = if details {
-        library::page(&mut tx, &principal, &found, &grants, Time::new(ctx.now)).await?
+        match prepared_library {
+            Some(prepared) => prepared.render(),
+            None => library::page(conn, principal, &found, &grants, Time::new(ctx.now)).await?,
+        }
     } else {
         std::collections::HashMap::new()
     };
     let library_threads = if details && kinds[0] == "provider" {
         library::threads(
-            &mut tx,
+            conn,
             &found
                 .iter()
                 .filter_map(|row| row.id.parse().ok())
@@ -552,7 +736,7 @@ async fn list(ctx: Ctx, query: EverythingListQuery, (): ()) -> ApiResult<Page<Ev
         })
         .collect();
     let markers =
-        crate::routes::nodes::view::named_admin_access(&mut tx, &principal, &marker_places).await?;
+        crate::routes::nodes::view::named_admin_access(conn, principal, &marker_places).await?;
     let display_ids: Vec<Id> = found
         .iter()
         .zip(&grants)
@@ -560,7 +744,7 @@ async fn list(ctx: Ctx, query: EverythingListQuery, (): ()) -> ApiResult<Page<Ev
         .filter_map(|(row, _)| row.id.parse().ok())
         .collect();
     let displays = orch_engine::views::thread_displays(
-        &mut tx,
+        conn,
         &display_ids,
         Some(principal.user()),
         principal.now(),
@@ -574,7 +758,7 @@ async fn list(ctx: Ctx, query: EverythingListQuery, (): ()) -> ApiResult<Page<Ev
             "resources" if row.kind == "group" => Some(EverythingGroup::Resources),
             _ => None,
         };
-        let path = path(&row, &projection, &grant)?;
+        let path = path(&row, projection, &grant)?;
         let place_label = path
             .iter()
             .filter(|step| step.id.to_string() != row.id)
@@ -603,9 +787,9 @@ async fn list(ctx: Ctx, query: EverythingListQuery, (): ()) -> ApiResult<Page<Ev
         let can_share = grant.view
             && row.kind != "machine"
             && row.kind != "chat"
-            && (grant.share || may_share(&row, &projection)?);
+            && (grant.share || may_share(&row, projection)?);
         let takes = if grant.view {
-            requirements(&row, &projection)?
+            requirements(&row, projection)?
         } else {
             None
         };
@@ -681,7 +865,6 @@ async fn list(ctx: Ctx, query: EverythingListQuery, (): ()) -> ApiResult<Page<Ev
             id: row.id,
         });
     }
-    tx.commit().await.map_err(orch_db::DbError::from)?;
     Ok(Page {
         items,
         next_cursor: continuation,

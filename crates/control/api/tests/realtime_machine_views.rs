@@ -1,4 +1,5 @@
 //! Machine view subscriptions use real sockets and connector reports, stop when hidden and retain HTTP access cuts.
+#![recursion_limit = "256"]
 #![allow(
     clippy::unwrap_used,
     clippy::expect_used,

@@ -16,7 +16,40 @@ use orch_engine::jobs::environment_move::{MoveDraft, MoveRecipe};
 use orch_engine::jobs::machine_move;
 use orch_engine::updates;
 use orch_types::{Id, Time, new_id};
+use serde::{Deserialize, Serialize};
 use serde_json::json;
+
+/// The native batch saved for confirmation and its private audience's factual subjects.
+#[derive(Serialize, Deserialize)]
+struct StoredMoveBatch {
+    recipes: Vec<MoveRecipe>,
+    #[serde(default)]
+    portable_recipes: Vec<machine_move::Recipe>,
+    request: api::EnvironmentMovePreflightBody,
+    notification: orch_api_contract::loss::OperationNotificationPlan,
+}
+
+pub(crate) fn recipient_subjects(
+    plan: &orch_types::Json,
+) -> ApiResult<Vec<orch_access_contract::decisions::ObjectRef>> {
+    let stored: StoredMoveBatch =
+        serde_json::from_value(plan.clone()).map_err(ApiError::internal)?;
+    Ok(stored
+        .recipes
+        .into_iter()
+        .map(|recipe| recipe.replacement.target.id())
+        .chain(
+            stored
+                .portable_recipes
+                .into_iter()
+                .map(|recipe| recipe.environment),
+        )
+        .map(|id| orch_access_contract::decisions::ObjectRef {
+            kind: orch_access_contract::permissions::ObjectKind::Environment,
+            id,
+        })
+        .collect())
+}
 
 /// Binds the plan and execution of one environment move.
 pub fn mount(registry: &mut Registry) {
@@ -599,7 +632,13 @@ pub(crate) async fn batch_preflight(
             node_id: Some(node),
             environment_id: None,
             created_by: principal.user(),
-            plan: json!({"recipes":recipes,"portable_recipes":portable_recipes,"request":request,"notification":notification}),
+            plan: serde_json::to_value(StoredMoveBatch {
+                recipes,
+                portable_recipes,
+                request,
+                notification: notification.clone(),
+            })
+            .map_err(ApiError::internal)?,
             expires_at: updates::expires(ctx.now),
             created_at: ctx.now,
         },
@@ -654,17 +693,14 @@ pub(crate) async fn batch_create(
     if row.expires_at <= ctx.now {
         return Err(refused(updates::UpdateError::Expired));
     }
-    let recipes: Vec<MoveRecipe> =
-        serde_json::from_value(row.plan["recipes"].clone()).map_err(ApiError::internal)?;
-    let portable_recipes: Vec<machine_move::Recipe> = serde_json::from_value(
-        row.plan
-            .get("portable_recipes")
-            .cloned()
-            .unwrap_or_else(|| json!([])),
-    )
-    .map_err(ApiError::internal)?;
-    let request: api::EnvironmentMovePreflightBody =
-        serde_json::from_value(row.plan["request"].clone()).map_err(ApiError::internal)?;
+    let stored: StoredMoveBatch =
+        serde_json::from_value(row.plan.clone()).map_err(ApiError::internal)?;
+    let StoredMoveBatch {
+        recipes,
+        portable_recipes,
+        request,
+        ..
+    } = stored;
     let under = orch_db::queries::environments::hosting::environments_under(&mut tx, node).await?;
     let mut drafts = Vec::new();
     let mut portable_drafts = Vec::new();

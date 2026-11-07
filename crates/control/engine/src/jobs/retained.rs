@@ -1,6 +1,8 @@
 //! Restore and purge jobs reserve the same frozen files and deletion revision.
 
-use super::runner::{Done, Failure, Job, MakeError, Making, Phase, Phased, Stop, Undone, make};
+use super::runner::{
+    Done, Failure, Job, MakeError, Making, Phase, Phased, Stop, Undone, make_before,
+};
 use crate::{Engine, commands::Outgoing, error::EngineError, ids};
 use async_trait::async_trait;
 use orch_db::audit::{self, Actor, Entry, Origin};
@@ -13,6 +15,9 @@ use orch_db::{Conn, DbError};
 use orch_link_contract::commands::{EnvDetach, NodeRuntimeRemove, NodeRuntimeStop, SerialKey};
 use orch_types::{Id, Json, Time, new_id};
 use serde_json::json;
+
+/// Current captured lifecycle sources and exact private physical command custody.
+pub mod operation;
 
 /// Restore spends most of its progress creating and checking the replacement.
 const RESTORE_PHASES: [Phase; 6] = [
@@ -71,6 +76,30 @@ pub async fn queue(
     identity: Json,
     now: chrono::DateTime<chrono::Utc>,
 ) -> Result<jobs::JobRow, MakeError> {
+    queue_before(
+        conn,
+        environment,
+        revision,
+        purge,
+        by,
+        identity,
+        now,
+        || Ok(()),
+    )
+    .await
+}
+
+/// The native retained-file reservation checks its writer immediately before the job INSERT.
+pub async fn queue_before(
+    conn: &mut Conn,
+    environment: Id,
+    revision: i64,
+    purge: bool,
+    by: Option<Id>,
+    identity: Json,
+    now: chrono::DateTime<chrono::Utc>,
+    before: impl FnOnce() -> Result<(), EngineError> + Send,
+) -> Result<jobs::JobRow, MakeError> {
     let promise = retained::removal(conn, environment)
         .await?
         .ok_or(MakeError::NoEnvironment)?;
@@ -90,10 +119,12 @@ pub async fn queue(
     let mut origin = audit::current_origin();
     let mut by = by;
     let mut identity = identity;
+    let mut inherited_operation = None;
     if retry
         && let Some((requester, plan)) =
             retained::started_purge(conn, environment, revision).await?
     {
+        inherited_operation = Some(plan.clone());
         by = requester;
         identity = plan.get("identity").cloned().unwrap_or(Json::Null);
         origin = plan
@@ -102,8 +133,8 @@ pub async fn queue(
             .and_then(|value| serde_json::from_value(value).ok())
             .unwrap_or_default();
     }
-    let row=make(conn,&Making{kind,environment,plan:json!({"removal_revision":revision,"volume_refs":promise.retained_volumes,"identity":identity,"origin":origin,"restoring":!purge,"fresh":false,"mode":"make"}),
-        phases:if purge {&PURGE_PHASES}else{&RESTORE_PHASES},created_by:by},now).await?;
+    let mut row=make_before(conn,&Making{kind,environment,plan:json!({"removal_revision":revision,"volume_refs":promise.retained_volumes,"identity":identity,"origin":origin,"restoring":!purge,"fresh":false,"mode":"make"}),
+        phases:if purge {&PURGE_PHASES}else{&RESTORE_PHASES},created_by:by},now,before).await?;
     if !retry
         && !retained::reserve(
             conn,
@@ -120,6 +151,21 @@ pub async fn queue(
     }
     if retry {
         jobs::merge_plan(conn, row.id, &json!({"purge_started":true}), now).await?;
+        row.plan["purge_started"] = json!(true);
+        if let Some(plan) = inherited_operation
+            && let Some(patch) = operation::inherited(&row, &plan)?
+        {
+            jobs::merge_plan(conn, row.id, &patch, now).await?;
+            row.plan
+                .as_object_mut()
+                .ok_or_else(|| EngineError::unreadable("the purge retry has no plan"))?
+                .extend(
+                    patch
+                        .as_object()
+                        .ok_or_else(|| EngineError::unreadable("the purge retry has no custody"))?
+                        .clone(),
+                );
+        }
     }
     Ok(row)
 }
@@ -185,10 +231,14 @@ impl Kept {
         let mut tx = self.engine.db().begin().await.map_err(EngineError::from)?;
         orch_db::queries::transaction_guard::lock_authority(&mut tx).await?;
         hosting::lock_environment(&mut tx, self.environment).await?;
-        self.check_purge_in(&mut tx, job).await
+        self.check_purge_in(&mut tx, job).await.map(|_| ())
     }
 
-    async fn check_purge_in(&self, conn: &mut Conn, job: &Job) -> Result<(), Stop> {
+    async fn check_purge_in(
+        &self,
+        conn: &mut Conn,
+        job: &Job,
+    ) -> Result<Option<orch_authz::Caller>, Stop> {
         let promise = retained::removal(conn, self.environment)
             .await?
             .ok_or_else(|| failed("gone", "the environment is gone"))?;
@@ -197,30 +247,38 @@ impl Kept {
         {
             return Err(failed("conflict", "the removal changed"));
         }
-        let row = job.row().await?;
+        let row = job.lock_owned(conn).await?.ok_or(Stop::Lost)?;
         if row.plan.get("purge_started").and_then(Json::as_bool) == Some(true)
             || promise.volumes_purge_at.is_some_and(|at| at <= job.now())
         {
-            return Ok(());
+            return Ok(None);
         }
-        let principal = requester(conn, &row, job.now()).await?;
+        let principal = if operation::applies(&row) {
+            operation::requester(conn, &row, self.engine.inner.clock.as_ref()).await?
+        } else {
+            requester(conn, &row, job.now()).await?
+        };
         if !authority(conn, &principal, self.environment).await?.1 {
             return Err(failed(
                 "denied",
                 "the requester is no longer an admin of the environment's home",
             ));
         }
-        Ok(())
+        Ok(Some(principal.caller().clone()))
     }
 
     async fn check_restore(&self, job: &Job) -> Result<(), Stop> {
         let mut tx = self.engine.db().begin().await.map_err(EngineError::from)?;
         orch_db::queries::transaction_guard::lock_authority(&mut tx).await?;
         hosting::lock_environment(&mut tx, self.environment).await?;
-        self.check_restore_in(&mut tx, job).await
+        self.check_restore_in(&mut tx, job).await.map(|_| ())
     }
 
-    async fn check_restore_in(&self, conn: &mut Conn, job: &Job) -> Result<(), Stop> {
+    async fn check_restore_in(
+        &self,
+        conn: &mut Conn,
+        job: &Job,
+    ) -> Result<orch_authz::Caller, Stop> {
         let promise = retained::removal(conn, self.environment)
             .await?
             .ok_or_else(|| failed("gone", "the environment is gone"))?;
@@ -229,8 +287,12 @@ impl Kept {
         {
             return Err(failed("conflict", "the kept files are no longer reserved"));
         }
-        let row = job.row().await?;
-        let principal = requester(conn, &row, job.now()).await?;
+        let row = job.lock_owned(conn).await?.ok_or(Stop::Lost)?;
+        let principal = if operation::applies(&row) {
+            operation::requester(conn, &row, self.engine.inner.clock.as_ref()).await?
+        } else {
+            requester(conn, &row, job.now()).await?
+        };
         let (manager, admin) = authority(conn, &principal, self.environment).await?;
         if !manager && !admin {
             return Err(failed(
@@ -245,71 +307,9 @@ impl Kept {
             .await?
             .is_some_and(|facts| facts.attaches())
         {
-            self.connected_machine(conn, &environment, &row.plan)
-                .await?;
+            connected_machine(conn, &environment, &row.plan).await?;
         }
-        Ok(())
-    }
-
-    async fn connected_machine(
-        &self,
-        conn: &mut Conn,
-        environment: &hosting::EnvironmentState,
-        plan: &Json,
-    ) -> Result<orch_db::queries::resources::MachineRow, Stop> {
-        let machine = environment
-            .machine_id
-            .ok_or_else(|| failed("unavailable", "the registered machine is unknown"))?;
-        let row = orch_db::queries::resources::machine(conn, machine)
-            .await?
-            .filter(|row| {
-                row.online
-                    && row.is_active()
-                    && row.session_marker().is_some()
-                    && row.roles.iter().any(|role| role == "environment")
-            })
-            .ok_or_else(|| failed("unavailable", "the registered machine is unavailable"))?;
-        let reported = orch_db::queries::environment_facts::of(conn, environment.id)
-            .await?
-            .filter(|facts| facts.attaches())
-            .ok_or_else(|| {
-                failed(
-                    "unavailable",
-                    "the machine no longer declares directory attachment",
-                )
-            })?;
-        let policy: orch_link_contract::policy::LocalPolicy =
-            serde_json::from_value(reported.policy.ok_or_else(|| {
-                failed(
-                    "unavailable",
-                    "the machine has not reported its current local policy",
-                )
-            })?)
-            .map_err(|_| failed("unavailable", "the machine's local policy is unreadable"))?;
-        policy
-            .check_root(std::path::Path::new(&environment.workspace_root))
-            .map_err(|_| {
-                failed(
-                    "denied",
-                    "the original directory is no longer offered by its machine",
-                )
-            })?;
-        if plan.get("connected").and_then(Json::as_bool) == Some(true) {
-            let session: Option<chrono::DateTime<chrono::Utc>> = serde_json::from_value(
-                plan.get("connected_session").cloned().unwrap_or(Json::Null),
-            )
-            .map_err(EngineError::from)?;
-            if plan["connected_machine"] != json!(machine)
-                || plan["connected_root"] != environment.workspace_root
-                || session != row.session_marker()
-            {
-                return Err(failed(
-                    "conflict",
-                    "the original registration or machine session changed",
-                ));
-            }
-        }
-        Ok(row)
+        Ok(principal.caller().clone())
     }
 
     async fn verify_network(&self, conn: &mut Conn, plan: &Json) -> Result<(), Stop> {
@@ -351,11 +351,12 @@ impl Kept {
             .await?
             .ok_or_else(|| failed("gone", "the environment is gone"))?;
         let plan = job.plan().await?;
+        let mut original = None;
         let changed = if self.purge {
             retained::purged(&mut tx, self.environment, self.revision, job.now()).await?
         } else if plan.get("connected").and_then(Json::as_bool) == Some(true) {
-            self.check_restore_in(&mut tx, job).await?;
-            let machine = self.connected_machine(&mut tx, &env, &plan).await?;
+            original = Some(self.check_restore_in(&mut tx, job).await?);
+            let machine = connected_machine(&mut tx, &env, &plan).await?;
             let facts = plan.get("candidate_facts").ok_or_else(|| {
                 failed("unavailable", "the registered directory was not verified")
             })?;
@@ -380,7 +381,7 @@ impl Kept {
             )
             .await?
         } else {
-            self.check_restore_in(&mut tx, job).await?;
+            original = Some(self.check_restore_in(&mut tx, job).await?);
             self.verify_network(&mut tx, &plan).await?;
             let runtime = plan
                 .get("runtime")
@@ -444,6 +445,17 @@ impl Kept {
             job.now(),
         )
         .await?;
+        if original
+            .as_ref()
+            .is_some_and(|caller: &orch_authz::Caller| {
+                !caller.key_deadline_allows(self.engine.inner.clock.as_ref())
+            })
+        {
+            return Err(failed(
+                "denied",
+                "the original restore key ended before publication",
+            ));
+        }
         tx.commit().await.map_err(DbError::from)?;
         Ok(Done::Finished)
     }
@@ -472,9 +484,25 @@ impl Phased for Kept {
                 let mut tx = self.engine.db().begin().await.map_err(EngineError::from)?;
                 orch_db::queries::transaction_guard::lock_authority(&mut tx).await?;
                 hosting::lock_environment(&mut tx, self.environment).await?;
-                self.check_purge_in(&mut tx, job).await?;
+                let original = self.check_purge_in(&mut tx, job).await?;
+                if original.as_ref().is_some_and(|caller| {
+                    !caller.key_deadline_allows(self.engine.inner.clock.as_ref())
+                }) {
+                    return Err(failed(
+                        "denied",
+                        "the original purge key ended before removal",
+                    ));
+                }
                 jobs::merge_plan(&mut tx, job.id(), &json!({"purge_started":true}), job.now())
                     .await?;
+                if original.as_ref().is_some_and(|caller| {
+                    !caller.key_deadline_allows(self.engine.inner.clock.as_ref())
+                }) {
+                    return Err(failed(
+                        "denied",
+                        "the original purge key ended before removal",
+                    ));
+                }
                 tx.commit().await.map_err(DbError::from)?;
                 let refs: Vec<retained::Volume> =
                     serde_json::from_value(plan["volume_refs"].clone())
@@ -564,7 +592,7 @@ impl Phased for Kept {
                     .await?
                     .is_some_and(|facts| facts.attaches())
                 {
-                    let machine = self.connected_machine(&mut tx, &environment, &plan).await?;
+                    let machine = connected_machine(&mut tx, &environment, &plan).await?;
                     jobs::merge_plan(
                         &mut tx,
                         job.id(),
@@ -689,9 +717,7 @@ impl Phased for Kept {
                     let environment = hosting::environment(&mut conn, self.environment)
                         .await?
                         .ok_or_else(|| failed("gone", "the environment is gone"))?;
-                    let machine = self
-                        .connected_machine(&mut conn, &environment, &plan)
-                        .await?;
+                    let machine = connected_machine(&mut conn, &environment, &plan).await?;
                     let with = orch_db::queries::trace::read_scope(
                         &[self.environment],
                         crate::environments::attach_with(&mut conn, self.environment, job.now()),
@@ -750,8 +776,7 @@ impl Phased for Kept {
                     let environment = hosting::environment(&mut conn, self.environment)
                         .await?
                         .ok_or_else(|| failed("gone", "the environment is gone"))?;
-                    self.connected_machine(&mut conn, &environment, &plan)
-                        .await?;
+                    connected_machine(&mut conn, &environment, &plan).await?;
                     let facts = plan.get("candidate_facts").ok_or_else(|| {
                         failed("unavailable", "the registered directory was not verified")
                     })?;
@@ -961,6 +986,65 @@ impl Phased for Kept {
         .await;
         result.map_or_else(|e| Undone::Partly(e.to_string()), |()| Undone::Everything)
     }
+}
+
+async fn connected_machine(
+    conn: &mut Conn,
+    environment: &hosting::EnvironmentState,
+    plan: &Json,
+) -> Result<orch_db::queries::resources::MachineRow, Stop> {
+    let machine = environment
+        .machine_id
+        .ok_or_else(|| failed("unavailable", "the registered machine is unknown"))?;
+    let row = orch_db::queries::resources::machine(conn, machine)
+        .await?
+        .filter(|row| {
+            row.online
+                && row.is_active()
+                && row.session_marker().is_some()
+                && row.roles.iter().any(|role| role == "environment")
+        })
+        .ok_or_else(|| failed("unavailable", "the registered machine is unavailable"))?;
+    let reported = orch_db::queries::environment_facts::of(conn, environment.id)
+        .await?
+        .filter(|facts| facts.attaches())
+        .ok_or_else(|| {
+            failed(
+                "unavailable",
+                "the machine no longer declares directory attachment",
+            )
+        })?;
+    let policy: orch_link_contract::policy::LocalPolicy =
+        serde_json::from_value(reported.policy.ok_or_else(|| {
+            failed(
+                "unavailable",
+                "the machine has not reported its current local policy",
+            )
+        })?)
+        .map_err(|_| failed("unavailable", "the machine's local policy is unreadable"))?;
+    policy
+        .check_root(std::path::Path::new(&environment.workspace_root))
+        .map_err(|_| {
+            failed(
+                "denied",
+                "the original directory is no longer offered by its machine",
+            )
+        })?;
+    if plan.get("connected").and_then(Json::as_bool) == Some(true) {
+        let session: Option<chrono::DateTime<chrono::Utc>> =
+            serde_json::from_value(plan.get("connected_session").cloned().unwrap_or(Json::Null))
+                .map_err(EngineError::from)?;
+        if plan["connected_machine"] != json!(machine)
+            || plan["connected_root"] != environment.workspace_root
+            || session != row.session_marker()
+        {
+            return Err(failed(
+                "conflict",
+                "the original registration or machine session changed",
+            ));
+        }
+    }
+    Ok(row)
 }
 
 /// Reloads the original request identity and its recorded administration mode for durable work.

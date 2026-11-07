@@ -55,11 +55,12 @@ async fn writable(conn: &mut Conn, environment: orch_types::Id) -> Result<bool, 
 }
 
 /// Includes the private repository's bytes in the same reviewed copy plan as its working files.
-pub(crate) async fn independent_plan(
+pub(crate) async fn independent_plan_from(
     engine: &Engine,
     environment: &EnvironmentRow,
     directory: &str,
     selection: orch_link_contract::commands::Selection,
+    preparation: Option<&crate::fork_plan::operation::Preparation>,
 ) -> Result<orch_link_contract::source::GitWorktreeCopyPlanResult, EngineError> {
     let machine = environment
         .machine_id
@@ -75,6 +76,10 @@ pub(crate) async fn independent_plan(
         },
     )
     .map_err(EngineError::from)?;
+    let command = match preparation {
+        Some(source) => source.command(engine, command).await?,
+        None => command,
+    };
     let result = tokio::time::timeout(
         engine.config().hosting.attach_wait,
         crate::commands::run(engine.inner.commands.as_ref(), command),
@@ -82,12 +87,124 @@ pub(crate) async fn independent_plan(
     .await
     .map_err(|_| EngineError::unreadable("the source worktree's repository measurement timed out"))?
     .map_err(EngineError::from)?;
+    if let Some(source) = preparation {
+        source.check(engine).await?;
+    }
     match result {
         Outcome::Succeeded(value) => serde_json::from_value(value).map_err(EngineError::from),
         _ => Err(EngineError::unreadable(
             "the source worktree could not provide a complete independent repository",
         )),
     }
+}
+
+/// A managed copy uses the one native retained principal; genuine legacy copies keep their old loader.
+async fn copy_principal(
+    conn: &mut Conn,
+    job: &crate::jobs::runner::Job,
+    recipe: &crate::jobs::fork::Recipe,
+    token: Option<orch_types::Id>,
+) -> Result<
+    (
+        orch_authz::Principal,
+        Option<crate::jobs::fork::operation::Checkpoint>,
+    ),
+    crate::jobs::runner::Stop,
+> {
+    let row = orch_db::queries::jobs::job(conn, job.id())
+        .await?
+        .ok_or(crate::jobs::runner::Stop::Lost)?;
+    if let Some(source) =
+        crate::jobs::fork::operation::Preparation::from_job(&row).map_err(copy_error)?
+    {
+        let checkpoint = source
+            .current(
+                conn,
+                job.engine().inner.clock.as_ref(),
+                job.engine().inner.access.as_ref(),
+            )
+            .await
+            .map_err(copy_error)?;
+        source
+            .retain_on(conn, job.engine().inner.clock.as_ref(), &checkpoint)
+            .await
+            .map_err(copy_error)?;
+        return Ok((checkpoint.principal().clone(), Some(checkpoint)));
+    }
+    if let Some(token) = token {
+        let scoped: bool = sqlx::query_scalar(
+            "SELECT EXISTS(SELECT 1 FROM api_tokens WHERE id=$1 AND operation_scope IS NOT NULL)",
+        )
+        .bind(token)
+        .fetch_one(&mut *conn)
+        .await
+        .map_err(orch_db::DbError::from)?;
+        if scoped {
+            return Err(crate::jobs::runner::Failure::new(
+                "access.denied",
+                "The original scoped file source is unavailable.",
+            )
+            .into());
+        }
+    }
+    Ok((
+        crate::jobs::source::load_principal(conn, job, recipe.by, token).await?,
+        None,
+    ))
+}
+fn copy_deadline(
+    job: &crate::jobs::runner::Job,
+    checkpoint: &Option<crate::jobs::fork::operation::Checkpoint>,
+) -> Result<(), crate::jobs::runner::Stop> {
+    if let Some(checkpoint) = checkpoint {
+        checkpoint
+            .check(job.engine().inner.clock.as_ref())
+            .map_err(copy_error)?;
+    }
+    Ok(())
+}
+fn copy_error(error: EngineError) -> crate::jobs::runner::Stop {
+    match error {
+        EngineError::BeforeEffect(_) => crate::jobs::runner::Failure::new(
+            "access.denied",
+            "The original scoped file source is unavailable.",
+        )
+        .into(),
+        error => error.into(),
+    }
+}
+
+/// The native source-file and destination-write prerequisites, shared with dispatch rechecks.
+pub(crate) async fn copy_grants(
+    conn: &mut Conn,
+    principal: &Principal,
+    source: orch_types::Id,
+    target: orch_types::Id,
+    message: &str,
+) -> Result<(), crate::jobs::runner::Stop> {
+    for (id, permission) in [
+        (source, Permission::FilesView),
+        (target, Permission::EnvironmentManage),
+    ] {
+        if !matches!(
+            orch_authz::resources::check(
+                conn,
+                principal,
+                ObjectRef {
+                    kind: ObjectKind::Environment,
+                    id
+                },
+                permission,
+                Policy::default()
+            )
+            .await
+            .map_err(EngineError::from)?,
+            Decision::Allowed { .. }
+        ) {
+            return Err(crate::jobs::runner::Failure::new("access.denied", message).into());
+        }
+    }
+    Ok(())
 }
 
 /// A slow source copy repeats its current token, file reach, placement and target-write checks.
@@ -107,34 +224,16 @@ pub(crate) async fn authorize_copy(
         .transpose()
         .map_err(EngineError::from)?
         .flatten();
-    let mut conn = job.engine().db().acquire().await?;
-    let principal = crate::jobs::source::load_principal(&mut conn, job, recipe.by, token).await?;
-    for (id, permission) in [
-        (source.id, Permission::FilesView),
-        (target.id, Permission::EnvironmentManage),
-    ] {
-        if !matches!(
-            orch_authz::resources::check(
-                &mut conn,
-                &principal,
-                ObjectRef {
-                    kind: ObjectKind::Environment,
-                    id
-                },
-                permission,
-                Policy::default()
-            )
-            .await
-            .map_err(EngineError::from)?,
-            Decision::Allowed { .. }
-        ) {
-            return Err(Failure::new(
-                "access.denied",
-                "current permission no longer permits this file copy",
-            )
-            .into());
-        }
-    }
+    let mut conn = job.engine().db().begin().await?;
+    let (principal, checkpoint) = copy_principal(&mut conn, job, recipe, token).await?;
+    copy_grants(
+        &mut conn,
+        &principal,
+        source.id,
+        target.id,
+        "current permission no longer permits this file copy",
+    )
+    .await?;
     for expected in [source, target] {
         if !orch_db::queries::environments::thread_engine::environment(&mut conn, expected.id)
             .await?
@@ -170,6 +269,8 @@ pub(crate) async fn authorize_copy(
         )
         .into());
     }
+    copy_deadline(job, &checkpoint)?;
+    conn.commit().await.map_err(orch_db::DbError::from)?;
     Ok(())
 }
 
@@ -272,6 +373,7 @@ pub(crate) async fn plan(
     environment: &EnvironmentRow,
     directory: &str,
     target: Option<&EnvironmentRow>,
+    preparation: Option<&crate::fork_plan::operation::Preparation>,
 ) -> Result<Planned, PlanError> {
     if request.worktree.is_none() && request.files_at.is_none() {
         return Ok(Planned::default());
@@ -325,7 +427,15 @@ pub(crate) async fn plan(
             },
         )
         .map_err(EngineError::from)?;
-        match engine.ask_bounded(command).await? {
+        let command = match preparation {
+            Some(source) => source.command(engine, command).await?,
+            None => command,
+        };
+        let outcome = engine.ask_bounded(command).await?;
+        if let Some(source) = preparation {
+            source.check(engine).await?;
+        }
+        match outcome {
             Some(Outcome::Failed(error)) if error.code == "not_found" => {}
             Some(Outcome::Succeeded(_)) => {
                 return Ok(Planned::blocked(
@@ -441,7 +551,15 @@ pub(crate) async fn plan(
             },
         )
         .map_err(EngineError::from)?;
-        let Some(Outcome::Succeeded(value)) = engine.ask_bounded(command).await? else {
+        let command = match preparation {
+            Some(source) => source.command(engine, command).await?,
+            None => command,
+        };
+        let outcome = engine.ask_bounded(command).await?;
+        if let Some(source) = preparation {
+            source.check(engine).await?;
+        }
+        let Some(Outcome::Succeeded(value)) = outcome else {
             return Ok(Planned::blocked(
                 "git.unavailable",
                 "the worktree's repository could not be reviewed",
@@ -505,6 +623,9 @@ pub(crate) async fn plan(
             changes_carried,
         });
     }
+    if let Some(source) = preparation {
+        source.check(engine).await?;
+    }
     Ok(planned)
 }
 
@@ -542,7 +663,7 @@ pub(crate) async fn copy(
         .ok_or_else(|| fail("the fork's destination environment is unavailable"))?;
     let selected = recipe.forkplan.files_at.as_ref();
     let source_id = selected.map_or(recipe.from_environment, |snapshot| snapshot.environment.id);
-    let mut conn = job.engine().db().acquire().await?;
+    let mut conn = job.engine().db().begin().await?;
     let source_env = environments::environment(&mut conn, source_id)
         .await?
         .ok_or_else(|| fail("the source environment disappeared"))?;
@@ -565,33 +686,15 @@ pub(crate) async fn copy(
         .transpose()
         .map_err(EngineError::from)?
         .flatten();
-    let principal = crate::jobs::source::load_principal(&mut conn, job, recipe.by, token).await?;
-    for (environment, permission) in [
-        (target_id, Permission::EnvironmentManage),
-        (source_id, Permission::FilesView),
-    ] {
-        if !matches!(
-            orch_authz::resources::check(
-                &mut conn,
-                &principal,
-                ObjectRef {
-                    kind: ObjectKind::Environment,
-                    id: environment
-                },
-                permission,
-                Policy::default()
-            )
-            .await
-            .map_err(EngineError::from)?,
-            Decision::Allowed { .. }
-        ) {
-            return Err(Failure::new(
-                "access.denied",
-                "current permission no longer permits the fork's files",
-            )
-            .into());
-        }
-    }
+    let (principal, checkpoint) = copy_principal(&mut conn, job, recipe, token).await?;
+    copy_grants(
+        &mut conn,
+        &principal,
+        source_id,
+        target_id,
+        "current permission no longer permits the fork's files",
+    )
+    .await?;
     let snapshot = if let Some(saved) = selected {
         let current = storage::snapshot(&mut conn, saved.id)
             .await?
@@ -626,7 +729,8 @@ pub(crate) async fn copy(
     .await
     .map_err(EngineError::from)?
     .ok_or_else(|| fail("recording bytes are unset"))?;
-    drop(conn);
+    copy_deadline(job, &checkpoint)?;
+    conn.commit().await.map_err(orch_db::DbError::from)?;
     if let Some(worktree) = &recipe.forkplan.worktree {
         if target_id != recipe.from_environment {
             return Err(fail("an own worktree must stay in its repository's environment").into());
@@ -742,34 +846,16 @@ pub(crate) async fn copy(
     }
     pin_export(job, hash).await?;
     // Recheck after a slow transfer before any destination bytes are written.
-    let mut conn = job.engine().db().acquire().await?;
-    let principal = crate::jobs::source::load_principal(&mut conn, job, recipe.by, token).await?;
-    for (environment, permission) in [
-        (source_id, Permission::FilesView),
-        (target_id, Permission::EnvironmentManage),
-    ] {
-        if !matches!(
-            orch_authz::resources::check(
-                &mut conn,
-                &principal,
-                ObjectRef {
-                    kind: ObjectKind::Environment,
-                    id: environment
-                },
-                permission,
-                Policy::default()
-            )
-            .await
-            .map_err(EngineError::from)?,
-            Decision::Allowed { .. }
-        ) {
-            return Err(Failure::new(
-                "access.denied",
-                "file permission was withdrawn during the saved-point transfer",
-            )
-            .into());
-        }
-    }
+    let mut conn = job.engine().db().begin().await?;
+    let (principal, checkpoint) = copy_principal(&mut conn, job, recipe, token).await?;
+    copy_grants(
+        &mut conn,
+        &principal,
+        source_id,
+        target_id,
+        "file permission was withdrawn during the saved-point transfer",
+    )
+    .await?;
     if !environments::environment(&mut conn, target_id)
         .await?
         .is_some_and(|current| {
@@ -783,7 +869,8 @@ pub(crate) async fn copy(
         )
         .into());
     }
-    drop(conn);
+    copy_deadline(job, &checkpoint)?;
+    conn.commit().await.map_err(orch_db::DbError::from)?;
     let target_root =
         crate::sessions::absolute_directory(&target.workspace_root, &recipe.forkplan.to.directory);
     let original = FsMaterialize {

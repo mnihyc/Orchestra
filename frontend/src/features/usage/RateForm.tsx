@@ -125,6 +125,7 @@ export function RateDialog({ node, mode, initial, replacing, card, revision, onC
               <Decimal label={t('usage.rates.col.input')} value={draft.input} onChange={(next) => set('input', next)} error={say('input')} />
               <Decimal label={t('usage.rates.col.cached')} value={draft.cached} onChange={(next) => set('cached', next)} error={say('cached')} />
               <Decimal label={t('usage.rates.col.output')} value={draft.output} onChange={(next) => set('output', next)} error={say('output')} />
+              <Decimal label={t('webSearch.price')} optional value={draft.webSearch ?? ''} onChange={(next) => set('webSearch', next)} error={say('webSearch')} />
               <Decimal label={t('usage.rates.col.cacheWrite')} optional value={draft.cacheWrite} onChange={(next) => set('cacheWrite', next)} error={say('cacheWrite')} />
             </div>
           </fieldset>

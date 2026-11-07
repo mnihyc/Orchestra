@@ -32,6 +32,7 @@ pub mod input_schedules;
 pub mod installation;
 pub mod job_leases;
 pub mod jobs;
+pub mod key_activity;
 pub mod lifecycle;
 pub mod link;
 pub mod links;
@@ -47,6 +48,7 @@ pub mod outsiders;
 pub mod package;
 pub mod ports;
 pub mod profiles;
+pub mod provider_credits;
 pub mod provider_facts;
 pub mod provider_plan;
 pub mod raw_events;
@@ -72,4 +74,9 @@ pub mod tokens;
 pub mod trace;
 pub mod transaction_guard;
 pub mod trust;
+/// Bounded projections over existing upload audit records.
+pub mod upload_history;
 pub mod uploads;
+
+/// Durable fenced progress of the offline document purge.
+pub mod document_purge_progress;

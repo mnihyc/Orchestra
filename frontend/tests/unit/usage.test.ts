@@ -390,9 +390,9 @@ describe('a cap in words', () => {
   it('names whom a cap covers in each of the ways', () => {
     expect(capTitle(cap({ split: 'each' }), t)).toContain('Each person');
     expect(capTitle(cap({ subject: { kind: 'role', role: 'developer' }, split: 'each' }), t)).toContain('Each Developer');
-    expect(capTitle(cap({ subject: { kind: 'group', group: { id: ID, name: 'Operators', place: 'org North', description: '', member_count: 2, org_id: ID } } }), t)).toContain('Operators, org North together');
-    expect(capTitle(cap({ subject: { kind: 'group', group: { id: ID, name: 'Operators', place: 'org North', description: '', member_count: 2, org_id: ID } }, split: 'each' }), t)).toContain('Each member of Operators, org North');
-    expect(capTitle(cap({ subject: { kind: 'group', group: { id: ID, name: 'Operators', place: null, description: '', member_count: 2, org_id: ID } } }), t)).toContain('Operators, a place you cannot see together');
+    expect(capTitle(cap({ subject: { kind: 'group', group: { revision: 1, id: ID, name: 'Operators', place: 'org North', description: '', member_count: 2, org_id: ID } } }), t)).toContain('Operators, org North together');
+    expect(capTitle(cap({ subject: { kind: 'group', group: { revision: 1, id: ID, name: 'Operators', place: 'org North', description: '', member_count: 2, org_id: ID } }, split: 'each' }), t)).toContain('Each member of Operators, org North');
+    expect(capTitle(cap({ subject: { kind: 'group', group: { revision: 1, id: ID, name: 'Operators', place: null, description: '', member_count: 2, org_id: ID } } }), t)).toContain('Operators, a place you cannot see together');
     const person=cap({ subject: { kind: 'user', user: { id: ID, kind: 'human', username: 'bo', display_name: 'Bo', address:'acme.bo', avatar: { text: 'B', color: 1 } } } });
     expect(capTitle(person,t)).toContain('Bo on');expect(capTitle(person,t)).not.toContain('acme.bo');
   });

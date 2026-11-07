@@ -1,5 +1,6 @@
 //! The real fixture joins its notice/socket owners before either pool or database is removed.
 
+#![recursion_limit = "256"]
 mod realtime_support;
 
 use realtime_support::{Client, Rig};

@@ -28,7 +28,9 @@
 //! nothing: the forwarder asks for an uncompressed answer or decodes it first.
 
 use orch_agent_contract::events::{TokenUsage, TokensReportedApart};
-use orch_model_contract::usage::{ObservedUsage, SseEvent, SseParser, UsageObserver};
+use orch_model_contract::usage::{
+    ObservedUsage, ResponseFacts, SseEvent, SseParser, UsageObserver,
+};
 use serde::Deserialize;
 use serde_json::Value;
 use serde_json::value::RawValue;
@@ -74,6 +76,8 @@ struct Probe<'a> {
 /// The members of a usage object that matter here.
 #[derive(Deserialize)]
 struct UsageView {
+    server_tool_use: Option<Value>,
+    speed: Option<Value>,
     input_tokens: Option<Value>,
     output_tokens: Option<Value>,
     cache_creation_input_tokens: Option<Value>,
@@ -130,6 +134,7 @@ fn replace(slot: &mut Option<i64>, new: Option<i64>) {
 /// What the vendor has said of the counts so far; each member is the latest word on it.
 #[derive(Debug, Clone, Default)]
 struct Figures {
+    web_searches: Option<i64>,
     input: Option<i64>,
     cache_read: Option<i64>,
     cache_write: Option<i64>,
@@ -141,6 +146,15 @@ struct Figures {
 impl Figures {
     /// Takes in a usage object: every member it carries replaces what was known of that member.
     fn take(&mut self, usage: &UsageView) {
+        replace(
+            &mut self.web_searches,
+            usage
+                .server_tool_use
+                .as_ref()
+                .and_then(|usage| usage.get("web_search_requests"))
+                .and_then(Value::as_i64)
+                .filter(|count| *count >= 0),
+        );
         replace(&mut self.input, count(usage.input_tokens.as_ref()));
         replace(
             &mut self.cache_read,
@@ -186,8 +200,10 @@ impl Figures {
 /// What has been learned of the message so far.
 #[derive(Debug, Clone, Default)]
 struct Seen {
+    facts: ResponseFacts,
     id: Option<String>,
     model: Option<String>,
+    service_tier: Option<String>,
     figures: Figures,
 }
 
@@ -195,6 +211,9 @@ impl Seen {
     /// Takes in a usage object given as raw text.
     fn take_usage(&mut self, raw: &RawValue) {
         if let Ok(usage) = serde_json::from_str::<UsageView>(raw.get()) {
+            if let Some(speed) = text(usage.speed.clone()) {
+                self.service_tier = Some(speed);
+            }
             self.figures.take(&usage);
         }
     }
@@ -212,8 +231,49 @@ impl Seen {
         }
     }
 
+    fn take_facts(&mut self, body: &Value) {
+        let message = body.get("message").unwrap_or(body);
+        if let Some(id) = message
+            .get("id")
+            .and_then(Value::as_str)
+            .filter(|id| !id.is_empty())
+        {
+            self.facts.request_id = Some(id.to_owned());
+        }
+        self.facts.output_started |= body["type"] == "content_block_delta"
+            && ["text", "thinking", "partial_json"].into_iter().any(|key| {
+                body.get("delta")
+                    .and_then(|delta| delta.get(key))
+                    .and_then(Value::as_str)
+                    .is_some_and(|text| !text.is_empty())
+            });
+        self.facts.completed |= body["type"] == "message_stop";
+        if let Some(error) = body.get("error").filter(|error| !error.is_null()) {
+            self.facts.failure = Some(serde_json::json!({"error":error}));
+        }
+        if body["stop_reason"] == "refusal"
+            || body.pointer("/delta/stop_reason") == Some(&Value::String("refusal".into()))
+        {
+            let words = body
+                .get("content")
+                .and_then(Value::as_array)
+                .and_then(|content| {
+                    content
+                        .iter()
+                        .find_map(|part| part.get("text").and_then(Value::as_str))
+                })
+                .unwrap_or("The vendor filter refused this request.");
+            self.facts.failure = Some(
+                serde_json::json!({"error":{"type":"model_refused","message":words,"reason":body.pointer("/stop_details/category")}}),
+            );
+        }
+    }
+
     /// Takes in one event of a stream.
     fn take_event(&mut self, event: &SseEvent) {
+        if let Ok(body) = serde_json::from_str::<Value>(&event.data) {
+            self.take_facts(&body);
+        }
         let kind = match event.event.as_deref() {
             Some(name) => name,
             None => match serde_json::from_str::<Probe<'_>>(&event.data)
@@ -247,6 +307,8 @@ impl Seen {
     /// What was seen, if it holds figures.
     fn observed(&self) -> Option<ObservedUsage> {
         Some(ObservedUsage {
+            web_searches: self.figures.web_searches,
+            service_tier: self.service_tier.clone(),
             model: self.model.clone(),
             tokens: self.figures.tokens()?,
             cost: self.figures.cost.clone(),
@@ -321,6 +383,16 @@ impl UsageObserver for MessagesUsage {
         }
         self.seen.observed()
     }
+    fn response_facts(&self) -> ResponseFacts {
+        let mut seen = self.seen.clone();
+        if let Body::Plain(Some(bytes)) = &self.body {
+            if let Ok(body) = serde_json::from_slice::<Value>(bytes) {
+                seen.take_facts(&body);
+                seen.facts.completed = true;
+            }
+        }
+        seen.facts
+    }
 }
 
 #[cfg(test)]
@@ -355,6 +427,14 @@ mod tests {
 
     fn whole(body: &str) -> Option<ObservedUsage> {
         feed(&[body.as_bytes()]).usage()
+    }
+
+    #[test]
+    fn output_evidence_exists_before_a_usage_body() {
+        let mut observer = MessagesUsage::new();
+        observer.observe(b"event: content_block_delta\ndata: {\"type\":\"content_block_delta\",\"delta\":{\"type\":\"text_delta\",\"text\":\"hello\"}}\n\n");
+        assert!(observer.response_facts().output_started);
+        assert!(observer.usage().is_none());
     }
 
     #[test]

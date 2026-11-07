@@ -203,6 +203,7 @@ mod tests {
             source: EntrySource::Page,
             created_by: None,
             created_at: at.parse::<Time>().unwrap(),
+            renewed_at: None,
             removed_at: None,
             revision: 1,
         }

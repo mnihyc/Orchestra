@@ -13,6 +13,7 @@ import { cachedRow, feedSequences } from '@/api/cache';
 import { agentReachKey } from '@/api/agentReach';
 import { queryClient, type ReadOptions } from '@/api/query';
 import { type ResourceRows, resourceRows } from '@/api/listed';
+import { libraryReader, sameLibraryReader, seedEnvironmentLibrary } from '@/api/resourceLibrary';
 import type {
   AgentReachOverview,
   Environment,
@@ -50,7 +51,10 @@ export const environmentQuery = (id: string, options: ReadOptions = {}) =>
     queryKey: environmentKey(id),
     initialData: () => cachedRow(queryClient, 'environment', id),
     queryFn: async (context): Promise<Environment> => {
-      const snapshot = await ok(api.GET('/environments/{id}/sync', { params: { path: { id } }, ...(options.keepReading === true ? {} : { signal: context.signal }) }));
+      const reader = libraryReader();
+      const signal = options.keepReading === true ? undefined : context.signal;
+      const snapshot = await ok(api.GET('/environments/{id}/sync', { params: { path: { id } }, ...(signal === undefined ? {} : { signal }) }));
+      if (signal?.aborted !== true && sameLibraryReader(reader) && snapshot.environment.id === id) seedEnvironmentLibrary(context.client, id, snapshot.library);
       feedSequences.set(`env:${id}`, snapshot.seq);
       return snapshot.environment;
     },
@@ -73,7 +77,7 @@ export const environmentSettingsQuery = (id: string) =>
   });
 
 /** Registers a directory on a machine of the caller's as an environment. The machine checks the root against its own policy. */
-export function registerEnvironment(machineId: string, body: MachineEnvironmentCreateBody, key: string): Promise<Environment> {
+export function registerEnvironment(machineId: string, body: MachineEnvironmentCreateBody, key: string) {
   return ok(api.POST('/machines/{id}/environments', { params: { path: { id: machineId } }, body, ...repeatable(key) }));
 }
 

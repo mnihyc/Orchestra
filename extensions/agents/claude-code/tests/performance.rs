@@ -262,3 +262,40 @@ fn a_retry_counts_rate_limiting_and_a_broken_stop_never_counts_placeholder_outpu
     );
     assert!(request_timing(&ended[0]).speed_milli.value().is_none());
 }
+
+#[test]
+fn message_tool_references_and_upstream_identity_survive_the_terminal_report() {
+    let mut requests = Requests::default();
+    requests.asked(at(0));
+    for (offset, event) in [
+        (
+            1,
+            json!({"type":"message_start","message":{"id":"message-local","model":"model","usage":{"input_tokens":10,"output_tokens":0}}}),
+        ),
+        (
+            2,
+            json!({"type":"content_block_start","index":0,"content_block":{"type":"tool_use","id":"tool-local","name":"Read"}}),
+        ),
+        (
+            3,
+            json!({"type":"message_delta","delta":{"stop_reason":"tool_use"},"usage":{"output_tokens":2}}),
+        ),
+    ] {
+        requests.observe(
+            &Frame::from_value(json!({"type":"stream_event","event":event})),
+            at(offset),
+            None,
+        );
+    }
+    let completed = requests.observe(
+        &Frame::from_value(json!({"type":"stream_event","event":{"type":"message_stop"}})),
+        at(4),
+        None,
+    );
+    assert_eq!(completed.len(), 1);
+    assert_eq!(
+        completed[0].provider_request_id.as_deref(),
+        Some("message-local")
+    );
+    assert_eq!(completed[0].tool_refs, Some(vec!["tool-local".to_owned()]));
+}

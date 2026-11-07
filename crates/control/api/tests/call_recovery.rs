@@ -131,6 +131,9 @@ async fn invalid_patterns_and_unconfigured_failover_candidates_are_refused_when_
         .send()
         .await
         .ok();
+    let saved = saved
+        .into_full()
+        .expect("this ordinary control expects the complete native setting");
     assert_eq!(saved.value, Some(json!(9)));
     assert!(saved.own.unwrap().locked);
     let refused = scene

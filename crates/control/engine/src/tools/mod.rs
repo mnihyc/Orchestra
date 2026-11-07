@@ -11,8 +11,9 @@
 //! them.
 //!
 //! **A call is checked at the moment it is made**, against the thread's settings as they are then: the tool must
-//! be one the thread is offered (the resolved `orch_tools.enabled`, what is built, and no `announce` in a side
-//! thread), the thread's agent must be within the rate, and the arguments must be what the tool's schema allows.
+//! be one the thread is offered (the resolved `orch_tools.enabled`, what is built, and only reading tools
+//! in a reading side thread, or none in a no-tools side), the thread's agent must be within the rate,
+//! and the arguments must be what the tool's schema allows.
 //! Each check that fails is a refusal: a result marked as an error that begins with its code and says what to do
 //! instead, which the model can read and correct itself by.
 //!
@@ -149,6 +150,21 @@ impl ToolSettings {
     }
 }
 
+/// A side's stored mechanism is authoritative. A side with missing or unknown metadata cannot
+/// receive ordinary tools; its adapter must establish a verified reading mode before it can read.
+pub(crate) fn side_reading(
+    thread: &ThreadRow,
+) -> Option<orch_agent_contract::descriptor::SideReading> {
+    use orch_agent_contract::descriptor::SideReading;
+    thread
+        .side_of
+        .map(|_| match thread.side_reading.as_deref() {
+            Some("read_only") => SideReading::ReadOnly,
+            Some("approval_gated") => SideReading::ApprovalGated,
+            _ => SideReading::NoTools,
+        })
+}
+
 /// The tools a thread's session is opened with: those the thread's settings enable and the engine has built, and
 /// none where its harness cannot take an MCP server or its environment switched them off for the agents that work
 /// there.
@@ -170,7 +186,7 @@ pub async fn offered_for_session(
         }
     }
     let settings = ToolSettings::load(conn, thread.node_id).await?;
-    let mut offered = definitions::offered(&settings.enabled, thread.side_of.is_some());
+    let mut offered = definitions::offered(&settings.enabled, side_reading(thread));
     if !browser::offered(conn, thread.environment_id).await? {
         offered.retain(|tool| *tool != OrchTool::UseBrowser);
     }
@@ -179,7 +195,7 @@ pub async fn offered_for_session(
     }
     ports::narrow(&mut offered, ports::offered(conn, thread, now).await?);
     // The goal tool is the agent's way of reporting on a goal: only a thread that has one is given it.
-    if crate::goals::offers_tool(conn, thread.node_id).await? {
+    if thread.side_of.is_none() && crate::goals::offers_tool(conn, thread.node_id).await? {
         offered.push(OrchTool::Goal);
     }
     Ok(offered)
@@ -418,13 +434,13 @@ impl Engine {
             let mut conn = self.inner.db.acquire().await?;
             ToolSettings::load(&mut conn, call.thread).await?
         };
-        let mut offered = definitions::offered(&settings.enabled, thread.side_of.is_some());
+        let mut offered = definitions::offered(&settings.enabled, side_reading(thread));
         let mut conn = self.inner.db.acquire().await?;
         ports::narrow(
             &mut offered,
             ports::offered(&mut conn, thread, self.inner.clock.time()).await?,
         );
-        if crate::goals::offers_tool(&mut conn, call.thread).await? {
+        if thread.side_of.is_none() && crate::goals::offers_tool(&mut conn, call.thread).await? {
             offered.push(OrchTool::Goal);
         }
         drop(conn);

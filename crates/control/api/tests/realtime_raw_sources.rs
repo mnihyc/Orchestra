@@ -1,6 +1,7 @@
 //! Real HTTP/socket source joins. Extra segment rows are explicit retained-reader fixtures,
 //! not claims that a native adapter opened or executed nine new conversations.
 
+#![recursion_limit = "256"]
 mod continuation_read_support;
 mod realtime_support;
 

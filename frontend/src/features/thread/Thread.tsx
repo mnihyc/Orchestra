@@ -3,8 +3,8 @@ import { threadIconFacts } from '@/ui/ThreadState';
  *
  * The screen of a thread: its head, the conversation with the agent's work, what stands above the
  * composer (why the thread cannot go on, what holds it, a plan, approvals that wait, the queue), and the
- * composer, or in its place the card for somebody who may only watch, or the line that the thread is
- * archived. The thread is followed live, so the screen is always the thread as it is now, and says when
+ * composer, disabled for somebody who may only watch, or the line that the thread is archived.
+ * The thread is followed live, so the screen is always the thread as it is now, and says when
  * it could not be brought up to date.
  */
 import { useMutation, useQuery } from '@tanstack/react-query';
@@ -32,7 +32,9 @@ import { PersonThingProvider } from '@/features/people/personContext';
 import { useSelection } from '@/features/forward/Selection';
 import { LocalAddresses } from '@/features/ports/LocalAddresses';
 import { BindingSummary } from '@/features/thread/BindingSummary';
+import { ThreadGatewayStatus } from '@/features/gateways/ThreadGatewayStatus';
 import { BlockedBanner } from '@/features/thread/BlockedBanner';
+import { threadSwitchRecovery } from '@/features/thread/switchRecovery';
 import { ConnectionBanner } from '@/features/thread/ConnectionBanner';
 import { SourcePreparation } from '@/features/source/Preparation';
 import { ReviewTray } from '@/features/source/Review';
@@ -42,7 +44,6 @@ import { GoalEditorHost } from '@/features/goal/GoalEditor';
 import { GoalLine } from '@/features/goal/GoalLine';
 import { LockBanner } from '@/features/thread/LockBanner';
 import { PassiveStrip } from '@/features/thread/PassiveStrip';
-import { WatchingCard } from '@/features/thread/WatchingCard';
 import type { ItemSelection, PromptFocus, SelectPromptVersion } from '@/features/timeline/context';
 import { FindInConversation } from '@/features/timeline/FindInConversation';
 import { PlanLine } from '@/features/timeline/PlanLine';
@@ -185,11 +186,15 @@ export function ThreadScreen({ threadId, item, items = null, turn, continuation 
     return found?.kind === 'approval' && found.status === 'pending' ? [found] : [];
   });
   const offscreen = pendingApprovals.filter((found) => !visible.has(found.id));
-  const composerShown = !reading.readOnly && !thread.archived && mayDrive && thread.input_access.allowed;
+  const composerShown = !reading.readOnly && !thread.archived;
+  const drivingShown = composerShown && mayDrive && thread.input_access.allowed;
 
   return (
     <PersonThingProvider thing={{ kind: 'thread', id: threadId }}><div ref={root} className="flex h-full min-h-0 flex-col overflow-x-hidden overflow-y-auto" data-screen="thread">
-      <ThreadHeader thread={thread} onRevealItem={(id) => timeline.current?.scrollToItem(id)} />
+      <ThreadHeader thread={thread} recoverySwitchVisible={threadSwitchRecovery(thread, reading.readOnly) !== undefined} onRevealItem={(id) => timeline.current?.scrollToItem(id)} />
+      {!reading.readOnly && thread.environment !== null && thread.binding !== null && <div className="min-w-0 px-4 pt-1">
+        <ThreadGatewayStatus threadId={threadId} executionRevision={thread.execution_revision} line />
+      </div>}
       {linkedTurn.isError && <ErrorAlert error={linkedTurn.error} />}
       <FindInConversation threadId={threadId} timeline={timeline} root={root} />
       {/* The thread's README stands above its conversation, folded to one line once it was read. */}
@@ -228,7 +233,7 @@ export function ThreadScreen({ threadId, item, items = null, turn, continuation 
           { id: 'goal', node: <GoalLine thread={thread} /> },
           { id: 'continuation', node: <ContinuationNotice key={windowKey} threadId={threadId} view={view} onSelect={onVersionSelect} /> },
           ...(reading.readOnly ? [] : [{ id: 'source', node: <SourcePreparation thread={thread} /> }]),
-          ...(composerShown && !picking.active ? [{ id: 'review', node: <ReviewTray threadId={threadId} /> }] : []),
+          ...(drivingShown && !picking.active ? [{ id: 'review', node: <ReviewTray threadId={threadId} /> }] : []),
         ]} />
         {offscreen.length > 0 && (
           <div role="status" className="flex items-center gap-2 rounded-lg border border-warning/40 bg-warning-subtle px-3 py-1 text-sm text-text">
@@ -242,7 +247,7 @@ export function ThreadScreen({ threadId, item, items = null, turn, continuation 
         <PlanLine threadId={threadId} onJump={(id) => timeline.current?.scrollToItem(id)} />
         <QueueTray threadId={threadId} queued={queuedInputs(view)} sending={sendingTray(view, sending)} readOnly={reading.readOnly} />
         {picking.active && !reading.readOnly ? (
-          <TimelineSelectionBar threadId={threadId} ids={picking.ids} canQuote={composerShown} onCancel={picking.clear} />
+          <TimelineSelectionBar threadId={threadId} ids={picking.ids} canQuote={drivingShown} onCancel={picking.clear} />
         ) : reading.readOnly ? null : thread.archived ? (
           <div className="flex flex-wrap items-center gap-3 rounded-lg border border-border bg-bg-subtle px-4 py-3 text-sm text-text">
             <Archive className="text-text-muted" aria-hidden />
@@ -258,9 +263,7 @@ export function ThreadScreen({ threadId, item, items = null, turn, continuation 
           </div>
         ) : composerShown ? (
           <Composer thread={thread} onSent={() => timeline.current?.scrollToEnd()} />
-        ) : (
-          <WatchingCard thread={thread} />
-        )}
+        ) : null}
       </Frame>
       <GoalEditorHost thread={thread} />
       {proceeding && limits.data !== undefined && (

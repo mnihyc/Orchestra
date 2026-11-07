@@ -50,13 +50,6 @@ pub(super) async fn prepare(
     let mut shared_documents = Vec::new();
     let mut shared_chats = Vec::new();
     if let Some(asking) = engine.asking(&mut conn, thread).await? {
-        use orch_authz::reach::{AgentReach, DocumentPolicy};
-        if asking.documents_policy != DocumentPolicy::None || asking.policy == AgentReach::Topic {
-            scopes.push(asking.agent.topic);
-        }
-        if asking.policy == AgentReach::Project {
-            scopes.extend(asking.agent.project);
-        }
         for grant in orch_authz::reach::grants(&mut conn, &asking.agent, asking.now).await? {
             use orch_access_contract::pages::StoredKind;
             match grant.page.kind {
