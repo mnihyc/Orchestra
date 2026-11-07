@@ -23,7 +23,10 @@ pub mod exports;
 pub mod first_steps;
 pub mod fleet;
 pub mod forks;
+pub mod gateways;
 pub mod imports;
+mod interactive_close;
+pub(crate) mod interactive_tickets;
 pub mod links;
 pub mod loss;
 pub mod meta;
@@ -74,6 +77,7 @@ pub fn install_master_key(key: &MasterKey) {
 /// Binds every request that has a handler.
 pub fn mount(registry: &mut Registry) {
     meta::mount(registry);
+    gateways::mount(registry);
     auth::mount(registry);
     nodes::mount(registry);
     access::mount(registry);

@@ -17,6 +17,7 @@ import { ProgramSettings } from '@/features/admin/ProgramSettings';
 import type { SectionProps } from '@/features/admin/sections';
 import { Tabs } from '@/ui/Tabs';
 import { useForm } from '@/lib/forms';
+import { DEFAULT_PROGRAM_BUILD_POLL_MS } from '@/lib/pollingDefaults';
 import { Section } from '@/shell/Page';
 import { StatusTag } from '@/features/admin/StatusTag';
 import { Button } from '@/ui/Button';
@@ -38,7 +39,7 @@ const SHA256 = /^[0-9a-f]{64}$/;
 const SHORT_SHA = 12;
 const BUILD_HELP = { article: 'agent-program-builds' } as const;
 /** How often the list is read again while a build is being checked: a check takes seconds once the build is fetched. */
-const CHECK_FOLLOW_MS = 5_000;
+const CHECK_FOLLOW_MS = DEFAULT_PROGRAM_BUILD_POLL_MS;
 
 function Checksum({ build, name }: { build: HarnessBuild; name: string }) {
   const { t } = useTranslation();

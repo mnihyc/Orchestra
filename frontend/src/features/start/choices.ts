@@ -15,6 +15,7 @@ import type {
   BindingEnvironment,
   BindingProvider,
   ModelOption,
+  NewEnvironment,
   ProviderStatus,
 } from '@/generated/api-types';
 
@@ -23,10 +24,24 @@ import { modelDisplayName } from '@/features/models/names';
 
 /** What stands for "a new environment, made from the defaults of the place" among the environments that exist. */
 export const NEW_ENVIRONMENT = 'new';
+/** Browsing existing placement is not a selected resource and is never sent as an environment id. */
+export const CHOOSE_EXISTING_ENVIRONMENT = '\u0000existing-environment';
 
 /** Permission alone cannot make a failed or removed workspace a valid start/default. */
 export function canUseEnvironment(row: BindingEnvironment): boolean {
   return row.usable && !['failed', 'disabled', 'removed'].includes(row.environment.status);
+}
+
+/** Creation authority does not supply a host for the place's default environment. */
+export function canCreateEnvironment(options: Pick<StartOptions, 'can_create' | 'hosts'>): boolean {
+  return options.can_create.allowed && options.hosts.some((host) => host.usable);
+}
+
+/** A new default without a host falls back to a reported usable workspace, never to a guessed one. */
+export function noHostEnvironment(options: Pick<StartOptions, 'can_create' | 'hosts' | 'environments'>): BindingEnvironment | null {
+  if (!options.can_create.allowed || options.hosts.some((host) => host.usable)) return null;
+  const rows = options.environments.filter(canUseEnvironment);
+  return rows.find((row) => row.is_default) ?? rows.find((row) => row.used === 'topic') ?? rows[0] ?? null;
 }
 
 /** What the person chose by hand. Everything left `null` comes from the defaults, or, in a dialog, from a suggestion. */
@@ -38,6 +53,8 @@ export interface Picks {
   /** The id of an environment that exists, or `NEW_ENVIRONMENT`. */
   environment: string | null;
   arrangement: ArrangementType | null;
+  /** These creation choices belong to this draft, never to the remembered setup. */
+  newEnvironment?: Pick<NewEnvironment, 'access' | 'files'>;
 }
 
 export const NO_PICKS: Picks = { provider: null, agent: null, model: null, effort: null, environment: null, arrangement: null };
@@ -134,6 +151,7 @@ export interface Resolved {
   environment: BindingEnvironment | null;
   /** A new environment is made for the thread, from the defaults of the place. */
   fresh: boolean;
+  newEnvironment?: Pick<NewEnvironment, 'access' | 'files'>;
   /** The environment that was chosen is not in the answer yet: it was made a moment ago and the answer is being asked again. */
   settling: boolean;
   /** Every arrangement of the profile on the provider, the ones that can be had first, in the server's order. */
@@ -162,7 +180,7 @@ export const modelName = (model: ModelOption): string => modelDisplayName(model.
 function providerRows(options: StartOptions): ProviderRow[] {
   const rows = options.providers.map((entry): ProviderRow => {
     const status = entry.provider.status;
-    const why: ProviderWhy | null = !entry.usable ? { kind: 'reason', reason: entry.reason ?? 'no_use' } : status !== 'ready' ? { kind: 'status', status } : null;
+    const why: ProviderWhy | null = !entry.usable ? { kind: 'reason', reason: entry.reason ?? 'no_use' } : status !== 'ready' && status !== 'exhausted' ? { kind: 'status', status } : null;
     return { id: entry.provider.id, entry, choosable: why === null, why, isDefault: options.defaults.provider_id === entry.provider.id };
   });
   return [...rows.filter((row) => row.choosable), ...rows.filter((row) => !row.choosable)];
@@ -245,17 +263,19 @@ export function resolve(options: StartOptions, picks: Picks, mode: Mode, last: P
           : model?.model_name === previous.model && efforts.includes(previous.effort ?? '') ? previous.effort : (model?.parameters.default_effort ?? efforts[0] ?? null);
 
   const environments = options.environments.filter(canUseEnvironment);
-  const mayMake = options.can_create.allowed;
-  const named = picks.environment !== null && picks.environment !== NEW_ENVIRONMENT;
+  const mayMake = canCreateEnvironment(options);
+  const choosingExisting = picks.environment === CHOOSE_EXISTING_ENVIRONMENT;
+  const named = picks.environment !== null && picks.environment !== NEW_ENVIRONMENT && !choosingExisting;
   const kept = named ? (environments.find((candidate) => candidate.environment.id === picks.environment) ?? null) : null;
   // An environment that was made a moment ago is the person's choice before the answer lists it.
   const settling = named && !options.environments.some((candidate) => candidate.environment.id === picks.environment);
   const unavailable = named && !settling && kept === null;
   const shared = options.environment_default === 'shared' ? (environments.find((candidate) => candidate.is_default) ?? null) : null;
   const previousEnvironment = picks.environment === null && shared === null && options.environment_default === 'shared' ? environments.find((candidate) => candidate.environment.id === last.environment) ?? null : null;
+  const hostFallback = picks.environment === null ? noHostEnvironment(options) : null;
   // What is pre-selected follows the place's own rule: its default environment where the person may use it, otherwise a new one.
-  const fresh = !settling && !unavailable && kept === null && previousEnvironment === null && (picks.environment === NEW_ENVIRONMENT ? mayMake : shared === null && mayMake);
-  const environment = unavailable ? null : kept ?? previousEnvironment ?? (fresh || settling ? null : (shared ?? (mode.suggest && !mode.respectDefaults ? (environments[0] ?? null) : null)));
+  const fresh = !choosingExisting && !settling && !unavailable && kept === null && previousEnvironment === null && (picks.environment === NEW_ENVIRONMENT ? mayMake : shared === null && mayMake);
+  const environment = unavailable || picks.environment === NEW_ENVIRONMENT && !mayMake ? null : kept ?? previousEnvironment ?? (fresh || settling ? null : (shared ?? hostFallback ?? (mode.suggest && !mode.respectDefaults ? (environments[0] ?? null) : null)));
   if (!fresh && !settling && environment === null) missing.push({ kind: 'environment' });
 
   const arrangements = arrangementRows(agent);
@@ -279,6 +299,7 @@ export function resolve(options: StartOptions, picks: Picks, mode: Mode, last: P
     environments,
     environment,
     fresh,
+    ...(fresh && picks.newEnvironment !== undefined ? { newEnvironment: picks.newEnvironment } : {}),
     settling,
     arrangements,
     arrangement,

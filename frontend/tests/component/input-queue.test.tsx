@@ -18,7 +18,9 @@ import { KEY_ACTIONS } from '@/shell/keyActions';
 import { me, userRef } from '../doubles/fixtures';
 import { threadInput, userMessage } from '../doubles/thread-rows';
 import { show } from './support';
+import { backgroundWake } from '../doubles/background-wake';
 import { snapshot } from '../unit/continuation-fixtures';
+import { deferred } from './deferred';
 
 const calls = vi.hoisted(() => ({ update: vi.fn<typeof ThreadsApi.updateInput>(), remove: vi.fn<typeof ThreadsApi.cancelInput>(), resume: vi.fn<typeof ThreadsApi.resumeQueue>() }));
 vi.mock('@/api/threads', async (original) => ({ ...await original<typeof ThreadsApi>(), updateInput: calls.update, cancelInput: calls.remove, resumeQueue: calls.resume }));
@@ -86,6 +88,36 @@ function draw(inputs: ThreadInput[], more: Partial<Thread> = {}, readOnly = fals
 afterEach(async () => { cleanup(); threadWriter.evict(THREAD); client.session.setState({ userId: null }); useComposerStore.setState({ cannotSteer: {} }); await setLocale('en'); document.documentElement.removeAttribute('data-theme'); });
 
 describe('the waiting-input queue', () => {
+  for (const locale of ['en', 'zh-CN'] as const) {
+    it.each(['editRow', 'moveRowUp', 'moveRowDown', 'removeRow'] as const)('explains a disabled %s while the queue change waits in '+locale, async (key) => {
+      await setLocale(locale);
+      const one = input('pending-change', 'Retain this waiting input', '1');
+      const pending = deferred<Awaited<ReturnType<typeof ThreadsApi.cancelInput>>>();
+      calls.remove.mockReturnValueOnce(pending.promise);
+      draw([one]);
+      await userEvent.click(button('removeRow', 1));
+      const control = button(key, 1);
+      expect(control).toBeDisabled();
+      const target = control.parentElement;
+      if (target === null) throw new Error('The disabled reason must have a keyboard target');
+      try {
+        expect(target).toHaveAttribute('tabindex', '0');
+        act(() => target.focus());
+        expect(await screen.findByRole('tooltip')).toHaveTextContent(i18n.t('ui.unavailable.queueChanging'));
+        expect(heldInputs.get(one.id)).toEqual(one);
+      } finally { await act(async () => { pending.resolve({ ...one, state: 'cancelled', seq_updated: ++sequence }); await pending.promise; }); }
+    });
+
+    it.each([['moveRowUp', 'first'], ['moveRowDown', 'last']] as const)('explains the %s boundary in '+locale, async (key, reason) => {
+      await setLocale(locale); draw([input('only-one', 'Only waiting input', '1')]);
+      const control = button(key, 1), target = control.parentElement;
+      if (target === null) throw new Error('The disabled reason must have a keyboard target');
+      act(() => target.focus());
+      expect(await screen.findByRole('tooltip')).toHaveTextContent(i18n.t(`ui.unavailable.${reason}`));
+      expect(calls.update).not.toHaveBeenCalled();
+    });
+  }
+
   it('offers Back to queue while a steer has not entered native dispatch', async () => {
     draw([input('steering', 'Take this or let it wait', '2', { state: 'delivering', delivery: 'steer', turn_id: 'running-turn' })], { state: 'running' });
     expect(screen.getByText('Steering…')).toBeVisible();
@@ -494,4 +526,20 @@ it('preserves an open pending editor but cannot save after interaction access is
   expect(editor).toHaveValue('Unsent edited words'); expect(editor).toBeDisabled();
   const save = screen.getByRole('button', { name: i18n.t('composer.queue.save') });
   await user.click(save); expect(calls.update).not.toHaveBeenCalled();
+});
+
+it('names an earlier author’s background work with the existing held-input line', () => {
+  mount([input('later-author', 'Continue after the build', '1', { state_detail: 'background_author', author: GRACE })], {
+    background: backgroundWake({ tasks: [], waiting_author: ADA, waiting_running: 2 }),
+  });
+  expect(screen.getByText("Waiting for Ada Lovelace's background tasks (2 running)")).toBeVisible();
+});
+
+it('keeps Stop-held background completions separate from ordinary queue resume', () => {
+  mount([], { background: backgroundWake({ tasks: [], held_completions: 2 }), queue: { held: false, by: null, at: null, held_inputs: 0, revision: 1 } });
+  expect(screen.getByText('2 finished tasks waiting')).toBeVisible();
+  expect(screen.queryByRole('button', { name: i18n.t('composer.queue.resume') })).not.toBeInTheDocument();
+  expect(calls.resume).not.toHaveBeenCalled();
+  act(() => threadWriter.patch(READ, (thread) => ({ ...thread, background: backgroundWake({ tasks: [], held_completions: 0 }) })));
+  expect(screen.queryByText('2 finished tasks waiting')).not.toBeInTheDocument();
 });

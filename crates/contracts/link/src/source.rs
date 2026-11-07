@@ -457,6 +457,9 @@ pub struct FsRestore {
     /// The running job's reporting and configured time allowance.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub work: Option<crate::commands::WorkReport>,
+    /// Reconciles only the matching existing journal; never starts a new restore.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub recovery_only: Option<bool>,
     /// The owning environment.
     pub environment_id: Id,
     /// The durable restore job.

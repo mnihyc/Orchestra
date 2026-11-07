@@ -746,7 +746,7 @@ impl CodexAdapter {
         {
             if shared
                 .with_session(spec.settings.thread_id, |record| {
-                    record.mapper.turn_in_progress()
+                    record.mapper.turn_in_progress() || record.mapper.background_running()
                 })
                 .unwrap_or(false)
             {
@@ -907,7 +907,8 @@ impl CodexAdapter {
                 segment_id: settings.segment_id,
                 native_thread: native.clone(),
                 directory: settings.directory.clone(),
-            }),
+            })
+            .with_opened_model(&settings.model, sessions::reported_model(&opened)),
             directory: settings.directory.clone(),
             cwd: settings.cwd.clone(),
             workspace_root: settings.workspace_root.clone(),
@@ -1141,6 +1142,29 @@ impl AgentAdapter for CodexAdapter {
                 allowed: vec!["/responses".to_owned(), "/models".to_owned()],
                 exact: Vec::new(),
             },
+            auto_review: Some(
+                orch_agent_contract::conformance::NativeAutoReview::Notifications(
+                    orch_agent_contract::conformance::NativeNotificationReview {
+                        // Real pinned 0.165.0 requests and native outcomes: auto-approval-trial/run-codex-01
+                        // and the explicit allow/deny/unavailable matrix. This does not activate Auto.
+                        model: crate::review::CODEX_REVIEW_MODEL.to_owned(),
+                        command_arguments: json!({"sandbox_permissions":"require_escalated",
+                    "justification":"Write only the native conformance disposable marker"}),
+                        allow_response: json!({"outcome":"allow","risk_level":"low","user_authorization":"high",
+                    "rationale":"Synthetic fixture allows only the disposable diagnostic marker."}),
+                        deny_response: json!({"outcome":"deny","risk_level":"high","user_authorization":"low",
+                    "rationale":"Synthetic fixture denies the disposable diagnostic marker."}),
+                        schema_pointer: "/text/format/schema".to_owned(),
+                        response_schema: json!({"type":"object","additionalProperties":false,"properties":{
+                    "risk_level":{"type":"string","enum":["low","medium","high","critical"]},
+                    "user_authorization":{"type":"string","enum":["unknown","low","medium","high"]},
+                    "outcome":{"type":"string","enum":["allow","deny"]},
+                    "rationale":{"type":"string"}},"required":["outcome"]}),
+                        started_method: "item/autoApprovalReview/started".to_owned(),
+                        completed_method: "item/autoApprovalReview/completed".to_owned(),
+                    },
+                ),
+            ),
         }
     }
 
@@ -1274,7 +1298,7 @@ impl AgentAdapter for CodexAdapter {
             (
                 record.mapper.native_thread().to_owned(),
                 record.mapper.segment_id(),
-                record.mapper.turn_in_progress(),
+                record.mapper.turn_in_progress() || record.mapper.background_running(),
             )
         }) && (busy
             || !(segment == source.segment_id && native == source.native_session_ref
@@ -1339,7 +1363,7 @@ impl AgentAdapter for CodexAdapter {
                 .with_session(source.thread_id, |record| {
                     (
                         record.mapper.native_thread().to_owned(),
-                        record.mapper.turn_in_progress(),
+                        record.mapper.turn_in_progress() || record.mapper.background_running(),
                         !record.approvals.is_empty(),
                     )
                 })
@@ -1473,7 +1497,7 @@ impl AgentAdapter for CodexAdapter {
                 if record.mapper.turn_in_progress() {
                     return Err(conflict("a turn is already running in this session"));
                 }
-                record.mapper.expect_turn(turn.turn_id);
+                record.mapper.expect_turn_model(turn.turn_id, &turn.model);
                 record.approval_mode = turn.approval_mode;
                 let was_planning = std::mem::replace(&mut record.planning, turn.plan);
                 Ok((

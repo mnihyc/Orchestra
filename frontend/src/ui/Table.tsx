@@ -15,6 +15,9 @@ import { cx } from '@/ui/cx';
 import type { MenuEntry } from '@/ui/Menu';
 import { ScrollRegion } from '@/ui/ScrollRegion';
 
+/** A shared first-line band matches small controls without changing chips outside the table. */
+const cellFrame = 'flex min-h-(--control-sm) items-center leading-(--control-sm) [&_.resource-chip]:min-h-(--control-sm) [&_[data-status-chip]]:min-h-(--control-sm)';
+
 /** How wide the room round the table is, in pixels, when each step of `from` begins to show a column. */
 const ROOM = { sm: 480, md: 640, lg: 800, xl: 1000 } as const;
 
@@ -128,9 +131,11 @@ export function Table<Row>({ label, columns, rows, rowKey, rowClassName, rowMenu
             key={column.id}
             data-table-column={column.id}
             data-table-grow={column === growing ? true : undefined}
-            className={cx('px-3 py-1 align-middle', sizing(column), column.align === 'end' && 'text-right', column.className)}
+            className={cx('px-3 py-1 align-top', sizing(column), column.align === 'end' && 'text-right', column.className)}
           >
-            {boundedIdentity && column === growing ? <div className="w-0 min-w-full">{column.cell(row, shownIds)}</div> : column.cell(row, shownIds)}
+            <div className={cx(cellFrame, column.align === 'end' && 'justify-end')}>
+              <div className={cx('first-line:leading-(--control-sm)', boundedIdentity && column === growing ? 'w-0 min-w-full' : 'min-w-0')}>{column.cell(row, shownIds)}</div>
+            </div>
           </td>
         ))}
       </tr>
@@ -156,7 +161,7 @@ export function Table<Row>({ label, columns, rows, rowKey, rowClassName, rowMenu
                 data-table-grow={column === growing ? true : undefined}
                 className={cx('h-(--table-row-height) bg-bg-subtle px-3 font-medium', sizing(column), column.align === 'end' && 'text-right', column.className)}
               >
-                <span className={cx(column.hideHeader === true && 'sr-only')}>{column.header}</span>
+                <div className={cx(cellFrame, column.align === 'end' && 'justify-end')}><div className={cx(column.hideHeader === true && 'sr-only')}>{column.header}</div></div>
               </th>
             ))}
           </tr>

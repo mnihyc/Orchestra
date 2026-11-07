@@ -71,25 +71,9 @@ pub(super) async fn agent_reach(
     let agent = reach::Agent::of(conn, thread)
         .await?
         .ok_or(Error::NotFound)?;
-    let policy =
-        orch_settings::get::<String>(conn, Place::Node(agent.topic), keys::SHARING_AGENT_REACH)
-            .await
-            .map_err(crate::EngineError::from)?
-            .and_then(|word| reach::AgentReach::parse(&word))
-            .unwrap_or_default();
-    let document_policy = orch_settings::get::<String>(
-        conn,
-        Place::Node(agent.topic),
-        keys::SHARING_AGENT_DOCUMENTS,
-    )
-    .await
-    .map_err(crate::EngineError::from)?
-    .and_then(|word| reach::DocumentPolicy::parse(&word))
-    .unwrap_or_default();
-    Ok(reach::Reach::load(
+    Ok(reach::Reach::load_current(
         conn,
         agent,
-        policy,
         now,
         &reach::Things {
             nodes,
@@ -97,11 +81,21 @@ pub(super) async fn agent_reach(
             people_chats: Vec::new(),
         },
     )
-    .await?
-    .with_document_policy(document_policy))
+    .await?)
 }
 
-pub(super) async fn standings(
+pub(super) fn standings(
+    conn: &mut Conn,
+    actor: Actor<'_>,
+    entries: &[containers::EntryRow],
+    now: Time,
+    retained: bool,
+) -> impl std::future::Future<Output = Result<HashMap<Item, Standing>, Error>> {
+    // Keep both ordinary and agent preparation off each enclosing projection.
+    Box::pin(prepare_standings(conn, actor, entries, now, retained))
+}
+
+async fn prepare_standings(
     conn: &mut Conn,
     actor: Actor<'_>,
     entries: &[containers::EntryRow],

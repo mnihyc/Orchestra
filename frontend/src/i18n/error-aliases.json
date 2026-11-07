@@ -42,5 +42,7 @@
   "environment_unreachable": "errors.source.offline",
   "environment_unavailable": "errors.environment.unavailable",
   "provider_unavailable": "errors.provider.unavailable",
-  "workspace_configuration": "ui.error.workspaceConfiguration"
+  "workspace_configuration": "ui.error.workspaceConfiguration",
+  "rate_limited": "ui.error.modelBusy",
+  "stream_interrupted": "ui.error.providerNetwork"
 }

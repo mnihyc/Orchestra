@@ -7,6 +7,7 @@ import { hostsQuery } from '@/api/resources';
 import type { ForkEnvironment } from '@/generated/api-types';
 import { holds } from '@/lib/permissions';
 import { resourceChoice } from '@/features/resource-facts/ResourceFacts';
+import { TemporaryChoice } from '@/features/resources/environments/Temporary';
 import { ErrorAlert } from '@/ui/ErrorState';
 import { Input } from '@/ui/Input';
 import { Select } from '@/ui/Select';
@@ -16,6 +17,9 @@ export function BatchDestination({ value, onChange, sources = [], allowSame = tr
   const environments = useQuery(environmentsQuery(null));
   const hosts = useQuery({ ...hostsQuery(null), enabled: value !== undefined && 'new' in value });
   const mode = value === undefined || 'same' in value ? (allowSame ? 'keep' : '') : 'new' in value ? 'new' : `use:${value.use}`;
+  const rawConfig = value !== undefined && 'new' in value ? value.new.config : undefined;
+  const config = typeof rawConfig === 'object' && rawConfig !== null && !Array.isArray(rawConfig) ? rawConfig : {};
+  const temporary = 'env.lifetime' in config && config['env.lifetime'] === 'temporary';
   return <div className="flex min-w-0 flex-col gap-2" data-batch-destination>
     <Select help={<Hint popover id="loss-switch" />} label={t('loss.destination')} value={mode} placeholder={t('changeCompact.chooseEnvironment')} onValueChange={(next) => onChange(next === 'keep' || next === '' ? undefined : next === 'new' ? { new: { host_id: null } } : { use: next.slice('use:'.length) })} options={[
       ...(allowSame ? [{ value: 'keep', name: t('loss.keepEnvironment') }] : []),
@@ -26,6 +30,12 @@ export function BatchDestination({ value, onChange, sources = [], allowSame = tr
     {value !== undefined && 'new' in value && <div className="grid gap-2 sm:grid-cols-2">
       <Input label={t('change.where.name')} optional value={value.new.name ?? ''} onChange={(event) => onChange({ new: { ...value.new, name: event.target.value } })} />
       <Select label={t('change.where.place')} value={value.new.host_id ?? 'automatic'} onValueChange={(id) => onChange({ new: { ...value.new, host_id: id === 'automatic' ? null : id } })} options={[{ value: 'automatic', name: t('changeCompact.automatic') }, ...(hosts.data ?? []).filter((host) => host.machine.online && host.lost_at === undefined).map((host) => ({ value: host.id, name: host.name, ...resourceChoice({ kind: 'host', host }) }))]} />
+      <TemporaryChoice checked={temporary} forThread={false} onChange={(checked) => {
+        const changed: Record<string, unknown> = { ...config };
+        if (checked) changed['env.lifetime'] = 'temporary';
+        else delete changed['env.lifetime'];
+        onChange({ new: { ...value.new, config: Object.keys(changed).length === 0 ? undefined : changed } });
+      }} />
       {hosts.error !== null && <ErrorAlert error={hosts.error} />}
     </div>}
   </div>;

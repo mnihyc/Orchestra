@@ -23,7 +23,9 @@
 //! nothing: the forwarder asks for an uncompressed answer or decodes it first.
 
 use orch_agent_contract::events::{TokenUsage, TokensReportedApart};
-use orch_model_contract::usage::{ObservedUsage, SseEvent, SseParser, UsageObserver};
+use orch_model_contract::usage::{
+    ObservedUsage, ResponseFacts, SseEvent, SseParser, UsageObserver,
+};
 use serde::Deserialize;
 use serde_json::Value;
 use serde_json::value::RawValue;
@@ -48,7 +50,24 @@ const RESPONSE_EVENTS: [&str; 6] = [
 struct ResponseView {
     id: Option<Value>,
     model: Option<Value>,
+    service_tier: Option<Value>,
     usage: Option<Box<RawValue>>,
+    output: Option<Vec<SearchItem>>,
+}
+
+/// Only hosted search actions are counted; message bodies and function arguments are skipped.
+#[derive(Deserialize)]
+struct SearchItem {
+    #[serde(rename = "type")]
+    kind: Option<String>,
+    status: Option<String>,
+    action: Option<SearchAction>,
+}
+
+#[derive(Deserialize)]
+struct SearchAction {
+    #[serde(rename = "type")]
+    kind: Option<String>,
 }
 
 /// An event that carries a response object.
@@ -67,6 +86,7 @@ struct Probe<'a> {
 /// The members of a usage object that matter here.
 #[derive(Deserialize)]
 struct UsageView {
+    server_tool_use: Option<Value>,
     #[serde(alias = "prompt_tokens")]
     input_tokens: Option<Value>,
     #[serde(alias = "completion_tokens")]
@@ -144,8 +164,11 @@ fn tokens(usage: &UsageView) -> Option<TokenUsage> {
 /// What has been learned of the response so far.
 #[derive(Debug, Clone, Default)]
 struct Seen {
+    facts: ResponseFacts,
+    web_searches: Option<i64>,
     id: Option<String>,
     model: Option<String>,
+    service_tier: Option<String>,
     tokens: Option<TokenUsage>,
     cost: Option<String>,
 }
@@ -153,6 +176,28 @@ struct Seen {
 impl Seen {
     /// Takes in a response object.
     fn take(&mut self, response: ResponseView) {
+        if let Some(output) = response.output {
+            self.web_searches = Some(
+                i64::try_from(
+                    output
+                        .iter()
+                        .filter(|item| {
+                            item.kind.as_deref() == Some("web_search_call")
+                                && item.status.as_deref() == Some("completed")
+                                && item
+                                    .action
+                                    .as_ref()
+                                    .and_then(|action| action.kind.as_deref())
+                                    == Some("search")
+                        })
+                        .count(),
+                )
+                .unwrap_or(i64::MAX),
+            );
+        }
+        if let Some(tier) = text(response.service_tier) {
+            self.service_tier = Some(tier);
+        }
         if let Some(id) = text(response.id) {
             self.id = Some(id);
         }
@@ -163,6 +208,16 @@ impl Seen {
         let Ok(usage) = serde_json::from_str::<UsageView>(raw.get()) else {
             return;
         };
+        if let Some(searches) = usage
+            .server_tool_use
+            .as_ref()
+            .and_then(|usage| usage.get("tool_search"))
+            .and_then(Value::as_i64)
+            .filter(|count| *count >= 0)
+        {
+            // The server's aggregate is authoritative, including an explicit zero.
+            self.web_searches = Some(searches);
+        }
         if let Some(tokens) = tokens(&usage) {
             self.tokens = Some(tokens);
             self.cost = usage
@@ -171,8 +226,82 @@ impl Seen {
         }
     }
 
+    fn take_facts(&mut self, body: &Value) {
+        let response = body.get("response").unwrap_or(body);
+        if let Some(id) = response
+            .get("id")
+            .and_then(Value::as_str)
+            .filter(|id| !id.is_empty())
+        {
+            self.facts.request_id = Some(id.to_owned());
+        }
+        let kind = body.get("type").and_then(Value::as_str).unwrap_or_default();
+        self.facts.completed |= matches!(
+            kind,
+            "response.completed" | "response.incomplete" | "response.failed"
+        ) || body.get("choices").and_then(Value::as_array).is_some_and(
+            |choices| {
+                choices.iter().any(|choice| {
+                    choice
+                        .get("finish_reason")
+                        .is_some_and(|reason| !reason.is_null())
+                })
+            },
+        );
+        self.facts.output_started |= matches!(
+            kind,
+            "response.output_text.delta"
+                | "response.reasoning_text.delta"
+                | "response.reasoning_summary_text.delta"
+                | "response.function_call_arguments.delta"
+        ) && body
+            .get("delta")
+            .is_some_and(|delta| delta.as_str().is_some_and(|text| !text.is_empty()));
+        if let Some(choices) = body.get("choices").and_then(Value::as_array) {
+            self.facts.output_started |= choices.iter().any(|choice| {
+                choice
+                    .pointer("/delta/content")
+                    .and_then(Value::as_str)
+                    .is_some_and(|text| !text.is_empty())
+                    || choice
+                        .pointer("/delta/tool_calls")
+                        .and_then(Value::as_array)
+                        .is_some_and(|calls| !calls.is_empty())
+            });
+        }
+        if let Some(error) = response.get("error").filter(|error| !error.is_null()) {
+            self.facts.failure = Some(serde_json::json!({"error":error}));
+        }
+        if let Some(choices) = body.get("choices").and_then(Value::as_array) {
+            if let Some(refusal) = choices
+                .iter()
+                .find_map(|choice| choice.pointer("/message/refusal").and_then(Value::as_str))
+                .filter(|text| !text.is_empty())
+            {
+                self.facts.failure =
+                    Some(serde_json::json!({"error":{"type":"model_refused","message":refusal}}));
+            }
+        }
+        if let Some(output) = response.get("output").and_then(Value::as_array) {
+            for item in output {
+                if let Some(content) = item.get("content").and_then(Value::as_array) {
+                    for part in content {
+                        if part["type"] == "refusal" {
+                            self.facts.failure = Some(serde_json::json!({"error": {
+                                "type":"model_refused", "message":part["refusal"]
+                            }}));
+                        }
+                    }
+                }
+            }
+        }
+    }
+
     /// Takes in one event of a stream.
     fn take_event(&mut self, event: &SseEvent) {
+        if let Ok(body) = serde_json::from_str::<Value>(&event.data) {
+            self.take_facts(&body);
+        }
         let kind = match event.event.as_deref() {
             Some(name) => name,
             None => match serde_json::from_str::<Probe<'_>>(&event.data)
@@ -197,6 +326,8 @@ impl Seen {
     /// What was seen, if it holds figures.
     fn observed(&self) -> Option<ObservedUsage> {
         Some(ObservedUsage {
+            web_searches: self.web_searches,
+            service_tier: self.service_tier.clone(),
             model: self.model.clone(),
             tokens: self.tokens?,
             cost: self.cost.clone(),
@@ -265,6 +396,12 @@ impl UsageObserver for ResponsesUsage {
             Body::Stream(parser) => {
                 for event in parser.push(chunk) {
                     if *chat {
+                        if event.data.trim() == "[DONE]" {
+                            seen.facts.completed = true;
+                        }
+                        if let Ok(body) = serde_json::from_str::<Value>(&event.data) {
+                            seen.take_facts(&body);
+                        }
                         if let Ok(response) = serde_json::from_str::<ResponseView>(&event.data) {
                             seen.take(response);
                         }
@@ -286,11 +423,30 @@ impl UsageObserver for ResponsesUsage {
         }
         self.seen.observed()
     }
+    fn response_facts(&self) -> ResponseFacts {
+        let mut seen = self.seen.clone();
+        if let Body::Plain(Some(bytes)) = &self.body {
+            if let Ok(body) = serde_json::from_slice::<Value>(bytes) {
+                seen.take_facts(&body);
+                seen.facts.completed = true;
+            }
+        }
+        seen.facts
+    }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn output_evidence_exists_before_a_usage_body() {
+        let mut observer = ResponsesUsage::new();
+        observer
+            .observe(b"data: {\"type\":\"response.output_text.delta\",\"delta\":\"hello\"}\n\n");
+        assert!(observer.response_facts().output_started);
+        assert!(observer.usage().is_none());
+    }
 
     #[test]
     fn chat_streams_and_plain_answers_report_the_same_inclusive_usage_without_rewriting() {

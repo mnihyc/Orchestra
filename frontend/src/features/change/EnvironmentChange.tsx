@@ -29,7 +29,7 @@ import { Blockers } from '@/features/change/Blockers';
 import { Frame, type View } from '@/features/change/Frame';
 import { PlanLists } from '@/features/change/Lists';
 import { MeasurementReason, Measurements, waitsForCount } from '@/features/change/Measurements';
-import { copyLines, filesLines, type Line, mcpLines, mountLines, rangeWords } from '@/features/change/plan';
+import { addedResourcesOf, copyLines, filesLines, keptResourcesOf, type Line, rangeWords, removedResourcesOf } from '@/features/change/plan';
 import { JobProgress, committed } from '@/features/change/Progress';
 import { useRefreshWhenOver } from '@/features/change/refresh';
 import { Result } from '@/features/change/Result';
@@ -390,22 +390,21 @@ function moveLists(plan: EnvironmentMovePlan, locale: string, t: TFunction): { c
   const changes: Line[] = [
     { id: 'moves', tone: 'plain', text: t('change.env.plan.moves', { from: source, to: destinationName(plan, t) }) },
     ...filesLines(plan.files, locale, t),
-    ...mountLines(plan.mounts.filter((mount) => mount.action !== 'detach'), t),
+    ...addedResourcesOf(plan, t),
     ...copyLines(plan.mounts, locale, t),
-    ...mcpLines(plan.mcp.filter((server) => server.fate === 'new'), t),
     ...(plan.files.home === null ? [{ id: 'home-left', tone: 'plain' as const, text: t('mountPlan.homeLeft') }] : []),
   ];
   if (plan.held_still) changes.push({ id: 'still', tone: 'plain', text: t('change.env.plan.heldStill') });
   const stays: Line[] = [
     { id: 'owner', tone: 'plain', text: t('change.env.plan.staysOwners', { name: plan.environment.owner.display_name }) },
     { id: 'page', tone: 'plain', text: t('change.env.plan.pageStays') },
+    ...keptResourcesOf(plan, t),
     ...plan.threads.map((entry, index): Line => ({ id: `thread-${index}`, tone: entry.action === 'blocked' ? 'danger' : 'plain', text: t(`change.env.plan.thread.${entry.action}`, { name: entry.thread?.name ?? t('change.env.plan.hidden'), note: entry.note }) })),
   ];
   const ends: Line[] = [
     { id: 'processes', tone: 'plain', text: t('change.env.plan.processes') },
     ...(moveRemovesSoftware(plan) ? [{ id: 'software', tone: 'warning' as const, text: t('isolation.replaced') }] : []),
-    ...mountLines(plan.mounts.filter((mount) => mount.action === 'detach'), t),
-    ...mcpLines(plan.mcp.filter((server) => server.fate === 'lost' || server.fate === 'unavailable'), t),
+    ...removedResourcesOf(plan, t),
     { id: 'old', tone: 'plain', text: plan.from === null ? t('uniformMoves.oldDirectory') : t('change.env.plan.oldUnit', { name: source }) },
   ];
   return { changes, stays, ends };

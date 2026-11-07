@@ -10,6 +10,7 @@ import { ArticleGuideLink } from '@/features/help/ArticleGuideLink';
 import type { CleanupChoice, CleanupItem, CleanupOutcome, CleanupPlan, CleanupRequest, Job } from '@/generated/api-types';
 import { useFormatContext } from '@/lib/appearance';
 import { formatBytes, formatNumber } from '@/lib/format';
+import { DEFAULT_CLEANUP_POLL_MS } from '@/lib/pollingDefaults';
 import { RelativeTime } from '@/ui/RelativeTime';
 import { Button } from '@/ui/Button';
 import { Checkbox } from '@/ui/Checkbox';
@@ -44,7 +45,7 @@ export function Cleanup({ request, onClose, onAccepted, onFinished, onRefused }:
     ? <span className="text-sm text-text-muted">{t(`storage.cleanup.choices.${choice(item)}`)}</span>
     : <Select size="sm" hideLabel label={t('storage.cleanup.fateFor', { name: item.record.name })} value={choice(item)} options={item.choices.map((value) => ({ value, name: t(`storage.cleanup.choices.${value}`) }))} disabled={start.isPending} onValueChange={(value) => setChoices((before) => new Map(before).set(item.record.id, value))} />;
   const start = useMutation({ mutationFn: (plan: CleanupPlan) => startCleanup({ plan_id: plan.id, choices: plan.items.map((item) => ({ id: item.record.id, choice: choice(item) })), confirmation_name: erases ? typed : null, notify: notify ?? plan.notify }), onSuccess: (job) => { setJobId(job.id); onAccepted?.(job); }, onError: () => onRefused?.() });
-  const progress = useQuery({ queryKey: ['cleanup-job', jobId], queryFn: ({ signal }) => readJob(jobId ?? '', signal), enabled: jobId !== null, refetchInterval: (query) => query.state.data === undefined || !over(query.state.data) ? 1_000 : false });
+  const progress = useQuery({ queryKey: ['cleanup-job', jobId], queryFn: ({ signal }) => readJob(jobId ?? '', signal), enabled: jobId !== null, refetchInterval: (query) => query.state.data === undefined || !over(query.state.data) ? DEFAULT_CLEANUP_POLL_MS : false });
   const stop = useMutation({ mutationFn: () => cancelJob(jobId ?? ''), onSuccess: () => void progress.refetch() });
   const job = progress.data;
   const ended = job !== undefined && over(job);

@@ -102,17 +102,22 @@ function GroupDialog({ org, group, onClose }: { org: Org; group: Group | null; o
 function GroupMembers({ org, group, mayManage, onClose }: { org: Org; group: Group; mayManage: boolean; onClose: () => void }) {
   const { t } = useTranslation();
   const people = useQuery(groupHoldersQuery(group.id));
+  const metadata = useQuery(groupsQuery(group.org_id, false));
+  const current = metadata.data?.find((row) => row.id === group.id) ?? group;
+  const refresh = () => { void metadata.refetch(); void people.refetch(); };
   const [query, setQuery] = useState('');
   const found = useCandidates(query, org.org_id, { kinds: ['user', 'group', 'role', 'members'], thing: org.name, placeId: org.id });
   const inside = new Set((people.data ?? []).map((holder) => holderKey(holder)));
   const add = useMutation({
-    mutationFn: (member: Candidate) => addGroupHolder(group.id, member.input),
+    mutationFn: (member: Candidate) => addGroupHolder(group.id, member.input, current.revision),
     onSuccess: (_none, person) => {
       setQuery('');
-      toast({ tone: 'success', title: t('members.groups.added', { name: person.name, group: group.name }) });
+      refresh();
+      toast({ tone: 'success', title: t('members.groups.added', { name: person.name, group: current.name }) });
     },
+    onError: refresh,
   });
-  const take = useMutation({ mutationFn: (holder: Holder) => removeGroupHolder(group.id, inputOf(holder)) });
+  const take = useMutation({ mutationFn: (holder: Holder) => removeGroupHolder(group.id, inputOf(holder)), onSuccess: refresh, onError: refresh });
   const groups = found.groups.map((section) => ({ ...section, options: section.options.map((option) => {
     const candidate = found.byValue.get(option.value);
     return { ...option, disabled: candidate !== undefined && inside.has(holderKey(candidate.input)) ? t('members.groups.alreadyIn') : option.disabled };
@@ -121,7 +126,7 @@ function GroupMembers({ org, group, mayManage, onClose }: { org: Org; group: Gro
     <Dialog
       open
       onOpenChange={(next) => !next && onClose()}
-      title={t('members.groups.membersTitle', { name: group.name })}
+      title={t('members.groups.membersTitle', { name: current.name })}
       description={t('members.groups.membersLead')}
       size="lg"
       footer={<Button onClick={onClose}>{t('common.close')}</Button>}

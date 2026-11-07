@@ -12,6 +12,7 @@ import { bindingReason, runsLine } from '@/features/start/words';
 import type { CreateThread, NewEnvironment } from '@/generated/api-types';
 import { i18n, setLocale } from '@/i18n';
 import { agent, arrangement, options, provider } from '../unit/start-fixtures';
+import { CATALOGUE } from '../unit/general-access-fixtures';
 import { show } from './support';
 
 const io = vi.hoisted(() => ({
@@ -26,6 +27,9 @@ vi.mock('@tanstack/react-router', async (original) => ({ ...await original<objec
 vi.mock('@/api/environments', async (original) => ({ ...await original<object>(), createEnvironment: io.environment }));
 vi.mock('@/api/threads', async (original) => ({ ...await original<object>(), createThread: io.thread }));
 vi.mock('@/api/nodes', async (original) => ({ ...await original<object>(), createTopic: io.topic, createTopicAndThread: io.topicThread }));
+vi.mock('@/api/access', async (original) => ({ ...await original<object>(), permissionsQuery: {
+  queryKey: ['start-submit-permissions'], queryFn: () => Promise.resolve(CATALOGUE.reply),
+} }));
 vi.mock('@/api/start', async (original) => ({ ...await original<object>(), setDefaultEnvironment: io.defaultEnvironment, setStartDefault: io.defaultSetting,
   startOptionsQuery: (node: string, target: string | null) => ({ queryKey: ['submit-preview', node, target], queryFn: (): Promise<StartOptions> => {
     io.reads(node, target); return io.offered === null ? Promise.reject(new Error('No preview')) : Promise.resolve(io.offered);
@@ -46,6 +50,32 @@ function Starter({ selected }: { selected: StartPlan }) {
     {make.standing.environment !== null && <p>{i18n.t('start.made.environment', { name: make.standing.environment.name })}</p>}</>;
 }
 
+it.each(['topic', 'project'] as const)('submits the confirmed agent areas with the audience and first input atomically (%s)', async (kind) => {
+  const selected = { ...plan(), agentAccess: { where: 'topic' as const, parts: { documents: 'edit' as const } } };
+  selected.place = { ...selected.place, kind };
+  show(<Starter selected={selected} />);
+  await userEvent.click(screen.getByRole('button', { name: 'Start this setup' }));
+  await waitFor(() => expect(io.navigate).toHaveBeenCalledOnce());
+  const request = (kind === 'topic' ? io.thread : io.topicThread).mock.calls[0]?.[1];
+  expect(request).toMatchObject({ agent_access: { where: 'topic', parts: { documents: 'edit' } },
+    first_input: { content: [{ type: 'text', text: selected.message }] } });
+  expect(io.defaultSetting).not.toHaveBeenCalled();
+  expect(io.defaultEnvironment).not.toHaveBeenCalled();
+});
+
+it('binds a first thread’s explicit audience to its new topic, preserving later topic-role cuts', async () => {
+  const selected = plan(); selected.place = { ...selected.place, id: 'project', kind: 'project' }; selected.generalAccess = 'interact';
+  show(<Starter selected={selected} />);
+  await userEvent.click(screen.getByRole('button', { name: 'Start this setup' }));
+  await waitFor(() => expect(io.topicThread).toHaveBeenCalledOnce());
+  const access = io.topicThread.mock.calls[0]?.[1].access;
+  if (typeof access !== 'object' || access === null || 'as' in access) throw new Error('The explicit audience uses the normal permission page change');
+  const holders = access.rows?.flatMap((row) => row.add?.map((entry) => entry.holder) ?? []) ?? [];
+  expect(holders.length).toBeGreaterThan(0);
+  expect(holders).toEqual(holders.map(() => ({ kind: 'role', role: 'viewer', at: null })));
+  expect(io.topicThread.mock.calls[0]?.[1].first_input).toMatchObject({ content: [{ type: 'text', text: selected.message }] });
+});
+
 beforeEach(() => {
   vi.clearAllMocks(); localStorage.clear(); queryClient.clear();
   client.session.setState({ status: 'signed_in', userId: 'starter' });
@@ -58,6 +88,19 @@ beforeEach(() => {
 afterEach(async () => { act(() => client.session.setState({ status: 'signed_out', userId: null })); await setLocale('en'); });
 
 for (const locale of ['en', 'zh-CN'] as const) {
+  it(`submits the chosen starting files, management and lifetime together (${locale})`, async () => {
+    await setLocale(locale);
+    const selected = plan();
+    selected.resolved = resolve(selected.options, { ...NO_PICKS, newEnvironment: { access: 'only_me', files: { from_thread: 'source', selection: { mode: 'selection', include: ['src/**'] } } } }, { suggest: true });
+    selected.temporary = true;
+    show(<Starter selected={selected} />);
+    await userEvent.click(screen.getByRole('button', { name: 'Start this setup' }));
+    await waitFor(() => expect(io.navigate).toHaveBeenCalledOnce());
+    expect(io.thread.mock.calls[0]?.[1].environment).toEqual({ new: { access: 'only_me', files: { from_thread: 'source', selection: { mode: 'selection', include: ['src/**'] } }, config: { 'env.lifetime': 'thread' } } });
+    expect(io.environment).not.toHaveBeenCalled();
+    expect(io.defaultEnvironment).not.toHaveBeenCalled();
+  });
+
   it(`checks then submits one atomic request with the named setup despite a later options answer (${locale})`, async () => {
     await setLocale(locale);
     const selected = plan();

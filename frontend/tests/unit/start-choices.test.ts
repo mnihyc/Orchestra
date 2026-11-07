@@ -33,6 +33,30 @@ describe('failed environments are never a default or an implicit replacement', (
   });
 });
 
+describe('a new default still needs a usable host', () => {
+  it('falls back to an actually usable existing environment in the inline and full starters', () => {
+    const offered = options({ environment_default: 'fresh', hosts: [] });
+    for (const mode of [starter, dialog]) {
+      const resolved = resolve(offered, NO_PICKS, mode);
+      expect(resolved.fresh).toBe(false);
+      expect(resolved.environment?.environment.id).toBe('e1');
+    }
+  });
+
+  it('keeps an explicit new choice unavailable rather than silently using a different environment', () => {
+    const resolved = resolve(options({ hosts: [] }), picked({ environment: NEW_ENVIRONMENT }), dialog);
+    expect(resolved.fresh).toBe(false); expect(resolved.environment).toBeNull();
+    expect(resolved.missing).toContainEqual({ kind: 'environment' });
+  });
+
+  it('does not turn a failed or unusable existing environment into the host fallback', () => {
+    const failed = environment('failed', { isDefault: true }); failed.environment.status = 'failed';
+    const resolved = resolve(options({ hosts: [], environments: [failed, environment('closed', { usable: false })] }), NO_PICKS, dialog);
+    expect(resolved.fresh).toBe(false); expect(resolved.environment).toBeNull();
+    expect(resolved.missing).toContainEqual({ kind: 'environment' });
+  });
+});
+
 describe('defaults and the person’s last successful setup', () => {
   const quick: Mode = { suggest: true, respectDefaults: true };
   const last = picked({ provider: 'p2', agent: 'a2', model: 'm2', environment: 'e2', arrangement: 'key_separated' });
@@ -100,10 +124,36 @@ describe('what is chosen where the defaults of the place are whole', () => {
     expect(resolve(options(), picked({ model: 'm2' }), starter).effort).toBeNull();
   });
 
-  it('puts a pick of the person above the default, and drops a pick that cannot be had', () => {
+  it('keeps an explicit provider above the default when only its cached quota is exhausted', () => {
     expect(resolve(options(), picked({ provider: 'p2' }), starter).provider?.id).toBe('p2');
     const closed = options({ providers: [provider('p1'), provider('p2', { status: 'exhausted' })] });
-    expect(resolve(closed, picked({ provider: 'p2' }), starter).provider?.id).toBe('p1');
+    expect(resolve(closed, picked({ provider: 'p2' }), starter).provider?.id).toBe('p2');
+  });
+});
+
+describe('cached vendor quota does not decide a fresh start', () => {
+  it('keeps an otherwise eligible exhausted default and its permitted model', () => {
+    const answer=options({providers:[provider('p1',{status:'exhausted'}),provider('p2')]});
+    const resolved=resolve(answer,NO_PICKS,starter);
+    expect(resolved.provider?.id).toBe('p1');
+    expect(resolved.provider?.why).toBeNull();
+    expect(resolved.model?.model_name).toBe('m1');
+    expect(resolved.missing).not.toContainEqual(expect.objectContaining({kind:'provider'}));
+  });
+  it.each(['needs_setup','error','offline','disabled'] as const)('still refuses a %s provider', (status)=>{
+    const closed=provider('p1');closed.provider.status=status;
+    const resolved=resolve(options({providers:[closed]}),picked({provider:'p1'}),starter);
+    expect(resolved.provider).toBeNull();
+    expect(resolved.providers[0]?.why).toEqual({kind:'status',status});
+  });
+  it('preserves use refusal and model allowlists on an exhausted provider',()=>{
+    const denied=resolve(options({providers:[provider('p1',{status:'exhausted',usable:false,reason:'no_use'})]}),NO_PICKS,starter);
+    expect(denied.provider).toBeNull();
+    expect(denied.providers[0]?.why).toEqual({kind:'reason',reason:'no_use'});
+    const noModel=resolve(options({providers:[provider('p1',{status:'exhausted',models:[{...model('m1'),allowed:false,reason:'excluded_by_policy'}]})]}),NO_PICKS,starter);
+    expect(noModel.provider?.id).toBe('p1');
+    expect(noModel.model).toBeNull();
+    expect(noModel.missing).toContainEqual({kind:'model',none:true});
   });
 });
 

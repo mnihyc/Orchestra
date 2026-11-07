@@ -9,6 +9,8 @@ mod desk;
 mod places;
 mod rig;
 mod support;
+use crate::support::FullPermissionPageReply;
+use support::FullRoleReply as _;
 
 use desk::Desk;
 use orch_api_contract::access::{
@@ -44,6 +46,15 @@ impl orch_engine::sharing::Parcels for NoParcelWrites {
     ) -> Result<(), orch_engine::sharing::ParcelFault> {
         panic!("a preview must not withdraw a copy");
     }
+    async fn withdraw_before(
+        &self,
+        _conn: &mut orch_db::Conn,
+        _copy: &orch_db::queries::shares::CopyRow,
+        _before: orch_engine::sharing::BeforeParcel<'_>,
+    ) -> Result<(), orch_engine::sharing::ParcelFailure> {
+        panic!("a preview must not withdraw a copy");
+    }
+
     async fn write_file(
         &self,
         _conn: &mut orch_db::Conn,
@@ -73,6 +84,7 @@ async fn private_with_reader(desk: &Desk, reader: &Who) {
         .raw_body(&json!({"whole":"private"}))
         .send()
         .await
+        .full_permission_page()
         .ok();
     desk.world
         .app
@@ -83,6 +95,7 @@ async fn private_with_reader(desk: &Desk, reader: &Who) {
         )
         .send()
         .await
+        .full_permission_page()
         .ok();
 }
 async fn durable_counts(desk: &Desk) -> (i64, i64, i64) {
@@ -128,6 +141,7 @@ async fn a_holder_can_preview_the_same_real_share_without_being_a_page_manager_o
         .raw_body(&applying)
         .send()
         .await
+        .full_permission_page()
         .ok();
     desk.world
         .app
@@ -209,7 +223,9 @@ async fn a_group_preview_names_real_people_once_and_a_role_preview_is_not_a_role
         .raw_body(&json!({"name":"Crew"}))
         .send()
         .await
-        .ok();
+        .ok()
+        .into_full()
+        .expect("this ordinary control requires the full native creation response");
     for person in [&one, &two] {
         desk.world
             .app
@@ -261,6 +277,7 @@ async fn a_group_preview_names_real_people_once_and_a_role_preview_is_not_a_role
         .raw_body(&give)
         .send()
         .await
+        .full_role()
         .ok();
 }
 
@@ -393,7 +410,9 @@ async fn a_copy_review_measures_real_material_and_checks_its_comment_without_kee
         .body(&document)
         .send()
         .await
-        .ok();
+        .ok()
+        .into_full()
+        .unwrap();
     s.rig
         .world
         .app

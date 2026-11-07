@@ -496,6 +496,7 @@ impl Rig {
     /// A turn that says `text`.
     pub fn turn(&self, thread: ThreadId, text: &str) -> TurnStart {
         TurnStart {
+            native_wake: None,
             plan: false,
             thread_id: thread,
             turn_id: new_id(),
@@ -725,6 +726,7 @@ pub fn plain_spec(
             instructions: "You are working inside Orch.".to_owned(),
             available_models: vec![MODEL.to_owned()],
             subagent_limits: Default::default(),
+            background_wake: true,
             memory: None,
             arrangement: ArrangementType::KeySeparated,
             orch_tools: Vec::new(),

@@ -6,6 +6,8 @@ mod realtime_support;
 mod rig;
 mod support;
 
+use crate::support::FullArchiveReply as _;
+use crate::support::FullPermissionPageReply;
 use base64::{Engine as _, engine::general_purpose::URL_SAFE_NO_PAD};
 use desk::Desk;
 use orch_api_contract::{
@@ -85,15 +87,25 @@ async fn act(
     by: &Who,
     body: &DocumentTreeOperationBody,
 ) -> Reply<DocumentTreeReceipt> {
-    desk.world
+    let reply = desk
+        .world
         .app
         .call(DocumentTreeOperate, &[])
         .token(&by.token)
         .body(body)
         .send()
-        .await
+        .await;
+    Reply {
+        body: reply.body.map(|response| {
+            response
+                .into_full()
+                .expect("ordinary tree operations keep their full native receipt")
+        }),
+        status: reply.status,
+        headers: reply.headers,
+        raw: reply.raw,
+    }
 }
-
 async fn folder(desk: &Desk, parent: Option<Id>, name: &str) -> Proof<Id> {
     let made = desk
         .world
@@ -107,7 +119,9 @@ async fn folder(desk: &Desk, parent: Option<Id>, name: &str) -> Proof<Id> {
         })
         .send()
         .await
-        .ok();
+        .ok()
+        .into_full()
+        .unwrap();
     match made.entries.first().map(|entry| entry.item) {
         Some(DocumentTreeItem::Container(id)) => Ok(id),
         _ => Err("folder receipt has no container".into()),
@@ -154,13 +168,15 @@ async fn give(desk: &Desk, folder: Id, holder: HolderInput, choice: AccessChoice
         })
         .send()
         .await
+        .full_permission_page()
         .ok();
 }
 
 async fn remove(desk: &Desk, item: DocumentTreeItem) -> DocumentTreeReceipt {
     let mut request = operation(DocumentTreeCommand::Delete, vec![item], None);
     request.deletion_plan = Some(
-        desk.world
+        (desk
+            .world
             .app
             .call(DocumentTreeDeletePreview, &[])
             .token(&desk.ada.token)
@@ -168,7 +184,10 @@ async fn remove(desk: &Desk, item: DocumentTreeItem) -> DocumentTreeReceipt {
             .send()
             .await
             .ok()
-            .stamp,
+            .into_full()
+            .expect("this native creation control requires its full response")
+            .stamp)
+            .into(),
     );
     act(desk, &desk.ada, &request).await.ok()
 }
@@ -188,6 +207,7 @@ async fn direct_folder_navigation_redacts_ancestors_and_creation_matches_the_act
         .raw_body(&json!({"whole":"private"}))
         .send()
         .await
+        .full_permission_page()
         .ok();
     give(
         &desk,
@@ -249,7 +269,9 @@ async fn direct_folder_navigation_redacts_ancestors_and_creation_matches_the_act
         .body(&desk::body("A real child"))
         .send()
         .await
-        .ok();
+        .ok()
+        .into_full()
+        .unwrap();
     assert_eq!(made.location.parent, DocumentDirectory::Container(shared));
     assert!(
         made.location
@@ -298,6 +320,7 @@ async fn direct_folder_navigation_redacts_ancestors_and_creation_matches_the_act
         .body(&archive)
         .send()
         .await
+        .full_archive()
         .ok();
     assert!(
         !list(&desk, &visitor, Some(shared), false, None, None)
@@ -702,6 +725,7 @@ async fn sealed_cursor_progresses_past_unreadable_runs_and_cannot_cross_authorit
         })
         .send()
         .await
+        .full_permission_page()
         .ok();
     let mut conn = desk.world.conn().await;
     assert_eq!(
@@ -969,7 +993,9 @@ async fn scoped_directory_and_entry_sockets_follow_native_changes_and_never_poll
         .body(&desk::body("Another"))
         .send()
         .await
-        .ok();
+        .ok()
+        .into_full()
+        .unwrap();
     let changed = data(&mut one, &page.feed).await;
     assert_eq!(
         changed["directory"]["items"][0]["entry"]["title"],
@@ -1040,6 +1066,7 @@ async fn live_folder_projection_uses_each_persons_actual_permissions_and_closes_
         .raw_body(&json!({"rows":[{"permission":"doc.view","remove":ids}]}))
         .send()
         .await
+        .full_permission_page()
         .ok();
     let closed = client.expect("closed").await;
     assert_eq!(closed["reason"], "revoked");
@@ -1070,7 +1097,9 @@ async fn read_first_paths_never_publish_an_agents_readable_folder_name_to_a_pers
         })
         .send()
         .await
-        .ok();
+        .ok()
+        .into_full()
+        .unwrap();
     let folder = match parent.entries.first().map(|entry| entry.item) {
         Some(DocumentTreeItem::Container(id)) => id,
         _ => return Err("folder".into()),
@@ -1084,11 +1113,12 @@ async fn read_first_paths_never_publish_an_agents_readable_folder_name_to_a_pers
             .token(&scene.ada.token)
             .raw_body(&json!({"whole":"private"}))
             .send()
-            .await,
+            .await
+            .full_permission_page(),
         "make the synthetic ancestor private",
     )?;
     checked(scene.rig.world.app.call(PermissionPageUpdate,&[&"document-containers",&folder]).token(&scene.ada.token)
-        .raw_body(&json!({"name":[{"holders":[{"kind":"agents","id":thread}],"choice":"full_view","export":false}]})).send().await,
+        .raw_body(&json!({"name":[{"holders":[{"kind":"agents","id":thread}],"choice":"full_view","export":false}]})).send().await.full_permission_page(),
         "give the actual thread agent ancestor Read")?;
     let document = scene
         .rig
@@ -1099,11 +1129,14 @@ async fn read_first_paths_never_publish_an_agents_readable_folder_name_to_a_pers
         .body(&desk::body("Readable leaf"))
         .send()
         .await
-        .ok();
+        .ok()
+        .into_full()
+        .unwrap();
     checked(scene.rig.world.app.call(PermissionPageUpdate,&[&"documents",&document.base.id]).token(&scene.ada.token)
-        .raw_body(&json!({"name":[{"holders":[{"kind":"user","id":scene.dan.id()}],"choice":"full_view","export":false}]})).send().await,
+        .raw_body(&json!({"name":[{"holders":[{"kind":"user","id":scene.dan.id()}],"choice":"full_view","export":false}]})).send().await.full_permission_page(),
         "give the actual person leaf Read without ancestor Read")?;
     let request = ShareWithAgents {
+        viewers_read: None,
         what: ShareWhat::Document(ShareWhatDocument {
             document_id: document.base.id,
         }),
@@ -1204,7 +1237,9 @@ async fn read_first_paths_never_publish_an_agents_readable_folder_name_to_a_pers
             .send()
             .await,
         "share the synthetic leaf for first reading",
-    )?;
+    )?
+    .into_full()
+    .map_err(|_| "the ordinary session unexpectedly received a share receipt")?;
     assert_eq!(made.shares.len(), 1);
     assert!(
         made.shares[0].read_first,
@@ -1349,6 +1384,7 @@ async fn live_text_rows_keep_the_native_personal_list_facts_without_fetching_eac
         })
         .send()
         .await
+        .full_permission_page()
         .ok();
     let flat = desk
         .world
@@ -1424,6 +1460,7 @@ async fn live_text_rows_keep_the_native_personal_list_facts_without_fetching_eac
         .body(&archive)
         .send()
         .await
+        .full_archive()
         .ok();
     let archived = list(&desk, &reader, None, false, None, None).await.ok();
     assert!(!archived.directory.can_create);
@@ -1483,6 +1520,7 @@ async fn row_facts_keep_native_admin_reach_distinct_from_participation_and_never
         .raw_body(&json!({"whole":"private"}))
         .send()
         .await
+        .full_permission_page()
         .ok();
     // Enabled native admin reach intentionally reads private content and marks that actual source.
     // Compare the whole reference again; do not turn a fixture's ordinary refusal into a policy change.

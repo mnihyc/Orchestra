@@ -437,3 +437,18 @@ CREATE TABLE document_discussion_participants (
     CONSTRAINT document_discussion_participants_discussion_id_fkey FOREIGN KEY (discussion_id) REFERENCES document_discussions(id) ON DELETE CASCADE,
     CONSTRAINT document_discussion_participants_user_id_fkey FOREIGN KEY (user_id) REFERENCES users(id) ON DELETE CASCADE
 );
+
+
+-- One resumable offline document sweep, independent of a process or lease lifetime.
+CREATE TABLE document_purge_progress (
+    job text PRIMARY KEY CHECK (job = 'document_purge'),
+    phase text NOT NULL CHECK (phase IN ('documents','files')),
+    after_document uuid,
+    after_file_at timestamptz,
+    after_file uuid,
+    blocks_before timestamptz NOT NULL,
+    batches_before timestamptz NOT NULL,
+    files_before timestamptz NOT NULL,
+    CHECK ((after_file_at IS NULL) = (after_file IS NULL))
+);
+CREATE INDEX document_files_purge_page_idx ON document_files (added_at,id);

@@ -18,6 +18,7 @@ import { CapabilityCard } from '@/features/approvals/Capability';
 import { SourceCard, SourceBrief } from '@/features/approvals/Source';
 import { approvalTitle, ApprovalHeadings, CardFrame, DecidedCard, kindWord } from '@/features/approvals/Card';
 import { useDecision } from '@/features/approvals/Decision';
+import { decisionReason } from '@/features/approvals/current';
 import { DecisionError } from '@/features/approvals/DecisionError';
 import { AnswersForm, decisionOfOption, ElicitationForm, type HarnessApproval, OptionButtons, planDecision, RequestBody } from '@/features/approvals/Harness';
 import { PlanAnswer } from '@/features/approvals/PlanAnswer';
@@ -182,25 +183,26 @@ function HarnessCard({ approval, live, onSettled }: { approval: HarnessApproval;
   const request = approval.request;
   const may = approval.can_decide && live;
   const busy = decision.pending;
+  const reason = decisionReason(approval, live, busy, t);
   return (
     <CardFrame approval={approval}>
       <RequestBody request={request} />
       {request.request_kind === 'user_input' ? (
-        <AnswersForm questions={request.detail.questions} disabled={!may || busy} pending={busy} onSend={(answers) => decision.decide({ answers }, t('approvals.sendAnswers'))} />
+        <AnswersForm questions={request.detail.questions} disabled={!may || busy} reason={reason} pending={busy} onSend={(answers) => decision.decide({ answers }, t('approvals.sendAnswers'))} />
       ) : request.request_kind === 'mcp_elicitation' ? (
         <ElicitationForm
           schema={request.detail.schema}
           message={request.detail.message}
-          disabled={!may || busy}
+          disabled={!may || busy} reason={reason}
           pending={busy}
           onSend={(action, content) => decision.decide({ action, ...(content === undefined ? {} : { content }) }, t('approvals.accept'))}
         />
       ) : request.request_kind === 'plan' ? (
-        <PlanAnswer disabled={!may} pending={decision.pressed === t('plan.proceed') ? 'proceed' : decision.pressed === t('plan.keepPlanning') ? 'keep' : null}
+        <PlanAnswer disabled={!may} reason={reason} pending={decision.pressed === t('plan.proceed') ? 'proceed' : decision.pressed === t('plan.keepPlanning') ? 'keep' : null}
           onProceed={() => decision.decide(planDecision(true), t('plan.proceed'))}
           onKeepPlanning={(words) => decision.decide(planDecision(false, words), t('plan.keepPlanning'))} />
       ) : (
-        <OptionButtons target={request.request_kind === 'command' ? request.detail.command : approval.title} options={request.options} disabled={!may || busy} pressed={decision.pressed} onChoose={(option) => decision.decide(decisionOfOption(option), option.label)} />
+        <OptionButtons target={request.request_kind === 'command' ? request.detail.command : approval.title} options={request.options} disabled={!may || busy} reason={reason} pressed={decision.pressed} onChoose={(option) => decision.decide(decisionOfOption(option), option.label)} />
       )}
       {!approval.can_decide && <p className="text-sm text-text-muted">{t('approvals.cannotAnswer')}</p>}
       {approval.can_decide && !live && <p className="text-sm text-text-muted">{t('approvals.waitForLine')}</p>}

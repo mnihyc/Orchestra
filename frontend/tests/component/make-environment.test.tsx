@@ -60,21 +60,22 @@ it('defaults Belongs to to the viewed org for a person with two orgs and sends i
   expect(server.navigate).toHaveBeenCalledWith({ to: '/resources/environments/$id', params: { id: 'made' } });
 });
 
-it.each([{ forThread: false, lifetime: 'temporary' }, { forThread: true, lifetime: 'thread' }])('Temporary submits explicit cleanup consent ($lifetime)', async ({ forThread, lifetime }) => {
+for (const locale of ['en', 'zh-CN'] as const) it.each([{ forThread: false, lifetime: 'temporary' }, { forThread: true, lifetime: 'thread' }])('Temporary submits explicit cleanup consent ($lifetime)', async ({ forThread, lifetime }) => {
+  await setLocale(locale);
   const user = userEvent.setup();
   show(<MakeEnvironmentDialog forThread={forThread} home={{ id: 'beta', name: 'Beta' }} onClose={server.close} />);
-  const temporary = await screen.findByRole('switch', { name: 'Temporary' });
-  const consent = i18n.t('temporary.consent');
+  const temporary = await screen.findByRole('switch', { name: i18n.t('temporary.name') });
+  const consent = i18n.t(forThread ? 'temporary.consent' : 'temporary.idleConsent');
   expect(temporary).not.toBeChecked();
   expect(screen.queryByText(consent)).not.toBeInTheDocument();
   await user.click(temporary);
   expect(screen.queryByText(consent)).not.toBeInTheDocument();
-  await user.hover(screen.getByRole('textbox', { name: 'Name' }));
+  await user.hover(screen.getByRole('textbox', { name: i18n.t('environments.make.name') }));
   await user.hover(temporary);
   expect(await screen.findByRole('tooltip')).toHaveTextContent(consent);
   expect(document.querySelector('[data-choice-selected-description]')).toBeNull();
-  expect(temporary).toHaveAccessibleDescription(`${i18n.t('temporary.description')} ${consent}`);
-  await user.click(screen.getByRole('button', { name: 'Add environment' }));
+  expect(temporary).toHaveAccessibleDescription(`${i18n.t(forThread ? 'temporary.description' : 'temporary.idleDescription')} ${consent}`);
+  await user.click(screen.getByRole('button', { name: i18n.t('environments.make.submit') }));
   await waitFor(() => expect(server.create).toHaveBeenCalledWith(expect.objectContaining({ home_node_id: 'beta', config: { 'env.lifetime': lifetime } }), expect.any(String)));
 });
 

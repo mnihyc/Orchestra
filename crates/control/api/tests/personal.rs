@@ -11,6 +11,7 @@ mod places;
 mod search_world;
 mod support;
 
+use crate::support::FullPermissionPageReply;
 use orch_api_contract::access::{
     AccessChoice, HolderInput, PageChange, PageChangeName, PageChangeRow, PermissionPageUpdate,
 };
@@ -865,7 +866,9 @@ async fn personal_folder(desk: &desk::Desk, parent: Option<Id>, name: &str) -> I
         })
         .send()
         .await
-        .ok();
+        .ok()
+        .into_full()
+        .unwrap();
     match made.entries.first().map(|entry| entry.item) {
         Some(DocumentTreeItem::Container(id)) => id,
         _ => panic!("the real create route did not return its distinct document folder"),
@@ -895,6 +898,7 @@ async fn give_folder_read(
         })
         .send()
         .await
+        .full_permission_page()
         .ok();
 }
 
@@ -965,6 +969,7 @@ async fn a_folder_only_reader_can_visit_star_list_and_unstar_without_gaining_its
         .raw_body(&json!({"whole":"private"}))
         .send()
         .await
+        .full_permission_page()
         .ok();
     give_folder_read(&desk, folder, &reader, None).await;
     let native = folder_read(&desk, &reader, folder).await;
@@ -1102,6 +1107,7 @@ async fn revoked_expired_private_or_deleted_folders_never_leak_from_names_recent
                     })
                     .send()
                     .await
+                    .full_permission_page()
                     .ok();
             }
             "expired" => desk.world.advance(chrono::Duration::seconds(2)),
@@ -1113,6 +1119,7 @@ async fn revoked_expired_private_or_deleted_folders_never_leak_from_names_recent
                     .raw_body(&json!({"whole":"private"}))
                     .send()
                     .await
+                    .full_permission_page()
                     .ok();
             }
             "deleted" => {
@@ -1126,7 +1133,8 @@ async fn revoked_expired_private_or_deleted_folders_never_leak_from_names_recent
                     deletion_plan: None,
                 };
                 request.deletion_plan = Some(
-                    desk.world
+                    (desk
+                        .world
                         .app
                         .call(DocumentTreeDeletePreview, &[])
                         .token(&desk.ada.token)
@@ -1134,7 +1142,10 @@ async fn revoked_expired_private_or_deleted_folders_never_leak_from_names_recent
                         .send()
                         .await
                         .ok()
-                        .stamp,
+                        .into_full()
+                        .expect("this native creation control requires its full response")
+                        .stamp)
+                        .into(),
                 );
                 desk.world
                     .app
@@ -1143,7 +1154,9 @@ async fn revoked_expired_private_or_deleted_folders_never_leak_from_names_recent
                     .body(&request)
                     .send()
                     .await
-                    .ok();
+                    .ok()
+                    .into_full()
+                    .expect("this native tree control requires its full response");
             }
             _ => unreachable!(),
         }
@@ -1309,6 +1322,7 @@ async fn folder_personal_state_uses_actual_admin_read_and_loses_visibility_when_
         .raw_body(&json!({"whole":"private"}))
         .send()
         .await
+        .full_permission_page()
         .ok();
     let native = folder_read(&desk, &admin, folder).await;
     assert!(

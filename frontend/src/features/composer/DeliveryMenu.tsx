@@ -26,6 +26,11 @@ export interface DeliveryState {
   agent: string;
 }
 
+/** The same draft and connection checks apply to buttons, shortcuts and confirmations. */
+export function inputUnavailable(state: DeliveryState, input: { mayDrive: boolean; empty: boolean; tooLong: boolean; attachmentsWaiting: boolean }, t: TFunction): string | false {
+  return !input.mayDrive ? t('composer.row.readOnly') : !state.live ? t('composer.reason.offline') : input.empty ? t('composer.row.empty') : input.tooLong ? t('composer.row.tooLong') : input.attachmentsWaiting ? t('composer.row.filesWaiting') : false;
+}
+
 /** Why a way of sending cannot be used now, or `false`. */
 export function whyNot(delivery: Delivery, state: DeliveryState, t: TFunction): string | false {
   if (delivery === 'queue') return false;

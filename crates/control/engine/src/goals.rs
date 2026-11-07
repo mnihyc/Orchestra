@@ -9,14 +9,14 @@
 //! also takes their own use of the thread's model, since the continuations run on their access. Every act is named in
 //! the thread's history and audited.
 //!
-//! **The loop** ([`drive`]) runs from the engine's look at a thread, after the end of a turn has been accounted. It
+//! **The loop** (`drive`) runs from the engine's look at a thread, after the end of a turn has been accounted. It
 //! counts the turns that ended into the goal's figures, acts on what the agent reported with its `goal` tool, stops the
 //! goal at a limit that is set, and otherwise queues one continuation. It waits while a question, an approval or a
 //! plan asks a person, while the queue is held or holds inputs, while the thread is blocked and while call recovery
 //! has work in hand.
 //!
 //! **"Met"** is the agent's report, checked by the place's helper model against the condition where there is one
-//! ([`check`]); a "not yet" starts the next turn with its reason. Without a helper model the report decides, and the
+//! (`check`); a "not yet" starts the next turn with its reason. Without a helper model the report decides, and the
 //! goal's line says so.
 //!
 //! **Limits** (`thread.goal.max_turns`, `thread.goal.max_minutes` and `thread.goal.max_credits`) default to none. A
@@ -97,6 +97,49 @@ impl From<InputError> for GoalError {
 impl From<orch_db::DbError> for GoalError {
     fn from(error: orch_db::DbError) -> Self {
         Self::Internal(error.into())
+    }
+}
+
+/// Immutable native goal operands after its actual thread/model preparation.
+#[derive(Debug)]
+pub struct PreparedGoal {
+    thread: ThreadRow,
+    actor: Id,
+    id: Id,
+    objective: String,
+    condition: String,
+    limits: GoalLimits,
+    plan_first: bool,
+    notify_on_end: bool,
+    after_turn: i32,
+    by: Json,
+}
+
+impl PreparedGoal {
+    /// The stored thread whose lock protects these operands.
+    #[must_use]
+    pub fn thread(&self) -> Id {
+        self.thread.node_id
+    }
+}
+
+/// Native accepted rows; no full response or protected settings are projected by the writer.
+#[derive(Debug)]
+pub struct CreatedGoal {
+    thread: ThreadRow,
+    goal: GoalRow,
+}
+
+impl CreatedGoal {
+    /// The thread that accepted the goal.
+    #[must_use]
+    pub fn thread(&self) -> Id {
+        self.thread.node_id
+    }
+    /// The actual accepted goal.
+    #[must_use]
+    pub fn id(&self) -> Id {
+        self.goal.id
     }
 }
 
@@ -614,8 +657,32 @@ impl Engine {
         thread_id: Id,
         body: &ThreadGoalCreateBody,
     ) -> Result<ThreadGoal, GoalError> {
-        let caller = principal.caller().clone();
-        let now = principal.now().get();
+        let prepared = self
+            .prepare_goal(&mut tx, &principal, thread_id, body)
+            .await?;
+        let (finished, created) = self
+            .create_goal_in(&mut tx, &principal, &prepared, || Ok(()))
+            .await?;
+        // Existing native callers keep the same full view inside their original transaction.
+        let reply = view_of(
+            &mut tx,
+            &created.thread,
+            &created.goal,
+            principal.now().get(),
+        )
+        .await?;
+        self.commit(tx, finished).await?;
+        Ok(reply)
+    }
+
+    /// The same native validation and immutable operands, without inserting or rendering a goal.
+    pub async fn prepare_goal(
+        &self,
+        conn: &mut Conn,
+        principal: &Principal,
+        thread_id: Id,
+        body: &ThreadGoalCreateBody,
+    ) -> Result<PreparedGoal, GoalError> {
         let objective = trimmed(
             &body.objective,
             GOAL_OBJECTIVE_MAX_CHARS,
@@ -630,79 +697,153 @@ impl Engine {
         )?;
         let limits = body.limits.clone().unwrap_or_default();
         checked_limits(&limits)?;
-        let (finished, reply) = {
-            let mut unit = Unit::new(&mut tx, now);
-            let thread = threads::lock(&mut *unit.conn, thread_id)
-                .await?
-                .filter(|row| row.deleted_at.is_none())
-                .ok_or(GoalError::NotFound)?;
-            if thread.archived_at.is_some() {
-                return Err(GoalError::Archived);
-            }
-            self.check_sender(&mut unit, &caller, &thread, true).await?;
-            if rows::live(&mut *unit.conn, thread_id).await?.is_some() {
-                return Err(GoalError::Exists);
-            }
-            let after_turn: i32 = sqlx::query_scalar(
-                "SELECT COALESCE(MAX(ordinal), 0) FROM turns WHERE thread_id = $1",
-            )
-            .bind(thread_id)
-            .fetch_one(&mut *unit.conn)
-            .await
-            .map_err(orch_db::DbError::from)?;
-            let authority = inputs::input_authority(&caller)?;
-            let plan_first = body.plan && agent_plans(&mut *unit.conn, &thread).await?;
-            let goal = rows::insert(
-                &mut *unit.conn,
-                &rows::NewGoal {
-                    id: new_id(),
-                    thread_id,
-                    objective: &objective,
-                    condition: &condition,
-                    set_by: caller.user(),
-                    set_authority: &authority,
-                    plan_first,
-                    notify_on_end: body.notify_on_end,
-                    max_turns: limits.max_turns,
-                    max_minutes: limits.max_minutes,
-                    max_credits: limits.max_credits.as_deref(),
-                    after_turn,
-                    at: now,
-                },
-            )
+        let mut unit = Unit::new(conn, principal.now().get());
+        let thread = threads::lock(unit.conn, thread_id)
+            .await?
+            .filter(|row| row.deleted_at.is_none())
+            .ok_or(GoalError::NotFound)?;
+        if thread.archived_at.is_some() {
+            return Err(GoalError::Archived);
+        }
+        self.check_sender(&mut unit, principal.caller(), &thread, true)
             .await?;
-            let who = by(&mut *unit.conn, caller.user()).await?;
-            marker(
-                &mut unit,
-                &thread,
-                "goal_set",
-                json!({ "goal_id": goal.id, "by": who, "objective": objective, "condition": condition }),
-            )
+        if rows::live(unit.conn, thread_id).await?.is_some() {
+            return Err(GoalError::Exists);
+        }
+        let after_turn: i32 =
+            sqlx::query_scalar("SELECT COALESCE(MAX(ordinal), 0) FROM turns WHERE thread_id = $1")
+                .bind(thread_id)
+                .fetch_one(&mut *unit.conn)
+                .await
+                .map_err(orch_db::DbError::from)?;
+        let plan_first = body.plan && agent_plans(unit.conn, &thread).await?;
+        let who = by(unit.conn, principal.user()).await?;
+        Ok(PreparedGoal {
+            thread,
+            actor: principal.user(),
+            id: new_id(),
+            objective,
+            condition,
+            limits,
+            plan_first,
+            notify_on_end: body.notify_on_end,
+            after_turn,
+            by: who,
+        })
+    }
+
+    /// The ordinary sender/model gate remains the native gate for the prepared thread.
+    pub async fn require_goal_preparation(
+        &self,
+        conn: &mut Conn,
+        principal: &Principal,
+        prepared: &PreparedGoal,
+    ) -> Result<(), GoalError> {
+        if principal.user() != prepared.actor {
+            return Err(GoalError::NotFound);
+        }
+        let mut unit = Unit::new(conn, principal.now().get());
+        self.check_sender(&mut unit, principal.caller(), &prepared.thread, true)
             .await?;
-            audit(
-                &mut unit,
-                thread_id,
-                Some(caller.user()),
-                orch_db::audit::name!("thread.goal_set"),
-                json!({ "goal_id": goal.id, "limits": limits, "plan": plan_first }),
-            )
+        Ok(())
+    }
+
+    /// The setter's existing full-response authority, independently of credential Read bounds.
+    pub async fn check_goal_readback(
+        &self,
+        conn: &mut Conn,
+        principal: &Principal,
+        thread: Id,
+    ) -> Result<(), GoalError> {
+        let row = threads::thread(conn, thread)
+            .await?
+            .filter(|row| row.deleted_at.is_none())
+            .ok_or(GoalError::NotFound)?;
+        let mut unit = Unit::new(conn, principal.now().get());
+        self.check_sender(&mut unit, principal.caller(), &row, true)
             .await?;
-            // The first turn begins at once where nothing else is in the way; otherwise the loop finds its time.
-            self.continue_goal_in(&mut unit, &thread, &goal, Some(&caller))
-                .await?;
-            publish(&mut unit, thread_id).await?;
-            unit.wake(thread_id);
-            let thread = threads::thread(&mut *unit.conn, thread_id)
-                .await?
-                .ok_or(GoalError::NotFound)?;
-            let row = rows::goal(&mut *unit.conn, goal.id)
-                .await?
-                .ok_or(GoalError::NotFound)?;
-            let reply = view_of(&mut *unit.conn, &thread, &row, now).await?;
-            (unit.finish().await?, reply)
-        };
+        Ok(())
+    }
+
+    /// Applies those exact prepared operands and returns accepted identities without full readback.
+    pub async fn create_prepared_goal_guarded<'a>(
+        &self,
+        mut tx: orch_db::Tx,
+        principal: Principal,
+        prepared: &'a PreparedGoal,
+        before: impl FnOnce() -> Result<(), EngineError> + Send + 'a,
+    ) -> Result<CreatedGoal, GoalError> {
+        let (finished, created) = self
+            .create_goal_in(&mut tx, &principal, prepared, before)
+            .await?;
         self.commit(tx, finished).await?;
-        Ok(reply)
+        Ok(created)
+    }
+
+    async fn create_goal_in<'a>(
+        &self,
+        conn: &'a mut Conn,
+        principal: &Principal,
+        prepared: &PreparedGoal,
+        before: impl FnOnce() -> Result<(), EngineError> + Send + 'a,
+    ) -> Result<(crate::unit::Finished, CreatedGoal), GoalError> {
+        let now = principal.now().get();
+        let current = threads::lock(conn, prepared.thread())
+            .await?
+            .ok_or(GoalError::NotFound)?;
+        if principal.user() != prepared.actor || current.seq() != prepared.thread.seq() {
+            return Err(GoalError::Invalid("the prepared goal's thread changed"));
+        }
+        let caller = principal.caller();
+        let authority = inputs::input_authority(caller)?;
+        let mut unit = Unit::with_first_effect(conn, now, before);
+        unit.check_tool_source().await?;
+        unit.before_effect()?;
+        let goal = rows::insert(
+            unit.conn,
+            &rows::NewGoal {
+                id: prepared.id,
+                thread_id: prepared.thread(),
+                objective: &prepared.objective,
+                condition: &prepared.condition,
+                set_by: caller.user(),
+                set_authority: &authority,
+                plan_first: prepared.plan_first,
+                notify_on_end: prepared.notify_on_end,
+                max_turns: prepared.limits.max_turns,
+                max_minutes: prepared.limits.max_minutes,
+                max_credits: prepared.limits.max_credits.as_deref(),
+                after_turn: prepared.after_turn,
+                at: now,
+            },
+        )
+        .await?;
+        marker(
+            &mut unit,
+            &current,
+            "goal_set",
+            json!({ "goal_id": goal.id,
+            "by": prepared.by, "objective": prepared.objective, "condition": prepared.condition }),
+        )
+        .await?;
+        audit(
+            &mut unit,
+            prepared.thread(),
+            Some(caller.user()),
+            orch_db::audit::name!("thread.goal_set"),
+            json!({"goal_id":goal.id,"limits":prepared.limits,"plan":prepared.plan_first}),
+        )
+        .await?;
+        self.continue_goal_in(&mut unit, &current, &goal).await?;
+        publish(&mut unit, prepared.thread()).await?;
+        unit.wake(prepared.thread());
+        let thread = threads::thread(unit.conn, prepared.thread())
+            .await?
+            .ok_or(GoalError::NotFound)?;
+        let goal = rows::goal(unit.conn, goal.id)
+            .await?
+            .ok_or(GoalError::NotFound)?;
+        Ok((unit.finish().await?, CreatedGoal { thread, goal }))
     }
 
     /// Edits a goal, pauses it, or sets it going again, for whoever drives the thread.
@@ -981,15 +1122,24 @@ impl Engine {
         unit: &mut Unit<'_>,
         thread: &ThreadRow,
         goal: &GoalRow,
-    ) -> Result<Option<Caller>, EngineError> {
+        request: &inputs::InputRequest,
+    ) -> Result<Option<inputs::InputCallers>, EngineError> {
         let Some(person) = goal.set_by else {
             return Ok(None);
         };
         let Some(authority) = inputs::saved_authority(goal.set_authority.as_ref())? else {
             return Ok(None);
         };
-        let now = Time::new(unit.now());
-        inputs::authority_caller(unit.conn, person, thread.node_id, now, &authority).await
+        inputs::input_authority_for_request(
+            unit,
+            thread,
+            request,
+            None,
+            person,
+            &authority,
+            self.inner.clock.as_ref(),
+        )
+        .await
     }
 
     /// Takes a person's cancellation of a goal's queued continuation as a pause: the loop would only queue it again.

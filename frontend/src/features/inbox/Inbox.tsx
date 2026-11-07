@@ -120,9 +120,9 @@ export function Inbox({ filter, onFilter }: { filter: InboxFilter; onFilter: (ne
           </PlaceMark>
         }
         title={t('screens.inbox.title')}
+        help={<Hint id="inbox" popover />}
         actions={
           <>
-            <Hint id="inbox" popover />
             <GroupingControl value={grouping.value} onChange={grouping.choose} disabled={grouping.loading || grouping.saving} error={grouping.error} />
             <SegmentedControl
               label={t('inbox.filter.label')}
@@ -130,7 +130,7 @@ export function Inbox({ filter, onFilter }: { filter: InboxFilter; onFilter: (ne
               onValueChange={onFilter}
               segments={filters}
             />
-            <Button icon={<CheckCheck aria-hidden />} disabled={unread === 0} onClick={() => void markNotificationsRead({ all: true })}>
+            <Button icon={<CheckCheck aria-hidden />} disabled={unread === 0} reason={unread === 0 ? loaded ? t('ui.unavailable.noUnread') : t('common.loading') : undefined} onClick={() => void markNotificationsRead({ all: true })}>
               {t('inbox.markAllRead')}
             </Button>
             <PauseControls />

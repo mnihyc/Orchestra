@@ -1,0 +1,4 @@
+# FU-STACK and DEPTH candidate e1c8a53c8 (ci-triage-c): the default-stack guards and the default recursion limit
+clippy
+test -p orch-engine --test document_folders
+test -p orch-api-core --test agents_receiving_place

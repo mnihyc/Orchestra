@@ -10,9 +10,9 @@ import type * as Uploads from '@/lib/uploads';
 import type * as Live from '@/realtime/live';
 import type * as Draft from '@/features/composer/Draft';
 import { Composer } from '@/features/composer/Composer';
-import { useComposerStore } from '@/features/composer/Draft';
+import { composerWriter, useComposerStore } from '@/features/composer/Draft';
 import { client } from '@/api/client';
-import type { ResolvedSetting, Thread, ThreadContext, ThreadParameters } from '@/generated/api-types';
+import type { ResolvedSetting, Thread, ThreadContext, ThreadParameters, ThreadLimits, LimitReached } from '@/generated/api-types';
 import type { PastedTextPart } from '@/lib/pastedText';
 import { rememberPaste } from '@/lib/pastedText';
 import type { CodeViewProps } from '@/ui/CodeView';
@@ -24,14 +24,18 @@ import { ACME, meta } from '../doubles/fixtures';
 import { turn } from '../doubles/thread-rows';
 import { harnessName } from '../doubles/harness-names';
 import { World } from '../doubles/world';
+import { choiceCap } from '../unit/resource-facts-fixtures';
 import { show } from './support';
 
-const server = vi.hoisted(() => ({ submit: vi.fn<typeof Draft.submitInput>(), context: vi.fn<() => Promise<ThreadContext>>(), cancelUpload: vi.fn<() => Promise<void>>(), live: true }));
+const server = vi.hoisted(() => {
+  const limits: ThreadLimits = { reached: [], bypass_all: false };
+  return { submit: vi.fn<typeof Draft.submitInput>(), context: vi.fn<() => Promise<ThreadContext>>(), cancelUpload: vi.fn<() => Promise<void>>(), live: true, limits };
+});
 vi.mock('@/features/composer/Draft', async (load) => ({ ...await load<typeof Draft>(), useDraftSync: () => 'idle', submitInput: server.submit }));
 vi.mock('@/realtime/live', async (load) => ({ ...await load<typeof Live>(), useSocketStatus: () => ({ phase: server.live ? 'ready' : 'reconnecting' }) }));
 vi.mock('@/api/threads', async (load) => ({ ...await load<typeof ThreadsApi>(),
   parametersQuery: (id: string) => ({ queryKey: ['keyboard-parameters', id], queryFn: () => Promise.resolve(parameters) }),
-  limitsQuery: (id: string) => ({ queryKey: ['keyboard-limits', id], queryFn: () => Promise.resolve({ reached: [] }) }),
+  limitsQuery: (id: string) => ({ queryKey: ['keyboard-limits', id], initialData: server.limits, queryFn: () => Promise.resolve(server.limits) }),
 }));
 vi.mock('@/api/settings', async (load) => ({ ...await load<typeof SettingsApi>(), settingsQuery: (id: string) => ({ queryKey: ['keyboard-settings', id], queryFn: () => Promise.resolve(settings) }) }));
 vi.mock('@/api/auth', async (load) => ({ ...await load<typeof AuthApi>(), metaQuery: { queryKey: ['keyboard-meta'], queryFn: () => Promise.resolve(meta()) } }));
@@ -57,14 +61,14 @@ let theme: string | null = null;
 let signedIn: string | null = null;
 beforeEach(() => {
   locale = currentLocale(); theme = document.documentElement.getAttribute('data-theme'); signedIn = client.session.getState().userId;
-  server.submit.mockReset(); server.live = true;
+  server.submit.mockReset(); server.live = true; server.limits = { reached: [], bypass_all: false };
   server.cancelUpload.mockReset().mockResolvedValue(undefined);
   server.context.mockReset(); server.context.mockResolvedValue({ harness_kind: null, harness: null, reports: { tokens: false, context: false, breakdown: false }, fill: null, turn_id: null, shortened: null, can_count: false });
   parameters.model.options = [];
   const world = new World(); const person = world.people.get('ada');
   const node = world.places.rowOf(ACME.mainThread);
   if (person === undefined || node === undefined) throw new Error('The keyboard test needs the native thread fixture');
-  native = { ...world.threads.thread(person, node), state: 'running' };
+  native = { ...world.threads.thread(person, node), state: 'running', current_turn_id: 'running-key-turn' };
   client.session.setState({ userId: person.me.id });
   useComposerStore.setState({ text: {}, parts: {}, sending: {}, refused: {}, cannotSteer: {}, passNext: {}, planning: {} });
   threadWriter.reset(native.id, { thread: native, turns: [turn('running-key-turn', { ordinal: 1, state: 'running', inputId: 'earlier' })] }, false);
@@ -122,6 +126,25 @@ it('recomputes paste delivery from the selected model’s reported estimate', as
   expect(screen.queryByText(/^Sent in the message/)).not.toBeInTheDocument();
 });
 
+for (const locale of ['en', 'zh-CN'] as const) it.each([true, false])('sends the explicit alternative to an automatic paste choice in '+locale+' (inline: %s)', async (inline) => {
+  await setLocale(locale);
+  parameters.model.options = [{ model_name: 'fake-1', display_name: 'Example', parameters: {}, allowed: true, reason: null,
+    token_estimate: { ascii_prose_x100: 400, ascii_structured_x100: 300, other_x100: 100, image_tokens: 1000, measured: false } }];
+  const now = '2026-10-26T00:00:00Z';
+  server.context.mockResolvedValue({ harness_kind: null, harness: null, reports: { tokens: true, context: true, breakdown: false }, fill: { count: 'orch', used: inline ? 900 : 960, window: 1000, compact_at: null, scaled: false, at: now, parts: [] }, turn_id: null, shortened: null, can_count: false });
+  native = { ...native, state: 'idle', current_turn_id: null, model: 'fake-1' };
+  threadWriter.reset(native.id, { thread: native, turns: [] }, false);
+  const part: PastedTextPart = { type: 'pasted_text', blob: 'b'.repeat(64), name: 'choice.txt', path: '.orch/attachments/choice.txt', characters: 100, ascii_characters: 100, size: 100 };
+  useComposerStore.setState({ parts: { [native.id]: [part] } });
+  show(<Composer thread={native} />);
+  expect(await screen.findByText(i18n.t('uploads.pasteSuggested'), { exact: true })).toBeVisible();
+  expect(screen.getByRole('radio', { name: i18n.t(inline ? 'uploads.inMessage' : 'uploads.asFile') })).toBeChecked();
+  await userEvent.click(screen.getByRole('radio', { name: i18n.t(inline ? 'uploads.asFile' : 'uploads.inMessage') }));
+  expect(screen.queryByText(i18n.t('uploads.pasteSuggested'), { exact: true })).not.toBeInTheDocument();
+  fireEvent.keyDown(screen.getByRole('textbox', { name: i18n.t('composer.label') }), { key: 'Enter' });
+  expect(server.submit).toHaveBeenCalledExactlyOnceWith(defaultThreadRead(native.id), [{ ...part, delivery: inline ? 'file' : 'inline' }], 'queue', undefined, undefined, false);
+});
+
 for (const language of ['en', 'zh-CN'] as const) for (const delivery of ['inline', 'file'] as const) it(`keeps an explicit ${delivery} choice without model estimates or a completed context read in ${language}`, async () => {
   await setLocale(language);
   server.context.mockImplementation(() => new Promise(() => undefined));
@@ -175,6 +198,23 @@ it('can drop an edited paste after permission is lost without leaving sending bl
 
 describe.each([['en', 'light'], ['en', 'dark'], ['zh-CN', 'light'], ['zh-CN', 'dark']] as const)('running delivery keys %s / %s', (language, look) => {
   beforeEach(async () => { await setLocale(language); document.documentElement.setAttribute('data-theme', look); });
+  it.each(['idle', 'running'] as const)('keeps an offline %s draft and explains why Enter cannot send it', (state) => {
+    native = { ...native, state };
+    if (state === 'idle') threadWriter.reset(native.id, { thread: native, turns: [] }, false);
+    server.live = false;
+    const view = show(<Composer thread={native} />);
+    const box = screen.getByRole('textbox', { name: i18n.t('composer.label') });
+    fireEvent.change(box, { target: { value: 'Keep this until the connection returns' } });
+    fireEvent.keyDown(box, { key: 'Enter' });
+    expect(server.submit).not.toHaveBeenCalled();
+    expect(box).toHaveValue('Keep this until the connection returns');
+    expect(screen.getByText(i18n.t('composer.reason.offline'), { exact: true })).toBeVisible();
+    server.live = true;
+    view.rerender(<Composer thread={native} />);
+    expect(screen.queryByText(i18n.t('composer.reason.offline'), { exact: true })).not.toBeInTheDocument();
+    fireEvent.keyDown(box, { key: 'Enter' });
+    expect(server.submit).toHaveBeenCalledExactlyOnceWith(defaultThreadRead(native.id), [{ type: 'text', text: 'Keep this until the connection returns' }], 'queue', undefined, undefined, false);
+  });
   it('queues with Enter, steers with Ctrl+Enter and interrupts only with the explicit modified key', async () => {
     show(<Composer thread={native} />);
     const hint = i18n.t(isApplePlatform() ? 'composer.runningHintMac' : 'composer.runningHint');
@@ -196,9 +236,8 @@ describe.each([['en', 'light'], ['en', 'dark'], ['zh-CN', 'light'], ['zh-CN', 'd
   });
   it('does not promise unsupported steering and removes the running hint when idle or offline', async () => {
     if (native.binding === null) throw new Error('The fixture must name its agent');
-    const agentId = native.binding.agent.id;
     const view = show(<Composer thread={native} />);
-    act(() => useComposerStore.setState({ cannotSteer: { [agentId]: true } }));
+    act(() => composerWriter.noteCannotSteer(native.id, 'running-key-turn'));
     expect(screen.getByText(i18n.t('composer.runningQueueHint'), { exact: true })).toBeVisible();
     const box = screen.getByRole('textbox', { name: i18n.t('composer.label') });
     await userEvent.type(box, 'Still here{Control>}{Enter}{/Control}');
@@ -227,6 +266,24 @@ it('offers Plan only where the agent program plans, and sends with Plan on as a 
   expect(server.submit).toHaveBeenCalledExactlyOnceWith(defaultThreadRead(native.id), [{ type: 'text', text: 'Plan the redirect fix' }], 'queue', undefined, undefined, true);
   // It stays on until the person turns it off, as the programs' own plan modes do.
   expect(plan).toHaveAttribute('aria-pressed', 'true');
+});
+
+it.each(['en', 'zh-CN'] as const)('forgets a learned steering refusal when the next turn starts in %s', async (locale) => {
+  await setLocale(locale);
+  composerWriter.noteCannotSteer(native.id, 'running-key-turn');
+  show(<Composer thread={native} />);
+  expect(screen.getByText(i18n.t('composer.runningQueueHint'), { exact: true })).toBeVisible();
+  native = { ...native, current_turn_id: 'next-key-turn', seq: native.seq + 2 };
+  act(() => threadWriter.apply(native.id, { thread: native, turns: [
+    { ...turn('running-key-turn', { ordinal: 1, state: 'completed', inputId: 'earlier' }), seq_updated: native.seq + 1 },
+    { ...turn('next-key-turn', { ordinal: 2, state: 'running', inputId: 'next' }), seq_updated: native.seq + 2 },
+  ] }));
+  const hint = i18n.t(isApplePlatform() ? 'composer.runningHintMac' : 'composer.runningHint');
+  expect(await screen.findByText(hint, { exact: true })).toBeVisible();
+  expect(screen.queryByText(i18n.t('composer.runningQueueHint'), { exact: true })).not.toBeInTheDocument();
+  const box = screen.getByRole('textbox', { name: i18n.t('composer.label') });
+  fireEvent.change(box, { target: { value: 'Steer this new turn' } }); fireEvent.keyDown(box, { key: 'Enter', ctrlKey: true });
+  expect(server.submit).toHaveBeenCalledExactlyOnceWith(defaultThreadRead(native.id), [{ type: 'text', text: 'Steer this new turn' }], 'steer', undefined, undefined, false);
 });
 
 it('keeps Send held for a build-disabled native image after the file and paste flows are combined', async () => {
@@ -264,4 +321,47 @@ for (const language of ['en', 'zh-CN'] as const) it(`uses the reported program n
   expect(await screen.findByText(reason)).toBeVisible();
   expect(screen.getByRole('button', { name: i18n.t('composer.send') })).toBeDisabled();
   expect(document.body).not.toHaveTextContent('research-agent');
+});
+
+
+function cachedVendorLimit(): LimitReached {
+  if (native.binding === null) throw new Error('Quota controls need the existing provider binding');
+  return { cap: null, provider_limit: { provider: native.binding.provider, as_of: '2026-10-25T12:00:00Z', resets_at: null, window: 'weekly' }, can_bypass: false, passed_by: null, ask: [], ask_more: 0 };
+}
+
+for (const stalePass of [false, true, 'null_caps'] as const) it(`sends once without a bypass prompt for cached vendor quota (old pass=${stalePass})`, async () => {
+  native = { ...native, state: 'idle', current_turn_id: null };
+  threadWriter.reset(native.id, { thread: native, turns: [] }, false);
+  server.limits = { reached: [cachedVendorLimit()], bypass_all: false };
+  if (stalePass) useComposerStore.setState({ passNext: { [native.id]: stalePass === 'null_caps' ? { provider_limit: true, caps: null } : { provider_limit: true } } });
+  show(<Composer thread={native} />);
+  const user = userEvent.setup();
+  const box = screen.getByRole('textbox');
+  await user.type(box, 'Use available paid credits');
+  await waitFor(() => expect(screen.getByRole('button', { name: i18n.t('composer.send') })).toBeEnabled());
+  fireEvent.keyDown(box, { key: 'Enter' });
+  expect(server.submit).toHaveBeenCalledExactlyOnceWith(defaultThreadRead(native.id), [{ type: 'text', text: 'Use available paid credits' }], 'queue', undefined, undefined, false);
+  expect(screen.queryByRole('dialog')).not.toBeInTheDocument();
+  fireEvent.keyDown(box, { key: 'Enter' });
+  expect(server.submit).toHaveBeenCalledTimes(1);
+});
+
+it('still prompts for a configured provider cap alongside cached vendor quota', async () => {
+  native = { ...native, state: 'idle', current_turn_id: null };
+  threadWriter.reset(native.id, { thread: native, turns: [] }, false);
+  const vendor = cachedVendorLimit();
+  const cap = choiceCap({ state: 'reached' });
+  cap.cap.provider = vendor.provider_limit!.provider;
+  server.limits = { reached: [vendor, { ...vendor, cap, provider_limit: null, can_bypass: true }], bypass_all: false };
+  show(<Composer thread={native} />);
+  const user = userEvent.setup();
+  const box = screen.getByRole('textbox');
+  await user.type(box, 'Explicit cap approval');
+  await waitFor(() => expect(screen.getByRole('button', { name: i18n.t('composer.send') })).toBeEnabled());
+  fireEvent.keyDown(box, { key: 'Enter' });
+  expect(server.submit).not.toHaveBeenCalled();
+  const dialog = await screen.findByRole('dialog', { name: i18n.t('ui.limit.title') });
+  expect(dialog).not.toHaveTextContent('weekly');
+  await user.click(screen.getByRole('button', { name: i18n.t('ui.limit.proceed') }));
+  expect(server.submit).toHaveBeenCalledExactlyOnceWith(native.id, [{ type: 'text', text: 'Explicit cap approval' }], 'queue', { caps: [cap.cap.id] }, undefined, false);
 });

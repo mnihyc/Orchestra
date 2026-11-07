@@ -28,6 +28,7 @@ import { SegmentedControl } from '@/ui/SegmentedControl';
 import type { CodeViewHandle } from '@/ui/CodeView';
 import { useViewShown } from '@/features/workbench/viewOpening';
 import { Button } from '@/ui/Button';
+import { Badge } from '@/ui/Badge';
 import { SkeletonRows } from '@/ui/Skeleton';
 import { cx } from '@/ui/cx';
 import { UploadHelp } from '@/features/composer/UploadHelp';
@@ -156,18 +157,21 @@ function ReadyAttachment({ part, index, onRemove, destination, readPaste, onPast
       return local !== undefined ? Promise.resolve(local) : readPaste?.(part) ?? Promise.reject(new Error('Pasted text unavailable'));
     },
   });
-  const path = destination?.(part);
+  const path = part.type === 'pasted_text' && part.delivery === 'inline' ? null : destination?.(part);
   const name = part.type === 'pasted_text' ? t('uploads.pastedText') : part.name;
   const characterLabel = part.type === 'pasted_text' ? t('uploads.characters', { count: part.characters, number: formatNumber(part.characters, locale) }) : null;
   const estimatedTokens = part.type === 'pasted_text' ? pasteTokens?.(part) : null;
-  const inlinePaste = part.type === 'pasted_text' ? pasteMode?.(part) : undefined;
+  const inlinePaste = part.type === 'pasted_text' ? part.delivery === 'inline' ? true : part.delivery === 'file' ? false : pasteMode?.(part) : undefined;
   return <li className={cx('flex max-w-full min-w-0 flex-col gap-1 rounded-md border border-border px-2 py-1 text-sm', part.type === 'pasted_text' && open && 'w-full')}>
     <div className={cx('flex min-w-0 flex-wrap items-center gap-y-1', part.type === 'pasted_text' ? 'gap-x-1' : 'gap-x-2')}>
       {part.type === 'pasted_text' ? <div className="flex w-full min-w-0 items-center gap-1"><FileText aria-hidden className="size-4 shrink-0 text-text-muted" /><button type="button" className="focus-inset min-w-0 truncate text-left" aria-expanded={open} onClick={() => setOpen(!open)}>{name}</button><UploadHelp topic="pasted-text" />
         <span className="min-w-0 flex-1 truncate text-text-muted tabular-nums" title={characterLabel ?? undefined}>{characterLabel}</span>
         {onRemove !== undefined && <IconButton size="sm" label={t('uploads.remove', { name })} icon={<X aria-hidden />} onClick={() => onRemove(index)} />}</div> : part.blob === null ? part.type === 'file' && <FilePathAttachment path={part.path} name={part.name} size={part.size} /> : <FileAttachment source={blobSource('upload', '', part.blob, part.name, 'size' in part ? part.size : undefined, 'media_type' in part ? part.media_type : undefined)} />}
-      {part.type === 'pasted_text' && onPasteDelivery !== undefined && <SegmentedControl size="sm" label={t('uploads.pasteDelivery')} value={part.delivery ?? (inlinePaste === true ? 'inline' : 'file')}
-        onValueChange={(value) => onPasteDelivery(part, value)} segments={[{value:'inline',name:t('uploads.inMessage')},{value:'file',name:t('uploads.asFile')}]} />}
+      {part.type === 'pasted_text' && onPasteDelivery !== undefined && <>
+        <SegmentedControl<'inline' | 'file'> size="sm" label={t('uploads.pasteDelivery')} value={part.delivery ?? (inlinePaste === undefined ? null : inlinePaste ? 'inline' : 'file')}
+          onValueChange={(value) => onPasteDelivery(part, value)} segments={[{value:'inline',name:t('uploads.inMessage')},{value:'file',name:t('uploads.asFile')}]} />
+        {(part.delivery === undefined || part.delivery === null) && inlinePaste !== undefined && <Badge>{t('uploads.pasteSuggested')}</Badge>}
+      </>}
       {part.type === 'pasted_text' && onPasteAsText !== undefined && <Button size="sm" variant="ghost" disabled={text.isFetching} onClick={() => {
         const local = editor.current?.getText() ?? edited ?? rememberedPaste(part.blob);
         if (local !== undefined) onPasteAsText(index, local);

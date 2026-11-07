@@ -12,6 +12,8 @@ import { infiniteQueryOptions, queryOptions, type QueryClient } from '@tanstack/
 import { api, client, done, ok, repeatable } from '@/api/client';
 import { queryClient } from '@/api/query';
 import { beginPeopleRead } from '@/api/peopleChanges';
+import { nodeKey } from '@/api/nodes';
+import { beginDefaultsOpening, hasUnattemptedPeopleHint, seedNodeDefaults, type DefaultsDemand } from '@/api/defaultsOpening';
 import { chatWriter, useChatStore } from '@/realtime/stores/chat';
 import type {
   Chat,
@@ -99,18 +101,31 @@ function seedChatDraft(cache: QueryClient, opening: ChatOpening): void {
 }
 
 /** One independently admitted panel opening supplies scopes and the selected conversation. */
-export const nodeChatOpeningQuery = (nodeId: string, scope: string, chatId: string | null) => queryOptions({
+export const nodeChatOpeningQuery = (nodeId: string, scope: string, chatId: string | null, defaults?: DefaultsDemand, ownsDefaults?: () => boolean) => queryOptions({
   queryKey: ['node-chat-opening', nodeId] as const,
   queryFn: async ({ signal, client: cache, queryKey }): Promise<NodeChatOpening> => {
+    const state = cache.getQueryState(queryKey);
+    // Later repair/retry owns only Chat. Existing editor queries retain their actual live demand.
+    const first = (state?.dataUpdateCount ?? 0) === 0 && (state?.errorUpdateCount ?? 0) === 0;
+    const requestedDefaults = first && defaults?.defaults === true ? defaults : ownsDefaults?.() === true && hasUnattemptedPeopleHint(cache, queryKey)
+      ? { defaults: true, ...(defaults?.settings_only === true ? { settings_only: true } : {}), secret_names: false, default_provider_name: false, embeddings_provider_name: false } : undefined;
+    const read = beginDefaultsOpening(cache, queryKey, nodeId, signal, ownsDefaults ?? (() => requestedDefaults?.defaults === true), requestedDefaults?.defaults === true);
     const checked = beginPeopleRead(cache, queryKey);
+    if (requestedDefaults?.defaults === true) cache.getQueryCache().build(cache, cache.defaultQueryOptions({ queryKey: nodeKey(nodeId) }));
+    const checkedNode = requestedDefaults?.defaults === true ? beginPeopleRead(cache, nodeKey(nodeId)) : null;
     try {
-    const reader = client.session.getState().readerVersion;
+    const { userId, readerVersion: reader } = client.session.getState();
     const preferred: NodeKind | undefined = ['org', 'project', 'topic', 'thread'].includes(scope) ? scope as NodeKind : undefined;
     const data = await ok(api.GET('/nodes/{id}/chat-opening', {
-      params: { path: { id: nodeId }, query: { scope: preferred, ...(chatId === null ? {} : { chat_id: chatId }), limit: MESSAGES_PAGE } }, signal,
+      params: { path: { id: nodeId }, query: { scope: preferred, ...(chatId === null ? {} : { chat_id: chatId }), limit: MESSAGES_PAGE,
+        ...(requestedDefaults?.defaults === true ? requestedDefaults : {}) } }, signal,
     }));
     signal.throwIfAborted();
-    if (client.session.getState().readerVersion !== reader) throw new DOMException('The chat reader changed', 'AbortError');
+    if (client.session.getState().readerVersion !== reader || client.session.getState().userId !== userId) throw new DOMException('The chat reader changed', 'AbortError');
+    if (requestedDefaults !== undefined && (ownsDefaults === undefined || ownsDefaults()) && seedNodeDefaults(cache, nodeId, data.defaults, requestedDefaults, `${userId ?? ''}:${reader ?? 0}`)) {
+      checkedNode?.accept(); if (read !== undefined) read.projection = data.defaults ?? undefined;
+    }
+    else checkedNode?.cancel();
     if (data.opening !== null) {
       seedChatDraft(cache, data.opening);
       const sync = data.opening.sync;
@@ -120,7 +135,7 @@ export const nodeChatOpeningQuery = (nodeId: string, scope: string, chatId: stri
     }
     checked.accept();
     return data;
-    } catch (error) { checked.cancel(); throw error; }
+    } catch (error) { checked.cancel(); checkedNode?.cancel(); throw error; }
   },
   retry: false,
 });

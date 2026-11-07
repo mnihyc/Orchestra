@@ -16,6 +16,7 @@ import { FilesChoice } from '@/features/change/Files';
 import { useFocusFirst } from '@/features/change/Sentence';
 import type { MoveMachine, Place, PlaceEnvironment, PlaceHost, Thread } from '@/generated/api-types';
 import { hostNotes } from '@/features/resources/hosts/words';
+import { TemporaryChoice } from '@/features/resources/environments/Temporary';
 import { HostCapacity, ResourceHint, resourceChoice, resourcePreview } from '@/features/resource-facts/ResourceFacts';
 import { Checkbox } from '@/ui/Checkbox';
 import { EnvironmentDot } from '@/ui/EnvironmentDot';
@@ -160,6 +161,7 @@ export function Where({ thread, choices, onChange, fork, focus = false }: WhereP
           <Checkbox label={t('fork.files.home')} checked={where.home} onCheckedChange={(home) => set({ ...where, home })} />
           <Checkbox label={t('fork.files.privateViews')} checked={where.privateViews} onCheckedChange={(privateViews) => set({ ...where, privateViews })} />
           <Checkbox label={t('change.where.onlyMe')} checked={where.onlyMe} onCheckedChange={(onlyMe) => set({ ...where, onlyMe })} />
+          <TemporaryChoice checked={where.temporary === true} onChange={(temporary) => set({ ...where, temporary })} forThread />
         </div>
       )}
     </div>

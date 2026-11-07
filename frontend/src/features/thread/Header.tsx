@@ -12,8 +12,8 @@ import { cx } from '@/ui/cx';
 import { useCompactControls } from '@/features/workbench/Narrow';
 import { useViewInstance } from '@/features/workbench/instance';
 import { useMutation, useQueries } from '@tanstack/react-query';
-import { ArrowRightLeft, Box, Ellipsis, GitFork, History, LoaderCircle, MessageSquareDashed, Search } from 'lucide-react';
-import { useMemo, useState } from 'react';
+import { ArrowRightLeft, Box, Ellipsis, GitFork, History, LoaderCircle, MessageSquareDashed, Search, SquareTerminal } from 'lucide-react';
+import { useContext, useMemo, useRef, useState } from 'react';
 import { useTranslation } from 'react-i18next';
 import { AdminReachNotice } from '@/features/access/AdminReachNotice';
 import { useMenuCommands } from '@/features/finder/menuCommands';
@@ -26,7 +26,7 @@ import { client } from '@/api/client';
 import { approvalQuery } from '@/api/approvals';
 import { updateNode } from '@/api/nodes';
 import { resumeAutomatic } from '@/api/threads';
-import type { Thread } from '@/generated/api-types';
+import type { BackgroundCommand, BackgroundWork, Thread } from '@/generated/api-types';
 import { openChange } from '@/features/change/target';
 import { openGoalEditor } from '@/features/goal/editor';
 import { isLive } from '@/features/goal/model';
@@ -44,8 +44,14 @@ import { CatchupRequest } from '@/features/inbox/away/Catchup';
 import { placeOfNode } from '@/features/navigation/places';
 import { DescriptionLine, DescriptionPanel } from '@/features/thread/Description';
 import { SubscriptionBell } from '@/features/thread/SubscriptionBell';
-import { useForkNow } from '@/features/thread/forkNow';
-import { RunningDialog } from '@/features/running/Running';
+import { useImmediateFork } from '@/features/thread/ImmediateFork';
+import { RunningControl, RunningDialog } from '@/features/running/Running';
+import { useRunning } from '@/features/running/live';
+import { BackgroundWorkLine, NativeBackgroundCommands } from '@/features/running/BackgroundWork';
+import type { BackgroundEndTarget } from '@/features/running/review';
+import { SettingsEditor } from '@/features/settings/Editor';
+import { ViewOpeningContext } from '@/features/workbench/viewOpening';
+import { restorePromptFocus } from '@/ui/PromptScope';
 import { MoveToTopic } from '@/features/thread-move/MoveToTopic';
 import { useTimelinePreferences } from '@/features/timeline/preferences';
 import type { WorkDetail } from '@/features/timeline/rows';
@@ -75,7 +81,7 @@ import { StatusPlace } from '@/features/status-items/StatusPlace';
 
 /** Frequent thread acts remain directly reachable, rather than being repeated in the session menu. */
 const HEADER_ACTIONS = new Set(['change-fork-now', 'change-fork', 'change-switch', 'side-ask']);
-const COMMAND_ICONS = { 'change-fork-now': GitFork, 'change-fork': GitFork, 'change-switch': ArrowRightLeft, 'side-ask': MessageSquareDashed, 'change-move': Box };
+const COMMAND_ICONS = { 'change-fork-now': GitFork, 'change-fork': GitFork, 'change-switch': ArrowRightLeft, 'side-ask': MessageSquareDashed, 'change-move': Box, running: SquareTerminal };
 
 /** A running time as minutes and seconds, or with hours once it is that long: "2:14". */
 export function clock(ms: number): string {
@@ -171,18 +177,17 @@ export function StateFact({ thread, compact = false }: { thread: Thread; compact
   const { state, label, words } = useThreadState(thread);
   const items = useThreadPart(thread.id, (view) => view.items);
   const pending = useMemo(() => [...items.values()].flatMap((item) => item.kind === 'approval' && item.status === 'pending' ? [item] : []), [items]);
-  // Observe the same cache as the card for every request, including inline cards. A confirmed POST
-  // stops addressing its former decider at once; thread state itself still comes from the live feed.
-  const observed = useQueries({ queries: pending.map((item) => ({ ...approvalQuery(item.payload.approval_id), enabled: false })) });
-  const canAnswer = pending.some((item, index) => {
-    const current = approvalAtItem(item, observed[index]?.data);
-    return current?.state === 'pending' && current.can_decide;
-  });
+  // An inline snapshot already answers who may decide; older items need the same read as the card.
+  // A confirmed POST stops addressing its former decider before the next thread frame arrives.
+  const observed = useQueries({ queries: pending.map((item) => ({ ...approvalQuery(item.payload.approval_id), enabled: state === 'waiting_approval' && approvalAtItem(item, undefined) === undefined })) });
+  const approvals = pending.map((item, index) => approvalAtItem(item, observed[index]?.data));
+  const canAnswer = approvals.some((current) => current?.state === 'pending' && current.can_decide);
+  const answerUnknown = pending.length < thread.pending_approvals || approvals.some((current) => current === undefined);
   if (threadIconFacts(thread) === undefined) return <ThreadStateIcon display={undefined} />;
   if (compact) {
     const short = isAgentHistoryRemoving(thread) && !thread.archived ? label
       : state === 'blocked' && thread.display.blocked_reason === 'unbound' ? t('thread.header.needsSetup')
-      : state === 'waiting_approval' ? (thread.display.waiting_inputs > 0 ? t('day100.views.needsAttention') : t(canAnswer ? 'composer.row.waitingForYou' : 'thread.header.waitingForAnswer')) : t(`state.${state}`);
+      : state === 'waiting_approval' ? (thread.display.waiting_inputs > 0 ? t('day100.views.needsAttention') : t(canAnswer ? 'composer.row.waitingForYou' : answerUnknown ? 'thread.header.waitingOnApproval' : 'thread.header.waitingForAnswer')) : t(`state.${state}`);
     return <Tooltip content={label}><span role="img" aria-label={label} data-state={state} className="inline-flex shrink-0"><StateChip state={state} label={short} /></span></Tooltip>;
   }
   const chip = <span role="img" aria-label={label}><StateChip state={state} label={label} /></span>;
@@ -195,23 +200,51 @@ export function StateFact({ thread, compact = false }: { thread: Thread; compact
   </span>;
 }
 
-export function ThreadHeader({ thread, onRevealItem }: { thread: Thread; onRevealItem?: ((itemId: string) => void) | undefined }) {
+export function ThreadHeader({ thread, onRevealItem, recoverySwitchVisible = false }: { thread: Thread; onRevealItem?: ((itemId: string) => void) | undefined; recoverySwitchVisible?: boolean }) {
   const compact = useCompactControls();
   const instance = useViewInstance();
   const read = useThreadReadRef(thread.id);
   const { t } = useTranslation();
   const meId = useStore(client.session, (state) => state.userId);
+  const readerVersion = useStore(client.session, (state) => state.readerVersion);
+  const opening = useContext(ViewOpeningContext);
+  const readOnly = useThreadPart(thread.id, threadReadOnly);
+  const runningScope = JSON.stringify([thread.id, opening === undefined ? 'outside' : opening, meId, readerVersion, readOnly]);
   const preferences = useTimelinePreferences();
   const presence = useThreadPart(thread.id, (view) => view.presence);
   const segments = useThreadPart(thread.id, (view) => view.segments);
   const importedHistory = useMemo(() => segments.some((segment) => segment.agent === null && segment.import_fidelity !== null), [segments]);
-  const readOnly = useThreadPart(thread.id, threadReadOnly);
   const [settingUp, setSettingUp] = useState<string | null>(null);
   const [describing, setDescribing] = useState(false);
   const [tagging, setTagging] = useState(false);
   const [editingDescription, setEditingDescription] = useState(false);
   const [catchupOpen, setCatchupOpen] = useState(false);
-  const [runningOpen, setRunningOpen] = useState(false);
+  const [runningFor, setRunningFor] = useState<string | null>(null);
+  const [endTarget, setEndTarget] = useState<BackgroundEndTarget | null>(null);
+  const [wakeSettingsFor, setWakeSettingsFor] = useState<string | null>(null);
+  const runningOpener = useRef<HTMLElement | null>(null);
+  const actionsButton = useRef<HTMLButtonElement>(null);
+  const background = useRunning(thread.id, !readOnly);
+  if (runningFor !== null && (runningFor !== runningScope || background.closed)) { setRunningFor(null); setEndTarget(null); }
+  if (wakeSettingsFor !== null && (wakeSettingsFor !== runningScope || readOnly || thread.archived || !holds(thread.access, 'thread.manage'))) setWakeSettingsFor(null);
+  const beginRunning = (ending: BackgroundEndTarget | null) => {
+    const target = document.activeElement;
+    runningOpener.current = target instanceof HTMLElement && target !== document.body && target !== document.documentElement ? target : null;
+    setEndTarget(ending);
+    setRunningFor(runningScope);
+  };
+  const openRunning = () => beginRunning(null);
+  const endTask = (task: BackgroundWork) => beginRunning({ task: { id: task.id, item_id: task.item_id, turn_id: task.turn_id } });
+  const endCommand = (command: BackgroundCommand) => beginRunning({ command: { id: command.id, segment_id: command.segment_id, item_id: command.item_id, turn_id: command.turn_id } });
+  const closeRunning = () => {
+    setRunningFor(null);
+    requestAnimationFrame(() => {
+      const target = runningOpener.current;
+      if (target !== null && restorePromptFocus(target)) target.focus();
+      else if (actionsButton.current !== null && restorePromptFocus(actionsButton.current)) actionsButton.current.focus();
+    });
+  };
+  const runningEntry = { id: 'running', label: t('running.title'), onSelect: openRunning };
   const [sidesOpen, setSidesOpen] = useState(false);
   const [peopleOpen, setPeopleOpen] = useState(false);
   const [movingTopic, setMovingTopic] = useState(false);
@@ -223,6 +256,7 @@ export function ThreadHeader({ thread, onRevealItem }: { thread: Thread; onRevea
   const capabilities = threadCapabilities(thread);
   const mayDescribe = mayManage && !thread.archived;
   const mayDrive = holds(thread.access, 'thread.interact') && !thread.archived;
+  const wake = readOnly ? null : (background.closed ? null : background.roster?.wake) ?? thread.background ?? null;
   const goal = thread.goal ?? null;
   const goalEditable = goal !== null && (isLive(goal) || goal.status === 'stopped');
   const place = placeOfNode(thread);
@@ -236,7 +270,7 @@ export function ThreadHeader({ thread, onRevealItem }: { thread: Thread; onRevea
     onError: () => toast({ tone: 'danger', title: t('thread.header.notSaved') }),
   });
 
-  const quickFork = useForkNow(thread.id);
+  const quickFork = useImmediateFork(thread);
   const automatic: MenuEntry[] = [];
   if (mayManage) {
     automatic.push(
@@ -270,8 +304,8 @@ export function ThreadHeader({ thread, onRevealItem }: { thread: Thread; onRevea
   const inHeader = (entry: MenuEntry) => HEADER_ACTIONS.has(entry.id);
   const sourceChanges = readOnly ? change.map((entry) => 'onSelect' in entry && entry.id !== 'change-progress'
     ? { ...entry, disabled: t('messageVersions.activeActions') } : entry) : change;
-  useMenuCommands(sourceChanges, { prefix: 'thread', name: thread.name, icons: COMMAND_ICONS });
-  const headerActions = sourceChanges.flatMap((entry) => inHeader(entry) && 'onSelect' in entry ? [entry] : []);
+  useMenuCommands([...sourceChanges, ...(instance === null || instance.focusedContent ? [runningEntry] : [])], { prefix: 'thread', name: thread.name, icons: COMMAND_ICONS });
+  const headerActions = sourceChanges.flatMap((entry) => inHeader(entry) && !(recoverySwitchVisible && entry.id === 'change-switch') && 'onSelect' in entry ? [entry] : []);
   // Compact icons and named menu entries provide the same actions.
   const otherChanges = sourceChanges;
   const remainingNode = nodeEntries;
@@ -293,7 +327,7 @@ export function ThreadHeader({ thread, onRevealItem }: { thread: Thread; onRevea
       entries: [
         { id: 'find', label: t('search.find.command'), icon: <Search aria-hidden />, onSelect: () => openFind(thread.id, instance?.id) },
         { id: 'notifications', label: t('thread.bell.label'), onSelect: () => setNotificationsOpen(true) },
-        { id: 'running', label: t('running.title'), onSelect: () => setRunningOpen(true) },
+        runningEntry,
         ...((thread.sides?.open ?? 0) > 0 ? [{ id: 'side-threads', label: t('side.chip.text', { count: thread.sides?.open ?? 0 }), onSelect: () => setSidesOpen(true) } as MenuEntry] : []),
         ...(presence.some((entry) => entry.user.id !== meId) ? [{ id: 'presence', label: t('ui.presence.here', { names: presence.filter((entry) => entry.user.id !== meId).map((entry) => entry.user.display_name).join(', ') }), onSelect: () => setPeopleOpen(true) } as MenuEntry] : []),
         { id: 'catchup', label: t('away.inbox.catchup'), icon: <History aria-hidden />, onSelect: () => setCatchupOpen(true) },
@@ -321,7 +355,13 @@ export function ThreadHeader({ thread, onRevealItem }: { thread: Thread; onRevea
   return (
     <><StatusPlace place="header" threadId={thread.id} className="shrink-0"><header className="flex shrink-0 flex-col gap-1 border-b border-border px-4 py-2" aria-label={t('thread.header.label')} data-thread-header>
       <div className="flex min-w-0 flex-wrap items-center gap-2" data-thread-title-row>
-        <div className={cx('flex min-w-0 items-start gap-2', compact ? 'basis-full' : 'basis-0 flex-1')}><div className="min-w-0 flex-1"><Title thread={thread} mayEdit={mayManage && !thread.archived} /></div><StateFact thread={thread} compact /><Hint id="thread-states" popover /></div>
+        <div className={cx('flex min-w-0 flex-col gap-1', compact ? 'basis-full' : 'basis-0 flex-1')}>
+          <div className="flex min-w-0 items-start gap-2"><div className="min-w-0 flex-1"><Title thread={thread} mayEdit={mayManage && !thread.archived} /></div><StateFact thread={thread} compact /><RunningControl roster={background.roster} closed={background.closed} opened={runningFor === runningScope} onOpen={openRunning} /><Hint id="thread-states" popover /></div>
+          <BackgroundWorkLine status={wake} showHeldCompletions={readOnly} canManage={mayManage && !thread.archived && !readOnly} mayEnd={mayDrive && !readOnly && !background.closed} onSetting={() => setWakeSettingsFor(runningScope)} onEnd={endTask}>
+            <NativeBackgroundCommands roster={readOnly || background.closed ? null : background.roster} represented={wake?.tasks ?? []} mayEnd={mayDrive && !readOnly && !background.closed} onEnd={endCommand} />
+            <SubagentChips threadId={thread.id} onReveal={onRevealItem} {...(wake === null ? {} : { tasks: wake.tasks })} mayEnd={mayDrive && !readOnly && !background.closed} onEnd={endTask} />
+          </BackgroundWorkLine>
+        </div>
         <div className={cx('flex shrink-0 flex-wrap items-center gap-1', compact ? 'w-full' : 'w-auto')} data-thread-actions-row>
           <div role="group" aria-label={t('thread.header.quickActions')} className="flex shrink-0 items-center gap-1">
             {headerActions.map((entry) => <IconButton key={entry.id} size="sm" label={choiceName(entry)} icon={entry.icon} blocked={Boolean(entry.disabled)}
@@ -332,7 +372,7 @@ export function ThreadHeader({ thread, onRevealItem }: { thread: Thread; onRevea
           <StarButton place={place} />
           <SubscriptionBell thread={thread} />
           <IconButton size="sm" action="share" label={actionName('share')} onClick={() => openAccess({ kind: 'thread', id: thread.id, name: thread.name })} />
-          <Menu label={actionName('actions', thread.name)} align="end" entries={entries} trigger={<IconButton size="sm" label={actionName('actions', thread.name)} icon={<Ellipsis aria-hidden />} />} />
+          <Menu label={actionName('actions', thread.name)} align="end" entries={entries} trigger={<IconButton ref={actionsButton} size="sm" label={actionName('actions', thread.name)} icon={<Ellipsis aria-hidden />} />} />
         </div>
       </div>
       {importedHistory && <StateLine compact icon={<History aria-hidden />} message={t('thread.header.importedHistory')}
@@ -341,16 +381,19 @@ export function ThreadHeader({ thread, onRevealItem }: { thread: Thread; onRevea
         </Tooltip> : undefined} />}
       <AdminReachNotice of={thread.access.admin_access?.place} private={thread.page === 'restricted'} object={{ kind: 'thread', id: thread.id }} />
       {thread.description.trim() !== '' && <DescriptionLine thread={thread} open={describing} onToggle={() => { setEditingDescription(false); setDescribing(true); }} mayEdit={false} />}
-      <SubagentChips threadId={thread.id} onReveal={onRevealItem} />
+      {wakeSettingsFor === runningScope && <Dialog open onOpenChange={(open) => { if (!open) setWakeSettingsFor(null); }} title={t('backgroundWake.settingTitle')}>
+        <SettingsEditor target={{ kind: 'node', id: thread.id }} scope="thread" only={['threads.background_wake']} compact place={{ name: thread.name, owner: thread.owner, access: thread.access, kind: 'thread' }} />
+      </Dialog>}
       {describing && <Dialog open onOpenChange={setDescribing} title={t('thread.description.field')}><DescriptionPanel key={`${thread.description}:${editingDescription}`} thread={thread} initialEdit={editingDescription} mayEdit={mayManage && !thread.archived} onClose={() => setDescribing(false)} /></Dialog>}
       {tagging && <Dialog open onOpenChange={setTagging} title={t('placeTags.title')}><TagPicker place={thread} allowed={holds(thread.access, 'thread.interact') && !thread.archived} /></Dialog>}
       {catchupOpen && <CatchupRequest threadId={thread.id} open onOpenChange={setCatchupOpen} />}
     </header></StatusPlace>
     {settingUp === thread.id && thread.binding === null && !thread.archived && thread.side_of === null && setupReason === null && <SetUpThread thread={thread} onClose={() => setSettingUp(null)} />}
     {notificationsOpen && <Dialog open onOpenChange={setNotificationsOpen} title={t('thread.bell.label')}><SubscriptionBell thread={thread} /></Dialog>}
-    {runningOpen && <RunningDialog thread={thread.id} close={() => setRunningOpen(false)} />}
+    {runningFor === runningScope && !background.closed && <RunningDialog key={JSON.stringify([runningScope, endTarget])} thread={thread.id} close={closeRunning} {...(endTarget === null ? {} : { endTarget })} />}
     {sidesOpen && <Dialog open onOpenChange={setSidesOpen} title={t('side.chip.label')}><SideThreadList thread={thread} onOpened={() => setSidesOpen(false)} onRevealItem={(id) => onRevealItem?.(id)} /></Dialog>}
     {peopleOpen && <Dialog open onOpenChange={setPeopleOpen} title={t('composer.row.looking')}><PresenceStack users={presence} without={meId} /><ul className="flex flex-col gap-2">{presence.filter((entry) => entry.user.id !== meId).map((entry) => <li key={entry.user.id}><UserChip user={entry.user} /></li>)}</ul></Dialog>}
+    {quickFork.confirmation}
     {movingTopic && <MoveToTopic key={thread.id} thread={thread} close={() => setMovingTopic(false)} />}
     </>
   );

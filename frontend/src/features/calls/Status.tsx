@@ -19,6 +19,7 @@ export function CallRecoveryStatus({ recovery, service = false }: { recovery: Ca
   let status: ReactNode;
   if (recovery.detail === 'repeat_limit') status = t('calls.repeatStopped', { kind, count: recovery.count ?? 0, occurrences: recovery.count === null ? '–' : formatNumber(recovery.count, format.locale), window: recovery.window_secs === null ? '–' : formatSpan(recovery.window_secs * 1_000, format, 'short') });
   else if (recovery.detail === 'returning') status = t('calls.returning');
+  else if (recovery.detail === 'machine_offline' && recovery.state === 'scheduled') status = t('calls.details.machine_offline');
   else if (recovery.state === 'stopped' || recovery.state === 'waiting') status = recovery.detail === null ? t('calls.needsAttention', { kind }) : t(`calls.details.${recovery.detail}`, { defaultValue: t('calls.needsAttention', { kind }) });
   else if (recovery.state === 'switching') status = t('calls.switching');
   else if (recovery.step?.type === 'failover') {

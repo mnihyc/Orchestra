@@ -9,6 +9,9 @@ mod places;
 mod resources;
 mod support;
 
+#[path = "skills/read_scopes.rs"]
+mod read_scopes;
+
 use std::io::Write;
 
 use orch_api_contract::access::NewResourceAccess;

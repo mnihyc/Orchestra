@@ -781,6 +781,7 @@ mod tests {
                 sandbox_mode: SandboxMode::Workspace,
                 available_models: vec!["fake-large".to_owned()],
                 subagent_limits: Default::default(),
+                background_wake: true,
                 instructions: String::new(),
                 memory: None,
                 arrangement: ArrangementType::Together,

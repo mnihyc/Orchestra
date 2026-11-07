@@ -19,18 +19,21 @@ use crate::uploads;
 use axum::body::Body;
 use axum::response::{IntoResponse, Response};
 use http::StatusCode;
-use orch_api_contract::common::{ErrorCode, MAX_BODY_BYTES, MAX_JSON_BYTES};
+use orch_api_contract::common::ErrorCode;
 use orch_api_contract::threads::{
-    ContentPart, FILENAME_HEADER, IMAGE_UPLOAD_MAX_BYTES, ThreadAttachmentBlobBody,
-    ThreadAttachmentCreate, ThreadAttachmentCreateReply, ThreadBlobGet, ThreadBlobGetQuery,
-    UploadBlobGet, UploadBlobGetQuery, UploadCreate, UploadSessionComplete, UploadSessionCreate,
-    UploadSessionCreateBody, UploadSessionCreateReply, UploadSessionPut, UploadSessionPutQuery,
-    UploadedBlob,
+    ContentPart, FILENAME_HEADER, IMAGE_UPLOAD_MAX_BYTES, ThreadAttachmentCreate, ThreadBlobGet,
+    ThreadBlobGetQuery, UploadBlobGet, UploadBlobGetQuery, UploadCreate, UploadSessionComplete,
+    UploadSessionCreate, UploadSessionCreateBody, UploadSessionCreateReply, UploadSessionPut,
+    UploadSessionPutQuery, UploadedBlob,
 };
 use orch_api_contract::threads::{UploadBlobDelete, UploadBlobDeleteQuery, UploadSessionDelete};
 use orch_blob_contract::range::BlobMeta;
 use orch_db::queries::storage;
 use orch_types::Hash;
+
+mod attachment;
+mod blob_source;
+mod custody;
 
 /// The kinds of image the agents take, as a request states them.
 const IMAGE_TYPES: [&str; 4] = ["image/png", "image/jpeg", "image/webp", "image/gif"];
@@ -45,14 +48,34 @@ const ATTACHMENTS_DIR: &str = ".orch/attachments";
 pub fn mount(registry: &mut Registry) {
     registry
         .on_raw(UploadCreate, create)
-        .on_raw(UploadBlobGet, upload_get)
+        .on_raw_read_with_optional_operation(
+            UploadBlobGet,
+            crate::key_operations::native::selected::<blob_source::Blobs>,
+            upload_get,
+        )
         .on(UploadSessionCreate, session_create)
-        .on_raw(UploadSessionPut, session_put)
-        .on(UploadSessionComplete, session_complete)
-        .on(UploadSessionDelete, session_delete)
-        .on(UploadBlobDelete, blob_delete)
-        .on_raw(ThreadAttachmentCreate, attach)
-        .on_raw(ThreadBlobGet, blob_get);
+        .on_raw_query_with_optional_operation(
+            UploadSessionPut,
+            crate::key_operations::native::stored::<uploads::session_operation::Sessions, _, _>,
+            session_put,
+        )
+        .on_with_optional_operation(
+            UploadSessionComplete,
+            crate::key_operations::native::stored::<uploads::session_operation::Sessions, _, _>,
+            session_complete,
+        )
+        .on_with_optional_operation(
+            UploadSessionDelete,
+            crate::key_operations::native::stored::<uploads::session_operation::Sessions, _, _>,
+            session_delete,
+        )
+        .on_with_optional_operation(
+            UploadBlobDelete,
+            crate::key_operations::native::stored_query::<custody::Custody, _>,
+            blob_delete,
+        )
+        .on_raw_staged_operation::<_, attachment::Attachment, _, _>(ThreadAttachmentCreate, attach)
+        .on_raw_read_with_operation(ThreadBlobGet, super::read_operation::prepare, blob_get);
 }
 
 /// The name a request gives the file in its body: the header's text, with the escapes a browser
@@ -154,6 +177,7 @@ async fn session_put(ctx: Ctx, query: UploadSessionPutQuery, body: Body) -> ApiR
         .with("limit", uploads::chunk_bytes())
     })?;
     let reply = uploads::put_piece(&ctx, ctx.id("upload_id")?, query.offset, &piece).await?;
+    crate::key_operations::publication::receipt(&ctx, &reply)?;
     json_reply(StatusCode::OK, &reply)
 }
 
@@ -167,151 +191,40 @@ async fn session_delete(ctx: Ctx, (): (), (): ()) -> ApiResult<()> {
 }
 
 async fn blob_delete(ctx: Ctx, query: UploadBlobDeleteQuery, (): ()) -> ApiResult<()> {
-    let hash = ctx
-        .param("hash")?
-        .parse::<Hash>()
-        .map_err(|_| ApiError::not_found())?;
-    if query.thread.is_some() != query.path.is_some() {
-        return Err(ApiError::invalid(
-            "path",
-            "an attachment release names both its thread and path",
-        ));
-    }
-    let (mut tx, guard) = transaction_guard::begin(&ctx).await?;
+    let asked = custody::input(&ctx, query)?;
+    let (mut tx, _initial) = transaction_guard::begin(&ctx).await?;
     // Retention takes the same lock, keeping another private copy safe while unused bytes are released.
-    orch_db::queries::uploads::lock_blobs(&mut tx, &[hash]).await?;
-    let content = serde_json::json!([{ "blob": hash.to_string() }]);
-    let images = serde_json::json!([{ "images": [{ "blob": hash.to_string() }] }]);
-    let attachments = serde_json::json!([{ "attachments": [{ "blob": hash.to_string() }] }]);
-    sqlx::query("DELETE FROM thread_attachment_uploads WHERE created_by=$1 AND blob=$2 AND thread_id=$3 AND path=$4")
-        .bind(guard.user().id()).bind(hash.as_bytes().as_slice()).bind(query.thread).bind(query.path)
-        .execute(&mut *tx).await.map_err(orch_db::DbError::from)?;
-    sqlx::query(
-        "DELETE FROM completed_uploads WHERE user_id=$1 AND hash=$2
-      AND NOT EXISTS(SELECT 1 FROM thread_attachment_uploads WHERE created_by=$1 AND blob=$2)
-      AND NOT EXISTS(SELECT 1 FROM drafts WHERE user_id=$1 AND (content @> $3 OR content @> $4 OR content @> $5))
-      AND NOT EXISTS(SELECT 1 FROM chat_states WHERE user_id=$1 AND (draft @> $3 OR draft @> $4 OR draft @> $5))",
-    )
-    .bind(guard.user().id())
-    .bind(hash.as_bytes().as_slice())
-    .bind(&content)
-    .bind(&images)
-    .bind(&attachments)
-    .execute(&mut *tx)
-    .await
-    .map_err(orch_db::DbError::from)?;
+    orch_db::queries::uploads::lock_blobs(&mut tx, &[asked.hash]).await?;
+    let (ctx, guard) = transaction_guard::after_wait(&ctx, &mut tx).await?;
+    let prepared = if crate::key_operations::native::modern(guard.principal().caller()) {
+        Some(guard.operation_data::<crate::key_operations::native::Prepared<custody::Release>>()?)
+    } else {
+        None
+    };
+    let value = prepared.as_ref().map_or(&asked, |ready| &ready.value);
+    if value.hash != asked.hash {
+        return Err(ApiError::internal("the locked upload hash changed"));
+    }
+    custody::require(&ctx, guard.principal(), value)?;
+    guard.check_deadline(&ctx)?;
+    custody::release(&mut tx, value).await?;
     tx.commit().await.map_err(orch_db::DbError::from)?;
     Ok(())
 }
 
 /// Attaches a file to a thread, from a body that has the file and the header that names it, or from
 /// the hash of an upload that was ended.
-async fn attach(ctx: Ctx, (): (), body: Body) -> ApiResult<Response> {
-    let supplied_bytes = filename_of(&ctx).is_some();
-    let (meta, name, replace): (BlobMeta, String, Option<String>) = if let Some(name) =
-        filename_of(&ctx)
-    {
-        let name = uploads::clean_name(FILENAME_HEADER, &name)?;
-        let limit = i64::try_from(MAX_BODY_BYTES).unwrap_or(i64::MAX);
-        let meta = ctx
-            .app
-            .blobs
-            .store_stream(body.into_data_stream(), limit)
-            .await
-            .map_err(uploads::stored_badly)?;
-        (meta, name, None)
-    } else {
-        let bytes = axum::body::to_bytes(body, MAX_JSON_BYTES)
-            .await
-            .map_err(|_| ApiError::new(ErrorCode::RequestTooLarge, "the body is too large"))?;
-        let named: ThreadAttachmentBlobBody = serde_json::from_slice(&bytes).map_err(|_| {
-            ApiError::invalid(
-                "",
-                "a file is sent as the body with its name in the header, or as the hash of an upload and a name",
-            )
-        })?;
-        let name = uploads::clean_name("name", &named.name)?;
-        let (mut tx, guard) = transaction_guard::begin(&ctx).await?;
-        attachments::require(&mut tx, guard.principal(), &named.blob).await?;
-        tx.commit().await.map_err(orch_db::DbError::from)?;
-        let size = ctx
-            .app
-            .blobs
-            .store()
-            .size(&named.blob)
-            .await
-            .map_err(ApiError::internal)?
-            .ok_or_else(ApiError::not_found)?;
-        (
-            BlobMeta {
-                hash: named.blob,
-                size,
-            },
-            name,
-            named.replace,
-        )
-    };
-    let (mut tx, guard) = transaction_guard::begin(&ctx).await?;
-    if !orch_db::queries::transaction_guard::lock_parent(&mut tx, ctx.id("id")?).await? {
-        return Err(ApiError::not_found());
-    }
-    orch_db::queries::threads::lock(&mut tx, ctx.id("id")?)
-        .await?
-        .ok_or_else(ApiError::not_found)?;
-    sqlx::query("DELETE FROM thread_attachment_uploads WHERE expires_at < $1")
-        .bind(ctx.now)
-        .execute(&mut *tx)
-        .await
-        .map_err(orch_db::DbError::from)?;
-    attachments::retain(
-        &ctx,
-        &mut tx,
-        guard.principal(),
-        &attachments::Taken {
-            meta,
-            name: name.clone(),
-            supplied_bytes,
-        },
-    )
-    .await?;
-    let owned: Option<String> = if let Some(path) = &replace {
-        if !path.starts_with(".orch/attachments/") {
-            return Err(ApiError::invalid(
-                "replace",
-                "an edit names its private attachment",
-            ));
-        }
-        sqlx::query_scalar("SELECT name FROM thread_attachment_uploads WHERE thread_id=$1 AND path=$2 AND created_by=$3 AND blob IS NOT NULL FOR UPDATE")
-            .bind(ctx.id("id")?).bind(path).bind(guard.user().id()).fetch_optional(&mut *tx).await.map_err(orch_db::DbError::from)?
-    } else {
-        None
-    };
-    let name = if let Some(name) = owned {
-        sqlx::query("UPDATE thread_attachment_uploads SET blob=$3,expires_at=$4 WHERE thread_id=$1 AND path=$2")
-            .bind(ctx.id("id")?).bind(replace).bind(meta.hash.as_bytes().as_slice()).bind(ctx.now + uploads::SESSION_LIFE)
-            .execute(&mut *tx).await.map_err(orch_db::DbError::from)?;
-        name
-    } else {
-        let used = orch_engine::paste::attachment_names(&mut tx, ctx.id("id")?)
-            .await
-            .map_err(ApiError::internal)?;
-        let name = orch_engine::paste::available_name(&crate::media::safe_name(&name), &used);
-        sqlx::query("INSERT INTO thread_attachment_uploads(thread_id,path,name,created_by,blob,expires_at) VALUES($1,$2,$3,$4,$5,$6)")
-            .bind(ctx.id("id")?).bind(format!("{ATTACHMENTS_DIR}/{name}")).bind(&name).bind(guard.user().id()).bind(meta.hash.as_bytes().as_slice()).bind(ctx.now + uploads::SESSION_LIFE)
-            .execute(&mut *tx).await.map_err(orch_db::DbError::from)?;
-        name
-    };
-    // The private reservation owns a pin until it is sent, removed or expires.
-    tx.commit().await.map_err(orch_db::DbError::from)?;
-    json_reply(
-        StatusCode::OK,
-        &ThreadAttachmentCreateReply {
-            path: format!("{ATTACHMENTS_DIR}/{name}"),
-            name,
-            size: meta.size,
-            blob: meta.hash,
-        },
-    )
+async fn attach(
+    ctx: Ctx,
+    (): (),
+    _input: std::sync::Arc<attachment::Input>,
+) -> ApiResult<Response> {
+    let (tx, _guard) = transaction_guard::begin(&ctx).await?;
+    let completed =
+        crate::key_operations::native::effects::apply_owned::<attachment::Attachment>(&ctx, tx)
+            .await?;
+    crate::key_operations::publication::receipt(&completed.ctx, &completed.output)?;
+    json_reply(StatusCode::OK, &completed.output)
 }
 
 // ---------------------------------------------------------------- what a thread carries
@@ -363,6 +276,7 @@ async fn blob_get(ctx: Ctx, query: ThreadBlobGetQuery, _: Body) -> ApiResult<Res
         .parse()
         .map_err(|_| ApiError::not_found())?;
     let mut conn = ctx.app.db.acquire().await?;
+    super::read_operation::require_current(&ctx, &mut conn).await?;
     let carrying = storage::input_carrying(&mut conn, thread, &hash).await?;
     let described = carrying
         .clone()
@@ -472,15 +386,15 @@ async fn blob_get(ctx: Ctx, query: ThreadBlobGetQuery, _: Body) -> ApiResult<Res
 
 /// A private draft reads only a hash the caller independently holds, never somebody else's unfinished input.
 async fn upload_get(ctx: Ctx, query: UploadBlobGetQuery, _: Body) -> ApiResult<Response> {
-    let hash: Hash = ctx
-        .param("hash")?
-        .parse()
-        .map_err(|_| ApiError::not_found())?;
-    let name = uploads::clean_name("name", &query.name)?;
-    let mut conn = ctx.app.db.acquire().await?;
-    let principal = crate::middleware::authorization::principal(&ctx, &mut conn).await?;
-    attachments::require(&mut conn, &principal, &hash).await?;
-    drop(conn);
+    let selected = crate::key_operations::native::selected_read::<blob_source::Blobs>(
+        ctx.clone(),
+        query.clone(),
+        (),
+    )
+    .await?;
+    blob_source::retain(&ctx, &selected)?;
+    let hash = selected.hash;
+    let name = selected.name.clone();
     let media = crate::media::media_type(&name, &[]);
     if query.archive == Some(true) {
         let size = ctx

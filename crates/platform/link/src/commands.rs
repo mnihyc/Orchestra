@@ -1024,6 +1024,8 @@ pub struct CommandIssuer {
     state: Arc<Mutex<IssuerState>>,
     down: mpsc::UnboundedSender<DownFrame>,
     clock: Arc<dyn Clock>,
+    #[cfg(feature = "test-observers")]
+    observed: Option<Arc<crate::test_observers::QueueGauge>>,
 }
 
 impl std::fmt::Debug for CommandIssuer {
@@ -1111,11 +1113,33 @@ impl CommandIssuer {
             })),
             down,
             clock,
+            #[cfg(feature = "test-observers")]
+            observed: None,
         }
     }
 
+    #[cfg(feature = "test-observers")]
+    pub(crate) fn with_observer(
+        mut self,
+        observed: Arc<crate::test_observers::QueueGauge>,
+    ) -> Self {
+        self.observed = Some(observed);
+        self
+    }
+
+    fn send_down(&self, frame: DownFrame) -> Result<(), mpsc::error::SendError<DownFrame>> {
+        #[cfg(feature = "test-observers")]
+        if let Some(observed) = &self.observed {
+            let bytes = orch_link_contract::frames::encode(&frame, usize::MAX)
+                .ok()
+                .map(|text| text.len());
+            return observed.send(&self.down, frame, bytes);
+        }
+        self.down.send(frame)
+    }
+
     fn transmit(&self, issued: &mut Issued, now: Instant) {
-        if self.down.send(DownFrame::Cmd(issued.cmd.clone())).is_ok() {
+        if self.send_down(DownFrame::Cmd(issued.cmd.clone())).is_ok() {
             issued.sent_at = Some(now);
             issued.tx.send_if_modified(|progress| {
                 if *progress == Progress::Queued {
@@ -1241,6 +1265,32 @@ impl CommandIssuer {
         }
     }
 
+    /// Refuses a local transmission only while the machine has not acknowledged it.
+    /// The same state lock serializes this decision with CmdAck and native results; an
+    /// earlier acknowledgement cannot be overwritten by a delayed sealing/admission error.
+    /// This is not a native answer and never establishes handler completion.
+    pub fn refuse_unaccepted(&self, id: Id, error: &CommandError) -> bool {
+        let mut state = lock(&self.state);
+        let Some(issued) = state.commands.get_mut(&id) else {
+            return false;
+        };
+        let refused = issued.tx.send_if_modified(|progress| {
+            if matches!(*progress, Progress::Queued | Progress::Sent) {
+                *progress = Progress::Failed(error.clone());
+                true
+            } else {
+                false
+            }
+        });
+        // A suppressed duplicate cannot receive a new ACK. Retire that resend's
+        // ACK timer just as the acknowledgement already observed by this issuer did.
+        let accepted = matches!(*issued.tx.borrow(), Progress::Accepted);
+        if refused || accepted {
+            issued.sent_at = None;
+        }
+        refused
+    }
+
     /// Whether the machine has returned from this command's handler, even after a cancellation request.
     #[must_use]
     pub fn answered(&self, id: Id) -> bool {
@@ -1288,7 +1338,7 @@ impl CommandIssuer {
             let _ = was_open;
         }
         // Cancellation is replayable after reconnect, including when only its terminal row remains.
-        let _ = self.down.send(DownFrame::CmdCancel(CmdCancel { id }));
+        let _ = self.send_down(DownFrame::CmdCancel(CmdCancel { id }));
     }
 
     /// Looks at the clocks: a command the machine did not acknowledge in time

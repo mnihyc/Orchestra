@@ -17,6 +17,7 @@ import { ArrangementSection } from './Arrangement';
 import { modelName, NEW_ENVIRONMENT, NO_PICKS, type Picks } from './choices';
 import { useStartOptions } from './options';
 import { Where } from './Where';
+import { TemporaryChoice } from '@/features/resources/environments/Temporary';
 import { agentWhy, bindingReason, providerWhy } from './words';
 
 const SUGGEST = { suggest: true };
@@ -27,9 +28,10 @@ export function SetUpThread({ thread, onClose }: { thread: Thread; onClose: () =
   const [created, setCreated] = useState<Environment | null>(null);
   const [picks, setPicks] = useState<Picks>({ ...NO_PICKS, environment: thread.environment?.id ?? null });
   const [requesting, setRequesting] = useState<BindingEnvironment | null>(null);
+  const [temporary, setTemporary] = useState(false);
   const { options, resolved, loading, failed, refreshing, retry } = useStartOptions(thread.topic_id, picks, SUGGEST);
   // A binding refusal leaves the accepted environment standing. Retry that same choice without making another.
-  const made = useRef<Environment | null>(null);
+  const made = useRef<{ intent: string; environment: Environment } | null>(null);
   const placed = useRef<{ choice: string; environment: string } | null>(null);
   const parent = thread.path.find((part) => part.id === thread.topic_id);
   const place: PlaceRef = { id: thread.topic_id, kind: 'topic', name: parent?.name ?? '', parentId: null, archived: false, status: null, folder: false };
@@ -41,21 +43,23 @@ export function SetUpThread({ thread, onClose }: { thread: Thread; onClose: () =
       const choice = resolved.fresh ? NEW_ENVIRONMENT : resolved.environment?.environment.id;
       if (choice === undefined) return;
       let environment = choice;
+      const body = { ...resolved.newEnvironment, home_node_id: thread.topic_id, ...(temporary ? { config: { 'env.lifetime': 'thread' } } : {}) };
+      const intent = choice === NEW_ENVIRONMENT ? JSON.stringify(body) : choice;
       if (choice === NEW_ENVIRONMENT) {
-        if (made.current === null) {
-          const body = { home_node_id: thread.topic_id };
-          made.current = await createEnvironment(body, actKey(body));
-          setCreated(made.current);
+        if (made.current?.intent !== intent) {
+          const environment = await createEnvironment(body, actKey(body));
+          made.current = { intent, environment };
+          setCreated(environment);
         }
-        environment = made.current.id;
+        environment = made.current.environment.id;
       }
       const held = placed.current;
-      if (held?.choice !== choice) {
+      if (held?.choice !== intent) {
         const answer = await placeUnboundThread(thread.id, {
           use: environment,
           ...(resolved.environment?.directory ? { directory: resolved.environment.directory } : {}),
         });
-        if (answer.environment !== null) placed.current = { choice, environment: answer.environment.id };
+        if (answer.environment !== null) placed.current = { choice: intent, environment: answer.environment.id };
       }
       await bindUnboundThread(thread.id, {
         agent_id: resolved.agent.id, provider_id: resolved.provider.id, arrangement: resolved.arrangement,
@@ -74,7 +78,7 @@ export function SetUpThread({ thread, onClose }: { thread: Thread; onClose: () =
       <Button disabled={save.isPending} onClick={onClose}>{t('common.cancel')}</Button>
       <Button variant="primary" pending={save.isPending} disabled={unavailable} onClick={() => save.mutate()}>{t('threadSetup.save')}</Button>
     </>}>
-    <div className="flex flex-col gap-4" data-thread-setup>
+    <div className="flex flex-col gap-4 outline-none" data-thread-setup data-autofocus tabIndex={-1}>
       {options === null || resolved === null ? loading ? <div className="h-32 animate-pulse rounded-md bg-bg-muted" aria-label={t('start.why.loading')} /> : <ErrorState compact error={failed} onRetry={retry} /> : <>
         <Select label={t('start.provider.title')} value={resolved.provider?.id ?? ''} disabled={options.defaults.locked || save.isPending}
           onValueChange={(provider) => pick({ provider, agent: null, model: null, effort: null, arrangement: null })}
@@ -87,7 +91,9 @@ export function SetUpThread({ thread, onClose }: { thread: Thread; onClose: () =
           options={resolved.models.map((model) => ({ value: model.model_name, label: modelName(model), ...resourceChoice({ kind: 'model', model, providerId: resolved.provider?.id ?? '' }) }))} />
         <section className="flex flex-col gap-2"><h3 className="text-sm font-medium">{t('start.where.title')}</h3>
           <Where compact place={place} options={options} value={resolved.fresh ? NEW_ENVIRONMENT : resolved.environment?.environment.id ?? null}
-            onChange={(environment) => { if (!save.isPending) pick({ environment, arrangement: null }); }} machines={[]} homeId={thread.org_id} requesting={requesting} onRequestingChange={setRequesting} onRefresh={retry} />
+            onChange={(environment) => { if (!save.isPending) pick({ environment, arrangement: null }); }} machines={[]} homeId={thread.org_id} requesting={requesting} onRequestingChange={setRequesting} onRefresh={retry}
+            newEnvironment={picks.newEnvironment} onNewEnvironmentChange={(newEnvironment) => { if (!save.isPending) pick({ newEnvironment }); }} />
+          {resolved.fresh && requesting === null && <TemporaryChoice checked={temporary} onChange={setTemporary} disabled={save.isPending} forThread />}
         </section>
         {requesting === null && <ArrangementSection resolved={resolved} refreshing={refreshing} onChange={(arrangement) => { if (!save.isPending) pick({ arrangement }); }} />}
       </>}

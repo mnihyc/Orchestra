@@ -7,6 +7,7 @@
 
 mod places;
 mod support;
+use support::FullRoleReply as _;
 
 use orch_api_contract::{
     access::{NodeRoleCreate, RoleCreateBody, RoleDelete},
@@ -83,6 +84,7 @@ async fn give_admin(
         .body(&body)
         .send()
         .await
+        .full_role()
         .ok()
 }
 

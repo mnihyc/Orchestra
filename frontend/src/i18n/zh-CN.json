@@ -66,6 +66,8 @@
   "temporary": {
     "name": "临时",
     "description": "空闲超时或创建它的线程归档后，删除此环境及其自有文件。已有目录会保留。",
+    "idleDescription": "空闲超时后删除此环境及其自有文件。已有目录会保留。",
+    "idleConsent": "空闲期限到达后删除自有文件，并提前通知。请在期限前选择“保留”以取消删除。",
     "consent": "按空闲期限或线程生命周期安排删除；删除自有文件前至少提前一小时通知。",
     "keep": "保留",
     "kept": "已保留，已取消自动删除",
@@ -200,6 +202,7 @@
       "label": "以管理员身份：{{state}}",
       "enable": "启用管理员模式",
       "description": "在此会话中使用你的管理权限。你的代理仍使用其自己的访问权限。",
+      "leftPage": "你已退出管理员模式；刚才的页面需要该模式。",
       "failed": "无法更改管理员模式。",
       "stateOn": "开启",
       "stateOff": "关闭"
@@ -786,24 +789,36 @@
     },
     "agentStep": {
       "none": {
-        "name": "无",
+        "name": "—",
         "description": "不授予此区域的访问权限。"
       },
       "view": {
-        "name": "查看",
+        "name": "可查看",
         "description": "允许智能体阅读此区域。"
       },
       "write": {
-        "name": "发言",
+        "name": "可写入",
         "description": "允许智能体在此区域发送消息。"
       },
       "edit": {
-        "name": "编辑",
+        "name": "可编辑",
         "description": "允许智能体编辑此区域的文档。"
       },
       "manage": {
-        "name": "管理",
-        "description": "允许智能体管理此区域，包括其访问权限。"
+        "name": "可管理",
+        "description": "管理文档、删除聊天中任何人的消息，或归档、创建分支和删除线程。权限页和所有权仍独立。"
+      },
+      "post": {
+        "name": "可发布",
+        "description": "阅读并在共享聊天中发送消息。"
+      },
+      "send": {
+        "name": "可发送",
+        "description": "阅读共享会话并向其发送消息。"
+      },
+      "read": {
+        "name": "$t(choiceCatalog.agentStep.view.name)",
+        "description": "$t(choiceCatalog.agentStep.view.description)"
       }
     },
     "period": {
@@ -1762,48 +1777,6 @@
         "description": "在此运行单元下次启动时应用所选更新。"
       }
     },
-    "broadcastReach": {
-      "topic": {
-        "name": "话题",
-        "description": "向当前话题内的会话发送公告。"
-      },
-      "project": {
-        "name": "项目",
-        "description": "向当前项目内代理可以参与的会话发送公告。"
-      },
-      "org": {
-        "name": "组织",
-        "description": "向最近上级组织内代理可以参与的会话发送公告。"
-      }
-    },
-    "agentReach": {
-      "none": {
-        "name": "无",
-        "description": "不通过此设置向代理提供这种访问范围。"
-      },
-      "topic": {
-        "name": "话题",
-        "description": "按此设置使用当前话题中可见的工作。"
-      },
-      "project": {
-        "name": "项目",
-        "description": "按允许范围使用此项目及其可读文件夹中的可见工作。"
-      }
-    },
-    "agentDocumentAccess": {
-      "none": {
-        "name": "无",
-        "description": "不通过此设置自动授予文档访问权。"
-      },
-      "read": {
-        "name": "阅读",
-        "description": "允许所选代理阅读此设置覆盖的文档。"
-      },
-      "write": {
-        "name": "写入",
-        "description": "允许所选代理在许可范围内修改文档。"
-      }
-    },
     "indexMode": {
       "full": {
         "name": "建立索引",
@@ -2087,7 +2060,7 @@
       },
       "manage_shared": {
         "name": "管理共享内容",
-        "description": "审阅并确认共享工作中获准的管理操作。文档名称不明确时会先列出候选并拒绝操作，不改变任何内容。"
+        "description": "创建文档文件夹、复制、移动和恢复会直接执行。删除文档以及管理线程或聊天需先预览再确认。文档名称不明确时会先列出候选并拒绝操作，不改变任何内容。"
       },
       "send_message": {
         "name": "发送消息",
@@ -2737,6 +2710,48 @@
         "name": "关闭",
         "description": "只使用初始图搜索宽度，不继续迭代扫描。"
       }
+    },
+    "agentReach": {
+      "nothing": {
+        "name": "$t(agentAccess.where.nothing)",
+        "description": "$t(agentAccess.reach.nothing)"
+      },
+      "thread": {
+        "name": "$t(agentAccess.where.thread)",
+        "description": "$t(agentAccess.reach.thread)"
+      },
+      "topic": {
+        "name": "$t(agentAccess.where.topic)",
+        "description": "$t(agentAccess.reach.topic)"
+      },
+      "project": {
+        "name": "$t(agentAccess.where.project)",
+        "description": "$t(agentAccess.reach.project)"
+      }
+    },
+    "webSearch": {
+      "disabled": {
+        "name": "关闭",
+        "description": "不提供原生网络搜索工具。"
+      },
+      "cached": {
+        "name": "缓存",
+        "description": "在支持时使用索引内容，不从网络实时读取。"
+      },
+      "live": {
+        "name": "实时",
+        "description": "允许模型在需要时搜索公开网络。"
+      }
+    },
+    "backgroundWake": {
+      "on": {
+        "name": "开",
+        "description": "后台工作结束时唤醒代理。"
+      },
+      "off": {
+        "name": "关",
+        "description": "Codex 的结果随下一次输入送达；Claude Code 命令在前台运行。"
+      }
     }
   },
   "inventoryChoices": {
@@ -3346,6 +3361,10 @@
       }
     },
     "exec": {
+      "version_overrides": {
+        "title": "任意代理版本",
+        "description": "环境管理者允许与任意代理版本配合使用的机器程序路径和版本。路径或版本改变后需要重新批准。"
+      },
       "offers": {
         "title": "提供的执行方式",
         "description": "与提供方一起运行的代理如何在此环境中运行工具，以及尝试这些方式的顺序。"
@@ -3366,14 +3385,6 @@
       }
     },
     "sharing": {
-      "agent_reach": {
-        "title": "智能体的读取范围",
-        "description": "没有单独分享时，此处智能体可以读取哪些其他线程：不读取、同一话题，或同一项目。"
-      },
-      "agent_documents": {
-        "title": "话题文档",
-        "description": "智能体是否可读取，或同时编辑和创建话题及其主线程旁的公开文档。私有文档、对话、聊天、管理和导出仍遵循各自规则。"
-      },
       "snapshot_max_bytes": {
         "title": "最大分享副本",
         "description": "单次请求可分享给智能体的最大副本大小，以字节计。"
@@ -3415,10 +3426,6 @@
       "rate_per_hour": {
         "title": "每小时公告数",
         "description": "一个线程的智能体在滚动一小时内最多发送多少条公告；零表示不允许发送。"
-      },
-      "agent_scope": {
-        "title": "智能体公告范围",
-        "description": "智能体的公告可送达本话题、所在项目或最近的组织。"
       }
     },
     "export": {
@@ -4222,6 +4229,22 @@
         "title": "摘要输入比例",
         "description": "交接、分叉或目标核对发送给摘要模型的对话最多占其上下文窗口的比例：先发最新的轮次，更早的只发一行索引。"
       }
+    },
+    "threads": {
+      "agent_access": {
+        "title": "智能体访问权限",
+        "description": "创建会话时显示的初始范围及各区域权限。创建者确认自己可以授予的权限。仅适用于新会话，不改写已有授权。"
+      },
+      "background_wake": {
+        "title": "后台唤醒",
+        "description": "后台任务或子代理结束时唤醒代理。关闭后，Codex 的结果随下一次输入送达；Claude Code 不提供后台任务，命令在前台运行。变更在下次会话生效。",
+        "keywords": [
+          "后台任务",
+          "完成后唤醒",
+          "后台",
+          "唤醒"
+        ]
+      }
     }
   },
   "helpScreenReview": {
@@ -4686,8 +4709,8 @@
     "alreadyMore_other": "另有 {{count}} 人已持有其中部分权限。",
     "inside": "此处及其中跟随它的内容",
     "itself": "仅此项",
-    "download": "代理也可以取走文件",
-    "noDownload": "不增加文件下载权限",
+    "download": "请求包含导出",
+    "noDownload": "未请求导出",
     "future": "包括目标位置今后创建的线程",
     "copy_one": "一份副本，{{count}} 个文件，{{bytes}} 字节",
     "copy_other": "一份副本，{{count}} 个文件，{{bytes}} 字节",
@@ -6008,7 +6031,7 @@
       "done": "完成",
       "provider_exhausted": "已达限额",
       "provider_unauthorized": "被拒绝",
-      "provider_busy": "请求受限",
+      "provider_busy": "提供方繁忙",
       "provider_unreachable": "网络错误",
       "model_unavailable": "模型不可用",
       "context_overflow": "上下文已达上限",
@@ -6020,7 +6043,10 @@
       "cap_reached": "用量已达上限",
       "not_measured": "未测量",
       "errors": "失败",
-      "model_refused": "请求被拒绝"
+      "model_refused": "请求被拒绝",
+      "rate_limited": "请求受限",
+      "overloaded": "提供方过载",
+      "stream_interrupted": "响应流中断"
     },
     "dash": "—",
     "why": "？",
@@ -6200,7 +6226,7 @@
           "description": "仅显示此结果的请求。"
         },
         "provider_busy": {
-          "name": "请求受限",
+          "name": "提供方繁忙",
           "description": "仅显示此结果的请求。"
         },
         "provider_unreachable": {
@@ -6250,6 +6276,18 @@
         "model_refused": {
           "name": "请求被拒绝",
           "description": "提供方的过滤器拒绝了此请求。"
+        },
+        "rate_limited": {
+          "name": "请求受限",
+          "description": "显示具有此结果的请求。"
+        },
+        "overloaded": {
+          "name": "提供方过载",
+          "description": "显示具有此结果的请求。"
+        },
+        "stream_interrupted": {
+          "name": "响应流中断",
+          "description": "显示具有此结果的请求。"
         }
       },
       "member": {
@@ -6490,6 +6528,8 @@
       "noEnvironment": "没有环境",
       "noEffort": "无推理强度",
       "standard": "标准",
+      "actualTierNotReported": "实际服务层级未报告",
+      "knownTier": "已知服务层级",
       "direct": "直接位于此组织",
       "hidden": "你无权查看的{{kind}}",
       "kind": {
@@ -6739,7 +6779,32 @@
     "update": "更新连接器后可在此更改角色。",
     "node": "节点由 orch-node 运行。其他角色请另添连接器。"
   },
+  "environmentTools": {
+    "codex": "Codex 工具",
+    "unknownProgram": "代理工具",
+    "anyVersion": "任意代理版本",
+    "anyVersionBy": "任意代理版本 · {{name}}",
+    "approverUnavailable": "姓名不可用",
+    "configUnavailable": "当前环境配置不可用，请刷新页面后重试。",
+    "unknownVersion": "未知",
+    "versionMismatch": "Codex 在 {{machine}} 上的版本是 {{programVersion}}；此代理运行的版本是 {{agentVersion}}。环境管理者可在环境页面允许使用该版本。"
+  },
   "machinePrograms": {
+    "nativeTitle": "这台机器上的智能体程序",
+    "nativeFound": "已发现",
+    "nativeConfirmed": "已确认",
+    "nativeUse": "使用",
+    "nativeRemove": "移除",
+    "nativeRefresh": "刷新程序",
+    "nativeUnknownVersion": "版本未知",
+    "nativeNotReported": "这台机器尚未报告智能体程序的发现结果。",
+    "nativeNotSearched": "尚未搜索任何智能体程序种类。",
+    "nativeEmpty": "未发现智能体程序。",
+    "nativeRoleNeeded": "智能体程序需要环境或智能体角色。",
+    "nativeKept": "智能体程序由这台机器的本地策略管理。",
+    "nativeCommandNotReported": "这台机器尚未报告当前智能体程序策略及其命令。",
+    "nativeRemoveTitle": "从已确认程序中移除 {{name}}？",
+    "nativeRemoveBody": "由此程序启动的执行器会停止。会话再次运行前会重新检查。程序文件仍保留在机器上。",
     "signIns": "登录方式：{{methods}}",
     "noSignIn": "无",
     "noModels": "未列出模型",
@@ -6763,7 +6828,6 @@
     "remove": "删除",
     "empty": "尚未注册外部程序。",
     "needsAttention": "需要处理",
-    "installedHarnesses": "已安装的代理程序",
     "invalidCommand": "请补全路径或参数的引号。命令直接运行，不经过命令解释器。",
     "roleNeeded": "代理和提供方程序需要对应的连接器角色。可在概览中更改角色，或添加连接器。",
     "kept": "由此机器本地控制 · {{file}}",
@@ -6887,8 +6951,7 @@
   "providerPolicy": {
     "notAllowed": "{{place}} 不允许使用",
     "settingTitle": "允许的提供方",
-    "settingHelp": "填写 Orch 提供方地址的匹配模式。每个上级位置都必须允许此选择；空列表表示全部不允许。不设置时，允许使用你原本有权使用的所有提供方。",
-    "askInChat": "在聊天中询问"
+    "settingHelp": "填写 Orch 提供方地址的匹配模式。每个上级位置都必须允许此选择；空列表表示全部不允许。不设置时，允许使用你原本有权使用的所有提供方。"
   },
   "screenReview": {
     "startTopic": "开始主题",
@@ -7292,7 +7355,7 @@
   },
   "running": {
     "refresh": "刷新",
-    "title": "运行中的命令",
+    "title": "后台工作",
     "count": "{{count}} 个运行中",
     "end": "结束",
     "endSelected": "结束所选（{{count}}）",
@@ -7312,18 +7375,22 @@
     "loading": "正在读取原生命令…",
     "offline": "原生会话离线，无法确认哪些命令仍在运行。",
     "unavailable": "原生命令控制不可用。",
-    "empty": "没有运行中的原生命令。",
+    "empty": "没有运行中的原生后台工作。",
     "partial": "此列表不完整，无法全部结束。请在原生程序中缩小范围。",
-    "confirmTitle": "结束已查看的命令",
-    "confirm": "结束 {{count}} 个命令",
-    "confirmDetail": "仅结束已查看的这 {{count}} 个命令，之后启动的命令会保留。每个命令的实际结果将分别显示。",
+    "confirmTitle": "结束已查看的任务",
+    "confirm": "结束 {{count}} 个任务",
+    "confirmDetail": "仅结束已查看的这 {{count}} 个任务，之后启动的任务会保留。每个任务的实际结果将分别显示。",
     "job": "正在结束已查看的命令 · {{percent}}%",
     "results": "命令结束结果",
     "result_ended": "已结束",
     "result_already_ended": "此前已结束",
     "result_still_running": "仍在运行",
     "result_unknown": "无法确认是否结束",
-    "cleanup": "命令：{{ended}} 个已结束 · {{still}} 个仍在运行 · {{unknown}} 个结束情况未知"
+    "cleanup": "命令：{{ended}} 个已结束 · {{still}} 个仍在运行 · {{unknown}} 个结束情况未知",
+    "confirm_one": "结束 {{count}} 个任务",
+    "confirm_other": "结束 {{count}} 个任务",
+    "confirmDetail_one": "仅结束已查看的这一个任务，之后启动的任务会保留，并显示它的实际结果。",
+    "confirmDetail_other": "仅结束已查看的这 {{count}} 个任务，之后启动的任务会保留。每个任务的实际结果将分别显示。"
   },
   "largeTree": {
     "reasons": {
@@ -7431,6 +7498,7 @@
     "whenSent": "发送时保存",
     "chatFiles": "聊天文件",
     "history": {
+      "first": "第一页",
       "files": "上传的文件",
       "unknownPerson": "某人",
       "complete": "上传了",
@@ -7462,6 +7530,7 @@
       "move": "移到 {{path}}"
     },
     "pasteDelivery": "粘贴文本的发送方式",
+    "pasteSuggested": "建议",
     "readingPasteDelivery": "正在读取粘贴文本的默认发送方式…",
     "inMessage": "放入消息",
     "asFile": "作为文件",
@@ -7563,6 +7632,24 @@
     "linkCopied": "链接已复制"
   },
   "ui": {
+    "unavailable": {
+      "saving": "正在保存…",
+      "deciding": "正在发送决定…",
+      "queueChanging": "正在更改队列…",
+      "senderOnly": "只有发送者可以编辑这条消息",
+      "first": "已经是第一条",
+      "last": "已经是最后一条",
+      "checkingFork": "正在检查分叉…",
+      "forkUnavailable": "无法检查分叉",
+      "recipient": "请选择访问权限的接收者",
+      "noUnread": "全部已读",
+      "modeChanging": "正在更改管理员模式…",
+      "signingIn": "正在登录…",
+      "checkingCode": "正在验证验证码…",
+      "sendingEmail": "正在发送邮件…",
+      "requiredFields": "请填写必填项",
+      "planWords": "请说明需要更改什么"
+    },
     "statusUnknown": "状态不可用",
     "nameUnknown": "名称不可用",
     "filterBar": {
@@ -7713,6 +7800,11 @@
     },
     "detailCard": {
       "inspect": "查看{{name}}详情"
+    },
+    "receipt": {
+      "title": "已接受",
+      "accepted": "操作已被接受，但没有返回既有内容。请在具备所需权限时读取当前状态，不要再次提交此操作。",
+      "readback": "读取当前状态"
     }
   },
   "state": {
@@ -8039,6 +8131,9 @@
     "goal": {
       "exists": "这里已有进行中的目标。请先编辑或清除它。",
       "limit_reached": "目标已达限额。请先提高限额，再继续。"
+    },
+    "tunnel": {
+      "gateway_unreachable": "这些机器无法连接到同一个网关。请检查机器的网络连接后重试。"
     }
   },
   "auth": {
@@ -8510,6 +8605,7 @@
     "pathJoin": " / ",
     "starred": "收藏",
     "recent": "最近",
+    "recentShortcuts": "最近访问快捷入口",
     "inside": "{{org}} 内部",
     "notKept": "你的选择未能保存",
     "unread": "未读",
@@ -8635,7 +8731,9 @@
     "arrangement": {
       "label": "导航视图",
       "tree": "树形",
-      "recent": "最近"
+      "recent": "最近",
+      "treeView": "树形视图",
+      "recentView": "最近条目"
     },
     "recentOrder": {
       "label": "最近排序",
@@ -8651,6 +8749,7 @@
       "earlier": "更早"
     },
     "recentAll": "全部",
+    "recentAllItems": "全部最近条目",
     "showInTree": "在树中显示",
     "openEverything": "在全部内容中打开",
     "noActivity": "暂无最近活动"
@@ -9165,6 +9264,8 @@
       "openChanges": "工作区：{{workspace}}。打开更改",
       "limitNear": "{{name}}即将用满",
       "limitReached": "{{name}}已达上限",
+      "providerLimit": "提供方限制",
+      "usageLimit": "用量限制",
       "shells_one": "{{count}} 个 Shell",
       "shells_other": "{{count}} 个 Shell",
       "shellsHint": "你在此环境中的 Shell。打开终端。",
@@ -9723,10 +9824,6 @@
       "cannotShare": "要把 {{name}} 共享给智能体，你需要在这里拥有可以共享的权限。",
       "nothing": "{{name}} 里没有任何内容共享给智能体。",
       "repeat": "任何能与这些智能体对话的人，都可以让它复述它读到的内容，并让它写出或发送它被允许的内容。",
-      "policy": {
-        "topic": "这个话题的智能体可以读取彼此的会话，依据 {{place}} 的设置。",
-        "project": "这个项目的智能体可以读取彼此的会话，依据 {{place}} 的设置。"
-      },
       "placeAlone": "只共享 {{name}} 本身",
       "copy": "副本 · {{date}} · {{state}}",
       "state": {
@@ -9740,21 +9837,21 @@
       "expiresLabel": "结束于",
       "takeCopyBack": "收回给 {{name}} 的副本",
       "stopFor": "停止与 {{name}} 的智能体共享",
-      "notYoursToChange": "只有共享它的人，或现在能共享同样内容的人，才能更改它。",
+      "notYoursToChange": "来源权限页的管理者，或当前仍可授予这些权限的原授权者，才能更改此项授权。",
       "by": "{{name}}，{{date}}",
       "area": {
-        "timeline": "会话",
+        "timeline": "线程",
         "chat": "聊天",
         "documents": "文档"
       },
       "step": {
-        "none": "不共享",
-        "read": "只读",
-        "write": "可读写",
-        "edit": "可读可改",
-        "manage": "可管理"
+        "none": "—",
+        "read": "可查看",
+        "edit": "可编辑",
+        "manage": "可管理",
+        "post": "可发布",
+        "send": "可发送"
       },
-      "manageNote": "它们还可以删除这里的文档并移动它们。不会真正销毁：被删除的内容在清除之前（出厂为 30 天）都可以由它们或由你恢复。",
       "makeNote": "它们还可以在那里创建新文档。",
       "change": {
         "title": "更改{{who}}可以做什么？",
@@ -9763,7 +9860,7 @@
       },
       "stop": {
         "title": "停止与{{who}}共享？",
-        "body": "它们在下一次调用时就会发现已不可用。已经读到的内容不会消失。",
+        "body": "仅移除此项授权。其他授权和普通权限条目保持不变，已读信息也不会被收回。",
         "confirm": "停止共享"
       },
       "takeBack": {
@@ -9782,7 +9879,6 @@
       },
       "dialog": {
         "title": "把“{{name}}”共享给智能体",
-        "lead": "智能体像浏览文件夹一样读取共享的内容：浏览、阅读和搜索。它们在工作时就能找到。",
         "whose": "哪些智能体",
         "whosePlaceholder": "一个会话，或一个位置…",
         "whoseGroup": "会话和位置",
@@ -9793,7 +9889,6 @@
         "what": "它们可以做什么",
         "byArea": "权限明细",
         "byAreaLabel": "权限明细",
-        "custom": "各个范围的级别不同，所以三种选择里没有一种能概括它们。",
         "notYours": "你无权给出",
         "copyReadOnly": "副本是只读的",
         "kind": "共享的方式",
@@ -9801,7 +9896,6 @@
         "message": "随附的消息",
         "messageHint": "会作为一条输入发给智能体，让它的回合立即开始。",
         "until": "结束于",
-        "history": "智能体所做的修改会以它的名字显示，并出现在文档的历史里，和任何人的一样。",
         "tooLarge": "这份副本超过了限制",
         "of": "，限制为",
         "tooLargeWays": "可以少共享一些、改为保持共享，或提高限制。",
@@ -9829,7 +9923,9 @@
         },
         "namesFailed": "暂时无法查找名称。仍可用下面的按钮选择这个位置的智能体。"
       },
-      "whoIs": "{{place}} 的智能体"
+      "whoIs": "{{place}} 的智能体",
+      "fork": "创建分支",
+      "archive": "归档"
     },
     "menu": {
       "share": "共享…"
@@ -9927,7 +10023,8 @@
     "newPage": {
       "ownerOnly": "只有它的所有者可以操作",
       "machine": "在个人的机器上，在默认设置另有规定之前，只有该机器的所有者可以操作会话。",
-      "forkLabel": "分叉以哪个页面开始"
+      "forkLabel": "分叉以哪个页面开始",
+      "audienceSummary": "人员权限：{{summary}}"
     },
     "gallery": {
       "field": "要点名的人",
@@ -10089,6 +10186,8 @@
     },
     "waiting": {
       "title": "等待你决定",
+      "review": "查看访问请求",
+      "empty": "这些请求中没有需要你决定的事项。",
       "deny": "拒绝",
       "state": {},
       "stateBy": {}
@@ -10628,7 +10727,7 @@
     },
     "board": {
       "done": "已完成",
-      "emptyColumn": "这一列没有话题",
+      "emptyColumn": "“{{state}}”列没有话题",
       "drag": {
         "instructions": "要移动话题，请按空格键拿起它，用方向键把它移入或移出“已完成”列，再按空格键放下。按 Esc 可放回原处。",
         "pickedUp": "已拿起“{{name}}”。",
@@ -10746,6 +10845,7 @@
     }
   },
   "documents": {
+    "referenceReadFailed": "无法读取可引用的位置和文档。",
     "pdf": {
       "invalidBundle": "无法读取导出的文档，请重新导出。",
       "tooBig": "文档太大，无法在此排版。请打印文档或导出源码。",
@@ -11186,7 +11286,6 @@
     "privateThread": "私密会话",
     "nextPost": "下次允许发言：{{time}}",
     "privateReference": "无法访问的引用",
-    "policyUnavailable": "无法获取当前文档策略。",
     "openMaterial": "打开",
     "closeMaterial": "收起",
     "noMaterial": "当前权限范围内没有资料",
@@ -11255,13 +11354,6 @@
     "templates": "从文档开始",
     "readFirst": "先阅读",
     "readFirstHint": "代理使用工具阅读这些资料。其文字不会作为指令插入。",
-    "documentsPolicy": "此主题旁的文档",
-    "policyWrite": "此处的代理可以阅读、编辑并创建此主题及其主会话旁的公开文档。",
-    "policyRead": "此处的代理可以阅读此主题及其主会话旁的公开文档。",
-    "policyNone": "此策略不向此处的代理授予文档访问权限。",
-    "privateExcluded": "私密文档仍保持私密。",
-    "conversationsSeparate": "其他会话使用自己的策略。聊天需要共享。管理和导出需要各自的权限。",
-    "policySetting": "文档策略设置",
     "recentReactions": "常用",
     "agentChoices": "代理",
     "blocksCount": "{{count}} 个块",
@@ -12025,7 +12117,9 @@
       "queueReleased": "被“停止”暂留的消息已全部处理",
       "ruleAllowed": "{{by}} 为此会话允许了一项操作",
       "ruleRevoked": "{{by}} 收回了为此会话允许的一项操作",
-      "ruleEnded": "为此会话允许的一项操作已结束：会话运行所在已更改"
+      "ruleEnded": "为此会话允许的一项操作已结束：会话运行所在已更改",
+      "agentForkedFrom": "代理从 {{thread}} 为 {{by}} 创建了此分支",
+      "agentForked": "代理为 {{by}} 将此线程分支为 {{into}}"
     },
     "selection": {
       "label": "已选项目",
@@ -12149,7 +12243,8 @@
       "would": "如果批准",
       "notGranted": "已批准，但未授予",
       "applying": "正在应用已批准的能力",
-      "liveEffect": "实时应用成功后，此能力即可使用，工作无需停止。如果应用失败，将不会授予能力，环境可能重启以恢复先前的权限；决策旁会显示失败结果。"
+      "liveEffect": "实时应用成功后，此能力即可使用，工作无需停止。如果应用失败，将不会授予能力，环境可能重启以恢复先前的权限；决策旁会显示失败结果。",
+      "gatewayEffect": "此能力可立即使用，无需停止任何工作。现有进程和所有文件均会保留。"
     },
     "scope": {
       "host": "由管理该宿主机的人决定",
@@ -12268,6 +12363,7 @@
     },
     "model": {
       "change": "模型与强度：{{model}}。点击更改",
+      "current": "模型与强度：{{model}}",
       "efforts": "{{model}} 的强度",
       "find": "查找模型",
       "list": "模型",
@@ -12592,6 +12688,7 @@
       "view": "视图",
       "organize": "整理",
       "placement": "代理和环境",
+      "waitingOnApproval": "等待审批",
       "waitingForAnswer": "等待答复",
       "rename": "重命名会话",
       "titleField": "标题",
@@ -12639,15 +12736,16 @@
       "who": "此会话的管理者可以恢复它：{{who}}"
     },
     "watching": {
-      "title": "你可以观看此会话。要参与其中，你还需要：",
-      "talk": "{{name}} · 与其智能体交流",
+      "title": "你可以观看此会话",
+      "missing": "还需要：{{access}}",
+      "talk": "与 {{name}} 交互",
       "use": "{{name}} · 使用模型 {{model}}",
       "useAt": "{{name}} · 使用模型 {{model}}，强度 {{effort}}",
-      "closed": "{{name}} 属于 {{owner}} 本人，所在位置只将其留给所有者。",
       "askWho": "可以授予权限的人：{{names}}",
+      "askOthers": "其他人可以授予权限。",
       "nobody": "无法从这里获得此权限。",
       "person": "此会话运行在 {{owner}} 的机器上。按 {{thread}} 的设定，在其点名之前只有所有者可以参与。",
-      "label": "你可以观看此会话",
+      "label": "所需权限",
       "thisThread": "此会话"
     },
     "connection": {
@@ -12705,6 +12803,35 @@
       "topicDefault": "主题默认",
       "none": "你目前没有管理任何环境。可以在下面登记一台已连接机器的目录。",
       "noMachines": "你没有已连接的机器，因此无法登记目录。请先连接一台计算机。",
+      "filesFrom": "起始文件来源…",
+      "managers": "由谁管理",
+      "fileThread": "线程",
+      "findThread": "查找线程…",
+      "noThreads": "没有匹配的线程",
+      "fileState": "起始文件",
+      "currentFiles": "当前文件",
+      "recordedFiles": "已记录的状态",
+      "snapshot": "已记录的状态",
+      "chooseSnapshot": "选择已记录的状态",
+      "noSnapshots": "没有已记录的状态",
+      "chooseFileThread": "请选择线程",
+      "useFiles": "使用这些文件",
+      "clearFiles": "从空目录开始",
+      "choice": "环境设置",
+      "useExisting": "使用现有环境",
+      "createNew": "新建环境",
+      "noExisting": "暂无现有环境",
+      "noHost": "这里没有主机能创建默认环境",
+      "chooseExisting": "选择环境",
+      "more": "更多…",
+      "moreTitle": "更多环境",
+      "search": "查找环境…",
+      "noMatches": "没有匹配的环境",
+      "used": {
+        "project": "在此项目中",
+        "elsewhere": "其他位置",
+        "unused": "未使用"
+      },
       "machineTitle": "你某台机器上的目录",
       "machineAbout": "登记目录会使其成为你的一个环境，随后此会话加入其中。能够运行机器的人可以读取机器上的内容。",
       "allOffline": "你的机器当前都处于离线状态。",
@@ -13713,41 +13840,6 @@
       "removeConfirm": "删除{{name}}",
       "removeBody": "{{name}}中的内容不再发往那里。",
       "removed": "已删除{{name}}",
-      "kinds": {
-        "turn": {
-          "completed": "一轮结束",
-          "failed": "一轮失败"
-        },
-        "thread": {
-          "blocked": "会话被阻塞"
-        },
-        "approval": {
-          "requested": "需要审批"
-        },
-        "milestone": "达到里程碑",
-        "announcement": "公告",
-        "provider": {
-          "exhausted": "提供方额度用尽"
-        },
-        "machine": {
-          "offline": "机器离线"
-        },
-        "environment": {
-          "idle_stop": "空闲环境停止",
-          "attention": "环境需要处理"
-        },
-        "cap": {
-          "warning": "即将达到上限",
-          "reached": "已达上限"
-        },
-        "job": {
-          "finished": "任务完成"
-        },
-        "doc": {
-          "mention": "文档中提到了某人",
-          "comment": "文档上的评论"
-        }
-      },
       "tickOne": "至少勾选一种事件，或选择“所有类型”。"
     },
     "gallery": {
@@ -14099,11 +14191,9 @@
   },
   "tokens": {
     "lead": "供程序和脚本以你的身份行事的密钥。",
-    "about": "令牌以你的身份行事，权限缩小到你勾选的范围，有效期由你决定。令牌的密文只在创建时显示一次。",
     "new": {
       "button": "新建令牌…",
       "title": "新建 API 令牌",
-      "lead": "选择它能做什么，以及有效多久。",
       "name": "名称",
       "nameHint": "它的用途，方便以后认出它。",
       "password": "你的密码",
@@ -14937,6 +15027,7 @@
       "anotherSpeed": "另一种速度（填其名称）",
       "anotherProgram": "另一个计划（填其名称）",
       "switchOn": "开启",
+      "switchOnIn": "在{{area}}中开启",
       "rateTitle": "费率",
       "rateLead": "每百万令牌的积分。没有费率时，用量按令牌计，不计入任何按积分计的上限。",
       "rateInput": "输入",
@@ -15473,6 +15564,18 @@
           "docker_inside": {
             "name": "内置 Docker",
             "description": "让工具在环境内运行自己的 Docker。"
+          },
+          "port_place": {
+            "name": "$t(capabilityWords.port_place.name)",
+            "description": "$t(capabilityWords.port_place.description)"
+          },
+          "port_host": {
+            "name": "$t(capabilityWords.port_host.name)",
+            "description": "$t(capabilityWords.port_host.description)"
+          },
+          "port_link": {
+            "name": "$t(capabilityWords.port_link.name)",
+            "description": "$t(capabilityWords.port_link.description)"
           }
         }
       },
@@ -15513,6 +15616,18 @@
           "docker_inside": {
             "name": "$t(templates.choices.base_capabilities.*.docker_inside.name)",
             "description": "$t(templates.choices.base_capabilities.*.docker_inside.description)"
+          },
+          "port_place": {
+            "name": "$t(templates.choices.base_capabilities.*.port_place.name)",
+            "description": "$t(templates.choices.base_capabilities.*.port_place.description)"
+          },
+          "port_host": {
+            "name": "$t(templates.choices.base_capabilities.*.port_host.name)",
+            "description": "$t(templates.choices.base_capabilities.*.port_host.description)"
+          },
+          "port_link": {
+            "name": "$t(templates.choices.base_capabilities.*.port_link.name)",
+            "description": "$t(templates.choices.base_capabilities.*.port_link.description)"
           }
         }
       },
@@ -16793,15 +16908,15 @@
       },
       "agents-whose": {
         "title": "哪些智能体",
-        "what": "一个位置的智能体，是其中的每一个智能体会话，之后开始的也包括在内。共享给某个会话的智能体，则只涉及这一个会话。"
+        "what": "一个范围内的智能体包括其中现有和将来的智能体会话，共享给单个会话的智能体只影响该会话。这是实际授权，父级的创建预设不会改写它。"
       },
       "agents-areas": {
-        "title": "它们知道什么",
-        "what": "会话是智能体做过的事，聊天是人们说过的话，文档是人们写下的内容。三者分别共享：不共享、只读，或可读写。"
+        "title": "可以访问哪些内容",
+        "what": "文档、聊天和线程分别选择：编辑、发布和发送包含读取，管理增加相应的管理操作；创建分支和归档可在“高级”中单独授予。每次操作都受授予者当前可共享权限限制。"
       },
       "agents-manage": {
         "title": "可以管理",
-        "what": "可以管理文档的智能体还能删除、移动和恢复文档。不会真正销毁任何东西：被它们删除的内容在清除之前都可以恢复。"
+        "what": "管理允许移动、删除和恢复文档，删除任何人的聊天消息，或归档、取消归档、创建分支和删除线程；分支的首位所有者是授予者。只有文档删除及线程或聊天管理需要预览并确认，文件夹创建、复制、移动和恢复直接执行；位置、权限页和所有权不在共享范围内。"
       },
       "agents-copy": {
         "title": "副本",
@@ -16809,12 +16924,12 @@
         "which": "要给智能体一份可以据以工作的快照：给一份副本。要让它也能读到之后写下的内容：保持共享。"
       },
       "agents-live": {
-        "title": "保持共享",
-        "what": "智能体每次工作时都通过 Orch 读取它，之后写下的内容也包括在内，直到你结束共享。不会复制任何内容。"
+        "title": "实时授权",
+        "what": "多项授权共同生效，每次操作都受授予者当前可共享权限和所选上限限制；失去权限可能降低或暂停其中一项，在授权仍有效时，重新获得权限可使其恢复。单纯授权不会发送指令或启动工作。"
       },
       "agents-download": {
-        "title": "允许下载",
-        "what": "下载就是带走：智能体会把读到的内容写成文件放进工作区。取消勾选，则它们只能读取和搜索，不能复制。"
+        "title": "导出",
+        "what": "此选择在普通权限检查允许时包含导出，取消勾选不会清除已读信息，也不会禁止引用和获准的写入。文档移动仍遵循普通访问和继承规则。"
       },
       "line-custom": {
         "title": "已自定义",
@@ -17573,6 +17688,7 @@
     },
     "job": {
       "started": "正在生成 {{place}} 的压缩包…",
+      "cancelled": "已取消导出",
       "ready": "{{place}}：导出已完成",
       "failed": "{{place}}：导出失败",
       "failedAbout": "压缩包未能生成。",
@@ -18276,12 +18392,7 @@
       "empty": "此智能体只能读取自己的线程。",
       "truncated": "此分支的项目过多。请打开更小的分支。",
       "share": "与此智能体共享内容…",
-      "copy": "由 {{name}} 共享的副本",
-      "policy": {
-        "none": "策略未授予更大的范围。",
-        "topic": "此主题的智能体可以读取彼此的线程。",
-        "project": "此项目的智能体可以读取彼此的线程。"
-      }
+      "copy": "由 {{name}} 共享的副本"
     },
     "given": {
       "title": "交给智能体的内容",
@@ -18545,7 +18656,7 @@
       "notReported": "尚未报告",
       "reviewer": "审核模型：{{model}}",
       "reviewUseApart": "审核用量单独计入此线程。",
-      "reviewUseInside": "审核用量已包含在代理程序的总用量中。",
+      "reviewUseInside": "未单独报告审核用量；总用量以代理程序的报告为准。",
       "subagentsAtOnce": "同时运行的子智能体：{{count}}",
       "subagentDepth": "子智能体深度：{{count}}（1 表示不可嵌套）",
       "subagentsUnsupported": "不适用：此代理程序未提供这项控制。",
@@ -20461,7 +20572,11 @@
       "lead": "{{provider}} 上的 {{name}}（{{routing}}）。不同的模型在这些方面各不相同，同一个模型在两个提供方那里也可能不同。",
       "theEndpoint": "端点",
       "thePlan": "这个套餐",
-      "startsWith": "会话起初使用",
+      "defaultSearch": "初始网络搜索模式",
+      "defaultEffort": "初始推理强度",
+      "defaultSpeed": "初始速度",
+      "defaultProgram": "初始访问计划",
+      "defaultContext": "初始上下文",
       "standard": "标准",
       "noProgram": "无",
       "typedIn": "在这里手动输入：{{source}} 的列表中没有它",
@@ -20751,6 +20866,10 @@
       "settings": {
         "title": "设置",
         "lead": "系统范围内的所有设置。"
+      },
+      "gateways": {
+        "title": "网关",
+        "lead": "已公布的区域与入口。"
       }
     },
     "refusal": {
@@ -22576,7 +22695,6 @@
     "model": "模型",
     "parameters": "参数",
     "dimensions": "嵌入维度",
-    "invalidParameters": "请输入参数对象",
     "times": "尝试次数",
     "delay": "延迟（秒）",
     "backoff": "间隔倍数",
@@ -22625,7 +22743,11 @@
       "provider_exhausted": "已达额度",
       "provider_unauthorized": "凭据被拒绝",
       "context_overflow": "上下文已满",
-      "harness_error": "代理出错"
+      "harness_error": "代理出错",
+      "session_lost": "会话断开",
+      "rate_limited": "请求受限",
+      "overloaded": "提供方过载",
+      "stream_interrupted": "响应流中断"
     },
     "actions": {
       "retry": "重试",
@@ -22649,6 +22771,7 @@
     },
     "details": {
       "history_changed": "所选历史已更改",
+      "machine_offline": "正在等待机器重新连接",
       "author_missing": "原输入作者不可用",
       "author_lacks_interact": "原输入作者不能操作此线程",
       "author_lacks_use": "原输入作者不能使用此模型",
@@ -22741,7 +22864,11 @@
       "provider_unauthorized": "提供方拒绝了凭据",
       "context_overflow": "上下文已满",
       "harness_error": "代理遇到错误",
-      "other": "调用失败"
+      "session_lost": "会话已断开",
+      "other": "调用失败",
+      "rate_limited": "请求受限",
+      "overloaded": "提供方过载",
+      "stream_interrupted": "响应流中断"
     },
     "firstStep": "已经是第一步",
     "lastStep": "已经是最后一步"
@@ -23301,6 +23428,30 @@
     "dataUnavailable": "文件不可用",
     "recoveryCount": "{{number}} 个环境待恢复"
   },
+  "providerCredits": {
+    "panel": "提供方用量",
+    "metric": "提供方用量指标",
+    "subscription": "订阅用量",
+    "credits": "额度 / 付费用量",
+    "history": "提供方额度历史",
+    "quantities": "提供方报告的数值",
+    "observationsOnly": "余额、付费用量和消费上限保留各自的单位。消费上限不是额度余额。",
+    "noAmounts": "未报告数值",
+    "overridden": "手动设置",
+    "total": "总额：{{amount}}",
+    "used": "已用：{{amount}}",
+    "limit": "消费上限：{{amount}}",
+    "previous": "上一页数值",
+    "next": "下一页数值",
+    "quantity": {
+      "balance": "额度余额",
+      "remaining": "剩余",
+      "total": "额度总额",
+      "used": "已用",
+      "paid": "付费用量",
+      "limit": "消费上限"
+    }
+  },
   "planUsage": {
     "title": "套餐",
     "mode": "套餐视图",
@@ -23554,6 +23705,14 @@
       "owner": "所有者",
       "age": "时长",
       "why": "保留原因"
+    },
+    "grouping": {
+      "host": "按宿主机",
+      "kind": "按类型",
+      "place": "按位置",
+      "owner": "按所有者",
+      "age": "按时长",
+      "why": "按保留原因"
     },
     "whys": {
       "in_use": "使用中",
@@ -24165,5 +24324,324 @@
   "threadSetup": {
     "title": "设置线程",
     "save": "设置"
+  },
+  "agentAccess": {
+    "title": "智能体访问权限",
+    "change": "更改智能体访问权限",
+    "scope": "可访问范围",
+    "where": {
+      "nothing": "无",
+      "thread": "此会话",
+      "topic": "此话题",
+      "project": "此项目"
+    },
+    "reach": {
+      "nothing": "不由你提供权限。其他人的授权和智能体自身的对话仍各自独立。",
+      "thread": "仅包括关联文档和独立聊天。智能体本就可访问自身对话；其他会话和环境文件另行授权。",
+      "topic": "所选区域内此话题的文档、聊天和其他会话。",
+      "project": "所选区域内此项目的文档、聊天和其他会话。"
+    },
+    "noContribution": "不提供权限",
+    "confirm": "采用此选择",
+    "unavailable": "你目前无法授予全部所选权限。请选择可授予的级别或“无”。",
+    "preset": "这是创建预设。创建者会确认选择；更改预设不会改写已有授权。",
+    "giverBound": "每项授权都受授权者当前可共享权限的限制。创建预设仅在创建会话时适用；修改预设不会改写已有授权。",
+    "checking": "正在检查智能体访问权限…",
+    "presetReduced": "预设超出你可授予的权限。下方显示当前可用的选择。预设：",
+    "presetUnavailable": "无法获取创建预设或可授权范围。你仍可选择“无”并创建会话。",
+    "forkTitle": "从 {{name}} 分叉后的智能体访问权限",
+    "forkAudience": "分叉会按现有规则复制 {{name}} 当前的可访问人群。要更改人员权限，请使用“分叉到…”。",
+    "forkThrough": "历史保留至第 {{turn}} 轮"
+  },
+  "agentContributions": {
+    "requested": "请求的权限上限",
+    "current": "当前这项授权",
+    "proposed": "拟定授权",
+    "none": "无",
+    "unassessed": "尚未针对这份材料和接收会话评估。",
+    "giverUnavailable": "无法显示授权者",
+    "previousToProposed": "你的权限上限：原有 → 拟定",
+    "viewerChoice": "同时向会话的查看者授予阅读权限",
+    "viewerHint": "普通阅读权限面向当前及将来的会话查看者，按正常授权规则独立于智能体授权存在。取消勾选不会移除已有阅读条目。",
+    "viewerStanding": "移除此项智能体授权不会移除独立的查看者阅读条目。",
+    "viewerEntries": "独立的查看者阅读条目",
+    "state": {
+      "active": "对此材料和接收会话有效",
+      "reduced": "当前限制降低了权限",
+      "inactive": "当前未生效",
+      "unassessed": "按具体材料或接收会话评估"
+    },
+    "reason": {
+      "giver_unavailable": "授权者不可用，或目前无法提供此项授权。",
+      "current_limits": "受当前授权者、条目、来源或接收会话的限制。",
+      "per_target": "权限按具体材料评估；这里不代表整个子树的权限。",
+      "recipient_context_required": "需指定具体接收会话后才能评估有效权限。",
+      "source_unavailable": "当前无法评估此来源。"
+    },
+    "proposedState": {
+      "active": "将对此材料和接收会话提供权限",
+      "reduced": "将受当前限制降低权限",
+      "inactive": "当前不会提供权限",
+      "unassessed": "需要按具体材料或接收会话评估"
+    },
+    "remaining": "此来源上的其他共享记录保持不变：",
+    "recordedFor": "{{giver}} → {{recipient}} 的智能体"
+  },
+  "operationKeys": {
+    "about": "每个密钥以你的身份在明确选择的目标和操作范围内行事。密钥只显示一次，且始终受你当前权限的限制。",
+    "newLead": "选择目标、资源种类和具体操作。没有规则时，这个密钥不能执行任何操作。",
+    "rules": "允许的操作",
+    "addRule": "添加目标和操作",
+    "editRule": "编辑目标和操作",
+    "keepRule": "使用此规则",
+    "targetKind": "目标种类",
+    "target": "目标",
+    "targetId": "目标 ID",
+    "targetIdHint": "输入现有目标的准确标识符。这不会授予对目标的访问权。",
+    "findTarget": "查找现有目标",
+    "noTargets": "找不到可见的目标。",
+    "thisAccount": "使用此账户",
+    "reachLabel": "覆盖范围",
+    "reach": {
+      "self": "仅此目标",
+      "subtree": "此目标及其层级下的对象"
+    },
+    "accountSubtree": "对于账户，其层级范围仅包括该账户的 API 密钥和会话。",
+    "resourceKinds": "资源种类",
+    "chooseResources": "选择此规则可操作的资源种类。",
+    "allResources": "所有资源种类",
+    "noResources": "未选择资源种类",
+    "preset": {
+      "read": "仅读取",
+      "write": "仅写入",
+      "readWrite": "读取和写入",
+      "manage": "读取、写入和管理"
+    },
+    "action": {
+      "read": "读取",
+      "write": "写入",
+      "manage": "管理"
+    },
+    "usage": {
+      "required": "必需的操作",
+      "response_content": "可选的响应内容"
+    },
+    "search": "查找操作",
+    "exactReview": "选择会保存这些准确的操作 ID 和动作。写入不包含读取。组合操作仍需满足每个必需目标和动作；响应内容的可选读取单独判断。",
+    "unavailable": "这些已保存的操作动作不在当前目录或资源筛选范围内。在你明确移除或选择预设之前，它们仍保持选中。",
+    "currentRights": "每次使用均检查密钥所属账户的当前权限以及所有必需目标；这些范围限制不会增加权限。",
+    "legacy": "旧式权限范围密钥。其原有权限范围和位置限制仍然生效。",
+    "denyAll": "未允许任何操作。创建的密钥将拒绝所有操作。",
+    "denyAllShort": "不允许操作",
+    "ruleCount_one": "{{count}} 条目标规则",
+    "ruleCount_other": "{{count}} 条目标规则",
+    "boundTargets": "目标见范围详情",
+    "review": "查看范围",
+    "reviewTitle": "{{name}} 的范围",
+    "ceilings": "继承的签发上限",
+    "ceilingsHint": "以下每一组上限均须满足。这些由服务器保留的限制不会增加权限。",
+    "placeLimits": "保留的位置限制",
+    "refused": "排除的位置",
+    "maxDays_one": "最多 {{count}} 天",
+    "maxDays_other": "最多 {{count}} 天",
+    "kind": {
+      "org": "组织",
+      "project": "项目",
+      "topic": "主题",
+      "thread": "线程",
+      "document": "文档",
+      "document_container": "文档文件夹",
+      "provider": "提供方",
+      "agent": "代理",
+      "environment": "环境",
+      "host": "宿主机",
+      "machine": "机器",
+      "template": "模板",
+      "mcp_server": "MCP 服务器",
+      "mount": "挂载",
+      "skill": "技能",
+      "chat": "聊天",
+      "group": "群组",
+      "account": "账户",
+      "key": "API 密钥",
+      "session": "会话",
+      "job": "任务",
+      "export": "导出",
+      "import": "导入",
+      "upload": "上传",
+      "invitation": "邀请",
+      "approval": "审批",
+      "schedule": "计划",
+      "notification": "通知",
+      "system": "系统级操作"
+    },
+    "byId": "使用准确 ID，无需读取其名称",
+    "removeUnavailable": "移除这些选择",
+    "removeUnavailableFor": "移除 {{operation}} 不再适用的选择",
+    "activity": {
+      "title": "最近活动",
+      "view": "密钥详情",
+      "forKey": "{{name}} 的最近活动",
+      "retention": "最多显示过去 7 天内最近的 100 次调用。名称和 IP 地址按你当前的访问权限展示。",
+      "refresh": "刷新活动",
+      "operation": "操作",
+      "time": "时间",
+      "outcome": "结果",
+      "status": "状态 {{status}}",
+      "replayed": "已重放",
+      "durationLabel": "耗时",
+      "duration": "{{duration}} 毫秒",
+      "details": "调用详情",
+      "requestId": "请求 ID",
+      "ip": "IP 地址",
+      "undisclosedName": "未披露名称",
+      "undisclosedIp": "未披露",
+      "none": "没有最近的调用",
+      "page": "第 {{page}} 页"
+    },
+    "editRuleButton": "编辑规则",
+    "removeRule": "移除规则"
+  },
+  "providerOptions": {
+    "title": "请求选项",
+    "fixedByProvider": "由提供方固定",
+    "fixedValue": "固定值",
+    "unavailable": "无法在此处更改此选项",
+    "schemaTitle": "允许的请求选项",
+    "schemaHelp": "按协议设置 JSON Schema；原生代理参数使用 native。enum 限定允许值，const 固定值，default 设置可覆盖的初始值。未明确禁止时仍允许额外属性。",
+    "invalidSchema": "请输入以协议名称为键、JSON Schema 对象为值的对象。"
+  },
+  "webSearch": {
+    "title": "网络搜索",
+    "modeSwitch": "{{mode}}网络搜索",
+    "managerHint": "仅为端点或运行程序支持的模型启用原生搜索。列出支持的模式不会自动启用它。",
+    "perUseHint": "使用提供方已启用的模式搜索公开网络。搜索费用可能独立于令牌费用。",
+    "offered": "由{{source}}列出；仅在提供方管理者启用后可用。",
+    "declared": "协议支持此模式。启用前请确认该模型也支持它。",
+    "defaultHint": "新的使用从此模式开始；每次使用仍可选择其他允许的模式。默认值不是锁定值。",
+    "price": "每次网络搜索的额度",
+    "priceNamed": "每次网络搜索 {{price}} 额度",
+    "enabledModes": "网络搜索：{{modes}}",
+    "modeNamed": "网络搜索（{{mode}}）",
+    "guide": "了解提供方网络搜索",
+    "count": "网络搜索次数",
+    "unknown": "未知",
+    "optionsHint": "在端点请求默认值中配置域名过滤、位置和搜索次数限制。指南列出了各协议支持的字段。"
+  },
+  "regionalGateways": {
+    "title": "网关",
+    "gateway": "网关",
+    "catalogue": "网关列表",
+    "automatic": "自动",
+    "selected": "指定",
+    "selection": "选择方式",
+    "primary": "主网关",
+    "connector": "连接器",
+    "connection": "连接状态",
+    "connected": "已连接",
+    "offline": "离线",
+    "notReported": "尚未报告",
+    "notMeasured": "尚未测量",
+    "measurements": "已测往返延迟",
+    "measured": "测量于",
+    "milliseconds": "{{value}} 毫秒",
+    "unavailable": "不可用（{{id}}）",
+    "tunnel": "隧道网关",
+    "unreachable": "$t(errors.tunnel.gateway_unreachable)",
+    "attempted": "已尝试的网关",
+    "tunnelState": {
+      "local": "本地",
+      "pending": "连接中",
+      "attached": "尚未报告",
+      "unavailable": "不可用",
+      "unknown": "尚未报告"
+    },
+    "revision": "版本 {{revision}}",
+    "edit": "编辑",
+    "editTitle": "编辑网关",
+    "empty": "尚未公布网关",
+    "endpointsFor": "{{label}} 的入口",
+    "id": "标识",
+    "label": "名称",
+    "region": "区域",
+    "trustLabel": "信任方式",
+    "trust": {
+      "pinned": "固定证书",
+      "public": "公共证书"
+    },
+    "gatewayNumber": "网关 {{number}}",
+    "endpointNumber": "入口 {{number}}",
+    "removeEndpointNumber": "移除 {{label}} 的入口 {{number}}",
+    "remove": "移除",
+    "addEndpoint": "添加入口",
+    "removeGateway": "移除 {{label}}",
+    "addGateway": "添加网关",
+    "loadFailed": "无法加载网关",
+    "statusFailed": "无法加载网关状态",
+    "choiceHelp": "自动模式会在机器安装和重新连接时测量延迟。指定的网关不可用时仍保持该选择。",
+    "primaryHelp": "主网关承载此连接器的控制连接。可在安装程序或本地控制台中更改选择。",
+    "tunnelHelp": "每条工具隧道通过一个已连接的网关传输。它可与主网关不同，不会改变任一机器的选择。",
+    "catalogueHelp": "按名称和区域公布网关。编辑只改变已公布的选择，不会迁移已连接的机器。",
+    "refresh": "刷新",
+    "refreshConnector": "刷新连接器网关",
+    "up": "上移",
+    "down": "下移",
+    "moveUp": "上移 {{label}}",
+    "moveDown": "下移 {{label}}"
+  },
+  "backgroundWake": {
+    "waitingTasks": "等待后台任务",
+    "work": "后台工作",
+    "willWake": "这些任务结束后将唤醒代理",
+    "nextInput": "结果随下一次输入送达",
+    "lost": "随会话丢失",
+    "settingTitle": "后台唤醒",
+    "settingOn": "后台唤醒：开",
+    "settingOff": "后台唤醒：关",
+    "pendingOn": "下次会话：开",
+    "pendingOff": "下次会话：关",
+    "deferred": "变更在运行中的任务结束后生效",
+    "held_one": "{{count}} 个已完成任务正在等待",
+    "held_other": "{{count}} 个已完成任务正在等待",
+    "waitingAuthor": "等待 {{name}} 的后台任务（{{count}} 个运行中）",
+    "waitingUnknownAuthor": "等待后台任务（{{count}} 个运行中）",
+    "endNamed": "结束 {{name}}",
+    "cannotEnd": "无法从此处结束",
+    "unnamedCommand": "后台命令",
+    "unnamedSubagent": "子代理",
+    "finished": "{{label}} 已完成",
+    "failed": "{{label}} 失败",
+    "wokenBy": "唤醒原因：{{causes}}",
+    "waitingBy": "已完成任务正在等待：{{causes}}",
+    "reviewChanged": "此任务已变更或结束。请重新查看当前列表。",
+    "wakeOffHold": "后台唤醒已关闭；结果随下一次输入送达。",
+    "refreshHold": "会话变更在运行中的任务结束后生效",
+    "authorLostHold": "{{name}} 已无权指挥此代理",
+    "states": {
+      "running": "运行中",
+      "completed": "已完成",
+      "failed": "失败",
+      "stopped": "已结束",
+      "lost": "已丢失"
+    }
+  },
+  "usageRequest": {
+    "uncached": "未缓存输入",
+    "cached": "缓存输入",
+    "cacheWrite": "缓存写入",
+    "reason": "原因",
+    "status": "上游状态码",
+    "attempt": "尝试次数",
+    "tools": "工具调用",
+    "toolTime": "工具耗时",
+    "providerId": "提供方请求标识",
+    "adapterId": "请求引用",
+    "owner": "线程所有者",
+    "reasons": {
+      "cyber": "网络安全策略",
+      "safety": "安全策略",
+      "other": "其他拒绝原因",
+      "access": "模型访问权限"
+    }
   }
 }

@@ -291,6 +291,7 @@ impl Deleting {
                     {
                         Ok(child) => cleanup.push(child.id),
                         Err(super::runner::MakeError::Running(child)) => cleanup.push(child.id),
+                        Err(super::runner::MakeError::Internal(error)) => return Err(error.into()),
                         Err(error) => {
                             return Err(Failure::new("cascade_failed", error.to_string()).into());
                         }

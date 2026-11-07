@@ -99,10 +99,16 @@ function LimitPart({ thread }: { thread: Thread }) {
   const programs = useHarnessNames(false);
   const blocked = thread.blocked?.reason;
   if (limit === null && blocked !== 'provider_exhausted' && blocked !== 'quota_exceeded') return null;
-  const reached = limit?.state === 'reached' || limit === null;
-  const name = limit === null ? t('providerPlan.limits') : capTitle(limit.cap, t, programs.title);
+  if (limit === null) {
+    const name = t(blocked === 'provider_exhausted' ? 'workbench.status.providerLimit' : 'workbench.status.usageLimit');
+    const detail = thread.blocked?.detail;
+    const label = detail === null || detail === undefined || detail === '' ? name : `${name} · ${detail}`;
+    return <StatusPart icon={<Gauge size={16} aria-hidden />} tone="warning" hint={label} onOpen={() => revealView('usage')}>{label}</StatusPart>;
+  }
+  const reached = limit.state === 'reached';
+  const name = capTitle(limit.cap, t, programs.title);
   const label = t(reached ? 'workbench.status.limitReached' : 'workbench.status.limitNear', { name });
-  const hint = limit === null ? label : `${usedWords(limit, t, locale)}. ${capSentence(limit.cap, t, locale, programs.title)}`;
+  const hint = `${usedWords(limit, t, locale)}. ${capSentence(limit.cap, t, locale, programs.title)}`;
   return <StatusPart icon={<Gauge size={16} aria-hidden />} tone={reached ? 'danger' : 'warning'} hint={hint} onOpen={() => revealView('usage')}>{label}</StatusPart>;
 }
 

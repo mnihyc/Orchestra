@@ -444,7 +444,9 @@ async fn every_document_action_refuses_authority_lost_during_arrival_and_accepts
                         .bytes(b"old file")
                         .send()
                         .await
-                        .ok();
+                        .ok()
+                        .into_full()
+                        .expect("this native creation control requires its full response");
                     Call::empty("DELETE", format!("{root}/files/{}", file.id))
                 }
                 Seen => Call::json(
@@ -1041,7 +1043,9 @@ async fn creating_updating_and_removing_a_cap_checks_the_authority_of_its_curren
                             .raw_body(&body)
                             .send()
                             .await
-                            .ok(),
+                            .ok()
+                            .into_full()
+                            .unwrap(),
                     )
                 };
                 let call = match (method, cap) {

@@ -110,14 +110,10 @@ pub async fn listed_access(
             {
                 continue;
             }
-            let member_access = principal.caller().permits(Permission::ChatView)
-                && members.iter().any(|member| {
-                    member.id == chat.id
-                        && member
-                            .expires_at
-                            .is_none_or(|end| end > principal.now().get())
-                        && (principal.is_in_tree(member.org_id) || member.guest)
-                });
+            let member_access = members.iter().any(|member| {
+                member.id == chat.id
+                    && ordinary_participant(principal, &root, member, Permission::ChatView)
+            });
             if member_access || inspection.contains_key(&chat.id) {
                 found.insert(
                     chat.id,
@@ -136,6 +132,22 @@ pub async fn listed_access(
         }
     }
     Ok(found)
+}
+
+/// The ordinary membership right, shared by inventories and current agent-loan checks.
+pub(crate) fn ordinary_participant(
+    principal: &Principal,
+    root: &crate::engine::Site,
+    member: &orch_db::queries::search::ParticipantChat,
+    permission: Permission,
+) -> bool {
+    !principal.suspension().applies(&root.orgs)
+        && principal.caller().permits(permission)
+        && principal.caller().reaches(root.path.as_deref())
+        && member
+            .expires_at
+            .is_none_or(|end| end > principal.now().get())
+        && (principal.is_in_tree(member.org_id) || member.guest)
 }
 
 /// All ordinary or native inspection access in a batched frame. Every current

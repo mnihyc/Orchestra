@@ -3,7 +3,7 @@ import { useCompactControls } from '@/features/workbench/Narrow';
 import { SendHorizontal } from 'lucide-react';
 import { useTranslation } from 'react-i18next';
 
-import { deliveryEntries, type DeliveryState } from '@/features/composer/DeliveryMenu';
+import { deliveryEntries, inputUnavailable, type DeliveryState } from '@/features/composer/DeliveryMenu';
 import { StopControl, type useStop } from '@/features/composer/StopControl';
 import type { Delivery } from '@/generated/api-types';
 import type { MenuEntry } from '@/ui/Menu';
@@ -27,7 +27,7 @@ export interface DeliveryControlProps {
 export function DeliveryControl({ state, stop, turnId, mayDrive, empty, tooLong, attachmentsWaiting, onSend, onAskOnSide, sideUnavailable = false }: DeliveryControlProps) {
   const compact = useCompactControls();
   const { t } = useTranslation();
-  const unavailable: string | false = !mayDrive ? t('composer.row.readOnly') : !state.live ? t('composer.reason.offline') : empty ? t('composer.row.empty') : tooLong ? t('composer.row.tooLong') : attachmentsWaiting ? t('composer.row.filesWaiting') : false;
+  const unavailable = inputUnavailable(state, { mayDrive, empty, tooLong, attachmentsWaiting }, t);
   const entries = deliveryEntries(state, onSend, t, onAskOnSide)
     .map<MenuEntry>((entry) => {
       if (!('onSelect' in entry)) return entry;

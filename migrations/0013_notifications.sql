@@ -19,6 +19,7 @@ CREATE TABLE announcements (
     topic_seq bigint NOT NULL,
     created_at timestamp with time zone DEFAULT now() NOT NULL,
     reference_body text,
+    posting_provenance jsonb,
     CONSTRAINT announcements_body_check CHECK ((char_length(body) <= 8000)),
     CONSTRAINT announcements_category_check CHECK ((category = ANY (ARRAY['notice'::text, 'milestone'::text]))),
     CONSTRAINT announcements_check CHECK (((from_thread_id IS NULL) <> (from_user_id IS NULL))),

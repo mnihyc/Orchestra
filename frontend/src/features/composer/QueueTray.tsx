@@ -25,8 +25,8 @@ import { Hint } from '@/features/help/Hint';
 import { environmentQuery } from '@/api/environments';
 import { TrustAnswers, TrustQuestion } from '@/features/resources/environments/HarnessTrust';
 import type { AttachmentIssue, ContentPart, Delivery, ThreadInput, RequestDecisionStatus } from '@/generated/api-types';
-import { composerWriter, discard, resend, useComposerStore, type SendingInput } from '@/features/composer/Draft';
-import { modelName } from '@/features/composer/ModelEffort';
+import { composerWriter, discard, resend, steerRefusedFor, useComposerStore, type SendingInput } from '@/features/composer/Draft';
+import { heldInputWords } from '@/features/composer/heldInputWords';
 import { afterDropping, afterMoving, editableWords, nowDelivery, queuePreview, withEditedWords } from '@/features/composer/queue';
 import { holds } from '@/lib/permissions';
 import { isComposing } from '@/lib/shortcuts';
@@ -36,7 +36,6 @@ import { ErrorAlert } from '@/ui/ErrorState';
 import { IconButton } from '@/ui/IconButton';
 import { Select } from '@/ui/Select';
 import { Textarea } from '@/ui/Textarea';
-import { Tooltip } from '@/ui/Tooltip';
 import { Pagination } from '@/ui/Pagination';
 import { useThreadReadRef } from '@/realtime/threadReadContext';
 import { threadReceipt } from '@/realtime/threadScope';
@@ -45,13 +44,6 @@ type InputChange = Parameters<typeof updateInput>[2];
 const DELIVERIES: readonly Delivery[] = ['queue', 'steer', 'interrupt'];
 // The same six-pixel intent threshold as the topic board: a press focuses; travel picks up.
 const DRAG_STARTS_AFTER_PX = 6;
-/** An input whose session command no longer checks out waits for its sender; each check that failed is said in words. */
-const COMMAND_HOLDS = {
-  'native_action.stale': 'composer.queue.heldCommandStale',
-  'native_action.permission': 'composer.queue.heldCommandPermission',
-  'native_action.arguments': 'composer.queue.heldCommandArguments',
-  'native_action.unavailable': 'composer.queue.heldCommandUnavailable',
-} as const;
 const QUEUE_SCROLL = { canScroll: (element: Element) => element.hasAttribute('data-queue-list') };
 interface QueueSlot { kind: 'queue-slot'; threadId: string; inputId: string; edge: 'before' | 'after' }
 function queueSlot(value: unknown): QueueSlot | null {
@@ -119,11 +111,11 @@ function HeldForFiles({ threadId, input, recovers }: { threadId: string; input: 
       </ul>
       {recovers ? (
         <span className="flex flex-wrap items-center gap-1">
-          <Button size="sm" variant="secondary" pending={retry.isPending} disabled={busy} onClick={() => retry.mutate()}>
+          <Button size="sm" variant="secondary" pending={retry.isPending} disabled={busy} reason={busy ? t('ui.unavailable.queueChanging') : undefined} onClick={() => retry.mutate()}>
             {t('common.tryAgain')}
           </Button>
           {words && (
-            <Button size="sm" variant="ghost" pending={without.isPending} disabled={busy} onClick={() => without.mutate()}>
+            <Button size="sm" variant="ghost" pending={without.isPending} disabled={busy} reason={busy ? t('ui.unavailable.queueChanging') : undefined} onClick={() => without.mutate()}>
               {t('composer.queue.sendWithout')}
             </Button>
           )}
@@ -174,15 +166,17 @@ function QueueHold({ threadId }: { threadId: string }) {
   const thread = useThreadPart(threadId, (view) => view.thread);
   const resume = useMutation({ mutationFn: (revision: number) => resumeQueue(read, revision) });
   const queue = thread?.queue;
-  if (!queue?.held) return null;
+  const finishedTasks = thread?.background?.held_completions ?? 0;
+  if (!queue?.held && finishedTasks === 0) return null;
   const may = holds(thread?.access, 'thread.interact');
   return (
     <div className="flex flex-wrap items-center gap-2 text-xs text-text-muted" data-queue-held>
       <span className="min-w-0 flex-1">
-        {t('composer.queue.heldByStop', { name: queue.by?.display_name ?? t('composer.queue.someone'), count: queue.held_inputs })}
+        {queue?.held === true && t('composer.queue.heldByStop', { name: queue.by?.display_name ?? t('composer.queue.someone'), count: queue.held_inputs })}
+        {finishedTasks > 0 && <span className="ml-1">{t('backgroundWake.held', { count: finishedTasks })}</span>}
       </span>
-      {may && (
-        <Button size="sm" variant="secondary" pending={resume.isPending} onClick={() => resume.mutate(queue.revision)}>
+      {may && queue?.held === true && (
+        <Button size="sm" variant="secondary" pending={resume.isPending} reason={resume.isPending ? t('ui.unavailable.queueChanging') : undefined} onClick={() => resume.mutate(queue.revision)}>
           {t('composer.queue.resume')}
         </Button>
       )}
@@ -211,11 +205,13 @@ function QueueRow({ threadId, input, index, orderIndex, count, busy, fallback, c
   const mine = may && input.author?.id === meId && input.source === 'user';
   const activeTurn = useThreadPart(threadId, runningTurn);
   const active = activeTurn !== null || thread?.state === 'running' || thread?.state === 'waiting_approval';
-  const cannotSteer = useComposerStore((state) => state.cannotSteer[thread?.binding?.agent.id ?? ''] === true);
+  const activeTurnId = activeTurn?.id ?? thread?.current_turn_id ?? null;
+  const cannotSteer = useComposerStore((state) => steerRefusedFor(state, threadId, activeTurnId));
   const number = index + 1;
   const pending = input.state === 'pending';
   const locked = busy || !pending || !may;
   const editorLocked = locked || !mine;
+  const lockReason = !may ? t('composer.row.readOnly') : !pending ? t('composer.queue.deliveryStarted') : busy ? t('ui.unavailable.queueChanging') : undefined;
   const { setNodeRef: setDragNode, setActivatorNodeRef, attributes, listeners, isDragging, active: carriedInput } =
     useDraggable({ id: input.id, disabled: !mayExecute || locked || editing });
   const { setNodeRef: setBeforeNode } = useDroppable({ id: `queue:${threadId}:${input.id}:before`, disabled: !mayExecute || locked,
@@ -226,23 +222,7 @@ function QueueRow({ threadId, input, index, orderIndex, count, busy, fallback, c
   // A drag handle remains an ordinary button; it is not a pressed-state selector.
   const { role: _role, 'aria-pressed': _pressed, 'aria-roledescription': _description, ...dragAttributes } = attributes;
   const changedContent = withEditedWords(input.content, words);
-  const held = input.queue_held
-    ? t('composer.queue.heldStop')
-    : input.state_detail === 'cap_reached'
-      ? t('composer.queue.heldCap', { name: input.author?.display_name ?? t('composer.queue.theSender') })
-      : input.state_detail === 'owner_lacks_access'
-        ? t('composer.queue.heldOwner', { owner: thread?.owner.display_name ?? '', provider: thread?.binding?.provider.name ?? '' })
-        : input.state_detail === 'second_step_required'
-          ? t('composer.queue.heldSecondStep', { name: input.author?.display_name ?? t('composer.queue.theSender') })
-          : input.state_detail === 'model_use_required'
-            ? thread?.environment !== null && thread?.environment !== undefined
-              ? t('composer.queue.heldUse', { model: modelName(thread), environment: thread.environment.name })
-              : t('composer.queue.heldModel', { model: thread === null ? '' : modelName(thread) })
-          : input.state_detail === 'files'
-          ? t('composer.queue.preparing')
-          : input.state_detail !== null && input.state_detail in COMMAND_HOLDS
-          ? t(COMMAND_HOLDS[input.state_detail as keyof typeof COMMAND_HOLDS], { name: input.author?.display_name ?? t('composer.queue.theSender') })
-          : null;
+  const held = heldInputWords(input, thread, t);
   // Somebody who may drive the thread runs a message that waits for the model on their own access; the server
   // asks for their own use of the model and answers with what is missing when they have none.
   const [decided,setDecided]=useState<{approvalId:string|null;status:RequestDecisionStatus}|null>(null);
@@ -312,10 +292,10 @@ function QueueRow({ threadId, input, index, orderIndex, count, busy, fallback, c
                 event.stopPropagation();
                 event.currentTarget.form?.requestSubmit();
               }} />
-            <Button type="submit" size="sm" variant="primary" pending={busy} disabled={editorLocked || changedContent.length === 0}>
+            <Button type="submit" size="sm" variant="primary" pending={busy} disabled={editorLocked || changedContent.length === 0} reason={lockReason ?? (!mine ? t('ui.unavailable.senderOnly') : changedContent.length === 0 ? t('composer.row.empty') : undefined)}>
               {t('composer.queue.save')}
             </Button>
-            <Button size="sm" variant="ghost" disabled={busy} onClick={() => { setEditing(false); row.current?.focus(); }}>
+            <Button size="sm" variant="ghost" disabled={busy} reason={busy ? t('ui.unavailable.queueChanging') : undefined} onClick={() => { setEditing(false); row.current?.focus(); }}>
               {t('common.cancel')}
             </Button>
           </form>
@@ -323,7 +303,7 @@ function QueueRow({ threadId, input, index, orderIndex, count, busy, fallback, c
           <span data-queued-preview className="min-w-0 flex-1 truncate text-sm text-text" title={input.source === 'goal' ? `${preview}. ${t('goals.turn.queuedHint')}` : preview}>{preview || t('composer.queue.noPreview')}</span>
         )}
         {!pending && <span role="status" className="text-sm text-text-muted" title={t('composer.queue.deliveryStarted')}>{t(input.delivery === 'steer' ? 'composer.queue.steering' : 'composer.queue.sending')}</span>}
-        {input.state === 'delivering' && input.delivery === 'steer' && mayExecute && <Tooltip content={input.state_detail === 'steering' ? t('composer.queue.steerTaken') : t('composer.queue.backToQueue')}><Button size="sm" variant="ghost" disabled={busy || input.state_detail === 'steering'} onClick={() => change(input.id, { delivery: 'queue' })}>{t('composer.queue.backToQueue')}</Button></Tooltip>}
+        {input.state === 'delivering' && input.delivery === 'steer' && mayExecute && <Button size="sm" variant="ghost" disabled={busy || input.state_detail === 'steering'} reason={busy ? t('ui.unavailable.queueChanging') : input.state_detail === 'steering' ? t('composer.queue.steerTaken') : t('composer.queue.backToQueue')} onClick={() => change(input.id, { delivery: 'queue' })}>{t('composer.queue.backToQueue')}</Button>}
       </div>
         {!editing && may && (
           <div className="flex flex-wrap items-center gap-1">
@@ -331,12 +311,12 @@ function QueueRow({ threadId, input, index, orderIndex, count, busy, fallback, c
               value={input.delivery} disabled={locked} fieldClassName="w-auto"
               options={DELIVERIES.map((delivery) => ({ value: delivery, name: t(`composer.queue.delivery.${delivery}`), description: delivery === 'steer' && active && cannotSteer ? t('composer.reason.noSteer') : t(`composer.queue.deliveryAbout.${delivery}`), disabled: delivery === 'steer' && active && cannotSteer }))}
               onValueChange={(delivery) => change(input.id, { delivery })} />
-            <Tooltip content={sendReason}>
               <Button size="sm" icon={<Send aria-hidden />} disabled={locked} aria-label={t(interrupts ? 'composer.queue.interruptNowLabel' : 'composer.queue.sendNowLabel', { number })}
+                reason={lockReason ?? sendReason}
                 onClick={() => change(input.id, active ? { delivery: sendDelivery, afterInputId: null } : { afterInputId: null })}>
                 {interrupts ? t('composer.queue.interruptNow') : t('composer.queue.sendNow')}
               </Button>
-            </Tooltip></>}
+            </>}
             <span className="ml-auto flex items-center gap-1">
             {mine && (
               <IconButton
@@ -344,19 +324,21 @@ function QueueRow({ threadId, input, index, orderIndex, count, busy, fallback, c
                 label={t('composer.queue.editRow', { number })}
                 icon={<Pencil aria-hidden />}
                 disabled={locked}
+                reason={lockReason}
                 onClick={() => {
                   setWords(editableWords(input.content));
                   setEditing(true);
                 }}
               />
             )}
-                {mayExecute && <><IconButton ref={setActivatorNodeRef} size="sm" label={t('composer.queue.drag', { number })} icon={<GripVertical aria-hidden />} disabled={locked}
+                {mayExecute && <><IconButton ref={setActivatorNodeRef} size="sm" label={t('composer.queue.drag', { number })} icon={<GripVertical aria-hidden />} disabled={locked} reason={lockReason}
                   className="touch-none cursor-grab select-none active:cursor-grabbing" data-queue-handle={input.id} {...dragAttributes} {...listeners} />
                 <IconButton
                   size="sm"
                   action="earlier"
                   label={t('composer.queue.moveRowUp', { number })}
                   disabled={locked || orderIndex === 0}
+                  reason={lockReason ?? (orderIndex === 0 ? t('ui.unavailable.first') : undefined)}
                   onClick={() => moveTo(orderIndex - 1)}
                 />
                 <IconButton
@@ -364,9 +346,10 @@ function QueueRow({ threadId, input, index, orderIndex, count, busy, fallback, c
                   action="later"
                   label={t('composer.queue.moveRowDown', { number })}
                   disabled={locked || orderIndex >= count - 1}
+                  reason={lockReason ?? (orderIndex >= count - 1 ? t('ui.unavailable.last') : undefined)}
                   onClick={() => moveTo(orderIndex + 1)}
                 /></>}
-                <IconButton size="sm" label={t('composer.queue.removeRow', { number })} icon={<X aria-hidden />} disabled={locked} onClick={() => change(input.id, null)} />
+                <IconButton size="sm" label={t('composer.queue.removeRow', { number })} icon={<X aria-hidden />} disabled={locked} reason={lockReason} onClick={() => change(input.id, null)} />
             </span>
           </div>
         )}
@@ -375,7 +358,7 @@ function QueueRow({ threadId, input, index, orderIndex, count, busy, fallback, c
       {decision!==null?<DecisionStatus source={decision}/>:runsOn !== null && <p className="flex items-center gap-1 text-sm text-text-muted">{t('agentIdentity.runsAs')}<UserChip user={runsOn} size={24}/></p>}
       {runnable && (
         <span>
-          <Button size="sm" variant="secondary" pending={runner.isPending} disabled={busy} aria-label={t('composer.queue.runItLabel', { number })} onClick={() => runner.mutate()}>
+          <Button size="sm" variant="secondary" pending={runner.isPending} disabled={busy} reason={busy || runner.isPending ? t('ui.unavailable.queueChanging') : undefined} aria-label={t('composer.queue.runItLabel', { number })} onClick={() => runner.mutate()}>
             {t('composer.queue.runIt')}
           </Button>
         </span>
@@ -451,7 +434,7 @@ export function QueueTray({ threadId, queued, sending, readOnly = false }: { thr
   };
   const total = queued.length + sending.length;
   const unsent = sending.some((entry) => entry.state === 'not_sent');
-  if (total === 0 && page.nextAfter === null && !page.restartRequired) return null;
+  if (total === 0 && page.nextAfter === null && !page.restartRequired) return readOnly ? null : <QueueHold threadId={threadId} />;
   // What was not sent is not hidden behind a folded tray.
   const shown = open || unsent;
   const ids = queued.filter((input) => input.state === 'pending').map((input) => input.id);

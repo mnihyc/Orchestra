@@ -7,18 +7,30 @@ import userEvent from '@testing-library/user-event';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { ThreadHeader } from '@/features/thread/Header';
 import type * as NodesApi from '@/api/nodes';
+import type * as ApprovalsApi from '@/api/approvals';
 import type * as ThreadsApi from '@/api/threads';
 import type * as ThreadStore from '@/realtime/stores/thread';
+import type * as RunningUi from '@/features/running/Running';
 import { approvalKey } from '@/api/approvals';
-import type { HarnessRequest, Item, Segment, Thread, ThreadGoal } from '@/generated/api-types';
+import type { Approval, HarnessRequest, Item, Segment, Thread, ThreadBackground, ThreadGoal } from '@/generated/api-types';
 import { i18n, setLocale } from '@/i18n';
 import { ThreadStateIcon } from '@/ui/ThreadState';
+import { actionName } from '@/ui/actions';
+import { client } from '@/api/client';
+import { ViewOpeningContext } from '@/features/workbench/viewOpening';
+import { commandsNow } from '@/features/finder/commands';
 import { show } from './support';
+import { backgroundWake, backgroundWork } from '../doubles/background-wake';
 import { snapshot } from '../unit/continuation-fixtures';
 import { ALLOW_DENY, approvalItem, harnessApproval } from '../doubles/thread-rows';
 import { me, memberAccess, userRef } from '../doubles/fixtures';
 
-const calls = vi.hoisted(() => ({ share: vi.fn(), update: vi.fn(), apply: vi.fn(), fork: vi.fn(), change: vi.fn(), ask: vi.fn(), find: vi.fn(), goal: vi.fn(), starred: false, items: new Map<string, Item>(), segments: [] as Segment[] }));
+const calls = vi.hoisted(() => ({ approval: vi.fn<(id: string) => Promise<Approval>>(), settings: vi.fn(), review: vi.fn(), share: vi.fn(), update: vi.fn(), apply: vi.fn(), fork: vi.fn(), change: vi.fn(), ask: vi.fn(), find: vi.fn(), goal: vi.fn(), starred: false, items: new Map<string, Item>(), segments: [] as Segment[], background: null as ThreadBackground | null, backgroundClosed: false }));
+vi.mock('@/api/approvals', async (original) => {
+  const actual = await original<typeof ApprovalsApi>();
+  return { ...actual, approvalQuery: (id: string) => ({ ...actual.approvalQuery(id), queryFn: () => calls.approval(id) }) };
+});
+vi.mock('@/features/settings/Editor', () => ({ SettingsEditor: (props: { target: unknown; only?: readonly string[]; scope: string }) => { calls.settings(props); return <div>One scoped setting</div>; } }));
 vi.mock('@/features/goal/editor', () => ({ openGoalEditor: calls.goal }));
 vi.mock('@/api/nodes', async (importOriginal) => ({ ...await importOriginal<typeof NodesApi>(), updateNode: calls.update }));
 vi.mock('@/api/threads', async (importOriginal) => ({ ...await importOriginal<typeof ThreadsApi>(), resumeAutomatic: vi.fn() }));
@@ -27,6 +39,13 @@ vi.mock('@/features/navigation/favorites', () => ({ StarButton: () => <button>{c
 vi.mock('@/features/thread/SubscriptionBell', () => ({ SubscriptionBell: () => <button>Notifications</button> }));
 vi.mock('@/features/navigation/NodeMenu', () => ({ useNodeMenu: () => [calls.starred ? 'Unstar' : 'Star', 'Export', 'Archive', 'Delete'].map((label) => ({ id: label.toLowerCase(), label, onSelect: vi.fn() })) }));
 vi.mock('@/features/thread/forkNow', () => ({ useForkNow: () => ({ pending: false, start: calls.fork }) }));
+vi.mock('@/api/forks', async (original) => ({ ...await original<object>(), planFork: () => Promise.resolve({
+  access: { summary: { custom: false, from: null, interact: [], manage: [], view: [] } },
+  agent_access: { preset: { where: 'nothing', parts: {} }, choices: [
+    { where: 'nothing', parts: {} }, { where: 'thread', parts: {} },
+    { where: 'topic', parts: {} }, { where: 'project', parts: {} },
+  ] },
+}) }));
 vi.mock('@/features/change/target', () => ({ openChange: calls.change }));
 vi.mock('@/features/side-threads/ask', () => ({ openSideAsk: calls.ask }));
 vi.mock('@/features/side-threads/SideChips', () => ({ SideThreadList: () => <p>Open side threads</p> }));
@@ -34,7 +53,8 @@ vi.mock('@/features/thread-move/MoveToTopic', () => ({ MoveToTopic: () => null }
 vi.mock('@/features/start/SetUpThread', () => ({ SetUpThread: ({ thread, onClose }: { thread: Thread; onClose: () => void }) => <div role="dialog" aria-label={`Setup ${thread.name}`}><button onClick={onClose}>Close setup</button></div> }));
 vi.mock('@/features/timeline/FindInConversation', () => ({ openFind: calls.find }));
 vi.mock('@/features/inbox/away/Catchup', () => ({ CatchupRequest: () => null }));
-vi.mock('@/features/running/Running', () => ({ RunningDialog: () => <div role="dialog">Running commands</div> }));
+vi.mock('@/features/running/Running', async (importOriginal) => ({ ...await importOriginal<typeof RunningUi>(), RunningDialog: ({ thread, close, endTarget }: { thread: string; close: () => void; endTarget?: unknown }) => { calls.review(endTarget); return <div role="dialog" aria-label={i18n.t('running.title')} data-running-thread={thread}><button onClick={close}>{i18n.t('common.close')}</button></div>; } }));
+vi.mock('@/features/running/live', () => ({ useRunning: () => ({ roster: calls.background, closed: calls.backgroundClosed, error: null }) }));
 vi.mock('@/features/timeline/preferences', () => ({ useTimelinePreferences: () => ({ detail: 'steps', hideHistory: false, setDetail: vi.fn(), setHideHistory: vi.fn() }) }));
 vi.mock('@/realtime/stores/thread', async (importOriginal) => {
   const actual = await importOriginal<typeof ThreadStore>();
@@ -53,7 +73,8 @@ const path: Thread['path'] = [
 ];
 const approvalRequest: HarnessRequest = { request_kind: 'command', options: ALLOW_DENY, detail: { command: 'check redirect', cwd: '/workspace', reason: null } };
 
-beforeEach(() => { vi.clearAllMocks(); calls.starred = false; calls.items.clear(); calls.segments = []; });
+const background = (more: Partial<ThreadBackground> = {}): ThreadBackground => ({ supported: true, state: 'live', total: 0, items: [], next_cursor: null, list_ref: null, expires_at: null, as_of: null, can_end: true, reason: null, ...more });
+beforeEach(() => { vi.clearAllMocks(); calls.approval.mockReset().mockRejectedValue(new Error('No approval fixture was supplied')); calls.starred = false; calls.items.clear(); calls.segments = []; calls.background = background(); calls.backgroundClosed = false; });
 afterEach(async () => { cleanup(); await setLocale('en'); });
 
 function draw(more: Partial<Thread> = {}, cache?: QueryClient) {
@@ -66,6 +87,71 @@ function draw(more: Partial<Thread> = {}, cache?: QueryClient) {
   const drawn = show(cache === undefined ? content : <QueryClientProvider client={cache}>{content}</QueryClientProvider>);
   return { thread, header: screen.getByRole('banner'), ...drawn };
 }
+
+async function confirmFork(user: ReturnType<typeof userEvent.setup>) {
+  const dialog = await screen.findByRole('dialog', { name: i18n.t('agentAccess.forkTitle', { name: 'Repair login' }) });
+  expect(calls.fork).not.toHaveBeenCalled();
+  const confirm = within(dialog).getByRole('button', { name: i18n.t('change.menu.forkNow') });
+  await waitFor(() => expect(confirm).toBeEnabled());
+  await user.click(confirm);
+  expect(calls.fork).toHaveBeenCalledExactlyOnceWith(undefined, { where: 'nothing', parts: {} });
+}
+
+it.each(['en', 'zh-CN'] as const)('shows native work from an earlier turn beside Idle in the actual header (%s)', async (locale) => {
+  await setLocale(locale);
+  calls.background = background({ total: 2, items: ['one', 'two'].map((id) => ({ id, segment_id: 'earlier-segment', turn_id: 'earlier-turn', item_id: `source-${id}`, command: 'sleep 300', command_truncated: false, cwd: null, cwd_redacted: false, place: 'environment', since: null, cpu_percent: null, memory_bytes: null })) });
+  const { header } = draw({ state: 'idle' });
+  expect(within(header).getByText(i18n.t('state.idle'), { exact: true })).toBeVisible();
+  const count = within(header).getByRole('button', { name: i18n.t('running.count', { count: 2 }) });
+  expect(count).toBeVisible();
+  expect(count.closest('[data-thread-title-row]')).not.toBeNull();
+});
+
+async function openRunningFromView(user: ReturnType<typeof userEvent.setup>, thread: Thread) {
+  await user.click(within(screen.getByRole('banner')).getByRole('button', { name: actionName('actions', thread.name) }));
+  const view = screen.getByRole('menuitem', { name: i18n.t('thread.header.view') });
+  act(() => view.focus());
+  await user.keyboard('{ArrowRight}');
+  await user.click(await screen.findByRole('menuitem', { name: i18n.t('running.title') }));
+}
+
+for (const change of ['view opening', 'reader authority', 'thread target', 'forbidden source'] as const) it(`retires the background review owner after ${change}`, async () => {
+  const user = userEvent.setup(), thread = snapshot().thread;
+  const content = (opening: string, target = thread) => <ViewOpeningContext value={opening}><ThreadHeader thread={target} /></ViewOpeningContext>;
+  const view = show(content('first-opening'));
+  await openRunningFromView(user, thread);
+  expect(screen.getAllByRole('dialog', { name: i18n.t('running.title') })).toHaveLength(1);
+  const before = client.session.getState();
+  try {
+    if (change === 'reader authority') act(() => client.session.setState({ readerVersion: (before.readerVersion ?? 0) + 1 }));
+    if (change === 'forbidden source') calls.backgroundClosed = true;
+    const other = change === 'thread target' ? { ...thread, id: 'other-thread', path: thread.path.map((part) => part.id === thread.id ? { ...part, id: 'other-thread' } : part) } : thread;
+    view.rerender(content(change === 'view opening' ? 'second-opening' : 'first-opening', other));
+    expect(screen.queryByRole('dialog', { name: i18n.t('running.title') })).not.toBeInTheDocument();
+  } finally { act(() => client.session.setState(before)); }
+});
+
+it('registers one current background action for the existing finder and View menu', async () => {
+  const user = userEvent.setup(), { thread } = draw();
+  const command = commandsNow().find((entry) => entry.id === 'thread.running');
+  expect(command).toBeDefined();
+  if (command === undefined) throw new Error('The current header must register its running action');
+  act(() => command.run('here'));
+  expect(screen.getAllByRole('dialog', { name: i18n.t('running.title') })).toHaveLength(1);
+  await user.click(screen.getByRole('button', { name: i18n.t('common.close') }));
+  await openRunningFromView(user, thread);
+  expect(screen.getAllByRole('dialog', { name: i18n.t('running.title') })).toHaveLength(1);
+});
+
+it('returns a command opening without an element opener to the current header actions', async () => {
+  const user = userEvent.setup(), { header, thread } = draw();
+  expect(document.body).toHaveFocus();
+  const command = commandsNow().find((entry) => entry.id === 'thread.running');
+  if (command === undefined) throw new Error('The current header must register its running action');
+  act(() => command.run('here'));
+  await user.click(screen.getByRole('button', { name: i18n.t('common.close') }));
+  await waitFor(() => expect(within(header).getByRole('button', { name: actionName('actions', thread.name) })).toHaveFocus());
+});
 
 describe('a thread header', () => {
   const importedSegment: Segment = {
@@ -193,6 +279,7 @@ describe('a thread header', () => {
     const { header, thread } = draw();
     const actions = within(header).getByRole('group', { name: t('thread.header.quickActions') });
     await user.click(within(actions).getByRole('button', { name: t('change.menu.forkNow') }));
+    await confirmFork(user);
     expect(calls.fork).toHaveBeenCalledOnce();
     await user.click(within(actions).getByRole('button', { name: t('change.menu.fork') }));
     expect(calls.change).toHaveBeenCalledWith({ kind: 'thread', id: thread.id, name: thread.name }, { kind: 'fork' });
@@ -224,6 +311,7 @@ describe('a thread header', () => {
     await userEvent.keyboard('{ArrowRight}');
     const fork = await screen.findByRole('menuitem', { name: /^Fork$/ });
     act(() => fork.focus()); await userEvent.keyboard('{Enter}');
+    await confirmFork(userEvent.setup());
     expect(calls.fork).toHaveBeenCalledOnce();
   });
 
@@ -260,7 +348,7 @@ describe('a thread header', () => {
 
   it('does not assume an unknown question is answerable and leaves renaming on the title', async () => {
     const { header } = draw({ state: 'waiting_approval', pending_approvals: 1 });
-    expect(within(header).getByText('Waiting for an answer', { exact: true })).toBeVisible();
+    expect(within(header).getByText('Waiting on an approval', { exact: true })).toBeVisible();
     await userEvent.click(within(header).getByRole('button', { name: /Rename/ }));
     expect(within(header).getByRole('textbox')).toHaveValue('Repair login');
   });
@@ -277,6 +365,7 @@ describe('a thread header', () => {
     expect(calls.ask).not.toHaveBeenCalled();
     if (via === 'pointer') await user.click(buttons[0]!);
     else { act(() => buttons[0]!.focus()); await user.keyboard('{Enter}'); }
+    await confirmFork(user);
     expect(calls.fork).toHaveBeenCalledOnce();
     if (via === 'pointer') await user.click(buttons[1]!);
     else { act(() => buttons[1]!.focus()); await user.keyboard('{Enter}'); }
@@ -296,15 +385,44 @@ describe('a thread header', () => {
     expect(within(header).queryByText(canDecide ? 'Waiting for an answer' : 'Waiting for you', { exact: true })).not.toBeInTheDocument();
   });
 
-  it('follows an older card’s already loaded authority without another approval request', async () => {
+  for (const locale of ['en', 'zh-CN'] as const) it.each([true, false])(`reads a missing approval before naming its decider in ${locale} (can decide: %s)`, async (canDecide) => {
+    await setLocale(locale);
+    const request = harnessApproval('unloaded-question', { threadId: 'thread-1', itemId: 'unloaded-item', title: 'Continue?', request: approvalRequest, requester: userRef(me(1, 'ada', 'Ada')), canDecide });
+    const item = approvalItem('unloaded-item', request.id);
+    calls.items.set(item.id, item);
+    let answer: (approval: Approval) => void = () => { throw new Error('The approval read must start first'); };
+    calls.approval.mockImplementation(() => new Promise((resolve) => { answer = resolve; }));
+    const { header } = draw({ state: 'waiting_approval', pending_approvals: 1 });
+    expect(within(header).getByText(i18n.t('thread.header.waitingOnApproval'), { exact: true })).toBeVisible();
+    expect(within(header).queryByText(i18n.t('composer.row.waitingForYou'), { exact: true })).not.toBeInTheDocument();
+    expect(within(header).queryByText(i18n.t('thread.header.waitingForAnswer'), { exact: true })).not.toBeInTheDocument();
+    await waitFor(() => expect(calls.approval).toHaveBeenCalledExactlyOnceWith(request.id));
+    await act(async () => { answer(request); await Promise.resolve(); });
+    expect(await within(header).findByText(i18n.t(canDecide ? 'composer.row.waitingForYou' : 'thread.header.waitingForAnswer'), { exact: true })).toBeVisible();
+    expect(within(header).queryByText(i18n.t('thread.header.waitingOnApproval'), { exact: true })).not.toBeInTheDocument();
+  });
+
+  it.each(['en', 'zh-CN'] as const)('keeps the neutral approval label after a failed read in %s', async (locale) => {
+    await setLocale(locale);
+    const item = approvalItem('unavailable-item', 'unavailable-question');
+    calls.items.set(item.id, item);
+    const { header } = draw({ state: 'waiting_approval', pending_approvals: 1 });
+    await waitFor(() => expect(calls.approval).toHaveBeenCalledExactlyOnceWith('unavailable-question'));
+    expect(within(header).getByText(i18n.t('thread.header.waitingOnApproval'), { exact: true })).toBeVisible();
+    expect(within(header).queryByText(i18n.t('thread.header.waitingForAnswer'), { exact: true })).not.toBeInTheDocument();
+  });
+
+  it('refreshes an older card’s loaded authority and follows its confirmed changes', async () => {
     const cache = new QueryClient({ defaultOptions: { queries: { retry: false } } });
     const request = harnessApproval('cached-question', { threadId: 'thread-1', itemId: 'cached-item', title: 'Continue?', request: approvalRequest, requester: userRef(me(1, 'ada', 'Ada')) });
     const base = approvalItem('cached-item', request.id);
     calls.items.set(base.id, base);
     cache.setQueryData(approvalKey(request.id), request);
+    calls.approval.mockResolvedValue(request);
     const { header } = draw({ state: 'waiting_approval', pending_approvals: 1 }, cache);
     expect(within(header).getByText('Waiting for you', { exact: true })).toBeVisible();
-    expect(cache.isFetching({ queryKey: approvalKey(request.id) })).toBe(0);
+    await waitFor(() => expect(calls.approval).toHaveBeenCalledExactlyOnceWith(request.id));
+    await waitFor(() => expect(cache.isFetching({ queryKey: approvalKey(request.id) })).toBe(0));
     act(() => { cache.setQueryData(approvalKey(request.id), { ...request, can_decide: false }); });
     await waitFor(() => expect(within(header).getByText('Waiting for an answer', { exact: true })).toBeVisible());
     expect(cache.isFetching({ queryKey: approvalKey(request.id) })).toBe(0);
@@ -348,4 +466,36 @@ describe('a thread header', () => {
     expect(within(dialog).getByText('A description to read')).toBeVisible();
     expect(within(dialog).queryByRole('textbox')).not.toBeInTheDocument();
   });
+});
+
+it.each(['en', 'zh-CN'] as const)('binds recorded tasks, one scoped wake setting and reviewed End in %s', async (locale) => {
+  await setLocale(locale);
+  const task = backgroundWork();
+  const { header } = draw({ background: backgroundWake({ tasks: [task] }) });
+  expect(within(header).getByText('Build web')).toBeVisible();
+  await userEvent.click(within(header).getByRole('button', { name: i18n.t('backgroundWake.settingOn') }));
+  expect(calls.settings.mock.lastCall?.[0]).toMatchObject({ target: { kind: 'node', id: 'thread-1' }, only: ['threads.background_wake'], scope: 'thread' });
+  await userEvent.click(within(screen.getByRole('dialog', { name: i18n.t('backgroundWake.settingTitle') })).getByRole('button', { name: i18n.t('common.close') }));
+  await userEvent.click(within(header).getByRole('button', { name: i18n.t('backgroundWake.endNamed', { name: task.label }) }));
+  expect(calls.review).toHaveBeenLastCalledWith({ task: { id: task.id, item_id: task.item_id, turn_id: task.turn_id } });
+});
+
+it('drops a forbidden live task observation without reusing its recorded End target', () => {
+  calls.background = background({ wake: backgroundWake({ tasks: [backgroundWork({ label: 'Current private work' })] }) });
+  const view = draw();
+  expect(within(view.header).getByText('Current private work')).toBeVisible();
+  calls.backgroundClosed = true;
+  view.rerender(<ThreadHeader thread={view.thread} />);
+  expect(within(view.header).queryByText('Current private work')).not.toBeInTheDocument();
+});
+
+it('retires the wake-setting opening across a target change and does not reopen it on return', async () => {
+  const task = backgroundWork();
+  const view = draw({ background: backgroundWake({ tasks: [task] }) });
+  await userEvent.click(within(view.header).getByRole('button', { name: i18n.t('backgroundWake.settingOn') }));
+  expect(screen.getByRole('dialog', { name: i18n.t('backgroundWake.settingTitle') })).toBeVisible();
+  view.rerender(<ThreadHeader thread={{ ...view.thread, id: 'other-thread' }} />);
+  expect(screen.queryByRole('dialog', { name: i18n.t('backgroundWake.settingTitle') })).not.toBeInTheDocument();
+  view.rerender(<ThreadHeader thread={view.thread} />);
+  expect(screen.queryByRole('dialog', { name: i18n.t('backgroundWake.settingTitle') })).not.toBeInTheDocument();
 });

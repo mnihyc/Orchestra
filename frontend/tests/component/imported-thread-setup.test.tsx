@@ -42,8 +42,8 @@ for (const locale of ['en', 'zh-CN'] as const) it(`sets up the imported thread w
   await setLocale(locale);
   const thread = imported(), close = vi.fn();
   show(<SetUpThread thread={thread} onClose={close} />);
-  expect(screen.getByRole('dialog')).toHaveTextContent('Provider p1');
-  expect(screen.getByRole('dialog')).toHaveTextContent('Agent a1');
+  expect(screen.getByRole('dialog', { name: i18n.t('threadSetup.title') })).toHaveTextContent('Provider p1');
+  expect(screen.getByRole('dialog', { name: i18n.t('threadSetup.title') })).toHaveTextContent('Agent a1');
   await userEvent.click(screen.getByRole('button', { name: locale === 'en' ? 'Set up' : '设置' }));
   await waitFor(() => expect(close).toHaveBeenCalledOnce());
   expect(io.place).toHaveBeenCalledExactlyOnceWith(thread.id, { use: 'e1' });
@@ -78,11 +78,35 @@ it('waits for a current placement answer before admitting setup', () => {
   expect(io.bind).not.toHaveBeenCalled();
 });
 
+for (const locale of ['en', 'zh-CN'] as const) it('does not reuse an accepted environment for changed management choices in '+locale, async () => {
+  await setLocale(locale);
+  io.fresh = true;
+  io.bind.mockRejectedValueOnce(new Error('The provider changed'));
+  const close = vi.fn(), thread = imported(), user = userEvent.setup();
+  show(<SetUpThread thread={thread} onClose={close} />);
+  await user.click(screen.getByRole('button', { name: i18n.t('threadSetup.save') }));
+  await screen.findByRole('alert');
+  await user.click(screen.getByRole('radio', { name: i18n.t('choiceCatalog.resourceAccess.only_me.name') }));
+  await user.click(screen.getByRole('button', { name: i18n.t('threadSetup.save') }));
+  await waitFor(() => expect(close).toHaveBeenCalledOnce());
+  expect(io.create.mock.calls.map(([body]) => body)).toEqual([{ home_node_id: thread.topic_id }, { home_node_id: thread.topic_id, access: 'only_me' }]);
+  expect(io.place).toHaveBeenCalledTimes(2);
+  expect(io.bind).toHaveBeenCalledTimes(2);
+});
+
+for (const locale of ['en', 'zh-CN'] as const) it('offers thread-bound Temporary when setup makes its environment in '+locale, async () => {
+  await setLocale(locale); io.fresh = true; const user = userEvent.setup();
+  show(<SetUpThread thread={imported()} onClose={vi.fn()} />);
+  await user.click(screen.getByRole('switch', { name: i18n.t('temporary.name') }));
+  await user.click(screen.getByRole('button', { name: i18n.t('threadSetup.save') }));
+  await waitFor(() => expect(io.create).toHaveBeenCalledWith({ home_node_id: imported().topic_id, config: { 'env.lifetime': 'thread' } }, expect.any(String)));
+});
+
 it('does not place an imported thread in the old environment while asking for another', async () => {
   io.asking = true;
   const user = userEvent.setup();
   show(<SetUpThread thread={imported()} onClose={vi.fn()} />);
-  await user.click(screen.getByRole('combobox', { name: i18n.t('start.where.title') }));
+  await user.click(screen.getByRole('combobox', { name: i18n.t('start.where.moreTitle') }));
   await user.click(screen.getByRole('option', { name: 'Env e2' }));
   const save = screen.getByRole('button', { name: 'Set up' });
   expect(save).toBeDisabled();

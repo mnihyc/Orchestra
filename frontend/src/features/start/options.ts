@@ -8,9 +8,9 @@ import { keepPreviousData, useQuery } from '@tanstack/react-query';
 
 import { startOptionsQuery } from '@/api/start';
 
-import { canUseEnvironment, type Mode, NO_PICKS, type Picks, resolve, type Resolved } from './choices';
+import { canUseEnvironment, CHOOSE_EXISTING_ENVIRONMENT, noHostEnvironment, type Mode, NO_PICKS, type Picks, resolve, type Resolved } from './choices';
 import { useLastSetup } from './lastSetup';
-import type { StartOptions } from '@/api/start';
+import type { CreationAccessContext, StartOptions } from '@/api/start';
 
 export interface Started {
   /** The answer, or `null` before the first one. */
@@ -24,21 +24,29 @@ export interface Started {
 }
 
 /** What a thread made in a topic, or in a topic made in a project, could be bound to, and what the person's picks make of it. */
-export function useStartOptions(nodeId: string, picks: Picks, mode: Mode): Started {
+export function useStartOptions(nodeId: string, picks: Picks, mode: Mode, enabled = true, context?: CreationAccessContext): Started {
   const last = useLastSetup();
-  const environmentId = picks.environment;
-  const base = useQuery({ ...startOptionsQuery(nodeId, environmentId), placeholderData: keepPreviousData });
+  const environmentId = picks.environment === CHOOSE_EXISTING_ENVIRONMENT ? null : picks.environment;
+  const base = useQuery({ ...startOptionsQuery(nodeId, environmentId, context), enabled, placeholderData: keepPreviousData });
   // A place's environment rule wins. Reuse a location only in that same place, while it is still usable.
   const rememberedEnvironment = !base.isError && !base.isPlaceholderData && environmentId === null && picks.environment === null && last?.place === nodeId && base.data?.environment_default === 'shared' && !base.data.environments.some((row) => row.is_default && canUseEnvironment(row))
     ? base.data.environments.find((row) => canUseEnvironment(row) && row.environment.id === last.picks.environment)?.environment.id ?? null : null;
-  const remembered = useQuery({ ...startOptionsQuery(nodeId, rememberedEnvironment), enabled: rememberedEnvironment !== null, placeholderData: keepPreviousData });
-  const query = rememberedEnvironment === null ? base : remembered;
+  const hostFallback = !base.isError && !base.isPlaceholderData && picks.environment === null && base.data !== undefined
+    && !(base.data.environment_default === 'shared' && base.data.environments.some((row) => row.is_default && canUseEnvironment(row)))
+    ? noHostEnvironment(base.data)?.environment.id ?? null : null;
+  const redirectedEnvironment = rememberedEnvironment ?? hostFallback;
+  const redirected = useQuery({ ...startOptionsQuery(nodeId, redirectedEnvironment, context), enabled: enabled && redirectedEnvironment !== null, placeholderData: keepPreviousData });
+  const query = redirectedEnvironment === null ? base : redirected;
   const options = base.isError || query.isError ? null : query.data ?? null;
   const previous = last === null ? NO_PICKS : { ...last.picks, environment: last.place === nodeId ? last.picks.environment : null };
-  const resolved = options === null ? null : resolve(options, picks, mode, previous);
+  // Freeze the implicit fallback into the context actually read, without making it a manual pick.
+  const effective = rememberedEnvironment === null && hostFallback !== null ? { ...picks, environment: hostFallback } : picks;
+  const resolved = options === null ? null : resolve(options, effective, mode, previous);
   const retry = async () => {
+    if (!enabled) return;
     const fresh = await base.refetch();
-    if (!fresh.isError && rememberedEnvironment !== null && fresh.data?.environments.some((row) => canUseEnvironment(row) && row.environment.id === rememberedEnvironment)) await remembered.refetch();
+    if (!fresh.isError && redirectedEnvironment !== null && fresh.data?.environments.some((row) => canUseEnvironment(row) && row.environment.id === redirectedEnvironment)
+      && (rememberedEnvironment !== null || noHostEnvironment(fresh.data) !== null)) await redirected.refetch();
   };
   return {
     options,

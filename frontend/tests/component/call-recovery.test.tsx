@@ -23,6 +23,23 @@ const rule = { id: 'busy', when: { kind: 'provider_busy' }, steps: [{ type: 'ret
 const recovery = (): CallRecovery => ({ state: 'scheduled', failure: { code: 'provider_busy', message: 'Synthetic capacity', retryable: true, window: null, said: null, resets_at: null, incomplete: false }, rule_id: 'busy', step: { type: 'retry', delay_secs: 60, times: 3, backoff: 2 }, attempt: 2, due_at: new Date(Date.now() + 42_000).toISOString(), detail: null, count: null, window_secs: null });
 
 for (const locale of ['en', 'zh-CN'] as const) {
+  it(`shows a lost session waiting for its machine and retains its causal history (${locale})`, async () => {
+    await setLocale(locale);
+    const held: CallRecovery = { ...recovery(), failure: { ...recovery().failure, code: 'session_lost' }, step: { type: 'continue', times: 1 }, attempt: 1, continuing: true, due_at: null, detail: 'machine_offline' };
+    const view = show(<CallRecoveryStatus recovery={held} />);
+    expect(view.container).toHaveTextContent(i18n.t('calls.details.machine_offline'));
+    expect(view.container).toHaveTextContent(i18n.t('calls.attempt', { attempt: '1', total: '1' }));
+    expect(view.container).not.toHaveTextContent(i18n.t('calls.needsAttention', { kind: i18n.t('calls.kinds.session_lost') }));
+    view.rerender(<CallRecoveryStatus recovery={{ ...held, state: 'running', detail: null }} />);
+    expect(view.container).toHaveTextContent(i18n.t('calls.continuing', { kind: recoveryCause('session_lost', i18n.t) }));
+    expect(markerSentence({ marker: 'call_recovery', data: { action: 'continue', rule: 'session-lost', kind: 'session_lost', attempt: 1, total: 1, automatic: true, input_id: 'input' } }, i18n.t, { locale })).toContain(recoveryCause('session_lost', i18n.t));
+    view.unmount();
+    show(<CallsRules shape={{ type: 'json' }} value={[rule]} label={i18n.t('calls.rules')} onChange={vi.fn()} />);
+    await userEvent.click(screen.getByRole('button', { name: /→/ }));
+    await userEvent.click(screen.getByRole('combobox', { name: i18n.t('calls.when') }));
+    expect(screen.getByRole('option', { name: i18n.t('calls.kinds.session_lost') })).toBeVisible();
+  });
+
   it(`shows administrative pauses without a vendor failure or an attempt count (${locale})`, async () => {
     await setLocale(locale);
     const view = show(<CallRecoveryStatus recovery={{ ...recovery(), state: 'waiting', due_at: null, detail: 'provider_switched_off' }} service />);

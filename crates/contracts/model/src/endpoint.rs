@@ -9,6 +9,7 @@
 //! | `headers` | Headers sent with every request to that endpoint, as they are | None |
 //! | `secret_headers` | Names of headers whose values are secrets of the provider, stored and rotated like its key and never returned | None |
 //! | `query` | Query parameters appended to every request | None |
+//! | `params` | Additional model body defaults; explicit request values win | None |
 //!
 //! A header the forwarder sets itself cannot be given: the one that carries the key, `Host`,
 //! `Content-Length` and the hop-by-hop headers. [`EndpointOptions::check`] refuses them when a provider is
@@ -76,6 +77,10 @@ pub struct EndpointOptions {
     /// Query parameters appended to every request.
     #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
     pub query: BTreeMap<String, String>,
+    /// Additional model request body defaults. Explicit request values take precedence.
+    /// Routing, prompt, tools, output bounds, retention and credentials remain owned by the caller.
+    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+    pub params: BTreeMap<String, Json>,
 }
 
 /// One endpoint of an API upstream: the protocol it speaks, where it is, and its options.
@@ -92,8 +97,18 @@ pub struct Upstream {
 }
 
 impl EndpointOptions {
-    /// Reads the options of an endpoint of a built-in protocol. An option that is not one of the five is
-    /// refused.
+    /// The same object used by explicit model request options.
+    #[must_use]
+    pub fn request_params(&self) -> Json {
+        Json::Object(
+            self.params
+                .iter()
+                .map(|(key, value)| (key.clone(), value.clone()))
+                .collect(),
+        )
+    }
+
+    /// Reads the declared options of an endpoint of a built-in protocol; unknown option names are refused.
     pub fn parse(options: &Json) -> Result<Self, serde_json::Error> {
         if options.is_null() {
             return Ok(Self::default());
@@ -163,6 +178,11 @@ impl EndpointOptions {
     /// Every fault is returned.
     pub fn check(&self, default_auth: AuthMode) -> Result<(), Vec<OptionFault>> {
         let mut faults = Vec::new();
+        if let Err(reason) =
+            orch_provider_contract::calls::completion_options(&self.request_params())
+        {
+            faults.push(OptionFault::new("params", reason));
+        }
         let mode = self.auth.unwrap_or(default_auth);
         match (mode, self.auth_header.as_deref()) {
             (AuthMode::Header, None) => {
@@ -391,7 +411,16 @@ pub fn standard_options() -> Vec<Field> {
     query.help = Some(
         "Parameters added to the address of every request, such as an API version.".to_owned(),
     );
-    vec![auth, auth_header, headers, secret_headers, query]
+    let mut params = Field::new("params", "Request defaults", FieldType::Json);
+    params.required = false;
+    params.default = Some(serde_json::json!({}));
+    params.help = Some(
+        "Additional JSON body defaults in this endpoint's format. Explicit request values take precedence. \
+         Nested vendor options are preserved; the model, prompt, tools, output limits and credentials cannot be replaced. \
+         A custom option does not establish that the upstream supports it."
+            .to_owned(),
+    );
+    vec![auth, auth_header, headers, secret_headers, query, params]
 }
 
 #[cfg(test)]
@@ -624,12 +653,19 @@ mod tests {
     }
 
     #[test]
-    fn a_form_asks_for_the_five_options_and_none_is_required() {
+    fn a_form_asks_for_endpoint_options_and_none_is_required() {
         let fields = standard_options();
         let names: Vec<_> = fields.iter().map(|field| field.name.as_str()).collect();
         assert_eq!(
             names,
-            ["auth", "auth_header", "headers", "secret_headers", "query"]
+            [
+                "auth",
+                "auth_header",
+                "headers",
+                "secret_headers",
+                "query",
+                "params"
+            ]
         );
         assert!(
             fields

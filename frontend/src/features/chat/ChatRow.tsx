@@ -10,7 +10,7 @@ import { BellOff, EyeOff, MessagesSquare } from 'lucide-react';
 import { useTranslation } from 'react-i18next';
 
 import { setChatState } from '@/api/chats';
-import { failed } from '@/features/chat/acts';
+import { acknowledgeReceipt, failed } from '@/features/chat/acts';
 import { chatTitle } from '@/features/chat/ChatView';
 import { PersonThingProvider } from '@/features/people/personContext';
 import type { MessagesSearch } from '@/features/chat/Messages';
@@ -79,7 +79,7 @@ export function ChatRow({
     onSuccess: (next) => {
       statesWriter.put(next);
     },
-    onError: (error) => failed(t('chat.failed.bell'), error),
+    onError: (error) => { if (!acknowledgeReceipt(error)) failed(t('chat.failed.bell'), error); },
   });
 
   const entries: MenuEntry[] = quiet

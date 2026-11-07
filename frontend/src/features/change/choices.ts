@@ -41,7 +41,7 @@ export type FileChoice = { mode: 'all' } | { mode: 'none' } | { mode: 'selection
 export type WhereChoice =
   | { kind: 'same' }
   | { kind: 'use'; id: string; files: FileChoice }
-  | { kind: 'new'; hostId: string | null; name: string; files: FileChoice; home: boolean; privateViews: boolean; onlyMe: boolean };
+  | { kind: 'new'; hostId: string | null; name: string; files: FileChoice; home: boolean; privateViews: boolean; onlyMe: boolean; temporary?: boolean };
 
 /** How much of the history a fork or a switch carries: all of it, up to one turn (what forking from a message asks), a range, a summary, none. */
 export type HistoryChoice = 'all' | 'upto' | 'range' | 'summary' | 'none';
@@ -138,6 +138,7 @@ function environmentOf(where: WhereChoice): ForkEnvironment | null {
           ...(where.home ? { home: true } : {}),
           ...(where.privateViews ? {} : { private_views: false }),
           ...(where.onlyMe ? { access: 'only_me' as const } : {}),
+          ...(where.temporary === true ? { config: { 'env.lifetime': 'thread' } } : {}),
         },
       };
   }

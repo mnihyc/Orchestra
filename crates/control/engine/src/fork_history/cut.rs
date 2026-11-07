@@ -805,6 +805,7 @@ pub(crate) async fn native_boundary(
     agent: Id,
     command: Id,
 ) -> Result<Option<NativeBoundary>, EngineError> {
+    crate::side_threads::operation::checkpoint(engine, cut).await?;
     if let Some(old) = cut.artifacts.get("native_boundary") {
         let boundary:NativeBoundary=serde_json::from_value(old.clone())
             .map_err(|_|EngineError::unreadable("The retained native witness lacks complete typed record evidence; another child is not admitted."))?;
@@ -835,6 +836,7 @@ pub(crate) async fn native_boundary(
                 "The retained native witness does not certify a complete prefix; another child is not admitted.",
             ));
         }
+        crate::side_threads::operation::checkpoint(engine, cut).await?;
         return Ok(Some(boundary));
     }
     if cut.first_turn != 1 {
@@ -872,24 +874,22 @@ pub(crate) async fn native_boundary(
     if items.is_empty() {
         return Ok(None);
     }
-    let outcome = crate::commands::run(
-        engine.inner.commands.as_ref(),
-        Outgoing::new(
-            command,
-            machine,
-            SerialKey::Harness {
-                provider_id: provider,
-                agent_id: agent,
-            },
-            &AgentReadSession {
-                provider_id: provider,
-                agent_id: agent,
-                native_session_ref: native.clone(),
-                write: true,
-            },
-        )?,
-    )
-    .await?;
+    let proposed = Outgoing::new(
+        command,
+        machine,
+        SerialKey::Harness {
+            provider_id: provider,
+            agent_id: agent,
+        },
+        &AgentReadSession {
+            provider_id: provider,
+            agent_id: agent,
+            native_session_ref: native.clone(),
+            write: true,
+        },
+    )?;
+    let proposed = crate::side_threads::command::source_record(engine, cut, proposed).await?;
+    let outcome = crate::commands::run(engine.inner.commands.as_ref(), proposed).await?;
     let read: AgentReadSessionResult = match outcome {
         Outcome::Succeeded(value) => serde_json::from_value(value)?,
         // This operation is a read, not child creation. A known failed record
@@ -931,6 +931,7 @@ pub(crate) async fn native_boundary(
             "The captured native record failed its identity check.",
         ));
     }
+    crate::side_threads::operation::checkpoint(engine, cut).await?;
     let text = std::str::from_utf8(&bytes).map_err(EngineError::unreadable)?;
     let (entries, unreadable) = orch_agent_contract::discovery::read_record(text);
     let evidence = NativeRecordEvidence::from(&read);
@@ -1211,7 +1212,7 @@ pub(crate) async fn copy(
         .active_continuation_id;
     // The identity a copied row has in the target is made from the target's and the original's, in the database
     // (`md5(target || original)`), so that no table of all the identities exists to hold or to send: a history of any
-    // length is copied by the same statements, a page of items at a time. A reference to a row that the cut does not hold
+    // length copies its turns and items a page at a time. A reference to a row that the cut does not hold
     // is nothing, as it was when the identities were tabled.
     let items_held = rows::item_count(unit.conn, cut.id).await?;
     let copyable: bool = sqlx::query_scalar(
@@ -1264,17 +1265,12 @@ pub(crate) async fn copy(
       WHERE r.cut_id=$2 AND r.kind='input'")
         .bind(target).bind(cut.id).bind(owner).bind(first)
         .execute(&mut *unit.conn).await.map_err(orch_db::DbError::from)?;
-    sqlx::query("INSERT INTO turns SELECT p.* FROM thread_history_cut_rows r
-      CROSS JOIN LATERAL jsonb_populate_record(NULL::turns,r.body||jsonb_build_object(
-      'id',md5($1::text||r.row_id::text)::uuid,'thread_id',$1::uuid,'continuation_id',$3::uuid,'ordinal',r.ordinal,
-      'segment_id',md5($1::text||(r.body->>'segment_id'))::uuid,'input_id',md5($1::text||(r.body->>'input_id'))::uuid,
-      'lease_id',NULL,'native_turn_ref','fork-copy:'||r.row_id::text,'native_end_confirmed',true,
-      'before_snapshot_id',NULL,'end_manifest_blob',NULL,'files_end_manifest',NULL,'end_work',NULL,
-      'files_work_pending',false,'files_end_due',false,'cut_notice_sent',true,'phase',NULL,'phase_at',NULL,
-      'waiting_since',NULL,'seq_updated',$4::bigint,'completed_seq',$4::bigint)) p
-      WHERE r.cut_id=$2 AND r.kind='turn'")
-        .bind(target).bind(cut.id).bind(owner).bind(first)
-        .execute(&mut *unit.conn).await.map_err(orch_db::DbError::from)?;
+    let mut turn_after = None;
+    while let Some(last) =
+        rows::copy_turns_page(unit.conn, cut.id, target, owner, first, turn_after).await?
+    {
+        turn_after = Some(last);
+    }
     sqlx::query("UPDATE thread_inputs i SET turn_id=CASE WHEN EXISTS(SELECT 1 FROM thread_history_cut_rows t
         WHERE t.cut_id=$1 AND t.kind='turn' AND t.row_id=(r.body->>'turn_id')::uuid)
         THEN md5($2::text||(r.body->>'turn_id'))::uuid END
@@ -1286,10 +1282,12 @@ pub(crate) async fn copy(
       WHERE r.cut_id=$1 AND r.kind='input' ON CONFLICT DO NOTHING RETURNING blob),counts AS(
         SELECT blob,count(*) AS n FROM added GROUP BY blob) UPDATE blobs b SET pin_count=b.pin_count+c.n FROM counts c WHERE b.hash=c.blob")
         .bind(cut.id).bind(target).execute(&mut *unit.conn).await.map_err(orch_db::DbError::from)?;
+    // Copied payloads receive new positions in frozen order within the same raw reservation.
+    // Source markers remain readable at the source and consume no copy payload pages.
     let mut after = 0;
     let mut offset = 0_i64;
     loop {
-        let page = rows::item_bodies_page(unit.conn, cut.id, after).await?;
+        let page = rows::copy_item_bodies_page(unit.conn, cut.id, after).await?;
         let Some(last) = page.last() else { break };
         after = last["seq_created"]
             .as_i64()
@@ -1327,21 +1325,12 @@ pub(crate) async fn copy(
             WHERE c.kind NOT IN ('user_message','marker') AND c.native_alias IS NOT NULL")
             .bind(cut.id).bind(target).execute(&mut *unit.conn).await.map_err(orch_db::DbError::from)?;
     }
-    // Parents may occur on a later payload page. Restore their mapped identities
-    // only after all child/parent rows exist; no per-item query or FK guess.
+    // Parents may occur on a later payload page. Restore them from the same frozen selector,
+    // one bounded database page at a time, after every child and parent has been inserted.
     after = 0;
-    loop {
-        let page = rows::item_bodies_page(unit.conn, cut.id, after).await?;
-        let Some(last) = page.last() else { break };
-        after = last["seq_created"]
-            .as_i64()
-            .ok_or_else(|| EngineError::unreadable("A captured item position is missing."))?;
-        sqlx::query("UPDATE items i SET parent_item_id=md5($2::text||(b.body->>'parent_item_id'))::uuid
-          FROM jsonb_array_elements($1::jsonb) b(body) WHERE b.body->>'parent_item_id' IS NOT NULL
-            AND i.id=md5($2::text||(b.body->>'id'))::uuid AND EXISTS(SELECT 1 FROM thread_history_cut_members($3) p
-              WHERE p.item_id=(b.body->>'parent_item_id')::uuid AND p.kind<>'marker')")
-            .bind(serde_json::to_value(&page)?).bind(target).bind(cut.id)
-            .execute(&mut *unit.conn).await.map_err(orch_db::DbError::from)?;
+    while let Some(last) = rows::restore_copy_parents_page(unit.conn, cut.id, target, after).await?
+    {
+        after = last;
     }
     sqlx::query("INSERT INTO approvals SELECT a.* FROM thread_history_cut_rows r
       CROSS JOIN LATERAL jsonb_populate_record(NULL::approvals,r.body||jsonb_build_object(

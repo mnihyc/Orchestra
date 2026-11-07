@@ -16,13 +16,15 @@ use orch_types::Json;
 use serde::{Deserialize, Serialize};
 use serde_json::json;
 
-#[derive(Serialize, Deserialize)]
-struct Authorization {
-    actor: Id,
+#[derive(Clone, Serialize, Deserialize)]
+pub(super) struct Authorization {
+    pub(super) actor: Id,
     token: Option<Id>,
     scope: Option<crate::continuations::recipe::AuthorizationScope>,
-    continuation: Id,
-    segment: Id,
+    pub(super) continuation: Id,
+    pub(super) segment: Id,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub(super) operation_origin: Option<orch_authz::CapturedOperation>,
 }
 
 pub(super) async fn capture(
@@ -53,6 +55,11 @@ pub(super) async fn capture(
         .ok_or_else(|| EngineError::unreadable("The side creation is unavailable."))?;
     let auth = Authorization {
         actor: caller.user(),
+        operation_origin: caller
+            .admitted_operation()
+            .map(|_| orch_authz::CapturedOperation::capture(caller))
+            .transpose()
+            .map_err(EngineError::unreadable)?,
         token: caller.grant().and_then(|grant| grant.token()),
         continuation: child.active_continuation_id,
         segment: child
@@ -126,6 +133,28 @@ async fn authorize_source_grant(
         return Err(EngineError::unreadable(
             "The side's preparation author is unavailable.",
         ));
+    }
+    if auth.operation_origin.is_some() {
+        let principal =
+            super::operation::principal(conn, engine.inner.clock.as_ref(), side.node_id)
+                .await?
+                .ok_or_else(|| {
+                    EngineError::unreadable("The original side operation is unavailable.")
+                })?;
+        let mut unit = Unit::new(conn, engine.inner.clock.now());
+        engine
+            .check_sender(&mut unit, principal.caller(), side, true)
+            .await
+            .map_err(EngineError::unreadable)?;
+        if !principal
+            .caller()
+            .key_deadline_allows(engine.inner.clock.as_ref())
+        {
+            return Err(EngineError::unreadable(
+                "The original side credential ended.",
+            ));
+        }
+        return Ok(());
     }
     let caller = if let Some(token) = auth.token {
         let row = credentials::job_token(conn, token, auth.actor, now)
@@ -579,6 +608,7 @@ pub(crate) async fn saved(
                 + chrono::Duration::seconds(i64::from(command.kind.deadline_secs())),
         ));
     }
+    command = super::command::retain(engine, &mut tx, &side, &cut, slot, command).await?;
     let deadline = command.deadline.ok_or_else(|| {
         EngineError::unreadable("The retained side opening lost its original deadline.")
     })?;
@@ -688,6 +718,35 @@ pub(crate) async fn save_first_turn(
         ));
     }
     authorize(engine, &mut tx, &side, engine.inner.clock.now()).await?;
+    if cut.as_ref().is_some_and(|cut| {
+        cut.artifacts["side_authorization"]
+            .get("operation_origin")
+            .is_some_and(|value| !value.is_null())
+    }) {
+        let current = threads::input(&mut tx, snap.input.id)
+            .await?
+            .ok_or_else(|| EngineError::unreadable("The side's initial input is unavailable."))?;
+        let mut unit = Unit::new(&mut tx, engine.inner.clock.now());
+        let original = crate::inputs::input_author_caller(
+            &mut unit,
+            side.node_id,
+            &current,
+            engine.inner.clock.as_ref(),
+        )
+        .await?
+        .ok_or_else(|| EngineError::unreadable("The side's initial input authority ended."))?;
+        for caller in original.callers() {
+            engine
+                .check_sender(&mut unit, caller, &side, true)
+                .await
+                .map_err(EngineError::unreadable)?;
+            if !caller.key_deadline_allows(engine.inner.clock.as_ref()) {
+                return Err(EngineError::unreadable(
+                    "The side's initial input credential ended.",
+                ));
+            }
+        }
+    }
     let old = link::command(&mut tx, command.id).await?;
     let deadline = old.as_ref().map_or_else(
         || {
@@ -926,6 +985,8 @@ async fn verify_child(
             }
             read = old;
         }
+        read =
+            super::command::retain(engine, &mut tx, &side, &cut, "side_verify_child", read).await?;
         let deadline = read.deadline.ok_or_else(|| {
             EngineError::unreadable("The native child readback lost the original creation budget.")
         })?;

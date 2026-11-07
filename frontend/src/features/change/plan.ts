@@ -189,7 +189,7 @@ export function copyLines(mounts: readonly PlanMount[], locale: string, t: TFunc
   });
 }
 
-/** What becomes of the MCP servers that a plan names as new, lost or unavailable there. */
+/** What becomes of every MCP server named by the plan. */
 export function mcpLines(servers: readonly PlanMcpServer[], t: TFunction): Line[] {
   return servers.map((server): Line => ({
     id: `mcp-${server.id}`,
@@ -197,6 +197,21 @@ export function mcpLines(servers: readonly PlanMcpServer[], t: TFunction): Line[
     tone: server.fate === 'new' || server.fate === 'kept' ? 'plain' : 'warning',
     text: server.reason === null ? t(`mcpPlan.${server.fate}`, { name: server.name }) : t(`mcpPlan.${server.fate}Because`, { name: server.name, reason: server.reason }),
   }));
+}
+
+/** Resources whose reported identity and attachment are retained. */
+export function keptResourcesOf(plan: Pick<ForkPlan, 'mounts' | 'mcp'>, t: TFunction): Line[] {
+  return [...mountLines(plan.mounts.filter((mount) => mount.action === 'keep'), t), ...mcpLines(plan.mcp.filter((server) => server.fate === 'kept'), t)];
+}
+
+/** New resource attachments also matter in the compact switch plan. */
+export function addedResourcesOf(plan: Pick<ForkPlan, 'mounts' | 'mcp'>, t: TFunction): Line[] {
+  return [...mountLines(plan.mounts.filter((mount) => mount.action === 'attach'), t), ...mcpLines(plan.mcp.filter((server) => server.fate === 'new'), t)];
+}
+
+/** Losses retain their reported warning and reason in every plan. */
+export function removedResourcesOf(plan: Pick<ForkPlan, 'mounts' | 'mcp'>, t: TFunction): Line[] {
+  return [...mountLines(plan.mounts.filter((mount) => mount.action === 'detach'), t), ...mcpLines(plan.mcp.filter((server) => server.fate === 'lost' || server.fate === 'unavailable'), t)];
 }
 
 /** What the result will be, and what is different: for a fork, first that it is its maker's. */
@@ -231,9 +246,8 @@ export function changesOf(plan: ForkPlan, context: PlanContext, t: TFunction): L
       text: t(plan.memory.carried ? 'change.plan.memoryAlong' : 'change.plan.memoryLeft', { count: plan.memory.files, size: formatBytes(plan.memory.bytes, context.locale) }),
     });
   }
-  lines.push(...mountLines(plan.mounts.filter((one) => one.action !== 'detach'), t));
+  lines.push(...addedResourcesOf(plan, t));
   lines.push(...copyLines(plan.mounts, context.locale, t));
-  lines.push(...mcpLines(plan.mcp.filter((server) => server.fate === 'new'), t));
   return lines;
 }
 
@@ -278,7 +292,7 @@ export function staysOf(plan: ForkPlan, context: PlanContext, t: TFunction): Lin
       });
     }
   }
-  return lines;
+  return [...lines, ...keptResourcesOf(plan, t)];
 }
 
 /** What stops and what is taken away: the old side in one exact sentence, processes, mounts the new place does not have. */
@@ -292,8 +306,7 @@ export function endsOf(plan: ForkPlan, context: PlanContext, t: TFunction): Line
     if (processes > 0 && plan.options.stop_processes) lines.push({ id: 'processes', resources, tone: 'plain', text: t('change.plan.processes', { count: processes, name: environment.name }) });
   }
   if (left?.session === true) lines.push({ id: 'session', tone: 'plain', text: t('change.plan.oldSession') });
-  lines.push(...mountLines(plan.mounts.filter((one) => one.action === 'detach'), t));
-  lines.push(...mcpLines(plan.mcp.filter((server) => server.fate === 'lost' || server.fate === 'unavailable'), t));
+  lines.push(...removedResourcesOf(plan, t));
   if (lines.length === 0) lines.push({ id: 'nothing', tone: 'plain', text: context.kind === 'fork' ? t('change.plan.endsNothingFork') : t('change.plan.endsNothing') });
   return lines;
 }

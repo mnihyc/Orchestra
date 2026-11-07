@@ -73,7 +73,7 @@ use crate::tunnels::TunnelServer;
 use crate::upstream::{
     End, IDLE_TIMEOUT, Relay, Upstream, UpstreamError, UpstreamRequest, Watcher,
 };
-use crate::usage::{lease_denied, lease_usage};
+use crate::usage::lease_denied;
 
 /// How long a harness is told to wait before it asks again when the forwarder could not reach the
 /// upstream, or the provider is not there: the first pause of the harnesses' own backoff.
@@ -569,7 +569,14 @@ impl Forwarder {
             && !self.providers.contains(session.provider_id)
             && let Some(ticket) = session.tickets.llm.as_deref().filter(|t| !t.is_empty())
         {
-            return self.through_tunnel(request, below_session, ticket).await;
+            return self
+                .through_tunnel(
+                    request,
+                    below_session,
+                    ticket,
+                    session.tickets.routes.get("llm"),
+                )
+                .await;
         }
         self.forward(request, below_session, lease).await
     }
@@ -889,6 +896,134 @@ impl Forwarder {
             converter = Some(response);
         }
         let endpoint_entry = self.protocols.get(endpoint_protocol);
+        if !endpoint.options().params.is_empty() {
+            let applied = match endpoint_entry {
+                Some(wire) => orch_model_contract::parameters::apply_request(
+                    wire.protocol.as_ref(),
+                    &sent_path,
+                    &sent_body,
+                    &endpoint.options().request_params(),
+                    true,
+                ),
+                None => orch_model_contract::parameters::apply(
+                    endpoint_protocol,
+                    &sent_body,
+                    &endpoint.options().request_params(),
+                    true,
+                ),
+            };
+            sent_body = match applied {
+                Ok(body) => Bytes::from(body),
+                Err(reason) => {
+                    return self.refuse(
+                        Some(entry),
+                        Refusal::new(StatusCode::BAD_REQUEST, code::REQUEST_REFUSED, reason),
+                    );
+                }
+            };
+            if u64::try_from(sent_body.len()).unwrap_or(u64::MAX) > self.max_request_bytes {
+                return self.refuse(
+                    Some(entry),
+                    Refusal::new(
+                        StatusCode::PAYLOAD_TOO_LARGE,
+                        code::REQUEST_TOO_LARGE,
+                        "the configured request exceeds this runtime's request limit",
+                    ),
+                );
+            }
+            if self
+                .protocols
+                .privacy()
+                .refused_member(&sent_body)
+                .is_some()
+            {
+                return self.refuse(
+                    Some(entry),
+                    Refusal::new(
+                        StatusCode::FORBIDDEN,
+                        code::REQUEST_REFUSED,
+                        "the configured model options contain a refused request member",
+                    ),
+                );
+            }
+        }
+        // Every final payload is checked after translation and every overlay, including translators
+        // whose target format has no built-in implementation. A legacy lease cannot prove a ceiling.
+        let Some(model_parameters) = lease.model_parameters(&model) else {
+            return self.refuse(
+                Some(entry),
+                Refusal::new(
+                    StatusCode::FORBIDDEN,
+                    code::REQUEST_REFUSED,
+                    "this lease lacks provider option constraints; start a new turn",
+                ),
+            );
+        };
+        sent_body = match orch_model_contract::parameters::outgoing_at(
+            endpoint_protocol,
+            &sent_path,
+            model_parameters,
+            &sent_body,
+        ) {
+            Ok(body) => Bytes::from(body),
+            Err(reason) => {
+                self.denied(&lease, &model, code::REQUEST_REFUSED).await;
+                return self.refuse(
+                    Some(entry),
+                    Refusal::new(StatusCode::FORBIDDEN, code::REQUEST_REFUSED, reason),
+                );
+            }
+        };
+        if u64::try_from(sent_body.len()).unwrap_or(u64::MAX) > self.max_request_bytes {
+            return self.refuse(
+                Some(entry),
+                Refusal::new(
+                    StatusCode::PAYLOAD_TOO_LARGE,
+                    code::REQUEST_TOO_LARGE,
+                    "the resolved request exceeds this runtime's request limit",
+                ),
+            );
+        }
+        if self
+            .protocols
+            .privacy()
+            .refused_member(&sent_body)
+            .is_some()
+        {
+            return self.refuse(
+                Some(entry),
+                Refusal::new(
+                    StatusCode::FORBIDDEN,
+                    code::REQUEST_REFUSED,
+                    "the resolved model options contain a refused request member",
+                ),
+            );
+        }
+        if endpoint_entry.map_or_else(
+            || {
+                serde_json::from_slice::<serde_json::Value>(&sent_body)
+                    .ok()
+                    .and_then(|body| {
+                        body.get("model")
+                            .and_then(serde_json::Value::as_str)
+                            .map(str::to_owned)
+                    })
+                    .as_deref()
+                    != Some(model.as_str())
+            },
+            |wire| {
+                wire.protocol.model_of(&sent_path, &sent_body).as_deref() != Some(model.as_str())
+            },
+        ) {
+            return self.refuse(
+                Some(entry),
+                Refusal::new(
+                    StatusCode::FORBIDDEN,
+                    code::MODEL_NOT_ALLOWED,
+                    "the final request does not retain the admitted model",
+                ),
+            );
+        }
         let extra_query = match self
             .authorize(
                 &provider,
@@ -931,6 +1066,60 @@ impl Forwarder {
         let url = upstream_url(endpoint, &sent_path, sent_query.as_deref(), &extra_query);
 
         // 7. Send it, and hand the answer on as it comes.
+        // These are facts of the final upstream payload, after translation and runtime defaults.
+        // Start awareness before any upstream or key-report await can race with lease.close.
+        let requested_service_tier = serde_json::from_slice::<serde_json::Value>(&sent_body)
+            .ok()
+            .and_then(|body| {
+                orch_model_contract::parameters::requested_service_tier(endpoint_protocol, &body)
+            });
+        let timing = orch_api_contract::usage::RequestTiming {
+            asked: Some(self.services.clock.time()),
+            web_searches: if endpoint_entry
+                .and_then(|wire| orch_model_contract::web_search::declared(wire.protocol.name()))
+                .is_some_and(|search| {
+                    serde_json::from_slice(&sent_body)
+                        .ok()
+                        .is_some_and(|body| search.selected(&body))
+                }) {
+                orch_api_contract::usage::UsageMeasurement::Unread
+            } else {
+                orch_api_contract::usage::UsageMeasurement::Unsupported
+            },
+            wire_protocol: Some(endpoint_protocol.to_owned()),
+            requested_service_tier,
+            reported_service_tier: if orch_model_contract::parameters::reports_service_tier(
+                endpoint_protocol,
+            ) {
+                orch_api_contract::usage::UsageMeasurement::Unread
+            } else {
+                orch_api_contract::usage::UsageMeasurement::Unsupported
+            },
+            ..Default::default()
+        };
+        let meter = Meter::start_observed(Arc::clone(&lease));
+        let mut watcher = Metered {
+            observer: endpoint_entry.map(|wire| wire.protocol.usage_observer()),
+            meter,
+            model,
+            timing,
+            request_id: orch_types::new_id().to_string(),
+            redactions: credential
+                .as_ref()
+                .map(|credential| credential.expose().to_owned())
+                .into_iter()
+                .chain(
+                    provider
+                        .secrets()
+                        .values()
+                        .map(|secret| secret.expose().to_owned()),
+                )
+                .filter(|secret| !secret.is_empty())
+                .collect(),
+            clock: Arc::clone(&self.services.clock),
+            publisher: Arc::clone(&self.services.publisher),
+            runtime: tokio::runtime::Handle::current(),
+        };
         let sent = self
             .upstream
             .send(UpstreamRequest {
@@ -950,6 +1139,7 @@ impl Forwarder {
                     _ => (StatusCode::BAD_GATEWAY, code::UPSTREAM_UNREACHABLE),
                 };
                 tracing::warn!(provider = %provider.id(), %error, "a model call could not be forwarded");
+                watcher.end(End::Cut(error.to_string()));
                 return self.refuse(
                     Some(entry),
                     Refusal::new(status, label, error.to_string()).later(),
@@ -957,19 +1147,22 @@ impl Forwarder {
             }
         };
         self.note_key(&provider, answer.status).await;
-        let watcher = Metered {
-            observer: entry.protocol.usage_observer(),
-            meter: Meter::start(Arc::clone(&lease)),
-            model,
-            publisher: Arc::clone(&self.services.publisher),
-            runtime: tokio::runtime::Handle::current(),
-        };
+        watcher.timing.upstream_status = Some(i64::from(answer.status.as_u16()));
+        watcher.timing.provider_request_id = ["x-request-id", "request-id"]
+            .into_iter()
+            .find_map(|name| {
+                answer
+                    .headers
+                    .get(name)
+                    .and_then(|value| value.to_str().ok())
+            })
+            .map(str::to_owned);
         let translated = converter.is_some();
         let body = match converter {
             Some(converter) => TranslatedRelay::new(
-                Relay::new(answer.body, Box::new(Unwatched), IDLE_TIMEOUT),
+                Relay::new(answer.body, Box::new(watcher), IDLE_TIMEOUT),
                 converter,
-                Box::new(watcher),
+                Box::new(Unwatched),
             )
             .boxed(),
             None => Relay::new(answer.body, Box::new(watcher), IDLE_TIMEOUT).boxed(),
@@ -1028,6 +1221,7 @@ impl Forwarder {
         request: Request<Incoming>,
         below_session: &str,
         ticket: &str,
+        route: Option<&orch_link_contract::gateways::TunnelPlan>,
     ) -> Response<Body> {
         let entry = self.protocols.of_request(request.method(), below_session);
         let unavailable = |why: String| {
@@ -1041,7 +1235,7 @@ impl Forwarder {
                 .later(),
             )
         };
-        let tunnel = match self.services.tunnels.open(ticket).await {
+        let tunnel = match self.services.tunnels.open_with_route(ticket, route).await {
             Ok(tunnel) => tunnel,
             Err(error) => {
                 return unavailable(format!(
@@ -1275,14 +1469,37 @@ impl Forwarder {
             .own_request(
                 &call,
                 |protocol| {
-                    protocol
+                    let (method, path, body) = protocol
                         .embedding_request(&request.model_name, &request.inputs, request.dimensions)
                         .ok_or_else(|| {
                             CommandError::new(
                                 ErrorCode::Unsupported,
                                 "this protocol cannot make embeddings",
                             )
-                        })
+                        })?;
+                    let body = match request.params.as_ref() {
+                        Some(params) => Bytes::from(
+                            orch_model_contract::parameters::apply_embedding(
+                                protocol.name(),
+                                &body,
+                                params,
+                            )
+                            .map_err(|reason| CommandError::new(ErrorCode::Conflict, reason))?,
+                        ),
+                        None => body,
+                    };
+                    let parameters = request.model_parameters.as_ref().ok_or_else(|| CommandError::new(
+                        ErrorCode::Conflict, "this retained request lacks provider option constraints; issue a new request"))?;
+                    let body = Bytes::from(
+                            orch_model_contract::parameters::outgoing_at(
+                                protocol.name(),
+                                path,
+                                parameters,
+                                &body,
+                            )
+                            .map_err(|reason| CommandError::new(ErrorCode::Conflict, reason))?,
+                        );
+                    Ok((method, path, body))
                 },
                 |protocol, body| {
                     protocol
@@ -1331,6 +1548,8 @@ impl Forwarder {
                 "no endpoint of this provider speaks the requested protocol",
             )
         })?;
+        // Structured commands carry the issuer's final immutable options. Only the raw
+        // incoming request path applies runtime endpoint defaults, never this replay path.
         let (method, path, body) = build(entry.protocol.as_ref())?;
         if u64::try_from(body.len()).unwrap_or(u64::MAX) > self.max_request_bytes {
             return Err(CommandError::new(
@@ -1341,6 +1560,29 @@ impl Forwarder {
                 ),
             ));
         }
+        if entry.protocol.model_of(path, &body).as_deref() != Some(call.model) {
+            return Err(CommandError::new(
+                ErrorCode::Conflict,
+                "model options changed the selected model",
+            ));
+        }
+        if self.protocols.privacy().refused_member(&body).is_some() {
+            return Err(CommandError::new(
+                ErrorCode::Conflict,
+                "model options contain a refused request member",
+            ));
+        }
+        let search_selected = orch_model_contract::web_search::declared(entry.protocol.name())
+            .is_some_and(|search| {
+                serde_json::from_slice(&body)
+                    .ok()
+                    .is_some_and(|body| search.selected(&body))
+            });
+        let requested_service_tier = serde_json::from_slice::<serde_json::Value>(&body)
+            .ok()
+            .and_then(|body| {
+                orch_model_contract::parameters::requested_service_tier(call.protocol, &body)
+            });
         let credential = provider.credential(&self.store);
         let mut headers = HeaderMap::new();
         headers.insert(ACCEPT_ENCODING, HeaderValue::from_static("identity"));
@@ -1399,12 +1641,25 @@ impl Forwarder {
                 output_streamed: Some(false),
                 ..Default::default()
             };
+            request.error_reason = error
+                .details
+                .as_ref()
+                .and_then(|details| details.pointer("/failure/reason"))
+                .and_then(serde_json::Value::as_str)
+                .map(str::to_owned);
+            request.upstream_status = error
+                .details
+                .as_ref()
+                .and_then(|details| details.pointer("/failure/status"))
+                .and_then(serde_json::Value::as_i64);
             request.finish(code, Some(&error.detail), said.as_deref());
             let mut details = error
                 .details
                 .clone()
                 .unwrap_or_else(|| serde_json::json!({}));
             details["model_request"] = serde_json::json!(request);
+            details["model_request"]["requested_service_tier"] =
+                serde_json::json!(requested_service_tier);
             error.with_details(details)
         };
         let (status, response_headers, body) = tokio::time::timeout(
@@ -1499,6 +1754,9 @@ impl Forwarder {
             {
                 details["model_request"]["tokens"] =
                     serde_json::json!(orch_api_contract::usage::RequestTokens::from(usage.tokens));
+                details["model_request"]["web_searches"] = serde_json::json!(usage.web_searches);
+                details["model_request"]["reported_service_tier"] =
+                    serde_json::json!(usage.service_tier);
             }
             return Err(error);
         }
@@ -1522,7 +1780,7 @@ impl Forwarder {
             )
         })?;
         self.note_key(provider, status).await;
-        let timing = orch_api_contract::performance::request_timing(
+        let mut timing = orch_api_contract::performance::request_timing(
             &orch_api_contract::usage::RequestSample {
                 asked: Some(started),
                 end: Some(self.services.clock.time()),
@@ -1533,6 +1791,27 @@ impl Forwarder {
                     value: "done".to_owned(),
                 },
                 ..orch_api_contract::usage::RequestSample::default()
+            },
+        );
+        timing.web_searches = usage.web_searches.map_or(
+            if search_selected {
+                orch_api_contract::usage::UsageMeasurement::Unread
+            } else {
+                orch_api_contract::usage::UsageMeasurement::Unsupported
+            },
+            |value| orch_api_contract::usage::UsageMeasurement::Told { value },
+        );
+        timing.upstream_status = Some(i64::from(status.as_u16()));
+        timing.provider_request_id = usage.request_ref.clone();
+        timing.requested_service_tier = requested_service_tier.clone();
+        timing.reported_service_tier = usage.service_tier.as_ref().map_or(
+            if orch_model_contract::parameters::reports_service_tier(call.protocol) {
+                orch_api_contract::usage::UsageMeasurement::Empty
+            } else {
+                orch_api_contract::usage::UsageMeasurement::Unsupported
+            },
+            |value| orch_api_contract::usage::UsageMeasurement::Told {
+                value: value.clone(),
             },
         );
         Ok((answer, usage, timing))
@@ -1559,76 +1838,20 @@ fn completion_request(
                 "this protocol cannot make text completions",
             )
         })?;
-    let body = if let Some(params) = request.params.as_ref() {
-        orch_provider_contract::calls::completion_options(params).map_err(invalid)?;
-        let mut extra = params
-            .as_object()
-            .cloned()
-            .ok_or_else(|| invalid("completion parameters must be an object"))?;
-        if extra.is_empty() {
-            body
-        } else {
-            use orch_model_contract::protocol::{
-                ANTHROPIC_MESSAGES, OPENAI_CHAT, OPENAI_RESPONSES,
-            };
-            if !matches!(
-                protocol.name(),
-                OPENAI_RESPONSES | OPENAI_CHAT | ANTHROPIC_MESSAGES
-            ) {
-                return Err(CommandError::new(
-                    ErrorCode::Unsupported,
-                    "This protocol has not declared completion model options",
-                ));
-            }
-            let has_effort = [
-                "/effort",
-                "/reasoning_effort",
-                "/reasoning/effort",
-                "/output_config/effort",
-            ]
-            .iter()
-            .any(|path| params.pointer(path).is_some());
-            let effort =
-                orch_provider_contract::calls::requested_effort(params).map_err(invalid)?;
-            extra.remove("effort");
-            extra.remove("reasoning_effort");
-            extra.remove("reasoning");
-            extra.remove("output_config");
-            if has_effort {
-                let effort = serde_json::json!(effort);
-                match protocol.name() {
-                    OPENAI_RESPONSES => {
-                        extra.insert("reasoning".to_owned(), serde_json::json!({"effort":effort}));
-                    }
-                    ANTHROPIC_MESSAGES => {
-                        extra.insert(
-                            "output_config".to_owned(),
-                            serde_json::json!({"effort":effort}),
-                        );
-                    }
-                    _ => {
-                        extra.insert("reasoning_effort".to_owned(), effort);
-                    }
-                }
-            }
-            let mut payload: serde_json::Value = serde_json::from_slice(&body)
-                .map_err(|_| invalid("completion request must be an object"))?;
-            let members = payload
-                .as_object_mut()
-                .ok_or_else(|| invalid("completion request must be an object"))?;
-            for (key, value) in extra {
-                if members.contains_key(&key) {
-                    return Err(invalid(
-                        "completion parameters cannot replace the protocol request",
-                    ));
-                }
-                members.insert(key, value);
-            }
-            bytes::Bytes::from(payload.to_string())
-        }
-    } else {
-        body
+    let body = match request.params.as_ref() {
+        Some(params) => Bytes::from(
+            orch_model_contract::parameters::apply_request(protocol, path, &body, params, false)
+                .map_err(invalid)?,
+        ),
+        None => body,
     };
+    let parameters = request.model_parameters.as_ref().ok_or_else(|| {
+        invalid("this retained request lacks provider option constraints; issue a new request")
+    })?;
+    let body = Bytes::from(
+        orch_model_contract::parameters::outgoing_at(protocol.name(), path, parameters, &body)
+            .map_err(invalid)?,
+    );
     if protocol.model_of(path, &body).as_deref() != Some(request.model_name.as_str()) {
         return Err(invalid("completion parameters changed the selected model"));
     }
@@ -1645,7 +1868,7 @@ struct OwnCall<'a> {
     kind: orch_link_contract::commands::CommandKind,
 }
 
-/// A relay whose observation is performed after response conversion instead.
+/// A stage of a relay that does not need another observation.
 struct Unwatched;
 
 impl Watcher for Unwatched {
@@ -1658,7 +1881,7 @@ type ConvertedPiece = (
     Result<Bytes, translator::TranslateError>,
 );
 
-/// Converts one response chunk at a time on blocking workers and meters only the resulting format.
+/// Converts one response chunk at a time on blocking workers, after upstream observation.
 /// Pulling the next upstream chunk waits for the preceding conversion and the harness's demand.
 struct TranslatedRelay {
     relay: Relay,
@@ -1822,34 +2045,163 @@ fn upstream_url(
 
 /// Watches a forwarded answer: reads what it used as it passes and keeps the lease up to date.
 struct Metered {
-    observer: Box<dyn UsageObserver>,
+    request_id: String,
+    redactions: Vec<String>,
+    clock: Arc<dyn orch_types::Clock>,
+    observer: Option<Box<dyn UsageObserver>>,
     meter: Meter,
     model: String,
+    timing: orch_api_contract::usage::RequestTiming,
     publisher: Arc<dyn Publisher>,
     runtime: tokio::runtime::Handle,
 }
 
+impl Metered {
+    fn update(&mut self, seen: &ObservedUsage, complete: bool) {
+        use orch_api_contract::usage::UsageMeasurement;
+        if let Some(value) = seen.web_searches {
+            self.timing.web_searches = UsageMeasurement::Told { value };
+        }
+        if let Some(value) = &seen.service_tier {
+            self.timing.reported_service_tier = UsageMeasurement::Told {
+                value: value.clone(),
+            };
+        } else if complete && matches!(self.timing.reported_service_tier, UsageMeasurement::Unread)
+        {
+            self.timing.reported_service_tier = UsageMeasurement::Empty;
+        }
+        self.meter
+            .update_observed(&self.model, &seen.tokens, &self.timing);
+    }
+}
+
 impl Watcher for Metered {
     fn piece(&mut self, piece: &[u8]) {
-        self.observer.observe(piece);
-        if let Some(seen) = self.observer.usage() {
-            self.meter.update(&seen.tokens);
+        let Some(observer) = self.observer.as_mut() else {
+            return;
+        };
+        observer.observe(piece);
+        if observer.response_facts().output_started {
+            self.timing
+                .first_output
+                .get_or_insert_with(|| self.clock.time());
+        }
+        if let Some(seen) = observer.usage() {
+            self.update(&seen, false);
         }
     }
 
     fn end(&mut self, end: End) {
-        let seen: Option<ObservedUsage> = self.observer.usage();
+        let seen: Option<ObservedUsage> =
+            self.observer.as_ref().and_then(|observer| observer.usage());
         if let Some(seen) = &seen {
-            self.meter.update(&seen.tokens);
+            // Persist final facts synchronously, before detached event publication. A close RPC
+            // that overtakes publication therefore still has all facts the observer retained.
+            self.update(seen, matches!(end, End::Whole));
         }
         if let End::Cut(why) = &end {
             tracing::debug!(%why, "a forwarded answer was cut");
         }
-        let Some(event) =
-            seen.and_then(|seen| lease_usage(self.meter.lease().id(), &self.model, &seen))
-        else {
-            return;
+        use orch_api_contract::usage::{RequestSample, UsageMeasurement};
+        let facts = self
+            .observer
+            .as_ref()
+            .map(|observer| observer.response_facts())
+            .unwrap_or_default();
+        self.timing.provider_request_id = facts
+            .request_id
+            .or_else(|| seen.as_ref().and_then(|seen| seen.request_ref.clone()))
+            .or_else(|| self.timing.provider_request_id.clone());
+        let message = facts
+            .failure
+            .as_ref()
+            .and_then(|body| {
+                body.pointer("/error/message")
+                    .or_else(|| body.get("message"))
+            })
+            .and_then(serde_json::Value::as_str)
+            .map(str::to_owned);
+        let status = self.timing.upstream_status;
+        let failed = facts.failure.is_some() || status.is_some_and(|status| status >= 400);
+        let (mut outcome, reason, words) = if failed {
+            let classification = orch_provider_contract::failure::classify_body(
+                status,
+                facts.failure.as_ref().unwrap_or(&serde_json::Value::Null),
+                message.as_deref().unwrap_or_default(),
+            );
+            let reason = facts
+                .failure
+                .as_ref()
+                .and_then(|body| body.pointer("/error/reason"))
+                .and_then(serde_json::Value::as_str)
+                .map(str::to_owned)
+                .or(classification.reason);
+            (classification.code, reason, message)
+        } else {
+            match &end {
+                End::Whole if facts.output_started && !facts.completed => (
+                    "stream_interrupted".into(),
+                    None,
+                    Some("The upstream ended before its terminal event.".into()),
+                ),
+                End::Whole => ("done".to_owned(), None, None),
+                End::Abandoned => ("forced".to_owned(), None, None),
+                End::Cut(why) => (
+                    if self.timing.first_output.is_some() {
+                        "stream_interrupted"
+                    } else {
+                        "provider_unreachable"
+                    }
+                    .to_owned(),
+                    None,
+                    Some(why.clone()),
+                ),
+            }
         };
+        if outcome == "provider_unreachable" && self.timing.first_output.is_some() {
+            outcome = "stream_interrupted".into();
+        }
+        let measured = orch_api_contract::performance::request_timing(&RequestSample {
+            asked: self.timing.asked,
+            first_output: self.timing.first_output,
+            end: Some(self.clock.time()),
+            reported_tokens: seen.as_ref().map(|seen| seen.tokens.into()),
+            output_tokens: seen.as_ref().map(|seen| seen.tokens.output_tokens),
+            // The relay cannot prove that hidden reasoning was streamed separately.
+            output_streamed: None,
+            outcome: UsageMeasurement::Told { value: outcome },
+            error_message: words.clone(),
+            vendor_words: words,
+            ..Default::default()
+        });
+        self.timing.first_token_ms = measured.first_token_ms;
+        self.timing.request_ms = measured.request_ms;
+        // HTTP body completion is not an observation of the last generated token.
+        // A matching harness report can supply that boundary and its eligible speed.
+        self.timing.generation_ms = UsageMeasurement::Unsupported;
+        self.timing.reported_tokens = measured.reported_tokens;
+        self.timing.end = measured.end;
+        self.timing.outcome = measured.outcome;
+        let redact = |words: String| {
+            self.redactions
+                .iter()
+                .fold(words, |words, secret| words.replace(secret, "[redacted]"))
+        };
+        self.timing.error_message = measured.error_message.map(redact);
+        self.timing.vendor_words = measured.vendor_words.map(redact);
+        self.timing.error_reason = reason.map(redact);
+        let event =
+            orch_link_contract::events::Event::LeaseUsage(orch_link_contract::events::LeaseUsage {
+                lease_id: self.meter.lease().id(),
+                model: self.model.clone(),
+                usage: seen.as_ref().map(|seen| seen.tokens).unwrap_or_default(),
+                request_ref: Some(
+                    seen.as_ref()
+                        .and_then(|seen| seen.request_ref.clone())
+                        .unwrap_or_else(|| self.request_id.clone()),
+                ),
+                timing: Some(self.timing.clone()),
+            });
         let stream = Stream::Provider {
             provider_id: self.meter.lease().provider_id(),
         };

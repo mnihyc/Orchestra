@@ -16,7 +16,7 @@ vi.mock('@/features/help/open',()=>({useHelpOpener:()=>vi.fn()}));
 vi.mock('@/api/resources',async(load)=>({...await load<typeof Resources>(),setMachineRoles:vi.fn()}));
 vi.mock('@tanstack/react-router',()=>({Link:({children}:{children:ReactNode})=><a href="/resources/machines/machine?tab=policy">{children}</a>}));
 
-function machine(delegated=true):Machine {return {id:'machine',name:'world-box',online:true,placement:'connected',platform_os:'linux',
+function machine(delegated=true):Machine {return {revision:7,id:'machine',name:'world-box',online:true,placement:'connected',platform_os:'linux',
   platform_arch:'x86_64',connector_version:'1.0.0',protocol_version:1,owner:null,roles:['environment','agent'],status:'active',
   last_seen_at:null,last_ip:null,cert_not_after:'2027-01-01T00:00:00Z',providers:[],agents:[],environments:[],environment_sandboxes:[],
   access:{permissions:['machine.view','machine.manage'],admin_only:[],administers:false,participating:true,through:[]},
@@ -42,7 +42,7 @@ for(const locale of ['en','zh-CN'] as const)for(const theme of ['light','dark'])
   await user.click(screen.getByRole('checkbox',{name:t('machines.add.roleChoices.provider.name')}));
   await user.click(screen.getByRole('button',{name:t('common.save')}));
   await waitFor(()=>expect(screen.queryByRole('group',{name:t('machineRoles.edit')})).not.toBeInTheDocument());
-  expect(setMachineRoles).toHaveBeenCalledExactlyOnceWith('machine',['environment','agent','provider']);
+  expect(setMachineRoles).toHaveBeenCalledExactlyOnceWith('machine',['environment','agent','provider'],7);
   expect(screen.getAllByText(['environment','agent','provider'].map((role)=>role==='environment'?t('machines.add.roleChoices.environment.name'):role==='agent'?t('machines.add.roleChoices.agent.name'):t('machines.add.roleChoices.provider.name')).join(' · '))).toHaveLength(1);
   expect(screen.queryByText(/roles set/u)).not.toBeInTheDocument();
 });
@@ -86,4 +86,16 @@ it('does not offer a Node factory, widen a kept switch, or give readers a role e
   view.rerender(<MachineRoles machine={{...machine(),role_management:{supported:true,delegated:true,enabled:false}}}/>);
   expect(screen.getByText(i18n.t('machineRoles.off'))).toBeVisible();expect(screen.getByRole('link',{name:i18n.t('machinePrograms.openPolicy')})).toBeVisible();
   expect(screen.queryByText(/roles set/u)).not.toBeInTheDocument();
+});
+
+
+it('sends the revision shown when the role draft opened even if a later machine observation arrives',async()=>{
+  const original=machine();
+  vi.mocked(setMachineRoles).mockResolvedValue({machine_view:original,requested_roles:['environment','agent','provider'],reconnecting:false});
+  const user=userEvent.setup();const view=show(<MachineRoles machine={original}/>);
+  await user.click(screen.getByRole('button',{name:'Change roles'}));
+  await user.click(screen.getByRole('checkbox',{name:'Provider'}));
+  view.rerender(<MachineRoles machine={{...original,revision:8}}/>);
+  await user.click(screen.getByRole('button',{name:'Save'}));
+  await waitFor(()=>expect(setMachineRoles).toHaveBeenCalledExactlyOnceWith('machine',['environment','agent','provider'],7));
 });

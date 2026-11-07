@@ -31,7 +31,7 @@ import { Frame, type View } from '@/features/change/Frame';
 import { HistoryChoices } from '@/features/change/History';
 import { HistoryReportTable, PlanLists } from '@/features/change/Lists';
 import { Options } from '@/features/change/Options';
-import { changesOf, endsOf, planProviderName, plannedApprovalWords, targetModelName, targetModelWords, type PlanContext, staysOf } from '@/features/change/plan';
+import { addedResourcesOf, changesOf, endsOf, keptResourcesOf, planProviderName, plannedApprovalWords, targetModelName, targetModelWords, type PlanContext, staysOf } from '@/features/change/plan';
 import { providerLabels } from '@/features/resources/providers/labels';
 import { JobProgress, committed } from '@/features/change/Progress';
 import { MeasurementReason, Measurements, waitsForCount } from '@/features/change/Measurements';
@@ -40,6 +40,8 @@ import { Result } from '@/features/change/Result';
 import { agentFor, hasReported, movesRuns, profilesFor, RunsOn, useModelFor } from '@/features/change/RunsOn';
 import { Time } from '@/features/change/Time';
 import { Where } from '@/features/change/Where';
+import { CreationAgentAccess } from '@/features/start/AgentAccess';
+import { offeredAgentAccess, useAgentAccessSelection } from '@/features/start/agentAccessOffer';
 import type { ForkPlan, ForkRequest, Job, Provider, Thread } from '@/generated/api-types';
 import { useFormatContext } from '@/lib/appearance';
 import { useActKey } from '@/lib/forms';
@@ -116,20 +118,21 @@ function Body({ thread, kind, toTurn, focus, job, say, open, onClose }: ThreadCh
   const [ran, setRan] = useState<{ heading: string; done: string; interrupted: boolean; waited: number; fork: boolean } | null>(null);
 
   const picking = open && jobId === null;
+  const agentSelection = useAgentAccessSelection(thread.id);
   const usable = useQuery({ ...providersQuery('usable'), enabled: picking });
   const agents = useQuery({ ...agentsQuery(), enabled: picking });
   const [defaulted, setDefaulted] = useState(false);
   if (!defaulted && startsOnDefault && jobId === null && usable.data !== undefined && agents.data !== undefined) {
     // Once, as soon as the lists are here: the choice is the person's from then on.
     setDefaulted(true);
-    const next = usable.data.find((candidate: Provider) => candidate.id !== thread.binding?.provider.id && candidate.status === 'ready' && profilesFor(candidate, agents.data).some(hasReported));
+    const next = usable.data.find((candidate: Provider) => candidate.id !== thread.binding?.provider.id && (candidate.status === 'ready' || candidate.status === 'exhausted') && profilesFor(candidate, agents.data).some(hasReported));
     if (next !== undefined) setChoices((current) => ({ ...current, providerId: next.id, agentId: agentFor(next, agents.data, thread) }));
   }
 
   const models = useModelFor(thread, choices, patch, picking);
 
   // The plan, asked for once the choices have rested, and kept: a plan is a statement of what would happen now.
-  const request: ForkRequest = useMemo(() => requestOf(choices), [choices]);
+  const request: ForkRequest = useMemo(() => ({ ...requestOf(choices), ...(fork && agentSelection.chosen !== null ? { agent_access: agentSelection.chosen } : {}) }), [choices, fork, agentSelection.chosen]);
   const asked = JSON.stringify(request);
   const rested = useDebounced(asked, PLAN_PAUSE_MS);
   const settled = !movesRuns(choices) || choices.model !== null;
@@ -144,6 +147,11 @@ function Body({ thread, kind, toTurn, focus, job, say, open, onClose }: ThreadCh
     placeholderData: keepPreviousData,
   });
   const current = plan.data;
+  const agentAccess = offeredAgentAccess(agentSelection, { offer: current?.agent_access, enabled: picking && fork,
+    pending: plan.isPending || plan.isFetching || rested !== asked, error: plan.error, retry: () => void plan.refetch() });
+  // The first admitted preview supplies the offer. The existing query then freezes the shown
+  // explicit choice; confirmation cannot use the earlier omitted-choice plan.
+  if (picking && fork && agentSelection.chosen === null && plan.isSuccess && !plan.isFetching && rested === asked && current?.agent_access !== undefined && current.agent_access !== null) agentSelection.onChange(agentAccess.value);
   const fingerprints = useMutation({
     mutationFn: ({ body, requestId }: { body: ForkRequest; requestId: string }) => planFork(thread.id, { ...body, check_fingerprints: true, fingerprint_request_id: requestId }),
     onSuccess: (checked, { body }) => { queryClient.setQueriesData({ queryKey: ['change-plan', thread.id, JSON.stringify(body)], exact: true }, checked); },
@@ -199,7 +207,7 @@ function Body({ thread, kind, toTurn, focus, job, say, open, onClose }: ThreadCh
   const blockers = confirm.error instanceof ApiError && confirm.error.is('plan.blocked') ? blockersOf(confirm.error) : (current?.blockers ?? []);
   const held = heldBy(confirm.error);
   const planFresh = wanted && current !== undefined && rested === asked && !plan.isError && !plan.isFetching && !plan.isPlaceholderData && !expired && !checkingContent;
-  const canConfirm = planFresh && blockers.length === 0 && !confirm.isPending;
+  const canConfirm = planFresh && blockers.length === 0 && !confirm.isPending && (!fork || agentAccess.ready && agentSelection.chosen !== null);
   const firstBlocker = blockers[0];
   const refusalKey = firstBlocker?.code === 'access' ? 'access' : firstBlocker?.code === 'already_running' ? 'running' : firstBlocker?.code === 'provider_not_ready' ? 'provider' : firstBlocker?.code === 'model_not_allowed' ? 'model' : firstBlocker?.code === 'no_host' || firstBlocker?.code === 'no_capacity' ? 'capacity' : 'blocked';
   const reason = confirm.isPending ? t('changeReady.applying')
@@ -366,6 +374,7 @@ function Body({ thread, kind, toTurn, focus, job, say, open, onClose }: ThreadCh
         {!simple && <Where thread={thread} choices={choices} onChange={patch} fork={fork} focus={open && focus === 'environment'} />}
         {!simple && current !== undefined && <MountFates mounts={current.mounts} picks={choices.mounts} onPickAll={(fate) => patch({ mounts: withFate(choices.mounts, current.mounts, fate) })} onPick={(mount, pick) => patch({ mounts: withPick(choices.mounts, mount, pick) })} onCheck={() => fingerprints.mutate({ body: request, requestId: newActKey() })} checking={checkingContent} checkDisabled={!planFresh && !checkingContent} checkError={checkError} />}
       </div>
+      {fork && <CreationAgentAccess access={agentAccess} disabled={confirm.isPending} />}
       {!simple && options && <Options choices={choices} onChange={patch} applied={current?.options ?? null} plan={current ?? null} topic={topic} />}
 
       {wanted && plan.isError && <PlanFailure error={plan.error} onRetry={() => void plan.refetch()} />}
@@ -389,7 +398,7 @@ function Body({ thread, kind, toTurn, focus, job, say, open, onClose }: ThreadCh
           {planGone(confirm.error) && <InlineAlert tone="warning" title={t('change.expired.title')}>{t('change.expired.made')}</InlineAlert>}
           <Blockers blockers={blockers.filter((blocker) => blocker.code !== 'measurement_pending')} plan={current} onShow={held === null ? undefined : () => setJobId(held)} />
           {plannedApprovalWords(current.to, t) !== null && <p className="text-sm text-text-muted" data-planned-approval>{plannedApprovalWords(current.to, t)}</p>}
-          <PlanLists compact={simple} changes={simple ? [] : changesOf(current, context, t)} stays={simple ? [] : staysOf(current, context, t)} ends={endsOf(current, context, t)} />
+          <PlanLists compact={simple} changes={simple ? addedResourcesOf(current, t) : changesOf(current, context, t)} stays={simple ? keptResourcesOf(current, t) : staysOf(current, context, t)} ends={endsOf(current, context, t)} />
           {(!simple || current.history.report.fidelity !== 'lossless' || current.history.report.warnings.length > 0 || current.history.report.dropped.length > 0) && <HistoryReportTable report={current.history.report} />}
           {!fork && <Depends depends={simple ? current.depends.filter((dependency) => dependency.open !== 'all') : current.depends} model={targetModelName(current, context, t)} ticked={ticked} onTick={(id, on) => setTicked((set) => { const next = new Set(set); if (on) next.add(id); else next.delete(id); return next; })} />}
           {(!simple || current.turn_running) && <Time estimate={current.estimate} options={current.options} turnRunning={current.turn_running && !fork} stands={fork ? null : t('change.time.thisThread')} />}

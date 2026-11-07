@@ -6,6 +6,7 @@ mod desk;
 mod places;
 mod support;
 
+use crate::support::FullPermissionPageReply;
 use desk::{Desk, paragraph};
 use orch_api_contract::access::{
     AccessChoice, HolderInput, PageChange, PageChangeName, PageChangeWhole, PermissionPageGet,
@@ -45,15 +46,25 @@ async fn act(
     who: &Who,
     body: &DocumentTreeOperationBody,
 ) -> Reply<DocumentTreeReceipt> {
-    desk.world
+    let reply = desk
+        .world
         .app
         .call(DocumentTreeOperate, &[])
         .token(&who.token)
         .body(body)
         .send()
-        .await
+        .await;
+    Reply {
+        body: reply.body.map(|response| {
+            response
+                .into_full()
+                .expect("ordinary tree operations keep their full native receipt")
+        }),
+        status: reply.status,
+        headers: reply.headers,
+        raw: reply.raw,
+    }
 }
-
 async fn folder(desk: &Desk, parent: Option<Id>, name: &str) -> TestResult<Id> {
     orch_api_core::routes::resources::sealing::install_master_key(
         orch_db::secrets::MasterKey::new([42; 32]),
@@ -70,7 +81,9 @@ async fn folder(desk: &Desk, parent: Option<Id>, name: &str) -> TestResult<Id> {
         })
         .send()
         .await
-        .ok();
+        .ok()
+        .into_full()
+        .unwrap();
     match receipt.entries.first().map(|entry| entry.item) {
         Some(DocumentTreeItem::Container(id)) => Ok(id),
         _ => Err("folder creation must return a real container".into()),
@@ -100,11 +113,13 @@ async fn preview(desk: &Desk, who: &Who, body: &DocumentTreeOperationBody) -> Do
         .send()
         .await
         .ok()
+        .into_full()
+        .expect("this native creation control requires its full response")
 }
 
 async fn delete(desk: &Desk, item: DocumentTreeItem) -> DocumentTreeReceipt {
     let mut body = operation(DocumentTreeCommand::Delete, vec![item], None);
-    body.deletion_plan = Some(preview(desk, &desk.ada, &body).await.stamp);
+    body.deletion_plan = Some((preview(desk, &desk.ada, &body).await.stamp).into());
     act(desk, &desk.ada, &body).await.ok()
 }
 
@@ -184,7 +199,9 @@ async fn folders_are_navigable_typed_items_and_moves_preserve_text_identity_and_
         })
         .send()
         .await
-        .ok();
+        .ok()
+        .into_full()
+        .unwrap();
     let parent: Option<Id> =
         sqlx::query_scalar("SELECT parent_container_id FROM documents WHERE id=$1")
             .bind(document)
@@ -217,6 +234,7 @@ async fn a_direct_folder_grant_lists_only_its_descendants_and_redacts_unreadable
         })
         .send()
         .await
+        .full_permission_page()
         .ok();
     desk.world
         .app
@@ -235,6 +253,7 @@ async fn a_direct_folder_grant_lists_only_its_descendants_and_redacts_unreadable
         })
         .send()
         .await
+        .full_permission_page()
         .ok();
     let listed = desk
         .world
@@ -330,6 +349,7 @@ async fn a_direct_folder_grant_lists_only_its_descendants_and_redacts_unreadable
         })
         .send()
         .await
+        .full_permission_page()
         .ok();
     let made = desk
         .world
@@ -339,7 +359,9 @@ async fn a_direct_folder_grant_lists_only_its_descendants_and_redacts_unreadable
         .body(&desk::body("Created inside"))
         .send()
         .await
-        .ok();
+        .ok()
+        .into_full()
+        .unwrap();
     let entry = desk
         .world
         .app
@@ -388,6 +410,7 @@ async fn a_recursive_refusal_and_hidden_collision_leave_every_member_unchanged()
         })
         .send()
         .await
+        .full_permission_page()
         .ok();
     let before: Vec<(Id, Option<chrono::DateTime<chrono::Utc>>)> =
         sqlx::query_as("SELECT id,deleted_at FROM documents WHERE node_id=$1 ORDER BY id")
@@ -453,7 +476,7 @@ async fn deletion_preview_is_complete_and_restore_preserves_independent_deletion
         vec![DocumentTreeItem::Container(parent)],
         None,
     );
-    request.deletion_plan = Some(preview(&desk, &desk.ada, &request).await.stamp);
+    request.deletion_plan = Some((preview(&desk, &desk.ada, &request).await.stamp).into());
     let later = folder(&desk, Some(parent), "New child").await?;
     assert_eq!(
         act(&desk, &desk.ada, &request).await.problem().code,
@@ -484,11 +507,12 @@ async fn deletion_preview_is_complete_and_restore_preserves_independent_deletion
         "a fresh preview refuses a carried confirmation stamp"
     );
     request.deletion_plan = None;
-    request.deletion_plan = Some(preview(&desk, &desk.ada, &request).await.stamp);
+    request.deletion_plan = Some((preview(&desk, &desk.ada, &request).await.stamp).into());
     assert_eq!(
         request
             .deletion_plan
             .as_ref()
+            .and_then(DocumentTreeDeletion::membership)
             .map(|plan| plan.entries.len()),
         Some(4)
     );
@@ -575,7 +599,9 @@ async fn ordinary_copy_keeps_raw_title_private_choice_provenance_and_current_aut
         .body(&body)
         .send()
         .await
-        .ok();
+        .ok()
+        .into_full()
+        .expect("this native creation control requires its full response");
     assert_eq!(copy.base.title, "Human / title");
     assert_eq!(
         desk.words(&desk.ada, copy.base.id).await,
@@ -599,7 +625,9 @@ async fn ordinary_copy_keeps_raw_title_private_choice_provenance_and_current_aut
         .body(&body)
         .send()
         .await
-        .ok();
+        .ok()
+        .into_full()
+        .expect("this native creation control requires its full response");
     assert_eq!(repeat.base.id, copy.base.id);
     assert_eq!(repeat.base.seq, copy.base.seq);
     let altered = NodeDocumentCopyBody {
@@ -741,7 +769,9 @@ async fn folder_creation_replays_the_same_identity_and_refuses_changed_arguments
         .body(&body)
         .send()
         .await
-        .ok();
+        .ok()
+        .into_full()
+        .unwrap();
     let again = desk
         .world
         .app
@@ -750,7 +780,9 @@ async fn folder_creation_replays_the_same_identity_and_refuses_changed_arguments
         .body(&body)
         .send()
         .await
-        .ok();
+        .ok()
+        .into_full()
+        .unwrap();
     assert_eq!(first.operation, again.operation);
     assert_eq!(first.entries, again.entries);
     let changed = DocumentContainerCreateBody {
@@ -802,6 +834,7 @@ async fn recipient_replacement_invalidates_a_preview_even_without_an_epoch_or_co
         })
         .send()
         .await
+        .full_permission_page()
         .ok();
     let mut request = operation(
         DocumentTreeCommand::Delete,
@@ -821,7 +854,7 @@ async fn recipient_replacement_invalidates_a_preview_even_without_an_epoch_or_co
         fresh.stamp.authority_fingerprint,
         plan.stamp.authority_fingerprint
     );
-    request.deletion_plan = Some(plan.stamp);
+    request.deletion_plan = Some((plan.stamp).into());
     assert_eq!(
         act(&desk, &desk.ada, &request).await.problem().code,
         ErrorCode::ConflictStaleRevision
@@ -859,7 +892,9 @@ async fn recursive_purge_collects_children_before_folders_and_releases_attached_
         .bytes(b"purge this copy")
         .send()
         .await
-        .ok();
+        .ok()
+        .into_full()
+        .expect("this native creation control requires its full response");
     let blob: Vec<u8> =
         sqlx::query_scalar("SELECT blob FROM document_files WHERE document_id=$1 AND id=$2")
             .bind(document)

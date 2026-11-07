@@ -9,6 +9,9 @@ mod common;
 mod hosting;
 mod native_tools;
 
+#[path = "orch_capabilities/recreation_scopes.rs"]
+mod recreation_scopes;
+
 use common::{World, eventually, queued};
 use orch_api_contract::approvals::{ApprovalDecision, CapabilityDecision};
 use orch_authz::Caller;
@@ -18,6 +21,253 @@ use orch_link_contract::events::{Event, TurnOutcome};
 use orch_types::{Id, Json, new_id};
 use serde_json::json;
 use std::ops::Deref;
+
+#[tokio::test]
+async fn native_capability_revocation_prepares_without_effect_and_checks_once_before_its_update() {
+    use orch_authz::Principal;
+    use orch_engine::{EngineError, capabilities::RevokeError};
+    use orch_types::Time;
+    use std::sync::atomic::{AtomicUsize, Ordering};
+
+    let world = World::new().await;
+    sqlx::query("UPDATE environments SET granted_capabilities=ARRAY['port_place'] WHERE id=$1")
+        .bind(world.environment)
+        .execute(world.pool.pool())
+        .await
+        .unwrap();
+    let checks = AtomicUsize::new(0);
+    for allow in [false, true] {
+        let mut tx = world.pool.begin().await.unwrap();
+        let principal = Principal::load(
+            &mut tx,
+            Caller::session(world.ada),
+            Time::new(world.clock.now()),
+        )
+        .await
+        .unwrap();
+        let prepared = world
+            .engine()
+            .prepare_capability_revocation(&mut tx, &principal, world.environment, "port_place")
+            .await
+            .unwrap();
+        assert_eq!(prepared.environment(), world.environment);
+        assert_eq!(prepared.key(), "port_place");
+        let selected: Vec<String> =
+            sqlx::query_scalar("SELECT granted_capabilities FROM environments WHERE id=$1")
+                .bind(world.environment)
+                .fetch_one(&mut *tx)
+                .await
+                .unwrap();
+        assert_eq!(
+            selected,
+            vec!["port_place"],
+            "preparing the actual native operands removes nothing"
+        );
+        let result = world
+            .engine()
+            .apply_capability_revocation(tx, &principal, &prepared, || {
+                checks.fetch_add(1, Ordering::SeqCst);
+                if allow {
+                    Ok(())
+                } else {
+                    Err(EngineError::BeforeEffect(Box::new(std::io::Error::other(
+                        "closed at the native effect",
+                    ))))
+                }
+            })
+            .await;
+        if allow {
+            assert_eq!(
+                result.unwrap(),
+                None,
+                "gateway revocation keeps its genuine no-job result"
+            );
+        } else {
+            assert!(matches!(
+                result,
+                Err(RevokeError::Internal(EngineError::BeforeEffect(_)))
+            ));
+        }
+        let grants: Vec<String> = world
+            .scalar(
+                "SELECT granted_capabilities FROM environments WHERE id=$1",
+                world.environment,
+            )
+            .await;
+        assert_eq!(
+            grants,
+            if allow {
+                Vec::<String>::new()
+            } else {
+                vec!["port_place".to_owned()]
+            }
+        );
+        assert_eq!(world.count(
+            "SELECT count(*) FROM audit_log WHERE environment_id=$1 AND action='capability.revoked'",
+            world.environment,
+        ).await, i64::from(allow));
+    }
+    assert_eq!(
+        checks.load(Ordering::SeqCst),
+        2,
+        "each native attempt consumes its first-effect check once"
+    );
+}
+
+#[tokio::test]
+async fn native_capability_revocation_cannot_replace_the_preparing_caller_at_apply() {
+    use orch_authz::Principal;
+    use orch_types::Time;
+
+    let world = World::new().await;
+    let stranger = world.person("revocation-stranger").await;
+    sqlx::query("UPDATE environments SET granted_capabilities=ARRAY['port_place'] WHERE id=$1")
+        .bind(world.environment)
+        .execute(world.pool.pool())
+        .await
+        .unwrap();
+    let mut tx = world.pool.begin().await.unwrap();
+    let principal = Principal::load(
+        &mut tx,
+        Caller::session(world.ada),
+        Time::new(world.clock.now()),
+    )
+    .await
+    .unwrap();
+    let prepared = world
+        .engine()
+        .prepare_capability_revocation(&mut tx, &principal, world.environment, "port_place")
+        .await
+        .unwrap();
+    let other = Principal::load(
+        &mut tx,
+        Caller::session(stranger),
+        Time::new(world.clock.now()),
+    )
+    .await
+    .unwrap();
+    let checked = std::sync::atomic::AtomicBool::new(false);
+    let result = world
+        .engine()
+        .apply_capability_revocation(tx, &other, &prepared, || {
+            checked.store(true, std::sync::atomic::Ordering::SeqCst);
+            Ok(())
+        })
+        .await;
+    assert!(result.is_err());
+    assert!(
+        !checked.load(std::sync::atomic::Ordering::SeqCst),
+        "mismatched origin never reaches an effect"
+    );
+    let grants: Vec<String> = world
+        .scalar(
+            "SELECT granted_capabilities FROM environments WHERE id=$1",
+            world.environment,
+        )
+        .await;
+    assert_eq!(grants, vec!["port_place"]);
+}
+
+#[tokio::test]
+async fn native_scoped_revocation_retains_the_actual_key_operation_in_its_unit_reconciliation() {
+    use orch_access_contract::decisions::ObjectRef;
+    use orch_access_contract::key_scope::{KeyAction, KeyFacet, KeyScope, KeyTargetKind};
+    use orch_access_contract::permissions::ObjectKind;
+    use orch_authz::{CapturedOperation, TokenGrant};
+    use orch_db::queries::identity::{self, NewApiToken};
+    use orch_types::Time;
+
+    fn contains(value: &Json, expected: &Json) -> bool {
+        value == expected
+            || match value {
+                Json::Object(fields) => fields.values().any(|value| contains(value, expected)),
+                Json::Array(values) => values.iter().any(|value| contains(value, expected)),
+                _ => false,
+            }
+    }
+
+    let world = a_world_with_capabilities().await;
+    let (_host, environment, _runtime, _unit) = a_prepared_live_environment(&world).await;
+    sqlx::query("UPDATE environments SET granted_capabilities=ARRAY['kvm'] WHERE id=$1")
+        .bind(environment)
+        .execute(world.pool.pool())
+        .await
+        .unwrap();
+    let key = new_id();
+    let scope: KeyScope = serde_json::from_value(json!({"rules":[{
+        "target":{"kind":"environment","id":environment,"reach":"self"},
+        "resources":["environment"],
+        "allow":[{"operation":"EnvironmentCapabilityRevoke","actions":["manage"]}],
+    }]}))
+    .unwrap();
+    let expires = world.clock.now() + chrono::Duration::hours(1);
+    let mut conn = world.pool.acquire().await.unwrap();
+    identity::create_api_token_scoped(
+        &mut conn,
+        &NewApiToken {
+            id: key,
+            user_id: world.ada,
+            name: "Native revocation origin fixture",
+            token_hash: &[47_u8; 32],
+            scopes: &[],
+            node_id: None,
+            at: world.clock.now(),
+            expires_at: Some(expires),
+        },
+        Some(&json!(scope)),
+    )
+    .await
+    .unwrap();
+    let target = orch_engine::operation_scope::targets::page_object(
+        &mut conn,
+        ObjectRef {
+            kind: ObjectKind::Environment,
+            id: environment,
+        },
+    )
+    .await
+    .unwrap();
+    let caller = Caller::token(
+        world.ada,
+        TokenGrant::from_stored_scope(&[], None, Some(scope), Some(Time::new(expires)))
+            .unwrap()
+            .for_token(key),
+    )
+    .admit_facets(&[KeyFacet {
+        operation: "EnvironmentCapabilityRevoke".to_owned(),
+        action: KeyAction::Manage,
+        resource_kind: KeyTargetKind::Object(ObjectKind::Environment),
+        target,
+    }])
+    .unwrap()
+    .into_caller();
+    drop(conn);
+    let origin = serde_json::to_value(CapturedOperation::capture(&caller).unwrap()).unwrap();
+    let job = world
+        .engine()
+        .revoke_capability(&caller, environment, "kvm")
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!(job.environment_id, environment);
+    assert_eq!(job.created_by, Some(world.ada));
+    assert!(
+        contains(&job.plan, &origin),
+        "known key-origin reconciliation retains its actual operation and credential, never only an actor id"
+    );
+    assert_eq!(job.plan["revocation_origin"], origin);
+    assert_eq!(job.plan["revocation_origin_required"], true);
+    assert_eq!(
+        job.plan["grant"], false,
+        "reconciliation can only finish the accepted removal"
+    );
+    assert!(
+        job.plan["approval_binding"].is_object(),
+        "the removal owns its actual frozen unit frame"
+    );
+    let (state, _, error) = hosting::wait_over(&world, job.id).await;
+    assert_eq!(state, "succeeded", "{error:?}");
+}
 
 /// Keep the physical node alive while its independently connected harness is used.
 /// The base capability cases precede the first owned runtime; live cases enroll one.
@@ -34,31 +284,7 @@ impl Deref for CapabilityWorld {
 }
 
 async fn declared_drivers(world: &World, host: &hosting::ScriptedHost) {
-    let mut docker: Json = world
-        .scalar("SELECT drivers->'docker' FROM hosts WHERE id=$1", host.id)
-        .await;
-    docker["version"] = json!("0.1.0");
-    docker["confinement"] = json!("isolated");
-    docker["process_scope"] = json!("all");
-    docker["network_egress"] = json!(["open"]);
-    docker["recreate"] = json!("replace");
-    docker["capabilities"] =
-        json!({"ptrace":{},"kvm":{},"gpu":{},"net_admin":{},"privileged":{},"unconfined":{}});
-    let docker: orch_driver_contract::descriptor::DriverDescriptor =
-        serde_json::from_value(docker).unwrap();
-    let mut programs = json!(docker);
-    programs["name"] = json!("host");
-    programs["title"] = json!("Programs on the host");
-    programs["confinement"] = json!("none");
-    programs["capabilities"] = json!({});
-    let programs: orch_driver_contract::descriptor::DriverDescriptor =
-        serde_json::from_value(programs).unwrap();
-    sqlx::query("UPDATE hosts SET drivers=$2 WHERE id=$1")
-        .bind(host.id)
-        .bind(json!({"docker":docker,"host":programs}))
-        .execute(world.pool.pool())
-        .await
-        .unwrap();
+    hosting::capabilities::declared_drivers(world, host).await;
 }
 
 async fn thread_on(world: &World, environment: Id, name: &str) -> Id {
@@ -144,33 +370,9 @@ async fn finish_authored_turn(world: &World, thread: Id) -> Id {
 async fn a_prepared_live_environment(
     world: &World,
 ) -> (hosting::ScriptedHost, Id, Id, hosting::Unit) {
-    hosting::serve(world);
-    let host = hosting::ScriptedHost::on(world, "live-capabilities", 16_384).await;
-    hosting::physical::report(world, host.machine, false, Some(true), "open").await;
-    declared_drivers(world, &host).await;
-    let template = hosting::template(world).await;
-    sqlx::query("UPDATE env_templates SET spec=spec || $2 WHERE id=$1")
-        .bind(template)
-        .bind(json!({"allowed_capabilities":["kvm"],"base_capabilities":[]}))
-        .execute(world.pool.pool())
-        .await
-        .unwrap();
-    sqlx::query("UPDATE capability_defs SET driver_patch=$2 WHERE key=$1")
-        .bind("kvm")
-        .bind(json!({"docker":{"devices":[{"path":"/dev/kvm","permissions":"rwm"}]}}))
-        .execute(world.pool.pool())
-        .await
-        .unwrap();
-    sqlx::query("UPDATE hosts SET drivers=jsonb_set(drivers,'{docker,live_changes}',$2) WHERE id=$1").bind(host.id)
-        .bind(json!({"resources":true,"mounts":true,"capabilities":["kvm","docker_socket"],"gateway_given":["port_place","port_host","port_link"]})).execute(world.pool.pool()).await.unwrap();
-    let (environment, runtime, unit) =
-        hosting::running(world, &host, template, "Prepared live unit").await;
-    native_tools::workspace_on(world, &unit.added.machine, environment);
-    let capabilities = json!({"allowed":["kvm"],"base":[],"granted":[],"patches":{"kvm":{"devices":[{"path":"/dev/kvm","permissions":"rwm"}]}}});
-    sqlx::query("UPDATE jobs SET plan=jsonb_set(plan,'{created_spec,capabilities}',$2) WHERE environment_id=$1
-        AND kind='environment_provision' AND state='succeeded' AND plan->>'runtime'=$3")
-        .bind(environment).bind(capabilities).bind(runtime.to_string()).execute(world.pool.pool()).await.unwrap();
-    (host, environment, runtime, unit)
+    let made = hosting::capabilities::prepared_live_environment(world).await;
+    native_tools::workspace_on(world, &made.3.added.machine, made.1);
+    made
 }
 
 #[tokio::test]
@@ -566,7 +768,6 @@ async fn own_tool_bytes(world: &World, thread: Id) -> Vec<u8> {
             orch_engine::tools::definitions::definition_at(
                 tool,
                 &settings.messages,
-                &settings.broadcast_agent_scope,
                 &settings.broadcast_agent_options,
             )
             .to_mcp()
@@ -757,10 +958,40 @@ async fn a_gateway_request_needs_no_driver_patch_and_is_decided_by_current_ports
     gateways(&world).await;
     world.exec("UPDATE env_templates SET driver = 'host'").await;
     let thread = tool_thread(&world, "Gateway request").await;
+    let lifecycle = [
+        CommandKind::NodeRuntimeCreate,
+        CommandKind::NodeRuntimeStop,
+        CommandKind::NodeRuntimeStart,
+        CommandKind::NodeRuntimeRemove,
+    ];
+    let before = lifecycle.map(|kind| world.commands.issued_of(kind.as_str()));
     let (status, notice, request) = said(&ask(&world, thread, "port_place").await);
     assert_eq!(status, "pending");
-    assert!(notice.contains("without stopping anything"));
     let request: Id = request.unwrap().parse().unwrap();
+    let consequences: Json = world
+        .scalar(
+            "SELECT request->'consequences' FROM approvals WHERE id=$1",
+            request,
+        )
+        .await;
+    let effect = consequences[0].as_str().unwrap();
+    assert!(!effect.contains("restart"), "{effect}");
+    assert!(!effect.contains("recreat"), "{effect}");
+    assert_eq!(
+        effect,
+        "This capability becomes available without stopping anything. Existing processes and all files are kept."
+    );
+    assert!(notice.contains("without stopping anything"));
+    assert!(!notice.contains("restart") && !notice.contains("recreat"));
+    assert!(
+        !world
+            .scalar::<bool>(
+                "SELECT 'port_place'=ANY(granted_capabilities) FROM environments WHERE id=$1",
+                world.environment,
+            )
+            .await,
+        "a pending request is not a grant"
+    );
     let scope: String = world
         .scalar(
             "SELECT approver_scope FROM approvals WHERE id = $1",
@@ -793,6 +1024,18 @@ async fn a_gateway_request_needs_no_driver_patch_and_is_decided_by_current_ports
         .await
         .unwrap();
     assert_eq!(world.count("SELECT count(*) FROM jobs WHERE environment_id = $1 AND kind = 'environment_recreate'",world.environment).await,0);
+    assert!(
+        world
+            .scalar::<bool>(
+                "SELECT 'port_place'=ANY(granted_capabilities) FROM environments WHERE id=$1",
+                world.environment,
+            )
+            .await,
+        "the current ports manager's approval grants the gateway key"
+    );
+    for (kind, before) in lifecycle.into_iter().zip(before) {
+        assert_eq!(world.commands.issued_of(kind.as_str()), before);
+    }
 }
 
 #[tokio::test]

@@ -9,6 +9,7 @@ mod places;
 mod rig;
 mod support;
 
+use crate::support::FullPermissionPageReply;
 use orch_api_contract::access::{
     AccessChoice, AgentLevel, HolderInput, PageChange, PageChangeName, PermissionPageGet,
     PermissionPageUpdate,
@@ -37,6 +38,7 @@ fn manage() -> Option<ShareParts> {
 
 fn share_of(what: ShareWhat, parts: Option<ShareParts>, to: Id, client: &str) -> ShareWithAgents {
     ShareWithAgents {
+        viewers_read: None,
         read_first: None,
         what,
         inside: None,
@@ -55,14 +57,25 @@ async fn create(
     by: &Who,
     request: &ShareWithAgents,
 ) -> orch_api_core::testing::Reply<ShareAgentCreateReply> {
-    s.rig
+    let reply = s
+        .rig
         .world
         .app
         .call(ShareAgentCreate, &[])
         .token(&by.token)
         .body(request)
         .send()
-        .await
+        .await;
+    orch_api_core::testing::Reply {
+        status: reply.status,
+        headers: reply.headers,
+        raw: reply.raw,
+        body: reply.body.map(|answer| {
+            answer
+                .into_full()
+                .expect("the ordinary session receives the full share projection")
+        }),
+    }
 }
 
 /// A scene whose agents take the tools, with a thread whose agents are to be given documents to manage.
@@ -91,6 +104,8 @@ async fn document_beside(s: &Scene, node: Id, title: &str) -> Id {
         .send()
         .await
         .ok()
+        .into_full()
+        .unwrap()
         .base
         .id
 }
@@ -146,6 +161,7 @@ async fn a_share_to_manage_is_given_by_a_developer_listed_changed_and_taken_back
         })
         .send()
         .await
+        .full_permission_page()
         .ok();
     let refused = create(&s, &s.cai, &request("c1")).await.problem();
     assert_eq!(refused.code, ErrorCode::AuthzDenied);
@@ -165,7 +181,7 @@ async fn a_share_to_manage_is_given_by_a_developer_listed_changed_and_taken_back
         4,
         "View, Edit and Manage, and the Export row that travels with them"
     );
-    assert_eq!(share.by.id, s.dan.id());
+    assert_eq!(share.by.as_ref().map(|by| by.id), Some(s.dan.id()));
     // It is listed on the document's page.
     let listed = s
         .rig
@@ -197,7 +213,9 @@ async fn a_share_to_manage_is_given_by_a_developer_listed_changed_and_taken_back
         })
         .send()
         .await
-        .ok();
+        .ok()
+        .into_full()
+        .expect("ordinary updated share content");
     assert_eq!(edited.parts.documents, Some(ShareDocumentsLevel::Edit));
     assert_eq!(
         edited.entries.len(),
@@ -314,7 +332,9 @@ async fn the_tree_says_which_documents_the_agent_may_manage_and_lists_a_deleted_
         .raw_body(&serde_json::json!({}))
         .send()
         .await
-        .ok();
+        .ok()
+        .into_full()
+        .unwrap();
     let entries = reached_by(&s, &s.ada, reader_id, topic).await;
     let back = entries.iter().find(|entry| entry.id == doc).unwrap();
     assert!(!back.deleted && back.readable && back.manageable);
@@ -342,7 +362,9 @@ async fn person_projection_redacts_folder_ancestors_base_paths_and_document_atta
         })
         .send()
         .await
-        .ok();
+        .ok()
+        .into_full()
+        .unwrap();
     let parent = match receipt.entries.first().map(|entry| entry.item) {
         Some(DocumentTreeItem::Container(id)) => id,
         _ => return Err("folder receipt absent".into()),
@@ -360,7 +382,9 @@ async fn person_projection_redacts_folder_ancestors_base_paths_and_document_atta
         })
         .send()
         .await
-        .ok();
+        .ok()
+        .into_full()
+        .unwrap();
     let child = match receipt.entries.first().map(|entry| entry.item) {
         Some(DocumentTreeItem::Container(id)) => id,
         _ => return Err("child receipt absent".into()),
@@ -382,7 +406,9 @@ async fn person_projection_redacts_folder_ancestors_base_paths_and_document_atta
         })
         .send()
         .await
-        .ok();
+        .ok()
+        .into_full()
+        .expect("this native tree control requires its full response");
     s.rig
         .world
         .app
@@ -393,7 +419,9 @@ async fn person_projection_redacts_folder_ancestors_base_paths_and_document_atta
         .bytes(b"current file")
         .send()
         .await
-        .ok();
+        .ok()
+        .into_full()
+        .expect("this native creation control requires its full response");
     s.rig
         .world
         .app
@@ -413,6 +441,7 @@ async fn person_projection_redacts_folder_ancestors_base_paths_and_document_atta
         })
         .send()
         .await
+        .full_permission_page()
         .ok();
     let grant = PageChange {
         name: Some(vec![PageChangeName {
@@ -433,6 +462,7 @@ async fn person_projection_redacts_folder_ancestors_base_paths_and_document_atta
         .body(&grant)
         .send()
         .await
+        .full_permission_page()
         .ok();
     let query = ThreadSharedTreeGetQuery {
         path: Some(format!("id:{child}")),
@@ -488,6 +518,7 @@ async fn person_projection_redacts_folder_ancestors_base_paths_and_document_atta
         .body(&grant)
         .send()
         .await
+        .full_permission_page()
         .ok();
     let admitted = s
         .rig

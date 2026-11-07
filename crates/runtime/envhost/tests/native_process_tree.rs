@@ -5,6 +5,10 @@
     reason = "a test fails by panicking"
 )]
 
+#[cfg(windows)]
+#[path = "support/windows_terminal.rs"]
+mod windows_terminal;
+
 use std::path::Path;
 use std::process::{Child, Command, Stdio};
 use std::sync::Arc;
@@ -221,7 +225,8 @@ async fn closing_a_windows_terminal_ends_its_shell_and_its_tracked_child_tree() 
         .pid
         .expect("the terminal exposes its process identity");
     tokio::time::sleep(START_TIME_RESOLUTION).await;
-    let screen = terminals.attach(id, true).unwrap();
+    let mut screen = terminals.attach(id, true).unwrap();
+    windows_terminal::answer_initial_query(&mut screen).await;
     let executable = std::env::current_exe().unwrap();
     screen
         .send_input(

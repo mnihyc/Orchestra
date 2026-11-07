@@ -140,11 +140,13 @@ fn web_push(config: &ServerConfig, key_file: &Path) -> anyhow::Result<PushNotifi
 }
 
 /// Runs the service until it is asked to stop.
-pub async fn run(launch: &Launch<'_>, build: BuildInfo) -> anyhow::Result<()> {
-    let config: ServerConfig = orch_config::load(launch.config)
-        .with_context(|| format!("reading {}", launch.config.display()))?;
+pub async fn run(
+    launch: &Launch<'_>,
+    build: BuildInfo,
+    config: ServerConfig,
+) -> anyhow::Result<()> {
     orch_telemetry::init_logging("api", LogFormat::named(&config.log.format));
-    tracing::info!(%build, "starting");
+    tracing::info!(%build, worker_stack_mib = config.api.worker_stack_mib, "starting");
     let readings = orch_telemetry::install_metrics().context("keeping measurements")?;
 
     anyhow::ensure!(

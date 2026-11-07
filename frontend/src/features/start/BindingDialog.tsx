@@ -14,6 +14,8 @@ import { providerPickerLabels } from '@/features/resources/providers/labels';
 import { useKnownPlaces } from '@/features/navigation/placeLabels';
 import { RepositoryChoice } from '@/features/source/RepositoryChoice';
 import { nodeQuery } from '@/api/nodes';
+import { permissionsQuery } from '@/api/access';
+import { generalAccessChange, indexCatalogue } from '@/features/access/model';
 import { NewPage, type NewPagePreset } from '@/features/access/NewPage';
 import type { PlaceRef } from '@/features/navigation/places';
 import { Button } from '@/ui/Button';
@@ -31,14 +33,19 @@ import { useStartOptions } from './options';
 import { useStart } from './start';
 import { DirectorySign } from './DirectorySign';
 import { Where, WhereOptions } from './Where';
+import { CreationAgentAccess } from './AgentAccess';
+import { useOfferedAgentAccess } from './agentAccessOffer';
 import { TemporaryChoice } from '@/features/resources/environments/Temporary';
-import type { BindingEnvironment } from '@/generated/api-types';
+import type { AgentAccessChoice, BindingEnvironment } from '@/generated/api-types';
 import { agentWhy, bindingReason, providerWhy, reasonWords } from './words';
 
 /** What the person typed and chose in the inline starter, which the dialog opens with. */
 export interface StartDraft {
   picks: Picks;
   message: string;
+  agentAccess?: AgentAccessChoice;
+  generalAccess?: NewPagePreset;
+  letIntoEnvironment?: boolean;
 }
 
 /** A dialog suggests the first of each choice where the place has no default: the person is there to choose. */
@@ -70,8 +77,8 @@ function ThreadSetup({ parent, open, onClose, draft }: NewThreadDialogProps) {
   const harnessTitle = useHarnessTitle(open);
   const [picks, setPicks] = useState<Picks>(draft?.picks ?? NO_PICKS);
   const [requesting, setRequesting] = useState<BindingEnvironment | null>(null);
-  const [access, setAccess] = useState<NewPagePreset>('defaults');
-  const [letIntoEnvironment, setLetIntoEnvironment] = useState(true);
+  const [access, setAccess] = useState<NewPagePreset>(draft?.generalAccess ?? 'defaults');
+  const [letIntoEnvironment, setLetIntoEnvironment] = useState(draft?.letIntoEnvironment ?? true);
   const [name, setName] = useState('');
   const [directory, setDirectory] = useState('');
   const [prepareSource, setPrepareSource] = useState(true);
@@ -79,14 +86,22 @@ function ThreadSetup({ parent, open, onClose, draft }: NewThreadDialogProps) {
   const [message, setMessage] = useState(draft?.message ?? '');
   const [advanced, setAdvanced] = useState(false);
   const making = parent.kind !== 'topic';
-
-  const { options, resolved, loading, failed, refreshing, retry } = useStartOptions(parent.id, picks, SUGGEST);
+  const simpleAudience = access === 'defaults' || access === 'private';
+  const catalogue = useQuery({ ...permissionsQuery, enabled: open && !simpleAudience });
+  const audienceReady = simpleAudience || catalogue.data !== undefined;
+  const threadAccess = access === 'defaults' ? undefined : access === 'private' ? 'private' as const
+    : catalogue.data === undefined ? undefined : generalAccessChange(indexCatalogue(catalogue.data), 'thread', parent.kind === 'topic' ? parent.id : null, access);
+  const { options, resolved, loading, failed, refreshing, retry } = useStartOptions(parent.id, picks, SUGGEST, open && audienceReady,
+    threadAccess === undefined ? undefined : { threadAccess });
+  const agentAccess = useOfferedAgentAccess({ at: parent.id, enabled: open, initial: draft?.agentAccess,
+    offer: options?.agent_access, pending: loading || refreshing || !audienceReady,
+    error: options === null || resolved === null ? null : failed, retry });
   const extraOpen = advanced || resolved?.missing.some((row) => row.kind === 'arrangement') === true;
   // Drawn beside a choice and never the choice: what a provider is, where it runs and how much of it is used.
   const providers = useQuery({ ...providersQuery('all'), enabled: open });
   const places = useKnownPlaces({ trees: false });
   const machines = useQuery({ ...machinesQuery, enabled: open && extraOpen });
-  const place = useQuery(nodeQuery(parent.id));
+  const place = useQuery({ ...nodeQuery(parent.id), enabled: open });
   const known = new Map((providers.data ?? []).map((provider) => [provider.id, provider]));
   const providerNames=providerPickerLabels(resolved?.providers.map((row)=>row.entry.provider) ?? [],providers.data ?? [],places);
 
@@ -101,10 +116,11 @@ function ThreadSetup({ parent, open, onClose, draft }: NewThreadDialogProps) {
   const pick = (patch: Partial<Picks>) => setPicks((before) => ({ ...before, ...patch }));
 
   const why: string | null =
-    options === null || resolved === null
+    !audienceReady ? t(catalogue.isError ? 'start.why.failed' : 'start.why.checking') : options === null || resolved === null
       ? loading
         ? t('start.why.loading')
         : t('start.why.failed')
+      : !agentAccess.ready ? t('agentAccess.checking')
       : requesting !== null
         ? t('start.why.environment')
       : refreshing || resolved.settling
@@ -114,7 +130,7 @@ function ThreadSetup({ parent, open, onClose, draft }: NewThreadDialogProps) {
           : t(`start.why.${resolved.missing[0].kind === 'agent' && resolved.missing[0].unreported ? 'agentUnreported' : resolved.missing[0].kind}`);
 
   const create = () => {
-    if (options === null || resolved === null || requesting !== null) return;
+    if (options === null || resolved === null || requesting !== null || !agentAccess.ready || !audienceReady) return;
     make.start({
       place: parent,
       options,
@@ -125,6 +141,7 @@ function ThreadSetup({ parent, open, onClose, draft }: NewThreadDialogProps) {
       temporary,
       privately: access === 'private',
       generalAccess: access,
+      agentAccess: agentAccess.value,
       letIntoEnvironment,
       message: message.trim(),
     });
@@ -245,11 +262,20 @@ function ThreadSetup({ parent, open, onClose, draft }: NewThreadDialogProps) {
             </Step>
 
             <Step title={t('start.where.title')}>
-              <Where compact place={parent} options={options} value={whereValue} onChange={(next) => pick({ environment: next, arrangement: null })} machines={machines.data ?? []} homeId={place.data?.org_id ?? ''} requesting={requesting} onRequestingChange={setRequesting} onRefresh={retry} />
+              <Where compact place={parent} options={options} value={whereValue} onChange={(next) => pick({ environment: next, arrangement: null })} machines={machines.data ?? []} homeId={place.data?.org_id ?? ''} requesting={requesting} onRequestingChange={setRequesting} onRefresh={retry}
+                newEnvironment={picks.newEnvironment} onNewEnvironmentChange={(newEnvironment) => pick({ newEnvironment })} />
               {requesting === null && resolved.fresh && <TemporaryChoice checked={temporary} onChange={setTemporary} disabled={make.pending} />}
             </Step>
           </>
         )}
+
+        {resolved !== null && options !== null && <>
+          <NewPage place={parent} placement={requesting?.environment.placement ?? resolved.environment?.environment.placement ?? 'managed'} preset={access} onPresetChange={setAccess}
+            letIntoEnvironment={letIntoEnvironment} onLetIntoEnvironmentChange={setLetIntoEnvironment}
+            summary={(requesting?.environment.placement ?? resolved.environment?.environment.placement) === 'connected' ? options.access.connected : options.access.managed}
+            {...(making ? { audienceName: t('places.project.newTopic') } : {})} />
+        </>}
+        <CreationAgentAccess access={agentAccess} disabled={make.pending} />
 
         <Button variant="ghost" className="self-start" aria-expanded={extraOpen} aria-controls={extraOpen ? optionsId : undefined} onClick={() => setAdvanced((value) => !value)}>{t('start.options.title')}</Button>
         {extraOpen && <div id={optionsId} role="region" aria-label={t('start.options.title')} className="flex flex-col gap-3">
@@ -267,10 +293,7 @@ function ThreadSetup({ parent, open, onClose, draft }: NewThreadDialogProps) {
               />
               <RepositoryChoice source={options.source} checked={prepareSource} onChange={setPrepareSource} />
               {requesting === null && <ArrangementSection resolved={resolved} refreshing={refreshing} onChange={(type) => pick({ arrangement: type })} />}
-          <NewPage place={parent} placement={requesting?.environment.placement ?? resolved.environment?.environment.placement ?? 'managed'} preset={access} onPresetChange={setAccess}
-            letIntoEnvironment={letIntoEnvironment} onLetIntoEnvironmentChange={setLetIntoEnvironment}
-            summary={(requesting?.environment.placement ?? resolved.environment?.environment.placement) === 'connected' ? options.access.connected : options.access.managed}
-            {...(making ? { audienceName: t('places.project.newTopic') } : {})} />
+
           </>}
           <Input label={t('start.options.name')} optional hint={t('start.options.nameHint')} value={name} onChange={(event) => setName(event.target.value)} autoComplete="off" />
           <Textarea label={t('start.message.title')} rows={3} value={message} onChange={(event) => setMessage(event.target.value)} />

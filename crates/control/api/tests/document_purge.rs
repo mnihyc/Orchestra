@@ -34,6 +34,8 @@ async fn put_file(desk: &Desk, by: &Who, document: Id, name: &str, bytes: &[u8])
         .send()
         .await
         .ok()
+        .into_full()
+        .expect("this native creation control requires its full response")
 }
 
 /// A block that shows a file of the document.
@@ -215,4 +217,151 @@ async fn a_purged_document_lets_go_of_the_bytes_its_files_held_and_another_that_
         1,
         "the purged document no longer holds the bytes, and the other still does"
     );
+}
+
+#[tokio::test]
+async fn offline_purge_resumes_the_committed_oldest_file_supplier_and_releases_each_pin_once() {
+    use orch_db::queries::{
+        document_purge_progress as progress, documents as rows, job_leases::Lease,
+    };
+    let desk = Desk::new().await;
+    let document = desk.make(&desk.ada, "Resumed purge").await.base.id;
+    let one = put_file(
+        &desk,
+        &desk.ada,
+        document,
+        "one.txt",
+        b"first old unreferenced file",
+    )
+    .await;
+    let two = put_file(
+        &desk,
+        &desk.ada,
+        document,
+        "two.txt",
+        b"second old unreferenced file",
+    )
+    .await;
+    let one_blob = blob_of(&desk, document, one.id).await;
+    let two_blob = blob_of(&desk, document, two.id).await;
+    desk.world.advance(Duration::days(2));
+    let clock = desk.world.app.app.clock.as_ref();
+    let database = db(&desk);
+    let cutoff = clock.now() - Duration::days(1);
+    let old = Lease::new(
+        documents_upkeep::PURGE_JOB,
+        "interrupted-offline-pass",
+        Duration::minutes(10),
+    );
+    assert!(old.hold(&database, clock.now()).await.unwrap());
+    let mut tx = database.begin().await.unwrap();
+    let mut cursor = progress::open(&mut tx, &old, clock, cutoff, cutoff, cutoff)
+        .await
+        .unwrap()
+        .unwrap();
+    // Commit the actual document portion before beginning its file supplier.
+    let documents = rows::maintenance_page(&mut tx, None, 500).await.unwrap();
+    let ids = documents.iter().map(|(id, _)| *id).collect::<Vec<_>>();
+    rows::purge_removed_blocks_among(&mut tx, cutoff, &ids)
+        .await
+        .unwrap();
+    rows::purge_batch_records_among(&mut tx, cutoff, &ids)
+        .await
+        .unwrap();
+    cursor.phase = "files".into();
+    assert!(progress::save(&mut tx, &old, clock, &cursor).await.unwrap());
+    tx.commit().await.unwrap();
+    let mut tx = database.begin().await.unwrap();
+    let mut cursor = progress::open(&mut tx, &old, clock, cutoff, cutoff, cutoff)
+        .await
+        .unwrap()
+        .unwrap();
+    let first = rows::unnamed_files_page(&mut tx, cutoff, None, 1)
+        .await
+        .unwrap()[0];
+    assert!(
+        rows::release_unnamed_file(&mut tx, first.0, first.1, cutoff, clock.now())
+            .await
+            .unwrap()
+    );
+    cursor.after_file_at = Some(first.2);
+    cursor.after_file = Some(first.1);
+    assert!(progress::save(&mut tx, &old, clock, &cursor).await.unwrap());
+    tx.commit().await.unwrap();
+    old.release(&database).await.unwrap();
+    let app = &desk.world.app.app;
+    let done = documents_upkeep::purge(&database, clock, &app.config)
+        .await
+        .unwrap();
+    assert_eq!(
+        done.files, 1,
+        "the new holder consumes only the unfinished file supplier"
+    );
+    assert_eq!(pins(&desk, &one_blob).await, 0);
+    assert_eq!(pins(&desk, &two_blob).await, 0);
+    assert!(files_of(&desk, &desk.ada, document).await.is_empty());
+    let remaining: i64 = sqlx::query_scalar("SELECT count(*) FROM document_purge_progress")
+        .fetch_one(&desk.world.db.pool)
+        .await
+        .unwrap();
+    assert_eq!(remaining, 0);
+}
+
+#[tokio::test]
+async fn expired_offline_purge_page_keeps_the_actual_file_and_pin_for_the_next_holder() {
+    let desk = Desk::new().await;
+    let document = desk.make(&desk.ada, "Fenced purge").await.base.id;
+    let file = put_file(
+        &desk,
+        &desk.ada,
+        document,
+        "kept.txt",
+        b"fenced old file bytes",
+    )
+    .await;
+    let blob = blob_of(&desk, document, file.id).await;
+    desk.world.advance(Duration::days(2));
+    let mut blocker = desk.world.db.pool.begin().await.unwrap();
+    sqlx::query("LOCK TABLE document_files IN SHARE MODE")
+        .execute(&mut *blocker)
+        .await
+        .unwrap();
+    let pid: i32 = sqlx::query_scalar("SELECT pg_backend_pid()")
+        .fetch_one(&mut *blocker)
+        .await
+        .unwrap();
+    let database = db(&desk);
+    let app = desk.world.app.app.clone();
+    let request = tokio::spawn(async move {
+        documents_upkeep::purge(&database, app.clock.as_ref(), &app.config).await
+    });
+    let wait = std::time::Duration::from_secs(30);
+    tokio::time::timeout(wait,async {loop {
+        assert!(!request.is_finished(),"the actual file deletion reaches its blocking statement");
+        let blocked:bool=sqlx::query_scalar("SELECT EXISTS(SELECT 1 FROM pg_stat_activity WHERE datname=current_database() AND wait_event_type='Lock' AND $1=ANY(pg_blocking_pids(pid)) AND query LIKE '%DELETE FROM document_files%')")
+            .bind(pid).fetch_one(&desk.world.db.pool).await.unwrap();
+        if blocked{break;}tokio::task::yield_now().await;
+    }}).await.unwrap();
+    desk.world.advance(Duration::minutes(11));
+    blocker.commit().await.unwrap();
+    let done = tokio::time::timeout(wait, request)
+        .await
+        .unwrap()
+        .unwrap()
+        .unwrap();
+    assert_eq!(done.files, 0);
+    assert_eq!(pins(&desk, &blob).await, 1);
+    assert_eq!(files_of(&desk, &desk.ada, document).await, vec!["kept.txt"]);
+    let cursor: (String, Option<Id>) =
+        sqlx::query_as("SELECT phase,after_file FROM document_purge_progress")
+            .fetch_one(&desk.world.db.pool)
+            .await
+            .unwrap();
+    assert_eq!(cursor, ("files".into(), None));
+    let app = &desk.world.app.app;
+    let done = documents_upkeep::purge(&db(&desk), app.clock.as_ref(), &app.config)
+        .await
+        .unwrap();
+    assert_eq!(done.files, 1);
+    assert_eq!(pins(&desk, &blob).await, 0);
 }

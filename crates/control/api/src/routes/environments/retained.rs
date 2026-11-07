@@ -1,6 +1,9 @@
 //! Kept environment metadata and guarded restore or permanent removal requests.
 
-use super::{Standing, environment_views, jobs};
+use super::{Standing, jobs};
+
+mod changes;
+mod selected;
 use crate::{
     middleware::{
         authentication::Via,
@@ -12,7 +15,7 @@ use crate::{
 };
 use orch_access_contract::{decisions::ObjectRef, permissions::ResourceKind};
 use orch_api_contract::{
-    common::{ErrorCode, Page},
+    common::ErrorCode,
     environment as api,
     nodes::{DeletedInspection, JobRef, JobState},
     workspace::Job,
@@ -32,9 +35,21 @@ use std::collections::HashMap;
 /// Registers the kept-data requests beside the ordinary environment reader.
 pub fn mount(registry: &mut Registry) {
     registry
-        .on(api::NodeDeletedEnvironmentList, list)
-        .on(api::EnvironmentRestore, restore)
-        .on(api::EnvironmentPurge, purge);
+        .on_snapshot_read_with_optional_operation(
+            api::NodeDeletedEnvironmentList,
+            crate::key_operations::native::selected::<selected::RetainedRows>,
+            crate::key_operations::native::selected_read::<selected::RetainedRows>,
+        )
+        .on_with_operation(
+            api::EnvironmentRestore,
+            crate::key_operations::native::effects::prepare::<changes::Restore>,
+            changes::restore,
+        )
+        .on_with_operation(
+            api::EnvironmentPurge,
+            crate::key_operations::native::effects::prepare::<changes::Purge>,
+            changes::purge,
+        );
 }
 
 fn denied() -> ApiError {
@@ -145,13 +160,51 @@ pub(crate) async fn present(
     }))
 }
 
-pub(crate) async fn read(
-    ctx: &Ctx,
+/// The native retained view's stored operands, before a transport body is rendered.
+pub(super) struct PreparedRead {
+    pub(super) id: Id,
+    pub(super) home: Id,
+    pub(super) projection: super::PreparedInventory,
+    pub(super) deleted_at: Option<chrono::DateTime<chrono::Utc>>,
+    pub(super) authority: (bool, bool),
+}
+
+impl PreparedRead {
+    pub(super) async fn render(
+        &self,
+        ctx: &Ctx,
+        conn: &mut Conn,
+        principal: &Principal,
+    ) -> ApiResult<api::Environment> {
+        let mut shown = super::show_inventory_prepared(ctx, conn, principal, &self.projection)
+            .await?
+            .pop()
+            .ok_or_else(ApiError::not_found)?;
+        if let Some(deleted) = self.deleted_at {
+            let removal = shown
+                .removal
+                .as_ref()
+                .ok_or_else(|| ApiError::internal("the kept data has no removal metadata"))?;
+            shown.inspection = Some(DeletedInspection {
+                deleted_at: Time::new(deleted),
+                deleted_by: removal.deleted_by.clone(),
+                purge_at: removal
+                    .purge_at
+                    .ok_or_else(|| ApiError::internal("the kept data has no purge day"))?,
+                readonly: true,
+            });
+        }
+        Ok(shown)
+    }
+}
+
+pub(super) async fn prepare_read(
+    _ctx: &Ctx,
     conn: &mut Conn,
     principal: &Principal,
     id: Id,
-) -> ApiResult<api::Environment> {
-    may_read(conn, principal, id).await?;
+) -> ApiResult<PreparedRead> {
+    let authority = may_read(conn, principal, id).await?;
     let promise = retained::removal(conn, id)
         .await?
         .ok_or_else(ApiError::not_found)?;
@@ -194,33 +247,36 @@ pub(crate) async fn read(
             held: effective.held,
         },
     )]);
-    let mut shown = environment_views(ctx, conn, principal, vec![row], &standing)
-        .await?
-        .pop()
-        .ok_or_else(ApiError::not_found)?;
-    if let Some(deleted) = promise.deleted_at {
-        let removal = shown
-            .removal
-            .as_ref()
-            .ok_or_else(|| ApiError::internal("the kept data has no removal metadata"))?;
-        shown.inspection = Some(DeletedInspection {
-            deleted_at: Time::new(deleted),
-            deleted_by: removal.deleted_by.clone(),
-            purge_at: removal
-                .purge_at
-                .ok_or_else(|| ApiError::internal("the kept data has no purge day"))?,
-            readonly: true,
-        });
-    }
-    Ok(shown)
+    let home = row.home_node_id;
+    let projection =
+        super::prepare_environment_views(conn, vec![row], standing, principal.now()).await?;
+    Ok(PreparedRead {
+        id,
+        home,
+        projection,
+        deleted_at: promise.deleted_at,
+        authority,
+    })
 }
 
-pub(crate) async fn inspect(mut ctx: Ctx, id: Id) -> ApiResult<api::Environment> {
-    let (mut tx, guard) = transaction_guard::begin(&ctx).await?;
-    ctx.now = guard.now().get();
-    let shown = read(&ctx, &mut tx, guard.principal(), id).await?;
+/// Once-only successful inspection observation, outside content snapshot retries.
+pub(super) async fn record_inspected(ctx: &Ctx, id: Id) -> ApiResult<()> {
+    let mut tx = ctx.app.db.begin().await?;
+    // Serialize the native once-per-day observation before its fresh permission checkpoint.
+    hosting::lock_environment(&mut tx, id)
+        .await?
+        .ok_or_else(ApiError::not_found)?;
     let day:bool=sqlx::query_scalar("SELECT EXISTS(SELECT 1 FROM audit_log WHERE actor_id=$1 AND object_kind='environment' AND object_id=$2 AND action='deleted.inspected' AND (at AT TIME ZONE 'UTC')::date=($3::timestamptz AT TIME ZONE 'UTC')::date)")
-        .bind(guard.principal().user()).bind(id).bind(ctx.now).fetch_one(&mut *tx).await.map_err(DbError::from)?;
+        .bind(ctx.user()?.id()).bind(id).bind(ctx.app.clock.now()).fetch_one(&mut *tx).await.map_err(DbError::from)?;
+    let (current, guard) = transaction_guard::after_wait(ctx, &mut tx).await?;
+    let source = prepare_read(&current, &mut tx, guard.principal(), id).await?;
+    let org = source
+        .projection
+        .rows
+        .first()
+        .ok_or_else(ApiError::not_found)?
+        .org_id;
+    guard.check_deadline(&current)?;
     if !day {
         let mut entry = orch_db::audit::Entry::new(
             orch_db::audit::Actor::User(guard.principal().user()),
@@ -229,89 +285,19 @@ pub(crate) async fn inspect(mut ctx: Ctx, id: Id) -> ApiResult<api::Environment>
             Some(id),
             "A removed environment's retained metadata was inspected",
         );
-        entry.node_id = Some(shown.home.id);
-        entry.org_id = Some(shown.org_id);
-        orch_db::audit::append(&mut tx, &entry, &crate::sign_in::origin(&ctx), ctx.now).await?;
+        entry.node_id = Some(source.home);
+        entry.org_id = Some(org);
+        orch_db::audit::append(
+            &mut tx,
+            &entry,
+            &crate::sign_in::origin(&current),
+            current.now,
+        )
+        .await?;
     }
+    guard.check_deadline(&current)?;
     tx.commit().await.map_err(DbError::from)?;
-    Ok(shown)
-}
-
-async fn list(
-    ctx: Ctx,
-    query: api::NodeDeletedEnvironmentListQuery,
-    (): (),
-) -> ApiResult<Page<api::DeletedEnvironment>> {
-    let node = ctx.id("id")?;
-    let limit = usize::try_from(
-        query
-            .limit
-            .unwrap_or(orch_api_contract::common::DEFAULT_LIMIT)
-            .clamp(1, orch_api_contract::common::MAX_LIMIT),
-    )
-    .map_err(ApiError::internal)?;
-    let mut after = query
-        .cursor
-        .as_deref()
-        .map(|v| {
-            v.parse::<Id>()
-                .map_err(|_| super::invalid("cursor", "is not a cursor of this list"))
-        })
-        .transpose()?;
-    let mut conn = ctx.app.db.acquire().await?;
-    let principal = authorization::principal(&ctx, &mut conn).await?;
-    let mut entries = Vec::new();
-    loop {
-        let candidates:Vec<Id>=sqlx::query_scalar("SELECT e.id FROM environments e JOIN nodes n ON n.id=e.home_node_id WHERE e.deleted_at IS NOT NULL AND e.purged_at IS NULL AND e.removal_phase IN ('kept','restoring','purging') AND (e.home_node_id=$1 OR ($2 AND $1=ANY(n.path))) AND ($3::uuid IS NULL OR e.id>$3) ORDER BY e.id LIMIT $4")
-            .bind(node).bind(query.under.unwrap_or(false)).bind(after).bind(i64::from(orch_api_contract::common::MAX_LIMIT)).fetch_all(&mut *conn).await.map_err(DbError::from)?;
-        if candidates.is_empty() {
-            break;
-        }
-        for id in &candidates {
-            after = Some(*id);
-            match may_read(&mut conn, &principal, *id).await {
-                Ok(_) => {}
-                Err(error)
-                    if matches!(
-                        error.code(),
-                        ErrorCode::AuthzDenied | ErrorCode::NotFound | ErrorCode::Gone
-                    ) =>
-                {
-                    continue;
-                }
-                Err(error) => return Err(error),
-            }
-            let shown = read(&ctx, &mut conn, &principal, *id).await?;
-            if let Some(removal) = shown.removal {
-                entries.push(api::DeletedEnvironment {
-                    environment: shown.base,
-                    home: shown.home,
-                    host: shown.host,
-                    storage: shown.workspace_storage,
-                    removal,
-                });
-            }
-            if entries.len() > limit {
-                break;
-            }
-        }
-        if entries.len() > limit
-            || candidates.len()
-                < usize::try_from(orch_api_contract::common::MAX_LIMIT)
-                    .map_err(ApiError::internal)?
-        {
-            break;
-        }
-    }
-    let more = entries.len() > limit;
-    entries.truncate(limit);
-    let next_cursor = more
-        .then(|| entries.last().map(|e| e.environment.id.to_string()))
-        .flatten();
-    Ok(Page {
-        items: entries,
-        next_cursor,
-    })
+    Ok(())
 }
 
 pub(crate) fn identity(ctx: &Ctx) -> ApiResult<Json> {
@@ -319,92 +305,4 @@ pub(crate) fn identity(ctx: &Ctx) -> ApiResult<Json> {
         Via::Session { session_id } => json!({"session_id":session_id}),
         Via::Token { token_id, .. } => json!({"token_id":token_id}),
     })
-}
-
-async fn change(mut ctx: Ctx, expected: i64, purge: bool, confirm: Option<&str>) -> ApiResult<Job> {
-    let id = ctx.id("id")?;
-    let (mut tx, guard) = transaction_guard::begin(&ctx).await?;
-    ctx.now = guard.now().get();
-    let (manager, admin) = may_read(&mut tx, guard.principal(), id).await?;
-    let env = hosting::lock_environment(&mut tx, id)
-        .await?
-        .ok_or_else(ApiError::not_found)?;
-    let removal = retained::removal(&mut tx, id)
-        .await?
-        .ok_or_else(ApiError::not_found)?;
-    if removal.purged_at.is_some() {
-        return Err(ApiError::new(
-            ErrorCode::Gone,
-            "the owned files were removed for good",
-        ));
-    }
-    if removal.removal_revision != expected {
-        return Err(
-            ApiError::new(ErrorCode::ConflictStaleRevision, "the removal changed")
-                .with("current", removal.removal_revision),
-        );
-    }
-    if purge && (!admin && !(manager && removal.volumes_purge_at.is_some_and(|at| at <= ctx.now))) {
-        return Err(ApiError::new(
-            ErrorCode::AuthzDenied,
-            "only a current home admin may shorten the kept-file window",
-        ));
-    }
-    if confirm.is_some_and(|v| v != env.name) {
-        return Err(super::invalid("confirm", "must be the environment's name"));
-    }
-    if let Some(job) = job_rows::retained::open_of_environment(&mut tx, id)
-        .await?
-        .into_iter()
-        .next()
-    {
-        if job.kind
-            == if purge {
-                job_rows::retained::PURGE
-            } else {
-                job_rows::retained::RESTORE
-            }
-        {
-            return jobs::view(&mut tx, &job).await;
-        }
-        return Err(ApiError::new(
-            ErrorCode::ResourceInUse,
-            "another lifecycle job owns the kept files",
-        )
-        .with("job", job.id));
-    }
-    if removal.removal_phase.as_deref() != Some("kept") {
-        return Err(ApiError::new(
-            ErrorCode::ResourceInUse,
-            "the kept files are unavailable during their current phase",
-        ));
-    }
-    let job = orch_engine::jobs::retained::queue(
-        &mut tx,
-        id,
-        expected,
-        purge,
-        Some(guard.principal().user()),
-        identity(&ctx)?,
-        ctx.now,
-    )
-    .await
-    .map_err(|e| match e {
-        orch_engine::jobs::runner::MakeError::Running(job) => ApiError::new(
-            ErrorCode::ResourceInUse,
-            "another job owns this environment",
-        )
-        .with("job", job.id),
-        _ => ApiError::new(ErrorCode::ConflictStaleRevision, "the removal changed"),
-    })?;
-    let shown = jobs::view(&mut tx, &job).await?;
-    tx.commit().await.map_err(DbError::from)?;
-    ctx.app.engine.kick();
-    Ok(shown)
-}
-async fn restore(ctx: Ctx, (): (), body: api::EnvironmentRestoreBody) -> ApiResult<Job> {
-    change(ctx, body.expected_revision, false, None).await
-}
-async fn purge(ctx: Ctx, query: api::EnvironmentPurgeQuery, (): ()) -> ApiResult<Job> {
-    change(ctx, query.expected_revision, true, Some(&query.confirm)).await
 }

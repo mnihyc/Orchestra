@@ -24,6 +24,7 @@
 
 #![forbid(unsafe_code)]
 
+pub mod account_policy;
 pub mod locks;
 pub mod merge;
 pub mod provenance;

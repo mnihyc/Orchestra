@@ -484,6 +484,13 @@ impl OpenItem {
 struct Child {
     parent_item: Option<String>,
     turn_id: Option<TurnId>,
+    name: Option<String>,
+    nickname: Option<String>,
+    role: Option<String>,
+    path: Option<String>,
+    native_turn: Option<String>,
+    reported_name: Option<String>,
+    reported_role: Option<String>,
 }
 
 /// Follows one session.
@@ -492,7 +499,10 @@ pub struct Mapper {
     requests: crate::performance::Requests,
     request_turn: Option<TurnId>,
     request_reports: Vec<(TurnId, UsageRequest)>,
+    request_owners: HashMap<String, TurnId>,
     config: MapperConfig,
+    /// The concrete opening answer, compared with the choice that produced that answer.
+    session_model: Option<(String, String)>,
     pending_turn: Option<TurnId>,
     turn: Option<TurnState>,
     foreign_turn: Option<String>,
@@ -505,6 +515,8 @@ pub struct Mapper {
     /// The state each sub-agent's card last said, by the sub-agent's thread: its spawn call's card follows the
     /// sub-agent, which goes on after the call that started it has completed.
     child_states: HashMap<String, SubagentState>,
+    background_records: HashMap<String, orch_agent_contract::background::BackgroundTask>,
+    background_changes: Vec<orch_agent_contract::background::BackgroundTask>,
     thread_usage: TokenUsage,
     children_usage: TokenUsage,
     /// The size of the last prompt of the session's own thread, for a shortening's size before it.
@@ -561,7 +573,9 @@ impl Mapper {
             requests: crate::performance::Requests::default(),
             request_turn: None,
             request_reports: Vec::new(),
+            request_owners: HashMap::new(),
             config,
+            session_model: None,
             pending_turn: None,
             turn: None,
             foreign_turn: None,
@@ -571,6 +585,8 @@ impl Mapper {
             spawn_items: HashMap::new(),
             open_spawn: None,
             child_states: HashMap::new(),
+            background_records: HashMap::new(),
+            background_changes: Vec::new(),
             thread_usage: TokenUsage::default(),
             children_usage: TokenUsage::default(),
             last_prompt: None,
@@ -578,6 +594,29 @@ impl Mapper {
             last_failure_row: None,
             last_heard: None,
         }
+    }
+
+    /// Retain the opening answer until the next owned turn can name its real turn identity.
+    #[must_use]
+    pub fn with_opened_model(mut self, requested: &str, reported: Option<&str>) -> Self {
+        self.session_model = reported
+            .filter(|model| {
+                !model.trim().is_empty() && !requested.trim().is_empty() && *model != requested
+            })
+            .map(|model| (requested.to_owned(), model.to_owned()));
+        self
+    }
+
+    /// A later explicit model choice needs its own native evidence, not the old opening answer.
+    pub fn expect_turn_model(&mut self, turn_id: TurnId, model: &str) {
+        if self
+            .session_model
+            .as_ref()
+            .is_some_and(|(asked, _)| asked != model)
+        {
+            self.session_model = None;
+        }
+        self.expect_turn(turn_id);
     }
 
     /// Gives up on the turn that runs if it has waited for too long: the harness has said nothing for
@@ -624,6 +663,8 @@ impl Mapper {
         let native = turn.native.clone();
         let thread = self.config.native_thread.clone();
         for mut request in self.requests.abort_all(&error.code, Some(&error.message)) {
+            request.error_reason = error.reason.clone();
+            request.upstream_status = error.status;
             if let Some(orch_agent_contract::requests::RequestOutcome::Error { said, .. }) =
                 &mut request.outcome
             {
@@ -681,7 +722,8 @@ impl Mapper {
 
     /// Says that a turn of Orch is about to be started in the harness; its `turn/started` is the next.
     pub fn expect_turn(&mut self, turn_id: TurnId) {
-        for request in self.requests.abort_all(
+        for request in self.requests.abort(
+            &self.config.native_thread.clone(),
             "session_lost",
             Some("The previous turn ended before its request report."),
         ) {
@@ -693,7 +735,6 @@ impl Mapper {
 
     /// Records the moment the input is given to the harness, before awaiting its turn/start reply.
     pub fn request_asked(&mut self, at: Time) {
-        self.requests = crate::performance::Requests::default();
         self.requests.asked(&self.config.native_thread, at);
     }
 
@@ -816,7 +857,7 @@ impl Mapper {
         let mut out = Vec::new();
         self.last_heard = Some(ctx.clock.time());
         match method {
-            "thread/started" => self.thread_started(params),
+            "thread/started" => self.thread_started(params, &mut out),
             "turn/started" => self.turn_started(params, &mut out),
             "turn/completed" => self.turn_completed(params, &mut out, ctx),
             "item/started" => self.item_started(params, &mut out, ctx),
@@ -850,6 +891,16 @@ impl Mapper {
             _ => {}
         }
         self.observe_request(method, params, arrived, &out);
+        if !self.background_changes.is_empty() {
+            out.push(SessionEvent::BackgroundTasks(
+                orch_agent_contract::background::BackgroundTasks {
+                    self_waking: false,
+                    native_idle: false,
+                    tasks: std::mem::take(&mut self.background_changes),
+                    native_wake: None,
+                },
+            ));
+        }
         out
     }
 
@@ -893,12 +944,17 @@ impl Mapper {
             Some((code, error.map(|e| e.message.as_str()))),
         );
         if method == "turn/completed" && text(params, "threadId") == self.config.native_thread {
-            requests.extend(
-                self.requests
-                    .abort_all(code, error.map(|e| e.message.as_str())),
-            );
+            requests.extend(self.requests.abort(
+                &self.config.native_thread,
+                code,
+                error.map(|e| e.message.as_str()),
+            ));
         }
         for mut request in requests {
+            if let Some(error) = error {
+                request.error_reason = request.error_reason.or_else(|| error.reason.clone());
+                request.upstream_status = request.upstream_status.or(error.status);
+            }
             if let Some(orch_agent_contract::requests::RequestOutcome::Error { said, .. }) =
                 &mut request.outcome
                 && let Some(words) = error.and_then(|error| error.said.clone())
@@ -910,16 +966,177 @@ impl Mapper {
     }
 
     fn publish_request(&mut self, request: UsageRequest) {
-        let turn_id = self.request_turn;
+        let turn_id = if request.subagent {
+            let owner = self.request_owners.get(&request.id).copied().or_else(|| {
+                request
+                    .id
+                    .rsplit_once(':')
+                    .and_then(|(thread, _)| self.children.get(thread))
+                    .and_then(|child| child.turn_id)
+            });
+            if let Some(owner) = owner {
+                self.request_owners
+                    .entry(request.id.clone())
+                    .or_insert(owner);
+            }
+            owner
+        } else {
+            self.request_turn
+        };
         let Some(turn_id) = turn_id else {
             return;
         };
+        if request.subagent && request.outcome.is_some() && request.tokens.total_tokens.is_some() {
+            self.request_owners.remove(&request.id);
+        }
         self.request_reports.push((turn_id, request));
     }
 
     // -- threads -------------------------------------------------------------------------------------
 
-    fn thread_started(&mut self, params: &Json) {
+    pub(crate) fn background_running(&self) -> bool {
+        self.background_records
+            .values()
+            .any(|task| task.state == orch_agent_contract::background::BackgroundTaskState::Running)
+    }
+
+    fn record_background(&mut self, task: orch_agent_contract::background::BackgroundTask) {
+        let key = format!(
+            "{}:{}",
+            if task.kind == orch_agent_contract::background::BackgroundTaskKind::Command {
+                "command"
+            } else {
+                "agent"
+            },
+            task.id
+        );
+        if self.background_records.get(&key) == Some(&task) {
+            return;
+        }
+        if !self.background_records.contains_key(&key)
+            && self.background_records.len() >= orch_agent_contract::background::SNAPSHOT_COMMANDS
+        {
+            self.background_records.retain(|_, task| {
+                task.state == orch_agent_contract::background::BackgroundTaskState::Running
+            });
+            if self.background_records.len() >= orch_agent_contract::background::SNAPSHOT_COMMANDS {
+                return;
+            }
+        }
+        self.background_records.insert(key, task.clone());
+        self.background_changes.push(task);
+    }
+
+    fn command_background(
+        &self,
+        id: &str,
+    ) -> Option<orch_agent_contract::background::BackgroundTask> {
+        use orch_agent_contract::background::{
+            BackgroundTask, BackgroundTaskKind, BackgroundTaskState,
+        };
+        let item = self.items.get(id)?;
+        let call = item.call.as_ref()?;
+        let ToolPayload::Command {
+            command,
+            process_id,
+            ..
+        } = &call.tool
+        else {
+            return None;
+        };
+        Some(BackgroundTask {
+            id: id.to_owned(),
+            run_id: None,
+            native_item_ref: id.to_owned(),
+            origin_turn: item.command_turn?,
+            kind: BackgroundTaskKind::Command,
+            label: command.clone(),
+            name: None,
+            nickname: None,
+            role: None,
+            state: BackgroundTaskState::Running,
+            exit_code: None,
+            can_end: process_id.is_some(),
+        })
+    }
+
+    fn record_child_background(&mut self, id: &str, state: SubagentState) {
+        use orch_agent_contract::background::{
+            BackgroundTask, BackgroundTaskKind, BackgroundTaskState,
+        };
+        let Some(child) = self.children.get(id) else {
+            return;
+        };
+        let (Some(origin), Some(item)) = (child.turn_id, child.parent_item.as_ref()) else {
+            return;
+        };
+        let task = BackgroundTask {
+            id: format!("child:{id}:{origin}"),
+            run_id: None,
+            native_item_ref: item.clone(),
+            origin_turn: origin,
+            kind: BackgroundTaskKind::Subagent,
+            label: child
+                .name
+                .clone()
+                .or_else(|| child.nickname.clone())
+                .or_else(|| child.path.clone())
+                .unwrap_or_else(|| id.to_owned()),
+            name: child.name.clone(),
+            nickname: child.nickname.clone(),
+            role: child.role.clone(),
+            state: match state {
+                SubagentState::Running => BackgroundTaskState::Running,
+                SubagentState::Completed => BackgroundTaskState::Completed,
+                SubagentState::Failed => BackgroundTaskState::Failed,
+                SubagentState::Interrupted => BackgroundTaskState::Stopped,
+            },
+            exit_code: None,
+            can_end: false,
+        };
+        self.record_background(task);
+    }
+
+    fn child_metadata(&mut self, id: &str, out: &mut Vec<SessionEvent>) {
+        let Some(child) = self.children.get_mut(id) else {
+            return;
+        };
+        let Some(spawn) = child.parent_item.clone() else {
+            return;
+        };
+        let name = child
+            .name
+            .clone()
+            .or_else(|| child.nickname.clone())
+            .or_else(|| child.path.clone());
+        if child.reported_name == name && child.reported_role == child.role {
+            return;
+        }
+        child.reported_name = name.clone();
+        child.reported_role = child.role.clone();
+        let mut tool = json!({});
+        if let Some(name) = name {
+            tool["name"] = json!(name);
+        }
+        if let Some(role) = &child.role {
+            tool["role"] = json!(role);
+        }
+        if tool.as_object().is_some_and(|tool| !tool.is_empty()) {
+            out.push(SessionEvent::ItemUpdated(ItemUpdated {
+                native_ref: spawn,
+                payload: json!({"tool":tool}),
+            }));
+        }
+        self.record_child_background(
+            id,
+            self.child_states
+                .get(id)
+                .copied()
+                .unwrap_or(SubagentState::Running),
+        );
+    }
+
+    fn thread_started(&mut self, params: &Json, out: &mut Vec<SessionEvent>) {
         let thread = params.get("thread").unwrap_or(&Json::Null);
         let id = text(thread, "id");
         let parent = text(thread, "parentThreadId");
@@ -936,8 +1153,27 @@ impl Mapper {
                 Child {
                     parent_item,
                     turn_id: self.turn.as_ref().map(|turn| turn.id),
+                    name: None,
+                    nickname: None,
+                    role: None,
+                    path: None,
+                    native_turn: None,
+                    reported_name: None,
+                    reported_role: None,
                 },
             );
+        }
+        if let Some(child) = self.children.get_mut(id) {
+            if let Some(name) = opt_text(thread, "name") {
+                child.name = Some(name);
+            }
+            if let Some(name) = opt_text(thread, "agentNickname") {
+                child.nickname = Some(name);
+            }
+            if let Some(role) = opt_text(thread, "agentRole") {
+                child.role = Some(role);
+            }
+            self.child_metadata(id, out);
         }
     }
 
@@ -966,9 +1202,79 @@ impl Mapper {
                 child.to_owned(),
                 Child {
                     parent_item: Some(spawn.to_owned()),
-                    turn_id,
+                    turn_id: turn_id
+                        .or_else(|| self.children.get(child).and_then(|child| child.turn_id)),
+                    name: self
+                        .children
+                        .get(child)
+                        .and_then(|child| child.name.clone()),
+                    nickname: self
+                        .children
+                        .get(child)
+                        .and_then(|child| child.nickname.clone()),
+                    role: self
+                        .children
+                        .get(child)
+                        .and_then(|child| child.role.clone()),
+                    path: self
+                        .children
+                        .get(child)
+                        .and_then(|child| child.path.clone()),
+                    native_turn: self
+                        .children
+                        .get(child)
+                        .and_then(|child| child.native_turn.clone()),
+                    reported_name: self
+                        .children
+                        .get(child)
+                        .and_then(|child| child.reported_name.clone()),
+                    reported_role: self
+                        .children
+                        .get(child)
+                        .and_then(|child| child.reported_role.clone()),
                 },
             );
+            self.record_child_background(
+                child,
+                self.child_states
+                    .get(child)
+                    .copied()
+                    .unwrap_or(SubagentState::Running),
+            );
+        }
+    }
+
+    /// A new input to an idle retained child belongs to the input sending it, not its old spawn.
+    fn resume_children(&mut self, item: &Json, parent_thread: &str) {
+        if text(item, "type") != "collabAgentToolCall"
+            || !matches!(text(item, "tool"), "sendInput" | "resumeAgent")
+        {
+            return;
+        }
+        let Some(origin) = self.turn_for(parent_thread) else {
+            return;
+        };
+        let source = text(item, "id");
+        for id in item
+            .get("receiverThreadIds")
+            .and_then(Json::as_array)
+            .into_iter()
+            .flatten()
+            .filter_map(Json::as_str)
+        {
+            if self.child_states.get(id) == Some(&SubagentState::Running) {
+                continue;
+            }
+            let Some(child) = self.children.get_mut(id) else {
+                continue;
+            };
+            child.parent_item = Some(source.to_owned());
+            child.turn_id = Some(origin);
+            child.native_turn = None;
+            self.spawn_items.insert(id.to_owned(), source.to_owned());
+            self.child_states
+                .insert(id.to_owned(), SubagentState::Running);
+            self.record_child_background(id, SubagentState::Running);
         }
     }
 
@@ -988,6 +1294,9 @@ impl Mapper {
 
     fn turn_started(&mut self, params: &Json, out: &mut Vec<SessionEvent>) {
         if text(params, "threadId") != self.config.native_thread {
+            if let Some(child) = self.children.get_mut(text(params, "threadId")) {
+                child.native_turn = opt_text(params.get("turn").unwrap_or(&Json::Null), "id");
+            }
             return;
         }
         let native = text(params.get("turn").unwrap_or(&Json::Null), "id").to_owned();
@@ -1017,6 +1326,13 @@ impl Mapper {
             turn_id: id,
             native_turn_ref: native,
         }));
+        if let Some((from, to)) = self.session_model.clone()
+            && let Some(turn) = &self.turn
+        {
+            let answered = json!({"threadId":self.config.native_thread,"turnId":turn.native,
+                "fromModel":from,"toModel":to});
+            self.rerouted(&answered, out);
+        }
     }
 
     fn turn_completed(&mut self, params: &Json, out: &mut Vec<SessionEvent>, ctx: &Context<'_>) {
@@ -1030,8 +1346,21 @@ impl Mapper {
             _ => (TurnOutcome::Failed, ItemStatus::Failed),
         };
         if thread != self.config.native_thread {
-            if self.children.contains_key(thread) {
+            if let Some(child) = self.children.get(thread) {
+                if child.native_turn.as_deref().is_some_and(|id| id != native) {
+                    return;
+                }
                 self.close_items_of(thread, item_status, false, out);
+                self.child_changed(
+                    thread,
+                    match outcome {
+                        TurnOutcome::Completed => SubagentState::Completed,
+                        TurnOutcome::Interrupted => SubagentState::Interrupted,
+                        TurnOutcome::Failed => SubagentState::Failed,
+                    },
+                    None,
+                    out,
+                );
             }
             return;
         }
@@ -1163,6 +1492,9 @@ impl Mapper {
                             payload: json!({ "tool": call.tool }),
                         }));
                     }
+                }
+                if let Some(task) = self.command_background(&id) {
+                    self.record_background(task);
                 }
                 continue;
             }
@@ -1306,6 +1638,7 @@ impl Mapper {
         if id.is_empty() || self.items.contains_key(id) {
             return;
         }
+        self.resume_children(item, thread);
         let started_at = params
             .get("startedAtMs")
             .and_then(Json::as_i64)
@@ -1456,12 +1789,57 @@ impl Mapper {
         let Some(open) = self.items.remove(id) else {
             return;
         };
+        if kind == "commandExecution" && open.background {
+            if let Some(mut task) = self
+                .background_records
+                .get(&format!("command:{id}"))
+                .cloned()
+            {
+                task.exit_code = whole(item, "exitCode");
+                task.state = if text(item, "status") == "completed"
+                    && task.exit_code.is_none_or(|code| code == 0)
+                {
+                    orch_agent_contract::background::BackgroundTaskState::Completed
+                } else {
+                    orch_agent_contract::background::BackgroundTaskState::Failed
+                };
+                self.record_background(task);
+            }
+        }
         self.spawn_children(item, thread);
         if kind == "collabAgentToolCall" && self.open_spawn.as_deref() == Some(id) {
             self.open_spawn = None;
         }
         if kind == "collabAgentToolCall" {
             self.children_reported(item, out);
+            if matches!(text(item, "tool"), "sendInput" | "resumeAgent")
+                && matches!(text(item, "status"), "failed" | "interrupted")
+            {
+                for child in item
+                    .get("receiverThreadIds")
+                    .and_then(Json::as_array)
+                    .into_iter()
+                    .flatten()
+                    .filter_map(Json::as_str)
+                {
+                    if self
+                        .children
+                        .get(child)
+                        .is_some_and(|child| child.parent_item.as_deref() == Some(id))
+                    {
+                        self.child_changed(
+                            child,
+                            if text(item, "status") == "interrupted" {
+                                SubagentState::Interrupted
+                            } else {
+                                SubagentState::Failed
+                            },
+                            None,
+                            out,
+                        );
+                    }
+                }
+            }
         }
         match open.kind {
             ItemKind::AgentMessage => {
@@ -2002,6 +2380,11 @@ impl Mapper {
 
     fn sub_agent_activity(&mut self, item: &Json, out: &mut Vec<SessionEvent>) {
         let child = text(item, "agentThreadId");
+        if let Some(record) = self.children.get_mut(child)
+            && let Some(path) = opt_text(item, "agentPath")
+        {
+            record.path = Some(path);
+        }
         let Some(spawn) = self.spawn_items.get(child).cloned() else {
             return;
         };
@@ -2010,6 +2393,16 @@ impl Mapper {
             "completed" => SubagentState::Completed,
             _ => SubagentState::Running,
         };
+        let metadata = self.children.get(child).map(|child| {
+            (
+                child
+                    .name
+                    .clone()
+                    .or_else(|| child.nickname.clone())
+                    .or_else(|| child.path.clone()),
+                child.role.clone(),
+            )
+        });
         let Some(call) = self
             .items
             .get_mut(&spawn)
@@ -2023,19 +2416,37 @@ impl Mapper {
         if let ToolPayload::Subagent {
             state: current,
             model,
+            name,
+            role,
             ..
         } = &mut call.tool
         {
             *current = state;
+            if let Some((reported_name, reported_role)) = &metadata {
+                if reported_name.is_some() {
+                    *name = reported_name.clone();
+                }
+                if reported_role.is_some() {
+                    *role = reported_role.clone();
+                }
+            }
             // The activity names the model the sub-agent runs on, where the spawn asked for none.
             if let Some(running) = opt_text(item, "model") {
                 *model = Some(running);
             }
         }
+        let payload = json!({ "tool": call.tool });
         out.push(SessionEvent::ItemUpdated(ItemUpdated {
             native_ref: spawn,
-            payload: json!({ "tool": call.tool }),
+            payload,
         }));
+        if let Some((name, role)) = metadata
+            && let Some(record) = self.children.get_mut(child)
+        {
+            record.reported_name = name;
+            record.reported_role = role;
+        }
+        self.record_child_background(child, state);
     }
 
     /// Tells the card of the call that started the sub-agent of thread `child` its new state, where it
@@ -2051,11 +2462,39 @@ impl Mapper {
         let Some(spawn) = self.spawn_items.get(child).cloned() else {
             return;
         };
-        if self.child_states.get(child) == Some(&state) && model.is_none() {
+        let metadata = self.children.get(child).map(|child| {
+            (
+                child
+                    .name
+                    .clone()
+                    .or_else(|| child.nickname.clone())
+                    .or_else(|| child.path.clone()),
+                child.role.clone(),
+            )
+        });
+        let metadata_changed = metadata.as_ref().is_some_and(|(name, role)| {
+            self.children
+                .get(child)
+                .is_some_and(|child| child.reported_name != *name || child.reported_role != *role)
+        });
+        if self.child_states.get(child) == Some(&state) && model.is_none() && !metadata_changed {
             return;
         }
         self.child_states.insert(child.to_owned(), state);
+        self.record_child_background(child, state);
         let mut tool = json!({ "state": state });
+        if let Some((name, role)) = metadata {
+            if let Some(name) = &name {
+                tool["name"] = json!(name);
+            }
+            if let Some(role) = &role {
+                tool["role"] = json!(role);
+            }
+            if let Some(child) = self.children.get_mut(child) {
+                child.reported_name = name;
+                child.reported_role = role;
+            }
+        }
         if let Some(model) = model {
             tool["model"] = json!(model);
         }
@@ -2081,7 +2520,8 @@ impl Mapper {
         for (child, state) in reported {
             if self.spawn_items.get(&child).map(String::as_str) == Some(text(item, "id")) {
                 // The spawn call itself: its own card says it.
-                self.child_states.insert(child, state);
+                self.child_states.insert(child.clone(), state);
+                self.record_child_background(&child, state);
                 continue;
             }
             self.child_changed(&child, state, None, out);
@@ -2282,8 +2722,17 @@ impl Mapper {
                     } else {
                         sub_stream(child)
                     },
-                    name: None,
-                    role: None,
+                    name: self.children.get(child).and_then(|child| {
+                        child
+                            .name
+                            .clone()
+                            .or_else(|| child.nickname.clone())
+                            .or_else(|| child.path.clone())
+                    }),
+                    role: self
+                        .children
+                        .get(child)
+                        .and_then(|child| child.role.clone()),
                     prompt: opt_text(item, "prompt"),
                     state,
                     model: opt_text(item, "model"),
@@ -2813,7 +3262,125 @@ mod tests {
     }
 
     fn kinds(events: &[SessionEvent]) -> Vec<&'static str> {
-        events.iter().map(SessionEvent::kind).collect()
+        events
+            .iter()
+            .filter(|event| !matches!(event, SessionEvent::BackgroundTasks(_)))
+            .map(SessionEvent::kind)
+            .collect()
+    }
+
+    #[test]
+    fn background_command_completion_reports_the_original_turn_without_a_native_wake() {
+        use orch_agent_contract::background::BackgroundTaskState;
+        let mut rig = Rig::new();
+        rig.begin();
+        rig.item_started(command(
+            "build",
+            "inProgress",
+            json!("22"),
+            Json::Null,
+            Json::Null,
+        ));
+        let ended = rig.end("completed", Json::Null);
+        assert!(ended.iter().any(
+            |event| matches!(event, SessionEvent::BackgroundTasks(report)
+            if report.tasks.iter().any(|task| task.state == BackgroundTaskState::Running))
+        ));
+        let completed = rig.item_completed(command(
+            "build",
+            "failed",
+            json!("22"),
+            json!("failed"),
+            json!(2),
+        ));
+        let task = completed
+            .iter()
+            .find_map(|event| match event {
+                SessionEvent::BackgroundTasks(report) => {
+                    assert!(!report.self_waking);
+                    assert!(report.native_wake.is_none());
+                    report.tasks.first()
+                }
+                _ => None,
+            })
+            .expect("the terminal completion is a task event for controller admission");
+        assert_eq!(task.origin_turn, id(9));
+        assert_eq!(task.native_item_ref, "build");
+        assert_eq!(task.exit_code, Some(2));
+        assert_eq!(task.state, BackgroundTaskState::Failed);
+        assert!(!rig.mapper.background_running());
+        assert!(
+            !completed
+                .iter()
+                .any(|event| matches!(event, SessionEvent::TurnStarted(_)))
+        );
+    }
+
+    #[test]
+    fn late_child_completion_keeps_its_native_name_nickname_role_and_origin() {
+        use orch_agent_contract::background::BackgroundTaskState;
+        let mut rig = Rig::new();
+        rig.begin();
+        rig.item_started(
+            json!({"type":"collabAgentToolCall","id":"spawn","tool":"spawnAgent",
+            "status":"inProgress","receiverThreadIds":["child"],"agentsStates":{}}),
+        );
+        rig.feed(
+            "thread/started",
+            json!({"thread":{"id":"child","parentThreadId":THREAD,
+            "name":"Review changes","agentNickname":"Finch","agentRole":"reviewer"}}),
+        );
+        rig.item_completed(json!({"type":"collabAgentToolCall","id":"spawn","tool":"spawnAgent",
+            "status":"completed","receiverThreadIds":["child"],"agentsStates":{"child":{"status":"running"}}}));
+        rig.end("completed", Json::Null);
+        let completed = rig.feed(
+            "turn/completed",
+            json!({"threadId":"child",
+            "turn":{"id":"child-run","status":"failed"}}),
+        );
+        let task = completed
+            .iter()
+            .find_map(|event| match event {
+                SessionEvent::BackgroundTasks(report) => report.tasks.first(),
+                _ => None,
+            })
+            .expect("a failed child completes independently of its foreground parent");
+        assert_eq!(task.origin_turn, id(9));
+        assert_eq!(task.native_item_ref, "spawn");
+        assert_eq!(task.name.as_deref(), Some("Review changes"));
+        assert_eq!(task.nickname.as_deref(), Some("Finch"));
+        assert_eq!(task.role.as_deref(), Some("reviewer"));
+        assert_eq!(task.state, BackgroundTaskState::Failed);
+        assert!(!task.can_end);
+    }
+
+    #[test]
+    fn new_input_to_an_idle_child_binds_its_next_work_to_the_new_origin() {
+        let mut rig = Rig::new();
+        rig.begin();
+        rig.item_started(json!({"type":"collabAgentToolCall","id":"spawn","tool":"spawnAgent","status":"inProgress","receiverThreadIds":["child"],"agentsStates":{}}));
+        rig.feed(
+            "thread/started",
+            json!({"thread":{"id":"child","parentThreadId":THREAD,"name":"Review"}}),
+        );
+        rig.item_completed(json!({"type":"collabAgentToolCall","id":"spawn","tool":"spawnAgent","status":"completed","receiverThreadIds":["child"],"agentsStates":{"child":{"status":"completed"}}}));
+        rig.end("completed", Json::Null);
+        rig.mapper.expect_turn(id(10));
+        rig.feed(
+            "turn/started",
+            json!({"threadId":THREAD,"turn":{"id":"next-root"}}),
+        );
+        let events=rig.feed("item/started",json!({"threadId":THREAD,"turnId":"next-root","item":{"type":"collabAgentToolCall","id":"send-again","tool":"sendInput","status":"inProgress","receiverThreadIds":["child"],"agentsStates":{}}}));
+        let task = events
+            .iter()
+            .find_map(|event| match event {
+                SessionEvent::BackgroundTasks(report) => report.tasks.first(),
+                _ => None,
+            })
+            .expect("new owned child work");
+        assert_eq!(task.origin_turn, id(10));
+        assert_eq!(task.native_item_ref, "send-again");
+        assert_eq!(task.label, "Review");
     }
 
     #[test]
@@ -3438,6 +4005,88 @@ mod tests {
     }
 
     #[test]
+    fn an_opened_model_difference_uses_the_existing_owned_turn_marker_and_usage() {
+        let mut rig = Rig::new();
+        rig.mapper = rig
+            .mapper
+            .with_opened_model("gpt-6-sol", Some("gpt-6-sol-safe"));
+        assert!(
+            rig.feed(
+                "turn/started",
+                json!({"threadId":THREAD,"turn":{"id":"unasked"}})
+            )
+            .is_empty()
+        );
+        let started = rig.begin();
+        assert_eq!(
+            kinds(&started),
+            ["turn.started", "item.started", "item.completed"]
+        );
+        assert!(
+            matches!(&started[1],SessionEvent::ItemStarted(item) if matches!(&item.content,ItemContent::Error(error) if error.code==turn_error::MODEL_REROUTED && !error.retryable && error.message.contains("gpt-6-sol-safe instead of gpt-6-sol")))
+        );
+        let used=rig.feed("thread/tokenUsage/updated",json!({"threadId":THREAD,"turnId":TURN,"tokenUsage":{
+            "total":{"totalTokens":120,"inputTokens":100,"outputTokens":20},
+            "last":{"totalTokens":120,"inputTokens":100,"outputTokens":20},"modelContextWindow":258400}}));
+        let SessionEvent::UsageUpdated(update) = &used[0] else {
+            panic!("native usage")
+        };
+        let report = update.report.as_ref().unwrap();
+        assert_eq!(report.models.len(), 1);
+        assert_eq!(report.models[0].model, "gpt-6-sol-safe");
+        assert_eq!(report.models[0].tokens.total_tokens, 120);
+        let ended = rig.end("completed", Json::Null);
+        assert!(
+            matches!(ended.last(),Some(SessionEvent::TurnCompleted(end)) if end.status==TurnOutcome::Completed)
+        );
+        let again = rig.begin();
+        assert_eq!(
+            kinds(&again),
+            ["turn.started", "item.started", "item.completed"],
+            "each owned turn retains the reported session model"
+        );
+    }
+
+    #[test]
+    fn an_explicit_reroute_can_replace_the_opening_model_observation() {
+        let mut rig = Rig::new();
+        rig.mapper = rig
+            .mapper
+            .with_opened_model("gpt-6-sol", Some("gpt-6-sol-safe"));
+        rig.begin();
+        rig.feed("model/rerouted",json!({"threadId":THREAD,"turnId":TURN,"fromModel":"gpt-6-sol-safe","toModel":"gpt-6-sol-other"}));
+        let used=rig.feed("thread/tokenUsage/updated",json!({"threadId":THREAD,"turnId":TURN,"tokenUsage":{
+            "total":{"totalTokens":120,"inputTokens":100,"outputTokens":20},
+            "last":{"totalTokens":120,"inputTokens":100,"outputTokens":20},"modelContextWindow":258400}}));
+        let SessionEvent::UsageUpdated(update) = &used[0] else {
+            panic!("native usage")
+        };
+        assert_eq!(
+            update.report.as_ref().unwrap().models[0].model,
+            "gpt-6-sol-other"
+        );
+    }
+
+    #[test]
+    fn matching_or_unknown_opening_models_and_a_new_turn_choice_invent_no_reroute() {
+        for reported in [None, Some(""), Some("  "), Some("gpt-6-sol")] {
+            let mut rig = Rig::new();
+            rig.mapper = rig.mapper.with_opened_model("gpt-6-sol", reported);
+            assert_eq!(kinds(&rig.begin()), ["turn.started"]);
+        }
+        let mut rig = Rig::new();
+        rig.mapper = rig
+            .mapper
+            .with_opened_model("gpt-6-sol", Some("gpt-6-sol-safe"));
+        rig.mapper.expect_turn_model(id(9), "a-new-explicit-choice");
+        let started = rig.feed(
+            "turn/started",
+            json!({"threadId":THREAD,"turn":{"id":TURN}}),
+        );
+        assert_eq!(kinds(&started), ["turn.started"]);
+    }
+
+    #[test]
     fn a_turn_the_harness_moved_to_another_model_says_so_and_reports_its_use_under_that_model() {
         let mut rig = Rig::new();
         rig.begin();
@@ -3997,7 +4646,7 @@ mod tests {
             state_of(&ended),
             [(
                 "spawn".to_owned(),
-                json!({ "tool": { "state": "completed" } })
+                json!({ "tool": { "state": "completed", "name": "/root/t" } })
             )]
         );
         let again = rig.item_completed(json!({"type":"subAgentActivity","id":"act2","kind":"completed","model":null,"reasoningEffort":null,"agentThreadId":"thr_child","agentPath":"/root/t"}));
@@ -4094,6 +4743,7 @@ mod tests {
             ("spawn1", json!("completed"))
         );
         assert_eq!(update.payload["tool"]["kind"], "subagent");
+        assert_eq!(update.payload["tool"]["name"], "/root/t");
         // The child's own turn ends its items.
         let ended = rig.feed("turn/completed", json!({ "threadId": "thr_child", "turn": { "id": "turn_child", "status": "completed" } }));
         assert_eq!(kinds(&ended), ["item.completed"]);

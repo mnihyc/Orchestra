@@ -20,6 +20,11 @@ use serde::{Deserialize, Serialize};
 /// What the upstream says a response used.
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
 pub struct ObservedUsage {
+    /// Successful native search operations, only where the vendor reports them.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub web_searches: Option<i64>,
+    /// The processing tier or speed the upstream actually reported, never the requested choice.
+    pub service_tier: Option<String>,
     /// The model that answered, as the response names it.
     pub model: Option<String>,
     /// What was used, in tokens.
@@ -30,6 +35,19 @@ pub struct ObservedUsage {
     pub request_ref: Option<String>,
 }
 
+/// Facts observed independently of whether the response contained a usage object.
+#[derive(Debug, Clone, Default)]
+pub struct ResponseFacts {
+    /// The upstream response identity, even before its final token report.
+    pub request_id: Option<String>,
+    /// A real output delta was observed, rather than a keepalive or opening event.
+    pub output_started: bool,
+    /// The protocol supplied its terminal event or a complete JSON envelope.
+    pub completed: bool,
+    /// A structured upstream error or refusal, with its original words.
+    pub failure: Option<serde_json::Value>,
+}
+
 /// Reads one response as it streams by.
 pub trait UsageObserver: Send {
     /// Feeds the next piece of the response body, as it passes. It must not buffer the body or hold it up.
@@ -38,6 +56,11 @@ pub trait UsageObserver: Send {
     /// What has been seen so far, or `None` when the response said nothing about use. Best-effort: it may
     /// be asked at any time, also after the stream was cut.
     fn usage(&self) -> Option<ObservedUsage>;
+
+    /// Optional facts from the same parser, without a second body buffer or usage requirement.
+    fn response_facts(&self) -> ResponseFacts {
+        ResponseFacts::default()
+    }
 }
 
 /// One event of a server-sent event stream.
@@ -189,6 +212,8 @@ mod tests {
     #[test]
     fn usage_that_is_observed_reads_and_writes_as_a_figure() {
         let seen = ObservedUsage {
+            web_searches: None,
+            service_tier: None,
             model: Some("gpt-6-sol".into()),
             tokens: TokenUsage::from_parts(orch_agent_contract::events::TokensReportedApart {
                 input: 10,

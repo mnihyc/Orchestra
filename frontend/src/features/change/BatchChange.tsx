@@ -24,7 +24,8 @@ import { agentsQuery, providerModelsQuery, providersQuery } from '@/api/resource
 import { Blockers } from '@/features/change/Blockers';
 import { Frame, type View } from '@/features/change/Frame';
 import { effortLabel, modelLabel } from '@/features/change/modelLabel';
-import { rangeWords } from '@/features/change/plan';
+import { addedResourcesOf, keptResourcesOf, rangeWords, removedResourcesOf } from '@/features/change/plan';
+import { PlanLists } from '@/features/change/Lists';
 import { useRefreshWhenOver } from '@/features/change/refresh';
 import { hasReported, profilesFor } from '@/features/change/RunsOn';
 import { resourceChoice } from '@/features/resource-facts/ResourceFacts';
@@ -295,7 +296,7 @@ export function BatchChange({ source, batch, open, onClose }: BatchChangeProps) 
               setModel(null);
               setEffort(undefined);
             }}
-            options={(providers.data ?? []).filter((candidate) => candidate.status === 'ready').map((candidate) => ({ value: candidate.id, name: candidate.name, ...resourceChoice({ kind: 'provider', provider: candidate }) }))}
+            options={(providers.data ?? []).filter((candidate) => (candidate.status === 'ready' || candidate.status === 'exhausted')).map((candidate) => ({ value: candidate.id, name: candidate.name, ...resourceChoice({ kind: 'provider', provider: candidate }) }))}
           />
           <Select
             label={t('change.runs.agent')}
@@ -363,6 +364,7 @@ function PlanRows({ plans }: { plans: readonly ForkPlan[] }) {
               {plan.turn_running && <span className="text-sm text-text-muted">{t('change.env.turnRunning')}</span>}
             </div>
             {blocked && <Blockers blockers={plan.blockers} plan={plan} />}
+            <PlanLists compact changes={addedResourcesOf(plan, t)} stays={keptResourcesOf(plan, t)} ends={removedResourcesOf(plan, t)} />
           </li>
         );
       })}

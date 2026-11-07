@@ -184,7 +184,7 @@ export function MakeEnvironmentDialog({ onClose, home, templateId, hostId, forTh
             {template !== null && <RuntimeChoice template={template} hosts={host !== null && hostAvailable ? [host] : open} value={runtime} onChange={setRuntime} policy={runtimePolicy} disabled={make.isPending} />}
             {template !== null && <DataSourcesEditor machine={host?.machine.id} driver={template.driver} value={dataSources} onChange={setDataSources} onReady={setSourcesReady} disabled={make.isPending} />}
             <NewAccess value={access} onChange={setAccess} home={t('environments.make.yourPlace')} allowHome={false} />
-            <TemporaryChoice checked={temporary} onChange={setTemporary} disabled={make.isPending} />
+            <TemporaryChoice checked={temporary} onChange={setTemporary} disabled={make.isPending} forThread={forThread} />
           </>
         )}
       </form>

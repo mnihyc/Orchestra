@@ -1,6 +1,6 @@
 /** What the tests of starting a thread build their answers from: a provider, a profile, an arrangement, a model and an environment as the server would list them, and the answer that holds them. */
 import type { StartOptions } from '@/api/start';
-import type { Arrangement, ArrangementType, BindingAgent, BindingEnvironment, BindingProvider, ModelOption } from '@/generated/api-types';
+import type { Arrangement, ArrangementType, BindingAgent, BindingEnvironment, BindingProvider, ModelOption, PlaceHost } from '@/generated/api-types';
 import { MODEL_ESTIMATE } from '../doubles/fixtures';
 import { harnessName } from '../doubles/harness-names';
 
@@ -76,6 +76,13 @@ export function environment(id: string, options: { isDefault?: boolean; usable?:
   };
 }
 
+/** A healthy creation answer names a host that can actually make its default environment. */
+export function creationHost(): PlaceHost {
+  return { host: { id: 'h1', name: 'Build host', address: 'acme.build' }, automatic: true, current: false, owner: null,
+    capacity: { cpu_millis: 8000, memory_mb: 16384, disk_gb: 64 }, declared: { cpu_millis: 0, memory_mb: 0, disk_gb: 0 }, free: { cpu_millis: 8000, memory_mb: 16384, disk_gb: 64 },
+    used: { cpu_percent: null, memory_mb: null, disk_gb: null }, environments: { running: 0, idle: 0 }, labels: [], mounts: [], reasons: [], warnings: [], storages: [], when_full: 'warn', usable: true };
+}
+
 export function options(more: Partial<StartOptions> = {}): StartOptions {
   const summary = { custom: false, from: null, interact: [], manage: [], view: [] };
   return {
@@ -86,7 +93,7 @@ export function options(more: Partial<StartOptions> = {}): StartOptions {
     access: { managed: summary, connected: summary },
     new_environment: summary,
     can_create: { allowed: true, missing: [] },
-    hosts: [],
+    hosts: [creationHost()],
     machines: [],
     source: { repository_url: null, branch: null, secret_name: null, from: null },
     ...more,

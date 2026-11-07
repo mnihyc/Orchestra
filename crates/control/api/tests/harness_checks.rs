@@ -1,5 +1,6 @@
 //! The check of a build of an agent program: a system admin asks for it, a host of the build's system checks it in
 //! the background, and what it found stays with the build: a capability switched off, or why it could not run.
+// The engine's futures this fixture awaits are deep; the default query depth does not lay them out.
 #![allow(
     clippy::unwrap_used,
     clippy::expect_used,
@@ -10,6 +11,8 @@ mod admin_support;
 #[path = "harness_checks/channels.rs"]
 mod channel_cases;
 mod places;
+#[path = "harness_checks/scopes.rs"]
+mod scopes;
 mod support;
 
 use std::time::Duration;

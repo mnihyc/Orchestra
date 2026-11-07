@@ -9,6 +9,10 @@ mod places;
 mod support;
 mod workspace;
 
+#[path = "workspace_files/upload_history.rs"]
+mod upload_history;
+
+use crate::support::FullPermissionPageReply;
 use async_trait::async_trait;
 use chrono::Duration;
 use http::StatusCode;
@@ -236,7 +240,9 @@ async fn cancelled_upload(controller_failed: bool) {
             .token(&site.ada.token)
             .send()
             .await
-            .ok();
+            .ok()
+            .into_full()
+            .expect("ordinary cancellation keeps the full job");
         assert_eq!(stopping.state, JobState::Running);
         assert!(stopping.progress.activity.unwrap().stopping);
         JobState::Cancelled
@@ -443,7 +449,9 @@ async fn a_native_write_completed_before_cancel_keeps_its_receipt_even_when_its_
         .token(&site.ada.token)
         .send()
         .await
-        .ok();
+        .ok()
+        .into_full()
+        .expect("ordinary cancellation keeps the full job");
     assert_eq!(stopping.state, JobState::Running);
     assert!(stopping.progress.activity.unwrap().stopping);
     tokio::time::timeout(workspace::PATIENCE, machine.cancelled.cancelled())
@@ -682,6 +690,37 @@ async fn a_cancelled_upload_history_uses_the_servers_partial_receipt_even_after_
     assert_eq!(details["upload"]["files"][0]["size"], 100);
     assert_eq!(details["upload"]["files"][0]["received"], 7);
     assert!(site.disk.read("web/partial.txt").is_none());
+    let line: Id = sqlx::query_scalar(
+        "SELECT id FROM audit_log WHERE environment_id=$1 AND details #>> '{upload,id}'=$2",
+    )
+    .bind(site.environment)
+    .bind(batch.to_string())
+    .fetch_one(&mut *conn)
+    .await
+    .unwrap();
+    drop(conn);
+    let page = site
+        .app()
+        .call(
+            orch_api_contract::access::HistoryList,
+            &[&"environments", &site.environment],
+        )
+        .token(&site.ada.token)
+        .query(&orch_api_contract::access::HistoryListQuery {
+            upload: Some(line),
+            limit: Some(1),
+            ..Default::default()
+        })
+        .send()
+        .await
+        .ok();
+    let file = &page.items[0].upload.as_ref().unwrap().files[0];
+    assert_eq!(file.received, Some(7));
+    assert_eq!(file.path, None);
+    assert_eq!(
+        file.outcome,
+        orch_api_contract::workspace::WorkspaceUploadOutcome::Cancelled
+    );
 }
 
 #[tokio::test]
@@ -1092,6 +1131,7 @@ async fn the_environments_files_are_given_on_its_own_page_and_a_thread_named_giv
         }] }))
         .send()
         .await
+        .full_permission_page()
         .ok();
     let through_the_thread = listing(Some(site.thread), &guest.token).await.problem();
     assert_eq!(through_the_thread.code, ErrorCode::AuthzDenied);

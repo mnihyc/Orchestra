@@ -1,4 +1,5 @@
 //! The program itself, run as a process against a real gateway and API on loopback: it enrolls a host with a host token, holds its session and tells the system what the host has, says who it is, and stops when it is told to.
+// The engine's futures this fixture awaits are deep; the default query depth does not lay them out.
 #![allow(
     clippy::unwrap_used,
     clippy::expect_used,

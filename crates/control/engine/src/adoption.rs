@@ -51,9 +51,20 @@ use orch_db::queries::resources::thread_engine as resources;
 use orch_db::queries::threads::binding as thread_rows;
 use orch_link_contract::commands::{AgentReadSession, AgentReadSessionResult, SerialKey};
 use orch_types::{Id, Time};
-use serde::Deserialize;
+use serde::{Deserialize, Serialize};
 use serde_json::json;
 use std::time::Duration;
+
+mod birth;
+pub mod operation;
+mod plan;
+mod retained;
+pub mod retry;
+pub use birth::{Adopted, AdoptionWrite, PreparedAdoption};
+pub use plan::{Fetched, Planned};
+pub use retained::{
+    FetchedHistory, HistoryRecord, RetainedHistory, require_retry_history, retained_history_source,
+};
 
 /// The name a thread has when neither its maker nor the session gives it one.
 pub const DEFAULT_NAME: &str = "Adopted session";
@@ -67,8 +78,11 @@ const READ_WAIT: Duration = Duration::from_secs(300);
 const RECORD_READ_MAX_BYTES: usize = orch_agent_contract::discovery::RECORD_MAX_BYTES + 64 * 1024;
 
 /// What a person asks when they take in a session.
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct Adoption {
+    /// The confirmed agent contribution for the new holder; history retry does not apply it.
+    pub agent_access: Option<orch_api_contract::nodes::AgentAccessChoice>,
     /// The topic the thread is made in.
     pub topic: Id,
     /// The provider whose harness holds the session.
@@ -168,6 +182,14 @@ enum Recorded {
     Failed(String),
 }
 
+#[derive(Debug, thiserror::Error)]
+enum RecordReadError {
+    #[error(transparent)]
+    Source(#[from] EngineError),
+    #[error("{0}")]
+    Content(String),
+}
+
 /// The model an adopted thread runs on, and why not the session's, where not.
 struct ModelChoice {
     model: Option<String>,
@@ -241,6 +263,58 @@ const fn status_word(status: orch_agent_contract::events::ItemStatus) -> &'stati
     }
 }
 
+/// The same stored adoption-history status used by the engine and HTTP reader.
+/// Availability reads current machine facts and queues no native work.
+pub async fn history_status(
+    conn: &mut Conn,
+    thread: Id,
+) -> Result<Option<orch_api_contract::threads::AdoptHistoryStatus>, EngineError> {
+    use orch_api_contract::threads::{AdoptHistoryState, AdoptHistoryStatus};
+    let original: Option<(orch_types::Json, Id, Id, String)> = sqlx::query_as(
+        "SELECT i.payload,s.provider_id,s.environment_id,s.arrangement FROM items i JOIN segments s ON s.id=i.segment_id
+         WHERE i.thread_id=$1 AND i.kind='marker' AND i.native_ref='adopted' ORDER BY i.seq_created LIMIT 1")
+        .bind(thread).fetch_optional(&mut *conn).await.map_err(orch_db::DbError::from)?;
+    let Some((payload, provider, environment, arrangement)) = original else {
+        return Ok(None);
+    };
+    let missing = payload["data"]["history_missing"].as_str();
+    let reason = payload["data"]["history_error"].as_str().map(str::to_owned);
+    let state = match missing {
+        None => AdoptHistoryState::Read,
+        Some("unsupported") => AdoptHistoryState::Unsupported,
+        Some(_) => {
+            let provider = resources::provider(conn, provider)
+                .await?
+                .filter(|row| row.deleted_at.is_none());
+            let environment = environments::environment(conn, environment)
+                .await?
+                .filter(|row| row.deleted_at.is_none());
+            let machine = provider
+                .zip(environment)
+                .and_then(|(provider, environment)| {
+                    crate::harnesses::machine_of(
+                        Some(&arrangement),
+                        &provider,
+                        environment.machine_id,
+                    )
+                });
+            match machine {
+                Some(machine) => match resources::machine_place(conn, machine).await? {
+                    Some(machine) if machine.online => AdoptHistoryState::Unreadable,
+                    Some(_) => AdoptHistoryState::Offline,
+                    None => AdoptHistoryState::Unavailable,
+                },
+                None => AdoptHistoryState::Unavailable,
+            }
+        }
+    };
+    Ok(Some(AdoptHistoryStatus {
+        state,
+        reason,
+        can_read_again: state == AdoptHistoryState::Unreadable,
+    }))
+}
+
 impl Engine {
     /// What may be asked by whom: making a thread in the topic, and the use of the provider and of the
     /// profile. Who may not use them learns nothing about the sessions their harness holds.
@@ -308,18 +382,15 @@ impl Engine {
     }
 
     /// The session named, as the harness lists it, and the machine that listed it.
-    async fn held_session(&self, adoption: &Adoption) -> Result<(Held, Id), AdoptError> {
-        let keeper = {
-            let mut conn = self.inner.db.acquire().await?;
-            resources::provider(&mut conn, adoption.provider)
-                .await?
-                .filter(|row| row.deleted_at.is_none())
-                .ok_or(AdoptError::Gone)?
-        };
-        let listed = match self
-            .discover_sessions(adoption.provider, adoption.agent)
-            .await?
-        {
+    async fn held_session_with_preparation(
+        &self,
+        adoption: &Adoption,
+        preparation: Option<&operation::Preparation>,
+    ) -> Result<(Held, Id), AdoptError> {
+        let (observation, machine) = self
+            .discover_sessions_observed(adoption.provider, adoption.agent, preparation)
+            .await?;
+        let listed = match observation {
             Discovered::Sessions(listed) => listed,
             Discovered::Gone => return Err(AdoptError::Gone),
             Discovered::Unsupported => return Err(AdoptError::Unsupported),
@@ -332,11 +403,11 @@ impl Engine {
             .filter_map(|each| serde_json::from_value::<Held>(each).ok())
             .find(|each| each.native_session_ref == adoption.native_session_ref)
             .ok_or(AdoptError::NoSession)?;
-        // The machine that listed it, which has the folders to put it in and the record to read.
-        let machine = self
-            .harness_machine(&keeper, adoption.agent)
-            .await?
-            .ok_or(AdoptError::Offline)?;
+        // History belongs to the machine which actually listed this session. A later
+        // placement observation must not substitute another machine under the same reference.
+        let machine = machine.ok_or_else(|| {
+            EngineError::unreadable("the native session observation has no supplying machine")
+        })?;
         Ok((session, machine))
     }
 
@@ -345,17 +416,41 @@ impl Engine {
     async fn adopted_place(
         &self,
         conn: &mut Conn,
-        person: Id,
+        principal: &Principal,
+        adoption: &Adoption,
         machine: Id,
-        named: Option<Id>,
         cwd: Option<&str>,
+        selection: &str,
     ) -> Result<Place, AdoptError> {
-        if let Some(named) = named {
+        let filter = operation::PlaceFilter::prepare(
+            conn,
+            principal,
+            adoption,
+            selection,
+            Time::new(self.inner.clock.now()),
+        )
+        .await?;
+        if let Some(named) = adoption.environment {
             let root = environments::environment(conn, named)
                 .await?
                 .filter(|row| row.deleted_at.is_none() && row.remove_at.is_none())
                 .ok_or(CreateThreadError::EnvironmentUnavailable)?
                 .workspace_root;
+            filter.allows(conn, named).await?;
+            if let Answer::Refused(missing) = self
+                .inner
+                .access
+                .environment_place(conn, principal.user(), named)
+                .await
+                .map_err(EngineError::from)?
+            {
+                return Err(denied(
+                    Permission::EnvironmentUse,
+                    ObjectKind::Environment,
+                    named,
+                    missing,
+                ));
+            }
             let directory = match cwd {
                 Some(cwd) => relative_to(&root, cwd).ok_or_else(|| AdoptError::Outside {
                     root: root.clone(),
@@ -376,10 +471,17 @@ impl Engine {
             let Some(directory) = relative_to(&each.workspace_root, cwd) else {
                 continue;
             };
+            match filter.allows(conn, each.id).await {
+                Ok(()) => {}
+                Err(AdoptError::Create(
+                    CreateThreadError::Denied(_) | CreateThreadError::OperationScope,
+                )) => continue,
+                Err(error) => return Err(error),
+            }
             let managed = self
                 .inner
                 .access
-                .environment_place(conn, person, each.id)
+                .environment_place(conn, principal.user(), each.id)
                 .await
                 .map_err(EngineError::from)?;
             if matches!(managed, Answer::Refused(_)) {
@@ -400,13 +502,14 @@ impl Engine {
         })
     }
 
-    /// Asks the harness of `provider` and `agent` on `machine` what it recorded of a session; with `write`,
-    /// its earlier turns come up as a record. What goes wrong is said, and is no failure of the adoption.
-    async fn read_session_record(
+    /// The one native session-record command supplier, with an optional actual source observer.
+    async fn read_session_record_observed<E: operation::Entry>(
         &self,
         machine: Id,
         adoption: &Adoption,
         write: bool,
+        preparation: Option<&operation::Preparation>,
+        observer: Option<&mut operation::RecordObservation<E>>,
     ) -> Result<Recorded, EngineError> {
         let asked = orch_types::new_id();
         let command = Outgoing::new(
@@ -423,6 +526,32 @@ impl Engine {
                 write,
             },
         )?;
+        let command = match preparation {
+            Some(preparation) => {
+                preparation
+                    .command(
+                        self,
+                        crate::harnesses::HarnessKey {
+                            provider: adoption.provider,
+                            agent: adoption.agent,
+                            machine,
+                        },
+                        command,
+                    )
+                    .await?
+            }
+            None => command,
+        };
+        if let Some(observer) = observer {
+            let Some(crate::commands::CommandAuthority::AdoptionPreparation(evidence)) =
+                command.authority.as_ref()
+            else {
+                return Err(EngineError::BeforeEffect(Box::new(
+                    operation::PreparationEnded,
+                )));
+            };
+            observer.retain_command(evidence.preparation())?;
+        }
         let answered = tokio::time::timeout(
             READ_WAIT,
             crate::commands::run(self.inner.commands.as_ref(), command),
@@ -445,33 +574,52 @@ impl Engine {
         })
     }
 
-    /// The entries of the record a machine uploaded.
-    async fn record_entries(
+    /// The entries of the record a machine uploaded, using the one native parser and bounds.
+    async fn record_entries_from<E: operation::Entry>(
         &self,
         read: &AgentReadSessionResult,
-    ) -> Result<Vec<RecordedEntry>, String> {
+        mut source: Option<&mut operation::RecordObservation<E>>,
+    ) -> Result<Vec<RecordedEntry>, RecordReadError> {
         let Some(record) = read.record else {
             return Ok(Vec::new());
         };
-        let store = self
-            .blobs()
-            .ok_or_else(|| "no store of content is attached".to_owned())?;
-        let mut body = store
-            .get(&record.blob, None)
-            .await
-            .map_err(|error| error.to_string())?
+        let store = self.blobs().ok_or_else(|| {
+            RecordReadError::Content("no store of content is attached".to_owned())
+        })?;
+        let mut deadline = match source.as_deref_mut() {
+            Some(source) => Some(source.refresh(self).await?),
+            None => None,
+        };
+        let response = store.get(&record.blob, None).await;
+        if let Some(source) = source.as_deref_mut() {
+            deadline = Some(source.refresh(self).await?);
+        }
+        let mut body = response
+            .map_err(|error| RecordReadError::Content(error.to_string()))?
             .body;
-        let mut bytes: Vec<u8> = Vec::new();
-        while let Some(piece) = body.next().await {
-            let piece = piece.map_err(|error| error.to_string())?;
+        let mut bytes = Vec::new();
+        loop {
+            let piece = body.next().await;
+            if let Some(deadline) = &deadline {
+                deadline.check(self.inner.clock.as_ref())?;
+            }
+            let Some(piece) = piece else {
+                break;
+            };
+            let piece = piece.map_err(|error| RecordReadError::Content(error.to_string()))?;
             if bytes.len() + piece.len() > RECORD_READ_MAX_BYTES {
-                return Err("the record is larger than what is taken in".to_owned());
+                return Err(RecordReadError::Content(
+                    "the record is larger than what is taken in".to_owned(),
+                ));
             }
             bytes.extend_from_slice(&piece);
         }
         let (entries, unreadable) = read_record(&String::from_utf8_lossy(&bytes));
         if unreadable > 0 {
             tracing::warn!(unreadable, "lines of a session's record could not be read");
+        }
+        if let Some(deadline) = &deadline {
+            deadline.check(self.inner.clock.as_ref())?;
         }
         Ok(entries)
     }
@@ -655,86 +803,19 @@ impl Engine {
         caller: &Caller,
         adoption: Adoption,
     ) -> Result<AdoptPlan, AdoptError> {
-        let person = caller.user();
-        self.may_adopt(caller, &adoption).await?;
-        let (session, machine) = self.held_session(&adoption).await?;
-        let recorded = self.read_session_record(machine, &adoption, false).await?;
+        let fetched = self
+            .fetch_native_for::<operation::Previewing>(caller, adoption)
+            .await?;
         let mut conn = self.inner.db.acquire().await?;
-        let adopted_thread_id = thread_rows::adopting_threads(
-            &mut conn,
-            std::slice::from_ref(&adoption.native_session_ref),
-        )
-        .await?
-        .into_iter()
-        .next()
-        .map(|(_, thread)| thread);
-        let place = self
-            .adopted_place(
-                &mut conn,
-                person,
-                machine,
-                adoption.environment,
-                session.cwd.as_deref(),
-            )
+        let principal =
+            Principal::load(&mut conn, caller.clone(), Time::new(self.inner.clock.now()))
+                .await
+                .map_err(EngineError::from)?;
+        let planned = self
+            .prepare_adoption_plan_in(&mut conn, &principal, &fetched)
             .await?;
-        let (environment, directory, register_first) = match place {
-            Place::In {
-                environment,
-                directory,
-            } => {
-                let row = environments::environment(&mut conn, environment)
-                    .await?
-                    .ok_or(CreateThreadError::EnvironmentUnavailable)?;
-                let named = crate::views::environment_ref_json(
-                    &mut conn,
-                    &row,
-                    Time::new(self.inner.clock.now()),
-                )
-                .await?;
-                (
-                    Some(serde_json::from_value(named).map_err(EngineError::from)?),
-                    Some(directory),
-                    None,
-                )
-            }
-            Place::RegisterFirst(directory) => (None, None, directory),
-        };
-        let (reported, effort, turns, history_missing) = match &recorded {
-            Recorded::Read(read) => (read.model.clone(), read.effort.clone(), read.turns, None),
-            Recorded::Unsupported(_) => (None, None, 0, Some(AdoptHistoryMissing::Unsupported)),
-            Recorded::Failed(why) => {
-                tracing::info!(%why, "what a session recorded could not be read for its plan");
-                (None, None, 0, Some(AdoptHistoryMissing::Unreadable))
-            }
-        };
-        let choice = self
-            .adopted_model(
-                &mut conn,
-                person,
-                &adoption,
-                reported.as_deref(),
-                effort.as_deref(),
-            )
-            .await?;
-        Ok(AdoptPlan {
-            session: orch_api_contract::resources::NativeSession {
-                native_session_ref: session.native_session_ref.clone(),
-                title: session.title.clone(),
-                cwd: session.cwd.clone(),
-                updated_at: session.updated_at,
-                adopted_thread_id,
-            },
-            name: thread_name(adoption.name.as_deref(), session.title.as_deref()).0,
-            environment,
-            directory,
-            register_first,
-            session_model: reported,
-            model: choice.model,
-            model_reason: choice.reason,
-            turns,
-            history_missing,
-            adopted_thread_id,
-        })
+        self.render_adoption_plan_in(&mut conn, &fetched, &planned)
+            .await
     }
 
     /// Takes in a session that exists in a provider's harness as a thread of a topic. The caller needs what
@@ -747,167 +828,65 @@ impl Engine {
         caller: &Caller,
         adoption: Adoption,
     ) -> Result<CreatedThread, AdoptError> {
-        let person = caller.user();
-        self.may_adopt(caller, &adoption).await?;
-        let (session, machine) = self.held_session(&adoption).await?;
-        // What the session recorded is read before anything is written, outside any transaction: a long
-        // session takes a while to read and upload.
-        let recorded = self.read_session_record(machine, &adoption, true).await?;
-
-        // From the look for a thread that has the session to the making of the thread and the writing of
-        // its history, no other request takes in the same session: this transaction holds the lock of the
-        // session's name until the thread is there to be found by whoever waits for it.
-        // This coordinator only holds the session-name advisory lock and reads
-        // environments. The nested creation transaction takes authority first;
-        // taking it here too would make that transaction wait for this one.
-        let mut guard =
-            orch_db::queries::transaction_guard::scope(false, self.inner.db.begin()).await?;
-        adoption::lock_session(&mut guard, &adoption.native_session_ref).await?;
-        if let Some((_, thread)) = thread_rows::adopting_threads(
-            &mut guard,
-            std::slice::from_ref(&adoption.native_session_ref),
-        )
-        .await?
-        .into_iter()
-        .next()
-        {
-            return Err(AdoptError::AlreadyAdopted { thread });
-        }
-
-        // The environment and the thread's directory in it.
-        let (environment, directory) = match self
-            .adopted_place(
-                &mut guard,
-                person,
-                machine,
-                adoption.environment,
-                session.cwd.as_deref(),
-            )
+        let fetched = std::sync::Arc::new(
+            self.fetch_native_for::<operation::Adopting>(caller, adoption)
+                .await?,
+        );
+        let mut tx = self.inner.db.begin().await?;
+        orch_db::queries::transaction_guard::lock_native_actor(&mut tx, caller.user())
             .await?
+            .ok_or(AdoptError::Gone)?;
+        let original = Principal::load(&mut tx, caller.clone(), self.inner.clock.time())
+            .await
+            .map_err(EngineError::from)?;
+        let prepared = self
+            .prepare_adoption_birth_in(&mut tx, &original, fetched)
+            .await?;
+        let prefix = crate::operation_scope::creators::Prefix::prepare(
+            &mut tx,
+            prepared.principal(),
+            "ThreadAdopt",
+            prepared.new_thread(),
+            None,
+        )
+        .await?;
+        let (created, complete) = self
+            .create_thread_staged_taking_in_transaction(
+                &mut tx,
+                prefix,
+                prepared.new_thread(),
+                prepared.birth(),
+                orch_types::new_id(),
+                prepared.native_session_ref(),
+            )
+            .await?;
+        let principal = Principal::load(&mut tx, complete.caller, self.inner.clock.time())
+            .await
+            .map_err(EngineError::from)?;
+        let actual = principal.caller().clone();
+        let until = prepared.record_until();
+        let clock = self.inner.clock.clone();
+        let write = self
+            .write_adoption_in(&mut tx, &principal, &prepared, &created, move || {
+                if actual.key_deadline_allows(clock.as_ref())
+                    && until.is_none_or(|end| clock.time() < end)
+                {
+                    Ok(())
+                } else {
+                    Err(EngineError::BeforeEffect(Box::new(
+                        operation::PreparationEnded,
+                    )))
+                }
+            })
+            .await?;
+        if !principal
+            .caller()
+            .key_deadline_allows(self.inner.clock.as_ref())
+            || until.is_some_and(|end| self.inner.clock.time() >= end)
         {
-            Place::In {
-                environment,
-                directory,
-            } => (environment, directory),
-            Place::RegisterFirst(directory) => {
-                return Err(AdoptError::NoEnvironment { directory });
-            }
-        };
-
-        // The model it runs on, and the history it brings.
-        let mut history_error = match &recorded {
-            Recorded::Unsupported(why) | Recorded::Failed(why) => Some(why.clone()),
-            Recorded::Read(_) => None,
-        };
-        let (reported, effort, history) = match &recorded {
-            Recorded::Read(read) => match self.record_entries(read).await {
-                Ok(entries) => (read.model.clone(), read.effort.clone(), Ok((read, entries))),
-                Err(why) => {
-                    history_error = Some(why.clone());
-                    tracing::warn!(%why, "the record of an adopted session could not be read");
-                    (
-                        read.model.clone(),
-                        read.effort.clone(),
-                        Err(AdoptHistoryMissing::Unreadable),
-                    )
-                }
-            },
-            Recorded::Unsupported(_) => (None, None, Err(AdoptHistoryMissing::Unsupported)),
-            Recorded::Failed(why) => {
-                tracing::warn!(%why, "the harness could not read what an adopted session recorded");
-                (None, None, Err(AdoptHistoryMissing::Unreadable))
-            }
-        };
-        let choice = self
-            .adopted_model(
-                &mut guard,
-                person,
-                &adoption,
-                reported.as_deref(),
-                effort.as_deref(),
-            )
-            .await?;
-
-        let (name, titled) = thread_name(adoption.name.as_deref(), session.title.as_deref());
-        let created = self
-            .create_thread_taking(
-                caller,
-                NewThread {
-                    name,
-                    topic: adoption.topic,
-                    agent: adoption.agent,
-                    provider: adoption.provider,
-                    environment,
-                    directory,
-                    arrangement: None,
-                    model: choice.model.clone(),
-                    effort: choice.effort.clone(),
-                },
-                Birth {
-                    prepare_source: Some(false),
-                    // A name the session gave is the harness's to change as it goes on.
-                    titled_by_automation: titled,
-                    ..Birth::default()
-                },
-                None,
-                Some(&adoption.native_session_ref),
-            )
-            .await?;
-
-        // The line that says so, then what the session held before, in the transaction that holds the lock.
-        let author = adoption::machine_owner(&mut guard, machine).await?;
-        let _finished = {
-            let mut unit = Unit::new(&mut guard, self.inner.clock.now());
-            let (turns, items, missing, report) = match &history {
-                Ok((read, entries)) => (
-                    read.turns,
-                    i64::try_from(entries.len()).unwrap_or(i64::MAX),
-                    None,
-                    Some(serde_json::to_value(&read.report).map_err(EngineError::from)?),
-                ),
-                Err(missing) => (0, 0, Some(*missing), None),
-            };
-            let marker = json!({
-                "marker": "adopted",
-                "data": {
-                    "by": crate::views::user_ref_json(&mut *unit.conn, person).await?,
-                    "native_session_ref": adoption.native_session_ref,
-                    "turns": turns,
-                    "items": items,
-                    "history_missing": missing,
-                    "history_error": history_error,
-                    "session_model": reported,
-                    "model_reason": choice.reason,
-                    "history_author": author,
-                    "history_before": session.updated_at.unwrap_or_else(|| Time::new(unit.now())),
-                }
-            });
-            ingest::add_marker(
-                &mut unit,
-                created.thread,
-                created.segment,
-                None,
-                &marker,
-                "adopted",
-            )
-            .await?;
-            if let Ok((_, entries)) = &history {
-                self.write_session_record(
-                    &mut unit,
-                    created.thread,
-                    created.segment,
-                    author,
-                    entries,
-                )
-                .await?;
-            }
-            if let Some(report) = &report {
-                adoption::set_adopted_report(&mut *unit.conn, created.segment, report).await?;
-            }
-            unit.finish().await?
-        };
-        guard.commit().await.map_err(orch_db::DbError::from)?;
-        Ok(created)
+            return Err(EngineError::BeforeEffect(Box::new(operation::PreparationEnded)).into());
+        }
+        Ok(self.commit_adoption(tx, write).await?.created)
     }
 
     /// Reads an adopted session's missing earlier history again. Its ordinary inputs, model and queue
@@ -917,204 +896,109 @@ impl Engine {
         caller: &Caller,
         thread: Id,
     ) -> Result<(), AdoptError> {
+        use orch_api_contract::{
+            adoption_sources, routes::Endpoint, threads::ThreadAdoptRetryHistory,
+        };
         let mut conn = self.inner.db.acquire().await?;
-        self.may_retry_history(&mut conn, caller, thread).await?;
-        drop(conn);
-        if let Some(status) = self.adoption_history_status(thread).await? {
-            use orch_api_contract::threads::AdoptHistoryState;
-            match status.state {
-                AdoptHistoryState::Read => return Ok(()),
-                AdoptHistoryState::Unsupported => return Err(AdoptError::Unsupported),
-                AdoptHistoryState::Offline => return Err(AdoptError::Offline),
-                AdoptHistoryState::Unavailable => return Err(AdoptError::NoMachine),
-                AdoptHistoryState::Unreadable => {}
-            }
-        }
-        let mut conn = self.inner.db.acquire().await?;
-        // Original marker, segment, provider, agent, topic, payload and observation time.
-        type HistoryOrigin = (
-            Id,
-            Id,
-            Id,
-            Id,
-            Id,
-            orch_types::Json,
-            chrono::DateTime<chrono::Utc>,
-        );
-        let original: Option<HistoryOrigin> = sqlx::query_as(
-            "SELECT i.id,s.id,s.provider_id,s.agent_id,t.topic_id,i.payload,i.created_at
-             FROM items i JOIN segments s ON s.id=i.segment_id JOIN threads t ON t.node_id=i.thread_id
-             JOIN nodes n ON n.id=t.node_id
-             WHERE i.thread_id=$1 AND i.native_ref='adopted' AND i.kind='marker' AND n.deleted_at IS NULL
-             ORDER BY i.seq_created LIMIT 1")
-            .bind(thread).fetch_optional(&mut *conn).await.map_err(orch_db::DbError::from)?;
-        let Some((marker_id, segment, provider, agent, topic, payload, created_at)) = original
-        else {
-            return Err(AdoptError::Gone);
-        };
-        if payload["data"]["history_missing"].is_null() {
-            return Ok(());
-        }
-        let reference = payload["data"]["native_session_ref"]
-            .as_str()
-            .ok_or(AdoptError::NoSession)?
-            .to_owned();
-        let before = payload["data"]
-            .get("history_before")
-            .cloned()
-            .map(serde_json::from_value::<Time>)
-            .transpose()
-            .map_err(EngineError::from)?
-            .map_or(created_at, Time::get);
-        let author = payload["data"]
-            .get("history_author")
-            .cloned()
-            .map(serde_json::from_value::<Option<Id>>)
-            .transpose()
-            .map_err(EngineError::from)?
-            .flatten();
-        let has_turns: bool =
-            sqlx::query_scalar("SELECT EXISTS(SELECT 1 FROM turns WHERE segment_id=$1)")
-                .bind(segment)
-                .fetch_one(&mut *conn)
-                .await
-                .map_err(orch_db::DbError::from)?;
-        drop(conn);
-        let adoption = Adoption {
-            topic,
-            provider,
-            agent,
-            native_session_ref: reference,
-            environment: None,
-            name: None,
-        };
-        let (held, machine) = self.held_session(&adoption).await?;
-        let read = match self.read_session_record(machine, &adoption, true).await? {
-            Recorded::Read(read) => read,
-            Recorded::Unsupported(why) => {
-                self.record_history_failure(
-                    caller,
-                    thread,
-                    marker_id,
-                    AdoptHistoryMissing::Unsupported,
-                    &why,
-                )
-                .await?;
-                return Ok(());
-            }
-            Recorded::Failed(why) => {
-                self.record_history_failure(
-                    caller,
-                    thread,
-                    marker_id,
-                    AdoptHistoryMissing::Unreadable,
-                    &why,
-                )
-                .await?;
-                return Ok(());
-            }
-        };
-        let mut entries = match self.record_entries(&read).await {
-            Ok(entries) => entries,
-            Err(why) => {
-                self.record_history_failure(
-                    caller,
-                    thread,
-                    marker_id,
-                    AdoptHistoryMissing::Unreadable,
-                    &why,
-                )
-                .await?;
-                return Ok(());
-            }
-        };
-        let at = |entry: &RecordedEntry| match entry {
-            RecordedEntry::Said(words) => words.at,
-            RecordedEntry::Item(item) => item.at,
-        };
-        if (has_turns
-            || held
-                .updated_at
-                .is_some_and(|updated| updated.get() > before))
-            && entries.iter().any(|entry| at(entry).is_none())
-        {
-            return Err(AdoptError::Failed("the harness supplies no time for some entries, so earlier history cannot be separated from work done after adoption; nothing was imported".to_owned()));
-        }
-        entries.retain(|entry| at(entry).is_none_or(|at| at.get() <= before));
-        let turns = entries
-            .iter()
-            .map(|entry| match entry {
-                RecordedEntry::Said(words) => words.turn,
-                RecordedEntry::Item(item) => item.turn,
-            })
-            .collect::<std::collections::HashSet<_>>()
-            .len();
-        let mut tx = self.inner.db.begin().await?;
-        // A revocation committed while this runs refuses its commit; no epoch row is held meanwhile.
-        orch_db::queries::transaction_guard::lock_action(&mut tx).await?;
-        self.may_retry_history(&mut tx, caller, thread).await?;
-        adoption::lock_session(&mut tx, &adoption.native_session_ref).await?;
-        let finished = {
-            let mut unit = Unit::new(&mut tx, self.inner.clock.now());
-            if orch_db::queries::threads::lock(&mut *unit.conn, thread)
-                .await?
-                .is_none()
-            {
-                return Err(AdoptError::Gone);
-            }
-            let current: Option<orch_types::Json> =
-                sqlx::query_scalar("SELECT payload FROM items WHERE id=$1 AND thread_id=$2")
-                    .bind(marker_id)
-                    .bind(thread)
-                    .fetch_optional(&mut *unit.conn)
-                    .await
-                    .map_err(orch_db::DbError::from)?;
-            let Some(mut current) = current else {
-                return Err(AdoptError::Gone);
-            };
-            if current["data"]["history_missing"].is_null() {
-                return Ok(());
-            }
-            // Work may have started while the record was being read. A missing native boundary never
-            // turns that work into read-only history from before Orch.
-            let now_has_turns: bool =
-                sqlx::query_scalar("SELECT EXISTS(SELECT 1 FROM turns WHERE segment_id=$1)")
-                    .bind(segment)
-                    .fetch_one(&mut *unit.conn)
-                    .await
-                    .map_err(orch_db::DbError::from)?;
-            if now_has_turns && entries.iter().any(|entry| at(entry).is_none()) {
-                return Err(AdoptError::Failed("the session ran while its history was read, and the harness supplies no time boundary; nothing was imported".to_owned()));
-            }
-            self.write_session_record(&mut unit, thread, segment, author, &entries)
-                .await?;
-            let total: i64 = sqlx::query_scalar(
-                "SELECT count(*) FROM items WHERE thread_id=$1 AND segment_id=$2 AND before_orch",
-            )
-            .bind(thread)
-            .bind(segment)
-            .fetch_one(&mut *unit.conn)
+        let target = crate::operation_scope::targets::node(&mut conn, thread)
             .await
-            .map_err(orch_db::DbError::from)?;
-            current["data"]["history_missing"] = serde_json::Value::Null;
-            current["data"]["history_error"] = serde_json::Value::Null;
-            current["data"]["turns"] = json!(turns);
-            current["data"]["items"] = json!(total);
-            let seq = unit.stamp(thread).await?;
-            sqlx::query("UPDATE items SET payload=$2,seq_updated=$3,updated_at=$4 WHERE id=$1")
-                .bind(marker_id)
-                .bind(current)
-                .bind(seq)
-                .bind(unit.now())
-                .execute(&mut *unit.conn)
+            .map_err(EngineError::unreadable)?;
+        let root = crate::operation_scope::sources::Facts::one(
+            adoption_sources::Source::RetainedThread,
+            orch_access_contract::key_scope::KeyTargetKind::Object(ObjectKind::Thread),
+            target,
+        );
+        let known = crate::operation_scope::sources::bind_known(
+            ThreadAdoptRetryHistory::ROUTE,
+            &adoption_sources::RETRY_PREPARATION,
+            &[root],
+        )
+        .map_err(EngineError::unreadable)?;
+        let selecting = known
+            .preparation_caller(caller)
+            .map_err(EngineError::unreadable)?;
+        let selecting = Principal::load(&mut conn, selecting, Time::new(self.inner.clock.now()))
+            .await
+            .map_err(EngineError::from)?;
+        retry::require_thread(&mut conn, &selecting, thread).await?;
+        let source = retry::select(&mut conn, thread).await?;
+        let principal = retry::principal(
+            &mut conn,
+            caller,
+            &source,
+            Time::new(self.inner.clock.now()),
+        )
+        .await?;
+        let preparation = operation::Preparation::capture_retry(
+            principal.caller(),
+            operation::HttpCredential::Native,
+            source.clone(),
+        )?;
+        drop(conn);
+        let fetched = std::sync::Arc::new(
+            self.fetch_retry_adopted_history(
+                principal.caller(),
+                source,
+                operation::HttpCredential::Native,
+                None,
+                None,
+            )
+            .await?,
+        );
+        let mut tx = self.inner.db.begin().await?;
+        orch_db::queries::transaction_guard::lock_action(&mut tx).await?;
+        let (mut current, until) = crate::operation_scope::request_origin::current(
+            &mut tx,
+            self.inner.clock.as_ref(),
+            preparation.origin(),
+            &operation::HttpCredential::Native,
+            None,
+            "ThreadAdoptRetryHistory",
+        )
+        .await
+        .map_err(|error| EngineError::BeforeEffect(Box::new(error)))?;
+        if let Some(origin) = fetched.origin() {
+            let earlier = origin
+                .restore_current(&mut tx, self.inner.clock.as_ref())
                 .await
-                .map_err(orch_db::DbError::from)?;
-            let mut report = serde_json::to_value(&read.report).map_err(EngineError::from)?;
-            report["items_total"] = json!(total);
-            adoption::set_adopted_report(&mut *unit.conn, segment, &report).await?;
-            unit.finish().await?
+                .map_err(EngineError::from)?
+                .ok_or_else(|| EngineError::BeforeEffect(Box::new(operation::PreparationEnded)))?;
+            current = current
+                .intersect_restrictions(&earlier)
+                .map_err(EngineError::unreadable)?;
+        }
+        let principal = retry::principal(
+            &mut tx,
+            &current,
+            fetched.source(),
+            Time::new(self.inner.clock.now()),
+        )
+        .await?;
+        let prepared = self
+            .prepare_retry_adopted_history(&mut tx, &principal, fetched)
+            .await?;
+        let principal = retry::principal(
+            &mut tx,
+            &current,
+            prepared.source(),
+            Time::new(self.inner.clock.now()),
+        )
+        .await?;
+        let caller = principal.caller().clone();
+        let deadline = prepared.until().into_iter().chain(until).min();
+        let check = || {
+            if caller.key_deadline_allows(self.inner.clock.as_ref())
+                && deadline.is_none_or(|until| self.inner.clock.now() < until.get())
+            {
+                Ok(())
+            } else {
+                Err(EngineError::BeforeEffect(Box::new(
+                    operation::PreparationEnded,
+                )))
+            }
         };
-        self.commit(tx, finished).await?;
+        self.apply_retry_adopted_history(tx, &principal, prepared, check, check)
+            .await?;
         Ok(())
     }
 
@@ -1123,128 +1007,8 @@ impl Engine {
         &self,
         thread: Id,
     ) -> Result<Option<orch_api_contract::threads::AdoptHistoryStatus>, EngineError> {
-        use orch_api_contract::threads::{AdoptHistoryState, AdoptHistoryStatus};
         let mut conn = self.inner.db.acquire().await?;
-        let original: Option<(orch_types::Json, Id, Id, String)> = sqlx::query_as(
-            "SELECT i.payload,s.provider_id,s.environment_id,s.arrangement FROM items i JOIN segments s ON s.id=i.segment_id
-             WHERE i.thread_id=$1 AND i.kind='marker' AND i.native_ref='adopted' ORDER BY i.seq_created LIMIT 1")
-            .bind(thread).fetch_optional(&mut *conn).await.map_err(orch_db::DbError::from)?;
-        let Some((payload, provider, environment, arrangement)) = original else {
-            return Ok(None);
-        };
-        let missing = payload["data"]["history_missing"].as_str();
-        let reason = payload["data"]["history_error"].as_str().map(str::to_owned);
-        let state = match missing {
-            None => AdoptHistoryState::Read,
-            Some("unsupported") => AdoptHistoryState::Unsupported,
-            Some(_) => {
-                let provider = resources::provider(&mut conn, provider)
-                    .await?
-                    .filter(|row| row.deleted_at.is_none());
-                let environment = environments::environment(&mut conn, environment)
-                    .await?
-                    .filter(|row| row.deleted_at.is_none());
-                let machine = provider
-                    .zip(environment)
-                    .and_then(|(provider, environment)| {
-                        crate::harnesses::machine_of(
-                            Some(&arrangement),
-                            &provider,
-                            environment.machine_id,
-                        )
-                    });
-                match machine {
-                    Some(machine) => match resources::machine_place(&mut conn, machine).await? {
-                        Some(machine) if machine.online => AdoptHistoryState::Unreadable,
-                        Some(_) => AdoptHistoryState::Offline,
-                        None => AdoptHistoryState::Unavailable,
-                    },
-                    None => AdoptHistoryState::Unavailable,
-                }
-            }
-        };
-        Ok(Some(AdoptHistoryStatus {
-            state,
-            reason,
-            can_read_again: state == AdoptHistoryState::Unreadable,
-        }))
-    }
-
-    /// A failed read has a readable reason, and can never overwrite a successful concurrent import.
-    async fn record_history_failure(
-        &self,
-        caller: &Caller,
-        thread: Id,
-        marker: Id,
-        missing: AdoptHistoryMissing,
-        reason: &str,
-    ) -> Result<(), AdoptError> {
-        let mut tx = self.inner.db.begin().await?;
-        // A revocation committed while this runs refuses its commit; no epoch row is held meanwhile.
-        orch_db::queries::transaction_guard::lock_action(&mut tx).await?;
-        self.may_retry_history(&mut tx, caller, thread).await?;
-        let finished = {
-            let mut unit = Unit::new(&mut tx, self.inner.clock.now());
-            if orch_db::queries::threads::lock(&mut *unit.conn, thread)
-                .await?
-                .is_none()
-            {
-                return Err(AdoptError::Gone);
-            }
-            let payload: Option<orch_types::Json> =
-                sqlx::query_scalar("SELECT payload FROM items WHERE id=$1 AND thread_id=$2")
-                    .bind(marker)
-                    .bind(thread)
-                    .fetch_optional(&mut *unit.conn)
-                    .await
-                    .map_err(orch_db::DbError::from)?;
-            let Some(mut payload) = payload else {
-                return Err(AdoptError::Gone);
-            };
-            if payload["data"]["history_missing"].is_null() {
-                return Ok(());
-            }
-            payload["data"]["history_missing"] =
-                serde_json::to_value(missing).map_err(EngineError::from)?;
-            payload["data"]["history_error"] = json!(reason);
-            let seq = unit.stamp(thread).await?;
-            sqlx::query("UPDATE items SET payload=$2,seq_updated=$3,updated_at=$4 WHERE id=$1")
-                .bind(marker)
-                .bind(payload)
-                .bind(seq)
-                .bind(unit.now())
-                .execute(&mut *unit.conn)
-                .await
-                .map_err(orch_db::DbError::from)?;
-            unit.finish().await?
-        };
-        self.commit(tx, finished).await?;
-        Ok(())
-    }
-
-    async fn may_retry_history(
-        &self,
-        conn: &mut Conn,
-        caller: &Caller,
-        thread: Id,
-    ) -> Result<(), AdoptError> {
-        let principal = Principal::load(conn, caller.clone(), Time::new(self.inner.clock.now()))
-            .await
-            .map_err(EngineError::from)?;
-        match nodes::check(
-            conn,
-            &principal,
-            thread,
-            Permission::ThreadManage,
-            Act::Use,
-            Policy::default(),
-        )
-        .await
-        .map_err(EngineError::from)?
-        {
-            Decision::Allowed { .. } => Ok(()),
-            Decision::Refused(refusal) => Err(CreateThreadError::Denied(Box::new(refusal)).into()),
-        }
+        history_status(&mut conn, thread).await
     }
 }
 

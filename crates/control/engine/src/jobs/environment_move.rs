@@ -38,6 +38,10 @@ use serde::{Deserialize, Serialize};
 use serde_json::json;
 use std::collections::{BTreeMap, HashSet};
 
+mod choice;
+/// The native effect-free destination/source selector used before move measurements.
+pub use choice::{MoveChoice, select_destination};
+
 /// Move weights make the workspace transfer the largest part of the progress bar.
 pub const PHASES: [Phase; 8] = [
     Phase {
@@ -220,62 +224,22 @@ impl Engine {
                 given,
             )
             .await?;
-        let state = envs::environment(conn, environment)
-            .await?
-            .ok_or(UpdateError::NotFound)?;
-        if request
-            .template_id
-            .is_some_and(|template| Some(template) != state.template_id)
-        {
-            return Err(UpdateError::Invalid("A move keeps the current unit template. Change its template through an update before moving it.".into()));
-        }
-        let selection = move_selection(
-            request.files.as_ref(),
-            state.facts.get("index").and_then(Json::as_str) == Some("live"),
-        )?;
-        let old = envs::runtime(conn, common.recipe.old)
-            .await?
-            .ok_or(UpdateError::NotFound)?;
-        let kept_image = old
-            .kept_image
-            .as_ref()
-            .map(|image| {
-                serde_json::from_value::<orch_driver_contract::kept::KeptImage>(image.clone())
-            })
-            .transpose()
-            .map_err(EngineError::from)?;
-        let image_bytes = kept_image
-            .as_ref()
-            .map_or(0, |image| image.total_bytes.max(image.bytes));
-        let mut template = hosts::template(conn, common.recipe.template)
-            .await?
-            .ok_or(UpdateError::NotFound)?;
-        template.spec = common.recipe.definition.clone();
-        template.driver.clone_from(&old.driver);
-        let mut wanted =
-            crate::places::wanted(conn, state.home_node_id, template, &state.config).await?;
-        // A move may deliberately detach mounts absent on another host; its plan says which.
-        wanted.mounts.clear();
-        let places = crate::places::host_places_for_environment(
+        let MoveChoice {
+            state,
+            old,
+            destination,
+            selection,
+            kept_image,
+            image_bytes,
+        } = select_destination(
             conn,
             principal,
-            &crate::places::Ask {
-                home: state.home_node_id,
-                wanted: &wanted,
-                current: Some(old.host_id),
-                minutes_idle: crate::places::IDLE_MINUTES_DEFAULT,
-                now: self.inner.clock.now(),
-            },
             environment,
+            &common.recipe,
+            request,
+            self.inner.clock.time(),
         )
         .await?;
-        let other: Vec<_> = places
-            .into_iter()
-            .filter(|p| p.host.id != old.host_id)
-            .collect();
-        let destination = crate::places::choose(&other, request.host_id)
-            .map_err(|e| UpdateError::Blocked(vec![updates::blocker(e.code, e.message)]))?
-            .clone();
         let mut blockers = common
             .blockers
             .into_iter()
@@ -346,6 +310,7 @@ impl Engine {
             self,
             conn,
             &crate::mount_copies::Ask {
+                preparation: None,
                 choices: request.mounts.as_deref().unwrap_or_default(),
                 check_fingerprints: request.check_fingerprints.unwrap_or(false).then(|| {
                     request
@@ -1622,9 +1587,9 @@ impl Moving {
 impl Phased for Moving {
     async fn run(&self, job: &Job, phase: &str) -> Result<Done, Stop> {
         match phase {
-            "lock" => self.lock(job).await,
-            "provision" => self.provision(job).await,
-            "copy" => self.copy(job).await,
+            "lock" => Box::pin(self.lock(job)).await,
+            "provision" => Box::pin(self.provision(job)).await,
+            "copy" => Box::pin(self.copy(job)).await,
             "history" => {
                 let plan = job.plan().await?;
                 let next: Id =
@@ -1638,7 +1603,7 @@ impl Phased for Moving {
                     .ok_or_else(|| fail("runtime_gone", "The destination unit is gone"))?
                     .generation;
                 drop(conn);
-                crate::recovery::prepare_histories(
+                Box::pin(crate::recovery::prepare_histories(
                     job,
                     self.environment(),
                     machine,
@@ -1647,13 +1612,13 @@ impl Phased for Moving {
                     })?,
                     generation,
                     self.recipe.files.home.is_some(),
-                )
+                ))
                 .await
             }
-            "after_up" => super::after_up::run(job).await,
-            "verify" => self.verify(job).await,
-            "commit" => self.commit(job).await,
-            "cleanup" => self.cleanup(job).await,
+            "after_up" => Box::pin(super::after_up::run(job)).await,
+            "verify" => Box::pin(self.verify(job)).await,
+            "commit" => Box::pin(self.commit(job)).await,
+            "cleanup" => Box::pin(self.cleanup(job)).await,
             _ => Err(fail("internal", format!("a move has no phase {phase}"))),
         }
     }

@@ -19,6 +19,7 @@ import { useThreadReadRef } from '@/realtime/threadReadContext';
 import { approvalKey, approvalQuery } from '@/api/approvals';
 import type { Approval, Item } from '@/generated/api-types';
 import { useDecision } from '@/features/approvals/Decision';
+import { decisionReason } from '@/features/approvals/current';
 import { DecisionError } from '@/features/approvals/DecisionError';
 import { approvalTitle, ApprovalSubjectScope } from '@/features/approvals/Card';
 import { approvalAtItem, approvalOutcome } from '@/features/approvals/current';
@@ -112,6 +113,7 @@ function HarnessPending({ approval, itemId, threadId, onLost }: { approval: Harn
   const request = approval.request;
   const may = approval.can_decide && live;
   const busy = decision.pending;
+  const reason = decisionReason(approval, live, busy, t);
   return (
     <ApprovalSubjectScope subject={approval.title}><section
       aria-label={approval.title}
@@ -132,7 +134,7 @@ function HarnessPending({ approval, itemId, threadId, onLost }: { approval: Harn
       {request.request_kind === 'user_input' ? (
         <AnswersForm
           questions={request.detail.questions}
-          disabled={!may || busy}
+          disabled={!may || busy} reason={reason}
           pending={busy}
           onSend={(answers) => decision.decide({ answers }, t('approvals.sendAnswers'))}
         />
@@ -140,18 +142,18 @@ function HarnessPending({ approval, itemId, threadId, onLost }: { approval: Harn
         <ElicitationForm
           schema={request.detail.schema}
           message={request.detail.message}
-          disabled={!may || busy}
+          disabled={!may || busy} reason={reason}
           pending={busy}
           onSend={(action, content) => decision.decide({ action, ...(content === undefined ? {} : { content }) }, t('approvals.accept'))}
         />
       ) : request.request_kind === 'plan' ? (
-        <PlanAnswer disabled={!may} pending={decision.pressed === t('plan.proceed') ? 'proceed' : decision.pressed === t('plan.keepPlanning') ? 'keep' : null}
+        <PlanAnswer disabled={!may} reason={reason} pending={decision.pressed === t('plan.proceed') ? 'proceed' : decision.pressed === t('plan.keepPlanning') ? 'keep' : null}
           onProceed={() => decision.decide(planDecision(true), t('plan.proceed'))}
           onKeepPlanning={(words) => decision.decide(planDecision(false, words), t('plan.keepPlanning'))} />
       ) : (
         <OptionButtons target={request.request_kind === 'command' ? request.detail.command : approval.title}
           options={request.options}
-          disabled={!may || busy}
+          disabled={!may || busy} reason={reason}
           pressed={decision.pressed}
           onChoose={(option) => decision.decide(decisionOfOption(option), option.label)}
         />
@@ -193,10 +195,10 @@ function CapabilityPending({ approval, itemId, onLost }: { approval: Extract<App
         </ul>
       )}
       <div className="flex flex-wrap items-center gap-2">
-        <Button action="approve" aria-label={actionName('approve', title)} variant="secondary" pending={decision.pressed === t('approvals.approve')} disabled={!approval.can_decide || !live || decision.pending} onClick={() => decision.decide({ approve: true }, t('approvals.approve'))}>
+        <Button action="approve" aria-label={actionName('approve', title)} variant="secondary" pending={decision.pressed === t('approvals.approve')} disabled={!approval.can_decide || !live || decision.pending} reason={decisionReason(approval, live, decision.pending, t)} onClick={() => decision.decide({ approve: true }, t('approvals.approve'))}>
           {t('approvals.approve')}
         </Button>
-        <Button action="deny" aria-label={actionName('deny', title)} variant="danger-ghost" disabled={!approval.can_decide || !live || decision.pending} onClick={() => decision.decide({ approve: false }, t('approvals.refuse'))}>
+        <Button action="deny" aria-label={actionName('deny', title)} variant="danger-ghost" disabled={!approval.can_decide || !live || decision.pending} reason={decisionReason(approval, live, decision.pending, t)} onClick={() => decision.decide({ approve: false }, t('approvals.refuse'))}>
           {t('approvals.refuse')}
         </Button>
       </div>

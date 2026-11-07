@@ -25,9 +25,9 @@ use orch_agent_contract::adapter::{AgentAdapter, AgentStart};
 use orch_agent_contract::facts::AgentProfile;
 use orch_agent_contract::loopback::Loopback;
 use orch_agent_programs::{ProgramManifest, Programs};
-use orch_conformance::native::{self, Fixture, ModelRequest};
+use orch_conformance::native::{self, Fixture, ModelControl, ModelRequest};
 use orch_link_contract::commands::NodeToolConformanceResult;
-use orch_testkit::doubles::model::{MockConfig, MockLlm};
+use orch_testkit::doubles::model::{MockConfig, MockLlm, QueueFilter};
 use orch_types::{SystemClock, new_id};
 use serde_json::json;
 
@@ -178,6 +178,9 @@ pub async fn run(args: &Args) -> anyhow::Result<()> {
                 .map(|request| ModelRequest {
                     path: request.path,
                     body: request.body,
+                    status: request.status,
+                    queued: request.script
+                        == Some(orch_testkit::doubles::model::ScriptSource::Queue),
                 })
                 .collect()
         };
@@ -196,6 +199,46 @@ pub async fn run(args: &Args) -> anyhow::Result<()> {
         profile_env.extend(adapter.native_check().profile_env);
         let observe = |event: &orch_agent_contract::events::SessionEvent| {
             eprintln!("{}", json!({"case":name,"event":event}));
+        };
+        let control_model = |control: ModelControl| -> Result<(), String> {
+            match control {
+                ModelControl::Reset => {
+                    model.reset();
+                    Ok(())
+                }
+                ModelControl::Queue {
+                    model: model_name,
+                    script,
+                } => model
+                    .queue_for(
+                        &script,
+                        &QueueFilter {
+                            model: Some(model_name),
+                            format: None,
+                        },
+                        1,
+                    )
+                    .map_err(|error| error.to_string()),
+                ModelControl::QueueMatching {
+                    model: selected_model,
+                    script,
+                    pattern,
+                    times,
+                } => model
+                    .queue_matching(
+                        &script,
+                        &QueueFilter {
+                            model: selected_model,
+                            format: None,
+                        },
+                        times,
+                        move |body| pattern.matches(body),
+                    )
+                    .map_err(|error| error.to_string()),
+                ModelControl::Default { script } => model
+                    .set_default(&script)
+                    .map_err(|error| error.to_string()),
+            }
         };
         let fixture = Fixture {
             start: AgentStart {
@@ -217,6 +260,7 @@ pub async fn run(args: &Args) -> anyhow::Result<()> {
             workspace: work,
             within,
             requests: &requests,
+            control_model: Some(&control_model),
             launches: &launched,
             elicitation: &elicited,
             observe: if args.evidence { Some(&observe) } else { None },

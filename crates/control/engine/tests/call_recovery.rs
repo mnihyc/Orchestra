@@ -8,6 +8,8 @@
 #[path = "call_recovery/auxiliary.rs"]
 mod auxiliary;
 mod common;
+#[path = "call_recovery/session_loss.rs"]
+mod session_loss;
 
 use common::{World, eventually, queued, turn_began};
 use orch_authz::Caller;

@@ -1,4 +1,4 @@
-/** Enter starts with a valid setup; only four choices are asked before Options opens. */
+/** Enter starts with a valid setup; core choices and More remain separate from optional input. */
 import { act, fireEvent, screen, waitFor, within } from '@testing-library/react';
 import userEvent from '@testing-library/user-event';
 import { afterEach, beforeEach, expect, it, vi } from 'vitest';
@@ -14,7 +14,7 @@ import type { StartPlan } from '@/features/start/start';
 import type { Approval, PlaceHost, Project, Topic } from '@/generated/api-types';
 import { i18n, setLocale } from '@/i18n';
 
-import { agent, arrangement, environment, options, provider } from '../unit/start-fixtures';
+import { agent, arrangement, environment as environmentRow, options, provider } from '../unit/start-fixtures';
 import { BEA, TOPIC } from '../unit/general-access-fixtures';
 import { show } from './support';
 
@@ -41,11 +41,13 @@ vi.mock('@/api/resources', async (original) => ({ ...await original<object>(), p
 vi.mock('@/api/nodes', async (original) => ({ ...await original<object>(), nodeQuery: (id: string) => ({ queryKey: ['start-flow-node', id], queryFn: () => Promise.resolve({ org_id: 'org', access: { permissions: [] } }) }) }));
 vi.mock('@/features/resources/harnesses', () => ({ useHarnessTitle: () => () => 'Reported harness' }));
 vi.mock('@/features/resources/providers/ProviderUsageCard', () => ({ ProviderUsageCard: () => null }));
-vi.mock('@/features/access/NewPage', () => ({ NewPage: () => <div data-access-options /> }));
+vi.mock('@/features/access/NewPage', async (original) => ({ ...await original<object>(), NewPage: () => <div data-access-options /> }));
 vi.mock('@/features/help/open', () => ({ useHelpOpener: () => vi.fn() }));
 
 const topic = { id: 'topic', name: 'login', kind: 'topic', path: [], parent_id: null, archived: false, folder: false, status: 'open', access: { permissions: ['topic.interact', 'topic.start_threads'] } } as unknown as Topic;
 const parent = { id: topic.id, name: topic.name, kind: 'topic' as const, parentId: null, archived: false, folder: false, status: 'open' as const };
+// These cases exercise current-topic placement and access; More categories have their own tests.
+const environment: typeof environmentRow = (id, args) => ({ ...environmentRow(id, args), used: 'topic' });
 beforeEach(() => { vi.clearAllMocks(); localStorage.clear(); sessionStorage.clear(); state.refusal = null; state.refusedEnvironment = null; state.askFor = null; state.askClosed = false; state.approvals = []; state.freshAnswer = null; state.answer = options(); state.request.mockResolvedValue({ batch_id: 'start-request', approvals: [] }); client.session.setState({ status: 'signed_in', userId: 'starter' }); });
 afterEach(async () => { act(() => client.session.setState({ status: 'signed_out', userId: null })); await setLocale('en'); });
 
@@ -85,8 +87,9 @@ for (const locale of ['en', 'zh-CN'] as const) {
     const user = userEvent.setup();
     show(<NewThreadDialog parent={parent} open onClose={() => undefined} draft={{ picks: NO_PICKS, message: 'Keep this message' }} />);
     const dialog = await screen.findByRole('dialog');
-    expect(within(dialog).getAllByRole('combobox')).toHaveLength(4);
-    expect(within(dialog).queryByRole('radiogroup')).toBeNull();
+    expect(within(dialog).getAllByRole('combobox')).toHaveLength(5);
+    expect(within(dialog).getByRole('combobox', { name: i18n.t('start.where.moreTitle') })).toBeVisible();
+    expect(within(dialog).getByRole('radiogroup', { name: i18n.t('start.where.choice') })).toBeVisible();
     expect(within(dialog).queryByRole('textbox')).toBeNull();
     const more = within(dialog).getByRole('button', { name: i18n.t('start.options.title') });
     expect(more).toHaveAttribute('aria-expanded', 'false');
@@ -122,8 +125,7 @@ for (const locale of ['en', 'zh-CN'] as const) {
     const closed = { ...arrangement('separated', 1, false, 'executor_missing'), detail: null };
     state.freshAnswer = options({ providers: [provider('p1', { agents: [agent('a1', { reason: 'executor_missing', arrangements: [closed] })] })] });
     show(<NewThreadDialog parent={parent} open onClose={() => undefined} />);
-    await userEvent.click(await screen.findByRole('combobox', { name: i18n.t('start.where.title') }));
-    await userEvent.click(screen.getByRole('option', { name: i18n.t('choiceCatalog.environmentDestination.new.name') }));
+    await userEvent.click(await screen.findByRole('radio', { name: i18n.t('start.where.createNew') }));
     await waitFor(() => expect(state.reads).toHaveBeenCalledWith('new'));
     await userEvent.click(screen.getByRole('combobox', { name: i18n.t('start.agent.title') }));
     const profile = screen.getByRole('option', { name: 'Agent a1' });
@@ -171,6 +173,7 @@ for (const locale of ['en', 'zh-CN'] as const) it(`never offers a failed Main as
   failed.environment.name = 'Main'; failed.environment.status = 'failed';
   state.answer = options({ environments: [failed] });
   show(<NewThreadDialog parent={parent} open onClose={() => undefined} />);
+  await userEvent.click(await screen.findByRole('radio', { name: i18n.t('start.where.useExisting') }));
   const where = await screen.findByRole('combobox', { name: i18n.t('start.where.title') });
   expect(where).not.toHaveTextContent('Main');
   await userEvent.click(where);
@@ -211,6 +214,7 @@ for (const locale of ['en', 'zh-CN'] as const) for (const access of ['usable', '
   const row = access === 'usable' ? environment('single') : { ...environment('single', { usable: false }), reason: 'environment_use_required' };
   state.answer = options({ environments: [row] });
   show(<NewThreadDialog parent={parent} open onClose={() => undefined} />);
+  await userEvent.click(await screen.findByRole('radio', { name: i18n.t('start.where.useExisting') }));
   await userEvent.click(await screen.findByRole('combobox', { name: i18n.t('start.where.title') }));
   expect(screen.getByRole('option', { name: 'Env single' })).toBeEnabled();
   expect(screen.queryByRole('group', { name: i18n.t('start.where.canUse') })).toBeNull();
@@ -286,10 +290,10 @@ it('selects the requested environment only after a current read confirms Use', a
   const requested = { ...environment('e2', { usable: false }), reason: 'environment_use_required' };
   state.answer = options({ environments: [environment('e1', { isDefault: true }), requested] });
   state.askFor = 'e2';
-  state.request.mockImplementation(async () => {
+  state.request.mockImplementation(() => {
     state.askFor = null;
     state.answer = options({ environments: [environment('e1', { isDefault: true }), environment('e2')] });
-    return { batch_id: 'start-request', approvals: [] };
+    return Promise.resolve({ batch_id: 'start-request', approvals: [] });
   });
   const user = userEvent.setup();
   show(<NewThreadDialog parent={parent} open onClose={() => undefined} />);
@@ -329,6 +333,7 @@ it('does not show new-environment choices or arrangements for an access request'
   const user = userEvent.setup();
   show(<NewThreadDialog parent={parent} open onClose={() => undefined} />);
   expect(await screen.findByRole('switch', { name: i18n.t('temporary.name') })).toBeVisible();
+  await user.click(screen.getByRole('radio', { name: i18n.t('start.where.useExisting') }));
   await user.click(screen.getByRole('combobox', { name: i18n.t('start.where.title') }));
   await user.click(screen.getByRole('option', { name: 'Env e2' }));
   expect(screen.queryByRole('switch', { name: i18n.t('temporary.name') })).toBeNull();
@@ -426,7 +431,7 @@ it.each(['en', 'zh-CN'] as const)('says why a host cannot take a new environment
     host('closed', 'Closed host', { usable: false, reasons: ['template_not_allowed'] }),
   ] });
   show(<NewThreadDialog parent={parent} open onClose={() => undefined} />);
-  await userEvent.click(await screen.findByRole('combobox', { name: i18n.t('start.where.title') }));
+  await screen.findByRole('radio', { name: i18n.t('start.where.createNew') });
   const list = document.querySelector<HTMLElement>('[data-start-hosts]');
   if (list === null) throw new Error('the new environment option lists the hosts it could be made on');
   const hosts = within(list);

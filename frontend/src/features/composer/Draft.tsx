@@ -19,7 +19,7 @@ import { clearDraftText } from '@/api/source';
 import type { ContentPart, Delivery, LimitBypassRequest } from '@/generated/api-types';
 import { isForwarded } from '@/lib/content';
 import { NetworkError, newActKey } from '@/lib/requests';
-import { threadViewOf, threadWriter } from '@/realtime/stores/thread';
+import { runningTurn, threadViewOf, threadWriter } from '@/realtime/stores/thread';
 import { defaultThreadRead, type ThreadReadTarget } from '@/realtime/threadScope';
 
 /** How long after the last key the draft is saved: a pause in typing, not a rhythm of it. */
@@ -108,13 +108,18 @@ interface ComposerStore {
   /** What the server refused the last send with, per thread, to be read beside the box. */
   refused: Record<string, unknown>;
   sending: Record<string, SendingInput[]>;
-  /** The agents that answered a steer with "cannot": asked once, remembered while the page is open. */
-  cannotSteer: Record<string, true>;
+  /** The turn that refused steering, per thread; a later turn does not inherit the refusal. */
+  cannotSteer: Record<string, string>;
   /** The composer's Plan switch per thread, where the person set it; unset follows `thread.plan_first`. */
   planning: Record<string, boolean>;
 }
 
 export const useComposerStore = create<ComposerStore>(() => ({ passNext: {}, text: {}, parts: {}, refused: {}, sending: {}, cannotSteer: {}, planning: {} }));
+
+/** A learned refusal belongs only to the active turn that actually returned it. */
+export function steerRefusedFor(state: Pick<ComposerStore, 'cannotSteer'>, threadId: string, turnId: string | null): boolean {
+  return turnId !== null && state.cannotSteer[threadId] === turnId;
+}
 
 const NOBODY: SendingInput[] = [];
 const NOPARTS: ContentPart[] = [];
@@ -170,9 +175,9 @@ export const composerWriter = {
       return { text: { ...state.text, [threadId]: `${before.trim() === '' ? '' : `${before.trimEnd()}\n\n`}${quoted}\n\n` } };
     });
   },
-  /** The agent said that it takes no steering: the menu offers none from now on. */
-  noteCannotSteer(agentId: string): void {
-    useComposerStore.setState((state) => ({ cannotSteer: { ...state.cannotSteer, [agentId]: true } }));
+  /** This turn said it takes no steering; a new turn may report a different capability. */
+  noteCannotSteer(threadId: string, turnId: string): void {
+    useComposerStore.setState((state) => ({ cannotSteer: { ...state.cannotSteer, [threadId]: turnId } }));
   },
   /** The person turns the composer's Plan switch of a thread on or off. */
   setPlanning(threadId: string, on: boolean): void {
@@ -200,7 +205,9 @@ export function submitInput(target: ThreadReadTarget, message: string | ContentP
   const lifetime = draftLifetime;
   const content: ContentPart[] = typeof message === 'string' ? [{ type: 'text', text: message }] : message;
   const text = content.filter((part) => !isForwarded(part) && part.type === 'text').map((part) => 'text' in part ? part.text : '').join('\n');
-  const continuation = threadViewOf(read).read?.projection?.viewed_continuation_id;
+  const view = threadViewOf(read);
+  const continuation = view.read?.projection?.viewed_continuation_id;
+  const steerTurnId = delivery === 'steer' ? runningTurn(view)?.id ?? view.thread?.current_turn_id ?? null : null;
   const entry: SendingInput = { clientId, content, delivery, bypass, ...(plan ? { plan } : {}), state: 'sending', at: new Date().toISOString(),
     ...(continuation === undefined ? {} : { continuationId: continuation }) };
   setSending(threadId, (list) => [...list.filter((held) => held.clientId !== clientId), entry]);
@@ -221,8 +228,11 @@ export function submitInput(target: ThreadReadTarget, message: string | ContentP
       if (error instanceof ApiError) {
         // Refused: nothing was sent. The words go back into the box, and the refusal is read beside it.
         setSending(threadId, (list) => list.filter((held) => held.clientId !== clientId));
-        const agentId = threadViewOf(read).thread?.binding?.agent.id;
-        if (delivery === 'steer' && error.is('capability.unsupported') && agentId !== undefined) composerWriter.noteCannotSteer(agentId);
+        if (delivery === 'steer' && error.is('capability.unsupported') && steerTurnId !== null) {
+          const current = threadViewOf(read);
+          if (current.closed === null && (current.read === null || current.read.ready)
+            && (runningTurn(current)?.id ?? current.thread?.current_turn_id ?? null) === steerTurnId) composerWriter.noteCannotSteer(threadId, steerTurnId);
+        }
         useComposerStore.setState((state) => ({
           refused: { ...state.refused, [threadId]: error },
           text: { ...state.text, [threadId]: (state.text[threadId] ?? '') === '' ? text : `${text}\n${state.text[threadId] ?? ''}` },

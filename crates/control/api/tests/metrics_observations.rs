@@ -109,6 +109,14 @@ async fn real_work_reaches_exporter_and_management_without_recounting_trace_or_o
     .await
     .expect("the feed is admitted");
     let samples = readings.take_samples();
+    // Sample again before another real HTTP request increments its request counter.
+    let next = readings.take_samples();
+    assert!(
+        next.iter()
+            .filter(|row| row.counter)
+            .all(|row| row.value == 0.0),
+        "sampling itself repeats no work"
+    );
     let one = |name: &str| {
         samples
             .iter()
@@ -194,13 +202,6 @@ async fn real_work_reaches_exporter_and_management_without_recounting_trace_or_o
             .points[0]
             .1,
         0.125
-    );
-    let next = readings.take_samples();
-    assert!(
-        next.iter()
-            .filter(|row| row.counter)
-            .all(|row| row.value == 0.0),
-        "sampling itself repeats no work"
     );
     {
         let mut conn = world.conn().await;

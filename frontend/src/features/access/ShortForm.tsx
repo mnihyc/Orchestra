@@ -51,7 +51,7 @@ import {
   wholeChange,
 } from './model';
 import { Owners } from './Owners';
-import { WaitingRequests } from './RequestCard';
+import { RequestReview, WaitingRequests } from './RequestCard';
 import { EnvironmentReachLine, privateWarning, ReachesLine } from './Reaches';
 import { linkOf } from './target';
 
@@ -250,7 +250,7 @@ export function ShortForm({ target, page, catalogue, changes, ask, onFull, focus
         <InlineAlert tone="info">{t('access.connected.lead', { owner: page.reaches.environment.owner.display_name, name: page.reaches.environment.name, place: placeText })}</InlineAlert>
       )}
 
-      {mayChange && isNodeKind(target.kind) && <WaitingRequests nodeId={target.id} />}
+      {mayChange && isNodeKind(target.kind) && (focusAdd ? <RequestReview nodeId={target.id} /> : <WaitingRequests nodeId={target.id} />)}
 
       <Owners page={page} target={target} changes={changes} />
 

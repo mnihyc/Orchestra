@@ -4,17 +4,29 @@
  * plan is confirmed by its own word (`preflight_id`), and a job that was accepted is followed, never
  * asked for twice. What the server refuses comes back as the problem it says.
  */
-import { queryOptions } from '@tanstack/react-query';
+import { infiniteQueryOptions, queryOptions } from '@tanstack/react-query';
 
 import { api, done, ok, repeatable } from '@/api/client';
 import type { Door } from '@/api/workspace';
-import type { ChangeOptions, ContentPart, Delivery, Draft, EnvironmentGitCommitBody, EnvironmentGitPushBody, Job, RepositorySource, RestorePlan, ReviewComment, Snapshot, ThreadLink } from '@/generated/api-types';
+import type { ChangeOptions, ContentPart, Delivery, Draft, EnvironmentGitCommitBody, EnvironmentGitPushBody, Job, RepositorySource, RestorePlan, ReviewComment, Snapshot, SnapshotPage, ThreadLink } from '@/generated/api-types';
 
 const through = (door: Door): { thread?: string } => (door.threadId === null ? {} : { thread: door.threadId });
 
 export const sourceKeys = {
   snapshot: (id: string) => ['source-snapshot', id] as const,
+  snapshots: (thread: string) => ['thread-snapshots', thread] as const,
 };
+
+/** A recorded file source is chosen a page at a time, using the server's page-size default. */
+export const threadSnapshotsQuery = (id: string) => infiniteQueryOptions({
+  queryKey: sourceKeys.snapshots(id),
+  initialPageParam: null as string | null,
+  queryFn: ({ pageParam, signal }): Promise<SnapshotPage> => ok(api.GET('/threads/{id}/snapshots', {
+    params: { path: { id }, query: { ...(pageParam === null ? {} : { cursor: pageParam }) } }, signal,
+  })),
+  getNextPageParam: (page) => page.next_cursor ?? undefined,
+  retry: false,
+});
 
 /** One recorded state of files: whether it is complete, where it was taken, and why it may not be had. */
 export const snapshotQuery = (id: string) =>

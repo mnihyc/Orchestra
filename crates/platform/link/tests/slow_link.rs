@@ -489,6 +489,7 @@ fn enrollment_and_renewal_requests_fit_the_limit_of_thirty_seconds_on_both_lines
         roles: vec![Role::Agent, Role::Environment],
     };
     let reply = EnrollReply {
+        gateways: Vec::new(),
         machine_id: new_id(),
         certificate_pem: "-".repeat(1_100),
         ca_pem: "-".repeat(700),
