@@ -4,7 +4,7 @@ import { useNavigate } from '@tanstack/react-router';
 import { Clock, Pause, Play, RefreshCw, Settings } from 'lucide-react';
 import { useTranslation } from 'react-i18next';
 
-import { awayPrefsQuery, outsideQuery } from '@/api/away';
+import { awayPrefsQuery, outsideStatusQuery } from '@/api/away';
 import { ApiError } from '@/api/client';
 import { useAppearance } from '@/lib/appearance';
 import { DropdownEntries } from '@/ui/Menu';
@@ -17,12 +17,12 @@ export function OutsideMenu({ nodeId, onClose, onPause }: { nodeId: string; onCl
   const { t } = useTranslation();
   const navigate = useNavigate();
   useAwayLive();
-  const query = useQuery(outsideQuery(nodeId));
+  const query = useQuery(outsideStatusQuery(nodeId));
   const prefs = useQuery(awayPrefsQuery);
   const zone = useAppearance((state) => state.timeZone);
   const locale = useAppearance((state) => state.locale);
   const refused = query.error instanceof ApiError && (query.error.status === 403 || query.error.status === 404);
-  const outside = refused ? undefined : query.data?.outside;
+  const outside = refused ? undefined : query.data;
   const label = outside === undefined ? t(refused ? 'away.refused' : query.isPending ? 'away.checking' : 'away.failed') : outside.pause_until !== null ? t('away.status.paused', { time: writePause(outside.pause_until, zone, locale) }) : outside.ways.length === 0 ? t('away.status.off') : t('away.status.on', { ways: new Intl.ListFormat(locale).format(outside.ways.map((way) => way.name)) });
   return (
     <>
@@ -47,7 +47,7 @@ export function OutsideMenu({ nodeId, onClose, onPause }: { nodeId: string; onCl
 /** A first-work list consumes its completed org projection, not a route inferred from a device or role. */
 export function ConfiguredAway({ configured, nodeId }: { configured: boolean; nodeId: string }) {
   const { t } = useTranslation();
-  const query = useQuery({ ...outsideQuery(nodeId), enabled: configured });
-  const outside = query.data?.outside;
+  const query = useQuery({ ...outsideStatusQuery(nodeId), enabled: configured });
+  const outside = query.data;
   return <div className="flex flex-col gap-1 text-xs text-text-muted"><p>{t(configured ? 'away.configured' : 'away.status.off')}</p>{configured && <>{outside?.pause_until !== null && outside?.pause_until !== undefined && <p className="flex items-center gap-1"><Clock aria-hidden className="size-4" />{t('away.pause.active')}</p>}{outside?.ways.some((way) => way.state === 'needs_attention') === true && <p>{t('away.attention')}</p>}{outside?.ways.some((way) => way.last_ok_at === null) === true && <p>{t('away.notTested')}</p>}</>}</div>;
 }

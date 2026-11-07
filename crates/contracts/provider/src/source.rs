@@ -94,6 +94,14 @@ pub struct SourceDescriptorFacts {
     /// contract does not know is left out.
     #[serde(default, deserialize_with = "known_members")]
     pub reports: Vec<FactMember>,
+    /// Optional closed field lists for normalized credit member/item paths. Omitted paths keep
+    /// legacy unknown capability; a present value still proves support independently of this list.
+    #[serde(
+        default,
+        skip_serializing_if = "BTreeMap::is_empty",
+        deserialize_with = "crate::credit_fields::deserialize_reports"
+    )]
+    pub field_reports: BTreeMap<String, Vec<String>>,
     /// Whether it spends the resets it lists in `available_resets` (`resets.spend`).
     #[serde(default)]
     pub spends_resets: bool,
@@ -182,6 +190,9 @@ pub enum DescriptorFault {
     /// It lists a member twice.
     #[error("the member {0} is listed twice")]
     ReportedTwice(FactMember),
+    /// A normalized credit group or field is not known to this contract.
+    #[error("the credit field declaration {0:?} is not a known member/item field")]
+    FieldReport(String),
     /// It spends resets and does not tell them.
     #[error("a source that spends resets tells available_resets")]
     ResetsUntold,
@@ -291,6 +302,28 @@ impl SourceDescriptor {
             for (index, member) in facts.reports.iter().enumerate() {
                 if facts.reports[..index].contains(member) {
                     return Err(DescriptorFault::ReportedTwice(*member));
+                }
+            }
+            for (member, cap) in [
+                (FactMember::Balances, limits::BALANCES_MAX),
+                (FactMember::Spend, limits::SPEND_MAX),
+                (FactMember::ExtraUsage, 1),
+            ] {
+                let groups = facts
+                    .field_reports
+                    .keys()
+                    .filter(|group| group.split('.').next() == Some(member.as_str()))
+                    .count();
+                if groups > cap || groups > 0 && !facts.reports.contains(&member) {
+                    return Err(DescriptorFault::FieldReport(member.as_str().to_owned()));
+                }
+            }
+            for (group, fields) in &facts.field_reports {
+                let Some(known) = crate::credit_fields::known_fields(group) else {
+                    return Err(DescriptorFault::FieldReport(group.clone()));
+                };
+                if fields.iter().any(|field| !known.contains(&field.as_str())) {
+                    return Err(DescriptorFault::FieldReport(group.clone()));
                 }
             }
             if facts.spends_resets && !facts.reports.contains(&FactMember::AvailableResets) {

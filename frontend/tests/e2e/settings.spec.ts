@@ -1,5 +1,6 @@
 /** A person's own settings and an org's: a second step switched on and asked for at the next sign-in, a token made, shown once and revoked, and what the interface keeps; then the org's members moved, suspended and ended, an invitation made by the org's rules, a setting set and removed, a locked key, a secret, a channel that fails its Test, and the pages read-only for somebody who may not manage. */
-import { expect, type Page, test } from '@playwright/test';
+import { expect, type Locator, type Page, test } from '@playwright/test';
+import { TOKEN_OPERATIONS } from '../doubles/token-operations';
 
 import { ACME, bodySent, expectAccessibleSettled, mailed, PEOPLE, scenario, secretsWritten, signIn } from './support.ts';
 
@@ -14,6 +15,33 @@ async function open(page: Page, path: string, person: { login: string; password:
   await signIn(page, person);
   await page.goto(path);
   await page.waitForLoadState('networkidle');
+}
+
+/** Uses the existing rule editor; no setup API changes the key journey. */
+async function chooseKeyRule(page: Page, form: Locator, target: 'project' | 'account', preset = false): Promise<void> {
+  await form.getByRole('button', { name: 'Add target and operations', exact: true }).click();
+  const rule = page.getByRole('dialog', { name: 'Add target and operations', exact: true });
+  await rule.getByRole('combobox', { name: 'Target kind', exact: true }).click();
+  await page.getByRole('option', { name: target === 'project' ? 'Project' : 'Account', exact: true }).click();
+  if (target === 'account') await rule.getByRole('button', { name: 'Use this account', exact: true }).click();
+  else {
+    await rule.getByText('Use an exact ID without reading its name', { exact: true }).click();
+    await rule.getByLabel('Target ID', { exact: true }).fill(ACME.web);
+  }
+  await rule.getByRole('combobox', { name: 'Reach', exact: true }).click();
+  await page.getByRole('option', { name: 'This target and its hierarchy', exact: true }).click();
+  await rule.getByRole('checkbox', { name: target === 'account' ? 'API key' : preset ? 'Document' : 'Thread', exact: true }).check();
+  if (preset) await rule.getByRole('button', { name: 'Read and write', exact: true }).click();
+  else {
+    const selections = target === 'account' ? [['MeTokenList', 'Read']] : [['NodeGet.read', 'Read'], ['ThreadCreate', 'Write']];
+    for (const [operation, action] of selections) {
+      if (operation === undefined || action === undefined) throw new Error('The exact operation selection is missing');
+      await rule.getByLabel('Find an operation', { exact: true }).fill(operation);
+      const entry = rule.locator('fieldset').filter({ has: page.getByText(operation, { exact: true }) });
+      await entry.getByRole('checkbox', { name: action, exact: true }).check();
+    }
+  }
+  await rule.getByRole('button', { name: 'Use this rule', exact: true }).click();
 }
 
 /** The settings section list becomes its same searchable choice in a narrow pane. */
@@ -129,38 +157,26 @@ test.describe('a person’s own settings', () => {
     await expect(page.getByText('We sent a code to your address.')).toBeVisible();
   });
 
-  test('a token is made with the permissions ticked and a place, shown once, and revoked', async ({ page }) => {
+  test('a token is made with exact operations and a target, shown once, and revoked', async ({ page }) => {
     await open(page, '/settings/tokens');
     await expect(page.getByText('You have no API tokens.')).toBeVisible();
     await expectAccessibleSettled(page);
 
     await page.getByRole('button', { name: 'New token…' }).click();
     const dialog = page.getByRole('dialog', { name: 'New API token' });
-    // A token needs a name and, if it is to do only some things, at least one of them.
+    // An explicit deny-all default never becomes a legacy wildcard.
+    await expect(dialog.getByRole('region', { name: 'Allowed operations' })).toContainText('No operations are allowed.');
     await dialog.getByRole('button', { name: 'Create token' }).click();
     await expect(dialog.getByText('A token needs a name.')).toBeVisible();
     await dialog.getByLabel('Name').fill('ci');
-    await dialog.getByRole('radio', { name: 'Selected', exact: true }).click();
-    await dialog.getByRole('radio', { name: 'By area', exact: true }).click();
-    await dialog.getByRole('button', { name: 'Create token' }).click();
-    await expect(dialog.getByText('Tick at least one permission, or choose everything.')).toBeVisible();
-    await dialog.getByRole('checkbox', { name: /View Thread/ }).click();
-    await dialog.getByRole('checkbox', { name: /Interact Topic/ }).click();
-
-    // Kept to one place and what lies under it.
-    await dialog.getByRole('combobox', { name: 'Only in' }).fill('Web');
-    // The list stands above the dialog, outside it.
-    const web = page.getByRole('option', { name: 'Acme / Research / Web', exact: true });
-    await expect(web).toHaveAccessibleDescription('Project');
-    await web.click();
-    await expect(dialog.getByText('Acme / Research / Web')).toBeVisible();
+    await chooseKeyRule(page, dialog, 'project');
     await dialog.getByRole('combobox', { name: 'Good for' }).click();
     await page.getByRole('option', { name: '30 days' }).click();
     await dialog.getByLabel('Your password', { exact: true }).fill(PEOPLE.ada.password);
     await expectAccessibleSettled(page, '[role="dialog"]');
     const created = page.waitForResponse((response) => response.request().method() === 'POST' && new URL(response.url()).pathname.endsWith('/me/tokens'));
     await dialog.getByRole('button', { name: 'Create token' }).click();
-    expect(await bodySent((await created).request())).toMatchObject({ name: 'ci', node_id: ACME.web, scopes: ['thread.view', 'topic.interact'] });
+    expect(await bodySent((await created).request())).toMatchObject({ name: 'ci', rules: [{ target: { kind: 'project', id: ACME.web, reach: 'subtree' }, resources: ['thread'], allow: [{ operation: 'NodeGet.read', actions: ['read'] }, { operation: 'ThreadCreate', actions: ['write'] }] }] });
 
     // The secret is shown now, with the warning, and nowhere afterwards.
     const made = page.getByRole('dialog', { name: 'Token created' });
@@ -170,8 +186,14 @@ test.describe('a person’s own settings', () => {
     await made.getByRole('button', { name: 'Done' }).click();
 
     const row = page.getByRole('row', { name: /ci/ });
-    await expect(row).toContainText('Acme / Research / Web'.split(' / ').at(-1) ?? '');
-    await expect(row).toContainText('2 permissions');
+    await expect(row).toContainText('1 target rule');
+    await expect(row).toContainText('Targets listed in scope review');
+    await row.getByRole('button', { name: 'Review scope', exact: true }).click();
+    const review = page.getByRole('dialog', { name: 'Scope of ci', exact: true });
+    await expect(review).toContainText(ACME.web);
+    await expect(review).toContainText('NodeGet.read');
+    await expect(review).toContainText('ThreadCreate');
+    await review.getByRole('button', { name: 'Close', exact: true }).last().click();
     await expect(row).toContainText('Never used');
     for (const width of [400, 1440]) for (const theme of ['light', 'dark'] as const) {
       await page.setViewportSize({ width, height: 900 });
@@ -179,8 +201,8 @@ test.describe('a person’s own settings', () => {
       await expect(page.locator('html')).toHaveAttribute('data-theme', theme);
       await row.scrollIntoViewIfNeeded();
       await expect(row).toBeInViewport();
-      await expect(row.getByRole('link', { name: 'Web', exact: true })).toBeVisible();
-      await expect(row).toContainText('2 permissions');
+      await expect(row).toContainText('Targets listed in scope review');
+      await expect(row).toContainText('1 target rule');
       await expect(row).toContainText('Never used');
       const pane = await page.locator('[data-main-area]').boundingBox(), bounds = await row.boundingBox();
       expect(pane).not.toBeNull(); expect(bounds).not.toBeNull();
@@ -200,12 +222,12 @@ test.describe('a person’s own settings', () => {
     await expect(page.getByText('You have no API tokens.')).toBeVisible();
   });
 
-  test('a token that does everything its person can is made with one choice and a time', async ({ page }) => {
+  test('a token preset saves current explicit operations and an expiry without future expansion', async ({ page }) => {
     await open(page, '/settings/tokens');
     await page.getByRole('button', { name: 'New token…' }).click();
     const dialog = page.getByRole('dialog', { name: 'New API token' });
     await dialog.getByLabel('Name').fill('everything');
-    await dialog.getByRole('radio', { name: 'Everything', exact: true }).click();
+    await chooseKeyRule(page, dialog, 'project', true);
     await dialog.getByRole('combobox', { name: 'Good for' }).click();
     await page.getByRole('option', { name: 'Never', exact: true }).click();
     await expect(dialog.getByText('A token that never ends stays good if it leaks.')).toBeVisible();
@@ -215,19 +237,25 @@ test.describe('a person’s own settings', () => {
     await expect(dialog.getByText('Choose the day it ends.')).toBeVisible();
     await dialog.getByLabel('Ends on', { exact: true }).fill('2030-01-31');
     await dialog.getByLabel('Your password', { exact: true }).fill(PEOPLE.ada.password);
+    const saved = page.waitForResponse((response) => response.request().method() === 'POST' && new URL(response.url()).pathname.endsWith('/me/tokens'));
     await dialog.getByRole('button', { name: 'Create token' }).click();
+    const explicit = TOKEN_OPERATIONS.filter((operation) => operation.delegation === 'business').flatMap((operation) => operation.variants.flatMap((variant) => {
+      const actions = (['read', 'write'] as const).filter((action) => variant.facets.some((facet) => facet.action === action && facet.resources.includes('document')));
+      return actions.length === 0 ? [] : [{ operation: variant.operation, actions }];
+    }));
+    expect(await bodySent((await saved).request())).toMatchObject({ rules: [{ target: { kind: 'project', id: ACME.web, reach: 'subtree' }, resources: ['document'], allow: explicit }] });
     await page.getByRole('dialog', { name: 'Token created' }).getByRole('button', { name: 'Done' }).click();
     const row = page.getByRole('row', { name: /everything/ });
-    await expect(row).toContainText('Everything I can do');
-    await expect(row).toContainText('Everywhere');
+    await expect(row).toContainText('1 target rule');
+    await expect(row).toContainText('Targets listed in scope review');
     for (const width of [400, 1440]) for (const theme of ['light', 'dark'] as const) {
       await page.setViewportSize({ width, height: 900 });
       await page.emulateMedia({ colorScheme: theme });
       await expect(page.locator('html')).toHaveAttribute('data-theme', theme);
       await row.scrollIntoViewIfNeeded();
       await expect(row).toBeInViewport();
-      await expect(row).toContainText('Everything I can do');
-      await expect(row).toContainText('Everywhere');
+      await expect(row).toContainText('1 target rule');
+      await expect(row).toContainText('Targets listed in scope review');
       await expect(row).toContainText('Never used');
       const pane = await page.locator('[data-main-area]').boundingBox();
       const bounds = await row.boundingBox();
@@ -675,8 +703,14 @@ test.describe('an org’s settings', () => {
     await expect(tokens).toBeVisible();
     await tokens.getByRole('button', { name: 'Make token' }).click();
     await tokens.getByLabel('Name', { exact: true }).fill('prod');
+    await chooseKeyRule(page, tokens, 'account');
     await tokens.getByLabel('Your password', { exact: true }).fill(PEOPLE.ada.password);
+    const issued = page.waitForResponse((response) => response.request().method() === 'POST' && /\/service-accounts\/[^/]+\/tokens$/.test(new URL(response.url()).pathname));
     await tokens.getByRole('button', { name: 'Create token', exact: true }).click();
+    const serviceRequest = (await issued).request();
+    const serviceId = /\/service-accounts\/([^/]+)\/tokens$/.exec(new URL(serviceRequest.url()).pathname)?.[1];
+    expect(serviceId).toBeDefined();
+    expect(await bodySent(serviceRequest)).toMatchObject({ rules: [{ target: { kind: 'account', id: serviceId, reach: 'subtree' }, resources: ['key'], allow: [{ operation: 'MeTokenList', actions: ['read'] }] }], proof: { password: PEOPLE.ada.password } });
     await expect(tokens.getByText('This is the only time the token is shown.')).toBeVisible();
     await expect(tokens.getByLabel('Token prod', { exact: true })).toHaveValue(/^opat_/);
     await expectAccessibleSettled(page, '[role="dialog"]');

@@ -180,8 +180,23 @@ fn provider_of(provider: &SessionOpenProvider) -> Id {
 
 fn signed(slot: &TicketSlot) -> Option<String> {
     match slot {
+        TicketSlot::Routed(routed) => Some(routed.ticket.clone()),
         TicketSlot::Signed(ticket) => Some(ticket.clone()),
         TicketSlot::Asked(_) => None,
+    }
+}
+
+fn retain_route(
+    tickets: &mut Tickets,
+    key: String,
+    slot: &TicketSlot,
+    link: &orch_link::machine::MachineLink,
+) {
+    if let TicketSlot::Routed(routed) = slot {
+        tickets.routes.insert(key.clone(), routed.route.clone());
+        tickets
+            .route_leases
+            .insert(key, link.retain_tunnel_plans(vec![routed.route.clone()]));
     }
 }
 
@@ -297,6 +312,49 @@ impl AgentRole {
             .map_err(|error| CommandError::new(ErrorCode::Internal, error.to_string()))?;
         let provider_id = provider_of(&body.provider);
         let process = self.hosting.process(provider_id, body.agent_id)?;
+        if body.transport_only {
+            process.check_segment(body.thread_id, Some(body.segment_id))?;
+            if body.native_session_ref.as_deref()
+                != process.native_session_ref(body.thread_id).as_deref()
+            {
+                return Err(internal(
+                    "The model transport names another native session.",
+                ));
+            }
+            let key = process
+                .session_key(body.thread_id)
+                .ok_or_else(|| internal("The retained native session is not open."))?;
+            self.hosting
+                .services()
+                .loopback
+                .replace_llm(
+                    &key,
+                    match &body.provider {
+                        SessionOpenProvider::Forwarded { ticket, .. } => signed(ticket),
+                        _ => None,
+                    },
+                )
+                .ok_or_else(|| internal("The retained model transport disappeared."))?;
+            return Ok(Opened {
+                session: orch_agent_contract::session::SessionOpened {
+                    native_session_ref: body
+                        .native_session_ref
+                        .clone()
+                        .ok_or_else(|| internal("The retained session has no native identity."))?,
+                    resumed: true,
+                    import_report: None,
+                    instruction_sources: Vec::new(),
+                    approval_reviewer: None,
+                },
+                prefix: None,
+            });
+        }
+        if process.background_running(body.thread_id) {
+            return Err(CommandError::new(
+                ErrorCode::Busy,
+                "Session updates apply when the running tasks finish.",
+            ));
+        }
         match &mut intent {
             OpenIntent::Prefix(prefix) => process.check_idle_source(&prefix.source, None)?,
             OpenIntent::Resume {
@@ -401,7 +459,9 @@ impl AgentRole {
                     form: form.clone(),
                 },
             };
-            let tickets = Tickets {
+            let mut tickets = Tickets {
+                routes: Default::default(),
+                route_leases: Default::default(),
                 llm: match &body.provider {
                     SessionOpenProvider::Forwarded { ticket, .. } => signed(ticket),
                     _ => None,
@@ -413,6 +473,30 @@ impl AgentRole {
                     .filter_map(|server| signed(&server.ticket).map(|t| (server.name.clone(), t)))
                     .collect(),
             };
+            if let SessionOpenProvider::Forwarded { ticket, .. } = &body.provider {
+                retain_route(
+                    &mut tickets,
+                    "llm".into(),
+                    ticket,
+                    &self.hosting.services().link,
+                );
+            }
+            if let Some(ticket) = &body.exec.ticket {
+                retain_route(
+                    &mut tickets,
+                    "exec".into(),
+                    ticket,
+                    &self.hosting.services().link,
+                );
+            }
+            for server in &body.mcp {
+                retain_route(
+                    &mut tickets,
+                    format!("mcp/{}", server.name),
+                    &server.ticket,
+                    &self.hosting.services().link,
+                );
+            }
             if process.session_key(body.thread_id).is_some() {
                 process.session_closed(body.thread_id);
             }
@@ -516,6 +600,7 @@ impl AgentRole {
             process.keep_for_turn(body.turn_id, call.context.id);
         }
         let turn = AdapterTurn {
+            native_wake: body.native_wake,
             thread_id: body.thread_id,
             turn_id: body.turn_id,
             text: body.text,
@@ -615,6 +700,7 @@ fn typed(name: &str, kind: Option<FieldType>, text: String) -> Result<Json, Comm
         )
     };
     match kind {
+        Some(FieldType::Json) => serde_json::from_str(&text).map_err(|_| unfit("valid JSON")),
         Some(FieldType::Boolean) => match text.as_str() {
             "true" => Ok(Json::Bool(true)),
             "false" => Ok(Json::Bool(false)),
@@ -928,15 +1014,33 @@ impl RoleHandler for AgentRole {
                     })
                     .collect();
                 let names = body.mcp.iter().map(|server| server.name.clone()).collect();
+                let mut replacement = crate::loopback::McpRoutes {
+                    tickets,
+                    ..Default::default()
+                };
+                for server in &body.mcp {
+                    if let TicketSlot::Routed(routed) = &server.ticket {
+                        replacement
+                            .routes
+                            .insert(server.name.clone(), routed.route.clone());
+                        replacement.leases.insert(
+                            server.name.clone(),
+                            self.hosting
+                                .services()
+                                .link
+                                .retain_tunnel_plans(vec![routed.route.clone()]),
+                        );
+                    }
+                }
                 let loopback = &self.hosting.services().loopback;
                 let previous = loopback
-                    .replace_mcp(&key, tickets)
+                    .replace_mcp_routed(&key, replacement)
                     .ok_or_else(|| internal("the session's tool routes are gone"))?;
                 if let Err(error) = process
                     .call(|adapter| adapter.reload_mcp(body.thread_id, names))
                     .await
                 {
-                    loopback.replace_mcp(&key, previous);
+                    loopback.replace_mcp_routed(&key, previous);
                     return Err(error);
                 }
                 CommandResult::SessionMcpReload(Empty {})

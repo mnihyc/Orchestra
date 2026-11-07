@@ -5,7 +5,13 @@
     reason = "a test fails by panicking"
 )]
 
+#[path = "runtime_updates/node_preflight_scopes.rs"]
+mod node_preflight_scopes;
 mod places;
+#[path = "runtime_updates/provider_batch_scopes.rs"]
+mod provider_batch_scopes;
+#[path = "runtime_updates/provider_owner_host_use.rs"]
+mod provider_owner_host_use;
 mod resources;
 mod support;
 
@@ -299,7 +305,9 @@ async fn a_batch_keeps_its_scope_and_queues_each_distinct_environment_once() {
         })
         .send()
         .await
-        .ok();
+        .ok()
+        .into_full()
+        .expect("the ordinary administrator reads the native batch plan");
     assert_eq!(plan.executable, 1);
     assert_eq!(plan.plans.len(), 1);
     let refused = world
@@ -606,7 +614,13 @@ async fn the_plan_carries_the_check_of_the_exact_selected_artifact_instead_of_an
         .into_iter()
         .find(|program| program.kind == "codex")
         .unwrap();
-    assert_eq!(target.build, Some(selected));
+    assert_eq!(
+        target.build,
+        Some(HarnessBuild {
+            carry: Some(orch_api_contract::programs::CarryFallback::Handoff),
+            ..selected
+        })
+    );
     assert!(
         plan.blockers.is_empty(),
         "a completed failed check is a warning rather than a block"
@@ -750,7 +764,9 @@ async fn provider_batches_recheck_permissions_and_group_their_jobs() {
         })
         .send()
         .await
-        .ok();
+        .ok()
+        .into_full()
+        .unwrap();
     assert_eq!(hidden.executable, 0);
     assert!(hidden.plans.is_empty());
     let plan = world
@@ -762,7 +778,9 @@ async fn provider_batches_recheck_permissions_and_group_their_jobs() {
         })
         .send()
         .await
-        .ok();
+        .ok()
+        .into_full()
+        .unwrap();
     assert_eq!(plan.executable, 1);
     let body = ForkCreateBody {
         notify: None,
@@ -784,7 +802,9 @@ async fn provider_batches_recheck_permissions_and_group_their_jobs() {
         .body(&body)
         .send()
         .await
-        .ok();
+        .ok()
+        .into_full()
+        .unwrap();
     assert_eq!(batch.jobs.len(), 1);
     assert_eq!(batch.jobs[0].job.batch_id, Some(batch.batch_id));
 }
@@ -904,7 +924,9 @@ async fn recycle_skips_kept_awake_units_and_units_held_by_a_job_in_its_preview()
         .body(&body)
         .send()
         .await
-        .ok();
+        .ok()
+        .into_full()
+        .expect("ordinary recycle retains native candidate content");
     assert!(preview.candidates.is_empty());
     assert_eq!(preview.skipped_active, 1);
     let preview = world
@@ -978,7 +1000,9 @@ async fn recycle_previews_and_stops_the_same_idle_units_and_returns_a_permission
         .body(&body)
         .send()
         .await
-        .ok();
+        .ok()
+        .into_full()
+        .expect("ordinary recycle retains native candidate content");
     assert_eq!(preview.candidates.len(), 1);
     assert_eq!(preview.stopped, 0);
     let mut conn = world.conn().await;

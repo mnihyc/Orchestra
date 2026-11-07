@@ -225,7 +225,12 @@ pub async fn may_pass(
 }
 
 fn system(principal: &Principal) -> Verdict {
-    if principal.is_system_admin() {
+    if crate::system_administration::on_system(
+        principal,
+        orch_access_contract::key_scope::KeyTargetKind::Identity(
+            orch_access_contract::key_scope::KeyIdentityKind::System,
+        ),
+    ) {
         Verdict::Allowed
     } else {
         Verdict::SystemAdminOnly

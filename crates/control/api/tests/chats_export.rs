@@ -9,6 +9,7 @@ mod chat_world;
 mod places;
 mod support;
 
+use crate::support::FullPermissionPageReply;
 use bytes::Bytes;
 use chat_world::{Room, text};
 use orch_api_contract::access::{
@@ -71,6 +72,7 @@ async fn name(room: &Room, who: &Who, export: Option<bool>) {
         })
         .send()
         .await
+        .full_permission_page()
         .ok();
 }
 
@@ -229,6 +231,7 @@ async fn taking_a_nodes_chat_away_asks_for_its_export_row_and_reading_it_is_left
         })
         .send()
         .await
+        .full_permission_page()
         .ok();
     assert_eq!(
         export(&room, &room.fay, room.chat, ChatExportGetQuery::default())
@@ -264,6 +267,7 @@ async fn taking_a_nodes_chat_away_asks_for_its_export_row_and_reading_it_is_left
         })
         .send()
         .await
+        .full_permission_page()
         .ok();
     assert_eq!(
         export(&room, &room.fay, room.chat, ChatExportGetQuery::default())
@@ -427,3 +431,6 @@ async fn a_chat_with_its_files_is_an_archive_of_the_text_and_the_files_it_names(
         "the chat in the archive is the chat taken away alone"
     );
 }
+
+#[path = "chats_export/scopes.rs"]
+mod scopes;

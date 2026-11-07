@@ -29,6 +29,7 @@ pub mod enrollment_choices;
 pub mod events;
 pub mod foreign;
 pub mod frames;
+pub mod gateways;
 pub mod local_ports;
 pub mod mcp_import;
 pub mod policy;

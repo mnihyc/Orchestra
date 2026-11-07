@@ -25,6 +25,62 @@ use orch_types::{Id, Time, new_id};
 use serde_json::json;
 use std::collections::HashSet;
 
+/// The real stored subjects represented by native undo counts and operations.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
+pub enum Subject {
+    /// A stored place or thread, whose actual kind is read from the node table.
+    Node(Id),
+    /// A document, including a parent of imported comments or versions.
+    Document(Id),
+    /// A document folder made by the import.
+    Folder(Id),
+    /// The actual chat into which imported messages were merged.
+    Chat(Id),
+}
+
+/// The native undo source footprint before an aggregate or a job is produced.
+pub struct Prepared {
+    /// The native creator-filtered stored Import.
+    pub import: rows::ImportRow,
+    /// Distinct real subjects; a million history rows can share one thread.
+    pub subjects: Vec<Subject>,
+}
+
+impl Engine {
+    /// Resolve actual undo inputs without rendering, recounting or opening source archives.
+    pub async fn prepare_undo(
+        &self,
+        conn: &mut Conn,
+        user: Id,
+        import: Id,
+    ) -> Result<Prepared, ImportError> {
+        let row = self.import_of(conn, user, import).await?;
+        let subjects = rows::undo_subjects(conn, import)
+            .await?
+            .into_iter()
+            .map(|(kind, id)| {
+                Ok(match kind.as_str() {
+                    "node" => Subject::Node(id),
+                    "document" => Subject::Document(id),
+                    "folder" => Subject::Folder(id),
+                    "chat" => Subject::Chat(id),
+                    _ => {
+                        return Err(ImportError::Internal(
+                            crate::error::EngineError::unreadable(
+                                "an undo source has an unknown native table",
+                            ),
+                        ));
+                    }
+                })
+            })
+            .collect::<Result<Vec<_>, ImportError>>()?;
+        Ok(Prepared {
+            import: row,
+            subjects,
+        })
+    }
+}
+
 impl Engine {
     /// What taking the import back would remove: counted by a few statements over the rows that say what the import made, never by loading
     /// them, so that it costs the same for a thousand things as for a million.

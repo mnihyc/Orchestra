@@ -25,11 +25,15 @@
 //! A person who is covered by a cap and is not in the tree of its place is still
 //! covered.
 
+pub(super) mod native_effects;
+pub(super) mod native_reads;
+
 use super::names::Names;
 use crate::middleware::authorization::{self, exact, refusals};
 use crate::middleware::requests::{ApiError, ApiResult};
 use crate::middleware::transaction_guard;
 use crate::registry::Ctx;
+use crate::routes::access::page::{NameBounds, NameSources};
 use crate::routes::nodes::{actor_name, invalid};
 use crate::sign_in::origin;
 use chrono::{DateTime, NaiveDate, Utc};
@@ -45,7 +49,7 @@ use orch_api_contract::usage::{
     CAP_CREDIT_DECIMALS, CAP_WARN_PERCENT_MAX, CAP_WARN_PERCENT_MIN, CapAtLimit, CapBypassLast,
     CapBypasses, CapInput, CapLeftOut, CapMeter, CapPeriod, CapSplit, CapState, CapStatus,
     CapSubject, CapSubjectInput, CapUncounted, Limits, UsageCap, UsageCapListQuery,
-    UsageCapUpdateBody, UsageCapWaiting, UsageCapWaitingListReply, UsageLimitsGetQuery,
+    UsageCapUpdateBody, UsageCapWaitingListReply, UsageLimitsGetQuery,
 };
 use orch_authz::caps::{Home, Verdict, check_manage, check_view, may_pass};
 use orch_authz::{Act, Policy, Principal};
@@ -127,7 +131,7 @@ fn counts(meter_name: &str) -> &'static str {
 
 /// What is done to a cap, which decides who may.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-enum Need {
+pub(super) enum Need {
     /// Make, change or remove it.
     Manage,
     /// Read it and its use.
@@ -135,7 +139,12 @@ enum Need {
 }
 
 /// Refuses the caller who may not do `need` to a cap defined in `home`, with what they lack.
-async fn require(conn: &mut Conn, principal: &Principal, home: Home, need: Need) -> ApiResult<()> {
+pub(super) async fn require(
+    conn: &mut Conn,
+    principal: &Principal,
+    home: Home,
+    need: Need,
+) -> ApiResult<()> {
     let verdict = match need {
         Need::Manage => check_manage(conn, principal, home, Policy::default()).await,
         Need::View => check_view(conn, principal, home, Policy::default()).await,
@@ -178,13 +187,8 @@ struct Known {
 }
 
 impl Known {
-    /// Names what `caps` name, and the people in `more_users`.
-    async fn load(
-        conn: &mut Conn,
-        principal: &Principal,
-        caps: &[&CapRow],
-        more_users: &[Id],
-    ) -> ApiResult<Self> {
+    /// The exact identities read by the original name scan, without projecting them.
+    fn sources(caps: &[&CapRow], more_users: &[Id]) -> (NameSources, Vec<Id>) {
         let mut users: Vec<Id> = more_users.to_vec();
         let (mut providers, mut nodes, mut groups) = (Vec::new(), Vec::new(), Vec::new());
         for cap in caps {
@@ -202,12 +206,46 @@ impl Known {
             list.sort_unstable();
             list.dedup();
         }
-        let names = Names::load(conn, principal, &users, &providers, &nodes).await?;
-        let groups = if groups.is_empty() {
+        (
+            NameSources {
+                users: users.into_iter().collect(),
+                nodes: nodes.into_iter().collect(),
+                groups: groups.into_iter().collect(),
+                ..NameSources::default()
+            },
+            providers,
+        )
+    }
+
+    /// Names what `caps` name, and the people in `more_users`.
+    async fn load(
+        conn: &mut Conn,
+        principal: &Principal,
+        caps: &[&CapRow],
+        more_users: &[Id],
+    ) -> ApiResult<Self> {
+        let (sources, providers) = Self::sources(caps, more_users);
+        Self::project(conn, principal, &sources, &providers, None).await
+    }
+
+    /// Groups are projected whole after the caller admits their actual source;
+    /// only their optional place names and users' domain addresses are bounded here.
+    async fn project(
+        conn: &mut Conn,
+        principal: &Principal,
+        sources: &NameSources,
+        providers: &[Id],
+        bounds: Option<&NameBounds>,
+    ) -> ApiResult<Self> {
+        let users: Vec<Id> = sources.users.iter().copied().collect();
+        let nodes: Vec<Id> = sources.nodes.iter().copied().collect();
+        let names = Names::load_bounded(conn, principal, &users, providers, &nodes, bounds).await?;
+        let groups = if sources.groups.is_empty() {
             HashMap::new()
         } else {
+            let groups: Vec<Id> = sources.groups.iter().copied().collect();
             let rows = access::groups_full(conn, &groups).await?;
-            crate::routes::directory::groups_named(conn, principal, rows)
+            crate::routes::directory::groups_named_bounded(conn, principal, rows, bounds)
                 .await?
                 .into_iter()
                 .map(|group| (group.id, group))
@@ -294,13 +332,25 @@ struct Shown {
     replaced_by: Option<Id>,
 }
 
-/// How each of the caps stands, for the caller: with whether they may change each and let a turn past it.
-async fn statuses(
+type ComputedStatus = (CapRow, engine::Status, bool, bool);
+
+/// Existing provider-choice standings and every source their ordinary projection names.
+/// The caller admits full group payloads before bounded projection in the same read snapshot.
+#[derive(Clone)]
+pub(crate) struct PreparedProviderChoices {
+    computed: Vec<ComputedStatus>,
+    providers: Vec<Id>,
+    at: DateTime<Utc>,
+    pub(crate) names: NameSources,
+}
+
+/// Computes the original standings and permission pairs once, before any name projection.
+async fn compute_statuses(
     ctx: &Ctx,
     conn: &mut Conn,
     principal: &Principal,
     shown: Vec<Shown>,
-) -> ApiResult<Vec<CapStatus>> {
+) -> ApiResult<Vec<ComputedStatus>> {
     let mut computed = Vec::with_capacity(shown.len());
     let mut allowed: HashMap<(Option<Id>, Option<Id>), (bool, bool)> = HashMap::new();
     for each in shown {
@@ -324,19 +374,36 @@ async fn statuses(
         };
         computed.push((each.cap, status, can_edit, can_bypass));
     }
+    Ok(computed)
+}
+
+fn status_sources(computed: &[ComputedStatus]) -> (NameSources, Vec<Id>) {
     let caps: Vec<&CapRow> = computed.iter().map(|each| &each.0).collect();
     let mut people: Vec<Id> = Vec::new();
-    for (_, status, _, _) in &computed {
+    for (_, status, _, _) in computed {
         people.extend(status.standing.person);
         people.extend(status.bypassed.last_by);
     }
-    let known = Known::load(conn, principal, &caps, &people).await?;
+    Known::sources(&caps, &people)
+}
+
+/// Maps the exact computed rows; name admission does not recalculate or filter a cap.
+async fn project_statuses(
+    at: DateTime<Utc>,
+    conn: &mut Conn,
+    principal: &Principal,
+    computed: &[ComputedStatus],
+    sources: &NameSources,
+    providers: &[Id],
+    bounds: Option<&NameBounds>,
+) -> ApiResult<Vec<CapStatus>> {
+    let known = Known::project(conn, principal, sources, providers, bounds).await?;
     computed
         .iter()
         .map(|(cap, status, can_edit, can_bypass)| {
             let standing = &status.standing;
             Ok(CapStatus {
-                forecast: cap_forecast(standing, ctx.now),
+                forecast: cap_forecast(standing, at),
                 cap: known.cap(cap, *can_edit)?,
                 person: standing.person.map(|id| known.names.user(id)),
                 used: standing.used.text(),
@@ -367,6 +434,21 @@ async fn statuses(
             })
         })
         .collect()
+}
+
+/// How each of the caps stands, for the caller: with whether they may change each and let a turn past it.
+async fn statuses(
+    ctx: &Ctx,
+    conn: &mut Conn,
+    principal: &Principal,
+    shown: Vec<Shown>,
+) -> ApiResult<Vec<CapStatus>> {
+    let computed = compute_statuses(ctx, conn, principal, shown).await?;
+    let (sources, providers) = status_sources(&computed);
+    project_statuses(
+        ctx.now, conn, principal, &computed, &sources, &providers, None,
+    )
+    .await
 }
 
 /// Daily rollups give the exact period count without an extra ledger scan for each cap.
@@ -497,31 +579,7 @@ async fn on_the_way(conn: &mut Conn, node: Id) -> ApiResult<Vec<CapRow>> {
 /// Lists the caps defined in a place with how each stands, and with `covering` those defined elsewhere that
 /// cover work at the node.
 pub async fn list(ctx: Ctx, query: UsageCapListQuery, (): ()) -> ApiResult<Vec<CapStatus>> {
-    let mut conn = ctx.app.db.acquire().await?;
-    let principal = authorization::principal(&ctx, &mut conn).await?;
-    let (home, defined) = place_of(&query)?;
-    require(&mut conn, &principal, home, Need::View).await?;
-    let mut caps = rows::defined_on(&mut conn, defined).await?;
-    if query.covering == Some(true) {
-        let DefinedOn::Node(node) = defined else {
-            return Err(invalid(
-                "covering",
-                "needs node_id: it asks what covers work at a node",
-            ));
-        };
-        let here: HashSet<Id> = caps.iter().map(|cap| cap.id).collect();
-        caps.extend(
-            on_the_way(&mut conn, node)
-                .await?
-                .into_iter()
-                .filter(|cap| !here.contains(&cap.id)),
-        );
-    }
-    let mut shown = Vec::new();
-    for cap in &caps {
-        shown.extend(rows_of(&mut conn, cap, ctx.now).await?);
-    }
-    statuses(&ctx, &mut conn, &principal, shown).await
+    crate::key_operations::native::selected_read::<native_reads::List>(ctx, query, ()).await
 }
 
 /// The caller's applicable caps defined on a provider already admitted by its ordinary View check.
@@ -531,6 +589,17 @@ pub(crate) async fn for_provider_choices(
     principal: &Principal,
     providers: &[Id],
 ) -> ApiResult<HashMap<Id, Vec<CapStatus>>> {
+    let prepared = prepare_provider_choices(ctx, conn, principal, providers).await?;
+    project_provider_choices(ctx, conn, principal, prepared, None).await
+}
+
+/// Selects and computes the same applicable provider caps before their names are admitted.
+pub(crate) async fn prepare_provider_choices(
+    ctx: &Ctx,
+    conn: &mut Conn,
+    principal: &Principal,
+    providers: &[Id],
+) -> ApiResult<PreparedProviderChoices> {
     let mut covered = Vec::new();
     for cap in rows::on_providers(conn, providers).await? {
         // A cap may also name a place. Its ordinary visibility check still governs that name.
@@ -559,9 +628,37 @@ pub(crate) async fn for_provider_choices(
             replaced_by: None,
         })
         .collect();
+    let computed = compute_statuses(ctx, conn, principal, shown).await?;
+    let (names, providers) = status_sources(&computed);
+    Ok(PreparedProviderChoices {
+        computed,
+        providers,
+        at: ctx.now,
+        names,
+    })
+}
+
+/// The ordinary provider-choice DTOs from the retained standings and admitted name sources.
+pub(crate) async fn project_provider_choices(
+    _ctx: &Ctx,
+    conn: &mut Conn,
+    principal: &Principal,
+    prepared: PreparedProviderChoices,
+    bounds: Option<&NameBounds>,
+) -> ApiResult<HashMap<Id, Vec<CapStatus>>> {
     let mut grouped: HashMap<Id, Vec<CapStatus>> = HashMap::new();
-    if !shown.is_empty() {
-        for status in statuses(ctx, conn, principal, shown).await? {
+    if !prepared.computed.is_empty() {
+        for status in project_statuses(
+            prepared.at,
+            conn,
+            principal,
+            &prepared.computed,
+            &prepared.names,
+            &prepared.providers,
+            bounds,
+        )
+        .await?
+        {
             if let Some(provider) = &status.cap.provider {
                 grouped.entry(provider.id).or_default().push(status);
             }
@@ -573,67 +670,71 @@ pub(crate) async fn for_provider_choices(
 /// Lists everything that bounds work at a node, with the caller's own share of the caps counted per person, or
 /// somebody else's for a reader of usage.
 pub async fn limits(ctx: Ctx, query: UsageLimitsGetQuery, (): ()) -> ApiResult<Limits> {
-    let mut conn = ctx.app.db.acquire().await?;
-    let principal = authorization::principal(&ctx, &mut conn).await?;
-    let node = query.node_id;
-    authorization::require(
-        &mut conn,
-        &principal,
-        node,
-        authorization::VIEW,
-        Act::Use,
-        Policy::default(),
-    )
-    .await?;
-    let person = match query.user_id {
-        Some(other) if other != principal.user() => {
-            authorization::require(
-                &mut conn,
-                &principal,
-                node,
-                exact(Permission::UsageView),
-                Act::Use,
-                Policy::default(),
-            )
-            .await?;
-            other
-        }
-        _ => principal.user(),
-    };
-    let mut covering = Vec::new();
-    for cap in on_the_way(&mut conn, node).await? {
-        if engine::covers_person(&mut conn, &cap, person, Some(node), ctx.now)
-            .await
-            .map_err(ApiError::internal)?
-        {
-            covering.push(cap);
-        }
-    }
-    let shown = share_of(covering, person);
-    Ok(Limits {
-        caps: statuses(&ctx, &mut conn, &principal, shown).await?,
-    })
+    crate::key_operations::native::selected_read::<native_reads::LimitsReader>(ctx, query, ()).await
 }
 
-/// Current caps for exactly one prospective turn, using the same coverage and precedence as preflight.
-pub(crate) async fn for_turn(
+/// Native reached-cap rows and their actual provenance, before any full cap/group/name projection.
+#[derive(Clone)]
+pub(crate) struct PreparedReached {
+    computed: Vec<ComputedStatus>,
+    pub(crate) names: NameSources,
+    providers: Vec<Id>,
+    at: DateTime<Utc>,
+}
+
+impl PreparedReached {
+    /// Scope homes come from the real selected cap rows, including system-wide caps.
+    pub(crate) fn homes(&self) -> Vec<Home> {
+        self.computed
+            .iter()
+            .map(|each| engine::home_of(&each.0))
+            .collect()
+    }
+
+    /// The exact retained native cap set, independent of mutable use counters.
+    pub(crate) fn ids(&self) -> Vec<Id> {
+        self.computed.iter().map(|each| each.0.id).collect()
+    }
+}
+
+/// Select the same native precedence and current standings before the enclosing reader projects them.
+pub(crate) async fn prepare_reached_for_thread(
     ctx: &Ctx,
     conn: &mut Conn,
     principal: &Principal,
-    ask: &engine::Ask,
-) -> ApiResult<Vec<CapStatus>> {
-    let shown = engine::covering(conn, ask, ctx.now)
+    thread: Id,
+    input: Option<&threads::InputRow>,
+) -> ApiResult<PreparedReached> {
+    let author = input.map_or(Some(principal.user()), |input| input.author_id);
+    let shown = match engine::ask_for_thread(conn, thread, author)
         .await
         .map_err(ApiError::internal)?
+    {
+        Some(ask) => engine::covering(conn, &ask, ctx.now)
+            .await
+            .map_err(ApiError::internal)?
+            .into_iter()
+            .filter(|each| each.replaced_by.is_none())
+            .map(|each| Shown {
+                person: each.cap.per_person().then_some(ask.person).flatten(),
+                replaced_by: None,
+                cap: each.cap,
+            })
+            .collect(),
+        None => Vec::new(),
+    };
+    let computed = compute_statuses(ctx, conn, principal, shown)
+        .await?
         .into_iter()
-        .filter(|each| each.replaced_by.is_none())
-        .map(|each| Shown {
-            person: each.cap.per_person().then_some(ask.person).flatten(),
-            replaced_by: None,
-            cap: each.cap,
-        })
-        .collect();
-    statuses(ctx, conn, principal, shown).await
+        .filter(|each| each.1.standing.state() == engine::State::Reached)
+        .collect::<Vec<_>>();
+    let (names, providers) = status_sources(&computed);
+    Ok(PreparedReached {
+        computed,
+        names,
+        providers,
+        at: ctx.now,
+    })
 }
 
 /// Reached caps with current bypass authority and request targets, for the author of a pending input.
@@ -644,25 +745,41 @@ pub(crate) async fn reached_for_thread(
     thread: Id,
     input: Option<&threads::InputRow>,
 ) -> ApiResult<Vec<orch_api_contract::threads::LimitReached>> {
+    let prepared = prepare_reached_for_thread(ctx, conn, principal, thread, input).await?;
+    show_reached_for_thread(ctx, conn, principal, &prepared, input, None).await
+}
+
+/// Render only the already selected cap set under the enclosing operation's admitted sources.
+pub(crate) async fn show_reached_for_thread(
+    ctx: &Ctx,
+    conn: &mut Conn,
+    principal: &Principal,
+    prepared: &PreparedReached,
+    input: Option<&threads::InputRow>,
+    bounds: Option<&NameBounds>,
+) -> ApiResult<Vec<orch_api_contract::threads::LimitReached>> {
     use crate::thread_access::AuthzAccess;
     use orch_api_contract::threads::LimitReached;
     use orch_engine::access::{Limit, ResourceAccess};
     // Refusal previews expose the five nearest holders throughout the API.
     const ASK_LIMIT: usize = 5;
-    let author = input.map_or(Some(principal.user()), |input| input.author_id);
-    let Some(ask) = engine::ask_for_thread(conn, thread, author)
-        .await
-        .map_err(ApiError::internal)?
-    else {
-        return Ok(Vec::new());
-    };
     // Stored entries carry ids rather than public user references.
     let stored = input
         .and_then(|input| input.limit_bypass.as_ref())
         .and_then(Json::as_array);
     let mut reached = Vec::new();
     let access = AuthzAccess::new(std::sync::Arc::clone(&ctx.app.clock));
-    for mut status in for_turn(ctx, conn, principal, &ask).await? {
+    for mut status in project_statuses(
+        prepared.at,
+        conn,
+        principal,
+        &prepared.computed,
+        &prepared.names,
+        &prepared.providers,
+        bounds,
+    )
+    .await?
+    {
         if status.state != CapState::Reached {
             continue;
         }
@@ -717,11 +834,21 @@ pub(crate) async fn reached_for_thread(
                 .map_err(ApiError::internal)?
             {
                 Verdict::Refused(refusal) => {
-                    let missing = refusals::missing_access(conn, &refusal.missing).await?;
-                    missing
-                        .into_iter()
-                        .next()
-                        .map_or((Vec::new(), 0), |first| (first.ask, first.ask_more))
+                    // This pane returns public askers only; do not construct a named
+                    // permission page that is not part of its selected response.
+                    if let Some(first) = refusal.missing.first() {
+                        let people = refusals::user_refs(conn, &first.ask).await?;
+                        (
+                            first
+                                .ask
+                                .iter()
+                                .filter_map(|id| people.get(id).cloned())
+                                .collect(),
+                            first.ask_more,
+                        )
+                    } else {
+                        (Vec::new(), 0)
+                    }
                 }
                 Verdict::SystemAdminOnly => {
                     let ids = orch_authz::caps::managers(conn, home, Time::new(ctx.now))
@@ -790,47 +917,7 @@ pub async fn mine(ctx: Ctx, (): (), (): ()) -> ApiResult<Vec<CapStatus>> {
 /// as far as they may see the thread; somebody the cap only covers sees their own rows named and the others as
 /// places in the queue.
 pub async fn waiting(ctx: Ctx, (): (), (): ()) -> ApiResult<UsageCapWaitingListReply> {
-    let id = ctx.id("id")?;
-    let mut conn = ctx.app.db.acquire().await?;
-    let principal = authorization::principal(&ctx, &mut conn).await?;
-    let cap = rows::get(&mut conn, id)
-        .await?
-        .ok_or_else(ApiError::not_found)?;
-    let caller = principal.user();
-    let reader = may(&mut conn, &principal, engine::home_of(&cap), Need::View).await?;
-    if !reader {
-        let covered = engine::covers_person(&mut conn, &cap, caller, None, ctx.now)
-            .await
-            .map_err(ApiError::internal)?;
-        if !covered {
-            // The refusal says what they lack.
-            require(&mut conn, &principal, engine::home_of(&cap), Need::View).await?;
-        }
-    }
-    let queue = engine::waiting_for(&mut conn, &cap, ctx.now)
-        .await
-        .map_err(ApiError::internal)?;
-    let threads: Vec<Id> = queue.iter().map(|waiter| waiter.thread_id).collect();
-    let people: Vec<Id> = queue.iter().filter_map(|waiter| waiter.author_id).collect();
-    let names = Names::load(&mut conn, &principal, &people, &[], &threads).await?;
-    let items = queue
-        .iter()
-        .map(|waiter| {
-            let mine = waiter.author_id == Some(caller);
-            let named = reader || mine;
-            let thread = names.node(waiter.thread_id, NodeKind::Thread);
-            UsageCapWaiting {
-                thread: (named && !thread.redacted).then_some(thread),
-                author: waiter
-                    .author_id
-                    .filter(|_| named)
-                    .map(|author| names.user(author)),
-                since: Time::new(waiter.since),
-                mine,
-            }
-        })
-        .collect();
-    Ok(UsageCapWaitingListReply { items })
+    crate::key_operations::native::selected_read::<native_reads::Waiting>(ctx, (), ()).await
 }
 
 // ---------------------------------------------------------------- writing
@@ -1089,103 +1176,12 @@ async fn engine_told(ctx: &Ctx, cap: Id) {
 }
 
 /// Makes a cap.
-pub async fn create(mut ctx: Ctx, (): (), body: CapInput) -> ApiResult<UsageCap> {
-    let (mut tx, guard) = transaction_guard::begin(&ctx).await?;
-    ctx.now = guard.now().get();
-    let principal = guard.principal().clone();
-    let home = Home::of(body.node_id, body.provider_id);
-    require(&mut tx, &principal, home, Need::Manage).await?;
-    let checked = check(&body)?;
-    match (checked.subject_kind, checked.subject_id) {
-        (subject::USER, Some(user)) => {
-            if !refusals::user_refs(&mut tx, &[user])
-                .await?
-                .contains_key(&user)
-            {
-                return Err(invalid("subject.id", "names nobody"));
-            }
-        }
-        (subject::GROUP, Some(group)) => {
-            let found = access::groups_full(&mut tx, &[group]).await?;
-            let found = found
-                .first()
-                .ok_or_else(|| invalid("subject.id", "names no group"))?;
-            authorization::require(
-                &mut tx,
-                &principal,
-                found.org_id,
-                authorization::VIEW,
-                Act::Use,
-                Policy::default(),
-            )
-            .await?;
-        }
-        (subject::ROLE | subject::MEMBERS, Some(source)) => {
-            let (_, kind) = crate::routes::nodes::placed(&mut tx, source).await?;
-            if kind == orch_api_contract::nodes::NodeKind::Thread
-                || (checked.subject_kind == subject::MEMBERS
-                    && kind != orch_api_contract::nodes::NodeKind::Org)
-            {
-                return Err(invalid("subject.at", "is no place of that kind"));
-            }
-            authorization::require(
-                &mut tx,
-                &principal,
-                source,
-                authorization::VIEW,
-                Act::Use,
-                Policy::default(),
-            )
-            .await?;
-        }
-        _ => {}
-    }
-    let made = rows::insert(
-        &mut tx,
-        &NewCap {
-            id: new_id(),
-            node_id: body.node_id,
-            provider_id: body.provider_id,
-            subject_kind: checked.subject_kind,
-            subject_id: checked.subject_id,
-            subject_role: checked.subject_role.as_deref(),
-            split: checked.split,
-            models: &checked.models,
-            tiers: &checked.tiers,
-            harness_kinds: &checked.harness_kinds,
-            meter: checked.meter,
-            period: checked.period,
-            counted_from: checked.counted_from,
-            amount: checked.amount.as_deref(),
-            at_limit: checked.at_limit,
-            warn_percent: checked.warn_percent,
-            uncounted: checked.uncounted,
-            note: &checked.note,
-            created_by: principal.user(),
-            at: ctx.now,
-        },
-    )
-    .await?;
-    let Some(cap) = made else {
-        return Err(ApiError::new(
-            ErrorCode::ConflictExists,
-            "a cap with the same node, provider, subject, split, models, tiers, harness kinds, meter and period exists",
-        ));
-    };
-    record(
-        &ctx,
-        &mut tx,
-        orch_db::audit::action!(AuditAction::UsageCapCreated),
-        &cap,
-        "added",
-        about(&cap),
-    )
-    .await?;
-    tx.commit().await.map_err(orch_db::DbError::from)?;
-    engine_told(&ctx, cap.id).await;
-    let mut conn = ctx.app.db.acquire().await?;
-    let known = Known::load(&mut conn, &principal, &[&cap], &[]).await?;
-    known.cap(&cap, true)
+pub async fn create(
+    ctx: Ctx,
+    (): (),
+    _body: CapInput,
+) -> ApiResult<orch_api_contract::usage::UsageCapWriteResponse> {
+    native_effects::run::<native_effects::Create>(ctx).await
 }
 
 /// What a change to a cap says, checked against the cap.
@@ -1285,89 +1281,52 @@ fn touched(body: &UsageCapUpdateBody) -> Vec<&'static str> {
 }
 
 /// Changes a cap against the revision the caller saw.
-pub async fn update(mut ctx: Ctx, (): (), body: UsageCapUpdateBody) -> ApiResult<UsageCap> {
-    let id = ctx.id("id")?;
-    let (mut tx, guard) = transaction_guard::begin(&ctx).await?;
-    ctx.now = guard.now().get();
-    let principal = guard.principal().clone();
-    let cap = rows::get(&mut tx, id)
-        .await?
-        .ok_or_else(ApiError::not_found)?;
-    require(&mut tx, &principal, engine::home_of(&cap), Need::Manage).await?;
-    let touching = touched(&body);
-    if touching.is_empty() {
-        return Err(invalid("", "names nothing to change"));
-    }
-    let changing = check_change(&cap, &body)?;
-    let outcome = rows::update(
-        &mut tx,
-        id,
-        body.expected_revision,
-        &Change {
-            models: changing.models.as_deref(),
-            tiers: changing.tiers.as_deref(),
-            harness_kinds: changing.harness_kinds.as_deref(),
-            counted_from: changing.counted_from,
-            amount: changing.amount.as_ref().map(Option::as_deref),
-            at_limit: changing.at_limit,
-            warn_percent: changing.warn_percent,
-            uncounted: changing.uncounted,
-            note: changing.note.as_deref(),
-            enabled: changing.enabled,
-        },
-        ctx.now,
-    )
-    .await?;
-    let changed = match outcome {
-        Updated::Done(changed) => *changed,
-        Updated::Stale(current) => {
-            tx.rollback().await.map_err(orch_db::DbError::from)?;
-            let mut conn = ctx.app.db.acquire().await?;
-            let known = Known::load(&mut conn, &principal, &[&current], &[]).await?;
-            let shown = known.cap(&current, true)?;
-            return Err(ApiError::new(
-                ErrorCode::ConflictStaleRevision,
-                "the cap was changed since it was read",
-            )
-            .with("current", shown));
-        }
-        Updated::Exists => {
-            return Err(ApiError::new(
-                ErrorCode::ConflictExists,
-                "with these models, tiers and harness kinds it would be a cap that exists",
-            ));
-        }
-        Updated::Gone => return Err(ApiError::not_found()),
-    };
-    let mut details = about(&changed);
-    details["changed"] = json!(touching);
-    details["revision"] = json!(changed.revision);
-    record(
-        &ctx,
-        &mut tx,
-        orch_db::audit::action!(AuditAction::UsageCapUpdated),
-        &changed,
-        "changed",
-        details,
-    )
-    .await?;
-    tx.commit().await.map_err(orch_db::DbError::from)?;
-    engine_told(&ctx, changed.id).await;
-    let mut conn = ctx.app.db.acquire().await?;
-    let known = Known::load(&mut conn, &principal, &[&changed], &[]).await?;
-    known.cap(&changed, true)
+pub async fn update(
+    ctx: Ctx,
+    (): (),
+    _body: UsageCapUpdateBody,
+) -> ApiResult<orch_api_contract::usage::UsageCapWriteResponse> {
+    native_effects::run::<native_effects::Update>(ctx).await
 }
 
 /// Removes a cap.
-pub async fn delete(mut ctx: Ctx, (): (), (): ()) -> ApiResult<()> {
+pub async fn delete(ctx: Ctx, (): (), (): ()) -> ApiResult<()> {
     let id = ctx.id("id")?;
-    let (mut tx, guard) = transaction_guard::begin(&ctx).await?;
-    ctx.now = guard.now().get();
-    let principal = guard.principal().clone();
-    let cap = rows::get(&mut tx, id)
+    let (mut tx, initial) = transaction_guard::begin(&ctx).await?;
+    let early = rows::get(&mut tx, id)
         .await?
         .ok_or_else(ApiError::not_found)?;
-    require(&mut tx, &principal, engine::home_of(&cap), Need::Manage).await?;
+    let allowed = require(
+        &mut tx,
+        initial.principal(),
+        engine::home_of(&early),
+        Need::Manage,
+    )
+    .await;
+    initial.check_deadline(&ctx)?;
+    allowed?;
+    rows::lock(&mut tx, id)
+        .await?
+        .ok_or_else(ApiError::not_found)?;
+    let (ctx, guard) = transaction_guard::after_wait(&ctx, &mut tx).await?;
+    let principal = guard.principal().clone();
+    let cap = if crate::key_operations::native::modern(principal.caller()) {
+        let ready = guard
+            .operation_data::<crate::key_operations::native::Prepared<super::native::Subject>>()?;
+        let super::native::Subject::Cap(cap) = &ready.value else {
+            return Err(ApiError::internal("the native cap subject changed kind"));
+        };
+        cap.as_ref().clone()
+    } else {
+        rows::get(&mut tx, id)
+            .await?
+            .ok_or_else(ApiError::not_found)?
+    };
+    // The scoped Guard's stored provider just checked this same native Home on this connection.
+    if !crate::key_operations::native::modern(principal.caller()) {
+        require(&mut tx, &principal, engine::home_of(&cap), Need::Manage).await?;
+    }
+    guard.check_deadline(&ctx)?;
     if !rows::delete(&mut tx, id).await? {
         return Err(ApiError::not_found());
     }

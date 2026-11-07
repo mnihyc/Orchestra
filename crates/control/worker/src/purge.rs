@@ -84,6 +84,8 @@ pub struct Expired {
     pub deliveries: u64,
     /// Notifications of people's Inboxes past the days they are kept.
     pub inbox: u64,
+    /// Recent key-call metadata past its fixed seven-day lifetime.
+    pub key_activity: u64,
 }
 
 /// Removes what has run out, under the lock of the job. None where another
@@ -110,6 +112,12 @@ pub async fn expired(
     let link_codes = routes::drop_expired_codes(&mut tx, now).await?;
     tx.commit().await.map_err(DbError::from)?;
     let (deliveries, inbox) = deliveries_and_inbox(db, now).await?;
+    // This metadata holds no authority. Purge it after the exclusive sign-in
+    // transaction, using the existing bounded upkeep batch and cadence.
+    let key_activity = {
+        let mut conn = db.acquire().await?;
+        orch_db::queries::key_activity::purge(&mut conn, now, ROWS_PER_RUN).await?
+    };
     Ok(Some(Expired {
         sign_in,
         throttle,
@@ -117,6 +125,7 @@ pub async fn expired(
         link_codes,
         deliveries,
         inbox,
+        key_activity,
     }))
 }
 

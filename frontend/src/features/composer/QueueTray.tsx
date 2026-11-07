@@ -26,7 +26,7 @@ import { environmentQuery } from '@/api/environments';
 import { TrustAnswers, TrustQuestion } from '@/features/resources/environments/HarnessTrust';
 import type { AttachmentIssue, ContentPart, Delivery, ThreadInput, RequestDecisionStatus } from '@/generated/api-types';
 import { composerWriter, discard, resend, useComposerStore, type SendingInput } from '@/features/composer/Draft';
-import { modelName } from '@/features/composer/ModelEffort';
+import { heldInputWords } from '@/features/composer/heldInputWords';
 import { afterDropping, afterMoving, editableWords, nowDelivery, queuePreview, withEditedWords } from '@/features/composer/queue';
 import { holds } from '@/lib/permissions';
 import { isComposing } from '@/lib/shortcuts';
@@ -45,13 +45,6 @@ type InputChange = Parameters<typeof updateInput>[2];
 const DELIVERIES: readonly Delivery[] = ['queue', 'steer', 'interrupt'];
 // The same six-pixel intent threshold as the topic board: a press focuses; travel picks up.
 const DRAG_STARTS_AFTER_PX = 6;
-/** An input whose session command no longer checks out waits for its sender; each check that failed is said in words. */
-const COMMAND_HOLDS = {
-  'native_action.stale': 'composer.queue.heldCommandStale',
-  'native_action.permission': 'composer.queue.heldCommandPermission',
-  'native_action.arguments': 'composer.queue.heldCommandArguments',
-  'native_action.unavailable': 'composer.queue.heldCommandUnavailable',
-} as const;
 const QUEUE_SCROLL = { canScroll: (element: Element) => element.hasAttribute('data-queue-list') };
 interface QueueSlot { kind: 'queue-slot'; threadId: string; inputId: string; edge: 'before' | 'after' }
 function queueSlot(value: unknown): QueueSlot | null {
@@ -174,14 +167,16 @@ function QueueHold({ threadId }: { threadId: string }) {
   const thread = useThreadPart(threadId, (view) => view.thread);
   const resume = useMutation({ mutationFn: (revision: number) => resumeQueue(read, revision) });
   const queue = thread?.queue;
-  if (!queue?.held) return null;
+  const finishedTasks = thread?.background?.held_completions ?? 0;
+  if (!queue?.held && finishedTasks === 0) return null;
   const may = holds(thread?.access, 'thread.interact');
   return (
     <div className="flex flex-wrap items-center gap-2 text-xs text-text-muted" data-queue-held>
       <span className="min-w-0 flex-1">
-        {t('composer.queue.heldByStop', { name: queue.by?.display_name ?? t('composer.queue.someone'), count: queue.held_inputs })}
+        {queue?.held === true && t('composer.queue.heldByStop', { name: queue.by?.display_name ?? t('composer.queue.someone'), count: queue.held_inputs })}
+        {finishedTasks > 0 && <span className="ml-1">{t('backgroundWake.held', { count: finishedTasks })}</span>}
       </span>
-      {may && (
+      {may && queue?.held === true && (
         <Button size="sm" variant="secondary" pending={resume.isPending} onClick={() => resume.mutate(queue.revision)}>
           {t('composer.queue.resume')}
         </Button>
@@ -226,23 +221,7 @@ function QueueRow({ threadId, input, index, orderIndex, count, busy, fallback, c
   // A drag handle remains an ordinary button; it is not a pressed-state selector.
   const { role: _role, 'aria-pressed': _pressed, 'aria-roledescription': _description, ...dragAttributes } = attributes;
   const changedContent = withEditedWords(input.content, words);
-  const held = input.queue_held
-    ? t('composer.queue.heldStop')
-    : input.state_detail === 'cap_reached'
-      ? t('composer.queue.heldCap', { name: input.author?.display_name ?? t('composer.queue.theSender') })
-      : input.state_detail === 'owner_lacks_access'
-        ? t('composer.queue.heldOwner', { owner: thread?.owner.display_name ?? '', provider: thread?.binding?.provider.name ?? '' })
-        : input.state_detail === 'second_step_required'
-          ? t('composer.queue.heldSecondStep', { name: input.author?.display_name ?? t('composer.queue.theSender') })
-          : input.state_detail === 'model_use_required'
-            ? thread?.environment !== null && thread?.environment !== undefined
-              ? t('composer.queue.heldUse', { model: modelName(thread), environment: thread.environment.name })
-              : t('composer.queue.heldModel', { model: thread === null ? '' : modelName(thread) })
-          : input.state_detail === 'files'
-          ? t('composer.queue.preparing')
-          : input.state_detail !== null && input.state_detail in COMMAND_HOLDS
-          ? t(COMMAND_HOLDS[input.state_detail as keyof typeof COMMAND_HOLDS], { name: input.author?.display_name ?? t('composer.queue.theSender') })
-          : null;
+  const held = heldInputWords(input, thread, t);
   // Somebody who may drive the thread runs a message that waits for the model on their own access; the server
   // asks for their own use of the model and answers with what is missing when they have none.
   const [decided,setDecided]=useState<{approvalId:string|null;status:RequestDecisionStatus}|null>(null);
@@ -451,7 +430,7 @@ export function QueueTray({ threadId, queued, sending, readOnly = false }: { thr
   };
   const total = queued.length + sending.length;
   const unsent = sending.some((entry) => entry.state === 'not_sent');
-  if (total === 0 && page.nextAfter === null && !page.restartRequired) return null;
+  if (total === 0 && page.nextAfter === null && !page.restartRequired) return readOnly ? null : <QueueHold threadId={threadId} />;
   // What was not sent is not hidden behind a folded tray.
   const shown = open || unsent;
   const ids = queued.filter((input) => input.state === 'pending').map((input) => input.id);

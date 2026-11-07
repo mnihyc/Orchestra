@@ -41,6 +41,13 @@ const ACTIVITY_KEPT: usize = 200;
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(tag = "op", rename_all = "snake_case")]
 pub enum Request {
+    /// Labelled primary choices and their latest verified measurements.
+    Gateways,
+    /// The local operator explicitly selected a primary and requests reconnect.
+    SelectGateway {
+        /// Exact local choice; advertisements cannot submit this operation.
+        choice: orch_link_contract::gateways::GatewayChoice,
+    },
     /// Adopts a same-machine replacement identity after its token has been checked and files saved.
     ReloadIdentity,
     /// The session and who this machine is.
@@ -134,6 +141,15 @@ pub struct ActivityRow {
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(tag = "reply", rename_all = "snake_case")]
 pub enum Reply {
+    /// Installation metadata and local primary choice, with no credential material.
+    Gateways {
+        /// Current local choice.
+        choice: orch_link_contract::gateways::GatewayChoice,
+        /// The actual standing primary, if connected.
+        gateway_id: Option<String>,
+        /// Automatic plus operator-advertised logical gateways.
+        options: Vec<crate::gateway_selector::GatewayOption>,
+    },
     /// The session.
     Status(Status),
     /// The environments.
@@ -290,6 +306,8 @@ pub struct LocalState {
 impl LocalState {
     async fn answer(&self, request: Request) -> Reply {
         match request {
+            Request::Gateways => self.gateways(),
+            Request::SelectGateway { choice } => self.select_gateway(choice),
             Request::ReloadIdentity => self.reload_identity(),
             Request::Status => Reply::Status(self.status()),
             Request::Environments => Reply::Environments {
@@ -318,6 +336,72 @@ impl LocalState {
             Request::Activity { limit } => Reply::Activity {
                 rows: self.activity.latest(limit.unwrap_or(ACTIVITY_KEPT)),
             },
+        }
+    }
+
+    fn gateways(&self) -> Reply {
+        let result = (|| -> Result<_, crate::enrollment::EnrollError> {
+            let data = DataDir::open(&self.data_dir)?;
+            let choice = data.config(|_| None)?.connector.gateway;
+            let record = data.record()?;
+            let measured = self.link.gateway_measurements();
+            let measurements = if measured.is_empty() {
+                &record.gateway_measurements
+            } else {
+                &measured
+            };
+            let mut options = crate::gateway_selector::options(&record.gateways, measurements);
+            crate::gateway_selector::retain_current(&mut options, &choice);
+            Ok((choice, options))
+        })();
+        match result {
+            Ok((choice, options)) => Reply::Gateways {
+                choice,
+                gateway_id: self.link.gateway_id(),
+                options,
+            },
+            Err(error) => Reply::Error {
+                message: error.to_string(),
+            },
+        }
+    }
+
+    fn select_gateway(&self, choice: orch_link_contract::gateways::GatewayChoice) -> Reply {
+        use orch_config::loader::Validate as _;
+        let result = (|| -> Result<bool, String> {
+            let data = DataDir::open(&self.data_dir).map_err(|error| error.to_string())?;
+            let mut config = data.config(|_| None).map_err(|error| error.to_string())?;
+            let current = config.connector.gateway.clone();
+            if choice == current {
+                return Ok(false);
+            }
+            config.connector.gateway = choice.clone();
+            config.validate().map_err(|error| error.to_string())?;
+            if choice.selection == orch_link_contract::gateways::GatewaySelection::Selected
+                && choice != current
+            {
+                let record = data.record().map_err(|error| error.to_string())?;
+                if !record
+                    .gateways
+                    .iter()
+                    .any(|gateway| Some(gateway.id.as_str()) == choice.gateway_id.as_deref())
+                {
+                    return Err("the selected gateway is no longer advertised".into());
+                }
+            }
+            data.update_config(|config| config.connector.gateway = choice.clone())
+                .map_err(|error| error.to_string())?;
+            self.link.select_gateway(choice);
+            Ok(true)
+        })();
+        match result {
+            Ok(true) => Reply::Done {
+                said: "Primary gateway choice saved; reconnecting.".into(),
+            },
+            Ok(false) => Reply::Done {
+                said: "Primary gateway choice unchanged.".into(),
+            },
+            Err(message) => Reply::Error { message },
         }
     }
 

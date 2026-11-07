@@ -9,7 +9,8 @@ use crate::middleware::authorization::refusals;
 use crate::middleware::requests::{ApiError, ApiResult};
 use crate::routes::resources::view::environment_refs;
 use crate::thread_access::AuthzAccess;
-use orch_access_contract::permissions::Permission;
+use orch_access_contract::decisions::ObjectRef;
+use orch_access_contract::permissions::{ObjectKind, Permission};
 use orch_api_contract::access::{
     AccessChoice, Dependency, DependencyObject, DependencyOpen, PageReaches, PermissionPage,
 };
@@ -18,6 +19,7 @@ use orch_authz::doors::{self, Wants};
 use orch_authz::{Policy, Principal, environments};
 use orch_db::Conn;
 use orch_db::queries::environments::workspace as environment_rows;
+use orch_db::queries::resources;
 use orch_types::Id;
 
 /// The permission of the environment that a dependency says it needs: the choice of looking in, or
@@ -29,7 +31,33 @@ fn wanted(wants: Wants) -> String {
     }
 }
 
-/// Fills in what the page of the thread `thread` shows of its environment, for the caller.
+/// The ordinary environment reach and door decisions retained until their source is admitted.
+/// No public environment reference is constructed during preparation.
+#[derive(Clone)]
+pub(crate) struct PreparedThreadEnvironment {
+    environment: Id,
+    reaches: Option<environments::Reaches>,
+    doors: Vec<doors::Dependency>,
+}
+
+impl PreparedThreadEnvironment {
+    /// The actual environment whose reference, reach counts and door information will be shown.
+    pub(crate) fn objects(&self) -> impl Iterator<Item = ObjectRef> + '_ {
+        (self.reaches.is_some() || !self.doors.is_empty())
+            .then_some(ObjectRef {
+                kind: ObjectKind::Environment,
+                id: self.environment,
+            })
+            .into_iter()
+    }
+
+    /// Environment doors have no separately named node provenance.
+    pub(crate) fn nodes(&self) -> impl Iterator<Item = Id> {
+        std::iter::empty()
+    }
+}
+
+/// Fills in what the page of the thread shows of its environment, using the ordinary producer.
 pub async fn show(
     conn: &mut Conn,
     principal: &Principal,
@@ -37,16 +65,63 @@ pub async fn show(
     policy: Policy,
     page: &mut PermissionPage,
 ) -> ApiResult<()> {
+    if let Some(prepared) = prepare_thread(conn, principal, thread, policy).await? {
+        project_thread(conn, principal, &prepared, page).await?;
+    }
+    Ok(())
+}
+
+/// Resolves the actual environment and the existing reach/door decisions without publishing its
+/// reference. Page authority owns these decisions; no new EnvironmentView requirement is added.
+pub(crate) async fn prepare_thread(
+    conn: &mut Conn,
+    principal: &Principal,
+    thread: Id,
+    policy: Policy,
+) -> ApiResult<Option<PreparedThreadEnvironment>> {
     let Some(environment) = environment_rows::thread_place(conn, thread)
         .await?
         .and_then(|place| place.environment_id)
     else {
-        return Ok(());
+        return Ok(None);
     };
     let policies = AuthzAccess::policies(conn, environment)
         .await
         .map_err(ApiError::internal)?;
-    let Some(reference) = environment_refs(conn, &[environment], &[], principal.now())
+    // The original environment reference omits missing/deleted environments. Keep that absence
+    // check before computing reach/doors, without constructing its public reference or counts.
+    let present = resources::resource_facts(conn, &[environment])
+        .await?
+        .iter()
+        .any(|row| row.id == environment && row.kind == "environment" && !row.deleted);
+    if !present {
+        return Ok(None);
+    }
+    let reaches = environments::reaches(conn, principal, thread, policy)
+        .await
+        .map_err(ApiError::internal)?;
+    let doors = doors::of_thread(conn, principal, thread, environment, &policies)
+        .await
+        .map_err(ApiError::internal)?;
+    Ok(Some(PreparedThreadEnvironment {
+        environment,
+        reaches,
+        doors,
+    }))
+}
+
+/// Publishes the existing full environment reference and prepared door information after the
+/// caller has admitted that Environment source under the same operation.
+pub(crate) async fn project_thread(
+    conn: &mut Conn,
+    principal: &Principal,
+    prepared: &PreparedThreadEnvironment,
+    page: &mut PermissionPage,
+) -> ApiResult<()> {
+    if prepared.reaches.is_none() && prepared.doors.is_empty() {
+        return Ok(());
+    }
+    let Some(reference) = environment_refs(conn, &[prepared.environment], &[], principal.now())
         .await?
         .into_iter()
         .next()
@@ -54,19 +129,15 @@ pub async fn show(
     else {
         return Ok(());
     };
-    if let Some(reaches) = environments::reaches(conn, principal, thread, policy)
-        .await
-        .map_err(ApiError::internal)?
-    {
+    if let Some(reaches) = &prepared.reaches {
         page.reaches = Some(PageReaches {
             environment: reference,
             people: reaches.people,
             threads: reaches.threads,
         });
     }
-    let found = doors::of_thread(conn, principal, thread, environment, &policies)
-        .await
-        .map_err(ApiError::internal)?;
+    let found = &prepared.doors;
+
     let owners: Vec<Id> = found.iter().filter_map(|each| each.owner).collect();
     let owners = refusals::user_refs(conn, &owners).await?;
     for each in found {

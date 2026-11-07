@@ -12,15 +12,17 @@ use crate::certificates::{TokenFor, TokenRequest};
 use crate::middleware::authorization::{self, refusals};
 use crate::middleware::requests::{ApiError, ApiResult};
 use crate::registry::{Ctx, Registry};
+use crate::routes::access::page::{NameBounds, NameSources};
 use crate::routes::nodes::{actor_name, invalid, placed, policy_at, view as node_view};
 use crate::routes::resources::machines::{
     Installer, enrollment_commands, enrollment_commands_choices,
 };
 use crate::routes::resources::providers::{home_policies, refused_making};
 use crate::routes::resources::view::{
-    Holding, accesses, addresses, environment_refs, machine_refs, parse, provider_refs,
+    Holding, PreparedAccess, accesses_prepared, addresses_with_names, environment_refs,
+    environment_refs_from_rows_with_names, machine_refs, parse, prepare_accesses, provider_refs,
 };
-use crate::routes::resources::{Home, LIST_LIMIT, begin_mutation, clean_name, record, require};
+use crate::routes::resources::{Home, begin_mutation, clean_name, record, require};
 use orch_access_contract::audit::AuditAction;
 use orch_access_contract::decisions::{Held, ObjectRef};
 use orch_access_contract::permissions::{Permission, ResourceKind};
@@ -33,7 +35,6 @@ use orch_api_contract::resources::{
     self as api, EnrollmentToken, Host, HostDriver, HostRef, HostRunning, HostWhenFull,
     ProviderRef, UnitKind,
 };
-use orch_authz::nodes::Page;
 use orch_authz::ownership::{self, Basis, Making};
 use orch_authz::{Policy, Principal, resources};
 use orch_db::queries::environments::hosting::{self as environment_hosting, RuntimeFull};
@@ -45,7 +46,10 @@ use orch_settings::{Place, get as setting};
 use orch_settings_contract::registry::keys;
 use orch_types::{Id, Json};
 use serde_json::json;
-use std::collections::HashMap;
+use std::collections::{BTreeMap, BTreeSet, HashMap};
+
+mod read;
+mod update_now;
 
 /// CPU samples retain three decimal places in the integer resource projection.
 const CPU_PERCENT_MILLI_SCALE: f64 = 1_000.0;
@@ -57,37 +61,18 @@ const LABEL_MAX_CHARS: usize = 40;
 
 /// Binds this module's requests.
 pub fn mount(registry: &mut Registry) {
+    read::mount(registry);
     registry
-        .on(api::HostList, list)
         .on(api::HostEnrollmentTokenCreate, token_create)
-        .on(api::HostGet, get)
         .on(api::HostUpdate, update)
-        .on(api::HostUpdateNow, update_now)
+        .on_with_operation(
+            api::HostUpdateNow,
+            crate::key_operations::native::effects::prepare::<update_now::Update>,
+            update_now::run,
+        )
         .on(api::HostRuntimeList, runtime_list)
         .on(api::HostRuntimeStop, runtime_stop)
         .on(api::HostRuntimeDelete, runtime_delete);
-}
-
-async fn update_now(ctx: Ctx, (): (), (): ()) -> ApiResult<api::ComponentUpdate> {
-    let machine = {
-        let mut conn = ctx.app.db.acquire().await?;
-        let principal = authorization::principal(&ctx, &mut conn).await?;
-        let id = ctx.id("id")?;
-        require(
-            &mut conn,
-            &principal,
-            ResourceKind::Host,
-            id,
-            Permission::HostManage,
-        )
-        .await?;
-        queries::hosts(&mut conn, &[id], principal.user())
-            .await?
-            .pop()
-            .ok_or_else(ApiError::not_found)?
-            .machine_id
-    };
-    super::machines::request_update_on(&ctx, machine).await
 }
 
 /// What the caller holds on a host, as the engine told it.
@@ -231,12 +216,10 @@ fn clean_labels(path: &str, labels: &[String]) -> ApiResult<Vec<String>> {
     Ok(clean)
 }
 
-/// Host and fleet readers share the inventory, including environments whose units were archived.
-pub(crate) async fn kept_layers_of(
+async fn prepare_kept_layers(
     conn: &mut Conn,
     ids: &[Id],
-    now: chrono::DateTime<chrono::Utc>,
-) -> ApiResult<HashMap<Id, Vec<api::HostKeptLayers>>> {
+) -> ApiResult<HashMap<Id, Vec<orch_driver_contract::kept::KeptImage>>> {
     let inventories: Vec<(Id, Json)> =
         sqlx::query_as("SELECT id,kept_images FROM hosts WHERE id=ANY($1)")
             .bind(ids)
@@ -253,24 +236,59 @@ pub(crate) async fn kept_layers_of(
             )
         })
         .collect();
+    Ok(images)
+}
+
+async fn layer_environment_rows(
+    conn: &mut Conn,
+    images: &HashMap<Id, Vec<orch_driver_contract::kept::KeptImage>>,
+) -> ApiResult<Vec<queries::EnvironmentRefRow>> {
     let environment_ids: Vec<Id> = images
         .values()
         .flatten()
         .map(|image| image.environment)
         .collect();
-    let environments: HashMap<Id, EnvironmentRef> =
-        environment_refs(conn, &environment_ids, &[], orch_types::Time::new(now))
+    if environment_ids.is_empty() {
+        return Ok(Vec::new());
+    }
+    Ok(queries::environments_among(conn, &environment_ids, &[]).await?)
+}
+
+async fn layer_environment_refs(
+    conn: &mut Conn,
+    rows: &[queries::EnvironmentRefRow],
+    now: orch_types::Time,
+    bounds: Option<&NameBounds>,
+    selected: Option<&BTreeSet<Id>>,
+) -> ApiResult<HashMap<Id, EnvironmentRef>> {
+    let rows = rows
+        .iter()
+        .filter(|row| selected.is_none_or(|ids| ids.contains(&row.id)))
+        .cloned()
+        .collect::<Vec<_>>();
+    if rows.is_empty() {
+        return Ok(HashMap::new());
+    }
+    Ok(
+        environment_refs_from_rows_with_names(conn, rows, now, bounds)
             .await?
             .into_iter()
-            .map(|(_, environment)| (environment.id, environment))
-            .collect();
-    Ok(images
-        .into_iter()
-        .map(|(host, images)| {
+            .map(|(_, row)| (row.id, row))
+            .collect(),
+    )
+}
+
+fn kept_layers_prepared(
+    images: &HashMap<Id, Vec<orch_driver_contract::kept::KeptImage>>,
+    environments: &HashMap<Id, EnvironmentRef>,
+) -> HashMap<Id, Vec<api::HostKeptLayers>> {
+    images
+        .iter()
+        .map(|(&host, images)| {
             (
                 host,
                 images
-                    .into_iter()
+                    .iter()
                     .map(|image| api::HostKeptLayers {
                         environment_id: image.environment,
                         environment: environments.get(&image.environment).cloned(),
@@ -280,20 +298,56 @@ pub(crate) async fn kept_layers_of(
                     .collect(),
             )
         })
-        .collect())
+        .collect()
 }
 
-/// Host and fleet managers share retained-file rows with the same environment and home redactions.
-pub(crate) async fn kept_data_of(
+struct KeptData {
+    row: orch_db::queries::environments::retained::HostData,
+    removal: orch_api_contract::environment::EnvironmentRemoval,
+}
+
+fn preserves_kept(
+    old_data: &[KeptData],
+    old_layers: &HashMap<Id, Vec<orch_driver_contract::kept::KeptImage>>,
+    named: Option<&BTreeSet<Id>>,
+    fresh_data: &[KeptData],
+    fresh_layers: &HashMap<Id, Vec<orch_driver_contract::kept::KeptImage>>,
+) -> bool {
+    let data: BTreeMap<_, _> = fresh_data
+        .iter()
+        .map(|entry| ((entry.row.host_id, entry.row.environment_id), entry))
+        .collect();
+    let layers: BTreeSet<_> = fresh_layers
+        .iter()
+        .flat_map(|(host, images)| {
+            images
+                .iter()
+                .map(move |image| (*host, image.environment, image.generation))
+        })
+        .collect();
+    old_data.iter().all(|old| {
+        data.get(&(old.row.host_id, old.row.environment_id))
+            .is_some_and(|current| {
+                old.row.home_id == current.row.home_id
+                    && (!(old.removal.can_inspect
+                        && named.is_none_or(|ids| ids.contains(&old.row.environment_id)))
+                        || current.removal.can_inspect)
+            })
+    }) && old_layers.iter().all(|(host, images)| {
+        images
+            .iter()
+            .all(|image| layers.contains(&(*host, image.environment, image.generation)))
+    })
+}
+
+async fn prepare_kept_data(
     ctx: &Ctx,
     conn: &mut Conn,
     principal: &Principal,
     hosts: &[Id],
-) -> ApiResult<HashMap<Id, Vec<api::HostKeptData>>> {
+) -> ApiResult<Vec<KeptData>> {
     let rows = orch_db::queries::environments::retained::on_hosts(conn, hosts).await?;
-    let homes: Vec<Id> = rows.iter().map(|row| row.home_id).collect();
-    let homes = node_view::refs(conn, principal, &homes, Policy::default()).await?;
-    let mut grouped: HashMap<Id, Vec<api::HostKeptData>> = HashMap::new();
+    let mut prepared = Vec::new();
     for row in rows {
         let Some(removal) = crate::routes::environments::retained::present(
             ctx,
@@ -305,79 +359,245 @@ pub(crate) async fn kept_data_of(
         else {
             continue;
         };
-        if !matches!(
+        if matches!(
             removal.phase,
             orch_api_contract::environment::EnvironmentRemovalPhase::Kept
                 | orch_api_contract::environment::EnvironmentRemovalPhase::Restoring
                 | orch_api_contract::environment::EnvironmentRemovalPhase::Purging
         ) {
-            continue;
+            prepared.push(KeptData { row, removal });
         }
+    }
+    Ok(prepared)
+}
+
+async fn kept_data_views_bounded(
+    conn: &mut Conn,
+    principal: &Principal,
+    rows: &[KeptData],
+    bounds: Option<&NameBounds>,
+    environments: Option<&BTreeSet<Id>>,
+) -> ApiResult<HashMap<Id, Vec<api::HostKeptData>>> {
+    let homes: Vec<Id> = rows.iter().map(|entry| entry.row.home_id).collect();
+    let homes = match bounds {
+        Some(bounds) => bounds.refs(conn, principal, &homes).await?,
+        None => node_view::refs(conn, principal, &homes, Policy::default()).await?,
+    };
+    let mut grouped: HashMap<Id, Vec<api::HostKeptData>> = HashMap::new();
+    for KeptData { row, removal } in rows {
         grouped
             .entry(row.host_id)
             .or_default()
             .push(api::HostKeptData {
                 environment_id: row.environment_id,
-                name: removal.can_inspect.then_some(row.name),
+                name: (removal.can_inspect
+                    && environments.is_none_or(|ids| ids.contains(&row.environment_id)))
+                .then(|| row.name.clone()),
                 home: homes.get(&row.home_id).cloned(),
-                storages: row.storages,
+                storages: row.storages.clone(),
                 phase: removal.phase,
                 bytes: removal.bytes,
                 purge_at: removal.purge_at,
-                job: removal.job,
+                job: removal.job.clone(),
             });
     }
     Ok(grouped)
 }
 
-async fn host_views(
+/// The native fleet and ordinary host readers share retained-file/layer source selection.
+pub(crate) struct PreparedRetention {
+    data: Vec<KeptData>,
+    layers: HashMap<Id, Vec<orch_driver_contract::kept::KeptImage>>,
+    environments: Vec<queries::EnvironmentRefRow>,
+    environment_nodes: BTreeSet<Id>,
+    names: Option<(NameBounds, BTreeSet<Id>)>,
+    now: orch_types::Time,
+}
+impl PreparedRetention {
+    pub(crate) fn sources(&self) -> (NameSources, BTreeSet<Id>) {
+        let mut names = NameSources::default();
+        names
+            .nodes
+            .extend(self.data.iter().map(|entry| entry.row.home_id));
+        names.nodes.extend(self.environment_nodes.iter().copied());
+        let mut environments = self
+            .data
+            .iter()
+            .filter(|entry| entry.removal.can_inspect)
+            .map(|entry| entry.row.environment_id)
+            .collect::<BTreeSet<_>>();
+        environments.extend(self.environments.iter().map(|row| row.id));
+        (names, environments)
+    }
+    pub(crate) fn bound_names(&mut self, bounds: NameBounds, environments: BTreeSet<Id>) {
+        self.names = Some((bounds, environments));
+    }
+    pub(crate) fn preserves_sources(&self, fresh: &Self) -> bool {
+        preserves_kept(
+            &self.data,
+            &self.layers,
+            self.names.as_ref().map(|(_, ids)| ids),
+            &fresh.data,
+            &fresh.layers,
+        )
+    }
+    pub(crate) async fn render(
+        &self,
+        conn: &mut Conn,
+        principal: &Principal,
+    ) -> ApiResult<(
+        HashMap<Id, Vec<api::HostKeptData>>,
+        HashMap<Id, Vec<api::HostKeptLayers>>,
+    )> {
+        let data = kept_data_views_bounded(
+            conn,
+            principal,
+            &self.data,
+            self.names.as_ref().map(|(n, _)| n),
+            self.names.as_ref().map(|(_, ids)| ids),
+        )
+        .await?;
+        let environments = layer_environment_refs(
+            conn,
+            &self.environments,
+            self.now,
+            self.names.as_ref().map(|(bounds, _)| bounds),
+            self.names.as_ref().map(|(_, ids)| ids),
+        )
+        .await?;
+        Ok((data, kept_layers_prepared(&self.layers, &environments)))
+    }
+}
+pub(crate) async fn prepare_retention(
     ctx: &Ctx,
     conn: &mut Conn,
     principal: &Principal,
+    hosts: &[Id],
+    managed: &[Id],
+) -> ApiResult<PreparedRetention> {
+    let data = prepare_kept_data(ctx, conn, principal, managed).await?;
+    let layers = prepare_kept_layers(conn, hosts).await?;
+    let environments = layer_environment_rows(conn, &layers).await?;
+    let environment_nodes = resources::address_name_sources(
+        conn,
+        &environments.iter().map(|row| row.id).collect::<Vec<_>>(),
+    )
+    .await
+    .map_err(authorization::restoration_error)?
+    .into_iter()
+    .collect();
+    Ok(PreparedRetention {
+        data,
+        layers,
+        environments,
+        environment_nodes,
+        names: None,
+        now: orch_types::Time::new(ctx.now),
+    })
+}
+
+/// Opaque native Host facts; optional names narrow the same ordinary construction.
+pub(crate) struct PreparedInventory {
     rows: Vec<HostRow>,
-    standing: &HashMap<Id, Standing>,
-) -> ApiResult<Vec<Host>> {
-    let full_percent = orch_engine::places::system_full_percent(conn)
-        .await
-        .map_err(ApiError::internal)?;
-    let ids: Vec<Id> = rows.iter().map(|row| row.id).collect();
-    let managed: Vec<Id> = ids
-        .iter()
-        .copied()
-        .filter(|id| {
-            standing.get(id).is_some_and(|standing| {
-                standing
-                    .held
-                    .iter()
-                    .any(|held| held.permission == Permission::HostManage)
-            })
-        })
-        .collect();
-    let kept_data = kept_data_of(ctx, conn, principal, &managed).await?;
-    let kept_layers = kept_layers_of(conn, &ids, ctx.now).await?;
-    let loads = orch_db::queries::resources::hosting::loads(conn, &ids).await?;
-    let mut by_host: HashMap<Id, Vec<_>> = HashMap::new();
-    for load in loads {
-        by_host.entry(load.host_id).or_default().push(load);
+    standing: HashMap<Id, Standing>,
+    access: PreparedAccess,
+    sources: NameSources,
+    bounds: NameBounds,
+    layers: HashMap<Id, Vec<orch_driver_contract::kept::KeptImage>>,
+    data: Vec<KeptData>,
+    #[expect(
+        dead_code,
+        reason = "retained source facts for the native family adapter rollout"
+    )]
+    retained_environments: Vec<Id>,
+    layer_environments: Vec<queries::EnvironmentRefRow>,
+    retained_name_sources: Vec<Id>,
+    retained_bounds: Option<BTreeSet<Id>>,
+}
+impl PreparedInventory {
+    /// The Host's physical publisher and retained context remain this native association.
+    pub(crate) fn preserves_sources(&self, fresh: &Self) -> bool {
+        let rows = fresh
+            .rows
+            .iter()
+            .map(|row| (row.id, row.machine_id))
+            .collect::<HashMap<_, _>>();
+        let retained = fresh
+            .retained_name_sources
+            .iter()
+            .copied()
+            .collect::<BTreeSet<_>>();
+        self.access.preserves_authority(&fresh.access)
+            && preserves_kept(
+                &self.data,
+                &self.layers,
+                self.retained_bounds.as_ref(),
+                &fresh.data,
+                &fresh.layers,
+            )
+            && self
+                .rows
+                .iter()
+                .all(|row| rows.get(&row.id) == Some(&row.machine_id))
+            && self
+                .retained_name_sources
+                .iter()
+                .all(|id| retained.contains(id))
     }
-    let declared: HashMap<Id, _> = by_host
-        .into_iter()
-        .map(|(id, held)| (id, orch_engine::places::declared_of(&held)))
-        .collect();
-    let addresses = addresses(conn, &ids).await?;
-    let people: Vec<Id> = rows.iter().filter_map(|row| row.owner_id).collect();
-    let people = refusals::user_refs(conn, &people).await?;
-    let homes: Vec<Id> = rows.iter().filter_map(|row| row.home_id).collect();
-    let homes = node_view::refs(conn, principal, &homes, Policy::default()).await?;
-    let machines: Vec<Id> = rows.iter().map(|row| row.machine_id).collect();
-    let software_updates = crate::component_updates::views(&ctx.app.link, conn, &machines).await?;
-    let machines = machine_refs(&ctx.app, conn, &machines).await?;
-    let system: Option<String> = setting(conn, Place::System, keys::HOSTS_WHEN_FULL)
-        .await
-        .map_err(ApiError::internal)?;
-    let system: WhenFull = parse(system.as_deref().unwrap_or("warn"))?;
-    let holdings: Vec<Holding<'_>> = rows
-        .iter()
+
+    pub(crate) fn name_sources(&self) -> &NameSources {
+        &self.sources
+    }
+    pub(crate) fn bound_names(&mut self, bounds: NameBounds) {
+        self.bounds = bounds;
+    }
+    /// Actual emitted retention references; this classifies no permission or scope.
+    #[expect(
+        dead_code,
+        reason = "retained source accessor for native family adapters"
+    )]
+    pub(crate) fn retained_environment_ids(&self) -> &[Id] {
+        &self.retained_environments
+    }
+
+    /// Actual protected retained names/refs, excluding ID-only or absent context references.
+    /// Bound only the actual protected retention names of this consuming projection.
+    pub(crate) async fn bound_retained_sources(
+        &mut self,
+        conn: &mut Conn,
+        selected: BTreeSet<Id>,
+    ) -> ApiResult<()> {
+        self.retained_name_sources
+            .retain(|id| selected.contains(id));
+        self.sources = self.access.names.clone();
+        self.sources
+            .nodes
+            .extend(self.rows.iter().filter_map(|row| row.home_id));
+        self.sources
+            .nodes
+            .extend(self.data.iter().map(|entry| entry.row.home_id));
+        let ids: Vec<_> = self
+            .layer_environments
+            .iter()
+            .filter(|row| selected.contains(&row.id))
+            .map(|row| row.id)
+            .collect();
+        self.sources.nodes.extend(
+            resources::address_name_sources(conn, &ids)
+                .await
+                .map_err(authorization::restoration_error)?,
+        );
+        self.retained_bounds = Some(selected);
+        Ok(())
+    }
+
+    pub(crate) fn retained_name_sources(&self) -> &[Id] {
+        &self.retained_name_sources
+    }
+}
+
+fn holdings<'a>(rows: &'a [HostRow], standing: &'a HashMap<Id, Standing>) -> Vec<Holding<'a>> {
+    rows.iter()
         .filter_map(|row| {
             standing.get(&row.id).map(|each| Holding {
                 admin_only: &each.admin_only,
@@ -390,8 +610,150 @@ async fn host_views(
                 held: &each.held,
             })
         })
+        .collect()
+}
+fn shows_layers(standing: Option<&Standing>) -> bool {
+    standing.is_some_and(|standing| {
+        standing.held.iter().any(|held| {
+            matches!(
+                held.permission,
+                Permission::HostView | Permission::HostManage
+            )
+        })
+    })
+}
+async fn prepare_host_views(
+    ctx: &Ctx,
+    conn: &mut Conn,
+    principal: &Principal,
+    rows: Vec<HostRow>,
+    standing: HashMap<Id, Standing>,
+) -> ApiResult<PreparedInventory> {
+    let ids: Vec<_> = rows.iter().map(|row| row.id).collect();
+    let managed: Vec<_> = ids
+        .iter()
+        .copied()
+        .filter(|id| {
+            standing.get(id).is_some_and(|each| {
+                each.held
+                    .iter()
+                    .any(|held| held.permission == Permission::HostManage)
+            })
+        })
         .collect();
-    let access = accesses(conn, principal, &holdings).await?;
+    let data = prepare_kept_data(ctx, conn, principal, &managed).await?;
+    let layers = prepare_kept_layers(conn, &ids).await?;
+    let layer_environments = layer_environment_rows(conn, &layers).await?;
+    let access = prepare_accesses(conn, &holdings(&rows, &standing)).await?;
+    let mut sources = access.names.clone();
+    sources
+        .nodes
+        .extend(rows.iter().filter_map(|row| row.home_id));
+    sources
+        .nodes
+        .extend(data.iter().map(|entry| entry.row.home_id));
+    sources.nodes.extend(
+        resources::address_name_sources(
+            conn,
+            &layer_environments
+                .iter()
+                .map(|row| row.id)
+                .collect::<Vec<_>>(),
+        )
+        .await
+        .map_err(authorization::restoration_error)?,
+    );
+    let mut retained: BTreeSet<_> = data.iter().map(|entry| entry.row.environment_id).collect();
+    retained.extend(
+        layers
+            .iter()
+            .filter(|(host, _)| shows_layers(standing.get(*host)))
+            .flat_map(|(_, images)| images.iter().map(|image| image.environment)),
+    );
+    let mut retained_name_sources: BTreeSet<_> = data
+        .iter()
+        .filter(|entry| entry.removal.can_inspect)
+        .map(|entry| entry.row.environment_id)
+        .collect();
+    let layer_ids: BTreeSet<_> = layer_environments.iter().map(|row| row.id).collect();
+    retained_name_sources.extend(
+        layers
+            .iter()
+            .filter(|(host, _)| shows_layers(standing.get(*host)))
+            .flat_map(|(_, images)| images.iter().map(|image| image.environment))
+            .filter(|id| layer_ids.contains(id)),
+    );
+    Ok(PreparedInventory {
+        rows,
+        standing,
+        access,
+        sources,
+        bounds: NameBounds::default(),
+        layers,
+        data,
+        retained_environments: retained.into_iter().collect(),
+        layer_environments,
+        retained_name_sources: retained_name_sources.into_iter().collect(),
+        retained_bounds: None,
+    })
+}
+
+pub(crate) async fn show_inventory_prepared(
+    ctx: &Ctx,
+    conn: &mut Conn,
+    principal: &Principal,
+    prepared: &PreparedInventory,
+) -> ApiResult<Vec<Host>> {
+    let rows = prepared.rows.clone();
+    let standing = &prepared.standing;
+    let bounds = prepared.bounds.limited.then_some(&prepared.bounds);
+    let full_percent = orch_engine::places::system_full_percent(conn)
+        .await
+        .map_err(ApiError::internal)?;
+    let ids: Vec<Id> = rows.iter().map(|row| row.id).collect();
+    let kept_data = kept_data_views_bounded(
+        conn,
+        principal,
+        &prepared.data,
+        bounds,
+        prepared.retained_bounds.as_ref(),
+    )
+    .await?;
+    let environments = layer_environment_refs(
+        conn,
+        &prepared.layer_environments,
+        orch_types::Time::new(ctx.now),
+        bounds,
+        prepared.retained_bounds.as_ref(),
+    )
+    .await?;
+    let kept_layers = kept_layers_prepared(&prepared.layers, &environments);
+    let loads = orch_db::queries::resources::hosting::loads(conn, &ids).await?;
+    let mut by_host: HashMap<Id, Vec<_>> = HashMap::new();
+    for load in loads {
+        by_host.entry(load.host_id).or_default().push(load);
+    }
+    let declared: HashMap<Id, _> = by_host
+        .into_iter()
+        .map(|(id, held)| (id, orch_engine::places::declared_of(&held)))
+        .collect();
+    let addresses = addresses_with_names(conn, &ids, bounds).await?;
+    let people: Vec<Id> = rows.iter().filter_map(|row| row.owner_id).collect();
+    let people = refusals::user_refs(conn, &people).await?;
+    let homes: Vec<Id> = rows.iter().filter_map(|row| row.home_id).collect();
+    let homes = match bounds {
+        Some(bounds) => bounds.refs(conn, principal, &homes).await?,
+        None => node_view::refs(conn, principal, &homes, Policy::default()).await?,
+    };
+    let machines: Vec<Id> = rows.iter().map(|row| row.machine_id).collect();
+    let software_updates = crate::component_updates::views(&ctx.app.link, conn, &machines).await?;
+    let machines = machine_refs(&ctx.app, conn, &machines).await?;
+    let system: Option<String> = setting(conn, Place::System, keys::HOSTS_WHEN_FULL)
+        .await
+        .map_err(ApiError::internal)?;
+    let system: WhenFull = parse(system.as_deref().unwrap_or("warn"))?;
+    let holdings = holdings(&rows, standing);
+    let access = accesses_prepared(conn, principal, &holdings, &prepared.access, bounds).await?;
     rows.into_iter()
         .map(|row| {
             let own = row
@@ -433,14 +795,7 @@ async fn host_views(
                 },
                 software_update: software_updates.get(&row.machine_id).cloned(),
                 kept_data: kept_data.get(&row.id).cloned().unwrap_or_default(),
-                kept_layers: if standing.get(&row.id).is_some_and(|standing| {
-                    standing.held.iter().any(|held| {
-                        matches!(
-                            held.permission,
-                            Permission::HostView | Permission::HostManage
-                        )
-                    })
-                }) {
+                kept_layers: if shows_layers(standing.get(&row.id)) {
                     kept_layers.get(&row.id).cloned().unwrap_or_default()
                 } else {
                     Vec::new()
@@ -494,6 +849,16 @@ pub(crate) async fn inventory(
     principal: &Principal,
     seen: &[resources::Seen],
 ) -> ApiResult<Vec<Host>> {
+    let prepared = prepare_inventory(ctx, conn, principal, seen).await?;
+    show_inventory_prepared(ctx, conn, principal, &prepared).await
+}
+
+pub(crate) async fn prepare_inventory(
+    ctx: &Ctx,
+    conn: &mut Conn,
+    principal: &Principal,
+    seen: &[resources::Seen],
+) -> ApiResult<PreparedInventory> {
     let ids: Vec<_> = seen.iter().map(|each| each.resource.id).collect();
     let rows = queries::hosts(conn, &ids, principal.user()).await?;
     let standing = seen
@@ -513,7 +878,7 @@ pub(crate) async fn inventory(
             )
         })
         .collect();
-    host_views(ctx, conn, principal, rows, &standing).await
+    prepare_host_views(ctx, conn, principal, rows, standing).await
 }
 
 /// Memory load for ordering uses the scheduler's same declarations and reported capacity.
@@ -553,6 +918,20 @@ pub(crate) async fn show(
     principal: &Principal,
     id: Id,
 ) -> ApiResult<Host> {
+    let prepared = prepare_single(ctx, conn, principal, id).await?;
+    show_inventory_prepared(ctx, conn, principal, &prepared)
+        .await?
+        .pop()
+        .ok_or_else(|| ApiError::internal("a host was read and is not shown"))
+}
+
+/// The same passive individual Host factory, before rendering or a Get-only ports probe.
+pub(crate) async fn prepare_single(
+    ctx: &Ctx,
+    conn: &mut Conn,
+    principal: &Principal,
+    id: Id,
+) -> ApiResult<PreparedInventory> {
     let row = queries::hosts(conn, &[id], principal.user())
         .await?
         .pop()
@@ -576,111 +955,7 @@ pub(crate) async fn show(
             held: effective.held,
         },
     )]);
-    host_views(ctx, conn, principal, vec![row], &standing)
-        .await?
-        .pop()
-        .ok_or_else(|| ApiError::internal("a host was read and is not shown"))
-}
-
-/// The hosts the caller may use or manage.
-async fn list(
-    ctx: Ctx,
-    query: api::HostListQuery,
-    (): (),
-) -> ApiResult<Vec<orch_api_contract::common::Listed<Host>>> {
-    let mut conn = ctx.app.db.acquire().await?;
-    let principal = authorization::principal(&ctx, &mut conn).await?;
-    let page = Page {
-        after: None,
-        limit: LIST_LIMIT,
-    };
-    let seen = resources::visible(
-        &mut conn,
-        &principal,
-        ResourceKind::Host,
-        page,
-        Policy::default(),
-    )
-    .await
-    .map_err(ApiError::internal)?;
-    let mut seen: Vec<_> = seen
-        .items
-        .into_iter()
-        .filter(|each| {
-            each.administers
-                || each.held.iter().any(|held| {
-                    matches!(
-                        held.permission,
-                        Permission::HostView
-                            | Permission::HostUse
-                            | Permission::HostManage
-                            | Permission::AccessManage
-                    )
-                })
-        })
-        .collect();
-    if let Some(org) = query.org_id {
-        let homes: Vec<Id> = seen.iter().filter_map(|each| each.resource.home).collect();
-        let inside = queries::homes_under(&mut conn, org, &homes).await?;
-        seen.retain(|each| each.resource.home.is_none_or(|home| inside.contains(&home)));
-    }
-    let private = super::hidden_items(&mut conn, &principal, &mut seen).await?;
-    let ids: Vec<Id> = seen.iter().map(|each| each.resource.id).collect();
-    let rows = queries::hosts(&mut conn, &ids, principal.user()).await?;
-    let standing: HashMap<Id, Standing> = seen
-        .into_iter()
-        .map(|each| {
-            (
-                each.resource.id,
-                Standing {
-                    admin_access: each.admin_access,
-                    admin_place: each.admin_place,
-                    participating: each.participating,
-                    admin_only: each.admin_only,
-                    owner: each.owner,
-                    administers: each.administers,
-                    held: each.held,
-                },
-            )
-        })
-        .collect();
-    Ok(super::listed(
-        host_views(&ctx, &mut conn, &principal, rows, &standing).await?,
-        private,
-    ))
-}
-
-/// Reads a host: whoever holds any permission on it.
-async fn get(ctx: Ctx, (): (), (): ()) -> ApiResult<Host> {
-    let id = ctx.id("id")?;
-    let mut conn = ctx.app.db.acquire().await?;
-    let principal = authorization::principal(&ctx, &mut conn).await?;
-    queries::hosts(&mut conn, &[id], principal.user())
-        .await?
-        .pop()
-        .ok_or_else(ApiError::not_found)?;
-    require(
-        &mut conn,
-        &principal,
-        ResourceKind::Host,
-        id,
-        Permission::HostView,
-    )
-    .await?;
-    let host = show(&ctx, &mut conn, &principal, id).await?;
-    // A manager's page is filled with the node's proposal for its ports, asked for in the background
-    // where this process has none yet; the next read shows it.
-    if host.ports_proposal.is_none()
-        && host.machine.online
-        && host
-            .access
-            .permissions
-            .iter()
-            .any(|held| held == "host.manage")
-    {
-        crate::host_ports::ask_in_background(&ctx.app, id, host.machine.id);
-    }
-    Ok(host)
+    prepare_host_views(ctx, conn, principal, vec![row], standing).await
 }
 
 /// Makes the token with which a host enrolls: single use, and the host that uses it is the
@@ -691,7 +966,8 @@ async fn token_create(
     (): (),
     body: api::HostEnrollmentTokenCreateBody,
 ) -> ApiResult<EnrollmentToken> {
-    super::machines::require_node_installable(&ctx.app.config)?;
+    let installation = super::machines::installation_config(&ctx);
+    super::machines::require_node_installable(&installation)?;
     let name_hint = body
         .name_hint
         .as_deref()
@@ -775,9 +1051,9 @@ async fn token_create(
     Ok(EnrollmentToken {
         receipt: Some(made.receipt),
         commands: choices.as_ref().map_or_else(
-            || enrollment_commands(&ctx.app.config, &made.token, Installer::Node),
+            || enrollment_commands(&installation, &made.token, Installer::Node),
             |choices| {
-                enrollment_commands_choices(&ctx.app.config, &made.token, Installer::Node, choices)
+                enrollment_commands_choices(&installation, &made.token, Installer::Node, choices)
             },
         ),
         token: made.token,

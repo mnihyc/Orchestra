@@ -104,6 +104,8 @@ CREATE TABLE commands (
     updated_at timestamp with time zone DEFAULT now() NOT NULL,
     stop_confirmed_at timestamp with time zone,
     session_fact_revision bigint,
+    login_authority jsonb,
+    authority_required boolean DEFAULT false NOT NULL,
     CONSTRAINT commands_state_check CHECK ((state = ANY (ARRAY['queued'::text, 'sent'::text, 'accepted'::text, 'succeeded'::text, 'failed'::text, 'expired'::text, 'cancelled'::text]))),
     CONSTRAINT commands_pkey PRIMARY KEY (id)
 );

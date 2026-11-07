@@ -84,6 +84,14 @@ pub(crate) async fn check_target(
     machine: Id,
     driver: &str,
 ) -> Result<(), EngineError> {
+    check_target_from(engine, machine, driver, None).await
+}
+pub(crate) async fn check_target_from(
+    engine: &Engine,
+    machine: Id,
+    driver: &str,
+    preparation: Option<&crate::fork_plan::operation::Preparation>,
+) -> Result<(), EngineError> {
     let mut conn = engine.db().acquire().await?;
     archive_part_bytes(&mut conn).await?;
     drop(conn);
@@ -95,11 +103,18 @@ pub(crate) async fn check_target(
             driver: driver.into(),
         },
     )?;
+    let command = match preparation {
+        Some(source) => source.command(engine, command).await?,
+        None => command,
+    };
     let Some(Outcome::Succeeded(value)) = engine.ask_bounded(command).await? else {
         return Err(EngineError::unreadable(
             "the target host did not verify whole-volume carry support",
         ));
     };
+    if let Some(source) = preparation {
+        source.check(engine).await?;
+    }
     let result: orch_link_contract::commands::NodeVolumeCarryCheckResult =
         serde_json::from_value(value)?;
     if result.available {
@@ -128,15 +143,26 @@ pub(crate) async fn archive_part_bytes(conn: &mut orch_db::Conn) -> Result<i64, 
 }
 
 /// Measures all private layers in a plan, including those left behind, and an explicitly carried home.
-pub(crate) async fn measure(
+pub(crate) async fn measure_from(
     engine: &Engine,
     conn: &mut orch_db::Conn,
     environment: Id,
     home: bool,
     by: Id,
     private: &mut [PrivateViewPlan],
+    preparation: Option<&crate::fork_plan::operation::Preparation>,
 ) -> Result<Option<FilesHome>, EngineError> {
-    measure_inner(engine, conn, environment, home, by, private, false).await
+    measure_inner(
+        engine,
+        conn,
+        environment,
+        home,
+        by,
+        private,
+        false,
+        preparation,
+    )
+    .await
 }
 
 /// A move can continue from its record when the source explicitly cannot copy its optional native home.
@@ -148,7 +174,7 @@ pub(crate) async fn measure_for_move(
     by: Id,
     private: &mut [PrivateViewPlan],
 ) -> Result<Option<FilesHome>, EngineError> {
-    measure_inner(engine, conn, environment, home, by, private, true).await
+    measure_inner(engine, conn, environment, home, by, private, true, None).await
 }
 
 async fn measure_inner(
@@ -159,6 +185,7 @@ async fn measure_inner(
     by: Id,
     private: &mut [PrivateViewPlan],
     home_fallback: bool,
+    preparation: Option<&crate::fork_plan::operation::Preparation>,
 ) -> Result<Option<FilesHome>, EngineError> {
     let mut selectors = Vec::new();
     if home {
@@ -191,7 +218,7 @@ async fn measure_inner(
                 .await?
         } else {
             engine
-                .measure_in_background(host.machine_id, kind, body, subject, by)
+                .measure_in_background_from(host.machine_id, kind, body, subject, by, preparation)
                 .await?
         };
         if count.unsupported {

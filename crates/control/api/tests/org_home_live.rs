@@ -1,3 +1,4 @@
+#![recursion_limit = "256"]
 //! Compact waiting words arrive and clear on the existing org feed, without a second read of each thread.
 
 mod realtime_support;

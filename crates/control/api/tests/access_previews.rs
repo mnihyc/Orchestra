@@ -9,6 +9,8 @@ mod desk;
 mod places;
 mod support;
 
+use crate::support::FullPermissionPageReply;
+use crate::support::FullTransferReply;
 use desk::Desk;
 use orch_api_contract::access::{
     AccessChoice, HolderInput, NodeDefaultsGet, NodeDefaultsPreview, PageChange, PageChangeAdd,
@@ -61,6 +63,7 @@ async fn firm() -> Firm {
         })
         .send()
         .await
+        .full_transfer()
         .ok();
     let mut topics = Vec::new();
     for name in ["Plans", "Notes", "Secrets"] {
@@ -80,6 +83,7 @@ async fn firm() -> Firm {
         })
         .send()
         .await
+        .full_permission_page()
         .ok();
     Firm {
         desk,
@@ -381,6 +385,8 @@ async fn a_preview_of_a_resource_and_of_a_document_says_who_would_gain() {
         .send()
         .await
         .ok()
+        .into_full()
+        .unwrap()
         .provider
         .base
         .id;
@@ -502,6 +508,7 @@ async fn a_preview_of_a_place_s_defaults_counts_the_pages_that_follow_and_names_
         ))
         .send()
         .await
+        .full_permission_page()
         .ok();
     let on_a_topic = firm
         .desk
@@ -582,6 +589,7 @@ async fn people_are_named_only_as_far_as_the_caller_may_know_them_and_the_rest_a
         .body(&naming(firm.pam.id(), AccessChoice::FullView))
         .send()
         .await
+        .full_permission_page()
         .ok();
     let change = adding(
         "project.interact",

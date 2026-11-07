@@ -1,3 +1,4 @@
+#![recursion_limit = "256"]
 //! Watching drops actual RFB actions before a real window sees them, including clipboard directions.
 #![cfg(unix)]
 #![allow(

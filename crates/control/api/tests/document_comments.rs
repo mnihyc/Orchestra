@@ -9,6 +9,7 @@ mod desk;
 mod places;
 mod support;
 
+use crate::support::{FullArchiveReply as _, FullCommentMutationReply as _};
 use chrono::Duration;
 use desk::{Desk, rewrite, text};
 use orch_api_contract::common::ErrorCode;
@@ -331,7 +332,7 @@ async fn an_editor_or_whoever_wrote_in_a_discussion_resolves_it_and_opens_it_aga
         let call = call
             .token(&by.token)
             .body(&DocumentDiscussionResolveBody { resolved });
-        async move { call.send().await }
+        async move { call.send().await.full_comment_mutation() }
     };
     // A viewer who wrote nothing there may not; the one who asked may; an editor may.
     let refused = resolve(&walt, true).await.problem();
@@ -388,7 +389,7 @@ async fn a_comment_is_edited_by_its_author_alone_and_deleted_by_them_or_whoever_
             client_id: None,
             expected_seq: None,
         });
-        async move { call.send().await }
+        async move { call.send().await.full_comment_mutation() }
     };
     let refused = edit(&desk.ada, "Mine now").await.problem();
     assert_eq!(
@@ -557,6 +558,7 @@ async fn under_an_archived_node_nothing_is_added_to_a_discussion_or_changed_in_o
         .body(&places::archive_body(&desk.world, &desk.ada.token, desk.topic, true).await)
         .send()
         .await
+        .full_archive()
         .ok();
     let refused = [
         desk.world

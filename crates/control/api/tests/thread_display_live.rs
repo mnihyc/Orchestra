@@ -1,3 +1,4 @@
+#![recursion_limit = "256"]
 //! Live thread icons and read acknowledgements arrive through the existing feeds.
 #![allow(
     clippy::unwrap_used,

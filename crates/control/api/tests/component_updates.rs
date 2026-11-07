@@ -288,7 +288,9 @@ async fn a_node_uses_its_host_manage_page_and_reports_its_own_version_and_comman
         .token(&manager.token)
         .send()
         .await
-        .ok();
+        .ok()
+        .into_full()
+        .expect("this control reads the full native Host update status");
     assert_eq!(
         shared.status, "queued",
         "Host Manage is sufficient without ownership"
@@ -299,7 +301,9 @@ async fn a_node_uses_its_host_manage_page_and_reports_its_own_version_and_comman
         .token(&owner.token)
         .send()
         .await
-        .ok();
+        .ok()
+        .into_full()
+        .expect("this control reads the full native Host update status");
     assert_eq!(accepted.status, "queued");
     assert_eq!(accepted.running_version, "0.0.0");
     let mut conn = world.conn().await;

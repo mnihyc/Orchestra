@@ -36,6 +36,16 @@ pub async fn lock(conn: &mut Conn, id: Id) -> Result<Option<orch_types::Json>, D
     )
 }
 
+/// Reads the immutable accepted choice without taking a completion-writer lock.
+pub async fn get(conn: &mut Conn, id: Id) -> Result<Option<orch_types::Json>, DbError> {
+    Ok(
+        sqlx::query_scalar("SELECT data FROM notification_operations WHERE id=$1")
+            .bind(id)
+            .fetch_optional(conn)
+            .await?,
+    )
+}
+
 /// A stable resource-set key, independent of the next operation's identifier or outcome.
 pub fn group_key(family: &str, resources: &[(String, Id)]) -> String {
     let mut resources = resources.to_vec();

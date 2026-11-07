@@ -1,3 +1,4 @@
+#![recursion_limit = "256"]
 //! Presence merges one person's visible tabs across two API processes and removes them only after the last tab leaves.
 #![allow(
     clippy::unwrap_used,

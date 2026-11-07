@@ -69,6 +69,10 @@ pub struct ParameterOption {
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize, JsonSchema)]
 #[serde(rename_all = "snake_case")]
 pub enum ModelList {
+    /// Native web search modes enabled on the model.
+    WebSearch,
+    /// Enabled live search only, for a harness without a cache-only mode.
+    LiveWebSearch,
     /// The reasoning efforts the model lists.
     Efforts,
     /// The service tiers a manager enabled on the model.
@@ -94,6 +98,8 @@ pub enum ParameterOptions {
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize, JsonSchema)]
 #[serde(rename_all = "snake_case")]
 pub enum DefaultFromModel {
+    /// The model's default native search mode.
+    DefaultWebSearch,
     /// The model's default reasoning effort.
     DefaultEffort,
     /// The service tier a thread on the model starts with; none where the entry names none.
@@ -184,6 +190,8 @@ pub enum ParameterApply {
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize, JsonSchema)]
 #[serde(rename_all = "snake_case")]
 pub enum ModelFeature {
+    /// Whether a manager opened native web search.
+    WebSearch,
     /// The reasoning efforts it lists.
     Efforts,
     /// The service tiers enabled on it.
@@ -274,6 +282,7 @@ impl Condition {
             Self::ProviderKind(kind) => ctx.provider_kind == *kind,
             Self::EnvironmentPlacement(placement) => ctx.environment_placement == *placement,
             Self::ModelHas(feature) => match feature {
+                ModelFeature::WebSearch => !ctx.model.web_search_modes().is_empty(),
                 ModelFeature::Efforts => !ctx.model.efforts().is_empty(),
                 ModelFeature::ServiceTiers => !ctx.model.service_tiers().is_empty(),
                 ModelFeature::AccessPrograms => !ctx.model.access_programs().is_empty(),
@@ -416,7 +425,9 @@ impl ParameterDef {
     /// Whether it is shown and sent: eligible and enabled.
     #[must_use]
     pub fn is_shown(&self, ctx: &Eligibility, features: &BTreeMap<String, bool>) -> bool {
-        self.is_eligible(ctx) && self.is_enabled(features)
+        self.is_eligible(ctx)
+            && self.is_enabled(features)
+            && ctx.model.option_rule("native", &self.key) != Some(&Json::Bool(false))
     }
 
     /// The choices it has for `model`: its fixed list, or the model's own.
@@ -427,10 +438,25 @@ impl ParameterDef {
             label: label.to_owned(),
             description: None,
         };
-        match &self.options {
+        let options = match &self.options {
             None => Vec::new(),
             Some(ParameterOptions::Listed(listed)) => listed.clone(),
             Some(ParameterOptions::FromModel { from_model }) => match from_model {
+                ModelList::WebSearch | ModelList::LiveWebSearch => {
+                    std::iter::once(plain("disabled", "Disabled"))
+                        .chain(
+                            model
+                                .web_search_modes()
+                                .iter()
+                                .filter(|mode| {
+                                    mode.as_str() != "disabled"
+                                        && (*from_model != ModelList::LiveWebSearch
+                                            || mode.as_str() == "live")
+                                })
+                                .map(|mode| plain(mode, mode)),
+                        )
+                        .collect()
+                }
                 ModelList::Efforts => model
                     .efforts()
                     .iter()
@@ -439,6 +465,7 @@ impl ParameterDef {
                 ModelList::ServiceTiers => model
                     .service_tiers()
                     .iter()
+                    .filter(|tier| tier.id != "auto")
                     .map(|tier| plain(&tier.id, &tier.label))
                     .collect(),
                 ModelList::AccessPrograms => model
@@ -447,16 +474,110 @@ impl ParameterDef {
                     .map(|program| plain(program, program))
                     .collect(),
             },
+        };
+        options
+            .into_iter()
+            .filter(|option| self.provider_allows(model, &Json::String(option.value.clone())))
+            .collect()
+    }
+
+    /// The provider's native schema narrows an adapter declaration; it grants no undeclared value.
+    #[must_use]
+    pub fn provider_allows(&self, model: &ModelParameters, value: &Json) -> bool {
+        model.option_schema("native").is_none_or(|schema| {
+            if schema
+                .get("properties")
+                .and_then(|properties| properties.get(&self.key))
+                .is_none()
+            {
+                return true;
+            }
+            let pointer = format!(
+                "/properties/{}",
+                self.key.replace('~', "~0").replace('/', "~1")
+            );
+            orch_types::schema::allows_at(schema, &pointer, value)
+        })
+    }
+
+    /// Resolved metadata used by the same dropdowns and frozen controls as native dispatch.
+    #[must_use]
+    pub fn projection(&self, model: &ModelParameters) -> Json {
+        let mut value = serde_json::to_value(self).unwrap_or(Json::Null);
+        if self.options.is_some() {
+            value["resolved_options"] = serde_json::json!(self.options_for(model));
         }
+        value["resolved_default"] = self.start_for(model).unwrap_or(Json::Null);
+        value["allows_none"] = Json::Bool(self.provider_allows(model, &Json::Null));
+        if let Some(range) = self.range {
+            let rule = model.option_rule("native", &self.key);
+            let min = rule
+                .and_then(|rule| rule.get("minimum"))
+                .and_then(Json::as_i64)
+                .unwrap_or(range.min)
+                .max(range.min);
+            let max = self.range_max(model).map(|max| {
+                rule.and_then(|rule| rule.get("maximum"))
+                    .and_then(Json::as_i64)
+                    .unwrap_or(max)
+                    .min(max)
+            });
+            value["resolved_range"] = serde_json::json!({"min":min,"max":max});
+        }
+        if let Some(rule) = model.option_rule("native", &self.key) {
+            let mut constraint = rule.clone();
+            if let Some(object) = constraint.as_object_mut() {
+                object.entry("type").or_insert_with(|| {
+                    Json::String(
+                        match self.kind {
+                            ParameterType::Enum | ParameterType::String => "string",
+                            ParameterType::Integer => "integer",
+                            ParameterType::Boolean => "boolean",
+                        }
+                        .to_owned(),
+                    )
+                });
+                object
+                    .entry("title")
+                    .or_insert_with(|| Json::String(self.title.clone()));
+                object.insert(
+                    "x-orch-source".to_owned(),
+                    Json::String("provider".to_owned()),
+                );
+            }
+            value["provider_constraint"] = constraint;
+            value["constraint_source"] = Json::String("provider".to_owned());
+        }
+        value
     }
 
     /// The value it has for `model` when nobody set one; `None` sends nothing.
     #[must_use]
     pub fn default_for(&self, model: &ModelParameters) -> Option<Json> {
+        if let Some(start) = model
+            .option_rule("native", &self.key)
+            .and_then(|rule| rule.get("const").or_else(|| rule.get("default")))
+        {
+            return (!start.is_null()).then(|| start.clone());
+        }
         match &self.default {
             ParameterDefault::Value(Json::Null) => None,
             ParameterDefault::Value(value) => Some(value.clone()),
             ParameterDefault::FromModel { from_model } => match from_model {
+                DefaultFromModel::DefaultWebSearch => {
+                    let start = model.web_search_start();
+                    Some(Json::from(
+                        if self
+                            .options_for(model)
+                            .iter()
+                            .any(|mode| mode.value == start)
+                        {
+                            start
+                        } else {
+                            "disabled"
+                        },
+                    ))
+                }
                 DefaultFromModel::DefaultEffort => model.default_effort.clone().map(Json::String),
                 DefaultFromModel::DefaultServiceTier => model.service_tier_start().map(Json::from),
                 DefaultFromModel::DefaultAccessProgram => {
@@ -500,9 +621,21 @@ impl ParameterDef {
     #[must_use]
     pub fn start_for(&self, model: &ModelParameters) -> Option<Json> {
         self.default_for(model).filter(|start| {
-            start
-                .as_i64()
-                .is_none_or(|number| self.in_range(number, model))
+            let right_type = match self.kind {
+                ParameterType::Enum | ParameterType::String => start.is_string(),
+                ParameterType::Boolean => start.is_boolean(),
+                ParameterType::Integer => start.is_i64(),
+            };
+            right_type
+                && start
+                    .as_i64()
+                    .is_none_or(|number| self.in_range(number, model))
+                && self.provider_allows(model, start)
+                && (self.kind != ParameterType::Enum
+                    || self
+                        .options_for(model)
+                        .iter()
+                        .any(|option| start.as_str() == Some(option.value.as_str())))
         })
     }
 
@@ -520,7 +653,11 @@ impl ParameterDef {
         // A thread that chose none of a speed or a program chose the ordinary tier, or no program:
         // that is sent as nothing, whatever the model starts with.
         if stored.is_some_and(Json::is_null) && self.chooses_none() {
-            return Resolution::SendNothing;
+            return if self.provider_allows(&ctx.model, &Json::Null) {
+                Resolution::SendNothing
+            } else {
+                Resolution::Stale(Json::Null)
+            };
         }
         let Some(value) = stored.filter(|value| !value.is_null()) else {
             return self
@@ -534,6 +671,9 @@ impl ParameterDef {
         };
         if !right_type {
             return Resolution::WrongType(value.clone());
+        }
+        if !self.provider_allows(&ctx.model, value) {
+            return Resolution::Stale(value.clone());
         }
         if self.kind == ParameterType::Integer
             && value
@@ -761,6 +901,40 @@ mod tests {
             "scopes": ["org", "project", "topic", "thread"], "apply": "next_turn",
             "eligible_when": { "model_has": "service_tiers" }
         }))
+    }
+
+    #[test]
+    fn provider_native_constraints_drive_both_resolution_and_projection() {
+        let ctx = context(
+            json!({"service_tiers":[{"id":"fast","label":"Fast"},{"id":"flex","label":"Flex"}],
+            "request_options":{"native":{"type":"object","$defs":{"fixed":{"const":"fast"}},
+                "properties":{"service_tier":{"$ref":"#/$defs/fixed"}}}}}),
+        );
+        let tier = service_tier();
+        assert_eq!(
+            tier.options_for(&ctx.model)
+                .iter()
+                .map(|option| option.value.as_str())
+                .collect::<Vec<_>>(),
+            ["fast"]
+        );
+        assert_eq!(tier.start_for(&ctx.model), Some(json!("fast")));
+        let projected = tier.projection(&ctx.model);
+        assert_eq!(projected["resolved_options"][0]["value"], "fast");
+        assert_eq!(projected["provider_constraint"]["const"], "fast");
+        assert_eq!(projected["allows_none"], false);
+        let sent = sendable(
+            &[tier.clone()],
+            &ctx,
+            &BTreeMap::new(),
+            &json!({"service_tier":"flex"}),
+        );
+        assert_eq!(sent.values.get("service_tier"), Some(&json!("fast")));
+        assert_eq!(sent.flagged, ["service_tier"]);
+        assert_eq!(
+            tier.resolve(&ctx, &BTreeMap::new(), Some(&Json::Null)),
+            Resolution::Stale(Json::Null)
+        );
     }
 
     fn cyber() -> ParameterDef {
@@ -1302,5 +1476,24 @@ mod tests {
             written["rate"]["above"][0]["context_tokens"],
             json!(272_000)
         );
+    }
+}
+
+/// Native search is a provider-managed model capability; adapters map only the selected mode.
+#[must_use]
+pub fn web_search_parameter(cached: bool) -> ParameterDef {
+    ParameterDef {
+        key: "web_search".to_owned(),
+        title: "Web search".to_owned(),
+        description: "Let the model search the public web within the modes enabled by the provider. Search may have an additional fee.".to_owned(),
+        group: ParameterGroup::Behaviour,
+        kind: ParameterType::Enum,
+        options: Some(ParameterOptions::FromModel { from_model: if cached { ModelList::WebSearch } else { ModelList::LiveWebSearch } }),
+        range: None,
+        default: ParameterDefault::FromModel { from_model: DefaultFromModel::DefaultWebSearch },
+        scopes: vec![ParameterScope::Org, ParameterScope::Project, ParameterScope::Topic, ParameterScope::Thread],
+        apply: ParameterApply::NewSession,
+        eligible_when: Some(Condition::ModelHas(ModelFeature::WebSearch)),
+        feature: None,
     }
 }

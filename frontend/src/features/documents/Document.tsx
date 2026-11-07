@@ -7,10 +7,10 @@
 import { useViewSaveGuard } from '@/features/workbench/CloseViews';
 import { useViewInstance } from '@/features/workbench/instance';
 import { useWorkbench } from '@/features/workbench/store';
-import { useQuery } from '@tanstack/react-query';
+import { useQuery, useQueryClient } from '@tanstack/react-query';
 import { useBlocker } from '@tanstack/react-router';
 import { Clock, FileText, History as HistoryIcon, MoreHorizontal, Search, Share2 } from 'lucide-react';
-import { type RefObject, useCallback, useEffect, useRef, useState } from 'react';
+import { type RefObject, useCallback, useEffect, useLayoutEffect, useRef, useState } from 'react';
 import { useTranslation } from 'react-i18next';
 import type { TFunction } from 'i18next';
 import { AdminReachNotice } from '@/features/access/AdminReachNotice';
@@ -46,7 +46,7 @@ import { ReaderComment } from '@/features/people/ReaderComment';
 import { useViewFind } from '@/features/search/ViewFind';
 import { useShape } from '@/features/workbench/Narrow';
 import { useReadmeEntry } from '@/features/documents/Readme';
-import type { Document, Node, SearchHit, UserRef } from '@/generated/api-types';
+import type { Document, DocumentLinks, Node, SearchHit, UserRef } from '@/generated/api-types';
 import { holds } from '@/lib/permissions';
 import { reloadDocument, useDocumentFeed, useOrgTreeFeed } from '@/realtime/live';
 import { useDocumentState } from '@/realtime/stores/document';
@@ -114,6 +114,8 @@ function madeBy(t: Say, doc: Document): string | null {
 
 export function DocumentPage({ documentId, block, file, line, onFileClosed, version, fresh = false, onOffered, onVersion, embedded = false }: DocumentPageProps) {
   const { t } = useTranslation();
+  const cache = useQueryClient();
+  const [linksSeed, setLinksSeed] = useState<{ id: string; value: DocumentLinks } | null>(null);
   const instance = useViewInstance();
   const marks = useDocumentMarksStore();
   const marksScope = useDocumentMarksScope();
@@ -126,7 +128,17 @@ export function DocumentPage({ documentId, block, file, line, onFileClosed, vers
   const visitId = doc !== null && !doc.deleted && state.ended === null ? doc.id : undefined;
   const place = useQuery({ ...nodeQuery(doc?.node.id ?? ''), enabled: doc !== null && !doc.node.redacted }).data;
   // A document that switches every tab of its Links section off does not offer the section.
-  const tabs = useQuery({ ...documentLinksQuery(documentId), enabled: doc !== null && !doc.deleted && state.ended === null });
+  const nativeTabs = doc?.link_settings;
+  useLayoutEffect(() => {
+    if (nativeTabs === undefined || nativeTabs === null || (linksSeed?.id === documentId && linksSeed.value === nativeTabs)) return;
+    const key = documentLinksQuery(documentId).queryKey;
+    const held = cache.getQueryState(key);
+    // The native setting's own accepted changes/refusals outrank an opening's seed.
+    if (held?.data === undefined && held?.status !== 'error') cache.setQueryData(key, nativeTabs);
+    setLinksSeed({ id: documentId, value: nativeTabs });
+  }, [cache, documentId, nativeTabs, linksSeed]);
+  const tabs = useQuery({ ...documentLinksQuery(documentId), enabled: doc !== null && !doc.deleted && state.ended === null
+    && (nativeTabs === undefined || nativeTabs === null || linksSeed?.id === documentId && linksSeed.value === nativeTabs) });
   // The places of the document's org: where it can be moved to, and what a link in its text can name.
   useOrgTreeFeed(doc?.path[0]?.redacted === false ? doc.path[0].id : null);
   const [editor, setEditor] = useState<EditorApi | null>(null);

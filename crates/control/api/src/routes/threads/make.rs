@@ -20,15 +20,15 @@ use orch_access_contract::pages::{PageChange, Whole};
 use orch_agent_contract::descriptor::ArrangementType as AgentArrangement;
 use orch_api_contract::access::{AccessPreset, ThreadAccess};
 use orch_api_contract::binding::EnvironmentChoice;
-use orch_api_contract::common::ErrorCode;
-use orch_api_contract::nodes::{CreateThread, NodeKind, ThreadCreate};
+use orch_api_contract::common::{ErrorCode, Problem};
+use orch_api_contract::nodes::{CreateThread, NodeKind, ThreadCreate, ThreadCreateResponse};
 use orch_api_contract::threads::Thread;
 use orch_engine::access::{Answer, ProviderUse, ResourceAccess};
 use orch_engine::binding::{Birth, CreateThreadError, NewThread};
 use orch_engine::provider_setup::Learning;
 use orch_settings::{Place, get as setting};
 use orch_settings_contract::registry::keys;
-use orch_types::Id;
+use orch_types::{Id, Json};
 use serde_json::json;
 use std::sync::Arc;
 
@@ -38,15 +38,20 @@ pub const NEW_THREAD: &str = "New thread";
 
 /// Binds this module's requests.
 pub fn mount(registry: &mut Registry) {
-    registry.on(ThreadCreate, thread_create);
+    registry.on_with_optional_initial_operation(
+        ThreadCreate,
+        super::creator_discovery::initial,
+        super::creation_operation::thread,
+        thread_create,
+    );
 }
 
 /// What a thread is bound to, once the request and the settings of the place
 /// have both been heard.
-struct Chosen {
-    agent: Id,
-    provider: Id,
-    arrangement: Option<AgentArrangement>,
+pub(super) struct Chosen {
+    pub agent: Id,
+    pub provider: Id,
+    pub arrangement: Option<AgentArrangement>,
 }
 
 /// A word of the API's contract as the same word of the agent contract.
@@ -59,7 +64,7 @@ fn arrangement_of(word: orch_api_contract::binding::ArrangementType) -> Option<A
 /// The agent profile and the provider a thread is bound to: the ones the
 /// request names, else the ones the topic defaults to when the caller may use
 /// both. None when there is no binding to make.
-async fn binding_of(
+pub(super) async fn binding_of(
     app: &crate::state::AppState,
     conn: &mut orch_db::Conn,
     topic: Id,
@@ -146,9 +151,39 @@ async fn needs_new_default(
     ))
 }
 
+/// An implicit environment's availability failure keeps its cause under the thread's refusal.
+fn implicit_environment_error(mut error: ApiError) -> ApiError {
+    let extra = &error.problem.extra;
+    let unavailable = match error.code() {
+        ErrorCode::PlanBlocked => {
+            matches!(extra.get("reason").and_then(Json::as_str), Some("no_host"))
+        }
+        ErrorCode::RequestInvalid => {
+            extra
+                .get("errors")
+                .and_then(Json::as_array)
+                .is_some_and(|errors| {
+                    !errors.is_empty()
+                        && errors.iter().all(|fault| {
+                            fault.get("path").and_then(Json::as_str) == Some("template_id")
+                        })
+                })
+        }
+        _ => false,
+    };
+    if !unavailable {
+        return error;
+    }
+    let Problem { detail, extra, .. } = *error.problem;
+    let mut problem = Problem::new(ErrorCode::EnvironmentNoneUsable, detail);
+    problem.extra = extra;
+    error.problem = Box::new(problem);
+    error
+}
+
 /// The environment a thread is put into: the one the request names, else the
 /// topic's own when threads share it and the caller manages it.
-async fn environment_of(
+pub(super) async fn environment_of(
     app: &crate::state::AppState,
     conn: &mut orch_db::Conn,
     topic: Id,
@@ -208,7 +243,7 @@ async fn environment_of(
 }
 
 /// The page a thread starts with, as the rows its creator changes.
-fn page_of(access: Option<&ThreadAccess>) -> ApiResult<Option<PageChange>> {
+pub(crate) fn page_of(access: Option<&ThreadAccess>) -> ApiResult<Option<PageChange>> {
     match access {
         None | Some(ThreadAccess::Preset(AccessPreset::Defaults)) => Ok(None),
         Some(ThreadAccess::Preset(AccessPreset::Private)) => Ok(Some(PageChange {
@@ -323,6 +358,7 @@ pub(crate) async fn scheduled_choices(
             effort: body.effort.clone(),
         },
         Birth {
+            agent_access: body.agent_access.into(),
             first_input: None,
             prepare_source: body.prepare_source,
             worktree,
@@ -336,13 +372,14 @@ pub(crate) async fn scheduled_choices(
 /// Makes a thread in a topic.
 /// Called with the caller's existing guarded transaction, including for a topic and its first thread.
 /// Every resource, page, job and input remains private until the caller commits the complete admission.
-pub(crate) async fn create_in(
+pub(crate) async fn resolve_in(
     ctx: &Ctx,
     conn: &mut orch_db::Conn,
     principal: &orch_authz::Principal,
     topic: Id,
     body: &CreateThread,
-) -> ApiResult<Thread> {
+    creator_prefix: bool,
+) -> ApiResult<(NewThread, Birth, Option<(Id, Id)>)> {
     let worktree = worktree_of(body)?;
     let name = body
         .name
@@ -385,6 +422,7 @@ pub(crate) async fn create_in(
     } else {
         None
     };
+    let mut new_environment_home = None;
     let environment = match body.environment.as_ref().or(fallback.as_ref()) {
         Some(EnvironmentChoice::New(new)) => {
             let mut new = (**new).clone();
@@ -421,9 +459,21 @@ pub(crate) async fn create_in(
                     ));
                 }
             }
-            crate::routes::environments::hosted::create_in(ctx, conn, principal, new)
-                .await?
-                .id
+            let made = if creator_prefix {
+                super::creation_operation::environment_prefix(ctx, conn, principal, topic, new)
+                    .await
+            } else {
+                crate::routes::environments::hosted::create_in(ctx, conn, principal, new).await
+            };
+            let made = made.map_err(|error| {
+                if fallback.is_some() {
+                    implicit_environment_error(error)
+                } else {
+                    error
+                }
+            })?;
+            new_environment_home = Some((home, made.job.id));
+            made.id
         }
         _ => {
             environment_of(
@@ -459,6 +509,7 @@ pub(crate) async fn create_in(
         effort: body.effort.clone(),
     };
     let birth = Birth {
+        agent_access: body.agent_access.into(),
         first_input: body.first_input.clone(),
         prepare_source: body.prepare_source,
         worktree,
@@ -466,6 +517,17 @@ pub(crate) async fn create_in(
         settings,
         page,
     };
+    Ok((new, birth, new_environment_home))
+}
+
+pub(crate) async fn create_in(
+    ctx: &Ctx,
+    conn: &mut orch_db::Conn,
+    principal: &orch_authz::Principal,
+    topic: Id,
+    body: &CreateThread,
+) -> ApiResult<Thread> {
+    let (new, birth, _) = resolve_in(ctx, conn, principal, topic, body, false).await?;
     let made = ctx
         .app
         .engine
@@ -485,7 +547,7 @@ pub(crate) async fn create_in(
     one(ctx, conn, made.thread).await
 }
 
-fn worktree_of(
+pub(super) fn worktree_of(
     body: &CreateThread,
 ) -> ApiResult<Option<orch_api_contract::source::WorktreeChoice>> {
     let Some(mut choice) = body.worktree.clone() else {
@@ -522,21 +584,86 @@ fn worktree_of(
 }
 
 /// Makes a thread in a topic.
-async fn thread_create(ctx: Ctx, (): (), mut body: CreateThread) -> ApiResult<Thread> {
-    if body.environment.is_none() {
+async fn thread_create(ctx: Ctx, (): (), body: CreateThread) -> ApiResult<ThreadCreateResponse> {
+    if authorization::caller_of(ctx.user()?)?
+        .grant()
+        .is_some_and(|grant| grant.operation_scope().is_some())
+    {
+        return create_scoped(ctx, body).await;
+    }
+    thread_create_ordinary(ctx, body)
+        .await
+        .map(ThreadCreateResponse::full)
+}
+
+async fn create_scoped(ctx: Ctx, body: CreateThread) -> ApiResult<ThreadCreateResponse> {
+    let (ctx, mut tx, guard) = if ctx.topic_creation_prefix().is_some() {
+        crate::key_operations::creation_stage::begin_thread(&ctx, &body).await?
+    } else {
+        let (tx, guard) = transaction_guard::begin(&ctx).await?;
+        (ctx, tx, guard)
+    };
+    let creation = guard.operation_data::<super::creation_operation::Creation>()?;
+    let principal = guard.into_principal();
+    let created = if let Some(created) = &creation.created {
+        created.clone()
+    } else {
+        let created = ctx
+            .app
+            .engine
+            .create_thread_in_transaction(
+                &mut tx,
+                principal.caller(),
+                &creation.new,
+                &creation.birth,
+                orch_types::new_id(),
+                principal.now().get(),
+            )
+            .await;
+        let created = match created {
+            Ok(created) => created,
+            Err(error) => return Err(create_failed(&mut tx, error).await),
+        };
+        created
+    };
+    let receipt = super::creation_operation::receipt(
+        &mut tx,
+        principal.user(),
+        created.thread,
+        creation.new.topic,
+        body.first_input.as_ref(),
+    )
+    .await?;
+    let shown = super::creation_operation::read(
+        &ctx,
+        &mut tx,
+        &principal,
+        &creation,
+        created.thread,
+        false,
+    )
+    .await?;
+    tx.commit().await.map_err(orch_db::DbError::from)?;
+    if body.first_input.is_some() {
+        ctx.app.engine.wake(created.thread);
+    }
+    ctx.app.engine.kick();
+    Ok(match shown {
+        Some((thread, _)) if !ctx.key_receipt_required() => ThreadCreateResponse::full(thread),
+        _ => ThreadCreateResponse::Receipt(receipt),
+    })
+}
+
+async fn thread_create_ordinary(ctx: Ctx, body: CreateThread) -> ApiResult<Thread> {
+    let automatic_new = if body.environment.is_none() {
         let mut conn = ctx.app.db.acquire().await?;
         let principal = authorization::principal(&ctx, &mut conn).await?;
         let topic = ctx.id("id")?;
-        if needs_new_default(&ctx.app, &mut conn, topic, principal.user()).await? {
-            body.environment = Some(EnvironmentChoice::New(Box::new(
-                orch_api_contract::binding::NewEnvironment {
-                    home_node_id: Some(topic),
-                    ..Default::default()
-                },
-            )));
-        }
-    }
-    if matches!(body.environment.as_ref(), Some(EnvironmentChoice::New(_))) {
+        needs_new_default(&ctx.app, &mut conn, topic, principal.user()).await?
+    } else {
+        false
+    };
+    if automatic_new || matches!(body.environment.as_ref(), Some(EnvironmentChoice::New(_))) {
         let topic = ctx.id("id")?;
         let (mut tx, guard) = transaction_guard::begin(&ctx).await?;
         let principal = guard.into_principal();
@@ -623,6 +750,7 @@ async fn thread_create(ctx: Ctx, (): (), mut body: CreateThread) -> ApiResult<Th
         effort: body.effort.clone(),
     };
     let birth = Birth {
+        agent_access: body.agent_access.into(),
         first_input: body.first_input.clone(),
         prepare_source: body.prepare_source,
         worktree: worktree.clone(),

@@ -236,7 +236,8 @@ pub enum OrchTool {
     DownloadShared,
     /// Makes or changes a document.
     EditDocument,
-    /// Organizes documents and folders; only deletion requires a preview and confirmation.
+    /// Organizes documents and folders: create, copy, move and restore execute directly;
+    /// document deletion and thread/chat management require a preview and confirmation.
     ManageShared,
     /// Posts to people in a chat or queues a note to another thread's agent, according to its typed target.
     SendMessage,
@@ -1299,6 +1300,9 @@ pub enum SessionEvent {
     /// The session is gone.
     #[serde(rename = "session.lost")]
     SessionLost(SessionLost),
+    /// Owned task state and an optional native continuation awaiting admission.
+    #[serde(rename = "session.background_tasks")]
+    BackgroundTasks(crate::background::BackgroundTasks),
     /// A turn began.
     #[serde(rename = "turn.started")]
     TurnStarted(TurnStarted),
@@ -1344,11 +1348,12 @@ pub enum SessionEvent {
 }
 
 /// The kinds of a session event, as they are written.
-pub const SESSION_EVENT_KINDS: [&str; 18] = [
+pub const SESSION_EVENT_KINDS: [&str; 19] = [
     "session.opened",
     "session.instructions",
     "session.title",
     "session.lost",
+    "session.background_tasks",
     "turn.started",
     "item.started",
     "item.delta",
@@ -1374,6 +1379,7 @@ impl SessionEvent {
             Self::InstructionSources(_) => "session.instructions",
             Self::SessionTitle(_) => "session.title",
             Self::SessionLost(_) => "session.lost",
+            Self::BackgroundTasks(_) => "session.background_tasks",
             Self::TurnStarted(_) => "turn.started",
             Self::ItemStarted(_) => "item.started",
             Self::ItemDelta(_) => "item.delta",
@@ -1418,6 +1424,7 @@ mod tests {
             json!({ "kind": "session.instructions", "body": { "sources": [] } }),
             json!({ "kind": "session.title", "body": { "title": "Fix the login redirect" } }),
             json!({ "kind": "session.lost", "body": { "reason": "the harness process exited" } }),
+            json!({ "kind": "session.background_tasks", "body": { "self_waking": true, "tasks": [], "native_wake": null } }),
             json!({ "kind": "turn.started", "body": { "turn_id": id(1), "native_turn_ref": "turn_9" } }),
             json!({ "kind": "item.started", "body": {
                 "turn_id": id(1), "native_ref": "item_3", "stream": "main", "kind": "agent_message",

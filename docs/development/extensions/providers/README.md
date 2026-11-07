@@ -81,6 +81,7 @@ Contract **1**.
 | Member | JSON shape | Presence | Meaning |
 |--------|------------|----------|---------|
 | `reports` | `FactMember[]` | may be absent | The members it can tell. A member it does not list is unsupported until it tells it; a name this contract does not know is left out. |
+| `field_reports` | `map of string[]` | may be absent | Optional closed field lists for normalized credit member/item paths. Omitted paths keep legacy unknown capability; a present value still proves support independently of this list. |
 | `spends_resets` | `boolean` | may be absent | Whether it spends the resets it lists in `available_resets` (`resets.spend`). |
 | `credential` | `SourceCredential` | may be absent | Whether it wants the provider's key to read. |
 | `min_interval_secs` | `integer or null` | may be absent | The least time between two of its reads, in seconds, at least 60; `null` leaves it to Orch. |
@@ -134,6 +135,7 @@ Contract **1**.
 | `"date"` | A calendar day, `YYYY-MM-DD`. |
 | `"map"` | Names with values. |
 | `"secret_map"` | Names with values that are never shown again. |
+| `"json"` | A JSON value, retaining nested objects, arrays, numbers, booleans and null. |
 
 **Choice**
 

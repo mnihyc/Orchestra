@@ -10,15 +10,29 @@ import type { Thread } from '@/generated/api-types';
 import { i18n } from '@/i18n';
 import { sandboxWords } from '@/features/resources/SandboxReadiness';
 
-const CONFINEMENT_KEYS=['threadConfinement.approvalNotAllowed','threadConfinement.approvalUnsupported','threadConfinement.sandboxUnsupported','agentHistory.removingDetail','agentHistory.sideNeedsImport'] as const;
+const APPROVAL_KEYS=['threadConfinement.approvalNotAllowed','threadConfinement.approvalUnsupported'] as const;
+const CONFINEMENT_KEYS=[...APPROVAL_KEYS,'threadConfinement.sandboxUnsupported','agentHistory.removingDetail','agentHistory.sideNeedsImport'] as const;
+const MACHINE_PROGRAM_VERSION = /^Codex on (.+) is ([^;\r\n]+); this agent runs ([^\r\n]+)\. An environment manager can allow it on the environment's page\.$/u;
+
+/** Only this complete engine sentence names the environment's current machine-program version refusal. */
+export function isMachineProgramVersionMismatch(raw: string): boolean {
+  return MACHINE_PROGRAM_VERSION.test(raw);
+}
+const APPROVAL_MODES=[['Ask','ask'],['On request','on_request'],['Auto','auto'],['Bypass','bypass']] as const;
 
 /** This automatic native-cache wait has no human recovery action and is not an error. */
 export function isAgentHistoryRemoving(thread: Thread): boolean {
   return thread.state === 'blocked' && thread.blocked?.detail === i18n.getFixedT('en')('agentHistory.removingDetail');
 }
 
-/** Only these fixed engine explanations are translated; unknown/native error details remain verbatim. */
+/** Only known engine explanations are translated; unknown/native error details remain verbatim. */
 export function blockedDetail(raw:string,t:TFunction):string {
+  const programVersion = MACHINE_PROGRAM_VERSION.exec(raw);
+  if (programVersion?.[1] !== undefined && programVersion[2] !== undefined && programVersion[3] !== undefined) {
+    return t('environmentTools.versionMismatch', { machine: programVersion[1],
+      programVersion: programVersion[2] === 'unknown' ? t('environmentTools.unknownVersion') : programVersion[2],
+      agentVersion: programVersion[3] === 'unknown' ? t('environmentTools.unknownVersion') : programVersion[3] });
+  }
   // Retained blocked rows from the previous engine used these three exact internal sentences.
   if (['ReadOnly','Workspace','Open'].some((mode)=>raw===`no sandbox mode at or below ${mode} can be enforced here: change the setting, the environment's limit or the environment`)) {
     return t('threadConfinement.sandboxUnsupported');
@@ -33,6 +47,12 @@ export function blockedDetail(raw:string,t:TFunction):string {
   const refused = /^(?:harness_unavailable|harness_error): (.+)$/su.exec(raw);
   if (refused?.[1] !== undefined) return t('threadConfinement.agentRefused', { detail: refused[1] });
   const english=i18n.getFixedT('en');
+  const namedMode=APPROVAL_MODES.find(([name])=>raw.startsWith(`${name}: `));
+  if(namedMode!==undefined){
+    const explanation=raw.slice(namedMode[0].length+2);
+    const key=APPROVAL_KEYS.find((key)=>english(key)===explanation);
+    if(key!==undefined)return `${t(`composer.mode.labels.${namedMode[1]}`)}: ${t(key)}`;
+  }
   const key=CONFINEMENT_KEYS.find((key)=>english(key)===raw);
   return key===undefined?raw:t(key);
 }
@@ -101,6 +121,7 @@ export function waitingWords(thread: Thread | null, t: TFunction): string | null
       case 'binding_invalid':
         // Held for the second step of the people who sent what waits: their setup is the way on.
         if (raw === 'second_step_required') return t('thread.blocked.secondStep');
+        if (isMachineProgramVersionMismatch(raw)) return blockedDetail(raw, t);
         return t('thread.blocked.binding_invalid', common);
       case 'provider_exhausted':
         return t('thread.blocked.provider_exhausted', common);

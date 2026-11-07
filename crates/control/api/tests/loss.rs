@@ -9,6 +9,11 @@ mod places;
 mod resources;
 mod support;
 
+#[path = "loss/preflight_scopes.rs"]
+mod preflight_scopes;
+#[path = "loss/recipient_scopes.rs"]
+mod recipient_scopes;
+
 use orch_access_contract::{decisions::ObjectRef, permissions::ObjectKind};
 use orch_api_contract::{common::ErrorCode, loss::*};
 use orch_authz::ownership::{NewAccess, start_resource};
@@ -65,7 +70,9 @@ async fn only_managers_can_plan_and_confirm_a_host_loss() {
         .body(&body)
         .send()
         .await
-        .ok();
+        .ok()
+        .into_full()
+        .expect("ordinary loss preview retains its native full result");
     assert_eq!(plan.name, "Lost host");
     let wrong = LossDeclareBody {
         notify: true,
@@ -215,7 +222,9 @@ async fn a_persons_lost_machine_cannot_renew_or_use_a_previously_issued_reenroll
         .body(&body)
         .send()
         .await
-        .ok();
+        .ok()
+        .into_full()
+        .expect("ordinary loss preview retains its native full result");
     world
         .app
         .call(LossDeclare, &[])
@@ -351,7 +360,9 @@ async fn a_host_manager_recovers_only_their_managed_rows_and_owners_are_notified
             })
             .send()
             .await
-            .ok();
+            .ok()
+            .into_full()
+            .expect("ordinary loss preview retains its native full result");
         world
             .app
             .call(LossDeclare, &[])
@@ -451,7 +462,9 @@ async fn declaring_loss_as_administrator_names_the_actor_on_the_page_and_marks_t
         })
         .send()
         .await
-        .ok();
+        .ok()
+        .into_full()
+        .expect("ordinary loss preview retains its native full result");
     assert_eq!(plan.admin_grants.len(), 1);
     assert_eq!(
         plan.admin_grants[0].permission,
@@ -791,7 +804,9 @@ async fn notification_previews_are_caller_bound_and_filter_private_names_and_per
         })
         .send()
         .await
-        .ok();
+        .ok()
+        .into_full()
+        .expect("ordinary loss preview retains its native full result");
     let people = world
         .app
         .call(OperationRecipientsGet, &[&plan.preflight_id])

@@ -176,6 +176,34 @@ async fn visible(
     })
 }
 
+/// Rechecks only the original native matches, using the planner's existing visibility producer.
+/// The destination itself keeps its separate native archived-place viewing rule.
+pub async fn existing_readable(
+    conn: &mut Conn,
+    principal: &Principal,
+    destination: Id,
+    existing: &[(Table, Id)],
+) -> Result<bool, ImportError> {
+    for (table, kind) in [
+        (Table::Nodes, PackageKind::Project),
+        (Table::Documents, PackageKind::Document),
+        (Table::Containers, PackageKind::Folder),
+    ] {
+        let ids = existing
+            .iter()
+            .filter(|(found, id)| *found == table && !(table == Table::Nodes && *id == destination))
+            .map(|(_, id)| *id)
+            .collect::<Vec<_>>();
+        let seen = visible(conn, principal, kind, &ids).await?;
+        if ids.iter().any(|id| !seen.contains(id)) {
+            return Ok(false);
+        }
+    }
+    Ok(existing
+        .iter()
+        .all(|(table, _)| matches!(table, Table::Nodes | Table::Documents | Table::Containers)))
+}
+
 /// The permission that makes a thing of `kind` in the node `node`, which is of the kind `parent`.
 pub(super) fn creation_right(parent: NodeKind, kind: PackageKind) -> Option<Permission> {
     use PackageKind::{Chat, Document, Folder, Org, Project, Thread, Topic};
@@ -541,6 +569,7 @@ pub async fn build(
                 },
                 allowed: Vec::new(),
                 existing: Some(Existing {
+                    table: Table::Nodes,
                     id: node,
                     name: destination.name.clone(),
                     found_by: ImportMatch::Name,
@@ -610,6 +639,7 @@ pub async fn build(
 
         // What it meets that is here: what an earlier import made of it, or what has its name beside the same things.
         let mut existing: Option<Existing> = live_origins.get(&object.id).map(|row| Existing {
+            table: table_of(origin_package_kind(&row.kind)),
             id: row.object_id,
             name: row
                 .source_name
@@ -660,6 +690,7 @@ pub async fn build(
                 .and_then(|group| group.get(&object.name.to_lowercase()))
             {
                 existing = Some(Existing {
+                    table: table_of(made),
                     id: found.id,
                     name: found.name.clone(),
                     found_by: ImportMatch::Name,

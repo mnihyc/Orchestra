@@ -63,10 +63,10 @@ export function RegisterEnvironmentDialog({ machine, open, onClose }: { machine:
       };
       return registerEnvironment(machine.id, body, key(body));
     },
-    onSuccess: (environment) => {
-      toast({ tone: 'success', title: t('machines.environment.done', { name: environment.name }) });
+    onSuccess: (environment, values) => {
+      toast({ tone: 'success', title: t('machines.environment.done', { name: values.name.trim() }) });
       onClose();
-      void navigate({ to: '/resources/environments/$id', params: { id: environment.id } });
+      void navigate({ to: '/resources/environments/$id', params: { id: 'environment_id' in environment ? String(environment.environment_id) : environment.id } });
     },
     onError: (error) => setPlaced(form.refuse(error)),
   });

@@ -1,3 +1,4 @@
+#![recursion_limit = "256"]
 //! The real fixture joins its notice/socket owners before either pool or database is removed.
 
 mod realtime_support;

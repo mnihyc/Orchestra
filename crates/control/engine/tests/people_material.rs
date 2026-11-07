@@ -1,4 +1,4 @@
-//! Topic-document policy is independent, and first-reading material keeps stable identities and current paths without hidden input.
+//! Explicit document gifts narrow independently, and first-reading material keeps stable identities and current paths without hidden input.
 #![allow(
     clippy::unwrap_used,
     clippy::expect_used,
@@ -10,12 +10,12 @@ mod shared;
 
 use orch_api_contract::{
     share::{
-        ShareDocumentsLevel, ShareParts, ShareTo, ShareToThread, ShareWhat, ShareWhatDocument,
-        ShareWithAgents,
+        ShareAgentUpdateBody, ShareDocumentsLevel, ShareParts, ShareTo, ShareToThread, ShareWhat,
+        ShareWhatDocument, ShareWhatNode, ShareWithAgents,
     },
     threads::ShareMode,
 };
-use orch_authz::{Caller, reach::DocumentPolicy};
+use orch_authz::Caller;
 use orch_db::audit::Origin;
 use orch_link_contract::commands::OrchTool;
 use orch_types::Id;
@@ -30,8 +30,35 @@ async fn topic(world: &common::World, thread: Id) -> Id {
         .unwrap()
 }
 
+async fn cut_document_rows(world: &common::World, target: orch_authz::pages::Target) {
+    let mut conn = world.pool.acquire().await.unwrap();
+    let principal = orch_authz::Principal::load(
+        &mut conn,
+        Caller::session(world.ada),
+        orch_types::Time::new(world.clock.now()),
+    )
+    .await
+    .unwrap();
+    let change = serde_json::from_value(json!({"rows": [
+        {"permission":"doc.view", "inherit":false},
+        {"permission":"doc.edit", "inherit":false},
+        {"permission":"doc.manage", "inherit":false}
+    ]}))
+    .unwrap();
+    orch_authz::pages::change(
+        &mut conn,
+        &principal,
+        target,
+        &change,
+        orch_authz::Policy::default(),
+        &Origin::default(),
+    )
+    .await
+    .unwrap();
+}
+
 #[tokio::test]
-async fn default_write_then_read_then_none_narrows_only_public_topic_material_and_creation_entries_remain_independent()
+async fn write_then_read_then_revoked_gifts_preserve_private_document_cuts_and_independent_creation_entries()
  {
     let world = a_world_whose_agent_takes_tools().await;
     // The server always has a writer of files into workspaces; without one a download says so before it asks
@@ -41,6 +68,32 @@ async fn default_write_then_read_then_none_narrows_only_public_topic_material_an
         .attach_parcels(std::sync::Arc::new(shared::MemoryParcels::default()));
     let origin = world.thread("Writer").await;
     let own_topic = topic(&world, origin).await;
+    let gifted = world
+        .engine()
+        .share_with_agents(
+            &Caller::session(world.ada),
+            &Origin::default(),
+            &ShareWithAgents {
+                viewers_read: None,
+                read_first: None,
+                what: ShareWhat::Node(ShareWhatNode { node_id: own_topic }),
+                inside: Some(true),
+                download: Some(false),
+                parts: Some(ShareParts {
+                    documents: Some(ShareDocumentsLevel::Edit),
+                    ..ShareParts::default()
+                }),
+                mode: ShareMode::Live,
+                to: ShareTo::Threads(vec![ShareToThread { thread_id: origin }]),
+                comment: None,
+                expires_at: None,
+                client_id: "explicit-topic-material".into(),
+            },
+        )
+        .await
+        .unwrap();
+    assert_eq!(gifted.len(), 1);
+    let gift = gifted[0].id;
     let source = world
         .document_beside(own_topic, "Public plan", &["Public topic words"])
         .await;
@@ -70,12 +123,20 @@ async fn default_write_then_read_then_none_narrows_only_public_topic_material_an
     assert_eq!(
         shared::refused(&export).0,
         "not_downloadable",
-        "the implicit policy grants no Export"
+        "the selected document gift grants no Export"
     );
     let private = world
         .document_beside(own_topic, "Private", &["Never implicit"])
         .await;
-    sqlx::query("INSERT INTO permission_rows(object_kind,object_id,page,profile,permission,inherit) VALUES('document',$1,'live','any','doc.view',false) ON CONFLICT(object_kind,object_id,page,profile,permission) DO UPDATE SET inherit=false").bind(private).execute(world.pool.pool()).await.unwrap();
+    cut_document_rows(
+        &world,
+        orch_authz::pages::Target::Resource(orch_access_contract::decisions::ObjectRef {
+            kind: orch_access_contract::permissions::ObjectKind::Document,
+            id: private,
+        }),
+    )
+    .await;
+
     assert!(
         call(
             &world,
@@ -98,6 +159,9 @@ async fn default_write_then_read_then_none_narrows_only_public_topic_material_an
     .await);
     sqlx::query("INSERT INTO permission_rows(object_kind,object_id,page,profile,permission,inherit) VALUES('node',$1,'live','any','thread.view',false) ON CONFLICT(object_kind,object_id,page,profile,permission) DO UPDATE SET inherit=false")
         .bind(peer).execute(world.pool.pool()).await.unwrap();
+    // Conversation and document rows are independent: privacy of these documents is an
+    // actual Doc cut, not an assumption that cutting conversation View cuts another area.
+    cut_document_rows(&world, orch_authz::pages::Target::Live(peer)).await;
     assert!(
         call(
             &world,
@@ -117,8 +181,16 @@ async fn default_write_then_read_then_none_narrows_only_public_topic_material_an
         .await
         .unwrap();
     let side_doc = world
-        .document_beside(side, "Side material", &["No implicit side material"])
+        .document_beside(side, "Side material", &["Private side material"])
         .await;
+    cut_document_rows(
+        &world,
+        orch_authz::pages::Target::Resource(orch_access_contract::decisions::ObjectRef {
+            kind: orch_access_contract::permissions::ObjectKind::Document,
+            id: side_doc,
+        }),
+    )
+    .await;
     assert!(
         call(
             &world,
@@ -131,8 +203,21 @@ async fn default_write_then_read_then_none_narrows_only_public_topic_material_an
         .is_some()
     );
     world
-        .set(own_topic, "sharing.agent_documents", json!("read"))
-        .await;
+        .engine()
+        .update_share(
+            &Caller::session(world.ada),
+            &Origin::default(),
+            gift,
+            &ShareAgentUpdateBody {
+                parts: Some(ShareParts {
+                    documents: Some(ShareDocumentsLevel::Read),
+                    ..ShareParts::default()
+                }),
+                ..ShareAgentUpdateBody::default()
+            },
+        )
+        .await
+        .unwrap();
     ok(call(
         &world,
         origin,
@@ -149,8 +234,10 @@ async fn default_write_then_read_then_none_narrows_only_public_topic_material_an
     .await);
     assert_eq!(entry(&read, "docs")["writable"], false);
     world
-        .set(own_topic, "sharing.agent_documents", json!("none"))
-        .await;
+        .engine()
+        .revoke_share(&Caller::session(world.ada), &Origin::default(), gift)
+        .await
+        .unwrap();
     assert!(
         call(
             &world,
@@ -197,6 +284,7 @@ async fn read_first_follows_renames_and_revocation_without_creating_an_input_or_
         )
         .await;
     let request = ShareWithAgents {
+        viewers_read: None,
         read_first: Some(true),
         what: ShareWhat::Document(ShareWhatDocument {
             document_id: source,
@@ -234,7 +322,6 @@ async fn read_first_follows_renames_and_revocation_without_creating_an_input_or_
         .topic_material(&mut conn, origin)
         .await
         .unwrap();
-    assert_eq!(first.policy, DocumentPolicy::Write);
     assert_eq!(first.paths.len(), 1);
     assert_eq!(first.paths[0].id, source);
     assert!(first.paths[0].path.contains("Before name"));

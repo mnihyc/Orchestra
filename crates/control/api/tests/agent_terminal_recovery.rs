@@ -1,3 +1,4 @@
+#![recursion_limit = "256"]
 //! An actual profile repair retries original native accounting without moving the domain clock.
 
 mod realtime_support;

@@ -41,7 +41,7 @@ vi.mock('@/api/resources', async (original) => ({ ...await original<object>(), p
 vi.mock('@/api/nodes', async (original) => ({ ...await original<object>(), nodeQuery: (id: string) => ({ queryKey: ['start-flow-node', id], queryFn: () => Promise.resolve({ org_id: 'org', access: { permissions: [] } }) }) }));
 vi.mock('@/features/resources/harnesses', () => ({ useHarnessTitle: () => () => 'Reported harness' }));
 vi.mock('@/features/resources/providers/ProviderUsageCard', () => ({ ProviderUsageCard: () => null }));
-vi.mock('@/features/access/NewPage', () => ({ NewPage: () => <div data-access-options /> }));
+vi.mock('@/features/access/NewPage', async (original) => ({ ...await original<object>(), NewPage: () => <div data-access-options /> }));
 vi.mock('@/features/help/open', () => ({ useHelpOpener: () => vi.fn() }));
 
 const topic = { id: 'topic', name: 'login', kind: 'topic', path: [], parent_id: null, archived: false, folder: false, status: 'open', access: { permissions: ['topic.interact', 'topic.start_threads'] } } as unknown as Topic;
@@ -286,10 +286,10 @@ it('selects the requested environment only after a current read confirms Use', a
   const requested = { ...environment('e2', { usable: false }), reason: 'environment_use_required' };
   state.answer = options({ environments: [environment('e1', { isDefault: true }), requested] });
   state.askFor = 'e2';
-  state.request.mockImplementation(async () => {
+  state.request.mockImplementation(() => {
     state.askFor = null;
     state.answer = options({ environments: [environment('e1', { isDefault: true }), environment('e2')] });
-    return { batch_id: 'start-request', approvals: [] };
+    return Promise.resolve({ batch_id: 'start-request', approvals: [] });
   });
   const user = userEvent.setup();
   show(<NewThreadDialog parent={parent} open onClose={() => undefined} />);

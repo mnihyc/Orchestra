@@ -23,6 +23,24 @@ use orch_types::{Hash, Id, Json, Time, new_id};
 use serde_json::json;
 use std::collections::{BTreeMap, HashMap};
 
+mod operation;
+mod projection;
+mod writing;
+
+use crate::key_operations::native::effects::{self, FirstEffect};
+use orch_access_contract::permissions::ObjectKind;
+
+pub(super) struct Reviewed {
+    pub id: Id,
+    pub actor: Id,
+    pub plan: ThreadMovePlan,
+    sources: operation::ReviewSources,
+}
+pub(super) struct MovedThread {
+    pub receipt: orch_api_contract::thread_move::ThreadMoveReceipt,
+    original: Option<operation::OriginalGate>,
+}
+
 /// This is the ordinary preflight interval, shared with other reviewed changes.
 const PLAN_LIFETIME: chrono::Duration = chrono::Duration::minutes(15);
 const KIND: &str = "thread_move";
@@ -30,8 +48,16 @@ const KIND: &str = "thread_move";
 /// Binds the main thread's preview and confirmation.
 pub fn mount(registry: &mut Registry) {
     registry
-        .on(ThreadMovePreview, preview)
-        .on(ThreadMove, move_thread);
+        .on_with_operation(
+            ThreadMovePreview,
+            effects::prepare::<operation::Preview>,
+            writing::preview,
+        )
+        .on_with_operation(
+            ThreadMove,
+            effects::prepare::<operation::Move>,
+            writing::move_thread,
+        );
 }
 
 async fn ordinary(
@@ -129,7 +155,13 @@ async fn trial(
     principal: &Principal,
     plan: &Plan,
     lanes: &[threads::ThreadRow],
-) -> ApiResult<(orch_api_contract::access::PagePreview, Vec<MoveSetting>)> {
+    first: &mut Option<FirstEffect<'_>>,
+    original: Option<&operation::OriginalGate>,
+) -> ApiResult<(
+    orch_api_contract::access::PagePreview,
+    Vec<MoveSetting>,
+    Vec<(ObjectKind, Id)>,
+)> {
     let mut before = Vec::new();
     for lane in lanes {
         before.push(
@@ -149,9 +181,11 @@ async fn trial(
         .await
         .map_err(DbError::from)?;
     let tested: ApiResult<_> = async {
-        thread_move::reparent(conn, lanes, plan.moved.id, plan.to.id, ctx.now)
-            .await
-            .map_err(ApiError::internal)?;
+        thread_move::reparent_before(conn, lanes, plan.moved.id, plan.to.id, ctx.now, || {
+            operation::check_first(ctx, first, original)
+        })
+        .await
+        .map_err(ApiError::engine)?;
         let mut access = Preview::default();
         for before in &before {
             let current = before
@@ -168,6 +202,7 @@ async fn trial(
         access.gaining = combined(access.gaining, &mut access.more);
         access.losing = combined(access.losing, &mut access.more);
         let mut changed = Vec::new();
+        let mut sources = Vec::new();
         for setting in resolve_all(conn, Place::Node(plan.moved.id))
             .await
             .map_err(ApiError::internal)?
@@ -181,6 +216,14 @@ async fn trial(
                 None => None,
                 Some(None) => Some(NodeOrSystem::SYSTEM),
                 Some(Some(id)) => {
+                    // The native setting's real owner supplies this source before
+                    // formatting; trial ancestry never becomes a scope proof.
+                    let source = crate::key_operations::targets::node(conn, id).await?;
+                    if let orch_access_contract::key_scope::KeyTargetKind::Object(kind) =
+                        source.object.kind
+                    {
+                        sources.push((kind, id));
+                    }
                     let refs =
                         crate::routes::nodes::view::refs(conn, principal, &[id], Policy::default())
                             .await?;
@@ -200,7 +243,7 @@ async fn trial(
         }
         changed.sort_by(|one, two| one.key.cmp(&two.key));
         let access = crate::routes::access::previews::worded(conn, access).await?;
-        Ok((access, changed))
+        Ok((access, changed, sources))
     }
     .await;
     sqlx::query("ROLLBACK TO SAVEPOINT thread_move_trial")
@@ -228,7 +271,9 @@ async fn review(
     target: Id,
     lanes: &[threads::ThreadRow],
     stamp: ReviewStamp,
-) -> ApiResult<ThreadMovePlan> {
+    first: &mut Option<FirstEffect<'_>>,
+    original: Option<&operation::OriginalGate>,
+) -> ApiResult<(ThreadMovePlan, Vec<(ObjectKind, Id)>)> {
     let row = ordinary(conn, principal, node).await?;
     let plan = plan_of(ctx, conn, NodeKind::Thread, node, target).await?;
     let mut movement = plan_reply(ctx, conn, principal, &plan).await?;
@@ -252,10 +297,13 @@ async fn review(
             missing: None,
         });
     }
+    let mut sources = Vec::new();
     if movement.blockers.is_empty() {
-        let (access, settings) = trial(ctx, conn, principal, &plan, lanes).await?;
+        let (access, settings, content) =
+            trial(ctx, conn, principal, &plan, lanes, first, original).await?;
         movement.access = access;
         movement.settings = settings;
+        sources = content;
     }
     let Node::Thread(thread) = shown(ctx, conn, principal, node).await? else {
         return Err(ApiError::not_found());
@@ -272,7 +320,7 @@ async fn review(
         },
     };
     answer.movement.stamp = fingerprint(conn, &answer).await?;
-    Ok(answer)
+    Ok((answer, sources))
 }
 
 async fn fingerprint(conn: &mut Conn, plan: &ThreadMovePlan) -> ApiResult<String> {
@@ -294,148 +342,4 @@ async fn fingerprint(conn: &mut Conn, plan: &ThreadMovePlan) -> ApiResult<String
     }
     let value = json!({"epoch":epoch,"source":source,"destination":destination,"revisions":revisions,"movement":movement,"unchanged":plan.unchanged});
     Ok(Hash::of(&serde_json::to_vec(&value).map_err(ApiError::internal)?).to_string())
-}
-
-async fn preview(ctx: Ctx, (): (), body: ThreadMovePreviewBody) -> ApiResult<ThreadMovePlan> {
-    let node = ctx.id("id")?;
-    let (ctx, mut tx, principal) = crate::routes::nodes::action(&ctx).await?;
-    let row = ordinary(&mut tx, &principal, node).await?;
-    may_move(&mut tx, &principal, NodeKind::Thread, node, body.parent_id).await?;
-    let lanes = locks(&mut tx, row.org_id, node, body.parent_id).await?;
-    let id = new_id();
-    let until = Time::new(ctx.now + PLAN_LIFETIME);
-    let plan = review(
-        &ctx,
-        &mut tx,
-        &principal,
-        node,
-        body.parent_id,
-        &lanes,
-        ReviewStamp { id, until },
-    )
-    .await?;
-    let fingerprint = fingerprint(&mut tx, &plan).await?;
-    jobs::forks::save_preflight(
-        &mut tx,
-        &jobs::forks::PreflightRow {
-            id,
-            kind: KIND.to_owned(),
-            node_id: Some(node),
-            environment_id: None,
-            created_by: principal.user(),
-            plan: json!({"review":plan,"fingerprint":fingerprint}),
-            expires_at: until.get(),
-            created_at: ctx.now,
-        },
-    )
-    .await?;
-    tx.commit().await.map_err(DbError::from)?;
-    Ok(plan)
-}
-
-async fn move_thread(ctx: Ctx, (): (), body: ThreadMoveBody) -> ApiResult<Thread> {
-    let node = ctx.id("id")?;
-    let (ctx, mut tx, principal) = crate::routes::nodes::action(&ctx).await?;
-    let row = ordinary(&mut tx, &principal, node).await?;
-    may_move(&mut tx, &principal, NodeKind::Thread, node, body.parent_id).await?;
-    let lanes = locks(&mut tx, row.org_id, node, body.parent_id).await?;
-    let saved = jobs::changes::lock_plan(&mut tx, body.preflight_id)
-        .await?
-        .filter(|saved| {
-            saved.kind == KIND
-                && saved.node_id == Some(node)
-                && saved.created_by == principal.user()
-        })
-        .ok_or_else(|| {
-            ApiError::new(
-                ErrorCode::PreflightExpired,
-                "the stored thread move review is no longer available",
-            )
-        })?;
-    if saved.expires_at <= ctx.now {
-        return Err(ApiError::new(
-            ErrorCode::PreflightExpired,
-            "the thread move review expired; read it again",
-        ));
-    }
-    let prior: ThreadMovePlan =
-        serde_json::from_value(saved.plan["review"].clone()).map_err(ApiError::internal)?;
-    if prior.movement.to.id != body.parent_id || prior.expected_revision != body.expected_revision {
-        return Err(ApiError::new(
-            ErrorCode::ConflictStaleRevision,
-            "the destination or displayed revision differs from the stored review",
-        ));
-    }
-    let plan = review(
-        &ctx,
-        &mut tx,
-        &principal,
-        node,
-        body.parent_id,
-        &lanes,
-        ReviewStamp {
-            id: body.preflight_id,
-            until: Time::new(saved.expires_at),
-        },
-    )
-    .await?;
-    if let Some(blocker) = plan.movement.blockers.first() {
-        let code = if blocker.code == "thread.not_idle" {
-            ErrorCode::ThreadNotIdle
-        } else {
-            ErrorCode::NodeWrongParent
-        };
-        return Err(ApiError::new(code, blocker.message.clone()));
-    }
-    if body.expected_revision != plan.expected_revision
-        || saved.plan["fingerprint"].as_str() != Some(fingerprint(&mut tx, &plan).await?.as_str())
-    {
-        return Err(ApiError::new(
-            ErrorCode::ConflictStaleRevision,
-            "the access or inherited settings of this move changed; review them again",
-        ));
-    }
-    let by = orch_engine::views::user_ref_json(&mut tx, principal.user())
-        .await
-        .map_err(ApiError::internal)?;
-    let marker = thread_move::marker(
-        serde_json::to_value(&plan.movement.from).map_err(ApiError::internal)?,
-        serde_json::to_value(&plan.movement.to).map_err(ApiError::internal)?,
-        by,
-    );
-    thread_move::write(
-        &mut tx,
-        &principal,
-        &lanes,
-        node,
-        body.parent_id,
-        marker,
-        &format!("thread-move:{}", body.preflight_id),
-    )
-    .await
-    .map_err(ApiError::internal)?;
-    epoch::bump(&mut tx).await.map_err(ApiError::internal)?;
-    let who = super::actor_name(&ctx)?;
-    let summary = format!("{who} moved {} to another topic", row.name);
-    let details = json!({"thread_id":node,"from":row.topic_id,"to":body.parent_id,"owner_id":row.owner_id,"environment_id":row.environment_id,"directory":row.workspace_dir});
-    // One act keeps both its former and current place in its event-time scope.
-    crate::routes::nodes::record_about(
-        &ctx,
-        &mut tx,
-        orch_db::audit::action!(AuditAction::ThreadMoved),
-        node,
-        crate::routes::nodes::Placed {
-            id: node,
-            org: row.org_id,
-        },
-        &summary,
-        details,
-    )
-    .await?;
-    jobs::forks::forget_preflight(&mut tx, body.preflight_id).await?;
-    let Node::Thread(thread) = shown(&ctx, &mut tx, &principal, node).await? else {
-        return Err(ApiError::not_found());
-    };
-    tx.commit().await.map_err(DbError::from)?;
-    Ok(thread)
 }

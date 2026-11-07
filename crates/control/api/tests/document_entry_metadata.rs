@@ -1,3 +1,4 @@
+#![recursion_limit = "256"]
 //! Current single-entry place metadata uses native person authority and scoped structural wakes.
 
 mod desk;
@@ -9,6 +10,7 @@ mod realtime_support;
 mod rig;
 mod support;
 
+use crate::support::FullPermissionPageReply;
 use desk::Desk;
 use orch_api_contract::{
     access::{AccessChoice, HolderInput, PageChange, PageChangeName, PermissionPageUpdate},
@@ -66,7 +68,9 @@ async fn folder(desk: &Desk, parent: Option<Id>, name: &str) -> Proof<DocumentTr
         })
         .send()
         .await
-        .ok())
+        .ok()
+        .into_full()
+        .unwrap())
 }
 
 fn container(receipt: &DocumentTreeReceipt) -> Proof<Id> {
@@ -107,6 +111,7 @@ async fn give(desk: &Desk, kind: &str, id: Id, by: &Who, choice: AccessChoice) {
         })
         .send()
         .await
+        .full_permission_page()
         .ok();
 }
 
@@ -261,6 +266,7 @@ async fn leaf_grants_get_redacted_place_without_parent_node_view_and_keep_actual
             .raw_body(&json!({"whole":"private"}))
             .send()
             .await
+            .full_permission_page()
             .ok();
         diagnostics::phase("container.create");
         let hidden = container(&folder(&desk, None, "Hidden folder name").await?)?;
@@ -272,6 +278,7 @@ async fn leaf_grants_get_redacted_place_without_parent_node_view_and_keep_actual
             .raw_body(&json!({"whole":"private"}))
             .send()
             .await
+            .full_permission_page()
             .ok();
         diagnostics::phase("document.create");
         let doc = desk.make(&desk.ada, "Shared leaf").await.base.id;
@@ -650,7 +657,8 @@ async fn retained_entry_place_keeps_existing_inspection_authority_and_never_adds
     remove.command = DocumentTreeCommand::Delete;
     remove.to = None;
     remove.deletion_plan = Some(
-        desk.world
+        (desk
+            .world
             .app
             .call(DocumentTreeDeletePreview, &[])
             .token(&desk.ada.token)
@@ -658,7 +666,10 @@ async fn retained_entry_place_keeps_existing_inspection_authority_and_never_adds
             .send()
             .await
             .ok()
-            .stamp,
+            .into_full()
+            .expect("this native creation control requires its full response")
+            .stamp)
+            .into(),
     );
     let removed = act(&desk, &desk.ada, &remove).await;
     assert!(removed.view.place.is_none());

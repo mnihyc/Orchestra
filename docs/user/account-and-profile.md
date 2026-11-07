@@ -31,10 +31,23 @@ and signed-in browsers. Complete the offered setup before relying on a new
 method. Keep recovery codes in a place you control. Sign out another browser
 from the session list when it should no longer use your account.
 
-API tokens are managed in Tokens. Name a token, choose its permissions, place
-and expiry, and copy its secret when it is created. Later lists show metadata,
-not that secret. Revoke tokens you no longer need. A token is limited by your
-current access and never carries browser-only administrator authority.
+Manage automation keys in Tokens. Name the key, choose its targets and resource
+kinds, then review the exact operations selected by Read-only, Write-only,
+Read and write, Full management or Custom. Each rule keeps its operations bound
+to its own target. Presets save the reviewed selection; later API additions do
+not expand existing keys. Choose an expiry and copy the secret when it is created.
+Later lists show its policy and recent activity. Revoke keys you no longer need.
+
+A program uses the secret with `Authorization: Bearer <key>` on the same API.
+The key is limited by your current authority and its own rules. Administrative
+operations need your current administrative standing and an explicit selection;
+the browser's As admin private-access override is not delegated. A write-only
+operation returns an acknowledgement without existing content. A newly issued
+secret remains available once in that acknowledgement.
+
+Recent activity shows up to 100 calls from the last seven days, with operation,
+target, status and timing. Resource names and source addresses follow the reader's
+current access. Request bodies, response contents and secrets are not kept there.
 
 ## Keep personal choices
 
