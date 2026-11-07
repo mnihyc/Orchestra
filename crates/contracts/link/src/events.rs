@@ -110,6 +110,8 @@ event_kinds! {
     SessionTitle = "session.title", Durable, [Session];
     /// The harness no longer holds the session.
     SessionLost = "session.lost", Durable, [Session];
+    /// Owned task lifecycle and optional native follow-up admission.
+    BackgroundTasks = "session.background_tasks", Durable, [Session];
     /// A turn runs.
     TurnStarted = "turn.started", Durable, [Session];
     /// An item of the conversation began.
@@ -268,6 +270,8 @@ payloads! {
         SessionTitle(SessionTitle) = "session.title";
         /// The harness no longer holds the session.
         SessionLost(SessionLost) = "session.lost";
+        /// Owned task lifecycle and optional native follow-up admission.
+        BackgroundTasks(crate::background::BackgroundTasks) = "session.background_tasks";
         /// A turn runs.
         TurnStarted(TurnStarted) = "turn.started";
         /// An item of the conversation began.
@@ -736,6 +740,12 @@ turn_error_codes! {
     ProviderUnauthorized = "provider_unauthorized";
     /// The vendor is busy or failed, which passes: the provider keeps its state.
     ProviderBusy = "provider_busy";
+    /// The upstream rate limit was reached.
+    RateLimited = "rate_limited";
+    /// The upstream has no capacity.
+    Overloaded = "overloaded";
+    /// A response failed after output began.
+    StreamInterrupted = "stream_interrupted";
     /// The vendor could not be reached, which passes: the provider keeps its state.
     ProviderUnreachable = "provider_unreachable";
     /// The model cannot be used.
@@ -883,6 +893,9 @@ pub struct LeaseUsage {
     pub usage: foreign::TokenUsage,
     /// The model service's own name for the request, where it gave one.
     pub request_ref: Option<String>,
+    /// Actual upstream request/report facts, where the forwarder records them. Absent is legacy.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub timing: Option<orch_api_contract::usage::RequestTiming>,
 }
 
 // ---------------------------------------------------------------- environments

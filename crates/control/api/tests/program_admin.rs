@@ -162,7 +162,9 @@ async fn one_build_page_and_platform_summary_do_not_depend_on_loading_the_full_b
         .token(&c.root.token)
         .send()
         .await
-        .ok();
+        .ok()
+        .into_full()
+        .expect("the ordinary exact version projection");
     assert_eq!(fetched.len(), 1);
     assert_eq!(fetched[0].version, "1.0.3");
 }

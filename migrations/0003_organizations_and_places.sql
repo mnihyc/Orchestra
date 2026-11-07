@@ -237,6 +237,7 @@ CREATE TABLE topics (
 
 CREATE TABLE groups (
     id uuid NOT NULL,
+    revision bigint DEFAULT 1 NOT NULL,
     org_id uuid NOT NULL,
     name text NOT NULL,
     description text DEFAULT ''::text NOT NULL,
@@ -248,6 +249,8 @@ CREATE TABLE groups (
     CONSTRAINT groups_created_by_fkey FOREIGN KEY (created_by) REFERENCES users(id),
     CONSTRAINT groups_org_id_fkey FOREIGN KEY (org_id) REFERENCES nodes(id) ON DELETE CASCADE
 );
+
+CREATE TRIGGER groups_revision BEFORE UPDATE ON groups FOR EACH ROW EXECUTE FUNCTION orch_row_revision();
 
 CREATE UNIQUE INDEX groups_org_name_key ON groups USING btree (org_id, lower(name));
 
@@ -344,3 +347,5 @@ CREATE TABLE group_members (
 CREATE INDEX group_members_nested_idx ON group_members USING btree (member_group_id) WHERE (member_group_id IS NOT NULL);
 
 CREATE TRIGGER access_changed AFTER INSERT OR DELETE OR UPDATE ON group_members FOR EACH ROW EXECUTE FUNCTION access_changed();
+
+CREATE TRIGGER group_members_revision AFTER INSERT OR DELETE OR UPDATE ON group_members FOR EACH ROW EXECUTE FUNCTION orch_group_holder_revision();

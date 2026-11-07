@@ -1,4 +1,5 @@
 //! Watching drops actual RFB actions before a real window sees them, including clipboard directions.
+#![recursion_limit = "256"]
 #![cfg(unix)]
 #![allow(
     clippy::unwrap_used,

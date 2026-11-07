@@ -1,4 +1,5 @@
 //! Inspection on a real socket keeps the same caller address as an ordinary request.
+#![recursion_limit = "256"]
 #![allow(
     clippy::unwrap_used,
     clippy::expect_used,

@@ -104,6 +104,9 @@ CREATE TABLE commands (
     updated_at timestamp with time zone DEFAULT now() NOT NULL,
     stop_confirmed_at timestamp with time zone,
     session_fact_revision bigint,
+    login_authority jsonb,
+    authority_required boolean DEFAULT false NOT NULL,
+    mcp_import_completion jsonb,
     CONSTRAINT commands_state_check CHECK ((state = ANY (ARRAY['queued'::text, 'sent'::text, 'accepted'::text, 'succeeded'::text, 'failed'::text, 'expired'::text, 'cancelled'::text]))),
     CONSTRAINT commands_pkey PRIMARY KEY (id)
 );
@@ -111,6 +114,8 @@ CREATE TABLE commands (
 CREATE INDEX commands_busy_detach_idx ON commands USING btree (updated_at, id) WHERE ((kind = 'env.detach'::text) AND (state = 'failed'::text));
 
 CREATE INDEX commands_open_idx ON commands USING btree (machine_id) WHERE (state = ANY (ARRAY['queued'::text, 'sent'::text, 'accepted'::text]));
+CREATE INDEX commands_mcp_import_open_idx ON commands ((body->>'server_id'), id)
+    WHERE kind='mcp.import' AND state IN ('queued','sent','accepted');
 
 CREATE INDEX commands_open_thread_idx ON commands USING btree (((body ->> 'thread_id'::text))) WHERE (state = ANY (ARRAY['queued'::text, 'sent'::text, 'accepted'::text]));
 
@@ -372,6 +377,8 @@ CREATE TABLE machines (
     CONSTRAINT machines_org_id_fkey FOREIGN KEY (org_id) REFERENCES nodes(id),
     CONSTRAINT machines_owner_id_fkey FOREIGN KEY (owner_id) REFERENCES users(id)
 );
+
+CREATE TRIGGER machines_revision BEFORE UPDATE ON machines FOR EACH ROW EXECUTE FUNCTION orch_row_revision();
 
 CREATE TRIGGER agent_program_reports_write AFTER INSERT OR UPDATE OF facts, status, deleted_at ON machines FOR EACH ROW EXECUTE FUNCTION orch_project_program_reports();
 

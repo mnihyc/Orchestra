@@ -5,30 +5,41 @@
     reason = "a test fails by panicking"
 )]
 
+#[cfg(target_os = "linux")]
 mod rig_environment;
 
+#[cfg(target_os = "linux")]
 use orch_link_contract::commands::{
     AgentStart, McpForget, McpImport, McpStart, McpStartLocal, McpStop,
 };
+#[cfg(target_os = "linux")]
 use orch_link_contract::session::Role;
+#[cfg(target_os = "linux")]
 use orch_link_contract::tunnels::{Service, TicketSource};
+#[cfg(target_os = "linux")]
 use orch_types::{Json, new_id};
+#[cfg(target_os = "linux")]
 use rig_environment::tunnels::{messages, post};
+#[cfg(target_os = "linux")]
 use rig_environment::{EnvRig, stand_in};
+#[cfg(target_os = "linux")]
 use serde_json::json;
 
 /// The program of the tests when it is run as a tool server: no test at all otherwise.
 #[test]
+#[cfg(target_os = "linux")]
 fn stand_in_for_a_tool_server() {
     if std::env::var(stand_in::FLAG).is_ok() {
         stand_in::run();
     }
 }
 
+#[cfg(target_os = "linux")]
 const SECRET: &str = "ghp_the_owners_own_token";
 
 /// A rig whose machine plays the agent and the environment roles, and whose scripted harness has a tool
 /// server configured, with a secret in it.
+#[cfg(target_os = "linux")]
 async fn rig_with_a_configured_server() -> (EnvRig, std::path::PathBuf) {
     let mut rig = EnvRig::with_roles(vec![Role::Agent, Role::Environment]);
     rig.with_the_scripted_harness();
@@ -49,6 +60,7 @@ async fn rig_with_a_configured_server() -> (EnvRig, std::path::PathBuf) {
     (rig, workspace)
 }
 
+#[cfg(target_os = "linux")]
 fn import_of(rig: &EnvRig, server_id: orch_types::Id, name: &str) -> McpImport {
     McpImport {
         expected_fingerprint: None,
@@ -62,6 +74,7 @@ fn import_of(rig: &EnvRig, server_id: orch_types::Id, name: &str) -> McpImport {
 }
 
 /// Every file under a directory whose content holds `needle`.
+#[cfg(target_os = "linux")]
 fn files_holding(dir: &std::path::Path, needle: &str) -> Vec<std::path::PathBuf> {
     let mut found = Vec::new();
     let mut pending = vec![dir.to_path_buf()];
@@ -85,6 +98,7 @@ fn files_holding(dir: &std::path::Path, needle: &str) -> Vec<std::path::PathBuf>
     found
 }
 
+#[cfg(target_os = "linux")]
 #[tokio::test]
 async fn a_server_the_harness_configured_is_found_by_name_imported_run_from_its_copy_and_forgotten()
 {
@@ -196,6 +210,7 @@ async fn a_server_the_harness_configured_is_found_by_name_imported_run_from_its_
     rig.stop().await;
 }
 
+#[cfg(target_os = "linux")]
 #[tokio::test]
 async fn nothing_is_imported_that_the_harness_does_not_have_and_nothing_is_found_where_the_owner_allows_none()
  {

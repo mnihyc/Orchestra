@@ -4,7 +4,8 @@ import { EmptyState } from '@/ui/EmptyState';
 import { ApiError } from '@/api/client';
 import type { AccessTarget } from '@/api/access';
 import { Account } from '@/features/access/ChangePreview';
-import { AREA_WORDS, stepWords } from '@/features/access/AgentRow';
+import { AREA_WORDS, stepWords } from '@/features/access/agentShareWords';
+import { CurrentAgentContribution, ViewerReadStanding } from './AgentContribution';
 import { AREAS, stepOf } from '@/features/access/agentShares';
 import { HolderView } from '@/features/access/holders';
 import { usePermissionName } from '@/features/access/names';
@@ -46,7 +47,11 @@ export function ShareConsequences({ preview, target }: { preview: SharePreview; 
     </li>)}</ul>
     <ul className="flex flex-col gap-2">{preview.agents.map((agent, index) => <li key={index} className="rounded border border-border p-2">
       <ReviewPlace place={agent.to} /><p>{t(agent.inside ? 'shareReview.inside' : 'shareReview.itself')}</p>
+      <p className="font-medium">{t('agentContributions.previousToProposed')}</p>
       <ul>{AREAS.map((area) => <li key={area}>{t(AREA_WORDS[area])}{': '}{stepWords(t, area, stepOf(area, agent.already_shared))}{' → '}{stepWords(t, area, stepOf(area, agent.parts))}</li>)}</ul>
+      {agent.copy === null && <CurrentAgentContribution current={agent.current} proposed />}
+      <ViewerReadStanding entries={agent.viewer_entries} />
+      {agent.viewer_entries !== undefined && agent.viewer_entries.length > 0 && <section><p className="font-medium">{t('agentContributions.viewerEntries')}</p><EntryFacts entries={agent.viewer_entries} target={target} /></section>}
       <p>{t(agent.download ? 'shareReview.download' : 'shareReview.noDownload')}</p>
       {agent.future_threads && <p>{t('shareReview.future')}</p>}
       {agent.copy !== null && <p>{t('shareReview.copy', { count: agent.copy.files, bytes: agent.copy.bytes })}</p>}

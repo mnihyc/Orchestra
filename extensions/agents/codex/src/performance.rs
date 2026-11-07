@@ -21,6 +21,7 @@ pub struct Requests {
     awaiting_end: HashMap<String, Open>,
     serial: u64,
     tools: HashSet<(String, String)>,
+    tool_requests: HashMap<String, UsageRequest>,
 }
 
 fn text<'a>(value: &'a Json, key: &str) -> &'a str {
@@ -54,6 +55,7 @@ impl Requests {
                     id: format!("{thread}:{}", self.serial),
                     subagent,
                     asked: Some(at),
+                    tool_refs: Some(Vec::new()),
                     ..UsageRequest::default()
                 },
                 last_output: None,
@@ -84,6 +86,7 @@ impl Requests {
             reports.push(open.request);
         }
         self.tools.retain(|(owner, _)| owner != thread);
+        self.tool_requests.remove(thread);
         reports
     }
 
@@ -123,8 +126,21 @@ impl Requests {
                 at.get(),
                 &chrono::Utc,
             );
+            let retry_of = self
+                .current
+                .get(thread)
+                .or_else(|| self.awaiting_end.get(thread))
+                .map(|open| open.request.id.clone());
+            let next_attempt = self
+                .current
+                .get(thread)
+                .and_then(|open| open.request.attempt)
+                .unwrap_or(1)
+                + 1;
             let mut reports = self.abort(thread, &error.code, Some(&error.message));
             for request in &mut reports {
+                request.error_reason = error.reason.clone();
+                request.upstream_status = error.status;
                 if let Some(orch_agent_contract::requests::RequestOutcome::Error { said, .. }) =
                     &mut request.outcome
                 {
@@ -133,6 +149,10 @@ impl Requests {
             }
             if params.get("willRetry").and_then(Json::as_bool) == Some(true) {
                 self.asked(thread, at);
+                if let Some(open) = self.current.get_mut(thread) {
+                    open.request.attempt = Some(next_attempt);
+                    open.request.retry_of = retry_of;
+                }
                 reports.extend(self.running(thread));
             }
             return reports;
@@ -160,6 +180,47 @@ impl Requests {
                 }
             }
         } else if method == "item/started" && tool(item) {
+            let reference = text(item, "id");
+            let source = self
+                .current
+                .get(thread)
+                .or_else(|| self.awaiting_end.get(thread))
+                .or_else(|| self.ended.get(thread).and_then(|ended| ended.back()))
+                .map(|open| open.request.clone());
+            if let Some(source) = source
+                && self
+                    .tool_requests
+                    .get(thread)
+                    .is_none_or(|held| held.id != source.id)
+            {
+                self.tool_requests.insert(thread.to_owned(), source);
+            }
+            if let Some(source) = self.tool_requests.get_mut(thread) {
+                let refs = source.tool_refs.get_or_insert_with(Vec::new);
+                if !reference.is_empty() && !refs.iter().any(|known| known == reference) {
+                    refs.push(reference.to_owned());
+                }
+                let refs = source.tool_refs.clone();
+                let request_id = source.id.clone();
+                if let Some(open) = self.current.get_mut(thread)
+                    && open.request.id == request_id
+                {
+                    open.request.tool_refs = refs.clone();
+                }
+                if let Some(open) = self.awaiting_end.get_mut(thread)
+                    && open.request.id == request_id
+                {
+                    open.request.tool_refs = refs.clone();
+                }
+                if let Some(open) = self
+                    .ended
+                    .get_mut(thread)
+                    .and_then(|ended| ended.back_mut())
+                    && open.request.id == request_id
+                {
+                    open.request.tool_refs = refs;
+                }
+            }
             self.tools
                 .insert((thread.to_owned(), text(item, "id").to_owned()));
             if let Some(mut open) = self.awaiting_end.remove(thread) {
@@ -176,12 +237,17 @@ impl Requests {
                     .or_default()
                     .push_back(open);
             }
+            // Additional parallel calls enrich the same request even if its counts arrived first.
+            if let Some(source) = self.tool_requests.get(thread) {
+                return vec![source.clone()];
+            }
         } else if method == "item/completed" && tool(item) {
             self.tools
                 .remove(&(thread.to_owned(), text(item, "id").to_owned()));
             if !self.tools.iter().any(|(owner, _)| owner == thread)
                 && !self.current.contains_key(thread)
             {
+                self.tool_requests.remove(thread);
                 self.asked(thread, at);
                 return self.running(thread).into_iter().collect();
             }

@@ -227,6 +227,7 @@ pub(super) async fn take_back(
     principal: &orch_authz::Principal,
     now: DateTime<Utc>,
     limit: i64,
+    before: impl FnOnce() -> Result<(), MakeError>,
 ) -> Result<Taken, MakeError> {
     let Some(row) = rows::lock(tx, chat).await? else {
         return Ok(Taken::Nothing);
@@ -258,6 +259,7 @@ pub(super) async fn take_back(
     if added.is_empty() {
         return Ok(Taken::Nothing);
     }
+    before()?;
     let looked: Vec<Id> = added.iter().map(|(message, _)| *message).collect();
     let live: Vec<Id> = added
         .iter()

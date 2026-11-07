@@ -7,6 +7,12 @@
 //! by its name: a [`NameHit`] finds a thing and says where it lies; what is
 //! written in it is for [`SearchList`].
 
+use crate::operations::{OperationSpec as Op, TargetResolver as Target};
+use orch_access_contract::key_scope::KeyAction::Read;
+use orch_access_contract::key_scope::KeyIdentityKind as I;
+use orch_access_contract::key_scope::KeyTargetKind::{Identity, Object};
+use orch_access_contract::permissions::ObjectKind as K;
+
 use orch_types::{Id, Time};
 use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
@@ -348,7 +354,11 @@ pub struct SearchListQuery {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub scope: Option<Id>,
     /// A comma list of item kinds, `chat_message` and `document`; empty selects none, absence all.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[serde(
+        default,
+        deserialize_with = "search_kinds",
+        skip_serializing_if = "Option::is_none"
+    )]
     pub kinds: Option<String>,
     /// Only what this person wrote.
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -501,6 +511,15 @@ pub enum SearchStreamEvent {
     },
 }
 
+// Decode the present value before Option: HTML-form decoding otherwise turns an empty filter into absence.
+fn search_kinds<'de, D>(deserializer: D) -> Result<Option<String>, D::Error>
+where
+    D: serde::Deserializer<'de>,
+{
+    let value = serde_json::Value::deserialize(deserializer)?;
+    serde_json::from_value(value).map_err(serde::de::Error::custom)
+}
+
 /// One of the content kinds that can be related to a document.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
 #[serde(rename_all = "snake_case")]
@@ -612,13 +631,51 @@ pub struct RelatedItems {
 
 crate::endpoints! {
     /// Finds related readable documents, chats and threads using the document's resolved settings.
-    DocumentRelatedList: GET "/documents/{id}/related", User, query crate::common::PageQuery, none, json RelatedItems, 200;
+    DocumentRelatedList: GET "/documents/{id}/related", User, query crate::common::PageQuery, none, json RelatedItems, 200,
+        operation Op::facets(&[
+            crate::operations::FacetSpec::required(Read,&[Object(K::Document)],Target::Resolved("document")),
+            crate::operations::FacetSpec::required(Read,&[Object(K::Document),Object(K::Thread),Identity(I::Chat)],Target::ResolvedCollection("results")),
+            crate::operations::FacetSpec::response_content(&[Object(K::Org),Object(K::Project),Object(K::Topic),Object(K::Thread)],Target::ResolvedCollection("search_names")),
+            crate::operations::FacetSpec::response_content(&[Object(K::DocumentContainer)],Target::ResolvedCollection("search_folders")),
+        ]);
     /// Streams words and meaning concurrently, with hydrated parts, server orders, progress and a shared cursor.
-    SearchStreamList: GET "/search/stream", User, query SearchStreamListQuery, none, raw, 200;
+    SearchStreamList: GET "/search/stream", User, query SearchStreamListQuery, none, raw, 200,
+        operation Op::facets(&[
+            crate::operations::FacetSpec::required(Read,&[Object(K::Org),Object(K::Project),Object(K::Topic),Object(K::Thread),Object(K::Document),Identity(I::Chat)],Target::ResolvedCollection("results")),
+            crate::operations::FacetSpec::response_content(&[Object(K::Org),Object(K::Project),Object(K::Topic),Object(K::Thread)],Target::ResolvedCollection("search_names")),
+        ]);
     /// Searches the items of threads, the messages of chats and the documents that the caller may read, newest first.
-    SearchList: GET "/search", User, query SearchListQuery, none, json Page<SearchHit>, 200;
+    SearchList: GET "/search", User, query SearchListQuery, none, json Page<SearchHit>, 200,
+        operation Op::facets(&[
+            crate::operations::FacetSpec::required(Read,&[Object(K::Org),Object(K::Project),Object(K::Topic),Object(K::Thread),Object(K::Document),Identity(I::Chat)],Target::ResolvedCollection("results")),
+            crate::operations::FacetSpec::response_content(&[Object(K::Org),Object(K::Project),Object(K::Topic),Object(K::Thread)],Target::ResolvedCollection("search_names")),
+        ]);
     /// Finds whatever the caller may see by its name: the quick way to a place, a person, a resource, a document or a thread.
-    NameSearchList: GET "/search/names", User, query NameSearchListQuery, none, json NameSearchPage, 200;
+    NameSearchList: GET "/search/names", User, query NameSearchListQuery, none, json NameSearchPage, 200,
+        operation Op::facets(&[crate::operations::FacetSpec::required(
+            Read,
+            &[
+                Object(K::Org),
+                Object(K::Project),
+                Object(K::Topic),
+                Object(K::Thread),
+                Object(K::Document),
+                Object(K::DocumentContainer),
+                Object(K::Provider),
+                Object(K::Agent),
+                Object(K::Environment),
+                Object(K::Host),
+                Object(K::Machine),
+                Object(K::Template),
+                Object(K::McpServer),
+                Object(K::Mount),
+                Object(K::Skill),
+                Identity(I::Chat),
+                Identity(I::Account),
+                Identity(I::Group),
+            ],
+            Target::ResolvedCollection("results"),
+        ), crate::operations::FacetSpec::response_content(&[Object(K::Org),Object(K::Project),Object(K::Topic),Object(K::Thread)],Target::ResolvedCollection("search_names"))]);
 }
 
 #[cfg(test)]
@@ -641,6 +698,19 @@ mod related_tests {
 mod tests {
     use super::*;
     use serde_json::json;
+
+    #[test]
+    fn kind_selection_preserves_present_empty_and_keeps_null_and_absence_unfiltered() {
+        for (wire, expected) in [
+            (json!({"q":"release"}), None),
+            (json!({"q":"release","kinds":null}), None),
+            (json!({"q":"release","kinds":""}), Some("")),
+            (json!({"q":"release","kinds":"document"}), Some("document")),
+        ] {
+            let query: SearchListQuery = serde_json::from_value(wire).unwrap();
+            assert_eq!(query.kinds.as_deref(), expected);
+        }
+    }
 
     fn node(kind: &str, n: u8, name: &str) -> serde_json::Value {
         json!({ "id": format!("0199d1a8-7f3c-7a1e-8b3a-1c2d3e4f5a{n:02x}"), "kind": kind, "name": name, "redacted": false })

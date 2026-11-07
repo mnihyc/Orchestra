@@ -16,6 +16,7 @@ param(
     [string]$Url = '',
     [string]$Token = '',
     [string]$Name = '',
+    [string]$Gateway = '',
     [string]$Roles = '',
     [string]$Delegate = '',
     [string]$DataDir = '',
@@ -52,6 +53,7 @@ if ($Help) {
   -Url              系统地址：HTTPS；HTTP 仅限 127.0.0.0/8、[::1] 或 localhost
   -Token            系统显示的一次性注册令牌（oenr_…）
   -Name             机器在系统中的名称；省略时使用主机名
+  -Gateway          automatic 或网关 ID；可交互时显示标签、区域和实测延迟；手选网关保持固定
   -Roles            environment、agent、provider，使用逗号分隔
   -Delegate         将选中角色的设置交给 Orch；本机保留值仍然优先
   -DataDir          数据目录；指定路径的实例使用独立登录任务
@@ -86,6 +88,7 @@ Uninstall without --purge keeps data and identity; nested instances block their 
   -Url              HTTPS system address; HTTP only on 127.0.0.0/8, [::1] or localhost
   -Token            the one-use enrollment token the system showed (oenr_…)
   -Name             the machine's name in Orch (the host name if left out)
+  -Gateway          automatic or a gateway ID; interactive setup shows labels, regions and RTT; selected gateways stay fixed
   -Roles            environment,agent,provider, separated by commas
   -Delegate         hand the selected roles' settings to Orch; locally kept values still win
   -DataDir          another data directory, identity and task (platform default if left out)
@@ -144,6 +147,7 @@ try {
     if (-not $Url) { throw '-Url is needed: the address of the Orch system (see -Help)' }
     if (-not $Token) { throw '-Token is needed: the enrollment token the system showed (see -Help)' }
     if ($DelegatePolicy -and $Delegate) { throw 'use -Delegate or -DelegatePolicy, not both' }
+    if ($PSBoundParameters.ContainsKey('Gateway') -and [string]::IsNullOrEmpty($Gateway)) { throw '-Gateway needs automatic or a gateway ID' }
     if ($Roles.Split(',') -contains 'node') { throw 'The node role is hosted by orch-node: add this computer as a host as well.' }
     $Url = $Url.TrimEnd('/')
     if (-not (Test-SystemAddress $Url)) { throw (Get-SystemAddressError) }
@@ -220,6 +224,7 @@ try {
     }
 
     $arguments = @('--data-dir', $DataDir, 'enroll', '--url', $Url, '--token', $Token)
+    if ($Gateway) { $arguments += @('--gateway', $Gateway) }
     if ($Name) { $arguments += @('--name', $Name) }
     if ($Dedicated) { $arguments += '--dedicated' }
     if ($Roles) { $arguments += @('--roles', $Roles) }

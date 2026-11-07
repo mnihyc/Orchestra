@@ -20,6 +20,7 @@ Use the row menu to reorder or remove rules and steps. Save applies the rule; Ca
 The shipped rules retry **Provider busy** and **Provider unreachable** up to three times.
 The first pause is one minute, with a pause multiplier of two. A vendor's retry time takes priority.
 **Request refused** continues up to three times. **Limit reached** waits for a known reset.
+**Session lost** continues a confirmed running session once when its machine is reachable again.
 **Access not granted** and other failures wait for a person. These are editable defaults.
 An empty rules list leaves failures for a person.
 
@@ -46,6 +47,8 @@ The thread's live line names the failure, next action, known wait and attempt co
 The model chip shows the model that actually runs. A repeated failure uses one error line with its attempt count.
 Each automatic step leaves one history line with its rule, recorded attempt limit and time.
 A known wait in a switch job appears in that job's progress line too.
+When a lost session's machine is offline, the live line says it is waiting for the machine to return.
+Its reserved attempt survives an Orch restart. The usual Stop retrying control still holds it.
 
 **Retry now** brings a scheduled attempt forward. It still checks current access and limits.
 **Stop retrying** stops future automatic attempts. It does not undo work already done.
@@ -78,6 +81,8 @@ Rules, the guard and the notice follow the same inheritance and locks as other p
 
 If the failed turn kept no answer and started no tool, recovery can run the original input again.
 If it kept an answer or started a tool, recovery adds a visible `Continue` input instead.
+The loss of a running session also uses `Continue`: the process may have done work it could not report.
+If the session never confirmed that the turn began, a person decides what to do with its waiting input.
 It names the original input's author. Its header says **Sent automatically by a rule**.
 The tooltip names the rule and attempt. The history line explains why it continued and links to the rule.
 Its attempt limit is the value recorded when it ran; later rule edits do not change that history.

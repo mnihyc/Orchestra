@@ -1,4 +1,5 @@
 //! A rows-only refresh preserves every visible row while avoiding a thread view's extra database statements.
+#![recursion_limit = "256"]
 #![allow(
     clippy::unwrap_used,
     clippy::expect_used,

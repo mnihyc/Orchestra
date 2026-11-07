@@ -935,11 +935,14 @@ pub async fn turn_cost(
         return Ok(None);
     }
     let mut observations = ledger::events_of_turn(conn, turn).await?;
-    let per_request = observations
-        .iter()
-        .any(|row| row.origin == ledger::origin::HARNESS && row.scope == ledger::scope::REQUEST);
+    let per_request = observations.iter().any(|row| {
+        (row.origin == ledger::origin::HARNESS
+            || row.measurement_states.get("_adapter_request_ref").is_some())
+            && row.scope == ledger::scope::REQUEST
+    });
     observations.retain(|row| {
-        row.origin != ledger::origin::FORWARDER
+        (row.origin != ledger::origin::FORWARDER
+            || row.measurement_states.get("_adapter_request_ref").is_some())
             && row.purpose == ledger::purpose::TURN
             && (!per_request || row.scope == ledger::scope::REQUEST)
     });

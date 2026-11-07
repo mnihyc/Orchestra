@@ -50,6 +50,15 @@ use serde_json::json;
 use std::collections::BTreeMap;
 use std::time::Duration;
 
+mod creator_authority;
+pub use creator_authority::creator_principal;
+pub use creator_authority::remember_command as remember_creator_command;
+pub use creator_authority::retain as retain_creator_origin;
+pub use creator_authority::{
+    command_authorized as creator_command_authorized,
+    command_current_callers as creator_command_current_callers,
+};
+
 /// How many hex digits of the runtime's identifier a unit's name holds: the last ones, since the first
 /// twelve of an identifier are the moment it was made in and two runtimes made together share them.
 const NAME_DIGITS: usize = 12;
@@ -310,42 +319,65 @@ pub async fn candidates(
 ) -> Result<Vec<Candidate>, EngineError> {
     let principal =
         Principal::load(conn, Caller::session(provider.owner_id), Time::new(now)).await?;
-    let seen = resources::visible(
-        conn,
-        &principal,
-        ResourceKind::Host,
-        Page {
-            after: None,
-            limit: HOSTS_MAX,
-        },
-        Policy::default(),
-    )
-    .await?;
-    let may_use: Vec<Id> = seen
-        .items
-        .iter()
-        .filter(|each| {
-            each.held.iter().any(|held| {
-                matches!(
-                    held.permission,
-                    Permission::HostUse | Permission::HostManage
-                )
+    candidates_for(conn, provider, template, named, &principal).await
+}
+
+// Creator-owned births keep their actual accepted/current principal. Autonomous subsequent
+// starts retain the ordinary owner-based entry point above.
+async fn candidates_for(
+    conn: &mut orch_db::Conn,
+    provider: &State,
+    template: &TemplateState,
+    named: Option<Id>,
+    principal: &Principal,
+) -> Result<Vec<Candidate>, EngineError> {
+    let (may_use, template_allowed) = if principal.caller().admitted_operation()
+        == Some("ProviderCreate")
+    {
+        (
+            resources::provider_creation_hosts(conn, principal, provider.id, HOSTS_MAX).await?,
+            resources::provider_creation_template_use(conn, principal, provider.id, template.id)
+                .await?,
+        )
+    } else {
+        let seen = resources::visible(
+            conn,
+            principal,
+            ResourceKind::Host,
+            Page {
+                after: None,
+                limit: HOSTS_MAX,
+            },
+            Policy::default(),
+        )
+        .await?;
+        let may_use: Vec<Id> = seen
+            .items
+            .iter()
+            .filter(|each| {
+                each.held.iter().any(|held| {
+                    matches!(
+                        held.permission,
+                        Permission::HostUse | Permission::HostManage
+                    )
+                })
             })
-        })
-        .map(|each| each.resource.id)
-        .collect();
-    let template_allowed = resources::check(
-        conn,
-        &principal,
-        ObjectRef {
-            kind: ResourceKind::Template.into(),
-            id: template.id,
-        },
-        Permission::TemplateUse,
-        Policy::default(),
-    )
-    .await?
-    .is_allowed();
+            .map(|each| each.resource.id)
+            .collect();
+        let template_allowed = resources::check(
+            conn,
+            principal,
+            ObjectRef {
+                kind: ResourceKind::Template.into(),
+                id: template.id,
+            },
+            Permission::TemplateUse,
+            Policy::default(),
+        )
+        .await?
+        .is_allowed();
+        (may_use, template_allowed)
+    };
     if may_use.is_empty() {
         return Ok(Vec::new());
     }
@@ -680,9 +712,18 @@ impl ProviderProvision {
         if let Some(recipe) = &recovery {
             named = Some(recipe.host);
         }
-        let listed = candidates(&mut tx, &provider, &template, named, now)
+        let owner = orch_db::queries::jobs::job(&mut tx, job.id())
+            .await?
+            .ok_or_else(|| failed("provider_gone", "the provider job disappeared"))?;
+        let listed = match creator_authority::principal(&mut tx, &owner, Time::new(now))
             .await
-            .map_err(Stop::from)?;
+            .map_err(creator_authority::stop)?
+        {
+            Some(principal) => {
+                candidates_for(&mut tx, &provider, &template, named, &principal).await?
+            }
+            None => candidates(&mut tx, &provider, &template, named, now).await?,
+        };
         let (host, warnings): (HostState, Vec<&str>) = match &previous {
             Some(old) => {
                 let candidate = listed
@@ -946,27 +987,93 @@ impl ProviderProvision {
         let enrollment: Enrollment = match plan.get("enrollment") {
             Some(kept) => serde_json::from_value(kept.clone()).map_err(EngineError::from)?,
             None => {
-                let mut conn = self
-                    .engine
-                    .inner
-                    .db
-                    .acquire()
-                    .await
-                    .map_err(EngineError::from)?;
+                // A replacement's token and its private checkpoint are one admitted
+                // database intent. The service issues enrollment data on this connection;
+                // no native command or external machine wait is made in this transaction.
+                let guarded = super::recreate::batch_authority::applies(&job.row().await?);
+                let mut tx = if guarded {
+                    Some(
+                        self.engine
+                            .inner
+                            .db
+                            .begin()
+                            .await
+                            .map_err(EngineError::from)?,
+                    )
+                } else {
+                    None
+                };
+                let mut conn = if guarded {
+                    None
+                } else {
+                    Some(
+                        self.engine
+                            .inner
+                            .db
+                            .acquire()
+                            .await
+                            .map_err(EngineError::from)?,
+                    )
+                };
+                let connection = match tx.as_mut() {
+                    Some(tx) => &mut **tx,
+                    None => &mut **conn.as_mut().ok_or_else(|| {
+                        EngineError::unreadable("the enrollment connection disappeared")
+                    })?,
+                };
+                let mut created_by = placed.provider.owner_id;
+                if guarded {
+                    orch_db::queries::transaction_guard::lock_action(connection).await?;
+                    super::recreate::batch_authority::guard_in(connection, job).await?;
+                    let current = job.lock_owned(connection).await?.ok_or(Stop::Lost)?;
+                    if current.provider_id != Some(placed.provider.id)
+                        || current.plan.get("runtime") != Some(&json!(placed.runtime.id))
+                    {
+                        return Err(failed(
+                            "access.denied",
+                            "the enrollment target no longer belongs to this provider replacement",
+                        ));
+                    }
+                    let actual = env_rows::runtime(connection, placed.runtime.id)
+                        .await?
+                        .filter(|actual| {
+                            actual.kind == "provider"
+                                && actual.provider_id == Some(placed.provider.id)
+                                && actual.environment_id.is_none()
+                                && actual.host_id == placed.host.id
+                        })
+                        .ok_or_else(|| failed("access.denied", "the enrollment runtime changed"))?;
+                    let _ = actual;
+                    created_by = rows::state(connection, placed.provider.id)
+                        .await?
+                        .ok_or_else(|| failed("provider_gone", "the provider is gone"))?
+                        .owner_id;
+                }
                 let made = services
                     .enrollment(
-                        &mut conn,
+                        connection,
                         &EnrollmentAsk {
                             runtime: placed.runtime.id,
                             host: placed.host.id,
-                            created_by: placed.provider.owner_id,
+                            created_by,
                             name_hint: format!("{}-enroll", placed.runtime.unit_name),
                         },
                     )
                     .await
                     .map_err(|error| hosting_stop(&error))?;
-                drop(conn);
-                job.remember(&json!({ "enrollment": made })).await?;
+                if let Some(mut tx) = tx {
+                    orch_db::queries::jobs::merge_plan(
+                        &mut tx,
+                        job.id(),
+                        &json!({"enrollment":made}),
+                        job.now(),
+                    )
+                    .await?;
+                    tx.commit().await.map_err(DbError::from)?;
+                } else {
+                    drop(conn);
+                    job.remember(&json!({ "enrollment": made })).await?;
+                }
                 made
             }
         };
@@ -1260,7 +1367,20 @@ impl ProviderProvision {
     }
 
     async fn commit(&self, job: &Job) -> Result<Done, Stop> {
-        job.pass_commit().await?;
+        let owner = job.row().await?;
+        let creator = creator_authority::is_retained(&owner);
+        if creator
+            && owner
+                .plan
+                .get("provider_creator_committed")
+                .and_then(Json::as_bool)
+                == Some(true)
+        {
+            return Ok(Done::Finished);
+        }
+        if !creator {
+            job.pass_commit().await?;
+        }
         let placed = self.placed(job).await?;
         let now = job.now();
         let recovering = job.plan().await?.get("provider_recovery").is_some();
@@ -1272,6 +1392,22 @@ impl ProviderProvision {
             .begin()
             .await
             .map_err(EngineError::from)?;
+        if creator {
+            orch_db::queries::transaction_guard::lock_action(&mut tx).await?;
+            let owner = job.lock_owned(&mut tx).await?.ok_or(Stop::Lost)?;
+            creator_authority::principal(&mut tx, &owner, Time::new(now))
+                .await
+                .map_err(creator_authority::stop)?
+                .ok_or_else(|| {
+                    failed(
+                        "access.denied",
+                        "The retained provider creator disappeared.",
+                    )
+                })?;
+            if !orch_db::queries::jobs::pass_commit(&mut tx, job.id(), now).await? {
+                return Err(Stop::Cancelled);
+            }
+        }
         let (machine, _) = host_rows::machine_of_runtime(&mut tx, placed.runtime.id)
             .await?
             .ok_or_else(|| failed("unit_failed", "the unit's connector is not known"))?;
@@ -1310,6 +1446,15 @@ impl ProviderProvision {
                 true,
                 actor,
                 orch_types::Time::new(now),
+            )
+            .await?;
+        }
+        if creator {
+            orch_db::queries::jobs::merge_plan(
+                &mut tx,
+                job.id(),
+                &json!({"provider_creator_committed":true}),
+                now,
             )
             .await?;
         }
@@ -1559,7 +1704,12 @@ async fn rows_of_profiles(conn: &mut orch_db::Conn) -> Result<Vec<String>, Engin
 #[async_trait]
 impl Phased for ProviderProvision {
     async fn run(&self, job: &Job, phase: &str) -> Result<Done, Stop> {
-        if let Some(recipe) = job.plan().await?.get("provider_recovery").cloned() {
+        creator_authority::phase(job, phase).await?;
+        let current = job.row().await?;
+        if super::recreate::batch_authority::applies(&current) {
+            super::recreate::batch_authority::guard(job).await?;
+        }
+        if let Some(recipe) = current.plan.get("provider_recovery").cloned() {
             let recipe = serde_json::from_value::<crate::provider_recovery::Recipe>(recipe)
                 .map_err(EngineError::from)?;
             crate::provider_recovery::guard(job, &recipe).await?;

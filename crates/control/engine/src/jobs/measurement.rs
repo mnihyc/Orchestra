@@ -68,10 +68,23 @@ impl Engine {
         subject: Json,
         by: Id,
     ) -> Result<Count, EngineError> {
-        self.measure_count(machine, kind, body, subject, by, false)
+        self.measure_count(machine, kind, body, subject, by, false, None)
             .await
     }
 
+    /// A native planning count retains the actual original scoped source with its own job.
+    pub(crate) async fn measure_in_background_from(
+        &self,
+        machine: Id,
+        kind: CommandKind,
+        body: Json,
+        subject: Json,
+        by: Id,
+        preparation: Option<&crate::fork_plan::operation::Preparation>,
+    ) -> Result<Count, EngineError> {
+        self.measure_count(machine, kind, body, subject, by, false, preparation)
+            .await
+    }
     /// Optional move homes retain a permanent capability refusal for the ordinary count-valid window.
     pub(crate) async fn measure_home_in_background(
         &self,
@@ -81,7 +94,7 @@ impl Engine {
         subject: Json,
         by: Id,
     ) -> Result<Count, EngineError> {
-        self.measure_count(machine, kind, body, subject, by, true)
+        self.measure_count(machine, kind, body, subject, by, true, None)
             .await
     }
 
@@ -93,15 +106,17 @@ impl Engine {
         subject: Json,
         by: Id,
         reuse_unsupported: bool,
+        preparation: Option<&crate::fork_plan::operation::Preparation>,
     ) -> Result<Count, EngineError> {
         let now = self.inner.clock.now();
-        let identity = orch_types::Hash::of(&serde_json::to_vec(&json!([
-            machine,
-            kind.as_str(),
-            body,
-            subject
-        ]))?)
-        .to_string();
+        let mut identity_value = json!([machine, kind.as_str(), body, subject]);
+        if let Some(source) = preparation {
+            identity_value
+                .as_array_mut()
+                .ok_or_else(|| EngineError::unreadable("invalid native measurement identity"))?
+                .push(serde_json::to_value(source.origin())?);
+        }
+        let identity = orch_types::Hash::of(&serde_json::to_vec(&identity_value)?).to_string();
         let mut tx = self.db().begin().await?;
         // Only requests for the same physical data serialize; no machine or filesystem wait holds this lock.
         sqlx::query("SELECT pg_advisory_xact_lock(hashtextextended($1,0))")
@@ -109,6 +124,10 @@ impl Engine {
             .execute(&mut *tx)
             .await
             .map_err(orch_db::DbError::from)?;
+        let accepted = match preparation {
+            Some(source) => Some(source.accept_on(self, &mut tx).await?),
+            None => None,
+        };
         let keepalive = setting(&mut tx, keys::MEASUREMENT_KEEPALIVE_SECS).await?;
         let valid = setting(&mut tx, keys::MEASUREMENT_VALID_SECS).await?;
         let timeout = setting(&mut tx, keys::MEASUREMENT_TIMEOUT_SECS).await?;
@@ -124,6 +143,11 @@ impl Engine {
         .fetch_optional(&mut *tx)
         .await
         .map_err(orch_db::DbError::from)?;
+        let mut native_plan = json!({"measurement_key":identity,"machine":machine,"command_kind":kind.as_str(),"body":body,"subject":subject,"keep_until":now+Duration::seconds(keepalive),"timeout_secs":timeout});
+        if let Some(accepted) = &accepted {
+            native_plan["fork_preparation"] = serde_json::to_value(&accepted.origin)?;
+            accepted.check(self.inner.clock.as_ref())?;
+        }
         let row = if let Some(id) = existing {
             rows::merge_plan(
                 &mut tx,
@@ -144,9 +168,7 @@ impl Engine {
                     node_id: None,
                     environment_id: None,
                     provider_id: None,
-                    plan: &json!({"measurement_key": identity, "machine": machine,
-                    "command_kind": kind.as_str(), "body": body, "subject": subject,
-                    "keep_until": now + Duration::seconds(keepalive), "timeout_secs": timeout}),
+                    plan: &native_plan,
                     progress: &serde_json::to_value(initial_progress(
                         if kind == CommandKind::NodeMountFingerprint {
                             &FINGERPRINT_PHASES
@@ -160,6 +182,9 @@ impl Engine {
             )
             .await?
         };
+        if let Some(accepted) = &accepted {
+            accepted.check(self.inner.clock.as_ref())?;
+        }
         tx.commit().await.map_err(orch_db::DbError::from)?;
         self.kick();
         Ok(Count {
@@ -260,18 +285,19 @@ impl Phased for Measuring {
             })
             .map_err(EngineError::from)?;
         }
-        let result = job
-            .command(Outgoing {
-                id: crate::ids::derived("measurement", &[job.id().as_bytes()]),
-                machine,
-                kind,
-                key: SerialKey::None,
-                body,
-                deadline: Some(Time::new(
-                    job.now() + Duration::seconds(i64::try_from(timeout_secs).unwrap_or(i64::MAX)),
-                )),
-            })
-            .await?;
+        let command = Outgoing {
+            authority: None,
+            id: crate::ids::derived("measurement", &[job.id().as_bytes()]),
+            machine,
+            kind,
+            key: SerialKey::None,
+            body,
+            deadline: Some(Time::new(
+                job.now() + Duration::seconds(i64::try_from(timeout_secs).unwrap_or(i64::MAX)),
+            )),
+        };
+        let command = planning_command(job, &plan, "measure", command).await?;
+        let result = job.command(command).await?;
         validate_count(kind, &plan["body"], &result)?;
         job.remember(&json!({"count":result})).await?;
         job.pass_commit().await?;
@@ -311,16 +337,17 @@ async fn fingerprint_phase(
     // Both reads share the comparison's original allowance, including after a worker takeover.
     let deadline = row.started_at.unwrap_or(row.created_at)
         + Duration::seconds(i64::try_from(timeout_secs).unwrap_or(i64::MAX));
-    let result = job
-        .command(Outgoing {
-            id: crate::ids::derived(phase, &[job.id().as_bytes()]),
-            machine,
-            kind: CommandKind::NodeMountFingerprint,
-            key: SerialKey::None,
-            body: serde_json::to_value(body).map_err(EngineError::from)?,
-            deadline: Some(Time::new(deadline)),
-        })
-        .await?;
+    let command = Outgoing {
+        authority: None,
+        id: crate::ids::derived(phase, &[job.id().as_bytes()]),
+        machine,
+        kind: CommandKind::NodeMountFingerprint,
+        key: SerialKey::None,
+        body: serde_json::to_value(body).map_err(EngineError::from)?,
+        deadline: Some(Time::new(deadline)),
+    };
+    let command = planning_command(job, plan, phase, command).await?;
+    let result = job.command(command).await?;
     let read: NodeMountFingerprintResult =
         serde_json::from_value(result).map_err(EngineError::from)?;
     if phase == "fingerprint_source" {
@@ -425,4 +452,22 @@ fn validate_count(kind: CommandKind, body: &Json, result: &Json) -> Result<(), E
         }
     }
     Ok(())
+}
+
+async fn planning_command(
+    job: &Job,
+    plan: &Json,
+    phase: &str,
+    command: Outgoing,
+) -> Result<Outgoing, EngineError> {
+    match plan.get("fork_preparation") {
+        None => Ok(command),
+        Some(value) => {
+            let origin =
+                serde_json::from_value::<crate::fork_plan::operation::Origin>(value.clone())?;
+            crate::fork_plan::operation::Preparation::new(origin)
+                .measurement_command(job.engine(), job.id(), phase, command)
+                .await
+        }
+    }
 }

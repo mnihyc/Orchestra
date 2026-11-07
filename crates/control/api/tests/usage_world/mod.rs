@@ -86,6 +86,8 @@ pub async fn team(world: &World) -> Team {
         .send()
         .await
         .ok()
+        .into_full()
+        .unwrap()
         .provider
         .base
         .id;

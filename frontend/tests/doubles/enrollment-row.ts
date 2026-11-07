@@ -3,7 +3,7 @@ import type { Host, Machine } from '../../src/generated/api-types';
 
 export function enrollmentMachine(id: string, online: boolean): Machine {
   return {
-    id, name: 'build-vm', online, platform_os: 'linux', placement: 'connected',
+    revision: 1, id, name: 'build-vm', online, platform_os: 'linux', placement: 'connected',
     access: { permissions: ['machine.view', 'machine.manage'], administers: false, through: [{ kind: 'owner' }], admin_only: [], participating: true },
     owner: null, platform_arch: 'x86_64', connector_version: '1.0.0', protocol_version: 1,
     roles: ['environment', 'agent'], status: 'active', last_seen_at: null, last_ip: null,

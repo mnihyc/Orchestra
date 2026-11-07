@@ -1,4 +1,6 @@
 //! Carried-in vendor checksums are an explicit administrator act whose digest remains in the audit.
+#![recursion_limit = "256"]
+// The engine's futures this fixture awaits are deep; the default query depth does not lay them out.
 #![allow(
     clippy::unwrap_used,
     clippy::expect_used,
@@ -462,8 +464,17 @@ async fn revoking_a_mirror_during_download_prevents_the_following_execution() {
     let app = world.app.app.clone();
     let stored_key = key.clone();
     let expected = build.sha256.clone();
+    assert!(
+        orch_api_core::harness_checks::claim(&app, &stored_key)
+            .await
+            .unwrap()
+    );
+    let claim = orch_engine::build_checks::Claim::load(&mut *world.conn().await, &stored_key)
+        .await
+        .unwrap()
+        .expect("the actual native checksum-check claim");
     let running = tokio::spawn(async move {
-        orch_api_core::harness_checks::finish(&app, &stored_key, &build)
+        orch_api_core::harness_checks::finish(&app, &stored_key, &build, claim)
             .await
             .unwrap();
     });

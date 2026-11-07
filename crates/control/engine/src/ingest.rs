@@ -444,7 +444,10 @@ fn subagent_state_only(kind: &str, payload: &Json, patch: &Json) -> bool {
             .get("tool")
             .and_then(Json::as_object)
             .is_some_and(|tool| {
-                !tool.is_empty() && tool.keys().all(|key| key == "state" || key == "model")
+                !tool.is_empty()
+                    && tool
+                        .keys()
+                        .all(|key| matches!(key.as_str(), "state" | "model" | "name" | "role"))
             })
 }
 
@@ -517,8 +520,8 @@ impl Engine {
         machine: Id,
         delivery: &Delivery,
     ) -> Result<(), EngineError> {
-        self.apply_stream_events(conn, machine, &delivery.stream, &delivery.events)
-            .await
+        // Delivery adapters carry only a pointer to the stream dispatcher's state.
+        Box::pin(self.apply_stream_events(conn, machine, &delivery.stream, &delivery.events)).await
     }
 
     /// Applies the events of a stream, in their order. Applying the same
@@ -719,6 +722,13 @@ impl Engine {
             }
             Event::SessionTitle(title) => self.on_session_title(unit, batch, &title).await,
             Event::SessionLost(lost) => self.on_session_lost(unit, batch, &lost).await,
+            Event::BackgroundTasks(report) => {
+                if let Some(thread) = threads::thread(unit.conn, batch.thread_id).await? {
+                    self.observe_background_tasks(unit, &thread, &batch.segment, &report)
+                        .await?;
+                }
+                Ok(())
+            }
             Event::TurnStarted(started) => self.on_turn_started(unit, batch, &started).await,
             Event::ItemStarted(started) => self.on_item_started(unit, batch, &started).await,
             Event::ItemDelta(delta) => self.on_item_delta(unit, batch, &delta).await,
@@ -910,6 +920,7 @@ impl Engine {
         batch: &Batch,
         lost: &SessionLost,
     ) -> Result<(), EngineError> {
+        crate::background_wake::lost(unit, batch.thread_id, batch.segment.id).await?;
         // A per-conversation CLI can end while its adapter remains able to serve other conversations.
         sqlx::query("UPDATE harnesses SET last_error_at=$4,last_error_detail=$5,updated_at=$4 WHERE provider_id=$1 AND agent_id=$2 AND machine_id=$3")
             .bind(batch.segment.provider_id).bind(batch.segment.agent_id).bind(batch.machine).bind(unit.now()).bind(&lost.reason)
@@ -935,6 +946,18 @@ impl Engine {
             return Ok(());
         }
         let message = format!("The harness lost the session: {}", lost.reason);
+        let mut failure = error_json("session_lost", &message, true);
+        // An unconfirmed start keeps its existing manual decision: the native process
+        // may already have taken that prompt. A confirmed turn uses ordinary recovery.
+        let recovery = if turn.state == turn_state::RUNNING {
+            self.recover_agent_in(unit, &thread, &turn, &failure)
+                .await?
+        } else {
+            None
+        };
+        if let Some(recovery) = recovery.as_ref() {
+            failure["recovery"] = json!({"state":recovery.state,"rule":recovery.rule["id"],"automatic":recovery.state=="scheduled"||recovery.state=="stopped"});
+        }
         add_error_item(
             unit,
             batch.thread_id,
@@ -950,12 +973,8 @@ impl Engine {
             &thread,
             &turn,
             TurnEnd {
-                state: if turn.state == turn_state::RUNNING {
-                    turn_state::INTERRUPTED
-                } else {
-                    turn_state::FAILED
-                },
-                error: Some(error_json("session_lost", &message, true)),
+                state: turn_state::FAILED,
+                error: Some(failure),
                 // With no confirmation that the turn began, its input still needs
                 // a decision. Keep it in the queue and wait for a person before
                 // trying again: the lost session may have taken it already.
@@ -964,13 +983,16 @@ impl Engine {
                 } else {
                     InputAfter::Keep
                 },
-                then_block: (turn.state == turn_state::STARTING).then(|| Blocked {
+                then_block: (turn.state == turn_state::STARTING).then_some(Blocked {
                     reason: "error",
                     detail: Some(message),
                 }),
             },
         )
         .await?;
+        if let Some(recovery) = recovery {
+            self.hold_call_recovery_in(unit, &thread, &recovery).await?;
+        }
         Ok(())
     }
 
@@ -1029,6 +1051,8 @@ impl Engine {
         if let Some(input) = threads::input(&mut *unit.conn, turn.input_id).await?
             && (moved || input.state == input_state::DELIVERED)
         {
+            self.report_background_with_input(unit, &input, turn.id)
+                .await?;
             add_user_message(unit, thread_id, turn.segment_id, Some(turn.id), &input).await?;
             crate::native_actions::invoked(unit, turn, input.id).await?;
             // Automatic first-input titles use the delivered words; no provider work runs here.
@@ -1279,11 +1303,32 @@ impl Engine {
             batch.segment.agent_id,
         )
         .await?;
-        let descriptor = agent
-            .as_ref()
-            .map(crate::harnesses::descriptor_of)
-            .transpose()?
-            .flatten();
+        let descriptor = if let Some(mut agent) = agent {
+            // Native observations depend only on their reporting declaration. An unrelated
+            // legacy display override must not prevent a later usage report from committing;
+            // terminal accounting still validates the complete profile in its retained work.
+            let reporting = agent.descriptor_overrides.get("capabilities").map(|value| {
+                value.as_object().map_or_else(
+                    || value.clone(),
+                    |members| {
+                        let fields: serde_json::Map<_, _> = ["usage_tokens", "usage_context"]
+                            .into_iter()
+                            .filter_map(|name| {
+                                members
+                                    .get(name)
+                                    .map(|value| (name.to_owned(), value.clone()))
+                            })
+                            .collect();
+                        Json::Object(fields)
+                    },
+                )
+            });
+            agent.descriptor_overrides =
+                reporting.map_or_else(|| json!({}), |value| json!({"capabilities": value}));
+            crate::harnesses::descriptor_of(&agent)?
+        } else {
+            None
+        };
         Ok(descriptor.map_or((true, true), |descriptor| {
             (
                 descriptor.capabilities.usage_tokens,
@@ -1366,12 +1411,12 @@ impl Engine {
             && completed.status == TurnOutcome::Failed
         {
             // What passes (`provider_busy`, `provider_unreachable`) and every failure that no row knows leave
-            // the provider as it was. A limit of the plan closes it until the time the vendor names; a refused
-            // credential puts it in `error`; a limit that covers one family of models or the spending, which
-            // another model may get round, closes nothing.
+            // the provider as it was. Vendor quota remains an observation attached to this
+            // actual failure, never a gate on later requests. A refused credential still
+            // puts the provider in `error` under its existing recovery rules.
             match failure.code.as_str() {
                 "provider_exhausted" if !failure.retryable => {
-                    self.close_provider_by_limit(unit, batch.segment.provider_id, failure)
+                    self.record_provider_limit(unit, batch.segment.provider_id, failure)
                         .await?;
                 }
                 "provider_unauthorized" => {
@@ -1416,18 +1461,7 @@ impl Engine {
         )
         .await?;
         if let Some(recovery) = recovery {
-            let seq = unit.stamp(thread.node_id).await?;
-            threads::set_state(
-                unit.conn,
-                thread.node_id,
-                &[thread_state::IDLE, thread_state::BLOCKED],
-                &threads::StateChange::blocked("error", Some("call_recovery")),
-                seq,
-            )
-            .await?;
-            if recovery.state == "stopped" {
-                crate::calls::notify_stop(unit, &thread, &recovery).await?;
-            }
+            self.hold_call_recovery_in(unit, &thread, &recovery).await?;
         } else if matches!(
             completed.status,
             TurnOutcome::Completed | TurnOutcome::Failed
@@ -1751,6 +1785,12 @@ impl Engine {
             return Ok(());
         };
         let mut payload = normalized(&kind, &complete_payload);
+        if let Some(tasks) = existing
+            .as_ref()
+            .and_then(|item| item.payload.get("background_tasks"))
+        {
+            payload["background_tasks"] = tasks.clone();
+        }
         if kind == "plan" {
             if let Some(object) = payload.as_object_mut() {
                 object.remove("decision");

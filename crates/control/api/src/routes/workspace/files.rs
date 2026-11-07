@@ -56,8 +56,10 @@ use std::time::Duration;
 /// How often a fetch is asked again, in a single request, after the machine said that the file
 /// changed while it was read, or the command ran out: the new version is what the next try reads.
 const FETCH_ATTEMPTS: u32 = 3;
-/// Two names fit a compact history line; the complete list stays in its structured record.
+/// Two names fit a compact summary; complete outcomes are paged from the indexed file facts.
 const HISTORY_UPLOAD_NAMES: usize = 2;
+
+mod copy;
 
 /// Binds this module's requests.
 pub fn mount(registry: &mut Registry) {
@@ -73,7 +75,11 @@ pub fn mount(registry: &mut Registry) {
         .on(EnvironmentUploadFinish, upload_finish)
         .on(EnvironmentFileMkdir, mkdir)
         .on(EnvironmentFileRename, rename)
-        .on(EnvironmentFileCopy, copy)
+        .on_with_operation(
+            EnvironmentFileCopy,
+            crate::key_operations::native::effects::prepare::<copy::Copy>,
+            copy::run,
+        )
         .on(EnvironmentFileDelete, delete);
 }
 
@@ -1072,17 +1078,28 @@ async fn audited(
     summary: &str,
     details: Json,
 ) -> ApiResult<()> {
+    audited_on(ctx, conn, &door.env, action, summary, details).await
+}
+
+async fn audited_on(
+    ctx: &Ctx,
+    conn: &mut orch_db::Conn,
+    env: &orch_db::queries::environments::workspace::EnvironmentRow,
+    action: AuditAction,
+    summary: &str,
+    details: Json,
+) -> ApiResult<()> {
     let mut entry = Entry::new(
         Actor::User(ctx.user()?.id()),
         action.as_str(),
         "environment",
-        Some(door.env.id),
+        Some(env.id),
         summary,
     );
     entry.history = action.is_history_line();
-    entry.node_id = Some(door.env.home_node_id);
-    entry.org_id = Some(door.env.org_id);
-    entry.environment_id = Some(door.env.id);
+    entry.node_id = Some(env.home_node_id);
+    entry.org_id = Some(env.org_id);
+    entry.environment_id = Some(env.id);
     entry.details = details;
     audit::append(conn, &entry, &origin(ctx), ctx.now).await?;
     Ok(())
@@ -1390,11 +1407,22 @@ async fn upload_finish(
     if done {
         return Ok(());
     }
-    let writes: Vec<Json> = sqlx::query_scalar("SELECT details FROM audit_log WHERE environment_id=$1 AND actor_id=$2 AND action='workspace.file_written' AND details->>'upload_batch'=$3 ORDER BY id")
-        .bind(door.env.id).bind(guard.user().id()).bind(batch.to_string()).fetch_all(&mut *tx).await.map_err(orch_db::DbError::from)?;
-    let mut files = Vec::new();
-    let mut total = Some(0_i64);
-    let mut replaced = 0_i64;
+    let (mut file_count, written_bytes, replaced, preview): (i64,i64,i64,Json) = sqlx::query_as(
+        "WITH selected AS NOT MATERIALIZED (
+            SELECT id,details FROM audit_log WHERE environment_id=$1 AND actor_id=$2
+              AND action='workspace.file_written' AND details->>'upload_batch'=$3 AND details->>'path' IS NOT NULL
+         ) SELECT count(*)::bigint,
+            LEAST(COALESCE(sum((details->>'size')::numeric),0),9223372036854775807)::bigint,
+            count(*) FILTER (WHERE details->>'replaced'='true')::bigint,
+            (SELECT COALESCE(jsonb_agg(p.details ORDER BY p.id),'[]'::jsonb)
+               FROM (SELECT id,details FROM selected ORDER BY id LIMIT $4) p)
+           FROM selected"
+    ).bind(door.env.id).bind(guard.user().id()).bind(batch.to_string())
+        .bind(i64::try_from(HISTORY_UPLOAD_NAMES).map_err(ApiError::internal)?)
+        .fetch_one(&mut *tx).await.map_err(orch_db::DbError::from)?;
+    let writes: Vec<Json> = serde_json::from_value(preview).map_err(ApiError::internal)?;
+    let mut files = Vec::with_capacity(HISTORY_UPLOAD_NAMES);
+    let mut total = Some(written_bytes);
     for write in &writes {
         let path = write
             .get("path")
@@ -1408,17 +1436,30 @@ async fn upload_finish(
             .get("replaced")
             .and_then(Json::as_bool)
             .unwrap_or(false);
-        if was_replaced {
-            replaced += 1;
-        }
-        total = total.map(|bytes| bytes.saturating_add(size));
         files.push(serde_json::json!({"name":paths::name_of(path),"path":path,"size":size,"received":size,"outcome":"complete","replaced":was_replaced}));
     }
-    // What was written, and the receipts of the attempts that were not, are each read once for the whole upload.
-    let written_hashes: std::collections::HashSet<&str> = writes
+    // Match only hashes named by this bounded request; historical file details stay in their indexed rows.
+    let hashes = body
+        .files
         .iter()
-        .filter_map(|write| write.get("hash").and_then(Json::as_str))
-        .collect();
+        .filter_map(|attempt| attempt.blob.map(|blob| blob.to_string()))
+        .collect::<Vec<_>>();
+    let written: Vec<String> = sqlx::query_scalar(
+        "SELECT DISTINCT details->>'hash' FROM audit_log WHERE environment_id=$1 AND actor_id=$2
+           AND action='workspace.file_written' AND details->>'upload_batch'=$3
+           AND details->>'path' IS NOT NULL AND details->>'hash'=ANY($4)",
+    )
+    .bind(door.env.id)
+    .bind(guard.user().id())
+    .bind(batch.to_string())
+    .bind(&hashes)
+    .fetch_all(&mut *tx)
+    .await
+    .map_err(orch_db::DbError::from)?;
+    let written_hashes = written
+        .iter()
+        .map(String::as_str)
+        .collect::<std::collections::HashSet<_>>();
     let unwritten = |attempt: &&orch_api_contract::workspace::WorkspaceUploadAttempt| {
         !(attempt_written(attempt, &written_hashes) && attempt_complete(attempt))
     };
@@ -1456,6 +1497,8 @@ async fn upload_finish(
     .map_err(orch_db::DbError::from)?
     .into_iter()
     .collect();
+    let mut failed = body.outcome == WorkspaceUploadOutcome::Failed;
+    let mut cancelled = body.outcome == WorkspaceUploadOutcome::Cancelled;
     for attempt in &body.files {
         let name = paths::clean("files.name", &attempt.name, false)?;
         if attempt.size < 0 {
@@ -1495,15 +1538,31 @@ async fn upload_finish(
         } else {
             attempt.outcome
         };
-        files.push(serde_json::json!({"name":name,"path":Json::Null,"size":attempt.size,"received":received,"outcome":outcome,"replaced":false}));
+        let file = serde_json::json!({"name":name,"path":Json::Null,"size":attempt.size,"received":received,"outcome":outcome,"replaced":false});
+        file_count = file_count.saturating_add(1);
+        failed |= outcome == WorkspaceUploadOutcome::Failed;
+        cancelled |= outcome == WorkspaceUploadOutcome::Cancelled;
+        let action = if outcome == WorkspaceUploadOutcome::Cancelled {
+            "upload cancelled"
+        } else {
+            "upload failed"
+        };
+        audited(
+            &ctx,
+            &mut tx,
+            &door,
+            orch_db::audit::action!(AuditAction::WorkspaceFileWritten),
+            &said(&ctx, &format!("{action} {name}"))?,
+            serde_json::json!({"upload_batch":batch,"upload_folder":folder,"upload_file":file}),
+        )
+        .await?;
+        if files.len() < HISTORY_UPLOAD_NAMES {
+            files.push(file);
+        }
     }
-    let outcome = if body.outcome == WorkspaceUploadOutcome::Failed
-        || files.iter().any(|file| file["outcome"] == "failed")
-    {
+    let outcome = if failed {
         "failed"
-    } else if files.iter().any(|file| file["outcome"] == "cancelled")
-        || body.outcome == WorkspaceUploadOutcome::Cancelled
-    {
+    } else if cancelled {
         "cancelled"
     } else {
         "complete"
@@ -1514,7 +1573,8 @@ async fn upload_finish(
         .filter_map(|file| file.get("name").and_then(Json::as_str))
         .collect::<Vec<_>>()
         .join(", ");
-    let rest = files.len().saturating_sub(HISTORY_UPLOAD_NAMES);
+    let rest =
+        file_count.saturating_sub(i64::try_from(HISTORY_UPLOAD_NAMES).map_err(ApiError::internal)?);
     let action = match outcome {
         "failed" => "upload failed",
         "cancelled" => "upload cancelled",
@@ -1530,7 +1590,7 @@ async fn upload_finish(
         if folder.is_empty() { "/" } else { &folder }
     );
     audited(&ctx, &mut tx, &door, orch_db::audit::action!(AuditAction::WorkspaceFileWritten), &said(&ctx, &what)?,
-        serde_json::json!({"upload":{"id":batch,"environment_id":door.env.id,"folder":folder,"files":files,"bytes":total,"replaced":replaced,"outcome":outcome}})).await?;
+        serde_json::json!({"upload":{"id":batch,"environment_id":door.env.id,"folder":folder,"files":files,"file_count":file_count,"files_paged":true,"bytes":total,"replaced":replaced,"outcome":outcome}})).await?;
     // This changes only History's grouping; every individual audit fact and its content stays available.
     sqlx::query("UPDATE audit_log SET history=false WHERE environment_id=$1 AND actor_id=$2 AND action='workspace.file_written' AND details->>'upload_batch'=$3")
         .bind(door.env.id).bind(guard.user().id()).bind(batch.to_string()).execute(&mut *tx).await.map_err(orch_db::DbError::from)?;
@@ -1624,45 +1684,6 @@ async fn rename(
         &door,
         orch_db::audit::action!(AuditAction::WorkspaceFileRenamed),
         &said(&ctx, &format!("renamed {from} to {to}"))?,
-        serde_json::json!({ "from": from, "to": to, "size": stat.entry.size, "hash": stat.hash }),
-    )
-    .await?;
-    orch_db::queries::environments::thread_engine::touch_activity(&mut tx, door.env.id, ctx.now)
-        .await?;
-    tx.commit().await.map_err(orch_db::DbError::from)?;
-    Ok(stat)
-}
-
-/// Copies a file, or a directory with what is in it.
-async fn copy(
-    ctx: Ctx,
-    query: orch_api_contract::environment::ThroughThreadQuery,
-    body: FileFromToBody,
-) -> ApiResult<FileStat> {
-    let (from, to) = two_paths(&body)?;
-    let mut conn = ctx.app.db.acquire().await?;
-    let (door, machine) = writer(&ctx, &mut conn, query.thread).await?;
-    drop(conn);
-    let copied = live::run(
-        &ctx,
-        machine,
-        SerialKey::Environment(door.env.id),
-        &FsCopy {
-            environment_id: door.env.id,
-            from: from.clone(),
-            to: to.clone(),
-        },
-    )
-    .await
-    .map_err(|failure| failure.problem(Doing::Copying))?;
-    let stat = copied;
-    let mut tx = ctx.app.db.begin().await?;
-    audited(
-        &ctx,
-        &mut tx,
-        &door,
-        orch_db::audit::action!(AuditAction::WorkspaceFileCopied),
-        &said(&ctx, &format!("copied {from} to {to}"))?,
         serde_json::json!({ "from": from, "to": to, "size": stat.entry.size, "hash": stat.hash }),
     )
     .await?;

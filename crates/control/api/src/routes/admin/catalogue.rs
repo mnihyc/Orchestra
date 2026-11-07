@@ -8,14 +8,18 @@
 //! on it, and system admins hold every permission on it.
 
 use super::{admin_of, invalid, is_address, record};
+use crate::key_operations::native;
 use crate::middleware::requests::{ApiError, ApiResult};
-use crate::middleware::transaction_guard;
 use crate::registry::{Ctx, Registry};
+use crate::routes::access::page::NameSources;
 use crate::routes::downloads::payload_dir;
 use crate::routes::resources::view::{Holding, accesses, addresses, parse};
 use crate::routes::resources::{Home, clean_name, record as record_resource};
+use futures::future::BoxFuture;
 use orch_access_contract::audit::AuditAction;
 use orch_access_contract::decisions::ObjectRef;
+use orch_access_contract::key_scope::KeyTargetKind;
+use orch_access_contract::permissions::ObjectKind;
 use orch_access_contract::permissions::ResourceKind;
 use orch_agent_contract::facts::AgentProfile;
 use orch_api_contract::admin::{
@@ -24,12 +28,15 @@ use orch_api_contract::admin::{
     AdminHarnessChecksumsImport, AdminHarnessList, AdminHarnessSet, AdminHarnessUsageList,
     EnvironmentHarnessBuildList, HarnessBuild, HarnessBuildList, HarnessBuildSource,
     HarnessBuildStatus, HarnessBuildUsage, HarnessChecksumsImportBody, HarnessChecksumsImportReply,
-    HarnessVersionFetch, HarnessVersionFetchBody, RunningHarnessBuild,
+    HarnessFetchResponse, HarnessVersionFetch, HarnessVersionFetchBody, RunningHarnessBuild,
 };
+use orch_api_contract::admin_sources::{self as sources, Source};
 use orch_api_contract::common::ErrorCode;
+use orch_api_contract::operation_sources::Declaration;
 use orch_api_contract::resources::{
     Agent, AgentRef, CapabilityDef, CapabilityDefaultDecision, OrgAgentCreateBody,
 };
+use orch_authz::Caller;
 use orch_authz::{Policy, Principal, resources};
 use orch_db::queries::resources::management::{
     self, CapabilityPut, CapabilityRow, CapabilityWrite,
@@ -55,6 +62,8 @@ const SHA256_HEX_CHARS: usize = 64;
 /// merged over the adapter's configuration and the variables it finds.
 const PROFILE_MEMBERS: [&str; 4] = ["harness_version", "attach", "config", "env"];
 
+pub(super) mod fetch;
+
 /// Binds this module's requests.
 pub fn mount(registry: &mut Registry) {
     registry
@@ -68,8 +77,17 @@ pub fn mount(registry: &mut Registry) {
         .on(AdminHarnessChecksumsImport, harness_checksums_import)
         .on(AdminHarnessCheck, harness_check)
         .on(HarnessBuildList, builds_for_choice)
-        .on(HarnessVersionFetch, fetch_version)
-        .on(AdminHarnessUsageList, build_usage)
+        .on_with_initial_operation(
+            HarnessVersionFetch,
+            native::effects::initial::<fetch::Action<fetch::Fetch>>,
+            native::effects::prepare::<fetch::Action<fetch::Fetch>>,
+            fetch_version,
+        )
+        .on_snapshot_read_with_optional_operation(
+            AdminHarnessUsageList,
+            native::selected::<BuildUsage>,
+            build_usage,
+        )
         .on(EnvironmentHarnessBuildList, environment_builds)
         .on(AdminAgentCreate, agent_create);
 }
@@ -163,7 +181,7 @@ async fn capability_set(mut ctx: Ctx, (): (), body: CapabilityDef) -> ApiResult<
         .and_then(|word| word.as_str().map(str::to_owned))
         .ok_or_else(|| ApiError::internal("an approver scope is not a word"))?;
     let patches = Json::Object(body.driver_patch.clone().into_iter().collect());
-    let (mut tx, guard) = transaction_guard::begin(&ctx).await?;
+    let (mut tx, guard) = super::action(&ctx).await?;
     ctx.now = guard.now().get();
     let admin = guard.user().id();
     let put = management::put_capability(
@@ -211,7 +229,7 @@ async fn capability_set(mut ctx: Ctx, (): (), body: CapabilityDef) -> ApiResult<
 async fn capability_delete(mut ctx: Ctx, (): (), (): ()) -> ApiResult<CapabilityDef> {
     admin_of(&ctx)?;
     let key = ctx.param("key")?.to_owned();
-    let (mut tx, guard) = transaction_guard::begin(&ctx).await?;
+    let (mut tx, guard) = super::action(&ctx).await?;
     ctx.now = guard.now().get();
     let admin = guard.user().id();
     let existing = management::capability(&mut tx, &key)
@@ -406,170 +424,12 @@ async fn builds_for_choice(ctx: Ctx, (): (), (): ()) -> ApiResult<Vec<HarnessBui
     all_builds(&ctx, &mut conn).await
 }
 
-/// Scope checks are repeated with the action guard after any vendor request.
-async fn authorize_fetch(
-    conn: &mut Conn,
-    principal: &Principal,
-    body: &HarnessVersionFetchBody,
-    system_admin: bool,
-) -> ApiResult<()> {
-    use crate::middleware::authorization;
-    match (body.environment_id, body.node_id) {
-        (Some(id), None) => {
-            if !orch_engine::updates::may_manage(
-                conn,
-                principal,
-                orch_engine::updates::Target::Environment(id),
-            )
-            .await
-            .map_err(ApiError::internal)?
-            {
-                return Err(ApiError::new(
-                    ErrorCode::AuthzDenied,
-                    "environment.manage is required to fetch a build",
-                ));
-            }
-        }
-        (None, Some(id)) => {
-            let (_, kind) = crate::routes::nodes::placed(conn, id).await?;
-            if !matches!(
-                kind,
-                orch_api_contract::nodes::NodeKind::Org
-                    | orch_api_contract::nodes::NodeKind::Project
-            ) {
-                return Err(invalid("node_id", "must be an org or project"));
-            }
-            authorization::require(
-                conn,
-                principal,
-                id,
-                authorization::exact(orch_access_contract::permissions::Permission::SettingsManage),
-                orch_authz::Act::Use,
-                Policy::default(),
-            )
-            .await?;
-        }
-        (None, None) if system_admin => {}
-        (None, None) => {
-            return Err(ApiError::new(
-                ErrorCode::AuthzDenied,
-                "a system administrator browser session is required without a settings scope",
-            ));
-        }
-        _ => return Err(invalid("environment_id", "name one settings scope")),
-    }
-    Ok(())
-}
-
 async fn fetch_version(
     ctx: Ctx,
     (): (),
-    body: HarnessVersionFetchBody,
-) -> ApiResult<Vec<HarnessBuild>> {
-    fetch_exact(ctx.clone(), body).await?;
-    let mut conn = ctx.app.db.acquire().await?;
-    all_builds(&ctx, &mut conn).await
-}
-
-/// Fetches one version under the same transaction authority, keeping the reply bounded by platforms.
-pub(super) async fn fetch_exact(
-    mut ctx: Ctx,
-    body: HarnessVersionFetchBody,
-) -> ApiResult<Vec<HarnessBuild>> {
-    use crate::middleware::authorization;
-    if body.environment_id.is_none() && body.node_id.is_none() {
-        admin_of(&ctx)?;
-    }
-    let kind = ctx.param("kind")?.to_owned();
-    let version = ctx.param("version")?.to_owned();
-    if !is_word(&version, &['-', '_', '.', '+']) {
-        return Err(invalid("version", "must be a version"));
-    }
-    let mut conn = ctx.app.db.acquire().await?;
-    let principal = authorization::principal(&ctx, &mut conn).await?;
-    authorize_fetch(&mut conn, &principal, &body, ctx.user()?.is_system_admin()).await?;
-    let known = super::programs::exact_builds(&ctx, &mut conn, &kind, &version).await?;
-    let programs = orch_db::programs::registry(&mut conn).await?;
-    let fetch = !known
-        .iter()
-        .any(|build| build.kind == kind && build.version == version);
-    let mirror = if fetch {
-        orch_settings::get::<String>(
-            &mut conn,
-            orch_settings::Place::System,
-            orch_settings_contract::registry::keys::AGENTS_HARNESS_MIRROR,
-        )
-        .await
-        .map_err(ApiError::internal)?
-    } else {
-        None
-    };
-    let trust_mirror = crate::harness_channels::trusts_mirror(&mut conn).await?;
-    drop(conn);
-    let fetched = if fetch {
-        Some(
-            crate::harness_channels::read_exact_configured(
-                &reqwest::Client::new(),
-                &programs,
-                mirror.as_deref(),
-                trust_mirror,
-                &kind,
-                &version,
-            )
-            .await
-            .map_err(|reason| invalid("version", &reason))?,
-        )
-    } else {
-        None
-    };
-
-    // No network work holds the caller's authority locks. The write and check claims use fresh authority.
-    let (mut tx, guard) = transaction_guard::begin(&ctx).await?;
-    ctx.now = guard.now().get();
-    authorize_fetch(
-        &mut tx,
-        guard.principal(),
-        &body,
-        guard.user().is_system_admin(),
-    )
-    .await?;
-    if let Some(builds) = fetched {
-        crate::harness_channels::keep(&mut tx, &builds, ctx.now).await?;
-    }
-    let known = super::programs::exact_builds(&ctx, &mut tx, &kind, &version).await?;
-    if !known
-        .iter()
-        .any(|build| build.kind == kind && build.version == version)
-    {
-        return Err(invalid(
-            "version",
-            "the requested build is no longer listed; fetch it again",
-        ));
-    }
-    let mut claimed = Vec::new();
-    for build in known.into_iter().filter(|build| {
-        build.kind == kind
-            && build.version == version
-            && build.source == HarnessBuildSource::Channel
-            && build.status == HarnessBuildStatus::Untested
-            && build.check.is_none()
-    }) {
-        let key = crate::harness_channels::channel_key(&build);
-        if crate::harness_checks::claim_in(&mut tx, &key, ctx.now).await? {
-            claimed.push((key, build));
-        }
-    }
-    let all = super::programs::exact_builds(&ctx, &mut tx, &kind, &version).await?;
-    tx.commit().await.map_err(DbError::from)?;
-    for (key, build) in claimed {
-        let app = ctx.app.clone();
-        tokio::spawn(async move {
-            if let Err(error) = crate::harness_checks::finish(&app, &key, &build).await {
-                tracing::warn!(%error, "an explicitly requested build could not be checked");
-            }
-        });
-    }
-    Ok(all)
+    _body: HarnessVersionFetchBody,
+) -> ApiResult<HarnessFetchResponse> {
+    fetch::run::<fetch::Fetch>(ctx).await
 }
 
 /// Projects only the immutable checks of the exact tools a plan will install.
@@ -753,68 +613,238 @@ async fn environment_builds(ctx: Ctx, (): (), (): ()) -> ApiResult<Vec<RunningHa
     let mut conn = ctx.app.db.acquire().await?;
     let principal = crate::middleware::authorization::principal(&ctx, &mut conn).await?;
     let id = ctx.id("id")?;
-    crate::routes::environments::show(&ctx, &mut conn, &principal, id).await?;
+    let current = crate::routes::environments::show(&ctx, &mut conn, &principal, id).await?;
     let mut held: Vec<_> = held_builds(&ctx, &mut conn, &[id], &[])
         .await?
         .into_iter()
         .flat_map(|(_, programs)| programs)
         .collect();
-    if !held.is_empty() {
-        name_running_programs(&mut conn, &mut held).await?;
-        return Ok(held);
-    }
-    let reported: Vec<(String,String)> = sqlx::query_as("SELECT DISTINCT a.harness_kind,h.harness_version FROM threads t JOIN environments e ON e.id=t.environment_id JOIN agents a ON a.id=t.agent_id JOIN harnesses h ON h.provider_id=t.provider_id AND h.agent_id=t.agent_id AND h.machine_id=e.machine_id WHERE e.id=$1 AND h.harness_version IS NOT NULL")
-        .bind(id).fetch_all(&mut *conn).await.map_err(DbError::from)?;
-    let mut programs: Vec<_> = reported
-        .into_iter()
-        .map(|(kind, version)| RunningHarnessBuild {
-            kind,
-            harness: None,
-            version,
-            build: None,
-        })
+    let mut seen: std::collections::BTreeSet<_> = held
+        .iter()
+        .map(|program| (program.kind.clone(), program.version.clone()))
         .collect();
-    name_running_programs(&mut conn, &mut programs).await?;
-    Ok(programs)
+    let mut reported = std::collections::BTreeSet::new();
+    if current.base.placement == orch_api_contract::environment::Placement::Connected
+        && current.template.is_none()
+        && let Some(machine) = current.machine
+    {
+        let facts =
+            orch_db::queries::environments::routes::machine_program_facts(&mut conn, &[machine.id])
+                .await?;
+        if let Some((_, facts)) = facts.first() {
+            reported.extend(
+                crate::routes::environments::confirmed_machine_programs(facts)
+                    .into_iter()
+                    .map(|program| (program.kind, program.version)),
+            );
+        }
+    }
+    let used: Vec<(String,String)> = sqlx::query_as("SELECT DISTINCT a.harness_kind,h.harness_version FROM threads t JOIN environments e ON e.id=t.environment_id JOIN agents a ON a.id=t.agent_id JOIN harnesses h ON h.provider_id=t.provider_id AND h.agent_id=t.agent_id AND h.machine_id=e.machine_id WHERE e.id=$1 AND h.harness_version IS NOT NULL")
+        .bind(id).fetch_all(&mut *conn).await.map_err(DbError::from)?;
+    reported.extend(used);
+    held.extend(
+        reported
+            .into_iter()
+            .filter(|program| seen.insert(program.clone()))
+            .map(|(kind, version)| RunningHarnessBuild {
+                kind,
+                harness: None,
+                version,
+                build: None,
+            }),
+    );
+    name_running_programs(&mut conn, &mut held).await?;
+    Ok(held)
 }
 
 async fn build_usage(ctx: Ctx, (): (), (): ()) -> ApiResult<Vec<HarnessBuildUsage>> {
-    admin_of(&ctx)?;
-    let mut conn = ctx.app.db.acquire().await?;
-    let principal = crate::middleware::authorization::principal(&ctx, &mut conn).await?;
-    let environments: Vec<orch_types::Id> =
+    native::selected_read::<BuildUsage>(ctx, (), ()).await
+}
+struct BuildUsage;
+struct PreparedBuildUsage {
+    answer: Vec<HarnessBuildUsage>,
+    associations: Vec<(
+        orch_types::Id,
+        i32,
+        Option<orch_types::Id>,
+        Option<orch_types::Id>,
+        String,
+        String,
+    )>,
+}
+impl native::Selected for BuildUsage {
+    type Source = Source;
+    type Query = ();
+    type Value = PreparedBuildUsage;
+    type Reply = Vec<HarnessBuildUsage>;
+    const DECLARATION: &'static Declaration<Source> = &sources::HARNESS_USAGE;
+    fn select<'a>(
+        ctx: &'a Ctx,
+        conn: &'a mut Conn,
+        caller: &'a Caller,
+        _query: &'a (),
+    ) -> BoxFuture<'a, ApiResult<(Self::Value, Vec<native::Facts<Source>>)>> {
+        Box::pin(prepare_build_usage(ctx, conn, caller))
+    }
+    fn require<'a>(
+        ctx: &'a Ctx,
+        _conn: &'a mut Conn,
+        principal: &'a Principal,
+    ) -> BoxFuture<'a, ApiResult<()>> {
+        Box::pin(async move { super::native::require(ctx, principal) })
+    }
+    fn render<'a>(
+        _ctx: &'a Ctx,
+        _conn: &'a mut Conn,
+        _principal: &'a Principal,
+        value: &'a Self::Value,
+    ) -> BoxFuture<'a, ApiResult<Self::Reply>> {
+        Box::pin(async move { Ok(value.answer.clone()) })
+    }
+    fn check_opened<'a>(
+        _ctx: &'a Ctx,
+        _conn: &'a mut Conn,
+        _principal: &'a Principal,
+        _query: &'a (),
+        old: &'a Self::Value,
+        fresh: &'a Self::Value,
+    ) -> BoxFuture<'a, ApiResult<bool>> {
+        Box::pin(async move {
+            Ok(old
+                .associations
+                .iter()
+                .all(|row| fresh.associations.contains(row)))
+        })
+    }
+}
+async fn prepare_build_usage(
+    ctx: &Ctx,
+    conn: &mut Conn,
+    caller: &Caller,
+) -> ApiResult<(PreparedBuildUsage, Vec<native::Facts<Source>>)> {
+    let environment_ids: Vec<orch_types::Id> =
         sqlx::query_scalar("SELECT id FROM environments WHERE deleted_at IS NULL")
             .fetch_all(&mut *conn)
             .await
             .map_err(DbError::from)?;
-    let providers: Vec<orch_types::Id> =
+    let provider_ids: Vec<orch_types::Id> =
         sqlx::query_scalar("SELECT id FROM providers WHERE deleted_at IS NULL")
             .fetch_all(&mut *conn)
             .await
             .map_err(DbError::from)?;
-    let environments =
-        crate::routes::environments::environments_of(&ctx, &mut conn, &principal, &environments)
-            .await?;
-    let providers =
-        crate::routes::resources::view::provider_refs(&mut conn, &providers, &[]).await?;
-    let held = held_builds(
-        &ctx,
-        &mut conn,
-        &environments
-            .iter()
-            .map(|env| env.base.id)
-            .collect::<Vec<_>>(),
-        &providers
-            .iter()
-            .map(|(_, provider)| provider.id)
-            .collect::<Vec<_>>(),
-    )
-    .await?;
+    let mut environments = Vec::new();
+    let mut providers = Vec::new();
+    let mut candidates = Vec::new();
+    for (kind, ids) in [
+        (ObjectKind::Environment, environment_ids),
+        (ObjectKind::Provider, provider_ids),
+    ] {
+        for id in ids {
+            let target = super::native::resource(conn, kind, id).await?;
+            if super::native::permits(
+                ctx,
+                &sources::HARNESS_USAGE,
+                caller,
+                Source::Results,
+                KeyTargetKind::Object(kind),
+                &target,
+            )? {
+                if kind == ObjectKind::Environment {
+                    environments.push(id);
+                } else {
+                    providers.push(id);
+                }
+                candidates.push((KeyTargetKind::Object(kind), target));
+            }
+        }
+    }
+    let known = native::bind_known(
+        ctx,
+        &sources::HARNESS_USAGE,
+        &[super::native::collection(Source::Results, candidates)],
+    )?;
+    let principal = native::preparation_principal(ctx, conn, caller, &known).await?;
+    let eligible =
+        crate::routes::environments::environments_of(ctx, conn, &principal, &environments).await?;
+    let environments = eligible.iter().map(|env| env.base.id).collect::<Vec<_>>();
+    let provider_refs =
+        crate::routes::resources::view::provider_refs(conn, &providers, &[]).await?;
+    let providers = provider_refs.iter().map(|(_, p)| p.id).collect::<Vec<_>>();
+    let held = held_builds(ctx, conn, &environments, &providers).await?;
+    let emitted = held
+        .iter()
+        .filter(|(_, programs)| !programs.is_empty())
+        .flat_map(|(r, _)| {
+            r.environment_id
+                .into_iter()
+                .map(|id| (ObjectKind::Environment, id))
+                .chain(r.provider_id.map(|id| (ObjectKind::Provider, id)))
+        })
+        .collect::<std::collections::BTreeSet<_>>();
+    let mut results = Vec::new();
+    for (kind, id) in &emitted {
+        results.push((
+            KeyTargetKind::Object(*kind),
+            super::native::resource(conn, *kind, *id).await?,
+        ));
+    }
+    let mut names = NameSources::default();
+    names.nodes.extend(
+        orch_authz::resources::address_name_sources(
+            conn,
+            &emitted.iter().map(|(_, id)| *id).collect::<Vec<_>>(),
+        )
+        .await
+        .map_err(ApiError::internal)?,
+    );
+    let (names, name_facts) =
+        super::native::names(ctx, conn, caller, &sources::HARNESS_USAGE, names).await?;
+    let environments = if native::modern(caller) {
+        crate::routes::resources::view::environment_refs_with_names(
+            conn,
+            &environments,
+            &[],
+            Time::new(ctx.now),
+            Some(&names),
+        )
+        .await?
+        .into_iter()
+        .map(|(_, env)| env)
+        .collect::<Vec<_>>()
+    } else {
+        eligible.into_iter().map(|env| env.base).collect()
+    };
+    let providers = if native::modern(caller) {
+        crate::routes::resources::view::provider_refs_with_names(
+            conn,
+            &providers,
+            &[],
+            Some(&names),
+        )
+        .await?
+    } else {
+        provider_refs
+    };
+    let associations = held
+        .iter()
+        .flat_map(|(r, programs)| {
+            programs.iter().map(move |p| {
+                (
+                    r.id,
+                    r.generation,
+                    r.environment_id,
+                    r.provider_id,
+                    p.kind.clone(),
+                    p.version.clone(),
+                )
+            })
+        })
+        .collect();
     let pending = ctx
         .app
         .engine
         .pending_runtime_updates(
-            &mut conn,
+            conn,
             &held
                 .iter()
                 .map(|(runtime, _)| runtime.id)
@@ -843,11 +873,11 @@ async fn build_usage(ctx: Ctx, (): (), (): ()) -> ApiResult<Vec<HarnessBuildUsag
             });
             if let Some(environment) = environments
                 .iter()
-                .find(|env| Some(env.base.id) == runtime.environment_id)
+                .find(|env| Some(env.id) == runtime.environment_id)
             {
-                row.environments.push(environment.base.clone());
+                row.environments.push(environment.clone());
                 if behind {
-                    row.update_environments.push(environment.base.id);
+                    row.update_environments.push(environment.id);
                 }
             }
             if let Some((_, provider)) = providers
@@ -861,7 +891,16 @@ async fn build_usage(ctx: Ctx, (): (), (): ()) -> ApiResult<Vec<HarnessBuildUsag
             }
         }
     }
-    Ok(usage.into_values().collect())
+    Ok((
+        PreparedBuildUsage {
+            answer: usage.into_values().collect(),
+            associations,
+        },
+        vec![
+            super::native::collection(Source::Results, results),
+            name_facts,
+        ],
+    ))
 }
 
 fn is_word(text: &str, extra: &[char]) -> bool {
@@ -926,7 +965,7 @@ pub(super) async fn set_build(mut ctx: Ctx, body: HarnessBuild) -> ApiResult<Har
         check: None,
         ..body
     };
-    let (mut tx, guard) = transaction_guard::begin(&ctx).await?;
+    let (mut tx, guard) = super::action(&ctx).await?;
     ctx.now = guard.now().get();
     let admin = guard.user().id();
     if channel_choice {
@@ -1036,7 +1075,7 @@ async fn harness_checksums_import(
         value["checksum_origin"] = Json::from("vendor");
         anchored.push((key, value));
     }
-    let (mut tx, guard) = transaction_guard::begin(&ctx).await?;
+    let (mut tx, guard) = super::action(&ctx).await?;
     ctx.now = guard.now().get();
     management::put_imported_harness_builds(&mut tx, &anchored, guard.user().id(), ctx.now).await?;
     record(
@@ -1121,7 +1160,7 @@ pub(super) async fn read_channels(ctx: Ctx, kind: Option<String>) -> ApiResult<u
     };
     let unavailable = builds.is_empty() && !failures.is_empty();
     // What was read is kept in the transaction that checks the caller's authority again, never during the reads.
-    let (mut tx, guard) = transaction_guard::begin(&ctx).await?;
+    let (mut tx, guard) = super::action(&ctx).await?;
     crate::harness_channels::record_read(&mut tx, guard.now().get(), !unavailable).await?;
     if unavailable {
         tx.commit().await.map_err(DbError::from)?;
@@ -1168,23 +1207,51 @@ pub(super) async fn queue_check(ctx: Ctx) -> ApiResult<u32> {
     let version = ctx.param("version")?;
     // The builds are marked as being checked in the transaction that checks the caller's authority again; their
     // checks run once it is committed.
-    let (mut tx, guard) = transaction_guard::begin(&ctx).await?;
+    let (mut tx, guard) = super::action(&ctx).await?;
     let kept = crate::harness_checks::kept(&mut tx, kind, version).await?;
     if kept.is_empty() {
         return Err(ApiError::not_found());
     }
+    let keys = kept.iter().map(|(key, _)| key.clone()).collect::<Vec<_>>();
+    sqlx::query(
+        "SELECT key FROM settings WHERE node_id IS NULL AND key=ANY($1) ORDER BY key FOR UPDATE",
+    )
+    .bind(&keys)
+    .fetch_all(&mut *tx)
+    .await
+    .map_err(DbError::from)?;
+    let request = orch_engine::build_checks::Request::capture(
+        guard.principal().caller(),
+        orch_engine::build_checks::Destination::System,
+    )
+    .map_err(ApiError::internal)?;
+    let mut first = true;
     let mut claimed = Vec::new();
     for (key, build) in kept {
-        if crate::harness_checks::claim_in(&mut tx, &key, guard.now().get()).await? {
-            claimed.push((key, build));
+        if let Some(claim) = crate::harness_checks::claim_in_before(
+            &mut tx,
+            &key,
+            guard.now().get(),
+            Some(request.clone()),
+            || {
+                if first {
+                    guard.check_deadline(&ctx)?;
+                    first = false;
+                }
+                Ok::<_, ApiError>(())
+            },
+        )
+        .await?
+        {
+            claimed.push((key, build, claim));
         }
     }
     tx.commit().await.map_err(DbError::from)?;
     let queued = u32::try_from(claimed.len()).map_err(ApiError::internal)?;
-    for (key, build) in claimed {
+    for (key, build, claim) in claimed {
         let app = ctx.app.clone();
         tokio::spawn(async move {
-            if let Err(error) = crate::harness_checks::finish(&app, &key, &build).await {
+            if let Err(error) = crate::harness_checks::finish(&app, &key, &build, claim).await {
                 tracing::warn!(%error, "a harness build could not be checked");
             }
         });
@@ -1240,7 +1307,7 @@ async fn agent_create(mut ctx: Ctx, (): (), body: OrgAgentCreateBody) -> ApiResu
     let harness_kind = clean_harness_kind(&body.harness_kind)?;
     let profile = clean_profile(&body.profile)?;
     let id = orch_types::new_id();
-    let (mut tx, guard) = transaction_guard::begin(&ctx).await?;
+    let (mut tx, guard) = super::action(&ctx).await?;
     ctx.now = guard.now().get();
     let principal = guard.principal();
     management::insert_system_agent(&mut tx, id, &name, &harness_kind, &profile, ctx.now).await?;

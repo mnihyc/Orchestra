@@ -1,10 +1,10 @@
 /** The roles offered by this actual program, changed in place only after the local handover. */
-import { useMutation } from '@tanstack/react-query';
+import { useMutation, useQueryClient } from '@tanstack/react-query';
 import { Link } from '@tanstack/react-router';
 import { useState } from 'react';
 import { useTranslation } from 'react-i18next';
 import { ApiError } from '@/api/client';
-import { setMachineRoles } from '@/api/resources';
+import { machineQuery, setMachineRoles } from '@/api/resources';
 import type { Machine } from '@/generated/api-types';
 import { CommandBox } from '@/features/resources/Facts';
 import { CONNECTOR_ROLES,type ConnectorRole,roleName } from '@/features/resources/machines/EnrollmentRoles';
@@ -21,6 +21,8 @@ export function MachineRoles({machine}:{machine:Machine}) {
   const openHelp=useHelpOpener();
   const [editing,setEditing]=useState(false);
   const [draft,setDraft]=useState<ConnectorRole[]>([]);
+  const [revision,setRevision]=useState(machine.revision);
+  const cache=useQueryClient();
   const management=useMachineManagement();
   const capability=machine.role_management;
   const canManage=holdsMachineManagement(machine) || needsMachineManagementOverride(machine);
@@ -31,7 +33,10 @@ export function MachineRoles({machine}:{machine:Machine}) {
   const canEdit=canManage && machine.online && capability?.supported===true && capability.delegated && capability.enabled;
   // An old active-role snapshot in the command answer must never overwrite a newer live hello.
   // The acknowledgement supplies the pending selection; only the live machine row activates it.
-  const apply=useMutation({mutationFn:(roles:readonly ConnectorRole[])=>setMachineRoles(machine.id,roles),onSuccess:()=>setEditing(false)});
+  const apply=useMutation({mutationFn:(roles:readonly ConnectorRole[])=>setMachineRoles(machine.id,roles,revision),onSuccess:()=>setEditing(false)});
+  const refresh=useMutation({mutationFn:()=>cache.fetchQuery({...machineQuery(machine.id),staleTime:0}),onSuccess:(current)=>{
+    setDraft(CONNECTOR_ROLES.filter((role)=>current.roles.includes(role)));setRevision(current.revision);apply.reset();
+  }});
   const waiting=apply.data?.reconnecting===true && !sameRoles(machine.roles,apply.data.requested_roles);
   const names=(roles:readonly string[])=>roles.length===0?t('machines.overview.noRoles'):roles.map((role)=>roleName(t,role)).join(' · ');
   const failure=apply.error instanceof ApiError?apply.error.faults().find((error)=>error.path==='roles')?.message:undefined;
@@ -43,7 +48,7 @@ export function MachineRoles({machine}:{machine:Machine}) {
       <div className="flex items-center gap-2"><Button size="sm" variant="primary" pending={apply.isPending} disabled={draft.length===0 || sameRoles(machine.roles,draft)}
         onClick={()=>apply.mutate(draft)}>{t('common.save')}</Button><Button size="sm" disabled={apply.isPending} onClick={()=>{setEditing(false);apply.reset();}}>{t('common.cancel')}</Button></div>
     </div>:<div className="flex flex-wrap items-center gap-2">
-      {canEdit && !waiting?<Button size="sm" aria-label={t('machineRoles.edit')} onClick={()=>management.run(machine,()=>{setDraft(localRoles);apply.reset();setEditing(true);})}>{names(machine.roles)}</Button>:<span>{names(waiting && apply.data!==undefined?apply.data.requested_roles:machine.roles)}</span>}
+      {canEdit && !waiting?<Button size="sm" aria-label={t('machineRoles.edit')} onClick={()=>management.run(machine,()=>{setDraft(localRoles);setRevision(machine.revision);apply.reset();setEditing(true);})}>{names(machine.roles)}</Button>:<span>{names(waiting && apply.data!==undefined?apply.data.requested_roles:machine.roles)}</span>}
       {waiting && <span role="status" className="text-sm text-text-muted">{t('machineRoles.reconnecting')}</span>}
       <HelpHint term={t('machines.overview.roles')} what={t('machineRoles.help')}
         more={{label:t('help.hint.more'),onOpen:()=>openHelp('resources','enroll-by-role')}} guide={{article:'resources',heading:'enroll-by-role'}}/>
@@ -54,6 +59,8 @@ export function MachineRoles({machine}:{machine:Machine}) {
       {canManage && !node && capability?.delegated===true && !capability.enabled && <Link to="/resources/machines/$id" params={{id:machine.id}} search={{tab:'policy'}} className="text-link underline">{t('machinePrograms.openPolicy')}</Link>}
     </div>}
     {apply.isError && (failure===undefined?<ErrorAlert error={apply.error}/>:<p role="alert" className="text-sm text-danger-text">{failure}</p>)}
+    {editing && apply.error instanceof ApiError && apply.error.problem.code==='conflict.stale_revision' && <Button size="sm" pending={refresh.isPending} onClick={()=>refresh.mutate()}>{t('common.refresh')}</Button>}
+    {refresh.isError && <ErrorAlert error={refresh.error}/>}
     {management.dialog}
   </div>;
 }

@@ -1,3 +1,4 @@
+import { treeNode } from '../doubles/tree-node';
 // @vitest-environment node
 /// <reference types="node" />
 /** Every act of the application is in the registry of acts, with what it changes; a change reaches exactly the queries it
@@ -16,7 +17,7 @@ import { createApiClient } from '@/api/client';
 import { displaysQuery } from '@/api/displays';
 import { documentLinksQuery } from '@/api/links';
 import { portsKey } from '@/api/ports';
-import type { DocumentLinks, TreeNode } from '@/generated/api-types';
+import type { DocumentLinks, MachinePrograms, TreeNode } from '@/generated/api-types';
 import { me, org, userRef } from '../doubles/fixtures';
 
 const sourceRoot = resolve(import.meta.dirname, '../../src');
@@ -304,24 +305,7 @@ describe('a change', () => {
   });
 });
 
-const row = (id: string, parent: string | null, kind: TreeNode['kind'], seq: number, more: Partial<TreeNode> = {}): TreeNode => ({
-  address: kind === 'org' ? id : null,
-  id,
-  kind,
-  parent_id: parent,
-  name: id,
-  color: null,
-  participating: true,
-  archived: false,
-  restricted: false,
-  deleted: false,
-  tree_seq: seq,
-  topic: kind === 'topic' ? { status: 'open', tag_ids: [] } : null,
-  thread: null,
-  chat: { id: `chat-${id}`, seq: 0 },
-  docs: 0,
-  ...more,
-});
+const row = (id: string, parent: string | null, kind: TreeNode['kind'], seq: number, more: Partial<TreeNode> = {}): TreeNode => treeNode({ id, kind, parent_id: parent, address: kind === 'org' ? id : null, tree_seq: seq, topic: kind === 'topic' ? { status: 'open', tag_ids: [] } : null, ...more });
 
 describe('what the live tree says', () => {
   const held = new Map<string, TreeNode>(
@@ -406,12 +390,14 @@ it('applies program acknowledgements and live machine registry changes without a
   const cache=new QueryClient();
   const key=['machine-programs','machine'];
   cache.setQueryData(key,{entries:[],capabilities:[],config_file:null,can_manage:true});
-  const answer={entries:[{kind:'agent',name:'new-agent',ready:true}],capabilities:[],config_file:'/data/config.toml',can_manage:true};
+  const answer:MachinePrograms={entries:[{kind:'agent',name:'new-agent',command:['new-agent'],origin:'orch',ready:true,version:'1.0.0',
+    descriptor:{kind:'new-agent',harness:{name:'New agent'},sandbox_modes:['open'],approval_modes:['on_request']},models:null,detail:null}],
+    capabilities:[],config_file:'/data/config.toml',can_manage:true};
   const acknowledged=findAct('POST','/machines/machine/programs',{answer,input:{action:'reload'}});
   expect(acknowledged?.changes).toEqual([{value:{key,data:answer}}]);
   await applyChanges(acknowledged?.changes ?? [],cache);
   expect(cache.getQueryData(key)).toEqual(answer);
-  const report={...answer,entries:[{kind:'agent',name:'new-agent',ready:false,detail:'The program exited.'}]};
+  const report:MachinePrograms={...answer,entries:answer.entries.map((entry)=>({...entry,ready:false,detail:'The program exited.'}))};
   await applyChanges([{row:{kind:'machine',id:'machine',value:{id:'machine',access:{permissions:['machine.view']},facts:{programs:report}}}}],cache);
   expect(cache.getQueryData(key)).toEqual({...report,can_manage:false});
   await applyChanges([{row:{kind:'machine',id:'machine',value:null}}],cache);

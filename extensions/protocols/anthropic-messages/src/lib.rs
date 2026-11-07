@@ -27,6 +27,7 @@ pub mod decimal;
 pub mod models;
 pub mod requests;
 pub mod usage;
+pub mod web_search;
 
 use bytes::Bytes;
 use futures::future::BoxFuture;

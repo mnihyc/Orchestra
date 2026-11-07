@@ -1,4 +1,6 @@
 /** Compact screen selectors retain their meaning, visible filter labels and existing acts in every appearance. */
+import type * as UserStoreModule from '@/realtime/stores/user';
+import type * as UsageBoardModule from '@/features/usage/Board';
 import { cleanup, screen, within } from '@testing-library/react';
 import userEvent from '@testing-library/user-event';
 import type { ReactNode } from 'react';
@@ -110,7 +112,7 @@ vi.mock('@/realtime/live', async () => {
   return { useUserFeed: vi.fn(), useOrgTreeFeed: vi.fn(), reloadUserFeed: vi.fn(),
     socket: { subscribe: vi.fn(() => ({ unsubscribe: vi.fn() })), status: createStore(() => ({ phase: 'idle' })) } };
 });
-vi.mock('@/realtime/stores/user', () => ({ useHeldRows: () => [], useUserStore: <Value,>(read: (value: typeof fixture.user) => Value) => read(fixture.user), userWriter: { older: vi.fn(), found: vi.fn() } }));
+vi.mock('@/realtime/stores/user', async (original) => ({ ...await original<typeof UserStoreModule>(), useHeldRows: () => [], useUserStore: <Value,>(read: (value: typeof fixture.user) => Value) => read(fixture.user), userWriter: { older: vi.fn(), found: vi.fn() } }));
 vi.mock('@/features/settings/personal/away/live', () => ({ useAwayLive: vi.fn() }));
 vi.mock('@/features/settings/personal/away/Pause', () => ({ PauseControls: () => null }));
 vi.mock('@/features/inbox/away/Grouping', async (original) => ({ ...await original<typeof Grouping>(), useInboxGrouping: () => ({ value: 'day', choose: vi.fn(), loading: false, saving: false, error: null }) }));
@@ -125,7 +127,7 @@ vi.mock('@/features/project/ProjectStar', () => ({ ProjectStar: () => null }));
 vi.mock('@/features/project/FolderCards', () => ({ FolderCards: () => null }));
 vi.mock('@/features/project/Topics', () => ({ Topics: () => null }));
 vi.mock('@/features/project/Activity', () => ({ ProjectActivity: () => null }));
-vi.mock('@/features/usage/Board', () => ({ UsageSection: () => null }));
+vi.mock('@/features/usage/Board', async (original) => ({ ...await original<typeof UsageBoardModule>(), UsageSection: () => null }));
 vi.mock('@/features/start/QuickStart', () => ({ QuickStart: () => null }));
 vi.mock('@/features/ports/Outside', () => ({ OutsideOpenings: () => null }));
 vi.mock('@/features/access/ParticipationFilter', () => ({ ParticipationFilter: () => null }));

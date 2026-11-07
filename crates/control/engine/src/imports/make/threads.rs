@@ -1234,6 +1234,7 @@ pub(super) async fn take_back(
     thread: Id,
     principal: &orch_authz::Principal,
     limit: i64,
+    before: impl FnOnce() -> Result<(), MakeError>,
 ) -> Result<Taken, MakeError> {
     // What lies in a place that was deleted goes and comes back with it.
     if !place_is_live(tx, thread).await? {
@@ -1254,6 +1255,7 @@ pub(super) async fn take_back(
     if !allowed {
         return Ok(Taken::Refused);
     }
+    before()?;
     let looked = rows::take_back_items(tx, import, thread, limit).await?;
     Ok(if looked == 0 {
         Taken::Nothing

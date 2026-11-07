@@ -20,7 +20,8 @@ The thread supplies its own breadcrumb path; only visible Navigation follows the
 Status parts observe held panel data, and recorded file copies are read only after Restore opens.
 The screen also holds its conversation and
 its box, the banners that say the line is lost or the page may be out of date, why a thread is blocked
-or held by a job, and, for somebody who may only watch, what they would need to work with it. Related
+or held by a job. Somebody who may only watch keeps the same box and controls disabled, with the
+model and effort visible and one compact missing-access line opening the shared request form. Related
 modules supply sub-agent and side-thread lanes, the inspector, files, export, finding in the conversation
 and the History view.
 
@@ -34,7 +35,6 @@ and the History view.
 - `turnLink.ts`: Numbered turn links accept only a positive safe ordinal supplied by the ledger.
 - `BlockedBanner.tsx`: Actionable preflight failure reasons; for a limit that is reached, the limit prompt.
 - `EnvironmentStartRecovery.tsx`: One failed-setup reason with native Retry and the ordinary environment change plan; keeps the first input, allows an alternative during a slow retry and fences old refusals by thread/environment identity. The timeline omits the repeated environment failure while this banner is shown. P1 component/browser and fake-route regressions are authored, unrun; the native file-job generation fix and proof belong to w-ev.
-- `WatchingCard.tsx`: What the viewer lacks to work with this thread, with display names, who can grant access, one Request access action and Ask in chat; replaces the composer and its controls.
 - `LockBanner.tsx`: The switch, move or update that holds the thread: its percentage, its phase and the way back to its wizard.
 - `ConnectionBanner.tsx`: Connection freshness, a slow link said as such, and new-build notice.
 - `SubscriptionBell.tsx`: Inherited or explicit notification level.

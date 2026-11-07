@@ -1,4 +1,5 @@
 import { executionDisplay } from './thread-display.ts';
+import { treeNode } from './tree-node.ts';
 /** What the fake API starts from: a system, its people, an org with its tree, and invitations, each in the shape the real API answers in. */
 import type {
   Access,
@@ -224,24 +225,16 @@ function node(
   seq: number,
   more: Partial<TreeNode> = {},
 ): TreeNode {
-  return {
+  return treeNode({
     id: nodeId,
     kind,
     name,
-    address: null,
     parent_id: parentId,
-    color: null,
-    docs: 0,
-    archived: false,
-    deleted: false,
-    restricted: false,
-    participating: true,
     chat: { id: id(9, seq), seq: 0 },
-    thread: null,
     topic: kind === 'topic' ? { status: 'open', tag_ids: [] } : null,
     tree_seq: seq,
     ...more,
-  };
+  });
 }
 
 function thread(state: NonNullable<TreeNode['thread']>['state'], more: Partial<NonNullable<TreeNode['thread']>> = {}) {

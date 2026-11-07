@@ -94,6 +94,8 @@ pub fn config_of(settings: &NodeSettings) -> Result<DockerConfig, DriverError> {
         // Each restricted unit's proxy keeps its orders, heartbeat and state below the node's data directory,
         // which the daemon sees at the same path.
         egress: EgressConfig {
+            parent_proxy:settings.egress_proxy.clone(),
+            parent_probe:settings.egress_proxy.as_ref().and_then(|_|parent_transport(settings)),
             dir: Some(settings.data_dir.join(EGRESS_DIR)),
             proxy_image: docker.restricted_proxy_image.clone(),
         },
@@ -129,6 +131,23 @@ pub fn config_of(settings: &NodeSettings) -> Result<DockerConfig, DriverError> {
             .collect::<Result<_, DriverError>>()?,
         ..DockerConfig::default()
     })
+}
+
+/// Use the same trusted configured/enrolled entrance as the node, including a retained installation.
+fn parent_transport(settings: &NodeSettings) -> Option<String> {
+    if !settings.managed_endpoint.is_empty() {
+        return Some(settings.managed_endpoint.clone());
+    }
+    if !settings.gateway_url.is_empty() {
+        return Some(settings.gateway_url.clone());
+    }
+    let data = orch_connector_core::enrollment::DataDir::inspect(&settings.data_dir).ok()?;
+    let config = data.config(&|name: &str| std::env::var(name).ok()).ok()?;
+    data.endpoints(&config)
+        .ok()?
+        .into_iter()
+        .next()
+        .map(|endpoint| endpoint.url)
 }
 
 // Secrets have no Debug implementation and malformed input never reaches an error message.
@@ -601,6 +620,33 @@ impl BlobSource for DeskSource {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    #[allow(
+        clippy::unwrap_used,
+        reason = "a failed fixture or assertion must fail the test"
+    )]
+    fn restricted_parent_and_its_trusted_probe_come_only_from_node_settings() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut settings = NodeSettings::in_dir(dir.path());
+        settings.egress_proxy = Some("http://parent.invalid:3128".into());
+        settings.gateway_url = "wss://gateway.invalid:9443".into();
+        let configured = config_of(&settings).unwrap();
+        assert_eq!(configured.egress.parent_proxy, settings.egress_proxy);
+        assert_eq!(
+            configured.egress.parent_probe,
+            Some(settings.gateway_url.clone())
+        );
+        settings.managed_endpoint = "wss://managed.invalid:9443".into();
+        assert_eq!(
+            config_of(&settings).unwrap().egress.parent_probe,
+            Some(settings.managed_endpoint.clone())
+        );
+        settings.egress_proxy = None;
+        let direct = config_of(&settings).unwrap();
+        assert!(direct.egress.parent_proxy.is_none());
+        assert!(direct.egress.parent_probe.is_none());
+    }
 
     #[test]
     fn the_operators_pool_is_what_every_units_network_is_cut_from() {

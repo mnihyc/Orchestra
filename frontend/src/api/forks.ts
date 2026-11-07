@@ -14,6 +14,7 @@ import { queryOptions } from '@tanstack/react-query';
 import { api, ApiError, ok, repeatable } from '@/api/client';
 import { liveValue } from '@/api/liveValue';
 import type {
+  AgentAccessChoice,
   ForkBatch,
   ForkBatchPlan,
   ForkBatchPreflightBody,
@@ -45,36 +46,56 @@ export function isOver(state: Job['state']): boolean {
 // ---------------------------------------------------------------- the plan
 
 /** What a fork or a switch of one thread would do, before anything does. */
-export function planFork(threadId: string, request: ForkRequest, signal?: AbortSignal): Promise<ForkPlan> {
-  return ok(
+export async function planFork(
+  threadId: string,
+  request: ForkRequest,
+  signal?: AbortSignal,
+): Promise<ForkPlan> {
+  const result = await ok(
     api.POST('/threads/{id}/forks/preflight', {
       params: { path: { id: threadId } },
       body: request,
       ...(signal === undefined ? {} : { signal }),
     }),
   );
+  if ('projection' in result) {
+    throw new Error('The plan was prepared, but its details are no longer available.');
+  }
+  return result;
 }
 
 /** Forks a thread at once with nothing to choose: the same topic, environment, provider, profile and model, with all of the history. */
-export function forkNow(threadId: string, key: string, toTurn?: number): Promise<ForkNowReply> {
-  return ok(
-    api.POST('/threads/{id}/forks/now', { params: { path: { id: threadId } }, body: toTurn === undefined ? {} : { to_turn: toTurn }, ...repeatable(key) }),
+export async function forkNow(threadId: string, key: string, toTurn?: number, agentAccess?: AgentAccessChoice): Promise<ForkNowReply> {
+  const result = await ok(
+    api.POST('/threads/{id}/forks/now', { params: { path: { id: threadId } }, body: { ...(toTurn === undefined ? {} : { to_turn: toTurn }), ...(agentAccess === undefined ? {} : { agent_access: agentAccess }) }, ...repeatable(key) }),
   );
+  if ('projection' in result) {
+    throw new Error('The fork was started, but its details are no longer available.');
+  }
+  return result;
 }
 
 /** Carries a plan out: the job it makes, with the thread locked from this moment where it is a switch. */
-export function startFork(threadId: string, body: ForkCreateBody, key: string): Promise<Job> {
-  return ok(api.POST('/threads/{id}/forks', { params: { path: { id: threadId } }, body, ...repeatable(key) }));
+export async function startFork(threadId: string, body: ForkCreateBody, key: string): Promise<Job> {
+  const result = await ok(api.POST('/threads/{id}/forks', { params: { path: { id: threadId } }, body, ...repeatable(key) }));
+  if ('projection' in result) throw new Error('The job was accepted, but its details are no longer available.');
+  return result;
 }
 
 /** What switching several threads at once would do: one plan for each, each with its own blockers. */
-export function planBatch(body: ForkBatchPreflightBody, signal?: AbortSignal): Promise<ForkBatchPlan> {
-  return ok(api.POST('/forks/preflight', { body, ...(signal === undefined ? {} : { signal }) }));
+export async function planBatch(body: ForkBatchPreflightBody, signal?: AbortSignal): Promise<ForkBatchPlan> {
+  const result = await ok(api.POST('/forks/preflight', { body, ...(signal === undefined ? {} : { signal }) }));
+  if ('projection' in result) {
+    throw new Error('The batch was prepared, but its details are no longer available.');
+  }
+  return result;
 }
 
 /** Carries a batch plan out: one job for each plan without blockers, all their threads locked at once. */
-export function startBatch(body: ForkCreateBody, key: string): Promise<ForkBatch> {
-  return ok(api.POST('/forks', { body, ...repeatable(key) }));
+export async function startBatch(body: ForkCreateBody, key: string): Promise<ForkBatch> {
+  const result = await ok(api.POST('/forks', { body, ...repeatable(key) }));
+  if ('projection' in result) throw new Error('The batch was accepted, but its details are no longer available.');
+  return result;
 }
 
 // ---------------------------------------------------------------- jobs and batches
@@ -117,8 +138,10 @@ export const placesQuery = (nodeId: string, template: string | null = null) =>
 // ---------------------------------------------------------------- side threads
 
 /** Starts a side thread of a thread from one of its turns, with the first message queued in it. */
-export function startSide(threadId: string, body: ThreadSideCreateBody): Promise<ThreadSideCreateReply> {
-  return ok(api.POST('/threads/{id}/side', { params: { path: { id: threadId } }, body }));
+export async function startSide(threadId: string, body: ThreadSideCreateBody): Promise<ThreadSideCreateReply> {
+  const result = await ok(api.POST('/threads/{id}/side', { params: { path: { id: threadId } }, body }));
+  if ('projection' in result) throw new Error('The side was created, but its content is no longer available.');
+  return result;
 }
 
 /** The side threads of a thread, oldest first: those that are open, or those that were closed. */

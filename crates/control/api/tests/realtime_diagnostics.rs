@@ -1,4 +1,5 @@
 //! Resource changes, private provider progress and freshly masked diagnostic frames on transient feeds.
+#![recursion_limit = "256"]
 #![allow(
     clippy::unwrap_used,
     clippy::expect_used,
@@ -352,7 +353,7 @@ async fn the_provider_manager_is_allowed(rig: &Rig) {
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn a_program_error_reaches_the_provider_page_when_only_its_harness_report_changed() {
-    let rig = Rig::with_time_held().await;
+    let rig = Rig::with_unstarted_engine_and_time_held().await;
     the_provider_manager_is_allowed(&rig).await;
     let mut client = Client::signed_in(rig.server.addr, &rig.token).await;
     let feed = Feed::Resource {
@@ -369,6 +370,65 @@ async fn a_program_error_reaches_the_provider_page_when_only_its_harness_report_
             .is_empty()
     );
     realtime_support::coordinator_ready(&rig).await;
+    // Observe the real initial native-source work before isolating the later harness diagnostic.
+    rig.server.engine.start();
+    let settled = tokio::time::timeout(realtime_support::PATIENCE, async {
+        loop {
+            let frame = client.frame().await;
+            assert!(
+                frame["id"] == 1
+                    && frame["feed"] == feed.to_string()
+                    && frame["op"] == "event"
+                    && frame["data"]["what"] == "changed"
+                    && frame["data"]["row"]["kind"] == "provider"
+                    && frame["data"]["row"]["value"]["id"] == rig.provider.to_string(),
+                "initial source publication must be this provider's changed view: {}",
+                frame_summary(&frame, None)
+            );
+            let row = &frame["data"]["row"]["value"];
+            let mut unrelated = row.clone();
+            for field in ["harnesses", "sources", "updated_at", "facts_requested_at"] {
+                unrelated[field] = initial["row"]["value"][field].clone();
+            }
+            assert!(
+                unrelated == initial["row"]["value"],
+                "initial native-source work changed another provider field: {}",
+                frame_summary(&frame, None)
+            );
+            let mut complete = true;
+            for element in ["facts", "models"] {
+                let choice = &row["sources"][element];
+                let initial_choice = &initial["row"]["value"]["sources"][element];
+                let mut unchanged_choice = choice.clone();
+                unchanged_choice["last_error"] = initial_choice["last_error"].clone();
+                assert!(
+                    choice["by"] == "default" && unchanged_choice == *initial_choice,
+                    "initial native reads preserve their public default choice except the observed error: element={element}, default_by={}, descriptor_matches_initial={}, described_at_matches_initial={}",
+                    choice["by"] == "default",
+                    choice["descriptor"] == initial_choice["descriptor"],
+                    choice["described_at"] == initial_choice["described_at"]
+                );
+                let error = &choice["last_error"];
+                if error.is_null() {
+                    complete = false;
+                } else {
+                    assert!(
+                        error["code"] == "unavailable" && error["at"] == json!(rig.clock.time()),
+                        "the actual refused native source read publishes at the held observation cut"
+                    );
+                }
+            }
+            if complete {
+                assert!(
+                    row["facts_requested_at"] == json!(rig.clock.time()),
+                    "the completed initial read owns the held attempt clock"
+                );
+                break frame["data"].clone();
+            }
+        }
+    })
+    .await
+    .expect("the real initial facts and models outcomes publish within the fixture patience");
     let mut tx = rig.pool.begin().await.unwrap();
     orch_db::queries::resources::thread_engine::set_harness_status(
         &mut tx,
@@ -390,6 +450,10 @@ async fn a_program_error_reaches_the_provider_page_when_only_its_harness_report_
         .execute(&mut *tx).await.unwrap();
     tx.commit().await.unwrap();
     let changed = next_what(&mut client, "changed").await;
+    assert!(
+        changed["row"]["value"]["sources"] == settled["row"]["value"]["sources"],
+        "the later harness diagnostic is independent of the completed initial source reads"
+    );
     let reports = changed["row"]["value"]["harnesses"].as_array().unwrap();
     assert_eq!(reports.len(), 1);
     assert_eq!(reports[0]["status"], "online");
@@ -401,9 +465,47 @@ async fn a_program_error_reaches_the_provider_page_when_only_its_harness_report_
         changed["row"]["value"]["access"],
         initial["row"]["value"]["access"]
     );
+    let unexpected = client.hear_within(Duration::from_secs(2)).await;
+    let diagnostic = unexpected.as_ref().map(|heard| match heard {
+        Heard::Frame(frame) => {
+            fn changed_fields(before: &Value, after: &Value) -> Vec<String> {
+                before
+                    .as_object()
+                    .into_iter()
+                    .flat_map(|fields| fields.keys())
+                    .chain(
+                        after
+                            .as_object()
+                            .into_iter()
+                            .flat_map(|fields| fields.keys()),
+                    )
+                    .collect::<std::collections::BTreeSet<_>>()
+                    .into_iter()
+                    .filter(|key| before.get(key.as_str()) != after.get(key.as_str()))
+                    .cloned()
+                    .collect()
+            }
+            let before = &changed["row"]["value"];
+            let after = &frame["data"]["row"]["value"];
+            let reports = before["harnesses"]
+                .as_array()
+                .map_or(0, Vec::len)
+                .max(after["harnesses"].as_array().map_or(0, Vec::len));
+            let report_fields: Vec<_> = (0..reports)
+                .map(|index| {
+                    json!({"index":index,"fields":changed_fields(
+                        &before["harnesses"][index], &after["harnesses"][index])})
+                })
+                .collect();
+            json!({"frame":frame_summary(frame,None),
+                "changed_provider_fields":changed_fields(before,after),
+                "changed_harness_fields":report_fields})
+        }
+        Heard::Closed(code) => json!({"closed":code}),
+    });
     assert!(
-        client.hear_within(Duration::from_secs(2)).await.is_none(),
-        "the unchanged program report is quiet"
+        unexpected.is_none(),
+        "the unchanged program report is quiet; structural first={diagnostic:?}"
     );
     drop(client);
     rig.server.stop().await;

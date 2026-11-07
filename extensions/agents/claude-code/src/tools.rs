@@ -730,8 +730,8 @@ pub fn raw_call(name: &str, input: &Json, outcome: Option<&ToolOutcome>) -> RawC
 // The tools a session is given
 
 /// The built-in tools that are never offered. Each would make the harness act outside a turn of Orch:
-/// scheduled prompts and wake-ups start turns nobody asked for, a message to a background agent has no
-/// agent to reach, and a remote or push trigger leaves the machine. Entering plan mode is a person's
+/// scheduled prompts and wake-ups have no admitted originating input, cross-session messaging has no
+/// admitted recipient authority, and a remote or push trigger leaves the machine. Entering plan mode is a person's
 /// switch, never the agent's, and worktrees change what the harness is allowed to do in ways the approval
 /// and sandbox modes of Orch do not know. Leaving plan mode is offered: it is how a plan is proposed.
 pub const NEVER_OFFERED: [&str; 13] = [
@@ -753,7 +753,8 @@ pub const NEVER_OFFERED: [&str; 13] = [
 /// The built-in tools that act on no machine: starting a sub-agent, asking a person, proposing a plan, the
 /// list of things to do. These stay when the harness works through Orch's executor, because they need
 /// nothing of the machine the harness is on.
-pub const MACHINE_FREE: [&str; 9] = [
+pub const MACHINE_FREE: [&str; 10] = [
+    "WebFetch",
     AGENT_TOOL,
     QUESTION_TOOL,
     "ExitPlanMode",
@@ -769,12 +770,19 @@ pub const MACHINE_FREE: [&str; 9] = [
 /// except [`NEVER_OFFERED`]. With the harness in its provider's runtime only [`MACHINE_FREE`] stay, so that
 /// everything that touches a machine goes through the executor's `exec` server.
 #[must_use]
-pub fn tool_arguments(through_executor: bool) -> Vec<String> {
+pub fn tool_arguments(through_executor: bool, web_search: bool) -> Vec<String> {
     if through_executor {
-        vec!["--tools".to_owned(), MACHINE_FREE.join(",")]
+        let mut tools = MACHINE_FREE.to_vec();
+        if web_search {
+            tools.push("WebSearch");
+        }
+        vec!["--tools".to_owned(), tools.join(",")]
     } else {
         let mut arguments = vec!["--disallowed-tools".to_owned()];
         arguments.extend(NEVER_OFFERED.iter().map(|tool| (*tool).to_owned()));
+        if !web_search {
+            arguments.push("WebSearch".to_owned());
+        }
         arguments
     }
 }
@@ -1053,13 +1061,13 @@ mod tests {
     #[test]
     fn a_session_in_the_environment_keeps_its_tools_less_those_that_start_turns_and_one_with_its_provider_keeps_only_those_that_touch_no_machine()
      {
-        let own = tool_arguments(false);
+        let own = tool_arguments(false, false);
         assert_eq!(own[0], "--disallowed-tools");
         assert!(
             own.contains(&"CronCreate".to_owned()) && own.contains(&"ScheduleWakeup".to_owned())
         );
         assert!(!own.contains(&"Bash".to_owned()));
-        let through = tool_arguments(true);
+        let through = tool_arguments(true, false);
         assert_eq!(through[0], "--tools");
         let kept: Vec<&str> = through[1].split(',').collect();
         assert!(kept.contains(&"Agent") && !kept.contains(&"Bash") && !kept.contains(&"Write"));

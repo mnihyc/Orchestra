@@ -1,5 +1,6 @@
 //! Compact waiting words arrive and clear on the existing org feed, without a second read of each thread.
 
+#![recursion_limit = "256"]
 mod realtime_support;
 
 use orch_db::queries::hierarchy;

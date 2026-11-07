@@ -9,6 +9,7 @@ mod chat_world;
 mod places;
 mod support;
 
+use crate::support::FullArchiveReply as _;
 use chat_world::{Room, missing_permissions, text};
 use orch_api_contract::chats::{
     ChatCanReason, ChatDraftDelete, ChatDraftGet, ChatDraftSet, ChatDraftSetBody, ChatKind,
@@ -184,6 +185,8 @@ async fn a_reply_names_the_message_it_answers_and_shows_the_start_of_it() {
         .send()
         .await
         .ok()
+        .into_full()
+        .expect("the browser session receives the full chat message reply")
         .message;
     let reply = answer.reply_to.unwrap();
     assert_eq!(reply.id, asked.id);
@@ -229,13 +232,13 @@ async fn only_the_author_edits_a_message_and_it_is_marked_as_edited() {
         let refused = edit(stranger, "the plan").await.problem();
         assert_eq!(refused.code, ErrorCode::AuthzDenied);
     }
-    let edited = edit(&room.bea, "the plan").await.ok();
+    let edited = edit(&room.bea, "the plan").await.ok().into_full().unwrap();
     assert_eq!(Room::words(&edited), "the plan");
     assert!(edited.edited_at.is_some());
     assert!(edited.seq_updated > message.seq_updated);
     assert_eq!(edited.seq_created, message.seq_created);
     // The same words again change nothing.
-    let same = edit(&room.bea, "the plan").await.ok();
+    let same = edit(&room.bea, "the plan").await.ok().into_full().unwrap();
     assert_eq!(same.seq_updated, edited.seq_updated);
     assert_eq!(
         edit(&room.bea, "").await.problem().code,
@@ -263,6 +266,8 @@ async fn deleting_a_message_leaves_a_row_that_shows_nothing_of_what_it_said() {
         .send()
         .await
         .ok()
+        .into_full()
+        .expect("the browser session receives the full chat message reply")
         .message;
     let emoji = "%F0%9F%91%8D";
     room.world
@@ -287,7 +292,9 @@ async fn deleting_a_message_leaves_a_row_that_shows_nothing_of_what_it_said() {
         .token(&room.bea.token)
         .send()
         .await
-        .ok();
+        .ok()
+        .into_full()
+        .expect("the browser session receives the full mutation reply");
     assert!(gone.deleted);
     assert!(gone.parts.is_empty() && gone.reactions.is_empty() && gone.mentions.is_empty());
     assert!(gone.pinned.is_none() && !gone.mentions_all);
@@ -320,7 +327,9 @@ async fn deleting_a_message_leaves_a_row_that_shows_nothing_of_what_it_said() {
         .token(&room.bea.token)
         .send()
         .await
-        .ok();
+        .ok()
+        .into_full()
+        .expect("the browser session receives the full mutation reply");
     assert_eq!(again.seq_updated, gone.seq_updated);
     // Nothing can be said to it any more.
     let react = room
@@ -359,7 +368,9 @@ async fn whoever_holds_chat_manage_deletes_the_message_of_another_and_the_audit_
         .token(&room.cai.token)
         .send()
         .await
-        .ok();
+        .ok()
+        .into_full()
+        .expect("the browser session receives the full mutation reply");
     assert!(deleted.deleted);
     let audit = room.audit_of(room.chat).await;
     assert_eq!(audit, ["chat.message_deleted"]);
@@ -403,29 +414,53 @@ async fn a_reaction_is_made_once_by_a_person_and_taken_back_by_them_and_a_messag
             }
         }
     };
-    let first = react(&room.bea, up, true).await.ok();
+    let first = react(&room.bea, up, true)
+        .await
+        .ok()
+        .into_full()
+        .expect("the browser session receives the full mutation reply");
     assert_eq!(first.reactions.len(), 1);
     assert_eq!(first.reactions[0].emoji, "\u{1f44d}");
     assert_eq!(first.reactions[0].users, [room.bea.id()]);
-    let twice = react(&room.bea, up, true).await.ok();
+    let twice = react(&room.bea, up, true)
+        .await
+        .ok()
+        .into_full()
+        .expect("the browser session receives the full mutation reply");
     assert_eq!(
         twice.seq_updated, first.seq_updated,
         "a reaction already made changes nothing"
     );
-    let second = react(&room.cai, up, true).await.ok();
+    let second = react(&room.cai, up, true)
+        .await
+        .ok()
+        .into_full()
+        .expect("the browser session receives the full mutation reply");
     assert_eq!(
         second.reactions[0].users,
         [room.bea.id(), room.cai.id()],
         "in the order they reacted"
     );
-    let gone = react(&room.bea, up, false).await.ok();
+    let gone = react(&room.bea, up, false)
+        .await
+        .ok()
+        .into_full()
+        .expect("the browser session receives the full mutation reply");
     assert_eq!(gone.reactions[0].users, [room.cai.id()]);
-    let nothing = react(&room.bea, up, false).await.ok();
+    let nothing = react(&room.bea, up, false)
+        .await
+        .ok()
+        .into_full()
+        .expect("the browser session receives the full mutation reply");
     assert_eq!(
         nothing.seq_updated, gone.seq_updated,
         "one that was not made is not taken back"
     );
-    let last = react(&room.cai, up, false).await.ok();
+    let last = react(&room.cai, up, false)
+        .await
+        .ok()
+        .into_full()
+        .expect("the browser session receives the full mutation reply");
     assert!(last.reactions.is_empty());
     // At most twenty different emoji.
     for number in 0..20 {
@@ -450,7 +485,9 @@ async fn a_message_is_pinned_and_unpinned_by_whoever_can_write_and_the_pinned_on
         .token(&room.bea.token)
         .send()
         .await
-        .ok();
+        .ok()
+        .into_full()
+        .expect("the browser session receives the full mutation reply");
     assert_eq!(pinned.pinned.as_ref().unwrap().by.username, "bea");
     let list = |query: ChatMessageListQuery| {
         let call = room
@@ -478,7 +515,9 @@ async fn a_message_is_pinned_and_unpinned_by_whoever_can_write_and_the_pinned_on
         .token(&room.cai.token)
         .send()
         .await
-        .ok();
+        .ok()
+        .into_full()
+        .expect("the browser session receives the full mutation reply");
     assert_eq!(
         again.seq_updated, pinned.seq_updated,
         "pinning a pinned message changes nothing"
@@ -490,7 +529,9 @@ async fn a_message_is_pinned_and_unpinned_by_whoever_can_write_and_the_pinned_on
         .token(&room.cai.token)
         .send()
         .await
-        .ok();
+        .ok()
+        .into_full()
+        .expect("the browser session receives the full mutation reply");
     assert!(unpinned.pinned.is_none());
     assert!(
         list(ChatMessageListQuery {
@@ -751,7 +792,9 @@ async fn the_bell_follows_or_mutes_a_chat_and_null_returns_to_the_default() {
         hidden: None,
     })
     .await
-    .ok();
+    .ok()
+    .into_full()
+    .unwrap();
     assert_eq!(
         (follows.level, follows.effective_level),
         (Some(ChatLevel::All), ChatLevel::All)
@@ -762,7 +805,9 @@ async fn the_bell_follows_or_mutes_a_chat_and_null_returns_to_the_default() {
         hidden: None,
     })
     .await
-    .ok();
+    .ok()
+    .into_full()
+    .unwrap();
     assert_eq!(
         muted.effective_level,
         ChatLevel::Off,
@@ -774,12 +819,18 @@ async fn the_bell_follows_or_mutes_a_chat_and_null_returns_to_the_default() {
         hidden: None,
     })
     .await
-    .ok();
+    .ok()
+    .into_full()
+    .unwrap();
     assert_eq!(
         (default.level, default.effective_level),
         (None, ChatLevel::Mentions)
     );
-    let unchanged = set(ChatStateSetBody::default()).await.ok();
+    let unchanged = set(ChatStateSetBody::default())
+        .await
+        .ok()
+        .into_full()
+        .unwrap();
     assert_eq!(unchanged.effective_level, ChatLevel::Mentions);
     let hidden = set(ChatStateSetBody {
         level: None,
@@ -827,7 +878,9 @@ async fn a_draft_is_kept_for_its_person_alone_and_goes_when_it_is_discarded() {
         })
         .send()
         .await
-        .ok();
+        .ok()
+        .into_full()
+        .unwrap();
     let kept = get(&room.bea).await.unwrap();
     assert_eq!(kept, saved);
     assert_eq!(Room::words_of(&kept.parts), "half a thought");
@@ -869,6 +922,7 @@ async fn a_chat_under_an_archived_node_keeps_its_history_and_takes_no_message() 
         .body(&places::archive_body(&room.world, &room.ada.token, room.project, true).await)
         .send()
         .await
+        .full_archive()
         .ok();
     let refused = room
         .send(&room.bea, room.chat, vec![text("after")], "late")

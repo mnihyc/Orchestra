@@ -46,7 +46,7 @@ export function ProviderLink({ provider, label = provider.name }: { provider: Pi
   return (
     <span className="flex min-w-0 flex-col gap-0.5"><ResourceName subject={{ kind: 'provider', provider }} asChild><Link to="/resources/providers/$id" params={{ id: provider.id }} className="min-w-0 truncate font-medium text-text hover:underline">
       {label}
-    </Link></ResourceName><ResourceHint subject={{ kind: 'provider', provider }} /></span>
+    </Link></ResourceName><ResourceHint subject={{ kind: 'provider', provider }} wrap /></span>
   );
 }
 

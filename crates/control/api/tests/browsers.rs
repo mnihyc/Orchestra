@@ -1,4 +1,5 @@
 //! Browser gates, joining, tickets, view-only input and host-only sitting history over the real browser.
+#![recursion_limit = "256"]
 #![cfg(unix)]
 #![allow(
     clippy::unwrap_used,

@@ -8,8 +8,7 @@
 use super::*;
 use orch_api_contract::documents::{
     BlockType, DocumentImportRequest, DocumentImportRequestFileFormat as Format,
-    DocumentImportResult, DocumentImportResultEntry, DocumentImportResultError, InlineRefKind,
-    NodeDocumentImport,
+    DocumentImportResultEntry, DocumentImportResultError, InlineRefKind, NodeDocumentImport,
 };
 use orch_blob_contract::range::BlobMeta;
 use orch_documents::convert;
@@ -17,13 +16,20 @@ use orch_documents::markdown::{FileRef, Local};
 use orch_documents::references::Typed;
 use orch_types::Hash;
 
+mod operation;
+
 // Import uses the published 200-entry list bound, independently of larger archive-browser pages.
 const ENTRIES_MAX: usize = orch_api_contract::common::MAX_LIMIT as usize;
 // This is the registry's shipped expanded-source allowance when no override is stored.
 const SHIPPED_EXPANDED_BYTES: i64 = 64 * 1024 * 1024;
 
 pub(super) fn mount(registry: &mut Registry) {
-    registry.on(NodeDocumentImport, import);
+    registry.on_with_initial_operation(
+        NodeDocumentImport,
+        crate::key_operations::native::effects::initial::<operation::Imports>,
+        crate::key_operations::native::effects::prepare::<operation::Imports>,
+        operation::import,
+    );
 }
 
 struct Input {
@@ -46,21 +52,6 @@ fn refused(name: String, error: ApiError) -> DocumentImportResultEntry {
             message: error.problem.detail.clone(),
         }),
     }
-}
-
-async fn source_size(ctx: &Ctx, source: Hash) -> ApiResult<i64> {
-    let (mut tx, guard) = transaction_guard::begin(ctx).await?;
-    crate::attachments::require(&mut tx, guard.principal(), &source).await?;
-    tx.commit().await.map_err(DbError::from)?;
-    let size = ctx
-        .app
-        .blobs
-        .store()
-        .size(&source)
-        .await
-        .map_err(ApiError::internal)?
-        .ok_or_else(ApiError::not_found)?;
-    Ok(size)
 }
 
 async fn allowance(conn: &mut Conn, node: Id) -> ApiResult<i64> {
@@ -163,18 +154,49 @@ impl Directory for Entries<'_> {
     }
 }
 
-async fn inputs(ctx: &Ctx, body: &DocumentImportRequest, limit: i64) -> ApiResult<Vec<Input>> {
+async fn inputs(
+    ctx: &Ctx,
+    body: &DocumentImportRequest,
+    limit: i64,
+    origin: &orch_authz::CapturedOperation,
+    sources: &operation::Sources,
+    source_errors: &[Option<DocumentImportResultError>],
+) -> ApiResult<Vec<Input>> {
     let mut out = Vec::new();
     let mut used = 0_i64;
     let mut names = std::collections::HashSet::new();
-    for file in &body.files {
+    for (index, file) in body.files.iter().enumerate() {
+        if let Some(error) = &source_errors[index] {
+            out.push(Input {
+                name: file.name.clone(),
+                source: file.blob,
+                format: file.format,
+                bytes: Vec::new(),
+                error: Some(ApiError::new(
+                    serde_json::from_value(json!(error.code)).map_err(ApiError::internal)?,
+                    &error.message,
+                )),
+                companion: false,
+            });
+            continue;
+        }
+        let source = sources.for_hash(file.blob);
         let prepared = async {
             let name = crate::archives::import_path(&file.name)
                 .map_err(|error| invalid("files", error))?;
             if !names.insert(name.clone()) {
                 return Err(invalid("files", "duplicate source file name"));
             }
-            let size = source_size(ctx, file.blob).await?;
+            operation::check_inputs(ctx, origin, &source).await?;
+            let size = ctx
+                .app
+                .blobs
+                .store()
+                .size(&file.blob)
+                .await
+                .map_err(ApiError::internal)?
+                .ok_or_else(ApiError::not_found)?;
+            operation::check_inputs(ctx, origin, &source).await?;
             if file.format != Format::Archive && size > limit.saturating_sub(used) {
                 return Err(invalid(
                     "files",
@@ -182,7 +204,7 @@ async fn inputs(ctx: &Ctx, body: &DocumentImportRequest, limit: i64) -> ApiResul
                 ));
             }
             if file.format == Format::Archive {
-                let sources = crate::archives::documents(
+                let archived = crate::archives::documents(
                     &ctx.app.blobs,
                     BlobMeta {
                         hash: file.blob,
@@ -193,7 +215,8 @@ async fn inputs(ctx: &Ctx, body: &DocumentImportRequest, limit: i64) -> ApiResul
                 )
                 .await
                 .map_err(|error| invalid("files", &error.to_string()))?;
-                let sources = sources
+                operation::check_inputs(ctx, origin, &source).await?;
+                let sources = archived
                     .into_iter()
                     .map(|source| {
                         let format = archive_format(&source.name);
@@ -215,6 +238,7 @@ async fn inputs(ctx: &Ctx, body: &DocumentImportRequest, limit: i64) -> ApiResul
                 .read_whole(&file.blob, limit.saturating_sub(used))
                 .await
                 .map_err(ApiError::internal)?;
+            operation::check_inputs(ctx, origin, &source).await?;
             used = used.saturating_add(i64::try_from(bytes.len()).unwrap_or(i64::MAX));
             Ok(vec![Input {
                 name,
@@ -281,193 +305,4 @@ fn title(name: &str, blocks: &mut Vec<NewBlock>, warnings: &mut Vec<String>) -> 
     } else {
         chosen
     }
-}
-
-async fn make(
-    ctx: &Ctx,
-    client: &str,
-    index: usize,
-    input: Input,
-    expanded: i64,
-    siblings: &HashMap<String, Id>,
-    companions: &HashMap<String, Companion>,
-) -> ApiResult<(Document, Vec<String>)> {
-    let Some(format) = reader_format(input.format) else {
-        return Err(invalid(
-            "files",
-            "an archive entry must be Markdown, HTML, Word or text",
-        ));
-    };
-    // Reading an untrusted source runs before the short action transaction. The actual source grant and
-    // destination allowance are checked again after this work has completed.
-    let name = input.name.clone();
-    let bytes = input.bytes;
-    let prepared = tokio::task::spawn_blocking(move || convert::prepare(format, &bytes))
-        .await
-        .map_err(ApiError::internal)?
-        .map_err(|error| invalid("files", &error.to_string()))?;
-    let (mut ctx, mut tx, principal) = crate::routes::nodes::action(ctx).await?;
-    let node = ctx.id("id")?;
-    let id = rows::copy::identity(
-        principal.user(),
-        node,
-        client,
-        &format!("import:{index}:{name}"),
-    );
-    if let Some(made) = creation::existing(&ctx, &mut tx, &principal, id).await? {
-        let warnings: Option<orch_types::Json> = sqlx::query_scalar("SELECT COALESCE(details->'import_warnings','[]'::jsonb) FROM audit_log WHERE action='document.created' AND object_id=$1 ORDER BY at,id LIMIT 1")
-            .bind(id).fetch_optional(&mut *tx).await.map_err(DbError::from)?;
-        let warnings = warnings
-            .map(serde_json::from_value::<Vec<String>>)
-            .transpose()
-            .map_err(ApiError::internal)?
-            .unwrap_or_default();
-        tx.commit().await.map_err(DbError::from)?;
-        return Ok((made, warnings));
-    }
-    crate::attachments::require(&mut tx, &principal, &input.source).await?;
-    if expanded > allowance(&mut tx, node).await? {
-        return Err(invalid(
-            "files",
-            "the import exceeds the current expanded byte allowance",
-        ));
-    }
-    let base = name.rsplit_once('/').map_or("", |(base, _)| base);
-    let people = {
-        let found = rows::users_by_username(&mut tx, &prepared.mentioned_names()).await?;
-        found
-            .into_iter()
-            .map(|(name, id)| (name.to_ascii_lowercase(), id))
-            .collect()
-    };
-    let entries = Entries {
-        people,
-        base,
-        siblings,
-        companions,
-        asked: std::sync::Mutex::new(HashMap::new()),
-    };
-    let read = prepared.finish(&entries);
-    let mut blocks = read.blocks;
-    let mut warnings: Vec<String> = read.warnings.into_iter().map(|each| each.message).collect();
-    // The pictures and files of the archive that the text shows are files of this document.
-    let mut embedded = read.embedded;
-    embedded.extend(entries.named_files(&blocks));
-    let mut taken = std::collections::HashSet::new();
-    let files = super::convert::hold(
-        &ctx,
-        &embedded,
-        &mut taken,
-        principal.user(),
-        principal.now().get(),
-    )
-    .await?;
-    let title = title(&name, &mut blocks, &mut warnings);
-    ctx.now = principal.now().get();
-    let body = NodeDocumentCreateBody {
-        title,
-        blocks: Some(blocks),
-        markdown: None,
-        access: None,
-    };
-    let made = create_prepared(
-        ctx,
-        body,
-        Some(id),
-        files,
-        Some((tx, principal)),
-        warnings.clone(),
-    )
-    .await?;
-    Ok((made, warnings))
-}
-
-async fn import(ctx: Ctx, (): (), body: DocumentImportRequest) -> ApiResult<DocumentImportResult> {
-    creation::client_id(&body.client_id)?;
-    if body.files.is_empty() || body.files.len() > ENTRIES_MAX {
-        return Err(invalid("files", "select one to two hundred sources"));
-    }
-    if body.files.iter().any(|file| file.format == Format::Archive) && body.files.len() != 1 {
-        return Err(invalid(
-            "files",
-            "select several text files or one archive, not both",
-        ));
-    }
-    let (ctx, mut tx, _) = crate::routes::nodes::action(&ctx).await?;
-    let limit = allowance(&mut tx, ctx.id("id")?).await?;
-    tx.commit().await.map_err(DbError::from)?;
-    let selected = inputs(&ctx, &body, limit).await?;
-    let expanded = selected.iter().fold(0_i64, |total, input| {
-        total.saturating_add(i64::try_from(input.bytes.len()).unwrap_or(i64::MAX))
-    });
-    // The files that came with the texts of an archive, by their path in it.
-    let companions: HashMap<String, Companion> = selected
-        .iter()
-        .filter(|input| input.companion && input.error.is_none())
-        .map(|input| {
-            (
-                input.name.clone(),
-                Companion {
-                    media_type: orch_types::media::media_type(&input.name, &[]).to_owned(),
-                    bytes: input.bytes.clone(),
-                },
-            )
-        })
-        .collect();
-    // Which document each entry becomes, from what a retry would make again: a link from one to another is a reference.
-    let siblings: HashMap<String, Id> = {
-        let (_, tx, principal) = crate::routes::nodes::action(&ctx).await?;
-        let node = ctx.id("id")?;
-        let planned = selected
-            .iter()
-            .enumerate()
-            .filter(|(_, input)| {
-                input.error.is_none() && !input.companion && reader_format(input.format).is_some()
-            })
-            .map(|(index, input)| {
-                (
-                    input.name.clone(),
-                    rows::copy::identity(
-                        principal.user(),
-                        node,
-                        &body.client_id,
-                        &format!("import:{index}:{}", input.name),
-                    ),
-                )
-            })
-            .collect();
-        tx.commit().await.map_err(DbError::from)?;
-        planned
-    };
-    let mut entries = Vec::new();
-    for (index, mut input) in selected.into_iter().enumerate() {
-        let name = input.name.clone();
-        if let Some(error) = input.error.take() {
-            entries.push(refused(name, error));
-            continue;
-        }
-        if input.companion {
-            continue;
-        }
-        match make(
-            &ctx,
-            &body.client_id,
-            index,
-            input,
-            expanded,
-            &siblings,
-            &companions,
-        )
-        .await
-        {
-            Ok((document, warnings)) => entries.push(DocumentImportResultEntry {
-                name,
-                document: Some(document.base),
-                warnings,
-                error: None,
-            }),
-            Err(error) => entries.push(refused(name, error)),
-        }
-    }
-    Ok(DocumentImportResult { entries })
 }

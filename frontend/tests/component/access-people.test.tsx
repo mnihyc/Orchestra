@@ -21,7 +21,7 @@ import { ADA, BEA, CATALOGUE, pageFor, TOPIC } from '../unit/general-access-fixt
 import { show } from './support';
 
 const calls = vi.hoisted(() => ({ search: vi.fn<(query: string, options: CandidateOptions) => void>(), people: vi.fn() }));
-const group: Holder = { kind: 'group', group: { id: 'owners', org_id: 'acme', place: 'Acme', name: 'Reviewers', description: '', member_count: 1 } };
+const group: Holder = { kind: 'group', group: { revision: 1, id: 'owners', org_id: 'acme', place: 'Acme', name: 'Reviewers', description: '', member_count: 1 } };
 const regular: UserRef = { ...BEA, id: 'regular', username: 'vera', display_name: 'Vera' };
 const place = org('acme', 'acme', 'Acme', ADA);
 const changes: Changes = { busy: false, doing: null, error: null, stale: null, forget: vi.fn(), again: () => Promise.resolve(false), run: vi.fn(() => Promise.resolve(true)) };

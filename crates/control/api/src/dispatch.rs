@@ -24,7 +24,7 @@ use orch_db::{Db, DbError};
 use orch_link::commands::{CommandFailure, Progress};
 use orch_link_contract::commands::{
     Cmd, CommandBody, CommandError, CommandKind, ErrorCode, Reference, SerialKey, TicketWanted,
-    has_references, resolve_references,
+    has_references, resolve_reference_values, resolve_references,
 };
 use orch_pki::sealing::{RecipientKey, info_for_command, seal};
 use orch_types::{Id, Json, Time, new_id};
@@ -65,6 +65,9 @@ const ANSWERED_ONCE: [CommandKind; 5] = [
 /// Why a command could not be issued, or waited for.
 #[derive(Debug, thiserror::Error)]
 pub enum DispatchError {
+    /// A native issuing writer's actual first-effect check refused the queue insertion.
+    #[error("the command's current issuing boundary has ended: {0}")]
+    BeforeEffect(Box<dyn std::error::Error + Send + Sync>),
     /// The system does not know the machine.
     #[error("the system does not know that machine")]
     UnknownMachine,
@@ -83,6 +86,11 @@ pub enum DispatchError {
     /// The database failed.
     #[error("{0}")]
     Db(#[from] DbError),
+    /// A new scoped issuer cannot relabel or adopt another canonical native origin.
+    #[error(
+        "the retained native command belongs to another origin; its existing work was unchanged"
+    )]
+    AuthorityMismatch,
     /// The system is stopping.
     #[error("the system is stopping")]
     Stopping,
@@ -162,6 +170,8 @@ pub struct StoredCommand {
     pub deadline: Option<Time>,
     /// Its body, with references in place of secrets and tickets.
     pub body: Json,
+    /// Private typed evidence, redacted by its Debug implementation and never copied to Cmd.
+    pub authority: Option<orch_engine::commands::CommandAuthority>,
 }
 
 /// The command a row holds, with its authoritative key and no legacy storage member in the body.
@@ -257,6 +267,7 @@ impl Dispatcher {
         body: &B,
     ) -> Result<Issued, DispatchError> {
         self.issue_stored(StoredCommand {
+            authority: None,
             id: None,
             machine,
             kind: B::KIND.as_str().to_owned(),
@@ -278,6 +289,7 @@ impl Dispatcher {
         body: &B,
     ) -> Result<Issued, DispatchError> {
         self.issue_stored(StoredCommand {
+            authority: None,
             id: Some(id),
             machine,
             kind: B::KIND.as_str().to_owned(),
@@ -292,9 +304,36 @@ impl Dispatcher {
     /// once if the machine has a session, and whenever it has one until the
     /// command is over.
     pub async fn issue_stored(&self, command: StoredCommand) -> Result<Issued, DispatchError> {
+        self.issue_stored_boundary(command, None).await
+    }
+
+    /// Queue the same native command with its writer's check at the first SQL mutation.
+    pub async fn issue_stored_before(
+        &self,
+        command: StoredCommand,
+        before: orch_engine::commands::BeforeCommand<'_>,
+    ) -> Result<Issued, DispatchError> {
+        self.issue_stored_boundary(command, Some(before)).await
+    }
+
+    async fn issue_stored_boundary(
+        &self,
+        command: StoredCommand,
+        before: Option<orch_engine::commands::BeforeCommand<'_>>,
+    ) -> Result<Issued, DispatchError> {
+        let guarded = before.is_some();
         if command.kind == "session.background" {
             return Err(DispatchError::UnknownKind(
                 "live native reads must use the transient observation path".to_owned(),
+            ));
+        }
+        if command
+            .authority
+            .as_ref()
+            .is_some_and(|authority| authority.command_kind() != command.kind)
+        {
+            return Err(DispatchError::UnknownKind(
+                "the private command evidence belongs to another command".into(),
             ));
         }
         let kind: CommandKind = command
@@ -319,6 +358,15 @@ impl Dispatcher {
         );
         let body = command.body;
         let mut tx = inner.db.begin().await?;
+        if let Some(authority) = &command.authority {
+            authority
+                .lock_native_source(&mut tx)
+                .await
+                .map_err(|_| DispatchError::Unavailable)?;
+        }
+        orch_engine::jobs::provision::lock_creator_command_source(&mut tx, id)
+            .await
+            .map_err(|error| DispatchError::BeforeEffect(Box::new(error)))?;
         let provider_allowed = if matches!(
             kind,
             CommandKind::ProviderComplete | CommandKind::ProviderEmbed
@@ -339,7 +387,67 @@ impl Dispatcher {
             FROM jobs WHERE id=$2 OR (state IN ('queued','running') AND plan->'active_command'->>'id'=$1::text)
             ORDER BY id FOR UPDATE")
             .bind(id).bind(work_owner).fetch_all(&mut *tx).await.map_err(DbError::from)?;
-        let inserted = queries::insert_command(
+        let authority = command
+            .authority
+            .as_ref()
+            .map(serde_json::to_value)
+            .transpose()?;
+        // A new scoped issuer cannot affect an already retained different origin.
+        // Keep the same post-insert comparison too for a concurrent first insertion.
+        if guarded
+            && command
+                .authority
+                .as_ref()
+                .is_some_and(orch_engine::commands::CommandAuthority::is_scoped_native)
+            && let Some(saved) = queries::lock_command_with_authority(&mut tx, id).await?
+            && (saved.command.machine_id != command.machine
+                || saved.command.kind != kind.as_str()
+                || saved.command.serial_key() != command.key.as_deref()
+                || saved.command.body != body
+                || saved.authority.as_ref() != authority.as_ref())
+        {
+            return Err(DispatchError::AuthorityMismatch);
+        }
+        // Entry/provider/parent preparation and retained-command comparison can wait.
+        // New native queue work keeps its actual original operation on this transaction.
+        let issue_callers = if let Some(authority) = command.authority.as_ref()
+            && authority.requires_issue_checkpoint()
+            && queries::command(&mut tx, id).await?.is_none()
+        {
+            let current = authority
+                .current_issue_callers(
+                    &mut tx,
+                    &NewCommand {
+                        id,
+                        machine_id: command.machine,
+                        kind: kind.as_str(),
+                        body: &body,
+                        serial_key: command.key.as_deref(),
+                        deadline_at: deadline,
+                    },
+                    inner.clock.as_ref(),
+                    &crate::thread_access::AuthzAccess::new(inner.clock.clone()),
+                )
+                .await
+                .map_err(|_| DispatchError::Unavailable)?;
+            Some(current.ok_or(DispatchError::Unavailable)?)
+        } else {
+            None
+        };
+        if let Some(before) = before {
+            before().map_err(DispatchError::BeforeEffect)?;
+        }
+        if issue_callers.as_ref().is_some_and(|callers| {
+            callers.iter().any(|(caller, until)| {
+                caller
+                    .as_ref()
+                    .is_some_and(|caller| !caller.key_deadline_allows(inner.clock.as_ref()))
+                    || until.is_some_and(|until| until.get() <= inner.clock.now())
+            })
+        }) {
+            return Err(DispatchError::Unavailable);
+        }
+        let inserted = queries::insert_command_with_authority(
             &mut tx,
             &NewCommand {
                 id,
@@ -350,8 +458,28 @@ impl Dispatcher {
                 deadline_at: deadline,
             },
             now,
+            authority.as_ref(),
         )
         .await?;
+        if command
+            .authority
+            .as_ref()
+            .is_some_and(orch_engine::commands::CommandAuthority::is_scoped_native)
+        {
+            let saved = queries::lock_command_with_authority(&mut tx, id)
+                .await?
+                .ok_or(DispatchError::UnknownCommand)?;
+            // Original canonical None stays None, and its old queued/system work is not cancelled.
+            // Accepted work also keeps its original owner; domain result reconciliation is separate.
+            if saved.command.machine_id != command.machine
+                || saved.command.kind != kind.as_str()
+                || saved.command.serial_key() != command.key.as_deref()
+                || saved.command.body != body
+                || saved.authority.as_ref() != authority.as_ref()
+            {
+                return Err(DispatchError::AuthorityMismatch);
+            }
+        }
         if !provider_allowed {
             let error = serde_json::to_value(CommandError::new(
                 ErrorCode::Conflict,
@@ -375,11 +503,44 @@ impl Dispatcher {
         let row = queries::command(&mut tx, id)
             .await?
             .ok_or(DispatchError::UnknownCommand)?;
+        if guarded
+            && inserted
+            && let Some(authority) = &command.authority
+        {
+            let current = authority
+                .current_callers(
+                    &mut tx,
+                    &row,
+                    inner.clock.as_ref(),
+                    &crate::thread_access::AuthzAccess::new(inner.clock.clone()),
+                )
+                .await
+                .map_err(|error| DispatchError::BeforeEffect(Box::new(error)))?;
+            let allowed = current.is_some_and(|callers| {
+                callers.iter().all(|(caller, deadline)| {
+                    caller
+                        .as_ref()
+                        .is_none_or(|caller| caller.key_deadline_allows(inner.clock.as_ref()))
+                        && deadline.is_none_or(|end| inner.clock.now() < end.get())
+                })
+            });
+            if !allowed {
+                return Err(DispatchError::BeforeEffect(Box::new(
+                    crate::middleware::requests::ApiError::new(
+                        orch_api_contract::common::ErrorCode::AuthzDenied,
+                        "the native command's issuing authority is no longer current",
+                    ),
+                )));
+            }
+        }
+
         tx.commit().await.map_err(DbError::from)?;
         // Lifecycle transactions may have committed this command before the dispatcher sees it.
         #[cfg(test)]
         crate::backplane::command_admission_tests::adoption_read(&self.link, id).await;
         if row.state == "queued" {
+            #[cfg(feature = "test-observers")]
+            orch_link::test_observers::issued_probe(command.machine, id, &row.kind);
             entry.adopt(cmd_of(&row), Progress::Queued);
         }
         Ok(Issued {
@@ -418,6 +579,20 @@ impl Dispatcher {
                 () = inner.shutdown.cancelled() => return Err(DispatchError::Stopping),
             }
         }
+    }
+
+    /// Read only the canonical command's private custody facts for an existing retry.
+    pub(crate) async fn retained_return_source(
+        &self,
+        id: Id,
+    ) -> Result<Option<orch_engine::credentials::handover_authority::ReturnSource>, DispatchError>
+    {
+        let mut conn = self.link.inner.db.acquire().await?;
+        let authority = queries::command_authority(&mut conn, id)
+            .await?
+            .map(serde_json::from_value::<orch_engine::commands::CommandAuthority>)
+            .transpose()?;
+        Ok(authority.and_then(|authority| authority.handover_source().cloned()))
     }
 
     /// Whether events `machine` sent on `stream` are at this link and not taken in yet
@@ -609,7 +784,9 @@ impl Link {
         entry: &MachineEntry,
         original: &Cmd,
         mut prepared: Cmd,
-    ) -> Result<Option<Cmd>, CommandError> {
+    ) -> Result<Option<(Cmd, Vec<(Option<orch_authz::Caller>, Option<Time>)>)>, CommandError> {
+        let mut callers = Vec::new();
+        let mut admission_tx = None;
         // Only these existing request-owned reads intentionally have no durable row.
         // The guard is registered before issue and removed on return/cancellation;
         // a kind string alone never grants an untracked command this exception.
@@ -618,16 +795,16 @@ impl Link {
             "session.background" | "session.context" | "session.native_actions"
         ) && entry.owns_observation(original.id)
         {
-            return Ok(Some(prepared));
+            return Ok(Some((prepared, callers)));
         }
-        let row = {
+        let private = {
             let mut conn = self.inner.db.acquire().await.map_err(|_| {
                 CommandError::new(
                     ErrorCode::Internal,
                     "The durable command could not be checked before transmission.",
                 )
             })?;
-            queries::command(&mut conn, original.id)
+            queries::command_with_authority(&mut conn, original.id)
                 .await
                 .map_err(|_| {
                     CommandError::new(
@@ -642,6 +819,8 @@ impl Link {
                 "The durable command is no longer available.",
             )
         })?;
+        let has_authority = private.authority.is_some();
+        let row = private.command;
         if row.machine_id != entry.id {
             return Err(CommandError::new(
                 ErrorCode::Conflict,
@@ -706,9 +885,348 @@ impl Link {
                 ));
             }
         }
+        if row.state != "accepted" {
+            let internal = || {
+                CommandError::new(
+                    ErrorCode::Internal,
+                    "the creator source fence cannot be checked",
+                )
+            };
+            let mut tx = self.inner.db.begin().await.map_err(|_| internal())?;
+            orch_db::queries::transaction_guard::lock_action(&mut tx)
+                .await
+                .map_err(|_| internal())?;
+            orch_engine::jobs::provision::lock_creator_command_source(&mut tx, row.id)
+                .await
+                .map_err(|_| internal())?;
+            admission_tx = Some(tx);
+        }
+        // Native input publication follows the existing thread-before-command order of
+        // Stop/admission. Only the DB fence is held; native transport remains after commit.
+        if row.state != "accepted"
+            && (matches!(canonical.kind.as_str(), "turn.start" | "turn.start.fenced")
+                || (canonical.kind == "turn.steer" && has_authority))
+        {
+            let internal = || {
+                CommandError::new(
+                    ErrorCode::Internal,
+                    "the native input fence cannot be checked",
+                )
+            };
+            let mut tx = match admission_tx.take() {
+                Some(tx) => tx,
+                None => self.inner.db.begin().await.map_err(|_| internal())?,
+            };
+            orch_db::queries::transaction_guard::lock_action(&mut tx)
+                .await
+                .map_err(|_| internal())?;
+            if let Some(thread) =
+                orch_engine::inputs::native_delivery::thread_of(&row).map_err(|_| internal())?
+            {
+                orch_db::queries::threads::lock(&mut tx, thread)
+                    .await
+                    .map_err(|_| internal())?;
+            }
+            admission_tx = Some(tx);
+        }
+        // Preserve existing Login/Handover gating and apply the SAME private-channel checkpoint
+        // to disjoint ordinary native origins. Metadata is immutable after atomic insertion.
+        // An actual acknowledgement keeps result reconciliation separate from new authorization.
+        if row.state != "accepted"
+            && (has_authority
+                || matches!(
+                    canonical.kind.as_str(),
+                    "provider.login.start"
+                        | "provider.login.input"
+                        | "provider.login.cancel"
+                        | "provider.refresh"
+                        | "agent.credential.return"
+                        | "provider.credential.accept"
+                ))
+        {
+            let operation = if matches!(
+                canonical.kind.as_str(),
+                "agent.credential.return" | "provider.credential.accept"
+            ) {
+                "credential return"
+            } else if matches!(
+                canonical.kind.as_str(),
+                "provider.login.start"
+                    | "provider.login.input"
+                    | "provider.login.cancel"
+                    | "provider.refresh"
+            ) {
+                "login"
+            } else {
+                "native operation"
+            };
+            let internal = || {
+                CommandError::new(
+                    ErrorCode::Internal,
+                    format!("{operation} command authority cannot be checked"),
+                )
+            };
+            let mut tx = match admission_tx.take() {
+                Some(tx) => tx,
+                None => self.inner.db.begin().await.map_err(|_| internal())?,
+            };
+            orch_db::queries::transaction_guard::lock_action(&mut tx)
+                .await
+                .map_err(|_| internal())?;
+            if let Some(value) = &private.authority {
+                let authority: orch_engine::commands::CommandAuthority =
+                    serde_json::from_value(value.clone()).map_err(|_| internal())?;
+                authority
+                    .lock_native_source(&mut tx)
+                    .await
+                    .map_err(|_| internal())?;
+            }
+            let private = queries::lock_command_with_authority(&mut tx, row.id)
+                .await
+                .map_err(|_| internal())?
+                .ok_or_else(|| {
+                    CommandError::new(ErrorCode::NotFound, "the native command disappeared")
+                })?;
+            let current = private.command;
+            let locked = cmd_of(&current);
+            if current.machine_id != row.machine_id
+                || locked.kind != canonical.kind
+                || locked.key != canonical.key
+                || locked.body != canonical.body
+                || locked.deadline != canonical.deadline
+            {
+                return Err(CommandError::new(
+                    ErrorCode::Conflict,
+                    "the canonical native command changed during admission",
+                ));
+            }
+            if let Some(ended) = CommandOutcome::of(&current) {
+                let terminal = match ended {
+                    CommandOutcome::Succeeded(body) => Progress::Succeeded(body),
+                    CommandOutcome::Failed(error) => Progress::Failed(error),
+                    CommandOutcome::Expired => Progress::Expired,
+                    CommandOutcome::Cancelled => Progress::Cancelled,
+                };
+                entry.reconcile_terminal(original.id, terminal);
+                return Ok(None);
+            }
+            if current.state != "accepted" {
+                if let Some(stored) = private.authority {
+                    let authority: orch_engine::commands::CommandAuthority =
+                        serde_json::from_value(stored).map_err(|_| {
+                            CommandError::new(
+                                ErrorCode::Conflict,
+                                format!("{operation} command authority is invalid"),
+                            )
+                        })?;
+                    let Some(checked) = authority
+                        .current_callers(
+                            &mut tx,
+                            &current,
+                            self.inner.clock.as_ref(),
+                            &crate::thread_access::AuthzAccess::new(self.inner.clock.clone()),
+                        )
+                        .await
+                        .map_err(|_| internal())?
+                    else {
+                        return Err(CommandError::new(
+                            ErrorCode::Conflict,
+                            format!("the accepted {operation} command is no longer authorized"),
+                        ));
+                    };
+                    callers.extend(checked);
+                }
+            }
+            // Keep original/current key row boundaries through later currentness validators.
+            // This transaction still contains DB-only admission; publication remains outside it.
+            admission_tx = Some(tx);
+        }
+        if row.state != "accepted" {
+            let internal = || {
+                CommandError::new(
+                    ErrorCode::Internal,
+                    "creator operation authority cannot be checked",
+                )
+            };
+            let mut tx = match admission_tx.take() {
+                Some(tx) => tx,
+                None => self.inner.db.begin().await.map_err(|_| internal())?,
+            };
+            orch_db::queries::transaction_guard::lock_action(&mut tx)
+                .await
+                .map_err(|_| internal())?;
+            let current = queries::lock_command(&mut tx, row.id)
+                .await
+                .map_err(|_| internal())?
+                .ok_or_else(|| {
+                    CommandError::new(ErrorCode::NotFound, "the creator command disappeared")
+                })?;
+            if let Some(ended) = CommandOutcome::of(&current) {
+                let terminal = match ended {
+                    CommandOutcome::Succeeded(body) => Progress::Succeeded(body),
+                    CommandOutcome::Failed(error) => Progress::Failed(error),
+                    CommandOutcome::Expired => Progress::Expired,
+                    CommandOutcome::Cancelled => Progress::Cancelled,
+                };
+                entry.reconcile_terminal(original.id, terminal);
+                return Ok(None);
+            }
+            if current.machine_id != row.machine_id || cmd_of(&current) != canonical {
+                return Err(CommandError::new(
+                    ErrorCode::Conflict,
+                    "the canonical native command changed before current publication",
+                ));
+            }
+            if current.state == "accepted" {
+                callers.clear();
+            }
+            if current.state != "accepted" {
+                let input_callers =
+                    if matches!(canonical.kind.as_str(), "turn.start" | "turn.start.fenced") {
+                        orch_engine::inputs::native_delivery::current_callers(
+                            &mut tx,
+                            &current,
+                            None,
+                            self.inner.clock.as_ref(),
+                            &crate::thread_access::AuthzAccess::new(self.inner.clock.clone()),
+                        )
+                        .await
+                        .map_err(|_| internal())?
+                    } else {
+                        Some(Vec::new())
+                    };
+                let Some(input_callers) = input_callers else {
+                    return Err(CommandError::new(
+                        ErrorCode::Conflict,
+                        "the accepted input operation is no longer authorized",
+                    ));
+                };
+                callers.extend(input_callers);
+                let file_callers = if matches!(
+                    canonical.kind.as_str(),
+                    "fs.snapshot" | "fs.record.read" | "fs.materialize"
+                ) {
+                    orch_engine::initial_files::command_current_callers(
+                        &mut tx,
+                        current.id,
+                        current.machine_id,
+                        canonical.key.as_deref(),
+                        &canonical.kind,
+                        &canonical.body,
+                        self.inner.clock.as_ref(),
+                    )
+                    .await
+                } else if matches!(
+                    canonical.kind.as_str(),
+                    "fs.stat"
+                        | "fs.mkdir"
+                        | "fs.record"
+                        | "git.prepare"
+                        | "git.worktree"
+                        | "git.commit"
+                        | "git.push"
+                ) {
+                    orch_engine::jobs::source::creator_command_current_callers(
+                        &mut tx,
+                        current.id,
+                        current.machine_id,
+                        canonical.key.as_deref(),
+                        &canonical.kind,
+                        &canonical.body,
+                        self.inner.clock.as_ref(),
+                    )
+                    .await
+                } else {
+                    Ok(Some(Vec::new()))
+                }
+                .map_err(|_| internal())?;
+                // A legacy/lost private tag still has the capability job's actual immutable
+                // journal association. Known malformed/missing origins never become ordinary.
+                let capability_callers =
+                    if canonical.kind == "node.capabilities.apply" && !has_authority {
+                        orch_engine::jobs::capability_change::authority::command_current_callers(
+                            &mut tx,
+                            current.id,
+                            current.machine_id,
+                            canonical.key.as_deref(),
+                            &canonical.kind,
+                            &canonical.body,
+                            self.inner.clock.as_ref(),
+                        )
+                        .await
+                        .map_err(|_| internal())?
+                    } else {
+                        Some(Vec::new())
+                    };
+                let Some(capability_callers) = capability_callers else {
+                    return Err(CommandError::new(
+                        ErrorCode::Conflict,
+                        "the accepted live capability operation is no longer authorized",
+                    ));
+                };
+                callers.extend(capability_callers);
+                let provision_callers =
+                    orch_engine::jobs::provision::creator_command_current_callers(
+                        &mut tx,
+                        current.id,
+                        current.machine_id,
+                        canonical.key.as_deref(),
+                        &canonical.kind,
+                        &canonical.body,
+                        self.inner.clock.as_ref(),
+                        &crate::thread_access::AuthzAccess::new(self.inner.clock.clone()),
+                    )
+                    .await
+                    .map_err(|_| internal())?;
+                let provider_callers =
+                    orch_engine::jobs::provider_provision::creator_command_current_callers(
+                        &mut tx,
+                        current.id,
+                        current.machine_id,
+                        canonical.key.as_deref(),
+                        &canonical.kind,
+                        &canonical.body,
+                        self.inner.clock.as_ref(),
+                    )
+                    .await
+                    .map_err(|_| internal())?;
+                let batch_callers =
+                    orch_engine::jobs::recreate::batch_authority::command_current_callers(
+                        &mut tx,
+                        current.id,
+                        current.machine_id,
+                        canonical.key.as_deref(),
+                        &canonical.kind,
+                        &canonical.body,
+                        self.inner.clock.as_ref(),
+                    )
+                    .await
+                    .map_err(|_| internal())?;
+                match (
+                    file_callers,
+                    provision_callers,
+                    provider_callers,
+                    batch_callers,
+                ) {
+                    (Some(file), Some(provision), Some(provider), Some(batch)) => {
+                        callers.extend(file);
+                        callers.extend(provision);
+                        callers.extend(provider);
+                        callers.extend(batch);
+                    }
+                    _ => {
+                        return Err(CommandError::new(
+                            ErrorCode::Conflict,
+                            "the accepted creator operation is no longer authorized",
+                        ));
+                    }
+                }
+            }
+            tx.commit().await.map_err(|_| internal())?;
+        }
         #[cfg(test)]
         crate::backplane::command_admission_tests::wire_checked(original.id).await;
-        Ok(Some(prepared))
+        Ok(Some((prepared, callers)))
     }
 
     /// The command as it goes on the wire: every reference in its body
@@ -772,11 +1290,12 @@ impl Link {
             }
         }
         let machine = entry.id;
-        resolve_references(&mut cmd.body, &mut |reference| match reference {
-            Reference::Secret(id) => sealed
-                .get(&id)
-                .cloned()
-                .ok_or_else(|| CommandError::new(ErrorCode::Internal, "a secret was not sealed")),
+        resolve_reference_values(&mut cmd.body, &mut |reference| match reference {
+            Reference::Secret(id) => {
+                sealed.get(&id).cloned().map(Json::String).ok_or_else(|| {
+                    CommandError::new(ErrorCode::Internal, "a secret was not sealed")
+                })
+            }
             Reference::Ticket(more) => {
                 let wanted: TicketWanted = serde_json::from_value(Json::Object(more.clone()))
                     .map_err(|error| {
@@ -788,6 +1307,7 @@ impl Link {
                 inner
                     .tickets
                     .for_request(&wanted, machine)
+                    .map(|ticket| self.routed_ticket_value(ticket))
                     .map_err(|error| CommandError::new(ErrorCode::Internal, error.to_string()))
             }
         })?;

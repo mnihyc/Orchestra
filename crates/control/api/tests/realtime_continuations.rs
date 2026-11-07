@@ -1,5 +1,6 @@
 //! Real socket projection resets, scoped read notices and frozen-prefix append exclusion.
 
+#![recursion_limit = "256"]
 mod continuation_read_support;
 mod realtime_support;
 

@@ -244,6 +244,194 @@ async fn create_folder(
     Ok(true)
 }
 
+struct TextPlan {
+    parent: Directory,
+    id: Id,
+    title: String,
+    name: String,
+    identity: access::Identity,
+    node: Id,
+    root: Id,
+    container: Option<Id>,
+    request_ref: String,
+    arguments: orch_types::Json,
+    existing: Option<rows::DocumentRow>,
+}
+
+/// Native text-header operands under their original directory serialization lock.
+/// The plan is consumed once on the exact transaction that prepared it.
+pub struct TextCreationPlan {
+    packet: TextPlan,
+    transaction: String,
+}
+
+impl TextCreationPlan {
+    /// The actual document identity chosen before native header preparation.
+    #[must_use]
+    pub fn id(&self) -> Id {
+        self.packet.id
+    }
+
+    /// The actual existing directory, not the newly generated document.
+    #[must_use]
+    pub fn destination(&self) -> Directory {
+        self.packet.parent
+    }
+
+    /// The factual hierarchy anchor after taking the native directory lock.
+    #[must_use]
+    pub fn node(&self) -> Id {
+        self.packet.node
+    }
+
+    /// Whether the same stable identity already has its native document.
+    #[must_use]
+    pub fn is_replay(&self) -> bool {
+        self.packet.existing.is_some()
+    }
+}
+
+async fn transaction_id(conn: &mut Conn) -> Result<String, Error> {
+    Ok(sqlx::query_scalar("SELECT pg_current_xact_id()::text")
+        .fetch_one(conn)
+        .await?)
+}
+
+/// Runs the unchanged native title, directory, namespace and stable-id replay preparation.
+/// Preparation outside an explicit transaction remains provisional and cannot later apply.
+pub async fn prepare_text_creation_in(
+    conn: &mut Conn,
+    actor: Actor<'_>,
+    parent: Directory,
+    id: Id,
+    title: &str,
+    name: Option<&str>,
+    now: Time,
+) -> Result<TextCreationPlan, Error> {
+    let packet = prepare_text(conn, actor, parent, id, title, name, now).await?;
+    Ok(TextCreationPlan {
+        packet,
+        transaction: transaction_id(conn).await?,
+    })
+}
+
+/// Repeats only this native header plan's ordinary destination and replay gates.
+pub async fn require_text_creation_in(
+    conn: &mut Conn,
+    actor: Actor<'_>,
+    prepared: &TextCreationPlan,
+    now: Time,
+) -> Result<(), Error> {
+    let placement = access::require_create(conn, actor, prepared.packet.parent, now).await?;
+    if placement
+        != (
+            prepared.packet.node,
+            prepared.packet.root,
+            prepared.packet.container,
+        )
+    {
+        return Err(Error::Stale);
+    }
+    if prepared.packet.existing.is_some() {
+        let entry = containers::entry(conn, "document", prepared.packet.id)
+            .await?
+            .filter(|row| row.deleted_at.is_none())
+            .ok_or(Error::NotFound)?;
+        access::require_entries(
+            conn,
+            actor,
+            &[entry],
+            orch_access_contract::permissions::Permission::DocView,
+            now,
+            false,
+            orch_authz::Act::Use,
+        )
+        .await?;
+    }
+    Ok(())
+}
+
+/// Applies the original native header/page/receipt writer after one opaque first-effect check.
+/// Durable native replay returns without invoking that callback or repeating material.
+pub async fn apply_text_creation_in<E, F>(
+    tx: &mut Tx,
+    actor: Actor<'_>,
+    prepared: TextCreationPlan,
+    now: Time,
+    before: F,
+) -> Result<Result<TextCreation, Error>, E>
+where
+    F: FnOnce() -> Result<(), E>,
+{
+    apply_text_creation_on(&mut *tx, actor, prepared, now, before).await
+}
+
+pub(super) async fn apply_text_creation_on<E, F>(
+    conn: &mut Conn,
+    actor: Actor<'_>,
+    prepared: TextCreationPlan,
+    now: Time,
+    before: F,
+) -> Result<Result<TextCreation, Error>, E>
+where
+    F: FnOnce() -> Result<(), E>,
+{
+    let checked: Result<(), Error> = async {
+        if !orch_db::queries::transaction_guard::in_transaction(conn)
+            || transaction_id(conn).await? != prepared.transaction
+        {
+            return Err(Error::Stale);
+        }
+        let current = access::identity(conn, actor).await?;
+        let earlier = &prepared.packet.identity;
+        if current.kind != earlier.kind
+            || current.id != earlier.id
+            || current.owner != earlier.owner
+            || current.thread != earlier.thread
+        {
+            return Err(Error::Denied);
+        }
+        Ok(())
+    }
+    .await;
+    if let Err(error) = checked {
+        return Ok(Err(error));
+    }
+    if prepared.packet.existing.is_some() {
+        return Ok(finish_text(conn, &prepared.packet, now).await);
+    }
+    if let Err(error) = sqlx::query("SAVEPOINT document_text_prepared")
+        .execute(&mut *conn)
+        .await
+    {
+        return Ok(Err(error.into()));
+    }
+    if let Err(error) = before() {
+        if let Err(native) = sqlx::query("RELEASE SAVEPOINT document_text_prepared")
+            .execute(&mut *conn)
+            .await
+        {
+            return Ok(Err(native.into()));
+        }
+        return Err(error);
+    }
+    let result = finish_text(conn, &prepared.packet, now).await;
+    if result.is_err()
+        && let Err(error) = sqlx::query("ROLLBACK TO SAVEPOINT document_text_prepared")
+            .execute(&mut *conn)
+            .await
+    {
+        return Ok(Err(error.into()));
+    }
+    if let Err(error) = sqlx::query("RELEASE SAVEPOINT document_text_prepared")
+        .execute(&mut *conn)
+        .await
+    {
+        return Ok(Err(error.into()));
+    }
+    Ok(result)
+}
+
 pub(super) async fn create_text(
     conn: &mut Conn,
     actor: Actor<'_>,
@@ -253,6 +441,19 @@ pub(super) async fn create_text(
     name: Option<&str>,
     now: Time,
 ) -> Result<TextCreation, Error> {
+    let prepared = prepare_text(conn, actor, parent, id, title, name, now).await?;
+    finish_text(conn, &prepared, now).await
+}
+
+async fn prepare_text(
+    conn: &mut Conn,
+    actor: Actor<'_>,
+    parent: Directory,
+    id: Id,
+    title: &str,
+    name: Option<&str>,
+    now: Time,
+) -> Result<TextPlan, Error> {
     let title = title.trim();
     if title.is_empty()
         || title.chars().count()
@@ -311,9 +512,18 @@ pub(super) async fn create_text(
             orch_authz::Act::Use,
         )
         .await?;
-        return Ok(TextCreation {
-            document,
-            created: false,
+        return Ok(TextPlan {
+            parent,
+            id,
+            title: title.to_owned(),
+            name: name.to_owned(),
+            identity,
+            node,
+            root,
+            container,
+            request_ref,
+            arguments,
+            existing: Some(document),
         });
     }
     if saved.is_some() {
@@ -335,30 +545,57 @@ pub(super) async fn create_text(
         None
     };
     let name = allocated.as_deref().unwrap_or(name);
+    Ok(TextPlan {
+        parent,
+        id,
+        title: title.to_owned(),
+        name: name.to_owned(),
+        identity,
+        node,
+        root,
+        container,
+        request_ref,
+        arguments,
+        existing: None,
+    })
+}
+
+async fn finish_text(
+    conn: &mut Conn,
+    prepared: &TextPlan,
+    now: Time,
+) -> Result<TextCreation, Error> {
+    if let Some(document) = &prepared.existing {
+        return Ok(TextCreation {
+            document: document.clone(),
+            created: false,
+        });
+    }
+    let id = prepared.id;
     containers::insert_document(
         conn,
         &rows::NewDocument {
             id,
-            node_id: node,
-            org_id: root,
-            owner_id: identity.owner,
-            created_by_thread: identity.thread,
-            created_by_agent: identity.agent.as_deref(),
-            title,
+            node_id: prepared.node,
+            org_id: prepared.root,
+            owner_id: prepared.identity.owner,
+            created_by_thread: prepared.identity.thread,
+            created_by_agent: prepared.identity.agent.as_deref(),
+            title: &prepared.title,
             now: now.get(),
         },
-        container,
-        name,
+        prepared.container,
+        &prepared.name,
     )
     .await?;
-    creation_grant(conn, id, false, &identity, now).await?;
+    creation_grant(conn, id, false, &prepared.identity, now).await?;
     containers::remember(
         conn,
-        identity.kind,
-        identity.id,
-        &request_ref,
+        prepared.identity.kind,
+        prepared.identity.id,
+        &prepared.request_ref,
         &containers::Operation {
-            arguments,
+            arguments: prepared.arguments.clone(),
             operation_id: id,
             result: json!({"document":id}),
         },

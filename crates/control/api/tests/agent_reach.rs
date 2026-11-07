@@ -9,6 +9,9 @@ mod places;
 mod resources;
 mod support;
 
+#[path = "agent_reach/scopes.rs"]
+mod scopes;
+
 use orch_api_contract::binding::NewEnvironmentAccess;
 use orch_api_contract::environment::{
     AgentReachOverview, Environment, EnvironmentAgentReachGet, MachineEnvironmentCreate,
@@ -108,7 +111,9 @@ impl Scene {
             })
             .send()
             .await
-            .ok();
+            .ok()
+            .into_full()
+            .expect("ordinary directory registration retains full native content");
         let id = environment.base.id;
         {
             // Only its maker holds anything on its own page; the others reach it through a thread or not at all.

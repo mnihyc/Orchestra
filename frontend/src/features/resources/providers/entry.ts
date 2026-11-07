@@ -28,9 +28,12 @@ export interface StepForm {
 }
 
 export interface EntryForm {
+  requestOptions: string;
   efforts: string;
   defaultEffort: string;
   images: boolean;
+  searchModes: string[];
+  defaultSearch: string;
   /** The model's own window. */
   window: string;
   /** The largest context a thread may be given; empty until a manager fills it. */
@@ -45,7 +48,7 @@ export interface EntryForm {
   programs: string[];
   /** The one a thread starts with; empty is none. */
   defaultProgram: string;
-  rate: { input: string; cached: string; output: string; write: string };
+  rate: { input: string; cached: string; output: string; write: string; search?: string };
   /** The multiple of the rate that each speed is counted at, by the speed's id. */
   multipliers: Record<string, string>;
   steps: StepForm[];
@@ -53,7 +56,7 @@ export interface EntryForm {
 }
 
 /** What a field of the form can be refused for, by name. */
-export type FieldName = 'routing' | 'display' | 'efforts' | 'defaultEffort' | 'window' | 'largest' | 'start' | 'tier' | 'program' | 'rate' | 'steps' | 'groups';
+export type FieldName = 'routing' | 'display' | 'efforts' | 'defaultEffort' | 'window' | 'largest' | 'start' | 'tier' | 'program' | 'rate' | 'steps' | 'groups' | 'requestOptions' | 'search';
 export type Faults = Partial<Record<FieldName, string>>;
 
 const splitList = (text: string): string[] =>
@@ -79,9 +82,12 @@ export function formOf(parameters: ModelParameters, groups: readonly string[] = 
   const rate = parameters.rate;
   const start = startOf(parameters);
   return {
+    requestOptions: parameters.request_options === undefined || parameters.request_options === null ? '' : JSON.stringify(parameters.request_options, null, 2),
     efforts: (parameters.efforts ?? []).join(', '),
     defaultEffort: parameters.default_effort ?? '',
     images: parameters.input_images === true,
+    searchModes: parameters.web_search ?? [],
+    defaultSearch: parameters.default_web_search ?? 'disabled',
     window: text(parameters.context_window),
     largest: text(parameters.context_max),
     start: start.start,
@@ -95,6 +101,7 @@ export function formOf(parameters: ModelParameters, groups: readonly string[] = 
       cached: rate?.cached_input_per_mtok ?? '',
       output: rate?.output_per_mtok ?? '',
       write: rate?.cache_write_per_mtok ?? '',
+      search: rate?.web_search_per_call ?? '',
     },
     multipliers: { ...(rate?.tiers ?? {}) },
     steps: (rate?.above ?? []).map((step) => ({
@@ -106,6 +113,15 @@ export function formOf(parameters: ModelParameters, groups: readonly string[] = 
     })),
     groups: [...groups],
   };
+}
+
+function requestOptions(text: string): ModelParameters['request_options'] | undefined {
+  if (text.trim() === '') return undefined;
+  try {
+    const value: unknown = JSON.parse(text);
+    if (value === null || typeof value !== 'object' || Array.isArray(value) || Object.values(value).some((schema) => schema === null || typeof schema !== 'object' || Array.isArray(schema))) return undefined;
+    return value as ModelParameters['request_options'];
+  } catch { return undefined; }
 }
 
 const DECIMAL = /^\d+(\.\d+)?$/;
@@ -124,6 +140,7 @@ export function groupFault(name: string, t: TFunction): string | null {
 /** What is wrong with the form, in words, field by field: what the server would refuse, said before it is asked. */
 export function faultsOf(form: EntryForm, t: TFunction, locale = 'en-US'): Faults {
   const found: Faults = {};
+  if (form.requestOptions.trim() !== '' && requestOptions(form.requestOptions) === undefined) found.requestOptions = t('providerOptions.invalidSchema');
   const window = readTokens(form.window);
   const largest = readTokens(form.largest);
   if (form.window.trim() !== '' && !isSize(form.window)) found.window = t('models.fault.size');
@@ -140,6 +157,7 @@ export function faultsOf(form: EntryForm, t: TFunction, locale = 'en-US'): Fault
   const given = [
     ...prices,
     form.rate.write.trim(),
+    (form.rate.search ?? '').trim(),
     ...Object.values(form.multipliers).map((value) => value.trim()),
     ...form.steps.flatMap((step) => [step.input, step.cached, step.output, step.write].map((price) => price.trim())),
   ].filter((price) => price !== '');
@@ -177,6 +195,7 @@ function rateOf(form: EntryForm): Rate | undefined {
     cached_input_per_mtok: form.rate.cached.trim(),
     output_per_mtok: form.rate.output.trim(),
     ...(form.rate.write.trim() === '' ? {} : { cache_write_per_mtok: form.rate.write.trim() }),
+    ...((form.rate.search ?? '').trim() === '' ? {} : { web_search_per_call: (form.rate.search ?? '').trim() }),
     ...(Object.keys(tiers).length === 0 ? {} : { tiers }),
     ...(above.length === 0 ? {} : { above }),
   };
@@ -187,6 +206,8 @@ const OWNED = [
   'efforts',
   'default_effort',
   'input_images',
+  'web_search',
+  'default_web_search',
   'service_tiers',
   'default_service_tier',
   'access_programs',
@@ -195,6 +216,7 @@ const OWNED = [
   'context_max',
   'default_context',
   'rate',
+  'request_options',
 ] as const satisfies readonly (keyof ModelParameters)[];
 
 /** What the entry says once the form is saved: what is left empty is left out, so that an entry says only what a manager said. */
@@ -206,11 +228,15 @@ export function parametersOf(form: EntryForm, base: ModelParameters): ModelParam
   const largest = readTokens(form.largest);
   const started = form.start === 'window' ? window : form.start === 'number' ? readTokens(form.startNumber) : null;
   const rate = rateOf(form);
+  const optionSchemas = requestOptions(form.requestOptions);
   return {
     ...kept,
+    ...(optionSchemas === undefined ? {} : { request_options: optionSchemas }),
     ...(efforts.length === 0 ? {} : { efforts }),
     ...(efforts.includes(form.defaultEffort) ? { default_effort: form.defaultEffort } : {}),
     ...(form.images ? { input_images: true } : {}),
+    ...(form.searchModes.length === 0 ? {} : { web_search: form.searchModes }),
+    ...(form.defaultSearch !== 'disabled' && form.searchModes.includes(form.defaultSearch) ? { default_web_search: form.defaultSearch } : {}),
     ...(form.tiers.length === 0 ? {} : { service_tiers: form.tiers }),
     ...(form.tiers.some((tier) => tier.id === form.defaultTier) ? { default_service_tier: form.defaultTier } : {}),
     ...(form.programs.length === 0 ? {} : { access_programs: form.programs }),
@@ -240,12 +266,17 @@ function fieldOfPath(path: string): FieldName | null {
       return 'largest';
     case 'default_context':
       return 'start';
+    case 'web_search':
+    case 'default_web_search':
+      return 'search';
     case 'default_service_tier':
     case 'service_tiers':
       return 'tier';
     case 'default_access_program':
     case 'access_programs':
       return 'program';
+    case 'request_options':
+      return 'requestOptions';
     case 'rate':
       return 'rate';
     default:

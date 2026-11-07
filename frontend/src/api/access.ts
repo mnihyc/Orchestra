@@ -9,10 +9,10 @@
  */
 import { infiniteQueryOptions, queryOptions } from '@tanstack/react-query';
 
-import { ApiError, api, done, ok, repeatable } from '@/api/client';
+import { ApiError, accepted, api, client, done, ok, repeatable } from '@/api/client';
 import type {
   AccessRequestCreateBody,
-  AccessRequestCreateReply,
+  AccessRequestWriteResponse,
   AccessRequestGetReply,
   Approval,
   EffectiveAccess,
@@ -250,6 +250,22 @@ export const historyQuery = (target: Pick<AccessTarget, 'kind' | 'id'>, depth: '
     retry: false,
   });
 
+/** One bounded page of the actual file outcomes belonging to a stored upload history line. */
+export const uploadHistoryQuery = (environment: string, line: string, cursor: string | null) => {
+  const reader = client.session.getState();
+  return queryOptions({
+    queryKey: ['upload-history', reader.userId, reader.readerVersion ?? 0, environment, line, cursor] as const,
+    queryFn: ({ signal }): Promise<HistoryLinePage> => ok(api.GET('/{object}/{id}/history', {
+      params: { path: { object: 'environments', id: environment }, query: {
+        upload: line, limit: PEOPLE_PAGE, ...(cursor === null ? {} : { cursor }),
+      } }, signal,
+    })),
+    retry: false,
+    gcTime: 0,
+    staleTime: 0,
+  });
+};
+
 // ---------------------------------------------------------------- finding whom to name
 
 /** The fewest characters the server searches for. */
@@ -326,13 +342,13 @@ export function takeRole(roleId: string): Promise<void> {
 // ---------------------------------------------------------------- asking for access
 
 /** Asks for what is missing, one approval for each thing, each sent to the people who can give it. */
-export function requestAccess(body: AccessRequestCreateBody, key: string): Promise<AccessRequestCreateReply> {
-  return ok(api.POST('/access-requests', { body, ...repeatable(key) }));
+export function requestAccess(body: AccessRequestCreateBody, key: string): Promise<AccessRequestWriteResponse> {
+  return accepted(api.POST('/access-requests', { body, ...repeatable(key) }));
 }
 
 /** Asks to join a known group; the grant is ordinary membership. */
-export function requestJoin(chatId:string,body:{reason:string;label?:string;expires_at?:string},key:string):Promise<AccessRequestCreateReply> {
-  return ok(api.POST('/chats/{id}/join-requests',{params:{path:{id:chatId}},body,...repeatable(key)}));
+export function requestJoin(chatId:string,body:{reason:string;label?:string;expires_at?:string},key:string):Promise<AccessRequestWriteResponse> {
+  return accepted(api.POST('/chats/{id}/join-requests',{params:{path:{id:chatId}},body,...repeatable(key)}));
 }
 
 /** Where a batch of requests stands. */

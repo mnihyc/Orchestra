@@ -22,21 +22,32 @@
 pub(crate) mod build;
 mod comments;
 mod convert;
+mod copying;
 mod creation;
 pub(crate) mod export;
 mod files;
 mod history;
 mod imports;
 mod limits;
+mod list_read;
 mod listing;
 mod mentions;
+pub(crate) mod metadata_projection;
+mod move_operands;
+mod move_review;
+mod moving;
 mod notices;
+mod operation;
 mod ops;
 pub mod page;
+mod pages_read;
+pub(crate) mod read_operation;
 pub(crate) mod references;
+mod restoring;
 mod subscription;
+mod text_creation;
 
-use std::collections::{BTreeMap, HashMap};
+use std::collections::HashMap;
 
 use crate::middleware::authorization::{self, exact, refusals};
 use crate::middleware::requests::{ApiError, ApiResult};
@@ -46,28 +57,24 @@ use crate::routes::nodes::{actor_name, invalid, placed};
 use crate::sign_in::origin;
 use chrono::{DateTime, Utc};
 use orch_access_contract::audit::AuditAction;
-use orch_access_contract::decisions::Decision;
 use orch_access_contract::permissions::Permission;
-use orch_api_contract::access::{PREVIEW_MAX_PEOPLE, PagePreview, PreviewPerson};
-use orch_api_contract::common::{ErrorCode, Listed as ListedItem, Page, PageQuery};
+use orch_api_contract::common::{ErrorCode, Page, PageQuery};
 use orch_api_contract::documents::{
     DOCUMENT_SYNC_MAX_CHANGES, DOCUMENT_TITLE_MAX_CHARS, Document, DocumentDelete,
     DocumentFileChange, DocumentFileChangeKind, DocumentFileDelete, DocumentGet, DocumentMove,
-    DocumentMoveBody, DocumentMovePreview, DocumentOp, DocumentRef, DocumentRestore, DocumentSeen,
+    DocumentMoveBody, DocumentMovePreview, DocumentOp, DocumentRestore, DocumentSeen,
     DocumentSeenBody, DocumentSync, DocumentSyncGet, DocumentSyncGetQuery, DocumentUpdate,
     DocumentUpdateBody, NewBlock, NewDocumentAccess, NodeDocumentCreate, NodeDocumentCreateBody,
-    NodeDocumentList, NodeDocumentListQuery, NodeDocumentPage, NodeDocumentPagesGet,
-    NodeDocumentPagesGetQuery,
+    NodeDocumentList, NodeDocumentPagesGet,
 };
-use orch_api_contract::routes::Endpoint;
-use orch_authz::documents::{self, Listed, State};
+use orch_authz::documents;
 use orch_authz::pages;
 use orch_authz::usable::ResourcePolicy;
 use orch_authz::{Act, Policy, Principal};
 use orch_db::audit::{self, Actor, Entry};
 use orch_db::queries::documents::batch::{self, Outcome};
 use orch_db::queries::documents::discussions;
-use orch_db::queries::documents::{self as rows, DocumentRow, ListCursor, ListWhere};
+use orch_db::queries::documents::{self as rows, DocumentRow};
 use orch_db::{Conn, DbError};
 use orch_documents::markdown::{self, Directory};
 use orch_documents::placement::{self, Destination, MoveRefusal};
@@ -96,21 +103,46 @@ pub fn mount(registry: &mut Registry) {
     convert::mount(registry);
     imports::mount(registry);
     registry
-        .on(NodeDocumentList, list)
-        .on(NodeDocumentPagesGet, first_pages)
-        .on(NodeDocumentCreate, create)
-        .on(
-            orch_api_contract::document_tree::DocumentContainerDocumentCreate,
-            create,
+        .on_snapshot_read_with_optional_operation(
+            NodeDocumentList,
+            list_read::prepare,
+            list_read::read,
         )
-        .on(DocumentGet, get)
-        .on(DocumentSyncGet, sync)
+        .on_snapshot_read_with_optional_operation(
+            NodeDocumentPagesGet,
+            pages_read::prepare,
+            pages_read::get,
+        )
+        .on_with_operation(
+            NodeDocumentCreate,
+            crate::key_operations::native::effects::prepare::<text_creation::AtNode>,
+            text_creation::create::<text_creation::AtNode>,
+        )
+        .on_with_operation(
+            orch_api_contract::document_tree::DocumentContainerDocumentCreate,
+            crate::key_operations::native::effects::prepare::<text_creation::AtContainer>,
+            text_creation::create::<text_creation::AtContainer>,
+        )
+        .on_snapshot_read_with_operation(DocumentGet, read_operation::get, get)
+        .on_snapshot_read_with_operation(DocumentSyncGet, read_operation::sync, sync)
         .on(DocumentUpdate, update)
         .on(DocumentSeen, seen)
         .on(DocumentDelete, delete)
-        .on(DocumentRestore, restore)
-        .on(DocumentMovePreview, move_preview)
-        .on(DocumentMove, move_to)
+        .on_with_operation(
+            DocumentRestore,
+            crate::key_operations::native::effects::prepare::<restoring::Restores>,
+            restoring::restore,
+        )
+        .on_with_operation(
+            DocumentMovePreview,
+            crate::key_operations::native::effects::prepare::<move_review::Reviews>,
+            move_review::preview,
+        )
+        .on_with_operation(
+            DocumentMove,
+            crate::key_operations::native::effects::prepare::<moving::Moves>,
+            moving::move_to,
+        )
         .on(DocumentFileDelete, file_delete);
     ops::mount(registry);
     history::mount(registry);
@@ -171,6 +203,23 @@ async fn live_locked(conn: &mut Conn, id: Id) -> ApiResult<DocumentRow> {
         .ok_or_else(ApiError::not_found)
 }
 
+/// The stored directory belongs to the native tree entry, separately from the text content row.
+async fn stored_directory(
+    conn: &mut Conn,
+    document: &DocumentRow,
+) -> ApiResult<document_tree_domain::Directory> {
+    let entry = rows::containers::entry(conn, "document", document.id)
+        .await?
+        .ok_or_else(ApiError::not_found)?;
+    if entry.node_id != document.node_id || entry.org_id != document.org_id {
+        return Err(ApiError::not_found());
+    }
+    Ok(entry.parent_container_id.map_or(
+        document_tree_domain::Directory::NodeDocs(entry.node_id),
+        document_tree_domain::Directory::Container,
+    ))
+}
+
 /// A title as it is kept: without the space around it, one to the most characters.
 fn clean_title(path: &str, title: &str) -> ApiResult<String> {
     let title = title.trim();
@@ -211,252 +260,6 @@ fn write_cursor(at: DateTime<Utc>, id: Id) -> String {
 // ---------------------------------------------------------------- listing and reading
 
 /// Batch only the transport: every place retains its native permission and document-page supplier.
-async fn first_pages(
-    ctx: Ctx,
-    query: NodeDocumentPagesGetQuery,
-    (): (),
-) -> ApiResult<Vec<NodeDocumentPage>> {
-    let ids: Vec<Id> = query
-        .node_ids
-        .split(',')
-        .map(|id| {
-            id.parse()
-                .map_err(|_| invalid("node_ids", "must contain node identifiers"))
-        })
-        .collect::<ApiResult<_>>()?;
-    // A batch has the ordinary page-size bound, keeping a transport aggregation bounded too.
-    if ids.is_empty()
-        || ids.len() > orch_api_contract::common::MAX_LIMIT as usize
-        || ids.first() != Some(&ctx.id("id")?)
-    {
-        return Err(invalid(
-            "node_ids",
-            "must begin with the path node and fit one page",
-        ));
-    }
-    let mut pages = Vec::with_capacity(ids.len());
-    for id in ids {
-        let mut child = ctx.for_id(id);
-        child.route = NodeDocumentList::ROUTE;
-        let read = async {
-            authorization::require_on_path(&child, "node.view").await?;
-            list(
-                child,
-                NodeDocumentListQuery {
-                    limit: query.limit,
-                    ..Default::default()
-                },
-                (),
-            )
-            .await
-        }
-        .await;
-        pages.push(match read {
-            Ok(page) => NodeDocumentPage {
-                node_id: id,
-                page: Some(page),
-                error: None,
-            },
-            Err(error) => NodeDocumentPage {
-                node_id: id,
-                page: None,
-                error: Some(*error.problem),
-            },
-        });
-    }
-    Ok(pages)
-}
-
-/// The documents beside a node that the caller may read, the most recently
-/// changed first.
-async fn list(
-    ctx: Ctx,
-    query: NodeDocumentListQuery,
-    (): (),
-) -> ApiResult<Page<ListedItem<DocumentRef>>> {
-    let node = ctx.id("id")?;
-    let paging = PageQuery {
-        limit: query.limit,
-        cursor: query.cursor.clone(),
-    };
-    let limit = i64::from(paging.limit());
-    let private_offset = listing::offset(query.cursor.as_deref())?;
-    if query.participating.unwrap_or(false) && private_offset.is_some() {
-        return Err(invalid(
-            "cursor",
-            "is not a cursor of the ordinary participation list",
-        ));
-    }
-    let mut have_private = query
-        .cursor
-        .as_deref()
-        .is_some_and(|cursor| cursor.starts_with(WITH_PRIVATE_CURSOR));
-    let raw_readable_cursor = query
-        .cursor
-        .as_deref()
-        .map(|cursor| cursor.strip_prefix(WITH_PRIVATE_CURSOR).unwrap_or(cursor));
-    let (readable_cursor, mut first_offset) = if let Some(scan) =
-        raw_readable_cursor.and_then(|cursor| cursor.strip_prefix(SCAN_CURSOR))
-    {
-        let (count, base) = scan
-            .split_once('|')
-            .ok_or_else(|| invalid("cursor", "is not a cursor of this list"))?;
-        let offset = count
-            .parse::<i64>()
-            .ok()
-            .filter(|value| *value >= 0)
-            .ok_or_else(|| invalid("cursor", "is not a cursor of this list"))?;
-        (if base.is_empty() { None } else { Some(base) }, offset)
-    } else {
-        (raw_readable_cursor, 0)
-    };
-    let mut scanned = first_offset;
-    let mut after = if private_offset.is_none() {
-        read_cursor("cursor", readable_cursor)?.map(|(at, id)| ListCursor { at, id })
-    } else {
-        None
-    };
-    let want_deleted = query.deleted.is_some();
-    let mut conn = ctx.app.db.acquire().await?;
-    let principal = authorization::principal(&ctx, &mut conn).await?;
-    placed(&mut conn, node).await?;
-    if let Some(offset) = private_offset {
-        if want_deleted {
-            return Err(invalid("cursor", "is not a cursor of this list"));
-        }
-        return listing::append(
-            &mut conn,
-            &principal,
-            listing::PrivateList {
-                node,
-                under: query.under.unwrap_or(false),
-                limit,
-                offset,
-            },
-            Vec::new(),
-        )
-        .await;
-    }
-    let policy = Policy::default();
-    let mut chosen: Vec<(DocumentRow, Listed)> = Vec::new();
-    let mut more = false;
-    let mut exhausted = false;
-    for _ in 0..LIST_ROUNDS_MAX {
-        let found = rows::list_beside(
-            &mut conn,
-            &ListWhere {
-                node,
-                under: query.under.unwrap_or(false),
-                deleted: want_deleted,
-                after,
-                offset: std::mem::take(&mut first_offset),
-                limit: limit + 1,
-            },
-        )
-        .await?;
-        exhausted = i64::try_from(found.len()).unwrap_or(i64::MAX) <= limit;
-        let ids: Vec<Id> = found.iter().map(|row| row.id).collect();
-        let standing: HashMap<Id, Listed> = documents::listed(&mut conn, &principal, &ids, policy)
-            .await
-            .map_err(ApiError::internal)?
-            .into_iter()
-            .map(|each| (each.document.id, each))
-            .collect();
-        have_private |= !want_deleted
-            && standing.values().any(|held| {
-                !held.holds(Permission::DocView) && held.holds(Permission::AccessManage)
-            });
-        for row in found {
-            scanned = scanned
-                .checked_add(1)
-                .ok_or_else(|| invalid("cursor", "is not a cursor of this list"))?;
-            after = Some(ListCursor {
-                at: row.updated_at,
-                id: row.id,
-            });
-            // Whoever could have deleted a document sees it among the deleted.
-            let needs = if want_deleted {
-                Permission::DocManage
-            } else {
-                Permission::DocView
-            };
-            let Some(held) = standing.get(&row.id).filter(|each| {
-                each.holds(needs) && (!query.participating.unwrap_or(false) || each.participating)
-            }) else {
-                continue;
-            };
-            if i64::try_from(chosen.len()).unwrap_or(i64::MAX) == limit {
-                more = true;
-                break;
-            }
-            chosen.push((row, held.clone()));
-        }
-        if more || exhausted {
-            break;
-        }
-    }
-    let next_cursor = if more {
-        chosen
-            .last()
-            .map(|(row, _)| write_cursor(row.updated_at, row.id))
-    } else if exhausted {
-        None
-    } else if let Some((row, _)) = chosen.last() {
-        Some(write_cursor(row.updated_at, row.id))
-    } else {
-        Some(format!(
-            "{SCAN_CURSOR}{scanned}|{}",
-            readable_cursor.unwrap_or_default()
-        ))
-    };
-    let next_cursor = next_cursor.map(|cursor| {
-        if have_private {
-            format!("{WITH_PRIVATE_CURSOR}{cursor}")
-        } else {
-            cursor
-        }
-    });
-    let readable_end = chosen.last().map(|(row, _)| {
-        format!(
-            "{WITH_PRIVATE_CURSOR}{}",
-            write_cursor(row.updated_at, row.id)
-        )
-    });
-    let items = build::refs(&mut conn, &principal, &chosen, ctx.now, policy)
-        .await?
-        .into_iter()
-        .map(ListedItem::visible)
-        .collect();
-    if want_deleted
-        || !have_private
-        || next_cursor.is_some()
-        || query.participating.unwrap_or(false)
-    {
-        return Ok(Page { items, next_cursor });
-    }
-    let mut page = listing::append(
-        &mut conn,
-        &principal,
-        listing::PrivateList {
-            node,
-            under: query.under.unwrap_or(false),
-            limit,
-            offset: 0,
-        },
-        items,
-    )
-    .await?;
-    // A full readable page has no room to show its private group yet. Resume from the last
-    // readable row so the first private page has room, also for content-only list consumers.
-    if i64::try_from(page.items.len()).unwrap_or(i64::MAX) == limit
-        && page.items.iter().all(|row| row.as_visible().is_some())
-        && page.next_cursor.is_some()
-    {
-        page.next_cursor = readable_end;
-    }
-    Ok(page)
-}
-
 /// The people named in Markdown, looked up by the names the text uses.
 struct Names {
     users: HashMap<String, Id>,
@@ -494,97 +297,59 @@ fn creation_ops(blocks: Vec<NewBlock>) -> Vec<DocumentOp> {
         .collect()
 }
 
-/// Makes a document beside a node, from blocks or from Markdown. The caller
-/// owns it, whatever they hold on the documents of others there.
-async fn create(ctx: Ctx, (): (), body: NodeDocumentCreateBody) -> ApiResult<Document> {
-    orch_db::queries::transaction_guard::request_scope(
-        orch_db::queries::transaction_guard::Scope::Creation,
-        create_prepared(ctx, body, None, Vec::new(), None, Vec::new()),
-    )
-    .await
-}
-
-/// The ordinary guarded creation producer, also used for imported and copied current material.
-async fn create_prepared(
-    mut ctx: Ctx,
-    body: NodeDocumentCreateBody,
-    identity: Option<Id>,
-    copied_files: Vec<rows::HeldFile>,
-    checked: Option<(orch_db::Tx, Principal)>,
-    receipt_warnings: Vec<String>,
-) -> ApiResult<Document> {
-    let title = clean_title("title", &body.title)?;
-    let (mut tx, principal) = match checked {
-        Some((tx, principal)) => {
-            ctx.now = principal.now().get();
-            (tx, principal)
-        }
-        None => {
-            let (tx, guard) = transaction_guard::begin(&ctx).await?;
-            ctx.now = guard.now().get();
-            (tx, guard.principal().clone())
-        }
-    };
-    let parent = creation::parent(&ctx, &mut tx, &principal).await?;
-    let node = match parent {
-        document_tree_domain::Directory::NodeDocs(node) => node,
-        document_tree_domain::Directory::Container(id) => {
-            rows::containers::get(&mut tx, id)
-                .await?
-                .ok_or_else(ApiError::not_found)?
-                .node_id
-        }
-    };
-    placed(&mut tx, node).await?;
-    let settings = DocSettings::at(&mut tx, node).await?;
-    if !settings.enabled {
-        return Err(limits::disabled(&mut tx, &principal, &settings, Policy::default()).await);
-    }
-    let blocks = match (body.blocks, body.markdown) {
+async fn initial_blocks(
+    conn: &mut Conn,
+    blocks: Option<Vec<NewBlock>>,
+    markdown: Option<String>,
+) -> ApiResult<Vec<NewBlock>> {
+    Ok(match (blocks, markdown) {
         (Some(_), Some(_)) => {
             return Err(invalid("markdown", "give blocks or markdown, not both"));
         }
         (Some(blocks), None) => blocks,
         (None, Some(text)) => {
-            let names = names_in(&mut tx, &text).await?;
+            let names = names_in(conn, &text).await?;
             markdown::read(&text, &names)
         }
         (None, None) => Vec::new(),
-    };
-    let blocks = build::label_written(&mut tx, &principal, blocks).await?;
-    let id = identity.unwrap_or_else(orch_types::new_id);
-    let maker = principal.user();
-    let created = document_tree_domain::create_text_in(
-        &mut tx,
-        document_tree_domain::Actor::Person(&principal),
-        parent,
+    })
+}
+
+struct CreationMaterial<'a> {
+    id: Id,
+    node: Id,
+    title: &'a str,
+    access: Option<NewDocumentAccess>,
+    blocks: Vec<NewBlock>,
+    copied_files: &'a [rows::HeldFile],
+    receipt_warnings: &'a [String],
+    settings: DocSettings,
+}
+
+/// The one native content/files/privacy/audit installer for new current material.
+async fn install_created(
+    ctx: &Ctx,
+    tx: &mut orch_db::Tx,
+    principal: &Principal,
+    material: CreationMaterial<'_>,
+) -> ApiResult<()> {
+    let CreationMaterial {
         id,
-        &title,
-        None,
-        Time::new(ctx.now),
-    )
-    .await;
-    let created = crate::routes::document_tree::result(&mut tx, created).await?;
-    if !created.created {
-        let listed = build::standing(&mut tx, &principal, id, Policy::default()).await?;
-        let made = build::document(
-            &mut tx,
-            &principal,
-            &created.document,
-            &listed,
-            ctx.now,
-            Policy::default(),
-        )
-        .await?;
-        tx.commit().await.map_err(DbError::from)?;
-        return Ok(made);
-    }
+        node,
+        title,
+        access,
+        blocks,
+        copied_files,
+        receipt_warnings,
+        settings,
+    } = material;
+    let maker = principal.user();
     let mut total = 0_i64;
-    for file in &copied_files {
+    for file in copied_files {
         if file.file.size > settings.file_max_bytes.value {
             return Err(limits::too_large(
-                &mut tx,
-                &principal,
+                &mut *tx,
+                principal,
                 &settings,
                 limits::Limit::FileBytes,
                 Policy::default(),
@@ -595,26 +360,26 @@ async fn create_prepared(
     }
     if total > settings.files_max_bytes.value {
         return Err(limits::too_large(
-            &mut tx,
-            &principal,
+            &mut *tx,
+            principal,
             &settings,
             limits::Limit::FilesBytes,
             Policy::default(),
         )
         .await);
     }
-    convert::register(&ctx, &mut tx, &copied_files, ctx.now).await?;
-    rows::copy::install_files(&mut tx, id, &copied_files, Some(maker), None, ctx.now)
+    convert::register(ctx, &mut *tx, copied_files, ctx.now).await?;
+    rows::copy::install_files(&mut *tx, id, copied_files, Some(maker), None, ctx.now)
         .await
         .map_err(ApiError::internal)?;
     let policy = Policy::default();
-    if body.access == Some(NewDocumentAccess::Private) {
+    if access == Some(NewDocumentAccess::Private) {
         let change = orch_access_contract::pages::PageChange {
             whole: Some(orch_access_contract::pages::Whole::Private),
             ..Default::default()
         };
         let home = ResourcePolicy {
-            owners_name_outsiders: crate::routes::nodes::policy_at(&mut tx, node)
+            owners_name_outsiders: crate::routes::nodes::policy_at(&mut *tx, node)
                 .await?
                 .owners_name_outsiders,
             shared_subscriptions: None,
@@ -624,9 +389,9 @@ async fn create_prepared(
             id,
         };
         if let Err(error) =
-            pages::change_resource(&mut tx, &principal, object, &change, &home, &origin(&ctx)).await
+            pages::change_resource(&mut *tx, principal, object, &change, &home, &origin(ctx)).await
         {
-            return Err(refusals::change_failed(&mut tx, error).await);
+            return Err(refusals::change_failed(&mut *tx, error).await);
         }
     }
     let ops = creation_ops(blocks);
@@ -637,7 +402,7 @@ async fn create_prepared(
         .map_err(ApiError::internal)?;
     for chunk in ops.chunks(chunk_max) {
         let outcome = batch::apply(
-            &mut tx,
+            &mut *tx,
             id,
             &Writer::User(maker),
             None,
@@ -649,28 +414,25 @@ async fn create_prepared(
         .await?;
         match outcome {
             Outcome::Applied(_) => {}
-            other => return Err(ops::refuse(&mut tx, &principal, &settings, other, policy).await),
+            other => return Err(ops::refuse(&mut *tx, principal, &settings, other, policy).await),
         }
     }
-    let row = live(&mut tx, id).await?;
-    let who = actor_name(&ctx)?;
-    let mut details = json!({ "node": node, "title": title, "access": body.access });
+    let row = live(&mut *tx, id).await?;
+    let who = actor_name(ctx)?;
+    let mut details = json!({ "node": node, "title": title, "access": access });
     if !receipt_warnings.is_empty() {
         details["import_warnings"] = json!(receipt_warnings);
     }
     record(
-        &ctx,
-        &mut tx,
+        ctx,
+        &mut *tx,
         orch_db::audit::action!(AuditAction::DocumentCreated),
         &row,
         &format!("{who} made the document \"{title}\""),
         details,
     )
     .await?;
-    let listed = build::standing(&mut tx, &principal, id, policy).await?;
-    let made = build::document(&mut tx, &principal, &row, &listed, ctx.now, policy).await?;
-    tx.commit().await.map_err(DbError::from)?;
-    Ok(made)
+    Ok(())
 }
 
 /// Reads a document without its blocks.
@@ -679,29 +441,17 @@ pub(crate) async fn get(
     _query: orch_api_contract::nodes::DeletedInspectionQuery,
     (): (),
 ) -> ApiResult<Document> {
-    let id = ctx.id("id")?;
-    let mut conn = orch_db::queries::feeds::begin_reading(&ctx.app.db).await?;
-    let principal = authorization::principal(&ctx, &mut conn).await?;
-    let row = live(&mut conn, id).await?;
-    let listed = build::standing(&mut conn, &principal, id, Policy::default()).await?;
-    let shown = build::document(
-        &mut conn,
-        &principal,
-        &row,
-        &listed,
-        ctx.now,
-        Policy::default(),
-    )
-    .await?;
-    let cut = crate::routes::document_tree::metadata::cut(
-        &mut conn,
-        &principal,
-        row.node_id,
-        ctx.app.clock.time(),
-    )
-    .await?;
-    conn.commit().await.map_err(DbError::from)?;
-    finish_document_read(&ctx, &cut).await?;
+    let (shown, prepared, actual) =
+        crate::key_operations::native::read(ctx, |ctx, conn, principal| {
+            Box::pin(async move {
+                let prepared = ctx.operation_data::<read_operation::PreparedRead>()?;
+                read_operation::same_inspection(ctx, &prepared)?;
+                let shown = read_operation::project_document(conn, principal, &prepared).await?;
+                Ok((shown, prepared, ctx.clone()))
+            })
+        })
+        .await?;
+    read_operation::finish(&actual, &prepared).await?;
     Ok(shown)
 }
 
@@ -718,6 +468,35 @@ async fn read_sync(
     let row = live(conn, id).await?;
     let listed = build::standing(conn, principal, id, policy).await?;
     let document = build::document(conn, principal, &row, &listed, now, policy).await?;
+    let selected = sync_rows(conn, &row, since).await?;
+    let seq = row.doc_seq;
+    let SyncRows {
+        blocks,
+        discussions: found,
+        complete,
+    } = selected;
+    Ok(DocumentSync {
+        document,
+        blocks: build::blocks_for(conn, principal, &blocks, policy).await?,
+        discussions: build::discussions_for(conn, principal, id, &found, policy).await?,
+        seq,
+        since,
+        complete,
+    })
+}
+
+pub(super) struct SyncRows {
+    pub blocks: Vec<rows::BlockRow>,
+    pub discussions: Vec<discussions::Full>,
+    pub complete: bool,
+}
+
+pub(super) async fn sync_rows(
+    conn: &mut Conn,
+    row: &DocumentRow,
+    since: Option<i64>,
+) -> ApiResult<SyncRows> {
+    let id = row.id;
     let seq = row.doc_seq;
     let (blocks, found, complete) = match since {
         None => (
@@ -746,46 +525,30 @@ async fn read_sync(
             }
         }
     };
-    Ok(DocumentSync {
-        document,
-        blocks: build::blocks_for(conn, principal, &blocks, policy).await?,
-        discussions: build::discussions_for(conn, principal, id, &found, policy).await?,
-        seq,
-        since,
+    Ok(SyncRows {
+        blocks,
+        discussions: found,
         complete,
     })
 }
 
 /// Reads a document and every live block, or what changed since a sequence.
 async fn sync(ctx: Ctx, query: DocumentSyncGetQuery, (): ()) -> ApiResult<DocumentSync> {
-    let id = ctx.id("id")?;
     if query.since.is_some_and(|since| since < 0) {
         return Err(invalid("since", "must not be negative"));
     }
-    let mut conn = orch_db::queries::feeds::begin_reading(&ctx.app.db).await?;
-    let principal = authorization::principal(&ctx, &mut conn).await?;
-    let shown = read_sync(&mut conn, &principal, id, query.since, ctx.now).await?;
-    let cut = crate::routes::document_tree::metadata::cut(
-        &mut conn,
-        &principal,
-        shown.document.base.node.id,
-        ctx.app.clock.time(),
-    )
-    .await?;
-    conn.commit().await.map_err(DbError::from)?;
-    finish_document_read(&ctx, &cut).await?;
-    Ok(shown)
-}
-
-async fn finish_document_read(
-    ctx: &Ctx,
-    cut: &crate::routes::document_tree::metadata::Cut,
-) -> ApiResult<()> {
-    let (mut tx, guard) = transaction_guard::begin(ctx).await?;
-    crate::routes::document_tree::metadata::unchanged(&mut tx, guard.principal(), cut, guard.now())
+    let (shown, prepared, actual) =
+        crate::key_operations::native::read(ctx, |ctx, conn, principal| {
+            Box::pin(async move {
+                let prepared = ctx.operation_data::<read_operation::PreparedRead>()?;
+                read_operation::same_inspection(ctx, &prepared)?;
+                let shown = read_operation::project_sync(conn, principal, &prepared).await?;
+                Ok((shown, prepared, ctx.clone()))
+            })
+        })
         .await?;
-    tx.commit().await.map_err(DbError::from)?;
-    Ok(())
+    read_operation::finish(&actual, &prepared).await?;
+    Ok(shown)
 }
 
 // ---------------------------------------------------------------- the document as a thing
@@ -913,104 +676,6 @@ async fn delete(mut ctx: Ctx, (): (), (): ()) -> ApiResult<()> {
     Ok(())
 }
 
-/// Restores a deleted document: whoever could have deleted it, as it was.
-async fn restore(
-    mut ctx: Ctx,
-    (): (),
-    body: orch_api_contract::documents::DocumentRestoreBody,
-) -> ApiResult<Document> {
-    let id = ctx.id("id")?;
-    let (mut tx, guard) = transaction_guard::begin(&ctx).await?;
-    ctx.now = guard.now().get();
-    let principal = guard.principal().clone();
-    let policy = Policy::default();
-    let stored = rows::get(&mut tx, id)
-        .await?
-        .ok_or_else(ApiError::not_found)?;
-    match orch_db::queries::trace::read_scope(
-        &[id, stored.node_id],
-        documents::check_all(
-            &mut tx,
-            &principal,
-            id,
-            &[Permission::DocManage],
-            Act::Delete,
-            State::AsItWas,
-            policy,
-        ),
-    )
-    .await
-    {
-        Ok(Decision::Allowed { .. }) => {}
-        Ok(Decision::Refused(refusal)) => {
-            return Err(refusals::denied(&mut tx, refusal).await?);
-        }
-        Err(error) => return Err(refusals::problem(&mut tx, error).await),
-    }
-    rows::containers::lock_document_scope(&mut tx, id).await?;
-    let row = rows::lock(&mut tx, id)
-        .await?
-        .filter(|row| row.deleted_at.is_some())
-        .ok_or_else(ApiError::not_found)?;
-    let life = orch_db::queries::trace::life(&mut tx, "document", id).await?;
-    let current = life.as_ref().and_then(|l| l.deletion_id);
-    if body.expected_deletion_id.is_some() && body.expected_deletion_id != current {
-        return Err(ApiError::new(
-            ErrorCode::ConflictStaleRevision,
-            "the selected deletion is no longer current",
-        )
-        .with("current_deletion_id", current));
-    }
-    if orch_db::queries::hierarchy::deleted_node(&mut tx, row.node_id)
-        .await?
-        .is_some()
-    {
-        let refs =
-            crate::routes::nodes::view::refs(&mut tx, &principal, &[row.node_id], policy).await?;
-        return Err(ApiError::new(
-            ErrorCode::NodeRestoreParentFirst,
-            "bring back the document's place under its own restoration authority first",
-        )
-        .with("parent", refs.get(&row.node_id)));
-    }
-    if let Some(parent) = rows::containers::ancestors_many(&mut tx, &[id])
-        .await?
-        .into_iter()
-        .find(|parent| parent.deleted_at.is_some())
-    {
-        let refs =
-            crate::routes::document_tree::container_refs(&mut tx, &principal, &[parent.id]).await?;
-        return Err(ApiError::new(
-            ErrorCode::NodeRestoreParentFirst,
-            "bring back the document's containing folder first",
-        )
-        .with("parent", refs.get(&parent.id)));
-    }
-    let request = document_tree_domain::Request {
-        command: document_tree_domain::Command::Restore,
-        items: vec![document_tree_domain::Item::Document(id)],
-        to: None,
-        name: None,
-        request_ref: orch_types::new_id().to_string(),
-        version: None,
-    };
-    let restored = document_tree_domain::execute_in(
-        &mut tx,
-        document_tree_domain::Actor::Person(&principal),
-        &request,
-        None,
-        Time::new(ctx.now),
-        crate::routes::document_tree::options(&ctx),
-    )
-    .await;
-    crate::routes::document_tree::result(&mut tx, restored).await?;
-    let restored = live(&mut tx, id).await?;
-    let listed = build::standing(&mut tx, &principal, id, policy).await?;
-    let shown = build::document(&mut tx, &principal, &restored, &listed, ctx.now, policy).await?;
-    tx.commit().await.map_err(DbError::from)?;
-    Ok(shown)
-}
-
 // ---------------------------------------------------------------- moving
 
 /// What a move needs held, and what it needs of the place: Manage of the
@@ -1068,101 +733,6 @@ async fn may_move(
 
 /// Says who gains and who loses what when a document's rows follow those of
 /// another node.
-async fn move_preview(mut ctx: Ctx, (): (), body: DocumentMoveBody) -> ApiResult<PagePreview> {
-    let id = ctx.id("id")?;
-    let (mut conn, guard) = transaction_guard::begin(&ctx).await?;
-    ctx.now = guard.now().get();
-    let principal = guard.principal().clone();
-    let policy = Policy::default();
-    let row = live(&mut conn, id).await?;
-    let target = may_move(&mut conn, &principal, policy, &row, body.node_id).await?;
-    if target.is_none() {
-        return Ok(PagePreview {
-            pages: 1,
-            orgs: None,
-            gaining: Vec::new(),
-            losing: Vec::new(),
-            more: 0,
-        });
-    }
-    let plan = documents::plan_move(&mut conn, &principal, id, body.node_id, policy)
-        .await
-        .map_err(ApiError::internal)?;
-    let people: Vec<Id> = plan
-        .gaining
-        .keys()
-        .chain(plan.losing.keys())
-        .copied()
-        .collect();
-    let known = refusals::user_refs(&mut conn, &people).await?;
-    let shown = |side: &BTreeMap<Id, Vec<Permission>>| -> (Vec<PreviewPerson>, i64) {
-        let most = usize::try_from(PREVIEW_MAX_PEOPLE).unwrap_or(usize::MAX);
-        let mut listed = Vec::new();
-        let mut more = 0_i64;
-        for (person, permissions) in side {
-            match known.get(person) {
-                Some(user) if listed.len() < most => listed.push(PreviewPerson {
-                    user: user.clone(),
-                    permissions: permissions
-                        .iter()
-                        .map(|permission| permission.as_str().to_owned())
-                        .collect(),
-                    pages: 1,
-                }),
-                _ => more += 1,
-            }
-        }
-        (listed, more)
-    };
-    let (gaining, more_gaining) = shown(&plan.gaining);
-    let (losing, more_losing) = shown(&plan.losing);
-    Ok(PagePreview {
-        pages: 1,
-        orgs: None,
-        gaining,
-        losing,
-        more: more_gaining + more_losing,
-    })
-}
-
-/// Moves a document beside another node of its tree.
-async fn move_to(mut ctx: Ctx, (): (), body: DocumentMoveBody) -> ApiResult<Document> {
-    let id = ctx.id("id")?;
-    let (mut tx, guard) = transaction_guard::begin(&ctx).await?;
-    ctx.now = guard.now().get();
-    let principal = guard.principal().clone();
-    let policy = Policy::default();
-    let row = live(&mut tx, id).await?;
-    if may_move(&mut tx, &principal, policy, &row, body.node_id)
-        .await?
-        .is_some()
-    {
-        let request = document_tree_domain::Request {
-            command: document_tree_domain::Command::Move,
-            items: vec![document_tree_domain::Item::Document(id)],
-            to: Some(document_tree_domain::Directory::NodeDocs(body.node_id)),
-            name: None,
-            request_ref: orch_types::new_id().to_string(),
-            version: None,
-        };
-        let moved = document_tree_domain::execute_in(
-            &mut tx,
-            document_tree_domain::Actor::Person(&principal),
-            &request,
-            None,
-            Time::new(ctx.now),
-            crate::routes::document_tree::options(&ctx),
-        )
-        .await;
-        crate::routes::document_tree::result(&mut tx, moved).await?;
-    }
-    let moved = live(&mut tx, id).await?;
-    let listed = build::standing(&mut tx, &principal, id, policy).await?;
-    let shown = build::document(&mut tx, &principal, &moved, &listed, ctx.now, policy).await?;
-    tx.commit().await.map_err(DbError::from)?;
-    Ok(shown)
-}
-
 // ---------------------------------------------------------------- files
 
 /// Takes a file out of a document, unless a live block names it.

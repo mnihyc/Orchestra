@@ -36,11 +36,19 @@ use serde::{Deserialize, Serialize};
 use serde_json::json;
 
 mod data;
+mod footprint;
+mod preparation;
+mod source;
 
 /// Binds the host's reviewed cascade instead of an empty-host-only control.
 pub fn mount(registry: &mut Registry) {
     registry
-        .on(api::HostDeletePreflight, preflight)
+        .on_with_initial_operation(
+            api::HostDeletePreflight,
+            crate::key_operations::native::effects::initial::<preparation::Preview>,
+            crate::key_operations::native::effects::prepare::<preparation::Preview>,
+            preparation::run,
+        )
         .on(api::HostDeleteCreate, create);
 }
 
@@ -79,7 +87,7 @@ enum ProviderAction {
         recipe: Box<orch_engine::provider_recovery::Recipe>,
     },
 }
-#[derive(Serialize, Deserialize)]
+#[derive(Clone, Serialize, Deserialize)]
 struct Stored {
     host: Id,
     fingerprint: Hash,
@@ -90,6 +98,17 @@ struct Stored {
     volumes: Vec<operation::Volume>,
     audience: Vec<notifications::OperationRecipient>,
     data: Option<data::Planned>,
+    #[serde(default)]
+    read_environments: Vec<Id>,
+}
+
+/// The actual Host whose kept cascade supplied the private audience.
+pub(crate) fn recipient_subject(plan: &orch_types::Json) -> ApiResult<ObjectRef> {
+    let stored: Stored = serde_json::from_value(plan.clone()).map_err(ApiError::internal)?;
+    Ok(ObjectRef {
+        kind: orch_access_contract::permissions::ObjectKind::Host,
+        id: stored.host,
+    })
 }
 fn blocked(code: &str, message: impl Into<String>) -> PlanBlocker {
     updates::blocker(code, message)
@@ -201,7 +220,7 @@ async fn build(
     id: Id,
     body: &api::HostDeletePreflightBody,
 ) -> ApiResult<Stored> {
-    let mut tx = ctx.app.db.begin().await?;
+    let mut tx = ctx.app.db.begin_snapshot().await?;
     let host_row = hosts::host(&mut tx, host)
         .await?
         .ok_or_else(ApiError::not_found)?;
@@ -320,6 +339,7 @@ async fn build(
             volumes: vec![],
             audience: vec![],
             data: None,
+            read_environments: Vec::new(),
         });
     }
 
@@ -887,7 +907,7 @@ async fn build(
     plan.executable = plan.rows.iter().all(|row| row.blockers.is_empty())
         && plan.data.iter().all(|row| row.blockers.is_empty())
         && plan.erase_blockers.is_empty();
-    Ok(Stored {
+    let stored = Stored {
         host,
         fingerprint,
         body: body.clone(),
@@ -897,58 +917,9 @@ async fn build(
         volumes: vec![],
         audience,
         data: Some(data),
-    })
-}
-
-async fn preflight(
-    ctx: Ctx,
-    (): (),
-    body: api::HostDeletePreflightBody,
-) -> ApiResult<api::HostDeletePlan> {
-    let mut conn = ctx.app.db.acquire().await?;
-    let principal = authorization::principal(&ctx, &mut conn).await?;
-    drop(conn);
-    let id = new_id();
-    let stored = build(&ctx, &principal, ctx.id("id")?, id, &body).await?;
-    let plan = stored.plan.clone();
-    let (_, mut tx, principal) = crate::routes::nodes::action(&ctx).await?;
-    operation_access::review(
-        &mut tx,
-        &principal,
-        ObjectRef {
-            kind: ObjectKind::Host,
-            id: stored.host,
-        },
-        Permission::HostManage,
-    )
-    .await
-    .map_err(refused)?;
-    jobs::forks::save_preflight(
-        &mut tx,
-        &jobs::forks::PreflightRow {
-            id,
-            kind: "host_delete".into(),
-            node_id: None,
-            environment_id: None,
-            created_by: principal.user(),
-            plan: serde_json::to_value(&stored).map_err(ApiError::internal)?,
-            expires_at: plan.expires_at.get(),
-            created_at: ctx.now,
-        },
-    )
-    .await?;
-    orch_db::queries::notifications::operations::preview(
-        &mut tx,
-        id,
-        &stored
-            .audience
-            .iter()
-            .map(|person| person.user)
-            .collect::<Vec<_>>(),
-    )
-    .await?;
-    tx.commit().await.map_err(DbError::from)?;
-    Ok(plan)
+        read_environments: managed.into_iter().collect(),
+    };
+    Ok(stored)
 }
 
 async fn create(ctx: Ctx, (): (), body: api::HostDeleteCreateBody) -> ApiResult<Job> {

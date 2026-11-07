@@ -10,6 +10,24 @@ use serde::{Deserialize, Serialize};
 use std::collections::BTreeMap;
 use std::path::PathBuf;
 
+const MIB: usize = 1024 * 1024;
+
+/// Default stack reservation for a service runtime thread; deployments may raise or lower it.
+pub const WORKER_STACK_BYTES: usize = 64 * MIB;
+
+/// The service whose runtime is about to start.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum RuntimeComponent {
+    /// The API service.
+    Api,
+    /// The gateway service.
+    Gateway,
+    /// The background worker service.
+    Worker,
+    /// The host node service.
+    Node,
+}
+
 fn s(text: &str) -> String {
     text.to_owned()
 }
@@ -104,6 +122,8 @@ section! {
 section! {
     /// `[api]`
     Api {
+        /// Stack reservation per runtime thread in MiB; an adjustable default, not a cap.
+        worker_stack_mib: usize = WORKER_STACK_BYTES / MIB,
         /// The browser API, TLS under the system's own CA, reached through the front proxy.
         bind: String = s("0.0.0.0:8443"),
         /// Mutual TLS: the gateway's backplane and certificate renewal.
@@ -174,8 +194,24 @@ section! {
 }
 
 section! {
+    /// One logical gateway advertised in `[[gateway.instances]]`.
+    GatewayInstance {
+        /// Stable identity shared by all this gateway's entrances.
+        id: String = String::new(),
+        /// Operator label shown during installation and on machine pages.
+        label: String = String::new(),
+        /// Operator-described region; no location is inferred from it.
+        region: String = String::new(),
+        /// Pinned/public entrances that all reach this gateway.
+        endpoints: Vec<GatewayEndpoint> = Vec::new(),
+    }
+}
+
+section! {
     /// `[gateway]`
     Gateway {
+        /// Stack reservation per runtime thread in MiB; an adjustable default, not a cap.
+        worker_stack_mib: usize = WORKER_STACK_BYTES / MIB,
         /// Machines that present client certificates.
         pinned_bind: String = s("[::]:9443"),
         /// Machines that come through the public front; TLS under the system's CA.
@@ -186,6 +222,8 @@ section! {
         backplane_url: String = s("wss://api:8444/internal/backplane"),
         /// This gateway's name among several.
         gateway_id: String = s("compose-gateway"),
+        /// Labelled logical gateways; empty synthesizes the legacy single-gateway entry.
+        instances: Vec<GatewayInstance> = Vec::new(),
         /// The address given to runtimes the system creates itself.
         managed_endpoint: String = String::new(),
         /// The addresses advertised to connected machines, in order of preference.
@@ -195,9 +233,130 @@ section! {
     }
 }
 
+impl Gateway {
+    /// The operator's catalogue, including legacy single-gateway configuration.
+    #[must_use]
+    pub fn advertised_gateways(&self) -> Vec<orch_link_contract::gateways::GatewayInstance> {
+        let endpoints =
+            |entries: &[GatewayEndpoint]| -> Vec<orch_link_contract::enrollment::Endpoint> {
+                entries
+                    .iter()
+                    .map(|entry| orch_link_contract::enrollment::Endpoint {
+                        url: entry.url.clone(),
+                        trust: if entry.trust == "public" {
+                            orch_link_contract::enrollment::Trust::Public
+                        } else {
+                            orch_link_contract::enrollment::Trust::Pinned
+                        },
+                    })
+                    .collect()
+            };
+        if self.instances.is_empty() {
+            return vec![orch_link_contract::gateways::GatewayInstance {
+                id: self.gateway_id.clone(),
+                label: self.gateway_id.clone(),
+                region: "Unspecified".to_owned(),
+                endpoints: endpoints(&self.endpoints),
+            }];
+        }
+        self.instances
+            .iter()
+            .map(|instance| orch_link_contract::gateways::GatewayInstance {
+                id: instance.id.clone(),
+                label: instance.label.clone(),
+                region: instance.region.clone(),
+                endpoints: endpoints(&instance.endpoints),
+            })
+            .collect()
+    }
+
+    /// The legacy projection of the same catalogue, retaining declared order.
+    #[must_use]
+    pub fn advertised_endpoints(&self) -> Vec<orch_link_contract::enrollment::Endpoint> {
+        self.advertised_gateways()
+            .into_iter()
+            .flat_map(|instance| instance.endpoints)
+            .collect()
+    }
+
+    /// Validate the same operator catalogue at deployment and through administrative updates.
+    pub fn validate_instances(&self) -> Result<(), ConfigError> {
+        let invalid = |message: &str| ConfigError::Invalid {
+            key: "gateway.instances".to_owned(),
+            message: message.to_owned(),
+        };
+        let mut ids = std::collections::HashSet::new();
+        let mut entrances = std::collections::HashMap::new();
+        for instance in &self.instances {
+            if instance.id == "automatic" {
+                return Err(invalid(
+                    "automatic is reserved for the measured primary selection",
+                ));
+            }
+            if instance.id.is_empty()
+                || !instance
+                    .id
+                    .bytes()
+                    .all(|c| c.is_ascii_alphanumeric() || b"-_.".contains(&c))
+            {
+                return Err(invalid(
+                    "each gateway needs an identity containing letters, digits, dash, underscore or dot",
+                ));
+            }
+            if !ids.insert(&instance.id) {
+                return Err(invalid("gateway identities must be unique"));
+            }
+            if [&instance.label, &instance.region]
+                .iter()
+                .any(|text| text.trim().is_empty() || text.chars().any(char::is_control))
+            {
+                return Err(invalid(
+                    "each gateway needs a nonempty label and region without control characters",
+                ));
+            }
+            if instance.endpoints.is_empty() {
+                return Err(invalid("each gateway needs at least one verified entrance"));
+            }
+            for endpoint in &instance.endpoints {
+                let uri = endpoint
+                    .url
+                    .parse::<http::Uri>()
+                    .map_err(|_| invalid("gateway entrances must be WSS or HTTPS addresses"))?;
+                if !matches!(endpoint.trust.as_str(), "pinned" | "public")
+                    || !matches!(uri.scheme_str(), Some("wss" | "https"))
+                    || uri.host().is_none()
+                    || uri
+                        .authority()
+                        .is_some_and(|authority| authority.as_str().contains('@'))
+                    || uri.query().is_some()
+                    || endpoint.url.contains('#')
+                {
+                    return Err(invalid(
+                        "gateway entrances need WSS/HTTPS, pinned/public trust and no credentials, query or fragment",
+                    ));
+                }
+                let origin = format!(
+                    "{}:{}",
+                    uri.host().unwrap_or_default().to_ascii_lowercase(),
+                    uri.port_u16().unwrap_or(443)
+                );
+                if entrances
+                    .insert(origin, &instance.id)
+                    .is_some_and(|old| old != &instance.id)
+                {
+                    return Err(invalid("one entrance cannot name two different gateways"));
+                }
+            }
+        }
+        Ok(())
+    }
+}
+
 section! {
     /// `[link]`
     Link {
+        /// Close unused tunnel-only sessions after this many seconds; live references protect them.
+        tunnel_session_idle_secs: u64 = 60,
         /// How often each side says it is alive.
         heartbeat_secs: u64 = 20,
         /// Silence after which the other side is taken for gone: three heartbeats.
@@ -238,6 +397,8 @@ section! {
 section! {
     /// `[worker]`
     Worker {
+        /// Stack reservation per runtime thread in MiB; an adjustable default, not a cap.
+        worker_stack_mib: usize = WORKER_STACK_BYTES / MIB,
         /// Plain HTTP for an operator's collector.
         metrics_bind: String = s("0.0.0.0:9102"),
         /// Database connections.
@@ -452,10 +613,14 @@ pub type NodeHooks = orch_link_contract::policy::MachineHooks;
 section! {
     /// `[node]`: the environment host.
     Node {
+        /// Stack reservation per service runtime thread in MiB; an adjustable default, not a cap.
+        worker_stack_mib: usize = WORKER_STACK_BYTES / MIB,
         /// Where it keeps its own state.
         data_dir: String = s("/var/lib/orch-node"),
         /// The gateway it connects to.
         gateway_url: String = String::new(),
+        /// Parent HTTP proxy for restricted units; unset follows this node's HTTPS_PROXY.
+        egress_proxy: Option<String> = None,
         /// The built-in drivers it loads.
         drivers: Vec<String> = list(&["docker"]),
         /// How long a new runtime's connector has to enroll before its creation fails.
@@ -663,6 +828,27 @@ fn shares_origin(ports_domain: &str, main_host: &str) -> bool {
             || ports_domain.ends_with(&format!(".{main_host}")))
 }
 
+impl ServerConfig {
+    /// The selected service's stack reservation, checked before a runtime starts.
+    ///
+    /// # Errors
+    /// Returns an error naming the setting when it is zero or its byte count overflows.
+    pub fn worker_stack_bytes(&self, component: RuntimeComponent) -> Result<usize, ConfigError> {
+        let (section, mib) = match component {
+            RuntimeComponent::Api => ("api", self.api.worker_stack_mib),
+            RuntimeComponent::Gateway => ("gateway", self.gateway.worker_stack_mib),
+            RuntimeComponent::Worker => ("worker", self.worker.worker_stack_mib),
+            RuntimeComponent::Node => ("node", self.node.worker_stack_mib),
+        };
+        mib.checked_mul(MIB)
+            .filter(|bytes| *bytes > 0)
+            .ok_or_else(|| ConfigError::Invalid {
+                key: format!("{section}.worker_stack_mib"),
+                message: "must be positive and fit in this platform's address space".to_owned(),
+            })
+    }
+}
+
 impl Validate for ServerConfig {
     fn validate(&self) -> Result<(), ConfigError> {
         let invalid = |key: &str, message: &str| ConfigError::Invalid {
@@ -671,6 +857,14 @@ impl Validate for ServerConfig {
         };
         if self.version != 1 {
             return Err(invalid("version", "this build reads version 1"));
+        }
+        for component in [
+            RuntimeComponent::Api,
+            RuntimeComponent::Gateway,
+            RuntimeComponent::Worker,
+            RuntimeComponent::Node,
+        ] {
+            self.worker_stack_bytes(component)?;
         }
         if self.release.request_timeout_secs == 0 || self.release.manifest_max_bytes == 0 {
             return Err(invalid(
@@ -773,6 +967,7 @@ impl Validate for ServerConfig {
                 ));
             }
         }
+        self.gateway.validate_instances()?;
         for plugin in &self.plugin {
             if !orch_plugin_contract::registration::PluginKind::ALL
                 .iter()

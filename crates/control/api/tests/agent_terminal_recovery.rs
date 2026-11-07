@@ -1,5 +1,6 @@
 //! An actual profile repair retries original native accounting without moving the domain clock.
 
+#![recursion_limit = "256"]
 mod realtime_support;
 mod thread_history_support;
 

@@ -772,6 +772,7 @@ impl Engine {
             self,
             conn,
             &crate::mount_copies::Ask {
+                preparation: None,
                 choices: request.mounts.as_deref().unwrap_or_default(),
                 check_fingerprints: request.check_fingerprints.unwrap_or(false).then(|| {
                     request
@@ -2262,14 +2263,14 @@ impl Moving {
 impl Phased for Moving {
     async fn run(&self, job: &Job, phase: &str) -> Result<Done, Stop> {
         match phase {
-            "lock" => self.lock(job).await,
-            "provision" => self.provision(job).await,
-            "copy" => self.copy(job).await,
+            "lock" => Box::pin(self.lock(job)).await,
+            "provision" => Box::pin(self.provision(job)).await,
+            "copy" => Box::pin(self.copy(job)).await,
             "history" => {
                 let plan = job.plan().await?;
                 let machine: Id = serde_json::from_value(plan["candidate_machine"].clone())
                     .map_err(EngineError::from)?;
-                crate::recovery::prepare_histories(
+                Box::pin(crate::recovery::prepare_histories(
                     job,
                     self.recipe.environment,
                     machine,
@@ -2278,13 +2279,13 @@ impl Phased for Moving {
                         .ok_or_else(|| fail("files_missing", "The target root is missing"))?,
                     self.recipe.next_generation,
                     self.recipe.files.home.is_some(),
-                )
+                ))
                 .await
             }
-            "after_up" => super::after_up::run(job).await,
-            "verify" => self.verify(job).await,
-            "commit" => self.commit(job).await,
-            "cleanup" => self.cleanup(job).await,
+            "after_up" => Box::pin(super::after_up::run(job)).await,
+            "verify" => Box::pin(self.verify(job)).await,
+            "commit" => Box::pin(self.commit(job)).await,
+            "cleanup" => Box::pin(self.cleanup(job)).await,
             _ => Err(fail("internal", "The machine move has an unknown phase.")),
         }
     }

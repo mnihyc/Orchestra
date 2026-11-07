@@ -79,9 +79,7 @@ pub(super) async fn find(
     current: &CommentRow,
     attempt: &Attempt,
 ) -> ApiResult<Option<CommentRow>> {
-    let Some(replay) =
-        idempotency::find(conn, current.author_id, &key(current, attempt), since(ctx)).await?
-    else {
+    let Some(replay) = retained(ctx, conn, current, attempt).await? else {
         return Ok(None);
     };
     if replay.method != "PATCH" || replay.path != path(current) || replay.status != 200 {
@@ -110,6 +108,26 @@ pub(super) async fn find(
         ));
     }
     Ok(Some(row))
+}
+
+async fn retained(
+    ctx: &Ctx,
+    conn: &mut Conn,
+    current: &CommentRow,
+    attempt: &Attempt,
+) -> ApiResult<Option<Replay>> {
+    Ok(idempotency::find(conn, current.author_id, &key(current, attempt), since(ctx)).await?)
+}
+
+/// Factual presence only for effect-source preparation. The existing writer still checks
+/// current View/authorship/archive, exact retained payload and revision before using a replay.
+pub(super) async fn recorded(
+    ctx: &Ctx,
+    conn: &mut Conn,
+    current: &CommentRow,
+    attempt: &Attempt,
+) -> ApiResult<bool> {
+    Ok(retained(ctx, conn, current, attempt).await?.is_some())
 }
 
 pub(super) async fn keep(

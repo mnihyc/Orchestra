@@ -6,6 +6,7 @@
  * A test plays the other people with the requests under `/__double/documents`.
  */
 import { randomUUID } from 'node:crypto';
+import { isDeepStrictEqual } from 'node:util';
 
 import { readMarkdown, type Piece } from './markdown-reader.ts';
 import { readHtml } from '../../src/features/people/html.ts';
@@ -26,6 +27,9 @@ import type {
   DocumentTreeRead,
   DocumentTreePage,
   DocumentTreeReceipt,
+  DocumentTreeMembership,
+  DocumentTreeConfirmation,
+  DocumentTreePlan,
   Inline,
   NodeRef,
   RelatedItems,
@@ -131,6 +135,7 @@ const wordsOf = (block: DocumentBlock): string =>
 export class Documents implements Part {
   readonly world: World;
   docs = new Map<string, Doc>();
+  private deletionConfirmations = new Map<string, { reader: string; stamp: DocumentTreeMembership }>();
   private relatedAnswers = new Map<string, Answer>();
   /** What each document's owner chose to show of the Links section; none follows the place. */
   private linkTabs = new Map<string, LinksTab[]>();
@@ -138,11 +143,30 @@ export class Documents implements Part {
   private linkLocks = new Set<string>();
   private watchers: Watcher[] = [];
   private counter = 0;
+  private directoryVersions = new Map<string, { fingerprint: string; seq: number }>();
   /** Frames to withhold from live connections, to look at what a gap does. */
   private lose = false;
 
   constructor(world: World) {
     this.world = world;
+  }
+
+  /** Stable namespace observations, shared by tree summaries and native directory pages. */
+  directorySequences(): ReadonlyMap<string, number> {
+    const groups = new Map<string, unknown[][]>();
+    for (const doc of this.docs.values()) {
+      const rows = groups.get(doc.nodeId) ?? [];
+      rows.push([doc.id, doc.title, doc.page, doc.deleted]);
+      groups.set(doc.nodeId, rows);
+    }
+    for (const node of new Set([...groups.keys(), ...this.directoryVersions.keys()])) {
+      const rows = groups.get(node) ?? [];
+      rows.sort((one, other) => String(one[0]).localeCompare(String(other[0])));
+      const fingerprint = JSON.stringify(rows);
+      const before = this.directoryVersions.get(node);
+      if (before?.fingerprint !== fingerprint) this.directoryVersions.set(node, { fingerprint, seq: (before?.seq ?? 0) + 1 });
+    }
+    return new Map([...this.directoryVersions].map(([node, value]) => [node, value.seq]));
   }
 
   // ---------------------------------------------------------------- who holds what
@@ -394,6 +418,7 @@ export class Documents implements Part {
     const participating = ordinary.permissions.includes('doc.view');
     return {
       ...this.ref(person, doc),
+      link_settings: doc.deleted ? null : this.linksOf(person, doc),
       path: this.path(doc.nodeId),
       location: { parent: { kind: 'node_docs', id: doc.nodeId }, basename, ancestors: [] },
       files: clone(doc.files),
@@ -447,6 +472,19 @@ export class Documents implements Part {
         write: value.access.permissions.includes('doc.edit'), manage: value.access.permissions.includes('doc.manage') } };
   }
 
+  private deletionMembership(person: Person, doc: Doc): DocumentTreeMembership {
+    return { entries: [this.treeRow(person, doc).entry], authority_epoch: 1, authority_fingerprint: String(doc.seq), authority_until: null };
+  }
+
+  /** A fixture's protected preview retains its actual reader and complete native observations. */
+  protectDeletionPlan(person: Person, documentId: string): DocumentTreeConfirmation {
+    const doc = this.find(person, documentId);
+    this.need(person, doc, 'doc.manage');
+    const confirmation = randomUUID();
+    this.deletionConfirmations.set(confirmation, { reader: person.me.id, stamp: this.deletionMembership(person, doc) });
+    return { confirmation };
+  }
+
   private treeHandle(person: Person, method: string, path: string, query: URLSearchParams, body: Record<string, unknown>): Answer | null {
     const item = /^\/document-tree\/entries\/([^/]+)$/.exec(path);
     if (method === 'GET' && item !== null && query.get('kind') === 'document') {
@@ -461,7 +499,7 @@ export class Documents implements Part {
       const page: DocumentTreePage = { items: listed.items.map((row) => this.treeRow(person, this.find(person, row.id, row.deleted))),
         ancestors: [], next_cursor: listed.next_cursor, feed: `fixture-root-documents:${node.id}`,
         directory: { at: { kind: 'node_docs', id: node.id }, node: this.nodeRef(node.id), path: node.path, folder: null,
-          ancestors: [], can_create: !node.archived && node.access.permissions.includes('doc.create'), inspection: null, membership_seq: node.revision } };
+          ancestors: [], can_create: !node.archived && node.access.permissions.includes('doc.create'), inspection: null, membership_seq: this.directorySequences().get(node.id) ?? 0 } };
       return { status: 200, body: page };
     }
     if (method !== 'POST' || path !== '/document-tree/operations' && path !== '/document-tree/delete/preview') return null;
@@ -472,11 +510,16 @@ export class Documents implements Part {
     const row = this.treeRow(person, doc);
     // The fixed promise is scenario data, as in the retained-content browser fixture.
     const until = '2026-11-11T12:00:00.000Z';
-    if (path.endsWith('/preview')) return { status: 200, body: { gaining: 0, losing: 0, restore_until: until,
-      stamp: { entries: [row.entry], authority_epoch: 1, authority_fingerprint: String(doc.seq), authority_until: null } } };
+    if (path.endsWith('/preview')) {
+      const plan: DocumentTreePlan = { gaining: 0, losing: 0, restore_until: until, stamp: this.deletionMembership(person, doc) };
+      return { status: 200, body: plan };
+    }
     let current = doc;
     if (request.command === 'delete') {
-      if (request.deletion_plan?.entries[0]?.revision !== doc.seq) throw new Refusal(409, 'conflict.stale_revision', 'read the changed deletion preview again');
+      const supplied = request.deletion_plan;
+      const kept = supplied !== null && 'confirmation' in supplied ? this.deletionConfirmations.get(supplied.confirmation) : undefined;
+      const stamp = supplied !== null && 'entries' in supplied ? supplied : kept?.reader === person.me.id ? kept.stamp : undefined;
+      if (!isDeepStrictEqual(stamp, this.deletionMembership(person, doc))) throw new Refusal(409, 'conflict.stale_revision', 'read the changed deletion preview again');
       const snapshot = this.sync(person, doc, null);
       this.handle(person, 'DELETE', `/documents/${doc.id}`, query, {}); doc.updatedAt = now();
       this.world.trace.retained.set(doc.id, { kind: 'document', name: doc.title, home: doc.nodeId, state: 'deleted', document: snapshot,

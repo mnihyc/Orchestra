@@ -7,6 +7,10 @@
 //! `thread.view` for a turn, and the chat's own reading for a chat. A caller who may not read the thing is answered
 //! as if nothing were there, with no word of what it is: their chip is plain text already.
 
+mod attachments;
+#[cfg(test)]
+mod source_waits;
+
 use std::collections::HashMap;
 
 use crate::middleware::authorization;
@@ -639,6 +643,8 @@ fn whole(kind: InlineRefKind, id: Id) -> ReferencePreviewQuery {
 
 struct FileTarget {
     preview: ReferencePreview,
+    attachment: Option<attachments::Witness>,
+    opening: Option<attachments::Opening>,
     blob: Option<Hash>,
     text: bool,
     place: Id,
@@ -646,9 +652,24 @@ struct FileTarget {
 
 /// Reads attachment ownership before asking for any bytes. An unknown identifier and an unreadable owner agree.
 async fn attachment_target(ctx: &Ctx, query: &ReferencePreviewQuery) -> ApiResult<FileTarget> {
-    let mut conn = ctx.app.db.acquire().await?;
-    let principal = authorization::principal(ctx, &mut conn).await?;
-    attachment_target_on(&mut conn, &principal, query, ctx.now).await
+    use crate::middleware::transaction_guard::{self, HttpIdentityMode};
+    let (mut tx, guard) = transaction_guard::begin(ctx).await?;
+    let identity =
+        transaction_guard::current_http_identity(ctx, &mut tx, HttpIdentityMode::Read).await?;
+    let mut target =
+        attachment_target_on(&mut tx, guard.principal(), query, guard.now().get()).await?;
+    let opening = attachments::Opening {
+        identity,
+        accepted: guard.principal().caller().clone(),
+    };
+    opening.check(ctx)?;
+    guard.check_deadline(ctx)?;
+    tx.commit().await.map_err(DbError::from)?;
+    opening.check(ctx)?;
+    ctx.publication
+        .retain_deadline(opening.identity.expires_at)?;
+    target.opening = Some(opening);
+    Ok(target)
 }
 
 async fn attachment_target_on(
@@ -665,15 +686,19 @@ async fn attachment_target_on(
             .map_err(DbError::from)?;
     if let Some(owner) = owner {
         let card = document(conn, principal, &whole(InlineRefKind::Document, owner), now).await?;
-        let file = rows::file(conn, owner, query.id)
-            .await?
-            .ok_or_else(ApiError::not_found)?;
+        let witness = super::files::FileWitness::load(conn, owner, query.id).await?;
+        let file = witness.held().clone();
         let place = card
             .place
             .as_ref()
             .map(|node| node.id)
             .ok_or_else(ApiError::not_found)?;
         return Ok(FileTarget {
+            opening: None,
+            attachment: Some(attachments::Witness::Document {
+                owner,
+                file: witness,
+            }),
             preview: ReferencePreview {
                 thread_display: None,
                 kind: InlineRefKind::File,
@@ -719,6 +744,14 @@ async fn attachment_target_on(
         .await?
         .filter(|row| !row.is_deleted())
         .ok_or_else(ApiError::not_found)?;
+    let source = attachments::Witness::Chat {
+        reference: query.id,
+        chat: chat_id,
+        message: message_id,
+        carried,
+        content: attachments::message_content(&message.content)?,
+        at: message.created_at,
+    };
     let parts: Vec<orch_api_contract::chats::ChatPart> =
         serde_json::from_value(message.content).map_err(ApiError::internal)?;
     let files = chat_files(parts);
@@ -738,6 +771,8 @@ async fn attachment_target_on(
         .ok_or_else(ApiError::not_found)?;
     let place = row.node_id.unwrap_or(row.org_id);
     Ok(FileTarget {
+        opening: None,
+        attachment: Some(source),
         preview: ReferencePreview {
             thread_display: None,
             kind: InlineRefKind::File,
@@ -985,6 +1020,8 @@ async fn environment_target(ctx: &Ctx, query: &ReferencePreviewQuery) -> ApiResu
         }
     }
     Ok(FileTarget {
+        opening: None,
+        attachment: None,
         preview: ReferencePreview {
             thread_display: None,
             kind: InlineRefKind::EnvironmentFile,
@@ -1062,6 +1099,9 @@ async fn file_preview(ctx: &Ctx, query: &ReferencePreviewQuery) -> ApiResult<Ref
             .as_ref()
             .and_then(|file| file.size)
             .map_or(bytes, |size| bytes.min(size));
+        if let Some(opening) = &target.opening {
+            opening.check(ctx)?;
+        }
         let text = if bytes > 0 {
             match ctx
                 .app
@@ -1084,6 +1124,9 @@ async fn file_preview(ctx: &Ctx, query: &ReferencePreviewQuery) -> ApiResult<Ref
         } else {
             None
         };
+        if let Some(opening) = &target.opening {
+            opening.check(ctx)?;
+        }
         if let Some(text) = text
             && let Some(text) = excerpt(&text, line, context)
         {
@@ -1096,6 +1139,10 @@ async fn file_preview(ctx: &Ctx, query: &ReferencePreviewQuery) -> ApiResult<Ref
             });
         }
     }
+    if let Some(opening) = &target.opening {
+        opening.check(ctx)?;
+    }
+    let opening = target.opening.take();
     // Native and blob reads hold no authority lock. Recheck the exact credential and current access at commit.
     let (mut tx, guard) = crate::middleware::transaction_guard::begin(ctx).await?;
     if query.kind == InlineRefKind::EnvironmentFile {
@@ -1104,19 +1151,36 @@ async fn file_preview(ctx: &Ctx, query: &ReferencePreviewQuery) -> ApiResult<Ref
             file.owner_name = env.name;
         }
     } else {
+        let opened = target
+            .attachment
+            .as_ref()
+            .ok_or_else(|| ApiError::internal("the native attachment source was not retained"))?;
+        opened.check(&mut tx, guard.principal()).await?;
         let mut fresh =
             attachment_target_on(&mut tx, guard.principal(), query, guard.now().get()).await?;
+        if fresh.attachment.as_ref() != Some(opened) {
+            return Err(ApiError::not_found());
+        }
         if fresh.text {
             fresh.preview.part = target.preview.part.take();
-            if fresh.blob != target.blob
-                && let Some(part) = &mut fresh.preview.part
-            {
-                part.text.clear();
-            }
         }
         target = fresh;
     }
+    guard.check_deadline(ctx)?;
     tx.commit().await.map_err(DbError::from)?;
+    guard.check_deadline(ctx)?;
+    if let Some(source) = target.attachment {
+        let opening = opening.ok_or_else(|| {
+            ApiError::internal("the native attachment lost its original HTTP reader")
+        })?;
+        opening.check(ctx)?;
+        crate::key_operations::publication::retain(
+            ctx,
+            &opening.accepted,
+            source,
+            |_ctx, conn, current, source| Box::pin(source.check(conn, current)),
+        )?;
+    }
     Ok(target.preview)
 }
 
@@ -1157,7 +1221,9 @@ mod tests {
             })
             .send()
             .await
-            .ok();
+            .ok()
+            .into_full()
+            .unwrap();
         let file = app
             .call(DocumentFileCreate, &[&doc.base.id])
             .token(&scene.ada.token)
@@ -1166,7 +1232,9 @@ mod tests {
             .bytes(b"first\nsecond\nthird\n")
             .send()
             .await
-            .ok();
+            .ok()
+            .into_full()
+            .expect("this native creation control requires its full response");
         let query = ReferencePreviewQuery {
             line: Some(2),
             ..whole(InlineRefKind::File, file.id)
@@ -1214,7 +1282,9 @@ mod tests {
             })
             .send()
             .await
-            .ok();
+            .ok()
+            .into_full()
+            .unwrap();
         let file = app
             .call(DocumentFileCreate, &[&doc.base.id])
             .token(&scene.ada.token)
@@ -1223,7 +1293,9 @@ mod tests {
             .bytes(b"fn first() {}\nfn second() {}\n")
             .send()
             .await
-            .ok();
+            .ok()
+            .into_full()
+            .expect("this native creation control requires its full response");
         let mut conn = scene.rig.db.acquire().await.unwrap();
         let held = rows::file(&mut conn, doc.base.id, file.id)
             .await

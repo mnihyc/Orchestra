@@ -264,7 +264,9 @@ mod tests {
             })
             .send()
             .await
-            .ok();
+            .ok()
+            .into_full()
+            .unwrap();
         let meta = app
             .app
             .blobs

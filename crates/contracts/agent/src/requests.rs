@@ -37,6 +37,9 @@ pub fn normalized_code(code: &str) -> bool {
         turn_error::PROVIDER_EXHAUSTED,
         turn_error::PROVIDER_UNAUTHORIZED,
         turn_error::PROVIDER_BUSY,
+        turn_error::RATE_LIMITED,
+        turn_error::OVERLOADED,
+        turn_error::STREAM_INTERRUPTED,
         turn_error::PROVIDER_UNREACHABLE,
         turn_error::MODEL_UNAVAILABLE,
         turn_error::MODEL_REFUSED,
@@ -65,6 +68,28 @@ impl RequestOutcome {
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
 #[serde(default)]
 pub struct UsageRequest {
+    /// The previous adapter request when this is its native retry, rather than a new model step.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub retry_of: Option<String>,
+    /// Native tool item references emitted by this request; absent means no known association.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub tool_refs: Option<Vec<String>>,
+    /// Refusal or vendor-specific reason, when reported.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub error_reason: Option<String>,
+    /// The HTTP status actually received; absent for a transport failure.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub upstream_status: Option<i64>,
+    /// One-based attempt within the model step, when observed.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub attempt: Option<i64>,
+    /// Upstream request identity, separate from an adapter's own request reference.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub provider_request_id: Option<String>,
+
+    /// Vendor-reported successful native searches; missing is not a measured zero.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub web_searches: Option<i64>,
     /// Stable within the turn and reused by every observation of this request.
     pub id: String,
     /// The model actually used, where reported.
@@ -91,6 +116,11 @@ pub struct UsageRequest {
 impl UsageRequest {
     /// Sets a terminal outcome without calculating any metric.
     pub fn finish(&mut self, code: &str, message: Option<&str>, said: Option<&str>) {
+        let code = if code == turn_error::PROVIDER_UNREACHABLE && self.first_output.is_some() {
+            turn_error::STREAM_INTERRUPTED
+        } else {
+            code
+        };
         self.outcome = Some(if code == "done" {
             RequestOutcome::Done
         } else {
@@ -118,7 +148,7 @@ impl UsageRequest {
             }
             _ => (None, None),
         };
-        orch_api_contract::performance::request_timing(&RequestSample {
+        let mut timing = orch_api_contract::performance::request_timing(&RequestSample {
             asked: self.asked,
             first_output: self.first_output,
             end: self.end,
@@ -136,11 +166,44 @@ impl UsageRequest {
                 .map_or(UsageMeasurement::Unread, |outcome| UsageMeasurement::Told {
                     value: outcome.code().to_owned(),
                 }),
-        })
+        });
+        timing.error_reason = self.error_reason.clone();
+        timing.upstream_status = self.upstream_status;
+        timing.attempt = self.attempt;
+        timing.provider_request_id = self.provider_request_id.clone();
+        timing.web_searches = self
+            .web_searches
+            .map_or(UsageMeasurement::Unsupported, |value| {
+                UsageMeasurement::Told { value }
+            });
+        timing
     }
 
     /// Checks observable ordering and known counts; absence is permitted and is never replaced by zero.
     pub fn check(&self) -> Result<(), String> {
+        if self
+            .retry_of
+            .as_deref()
+            .is_some_and(|id| id.is_empty() || id == self.id)
+        {
+            return Err("a retry needs a different nonempty predecessor".into());
+        }
+        if self.tool_refs.as_ref().is_some_and(|refs| {
+            refs.iter().any(String::is_empty)
+                || refs.iter().collect::<std::collections::HashSet<_>>().len() != refs.len()
+        }) {
+            return Err("tool references must be nonempty and unique within the request".into());
+        }
+        if self.attempt.is_some_and(|attempt| attempt < 1)
+            || self
+                .upstream_status
+                .is_some_and(|status| !(100..=599).contains(&status))
+        {
+            return Err("request attempts and HTTP statuses must be valid".into());
+        }
+        if self.web_searches.is_some_and(|count| count < 0) {
+            return Err("web search count cannot be negative".into());
+        }
         if self.id.is_empty() {
             return Err("a model request needs its stable id".into());
         }
@@ -228,6 +291,27 @@ mod tests {
     use super::*;
     use crate::adapter::AdapterEvent;
     use serde_json::json;
+
+    #[test]
+    fn a_broken_started_stream_retains_its_attempt_status_and_reason() {
+        let mut request = UsageRequest {
+            id: "adapter-3".into(),
+            first_output: Some("2026-10-15T00:00:01Z".parse().unwrap()),
+            attempt: Some(3),
+            upstream_status: Some(200),
+            error_reason: Some("vendor_stream_reset".into()),
+            ..Default::default()
+        };
+        request.finish("provider_unreachable", Some("The stream broke."), None);
+        let timing = request.measured();
+        assert_eq!(
+            timing.outcome.value().map(String::as_str),
+            Some("stream_interrupted")
+        );
+        assert_eq!(timing.attempt, Some(3));
+        assert_eq!(timing.upstream_status, Some(200));
+        assert_eq!(timing.error_reason.as_deref(), Some("vendor_stream_reset"));
+    }
 
     #[test]
     fn an_external_adapter_and_a_builtin_report_the_same_request_with_nullable_counts() {

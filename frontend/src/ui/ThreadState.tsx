@@ -35,7 +35,7 @@ export function threadStateLabel(display: ThreadDisplay, t: TFunction, context: 
       return recovery.stop_reason === null ? kind : t(`calls.details.${recovery.stop_reason}`);
     }
     if (display.state === 'queued') {
-      const phrase = recovery.due_at === null ? t('state.queued') : t(
+      const phrase = recovery.stop_reason === 'machine_offline' ? t('calls.details.machine_offline') : recovery.due_at === null ? t('state.queued') : t(
         recovery.step === 'wait' ? 'threadStates.waitIn' : recovery.step === 'failover' ? 'threadStates.failoverIn' : recovery.continuing ? 'threadStates.continueIn' : 'threadStates.retryIn',
         { time: formatSpan(Math.max(0, Date.parse(recovery.due_at) - now), context, 'short') },
       );

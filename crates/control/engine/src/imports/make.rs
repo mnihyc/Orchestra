@@ -83,9 +83,26 @@ pub async fn take_back(
     principal: &orch_authz::Principal,
     now: DateTime<Utc>,
 ) -> Result<Taken, MakeError> {
+    take_back_before(tx, import, which, parent, principal, now, || Ok(())).await
+}
+
+/// The same native batch with a once-only check at its actual first SQL effect.
+pub async fn take_back_before(
+    tx: &mut Tx,
+    import: Id,
+    which: Merged,
+    parent: Id,
+    principal: &orch_authz::Principal,
+    now: DateTime<Utc>,
+    before: impl FnOnce() -> Result<(), MakeError>,
+) -> Result<Taken, MakeError> {
     match which {
-        Merged::Chat => chats::take_back(tx, import, parent, principal, now, TAKE_BACK_BATCH).await,
-        Merged::Thread => threads::take_back(tx, import, parent, principal, TAKE_BACK_BATCH).await,
+        Merged::Chat => {
+            chats::take_back(tx, import, parent, principal, now, TAKE_BACK_BATCH, before).await
+        }
+        Merged::Thread => {
+            threads::take_back(tx, import, parent, principal, TAKE_BACK_BATCH, before).await
+        }
     }
 }
 

@@ -10,6 +10,9 @@ mod places;
 mod rig;
 mod support;
 
+#[path = "exports/scopes.rs"]
+mod scoped_metadata;
+
 use archive_world::{
     Office, entry, entry_with, everything, has, kept, leads_to, links_of, text_of,
 };
@@ -582,6 +585,8 @@ async fn upload(o: &Office, document: Id, name: &str, bytes: &[u8]) -> DocumentF
         .send()
         .await
         .ok()
+        .into_full()
+        .expect("this native creation control requires its full response")
 }
 
 /// A top-level block that shows a file of the document.

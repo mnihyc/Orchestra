@@ -9,6 +9,7 @@ mod places;
 mod reader_diagnostics;
 mod support;
 
+use crate::support::FullArchiveReply as _;
 use orch_api_contract::common::{ErrorCode, PageQuery};
 use orch_api_contract::nodes::{
     ActivityKind, ArchivedFilter, NewNodeAccess, Node, NodeActivityList, NodeActivityListQuery,
@@ -230,7 +231,9 @@ async fn a_tree_leaves_out_what_the_caller_may_not_view_and_marks_what_is_privat
         })
         .send()
         .await
-        .ok();
+        .ok()
+        .into_full()
+        .expect("this control expects the ordinary full project response");
     let call = |who: &Who| {
         world
             .app
@@ -660,6 +663,7 @@ async fn archived_topics_are_listed_only_when_asked() {
         .body(&places::archive_body(&world, &t.boss.token, t.topics[0], true).await)
         .send()
         .await
+        .full_archive()
         .ok();
     async fn listed(world: &World, who: &Who, project: Id, filter: ArchivedFilter) -> Vec<String> {
         let query = TopicListQuery {
@@ -912,7 +916,9 @@ async fn activity_lists_the_places_history_newest_first_and_leaves_out_what_is_n
         })
         .send()
         .await
-        .ok();
+        .ok()
+        .into_full()
+        .expect("this control expects the ordinary full project response");
     let activity = |who: &Who, place: Id, mut query: NodeActivityListQuery| {
         query.depth = Some(orch_api_contract::nodes::ActivityDepth::Every);
         world

@@ -1,7 +1,9 @@
 ---
 title: 注册自己的程序
-screens: /resources/machines, /resources/agents, /resources/providers
-keywords: 注册, 程序, 自定义代理, 适配器, 提供方数据源, 命令, GPU, describe, adapter, provider source
+screens: /resources/machines, /resources/environments, /resources/agents, /resources/providers, /thread
+keywords: 注册, 程序, 自定义代理, 适配器, 提供方数据源, 命令, GPU, Codex, Claude Code, 代理版本, describe, adapter, provider source
+heading_id.使用已安装的代理程序: use-an-installed-agent-program
+heading_id.允许环境中程序的版本: allow-the-environments-program-version
 heading_id.1-选择机器和程序类型: 1-choose-a-machine-and-kind
 heading_id.2-填写名称和命令: 2-give-it-a-name-and-command
 heading_id.3-使用返回的声明: 3-use-the-returned-declaration
@@ -10,7 +12,32 @@ heading_id.4-注册由本机保留时: 4-if-registration-is-kept-on-the-machine
 
 # 注册自己的程序
 
+## 使用已安装的代理程序
+
+打开已连接机器的**程序**部分。在机器上找到的代理程序会显示版本和路径。
+**版本未知**表示程序没有报告可识别的版本。选择**使用**确认找到的程序；
+随后该行显示**已确认**，并提供**移除**。这些操作需要机器的管理权限，
+以及本机允许管理代理程序的策略。若本机保留了该权限，请使用页面中这台机器
+实际报告的策略命令。**刷新**会重新搜索并读取当前报告。
+
+移除确认会保留程序文件，停止使用该程序的执行器；受影响的线程在运行前会重新检查。
+仅被找到、尚未确认的程序不可用于执行。
+
+## 允许环境中程序的版本
+
+在环境的**工具**页面，若已确认的程序为该环境提供工具，**Codex 工具**会显示它的
+版本和路径。通常它的版本必须与代理的版本相同。环境管理者可以打开**任意代理版本**；
+开关旁会显示当前批准者的姓名。批准仅适用于显示的路径和版本，包括**版本未知**。
+路径或版本改变后需要重新批准。关闭开关会恢复版本匹配要求。
+此决定在线程下次开启会话时生效。
+代理适配器支持的版本范围和环境的其他规则仍然适用。
+
+因版本不同而阻塞的线程会链接到此环境页面。管理者允许当前程序后，线程会重新检查，
+符合条件时继续运行。从模板创建的环境仍使用自己的工具构建。
+
 ## 1. 选择机器和程序类型
+
+若要注册自己的适配器或提供方数据源，请按以下步骤操作。
 
 打开已连接机器的**程序**部分，选择**代理适配器**或**提供方数据源**，再选择**添加**。
 程序必须已在那台机器上可用；你笔记本上的路径并不指向另一台主机的文件。

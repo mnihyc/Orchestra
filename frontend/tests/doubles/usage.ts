@@ -46,6 +46,9 @@ const HISTORY_DAYS = 120;
 
 /** What one use of the ledger is: the same fields a row of the real ledger has, in the shapes the fake keeps them. */
 interface Row {
+  tool_calls?: number;
+  tool_ms?: number;
+  thread_owner?: string;
   timing?: RequestTiming;
   running?: boolean;
   program: string | null;
@@ -683,6 +686,9 @@ export class Usage {
     return {
       id: row.id,
       access_program: row.program,
+      ...(row.tool_calls===undefined?{}:{tool_calls:row.tool_calls}),
+      ...(row.tool_ms===undefined?{}:{tool_ms:row.tool_ms}),
+      ...(row.thread_owner===undefined?{}:{thread_owner:this.person(row.thread_owner)}),
       ...(row.timing === undefined ? {} : { timing: row.timing }),
       ...(row.running ? { running: true } : {}),
       at: row.at,
@@ -749,14 +755,17 @@ export class Usage {
     const page = rows.slice(start, start + limit);
     const next = start + limit < rows.length && page.length > 0 ? `${Date.parse(page.at(-1)!.at)}.${page.at(-1)!.id}` : null;
     if (accept.includes('text/csv')) {
-      const lines = ['id,at,user,thread,model,provider,tokens,credits,input_tokens,output_tokens,first_output_ms,speed_tokens_per_second,request_ms,outcome,outcome_message,vendor_words,running,access_program'];
+      const lines = ['id,at,user,thread,model,provider,tokens,credits,input_tokens,output_tokens,first_output_ms,speed_tokens_per_second,request_ms,outcome,outcome_message,vendor_words,running,access_program,cached_input_tokens,uncached_input_tokens,cache_write_tokens,error_reason,upstream_status,attempt,provider_request_id,thread_owner_id,web_searches,requested_service_tier,reported_service_tier,tool_calls,tool_ms'];
       const cell = (value: string | number) => /[",\n]/.test(String(value)) ? `"${String(value).replaceAll('"','""')}"` : String(value);
       for (const row of page) {
         const timing=row.timing;
         const first=timing?.first_token_ms.state === 'told' ? timing.first_token_ms.value : '';
         const speed=timing?.speed_milli.state === 'told' ? timing.speed_milli.value / 1000 : '';
         const whole=timing?.request_ms.state === 'told' ? timing.request_ms.value : '';
-        lines.push([row.id,row.at,row.user ?? '',row.thread ?? '',row.model,row.provider,totalOf(row),row.credits === null ? '' : decimalText(row.credits),timing === undefined ? row.tokens.input : timing.reported_tokens?.input_tokens ?? '',timing === undefined ? row.tokens.output : timing.reported_tokens?.output_tokens ?? '',first,speed,whole,timing?.outcome.state === 'told' ? timing.outcome.value : '',timing?.error_message ?? '',timing?.vendor_words ?? '',row.running ? 'true' : 'false',row.program ?? ''].map(cell).join(','));
+        const input=timing===undefined?row.tokens.input:timing.reported_tokens?.input_tokens??null;
+        const cached=timing===undefined?row.tokens.cached:timing.reported_tokens?.cached_input_tokens??null;
+        const written=timing===undefined?0:timing.reported_tokens?.cache_write_tokens??null;
+        lines.push([row.id,row.at,row.user ?? '',row.thread ?? '',row.model,row.provider,totalOf(row),row.credits === null ? '' : decimalText(row.credits),timing === undefined ? row.tokens.input : timing.reported_tokens?.input_tokens ?? '',timing === undefined ? row.tokens.output : timing.reported_tokens?.output_tokens ?? '',first,speed,whole,timing?.outcome.state === 'told' ? timing.outcome.value : '',timing?.error_message ?? '',timing?.vendor_words ?? '',row.running ? 'true' : 'false',row.program ?? '',cached??'',input===null||cached===null||written===null?'':Math.max(0,input-cached-written),written??'',timing?.error_reason??'',timing?.upstream_status??'',timing?.attempt??'',timing?.provider_request_id??'',row.thread_owner===undefined?'':this.person(row.thread_owner)?.id??'',timing?.web_searches?.state==='told'?timing.web_searches.value:'',timing?.requested_service_tier??'',timing?.reported_service_tier.state==='told'?timing.reported_service_tier.value:'',row.tool_calls??'',row.tool_ms??''].map(cell).join(','));
       }
       return { status: 200, text: `${lines.join('\n')}\n`, headers: next === null ? {} : { 'x-next-cursor': next } };
     }

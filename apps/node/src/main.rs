@@ -9,8 +9,10 @@
 
 use std::process::ExitCode;
 
+use anyhow::Context;
 use clap::Parser;
 use orch_build_info::BuildInfo;
+use orch_config::{RuntimeComponent, ServerConfig};
 use orch_node::arguments::{Args, Command, Enrollment, Ports};
 use orch_node::composition::{self, token_of};
 
@@ -27,13 +29,7 @@ fn main() -> ExitCode {
     let outcome = if let Some(Command::RuntimeHelper(helper)) = &args.command {
         orch_node::runtime_helper::run(helper)
     } else {
-        match tokio::runtime::Builder::new_multi_thread()
-            .enable_all()
-            .build()
-        {
-            Ok(runtime) => runtime.block_on(run(args)),
-            Err(error) => Err(error.into()),
-        }
+        start(args)
     };
     match outcome {
         Ok(()) => ExitCode::SUCCESS,
@@ -44,8 +40,32 @@ fn main() -> ExitCode {
     }
 }
 
+fn worker_stack_bytes(args: &Args) -> anyhow::Result<usize> {
+    // Standalone maintenance and conformance commands do not require a deployment file.
+    let config: ServerConfig = if matches!(
+        args.command.as_ref(),
+        None | Some(Command::Run(_) | Command::Enroll(_))
+    ) {
+        orch_config::load(&args.config)
+            .with_context(|| format!("reading {}", args.config.display()))?
+    } else {
+        ServerConfig::default()
+    };
+    Ok(config.worker_stack_bytes(RuntimeComponent::Node)?)
+}
+
+fn start(args: Args) -> anyhow::Result<()> {
+    let stack_bytes = worker_stack_bytes(&args)?;
+    tokio::runtime::Builder::new_multi_thread()
+        .thread_stack_size(stack_bytes)
+        .enable_all()
+        .build()?
+        .block_on(run(args))
+}
+
 fn enrollment_of(arguments: &Enrollment) -> anyhow::Result<composition::Enrollment> {
     Ok(composition::Enrollment {
+        gateway: arguments.gateway.clone(),
         delegate_policy: arguments.delegate_policy,
         url: arguments.url.clone(),
         token: token_of(arguments.token.as_deref(), arguments.token_file.as_deref())?,
@@ -55,6 +75,7 @@ fn enrollment_of(arguments: &Enrollment) -> anyhow::Result<composition::Enrollme
 
 async fn run(args: Args) -> anyhow::Result<()> {
     let command = args.command.unwrap_or(Command::Run(Enrollment {
+        gateway: None,
         delegate_policy: false,
         url: None,
         token: None,
@@ -122,5 +143,21 @@ async fn run(args: Args) -> anyhow::Result<()> {
         Command::RuntimeHelper(_) => {
             anyhow::bail!("the runtime helper must start before the node runtime")
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{Args, Command, worker_stack_bytes};
+    use std::path::PathBuf;
+
+    #[test]
+    fn standalone_version_keeps_its_stack_default_without_a_deployment_file() {
+        let args = Args {
+            config: PathBuf::from("missing-node-stack-config.toml"),
+            data_dir: None,
+            command: Some(Command::Version),
+        };
+        assert_eq!(worker_stack_bytes(&args).unwrap(), 64 * 1024 * 1024);
     }
 }

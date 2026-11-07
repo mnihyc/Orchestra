@@ -88,6 +88,18 @@ pub struct Request<'a> {
     pub config: &'a Json,
 }
 
+/// Program consent belongs to an existing environment and is recorded by its manager's PATCH.
+/// Creating or copying a configuration cannot carry an earlier environment's decision with it.
+pub fn check_initial_program_consent(config: &Json) -> Result<(), &'static str> {
+    if config
+        .get(keys::EXEC_VERSION_OVERRIDES)
+        .is_some_and(|value| value.as_object().is_none_or(|entries| !entries.is_empty()))
+    {
+        return Err("allow a machine program on the environment's page after creating it");
+    }
+    Ok(())
+}
+
 /// Why an environment could not be made.
 #[derive(Debug, thiserror::Error)]
 pub enum CreateError {
@@ -112,6 +124,9 @@ pub enum CreateError {
     /// The home node is not there.
     #[error("there is no such place to make it in")]
     NoHome,
+    /// An actual creation source falls outside the original operation scope.
+    #[error("the key does not permit this creation source")]
+    OperationScope,
     /// The system failed.
     #[error(transparent)]
     Internal(#[from] EngineError),
@@ -147,12 +162,68 @@ pub struct Made {
 /// Makes an environment in the caller's transaction, owned by `request.owner`, and queues the job
 /// that makes its unit. The caller has asked the access engine whether they may; what is checked
 /// here is that something can be made: the template, a host.
+/// Opaque native creation operands, selected without inserting an Environment or a job.
+pub struct PreparedCreation {
+    owner: Id,
+    home: Id,
+    template: Id,
+    host: Id,
+    mounts: Vec<Id>,
+    config: Json,
+    name: String,
+    host_entry: Option<Id>,
+    template_entry: Option<Id>,
+}
+impl PreparedCreation {
+    /// The actual settings home chosen by the native planner.
+    pub fn home(&self) -> Id {
+        self.home
+    }
+    /// The actual Template resolved by that home and request.
+    pub fn template(&self) -> Id {
+        self.template
+    }
+    /// The actual native chosen Host, before any output formatting.
+    pub fn host(&self) -> Id {
+        self.host
+    }
+    /// All Mounts in the actual native executable request.
+    pub fn mounts(&self) -> &[Id] {
+        &self.mounts
+    }
+}
+
+/// Makes an Environment and its first provision using the ordinary native preparation.
 pub async fn create(
     conn: &mut orch_db::Conn,
     now: DateTime<Utc>,
     principal: &Principal,
     request: &Request<'_>,
 ) -> Result<Made, CreateError> {
+    let prepared = prepare_creation(conn, now, principal, request).await?;
+    apply_creation(conn, now, &prepared, || Ok(())).await
+}
+
+/// Resolve native creation, permission-entry capacity locks and duplicate-name checks without writes.
+pub async fn prepare_creation(
+    conn: &mut orch_db::Conn,
+    now: DateTime<Utc>,
+    principal: &Principal,
+    request: &Request<'_>,
+) -> Result<PreparedCreation, CreateError> {
+    prepare_creation_bounded(conn, now, principal, request, None).await
+}
+
+/// The same native selector with factual candidate bounds from its canonical creation table.
+pub async fn prepare_creation_bounded(
+    conn: &mut orch_db::Conn,
+    now: DateTime<Utc>,
+    principal: &Principal,
+    request: &Request<'_>,
+    bound: Option<&crate::operation_scope::Prepared>,
+) -> Result<PreparedCreation, CreateError> {
+    check_initial_program_consent(request.config)
+        .map_err(|reason| CreateError::Runtime(reason.to_owned()))?;
     let template_id: Id = match request.template {
         Some(id) => id,
         None => setting(
@@ -202,7 +273,7 @@ pub async fn create(
             .await?
             .and_then(|value| value.as_i64())
             .unwrap_or(IDLE_MINUTES_DEFAULT);
-    let listed = places::host_places(
+    let mut listed = places::host_places(
         conn,
         principal,
         &Ask {
@@ -214,6 +285,17 @@ pub async fn create(
         },
     )
     .await?;
+    if let Some(bound) = bound {
+        crate::environment_creation::bound_candidates(
+            conn,
+            principal.caller(),
+            bound,
+            template_id,
+            &wanted.mounts,
+            &mut listed,
+        )
+        .await?;
+    }
     let chosen = places::choose(&listed, named).map_err(CreateError::NoPlace)?;
     // An omitted choice still uses the host's default, which the template may restrict.
     if wanted.runtime_class.is_none() {
@@ -315,18 +397,39 @@ pub async fn create(
     {
         return Err(CreateError::Taken(Some(existing)));
     }
+    Ok(PreparedCreation {
+        owner: request.owner,
+        home: request.home,
+        template: template_id,
+        host: chosen.host.id,
+        mounts: wanted.mounts.clone(),
+        config: own,
+        name: name.to_owned(),
+        host_entry,
+        template_entry,
+    })
+}
+
+/// Insert exactly the prepared native Environment and provision after the writer's first-effect cut.
+pub async fn apply_creation(
+    conn: &mut orch_db::Conn,
+    now: DateTime<Utc>,
+    prepared: &PreparedCreation,
+    before: impl FnOnce() -> Result<(), EngineError> + Send,
+) -> Result<Made, CreateError> {
+    before()?;
     let id = new_id();
     let made = rows::insert_managed(
         conn,
         &NewManaged {
             id,
-            name,
-            owner_id: request.owner,
-            home_node_id: request.home,
-            template_id,
-            config: &own,
-            host_entry_id: host_entry,
-            template_entry_id: template_entry,
+            name: &prepared.name,
+            owner_id: prepared.owner,
+            home_node_id: prepared.home,
+            template_id: prepared.template,
+            config: &prepared.config,
+            host_entry_id: prepared.host_entry,
+            template_entry_id: prepared.template_entry,
         },
         now,
     )
@@ -335,11 +438,16 @@ pub async fn create(
         Ok(true) => {}
         Ok(false) => return Err(CreateError::NoHome),
         Err(DbError::Unique { .. }) => {
-            let org = rows::root_org_of(conn, request.home).await?;
+            let org = rows::root_org_of(conn, prepared.home).await?;
             let existing = match org {
                 Some(org) => {
-                    orch_db::queries::environments::routes::named(conn, request.owner, org, name)
-                        .await?
+                    orch_db::queries::environments::routes::named(
+                        conn,
+                        prepared.owner,
+                        org,
+                        &prepared.name,
+                    )
+                    .await?
                 }
                 None => None,
             };
@@ -350,9 +458,10 @@ pub async fn create(
     let state = rows::environment(conn, id)
         .await?
         .ok_or(CreateError::NoHome)?;
-    let job = match provision::queue(conn, now, &state, Mode::Make, Some(request.owner)).await {
+    let job = match provision::queue(conn, now, &state, Mode::Make, Some(prepared.owner)).await {
         Ok(job) => job,
         Err(MakeError::Db(error)) => return Err(error.into()),
+        Err(MakeError::Internal(error)) => return Err(error.into()),
         Err(other) => {
             return Err(CreateError::Internal(EngineError::unreadable(format!(
                 "a job for a new environment could not be queued: {other}"
@@ -492,6 +601,7 @@ pub async fn start(
         Err(MakeError::Running(job)) => Ok(Starting::Job(job)),
         Err(MakeError::NoEnvironment) => Err(StartError::NotFound),
         Err(MakeError::Db(error)) => Err(error.into()),
+        Err(MakeError::Internal(error)) => Err(error.into()),
     }
 }
 
@@ -562,6 +672,27 @@ pub enum StopReason {
     Recycle(Id),
 }
 
+/// One actual native stop request; its HTTP operation and actor remain on the guarded principal.
+pub struct StopRequest {
+    /// Actual selected Environment.
+    pub environment: Id,
+    /// Whether existing turns are explicitly interrupted.
+    pub interrupt: bool,
+    /// The native reason, retained through accepted cleanup.
+    pub reason: StopReason,
+}
+
+/// A stop whose native decision and audit have actually committed.
+/// Its private association permits completing only the unit selected by that decision.
+pub struct AcceptedStop {
+    pub(crate) request: StopRequest,
+    pub(crate) owner: Id,
+    pub(crate) home: Id,
+    pub(crate) machine: Option<Id>,
+    pub(crate) generation: i32,
+    pub(crate) runtime: Option<Id>,
+}
+
 impl Engine {
     /// Starts an environment in a transaction of its own and sees that the job is taken up.
     pub async fn start_environment(
@@ -570,7 +701,7 @@ impl Engine {
         by: Option<Id>,
     ) -> Result<Starting, StartError> {
         let tx = self.inner.db.begin().await?;
-        self.start_environment_at(tx, environment, by, None, self.inner.clock.now())
+        self.start_environment_at(tx, environment, by, None, self.inner.clock.now(), None)
             .await
     }
 
@@ -587,6 +718,25 @@ impl Engine {
             Some(principal.user()),
             Some(principal),
             principal.now().get(),
+            None,
+        )
+        .await
+    }
+
+    /// Wakes the real existing fork destination and retains that source on a new native child.
+    pub async fn start_environment_from_fork(
+        &self,
+        environment: Id,
+        source: &crate::jobs::fork::operation::Preparation,
+    ) -> Result<Starting, StartError> {
+        let tx = self.inner.db.begin().await?;
+        self.start_environment_at(
+            tx,
+            environment,
+            Some(source.origin().captured().user()),
+            None,
+            self.inner.clock.now(),
+            Some(source),
         )
         .await
     }
@@ -598,7 +748,28 @@ impl Engine {
         by: Option<Id>,
         principal: Option<&orch_authz::Principal>,
         now: DateTime<Utc>,
+        source: Option<&crate::jobs::fork::operation::Preparation>,
     ) -> Result<Starting, StartError> {
+        let checkpoint = match source {
+            Some(source) => Some(
+                source
+                    .current_wake(
+                        &mut tx,
+                        self.inner.clock.as_ref(),
+                        self.inner.access.as_ref(),
+                        environment,
+                    )
+                    .await?,
+            ),
+            None => None,
+        };
+        let principal = checkpoint
+            .as_ref()
+            .map(|check| check.principal())
+            .or(principal);
+        if let Some(check) = &checkpoint {
+            check.check(self.inner.clock.as_ref())?;
+        }
         // Runtime updates: an owner-requested wake updates before starting the old unit.
         let started = match self
             .update_on_start(&mut tx, environment, principal, now)
@@ -607,7 +778,40 @@ impl Engine {
             Some(job) => Starting::Job(Box::new(job)),
             None => start(&mut tx, now, environment, by).await?,
         };
+        if let (Some(source), Starting::Job(job)) = (source, &started) {
+            let inserted_here: bool = sqlx::query_scalar("SELECT xmin=((pg_current_xact_id()::text::numeric % 4294967296)::text)::xid FROM jobs WHERE id=$1")
+                .bind(job.id).fetch_one(&mut *tx).await.map_err(DbError::from)?;
+            if inserted_here {
+                provision::retain_fork_wake_origin(
+                    &mut tx,
+                    source,
+                    environment,
+                    job.id,
+                    self.inner.clock.as_ref(),
+                    self.inner.access.as_ref(),
+                )
+                .await?;
+                let retained = orch_db::queries::jobs::job(&mut tx, job.id)
+                    .await?
+                    .ok_or_else(|| EngineError::unreadable("The fork wake child disappeared."))?;
+                provision::creator_checkpoint(
+                    &mut tx,
+                    &retained,
+                    self.inner.clock.as_ref(),
+                    self.inner.access.as_ref(),
+                )
+                .await?
+                .ok_or_else(|| EngineError::unreadable("The fork wake source is missing."))?
+                .check(self.inner.clock.as_ref())?;
+            }
+        }
+        if let Some(check) = &checkpoint {
+            check.check(self.inner.clock.as_ref())?;
+        }
         tx.commit().await.map_err(DbError::from)?;
+        if let Some(check) = &checkpoint {
+            check.check(self.inner.clock.as_ref())?;
+        }
         if matches!(started, Starting::Job(_)) {
             self.kick();
         }
@@ -781,6 +985,31 @@ impl Engine {
         interrupt: bool,
         reason: StopReason,
     ) -> Result<(), StopError> {
+        self.stop_environment_selected(environment, interrupt, reason, None)
+            .await
+    }
+
+    /// Finish the exact accepted stop without restoring its invoker or admitting another unit.
+    pub async fn finish_accepted_environment_stop(
+        &self,
+        accepted: AcceptedStop,
+    ) -> Result<(), StopError> {
+        self.stop_environment_selected(
+            accepted.request.environment,
+            accepted.request.interrupt,
+            accepted.request.reason,
+            Some(&accepted),
+        )
+        .await
+    }
+
+    async fn stop_environment_selected(
+        &self,
+        environment: Id,
+        interrupt: bool,
+        reason: StopReason,
+        accepted: Option<&AcceptedStop>,
+    ) -> Result<(), StopError> {
         let state = {
             let mut conn = self.inner.db.acquire().await?;
             rows::environment(&mut conn, environment)
@@ -788,6 +1017,16 @@ impl Engine {
                 .filter(|state| state.deleted_at.is_none())
                 .ok_or(StopError::NotFound)?
         };
+        if accepted.is_some_and(|accepted| {
+            state.owner_id != accepted.owner
+                || state.home_node_id != accepted.home
+                || state.machine_id != accepted.machine
+                || state.generation != accepted.generation
+        }) {
+            return Err(StopError::Unavailable(
+                "the accepted environment registration changed".into(),
+            ));
+        }
         let res = {
             let mut conn = self.inner.db.acquire().await?;
             !orch_db::queries::environment_facts::has_unit(&mut conn, environment).await?
@@ -837,6 +1076,13 @@ impl Engine {
             let mut conn = self.inner.db.acquire().await?;
             rows::live_runtime(&mut conn, environment).await?
         };
+        if accepted
+            .is_some_and(|accepted| runtime.as_ref().map(|runtime| runtime.id) != accepted.runtime)
+        {
+            return Err(StopError::Unavailable(
+                "the accepted environment unit changed".into(),
+            ));
+        }
         let Some(runtime) = runtime else {
             // No unit: only the record stands.
             let mut conn = self.inner.db.acquire().await?;
@@ -1563,6 +1809,9 @@ pub async fn idle_stop_at(
     {
         return Ok(None);
     }
+    if crate::background_wake::running(conn, None, None, Some(state.id)).await? {
+        return Ok(None);
+    }
     let minutes: i64 = setting(
         conn,
         SettingsPlace::Environment(state.id),
@@ -1580,6 +1829,22 @@ pub async fn idle_stop_at(
 #[cfg(test)]
 mod storage_tests {
     use super::*;
+    #[test]
+    fn creation_cannot_copy_program_consent_from_another_environment() {
+        assert!(check_initial_program_consent(&json!({})).is_ok());
+        assert!(check_initial_program_consent(&json!({(keys::EXEC_VERSION_OVERRIDES):{}})).is_ok());
+        assert!(
+            check_initial_program_consent(&json!({(keys::EXEC_VERSION_OVERRIDES):{"codex":{
+                "path":"/codex","version":"unknown","by":orch_types::new_id(),
+                "at":"2026-10-31T00:00:00.000Z"
+            }}}))
+            .is_err()
+        );
+        assert!(
+            check_initial_program_consent(&json!({(keys::EXEC_VERSION_OVERRIDES):null})).is_err()
+        );
+    }
+
     #[test]
     fn attaching_owned_data_carries_its_named_storage_choice_to_the_machine() {
         let id = orch_types::new_id();

@@ -154,6 +154,8 @@ impl Fixture {
             thread: Some(self.thread),
             caller: self.world.ada,
             token: None,
+            creator_origin: None,
+            scheduled_input: None,
             action,
         })
     }
@@ -639,6 +641,7 @@ async fn inline_parent(fixture: &Fixture, keep_result: bool) -> TestResult<(Job,
         engine: fixture.engine.clone(),
         plan,
         provisioning_runtime: Some(runtime),
+        operation: None,
     };
     let answer = json!(SourceInfo {
         kind: SourceKind::Directory,

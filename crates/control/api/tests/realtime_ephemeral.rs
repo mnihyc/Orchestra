@@ -1,4 +1,5 @@
 //! Unreplayed lists reach every API process, seed new readers and obey the environment's access page.
+#![recursion_limit = "256"]
 #![allow(
     clippy::unwrap_used,
     clippy::expect_used,

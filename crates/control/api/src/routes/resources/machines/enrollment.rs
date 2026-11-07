@@ -1,9 +1,7 @@
 //! Issuer-scoped enrollment progress, reusing the native resource projection and its current rights.
 
-use crate::middleware::authorization;
 use crate::middleware::requests::{ApiError, ApiResult};
-use crate::registry::{Answer, Ctx, Registry};
-use http::header::CACHE_CONTROL;
+use crate::registry::{Ctx, Registry};
 use orch_api_contract::everything::EverythingResource;
 use orch_api_contract::resources::{EnrollmentProgress, MachineEnrollmentStatusGet};
 use orch_authz::Principal;
@@ -11,22 +9,18 @@ use orch_db::{Conn, DbError};
 use orch_realtime_contract::feeds::ResourceKind;
 use orch_types::Id;
 
+mod read;
+
 /// Enrollment stores a 256-bit one-way fingerprint, encoded as hex in the receipt.
 const RECEIPT_BYTES: usize = 32;
 
 /// Binds the issuer-only recovery reader; live enrollment notices use the same projection.
 pub(super) fn mount(registry: &mut Registry) {
-    registry.on(MachineEnrollmentStatusGet, get);
-}
-
-async fn get(ctx: Ctx, (): (), (): ()) -> ApiResult<Answer<EnrollmentProgress>> {
-    let receipt = ctx.param("receipt")?;
-    let mut conn = ctx.app.db.acquire().await?;
-    let principal = authorization::principal(&ctx, &mut conn).await?;
-    Ok(
-        Answer::from(show(&ctx, &mut conn, &principal, receipt).await?)
-            .header(CACHE_CONTROL, crate::sign_in::NOT_KEPT),
-    )
+    registry.on_snapshot_read_with_optional_operation(
+        MachineEnrollmentStatusGet,
+        crate::key_operations::native::selected::<read::Progress>,
+        read::get,
+    );
 }
 
 /// The same admitted projection supplies HTTP recovery and the issuer's live enrollment event.

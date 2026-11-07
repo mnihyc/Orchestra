@@ -104,6 +104,7 @@ pub struct Importing {
     node: Id,
     credential: Option<(Vec<String>, Option<Id>)>,
     undo: bool,
+    undo_source: Option<imports::undo::operation::Request>,
     /// The plan, once it is made: kept for the phases of this run.
     plan: tokio::sync::Mutex<Option<Arc<Plan>>>,
 }
@@ -129,6 +130,7 @@ impl Importing {
                 (scopes, plan_id(each, "subtree"))
             });
         Ok(Self {
+            undo_source: imports::undo::operation::Request::from_job(row)?,
             engine,
             import: plan_id(&row.plan, "import").ok_or_else(|| missing("import"))?,
             user: plan_id(&row.plan, "user").ok_or_else(|| missing("person"))?,
@@ -736,8 +738,29 @@ impl Importing {
         &self.engine
     }
 
+    /// Bind the real current native undo page after the original credential and source locks.
+    pub async fn undo_cut(
+        &self,
+        conn: &mut orch_db::Conn,
+        work: imports::undo::operation::Work,
+    ) -> Result<Option<imports::undo::operation::Cut>, Stop> {
+        match &self.undo_source {
+            Some(source) => source
+                .frame(&self.engine, conn, work)
+                .await
+                .map(Some)
+                .map_err(|error| Failure::new("access.denied", error.to_string()).into()),
+            None => Ok(None),
+        }
+    }
+
     /// The person, loaded for a batch.
     pub async fn principal_for(&self, conn: &mut orch_db::Conn) -> Result<Principal, Stop> {
+        if self.undo_source.is_some() {
+            return Err(
+                Failure::new("access.denied", "the undo requires its actual native page").into(),
+            );
+        }
         self.principal(conn).await
     }
 }

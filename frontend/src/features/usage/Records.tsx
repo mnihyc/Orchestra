@@ -20,7 +20,8 @@ import { EventCredits } from '@/features/usage/Amounts';
 import { type Span, type UsageScope, type UsageSearch, recordsParams } from '@/features/usage/search';
 import { effortDisplayName, modelDisplayName } from '@/features/models/names';
 import { programNameIn } from '@/features/resources/programNames';
-import { offeredChoice } from '@/i18n/choices';
+import { RequestFacts, TokenFacts } from './RequestFacts';
+import { tierAvailable, tierLabel } from './tier';
 import { useFormatContext } from '@/lib/appearance';
 import { formatNumber, formatTokens } from '@/lib/format';
 import { IconButton } from '@/ui/IconButton';
@@ -89,6 +90,8 @@ function RecordButton({ event }: { event: UsageEvent }) {
           <dt>{t('usage.records.reportedBy')}</dt>
           <dd className="text-text">{t(`usage.records.origin.${event.origin}`)}</dd>
         </dl>
+        <TokenFacts event={event} />
+        <RequestFacts event={event} details />
         <div className="border-t border-border pt-2">
           <RateWords event={event} />
         </div>
@@ -131,7 +134,7 @@ function ModelLine({ event,scope }: { event: UsageEvent;scope:UsageScope }) {
   const {t}=useTranslation();
   const parts = [
     ...(event.effort===null?[]:[{name:t('usage.chip.effort'),value:effortDisplayName(event.effort,t)}]),
-    ...(event.tier===null?[]:[{name:t('usage.chip.tier'),value:offeredChoice(t,'serviceTier',event.tier)?.name??event.tier}]),
+    ...(!tierAvailable(event) || event.tier===null && event.tier_unknown !== true?[]:[{name:t('usage.chip.tier'),value:tierLabel(event,t)}]),
     ...(scope.kind==='provider'?[]:[{name:t('usage.chip.provider'),value:event.provider.name}]),
   ];
   return (
@@ -173,8 +176,10 @@ function RecordsView({ scope, search, span, depth, className }: RecordsProps) {
           ...(shown.has('tokens') ? [] : [formatTokens(event.tokens.total_tokens, locale)]),
         ];
         return (
-          <span className="flex min-w-0 flex-col">
+          <div className="flex min-w-0 flex-col">
             <Thread event={event} scope={scope} />
+            <RequestFacts event={event} speed />
+            {!shown.has('tokens') && <TokenFacts event={event} />}
             {folded.length > 0 && (
               <span className="flex flex-wrap gap-x-3 gap-y-1 text-sm text-text-muted">
                 {folded.map((part, at) => (
@@ -183,7 +188,7 @@ function RecordsView({ scope, search, span, depth, className }: RecordsProps) {
                 ))}
               </span>
             )}
-          </span>
+          </div>
         );
       },
     },
@@ -205,9 +210,10 @@ function RecordsView({ scope, search, span, depth, className }: RecordsProps) {
       from: 'md',
       align: 'end',
       cell: (event) => (
-        <span className="tabular-nums" title={event.context_tokens === null ? undefined : t('usage.records.prompt', { tokens: formatNumber(event.context_tokens, locale) })}>
+        <div className="tabular-nums" title={event.context_tokens === null ? undefined : t('usage.records.prompt', { tokens: formatNumber(event.context_tokens, locale) })}>
           {formatTokens(event.tokens.total_tokens, locale)}
-        </span>
+          <TokenFacts event={event} />
+        </div>
       ),
     },
     {

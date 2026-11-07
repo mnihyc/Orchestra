@@ -96,7 +96,8 @@ impl Room {
         parts: Vec<ChatPart>,
         client_id: &str,
     ) -> Reply<ChatMessageCreateReply> {
-        self.world
+        let reply = self
+            .world
             .app
             .call(ChatMessageCreate, &[&chat])
             .token(&by.token)
@@ -107,7 +108,17 @@ impl Room {
                 client_id: client_id.to_owned(),
             })
             .send()
-            .await
+            .await;
+        Reply {
+            status: reply.status,
+            headers: reply.headers,
+            raw: reply.raw,
+            body: reply.body.map(|answer| {
+                answer
+                    .into_full()
+                    .expect("the browser session receives the full chat message reply")
+            }),
+        }
     }
 
     /// `by` reads the chat.
@@ -134,6 +145,8 @@ impl Room {
             .send()
             .await
             .ok()
+            .into_full()
+            .expect("a native browser opening keeps the full chat")
     }
 
     /// `by` opens a group with `others`; the chat.
@@ -149,6 +162,8 @@ impl Room {
             .send()
             .await
             .ok()
+            .into_full()
+            .expect("a native browser opening keeps the full chat")
     }
 
     /// What `by` sees of the chat now, from the start.

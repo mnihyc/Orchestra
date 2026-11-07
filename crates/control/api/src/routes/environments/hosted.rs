@@ -7,24 +7,21 @@
 //! stopping asks the host to stop the unit and keeps it and its volumes; a unit's credentials that were
 //! handed over are returned first, which is not built yet, so an environment that holds one stays up.
 
-use super::{Standing, clean_config, home_of, show, taken, viewed_among};
+use super::{Standing, clean_config, home_of, show, taken};
 use crate::middleware::authorization;
 use crate::middleware::requests::{ApiError, ApiResult};
 use crate::registry::{Ctx, Registry};
 use crate::routes::nodes::{actor_name, invalid, placed};
-use crate::routes::resources::{Home, LIST_LIMIT, clean_name, record};
+use crate::routes::resources::{Home, clean_name, record};
 use orch_access_contract::audit::AuditAction;
 use orch_access_contract::decisions::ObjectRef;
-use orch_access_contract::permissions::{NodePermission, Permission, PermissionName, ResourceKind};
+use orch_access_contract::permissions::{NodePermission, PermissionName, ResourceKind};
 use orch_api_contract::binding::{NewEnvironment, NewEnvironmentAccess};
 use orch_api_contract::common::ErrorCode;
-use orch_api_contract::environment::{
-    self as api, Environment, FleetEntry, HostLoad, NodeEnvironmentListReply, TemplateRef,
-};
+use orch_api_contract::environment::{self as api, Environment, FleetEntry, HostLoad, TemplateRef};
 use orch_api_contract::workspace::Job;
-use orch_authz::nodes::Page;
 use orch_authz::ownership::{self, NewAccess};
-use orch_authz::{Act, Policy, Principal, resources};
+use orch_authz::{Act, Policy, Principal};
 use orch_db::queries::environments::hosting as rows;
 use orch_db::queries::environments::routes as queries;
 use orch_db::queries::resources::hosting as host_rows;
@@ -37,16 +34,22 @@ use orch_types::{Id, Time};
 use serde_json::json;
 use std::collections::HashMap;
 
+mod creation;
+
 /// Binds this module's requests.
 pub fn mount(registry: &mut Registry) {
     registry
-        .on(api::EnvironmentCreate, create)
+        .on_with_operation(
+            api::EnvironmentCreate,
+            crate::key_operations::native::effects::prepare::<creation::Create>,
+            creation::create,
+        )
         .on(api::EnvironmentStart, start)
         .on(api::EnvironmentStop, stop)
         .on(api::EnvironmentRestart, restart)
         .on(api::EnvironmentKeepAwake, keep_awake)
-        .on(api::EnvironmentKeep, keep)
-        .on(api::NodeEnvironmentList, node_list);
+        .on(api::EnvironmentKeep, keep);
+    crate::routes::resources::environment_fleet::mount(registry);
 }
 
 /// The place an environment is made in when the request names none: the caller's domain, where they
@@ -81,18 +84,6 @@ async fn blocked(conn: &mut Conn, why: &places::NoHost) -> ApiResult<ApiError> {
 // ---------------------------------------------------------------- making one
 
 /// Makes an environment from a template on a host, the caller's own, and the job that makes its unit.
-async fn create(ctx: Ctx, (): (), body: NewEnvironment) -> ApiResult<Environment> {
-    let (ctx, mut tx, principal) = crate::routes::nodes::action(&ctx).await?;
-    let made = create_in(&ctx, &mut tx, &principal, body).await?;
-    tx.commit().await.map_err(DbError::from)?;
-    ctx.app.engine.kick();
-    // Presentation reads can be slow under load. Release the credential and creation locks
-    // before assembling the response, and ask current read authority on the new connection.
-    let mut conn = ctx.app.db.acquire().await?;
-    let principal = authorization::principal(&ctx, &mut conn).await?;
-    super::read(&ctx, &mut conn, &principal, made.id).await
-}
-
 /// The same guarded admission, ownership and audit for a standalone environment or an atomic thread start.
 /// Only database work is done here; the caller commits the whole accepted request before kicking jobs.
 pub(crate) async fn create_in(
@@ -101,6 +92,60 @@ pub(crate) async fn create_in(
     principal: &Principal,
     body: NewEnvironment,
 ) -> ApiResult<orch_engine::environments::Made> {
+    create_with_prepared_initial(ctx, conn, principal, body, None).await
+}
+
+/// Reuses a creator's single ordinary initial-file plan on its private creation
+/// transaction; no body choice or source is resampled before the existing writer.
+pub(crate) async fn create_with_prepared_initial(
+    ctx: &Ctx,
+    conn: &mut Conn,
+    principal: &Principal,
+    body: NewEnvironment,
+    prepared: Option<orch_engine::initial_files::Plan>,
+) -> ApiResult<orch_engine::environments::Made> {
+    let input = prepare_input(ctx, conn, principal, body, prepared).await?;
+    let made = match orch_engine::environments::create(
+        conn,
+        ctx.now,
+        principal,
+        &input.request(principal),
+    )
+    .await
+    {
+        Ok(made) => made,
+        Err(error) => return Err(creation_failed(conn, error).await?),
+    };
+    finish_input(ctx, conn, principal, &input, &made).await?;
+    Ok(made)
+}
+struct CreationInput {
+    body: NewEnvironment,
+    config: serde_json::Value,
+    name: Option<String>,
+    home: Id,
+    org: Id,
+    initial: Option<orch_engine::initial_files::Plan>,
+}
+impl CreationInput {
+    fn request<'a>(&'a self, principal: &Principal) -> Request<'a> {
+        Request {
+            owner: principal.user(),
+            name: self.name.as_deref(),
+            home: self.home,
+            template: self.body.template_id,
+            host: self.body.host_id,
+            config: &self.config,
+        }
+    }
+}
+async fn prepare_input(
+    ctx: &Ctx,
+    conn: &mut Conn,
+    principal: &Principal,
+    body: NewEnvironment,
+    prepared: Option<orch_engine::initial_files::Plan>,
+) -> ApiResult<CreationInput> {
     let mut config = body.config.clone().unwrap_or_else(|| json!({}));
     if let Some(sources) = &body.data_sources {
         let own = config
@@ -112,6 +157,8 @@ pub(crate) async fn create_in(
         );
     }
     clean_config("config", &config)?;
+    orch_engine::environments::check_initial_program_consent(&config)
+        .map_err(|reason| invalid("config.exec.version_overrides", reason))?;
     let name = body
         .name
         .as_deref()
@@ -131,53 +178,57 @@ pub(crate) async fn create_in(
         Policy::default(),
     )
     .await?;
-    let initial = match body.files.as_ref() {
-        None => None,
-        Some(files) => Some(
-            orch_engine::initial_files::plan(conn, principal, files)
-                .await
-                .map_err(|error| match error {
-                    orch_engine::initial_files::Error::NotFound => ApiError::not_found(),
-                    orch_engine::initial_files::Error::Denied(refusal) => ApiError::new(
-                        ErrorCode::AuthzDenied,
-                        "the initial file source is not authorized",
-                    )
-                    .with("missing", refusal.missing),
-                    orch_engine::initial_files::Error::Invalid(message) => {
-                        invalid("files", &message)
-                    }
-                    orch_engine::initial_files::Error::Unavailable(message) => {
-                        ApiError::new(ErrorCode::EnvironmentUnavailable, message)
-                    }
-                    orch_engine::initial_files::Error::Internal(error) => ApiError::engine(error),
-                })?,
-        ),
-    };
-    let request = Request {
-        owner: principal.user(),
-        name: name.as_deref(),
-        home,
-        template: body.template_id,
-        host: body.host_id,
-        config: &config,
-    };
-    let made = match orch_engine::environments::create(conn, ctx.now, principal, &request).await {
-        Ok(made) => made,
-        Err(CreateError::Taken(existing)) => return Err(taken(existing)),
-        Err(CreateError::NoTemplate) => {
-            return Err(invalid(
-                "template_id",
-                "name a template: none is set for the place it is made in",
+    let initial = match (body.files.as_ref(), prepared) {
+        (None, None) => None,
+        (None, Some(_)) => {
+            return Err(ApiError::internal(
+                "an initial file plan has no matching creation request",
             ));
         }
-        Err(CreateError::Template(why)) => return Err(invalid("template_id", &why)),
-        Err(CreateError::Runtime(why)) => return Err(invalid("config", &why)),
-        Err(CreateError::DataSources(why)) => return Err(invalid("data_sources", &why)),
-        Err(CreateError::NoPlace(why)) => return Err(blocked(conn, &why).await?),
-        Err(CreateError::NoHome) => return Err(ApiError::not_found()),
-        Err(CreateError::Internal(error)) => return Err(ApiError::internal(error)),
+        (Some(_), Some(plan)) => Some(plan),
+        (Some(files), None) => Some(
+            orch_engine::initial_files::plan(conn, principal, files)
+                .await
+                .map_err(initial_failed)?,
+        ),
     };
-    if let Some(initial) = initial {
+    let _ = ctx;
+    Ok(CreationInput {
+        body,
+        config,
+        name,
+        home,
+        org: home_place.org,
+        initial,
+    })
+}
+async fn creation_failed(conn: &mut Conn, error: CreateError) -> ApiResult<ApiError> {
+    Ok(match error {
+        CreateError::Taken(existing) => taken(existing),
+        CreateError::NoTemplate => invalid(
+            "template_id",
+            "name a template: none is set for the place it is made in",
+        ),
+        CreateError::Template(why) => invalid("template_id", &why),
+        CreateError::Runtime(why) => invalid("config", &why),
+        CreateError::DataSources(why) => invalid("data_sources", &why),
+        CreateError::NoPlace(why) => blocked(conn, &why).await?,
+        CreateError::NoHome => ApiError::not_found(),
+        CreateError::OperationScope => ApiError::new(
+            ErrorCode::AuthzDenied,
+            "the key does not permit this creation source",
+        ),
+        CreateError::Internal(error) => ApiError::engine(error),
+    })
+}
+async fn finish_input(
+    ctx: &Ctx,
+    conn: &mut Conn,
+    principal: &Principal,
+    input: &CreationInput,
+    made: &orch_engine::environments::Made,
+) -> ApiResult<()> {
+    if let Some(initial) = input.initial.as_ref() {
         orch_db::queries::jobs::merge_plan(
             conn,
             made.job.id,
@@ -193,7 +244,7 @@ pub(crate) async fn create_in(
             id: made.id,
         },
         principal.user(),
-        match body.access {
+        match input.body.access.clone() {
             None | Some(NewEnvironmentAccess::Defaults) => NewAccess::Defaults,
             Some(NewEnvironmentAccess::OnlyMe) => NewAccess::OnlyMe,
         },
@@ -208,14 +259,14 @@ pub(crate) async fn create_in(
         AuditAction::EnvironmentCreated,
         made.id,
         Home {
-            node: Some(home),
-            org: Some(home_place.org),
+            node: Some(input.home),
+            org: Some(input.org),
         },
         &format!("{who} made an environment"),
         json!({ "environment": made.id, "job": made.job.id }),
     )
     .await?;
-    Ok(made)
+    Ok(())
 }
 
 /// Accepts the manager's same-unit restart and leaves its progress to the durable job.
@@ -431,22 +482,48 @@ async fn keep(ctx: Ctx, (): (), (): ()) -> ApiResult<Environment> {
 
 /// The environments that threads under a node run in and those whose home is there, as far as the
 /// caller may see them, with the hosts the caller manages.
-async fn node_list(
-    ctx: Ctx,
-    query: api::NodeEnvironmentListQuery,
-    (): (),
-) -> ApiResult<NodeEnvironmentListReply> {
-    let node = ctx.id("id")?;
-    let mut conn = ctx.app.db.acquire().await?;
-    let principal = authorization::principal(&ctx, &mut conn).await?;
-    let under = rows::environments_under(&mut conn, node).await?;
-    let (views, standing) = viewed_among(&ctx, &mut conn, &principal, &under).await?;
+pub(crate) struct FleetSource {
+    pub environment: Id,
+    pub home: Id,
+    pub template: Option<Id>,
+    pub host: Option<Id>,
+    pub providers: Vec<Id>,
+    pub manageable: bool,
+}
+
+#[derive(Default)]
+pub(crate) struct FleetBounds {
+    pub limited: bool,
+    pub homes: std::collections::BTreeSet<Id>,
+    pub hosts: std::collections::BTreeSet<Id>,
+    pub templates: std::collections::BTreeSet<Id>,
+    pub providers: std::collections::BTreeSet<Id>,
+}
+
+pub(crate) struct PreparedFleet {
+    pub sources: Vec<FleetSource>,
+    entries: Vec<FleetEntry>,
+    providers: HashMap<Id, Vec<orch_db::queries::resources::routes::ProviderRefRow>>,
+    pub bounds: FleetBounds,
+    pub disclosure: crate::routes::nodes::view::ReferenceDisclosure,
+}
+
+/// The original native query predicates and calculations, with raw row associations retained.
+pub(crate) async fn prepare_fleet(
+    ctx: &Ctx,
+    conn: &mut Conn,
+    principal: &Principal,
+    under: &[Id],
+    query: &api::NodeEnvironmentListQuery,
+) -> ApiResult<PreparedFleet> {
+    let (prepared, standing) = super::prepare_viewed_among(conn, principal, under).await?;
+    let views = super::show_inventory_prepared(ctx, conn, principal, &prepared).await?;
     let listed: Vec<Id> = views.iter().map(|view| view.base.id).collect();
-    let threads: HashMap<Id, i64> = rows::thread_counts(&mut conn, &listed)
+    let threads: HashMap<Id, i64> = rows::thread_counts(conn, &listed)
         .await?
         .into_iter()
         .collect();
-    let hosted: HashMap<Id, String> = rows::hosts_of(&mut conn, &listed)
+    let hosted: HashMap<Id, String> = rows::hosts_of(conn, &listed)
         .await?
         .into_iter()
         .map(|(environment, _, name)| (environment, name))
@@ -466,6 +543,8 @@ async fn node_list(
         })
         .collect();
     let mut entries = Vec::new();
+    let mut sources = Vec::new();
+    let mut providers = HashMap::new();
     for view in views {
         let id = view.base.id;
         let idle_minutes = view
@@ -486,16 +565,33 @@ async fn node_list(
             continue;
         }
         let manageable = standing.get(&id).is_some_and(Standing::manages);
-        let holds = if manageable {
-            let held = rows::providers_holding(&mut conn, id).await?;
-            crate::routes::resources::view::provider_refs(&mut conn, &held, &[])
-                .await?
-                .into_iter()
-                .map(|(_, provider)| provider)
-                .collect()
+        let native = prepared
+            .rows
+            .iter()
+            .find(|row| row.id == id)
+            .ok_or_else(ApiError::not_found)?;
+        let references = if manageable {
+            let held = rows::providers_holding(conn, id).await?;
+            orch_db::queries::resources::routes::providers_among(conn, &held, &[]).await?
         } else {
             Vec::new()
         };
+        sources.push(FleetSource {
+            environment: id,
+            home: native.home_node_id,
+            template: native.template_id.filter(|template| {
+                standing.get(&id).is_some_and(Standing::holds_something)
+                    && prepared.template_ids().contains(template)
+            }),
+            host: prepared
+                .hosted
+                .iter()
+                .find(|(environment, _, _)| *environment == id)
+                .map(|(_, host, _)| *host),
+            providers: references.iter().map(|row| row.id).collect(),
+            manageable,
+        });
+        providers.insert(id, references);
         entries.push(FleetEntry {
             environment: view.base,
             home: Some(view.home),
@@ -507,50 +603,132 @@ async fn node_list(
             last_activity_at: view.last_activity_at,
             idle_minutes,
             idle_stop_at: view.idle_stop_at,
-            active_turns: rows::active_turns(&mut conn, id).await?,
-            open_shells: rows::open_shells(&mut conn, id).await?,
+            active_turns: rows::active_turns(conn, id).await?,
+            open_shells: rows::open_shells(conn, id).await?,
             processes: None,
             cpu_percent: None,
             memory_bytes: None,
             memory_limit_bytes: None,
             disk_used_bytes: None,
             manageable,
-            holds,
+            holds: Vec::new(),
         });
     }
-    let hosts = managed_hosts(&mut conn, &principal).await?;
-    Ok(NodeEnvironmentListReply { entries, hosts })
+    let homes = sources.iter().map(|source| source.home).collect::<Vec<_>>();
+    let disclosure = crate::routes::nodes::view::reference_disclosure(
+        conn,
+        principal,
+        &homes,
+        Policy::default(),
+    )
+    .await?;
+    Ok(PreparedFleet {
+        sources,
+        entries,
+        providers,
+        bounds: FleetBounds::default(),
+        disclosure,
+    })
+}
+
+impl PreparedFleet {
+    pub(crate) async fn render(
+        &self,
+        conn: &mut Conn,
+        principal: &Principal,
+    ) -> ApiResult<Vec<FleetEntry>> {
+        let ids = self
+            .sources
+            .iter()
+            .map(|source| source.home)
+            .collect::<Vec<_>>();
+        let refs = if self.bounds.limited {
+            crate::routes::nodes::view::refs_with_name_sources(
+                conn,
+                principal,
+                &ids,
+                Policy::default(),
+                &self.bounds.homes,
+            )
+            .await?
+        } else {
+            crate::routes::nodes::view::refs(conn, principal, &ids, Policy::default()).await?
+        };
+        let mut result = Vec::new();
+        for (old, source) in self.entries.iter().zip(&self.sources) {
+            let mut entry = old.clone();
+            entry.home = refs.get(&source.home).cloned().or_else(|| old.home.clone());
+            if self.bounds.limited {
+                if source
+                    .host
+                    .is_some_and(|host| !self.bounds.hosts.contains(&host))
+                {
+                    entry.host_name = None;
+                }
+                if source
+                    .template
+                    .is_some_and(|template| !self.bounds.templates.contains(&template))
+                {
+                    entry.template = None;
+                }
+            }
+            let rows = self
+                .providers
+                .get(&source.environment)
+                .into_iter()
+                .flatten()
+                .filter(|row| !self.bounds.limited || self.bounds.providers.contains(&row.id))
+                .cloned()
+                .collect();
+            entry.holds = crate::routes::resources::view::provider_refs_from_rows(conn, rows)
+                .await?
+                .into_iter()
+                .map(|(_, provider)| provider)
+                .collect();
+            result.push(entry);
+        }
+        Ok(result)
+    }
+
+    pub(crate) fn preserves(&self, fresh: &Self) -> bool {
+        let current: HashMap<_, _> = fresh
+            .sources
+            .iter()
+            .map(|source| (source.environment, source))
+            .collect();
+        self.sources.iter().all(|old| {
+            current.get(&old.environment).is_some_and(|now| {
+                old.home == now.home
+                    && (!old.manageable || now.manageable)
+                    && old
+                        .host
+                        .filter(|host| self.bounds.hosts.contains(host))
+                        .is_none_or(|host| now.host == Some(host))
+                    && old
+                        .template
+                        .filter(|template| self.bounds.templates.contains(template))
+                        .is_none_or(|template| now.template == Some(template))
+                    && old
+                        .providers
+                        .iter()
+                        .filter(|id| self.bounds.providers.contains(id))
+                        .all(|id| now.providers.contains(id))
+            })
+        }) && self.disclosure.names.is_subset(&fresh.disclosure.names)
+            && self
+                .disclosure
+                .displays
+                .is_subset(&fresh.disclosure.displays)
+    }
 }
 
 /// The hosts the caller manages, with how loaded each is.
-async fn managed_hosts(conn: &mut Conn, principal: &Principal) -> ApiResult<Vec<HostLoad>> {
-    let seen = resources::visible(
-        conn,
-        principal,
-        ResourceKind::Host,
-        Page {
-            after: None,
-            limit: LIST_LIMIT,
-        },
-        Policy::default(),
-    )
-    .await
-    .map_err(ApiError::internal)?;
-    let managed: Vec<Id> = seen
-        .items
-        .iter()
-        .filter(|each| {
-            each.held
-                .iter()
-                .any(|held| held.permission == Permission::HostManage)
-        })
-        .map(|each| each.resource.id)
-        .collect();
+pub(crate) async fn host_loads(conn: &mut Conn, managed: &[Id]) -> ApiResult<Vec<HostLoad>> {
     if managed.is_empty() {
         return Ok(Vec::new());
     }
-    let hosts = host_rows::hosts(conn, Some(&managed)).await?;
-    let loads = host_rows::loads(conn, &managed).await?;
+    let hosts = host_rows::hosts(conn, Some(managed)).await?;
+    let loads = host_rows::loads(conn, managed).await?;
     let mut found = Vec::new();
     for host in hosts {
         let held: Vec<_> = loads
@@ -588,4 +766,21 @@ async fn managed_hosts(conn: &mut Conn, principal: &Principal) -> ApiResult<Vec<
         });
     }
     Ok(found)
+}
+
+/// The existing initial-file refusal projection, shared by atomic creator prefixes.
+pub(crate) fn initial_failed(error: orch_engine::initial_files::Error) -> ApiError {
+    match error {
+        orch_engine::initial_files::Error::NotFound => ApiError::not_found(),
+        orch_engine::initial_files::Error::Denied(refusal) => ApiError::new(
+            ErrorCode::AuthzDenied,
+            "the initial file source is not authorized",
+        )
+        .with("missing", refusal.missing),
+        orch_engine::initial_files::Error::Invalid(message) => invalid("files", &message),
+        orch_engine::initial_files::Error::Unavailable(message) => {
+            ApiError::new(ErrorCode::EnvironmentUnavailable, message)
+        }
+        orch_engine::initial_files::Error::Internal(error) => ApiError::engine(error),
+    }
 }

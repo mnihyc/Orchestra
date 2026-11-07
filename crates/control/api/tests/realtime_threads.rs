@@ -1,4 +1,5 @@
 //! A thread's feed on a real socket, with the thread engine and a scripted machine behind it: items in order while a turn runs, what a reader that came back is sent, deltas and the rows that catch up with them.
+#![recursion_limit = "256"]
 #![allow(
     clippy::unwrap_used,
     clippy::expect_used,

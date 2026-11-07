@@ -1,4 +1,5 @@
 //! The chat feed on the realtime socket, tested with a real WebSocket client against a real database: the rows of a chat in sequence, none missed across a reconnect, membership lost closing the subscription, typing, an admin who only inspects, and the news that reaches a person without a subscription.
+#![recursion_limit = "256"]
 #![allow(
     clippy::unwrap_used,
     clippy::expect_used,

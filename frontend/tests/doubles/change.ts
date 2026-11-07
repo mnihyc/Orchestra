@@ -377,7 +377,7 @@ export class Change implements Part {
   }
 
   /** The thread as the person sees it, whatever kind it is. */
-  private threadOf(person: Person, threadId: string): Thread {
+  threadOf(person: Person, threadId: string): Thread {
     const side = this.sides.get(threadId);
     if (side !== undefined) {
       const parent = this.threadOf(person, side.parent);

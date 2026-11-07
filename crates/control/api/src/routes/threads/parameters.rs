@@ -17,7 +17,7 @@
 use crate::middleware::authorization;
 use crate::middleware::requests::{ApiError, ApiResult};
 use crate::registry::{Ctx, Registry};
-use crate::routes::settings::resolved_keys;
+use crate::routes::access::page::NameBounds;
 use orch_agent_contract::descriptor::{EffortSupport, Placement, ProviderKind};
 use orch_agent_contract::parameters::Eligibility;
 use orch_api_contract::settings::{
@@ -25,6 +25,8 @@ use orch_api_contract::settings::{
     ResolvedSetting, SettingScope, SettingSource, ThreadEffortParameter, ThreadModelParameter,
     ThreadParameterGet, ThreadParameters,
 };
+use orch_authz::Principal;
+use orch_db::Conn;
 use orch_db::queries::resources::models_of_provider;
 use orch_engine::models::allowed_by;
 use orch_engine::views::thread_parts;
@@ -82,16 +84,42 @@ fn again<T: serde::Serialize, U: serde::de::DeserializeOwned>(value: &T) -> Opti
 
 /// What the thread's agent is set to.
 pub(super) async fn parameters(ctx: Ctx, (): (), (): ()) -> ApiResult<ThreadParameters> {
-    let thread = ctx.id("id")?;
     let mut conn = ctx.app.db.acquire().await?;
     let principal = authorization::principal(&ctx, &mut conn).await?;
-    let found = resolved_keys(
+    parameters_in(
+        &ctx,
         &mut conn,
         &principal,
+        &NameBounds::default(),
+        ProviderView::Native,
+    )
+    .await
+}
+
+/// An enclosing reader supplies its already admitted optional Provider projection.
+pub(super) enum ProviderView<'a> {
+    Native,
+    Selected(Option<&'a crate::routes::resources::providers::PreparedProjection>),
+}
+
+/// The same native parameter reader, on the enclosing operation's admitted snapshot.
+pub(super) async fn parameters_in(
+    ctx: &Ctx,
+    conn: &mut Conn,
+    principal: &Principal,
+    bounds: &NameBounds,
+    provider_view: ProviderView<'_>,
+) -> ApiResult<ThreadParameters> {
+    let thread = ctx.id("id")?;
+    let paired = crate::routes::settings::readers::resolved_views(
+        conn,
+        principal,
         thread,
-        &[keys::AGENT_MODEL, keys::AGENT_EFFORT, keys::AGENT_PARAMS],
+        Some(&[keys::AGENT_MODEL, keys::AGENT_EFFORT, keys::AGENT_PARAMS]),
     )
     .await?;
+    let found =
+        crate::routes::settings::readers::settings_shown(conn, principal, paired, bounds).await?;
     let of = |key: &str| {
         found
             .iter()
@@ -104,11 +132,11 @@ pub(super) async fn parameters(ctx: Ctx, (): (), (): ()) -> ApiResult<ThreadPara
         of(keys::AGENT_EFFORT),
         of(keys::AGENT_PARAMS),
     );
-    let parts = thread_parts(&mut conn, thread, None, orch_types::Time::new(ctx.now))
+    let parts = thread_parts(conn, thread, None, orch_types::Time::new(ctx.now))
         .await
         .map_err(ApiError::internal)?
         .ok_or_else(ApiError::not_found)?;
-    let settings = orch_engine::resolved::load(&mut conn, thread)
+    let settings = orch_engine::resolved::load(conn, thread)
         .await
         .map_err(ApiError::internal)?;
     let current = model
@@ -118,7 +146,7 @@ pub(super) async fn parameters(ctx: Ctx, (): (), (): ()) -> ApiResult<ThreadPara
         .map(str::to_owned);
     let mut options = Vec::new();
     if let Some(binding) = &parts.binding {
-        for row in models_of_provider(&mut conn, binding.provider.id).await? {
+        for row in models_of_provider(conn, binding.provider.id).await? {
             let left_out = settings
                 .models_allowed
                 .as_ref()
@@ -130,6 +158,8 @@ pub(super) async fn parameters(ctx: Ctx, (): (), (): ()) -> ApiResult<ThreadPara
             } else {
                 None
             };
+            let parameters: ModelParameters =
+                serde_json::from_value(row.parameters.clone()).unwrap_or_default();
             options.push(ModelOption {
                 token_estimate: orch_engine::token_density::of(&row.model_name),
                 groups: row.groups,
@@ -139,8 +169,10 @@ pub(super) async fn parameters(ctx: Ctx, (): (), (): ()) -> ApiResult<ThreadPara
                     row.display_name.clone()
                 },
                 model_name: row.model_name,
-                parameters: serde_json::from_value::<ModelParameters>(row.parameters)
-                    .unwrap_or_default(),
+                option_constraints: orch_model_contract::parameters::constraint_catalogue(
+                    &parameters,
+                ),
+                parameters,
                 allowed: reason.is_none(),
                 reason,
             });
@@ -168,14 +200,14 @@ pub(super) async fn parameters(ctx: Ctx, (): (), (): ()) -> ApiResult<ThreadPara
             .contains(&orch_agent_contract::descriptor::ApprovalMode::Auto)
         && let Some(binding) = parts.binding.as_ref()
     {
-        let row = orch_db::queries::threads::thread(&mut conn, thread)
+        let row = orch_db::queries::threads::thread(conn, thread)
             .await?
             .ok_or_else(ApiError::not_found)?;
         review_models = ctx
             .app
             .engine
             .review_models(
-                &mut conn,
+                conn,
                 &row,
                 binding.provider.id,
                 Some(principal.user()),
@@ -189,7 +221,7 @@ pub(super) async fn parameters(ctx: Ctx, (): (), (): ()) -> ApiResult<ThreadPara
             .app
             .engine
             .offered_approval_modes(
-                &mut conn,
+                conn,
                 parts
                     .facts
                     .environment
@@ -245,56 +277,84 @@ pub(super) async fn parameters(ctx: Ctx, (): (), (): ()) -> ApiResult<ThreadPara
     let values = params.value.clone().unwrap_or(Value::Null);
     let parameters = declared
         .into_iter()
-        .map(|def| ParameterView {
-            value: values.get(&def.key).cloned(),
-            key: def.key.clone(),
-            apply: match def.apply {
-                orch_agent_contract::parameters::ParameterApply::NextTurn => {
-                    ParameterApply::NextTurn
-                }
-                orch_agent_contract::parameters::ParameterApply::NewSession => {
-                    ParameterApply::NewSession
-                }
-                orch_agent_contract::parameters::ParameterApply::RecreateEnvironment => {
-                    ParameterApply::RecreateEnvironment
-                }
-            },
-            source: member_source(&params, &def.key),
-            def: serde_json::to_value(&def).unwrap_or(Value::Null),
-            locked_by: params.locked_by.clone(),
-            writable: params.writable,
+        .map(|def| {
+            let model = eligibility.as_ref().map(|ctx| &ctx.model);
+            let fixed = model
+                .and_then(|model| model.option_rule("native", &def.key))
+                .is_some_and(|rule| rule.get("const").is_some());
+            ParameterView {
+                value: if fixed {
+                    model
+                        .and_then(|model| model.option_rule("native", &def.key))
+                        .and_then(|rule| rule.get("const"))
+                        .cloned()
+                } else {
+                    values.get(&def.key).cloned()
+                },
+                key: def.key.clone(),
+                apply: match def.apply {
+                    orch_agent_contract::parameters::ParameterApply::NextTurn => {
+                        ParameterApply::NextTurn
+                    }
+                    orch_agent_contract::parameters::ParameterApply::NewSession => {
+                        ParameterApply::NewSession
+                    }
+                    orch_agent_contract::parameters::ParameterApply::RecreateEnvironment => {
+                        ParameterApply::RecreateEnvironment
+                    }
+                },
+                source: member_source(&params, &def.key),
+                def: model.map_or_else(
+                    || serde_json::to_value(&def).unwrap_or(Value::Null),
+                    |model| def.projection(model),
+                ),
+                locked_by: params.locked_by.clone(),
+                writable: params.writable && !fixed,
+            }
         })
         .collect();
-    let provider = match &parts.binding {
-        Some(binding) => {
-            let holding = orch_authz::resources::effective(
-                &mut conn,
-                &principal,
-                orch_access_contract::decisions::ObjectRef {
-                    kind: orch_access_contract::permissions::ResourceKind::Provider.into(),
-                    id: binding.provider.id,
-                },
-                orch_authz::Policy::default(),
+    let provider = match provider_view {
+        ProviderView::Selected(Some(prepared)) => Some(
+            crate::routes::resources::providers::show_prepared(
+                ctx,
+                conn,
+                principal,
+                prepared.clone(),
             )
-            .await
-            .map_err(ApiError::internal)?;
-            if holding.held.iter().any(|held| {
-                held.permission == orch_access_contract::permissions::Permission::ProviderView
-            }) {
-                Some(
-                    crate::routes::resources::providers::show(
-                        &ctx,
-                        &mut conn,
-                        &principal,
-                        binding.provider.id,
-                    )
-                    .await?,
+            .await?,
+        ),
+        ProviderView::Selected(None) => None,
+        ProviderView::Native => match &parts.binding {
+            Some(binding) => {
+                let holding = orch_authz::resources::effective(
+                    conn,
+                    principal,
+                    orch_access_contract::decisions::ObjectRef {
+                        kind: orch_access_contract::permissions::ResourceKind::Provider.into(),
+                        id: binding.provider.id,
+                    },
+                    orch_authz::Policy::default(),
                 )
-            } else {
-                None
+                .await
+                .map_err(ApiError::internal)?;
+                if holding.held.iter().any(|held| {
+                    held.permission == orch_access_contract::permissions::Permission::ProviderView
+                }) {
+                    Some(
+                        crate::routes::resources::providers::show(
+                            ctx,
+                            conn,
+                            principal,
+                            binding.provider.id,
+                        )
+                        .await?,
+                    )
+                } else {
+                    None
+                }
             }
-        }
-        None => None,
+            None => None,
+        },
     };
     Ok(ThreadParameters {
         provider,
@@ -322,7 +382,7 @@ pub(super) async fn parameters(ctx: Ctx, (): (), (): ()) -> ApiResult<ThreadPara
             .unwrap_or("on_request")
             .to_owned(),
         approval_modes: Some(approval_modes),
-        approval_reviewer: orch_engine::approval_review::session_reviewer(&mut conn, thread)
+        approval_reviewer: orch_engine::approval_review::session_reviewer(conn, thread)
             .await
             .map_err(ApiError::internal)?,
         subagent_limits: Some(orch_api_contract::settings::ThreadSubagentLimits {

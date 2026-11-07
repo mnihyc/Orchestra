@@ -19,7 +19,7 @@ export const detailAgent: Agent = { id: 'agent', name: 'Research profile', addre
   descriptor: { harness: { name: 'Research harness', status: 'supported', version: '1.2.3', supported_range: '>=1' },
     capabilities: { diagnostic_canary: 'diagnostic-canary' }, parameters: Array.from({ length: 27 }, (_, index) => ({ key: `worker_field_${index}`, type: 'integer', title: `Worker option ${index + 1}`, default: index + 1, scopes: ['org', 'project', 'topic', 'thread'], description: 'An adapter-declared option.' })) } };
 
-export const detailMachine: Machine = { ...detailMachineRef, owner: ADA, platform_arch: 'x86_64', connector_version: '1.2.3', protocol_version: 1,
+export const detailMachine: Machine = { revision: 1, ...detailMachineRef, owner: ADA, platform_arch: 'x86_64', connector_version: '1.2.3', protocol_version: 1,
   roles: ['environment', 'agent', 'provider', 'node'], status: 'active', last_seen_at: null, last_ip: null, cert_not_after: '2027-10-15T12:00:00Z',
   providers: [], agents: [], environments: [], environment_sandboxes: [], access: detailAccess,
   facts: { diagnostic_canary: 'diagnostic-canary', hostname: 'build-system' } };

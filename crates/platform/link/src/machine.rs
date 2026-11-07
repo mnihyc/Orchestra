@@ -23,8 +23,9 @@
 
 use crate::commands::{CommandHandler, CommandServer, ServerOptions};
 use crate::framing::Measurements;
+use crate::gateways::PrimaryGateway;
 use crate::journal::Journal;
-use crate::reconnect::{Backoff, Dialer, Endpoints, dial_in_order};
+use crate::reconnect::{Backoff, DialError, Dialer, Endpoints};
 use crate::session::{
     ClientIdentity, EndReason, Established, HandshakeError, SessionEvent, SessionSender, connect,
 };
@@ -45,6 +46,8 @@ use std::sync::{Arc, Mutex, PoisonError};
 use std::time::Duration;
 use tokio::sync::{mpsc, oneshot, watch};
 use tokio::time::Instant;
+
+mod auxiliary;
 
 /// How often the core looks at the clocks: to force the spool to disk, to see
 /// whether a stream has stalled, to forget what is old. A fifth of a second is
@@ -96,6 +99,8 @@ pub enum LinkStatus {
 /// What a machine is and how it reaches the system.
 #[derive(Debug)]
 pub struct MachineConfig {
+    /// The local primary choice and the latest authenticated gateway catalogue.
+    pub gateway: PrimaryGateway,
     /// The machine.
     pub machine_id: Id,
     /// The connector's own version.
@@ -133,6 +138,9 @@ pub struct MachineConfig {
 /// Why the link could not be started.
 #[derive(Debug, thiserror::Error)]
 pub enum StartError {
+    /// The machine's existing key could not be retained for its tunnel carriers.
+    #[error("{0}")]
+    Identity(#[from] orch_pki::PkiError),
     /// The spool could not be opened.
     #[error("{0}")]
     Spool(#[from] crate::spool::SpoolError),
@@ -164,6 +172,118 @@ enum Input {
     Shutdown(oneshot::Sender<()>),
 }
 
+#[cfg(all(test, feature = "test-observers"))]
+#[allow(clippy::unwrap_used, reason = "observer controls fail by panicking")]
+mod input_observer_tests {
+    use super::*;
+
+    #[tokio::test]
+    async fn actual_input_enqueue_and_batch_selection_keep_unprocessed_tail_and_failed_send_distinct()
+     {
+        let (sender, mut receiver) = mpsc::unbounded_channel();
+        let queue = crate::test_observers::QueueGauge::new("machine.inputs");
+        let observed = queue.receiver();
+        for offset in [0, 4, 8] {
+            assert!(
+                send_input(
+                    &sender,
+                    Input::Data(orch_link_contract::frames::DataFrame {
+                        channel: 3,
+                        offset,
+                        payload: bytes::Bytes::from_static(b"data"),
+                    }),
+                    &queue
+                )
+                .is_ok()
+            );
+        }
+        let mut batch = vec![receiver.recv().await.unwrap()];
+        while let Ok(item) = receiver.try_recv() {
+            batch.push(item);
+        }
+        let mut flights: std::collections::VecDeque<_> = batch
+            .iter()
+            .map(|item| observed.selected(item.observed_bytes()))
+            .collect();
+        assert_eq!(queue.snapshot().in_flight_messages, 3);
+        assert_eq!(
+            queue.snapshot().in_flight_payload_bytes,
+            3 * (orch_link_contract::frames::DataFrame::HEADER_BYTES + 4)
+        );
+        flights.pop_front().unwrap().processed();
+        // Core cancellation/shutdown can drop a tail already selected into its local batch.
+        drop(flights);
+        let ended = queue.snapshot();
+        assert_eq!(
+            (
+                ended.processed,
+                ended.sent,
+                ended.selected_without_completion
+            ),
+            (1, 0, 2)
+        );
+        assert_eq!(
+            (
+                ended.queued_messages,
+                ended.in_flight_messages,
+                ended.in_flight_payload_bytes
+            ),
+            (0, 0, 0)
+        );
+        drop(receiver);
+        assert!(send_input(&sender, Input::Ended, &queue).is_err());
+        assert_eq!(queue.snapshot().failed_enqueues, 1);
+        drop(observed);
+        assert!(queue.snapshot().receiver_closed);
+        assert!(!queue.snapshot().inconsistent);
+    }
+}
+
+#[cfg(feature = "test-observers")]
+impl Input {
+    fn observed_bytes(&self) -> Option<usize> {
+        match self {
+            Self::RawAfter { stream, after, .. } => {
+                serde_json::to_vec(&(stream.to_string(), after))
+                    .ok()
+                    .map(|bytes| bytes.len())
+            }
+            Self::Publish { stream, event, .. } => {
+                let body = event.body().ok()?;
+                serde_json::to_vec(&(stream.to_string(), event.kind().as_str(), body))
+                    .ok()
+                    .map(|bytes| bytes.len())
+            }
+            Self::Report { eph } => serde_json::to_vec(eph).ok().map(|bytes| bytes.len()),
+            Self::Ready(start) => serde_json::to_vec(&start.ready)
+                .ok()
+                .map(|bytes| bytes.len()),
+            Self::Frame(frame) => orch_link_contract::frames::encode(frame.as_ref(), usize::MAX)
+                .ok()
+                .map(|text| text.len()),
+            Self::Data(data) => data.encode(usize::MAX).ok().map(|bytes| bytes.len()),
+            Self::Datagram(packet) => packet.frame.encode().ok().map(|bytes| bytes.len()),
+            // These carry only local control/response handles, no serialized payload.
+            Self::Ended | Self::Shutdown(_) => Some(0),
+        }
+    }
+}
+
+#[inline]
+fn send_input(
+    inputs: &mpsc::UnboundedSender<Input>,
+    input: Input,
+    #[cfg(feature = "test-observers")] observed: &Arc<crate::test_observers::QueueGauge>,
+) -> Result<(), mpsc::error::SendError<Input>> {
+    #[cfg(feature = "test-observers")]
+    {
+        let bytes = input.observed_bytes();
+        return observed.send(inputs, input, bytes);
+    }
+    #[cfg(not(feature = "test-observers"))]
+    inputs.send(input)
+}
+
 /// What the core needs of a session that stands.
 #[derive(Debug)]
 struct SessionStart {
@@ -174,6 +294,17 @@ struct SessionStart {
 
 #[derive(Debug)]
 struct Shared {
+    auxiliary: Arc<auxiliary::Pool>,
+    incoming: Mutex<Option<IncomingTunnels>>,
+    primary_attaching: Mutex<Option<String>>,
+    tunnel_idle_secs: std::sync::atomic::AtomicU64,
+    primary_changed: tokio::sync::Notify,
+    gateway: Mutex<PrimaryGateway>,
+    gateway_id: Mutex<Option<String>>,
+    last_primary_gateway: Mutex<Option<String>>,
+    gateway_measurements: Mutex<Vec<orch_link_contract::gateways::GatewayMeasurement>>,
+    gateway_measured_at: Mutex<Option<orch_types::Time>>,
+    advertised_gateways: watch::Sender<Option<Vec<orch_link_contract::gateways::GatewayInstance>>>,
     directory: PathBuf,
     access_token: Mutex<Option<String>>,
     endpoints: Arc<Mutex<Vec<Endpoint>>>,
@@ -182,6 +313,8 @@ struct Shared {
     active_endpoint: Arc<Mutex<Option<Endpoint>>>,
     advertised: watch::Sender<Option<Vec<Endpoint>>>,
     inputs: mpsc::UnboundedSender<Input>,
+    #[cfg(feature = "test-observers")]
+    observed_inputs: Arc<crate::test_observers::QueueGauge>,
     status: watch::Receiver<LinkStatus>,
     commands: CommandServer,
     meter: Mutex<Option<Measurements>>,
@@ -204,6 +337,12 @@ struct Shared {
     >,
     port_records: Mutex<Option<Arc<crate::ports::PortRecords>>>,
     tunnels: TunnelHub,
+}
+
+impl Drop for Shared {
+    fn drop(&mut self) {
+        self.auxiliary.shutdown();
+    }
 }
 
 /// The handle on a machine's link.
@@ -254,6 +393,97 @@ impl Drop for PendingImport {
 }
 
 impl MachineLink {
+    /// Live tunnel-only transports, excluding the one authoritative primary.
+    #[must_use]
+    pub fn auxiliary_sessions(&self) -> usize {
+        self.shared.auxiliary.sessions()
+    }
+    /// The actual primary gateway, distinct from the entrance URL and auxiliary carriers.
+    #[must_use]
+    pub fn gateway_id(&self) -> Option<String> {
+        self.shared
+            .gateway_id
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner)
+            .clone()
+    }
+
+    /// Authenticated system catalogue, separate from a primary-only local address override.
+    #[must_use]
+    pub fn gateway_catalogue(&self) -> Vec<orch_link_contract::gateways::GatewayInstance> {
+        self.shared
+            .gateway
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner)
+            .catalogue
+            .clone()
+    }
+
+    /// Authenticated catalogue updates, including those a local primary override does not use.
+    #[must_use]
+    pub fn advertised_gateways(
+        &self,
+    ) -> watch::Receiver<Option<Vec<orch_link_contract::gateways::GatewayInstance>>> {
+        self.shared.advertised_gateways.subscribe()
+    }
+
+    /// Latest verified entrance measurements; not a permission or admission grant.
+    #[must_use]
+    pub fn gateway_measurements(&self) -> Vec<orch_link_contract::gateways::GatewayMeasurement> {
+        self.shared
+            .gateway_measurements
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner)
+            .clone()
+    }
+
+    /// Last probe time and the connector's own persisted primary choice.
+    #[must_use]
+    pub fn gateway_status(&self) -> orch_link_contract::gateways::GatewayStatusReport {
+        orch_link_contract::gateways::GatewayStatusReport {
+            choice: self
+                .shared
+                .gateway
+                .lock()
+                .unwrap_or_else(PoisonError::into_inner)
+                .choice
+                .clone(),
+            measured_at: *self
+                .shared
+                .gateway_measured_at
+                .lock()
+                .unwrap_or_else(PoisonError::into_inner),
+            measurements: self
+                .gateway_measurements()
+                .into_iter()
+                .filter_map(|mut sample| {
+                    sample.endpoint =
+                        orch_link_contract::gateways::public_endpoint(&sample.endpoint)?;
+                    Some(sample)
+                })
+                .collect(),
+        }
+    }
+
+    /// The local operator changed the persisted primary choice. Reconnect explicitly.
+    pub fn select_gateway(&self, choice: orch_link_contract::gateways::GatewayChoice) {
+        self.shared
+            .gateway
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner)
+            .choice = choice;
+        if let Some(sender) = self
+            .shared
+            .session
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner)
+            .as_ref()
+        {
+            sender.end();
+        }
+        self.shared.primary_changed.notify_one();
+    }
+
     /// Current port control from the enrolled gateway; a host listener retires on false.
     #[must_use]
     pub fn port_control(&self) -> tokio::sync::watch::Receiver<bool> {
@@ -266,6 +496,8 @@ impl MachineLink {
         dialer: Arc<dyn Dialer>,
         clock: Arc<dyn Clock>,
     ) -> Result<Self, StartError> {
+        #[cfg(feature = "test-observers")]
+        crate::test_observers::machine_started(config.machine_id);
         let journal_dir = config.data_dir.join("journal");
         let (streams, recovery) = StreamSender::open_for_machine(
             &config.data_dir,
@@ -286,12 +518,60 @@ impl MachineLink {
             },
         );
         let (inputs, receiver) = mpsc::unbounded_channel();
+        #[cfg(feature = "test-observers")]
+        let observed_inputs = crate::test_observers::QueueGauge::new("machine.inputs");
         let (status_tx, status_rx) = watch::channel(LinkStatus::Starting);
-        let tunnels = TunnelHub::with_options(config.tunnels, config.tunnel_gauge.clone());
+        let budget = Arc::new(tokio::sync::Semaphore::new(
+            orch_link_contract::version::MAX_CHANNELS as usize,
+        ));
+        let tunnels = TunnelHub::with_shared_budget(
+            config.tunnels,
+            config.tunnel_gauge.clone(),
+            Arc::clone(&budget),
+        );
+        let (incoming_tx, incoming_rx) = mpsc::unbounded_channel();
+        let auxiliary_identity = ClientIdentity {
+            purpose: orch_link_contract::gateways::SessionPurpose::Tunnel,
+            gateway_id: None,
+            machine_id: config.machine_id,
+            connector_version: config.connector_version.clone(),
+            platform: config.platform,
+            roles: config.roles.clone(),
+            proof: config
+                .proof
+                .as_ref()
+                .map(|(key, certificate)| key.duplicate().map(|key| (key, certificate.clone())))
+                .transpose()?,
+            endpoints: None,
+            hosted_endpoints: None,
+        };
         let (advertised, _) = watch::channel(None);
+        let (advertised_gateways, _) = watch::channel(None);
         let endpoints_now = Arc::new(Mutex::new(config.endpoints.clone()));
         let active_endpoint = Arc::new(Mutex::new(None));
-        let shared = Arc::new(Shared {
+        let shared = Arc::new_cyclic(|parent| Shared {
+            auxiliary: auxiliary::Pool::new(
+                parent.clone(),
+                auxiliary_identity,
+                Arc::clone(&dialer),
+                Arc::clone(&clock),
+                config.tunnels,
+                config.tunnel_gauge.clone(),
+                Arc::clone(&budget),
+                incoming_tx.clone(),
+            ),
+            incoming: Mutex::new(Some(IncomingTunnels::from_receiver(incoming_rx))),
+            primary_attaching: Mutex::new(None),
+            tunnel_idle_secs: std::sync::atomic::AtomicU64::new(
+                orch_link_contract::gateways::TUNNEL_IDLE_SECS,
+            ),
+            primary_changed: tokio::sync::Notify::new(),
+            gateway: Mutex::new(config.gateway),
+            gateway_id: Mutex::new(None),
+            last_primary_gateway: Mutex::new(None),
+            gateway_measurements: Mutex::new(Vec::new()),
+            gateway_measured_at: Mutex::new(None),
+            advertised_gateways,
             directory: config.data_dir.clone(),
             access_token: Mutex::new(None),
             follows_system: config.follow_system_endpoints,
@@ -300,6 +580,8 @@ impl MachineLink {
             active_endpoint: Arc::clone(&active_endpoint),
             advertised: advertised.clone(),
             inputs: inputs.clone(),
+            #[cfg(feature = "test-observers")]
+            observed_inputs: Arc::clone(&observed_inputs),
             status: status_rx,
             commands: commands.clone(),
             meter: Mutex::new(None),
@@ -310,7 +592,18 @@ impl MachineLink {
             port_records: Mutex::new(None),
             tunnels: tunnels.clone(),
         });
+        shared.auxiliary.start_idle();
+        let mut primary_incoming = tunnels.incoming();
+        tokio::spawn(async move {
+            while let Some(tunnel) = primary_incoming.next().await {
+                if incoming_tx.send(tunnel).is_err() {
+                    return;
+                }
+            }
+        });
         let identity = ClientIdentity {
+            purpose: Default::default(),
+            gateway_id: None,
             machine_id: config.machine_id,
             connector_version: config.connector_version,
             platform: config.platform,
@@ -326,6 +619,8 @@ impl MachineLink {
             tunnels,
             Arc::clone(&shared),
             Arc::clone(&clock),
+            #[cfg(feature = "test-observers")]
+            observed_inputs.receiver(),
         ));
         tokio::spawn(supervise(
             identity,
@@ -407,11 +702,16 @@ impl MachineLink {
     ) -> impl std::future::Future<Output = Result<(), PublishError>> + Send + 'static {
         let handed = if event.kind().travels_on(stream) {
             let (reply, answer) = oneshot::channel();
-            let _ = self.shared.inputs.send(Input::Publish {
-                stream: *stream,
-                event: Box::new(event.clone()),
-                reply,
-            });
+            let _ = send_input(
+                &self.shared.inputs,
+                Input::Publish {
+                    stream: *stream,
+                    event: Box::new(event.clone()),
+                    reply,
+                },
+                #[cfg(feature = "test-observers")]
+                &self.shared.observed_inputs,
+            );
             Ok(answer)
         } else {
             Err(PublishError::WrongStream {
@@ -430,11 +730,16 @@ impl MachineLink {
     /// Raises the capture allocator above the server's cursor without changing spooled frame ids.
     pub async fn raw_after(&self, stream: &Stream, after: i64) -> Result<(), PublishError> {
         let (reply, answer) = oneshot::channel();
-        let _ = self.shared.inputs.send(Input::RawAfter {
-            stream: *stream,
-            after,
-            reply,
-        });
+        let _ = send_input(
+            &self.shared.inputs,
+            Input::RawAfter {
+                stream: *stream,
+                after,
+                reply,
+            },
+            #[cfg(feature = "test-observers")]
+            &self.shared.observed_inputs,
+        );
         answer.await.unwrap_or(Ok(()))
     }
 
@@ -442,7 +747,12 @@ impl MachineLink {
     /// dropped.
     pub fn report(&self, stream: &Stream, at: orch_types::Time, report: &Report) {
         if let Ok(eph) = Eph::of(stream, at, report) {
-            let _ = self.shared.inputs.send(Input::Report { eph });
+            let _ = send_input(
+                &self.shared.inputs,
+                Input::Report { eph },
+                #[cfg(feature = "test-observers")]
+                &self.shared.observed_inputs,
+            );
         }
     }
 
@@ -618,7 +928,53 @@ impl MachineLink {
     /// Opens a tunnel with the ticket the system signed, and waits for the
     /// other end to take it.
     pub async fn open_tunnel(&self, ticket: &str) -> Result<Tunnel, OpenError> {
-        self.shared.tunnels.open(ticket).await
+        let opened = self.shared.tunnels.open(ticket).await;
+        if matches!(
+            &opened,
+            Err(OpenError::Refused {
+                code: orch_link_contract::tunnels::OpenErrorCode::PeerOffline,
+                ..
+            })
+        ) && !self
+            .shared
+            .gateway
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner)
+            .catalogue
+            .is_empty()
+        {
+            return self.shared.auxiliary.open(ticket, None, None).await;
+        }
+        opened
+    }
+
+    /// Open on the API-designated pair carrier; the signed capability is unchanged.
+    pub async fn open_routed_tunnel(
+        &self,
+        ticket: &str,
+        route: &orch_link_contract::gateways::TunnelPlan,
+    ) -> Result<Tunnel, OpenError> {
+        self.shared.auxiliary.open(ticket, Some(route), None).await
+    }
+
+    /// Shared adapter for existing signed-string consumers and new adjacent plans.
+    pub async fn open_tunnel_with_route(
+        &self,
+        ticket: &str,
+        route: Option<&orch_link_contract::gateways::TunnelPlan>,
+    ) -> Result<Tunnel, OpenError> {
+        match route {
+            Some(route) => self.open_routed_tunnel(ticket, route).await,
+            None => self.open_tunnel(ticket).await,
+        }
+    }
+
+    /// Keep the shared transport while the existing session binding needs these plans.
+    pub fn retain_tunnel_plans(
+        &self,
+        plans: Vec<orch_link_contract::gateways::TunnelPlan>,
+    ) -> Arc<crate::gateways::TunnelLease> {
+        self.shared.auxiliary.lease(plans)
     }
 
     /// Opens one accepted host socket under this node's publication template.
@@ -627,7 +983,31 @@ impl MachineLink {
         ticket: &str,
         peer: orch_link_contract::ports::HostPortPeer,
     ) -> Result<Tunnel, OpenError> {
-        self.shared.tunnels.open_host_port(ticket, peer).await
+        if !*self.shared.tunnels.port_control().borrow() {
+            return Err(OpenError::NoSession);
+        }
+        let opened = self
+            .shared
+            .tunnels
+            .open_host_port(ticket, peer.clone())
+            .await;
+        if matches!(
+            &opened,
+            Err(OpenError::Refused {
+                code: orch_link_contract::tunnels::OpenErrorCode::PeerOffline,
+                ..
+            })
+        ) && !self
+            .shared
+            .gateway
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner)
+            .catalogue
+            .is_empty()
+        {
+            return self.shared.auxiliary.open(ticket, None, Some(peer)).await;
+        }
+        opened
     }
 
     /// The current gateway's negotiated port bounds.
@@ -659,7 +1039,12 @@ impl MachineLink {
     /// Tunnels that other machines open to this one.
     #[must_use]
     pub fn incoming_tunnels(&self) -> IncomingTunnels {
-        self.shared.tunnels.incoming()
+        self.shared
+            .incoming
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner)
+            .take()
+            .unwrap_or_else(|| IncomingTunnels::from_receiver(mpsc::unbounded_channel().1))
     }
 
     /// Joins cancelled local captures and publications before a graceful physical-program stop.
@@ -669,8 +1054,16 @@ impl MachineLink {
 
     /// Ends the session, forces the spool to disk and stops.
     pub async fn shutdown(&self) {
+        self.shared.auxiliary.shutdown();
         let (done, finished) = oneshot::channel();
-        if self.shared.inputs.send(Input::Shutdown(done)).is_ok() {
+        if send_input(
+            &self.shared.inputs,
+            Input::Shutdown(done),
+            #[cfg(feature = "test-observers")]
+            &self.shared.observed_inputs,
+        )
+        .is_ok()
+        {
             let _ = finished.await;
         }
     }
@@ -679,7 +1072,7 @@ impl MachineLink {
 /// Keeps a session going: dials, runs the handshake, hands the session to the
 /// core, and, when it ends, waits and begins again.
 async fn supervise(
-    identity: ClientIdentity,
+    mut identity: ClientIdentity,
     mut endpoints: Endpoints,
     dialer: Arc<dyn Dialer>,
     clock: Arc<dyn Clock>,
@@ -695,70 +1088,136 @@ async fn supervise(
         status.send_replace(LinkStatus::Connecting {
             failures: backoff.failures(),
         });
+        let policy = shared
+            .gateway
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner)
+            .clone();
+        endpoints.replace(
+            shared
+                .endpoints
+                .lock()
+                .unwrap_or_else(PoisonError::into_inner)
+                .clone(),
+        );
+        let attempt = tokio::select! {
+            () = shared.primary_changed.notified() => continue,
+            attempt = establish_primary(
+                &mut identity,
+                &policy,
+                &endpoints,
+                dialer.as_ref(),
+                clock.as_ref(),
+                &shared,
+            ) => attempt,
+        };
         let mut named_by_gateway = None;
-        let why = match dial_in_order(dialer.as_ref(), &endpoints).await {
-            Err(failures) => failures
+        let why = match attempt {
+            Ok((established, endpoint)) => {
+                let previous = shared
+                    .last_primary_gateway
+                    .lock()
+                    .unwrap_or_else(PoisonError::into_inner)
+                    .replace(established.gateway_id.clone());
+                if previous
+                    .as_ref()
+                    .is_some_and(|previous| *previous != established.gateway_id)
+                {
+                    // Cross-gateway resumption is deferred; preserve the ordinary reset/recovery.
+                    shared.tunnels.reset_all();
+                }
+                endpoints.worked(&endpoint);
+                *shared
+                    .gateway_id
+                    .lock()
+                    .unwrap_or_else(PoisonError::into_inner) = Some(established.gateway_id.clone());
+                *shared
+                    .primary_attaching
+                    .lock()
+                    .unwrap_or_else(PoisonError::into_inner) = None;
+                shared.tunnel_idle_secs.store(
+                    established.ready.tunnel_session_idle_secs,
+                    std::sync::atomic::Ordering::Relaxed,
+                );
+                *shared
+                    .access_token
+                    .lock()
+                    .unwrap_or_else(PoisonError::into_inner) =
+                    Some(established.ready.session_token.clone());
+                *shared
+                    .active_endpoint
+                    .lock()
+                    .unwrap_or_else(PoisonError::into_inner) = Some(endpoint.clone());
+                if !established.ready.gateways.is_empty() {
+                    let catalogue = established.ready.gateways.clone();
+                    shared
+                        .gateway
+                        .lock()
+                        .unwrap_or_else(PoisonError::into_inner)
+                        .catalogue = catalogue.clone();
+                    shared.advertised_gateways.send_replace(Some(catalogue));
+                }
+                if let Some(listed) = &established.ready.endpoints {
+                    shared.advertised.send_replace(Some(listed.clone()));
+                    if shared.follows_system
+                        && *shared
+                            .endpoints
+                            .lock()
+                            .unwrap_or_else(PoisonError::into_inner)
+                            != *listed
+                    {
+                        *shared
+                            .endpoints
+                            .lock()
+                            .unwrap_or_else(PoisonError::into_inner) = listed.clone();
+                        // Preserve the successful entrance for tie breaking only.
+                        endpoints.replace(listed.clone());
+                    }
+                }
+                backoff.succeeded();
+                status.send_replace(LinkStatus::Connected {
+                    session_id: established.ready.session_id,
+                    endpoint: endpoint.url.clone(),
+                });
+                let ended = run_session(
+                    established,
+                    &inputs,
+                    &shared.primary_changed,
+                    #[cfg(feature = "test-observers")]
+                    &shared.observed_inputs,
+                )
+                .await;
+                format!("the session ended: {ended:?}")
+            }
+            Err(PrimaryFailure::Selection(detail)) => detail,
+            Err(PrimaryFailure::Dial(failures)) => failures
                 .into_iter()
                 .map(|(endpoint, error)| format!("{}: {error}", endpoint.url))
                 .collect::<Vec<_>>()
                 .join("; "),
-            Ok((connection, endpoint)) => {
-                if let Err(error) = keep_connected_endpoint(&shared.directory, &endpoint) {
-                    tracing::warn!(%error, "the verified connection address could not be saved");
-                }
-                match connect(connection, &identity, clock.as_ref()).await {
-                    Ok(established) => {
-                        endpoints.worked(&endpoint);
-                        *shared
-                            .access_token
-                            .lock()
-                            .unwrap_or_else(PoisonError::into_inner) =
-                            Some(established.ready.session_token.clone());
-                        *shared
-                            .active_endpoint
-                            .lock()
-                            .unwrap_or_else(PoisonError::into_inner) = Some(endpoint.clone());
-                        if let Some(listed) = &established.ready.endpoints {
-                            shared.advertised.send_replace(Some(listed.clone()));
-                            if shared.follows_system
-                                && *shared
-                                    .endpoints
-                                    .lock()
-                                    .unwrap_or_else(PoisonError::into_inner)
-                                    != *listed
-                            {
-                                *shared
-                                    .endpoints
-                                    .lock()
-                                    .unwrap_or_else(PoisonError::into_inner) = listed.clone();
-                                endpoints = Endpoints::new(listed.clone());
-                            }
-                        }
-                        backoff.succeeded();
-                        status.send_replace(LinkStatus::Connected {
-                            session_id: established.ready.session_id,
-                            endpoint: endpoint.url.clone(),
-                        });
-                        let ended = run_session(established, &inputs).await;
-                        format!("the session ended: {ended:?}")
-                    }
-                    Err(HandshakeError::Rejected(reject)) => {
-                        named_by_gateway = reject
-                            .retry_after_secs
-                            .map(|secs| Duration::from_secs(u64::from(secs)));
-                        status.send_replace(LinkStatus::Refused {
-                            update_permit: reject.update_permit.clone(),
-                            code: reject.code,
-                            detail: reject.detail.clone(),
-                        });
-                        format!("refused: {:?}", reject.code)
-                    }
-                    Err(error) => error.to_string(),
-                }
+            Err(PrimaryFailure::Handshake(HandshakeError::Rejected(reject))) => {
+                named_by_gateway = reject
+                    .retry_after_secs
+                    .map(|secs| Duration::from_secs(u64::from(secs)));
+                status.send_replace(LinkStatus::Refused {
+                    update_permit: reject.update_permit.clone(),
+                    code: reject.code,
+                    detail: reject.detail.clone(),
+                });
+                format!("refused: {:?}", reject.code)
             }
+            Err(PrimaryFailure::Handshake(error)) => error.to_string(),
         };
         *shared
             .active_endpoint
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner) = None;
+        *shared
+            .primary_attaching
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner) = None;
+        *shared
+            .gateway_id
             .lock()
             .unwrap_or_else(PoisonError::into_inner) = None;
         *shared
@@ -774,8 +1233,78 @@ async fn supervise(
                 why,
             });
         }
-        tokio::time::sleep(retry_in).await;
+        tokio::select! {
+            () = shared.primary_changed.notified() => {},
+            () = tokio::time::sleep(retry_in) => {},
+        }
     }
+}
+
+enum PrimaryFailure {
+    Selection(String),
+    Dial(Vec<(Endpoint, DialError)>),
+    Handshake(HandshakeError),
+}
+
+async fn establish_primary(
+    identity: &mut ClientIdentity,
+    policy: &PrimaryGateway,
+    endpoints: &Endpoints,
+    dialer: &dyn Dialer,
+    clock: &dyn Clock,
+    shared: &Shared,
+) -> Result<(Established, Endpoint), PrimaryFailure> {
+    let (candidates, measurements) = policy
+        .candidates(dialer, endpoints.list(), endpoints.last_worked())
+        .await
+        .map_err(PrimaryFailure::Selection)?;
+    let measured_at = (!measurements.is_empty()).then(|| clock.time());
+    *shared
+        .gateway_measurements
+        .lock()
+        .unwrap_or_else(PoisonError::into_inner) = measurements;
+    *shared
+        .gateway_measured_at
+        .lock()
+        .unwrap_or_else(PoisonError::into_inner) = measured_at;
+    let mut failures = Vec::new();
+    let mut busy = None;
+    for candidate in candidates {
+        if let Some(id) = &candidate.gateway_id {
+            *shared
+                .primary_attaching
+                .lock()
+                .unwrap_or_else(PoisonError::into_inner) = Some(id.clone());
+            shared.auxiliary.close_gateway(id).await;
+        }
+        let endpoint = candidate.endpoint;
+        let connection = match dialer.dial(&endpoint).await {
+            Ok(connection) => connection,
+            Err(error) => {
+                failures.push((endpoint, error));
+                continue;
+            }
+        };
+        identity.gateway_id = candidate.gateway_id;
+        if let Err(error) = keep_connected_endpoint(&shared.directory, &endpoint) {
+            tracing::warn!(%error, "the verified connection address could not be saved");
+        }
+        match connect(connection, identity, clock).await {
+            Ok(established) => return Ok((established, endpoint)),
+            Err(HandshakeError::Rejected(reject)) if reject.code == RejectCode::Busy => {
+                busy = Some(reject);
+            }
+            // A refused identity/update must not be retried through another gateway.
+            Err(error @ HandshakeError::Rejected(_)) => {
+                return Err(PrimaryFailure::Handshake(error));
+            }
+            Err(error) => failures.push((endpoint, DialError::Connect(error.to_string()))),
+        }
+    }
+    if let Some(reject) = busy {
+        return Err(PrimaryFailure::Handshake(HandshakeError::Rejected(reject)));
+    }
+    Err(PrimaryFailure::Dial(failures))
 }
 
 /// The last address whose transport was verified, including an authenticated update refusal.
@@ -796,7 +1325,12 @@ fn keep_connected_endpoint(data_dir: &std::path::Path, endpoint: &Endpoint) -> s
 }
 
 /// Forwards the events of a session to the core until it ends.
-async fn run_session(established: Established, inputs: &mpsc::UnboundedSender<Input>) -> EndReason {
+async fn run_session(
+    established: Established,
+    inputs: &mpsc::UnboundedSender<Input>,
+    primary_changed: &tokio::sync::Notify,
+    #[cfg(feature = "test-observers")] observed: &Arc<crate::test_observers::QueueGauge>,
+) -> EndReason {
     let Established {
         sender,
         mut inbox,
@@ -804,37 +1338,80 @@ async fn run_session(established: Established, inputs: &mpsc::UnboundedSender<In
         clock_offset_ms,
         ..
     } = established;
+    let operator_sender = sender.clone();
     let start = SessionStart {
         ready,
         sender,
         clock_offset_ms,
     };
-    if inputs.send(Input::Ready(Box::new(start))).is_err() {
+    if send_input(
+        inputs,
+        Input::Ready(Box::new(start)),
+        #[cfg(feature = "test-observers")]
+        observed,
+    )
+    .is_err()
+    {
         return EndReason::Local;
     }
     loop {
-        match inbox.next().await {
+        let event = tokio::select! {
+            event = inbox.next() => event,
+            () = primary_changed.notified() => { operator_sender.end(); continue; },
+        };
+        match event {
             Some(SessionEvent::Frame(frame)) => {
-                if inputs.send(Input::Frame(frame)).is_err() {
+                if send_input(
+                    inputs,
+                    Input::Frame(frame),
+                    #[cfg(feature = "test-observers")]
+                    observed,
+                )
+                .is_err()
+                {
                     return EndReason::Local;
                 }
             }
             Some(SessionEvent::Data(data)) => {
-                if inputs.send(Input::Data(data)).is_err() {
+                if send_input(
+                    inputs,
+                    Input::Data(data),
+                    #[cfg(feature = "test-observers")]
+                    observed,
+                )
+                .is_err()
+                {
                     return EndReason::Local;
                 }
             }
             Some(SessionEvent::Datagram(packet)) => {
-                if inputs.send(Input::Datagram(packet)).is_err() {
+                if send_input(
+                    inputs,
+                    Input::Datagram(packet),
+                    #[cfg(feature = "test-observers")]
+                    observed,
+                )
+                .is_err()
+                {
                     return EndReason::Local;
                 }
             }
             Some(SessionEvent::Ended(reason)) => {
-                let _ = inputs.send(Input::Ended);
+                let _ = send_input(
+                    inputs,
+                    Input::Ended,
+                    #[cfg(feature = "test-observers")]
+                    observed,
+                );
                 return reason;
             }
             None => {
-                let _ = inputs.send(Input::Ended);
+                let _ = send_input(
+                    inputs,
+                    Input::Ended,
+                    #[cfg(feature = "test-observers")]
+                    observed,
+                );
                 return EndReason::PeerClosed;
             }
         }
@@ -861,6 +1438,7 @@ async fn core(
     tunnels: TunnelHub,
     shared: Arc<Shared>,
     clock: Arc<dyn Clock>,
+    #[cfg(feature = "test-observers")] observed: crate::test_observers::ReceiverLifetime,
 ) {
     let mut session: Option<SessionSender> = None;
     let mut ticker = tokio::time::interval(CORE_TICK);
@@ -878,7 +1456,14 @@ async fn core(
             _ = ticker.tick() => None,
         };
         let mut batch: Vec<Input> = first.into_iter().collect();
+        #[cfg(feature = "test-observers")]
+        let mut flights: std::collections::VecDeque<_> = batch
+            .iter()
+            .map(|input| observed.selected(input.observed_bytes()))
+            .collect();
         while let Ok(more) = inputs.try_recv() {
+            #[cfg(feature = "test-observers")]
+            flights.push_back(observed.selected(more.observed_bytes()));
             batch.push(more);
         }
         let now = Instant::now();
@@ -893,6 +1478,8 @@ async fn core(
             }
         }
         for input in batch {
+            #[cfg(feature = "test-observers")]
+            let flight = flights.pop_front();
             match input {
                 Input::RawAfter {
                     stream,
@@ -955,6 +1542,30 @@ async fn core(
                 }
                 Input::Frame(frame) => {
                     let frame = *frame;
+                    if let Frame::Gateways(advertisement) = frame {
+                        shared
+                            .gateway
+                            .lock()
+                            .unwrap_or_else(PoisonError::into_inner)
+                            .catalogue = advertisement.gateways.clone();
+                        shared
+                            .advertised_gateways
+                            .send_replace(Some(advertisement.gateways));
+                        if shared.follows_system {
+                            *shared
+                                .endpoints
+                                .lock()
+                                .unwrap_or_else(PoisonError::into_inner) =
+                                advertisement.endpoints.clone();
+                        }
+                        shared
+                            .advertised
+                            .send_replace(Some(advertisement.endpoints));
+                        continue;
+                    }
+                    if shared.auxiliary.control(&frame) {
+                        continue;
+                    }
                     if let Frame::PortConnectionsQuery(query) = frame {
                         let records = shared
                             .port_records
@@ -978,6 +1589,10 @@ async fn core(
                                 },
                             ));
                         }
+                        #[cfg(feature = "test-observers")]
+                        if let Some(flight) = flight {
+                            flight.processed();
+                        }
                         continue;
                     }
                     if let Frame::McpImportAnswer(answer) = frame {
@@ -989,6 +1604,10 @@ async fn core(
                         {
                             let _ = tell.send(answer);
                         }
+                        #[cfg(feature = "test-observers")]
+                        if let Some(flight) = flight {
+                            flight.processed();
+                        }
                         continue;
                     }
                     if let Frame::PortLocalAnswer(answer) = frame {
@@ -999,6 +1618,10 @@ async fn core(
                             .remove(&answer.request_id)
                         {
                             let _ = tell.send(answer);
+                        }
+                        #[cfg(feature = "test-observers")]
+                        if let Some(flight) = flight {
+                            flight.processed();
                         }
                         continue;
                     }
@@ -1029,8 +1652,16 @@ async fn core(
                 }
                 Input::Shutdown(done) => {
                     shutdown = Some(done);
+                    #[cfg(feature = "test-observers")]
+                    if let Some(flight) = flight {
+                        flight.processed();
+                    }
                     break;
                 }
+            }
+            #[cfg(feature = "test-observers")]
+            if let Some(flight) = flight {
+                flight.processed();
             }
         }
         if shutdown.is_some() {

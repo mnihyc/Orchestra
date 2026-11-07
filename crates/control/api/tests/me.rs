@@ -6,6 +6,7 @@
 )]
 
 mod support;
+use support::FullTokenReply as _;
 
 use chrono::Duration;
 use orch_api_contract::auth::{
@@ -77,7 +78,7 @@ async fn change_password(world: &World, signed: &Signed, current: &str, new: &st
         .call(MePasswordChange, &[])
         .token(signed.token())
         .body(&MePasswordChangeBody {
-            current_password: current.to_owned(),
+            current_password: Some(current.to_owned()),
             new_password: new.to_owned(),
         })
         .send()
@@ -121,18 +122,20 @@ async fn create_token(
         .body(&body)
         .send()
         .await
+        .full_token()
 }
 
 fn named(name: &str) -> ApiTokenCreateBody {
     ApiTokenCreateBody {
+        rules: None,
         name: name.to_owned(),
         scopes: Some(vec!["*".to_owned()]),
         node_id: None,
         expires_at: None,
-        proof: orch_api_contract::auth::SensitiveProof {
+        proof: Some(orch_api_contract::auth::SensitiveProof {
             password: Some(support::PASSWORD.to_owned()),
             ..Default::default()
-        },
+        }),
     }
 }
 
@@ -613,7 +616,7 @@ async fn an_authenticator_is_set_up_switched_on_and_switched_off_with_codes_that
             .call(MeTotpDisable, &[])
             .token(signed.token())
             .body(&MeTotpDisableBody {
-                password: password.to_owned(),
+                password: Some(password.to_owned()),
                 code,
             })
             .send()
@@ -829,7 +832,7 @@ async fn a_mailed_code_stops_being_a_second_step_with_the_password_and_a_code_an
             .call(MeEmailCodeDisable, &[])
             .token(signed.token())
             .body(&MeEmailCodeDisableBody {
-                password: password.to_owned(),
+                password: Some(password.to_owned()),
                 code: code.to_owned(),
             })
             .send()
@@ -883,7 +886,7 @@ async fn a_mailed_second_step_can_be_switched_off_with_a_code_of_the_authenticat
         .call(MeEmailCodeDisable, &[])
         .token(signed.token())
         .body(&MeEmailCodeDisableBody {
-            password: PASSWORD.to_owned(),
+            password: Some(PASSWORD.to_owned()),
             code: world.totp_code(&secret),
         })
         .send()
@@ -1141,6 +1144,7 @@ async fn an_api_token_is_shown_once_stored_as_a_hash_and_made_only_from_a_browse
         .body(&named("more"))
         .send()
         .await
+        .full_token()
         .problem();
     assert_eq!(
         (refused.status, refused.code),
@@ -1189,14 +1193,15 @@ async fn an_api_token_is_made_with_the_scopes_the_node_and_the_end_it_is_asked_f
         &world,
         &signed,
         ApiTokenCreateBody {
+            rules: None,
             name: "reader".to_owned(),
             scopes: Some(vec!["thread.view".to_owned(), "project.view".to_owned()]),
             node_id: Some(project),
             expires_at: Some(ends.into()),
-            proof: orch_api_contract::auth::SensitiveProof {
+            proof: Some(orch_api_contract::auth::SensitiveProof {
                 password: Some(support::PASSWORD.to_owned()),
                 ..Default::default()
-            },
+            }),
         },
     )
     .await

@@ -37,7 +37,12 @@ impl Classification {
     pub fn retryable(&self) -> bool {
         matches!(
             self.code.as_str(),
-            "provider_busy" | "provider_unreachable" | "model_refused"
+            "provider_busy"
+                | "rate_limited"
+                | "overloaded"
+                | "stream_interrupted"
+                | "provider_unreachable"
+                | "model_refused"
         )
     }
 
@@ -51,7 +56,8 @@ impl Classification {
             "context_overflow" => "context_window",
             "provider_exhausted" => "plan_limit",
             "provider_unauthorized" => "credential_refused",
-            "provider_busy" => "busy",
+            "provider_busy" | "rate_limited" | "overloaded" => "busy",
+            "stream_interrupted" => "out_of_reach",
             "provider_unreachable" => "out_of_reach",
             _ => "unknown",
         }
@@ -318,21 +324,28 @@ fn words(text: &str) -> Option<Classification> {
     if has(
         text,
         &[
-            "overload",
-            "at capacity",
-            "capacity reached",
             "rate limit",
             "rate_limit",
             "too many requests",
             "throttl",
+            "temporarily limiting",
+        ],
+    ) {
+        return Some(result("rate_limited", None, Evidence::Words));
+    }
+    if has(
+        text,
+        &[
+            "overload",
+            "at capacity",
+            "capacity reached",
             "server busy",
             "service busy",
-            "temporarily limiting",
             "server error",
             "server_error",
         ],
     ) {
-        return Some(result("provider_busy", None, Evidence::Words));
+        return Some(result("overloaded", None, Evidence::Words));
     }
     if has(
         text,
@@ -436,13 +449,15 @@ pub fn classify(input: &FailureInput<'_>) -> Classification {
             | "invalid_credential_header"
             | "oauth_org_not_allowed"
             | "cloud_credential_error" => Some(("provider_unauthorized", None)),
+            "rate_limited" => Some(("rate_limited", None)),
+            "stream_interrupted" => Some(("stream_interrupted", None)),
             "serveroverloaded"
             | "internalservererror"
             | "flexunavailable"
             | "overloaded_error"
             | "server_is_overloaded"
             | "service_unavailable_error"
-            | "overloaded" => Some(("provider_busy", None)),
+            | "overloaded" => Some(("overloaded", None)),
             "server_error" | "api_error" => {
                 server_wrapper = true;
                 None
@@ -455,7 +470,7 @@ pub fn classify(input: &FailureInput<'_>) -> Classification {
             | "rate_limit_exceeded"
             | "rate_limit"
             | "slow_down" => {
-                generic = Some("provider_busy");
+                generic = Some("rate_limited");
                 None
             }
             "permission_error" => {
@@ -474,7 +489,11 @@ pub fn classify(input: &FailureInput<'_>) -> Classification {
         && let Some(found) = by_words.as_ref()
         && !matches!(
             found.code.as_str(),
-            "provider_busy" | "provider_unreachable"
+            "provider_busy"
+                | "rate_limited"
+                | "overloaded"
+                | "stream_interrupted"
+                | "provider_unreachable"
         )
     {
         return found.clone();
@@ -486,7 +505,8 @@ pub fn classify(input: &FailureInput<'_>) -> Classification {
         Some(404) if text.contains("model") => Some("model_unavailable"),
         Some(408 | 504) => Some("provider_unreachable"),
         Some(413) => Some("context_overflow"),
-        Some(429 | 500..=599) => Some("provider_busy"),
+        Some(429) => Some("rate_limited"),
+        Some(500..=599) => Some("overloaded"),
         _ => None,
     };
     if let Some(kind) = status_kind {
@@ -506,7 +526,7 @@ pub fn classify(input: &FailureInput<'_>) -> Classification {
         return result("provider_unreachable", None, Evidence::Transport);
     }
     if server_wrapper {
-        return result("provider_busy", None, Evidence::Structured);
+        return result("overloaded", None, Evidence::Structured);
     }
     // Retry advice alone names no cause and cannot make an unknown failure transient.
     result("harness_error", None, Evidence::Unknown)
