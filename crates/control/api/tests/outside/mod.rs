@@ -24,6 +24,7 @@ use orch_notifier_contract::notifier::Notifier;
 use orch_types::{Id, Json};
 use orch_worker_core::channels::Notifiers;
 use serde_json::json;
+use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex, OnceLock};
 use std::time::Duration;
 
@@ -56,6 +57,56 @@ pub struct Sent {
 }
 
 static SENT: Mutex<Vec<Sent>> = Mutex::new(Vec::new());
+
+/// One notifier check held at its actual native IO boundary, keyed by a unique fixture host.
+#[derive(Default)]
+pub struct CheckGate {
+    entered: tokio::sync::Notify,
+    proceed: tokio::sync::Notify,
+    released: AtomicBool,
+    calls: AtomicUsize,
+}
+static CHECK_GATES: OnceLock<Mutex<std::collections::BTreeMap<String, Arc<CheckGate>>>> =
+    OnceLock::new();
+static DELIVERY_GATES: OnceLock<Mutex<std::collections::BTreeMap<String, Arc<CheckGate>>>> =
+    OnceLock::new();
+
+/// Hold one real scripted delivery at its unique native SMTP host or push endpoint.
+pub fn hold_delivery(address: String) -> Arc<CheckGate> {
+    let gate = Arc::new(CheckGate::default());
+    DELIVERY_GATES
+        .get_or_init(Mutex::default)
+        .lock()
+        .unwrap()
+        .insert(address, Arc::clone(&gate));
+    gate
+}
+
+/// Install after creating the original channel, before requesting its one validation.
+pub fn hold_check(host: String) -> Arc<CheckGate> {
+    let gate = Arc::new(CheckGate::default());
+    CHECK_GATES
+        .get_or_init(Mutex::default)
+        .lock()
+        .unwrap()
+        .insert(host, Arc::clone(&gate));
+    gate
+}
+impl CheckGate {
+    /// Actual notifier entry, not an elapsed-time premise.
+    pub async fn entered(&self) {
+        self.entered.notified().await;
+    }
+    /// Release this supplier, including any erroneous replay so its count can fail explicitly.
+    pub fn release(&self) {
+        self.released.store(true, Ordering::Release);
+        self.proceed.notify_waiters();
+    }
+    /// How many real native checks reached this unique host.
+    pub fn calls(&self) -> usize {
+        self.calls.load(Ordering::Acquire)
+    }
+}
 
 /// Everything the scripted notifiers delivered in this test binary.
 pub fn sent() -> Vec<Sent> {
@@ -101,6 +152,17 @@ impl Notifier for Scripted {
 
     async fn check(&self, config: &Config) -> Result<Json, DeliverError> {
         let host = config.text("host").unwrap_or_default();
+        let gate = CHECK_GATES
+            .get()
+            .and_then(|gates| gates.lock().unwrap().get(host).cloned());
+        if let Some(gate) = gate {
+            let proceed = gate.proceed.notified();
+            gate.calls.fetch_add(1, Ordering::AcqRel);
+            gate.entered.notify_one();
+            if !gate.released.load(Ordering::Acquire) {
+                proceed.await;
+            }
+        }
         if host == REFUSING_HOST {
             return Err(DeliverError::refused(
                 "535",
@@ -132,6 +194,23 @@ impl Notifier for Scripted {
             secrets: delivery.config.secrets.keys().cloned().collect(),
             allowed: delivery.config.allowed_private_hosts.clone(),
         });
+        let key = delivery
+            .config
+            .text("host")
+            .or_else(|| delivery.to.get("endpoint").and_then(Json::as_str));
+        let gate = key.and_then(|key| {
+            DELIVERY_GATES
+                .get()
+                .and_then(|gates| gates.lock().unwrap().get(key).cloned())
+        });
+        if let Some(gate) = gate {
+            let proceed = gate.proceed.notified();
+            gate.calls.fetch_add(1, Ordering::AcqRel);
+            gate.entered.notify_one();
+            if !gate.released.load(Ordering::Acquire) {
+                proceed.await;
+            }
+        }
         if delivery.to["email"] == BOUNCING {
             return Err(DeliverError::refused("550", "550 5.1.1 no such user"));
         }

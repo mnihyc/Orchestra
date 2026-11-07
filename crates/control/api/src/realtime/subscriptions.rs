@@ -95,6 +95,13 @@ pub(crate) struct SubState {
     pub(crate) offline: bool,
 }
 
+impl SubState {
+    /// The exact credential decision that authorized this projection, under the state lock.
+    pub(super) fn publication_identity(&self) -> Id {
+        self.session
+    }
+}
+
 /// One feed followed by one connection.
 #[derive(Debug)]
 pub struct Subscription {
@@ -137,7 +144,7 @@ impl Subscription {
         inner: Weak<Inner>,
     ) -> Self {
         metrics::gauge!("orch_ws_subscriptions","feed_kind"=>metric_kind(&feed)).increment(1.0);
-        let session = connection.session();
+        let session = connection.decision_identity();
         Self {
             tag,
             feed,
@@ -237,7 +244,7 @@ impl Subscription {
                 .decided_session
                 .lock()
                 .unwrap_or_else(|error| error.into_inner())
-                != self.connection.session()
+                != self.connection.decision_identity()
         {
             self.refresh_after_expiry();
             return false;
@@ -309,7 +316,7 @@ impl Subscription {
         *self
             .decided_session
             .lock()
-            .unwrap_or_else(|error| error.into_inner()) = self.connection.session();
+            .unwrap_or_else(|error| error.into_inner()) = self.connection.decision_identity();
         self.decided_as_admin
             .store(self.connection.as_admin(), Ordering::Release);
         self.decided.store(epoch, Ordering::Release);
@@ -396,19 +403,61 @@ pub(crate) async fn may_view(
     }
 }
 
-tokio::task_local! {
-    /// The browser session a feed is decided for, where the decision is a connection's: the session a
-    /// second step is given in.
-    static VIEWING: Id;
+#[derive(Clone)]
+struct Viewing {
+    credential: super::server::Login,
+    admitted: Option<Caller>,
 }
 
-/// Every projection uses this connection's current browser session, including
-/// after reauthentication. A person's other session cannot supply its mode.
+tokio::task_local! {
+    /// The exact authenticated credential and current shared admission for this read checkpoint.
+    static VIEWING: Viewing;
+}
+
+/// Every projection retains this connection's actual credential; another session or key
+/// of the same account cannot supply its mode, policy or accepted boundary.
 pub(crate) async fn viewing<T>(
     connection: &Connection,
     work: impl std::future::Future<Output = T>,
 ) -> T {
-    VIEWING.scope(connection.session(), work).await
+    let credential = connection.credential();
+    if VIEWING
+        .try_with(|viewing| viewing.credential.authentication == credential.authentication)
+        .unwrap_or(false)
+    {
+        return work.await;
+    }
+    VIEWING
+        .scope(
+            Viewing {
+                credential,
+                admitted: None,
+            },
+            work,
+        )
+        .await
+}
+
+/// Uses a newly admitted ordinary caller for this one projection checkpoint. The next
+/// delivery resolves actual target ancestry and admits again; no caller proof is cached globally.
+pub(crate) async fn viewing_admitted<T>(
+    connection: &Connection,
+    caller: Caller,
+    work: impl std::future::Future<Output = T>,
+) -> Result<T, Fail> {
+    let credential = connection.credential();
+    if caller.user() != connection.user {
+        return Err(Fail::other("a feed changed its acting account"));
+    }
+    Ok(VIEWING
+        .scope(
+            Viewing {
+                credential,
+                admitted: Some(caller),
+            },
+            work,
+        )
+        .await)
 }
 
 /// The person as the access engine knows them now, if there is such a person. Where the decision is a
@@ -419,44 +468,105 @@ pub(crate) async fn principal_of(
     conn: &mut Conn,
     user: Id,
 ) -> Result<Option<Principal>, Fail> {
-    let viewing = VIEWING.try_with(|session| *session).ok();
-    let as_admin = match viewing {
-        Some(session) => {
-            orch_db::queries::identity::session_admin_mode(conn, user, session, inner.clock.now())
-                .await?
-                .unwrap_or(false)
-        }
-        None => false,
+    let Some(viewing) = VIEWING.try_with(Clone::clone).ok() else {
+        #[cfg(test)]
+        eprintln!("history socket diagnostic principal_context=missing_viewing");
+        return Ok(None);
     };
-    orch_db::audit::set_admin_mode(user, as_admin);
-    let principal = match Principal::load(
-        conn,
-        Caller::session(user).with_admin_mode(as_admin),
-        inner.clock.time(),
-    )
-    .await
+    if viewing.credential.user != user {
+        return Ok(None);
+    }
+    Ok(reader_of(inner, conn, user)
+        .await?
+        .map(|(principal, _)| principal))
+}
+
+/// A current ordinary reader paired with the actual authenticator used to load it.
+/// The tuple is request-local, not a native Session lease or a global permission cache.
+pub(crate) async fn reader_of(
+    inner: &Inner,
+    conn: &mut Conn,
+    user: Id,
+) -> Result<Option<(Principal, crate::middleware::authentication::Authed)>, Fail> {
+    use crate::middleware::{authorization, requests::ApiError};
+    let Some(viewing) = VIEWING.try_with(Clone::clone).ok() else {
+        return Ok(None);
+    };
+    if viewing.credential.user != user {
+        return Ok(None);
+    }
+    let app = inner
+        .app()
+        .ok_or_else(|| Fail::other("the realtime application is unavailable"))?;
+    let mut identity = match super::server::current_identity(&app, conn, &viewing.credential).await
     {
+        Ok(identity) => identity,
+        Err(error)
+            if matches!(
+                error.code(),
+                orch_api_contract::common::ErrorCode::AuthInvalidToken
+                    | orch_api_contract::common::ErrorCode::AuthRequired
+                    | orch_api_contract::common::ErrorCode::AuthSuspended
+            ) =>
+        {
+            return Ok(None);
+        }
+        Err(error) => return Err(Fail::other(error)),
+    };
+    if let Some(admitted) = &viewing.admitted {
+        let same = admitted.user() == user
+            && match (&viewing.credential.via, admitted.grant()) {
+                (crate::middleware::authentication::Via::Session { .. }, None) => true,
+                (crate::middleware::authentication::Via::Token { token_id, .. }, Some(grant)) => {
+                    !admitted.as_admin() && grant.token_ids().any(|id| id == *token_id)
+                }
+                _ => false,
+            };
+        if !same {
+            return Ok(None);
+        }
+        let accepted = if admitted.grant().is_some() {
+            let Some(current) = orch_authz::CapturedCaller::capture(admitted)
+                .restore_current(conn, app.clock.as_ref())
+                .await?
+            else {
+                return Ok(None);
+            };
+            current
+        } else {
+            admitted.clone()
+        };
+        let current = identity
+            .caller
+            .intersect_restrictions(&accepted)
+            .map_err(ApiError::internal)
+            .map_err(Fail::other)?;
+        identity.caller = authorization::readmit_current(current, admitted).map_err(Fail::other)?;
+    }
+    identity.user.as_admin = identity.caller.as_admin();
+    orch_db::audit::set_admin_mode(user, identity.user.as_admin);
+    identity.now = inner.clock.time();
+    let principal = match Principal::load(conn, identity.caller.clone(), identity.now).await {
         Ok(principal) => principal,
         Err(orch_authz::Error::NoSuchUser(_)) => return Ok(None),
         Err(error) => return Err(error.into()),
     };
-    let Some(session) = viewing else {
-        return Ok(Some(principal));
-    };
-    let Some(person) = orch_db::queries::identity::user_by_id(conn, user).await? else {
-        return Ok(None);
-    };
-    let viewer = crate::middleware::authentication::Authed {
-        as_admin,
-        user: person,
-        via: crate::middleware::authentication::Via::Session {
-            session_id: session,
-        },
-    };
-    crate::sign_in::second_step::hold(conn, &viewer, principal)
+    let principal = crate::sign_in::second_step::hold(conn, &identity.user, principal)
         .await
-        .map(Some)
-        .map_err(Fail::other)
+        .map_err(Fail::other)?;
+    if identity.check_deadline(&app).is_err() {
+        return Ok(None);
+    }
+    Ok(Some((principal, identity.user)))
+}
+
+/// Keep the same actual socket origin alongside a projected Principal, without rebuilding Via.
+pub(crate) async fn reader_for_connection(
+    inner: &Inner,
+    conn: &mut Conn,
+    connection: &Connection,
+) -> Result<Option<(Principal, crate::middleware::authentication::Authed)>, Fail> {
+    viewing(connection, reader_of(inner, conn, connection.user)).await
 }
 
 /// Whether the person of `connection` may follow `feed`, now, in the session the connection signed in
@@ -466,9 +576,10 @@ pub(crate) async fn decide_for(
     connection: &Connection,
     feed: &Feed,
 ) -> Result<Access, Fail> {
-    VIEWING
-        .scope(connection.session(), decide(inner, connection.user, feed))
-        .await
+    let Some(caller) = super::key_reads::admit(inner, connection, feed).await? else {
+        return Ok(Access::Forbidden);
+    };
+    viewing_admitted(connection, caller, decide(inner, connection.user, feed)).await?
 }
 
 /// Loads a delivery's principal with this exact browser session's second-step holds.
@@ -477,12 +588,7 @@ pub(crate) async fn principal_for_connection(
     conn: &mut Conn,
     connection: &Connection,
 ) -> Result<Option<Principal>, Fail> {
-    VIEWING
-        .scope(
-            connection.session(),
-            principal_of(inner, conn, connection.user),
-        )
-        .await
+    viewing(connection, principal_of(inner, conn, connection.user)).await
 }
 
 /// Whether `user` may follow `feed`, now.
@@ -590,7 +696,7 @@ impl Inner {
         }))
         .encode()
         {
-            connection.outbox.push_frame(sub.tag(), text);
+            connection.outbox.push_control(sub.tag(), text);
         }
         self.leave_presence(connection, sub.feed());
     }
@@ -637,9 +743,10 @@ impl Inner {
         if !watches::credential_current(self, sub.connection()).await? {
             return Ok(false);
         }
-        if st.epoch == epoch
+        if sub.connection().credential().current.grant().is_none()
+            && st.epoch == epoch
             && st.as_admin == sub.connection().as_admin()
-            && st.session == sub.connection().session()
+            && st.session == sub.connection().decision_identity()
             && st.valid_until.is_none_or(|until| self.clock.time() < until)
         {
             return Ok(!st.reload || personal);
@@ -648,7 +755,7 @@ impl Inner {
         // remains expired instead of being cached as though that grant had no end.
         let until = viewing(
             sub.connection(),
-            watches::earliest_end(self, sub.connection().user),
+            watches::earliest_end(self, sub.connection()),
         )
         .await?;
         // Read before deciding: a change of authority that commits after it moves the epoch
@@ -667,7 +774,7 @@ impl Inner {
             || st.epoch < 0
             || st.authority != authority
             || st.as_admin != sub.connection().as_admin()
-            || st.session != sub.connection().session();
+            || st.session != sub.connection().decision_identity();
         match decide_for(self, sub.connection(), sub.feed()).await? {
             access @ (Access::Allowed | Access::Inspecting) => {
                 if matches!(sub.feed(), Feed::DocumentTree(_)) {
@@ -679,7 +786,7 @@ impl Inner {
                 st.epoch = epoch;
                 st.authority = authority;
                 st.as_admin = sub.connection().as_admin();
-                st.session = sub.connection().session();
+                st.session = sub.connection().decision_identity();
                 st.valid_until = until;
                 sub.set_deadline(until);
                 sub.set_decided(epoch);
@@ -861,7 +968,7 @@ pub(crate) async fn subscribe(
         let mut conn = inner.db.acquire().await?;
         orch_db::queries::access::authority_epoch(&mut conn).await?
     };
-    let until = viewing(connection, watches::earliest_end(inner, connection.user)).await?;
+    let until = viewing(connection, watches::earliest_end(inner, connection)).await?;
     let access = decide_for(inner, connection, &feed).await?;
     match access {
         Access::Allowed | Access::Inspecting => {}
@@ -896,7 +1003,7 @@ pub(crate) async fn subscribe(
         })
         .encode()
         .map_err(Fail::other)?;
-        connection.outbox.push_frame(
+        connection.outbox.push_control(
             Tag {
                 id,
                 generation: inner.number(),
@@ -936,7 +1043,7 @@ pub(crate) async fn subscribe(
     st.epoch = epoch;
     st.authority = authority;
     st.as_admin = connection.as_admin();
-    st.session = connection.session();
+    st.session = connection.decision_identity();
     st.valid_until = until;
     sub.set_deadline(until);
     sub.set_decided(epoch);
@@ -1022,6 +1129,7 @@ async fn inner_opened(
         }
     };
     let mut tx = inner.db.begin().await?;
+    let session = connection.browser_session();
     let Some(principal) = principal_for_connection(inner, &mut tx, connection).await? else {
         return Ok(());
     };
@@ -1030,7 +1138,7 @@ async fn inner_opened(
         .map_err(Fail::other)?;
     let mut origin = connection.origin.clone();
     origin.as_admin = principal.caller().as_admin().then_some(connection.user);
-    if let Some(place) = place {
+    if let (Some(place), Some(session)) = (place, session) {
         let node = match place {
             orch_access_contract::roles::PlaceRef::Node(id) => Some(id),
             _ => None,
@@ -1041,7 +1149,7 @@ async fn inner_opened(
                 &mut tx,
                 orch_db::audit::Opening {
                     user: connection.user,
-                    session: connection.session(),
+                    session,
                     nonce: opening,
                     kind,
                     object: id,
@@ -1058,7 +1166,7 @@ async fn inner_opened(
         orch_db::audit::scope_origin(
             origin.clone(),
             orch_db::audit::scope_browser_opening(
-                Some(connection.session()),
+                session,
                 opening,
                 viewing(
                     connection,
@@ -1103,7 +1211,7 @@ async fn begin(
         })
         .encode()
         .map_err(Fail::other)?;
-        connection.outbox.push_frame(sub.tag(), text);
+        connection.outbox.push_control(sub.tag(), text);
         st.offline = inner.ephemeral.current(inner, sub, st).await?;
         return Ok(st.open);
     }
@@ -1149,7 +1257,7 @@ async fn begin(
     })
     .encode()
     .map_err(Fail::other)?;
-    connection.outbox.push_frame(sub.tag(), text);
+    connection.outbox.push_control(sub.tag(), text);
     if answer.mode == SubscribeMode::Reload {
         return Ok(false);
     }

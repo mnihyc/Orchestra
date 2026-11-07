@@ -132,10 +132,10 @@ describe('the speed of a thread', () => {
     expect(screen.getByText(/chosen by Dana/)).toBeInTheDocument();
   });
 
-  it('offers no way back to Standard where the model\'s managers made Fast its start', () => {
+  it('keeps Standard available when the model starts at Fast', () => {
     show(<SpeedChoice state={speed({ ...SOL, default_service_tier: 'fast' })} writable chooser={null} rate={null} onChoose={() => undefined} />);
     expect(screen.getByRole('radio', { name: 'Fast' })).toBeChecked();
-    expect(screen.getByRole('radio', { name: 'Standard' })).toBeDisabled();
+    expect(screen.getByRole('radio', { name: 'Standard' })).toBeEnabled();
     expect(screen.getByText(/start with Fast, as its managers chose/)).toBeInTheDocument();
   });
 

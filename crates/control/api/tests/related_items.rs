@@ -8,6 +8,7 @@
 mod places;
 mod rig;
 mod support;
+use support::FullTokenReply as _;
 
 use orch_api_contract::documents::{NewDocumentAccess, NodeDocumentCreate, NodeDocumentCreateBody};
 use orch_api_contract::search::{
@@ -111,6 +112,85 @@ async fn a_documents_related_tab_loads_for_its_owner_and_viewer_with_current_pri
         .await;
     assert_eq!(outsider.status, 404);
     assert_eq!(s.rig.commands.issued_of("provider.embed"), 0);
+}
+
+#[tokio::test]
+async fn inherited_related_candidates_stay_inside_a_tokens_subtree_and_scopes() {
+    use orch_api_contract::auth::{ApiTokenCreateBody, MeTokenCreate, SensitiveProof};
+
+    let s = Scene::new().await;
+    let topic = s.tree.topic.base.id;
+    let source = document(&s, topic, "Token source", "Source", false).await;
+    let inside = document(&s, topic, "Inside topic", "A peer", false).await;
+    let outside = document(&s, s.tree.org.base.id, "Outside topic", "A peer", false).await;
+    set(
+        &s,
+        topic,
+        "related.weights",
+        json!({"meaning":"0","place":"1","references":"0"}),
+    )
+    .await;
+    let ordinary = related(&s, source, &s.ada.token).await;
+    assert!(ordinary.items.iter().any(|item| item.id == outside));
+
+    for (scopes, documents_only) in [
+        (None, false),
+        (Some(vec!["*".to_owned()]), false),
+        (Some(vec!["doc.view".to_owned()]), true),
+    ] {
+        let no_permissions = scopes.is_none();
+        let token = s
+            .rig
+            .world
+            .app
+            .call(MeTokenCreate, &[])
+            .token(&s.ada.token)
+            .body(&ApiTokenCreateBody {
+                rules: None,
+                name: "Topic document reader".to_owned(),
+                scopes,
+                node_id: Some(topic),
+                expires_at: None,
+                proof: Some(SensitiveProof {
+                    password: Some(support::PASSWORD.to_owned()),
+                    ..Default::default()
+                }),
+            })
+            .send()
+            .await
+            .full_token()
+            .ok()
+            .token
+            .unwrap();
+        let response = s
+            .rig
+            .world
+            .app
+            .call(DocumentRelatedList, &[&source])
+            .token(&token)
+            .send()
+            .await;
+        if no_permissions {
+            assert_eq!(response.status, 404, "an unscoped token reads nothing");
+            continue;
+        }
+        assert_eq!(
+            response.status, 200,
+            "topic token documents_only={documents_only}: {:?}",
+            response.body
+        );
+        let bounded = response.ok();
+        assert!(bounded.items.iter().any(|item| item.id == inside));
+        assert!(bounded.items.iter().all(|item| item.id != outside));
+        if documents_only {
+            assert!(
+                bounded
+                    .items
+                    .iter()
+                    .all(|item| item.kind == orch_api_contract::search::RelatedKind::Document)
+            );
+        }
+    }
 }
 
 #[tokio::test]
@@ -425,7 +505,9 @@ async fn a_related_direct_chat_uses_its_readers_current_title_and_stays_hidden_f
         })
         .send()
         .await
-        .ok();
+        .ok()
+        .into_full()
+        .expect("the ordinary chat fixture is full");
     let source = document(
         &s,
         s.tree.topic.base.id,
@@ -846,7 +928,12 @@ async fn related_pages_are_bounded_complete_and_retire_a_changed_ranking() {
     let s = Scene::new().await;
     let node = s.tree.topic.base.id;
     let source = document(&s, node, "Paged source", "A source", false).await;
-    let mut expected = HashSet::new();
+    // The existing readable chats also participate through their topic, project and org.
+    let mut expected = HashSet::from([
+        s.tree.topic.base.chat_id,
+        s.tree.project.base.chat_id,
+        s.tree.org.base.chat_id,
+    ]);
     for number in 0..20 {
         expected.insert(document(&s, node, &format!("Paged peer {number}"), "A peer", false).await);
     }
@@ -861,7 +948,7 @@ async fn related_pages_are_bounded_complete_and_retire_a_changed_ranking() {
     let mut cursor = None;
     let mut seen = HashSet::new();
     let mut first = None;
-    for page in 0..7 {
+    for page in 0..expected.len().div_ceil(3) {
         let answer = s
             .rig
             .world

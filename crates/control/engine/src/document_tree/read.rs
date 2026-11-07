@@ -30,7 +30,18 @@ pub async fn load_entries_in(
     project_read(conn, actor, rows, now, true).await
 }
 
-async fn project_read(
+fn project_read(
+    conn: &mut Conn,
+    actor: Actor<'_>,
+    rows: Vec<containers::EntryRow>,
+    now: Time,
+    retained: bool,
+) -> impl std::future::Future<Output = Result<TreeRead, Error>> {
+    // All document-reader facades retain only a handle to this projection.
+    Box::pin(prepare_projection(conn, actor, rows, now, retained))
+}
+
+async fn prepare_projection(
     conn: &mut Conn,
     actor: Actor<'_>,
     rows: Vec<containers::EntryRow>,

@@ -13,6 +13,7 @@ import { EmptyState } from '@/ui/EmptyState';
 import { limitsQuery, parametersQuery } from '@/api/threads';
 import { EnvironmentStartRecovery } from './EnvironmentStartRecovery';
 import { ThreadCallRecovery } from './CallRecovery';
+import { threadSwitchRecovery } from './switchRecovery';
 import { changeModelChoice, isSettingConflict, useRunsWith } from '@/features/composer/runsWith';
 import { SettingConflict } from '@/features/composer/SettingConflict';
 import { useThreadPart } from '@/realtime/stores/thread';
@@ -20,7 +21,7 @@ import { ErrorAlert } from '@/ui/ErrorState';
 import { Select } from '@/ui/Select';
 import { openChange } from '@/features/change/target';
 import type { Thread } from '@/generated/api-types';
-import { isAgentHistoryRemoving, waitingWords } from '@/features/timeline/waiting';
+import { isAgentHistoryRemoving, isMachineProgramVersionMismatch, waitingWords } from '@/features/timeline/waiting';
 import { SandboxActions } from '@/features/resources/SandboxReadiness';
 import { holds } from '@/lib/permissions';
 import { Banner } from '@/ui/Banner';
@@ -29,16 +30,6 @@ import { providerQuery } from '@/api/resources';
 import { ProviderReset } from '@/features/resources/providers/Reset';
 import { ApiError } from '@/api/client';
 import { Link } from '@tanstack/react-router';
-
-/** The reasons a thread is held back that another provider, profile or environment gets it out of, with what the act is called for each. */
-const SWITCH_WAYS: Readonly<Record<string, 'switch' | 'switchProfile' | 'switchProvider'>> = {
-  agent_offline: 'switch',
-  agent_disabled: 'switchProfile',
-  binding_invalid: 'switchProfile',
-  provider_exhausted: 'switchProvider',
-  provider_unavailable: 'switchProvider',
-  model_not_allowed: 'switchProvider',
-};
 
 /**
  * The plan's other models, where the limit of one family of models stopped the thread's last turn: only those the
@@ -100,7 +91,7 @@ export function BlockedBanner({ thread, onProceed }: { thread: Thread; onProceed
   const { t } = useTranslation();
   const blocked = thread.state === 'blocked' && thread.blocked !== null && thread.lock === null ? thread.blocked : null;
   const secondStep = blocked?.reason === 'binding_invalid' && blocked.detail === 'second_step_required';
-  const limited = blocked?.reason === 'quota_exceeded' || blocked?.reason === 'provider_exhausted';
+  const limited = blocked?.reason === 'quota_exceeded';
   const limits = useQuery({ ...limitsQuery(thread.id), enabled: limited && holds(thread.access, 'thread.interact') });
   const providerId = thread.binding?.provider.id ?? '';
   const provider = useQuery({ ...providerQuery(providerId),enabled:blocked?.reason === 'provider_exhausted' && providerId !== '',retry:false });
@@ -109,9 +100,11 @@ export function BlockedBanner({ thread, onProceed }: { thread: Thread; onProceed
   if (blocked.detail === 'call_recovery') return <ThreadCallRecovery thread={thread} banner />;
   if (isAgentHistoryRemoving(thread)) return <Banner tone="info">{t('agentHistory.removing')}</Banner>;
   if (blocked.reason === 'environment_unavailable') return <EnvironmentStartRecovery key={JSON.stringify([thread.id, thread.environment?.id])} thread={thread} />;
-  const may = limits.data?.reached.some((limit) => limit.can_bypass) === true;
+  const versionMismatch = blocked.reason === 'binding_invalid' && (blocked.sandbox === null || blocked.sandbox === undefined) && isMachineProgramVersionMismatch(blocked.detail ?? '');
+  const versionEnvironment = versionMismatch ? thread.environment : null;
+  const may = limits.data?.reached.some((limit) => limit.cap !== null && limit.can_bypass) === true;
   const manages = holds(thread.access, 'thread.manage');
-  const way = secondStep ? undefined : SWITCH_WAYS[blocked.reason];
+  const way = threadSwitchRecovery(thread);
   const mayProceed = limited && may;
   return (
     <div className="flex flex-col gap-2"><Banner
@@ -119,10 +112,11 @@ export function BlockedBanner({ thread, onProceed }: { thread: Thread; onProceed
       className="rounded-md border"
       actionBelowOnMobile
       action={
-        secondStep ? <Link to="/settings/security" className="text-sm text-accent underline">{t('secondStep.setupAction')}</Link> : mayProceed || (way !== undefined && manages) ? (
+        secondStep ? <Link to="/settings/security" className="text-sm text-accent underline">{t('secondStep.setupAction')}</Link> : versionEnvironment !== null || mayProceed || (way !== undefined && manages) ? (
           <span className="flex flex-wrap items-center gap-2">
+            {versionEnvironment !== null && <Button size="sm" variant="primary" asChild><Link to="/resources/environments/$id" params={{ id: versionEnvironment.id }} search={{ tab: 'tools' }}>{t('resourceFacts.openEnvironment')}</Link></Button>}
             {way !== undefined && manages && (
-              <Button size="sm" variant={mayProceed ? 'secondary' : 'primary'} onClick={() => openChange({ kind: 'thread', id: thread.id, name: thread.name }, { kind: 'switch', focus: 'provider' })}>
+              <Button size="sm" variant={mayProceed || versionEnvironment !== null ? 'secondary' : 'primary'} onClick={() => openChange({ kind: 'thread', id: thread.id, name: thread.name }, { kind: 'switch', focus: 'provider' })}>
                 {t(`change.banner.${way}`)}
               </Button>
             )}
@@ -137,7 +131,7 @@ export function BlockedBanner({ thread, onProceed }: { thread: Thread; onProceed
     >
       <span data-blocked={blocked.reason}>
         {waitingWords(thread, t)}
-        {!secondStep && !manages && blocked.reason !== 'agent_offline' && blocked.reason !== 'quota_exceeded' && <span className="ml-1 text-text-muted">{t('thread.blocked.manager', { who: thread.owner.display_name })}</span>}
+        {!secondStep && !versionMismatch && !manages && blocked.reason !== 'agent_offline' && blocked.reason !== 'quota_exceeded' && blocked.reason !== 'provider_exhausted' && <span className="ml-1 text-text-muted">{t('thread.blocked.manager', { who: thread.owner.display_name })}</span>}
       </span>
     </Banner>
     {blocked.sandbox!==null && blocked.sandbox!==undefined && <SandboxActions value={blocked.sandbox} />}

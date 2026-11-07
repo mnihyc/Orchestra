@@ -50,6 +50,14 @@ use serde_json::json;
 use std::collections::BTreeMap;
 use std::time::Duration;
 
+mod creator_authority;
+pub use creator_authority::remember_command as remember_creator_command;
+pub use creator_authority::retain as retain_creator_provision_origin;
+pub use creator_authority::{
+    command_authorized as creator_command_authorized,
+    command_current_callers as creator_command_current_callers,
+};
+
 /// The phases of making a unit, and where the time usually goes: the image first (a pull or a build
 /// is minutes), then the unit and the wait for its connector. They shape a bar and nothing else.
 const SCHEDULE: Phase = Phase {
@@ -487,18 +495,24 @@ impl Provision {
                 "the template is gone or switched off",
             )
         })?;
-        let principal = Principal::load(
-            &mut tx,
-            Caller::session(
-                plan.pointer("/recovery/by")
-                    .and_then(Json::as_str)
-                    .and_then(|id| id.parse().ok())
-                    .unwrap_or(environment.owner_id),
-            ),
-            Time::new(now),
-        )
-        .await
-        .map_err(EngineError::from)?;
+        let owner = jobs::job(&mut tx, job.id())
+            .await?
+            .ok_or_else(|| EngineError::unreadable("The provision disappeared."))?;
+        let principal = match creator_authority::principal(&mut tx, &owner, Time::new(now)).await? {
+            Some(principal) => principal,
+            None => Principal::load(
+                &mut tx,
+                Caller::session(
+                    plan.pointer("/recovery/by")
+                        .and_then(Json::as_str)
+                        .and_then(|id| id.parse().ok())
+                        .unwrap_or(environment.owner_id),
+                ),
+                Time::new(now),
+            )
+            .await
+            .map_err(EngineError::from)?,
+        };
         // An environment that has been made stays on the host that has its volumes.
         let previous = if environment.generation > 0 && plan.get("recovery").is_none() {
             env_rows::published_host_of(&mut tx, environment.id).await?
@@ -1606,6 +1620,17 @@ impl Provision {
         let row = jobs::job(&mut tx, job.id())
             .await?
             .ok_or_else(|| EngineError::unreadable("the provisioning job is missing"))?;
+        if self.mode == Mode::Make && current.generation == 0 {
+            crate::jobs::source::publish_creator_generation(
+                &mut tx,
+                job,
+                current.id,
+                placed.runtime.id,
+                machine,
+                current.generation,
+            )
+            .await?;
+        }
         let origin = row
             .plan
             .get("origin")
@@ -1965,6 +1990,7 @@ impl Provision {
 #[async_trait]
 impl Phased for Provision {
     async fn run(&self, job: &Job, phase: &str) -> Result<Done, Stop> {
+        creator_authority::phase(job, phase).await?;
         match phase {
             "schedule" => self.schedule(job).await,
             "image" => self.image(job).await,

@@ -13,6 +13,7 @@ use super::files;
 use super::listing;
 use super::live;
 use super::paths;
+use super::snapshot_read;
 use crate::cache::{Entry, EntryKind, Manifest};
 use crate::middleware::authorization::{self, refusals};
 use crate::middleware::requests::{ApiError, ApiResult};
@@ -36,7 +37,7 @@ use orch_api_contract::workspace::{
     ThreadSnapshotCreateBody, ThreadSnapshotCreateSelection, ThreadSnapshotList,
     ThreadSnapshotPreflight, ThreadSnapshotPreflightBody,
 };
-use orch_authz::{Act, Policy, Principal};
+use orch_authz::{Policy, Principal};
 use orch_blob_contract::store::{BlobError, BlobStore, ByteStream};
 use orch_db::audit::{self, Actor, Entry as AuditEntry};
 use orch_db::queries::environments::workspace as environment_rows;
@@ -46,6 +47,10 @@ use orch_types::{Id, Time};
 use std::collections::HashMap;
 use std::io::{Read, Write};
 use std::sync::Arc;
+
+mod creation;
+mod deletion;
+mod preflight;
 
 /// How long a label of a snapshot may be: as long as a name of a thread.
 const LABEL_MAX_CHARS: usize = 120;
@@ -67,17 +72,44 @@ const LABEL_TIME_FORMAT: &str = "%Y-%m-%d %H:%M UTC";
 
 /// Binds this module's requests.
 pub fn mount(registry: &mut Registry) {
-    registry.on(EnvironmentFilesExport, export_environment);
+    registry.on_with_operation(
+        EnvironmentFilesExport,
+        crate::key_operations::native::effects::prepare::<creation::Export>,
+        creation::export,
+    );
     registry
         .on(ThreadSnapshotList, list)
-        .on(ThreadSnapshotCreate, create)
-        .on(ThreadSnapshotPreflight, preflight)
-        .on(SnapshotGet, get)
-        .on(SnapshotFileList, file_list)
-        .on_raw(SnapshotFileContentGet, file_content)
-        .on_raw(SnapshotArchiveGet, archive)
+        .on_with_initial_operation(
+            ThreadSnapshotCreate,
+            crate::key_operations::native::effects::initial::<creation::Create>,
+            crate::key_operations::native::effects::prepare::<creation::Create>,
+            creation::create,
+        )
+        .on_snapshot_body_read_with_optional_initial_operation(
+            ThreadSnapshotPreflight,
+            crate::key_operations::native::effects::initial::<preflight::Measure>,
+            crate::key_operations::native::selected_body::<
+                preflight::Measure,
+                (),
+                ThreadSnapshotPreflightBody,
+            >,
+            crate::key_operations::native::selected_body_read::<
+                preflight::Measure,
+                (),
+                ThreadSnapshotPreflightBody,
+            >,
+        )
+        .on_with_operation(SnapshotGet, snapshot_read::prepare, get)
+        .on_with_operation(SnapshotFileList, snapshot_read::prepare, file_list)
+        .on_raw_read_with_operation(SnapshotFileContentGet, snapshot_read::prepare, file_content)
+        .on_raw_read_with_operation(SnapshotArchiveGet, snapshot_read::prepare, archive)
         .on(SnapshotUpdate, update)
-        .on(SnapshotDelete, delete);
+        .on_with_initial_operation(
+            SnapshotDelete,
+            crate::key_operations::native::effects::initial::<deletion::Delete>,
+            crate::key_operations::native::effects::prepare::<deletion::Delete>,
+            deletion::run,
+        );
 }
 
 // ---------------------------------------------------------------- views
@@ -202,25 +234,11 @@ async fn own(
         .await?
         .ok_or_else(ApiError::not_found)?;
     let principal = authorization::principal(ctx, conn).await?;
-    if row.thread_id.is_none() {
-        if row.created_by != Some(principal.user()) {
-            return Err(ApiError::not_found());
-        }
-    } else if row.storage == "environment" {
-        authorization::require_resource(
-            conn,
-            &principal,
-            ResourceKind::Environment,
-            row.environment_id,
-            permission,
-            Policy::default(),
-        )
-        .await?;
-    } else {
-        let thread = row.thread_id.ok_or_else(ApiError::not_found)?;
-        require_where_it_runs(conn, &principal, thread, permission).await?;
-    }
-    Ok((row, principal))
+    let source = orch_engine::archive::snapshot_authority::Source::from_row(conn, row)
+        .await?
+        .ok_or_else(ApiError::not_found)?;
+    snapshot_read::require(conn, &principal, &source, permission).await?;
+    Ok((source.row, principal))
 }
 
 // ---------------------------------------------------------------- the snapshots of a thread
@@ -320,22 +338,16 @@ fn label_of(ctx: &Ctx, given: Option<&str>) -> ApiResult<String> {
     }
 }
 
-/// Resolves and authorizes exactly the paths both preflight and creation measure.
-async fn prepare_snapshot(
+/// The native current source shared by preflight and creation.
+async fn snapshot_environment(
     ctx: &Ctx,
-    selection: Option<&ThreadSnapshotCreateSelection>,
-) -> ApiResult<(
-    environment_rows::EnvironmentRow,
-    Id,
-    orch_link_contract::commands::Selection,
-)> {
-    let thread = ctx.id("id")?;
-    let mut conn = ctx.app.db.acquire().await?;
-    let place = environment_rows::thread_place(&mut conn, thread)
+    conn: &mut orch_db::Conn,
+) -> ApiResult<(environment_rows::EnvironmentRow, String)> {
+    let place = environment_rows::thread_place(conn, ctx.id("id")?)
         .await?
         .ok_or_else(ApiError::not_found)?;
     let environment = match place.environment_id {
-        Some(id) => environment_rows::environment(&mut conn, id).await?,
+        Some(id) => environment_rows::environment(conn, id).await?,
         None => None,
     }
     .ok_or_else(|| {
@@ -344,16 +356,33 @@ async fn prepare_snapshot(
             "this thread runs in no environment",
         )
     })?;
-    let principal = authorization::principal(ctx, &mut conn).await?;
+    Ok((environment, place.workspace_dir))
+}
+
+async fn require_snapshot(
+    conn: &mut orch_db::Conn,
+    principal: &Principal,
+    environment: Id,
+) -> ApiResult<()> {
     authorization::require_resource(
-        &mut conn,
-        &principal,
+        conn,
+        principal,
         ResourceKind::Environment,
-        environment.id,
+        environment,
         Permission::FilesManage,
         Policy::default(),
     )
-    .await?;
+    .await
+}
+
+/// The original native validation and physical selection, without dispatch or a job.
+async fn snapshot_paths(
+    ctx: &Ctx,
+    conn: &mut orch_db::Conn,
+    environment: &environment_rows::EnvironmentRow,
+    directory: &str,
+    selection: Option<&ThreadSnapshotCreateSelection>,
+) -> ApiResult<(Id, orch_link_contract::commands::Selection)> {
     let (include, exclude) = match selection {
         Some(selection) => {
             let clean = |list: &[String], field: &str| -> ApiResult<Vec<String>> {
@@ -381,22 +410,19 @@ async fn prepare_snapshot(
             )
         }
         None => {
-            if !listing::indexed(&environment) {
+            if !listing::indexed(environment) {
                 return Err(ApiError::new(
                     ErrorCode::WorkspaceNotIndexed,
                     "the tree is too large to index; a snapshot of it names the paths it takes",
                 ));
             }
-            (vec![place.workspace_dir.clone()], Vec::new())
+            (vec![directory.to_owned()], Vec::new())
         }
     };
-    let machine = live::machine_of(ctx, &mut conn, &environment)
+    let machine = live::machine_of(ctx, conn, environment)
         .await?
         .ok_or_else(live::offline)?;
-    drop(conn);
-    // The machine takes the snapshot of an environment it has been told to attach.
     Ok((
-        environment,
         machine,
         orch_link_contract::commands::Selection { include, exclude },
     ))
@@ -457,114 +483,38 @@ fn measurement_view(
     })
 }
 
-async fn measure_snapshot(
-    ctx: &Ctx,
-    environment: Id,
-    machine: Id,
-    selection: &orch_link_contract::commands::Selection,
-) -> ApiResult<SnapshotPreflight> {
-    let measured = live::run(
-        ctx,
-        machine,
-        orch_link_contract::commands::SerialKey::Environment(environment),
-        &orch_link_contract::commands::FsMeasure {
-            environment_id: environment,
-            selection: selection.clone(),
-        },
-    )
-    .await
-    .map_err(|failure| failure.problem(super::problems::Doing::Reading))?;
-    measurement_view(selection, measured)
-}
-
-/// Measures without writing a snapshot, audit row or job.
-async fn preflight(
-    ctx: Ctx,
-    (): (),
-    body: ThreadSnapshotPreflightBody,
-) -> ApiResult<SnapshotPreflight> {
-    let (environment, machine, selection) = prepare_snapshot(&ctx, body.selection.as_ref()).await?;
-    measure_snapshot(&ctx, environment.id, machine, &selection).await
-}
-
-/// Rechecks the selection before the transaction that starts the snapshot job.
-async fn create(ctx: Ctx, (): (), body: ThreadSnapshotCreateBody) -> ApiResult<Job> {
-    let thread = ctx.id("id")?;
-    let label = label_of(&ctx, body.label.as_deref())?;
-    let (environment, machine, selection) = prepare_snapshot(&ctx, body.selection.as_ref()).await?;
-    let measured = measure_snapshot(&ctx, environment.id, machine, &selection).await?;
-    if !measured.allowed {
-        return Err(ApiError::new(
-            ErrorCode::WorkspaceNotIndexed,
-            measured
-                .reason
-                .as_deref()
-                .unwrap_or("the selection could not be measured"),
-        )
-        .with("preflight", measured));
-    }
-    let orch_link_contract::commands::Selection { include, exclude } = selection;
-    let by = ctx.user()?.id();
-    let mut tx = ctx.app.db.begin().await?;
-    let begun = ctx
-        .app
-        .engine
-        .begin_snapshot(
-            &mut tx,
-            &Asked {
-                thread: Some(thread),
-                environment: environment.id,
-                generation: environment.generation,
-                label: label.clone(),
-                include: include.clone(),
-                exclude,
-                created_by: Some(by),
-            },
-        )
-        .await
-        .map_err(ApiError::internal)?;
-    let summary = format!(
-        "{} began a snapshot of {}",
-        crate::routes::nodes::actor_name(&ctx)?,
-        include.join(", ")
-    );
-    let mut entry = AuditEntry::new(
-        Actor::User(by),
-        orch_db::audit::action!(AuditAction::WorkspaceSnapshotCreated).as_str(),
-        "snapshot",
-        Some(begun.snapshot),
-        &summary,
-    );
-    entry.history = AuditAction::WorkspaceSnapshotCreated.is_history_line();
-    entry.node_id = Some(thread);
-    entry.org_id = Some(environment.org_id);
-    entry.environment_id = Some(environment.id);
-    entry.details =
-        serde_json::json!({ "snapshot": begun.snapshot, "label": label, "include": include });
-    audit::append(&mut tx, &entry, &origin(&ctx), ctx.now).await?;
-    let job = crate::routes::environments::jobs::view(&mut tx, &begun.job).await?;
-    tx.commit().await.map_err(orch_db::DbError::from)?;
-    Ok(job)
-}
-
 /// One snapshot.
 async fn get(ctx: Ctx, (): (), (): ()) -> ApiResult<Snapshot> {
-    let mut conn = ctx.app.db.acquire().await?;
-    let (row, _) = own(&ctx, &mut conn, Permission::FilesView).await?;
-    if row.kind == "turn"
+    // Recovery is factual preparation; retain only the final authenticated response tuple.
+    let (source, accepted) = snapshot_read::open(&ctx, false).await?;
+    let row = source.row;
+    let recovery = row.kind == "turn"
         && row.state == "unavailable"
-        && row.unavailable_reason.as_deref() == Some("store_unavailable")
-    {
-        drop(conn);
+        && row.unavailable_reason.as_deref() == Some("store_unavailable");
+    if recovery {
         if let Err(error) = ctx.app.engine.recover_recording(row.id).await {
             tracing::warn!(%error, snapshot=%row.id, "the retained recording could not be revalidated");
         }
-        conn = ctx.app.db.acquire().await?;
-        // Recheck the reader after external content work, even if recovery found no original.
-        let (current, _) = own(&ctx, &mut conn, Permission::FilesView).await?;
-        return view(&mut conn, current, Time::new(ctx.app.clock.now())).await;
     }
-    view(&mut conn, row, Time::new(ctx.app.clock.now())).await
+    let (reply, read) = crate::key_operations::snapshot_read::run(ctx.clone(), move |ctx| {
+        let accepted = accepted.clone();
+        async move {
+            let mut tx = ctx.app.db.begin_snapshot().await?;
+            let (source, principal) = if recovery {
+                accepted.refreshed_in(&mut tx).await?
+            } else {
+                accepted.current_in(&mut tx).await?
+            };
+            let read = snapshot_read::Read::new(&ctx, &source, &principal)?;
+            let reply = view(&mut tx, source.row, Time::new(ctx.app.clock.now())).await?;
+            tx.commit().await.map_err(orch_db::DbError::from)?;
+            read.publish()?;
+            Ok((reply, read))
+        }
+    })
+    .await?;
+    read.check().await?;
+    Ok(reply)
 }
 
 /// Renames a snapshot.
@@ -585,53 +535,6 @@ async fn update(ctx: Ctx, (): (), body: SnapshotUpdateBody) -> ApiResult<Snapsho
     view(&mut conn, renamed, Time::new(ctx.app.clock.now())).await
 }
 
-/// Deletes a snapshot, and lets go of the files it held.
-async fn delete(ctx: Ctx, (): (), (): ()) -> ApiResult<()> {
-    let mut conn = ctx.app.db.acquire().await?;
-    let (row, _) = own(&ctx, &mut conn, Permission::FilesManage).await?;
-    if row.state == storage::snapshot_state::RUNNING {
-        return Err(ApiError::new(
-            ErrorCode::ResourceInUse,
-            "the snapshot is being taken; cancel its job first",
-        ));
-    }
-    // What the snapshot pinned is read from its list before the list goes.
-    let listed: Vec<orch_types::Hash> = match row.manifest_blob.filter(|_| row.storage == "blobs") {
-        Some(manifest) => ctx
-            .app
-            .cache
-            .manifest_of(&ctx.app.blobs, row.id, &manifest)
-            .await
-            .map(|tree| {
-                tree.hashes()
-                    .collect::<std::collections::HashSet<_>>()
-                    .into_iter()
-                    .collect()
-            })
-            .unwrap_or_default(),
-        None => Vec::new(),
-    };
-    drop(conn);
-    let mut tx = ctx.app.db.begin().await?;
-    let tracked = storage::snapshot_pins(&mut tx, row.id).await?;
-    let removed = if row.storage == "environment" {
-        orch_db::queries::source::expire_recorded(&mut tx, row.id, ctx.now).await?
-    } else {
-        storage::delete_snapshot(&mut tx, row.id).await?
-    };
-    let Some(manifest) = removed else {
-        return Err(ApiError::not_found());
-    };
-    let mut released = tracked;
-    if released.is_empty() {
-        released = listed;
-        released.extend(manifest);
-    }
-    ctx.app.blobs.unpin(&mut tx, &released, ctx.now).await?;
-    tx.commit().await.map_err(orch_db::DbError::from)?;
-    Ok(())
-}
-
 // ---------------------------------------------------------------- what a snapshot holds
 
 async fn recorded_read(
@@ -639,7 +542,12 @@ async fn recorded_read(
     row: &SnapshotRow,
     path: Option<String>,
     export: bool,
+    read: &snapshot_read::Read,
 ) -> ApiResult<orch_link_contract::source::FsRecordReadResult> {
+    use crate::thread_engine::DispatchCommands;
+    use orch_engine::archive::snapshot_authority::SnapshotReadAuthority;
+    use orch_engine::commands::{CommandAuthority, Commands, Outgoing};
+    use orch_link_contract::source::FsRecordRead;
     if row.expires_at.is_some_and(|end| end <= ctx.app.clock.now())
         || row.state != storage::snapshot_state::COMPLETE
     {
@@ -655,35 +563,66 @@ async fn recorded_read(
                 .unwrap_or("expired_or_incomplete"),
         ));
     }
-    let mut conn = ctx.app.db.acquire().await?;
-    let environment = environment_rows::environment(&mut conn, row.environment_id)
-        .await?
-        .ok_or_else(ApiError::not_found)?;
-    let machine = live::require_live(ctx, &mut conn, &environment).await?;
-    drop(conn);
-    let result = live::run(
-        ctx,
-        machine,
-        orch_link_contract::commands::SerialKey::None,
-        &orch_link_contract::source::FsRecordRead {
-            environment_id: row.environment_id,
-            snapshot_id: row.id,
-            path,
-            export,
-        },
-    )
-    .await
-    .map_err(|_| {
+    let accepted = read.clone();
+    let command = crate::key_operations::snapshot_read::run(ctx.clone(), move |ctx| {
+        let (accepted, path) = (accepted.clone(), path.clone());
+        async move {
+            let mut tx = ctx.app.db.begin_snapshot().await?;
+            let (source, principal) = accepted.new_command_in(&mut tx).await?;
+            let environment = environment_rows::environment(&mut tx, source.row.environment_id)
+                .await?
+                .ok_or_else(ApiError::not_found)?;
+            let machine = live::require_live(&ctx, &mut tx, &environment).await?;
+            let command = Outgoing::new(
+                orch_types::new_id(),
+                machine,
+                orch_link_contract::commands::SerialKey::None,
+                &FsRecordRead {
+                    environment_id: source.row.environment_id,
+                    snapshot_id: source.row.id,
+                    path,
+                    export,
+                },
+            )
+            .map_err(ApiError::internal)?;
+            let origin = SnapshotReadAuthority::capture(
+                principal.caller(),
+                &source.row,
+                machine,
+                environment.generation,
+                &environment.workspace_root,
+                &command,
+            )
+            .map_err(snapshot_read::engine_error)?;
+            tx.commit().await.map_err(orch_db::DbError::from)?;
+            accepted.publish()?;
+            Ok(command.with_authority(CommandAuthority::snapshot_read(origin)))
+        }
+    })
+    .await?;
+    let dispatcher = ctx.app.link.dispatcher();
+    let id = command.id;
+    let unavailable = || {
         ApiError::new(
             ErrorCode::WorkspaceRestoreUnavailable,
             "the recorded state could not be read completely",
         )
         .with("snapshot_id", row.id)
-    })?;
+    };
+    DispatchCommands::new(dispatcher.clone())
+        .issue(command)
+        .await
+        .map_err(|_| unavailable())?;
+    let result = dispatcher
+        .wait_for::<FsRecordRead>(id)
+        .await
+        .map_err(|_| unavailable())?;
     let mut conn = ctx.app.db.acquire().await?;
-    // A slow transfer cannot return file data under the permission from before a move or revoke.
-    let _ = own(ctx, &mut conn, Permission::FilesView).await?;
+    // This exact Accepted command's upload/result is a fact. Its registration survives revocation;
+    // public readback below still requires current authority and the same Snapshot association.
     storage::register_blob(&mut conn, &result.blob, result.size, ctx.app.clock.now()).await?;
+    drop(conn);
+    read.check().await?;
     Ok(result)
 }
 
@@ -699,12 +638,11 @@ async fn tree_of(ctx: &Ctx, row: &SnapshotRow) -> ApiResult<Arc<Manifest>> {
 
 /// A directory of a snapshot.
 async fn file_list(ctx: Ctx, query: SnapshotPathQuery, (): ()) -> ApiResult<DirListing> {
-    let mut conn = ctx.app.db.acquire().await?;
-    let (row, _) = own(&ctx, &mut conn, Permission::FilesView).await?;
+    let (source, read) = snapshot_read::open(&ctx, true).await?;
+    let row = source.row;
     let path = paths::clean("path", &query.path, true)?;
-    drop(conn);
     if row.storage == "environment" {
-        let checked = recorded_read(&ctx, &row, None, false).await?;
+        let checked = recorded_read(&ctx, &row, None, false, &read).await?;
         if Some(checked.blob) != row.manifest_blob {
             return Err(ApiError::new(
                 ErrorCode::WorkspaceRestoreUnavailable,
@@ -713,7 +651,9 @@ async fn file_list(ctx: Ctx, query: SnapshotPathQuery, (): ()) -> ApiResult<DirL
             .with("reason", "store_changed"));
         }
     }
-    let tree = tree_of(&ctx, &row).await?;
+    let tree = tree_of(&ctx, &row).await;
+    read.check().await?;
+    let tree = tree?;
     let mut entries = listing::from_manifest(&tree, &path).ok_or_else(ApiError::not_found)?;
     // What a snapshot lists with a hash is in the store, pinned.
     for entry in &mut entries {
@@ -724,6 +664,7 @@ async fn file_list(ctx: Ctx, query: SnapshotPathQuery, (): ()) -> ApiResult<DirL
     }
     listing::sort(&mut entries);
     let truncated = listing::cut(&mut entries);
+    read.check().await?;
     Ok(DirListing {
         path,
         mount: None,
@@ -740,19 +681,20 @@ async fn file_list(ctx: Ctx, query: SnapshotPathQuery, (): ()) -> ApiResult<DirL
 
 /// The bytes of one file of a snapshot.
 async fn file_content(ctx: Ctx, query: SnapshotPathQuery, _: Body) -> ApiResult<Response> {
-    let mut conn = ctx.app.db.acquire().await?;
-    let (row, _) = own(&ctx, &mut conn, Permission::FilesView).await?;
-    drop(conn);
+    let (source, read) = snapshot_read::open(&ctx, true).await?;
+    let row = source.row;
     let path = paths::clean("path", &query.path, false)?;
-    let tree = tree_of(&ctx, &row).await?;
+    let tree = tree_of(&ctx, &row).await;
+    read.check().await?;
+    let tree = tree?;
     let hash = tree
         .get(&path)
         .filter(|entry| entry.kind == EntryKind::File)
         .and_then(|entry| entry.hash)
         .ok_or_else(ApiError::not_found)?;
     if row.storage == "environment" {
-        let read = recorded_read(&ctx, &row, Some(path.clone()), false).await?;
-        if read.blob != hash {
+        let pulled = recorded_read(&ctx, &row, Some(path.clone()), false, &read).await?;
+        if pulled.blob != hash {
             return Err(ApiError::new(
                 ErrorCode::WorkspaceRestoreUnavailable,
                 "the recorded file does not match the saved manifest",
@@ -761,14 +703,17 @@ async fn file_content(ctx: Ctx, query: SnapshotPathQuery, _: Body) -> ApiResult<
         }
     }
     let name = paths::name_of(&path);
-    files::read_for(
+    read.check().await?;
+    let response = files::read_for(
         &ctx,
         &hash,
         name,
         crate::media::media_type(name, &[]),
         false,
     )
-    .await
+    .await;
+    read.check().await?;
+    read.response(response?).await
 }
 
 // ---------------------------------------------------------------- as one stream
@@ -839,7 +784,14 @@ fn open_blob(
     handle: &tokio::runtime::Handle,
     store: &Arc<dyn BlobStore>,
     hash: &orch_types::Hash,
+    authority: &snapshot_read::Read,
 ) -> std::io::Result<(BlobReader, i64)> {
+    handle.block_on(authority.check()).map_err(|_| {
+        std::io::Error::new(
+            std::io::ErrorKind::PermissionDenied,
+            "the Snapshot read is no longer authorized",
+        )
+    })?;
     let read = handle
         .block_on(store.get(hash, None))
         .map_err(|error| match error {
@@ -863,6 +815,7 @@ fn write_tar_zst(
     store: &Arc<dyn BlobStore>,
     items: &[Item],
     out: Sink,
+    authority: &snapshot_read::Read,
 ) -> std::io::Result<()> {
     let encoder = zstd::stream::write::Encoder::new(out, ARCHIVE_COMPRESSION_LEVEL)?;
     let mut builder = tar::Builder::new(encoder);
@@ -881,7 +834,7 @@ fn write_tar_zst(
                 let Some(hash) = item.entry.hash else {
                     continue;
                 };
-                let (reader, size) = open_blob(handle, store, &hash)?;
+                let (reader, size) = open_blob(handle, store, &hash, authority)?;
                 header.set_entry_type(tar::EntryType::Regular);
                 header.set_size(u64::try_from(size).unwrap_or(0));
                 builder.append_data(&mut header, &item.path, reader)?;
@@ -907,6 +860,7 @@ fn write_zip(
     store: &Arc<dyn BlobStore>,
     items: &[Item],
     out: Sink,
+    authority: &snapshot_read::Read,
 ) -> std::io::Result<()> {
     let mut zip = zip::ZipWriter::new_stream(out);
     let plain = zip::write::SimpleFileOptions::default();
@@ -923,7 +877,7 @@ fn write_zip(
                 let Some(hash) = item.entry.hash else {
                     continue;
                 };
-                let (mut reader, size) = open_blob(handle, store, &hash)?;
+                let (mut reader, size) = open_blob(handle, store, &hash, authority)?;
                 let options = plain
                     .compression_method(zip::CompressionMethod::Deflated)
                     .unix_permissions(item.entry.mode & 0o777)
@@ -941,11 +895,10 @@ fn write_zip(
 
 /// Serves a snapshot as one stream: a tar compressed with Zstandard, or a zip.
 async fn archive(ctx: Ctx, query: SnapshotArchiveGetQuery, _: Body) -> ApiResult<Response> {
-    let mut conn = ctx.app.db.acquire().await?;
-    let (row, _) = own(&ctx, &mut conn, Permission::FilesView).await?;
-    drop(conn);
+    let (source, authority) = snapshot_read::open(&ctx, true).await?;
+    let row = source.row;
     if row.storage == "environment" {
-        let read = recorded_read(&ctx, &row, None, true).await?;
+        let read = recorded_read(&ctx, &row, None, true, &authority).await?;
         if Some(read.blob) != row.manifest_blob {
             return Err(ApiError::new(
                 ErrorCode::WorkspaceRestoreUnavailable,
@@ -954,7 +907,9 @@ async fn archive(ctx: Ctx, query: SnapshotArchiveGetQuery, _: Body) -> ApiResult
             .with("reason", "store_changed"));
         }
     }
-    let tree = tree_of(&ctx, &row).await?;
+    let tree = tree_of(&ctx, &row).await;
+    authority.check().await?;
+    let tree = tree?;
     let format = query.format.unwrap_or(SnapshotArchiveFormat::TarZst);
     // Everything goes below a directory named after the snapshot, so that unpacking one makes one.
     let top = crate::media::safe_name(&row.label);
@@ -980,10 +935,15 @@ async fn archive(ctx: Ctx, query: SnapshotArchiveGetQuery, _: Body) -> ApiResult
         pieces: pieces.clone(),
         held: Vec::new(),
     };
+    let writer_authority = authority.clone();
     tokio::task::spawn_blocking(move || {
         let written = match format {
-            SnapshotArchiveFormat::TarZst => write_tar_zst(&handle, &store, &items, sink),
-            SnapshotArchiveFormat::Zip => write_zip(&handle, &store, &items, sink),
+            SnapshotArchiveFormat::TarZst => {
+                write_tar_zst(&handle, &store, &items, sink, &writer_authority)
+            }
+            SnapshotArchiveFormat::Zip => {
+                write_zip(&handle, &store, &items, sink, &writer_authority)
+            }
         };
         if let Err(error) = written {
             // Say that the stream broke off, so that a reader does not take what it has for the whole.
@@ -1008,163 +968,7 @@ async fn archive(ctx: Ctx, query: SnapshotArchiveGetQuery, _: Body) -> ApiResult
     )) {
         headers.insert(header::CONTENT_DISPOSITION, value);
     }
-    Ok(response)
+    authority.response(response).await
 }
 
 // ---------------------------------------------------------------- jobs
-
-/// Whether the caller holds something on the environment: any permission at all.
-async fn holds_on_environment(
-    conn: &mut orch_db::Conn,
-    principal: &Principal,
-    environment: Id,
-) -> ApiResult<bool> {
-    let object = orch_access_contract::decisions::ObjectRef {
-        kind: ResourceKind::Environment.into(),
-        id: environment,
-    };
-    let effective = orch_authz::resources::effective(conn, principal, object, Policy::default())
-        .await
-        .map_err(ApiError::internal)?;
-    Ok(effective.owner || effective.administers || !effective.held.is_empty())
-}
-
-/// Captures a whole workspace without creating a hidden thread or holding a transaction for file work.
-async fn export_environment(ctx: Ctx, (): (), (): ()) -> ApiResult<Job> {
-    let id = ctx.id("id")?;
-    let (ctx, mut tx, principal) = crate::routes::nodes::action(&ctx).await?;
-    authorization::require_resource(
-        &mut tx,
-        &principal,
-        ResourceKind::Environment,
-        id,
-        Permission::EnvironmentManage,
-        Policy::default(),
-    )
-    .await?;
-    if !orch_db::queries::environments::temporary::try_lock(&mut tx, id).await? {
-        return Err(ApiError::new(
-            ErrorCode::PlanBlocked,
-            "The environment is changing or being removed. Try Export again when it finishes.",
-        ));
-    }
-    let environment = orch_db::queries::environments::hosting::environment(&mut tx, id)
-        .await?
-        .ok_or_else(ApiError::not_found)?;
-    let begun = ctx
-        .app
-        .engine
-        .begin_snapshot(
-            &mut tx,
-            &Asked {
-                thread: None,
-                environment: id,
-                generation: environment.generation,
-                label: environment.name.clone(),
-                include: vec!["**".to_owned()],
-                exclude: Vec::new(),
-                created_by: Some(principal.user()),
-            },
-        )
-        .await
-        .map_err(ApiError::internal)?;
-    orch_engine::temporary_environments::export_activity(&mut tx, id, ctx.now)
-        .await
-        .map_err(ApiError::internal)?;
-    let action = orch_db::audit::action!(AuditAction::WorkspaceSnapshotCreated);
-    let summary = format!("Workspace export of {} was requested", environment.name);
-    let mut entry = AuditEntry::new(
-        Actor::User(principal.user()),
-        action.as_str(),
-        "snapshot",
-        Some(begun.snapshot),
-        &summary,
-    );
-    entry.environment_id = Some(id);
-    entry.node_id = Some(environment.home_node_id);
-    entry.org_id = Some(environment.org_id);
-    entry.details =
-        serde_json::json!({"snapshot":begun.snapshot,"environment":id,"whole_workspace":true});
-    audit::append(&mut tx, &entry, &origin(&ctx), ctx.now).await?;
-    let job = crate::routes::environments::jobs::view(&mut tx, &begun.job).await?;
-    tx.commit().await.map_err(orch_db::DbError::from)?;
-    ctx.app.engine.kick();
-    Ok(job)
-}
-
-/// Whether the caller may read a snapshot job or a delivery job: whoever may view the thread it is
-/// about, holds anything on its environment, or manages its provider. The requests for jobs are bound
-/// once, with the environments; they ask the workspace about the jobs that are its own.
-pub(crate) async fn may_read_job(
-    conn: &mut orch_db::Conn,
-    principal: &Principal,
-    row: &orch_db::queries::jobs::JobRow,
-) -> ApiResult<()> {
-    if row
-        .plan
-        .get("workspace_export")
-        .and_then(serde_json::Value::as_bool)
-        == Some(true)
-        && row.created_by == Some(principal.user())
-    {
-        return Ok(());
-    }
-    let mut refusal: Option<ApiError> = None;
-    if let Some(thread) = row.node_id {
-        match authorization::require(
-            conn,
-            principal,
-            thread,
-            authorization::VIEW,
-            Act::Use,
-            Policy::default(),
-        )
-        .await
-        {
-            Ok(()) => return Ok(()),
-            Err(error) => refusal = Some(error),
-        }
-    }
-    if let Some(environment) = row.environment_id
-        && holds_on_environment(conn, principal, environment).await?
-    {
-        return Ok(());
-    }
-    if let Some(provider) = row.provider_id
-        && authorization::require_resource(
-            conn,
-            principal,
-            ResourceKind::Provider,
-            provider,
-            Permission::ProviderManage,
-            Policy::default(),
-        )
-        .await
-        .is_ok()
-    {
-        return Ok(());
-    }
-    Err(refusal.unwrap_or_else(ApiError::not_found))
-}
-
-/// Whether the caller could have started a snapshot job or a delivery job, and so may ask for it to
-/// be cancelled: whoever writes the files of the environment the thread it is about runs in.
-pub(crate) async fn may_cancel_job(
-    conn: &mut orch_db::Conn,
-    principal: &Principal,
-    row: &orch_db::queries::jobs::JobRow,
-) -> ApiResult<()> {
-    if row
-        .plan
-        .get("workspace_export")
-        .and_then(serde_json::Value::as_bool)
-        == Some(true)
-        && row.created_by == Some(principal.user())
-    {
-        return Ok(());
-    }
-    let Some(thread) = row.node_id else {
-        return Err(ApiError::not_found());
-    };
-    require_where_it_runs(conn, principal, thread, Permission::FilesManage).await
-}

@@ -1,4 +1,6 @@
 //! A Files upload cancelled after real native writes waits for the connector's stopped result and preserves the original target.
+// The engine's futures this fixture awaits are deep; the default query depth does not lay them out.
+#![recursion_limit = "256"]
 #![allow(
     clippy::unwrap_used,
     clippy::expect_used,
@@ -261,7 +263,10 @@ async fn cancelling_a_dispatched_files_write_joins_the_real_connector_before_can
         current.plan["active_command"]["machine"],
         serde_json::json!(machine)
     );
-    let stopping = app.call(JobCancel, &[&id]).token(&token).send().await.ok();
+    let stopping = app.call(JobCancel, &[&id]).token(&token).send().await;
+    assert!(stopping.status.is_success(), "{}", stopping.status);
+    let stopping: Job = serde_json::from_slice(&stopping.raw)
+        .expect("this ordinary cancellation control expects the complete native job");
     assert_eq!(stopping.state, JobState::Running);
     assert!(stopping.progress.activity.unwrap().stopping);
     eventually(

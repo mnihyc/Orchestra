@@ -20,6 +20,275 @@ use orch_api_core::sign_in::passwords;
 use orch_api_core::testing::{Reply, TestApp};
 use orch_config::ServerConfig;
 use orch_db::Db;
+
+/// Existing browser/full-projection controls retain their original response type and raw wire
+/// assertions. An unexpected restricted receipt fails the premise instead of inventing Info.
+pub trait FullTokenReply {
+    fn full_token(self) -> Reply<orch_api_contract::auth::TokenCreated>;
+}
+
+/// Ordinary setting controls keep their original native effective value and provenance assertions.
+pub trait FullSettingReply {
+    fn full_setting(self) -> Reply<orch_api_contract::settings::ResolvedSetting>;
+}
+impl FullSettingReply for Reply<orch_api_contract::settings::NodeSettingWriteResponse> {
+    fn full_setting(self) -> Reply<orch_api_contract::settings::ResolvedSetting> {
+        map_reply(self, |value| {
+            value
+                .into_full()
+                .expect("this control expects the complete native setting")
+        })
+    }
+}
+
+/// Ordinary page controls retain their existing complete native page premise.
+pub trait FullPermissionPageReply {
+    fn full_permission_page(self) -> Reply<orch_api_contract::access::PermissionPage>;
+}
+impl FullPermissionPageReply for Reply<orch_api_contract::access::PermissionPageWriteResponse> {
+    fn full_permission_page(self) -> Reply<orch_api_contract::access::PermissionPage> {
+        Reply {
+            status: self.status,
+            headers: self.headers,
+            raw: self.raw,
+            body: self.body.map(|value| {
+                value
+                    .into_full()
+                    .expect("this control expects the complete native permission page")
+            }),
+        }
+    }
+}
+
+/// Ordinary transfers keep their actual native Node/Resource projection premise.
+pub trait FullTransferReply {
+    type Full;
+    fn full_transfer(self) -> Reply<Self::Full>;
+}
+macro_rules! full_transfer_reply {
+    ($response:ty,$full:ty) => {
+        impl FullTransferReply for Reply<$response> {
+            type Full = $full;
+            fn full_transfer(self) -> Reply<Self::Full> {
+                Reply {
+                    status: self.status,
+                    headers: self.headers,
+                    raw: self.raw,
+                    body: self.body.map(|value| {
+                        value
+                            .into_full()
+                            .expect("this control expects the complete native transfer response")
+                    }),
+                }
+            }
+        }
+    };
+}
+full_transfer_reply!(
+    orch_api_contract::ownership::NodeTransferResponse,
+    orch_api_contract::nodes::Node
+);
+full_transfer_reply!(
+    orch_api_contract::ownership::ObjectTransferResponse,
+    orch_api_contract::resources::Resource
+);
+
+/// Browser and legacy role controls retain their existing full response premise.
+pub trait FullRoleReply {
+    fn full_role(self) -> Reply<orch_api_contract::access::RoleHeld>;
+}
+
+/// Ordinary archive controls keep their complete native node and inverse-plan premise.
+pub trait FullArchiveReply {
+    fn full_archive(self) -> Reply<orch_api_contract::nodes::NodeArchiveResult>;
+}
+
+/// Ordinary comment mutation controls retain their existing full native response premise.
+pub trait FullCommentMutationReply {
+    type Full;
+    fn full_comment_mutation(self) -> Reply<Self::Full>;
+}
+
+macro_rules! full_comment_mutation_reply {
+    ($response:ty, $full:ty) => {
+        impl FullCommentMutationReply for Reply<$response> {
+            type Full = $full;
+            fn full_comment_mutation(self) -> Reply<Self::Full> {
+                Reply {
+                    status: self.status,
+                    headers: self.headers,
+                    raw: self.raw,
+                    body: self.body.map(|value| {
+                        value.into_full().expect(
+                            "this ordinary control expects the full native comment projection",
+                        )
+                    }),
+                }
+            }
+        }
+    };
+}
+full_comment_mutation_reply!(
+    orch_api_contract::documents::DocumentCommentUpdateResponse,
+    orch_api_contract::documents::DocumentComment
+);
+full_comment_mutation_reply!(
+    orch_api_contract::documents::DocumentDiscussionResolveResponse,
+    orch_api_contract::documents::DocumentDiscussion
+);
+
+/// Ordinary move controls retain their exact native review/node projection.
+pub trait FullMoveReply {
+    type Full;
+    fn full_move(self) -> Reply<Self::Full>;
+}
+macro_rules! full_move_reply {
+    ($response:ty,$full:ty) => {
+        impl FullMoveReply for Reply<$response> {
+            type Full = $full;
+            fn full_move(self) -> Reply<Self::Full> {
+                Reply {
+                    status: self.status,
+                    headers: self.headers,
+                    raw: self.raw,
+                    body: self.body.map(|value| {
+                        value.into_full().expect(
+                            "this control expects the permitted full native move projection",
+                        )
+                    }),
+                }
+            }
+        }
+    };
+}
+full_move_reply!(
+    orch_api_contract::nodes::NodeMovePreviewResponse,
+    orch_api_contract::nodes::NodeMovePlan
+);
+full_move_reply!(
+    orch_api_contract::nodes::OrgMoveResponse,
+    orch_api_contract::nodes::Org
+);
+full_move_reply!(
+    orch_api_contract::nodes::ProjectMoveResponse,
+    orch_api_contract::nodes::Project
+);
+full_move_reply!(
+    orch_api_contract::nodes::TopicMoveResponse,
+    orch_api_contract::nodes::Topic
+);
+
+impl FullArchiveReply for Reply<orch_api_contract::nodes::NodeArchiveResponse> {
+    fn full_archive(self) -> Reply<orch_api_contract::nodes::NodeArchiveResult> {
+        Reply {
+            status: self.status,
+            headers: self.headers,
+            body: self.body.map(|body| {
+                body.into_full()
+                    .expect("this control expects the permitted full archive projection")
+            }),
+            raw: self.raw,
+        }
+    }
+}
+
+impl FullRoleReply for Reply<orch_api_contract::access::RoleWriteResponse> {
+    fn full_role(self) -> Reply<orch_api_contract::access::RoleHeld> {
+        Reply {
+            status: self.status,
+            headers: self.headers,
+            body: self.body.map(|body| {
+                body.into_full()
+                    .expect("this control expects the permitted full role projection")
+            }),
+            raw: self.raw,
+        }
+    }
+}
+
+impl FullTokenReply for Reply<orch_api_contract::auth::TokenCreateResponse> {
+    fn full_token(self) -> Reply<orch_api_contract::auth::TokenCreated> {
+        Reply {
+            status: self.status,
+            headers: self.headers,
+            body: self.body.map(|body| {
+                body.into_full()
+                    .expect("this control expects the permitted full token projection")
+            }),
+            raw: self.raw,
+        }
+    }
+}
+
+/// Native invitation controls keep their exact Full contract. An unexpected
+/// restricted receipt is a failed premise, never a synthesized empty resource.
+pub trait FullInvitationReply {
+    type Full;
+    fn full_invitation(self) -> Reply<Self::Full>;
+}
+
+fn map_reply<T, U>(reply: Reply<T>, full: impl FnOnce(T) -> U) -> Reply<U> {
+    Reply {
+        status: reply.status,
+        headers: reply.headers,
+        body: reply.body.map(full),
+        raw: reply.raw,
+    }
+}
+
+impl FullInvitationReply for Reply<orch_api_contract::users::InvitationCreateResponse> {
+    type Full = orch_api_contract::users::InvitationCreateReply;
+    fn full_invitation(self) -> Reply<Self::Full> {
+        map_reply(self, |body| {
+            body.into_full().unwrap_or_else(|_| {
+                // The generated bearer secret in a receipt must not be Debug-dumped.
+                panic!("this native control expects a Full invitation creation")
+            })
+        })
+    }
+}
+
+impl FullInvitationReply for Reply<orch_api_contract::users::InvitationAcceptResponse> {
+    type Full = orch_api_contract::users::InvitationAcceptReply;
+    fn full_invitation(self) -> Reply<Self::Full> {
+        map_reply(self, |body| {
+            body.into_full().unwrap_or_else(|_| {
+                panic!("this native control expects a Full invitation acceptance")
+            })
+        })
+    }
+}
+/// Native approval controls require the ordinary Full result. Restricted receipts are
+/// checked explicitly by scoped controls and never turned into fabricated request content.
+pub trait FullApprovalReply {
+    fn full_approval(self) -> Reply<orch_api_contract::approvals::ApprovalDecisionReply>;
+}
+
+impl FullApprovalReply for Reply<orch_api_contract::approvals::ApprovalWriteResponse> {
+    fn full_approval(self) -> Reply<orch_api_contract::approvals::ApprovalDecisionReply> {
+        map_reply(self, |body| {
+            body.into_full().unwrap_or_else(|_| {
+                // A generated port bearer proof must not be Debug-dumped.
+                panic!("this native control expects a Full approval result")
+            })
+        })
+    }
+}
+
+/// Native request controls require their unchanged complete cards. A restricted receipt
+/// is never silently treated as an empty batch or a false completion result.
+pub trait FullRequestReply {
+    fn full_request(self) -> Reply<orch_api_contract::access::AccessRequestCreateReply>;
+}
+impl FullRequestReply for Reply<orch_api_contract::access::AccessRequestWriteResponse> {
+    fn full_request(self) -> Reply<orch_api_contract::access::AccessRequestCreateReply> {
+        map_reply(self, |body| {
+            body.into_full()
+                .unwrap_or_else(|_| panic!("this native control expects a Full request batch"))
+        })
+    }
+}
+
 use orch_db::audit::{Actor, Origin};
 use orch_db::queries::access::testing::add_entry;
 use orch_db::queries::access::{PageKey, SYSTEM_ID};
@@ -74,10 +343,19 @@ pub struct World {
 
 impl World {
     pub async fn new() -> Self {
+        Self::with_request_limits(None).await
+    }
+
+    /// A server using the deployed request profile, with raw fixture seeding kept separate.
+    pub async fn for_requests() -> Self {
+        Self::with_request_limits(Some(orch_db::pool::Limits::REQUESTS)).await
+    }
+
+    async fn with_request_limits(limits: Option<orch_db::pool::Limits>) -> Self {
         let mut config = ServerConfig::default();
         config.system.public_url = "https://orch.test".into();
         config.gateway.endpoints[0].url = "wss://gateway.test:9443".into();
-        Self::with(config).await
+        Self::with_parts_and_limits(config, std::sync::Arc::default(), limits).await
     }
 
     /// A world whose wrong tries are locked after `limit` of them, so that a
@@ -103,6 +381,14 @@ impl World {
         config: ServerConfig,
         sources: std::sync::Arc<orch_provider_contract::builtins::BuiltinSources>,
     ) -> Self {
+        Self::with_parts_and_limits(config, sources, None).await
+    }
+
+    async fn with_parts_and_limits(
+        config: ServerConfig,
+        sources: std::sync::Arc<orch_provider_contract::builtins::BuiltinSources>,
+        limits: Option<orch_db::pool::Limits>,
+    ) -> Self {
         let db = TestDb::fresh().await;
         codes::install_master_key(MasterKey::new([7; 32]));
         // The system's defaults page as it ships, so that the roles hold what they do.
@@ -123,15 +409,21 @@ impl World {
                 .unwrap();
             }
         }
+        let serving = match limits {
+            Some(limits) => Db::connect_with_limits(
+                &db.url,
+                db.pool.options().get_max_connections(),
+                std::time::Duration::from_millis(config.database.slow_statement_ms),
+                std::time::Duration::from_millis(config.database.slow_acquire_ms),
+                limits,
+            )
+            .await
+            .expect("the request-profile fixture pool"),
+            None => Db::from_pool(db.pool.clone()),
+        };
         let mut registry = Registry::new();
         orch_api_core::routes::mount(&mut registry);
-        let app = TestApp::with_sources(
-            Db::from_pool(db.pool.clone()),
-            clock::manual(),
-            registry,
-            config,
-            sources,
-        );
+        let app = TestApp::with_sources(serving, clock::manual(), registry, config, sources);
         Self { app, db }
     }
 
@@ -513,6 +805,10 @@ thread_local! {
     static COUNT: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
 }
 
+tokio::task_local! {
+    static MEASURED_COUNT: std::cell::Cell<usize>;
+}
+
 impl Statements {
     /// Makes sure the subscriber is installed, and returns the count so far
     /// on this thread.
@@ -522,6 +818,18 @@ impl Statements {
             let _ = tracing::subscriber::set_global_default(Statements);
         });
         COUNT.with(std::cell::Cell::get)
+    }
+
+    /// Counts statements while one request future is polled, excluding separately spawned tasks.
+    /// Use one measured scope at a time; measurements are not nested.
+    pub async fn measure<F: std::future::Future>(future: F) -> (F::Output, usize) {
+        Self::now();
+        MEASURED_COUNT
+            .scope(std::cell::Cell::new(0), async {
+                let output = future.await;
+                (output, MEASURED_COUNT.with(std::cell::Cell::get))
+            })
+            .await
     }
 }
 
@@ -561,6 +869,7 @@ impl tracing::Subscriber for Statements {
         }
         if event.metadata().target() == "sqlx::query" {
             COUNT.with(|count| count.set(count.get() + 1));
+            let _ = MEASURED_COUNT.try_with(|count| count.set(count.get() + 1));
             static TIMINGS: OnceLock<bool> = OnceLock::new();
             if *TIMINGS.get_or_init(|| std::env::var_os("ORCH_TEST_SQL_TIMINGS").is_some()) {
                 // SQL summaries and durations identify a slow read without logging bound values.
@@ -578,7 +887,12 @@ impl tracing::Subscriber for Statements {
                 }
                 let mut timings = Timings(Vec::new());
                 event.record(&mut timings);
-                eprintln!("SQL timing {}", timings.0.join(" "));
+                eprintln!(
+                    "SQL timing thread={:?} task={:?} {}",
+                    std::thread::current().id(),
+                    tokio::task::try_id(),
+                    timings.0.join(" ")
+                );
             }
         }
     }

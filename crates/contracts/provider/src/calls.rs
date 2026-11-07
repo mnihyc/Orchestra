@@ -287,30 +287,78 @@ pub fn requested_effort(params: &Json) -> Result<Option<&str>, &'static str> {
     Ok(selected.flatten())
 }
 
-/// Completion candidates may change generation options, never tools, history or retention controls.
+/// Model request options can carry vendor extensions, never replace Orch's owned request fields.
 pub fn completion_options(params: &Json) -> Result<(), &'static str> {
     let object = params
         .as_object()
         .ok_or("completion parameters must be an object")?;
     requested_effort(params)?;
-    for (key, value) in object {
-        match key.as_str() {
-            "effort" | "reasoning_effort" => {}
-            "reasoning" | "output_config" => {
-                let nested = value
-                    .as_object()
-                    .ok_or("effort options must be an object")?;
-                if nested.keys().any(|key| key != "effort") {
-                    return Err(
-                        "only a declared effort can change the completion's reasoning options",
-                    );
-                }
-            }
-            "temperature" | "top_p" if value.is_number() => {}
-            _ => return Err("this completion option is not a supported model parameter"),
+    if params.pointer("/reasoning/mode").is_some() {
+        return Err("model options cannot enable privileged reasoning modes");
+    }
+    if let Some(search) = object.get("web_search") {
+        crate::search::mode(search)?;
+    }
+    for key in ["temperature", "top_p"] {
+        if object
+            .get(key)
+            .is_some_and(|value| !value.is_number() && !value.is_null())
+        {
+            return Err("sampling parameters must be numbers or null");
         }
     }
+    if object.keys().any(|key| owned_option(key)) {
+        return Err(
+            "model options cannot replace routing, input, tools, retention or authentication",
+        );
+    }
     Ok(())
+}
+
+/// Whether a request member belongs to the caller or protocol builder rather than option overlays.
+#[must_use]
+pub fn owned_option(key: &str) -> bool {
+    matches!(
+        key,
+        "model"
+            | "input"
+            | "inputs"
+            | "instructions"
+            | "system"
+            | "messages"
+            | "prompt"
+            | "max_output_tokens"
+            | "max_tokens"
+            | "max_completion_tokens"
+            | "stream"
+            | "stream_options"
+            | "tools"
+            | "tool_choice"
+            | "parallel_tool_calls"
+            | "cyber_access_program"
+            | "previous_response_id"
+            | "conversation"
+            | "store"
+            | "background"
+            | "metadata"
+            | "user"
+            | "safety_identifier"
+            | "provider_id"
+            | "protocol"
+            | "method"
+            | "path"
+            | "url"
+            | "base_url"
+            | "headers"
+            | "auth"
+            | "authorization"
+            | "api_key"
+            | "dimensions"
+            | "web_searches"
+            | "web_search_per_call"
+            | "search_usage"
+            | "known_requests"
+    )
 }
 
 /// A whole-second retry pause must never end before the vendor's absolute deadline.
@@ -450,11 +498,28 @@ mod completion_options_tests {
     use serde_json::json;
 
     #[test]
+    fn native_search_configuration_cannot_forge_accounting_carriers() {
+        assert!(!owned_option("web_search"));
+        assert!(completion_options(&json!({"web_search":"live"})).is_ok());
+        for key in [
+            "web_searches",
+            "web_search_per_call",
+            "search_usage",
+            "known_requests",
+        ] {
+            assert!(owned_option(key));
+            assert!(completion_options(&json!({(key):1})).is_err());
+        }
+    }
+
+    #[test]
     fn completion_parameters_cannot_turn_a_summary_into_an_agent_or_change_retention() {
         for params in [
             json!({}),
             json!({"effort":"high","temperature":0.2}),
             json!({"reasoning":{"effort":"low"}}),
+            json!({"reasoning":{"effort":"low","summary":"concise"}}),
+            json!({"extra_body":{"vendor":{"keep":[true,null,3]}}}),
         ] {
             assert!(completion_options(&params).is_ok());
         }
@@ -465,7 +530,7 @@ mod completion_options_tests {
             json!({"cyber_access_program":"unopened"}),
             json!({"reasoning":{"mode":"pro"}}),
         ] {
-            assert!(completion_options(&params).is_err());
+            assert!(completion_options(&params).is_err(), "{params}");
         }
     }
 }

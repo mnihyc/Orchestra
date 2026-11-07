@@ -215,6 +215,60 @@ async fn an_environment_that_is_never_to_stop_is_left_up_however_idle() {
 }
 
 #[tokio::test]
+async fn a_background_task_keeps_its_environment_up_after_the_foreground_turn_ends() {
+    let world = World::new().await;
+    serve(&world);
+    let host = ScriptedHost::on(&world, "background-idle", 16_384).await;
+    let template = template(&world).await;
+    let (busy, _, _busy_unit) = running(&world, &host, template, "Background work").await;
+    let (idle, _, _idle_unit) = running(&world, &host, template, "Idle control").await;
+    let thread = world.thread("Native background work").await;
+    hosting::bind(&world, thread, busy).await;
+    let (first, _) = world.running_turn(thread, "Begin").await;
+    let mut task = common::background::command(&world, thread, first.turn_id).await;
+    world
+        .say(
+            thread,
+            common::turn_ended(
+                first.turn_id,
+                orch_link_contract::events::TurnOutcome::Completed,
+            ),
+        )
+        .await;
+    world.wait_turn(first.turn_id, "completed").await;
+    world.wait_followed_up(thread).await;
+    let old = Utc::now() - Duration::hours(3);
+    sqlx::query("UPDATE environments SET last_activity_at=$2 WHERE id=ANY($1)")
+        .bind([busy, idle])
+        .bind(old)
+        .execute(world.pool.pool())
+        .await
+        .unwrap();
+    world
+        .set(world.root, "env.idle_stop_minutes", json!(60))
+        .await;
+    eventually("the idle environment control to stop", || async {
+        status(&world, idle).await.0 == "stopped"
+    })
+    .await;
+    meanwhile(std::time::Duration::from_millis(600)).await;
+    assert_eq!(status(&world, busy).await.0, "running");
+    task.state = orch_link_contract::background::BackgroundTaskState::Stopped;
+    common::background::update(&world, thread, task).await;
+    sqlx::query("UPDATE environments SET last_activity_at=$2 WHERE id=$1")
+        .bind(busy)
+        .bind(old)
+        .execute(world.pool.pool())
+        .await
+        .unwrap();
+    eventually(
+        "the environment becomes idle after its task ends",
+        || async { status(&world, busy).await.0 == "stopped" },
+    )
+    .await;
+}
+
+#[tokio::test]
 async fn removal_is_a_job_of_its_own_that_stops_and_removes_the_unit_and_keeps_its_volumes() {
     let world = World::new().await;
     serve(&world);

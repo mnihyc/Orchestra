@@ -5,6 +5,8 @@
     reason = "a test fails by panicking"
 )]
 
+#[path = "uploads/native_scopes.rs"]
+mod native_scopes;
 mod places;
 mod support;
 mod workspace;

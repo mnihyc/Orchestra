@@ -9,23 +9,29 @@
 //! What the harness shows (an address, a code, a command) and asks for comes back as data, step by step,
 //! and the page renders it without knowing which harness it is.
 
-use crate::middleware::authentication::Via;
+use crate::key_operations::{admission::Prepared, targets};
 use crate::middleware::requests::{ApiError, ApiResult};
-use crate::registry::{Ctx, Registry};
+use crate::middleware::transaction_guard;
+use crate::registry::{Ctx, OptionalOperationFuture, Registry};
 use crate::routes::resources::providers::show;
 use crate::routes::resources::sealing::{SECRET_MAX_BYTES, put_provider_secret};
 use crate::routes::resources::{Home, begin_mutation, record};
 use orch_access_contract::audit::AuditAction;
+use orch_access_contract::decisions::ObjectRef;
+use orch_access_contract::permissions::ObjectKind;
 use orch_agent_contract::login::{LoginKind, LoginMethodDef};
 use orch_api_contract::common::{ErrorCode, FieldFault, Problem};
 use orch_api_contract::resources::{
     self as api, LoginProgress, LoginState, Provider, ProviderLoginInputBody,
     ProviderLoginStartBody,
 };
+use orch_authz::{Caller, CapturedOperation};
 use orch_db::DbError;
 use orch_db::queries::resources::provider_runtime::{self as rows, LOGIN_SECRET_PREFIX, State};
 use orch_db::queries::resources::thread_engine as agent_rows;
-use orch_engine::provider_setup::{Asked, Delivered, Pending, SignInValue};
+use orch_engine::provider_setup::{
+    Asked, Delivered, LoginAuthority, Pending, SignInValue, login_operation,
+};
 use orch_types::fields::validate;
 use orch_types::{Field, FieldType, Id, Json};
 use serde_json::json;
@@ -46,11 +52,65 @@ const LOOK_EVERY: Duration = Duration::from_millis(100);
 /// Binds this module's requests.
 pub fn mount(registry: &mut Registry) {
     registry
-        .on(api::ProviderLoginStart, start)
+        .on_with_optional_operation(api::ProviderLoginStart, operation, start)
         .on(api::ProviderLoginInput, input)
         .on(api::ProviderLoginGet, get)
         .on(api::ProviderLoginCancel, cancel)
         .on(api::ProviderLogout, logout);
+}
+
+/// The method declaration selects the operation; an unavailable declaration creates no proof.
+fn operation<'a>(
+    ctx: &'a Ctx,
+    conn: &'a mut orch_db::Conn,
+    caller: &'a Caller,
+    (): (),
+    body: ProviderLoginStartBody,
+) -> OptionalOperationFuture<'a> {
+    Box::pin(async move {
+        let id = ctx.id("id")?;
+        let state = rows::state(conn, id)
+            .await?
+            .filter(|state| state.deleted_at.is_none())
+            .ok_or_else(ApiError::not_found)?;
+        subscription(&state)?;
+        let known = methods_of(conn, &state).await?;
+        // Resolve only the actual declaration here. Field/value validation stays in the
+        // ordinary authorized producer, so a denied caller learns no asked-for fields.
+        let method = match known {
+            Some(methods) if !methods.is_empty() => Some(
+                methods
+                    .into_iter()
+                    .find(|method| method.id == body.method)
+                    .ok_or_else(|| {
+                        ApiError::from(Problem::invalid(vec![fault(
+                            "method",
+                            "is no way of signing in that this provider's harness has",
+                        )]))
+                    })?,
+            ),
+            _ => None,
+        };
+        legacy_method(caller, method.as_ref())?;
+        let Some(method) = method else {
+            return Ok(None);
+        };
+        let selection = match method.kind {
+            LoginKind::Interactive => "ProviderLoginStart.interactive",
+            LoginKind::Import => "ProviderLoginStart.import",
+        };
+        let target = targets::page_object(
+            conn,
+            ObjectRef {
+                kind: ObjectKind::Provider,
+                id,
+            },
+        )
+        .await?;
+        let mut plan = Prepared::new(ctx.route, selection)?;
+        plan.bind(0, target.object.kind, &[target])?;
+        Ok(Some(plan))
+    })
 }
 
 // ---------------------------------------------------------------- what a person typed, and as what
@@ -99,6 +159,13 @@ fn typed(
             continue;
         }
         let value = match field.kind {
+            FieldType::Json => match serde_json::from_str::<Json>(text) {
+                Ok(value) => value,
+                Err(_) => {
+                    faults.push(fault(&path, "must be valid JSON"));
+                    continue;
+                }
+            },
             FieldType::Boolean => match text.as_str() {
                 "true" => Json::Bool(true),
                 "false" => Json::Bool(false),
@@ -199,8 +266,8 @@ async fn admit(conn: &mut orch_db::Conn, id: Id) -> ApiResult<()> {
 }
 
 async fn current(ctx: &Ctx, id: Id) -> ApiResult<LoginState> {
-    let mut conn = ctx.app.db.acquire().await?;
-    let state = rows::state(&mut conn, id)
+    let (mut tx, _guard) = transaction_guard::begin(ctx).await?;
+    let state = rows::state(&mut tx, id)
         .await?
         .ok_or_else(ApiError::not_found)?;
     Ok(shown(state.login_state.as_ref()))
@@ -280,6 +347,17 @@ pub(crate) fn check_request(
     Ok(method)
 }
 
+fn legacy_method(caller: &Caller, method: Option<&LoginMethodDef>) -> ApiResult<()> {
+    if caller
+        .grant()
+        .is_some_and(|grant| grant.requires_legacy_compatibility())
+        && method.is_none_or(|method| method.kind != LoginKind::Import)
+    {
+        return Err(Problem::invalid(vec![fault("method", "use a method that imports a credential for a script; open the provider's Sign in page for an interactive method")]).into());
+    }
+    Ok(())
+}
+
 /// Begins a sign-in on a provider by `body.method`: the values are checked against the method's fields
 /// where the harness has said what it declares, the secrets among them are sealed at once, the sign-in is
 /// kept for the runtime and given to its harness, and the answer is where it stands. A request that
@@ -289,7 +367,7 @@ pub(crate) async fn begin(
     id: Id,
     body: &ProviderLoginStartBody,
 ) -> ApiResult<LoginState> {
-    let (current_ctx, mut tx, _) = begin_mutation(ctx).await?;
+    let (current_ctx, mut tx, mut principal) = begin_mutation(ctx).await?;
     let ctx = &current_ctx;
     let by = ctx.user()?.id();
     let state = rows::lock(&mut tx, id)
@@ -297,20 +375,32 @@ pub(crate) async fn begin(
         .filter(|state| state.deleted_at.is_none())
         .ok_or_else(ApiError::not_found)?;
     subscription(&state)?;
+    let inline_creator = ctx.route.name == "ProviderCreate"
+        && principal.caller().admitted_operation() == Some("ProviderCreate");
+    if inline_creator {
+        let origin = CapturedOperation::capture(&principal.caller().clone().with_admin_mode(false))
+            .map_err(ApiError::internal)?;
+        principal = orch_engine::jobs::provider_provision::creator_principal(
+            &mut tx,
+            &origin,
+            id,
+            orch_types::Time::new(ctx.now),
+        )
+        .await
+        .map_err(ApiError::internal)?
+        .ok_or_else(|| {
+            ApiError::new(
+                ErrorCode::AuthzDenied,
+                "the accepted provider creation no longer permits this sign-in",
+            )
+        })?;
+        principal = crate::sign_in::second_step::hold(&mut tx, ctx.user()?, principal).await?;
+    }
     admit(&mut tx, id).await?;
     let known = methods_of(&mut tx, &state).await?;
     let given = body.values.clone().unwrap_or_default();
     let method = check_request(known.as_ref(), body)?;
-    if matches!(&ctx.user()?.via, Via::Token { .. })
-        && method
-            .as_ref()
-            .is_none_or(|method| method.kind != LoginKind::Import)
-    {
-        return Err(Problem::invalid(vec![fault(
-            "method",
-            "use a method that imports a credential for a script; open the provider's Sign in page for an interactive method",
-        )]).into());
-    }
+    legacy_method(principal.caller(), method.as_ref())?;
     // What waited before is replaced, with its secrets.
     rows::delete_login_secrets(&mut tx, id, LOGIN_SECRET_PREFIX).await?;
     let secret_fields: Vec<String> = match &method {
@@ -344,10 +434,37 @@ pub(crate) async fn begin(
             values.insert(field.to_owned(), SignInValue::Secret(secret));
         }
     }
-    let pending = Pending::new(&body.method, &values, by)
-        .to_bytes()
-        .map_err(ApiError::internal)?;
-    rows::keep_pending(&mut tx, id, &pending, ctx.now).await?;
+    let mut pending = Pending::new(&body.method, &values, by);
+    if (ctx.route.name == "ProviderLoginStart" && method.is_some()) || inline_creator {
+        pending = pending
+            .with_authority(principal.caller())
+            .map_err(ApiError::internal)?;
+    } else if principal
+        .caller()
+        .grant()
+        .is_some_and(|grant| grant.operation_scope().is_some())
+    {
+        return Err(ApiError::new(
+            ErrorCode::AuthzDenied,
+            "the sign-in needs its declared originating operation",
+        ));
+    }
+    rows::keep_pending(
+        &mut tx,
+        id,
+        &pending.to_bytes().map_err(ApiError::internal)?,
+        ctx.now,
+    )
+    .await?;
+    rows::keep_login_authority(
+        &mut tx,
+        id,
+        pending
+            .authority_state()
+            .map_err(ApiError::internal)?
+            .as_ref(),
+    )
+    .await?;
     record(
         ctx,
         &mut tx,
@@ -418,9 +535,9 @@ async fn start(ctx: Ctx, (): (), body: ProviderLoginStartBody) -> ApiResult<Logi
 /// now, the secrets among them sealed at once, and the harness is told.
 async fn input(ctx: Ctx, (): (), body: ProviderLoginInputBody) -> ApiResult<LoginState> {
     let id = ctx.id("id")?;
-    let (ctx, mut tx, _) = begin_mutation(&ctx).await?;
+    let (ctx, mut tx, principal) = begin_mutation(&ctx).await?;
     let by = ctx.user()?.id();
-    let state = rows::state(&mut tx, id)
+    let state = rows::lock(&mut tx, id)
         .await?
         .filter(|state| state.deleted_at.is_none())
         .ok_or_else(ApiError::not_found)?;
@@ -438,6 +555,28 @@ async fn input(ctx: Ctx, (): (), body: ProviderLoginInputBody) -> ApiResult<Logi
         ));
     };
     checked(&asks, &body.values, "values.")?;
+    let active = LoginAuthority::load(&mut tx, id)
+        .await
+        .map_err(ApiError::internal)?;
+    if let Some(active) = &active {
+        if !active
+            .authorized(&mut tx, id, orch_types::Time::new(ctx.now))
+            .await
+            .map_err(ApiError::internal)?
+        {
+            return Err(ApiError::new(
+                ErrorCode::AuthzDenied,
+                "the accepted sign-in authority is no longer available",
+            ));
+        }
+    }
+    let plan = login_operation(&mut tx, id, "ProviderLoginInput")
+        .await
+        .map_err(ApiError::internal)?;
+    let admitted = plan
+        .admit(principal.caller(), false)
+        .map_err(crate::key_operations::admission::binding_error)?;
+    let origin = CapturedOperation::capture(&admitted).map_err(ApiError::internal)?;
     rows::delete_login_secrets(&mut tx, id, LOGIN_SECRET_PREFIX).await?;
     let mut values: BTreeMap<String, SignInValue> = BTreeMap::new();
     for (name, text) in &body.values {
@@ -481,7 +620,7 @@ async fn input(ctx: Ctx, (): (), body: ProviderLoginInputBody) -> ApiResult<Logi
     let asked = ctx
         .app
         .engine
-        .send_login_input(id, &values)
+        .send_login_input_authorized(id, &values, origin, active)
         .await
         .map_err(ApiError::internal)?;
     refused_or(asked)?;

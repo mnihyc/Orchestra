@@ -679,7 +679,7 @@ permissions! {
     ProviderManage = "provider.manage", Provider, Manage, PROVIDER, NOBODY,
         "Manage Provider", "Sign the provider in and out, rotate its key, say which models and arrangements it allows, run and update its runtime, and enable, disable and delete it.";
     ProviderBypass = "provider.bypass", Provider, Advanced, PROVIDER, NOBODY,
-        "Go past limits", "Let one turn run past a cap on the provider that has no room left, or past the limit of its plan.";
+        "Go past limits", "Let one turn run past a configured Orch usage cap on the provider that has no room left.";
     AgentView = "agent.view", Agent, View, AGENT, NOBODY,
         "View Agent profile", "See the agent profile in lists, with what its adapter declares.";
     AgentUse = "agent.use", Agent, Use, AGENT, NOBODY,
@@ -954,17 +954,20 @@ impl Permission {
     }
 
     /// Whether the agents of a place can be named in its rows: the rows by
-    /// which conversations, chats and documents are read and written, and the
-    /// one by which documents are deleted, moved and brought back (nothing of
-    /// that kind is open to agents for conversations or chats).
+    /// which conversations, chats and documents are read, written and managed.
+    /// Advanced thread acts retain their own rows.
     #[must_use]
     pub const fn shared_with_agents(self) -> bool {
         matches!(
             self,
             Self::ThreadView
                 | Self::ThreadInteract
+                | Self::ThreadManage
+                | Self::ThreadFork
+                | Self::ThreadArchive
                 | Self::ChatView
                 | Self::ChatInteract
+                | Self::ChatManage
                 | Self::DocView
                 | Self::DocEdit
                 | Self::DocManage
@@ -2233,8 +2236,12 @@ mod tests {
         for row in [
             P::ThreadView,
             P::ThreadInteract,
+            P::ThreadManage,
+            P::ThreadFork,
+            P::ThreadArchive,
             P::ChatView,
             P::ChatInteract,
+            P::ChatManage,
             P::DocView,
             P::DocEdit,
             P::DocManage,
@@ -2243,14 +2250,15 @@ mod tests {
         }
         assert!(HolderKind::Agents.fits(P::DocEdit, ObjectKind::Document, false));
         assert!(HolderKind::Agents.fits(P::DocManage, ObjectKind::Document, false));
-        // A conversation and a chat are never managed by an agent, whatever was shared.
+        // Management never lends permission administration, ownership or environment access.
         for row in [
             P::DocCreate,
             P::DocComment,
             P::FilesView,
             P::TerminalManage,
-            P::ThreadManage,
-            P::ChatManage,
+            P::AccessManage,
+            P::AccessOwn,
+            P::TopicManage,
         ] {
             assert!(!HolderKind::Agents.fits(row, row.on()[0], false), "{row}");
         }
@@ -2888,7 +2896,7 @@ mod tests {
             json!({
                 "name": "thread.fork", "area": "thread", "level": "advanced", "with": "thread.manage",
                 "on": ["thread"], "label": "Fork", "allows": P::ThreadFork.allows(), "profiles": true,
-                "holders": ["role", "group", "members", "user"], "options_schema": null
+                "holders": ["role", "group", "members", "user", "agents"], "options_schema": null
             })
         );
         assert_eq!(written["choices"][1]["key"], "full_interact");

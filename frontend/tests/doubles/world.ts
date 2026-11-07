@@ -337,6 +337,7 @@ export class World {
     this.away.reset();
     this.firstSteps = new FirstStepsWorld(this);
     this.users.inbox = this.notifications;
+    this.users.onJoin = (listener) => this.requestFeeds.prime(listener);
     this.outbox = [];
     this.delayMs = scenario.delayMs ?? 0;
     this.confirmAddresses = scenario.confirmAddresses ?? false;

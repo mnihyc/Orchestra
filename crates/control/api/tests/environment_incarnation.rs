@@ -179,6 +179,8 @@ impl Scene {
             .send()
             .await
             .ok()
+            .into_full()
+            .unwrap()
     }
 }
 

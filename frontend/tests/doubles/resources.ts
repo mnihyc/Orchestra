@@ -28,6 +28,7 @@ import type {
   EnrollmentToken,
   EnrollmentProgress,
   ComponentUpdate,
+  ConnectorGatewayStatus,
   FactMember,
   Environment,
   EnvironmentMcp,
@@ -59,6 +60,7 @@ import type {
   ResolvedSetting,
   ResourceAccess,
   Runtime,
+  RunningHarnessBuild,
   Template,
   UserRef,
 } from '../../src/generated/api-types.ts';
@@ -172,10 +174,15 @@ function policySections(key: string): MachinePolicySection[] {
   if (key === 'environment.roots') return ['environment', 'node'];
   if (['drivers', 'storages', 'hooks', 'resources.max'].includes(key)) return ['node'];
   if (key === 'ports') return ['environment'];
-  if (key === 'agent.harnesses' || key === 'agent.programs' || key === 'tools.fetch') return ['agent'];
+  if (key === 'agent.harnesses') return ['environment', 'agent'];
+  if (key === 'agent.programs' || key === 'tools.fetch') return ['agent'];
   if (key.startsWith('provider.')) return ['provider'];
   if (key.startsWith('environment.') || key.startsWith('mcp.') || key === 'exec.offers' || key === 'agent.max_sandbox') return ['environment'];
   return ['machine'];
+}
+
+function policyDelegationSections(key: string): MachinePolicySection[] {
+  return key === 'agent.harnesses' ? ['agent'] : policySections(key);
 }
 
 function policyDefinition(key: string): MachinePolicy['keys'][number]['definition'] {
@@ -199,6 +206,8 @@ interface MachineRecord {
   lastSeen: string | null;
   roundTripMs: number;
   harnesses: { kind: string; path: string; version: string; daemon: boolean }[];
+  discoveredHarnesses?: MachineRecord['harnesses'];
+  searchedHarnessKinds?: string[];
   policy: Record<string, unknown>;
   roles?: Machine['roles'];
   /** When its certificate ends, as a distance from when the world began (negative: it has ended). Absent: a good certificate, or the one a revoked machine had. */
@@ -441,6 +450,7 @@ const USUAL_BINDING: ThreadBinding = {
 };
 
 export class Resources {
+  gatewayStatuses = new Map<string, ConnectorGatewayStatus>();
   readonly world: World;
   machines: MachineRecord[] = [];
   providers: ProviderRecord[] = [];
@@ -491,6 +501,7 @@ export class Resources {
   }
 
   reset(): void {
+    this.gatewayStatuses.clear();
     for (const timer of this.timers) clearTimeout(timer);
     this.timers.clear();
     this.jobs.clear();
@@ -1040,6 +1051,8 @@ export class Resources {
       memory_bytes: 17_179_869_184,
       storages: [{name:'default',default:true,capacity_gb:500,free_gb:320,private_views:false}],
       harnesses: record.harnesses,
+      ...(record.discoveredHarnesses === undefined ? {} : { discovered_harnesses: record.discoveredHarnesses }),
+      ...(record.searchedHarnessKinds === undefined ? {} : { searched_harness_kinds: record.searchedHarnessKinds }),
       adapters: [
         { kind: 'claude-code', adapter_version: 1, builtin: true },
         { kind: 'codex', adapter_version: 1, builtin: true },
@@ -1100,7 +1113,7 @@ export class Resources {
   private machineKeyHanded(record:MachineRecord,key:string):boolean {
     const delegated=record.policy['policy.delegated'];const local=record.policy['policy.local'];
     return key!=='policy.delegated' && !(isRecord(local) && Object.hasOwn(local,key)) && Array.isArray(delegated)
-      && (delegated.includes('*') || delegated.includes(key) || policySections(key).some((section)=>section!=='machine' && delegated.includes(`${section}.*`)));
+      && (delegated.includes('*') || delegated.includes(key) || policyDelegationSections(key).some((section)=>section!=='machine' && delegated.includes(`${section}.*`)));
   }
 
   private machinePrograms(person:Person|null,record:MachineRecord):MachinePrograms {
@@ -1128,6 +1141,30 @@ export class Resources {
     const name=asText(body.name);
     const entry=entries.find((entry)=>entry.kind===kind && entry.name===name);
     if(body.action==='reload') return this.machinePrograms(person,record);
+    if(body.action==='confirm_harness' || body.action==='remove_harness') {
+      const roles=record.roles ?? ['environment','agent','provider'];
+      if(!roles.some((role)=>role==='environment' || role==='agent')) this.invalid('kind','The machine needs an Environment or Agent role.');
+      if(!this.machineKeyHanded(record,'agent.harnesses')) throw new Refusal(409,'policy.not_delegated','Agent programs are kept on the machine.',{keys:['agent.harnesses']});
+      const harnessKind=asText(body.kind),path=asText(body.path);
+      const candidates=body.action==='remove_harness'?record.harnesses:[...record.harnesses,...(record.discoveredHarnesses ?? [])];
+      const program=candidates.find((row)=>row.kind===harnessKind && row.path===path);
+      if(program===undefined) this.invalid('path','The machine has not reported this program.');
+      const previous=record.policy['agent.harnesses'];
+      const values:readonly unknown[]=Array.isArray(previous)?previous:[];
+      const kept=values.filter((row)=>!isRecord(row) || row.kind!==harnessKind);
+      record.harnesses=record.harnesses.filter((row)=>row.kind!==harnessKind);
+      record.discoveredHarnesses=(record.discoveredHarnesses ?? []).filter((row)=>row.kind!==harnessKind);
+      if(body.action==='confirm_harness') {
+        record.policy['agent.harnesses']=[...kept,{kind:harnessKind,path}];
+        record.harnesses.push(program);
+      } else {
+        record.policy['agent.harnesses']=kept;
+        record.discoveredHarnesses.push(program);
+      }
+      this.world.users.tellAll({what:'resources',kind:'machine',id:record.id});
+      for(const environment of this.environments.filter((row)=>row.machine===record.id)) this.world.users.tellAll({what:'resources',kind:'environment',id:environment.id});
+      return this.machinePrograms(person,record);
+    }
     if(body.action==='test') {
       if(entry===undefined) throw new Refusal(404,'not_found','This program is not registered.');
       entry.ready=true;
@@ -1309,6 +1346,65 @@ export class Resources {
     } as unknown as Agent;
   }
 
+  /** The HTTP row and its native feed share the same confirmed tuple and server attribution. */
+  private environmentMachinePrograms(record:EnvironmentRecord,machine:MachineRecord|undefined):NonNullable<Environment['exec']['machine_programs']> {
+    if(machine===undefined || record.template!==null) return [];
+    const declared=machine.policy['agent.harnesses'];
+    const program=machine.harnesses.find((row)=>row.kind==='codex' && Array.isArray(declared) && declared.some((entry)=>isRecord(entry) && entry.kind===row.kind && entry.path===row.path));
+    if(program===undefined) return [];
+    const decisions=record.config?.['exec.version_overrides'];
+    const decision=isRecord(decisions)?decisions[program.kind]:undefined;
+    const row={harness_kind:program.kind,path:program.path,version:program.version};
+    if(!isRecord(decision) || decision.path!==program.path || decision.version!==program.version || typeof decision.by!=='string' || typeof decision.at!=='string') return [{...row,approval:null}];
+    const by=decision.by,at=decision.at;
+    const writer=[...this.world.people.values()].find((person)=>person.me.id===by);
+    return [{...row,approval:{by:writer===undefined?{id:by,kind:'human',username:'',display_name:'',address:null,avatar:{text:'',color:0}}:userRef(writer.me),at}}];
+  }
+
+  private prepareProgramConsent(person:Person,record:EnvironmentRecord,config:Record<string,unknown>):Record<string,unknown> {
+    const key='exec.version_overrides';
+    const previous=record.config?.[key];
+    const requested=config[key];
+    if(requested===undefined && previous===undefined) return config;
+    if(requested!==undefined && !isRecord(requested)) this.invalid('config','Version decisions must be an object.');
+    const current=this.environmentMachinePrograms(record,this.machines.find((row)=>row.id===record.machine));
+    const decisions:Record<string,unknown>={};
+    let changed=false;
+    for(const [kind,input] of Object.entries(requested ?? {})) {
+      if(!isRecord(input)) this.invalid('config','Name the confirmed path and version.');
+      if(Object.keys(input).some((key)=>!['path','version','by','at'].includes(key))) this.invalid('config','A version decision has an unknown member.');
+      if(typeof input.path!=='string' || typeof input.version!=='string') this.invalid('config','Name the confirmed path and version.');
+      const prior=isRecord(previous)?previous[kind]:undefined;
+      if(isRecord(prior) && prior.path===input.path && prior.version===input.version) {decisions[kind]=prior;continue;}
+      if(!current.some((row)=>row.harness_kind===kind && row.path===input.path && row.version===input.version)) this.invalid('config','The confirmed program changed. Refresh and try again.');
+      changed=true;
+      decisions[kind]={path:input.path,version:input.version,by:person.me.id,at:new Date().toISOString()};
+    }
+    changed ||= isRecord(previous) && Object.keys(previous).some((kind)=>!Object.hasOwn(decisions,kind));
+    if(changed && person.me.kind!=='human') throw new Refusal(403,'authz.denied','A human environment manager records version decisions.');
+    return {...config,[key]:decisions};
+  }
+
+  /** No held artifact bytes are observed by this fixture world; a catalogue/version match proves no build identity. */
+  private environmentHarnesses(person:Person,record:EnvironmentRecord):RunningHarnessBuild[] {
+    if(!this.world.access.permissionsOnEnvironment(person,record.id).includes('environment.view')) throw new Refusal(404,'not_found','There is no readable environment.');
+    const programs=new Map<string,RunningHarnessBuild>();
+    const add=(kind:string,version:string)=>{const key=JSON.stringify([kind,version]);if(!programs.has(key))programs.set(key,{kind,harness:harnessName(kind),version,build:null});};
+    const machine=this.machines.find((row)=>row.id===record.machine);
+    if(machine!==undefined && record.template===null) {
+      const raw=machine.policy['agent.harnesses'],selected=new Map<string,string>();
+      if(Array.isArray(raw)) for(const entry of raw) if(isRecord(entry) && typeof entry.kind==='string' && typeof entry.path==='string' && !selected.has(entry.kind)) selected.set(entry.kind,entry.path);
+      for(const program of machine.harnesses) {const path=selected.get(program.kind);if(path!==undefined && (!path.startsWith('/') || path===program.path)) add(program.kind,program.version);}
+    }
+    for(const binding of this.bindings.values()) {
+      if(binding.environment!==record.id) continue;
+      const agent=this.agents.find((row)=>row.id===binding.agent),provider=this.providers.find((row)=>row.id===binding.provider);
+      if(agent===undefined || provider===undefined) continue;
+      for(const observed of provider.harnessReports ?? []) if(observed.agent.id===agent.id && observed.machine.id===record.machine && observed.harness_version!==null) add(agent.harness,observed.harness_version);
+    }
+    return [...programs.values()].sort((a,b)=>a.kind<b.kind?-1:a.kind>b.kind?1:a.version<b.version?-1:a.version>b.version?1:0);
+  }
+
   private environment(person: Person, record: EnvironmentRecord): Environment {
     const machine = this.machines.find((candidate) => candidate.id === record.machine);
     const host = this.hosts.find((candidate) => candidate.id === record.host);
@@ -1339,7 +1435,7 @@ export class Resources {
       removal: null,
       host: host === undefined ? null : { id: host.id, name: host.name, address: host.home === null ? `system.${host.name}` : `acme.${host.owner ?? 'ada'}.${host.name}` },
       mounts: [],
-      exec: { offers: [{ name: 'codex-exec-server', available: true, reason: null }, { name: 'plain', available: true, reason: null }], orch_tools: true, machine_offers: record.machine === null ? null : ['codex-exec-server', 'claude-code', 'plain', 'custom'] },
+      exec: { offers: [{ name: 'codex-exec-server', available: true, reason: null }, { name: 'plain', available: true, reason: null }], orch_tools: true, machine_offers: record.machine === null ? null : ['codex-exec-server', 'claude-code', 'plain', 'custom'], ...(this.environmentMachinePrograms(record,machine).length===0?{}:{machine_programs:this.environmentMachinePrograms(record,machine)}) },
       mcp_found: [],
       index: record.index ?? 'full',
       index_reason: record.index === 'live' ? 'entries' : null,
@@ -1620,7 +1716,7 @@ export class Resources {
     if (!record.online) throw new Refusal(503, 'source.offline', 'the machine is offline');
     const delegated = Array.isArray(record.policy['policy.delegated']) ? (record.policy['policy.delegated'] as string[]) : [];
     const local = record.policy['policy.local'];
-    const handed = (key: string): boolean => !(typeof local === 'object' && local !== null && Object.hasOwn(local,key)) && (delegated.includes('*') || delegated.includes(key) || policySections(key).some((section) => delegated.includes(`${section}.*`)));
+    const handed = (key: string): boolean => !(typeof local === 'object' && local !== null && Object.hasOwn(local,key)) && (delegated.includes('*') || delegated.includes(key) || policyDelegationSections(key).some((section) => delegated.includes(`${section}.*`)));
     const refused = Object.keys(body).filter((key) => key === 'policy.delegated' || !handed(key));
     if (refused.length > 0) throw new Refusal(409, 'policy.not_delegated', 'the machine keeps those to itself', { keys: refused });
     Object.assign(record.policy, body);
@@ -1631,7 +1727,7 @@ export class Resources {
     const delegated = Array.isArray(record.policy['policy.delegated']) ? (record.policy['policy.delegated'] as string[]) : [];
     const local = record.policy['policy.local'];
     const kept = (key: string): boolean => typeof local === 'object' && local !== null && Object.hasOwn(local,key);
-    const handed = (key: string): boolean => key !== 'policy.delegated' && !kept(key) && (delegated.includes('*') || delegated.includes(key) || policySections(key).some((section) => delegated.includes(`${section}.*`)));
+    const handed = (key: string): boolean => key !== 'policy.delegated' && !kept(key) && (delegated.includes('*') || delegated.includes(key) || policyDelegationSections(key).some((section) => delegated.includes(`${section}.*`)));
     return {
       command:this.installation(record).commands.policy,
       machine: this.machineRef(record),
@@ -2317,6 +2413,7 @@ export class Resources {
       return {status:200,body:targets.map((target)=>{
         const object=isRecord(target.object)?target.object:{};
         const kind=String(object.kind);
+        if(kind==='environment' && !this.world.access.permissionsOnEnvironment(person,String(object.id)).includes('environment.view')) throw new Refusal(404,'not_found','There is no readable environment.');
         const unit=kind==='provider'||kind==='agent'||kind==='environment'?'turn':kind==='mcp_server'?'mcp_call':kind==='skill'?'skill_invocation':kind==='host'||kind==='template'?'environment_made':null;
         return {target,facts:{subject:{kind:'resource',object},as_of:new Date().toISOString(),dependents:[],dependents_complete:false,uses:unit===null?null:{kind:unit,coverage:{state:'unrecorded'},all_time:null,last_30_days:null,people:null,people_30_days:null,last_used_at:null}},threads:null};
       })};
@@ -2341,6 +2438,14 @@ export class Resources {
     let found: RegExpExecArray | null;
 
     // machines
+    if ((found = /^GET \/machines\/([^/]+)\/gateway$/.exec(route))) {
+      const id = found[1] ?? '';
+      const host = this.hosts.map((record) => this.host(person, record)).find((row) => row.machine.id === id);
+      if (host !== undefined && !host.access.permissions.includes('host.view')) throw new Refusal(404, 'not_found', 'The machine is not readable.');
+      const machine = host?.machine ?? this.machine(this.findMachine(person, id));
+      return { status: 200, body: this.gatewayStatuses.get(id) ?? { machine_id: id, selection: null, selected_gateway_id: null,
+        primary_gateway_id: null, connected: machine.online, measured_at: null, measurements: [] } };
+    }
     if(route==='GET /machines/enrollment-options') return {status:200,body:{secure:true,public_url:'https://orch.example'}};
     if ((found = /^GET \/machines\/enrollment-status\/([^/]+)$/.exec(route))) return { status: 200, body: this.enrollmentProgress(person, found[1] ?? '') };
     if (route === 'GET /machines') return { status: 200, body: this.machines.filter((record) => record.owner === person.me.username).map((record) => this.machine(record)) };
@@ -2610,6 +2715,11 @@ export class Resources {
       return { status: 200, body: this.agent(person, record) };
     }
 
+    if((found=/^GET \/environments\/([^/]+)\/harnesses$/.exec(route))) {
+      const record=this.findEnvironment(found[1] ?? '');
+      return {status:200,body:this.environmentHarnesses(person,record)};
+    }
+
     // environments
     if (route === 'GET /environments') {
       // `holding=manage` lists only those the caller looks after, which is what a place to start a thread in is chosen among.
@@ -2688,7 +2798,7 @@ export class Resources {
       if (typeof body.name === 'string' && body.name.trim() !== '') record.name = body.name.trim();
       if (typeof body.remote_write === 'boolean') record.remoteWrite = body.remote_write;
       if (typeof body.terminal === 'boolean') record.terminal = body.terminal;
-      if (typeof body.config === 'object' && body.config !== null) record.config = { ...(record.config ?? {}), ...(body.config as Record<string, unknown>) };
+      if (isRecord(body.config)) record.config = { ...(record.config ?? {}), ...this.prepareProgramConsent(person,record,body.config) };
       const selected = dataSources(body.data_sources);
       if (selected !== null) record.config = { ...record.config, 'env.data_sources': selected };
       record.revision += 1;
@@ -2900,6 +3010,23 @@ export class Resources {
   /** The requests only the double has for resources. */
   control(path: string, body: Record<string, unknown>): Answer | null {
     switch (path) {
+      case '/machine-programs': {
+        const machine=this.machines.find((row)=>row.id===asText(body.machine_id));
+        if(machine===undefined) return {status:404};
+        const rows=(value:unknown):MachineRecord['harnesses']=>Array.isArray(value)?value.flatMap((entry)=>isRecord(entry) && typeof entry.kind==='string' && typeof entry.path==='string' && typeof entry.version==='string'?[{kind:entry.kind,path:entry.path,version:entry.version,daemon:entry.daemon===true}]:[]):[];
+        machine.harnesses=rows(body.harnesses);
+        machine.discoveredHarnesses=rows(body.discovered_harnesses);
+        machine.searchedHarnessKinds=Array.isArray(body.searched_harness_kinds)?body.searched_harness_kinds.filter((value):value is string=>typeof value==='string'):[];
+        machine.policy['agent.harnesses']=machine.harnesses.map(({kind,path})=>({kind,path}));
+        if(body.delegated===true && !this.machineKeyHanded(machine,'agent.harnesses')) {
+          const previous=machine.policy['policy.delegated'];
+          const delegated:readonly unknown[]=Array.isArray(previous)?previous:[];
+          machine.policy['policy.delegated']=[...delegated,'agent.harnesses'];
+        }
+        this.world.users.tellAll({what:'resources',kind:'machine',id:machine.id});
+        for(const environment of this.environments.filter((row)=>row.machine===machine.id)) this.world.users.tellAll({what:'resources',kind:'environment',id:environment.id});
+        return {status:204};
+      }
       case '/plan-usage': {
         const record=this.providers.find((record)=>record.id===body.id);
         if(record===undefined) return {status:404};

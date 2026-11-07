@@ -205,6 +205,16 @@ async fn a_reply_is_by_the_number_of_the_message_it_answers() {
 async fn one_enabled_message_tool_routes_both_targets_without_borrowing_the_owners_reach() {
     let s = with_a_shared_chat(true).await;
     let receiver = s.world.thread("Validate").await;
+    share(
+        &s.world,
+        "node",
+        receiver,
+        "live",
+        "thread.interact",
+        "any",
+        s.agent,
+    )
+    .await;
     s.world
         .set(s.world.topic, "orch_tools.enabled", json!(["send_message"]))
         .await;
@@ -296,7 +306,19 @@ async fn a_thread_target_keeps_the_refusal_of_side_threads() {
         .execute(&mut *s.world.pool.acquire().await.unwrap())
         .await
         .unwrap();
-    let answer = send(&s, json!({"target":{"kind":"thread","path":format!("id:{side}")},"text":"A side thread cannot receive this."})).await;
+    let arguments = json!({"target":{"kind":"thread","path":format!("id:{side}")},"text":"A side thread cannot receive this."});
+    let hidden = send(&s, arguments.clone()).await;
+    assert_eq!(refused(&hidden).0, "not_found");
+    // A readable document makes its directory visible without lending the side conversation.
+    let note = s
+        .world
+        .document_beside(side, "Shared side note", &["Read without sending."])
+        .await;
+    share(
+        &s.world, "document", note, "live", "doc.view", "any", s.agent,
+    )
+    .await;
+    let answer = send(&s, arguments).await;
     assert_eq!(refused(&answer).0, "wrong_kind");
     assert!(refused(&answer).1.contains("side thread"));
     assert_eq!(
@@ -327,6 +349,7 @@ async fn historical_single_destination_settings_do_not_gain_the_other_destinatio
     ] {
         let s = with_a_shared_chat(true).await;
         let receiver = s.world.thread("Validate").await;
+        share_threads_inside(&s.world, s.world.topic, s.agent, true).await;
         s.world
             .set(s.world.topic, "orch_tools.enabled", json!(["send_message"]))
             .await;

@@ -188,15 +188,17 @@ async fn a_link_is_good_for_half_an_hour_and_not_for_a_minute_more() {
 
 #[tokio::test]
 async fn the_address_is_on_the_origin_of_the_system_and_only_the_hash_of_its_secret_is_kept() {
-    let world = World::new().await;
+    let mut config = orch_config::ServerConfig::default();
+    config.system.public_url = "https://recovery.example.test".into();
+    let world = World::with(config).await;
     let ada = world.person("ada").await;
 
     let made = link_for(&world, &ada, false, Actor::System).await;
 
     assert!(
-        made.url.starts_with("https://orch.example.com/reset/oem_"),
-        "{}",
         made.url
+            .starts_with("https://recovery.example.test/reset/oem_"),
+        "the reset link uses the configured system origin"
     );
     let secret = secret_of(&made);
     let stored: Vec<(Vec<u8>, String, bool)> =

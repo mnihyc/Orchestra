@@ -147,7 +147,7 @@ const pageOf = (rows: PermissionRow[], more: Partial<PermissionPage> = {}): Perm
   depends: [],
   reaches: null,
   covers: null,
-  gives: { choices: ['full_view', 'full_interact', 'full_manage'], roles: [], agents: ['view', 'edit'], holders_share: true },
+  gives: { choices: ['full_view', 'full_interact', 'full_manage'], roles: [], agents: ['view', 'edit'], agent_parts: { timeline: 'write', chat: 'write', documents: 'edit' }, holders_share: true },
   rows,
   ...more,
 });

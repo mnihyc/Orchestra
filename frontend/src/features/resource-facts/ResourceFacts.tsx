@@ -32,13 +32,13 @@ export function HostCapacity({ place }: { place: PlaceHost }) {
   return <span className="flex min-w-0 flex-col gap-1"><Meter neutral showActual look="compact" value={place.declared.memory_mb / place.capacity.memory_mb * 100} label={label} /><span className="text-sm text-text-muted">{label}</span></span>;
 }
 
-export function ResourceHint({ subject, className }: { subject: ResourceSubject; className?: string }) {
+export function ResourceHint({ subject, className, wrap = false }: { subject: ResourceSubject; className?: string; wrap?: boolean }) {
   const { t } = useTranslation();
   const format = useFormatContext();
   const now = useNow();
   const hint = resourceHint(subject, { ...format, t, now });
   return hint.text === '' ? null : <span data-resource-hint={subject.kind} data-warning={hint.warning || undefined}
-    className={cx('block min-w-0 max-w-full truncate text-sm font-normal', hint.warning ? 'text-warning-text' : 'text-text-muted', className)}>{hint.warning ? <StatusDot tone="warning" label={hint.text} showLabel className="min-w-0 max-w-full [&>span:last-child]:truncate" /> : hint.text}</span>;
+    className={cx('block min-w-0 max-w-full text-sm font-normal', wrap ? 'whitespace-normal wrap-anywhere' : 'truncate', hint.warning ? 'text-warning-text' : 'text-text-muted', className)}>{hint.warning ? <StatusDot tone="warning" label={hint.text} showLabel className={cx('min-w-0 max-w-full', !wrap && '[&>span:last-child]:truncate')} /> : hint.text}</span>;
 }
 
 export function resourcePreview(subject: ResourceSubject): CardPreview {

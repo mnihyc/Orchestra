@@ -10,9 +10,10 @@ mod rig;
 mod support;
 
 use orch_api_contract::chats::{
-    ChatMentionList, ChatMentionListQuery, ChatMentionPreview, ChatMentionPreviewBody,
-    ChatMentionPreviewReply, ChatMentionTarget, ChatMessageCreate, ChatMessageCreateBody,
-    ChatMessageCreateReply, ChatMessageUpdate, ChatMessageUpdateBody, ChatPart,
+    ChatAskedAgent, ChatMentionList, ChatMentionListQuery, ChatMentionPreview,
+    ChatMentionPreviewBody, ChatMentionPreviewReply, ChatMentionTarget, ChatMessageCreate,
+    ChatMessageCreateBody, ChatMessageCreateReply, ChatMessageUpdate, ChatMessageUpdateBody,
+    ChatPart,
 };
 use orch_api_contract::common::ErrorCode;
 use orch_api_contract::threads::{ContentPart, Delivery, ForwardedAuthor, ForwardedFrom};
@@ -29,6 +30,15 @@ fn agent(thread: Id) -> ChatPart {
     ChatPart::Mention {
         target: ChatMentionTarget::Agent { thread_id: thread },
     }
+}
+
+// Accepted receipt data is stable; its readable thread reference carries the current work icon.
+fn without_current_icons(mut asks: Vec<ChatAskedAgent>) -> Vec<ChatAskedAgent> {
+    for asked in &mut asks {
+        assert!(asked.thread.thread_display.is_some());
+        asked.thread.thread_display = None;
+    }
+    asks
 }
 
 async fn preview(
@@ -56,14 +66,25 @@ async fn send(
     chat: Id,
     body: &ChatMessageCreateBody,
 ) -> orch_api_core::testing::Reply<ChatMessageCreateReply> {
-    s.rig
+    let reply = s
+        .rig
         .world
         .app
         .call(ChatMessageCreate, &[&chat])
         .token(&by.token)
         .body(body)
         .send()
-        .await
+        .await;
+    orch_api_core::testing::Reply {
+        status: reply.status,
+        headers: reply.headers,
+        raw: reply.raw,
+        body: reply.body.map(|answer| {
+            answer
+                .into_full()
+                .expect("the browser session receives the full chat message reply")
+        }),
+    }
 }
 async fn input_count(s: &Scene) -> i64 {
     sqlx::query_scalar("SELECT count(*) FROM thread_inputs")
@@ -194,8 +215,14 @@ async fn the_preview_is_real_but_publishes_nothing_and_send_keeps_authors_sender
         .await;
     let repeated = send(&s, &s.ada, chat, &body).await;
     assert_eq!(repeated.status, http::StatusCode::OK);
-    assert_eq!(repeated.ok().message.asked_agents, accepted.asked_agents);
+    let repeated = repeated.ok().message;
+    assert_eq!(repeated.id, accepted.id);
+    assert_eq!(
+        without_current_icons(repeated.asked_agents),
+        without_current_icons(accepted.asked_agents)
+    );
     assert_eq!(input_count(&s).await, before + 2);
+    assert_eq!(message_count(&s, chat).await, messages + 1);
 }
 
 #[tokio::test]
@@ -460,11 +487,22 @@ async fn duplicate_agent_sends_and_an_ordinary_mixed_forward_finish_under_the_sa
     })
     .await
     .expect("ordinary Forward and typed sends share one sorted thread-before-chat lock order");
+    let first = first.ok().message;
+    let duplicate = duplicate.ok().message;
+    assert_eq!(first.id, duplicate.id);
     assert_eq!(
-        first.ok().message.asked_agents,
-        duplicate.ok().message.asked_agents
+        without_current_icons(first.asked_agents),
+        without_current_icons(duplicate.asked_agents)
     );
-    assert_eq!(forwarded.ok().threads.len(), 2);
+    assert_eq!(
+        forwarded
+            .ok()
+            .into_full()
+            .expect("the ordinary forward returns its full projection")
+            .threads
+            .len(),
+        2
+    );
     assert_eq!(input_count(&s).await, 4);
     assert_eq!(message_count(&s, chat).await, 2);
 }

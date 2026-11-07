@@ -560,6 +560,9 @@ async fn a_version_pins_its_archive_and_the_same_files_make_the_same_archive() {
 #[tokio::test]
 async fn a_turn_records_the_skill_versions_it_was_given() {
     let world = World::new().await;
+    let mut descriptor = common::descriptor();
+    descriptor["capabilities"]["skills"] = json!("directory");
+    world.declares(descriptor).await;
     let store = store().await;
     let made = skill(&world, &store, world.root, world.ada, "recorded").await;
     world
@@ -647,6 +650,9 @@ fn opens(world: &World, thread: Id) -> Vec<orch_link_contract::commands::Session
 async fn a_session_is_given_its_threads_skills_opened_anew_when_they_change_and_each_turn_records_them()
  {
     let world = World::new().await;
+    let mut descriptor = common::descriptor();
+    descriptor["capabilities"]["skills"] = json!("directory");
+    world.declares(descriptor).await;
     let store = store().await;
     let made = skill(&world, &store, world.root, world.ada, "pdf-tools").await;
     world

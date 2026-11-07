@@ -523,7 +523,7 @@ export function Board({ rail, top, status, pending }: BoardProps) {
       onResize: (size) => change((current) => resizeBar(current, id, size)),
       content: id !== 'bottom' ? <SideBarView bar={id} layout={layout[id]} renderView={(tab) => <ViewSlot tab={tab} />}
         onSelectContainer={(name) => change((current) => { const next = selectContainer(current, id, name); return floating ? { ...next, [id]: { ...next[id], open: false } } : next; })}
-        addView={<AddViewButton />}
+        addView={null}
         actions={<>{floating && <IconButton size="sm" label={t('workbench.bars.pin')} icon={<Pin aria-hidden />} onClick={() => {
           change((current) => setBarOpen(current, id, true)); setOverlay(null);
           requestAnimationFrame(() => document.querySelector<HTMLElement>(`[data-workbench-bar="${id}"] button`)?.focus());

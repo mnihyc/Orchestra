@@ -97,7 +97,7 @@ export function PersonQuickCard({ user, thing, identity = true }: { user: UserRe
   const isSelf = me === user.id || profile.data?.is_me === true;
   const isOther = !isSelf && (me !== null || profile.data?.is_me === false);
   if (isSelf && !identity) return null;
-  const message = isOther && profile.data !== undefined && profile.data.can_message ? <ProfileMessage compact profile={profile.data} /> : null;
+  const message = isOther && profile.data?.can_message === true ? <ProfileMessage compact profile={profile.data} /> : null;
   return <div className="flex max-w-[min(20rem,calc(100vw-2rem))] flex-col gap-2 p-3 text-text">
     {identity && <div className="flex min-w-0 items-center gap-2"><Avatar text={user.avatar.text} color={user.avatar.color} kind={user.kind === 'service' ? 'service' : 'human'} size={32} />
       <div className="min-w-0"><div className="truncate font-semibold">{user.display_name}</div>{user.username !== '' && <div className="truncate text-sm text-text-muted">@{user.username}</div>}</div></div>}
