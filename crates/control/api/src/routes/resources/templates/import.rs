@@ -9,11 +9,11 @@ use orch_api_contract::common::{ErrorCode, FieldFault, Problem};
 use orch_api_contract::resources::{self as api, UnitKind};
 use orch_authz::usable::{self, Policies, Usable};
 use orch_db::queries::resources::template_imports;
-use orch_driver_contract::imports::ImportDef;
+use orch_driver_contract::imports::{ImportDef, archive_references};
 use orch_link_contract::commands::{
     NodeTemplateImport, NodeTemplateImportResult, NoteLevel, RuntimeKind, SerialKey,
 };
-use orch_types::{FieldType, Hash, Json};
+use orch_types::{FieldType, Json};
 
 /// Proposes a recipe on an online host the caller may use in the requested home.
 pub(super) async fn import(
@@ -89,6 +89,8 @@ pub(super) async fn import(
     for (name, value) in &body.values {
         let field = import.fields.iter().find(|field| field.name == *name);
         let value = match field.map(|field| field.kind) {
+            Some(FieldType::Json) => serde_json::from_str(value)
+                .map_err(|_| invalid(&format!("values.{name}"), "must be valid JSON"))?,
             Some(FieldType::Boolean) => value
                 .parse::<bool>()
                 .map(Json::Bool)
@@ -121,28 +123,29 @@ pub(super) async fn import(
                 .collect(),
         ))
     })?;
-    // Blob and context_blob are the source contract's archive references; names alone confer no read authority.
-    for (name, value) in &body.values {
-        if name != "blob" && !name.ends_with("_blob") {
-            continue;
-        }
-        let hash: Hash = value.parse().map_err(|_| {
-            invalid(
-                &format!("values.{name}"),
-                "an archive names a completed upload",
-            )
-        })?;
-        if !orch_db::queries::uploads::owns(&mut tx, principal.user(), &hash).await?
+    let archives = archive_references(&values).map_err(|faults| {
+        ApiError::from(Problem::invalid(
+            faults
+                .into_iter()
+                .map(|fault| FieldFault {
+                    path: format!("values.{}", fault.path),
+                    message: fault.message,
+                })
+                .collect(),
+        ))
+    })?;
+    for archive in archives {
+        if !orch_db::queries::uploads::owns(&mut tx, principal.user(), &archive.hash).await?
             || !ctx
                 .app
                 .blobs
                 .store()
-                .exists(&hash)
+                .exists(&archive.hash)
                 .await
                 .map_err(|_| ApiError::internal("the uploaded archive could not be checked"))?
         {
             return Err(invalid(
-                &format!("values.{name}"),
+                &format!("values.{}", archive.name),
                 "this caller has no completed upload of that archive",
             ));
         }

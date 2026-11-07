@@ -49,6 +49,58 @@ pub struct BatchDraft {
     pub body: ForkBatchPreflightBody,
 }
 
+/// One actual batch membership snapshot; state may advance without changing its sources.
+#[derive(Clone)]
+pub struct BatchCancellation {
+    batch: Id,
+    rows: Vec<JobRow>,
+}
+
+impl BatchCancellation {
+    /// Actual native rows, including already finished members.
+    pub fn rows(&self) -> &[JobRow] {
+        &self.rows
+    }
+
+    /// The same immutable native membership and governors, independently of progress.
+    pub fn preserves(&self, fresh: &Self) -> bool {
+        self.batch == fresh.batch
+            && self.rows.len() == fresh.rows.len()
+            && self.rows.iter().zip(&fresh.rows).all(|(old, new)| {
+                old.id == new.id
+                    && old.kind == new.kind
+                    && old.node_id == new.node_id
+                    && old.environment_id == new.environment_id
+                    && old.provider_id == new.provider_id
+                    && old.batch_id == new.batch_id
+                    && old.created_by == new.created_by
+                    && old.created_at == new.created_at
+            })
+    }
+}
+
+/// The existing native cancellation outcome; cleanup starts only after its transaction commits.
+pub struct BatchMemberCancellation {
+    row: JobRow,
+    ended: bool,
+    asked: bool,
+}
+
+impl BatchMemberCancellation {
+    /// Actual affected member, never a new scope identity.
+    pub fn id(&self) -> Id {
+        self.row.id
+    }
+    /// A queued member ended in this transaction.
+    pub fn ended(&self) -> bool {
+        self.ended
+    }
+    /// A running member accepted the native cancellation request.
+    pub fn asked(&self) -> bool {
+        self.asked
+    }
+}
+
 /// The request for one thread of a batch: a switch in place to what the batch names.
 fn request_of(body: &ForkBatchPreflightBody) -> ForkRequest {
     ForkRequest {
@@ -56,6 +108,7 @@ fn request_of(body: &ForkBatchPreflightBody) -> ForkRequest {
         topic_id: None,
         name: None,
         access: None,
+        agent_access: None,
         history: None,
         to: body.to.clone(),
         environment: body.environment.clone(),
@@ -289,7 +342,7 @@ impl Engine {
                 reason,
             };
             match self
-                .draft_in(&mut conn, caller, thread, &request, reach, None)
+                .draft_in(&mut conn, caller, thread, &request, reach, None, None)
                 .await
             {
                 Ok(mut draft) => {
@@ -453,13 +506,12 @@ impl Engine {
             orch_types::Time::new(self.inner.clock.now()),
         )
         .await?;
-        let ids = draft
-            .members
-            .iter()
-            .zip(&draft.plan.plans)
-            .filter(|(_, plan)| plan.blockers.is_empty())
-            .map(|(member, _)| member.thread)
-            .collect::<Vec<_>>();
+        let mut stored = StoredBatch {
+            body: draft.body.clone(),
+            plan: draft.plan.clone(),
+            members: draft.members.clone(),
+        };
+        let ids = stored.recipient_threads();
         let audience =
             crate::notifications::operation_thread_audience(&mut conn, &principal, &ids).await?;
         draft.plan.notification = Some(orch_api_contract::loss::OperationNotificationPlan {
@@ -467,11 +519,7 @@ impl Engine {
             people: audience.len() as i64,
             default_on: draft.plan.executable > 0,
         });
-        let stored = StoredBatch {
-            body: draft.body.clone(),
-            plan: draft.plan.clone(),
-            members: draft.members.clone(),
-        };
+        stored.plan = draft.plan.clone();
         fork_rows::save_preflight(
             &mut conn,
             &fork_rows::PreflightRow {
@@ -636,6 +684,7 @@ impl Engine {
                     &request,
                     member.reach,
                     Some(batch),
+                    None,
                 )
                 .await
             else {
@@ -775,35 +824,88 @@ impl Engine {
     pub async fn cancel_batch(&self, by: Id, batch: Id) -> Result<Vec<JobRow>, EngineError> {
         let rows = self.batch_jobs(batch).await?;
         for row in rows.iter().filter(|row| row.is_open()) {
-            let never_began = row.state == state::QUEUED && row.plan.get("runner").is_none();
-            if never_began {
-                let now = self.inner.clock.now();
-                let (progress, _) = read_progress(row);
-                let mut tx = self.inner.db.begin().await?;
-                let ended = job_rows::finish(
-                    &mut tx,
-                    row.id,
-                    state::CANCELLED,
-                    &serde_json::to_value(&progress)?,
-                    None,
-                    Some(&serde_json::json!({
-                        "code": "cancelled",
-                        "message": "the job was cancelled before it began",
-                        "phase": progress.phase,
-                        "undone": true,
-                    })),
-                    now,
-                )
+            let mut tx = self.inner.db.begin().await?;
+            let Some(current) = job_rows::lock(&mut tx, row.id).await? else {
+                continue;
+            };
+            let result = self
+                .cancel_batch_member_before(&mut tx, &current, by, || Ok(()))
                 .await?;
-                tx.commit().await.map_err(orch_db::DbError::from)?;
-                if ended {
-                    self.after_fork_job(row).await;
-                }
-            } else {
-                self.cancel_job(row.id, by).await?;
-            }
+            tx.commit().await.map_err(DbError::from)?;
+            self.finish_batch_member(&result).await?;
         }
         self.batch_jobs(batch).await
+    }
+
+    /// Select the exact native batch without dispatching or cancelling anything.
+    pub async fn preparing_batch_cancellation(
+        &self,
+        conn: &mut orch_db::Conn,
+        batch: Id,
+    ) -> Result<BatchCancellation, EngineError> {
+        Ok(BatchCancellation {
+            batch,
+            rows: fork_rows::of_batch(conn, batch).await?,
+        })
+    }
+
+    /// The same per-member writer used by ordinary cancellation, on the caller's locked row.
+    /// The callback belongs immediately before the first actual SQL mutation.
+    pub async fn cancel_batch_member_before<F>(
+        &self,
+        conn: &mut orch_db::Conn,
+        row: &JobRow,
+        by: Id,
+        before: F,
+    ) -> Result<BatchMemberCancellation, EngineError>
+    where
+        F: FnOnce() -> Result<(), EngineError> + Send,
+    {
+        let mut result = BatchMemberCancellation {
+            row: row.clone(),
+            ended: false,
+            asked: false,
+        };
+        if !row.is_open() {
+            return Ok(result);
+        }
+        let never_began = row.state == state::QUEUED && row.plan.get("runner").is_none();
+        if never_began {
+            let (progress, _) = read_progress(row);
+            let progress_json = serde_json::to_value(&progress)?;
+            let error = serde_json::json!({"code":"cancelled", "message":"the job was cancelled before it began", "phase":progress.phase, "undone":true});
+            before()?;
+            result.ended = job_rows::finish(
+                conn,
+                row.id,
+                state::CANCELLED,
+                &progress_json,
+                None,
+                Some(&error),
+                self.inner.clock.now(),
+            )
+            .await?;
+        } else {
+            before()?;
+            result.asked =
+                job_rows::request_cancel(conn, row.id, by, self.inner.clock.now()).await?;
+        }
+        Ok(result)
+    }
+
+    /// Complete only the already accepted cancellation's native cleanup and wakeups.
+    pub async fn finish_batch_member(
+        &self,
+        result: &BatchMemberCancellation,
+    ) -> Result<(), EngineError> {
+        if result.ended {
+            self.after_fork_job(&result.row).await;
+        }
+        if result.asked {
+            self.stop_job_command(result.row.id).await?;
+            self.kick();
+        }
+        Ok(())
     }
 }
 

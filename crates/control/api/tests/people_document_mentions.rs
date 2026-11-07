@@ -9,6 +9,7 @@ mod desk;
 mod places;
 mod support;
 
+use crate::support::FullPermissionPageReply;
 use desk::Desk;
 use orch_api_contract::access::{
     AccessChoice, HolderInput, PageChange, PageChangeName, PermissionPageUpdate,
@@ -72,6 +73,7 @@ async fn a_private_pages_picker_obeys_current_view_and_has_no_hidden_people_or_q
         })
         .send()
         .await
+        .full_permission_page()
         .ok();
     let shared = desk
         .world
@@ -122,6 +124,7 @@ async fn a_sharer_sees_readers_before_people_who_need_access() {
         })
         .send()
         .await
+        .full_permission_page()
         .ok();
     let page = desk
         .world

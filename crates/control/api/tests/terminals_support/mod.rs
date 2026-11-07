@@ -57,12 +57,19 @@ const KEPT_BYTES: usize = 256 * 1024;
 
 // ---------------------------------------------------------------- the place where last outputs are kept
 
+type ReadBarrier = (
+    tokio::sync::oneshot::Sender<()>,
+    tokio::sync::oneshot::Receiver<()>,
+);
+
 /// Where the last output of shells is put away in these tests: in memory, by hash, with the values of the
 /// secrets taken out where the engine asks for that.
 #[derive(Default)]
 pub struct Store {
     blobs: Mutex<HashMap<Hash, Vec<u8>>>,
     secrets: Mutex<Vec<String>>,
+    reads: Mutex<HashMap<Hash, usize>>,
+    paused: Mutex<HashMap<Hash, ReadBarrier>>,
 }
 
 impl Store {
@@ -90,6 +97,28 @@ impl Store {
     pub fn knows_secret(&self, value: &str) {
         lock(&self.secrets).push(value.to_owned());
     }
+
+    /// A real storage-read barrier; dropping its release resumes the once-only supplier too.
+    pub fn pause_read(
+        &self,
+        hash: Hash,
+    ) -> (
+        tokio::sync::oneshot::Receiver<()>,
+        tokio::sync::oneshot::Sender<()>,
+    ) {
+        let (entered, observed) = tokio::sync::oneshot::channel();
+        let (release, resumed) = tokio::sync::oneshot::channel();
+        assert!(
+            lock(&self.paused)
+                .insert(hash, (entered, resumed))
+                .is_none()
+        );
+        (observed, release)
+    }
+
+    pub fn reads_of(&self, hash: Hash) -> usize {
+        lock(&self.reads).get(&hash).copied().unwrap_or(0)
+    }
 }
 
 #[async_trait]
@@ -115,6 +144,12 @@ impl Recordings for Store {
     }
 
     async fn read(&self, hash: &Hash) -> Result<Option<Vec<u8>>, RecordingFault> {
+        *lock(&self.reads).entry(*hash).or_default() += 1;
+        let pause = { lock(&self.paused).remove(hash) };
+        if let Some((entered, release)) = pause {
+            let _ = entered.send(());
+            let _ = release.await;
+        }
         Ok(lock(&self.blobs).get(hash).cloned())
     }
 }
@@ -145,6 +180,11 @@ pub struct FakeShell {
     /// A deliberate pause inside replay proves that its boundary is independent of timing.
     pub replay_pause: Mutex<Option<Duration>>,
     pub live_after_replay: Mutex<Vec<u8>>,
+    /// The single native attachment used by a control has finished consuming its accepted input.
+    pub input_ended: AtomicBool,
+    input_paused: AtomicBool,
+    input_wake: tokio::sync::Notify,
+    input_pause_ack: Mutex<Option<tokio::sync::oneshot::Sender<()>>>,
 }
 
 impl FakeShell {
@@ -162,7 +202,26 @@ impl FakeShell {
             busy: AtomicBool::new(false),
             replay_pause: Mutex::new(None),
             live_after_replay: Mutex::new(Vec::new()),
+            input_ended: AtomicBool::new(false),
+            input_paused: AtomicBool::new(false),
+            input_wake: tokio::sync::Notify::new(),
+            input_pause_ack: Mutex::new(None),
         })
+    }
+
+    /// Stops the actual native reader before it consumes further input/returns tunnel credit.
+    /// The acknowledgement witnesses its real loop, not a sleep or a guessed buffer state.
+    pub async fn pause_input(&self) {
+        let (send, wait) = tokio::sync::oneshot::channel();
+        *lock(&self.input_pause_ack) = Some(send);
+        self.input_paused.store(true, Ordering::SeqCst);
+        self.input_wake.notify_one();
+        tokio::time::timeout(PATIENCE, wait).await.unwrap().unwrap();
+    }
+
+    pub fn resume_input(&self) {
+        self.input_paused.store(false, Ordering::SeqCst);
+        self.input_wake.notify_one();
     }
 
     /// What the shell remembers of what it printed.
@@ -216,6 +275,14 @@ impl FakeShell {
 
     /// Serves one attachment until it ends.
     async fn serve(self: Arc<Self>, mut tunnel: Tunnel) {
+        struct End<'a>(&'a AtomicBool);
+        impl Drop for End<'_> {
+            fn drop(&mut self) {
+                self.0.store(true, Ordering::SeqCst);
+            }
+        }
+        self.input_ended.store(false, Ordering::SeqCst);
+        let _ended = End(&self.input_ended);
         let (signals, mut told) = mpsc::unbounded_channel();
         // One screen at a time: a second tunnel ends the first, and says why.
         let before = lock(&self.attachment).replace(signals);
@@ -255,7 +322,13 @@ impl FakeShell {
         let mut line = String::new();
         let mut buffer = vec![0_u8; 16 * 1024];
         loop {
+            if self.input_paused.load(Ordering::SeqCst) {
+                if let Some(ack) = lock(&self.input_pause_ack).take() {
+                    let _ = ack.send(());
+                }
+            }
             tokio::select! {
+                () = self.input_wake.notified() => {},
                 signal = told.recv() => {
                     match signal {
                         Some(Signal::Taken) => tunnel.fail("another screen took this shell"),
@@ -271,7 +344,7 @@ impl FakeShell {
                         *lock(&self.size) = (cols, rows);
                     }
                 }
-                read = tunnel.read(&mut buffer) => {
+                read = tunnel.read(&mut buffer), if !self.input_paused.load(Ordering::SeqCst) => {
                     let Ok(count) = read else { break };
                     if count == 0 {
                         break;
@@ -618,7 +691,17 @@ impl Floor {
         if let Some(thread) = thread {
             call = call.raw_query(&format!("thread={thread}"));
         }
-        call.send().await
+        let reply = call.send().await;
+        Reply {
+            status: reply.status,
+            headers: reply.headers,
+            raw: reply.raw,
+            body: reply.body.map(|value| {
+                value
+                    .into_full()
+                    .expect("ordinary shell creation retains the full native result")
+            }),
+        }
     }
 
     /// A shell opened through the thread, which has to succeed.
@@ -677,14 +760,25 @@ impl Floor {
     }
 
     pub async fn close(&self, who: &Who, shell: Id) -> Reply<TerminalSession> {
-        self.scene
+        let reply = self
+            .scene
             .rig
             .world
             .app
             .call(TerminalClose, &[&shell])
             .token(&who.token)
             .send()
-            .await
+            .await;
+        Reply {
+            status: reply.status,
+            headers: reply.headers,
+            raw: reply.raw,
+            body: reply.body.map(|response| {
+                response
+                    .into_full()
+                    .expect("ordinary shell close retains full native metadata")
+            }),
+        }
     }
 
     // ------------------------------------------------------------ the database, as the tests read it
@@ -773,6 +867,29 @@ impl Floor {
         Screen::connect(
             addr,
             &format!("/api/v1/ws/agent-terminals/{}?ticket={ticket}", self.thread),
+        )
+        .await
+    }
+
+    /// The actual key surface of a bound shell ticket; browser/key proofs are disjoint.
+    pub async fn key_screen(&self, shell: Id, ticket: &str) -> Screen {
+        let addr = self.serve().await;
+        Screen::connect(
+            addr,
+            &format!("/openapi/v1/ws/terminals/{shell}?ticket={ticket}"),
+        )
+        .await
+    }
+
+    /// The key surface of an agent ticket, retaining its original operation and proof.
+    pub async fn key_agent_screen(&self, ticket: &str) -> Screen {
+        let addr = self.serve().await;
+        Screen::connect(
+            addr,
+            &format!(
+                "/openapi/v1/ws/agent-terminals/{}?ticket={ticket}",
+                self.thread
+            ),
         )
         .await
     }

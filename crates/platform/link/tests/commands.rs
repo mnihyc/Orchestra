@@ -11,7 +11,8 @@ use orch_link::commands::{CommandIssuer, Progress};
 use orch_link::machine::{MachineConfig, MachineLink};
 use orch_link_contract::backplane::DownFrame;
 use orch_link_contract::commands::{
-    Cmd, CommandKind, ErrorCode, Reference, SerialKey, SessionClose, resolve_references,
+    Cmd, CommandError, CommandKind, ErrorCode, Reference, SerialKey, SessionClose,
+    resolve_references,
 };
 use orch_link_contract::session::{Arch, Os, Platform, Role};
 use orch_link_contract::version::Limits;
@@ -274,6 +275,7 @@ async fn a_command_that_reaches_a_machine_before_it_has_said_what_carries_comman
     let dir = tempfile::tempdir().unwrap();
     let link = MachineLink::start(
         MachineConfig {
+            gateway: Default::default(),
             hosted_endpoints: None,
             follow_system_endpoints: false,
             machine_id: id,
@@ -628,4 +630,122 @@ async fn a_stop_after_restart_waits_for_interrupted_external_work_to_be_cleaned_
     })
     .await;
     assert_eq!(cleanup.runs.load(std::sync::atomic::Ordering::SeqCst), 0);
+}
+
+#[tokio::test]
+async fn local_transmission_refusal_is_atomic_with_native_acknowledgement_and_results() {
+    for code in [ErrorCode::Conflict, ErrorCode::NotFound] {
+        for progress in [
+            Progress::Queued,
+            Progress::Sent,
+            Progress::Accepted,
+            Progress::Succeeded(json!({"native":"original"})),
+            Progress::Failed(CommandError::new(ErrorCode::Unsupported, "native refusal")),
+            Progress::Expired,
+            Progress::Cancelled,
+        ] {
+            let (issuer, mut frames, clock) = issuer();
+            let original = command(&clock, 60);
+            let handle = issuer.adopt(original.clone(), progress.clone());
+            let error = CommandError::new(code, "local sealing or authorization refusal");
+            let unaccepted = matches!(progress, Progress::Queued | Progress::Sent);
+            assert_eq!(issuer.refuse_unaccepted(original.id, &error), unaccepted);
+            assert_eq!(
+                handle.progress(),
+                if unaccepted {
+                    Progress::Failed(error)
+                } else {
+                    progress.clone()
+                }
+            );
+            assert!(
+                !issuer.answered(original.id),
+                "a local refusal is not native completion evidence"
+            );
+            assert!(
+                frames.try_recv().is_err(),
+                "local rejection emits no machine frame"
+            );
+            if progress == Progress::Accepted {
+                let native = json!({"native":"actual result"});
+                issuer.on_cmd_res(&orch_link_contract::commands::CmdRes {
+                    id: original.id,
+                    outcome: Ok(native.clone()),
+                });
+                assert_eq!(handle.progress(), Progress::Succeeded(native));
+                assert!(issuer.answered(original.id));
+            }
+        }
+    }
+}
+
+#[tokio::test]
+async fn a_native_ack_before_local_refusal_wins_but_unacknowledged_first_send_stays_refused() {
+    for ack_first in [true, false] {
+        let (issuer, _frames, clock) = issuer();
+        let original = command(&clock, 60);
+        let handle = issuer.issue(original.clone());
+        let ack = orch_link_contract::commands::CmdAck { id: original.id };
+        let error = CommandError::new(ErrorCode::Conflict, "current authority was revoked");
+        if ack_first {
+            issuer.on_cmd_ack(&ack);
+        }
+        assert_eq!(issuer.refuse_unaccepted(original.id, &error), !ack_first);
+        if !ack_first {
+            issuer.on_cmd_ack(&ack);
+        }
+        assert_eq!(
+            handle.progress(),
+            if ack_first {
+                Progress::Accepted
+            } else {
+                Progress::Failed(error)
+            }
+        );
+        assert!(!issuer.answered(original.id));
+    }
+}
+
+#[tokio::test]
+async fn a_locally_suppressed_acknowledged_resend_retires_its_ack_timer() {
+    use orch_link_contract::commands::{ACK_RESENDS, ACK_TIMEOUT_SECS, CmdAck, CmdRes};
+
+    for code in [ErrorCode::Conflict, ErrorCode::NotFound] {
+        let (issuer, mut frames, clock) = issuer();
+        let original = command(&clock, 60);
+        let handle = issuer.issue(original.clone());
+        issuer.session_ready();
+        assert_eq!(frames.recv().await, Some(DownFrame::Cmd(original.clone())));
+        issuer.on_cmd_ack(&CmdAck { id: original.id });
+        assert_eq!(handle.progress(), Progress::Accepted);
+        // Normal reconnection retries the acknowledged identity to recover its result.
+        issuer.session_ready();
+        assert_eq!(frames.recv().await, Some(DownFrame::Cmd(original.clone())));
+        assert!(!issuer.refuse_unaccepted(
+            original.id,
+            &CommandError::new(code, "local duplicate refusal")
+        ));
+        let now = tokio::time::Instant::now();
+        for step in 1..=ACK_RESENDS + 2 {
+            issuer.tick(now + Duration::from_secs(u64::from(ACK_TIMEOUT_SECS) * u64::from(step)));
+            assert_eq!(handle.progress(), Progress::Accepted);
+            assert!(!issuer.answered(original.id));
+            assert!(
+                frames.try_recv().is_err(),
+                "the suppressed duplicate must not arm another ACK retry"
+            );
+        }
+        // A later real reconnect still uses the original identity/body/deadline and
+        // can deliver its actual result. Retiring one local timer is not cancellation.
+        issuer.session_ready();
+        assert_eq!(frames.recv().await, Some(DownFrame::Cmd(original.clone())));
+        issuer.on_cmd_ack(&CmdAck { id: original.id });
+        let result = json!({"native":"completed after suppression"});
+        issuer.on_cmd_res(&CmdRes {
+            id: original.id,
+            outcome: Ok(result.clone()),
+        });
+        assert_eq!(handle.progress(), Progress::Succeeded(result));
+        assert!(issuer.answered(original.id));
+    }
 }

@@ -5,9 +5,17 @@
     reason = "a test fails by panicking"
 )]
 
+#[path = "kmounts_mcp/create_scopes.rs"]
+mod create_scopes;
+#[path = "kmounts_mcp/import_scopes.rs"]
+mod import_scopes;
+#[path = "kmounts_mcp/import_source.rs"]
+mod import_source;
 mod places;
 mod resources;
 mod support;
+#[path = "kmounts_mcp/update_scopes.rs"]
+mod update_scopes;
 
 use orch_api_contract::access::NewResourceAccess;
 use orch_api_contract::common::{ErrorCode, Listed};
@@ -54,7 +62,9 @@ async fn enabling_a_disabled_server_records_one_safe_factual_line_and_repeating_
         })
         .send()
         .await
-        .ok();
+        .ok()
+        .into_full()
+        .unwrap();
     let mut body = change(made.revision);
     assert_eq!(made.enabled_places, Some(0));
     world
@@ -112,7 +122,9 @@ async fn enabling_a_disabled_server_records_one_safe_factual_line_and_repeating_
         .body(&body)
         .send()
         .await
-        .ok();
+        .ok()
+        .into_full()
+        .unwrap();
     assert_eq!(disabled.enabled_places, Some(0));
     body.expected_revision = disabled.revision;
     body.enabled = Some(true);
@@ -123,7 +135,9 @@ async fn enabling_a_disabled_server_records_one_safe_factual_line_and_repeating_
         .body(&body)
         .send()
         .await
-        .ok();
+        .ok()
+        .into_full()
+        .unwrap();
     assert!(enabled.enabled);
     body.expected_revision = enabled.revision;
     world
@@ -133,7 +147,9 @@ async fn enabling_a_disabled_server_records_one_safe_factual_line_and_repeating_
         .body(&body)
         .send()
         .await
-        .ok();
+        .ok()
+        .into_full()
+        .unwrap();
     let records:Vec<(Option<Id>,String,Json)> = sqlx::query_as("SELECT actor_id,summary,details FROM audit_log WHERE action='mcp.enabled' AND object_id=$1")
         .bind(made.id).fetch_all(&world.db.pool).await.unwrap();
     assert_eq!(records.len(), 1);
@@ -224,7 +240,9 @@ async fn a_remote_presets_authentication_is_sealed_rotated_and_never_read_back()
         .body(&body)
         .send()
         .await
-        .ok();
+        .ok()
+        .into_full()
+        .unwrap();
     assert_eq!(made.spec["authentication"]["secret"], "MCP_BEARER_TOKEN");
     assert_eq!(made.spec["tools_allow"], json!(["search"]));
     assert!(
@@ -250,7 +268,9 @@ async fn a_remote_presets_authentication_is_sealed_rotated_and_never_read_back()
         .body(&update)
         .send()
         .await
-        .ok();
+        .ok()
+        .into_full()
+        .unwrap();
     let read = world
         .app
         .call(McpServerGet, &[&made.id])
@@ -339,7 +359,9 @@ async fn a_preset_has_current_revision_crud_and_no_foreign_access() {
         .body(&body)
         .send()
         .await
-        .ok();
+        .ok()
+        .into_full()
+        .unwrap();
     assert_eq!(made.owner.as_ref().unwrap().id, c.viewer.id());
     let listed = world
         .app
@@ -407,7 +429,9 @@ async fn a_preset_has_current_revision_crud_and_no_foreign_access() {
         .body(&change(made.revision))
         .send()
         .await
-        .ok();
+        .ok()
+        .into_full()
+        .unwrap();
     assert_eq!(changed.description, "Changed");
     assert_eq!(changed.revision, made.revision + 1);
     let stale = world
@@ -478,7 +502,9 @@ async fn only_an_environment_manager_can_queue_one_server_restart_and_the_list_s
         })
         .send()
         .await
-        .ok();
+        .ok()
+        .into_full()
+        .unwrap();
     sqlx::query("UPDATE environments SET status='running',facts=jsonb_set(facts,'{mcp_servers}',$2) WHERE id=$1").bind(env).bind(json!([{"name":"flaky","state":"failed","reason":"The server ended (exit status: 7): [masked]","revision":3}])).execute(&world.db.pool).await.unwrap();
     sqlx::query("UPDATE machines SET online=true WHERE id=$1")
         .bind(machine)
@@ -602,7 +628,9 @@ async fn an_environment_server_takes_local_policy_and_never_returns_a_secret() {
         .body(&body)
         .send()
         .await
-        .ok();
+        .ok()
+        .into_full()
+        .unwrap();
     assert_eq!(made.environment.as_ref().unwrap().id, env);
     assert!(
         !serde_json::to_string(&made)
@@ -680,7 +708,9 @@ async fn an_environment_server_takes_local_policy_and_never_returns_a_secret() {
         .body(&change(made.revision))
         .send()
         .await
-        .ok();
+        .ok()
+        .into_full()
+        .unwrap();
     assert_eq!(
         changed.description, "Changed",
         "the environment's manager needs no separate server page"
@@ -748,7 +778,9 @@ async fn imports_and_reimports_store_only_safe_origin_and_forgetting_removes_the
         .body(&body)
         .send()
         .await
-        .ok();
+        .ok()
+        .into_full()
+        .expect("ordinary import keeps its native full result");
     replied.await.unwrap();
     assert_eq!(imported.spec, json!({"transport":"stdio"}));
     assert_eq!(imported.machine.as_ref().unwrap().id, machine);
@@ -807,7 +839,9 @@ async fn imports_and_reimports_store_only_safe_origin_and_forgetting_removes_the
         .body(&project)
         .send()
         .await
-        .ok();
+        .ok()
+        .into_full()
+        .expect("ordinary import keeps its native full result");
     replied.await.unwrap();
     let mut disable = change(folder.revision);
     disable.enabled = Some(false);
@@ -818,7 +852,9 @@ async fn imports_and_reimports_store_only_safe_origin_and_forgetting_removes_the
         .body(&disable)
         .send()
         .await
-        .ok();
+        .ok()
+        .into_full()
+        .unwrap();
     assert!(
         !disabled.enabled,
         "the retained resource starts explicitly disabled"
@@ -931,7 +967,9 @@ async fn selecting_a_different_found_definition_needs_both_server_management_and
         })
         .send()
         .await
-        .ok();
+        .ok()
+        .into_full()
+        .expect("ordinary import keeps its native full result");
     replied.await.unwrap();
     let mut conn = world.conn().await;
     let machine = orch_db::queries::resources::access_fixtures::insert_persons_machine(

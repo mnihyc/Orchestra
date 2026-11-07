@@ -1,27 +1,18 @@
 //! MCP preset resources, environment-owned servers and imports whose definitions stay on their machine.
 
-use crate::middleware::authorization::refusals;
 use crate::middleware::requests::{ApiError, ApiResult};
 use crate::registry::{Ctx, Registry};
-use crate::routes::nodes::{invalid, placed, policy_at, view as node_view};
-use crate::routes::resources::providers::{home_policies, refused_making};
-use crate::routes::resources::view::{
-    Holding, accesses, addresses, environment_refs, machine_refs,
-};
+use crate::routes::nodes::invalid;
 use crate::routes::resources::{Home, begin_mutation, record, require, sealing};
 use orch_access_contract::audit::AuditAction;
-use orch_access_contract::decisions::ObjectRef;
 use orch_access_contract::permissions::{Permission, ResourceKind};
 use orch_agent_contract::discovery::{McpAuthentication, McpServerSpec, McpTransport};
-use orch_api_contract::access::NewResourceAccess;
 use orch_api_contract::common::ErrorCode;
-use orch_api_contract::nodes::NodeKind;
 use orch_api_contract::resources::{self as api, McpServer};
-use orch_authz::ownership::{self, Making, NewAccess};
-use orch_authz::{Policy, Principal, resources};
+use orch_authz::Principal;
 use orch_db::queries::resources::mcp::{self as rows, McpRow};
 use orch_db::{Conn, DbError};
-use orch_link_contract::commands::{McpForget, SerialKey};
+use orch_link_contract::commands::SerialKey;
 use orch_types::{Id, Json, Time};
 use serde_json::json;
 use std::collections::BTreeMap;
@@ -32,12 +23,29 @@ const NAME_MAX: usize = 32;
 /// The start command has a sixty-second deadline, so a definition's startup wait cannot exceed it.
 const STARTUP_MAX_SECS: u32 = 60;
 
+mod creation;
+mod delete;
+mod mutations;
+pub(crate) mod projection;
+
 /// Binds the preset's resource requests and reimport.
 pub fn mount(registry: &mut Registry) {
     registry
-        .on(api::McpServerCreate, create)
-        .on(api::McpServerUpdate, update)
-        .on(api::McpServerDelete, delete)
+        .on_with_operation(
+            api::McpServerCreate,
+            crate::key_operations::native::effects::prepare::<creation::Presets>,
+            creation::create,
+        )
+        .on_with_operation(
+            api::McpServerUpdate,
+            crate::key_operations::native::effects::prepare::<mutations::Servers>,
+            mutations::update,
+        )
+        .on_with_operation(
+            api::McpServerDelete,
+            crate::key_operations::native::effects::prepare::<delete::Delete>,
+            delete::run,
+        )
         .on(api::McpServerReimport, reimport)
         .on(api::McpOfferingUse, use_offering);
 }
@@ -195,7 +203,18 @@ pub(crate) async fn require_row(
     row: &McpRow,
     manages: bool,
 ) -> ApiResult<()> {
-    if let Some(environment) = row.environment_id {
+    require_subject(conn, principal, row.id, row.environment_id, manages).await
+}
+
+/// The original guard on the stored subject, before reading a selected server's full spec.
+pub(crate) async fn require_subject(
+    conn: &mut Conn,
+    principal: &Principal,
+    id: Id,
+    environment: Option<Id>,
+    manages: bool,
+) -> ApiResult<()> {
+    if let Some(environment) = environment {
         if !manages
             && super::super::environments::reading::decide(conn, principal, environment).await?
                 == super::super::environments::reading::Reading::Whole
@@ -219,7 +238,7 @@ pub(crate) async fn require_row(
             conn,
             principal,
             ResourceKind::McpServer,
-            row.id,
+            id,
             if manages {
                 Permission::McpManage
             } else {
@@ -237,465 +256,12 @@ pub(crate) async fn show(
     principal: &Principal,
     id: Id,
 ) -> ApiResult<McpServer> {
-    let row = rows::servers(conn, &[id])
+    let prepared =
+        projection::prepare(conn, principal, &[id], None, projection::Style::Individual).await?;
+    projection::render(ctx, conn, principal, &prepared, None)
         .await?
         .pop()
-        .ok_or_else(ApiError::not_found)?;
-    let people = row
-        .owner_id
-        .into_iter()
-        .chain(
-            row.spec
-                .pointer("/imported/by")
-                .and_then(Json::as_str)
-                .and_then(|id| id.parse().ok()),
-        )
-        .collect::<Vec<_>>();
-    let people = refusals::user_refs(conn, &people).await?;
-    let homes = node_view::refs(
-        conn,
-        principal,
-        &row.home_id.into_iter().collect::<Vec<_>>(),
-        Policy::default(),
-    )
-    .await?;
-    let addresses = if row.environment_id.is_none() {
-        addresses(conn, &[id]).await?
-    } else {
-        Default::default()
-    };
-    let environment = if let Some(environment) = row.environment_id {
-        environment_refs(conn, &[environment], &[], Time::new(ctx.now))
-            .await?
-            .into_iter()
-            .next()
-            .map(|(_, reference)| reference)
-    } else {
-        None
-    };
-    let current_offerings = rows::offerings(conn, &[id]).await?;
-    let offering_machines = machine_refs(
-        &ctx.app,
-        conn,
-        &current_offerings
-            .iter()
-            .map(|offering| offering.machine_id)
-            .collect::<Vec<_>>(),
-    )
-    .await?;
-    // An environment's own servers inherit its page and have no native offerings.
-    let can_manage = !current_offerings.is_empty()
-        && row.environment_id.is_none()
-        && resources::check(
-            conn,
-            principal,
-            ObjectRef {
-                kind: ResourceKind::McpServer.into(),
-                id,
-            },
-            Permission::McpManage,
-            Policy::default(),
-        )
-        .await
-        .map_err(ApiError::internal)?
-        .is_allowed();
-    let mut can_use = BTreeMap::new();
-    for offering in &current_offerings {
-        let allowed = if can_manage && (offering.state == "found" || offering.proposal.is_some()) {
-            if let Some(environment) = offering
-                .proposal
-                .as_ref()
-                .and_then(|proposal| proposal["environment"].as_str())
-                .and_then(|id| id.parse::<Id>().ok())
-                .or(offering.environment_id)
-            {
-                super::super::environments::mcp::may_import(conn, principal, environment).await?
-            } else {
-                false
-            }
-        } else {
-            false
-        };
-        can_use.insert(offering.machine_id, allowed);
-    }
-    let offerings = current_offerings
-        .iter()
-        .filter_map(|offering| {
-            offering_machines
-                .get(&offering.machine_id)
-                .cloned()
-                .map(|machine| api::McpServerOffering {
-                    different_definition: offering.proposal.is_some()
-                        || offering.reason.as_deref() == Some("different_definition"),
-
-                    definition_fingerprint: offering
-                        .proposal
-                        .as_ref()
-                        .map(|proposal| &proposal["source"])
-                        .unwrap_or(&offering.source)
-                        .get("definition_fingerprint")
-                        .cloned()
-                        .and_then(|value| serde_json::from_value(value).ok()),
-                    can_use_definition: can_use.get(&offering.machine_id).copied().unwrap_or(false),
-                    machine,
-                    state: match offering.state.as_str() {
-                        "found" => api::McpOfferingState::Found,
-                        "ready" => api::McpOfferingState::Ready,
-                        "pending" => api::McpOfferingState::Pending,
-                        _ => api::McpOfferingState::Failed,
-                    },
-                    offered_at: offering.offered_at.map(Time::new),
-                    seen_at: Time::new(offering.seen_at),
-                    reason: offering
-                        .proposal
-                        .as_ref()
-                        .and_then(|proposal| proposal["reason"].as_str())
-                        .map(str::to_owned)
-                        .or_else(|| offering.reason.clone()),
-                })
-        })
-        .collect();
-    let machine = if let Some(machine) = row.machine_id {
-        machine_refs(&ctx.app, conn, &[machine])
-            .await?
-            .remove(&machine)
-    } else {
-        None
-    };
-    let access = if let Some(environment) = row.environment_id {
-        let held = resources::effective(
-            conn,
-            principal,
-            ObjectRef {
-                kind: ResourceKind::Environment.into(),
-                id: environment,
-            },
-            Policy::default(),
-        )
-        .await
-        .map_err(ApiError::internal)?;
-        accesses(
-            conn,
-            principal,
-            &[Holding {
-                admin_only: &held.admin_only,
-                admin_access: held.admin_access,
-                admin_place: held.admin_place,
-                participating: held.participating,
-                id: environment,
-                owner: held.owner,
-                administers: held.administers,
-                held: &held.held,
-            }],
-        )
-        .await?
-        .remove(&environment)
-    } else {
-        let held = resources::effective(
-            conn,
-            principal,
-            ObjectRef {
-                kind: ResourceKind::McpServer.into(),
-                id,
-            },
-            Policy::default(),
-        )
-        .await
-        .map_err(ApiError::internal)?;
-        accesses(
-            conn,
-            principal,
-            &[Holding {
-                admin_only: &held.admin_only,
-                admin_access: held.admin_access,
-                admin_place: held.admin_place,
-                participating: held.participating,
-                id,
-                owner: held.owner,
-                administers: held.administers,
-                held: &held.held,
-            }],
-        )
-        .await?
-        .remove(&id)
-    }
-    .ok_or_else(|| ApiError::internal("the server's access was not read"))?;
-    let imported = if let Some(imported) = row.spec.get("imported") {
-        let by: Id = serde_json::from_value(imported["by"].clone()).map_err(ApiError::internal)?;
-        Some(api::McpServerImported {
-            source: imported["source"].as_str().unwrap_or_default().to_owned(),
-            scope: serde_json::from_value(imported["scope"].clone()).map_err(ApiError::internal)?,
-            directory: imported["directory"].as_str().map(str::to_owned),
-            name: imported["name"].as_str().unwrap_or_default().to_owned(),
-            at: serde_json::from_value(imported["at"].clone()).map_err(ApiError::internal)?,
-            by: people.get(&by).cloned().ok_or_else(ApiError::not_found)?,
-            stale: import_is_stale(conn, &row).await?,
-        })
-    } else {
-        None
-    };
-    let address = addresses
-        .get(&id)
-        .cloned()
-        .or_else(|| {
-            environment
-                .as_ref()
-                .map(|environment| format!("{}.{}", environment.address, row.name))
-        })
-        .unwrap_or_default();
-    let enabled_places: i64 = if !row.enabled {
-        0
-    } else if row.environment_id.is_some() {
-        1
-    } else {
-        sqlx::query_scalar("SELECT
-          (SELECT count(*) FROM settings s JOIN nodes n ON n.id=s.node_id AND n.deleted_at IS NULL WHERE s.key='mcp.enabled' AND s.value->>$1::uuid::text='true') +
-          (SELECT count(*) FROM environments WHERE deleted_at IS NULL AND config->'mcp.enabled'->>$1::uuid::text='true')")
-            .bind(id).fetch_one(&mut *conn).await.map_err(DbError::from)?
-    };
-    Ok(McpServer {
-        offerings,
-        enabled_places: Some(enabled_places),
-        id,
-        name: row.name,
-        description: row.description,
-        org_id: row.org_id,
-        owner: row.owner_id.and_then(|owner| people.get(&owner).cloned()),
-        home: row.home_id.and_then(|home| homes.get(&home).cloned()),
-        address,
-        machine,
-        environment,
-        imported,
-        spec: if row.imported {
-            json!({"transport":row.spec["transport"]})
-        } else {
-            row.spec
-        },
-        enabled: row.enabled,
-        revision: row.revision,
-        access,
-    })
-}
-
-async fn import_is_stale(conn: &mut Conn, row: &McpRow) -> ApiResult<bool> {
-    let offerings = rows::offerings(conn, &[row.id]).await?;
-    for offering in offerings
-        .into_iter()
-        .filter(|offering| offering.state == "ready")
-    {
-        let origin = &offering.source;
-        if rows::found_on_machine(conn, offering.machine_id)
-            .await?
-            .iter()
-            .any(|found| {
-                found["source"] == origin["source"]
-                    && (found["scope"] == origin["scope"]
-                        || (found["scope"] == "directory" && origin["scope"] == "project"))
-                    && found["name"] == origin["name"]
-                    && found["directory"] == origin["directory"]
-                    && found["digest"] != origin["digest"]
-            })
-        {
-            return Ok(true);
-        }
-    }
-    Ok(false)
-}
-
-async fn create(ctx: Ctx, (): (), body: api::McpServerCreateBody) -> ApiResult<McpServer> {
-    let name = name(&body.name)?;
-    let spec = spec(&body.spec)?;
-    secret_values(&spec, body.secrets.as_ref())?;
-    let (ctx, mut tx, principal) = begin_mutation(&ctx).await?;
-    let (org, members, policy) = match body.home_id {
-        Some(home) => {
-            let (place, kind) = placed(&mut tx, home).await?;
-            if kind != NodeKind::Org {
-                return Err(invalid("home_id", "a preset is at home in an org"));
-            }
-            (
-                Some(place.org),
-                home_policies(&mut tx, home).await?.members_make,
-                policy_at(&mut tx, home).await?,
-            )
-        }
-        None => (None, Vec::new(), Policy::default()),
-    };
-    match ownership::may_make(
-        &mut tx,
-        &principal,
-        ResourceKind::McpServer,
-        body.home_id,
-        &members,
-        policy,
-    )
-    .await
-    {
-        Ok(Making::Allowed(_)) => {}
-        Ok(Making::Refused(why)) => {
-            return Err(match body.home_id {
-                Some(home) => refused_making(&mut tx, home, why).await,
-                None => {
-                    refusals::system_admin_only("only a system admin makes a system MCP preset")
-                }
-            });
-        }
-        Err(error) => return Err(refusals::problem(&mut tx, error).await),
-    }
-    let row = McpRow {
-        imported: false,
-        id: orch_types::new_id(),
-        name,
-        description: body.description.unwrap_or_default().trim().to_owned(),
-        org_id: org,
-        home_id: body.home_id,
-        owner_id: Some(principal.user()),
-        machine_id: None,
-        environment_id: None,
-        spec,
-        enabled: true,
-        revision: 1,
-    };
-    rows::insert(&mut tx, &row, ctx.now).await?;
-    for (name, value) in body.secrets.as_ref().into_iter().flatten() {
-        put_secret(&ctx, &mut tx, row.id, name, value).await?;
-    }
-    ownership::start_resource(
-        &mut tx,
-        ObjectRef {
-            kind: ResourceKind::McpServer.into(),
-            id: row.id,
-        },
-        principal.user(),
-        match body.access {
-            None | Some(NewResourceAccess::Defaults) => NewAccess::Defaults,
-            Some(NewResourceAccess::OnlyMe) => NewAccess::OnlyMe,
-            Some(NewResourceAccess::Home) => NewAccess::Home,
-        },
-        Time::new(ctx.now),
-    )
-    .await
-    .map_err(ApiError::internal)?;
-    record(
-        &ctx,
-        &mut tx,
-        orch_db::audit::action!(AuditAction::McpCreated),
-        row.id,
-        home(&row),
-        "Added an MCP preset",
-        json!({"server":row.id,"name":row.name}),
-    )
-    .await?;
-    let result = show(&ctx, &mut tx, &principal, row.id).await?;
-    tx.commit().await.map_err(DbError::from)?;
-    Ok(result)
-}
-
-async fn update(ctx: Ctx, (): (), body: api::McpServerUpdateBody) -> ApiResult<McpServer> {
-    let clean_name = body.name.as_deref().map(name).transpose()?;
-    let clean_spec = body.spec.as_ref().map(spec).transpose()?;
-    let id = ctx.id("id")?;
-    let (ctx, mut tx, principal) = begin_mutation(&ctx).await?;
-    let mut row = rows::lock(&mut tx, id)
-        .await?
-        .ok_or_else(ApiError::not_found)?;
-    require_row(&mut tx, &principal, &row, true).await?;
-    if row.revision != body.expected_revision {
-        return Err(ApiError::new(
-            ErrorCode::ConflictStaleRevision,
-            "the server changed since it was read",
-        )
-        .with("current", show(&ctx, &mut tx, &principal, id).await?));
-    }
-    if row.imported && (body.spec.is_some() || body.secrets.is_some()) {
-        return Err(invalid(
-            "spec",
-            "an imported definition changes only by reimporting it from its machine",
-        ));
-    }
-    if let Some(name) = clean_name {
-        row.name = name;
-    }
-    if let Some(description) = body.description {
-        row.description = description.trim().to_owned();
-    }
-    if let Some(spec) = clean_spec {
-        row.spec = spec;
-    }
-    secret_values(&row.spec, body.secrets.as_ref())?;
-    for (name, value) in body.secrets.as_ref().into_iter().flatten() {
-        put_secret(&ctx, &mut tx, row.id, name, value).await?;
-    }
-    let was_enabled = row.enabled;
-    if let Some(enabled) = body.enabled {
-        row.enabled = enabled;
-    }
-    rows::update(&mut tx, &row, ctx.now).await?;
-    if !was_enabled && row.enabled {
-        record(
-            &ctx,
-            &mut tx,
-            orch_db::audit::action!(AuditAction::McpEnabled),
-            id,
-            home(&row),
-            "Enabled an MCP server",
-            json!({"server":id,"name":row.name}),
-        )
-        .await?;
-    }
-    record(
-        &ctx,
-        &mut tx,
-        orch_db::audit::action!(AuditAction::McpUpdated),
-        id,
-        home(&row),
-        "Changed an MCP server",
-        json!({"server":id,"name":row.name,"definition":body.spec.is_some(),"enabled":row.enabled}),
-    )
-    .await?;
-    let result = show(&ctx, &mut tx, &principal, id).await?;
-    tx.commit().await.map_err(DbError::from)?;
-    Ok(result)
-}
-
-async fn delete(ctx: Ctx, (): (), (): ()) -> ApiResult<()> {
-    let id = ctx.id("id")?;
-    let (ctx, mut tx, principal) = begin_mutation(&ctx).await?;
-    rows::lock_definition(&mut tx, id).await?;
-    let row = rows::lock(&mut tx, id)
-        .await?
-        .ok_or_else(ApiError::not_found)?;
-    require_row(&mut tx, &principal, &row, true).await?;
-    for offering in rows::offerings(&mut tx, &[id]).await? {
-        if orch_db::queries::resources::machine(&mut tx, offering.machine_id)
-            .await?
-            .is_some_and(|machine| machine.online && machine.is_active())
-        {
-            let _ = ctx
-                .app
-                .link
-                .dispatcher()
-                .run(
-                    offering.machine_id,
-                    &SerialKey::Machine,
-                    &McpForget { server_id: id },
-                )
-                .await;
-        }
-    }
-    rows::delete(&mut tx, id, ctx.now).await?;
-    record(
-        &ctx,
-        &mut tx,
-        orch_db::audit::action!(AuditAction::McpDeleted),
-        id,
-        home(&row),
-        "Deleted an MCP server",
-        json!({"server":id,"name":row.name}),
-    )
-    .await?;
-    tx.commit().await.map_err(DbError::from)?;
-    Ok(())
+        .ok_or_else(ApiError::not_found)
 }
 
 async fn reimport(ctx: Ctx, (): (), (): ()) -> ApiResult<McpServer> {
@@ -776,18 +342,7 @@ pub(crate) async fn put_secret(
     name: &str,
     value: &str,
 ) -> ApiResult<()> {
-    if value.len() > sealing::SECRET_MAX_BYTES {
-        return Err(invalid(
-            "secrets",
-            "a secret exceeds the stored-value limit",
-        ));
-    }
-    let sealed = sealing::master_key()?
-        .seal(
-            value.as_bytes(),
-            &sealing::binding("mcp_server", server, name),
-        )
-        .map_err(|_| ApiError::internal("the secret could not be sealed"))?;
+    let sealed = seal_secret(server, name, value)?;
     orch_db::queries::settings::put_secret(
         conn,
         "mcp_server",
@@ -799,6 +354,22 @@ pub(crate) async fn put_secret(
     )
     .await?;
     Ok(())
+}
+
+/// Prepare supplied secret bytes before the native writer reaches its first effect.
+fn seal_secret(server: Id, name: &str, value: &str) -> ApiResult<Vec<u8>> {
+    if value.len() > sealing::SECRET_MAX_BYTES {
+        return Err(invalid(
+            "secrets",
+            "a secret exceeds the stored-value limit",
+        ));
+    }
+    sealing::master_key()?
+        .seal(
+            value.as_bytes(),
+            &sealing::binding("mcp_server", server, name),
+        )
+        .map_err(|_| ApiError::internal("the secret could not be sealed"))
 }
 
 async fn use_offering(ctx: Ctx, (): (), body: api::McpOfferingUseBody) -> ApiResult<McpServer> {

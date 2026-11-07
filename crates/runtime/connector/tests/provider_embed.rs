@@ -137,9 +137,11 @@ async fn started(url: &str) -> ProviderRig {
 
 fn asked() -> ProviderEmbed {
     ProviderEmbed {
+        model_parameters: Some(Default::default()),
         provider_id: new_id(),
         protocol: EMBEDDINGS.to_owned(),
         model_name: "local".to_owned(),
+        params: None,
         inputs: vec![
             "title: none | text: 发布流程的说明".to_owned(),
             "title: none | text: the rollout plan".to_owned(),
@@ -158,6 +160,7 @@ async fn texts_become_vectors_in_their_order_through_the_endpoint_with_its_secre
         .succeed(
             &p.provider_key(),
             &ProviderEmbed {
+                model_parameters: Some(Default::default()),
                 provider_id: p.rig.provider,
                 ..asked()
             },
@@ -203,6 +206,7 @@ async fn a_refused_batch_fails_with_what_it_used_and_without_the_secret() {
         .send(
             &p.provider_key(),
             &ProviderEmbed {
+                model_parameters: Some(Default::default()),
                 provider_id: p.rig.provider,
                 ..asked()
             },
@@ -263,6 +267,7 @@ async fn embedding_errors_keep_their_classified_cause_and_a_filter_does_not_refu
             .send(
                 &p.provider_key(),
                 &ProviderEmbed {
+                    model_parameters: Some(Default::default()),
                     provider_id: p.rig.provider,
                     ..asked()
                 },
@@ -301,6 +306,7 @@ async fn an_endpoint_of_another_format_cannot_make_vectors() {
         .send(
             &p.provider_key(),
             &ProviderEmbed {
+                model_parameters: Some(Default::default()),
                 provider_id: p.rig.provider,
                 protocol: common::model::RESPONSES.to_owned(),
                 model_name: common::model::MODEL.to_owned(),
@@ -313,4 +319,38 @@ async fn an_endpoint_of_another_format_cannot_make_vectors() {
         "{result:?}"
     );
     assert!(p.model_requests().is_empty(), "nothing reached the model");
+}
+
+#[tokio::test]
+async fn embedding_options_cannot_conflict_with_the_float_decoder_or_generation_dimensions() {
+    let (url, seen) = stub(200).await;
+    let p = started(&url).await;
+    for params in [
+        json!({"encoding_format":"base64"}),
+        json!({"encoding_format":null}),
+        json!({"dimensions":512}),
+    ] {
+        let request = ProviderEmbed {
+            provider_id: p.rig.provider,
+            params: Some(params),
+            ..asked()
+        };
+        let result = p.rig.send(&p.provider_key(), &request).await;
+        assert!(matches!(result, Progress::Failed(_)), "{result:?}");
+    }
+    assert!(
+        seen.lock().unwrap().is_empty(),
+        "conflicting options are refused before model HTTP"
+    );
+    p.rig
+        .succeed(
+            &p.provider_key(),
+            &ProviderEmbed {
+                provider_id: p.rig.provider,
+                params: Some(json!({"encoding_format":"float"})),
+                ..asked()
+            },
+        )
+        .await;
+    assert_eq!(seen.lock().unwrap().len(), 1);
 }

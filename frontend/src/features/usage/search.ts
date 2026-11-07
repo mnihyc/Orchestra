@@ -69,6 +69,7 @@ export const ALL_TIME_FROM = '2020-01-01';
 export const FILTERS = {
   effort: 'effort',
   tier: 'tier',
+  tier_unknown: 'tier_unknown',
   program: 'program',
   outcome: 'outcome',
   turn: 'turn_id',
@@ -87,7 +88,7 @@ export type FilterName = keyof typeof FILTERS;
 
 /** The dimension each filter narrows to one member of, which is the table whose row sets it. */
 export const FILTER_DIMENSION: Record<FilterName, UsageDimension | undefined> = {
-  effort: 'effort', tier: 'tier', program: 'program', outcome: undefined, turn: undefined, org: 'org', topic: 'topic',
+  effort: 'effort', tier: 'tier', tier_unknown: 'tier', program: 'program', outcome: undefined, turn: undefined, org: 'org', topic: 'topic',
   person: 'person',
   model: 'model',
   provider: 'provider',
@@ -100,9 +101,11 @@ export const FILTER_DIMENSION: Record<FilterName, UsageDimension | undefined> = 
 export interface UsageSearch {
   view?: 'usage' | 'performance' | 'requests';
   plan?: 'current' | 'history';
+  plan_metric?: 'subscription' | 'credits';
   plan_bucket?: ChartBucket;
   effort?: string;
   tier?: string;
+  tier_unknown?: boolean;
   program?: string;
   outcome?: UsageOutcomeFilter;
   turn?: string;
@@ -174,8 +177,10 @@ export function readSearch(raw: Record<string, unknown>): UsageSearch {
   return {
     ...(raw.view === 'usage' || raw.view === 'performance' || raw.view === 'requests' ? { view: raw.view } : {}),
     ...(raw.plan === 'current' || raw.plan === 'history' ? { plan: raw.plan } : {}),
+    ...(raw.plan_metric === 'subscription' || raw.plan_metric === 'credits' ? { plan_metric: raw.plan_metric } : {}),
     ...(planBucket===undefined ? {} : {plan_bucket:planBucket}),
-    ...Object.fromEntries(['effort', 'tier', 'program', 'org', 'topic', 'turn'].flatMap((key) => text(raw[key]) === undefined ? [] : [[key, text(raw[key])]])),
+    ...Object.fromEntries(['effort', 'tier', 'program', 'org', 'topic', 'turn'].flatMap((key) => key === 'tier' && (raw.tier_unknown === true || raw.tier_unknown === 'true') || text(raw[key]) === undefined ? [] : [[key, text(raw[key])]])),
+    ...(raw.tier_unknown === true || raw.tier_unknown === 'true' ? { tier_unknown: true } : raw.tier_unknown === false || raw.tier_unknown === 'false' ? { tier_unknown: false } : {}),
     ...(readOutcome(raw.outcome) === undefined ? {} : { outcome: readOutcome(raw.outcome) }),
     ...(scope === 'me' ? {} : { scope }),
     ...(custom ? { ...(from === undefined ? {} : { from }), ...(to === undefined ? {} : { to }) } : range === undefined ? {} : { range }),
@@ -198,6 +203,8 @@ export function readSearch(raw: Record<string, unknown>): UsageSearch {
 export function patchSearch(search: UsageSearch, patch: { [Member in keyof UsageSearch]?: UsageSearch[Member] | undefined }): UsageSearch {
   // An undefined member removes that choice; the remaining explicit choices retain precedence on a refresh.
   const merged: Record<string, unknown> = { ...search, ...patch };
+  if (Object.hasOwn(patch, 'tier') && !Object.hasOwn(patch, 'tier_unknown')) merged.tier_unknown = undefined;
+  if (Object.hasOwn(patch, 'tier_unknown') && !Object.hasOwn(patch, 'tier')) merged.tier = undefined;
   if(patch.view!==undefined && patch.view!==search.view) {
     // Each chart resumes its own device choice when the view changes.
     if(patch.series===undefined) merged.series=undefined;
@@ -299,6 +306,7 @@ export function filtersOf(search: UsageSearch): UsageFilters {
   return {
     ...(search.effort === undefined ? {} : { effort: search.effort }),
     ...(search.tier === undefined ? {} : { tier: search.tier }),
+    ...(search.tier_unknown === undefined ? {} : { tier_unknown: search.tier_unknown }),
     ...(search.program === undefined ? {} : { program: search.program }),
     ...(search.outcome === undefined ? {} : { outcome: search.outcome }),
     ...(search.turn === undefined ? {} : { turn_id: search.turn }),
@@ -315,10 +323,11 @@ export function filtersOf(search: UsageSearch): UsageFilters {
 }
 
 /** The filters that are set, in the order the tables are listed. */
-export function activeFilters(search: UsageSearch): { name: FilterName; value: string }[] {
-  const names: FilterName[] = ['person', 'model', 'provider', 'agent', 'environment', 'effort', 'tier', 'program', 'outcome', 'org', 'project', 'topic', 'thread', 'turn'];
+export function activeFilters(search: UsageSearch): { name: FilterName; value: string | boolean }[] {
+  const names: FilterName[] = ['person', 'model', 'provider', 'agent', 'environment', 'effort', 'tier', 'tier_unknown', 'program', 'outcome', 'org', 'project', 'topic', 'thread', 'turn'];
   return names.flatMap((name) => {
     const value = search[name];
+    if (name === 'tier_unknown' && search.tier !== undefined) return [];
     return value === undefined ? [] : [{ name, value }];
   });
 }

@@ -31,7 +31,8 @@ pub const ONLINE: &str = "online";
 pub const OFFLINE: &str = "offline";
 
 /// A harness process: a provider and an agent profile on a machine.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, serde::Serialize, serde::Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct HarnessKey {
     /// The provider it serves.
     pub provider: Id,
@@ -62,19 +63,45 @@ impl OrchToolsRevision {
 }
 
 /// Session-only values which a turn cannot replace on an already open native conversation.
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize)]
 pub struct SessionConfiguration {
     /// The resolved absolute start directory.
     pub cwd: String,
+    /// The background completion preference accepted when the session opened.
+    pub background_wake: bool,
+    /// Native process-bound turn choices, absent for live-switchable harnesses.
+    pub restart_sensitive: Option<Json>,
     /// The resolved notes directory/keeper, or disabled native and agent notes.
     pub memory: Option<orch_link_contract::commands::SessionOpenMemory>,
+    /// The native executor build named by the accepted tool ticket.
+    pub executor_version: Option<String>,
 }
 
 impl From<&orch_link_contract::commands::SessionOpen> for SessionConfiguration {
     fn from(open: &orch_link_contract::commands::SessionOpen) -> Self {
         Self {
             cwd: open.cwd.clone(),
+            background_wake: open.background_wake,
+            restart_sensitive: open.turn_changes_require_restart.then(|| {
+                serde_json::json!({
+                    "model":open.model,"effort":open.effort,"params":open.params,
+                    "approval_mode":open.approval_mode,"sandbox_mode":open.sandbox_mode,
+                })
+            }),
             memory: open.memory.clone(),
+            executor_version: open.exec.ticket.as_ref().and_then(|ticket| match ticket {
+                orch_link_contract::commands::TicketSlot::Asked(asked)
+                    if asked.ticket.kind == orch_link_contract::tunnels::TunnelKind::Exec =>
+                {
+                    asked
+                        .ticket
+                        .more
+                        .get("executor_version")
+                        .and_then(Json::as_str)
+                        .map(str::to_owned)
+                }
+                _ => None,
+            }),
         }
     }
 }
@@ -107,6 +134,11 @@ impl OpenSessions {
     #[must_use]
     pub fn configuration_changed(&self, segment: Id, configuration: &SessionConfiguration) -> bool {
         self.accepted_configuration.get(&segment) != Some(configuration)
+    }
+
+    /// Whether this API process observed the actual successful opening.
+    pub(crate) fn configuration_known(&self, segment: Id) -> bool {
+        self.accepted_configuration.contains_key(&segment)
     }
 
     /// Records only an actual successful SessionOpen body, never a requested or refused change.
@@ -360,11 +392,97 @@ pub enum Started {
 #[derive(Default, serde::Serialize, serde::Deserialize)]
 #[serde(default)]
 struct AttachCommands {
+    #[serde(
+        default,
+        deserialize_with = "crate::adoption::operation::present_preparation",
+        skip_serializing_if = "Option::is_none"
+    )]
+    preparation: Option<crate::adoption::operation::Preparation>,
     request: Option<AgentStart>,
     ready_before_start: bool,
     commands: Vec<orch_settings_contract::unit::NamedAfterUpCommand>,
     notice: Option<String>,
     refusal: Option<String>,
+}
+
+/// Native machine preference, shared by discovery and current preparation association checks.
+pub(crate) async fn places_on(
+    conn: &mut orch_db::Conn,
+    provider: &ProviderRow,
+    agent: Id,
+) -> Result<Vec<Id>, EngineError> {
+    let mut places: Vec<Id> = resources_binding::harness_rows(conn, provider.id, agent)
+        .await?
+        .into_iter()
+        .map(|row| row.machine_id)
+        .collect();
+    let profile = resources::agent(conn, agent).await?;
+    for machine in [profile.and_then(|row| row.machine_id), provider.machine_id]
+        .into_iter()
+        .flatten()
+    {
+        if !places.contains(&machine) {
+            places.push(machine);
+        }
+    }
+    Ok(places)
+}
+
+/// Serializes the existing native claim tuple across processes, including an absent row.
+pub(crate) async fn claim_lock(
+    conn: &mut orch_db::Conn,
+    key: HarnessKey,
+) -> Result<(), EngineError> {
+    let tuple = format!(
+        "harness.claim:{}:{}:{}",
+        key.provider, key.agent, key.machine
+    );
+    sqlx::query("SELECT pg_advisory_xact_lock(hashtextextended($1,0))")
+        .bind(tuple)
+        .execute(conn)
+        .await
+        .map_err(orch_db::DbError::from)?;
+    Ok(())
+}
+
+/// The exact frozen native command of an actual retained attach run, never arbitrary JSON.
+pub(crate) async fn retained_attach_command(
+    conn: &mut orch_db::Conn,
+    key: HarnessKey,
+    body: &UnitAfterUp,
+) -> Result<Option<UnitAfterUp>, EngineError> {
+    let raw: Option<Json> = sqlx::query_scalar("SELECT after_up_plan FROM harnesses WHERE provider_id=$1 AND agent_id=$2 AND machine_id=$3 AND start_command_id=$4")
+        .bind(key.provider).bind(key.agent).bind(key.machine).bind(body.run_id).fetch_optional(conn).await.map_err(orch_db::DbError::from)?;
+    let Some(raw) = raw else {
+        return Ok(None);
+    };
+    let plan: AttachCommands = serde_json::from_value(raw)?;
+    let Some(entry) = usize::try_from(body.position)
+        .ok()
+        .and_then(|position| plan.commands.get(position))
+    else {
+        return Ok(None);
+    };
+    Ok(Some(attach_command(key, body.run_id, body.position, entry)))
+}
+fn attach_command(
+    key: HarnessKey,
+    run: Id,
+    position: u32,
+    entry: &orch_settings_contract::unit::NamedAfterUpCommand,
+) -> UnitAfterUp {
+    UnitAfterUp {
+        run_id: run,
+        environment_id: None,
+        provider_id: Some(key.provider),
+        agent_id: Some(key.agent),
+        position,
+        name: entry.name.clone(),
+        run: orch_settings_contract::unit::AfterUpCommand {
+            command: entry.command.clone(),
+            timeout_secs: entry.timeout_secs,
+        },
+    }
 }
 
 impl Engine {
@@ -438,8 +556,27 @@ impl Engine {
         command: Id,
         plan: &AttachCommands,
         configuration: &str,
+        preparation: Option<&crate::adoption::operation::Preparation>,
     ) -> Result<Option<(Id, AttachCommands)>, EngineError> {
-        let mut conn = self.inner.db.acquire().await?;
+        let mut conn = self.inner.db.begin().await?;
+        let check = match preparation {
+            Some(preparation) => Some(
+                preparation
+                    .checkpoint(&mut conn, self.inner.clock.as_ref(), key)
+                    .await?,
+            ),
+            None => {
+                claim_lock(&mut conn, key).await?;
+                None
+            }
+        };
+        let mut stored_plan = serde_json::to_value(plan)?;
+        if let (Some(original), Some(check)) = (&plan.preparation, check.as_ref()) {
+            stored_plan["preparation"] = serde_json::to_value(original.accepted_at(check)?)?;
+        }
+        if let Some(check) = check {
+            check.check(self.inner.clock.as_ref())?;
+        }
         let row:Option<(Id,Json)>=sqlx::query_as(
             "INSERT INTO harnesses(provider_id,agent_id,machine_id,status,start_command_id,after_up_plan,updated_at)
              VALUES($1,$2,$3,'starting',$4,$5,$6)
@@ -449,10 +586,36 @@ impl Engine {
                status='starting',status_detail=NULL,updated_at=EXCLUDED.updated_at
              WHERE harnesses.status<>'online' OR harnesses.start_command_id IS NOT NULL OR harnesses.after_up_plan->>'configuration_hash' IS DISTINCT FROM $7::text
              RETURNING start_command_id,after_up_plan")
-            .bind(key.provider).bind(key.agent).bind(key.machine).bind(command).bind(serde_json::to_value(plan)?)
+            .bind(key.provider).bind(key.agent).bind(key.machine).bind(command).bind(stored_plan)
             .bind(self.inner.clock.now()).bind(configuration).fetch_optional(&mut *conn).await.map_err(orch_db::DbError::from)?;
-        row.map(|(run, plan)| Ok((run, serde_json::from_value(plan)?)))
-            .transpose()
+        let result = row
+            .map(|(run, plan)| Ok::<_, EngineError>((run, serde_json::from_value(plan)?)))
+            .transpose()?;
+        if let Some(preparation) = preparation {
+            preparation
+                .checkpoint(&mut conn, self.inner.clock.as_ref(), key)
+                .await?
+                .check(self.inner.clock.as_ref())?;
+        }
+        conn.commit().await.map_err(orch_db::DbError::from)?;
+        Ok(result)
+    }
+
+    /// Release only this failed setup claim when no native command at that boundary is open.
+    /// A later independently authorized attempt follows the ordinary native error/retry path.
+    async fn end_unissued_preparation(
+        &self,
+        key: HarnessKey,
+        run: Id,
+        pending: Id,
+        error: &EngineError,
+    ) -> Result<(), EngineError> {
+        if !matches!(error, EngineError::BeforeEffect(_)) {
+            return Ok(());
+        }
+        sqlx::query("UPDATE harnesses SET status='error',status_detail='The setup request ended before its next command.' WHERE provider_id=$1 AND agent_id=$2 AND machine_id=$3 AND start_command_id=$4 AND NOT EXISTS(SELECT 1 FROM commands WHERE id=$5 AND state IN ('queued','sent','accepted'))")
+            .bind(key.provider).bind(key.agent).bind(key.machine).bind(run).bind(pending).execute(&mut *self.inner.db.acquire().await?).await.map_err(orch_db::DbError::from)?;
+        Ok(())
     }
 
     /// Directory provider runtimes use the unit command journal after their actual home attaches.
@@ -471,21 +634,20 @@ impl Engine {
         for (position, entry) in plan.commands.iter().enumerate() {
             let position = u32::try_from(position)
                 .map_err(|_| EngineError::unreadable("too many commands after provider attach"))?;
-            let body = UnitAfterUp {
-                run_id: run,
-                environment_id: None,
-                provider_id: Some(key.provider),
-                agent_id: Some(key.agent),
-                position,
-                name: entry.name.clone(),
-                run: orch_settings_contract::unit::AfterUpCommand {
-                    command: entry.command.clone(),
-                    timeout_secs: entry.timeout_secs,
-                },
-            };
+            let body = attach_command(key, run, position, entry);
             let id =
                 crate::ids::derived("unit.after_up", &[run.as_bytes(), &position.to_be_bytes()]);
             let sent = Outgoing::new(id, key.machine, SerialKey::Runtime(key.provider), &body)?;
+            let sent = match &plan.preparation {
+                Some(preparation) => match preparation.command(self, key, sent).await {
+                    Ok(sent) => sent,
+                    Err(error) => {
+                        self.end_unissued_preparation(key, run, id, &error).await?;
+                        return Err(error);
+                    }
+                },
+                None => sent,
+            };
             let outcome = crate::commands::run(self.inner.commands.as_ref(), sent).await?;
             if let Outcome::Failed(error) = &outcome
                 && error
@@ -540,6 +702,17 @@ impl Engine {
         agent: &AgentRow,
         command: Id,
     ) -> Result<Started, EngineError> {
+        self.ensure_harness_with_preparation(key, agent, command, None)
+            .await
+    }
+
+    async fn ensure_harness_with_preparation(
+        &self,
+        key: HarnessKey,
+        agent: &AgentRow,
+        command: Id,
+        preparation: Option<&crate::adoption::operation::Preparation>,
+    ) -> Result<Started, EngineError> {
         let serial = self.harness_serial(key);
         let _held = serial.lock().await;
         let was_ready = self.harness_is_online(key).await?;
@@ -586,13 +759,34 @@ impl Engine {
         if configured {
             return Ok(Started::Up);
         }
+        if was_ready
+            && crate::background_wake::live_harness_thread(
+                &mut *self.inner.db.acquire().await?,
+                key.provider,
+                key.agent,
+                Some(key.machine),
+            )
+            .await?
+            .is_some()
+        {
+            return Ok(Started::Up);
+        }
         let mut proposed = self.provider_attach_plan(key).await?;
         proposed.request = Some(body.clone());
+        proposed.preparation = preparation.cloned();
         proposed.ready_before_start = was_ready || prior_configuration.is_some();
-        let Some((command, plan)) = self.begin_harness(key, command, &proposed, &wanted).await?
+        let Some((command, mut plan)) = self
+            .begin_harness(key, command, &proposed, &wanted, preparation)
+            .await?
         else {
             return Ok(Started::Up);
         };
+        if plan.preparation.is_none() {
+            plan.preparation = preparation.cloned();
+        }
+        if let (Some(original), Some(current)) = (&mut plan.preparation, preparation) {
+            original.attach_transport(current);
+        }
         let frozen = plan.request.is_some();
         let body = plan.request.clone().unwrap_or(body);
         let configuration = orch_types::Hash::of(&serde_json::to_vec(&body)?);
@@ -605,6 +799,17 @@ impl Engine {
             },
             &body,
         )?;
+        let outgoing = match &plan.preparation {
+            Some(preparation) => match preparation.command(self, key, outgoing).await {
+                Ok(outgoing) => outgoing,
+                Err(error) => {
+                    self.end_unissued_preparation(key, command, command, &error)
+                        .await?;
+                    return Err(error);
+                }
+            },
+            None => outgoing,
+        };
         let outcome = crate::commands::run(self.inner.commands.as_ref(), outgoing).await?;
         let Outcome::Succeeded(result) = outcome else {
             let mut conn = self.inner.db.acquire().await?;
@@ -830,6 +1035,26 @@ impl Engine {
         if effective != ONLINE {
             lock(&self.inner.sessions).restarted(key);
         }
+        if matches!(status.status.as_str(), "stopped" | "error")
+            || status.status == "offline" && status.sessions_open == 0
+        {
+            let sources: Vec<(Id, Id)> = sqlx::query_as(
+                r#"SELECT DISTINCT i.thread_id,i.segment_id FROM items i
+                JOIN segments s ON s.id=i.segment_id WHERE s.provider_id=$1 AND s.agent_id=$2
+                AND s.machine_id=$3 AND i.kind='tool_call'
+                AND (i.payload @? '$.background_tasks.*.task.state ? (@ == "running")'
+                  OR i.payload @? '$.background_tasks.*.awaiting_native_wake ? (@ == true)')"#,
+            )
+            .bind(provider)
+            .bind(agent)
+            .bind(machine)
+            .fetch_all(&mut *unit.conn)
+            .await
+            .map_err(orch_db::DbError::from)?;
+            for (thread, segment) in sources {
+                crate::background_wake::lost(unit, thread, segment).await?;
+            }
+        }
         if status.status == ONLINE && before.as_deref() != Some(ONLINE) {
             for thread in orch_db::queries::threads::blocked_threads_of_provider(
                 &mut *unit.conn,
@@ -942,25 +1167,7 @@ impl Engine {
         provider: &ProviderRow,
         agent: Id,
     ) -> Result<Vec<Id>, EngineError> {
-        let mut conn = self.inner.db.acquire().await?;
-        let mut places: Vec<Id> = resources_binding::harness_rows(&mut conn, provider.id, agent)
-            .await?
-            .into_iter()
-            .map(|row| row.machine_id)
-            .collect();
-        let profile = resources::agent(&mut conn, agent).await?;
-        for machine in [
-            profile.and_then(|profile| profile.machine_id),
-            provider.machine_id,
-        ]
-        .into_iter()
-        .flatten()
-        {
-            if !places.contains(&machine) {
-                places.push(machine);
-            }
-        }
-        Ok(places)
+        places_on(&mut *self.inner.db.acquire().await?, provider, agent).await
     }
 
     /// Brings the harness process of a profile for a provider up anew, on every machine that holds one:
@@ -969,6 +1176,11 @@ impl Engine {
     /// provider runs.
     pub async fn restart_harness(&self, provider: Id, agent: Id) -> Result<Restarted, EngineError> {
         let mut conn = self.inner.db.acquire().await?;
+        if let Some(thread) =
+            crate::background_wake::live_harness_thread(&mut conn, provider, agent, None).await?
+        {
+            return Err(EngineError::BackgroundRunning(thread));
+        }
         let Some(keeper) = resources::provider(&mut conn, provider)
             .await?
             .filter(|row| row.deleted_at.is_none())
@@ -1147,24 +1359,46 @@ impl Engine {
         provider: Id,
         agent: Id,
     ) -> Result<Discovered, EngineError> {
+        self.discover_sessions_with_preparation(provider, agent, None)
+            .await
+    }
+
+    pub(crate) async fn discover_sessions_with_preparation(
+        &self,
+        provider: Id,
+        agent: Id,
+        preparation: Option<&crate::adoption::operation::Preparation>,
+    ) -> Result<Discovered, EngineError> {
+        self.discover_sessions_observed(provider, agent, preparation)
+            .await
+            .map(|(outcome, _)| outcome)
+    }
+
+    /// The exact machine that supplied the observation, retained for its later native history read.
+    pub(crate) async fn discover_sessions_observed(
+        &self,
+        provider: Id,
+        agent: Id,
+        preparation: Option<&crate::adoption::operation::Preparation>,
+    ) -> Result<(Discovered, Option<Id>), EngineError> {
         let mut conn = self.inner.db.acquire().await?;
         let Some(keeper) = resources::provider(&mut conn, provider)
             .await?
             .filter(|row| row.deleted_at.is_none())
         else {
-            return Ok(Discovered::Gone);
+            return Ok((Discovered::Gone, None));
         };
         let Some(profile) = resources::agent(&mut conn, agent)
             .await?
             .filter(|row| row.deleted_at.is_none())
         else {
-            return Ok(Discovered::Gone);
+            return Ok((Discovered::Gone, None));
         };
         drop(conn);
         if descriptor_of(&profile)?
             .is_some_and(|descriptor| !descriptor.capabilities.discover_sessions)
         {
-            return Ok(Discovered::Unsupported);
+            return Ok((Discovered::Unsupported, None));
         }
         let places = self.harness_places(&keeper, agent).await?;
         let has_places = !places.is_empty();
@@ -1183,11 +1417,14 @@ impl Engine {
             }
         }
         let Some((machine, _)) = found else {
-            return Ok(if has_places {
-                Discovered::Offline
-            } else {
-                Discovered::NoMachine
-            });
+            return Ok((
+                if has_places {
+                    Discovered::Offline
+                } else {
+                    Discovered::NoMachine
+                },
+                None,
+            ));
         };
         let key = HarnessKey {
             provider,
@@ -1197,22 +1434,24 @@ impl Engine {
         let command = orch_types::new_id();
         let started = tokio::time::timeout(
             self.inner.config.start_timeout,
-            self.ensure_harness(key, &profile, command),
+            self.ensure_harness_with_preparation(key, &profile, command, preparation),
         )
         .await;
         match started {
             Err(_elapsed) => {
                 self.inner.commands.cancel(command).await?;
-                return Ok(Discovered::Failed(
-                    "the harness did not start in time".to_owned(),
+                return Ok((
+                    Discovered::Failed("the harness did not start in time".to_owned()),
+                    Some(machine),
                 ));
             }
             Ok(Err(error)) => return Err(error),
             Ok(Ok(Started::Up)) => {}
             Ok(Ok(Started::Failed(outcome))) => {
-                return Ok(Discovered::Failed(crate::provider_setup::failure_text(
-                    &outcome,
-                )));
+                return Ok((
+                    Discovered::Failed(crate::provider_setup::failure_text(&outcome)),
+                    Some(machine),
+                ));
             }
         }
         // What the harness declared by starting is what says whether it can list its conversations.
@@ -1222,7 +1461,7 @@ impl Engine {
         let can = descriptor_of(&profile)?
             .is_some_and(|descriptor| descriptor.capabilities.discover_sessions);
         if !can {
-            return Ok(Discovered::Unsupported);
+            return Ok((Discovered::Unsupported, Some(machine)));
         }
         let asked = orch_types::new_id();
         let command = Outgoing::new(
@@ -1237,12 +1476,16 @@ impl Engine {
                 agent_id: agent,
             },
         )?;
+        let command = match preparation {
+            Some(preparation) => preparation.command(self, key, command).await?,
+            None => command,
+        };
         let outcome = tokio::time::timeout(
             self.inner.config.start_timeout,
             crate::commands::run(self.inner.commands.as_ref(), command),
         )
         .await;
-        match outcome {
+        let outcome = match outcome {
             Err(_elapsed) => {
                 self.inner.commands.cancel(asked).await?;
                 Ok(Discovered::Failed(
@@ -1264,7 +1507,8 @@ impl Engine {
                     &other,
                 ))),
             },
-        }
+        };
+        outcome.map(|outcome| (outcome, Some(machine)))
     }
 }
 
@@ -1304,7 +1548,10 @@ mod tests {
         let thread = new_id();
         let configuration = SessionConfiguration {
             cwd: "/workspace/child".into(),
+            background_wake: true,
+            restart_sensitive: None,
             memory: None,
+            executor_version: None,
         };
         let mut sessions = OpenSessions::default();
         sessions.opened(segment, thread, process);

@@ -8,7 +8,10 @@
 mod desk;
 mod places;
 mod support;
+use support::FullApprovalReply;
+use support::FullRequestReply;
 
+use crate::support::FullPermissionPageReply;
 use chrono::Duration;
 use desk::{Desk, paragraph, put};
 use orch_api_contract::access::{
@@ -47,6 +50,7 @@ async fn private_document(desk: &Desk, title: &str) -> Id {
         })
         .send()
         .await
+        .full_permission_page()
         .ok();
     id
 }
@@ -176,9 +180,9 @@ async fn simultaneous_sends_leave_one_open_request_for_the_person_and_thing() {
     };
     let (a, b) = tokio::join!(send(), send());
     let (made, duplicate) = if a.body.is_ok() {
-        (a.ok(), b.problem())
+        (a.full_request().ok(), b.problem())
     } else {
-        (b.ok(), a.problem())
+        (b.full_request().ok(), a.problem())
     };
     assert_eq!(duplicate.code, ErrorCode::ConflictExists);
     assert_eq!(duplicate.extra["approval_id"], json!(made.approvals[0].id));
@@ -220,6 +224,7 @@ async fn every_quick_duration_gives_one_person_one_thing_and_expires_at_the_serv
             .body(&request(target))
             .send()
             .await
+            .full_request()
             .ok();
         let id = made.approvals[0].id;
         assert_eq!(
@@ -241,6 +246,7 @@ async fn every_quick_duration_gives_one_person_one_thing_and_expires_at_the_serv
             }))
             .send()
             .await
+            .full_approval()
             .ok();
         assert_eq!(decision.state, ApprovalState::Approved);
         let at = decision.decided_at.unwrap();
@@ -305,6 +311,7 @@ async fn only_the_direct_owner_is_told_and_an_eligible_admin_uses_the_other_list
         .body(&request(target))
         .send()
         .await
+        .full_request()
         .ok();
     let id = made.approvals[0].id;
     let people:Vec<Id>=sqlx::query_scalar("SELECT user_id FROM notifications WHERE approval_id=$1 AND kind='access.requested' ORDER BY user_id").bind(id).fetch_all(&mut *desk.world.conn().await).await.unwrap();

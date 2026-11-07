@@ -12,7 +12,7 @@
 //! enables them, and only then does a thread show the parameter. What a thread starts with of each is the
 //! model's entry's to say, and the parameters take it from there.
 //!
-//! **The context** is the only parameter that belongs to the session and not to the turn. This harness holds
+//! **The context** and native search are applied when a session opens. This harness holds
 //! the threshold at which it shortens a conversation apart from the window of the model, so the adapter tells
 //! it both ([`context_members`]); the threshold follows from the context by a rule (nine tenths, which is the
 //! harness's own) and is set by nobody.
@@ -153,6 +153,7 @@ pub fn definitions() -> Vec<ParameterDef> {
             ])),
             feature: Some(CYBER_ACCESS_FEATURE.to_owned()),
         },
+        orch_agent_contract::parameters::web_search_parameter(true),
     ]
 }
 
@@ -396,6 +397,7 @@ pub fn offered_for(model: &Json) -> Option<Offered> {
         return None;
     }
     Some(Offered {
+        web_search: None,
         service_tiers: (!tiers.is_empty()).then_some(tiers),
         access_programs: (!programs.is_empty()).then_some(programs),
         context_max: larger,
@@ -423,7 +425,7 @@ mod tests {
     use orch_agent_contract::parameters::check_parameters;
 
     #[test]
-    fn the_parameters_published_are_consistent_and_five() {
+    fn the_parameters_published_are_consistent_including_native_search() {
         let defs = definitions();
         assert_eq!(check_parameters(&defs), Ok(()));
         let keys: Vec<_> = defs.iter().map(|def| def.key.as_str()).collect();
@@ -433,7 +435,8 @@ mod tests {
                 SERVICE_TIER,
                 CONTEXT,
                 REASONING_SUMMARY,
-                CYBER_ACCESS_PROGRAM
+                CYBER_ACCESS_PROGRAM,
+                "web_search"
             ]
         );
     }
@@ -647,6 +650,7 @@ mod tests {
         assert_eq!(
             offered_for(&model),
             Some(Offered {
+                web_search: None,
                 context_max: Some(1_000_000),
                 ..Offered::default()
             })

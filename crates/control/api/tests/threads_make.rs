@@ -9,6 +9,7 @@ mod places;
 mod rig;
 mod support;
 
+use crate::support::FullArchiveReply as _;
 use orch_api_contract::access::{AccessPreset, ThreadAccess};
 use orch_api_contract::binding::EnvironmentChoice;
 use orch_api_contract::common::ErrorCode;
@@ -54,7 +55,9 @@ async fn a_temporary_environment_records_its_creating_thread_in_the_same_thread_
         .body(&body)
         .send()
         .await
-        .ok();
+        .ok()
+        .into_full()
+        .unwrap();
     let second = scene
         .rig
         .world
@@ -64,7 +67,9 @@ async fn a_temporary_environment_records_its_creating_thread_in_the_same_thread_
         .body(&body)
         .send()
         .await
-        .ok();
+        .ok()
+        .into_full()
+        .unwrap();
     assert_ne!(first.base.id, second.base.id);
     let creator: Option<orch_types::Id> =
         sqlx::query_scalar("SELECT thread_id FROM environment_lifetimes WHERE environment_id=$1")
@@ -141,7 +146,9 @@ async fn a_named_thread_keeps_its_name_from_automation_and_an_unnamed_one_is_new
         })
         .send()
         .await
-        .ok();
+        .ok()
+        .into_full()
+        .unwrap();
     assert_eq!(unnamed.base.name, "New thread");
     assert_eq!(unnamed.base.title_source, FieldSource::Auto);
 }
@@ -187,7 +194,7 @@ async fn what_the_request_leaves_out_comes_from_the_topic_when_the_caller_may_us
         async move { call.send().await }
     };
     // Where the caller may use all of it, `{}` makes a thread that is ready.
-    let thread = make(&s.eve).await.ok();
+    let thread = make(&s.eve).await.ok().into_full().unwrap();
     assert_eq!(
         thread.binding.as_ref().map(|each| each.provider.id),
         Some(s.on.provider)
@@ -326,7 +333,9 @@ async fn a_person_given_start_threads_alone_can_create_and_own_a_thread() {
         })
         .send()
         .await
-        .ok();
+        .ok()
+        .into_full()
+        .unwrap();
     assert_eq!(thread.base.owner.id, s.cai.id());
 }
 
@@ -349,7 +358,9 @@ async fn a_thread_made_private_is_its_makers_alone() {
         })
         .send()
         .await
-        .ok();
+        .ok()
+        .into_full()
+        .unwrap();
     let read = |who: &places::Who| {
         let call = s
             .rig
@@ -393,7 +404,7 @@ async fn a_model_and_an_effort_must_be_ones_the_provider_lists() {
     let odd = make(MODEL, Some("ultra")).await.problem();
     assert_eq!(odd.code, ErrorCode::ModelNotAllowed);
     assert_eq!(odd.extra["reason"], "effort");
-    let made = make(MODEL, Some("high")).await.ok();
+    let made = make(MODEL, Some("high")).await.ok().into_full().unwrap();
     assert_eq!(made.effort.as_deref(), Some("high"));
 }
 
@@ -420,7 +431,9 @@ async fn an_input_sent_with_the_thread_starts_it_at_once() {
         })
         .send()
         .await
-        .ok();
+        .ok()
+        .into_full()
+        .unwrap();
     let start = s.rig.turn_start(made.base.id, 0).await;
     assert_eq!(start.thread_id, made.base.id);
 }
@@ -476,7 +489,7 @@ async fn an_unmanageable_environment_and_an_invalid_new_environment_are_refused(
     let missing_one = make(EnvironmentChoice::Use(orch_types::new_id()))
         .await
         .problem();
-    assert_eq!(missing_one.code, ErrorCode::RequestInvalid);
+    assert_eq!(missing_one.code, ErrorCode::EnvironmentUnavailable);
     let fresh = make(EnvironmentChoice::New(Box::new(
         orch_api_contract::binding::NewEnvironment {
             name: Some(String::new()),
@@ -501,7 +514,7 @@ async fn an_unmanageable_environment_and_an_invalid_new_environment_are_refused(
         .send()
         .await
         .problem();
-    assert_eq!(none.code, ErrorCode::EnvironmentNoneUsable);
+    assert_eq!(none.code, ErrorCode::EnvironmentNoneUsable, "{none:?}");
 }
 
 #[tokio::test]
@@ -534,6 +547,7 @@ async fn a_directory_stays_in_the_workspace_and_an_archived_topic_takes_no_threa
         .body(&places::archive_body(&s.rig.world, &s.ada.token, s.tree.topic.base.id, true).await)
         .send()
         .await
+        .full_archive()
         .ok();
     let archived = s
         .rig

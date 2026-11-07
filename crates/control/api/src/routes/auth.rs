@@ -11,9 +11,11 @@
 //! The requests that answer `202` whatever the name or the address do the
 //! same work for every one, so that they tell nothing.
 
+pub(crate) mod account_read;
 mod bootstrap;
 pub mod me;
 pub mod oidc;
+mod token_activity;
 pub mod tokens;
 
 use crate::middleware::authentication::{SESSION_PREFIX, new_token, token_hash};
@@ -59,6 +61,7 @@ pub fn mount(registry: &mut Registry) {
     me::mount(registry);
     oidc::mount(registry);
     tokens::mount(registry);
+    token_activity::mount(registry);
 }
 
 /// `410 gone`: a link that was used, that ended, or that nobody made, which

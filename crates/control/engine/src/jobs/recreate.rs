@@ -60,6 +60,8 @@ const LOOK_EVERY: Duration = Duration::from_millis(250);
 /// A UUID's last twelve digits vary even when two jobs begin in the same millisecond.
 const NAME_DIGITS: usize = 12;
 
+pub mod batch_authority;
+
 fn fail(code: &str, message: impl Into<String>) -> Stop {
     Stop::Failed(Failure::new(code, message))
 }
@@ -205,12 +207,21 @@ impl Recreating {
 
     async fn notice(&self, job: &Job, message: &str) -> Result<(), Stop> {
         let mut tx = job.engine().db().begin().await.map_err(EngineError::from)?;
+        orch_db::queries::transaction_guard::lock_action(&mut tx).await?;
+        batch_authority::guard_in(&mut tx, job).await?;
+        let owner = jobs::job(&mut tx, job.id()).await?.ok_or(Stop::Lost)?;
         let mut unit = Unit::new(&mut tx, job.now());
         let mut steers = Vec::new();
         for thread in &self.recipe.threads {
             let Some(row) = threads::lock(&mut *unit.conn, *thread).await? else {
                 continue;
             };
+            if batch_authority::is_restricted(&owner) && row.provider_id != owner.provider_id {
+                return Err(fail(
+                    "access.denied",
+                    "The affected thread no longer belongs to this provider update.",
+                ));
+            }
             if let Some(turn) = threads::active_turn(&mut *unit.conn, *thread).await?
                 && turn.state == "running"
                 && job.engine().agent_takes_a_steer(&mut unit, &row).await?
@@ -230,6 +241,31 @@ impl Recreating {
             env_changes::notice(&mut *unit.conn, *thread, message, job.now()).await?;
             let seq = unit.stamp(*thread).await?;
             threads::set_seq_state(&mut *unit.conn, *thread, seq).await?;
+        }
+        for (thread, turn, machine) in &steers {
+            let command = Outgoing::new(
+                ids::derived(
+                    "turn.steer",
+                    &[job.id().as_bytes(), thread.as_bytes(), message.as_bytes()],
+                ),
+                *machine,
+                SerialKey::Thread(*thread),
+                &TurnSteer {
+                    thread_id: *thread,
+                    turn_id: *turn,
+                    text: message.into(),
+                    images: vec![],
+                    native_action: None,
+                },
+            )
+            .map_err(EngineError::from)?;
+            batch_authority::retain_notice(
+                &mut *unit.conn,
+                &owner,
+                &command,
+                orch_types::Time::new(job.now()),
+            )
+            .await?;
         }
         let finished = unit.finish().await?;
         job.engine().commit(tx, finished).await?;
@@ -288,10 +324,11 @@ impl Recreating {
             job.remember(&json!({"waiting_since":since})).await?;
         }
         for thread in &self.recipe.threads {
-            job.engine().cancel_pending_approvals(*thread).await?;
+            batch_authority::cancel_approvals(job, *thread).await?;
         }
         loop {
             job.check()?;
+            batch_authority::guard(job).await?;
             let mut active = Vec::new();
             {
                 let mut conn = job
@@ -325,9 +362,7 @@ impl Recreating {
             }
             if self.recipe.options.active_turn == ActiveTurn::Interrupt {
                 for (thread, turn) in active {
-                    job.engine()
-                        .interrupt_for_change(thread, &turn, self.recipe.by)
-                        .await?;
+                    batch_authority::interrupt(job, thread, &turn, self.recipe.by).await?;
                 }
             }
             job.pause(LOOK_EVERY).await?;
@@ -352,6 +387,8 @@ impl Recreating {
         let plan = job.plan().await?;
         if plan.get("runtime").is_none() {
             let mut tx = job.engine().db().begin().await.map_err(EngineError::from)?;
+            orch_db::queries::transaction_guard::lock_action(&mut tx).await?;
+            batch_authority::guard_in(&mut tx, job).await?;
             let next = new_id();
             let digits = next.simple().to_string();
             let name = format!(
@@ -487,8 +524,29 @@ impl Recreating {
                 orch_db::queries::network::require(&mut conn, old.id, None).await?;
             }
         }
-        job.remember(&json!({"old_stop_requested":true})).await?;
-        {
+        if batch_authority::applies(&job.row().await?) {
+            let mut tx = job.engine().db().begin().await.map_err(EngineError::from)?;
+            orch_db::queries::transaction_guard::lock_action(&mut tx).await?;
+            batch_authority::guard_in(&mut tx, job).await?;
+            jobs::merge_plan(
+                &mut tx,
+                job.id(),
+                &json!({"old_stop_requested":true}),
+                job.now(),
+            )
+            .await?;
+            envs::set_runtime_state(
+                &mut tx,
+                old.id,
+                &envs::runtime_state::LIVE,
+                "stopping",
+                None,
+                job.now(),
+            )
+            .await?;
+            tx.commit().await.map_err(DbError::from)?;
+        } else {
+            job.remember(&json!({"old_stop_requested":true})).await?;
             let mut conn = job
                 .engine()
                 .db()
@@ -600,6 +658,7 @@ impl Recreating {
         let row = job.row().await?;
         let carry = job.plan().await?.get("carry").and_then(Json::as_bool) == Some(true);
         for phase in ["image", "tools", "create", "enroll"] {
+            batch_authority::guard(job).await?;
             if phase == "create"
                 && let Target::Provider(provider) = self.recipe.target
                 && self.recipe.volume_carry.is_some()
@@ -891,8 +950,13 @@ impl Recreating {
                             .map_err(EngineError::from)?,
                         )
                         .await?;
-                    if self.recipe.old_facts["provider_status"] == "ready"
-                        && refreshed.get("status").and_then(Json::as_str) != Some("ready")
+                    if self.recipe.old_facts["provider_status"]
+                        .as_str()
+                        .is_some_and(crate::providers::request_status_available)
+                        && !refreshed
+                            .get("status")
+                            .and_then(Json::as_str)
+                            .is_some_and(crate::providers::request_status_available)
                     {
                         return Err(fail(
                             "sign_in_lost",
@@ -913,6 +977,11 @@ impl Recreating {
         let locked = jobs::lock(&mut tx, job.id())
             .await?
             .ok_or_else(|| fail("job_gone", "the job is gone"))?;
+        if locked.plan.get("committed").and_then(Json::as_bool) == Some(true) {
+            return Ok(Done::Finished);
+        }
+        orch_db::queries::transaction_guard::lock_action(&mut tx).await?;
+        batch_authority::guard_in(&mut tx, job).await?;
         if locked.cancel_requested() {
             return Err(Stop::Cancelled);
         }
@@ -955,6 +1024,12 @@ impl Recreating {
             let Some(row) = threads::lock(&mut *unit.conn, *thread).await? else {
                 continue;
             };
+            if batch_authority::is_restricted(&locked) && row.provider_id != locked.provider_id {
+                return Err(fail(
+                    "access.denied",
+                    "The affected thread no longer belongs to this provider update.",
+                ));
+            }
             renew_segment(
                 &mut unit,
                 *thread,
@@ -1030,6 +1105,7 @@ impl Recreating {
         if plan.get("committed").and_then(Json::as_bool) == Some(true) {
             return Ok(None);
         }
+        batch_authority::cleanup_guard(job).await?;
         let mut cleanup_detail = None;
         let old = self.old(job).await?;
         let mut conn = job
@@ -1416,6 +1492,11 @@ fn replaced_notice(recipe: &Recipe, generation: i32) -> String {
 #[async_trait]
 impl Phased for Recreating {
     async fn run(&self, job: &Job, phase: &str) -> Result<Done, Stop> {
+        if phase != "commit"
+            || job.plan().await?.get("committed").and_then(Json::as_bool) != Some(true)
+        {
+            batch_authority::guard(job).await?;
+        }
         match phase {
             "notify" => {
                 let mut message = if self.recipe.preserve_files {

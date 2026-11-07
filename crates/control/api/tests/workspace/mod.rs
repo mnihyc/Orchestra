@@ -1351,6 +1351,8 @@ impl Site {
             .send()
             .await
             .ok()
+            .into_full()
+            .unwrap()
             .base
             .id;
         let content = Content::over(&world.app.app);
@@ -1395,6 +1397,8 @@ impl Site {
             .send()
             .await
             .ok()
+            .into_full()
+            .unwrap()
             .base
             .id
     }
@@ -1794,7 +1798,8 @@ pub mod ask {
 
     /// A path copied.
     pub async fn copy(site: &Site, by: &Who, from: &str, to: &str) -> Reply<FileStat> {
-        site.app()
+        let call = site
+            .app()
             .call(EnvironmentFileCopy, &[&site.environment])
             .token(&by.token)
             .query(&ThroughThreadQuery {
@@ -1803,9 +1808,18 @@ pub mod ask {
             .body(&FileFromToBody {
                 from: from.to_owned(),
                 to: to.to_owned(),
-            })
-            .send()
-            .await
+            });
+        let reply = call.send().await;
+        Reply {
+            status: reply.status,
+            headers: reply.headers,
+            raw: reply.raw,
+            body: reply.body.map(|result| {
+                result
+                    .into_full()
+                    .expect("ordinary copying keeps native metadata")
+            }),
+        }
     }
 
     /// A path deleted.

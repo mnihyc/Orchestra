@@ -68,7 +68,9 @@ async fn place_with(config: ServerConfig) -> Place {
         })
         .send()
         .await
-        .ok();
+        .ok()
+        .into_full()
+        .unwrap();
     Place {
         world,
         ada,

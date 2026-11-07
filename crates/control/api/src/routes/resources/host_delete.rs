@@ -91,6 +91,15 @@ struct Stored {
     audience: Vec<notifications::OperationRecipient>,
     data: Option<data::Planned>,
 }
+
+/// The actual Host whose kept cascade supplied the private audience.
+pub(crate) fn recipient_subject(plan: &orch_types::Json) -> ApiResult<ObjectRef> {
+    let stored: Stored = serde_json::from_value(plan.clone()).map_err(ApiError::internal)?;
+    Ok(ObjectRef {
+        kind: orch_access_contract::permissions::ObjectKind::Host,
+        id: stored.host,
+    })
+}
 fn blocked(code: &str, message: impl Into<String>) -> PlanBlocker {
     updates::blocker(code, message)
 }

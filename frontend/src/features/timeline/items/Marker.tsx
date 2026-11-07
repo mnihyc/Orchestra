@@ -54,6 +54,8 @@ import { openGiven } from '@/features/inspector/givenFocus';
 import { useTimelineContext } from '../context';
 import { CallModel } from '@/features/calls/Model';
 import { recoveryCause, recoverySentence, RecoveryRuleLink } from '@/features/calls/History';
+import { BackgroundWakeMarker } from '@/features/running/BackgroundWakeMarker';
+import { wakeCauses } from '@/features/running/backgroundWake';
 
 type MarkerItem = Extract<Item, { kind: 'marker' }>;
 
@@ -61,6 +63,7 @@ const who = (user: UserRef | null, t: TFunction): string => user?.display_name ?
 const environment = (ref: EnvironmentRef | null, t: TFunction): string => ref?.name ?? t('timeline.marker.anEnvironment');
 
 const ICONS: Record<MarkerPayload['marker'], LucideIcon> = {
+  background_wake: Play,
   resource_resumed: Play,
   resource_stopped: Square,
   call_recovery: Play,
@@ -115,6 +118,8 @@ const ICONS: Record<MarkerPayload['marker'], LucideIcon> = {
 /** The sentence of a line of history. */
 export function markerSentence(payload: MarkerPayload, t: TFunction, context: { locale: string; timeZone?: string | undefined }, includeActor = true): string {
   switch (payload.marker) {
+    case 'background_wake':
+      return t(payload.data.admitted ? 'backgroundWake.wokenBy' : 'backgroundWake.waitingBy', { causes: wakeCauses(payload.data.causes, t) || t('backgroundWake.work') });
     case 'resource_resumed':
       return t(payload.data.input_id === null ? 'storage.resumed.refused' : 'storage.resumed.continued', { name: payload.data.name, by: who(payload.data.by, t) });
     case 'resource_stopped':
@@ -170,9 +175,9 @@ export function markerSentence(payload: MarkerPayload, t: TFunction, context: { 
       return t('timeline.marker.switchedCarried', { ...words, count: carried });
     }
     case 'forked_from':
-      return t('timeline.marker.forkedFrom', { by: who(payload.data.by, t), thread: payload.data.thread.name ?? t('timeline.marker.aThread') });
+      return t(payload.data.by_agent === undefined || payload.data.by_agent === null ? 'timeline.marker.forkedFrom' : 'timeline.marker.agentForkedFrom', { by: who(payload.data.by, t), thread: payload.data.thread.name ?? t('timeline.marker.aThread') });
     case 'forked':
-      return t('timeline.marker.forked', { by: who(payload.data.by, t), into: payload.data.into.name ?? t('timeline.marker.aThread') });
+      return t(payload.data.by_agent === undefined || payload.data.by_agent === null ? 'timeline.marker.forked' : 'timeline.marker.agentForked', { by: who(payload.data.by, t), into: payload.data.into.name ?? t('timeline.marker.aThread') });
     case 'environment_recreated':
       return t('timeline.marker.environmentRecreated', { template: payload.data.template.name, reason: t(`timeline.marker.recreated.${payload.data.reason}`) });
     case 'environment_restarted':
@@ -292,6 +297,7 @@ export function MarkerLine({ item, count = 1 }: { item: MarkerItem; count?: numb
   const context = useFormatContext();
   const timeline = useTimelineContext();
   const Icon = ICONS[item.payload.marker];
+  if (item.payload.marker === 'background_wake') return <BackgroundWakeMarker threadId={timeline.threadId} data={item.payload.data} at={item.created_at} />;
   if (item.payload.marker === 'resource_resumed') {
     const data=item.payload.data;
     const reason=data.reason==='original_author_unavailable'||data.reason==='original_input_unavailable'?t(`storage.resumed.reasons.${data.reason}`):null;

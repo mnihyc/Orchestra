@@ -12,7 +12,6 @@ use super::csv::json_response;
 use super::names::{Names, rate_of};
 use crate::middleware::authorization::{self, refusals};
 use crate::middleware::requests::{ApiError, ApiResult};
-use crate::middleware::transaction_guard;
 use crate::registry::Ctx;
 use crate::sign_in::origin;
 use axum::body::Body;
@@ -64,32 +63,31 @@ fn matched<'a>(patterns: impl IntoIterator<Item = &'a str>, model: &str) -> Opti
 
 /// Says what each model usable at a node is counted at.
 pub async fn table(ctx: Ctx, query: UsageRateTableGetQuery, (): ()) -> ApiResult<RateTable> {
-    let mut conn = ctx.app.db.acquire().await?;
-    let principal = authorization::principal(&ctx, &mut conn).await?;
+    crate::key_operations::native::selected_read::<Table>(ctx, query, ()).await
+}
+
+async fn table_for(
+    ctx: &Ctx,
+    conn: &mut Conn,
+    principal: &orch_authz::Principal,
+    value: &PreparedTable,
+) -> ApiResult<RateTable> {
+    let query = &value.query;
     if query.system == Some(true) {
         if query.node_id.is_some() {
             return Err(ApiError::invalid("system", "choose a node or the system"));
         }
-        if !principal.is_system_admin()
-            || !matches!(
-                &ctx.user()?.via,
-                crate::middleware::authentication::Via::Session { .. }
-            )
-        {
-            return Err(refusals::system_admin_only(
-                "only a system admin in a browser reads the system rate card",
-            ));
-        }
+        ctx.ordinary_system_admin_with(ctx.user()?, principal.caller())?;
         // The system form edits its own patterns, not the contents of any private provider.
-        let on = orch_settings::get(&mut conn, Place::System, keys::USAGE_CATALOGUE)
+        let on = orch_settings::get(conn, Place::System, keys::USAGE_CATALOGUE)
             .await
             .map_err(ApiError::internal)?
             .unwrap_or(true);
-        let scale = orch_settings::get(&mut conn, Place::System, keys::USAGE_CATALOGUE_SCALE)
+        let scale = orch_settings::get(conn, Place::System, keys::USAGE_CATALOGUE_SCALE)
             .await
             .map_err(ApiError::internal)?
             .unwrap_or_else(|| "1".to_owned());
-        let catalogue = ledger::catalogue_in_force(&mut conn).await?;
+        let catalogue = ledger::catalogue_in_force(conn).await?;
         return Ok(RateTable {
             models: Vec::new(),
             catalogue: RateTableCatalogue {
@@ -105,30 +103,27 @@ pub async fn table(ctx: Ctx, query: UsageRateTableGetQuery, (): ()) -> ApiResult
         .node_id
         .ok_or_else(|| ApiError::invalid("node_id", "choose a node or system=true"))?;
     authorization::require(
-        &mut conn,
-        &principal,
+        conn,
+        principal,
         node,
         authorization::exact(Permission::UsageView),
         Act::Use,
         Policy::default(),
     )
     .await?;
-    let place = rollup::place_of(&mut conn, node)
+    let place = rollup::place_of(conn, node)
         .await?
         .ok_or_else(ApiError::not_found)?;
-    let root = orch_db::usage::caps::node_org(&mut conn, node)
-        .await?
-        .ok_or_else(ApiError::not_found)?;
-    let usable = rollup::models_usable_at(&mut conn, root, Some(place)).await?;
-    let book = RateBook::load(&mut conn, node)
+    let usable = value.usable.clone();
+    let book = RateBook::load(conn, node)
         .await
         .map_err(ApiError::internal)?;
     let card: BTreeMap<String, Rate> =
-        orch_settings::get(&mut conn, Place::Node(node), keys::USAGE_RATES)
+        orch_settings::get(conn, Place::Node(node), keys::USAGE_RATES)
             .await
             .map_err(ApiError::internal)?
             .unwrap_or_default();
-    let in_force = ledger::catalogue_in_force(&mut conn).await?;
+    let in_force = ledger::catalogue_in_force(conn).await?;
     let families: Vec<String> = in_force
         .as_ref()
         .map(|row| families_of(&row.doc))
@@ -136,18 +131,17 @@ pub async fn table(ctx: Ctx, query: UsageRateTableGetQuery, (): ()) -> ApiResult
         .into_iter()
         .map(|family| family.pattern)
         .collect();
-    let on = orch_settings::get::<bool>(&mut conn, Place::Node(node), keys::USAGE_CATALOGUE)
+    let on = orch_settings::get::<bool>(conn, Place::Node(node), keys::USAGE_CATALOGUE)
         .await
         .map_err(ApiError::internal)?
         .unwrap_or(true);
-    let scale =
-        orch_settings::get::<String>(&mut conn, Place::Node(node), keys::USAGE_CATALOGUE_SCALE)
-            .await
-            .map_err(ApiError::internal)?
-            .unwrap_or_else(|| "1".to_owned());
+    let scale = orch_settings::get::<String>(conn, Place::Node(node), keys::USAGE_CATALOGUE_SCALE)
+        .await
+        .map_err(ApiError::internal)?
+        .unwrap_or_else(|| "1".to_owned());
     let since = ctx.now.date_naive() - Duration::days(UNRATED_LOOK_BACK_DAYS);
     let unrated: HashMap<(Id, String), i64> = rollup::unrated_by_model(
-        &mut conn,
+        conn,
         &Filter {
             node: Some(RollupPlace { id: node, ..place }),
             ..Filter::default()
@@ -161,7 +155,7 @@ pub async fn table(ctx: Ctx, query: UsageRateTableGetQuery, (): ()) -> ApiResult
     let mut provider_ids: Vec<Id> = usable.iter().map(|each| each.provider_id).collect();
     provider_ids.sort_unstable();
     provider_ids.dedup();
-    let names = Names::load(&mut conn, &principal, &[], &provider_ids, &[]).await?;
+    let names = Names::load(conn, principal, &[], &provider_ids, &[]).await?;
 
     let mut models = Vec::new();
     for each in usable {
@@ -172,7 +166,7 @@ pub async fn table(ctx: Ctx, query: UsageRateTableGetQuery, (): ()) -> ApiResult
             .ok()
             .and_then(|parameters| parameters.rate);
         let found = book
-            .find(&mut conn, own.as_ref(), &each.model_name)
+            .find(conn, own.as_ref(), &each.model_name)
             .await
             .map_err(ApiError::internal)?;
         let (rate, source, pattern) = match found {
@@ -327,15 +321,10 @@ pub async fn catalogue(
 }
 
 /// Replaces the catalogue in force by a file, by one fetched from the configured address, or by the
-/// shipped one: a system admin, in a browser session.
+/// shipped one, through the ordinary administrative operation gate.
 pub async fn set(ctx: Ctx, (): (), body: Body) -> ApiResult<Response> {
     let mut conn = ctx.app.db.acquire().await?;
-    let principal = authorization::principal(&ctx, &mut conn).await?;
-    if !principal.is_system_admin() {
-        return Err(refusals::system_admin_only(
-            "only a system admin replaces the rate catalogue",
-        ));
-    }
+    crate::routes::admin::admin_of(&ctx)?;
     let limit = usize::try_from(USAGE_CATALOGUE_MAX_BYTES).unwrap_or(usize::MAX);
     let bytes = axum::body::to_bytes(body, limit).await.map_err(|_| {
         ApiError::new(ErrorCode::RequestTooLarge, "a catalogue is at most 2 MiB")
@@ -374,7 +363,7 @@ pub async fn set(ctx: Ctx, (): (), body: Body) -> ApiResult<Response> {
     } else {
         None
     };
-    let (mut tx, guard) = transaction_guard::begin(&ctx).await?;
+    let (mut tx, guard) = crate::routes::admin::action(&ctx).await?;
     let by = Actor::User(guard.user().id());
     let from = origin(&ctx);
     let now = guard.now().get();
@@ -411,5 +400,147 @@ fn refused(error: SeedError) -> ApiError {
     match error {
         SeedError::Catalogue { path, reason } => ApiError::invalid(&path, &reason),
         other => ApiError::internal(other),
+    }
+}
+
+/// Actual usable model rows, retained before rate and provider-reference hydration.
+pub(crate) struct PreparedTable {
+    query: UsageRateTableGetQuery,
+    usable: Vec<rollup::UsableModel>,
+}
+pub(super) struct Table;
+impl crate::key_operations::native::Selected for Table {
+    type Source = orch_api_contract::usage_sources::Source;
+    type Query = UsageRateTableGetQuery;
+    type Value = PreparedTable;
+    type Reply = RateTable;
+    const DECLARATION: &'static orch_api_contract::operation_sources::Declaration<Self::Source> =
+        &orch_api_contract::usage_sources::RATES_NODE;
+    fn declaration(
+        _query: &Self::Query,
+        value: &Self::Value,
+    ) -> &'static orch_api_contract::operation_sources::Declaration<Self::Source> {
+        if value.query.system == Some(true) {
+            &orch_api_contract::usage_sources::RATES_SYSTEM
+        } else {
+            Self::DECLARATION
+        }
+    }
+    fn select<'a>(
+        ctx: &'a Ctx,
+        conn: &'a mut Conn,
+        caller: &'a orch_authz::Caller,
+        query: &'a Self::Query,
+    ) -> futures::future::BoxFuture<
+        'a,
+        ApiResult<(
+            Self::Value,
+            Vec<crate::key_operations::native::Facts<Self::Source>>,
+        )>,
+    > {
+        Box::pin(async move {
+            use crate::key_operations::{native, targets};
+            use orch_api_contract::usage_sources::{self as sources, Source};
+            if query.system == Some(true) {
+                if query.node_id.is_some() {
+                    return Err(ApiError::invalid("system", "choose a node or the system"));
+                }
+                let facts = vec![native::Facts::one(
+                    Source::System,
+                    orch_access_contract::key_scope::KeyTargetKind::Identity(
+                        orch_access_contract::key_scope::KeyIdentityKind::System,
+                    ),
+                    targets::system(),
+                )];
+                let plan = native::bind(ctx, &sources::RATES_SYSTEM, &facts)?;
+                let principal = native::preparation_principal(ctx, conn, caller, &plan).await?;
+                ctx.ordinary_system_admin_with(ctx.user()?, principal.caller())?;
+                return Ok((
+                    PreparedTable {
+                        query: query.clone(),
+                        usable: Vec::new(),
+                    },
+                    facts,
+                ));
+            }
+            let node = query
+                .node_id
+                .ok_or_else(|| ApiError::invalid("node_id", "choose a node or system=true"))?;
+            let target = targets::node(conn, node).await?;
+            let mut facts = vec![native::Facts::one(Source::Node, target.object.kind, target)];
+            let plan = native::bind_known(ctx, &sources::RATES_NODE, &facts)?;
+            let principal = native::preparation_principal(ctx, conn, caller, &plan).await?;
+            authorization::require(
+                conn,
+                &principal,
+                node,
+                authorization::exact(Permission::UsageView),
+                Act::Use,
+                Policy::default(),
+            )
+            .await?;
+            let place = rollup::place_of(conn, node)
+                .await?
+                .ok_or_else(ApiError::not_found)?;
+            let root = orch_db::usage::caps::node_org(conn, node)
+                .await?
+                .ok_or_else(ApiError::not_found)?;
+            let candidates = rollup::models_usable_at(conn, root, Some(place)).await?;
+            let mut allowed = HashMap::new();
+            let mut providers = Vec::new();
+            for each in &candidates {
+                if allowed.contains_key(&each.provider_id) {
+                    continue;
+                }
+                let target = targets::resource_identity(
+                    conn,
+                    orch_access_contract::decisions::ObjectRef {
+                        kind: orch_access_contract::permissions::ObjectKind::Provider,
+                        id: each.provider_id,
+                    },
+                )
+                .await?;
+                let yes = !native::modern(caller)
+                    || native::permits(
+                        &plan,
+                        &sources::RATES_NODE,
+                        caller,
+                        &Source::RateProviders,
+                        target.object.kind,
+                        &target,
+                    )?;
+                allowed.insert(each.provider_id, yes);
+                if yes {
+                    providers.push(target)
+                }
+            }
+            let usable = candidates
+                .into_iter()
+                .filter(|each| allowed.get(&each.provider_id) == Some(&true))
+                .collect();
+            facts.push(super::native::collection(Source::RateProviders, providers));
+            Ok((
+                PreparedTable {
+                    query: query.clone(),
+                    usable,
+                },
+                facts,
+            ))
+        })
+    }
+    fn require<'a>(
+        _ctx: &'a Ctx,
+        _conn: &'a mut Conn,
+        _principal: &'a orch_authz::Principal,
+    ) -> futures::future::BoxFuture<'a, ApiResult<()>> {
+        Box::pin(async { Ok(()) })
+    }
+    fn render<'a>(
+        ctx: &'a Ctx,
+        conn: &'a mut Conn,
+        principal: &'a orch_authz::Principal,
+        value: &'a Self::Value,
+    ) -> futures::future::BoxFuture<'a, ApiResult<Self::Reply>> {
+        Box::pin(table_for(ctx, conn, principal, value))
     }
 }

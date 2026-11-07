@@ -13,8 +13,10 @@
  * makes nothing twice. A change to something with a revision carries the revision the person saw, and
  * a stale one comes back as `conflict.stale_revision`, which the screen shows and never retries alone.
  */
-import { infiniteQueryOptions, queryOptions } from '@tanstack/react-query';
+import { infiniteQueryOptions, queryOptions, type QueryClient } from '@tanstack/react-query';
 
+import { suppliedRead } from '@/api/readScheduler';
+import { joinedDefaultsNode } from '@/api/defaultsOpening';
 import { api, client, ok, repeatable } from '@/api/client';
 import { type ResourceRows, resourceRows } from '@/api/listed';
 import { queryClient } from '@/api/query';
@@ -72,15 +74,21 @@ export const orgsQuery = queryOptions({
 export const orgBySlugQuery = (slug: string) =>
   queryOptions({
     queryKey: orgBySlugKey(slug),
+    ...suppliedRead(orgBySlugKey(slug)),
     queryFn: ({ signal }): Promise<Org> =>
       ok(api.GET('/orgs/by-slug/{slug}', { params: { path: { slug } }, signal })),
   });
+
+async function fetchNode(id: string, cache: QueryClient, signal: AbortSignal): Promise<Node> {
+  return await joinedDefaultsNode(cache, id, signal) ?? ok(api.GET('/nodes/{id}', { params: { path: { id } }, signal }));
+}
 
 /** Any node by its id, with what the caller holds on it. */
 export const nodeQuery = (id: string) =>
   queryOptions({
     queryKey: nodeKey(id),
-    queryFn: ({ signal }): Promise<Node> => ok(api.GET('/nodes/{id}', { params: { path: { id } }, signal })),
+    ...suppliedRead(nodeKey(id)),
+    queryFn: ({ signal, client: cache }): Promise<Node> => fetchNode(id, cache, signal),
   });
 
 /** Explicitly reads current or retained facts to reconcile an uncertain write. */
@@ -92,8 +100,9 @@ export function readNode(id: string, inspectDeleted = false): Promise<Node> {
 export const projectQuery = (id: string) =>
   queryOptions({
     queryKey: nodeKey(id),
-    queryFn: ({ signal }): Promise<Project> =>
-      ok(api.GET('/nodes/{id}', { params: { path: { id } }, signal })).then((node) => {
+    ...suppliedRead(nodeKey(id)),
+    queryFn: ({ signal, client: cache }): Promise<Project> =>
+      fetchNode(id, cache, signal).then((node) => {
         if (node.kind !== 'project') throw new WrongKind('project', node.kind);
         return node;
       }),
@@ -103,8 +112,9 @@ export const projectQuery = (id: string) =>
 export const topicQuery = (id: string) =>
   queryOptions({
     queryKey: nodeKey(id),
-    queryFn: ({ signal }): Promise<Topic> =>
-      ok(api.GET('/nodes/{id}', { params: { path: { id } }, signal })).then((node) => {
+    ...suppliedRead(nodeKey(id)),
+    queryFn: ({ signal, client: cache }): Promise<Topic> =>
+      fetchNode(id, cache, signal).then((node) => {
         if (node.kind !== 'topic') throw new WrongKind('topic', node.kind);
         return node;
       }),
@@ -135,7 +145,7 @@ export type NodePage = ListedPage<Node>;
 export type TopicPage = ListedPage<Topic>;
 
 /** A page as the API answers it, made into the page the screens read. */
-function listedPage<T>(page: { items: readonly unknown[]; next_cursor?: string | null }): ListedPage<T> {
+export function listedPage<T>(page: { items: readonly unknown[]; next_cursor?: string | null }): ListedPage<T> {
   return { items: resourceRows<T>(page.items as readonly (HiddenItem | (T & { content_hidden?: false }))[]), next_cursor: page.next_cursor ?? null };
 }
 
@@ -143,6 +153,7 @@ function listedPage<T>(page: { items: readonly unknown[]; next_cursor?: string |
 export const childrenQuery = (id: string, archived: ArchivedFilter = 'exclude', participating = false) =>
   infiniteQueryOptions({
     queryKey: [...childrenKey(id), archived, participating] as const,
+    ...suppliedRead([...childrenKey(id), archived, participating]),
     initialPageParam: null as string | null,
     queryFn: async ({ pageParam, signal }): Promise<NodePage> =>
       listedPage<Node>(
@@ -214,6 +225,7 @@ export const topicsQuery = (projectId: string, filters: TopicFilters, limit: num
 export const activityQuery = (id: string, kinds: readonly ActivityKind[] = [], depth: 'summary' | 'every' = 'summary') =>
   infiniteQueryOptions({
     queryKey: [...activityKey(id), kinds, depth] as const,
+    ...suppliedRead([...activityKey(id), kinds, depth]),
     initialPageParam: null as string | null,
     queryFn: ({ pageParam, signal }): Promise<ActivityEntryPage> =>
       ok(

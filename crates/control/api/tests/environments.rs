@@ -9,6 +9,7 @@ mod places;
 mod resources;
 mod support;
 
+use crate::support::FullPermissionPageReply;
 use orch_api_contract::binding::NewEnvironmentAccess;
 use orch_api_contract::common::ErrorCode;
 use orch_api_contract::environment::{
@@ -344,7 +345,9 @@ async fn an_environment_is_read_by_whoever_holds_something_on_it_and_what_it_hol
         })
         .send()
         .await
-        .ok();
+        .ok()
+        .into_full()
+        .unwrap();
     assert_eq!(own.config["exec.offers"], json!(["plain"]));
     // As shipped, the viewers of the org see it; they do not see how it is configured.
     let seen = world
@@ -649,7 +652,9 @@ async fn an_environment_is_changed_by_whoever_manages_it_within_what_its_machine
         .body(&change(1))
         .send()
         .await
-        .ok();
+        .ok()
+        .into_full()
+        .unwrap();
     assert_eq!(changed.base.name, "Renamed");
     assert!(changed.remote_write && changed.terminal);
     assert_eq!(changed.config["exec.offers"], json!(["plain"]));
@@ -758,7 +763,9 @@ async fn another_home_is_taken_only_by_whoever_may_interact_there_and_only_in_th
         })
         .send()
         .await
-        .ok();
+        .ok()
+        .into_full()
+        .unwrap();
     assert_eq!(moved.home.id, project.base.id);
     let other = places::make_org(&world, &c.admin, "Other", "other").await;
     let outside = world
@@ -1080,7 +1087,9 @@ async fn the_settings_of_an_environment_are_what_its_home_resolves_and_then_its_
         })
         .send()
         .await
-        .ok();
+        .ok()
+        .into_full()
+        .unwrap();
     let settings = world
         .app
         .call(EnvironmentSettingList, &[&id])
@@ -1175,7 +1184,9 @@ async fn program_versions_resolve_system_org_project_and_environment_and_honor_a
         })
         .send()
         .await
-        .ok();
+        .ok()
+        .into_full()
+        .unwrap();
     let own = get(environment.base.id).await;
     assert_eq!(
         own.iter()
@@ -1333,7 +1344,9 @@ mod delegated_machine_registration {
             })
             .send()
             .await
-            .ok();
+            .ok()
+            .into_full()
+            .unwrap();
         assert_eq!(changed.revision, shown.revision + 1);
         changed
     }
@@ -1508,6 +1521,7 @@ mod delegated_machine_registration {
             })
             .send()
             .await
+            .full_permission_page()
             .ok();
         let refused = s
             .world
@@ -1563,6 +1577,7 @@ mod delegated_machine_registration {
             })
             .send()
             .await
+            .full_permission_page()
             .ok();
         canonical_owner(&s, made.base.id, s.company.viewer.id()).await;
         let shown = s

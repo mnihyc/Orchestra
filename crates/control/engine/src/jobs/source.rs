@@ -8,7 +8,7 @@ use orch_api_contract::nodes::{JobRef, JobState};
 use orch_api_contract::source::{
     RepositorySource, SourceDestination, SourceInfo, SourceKind, SourceState,
 };
-use orch_authz::{Caller, Policy, Principal, TokenGrant};
+use orch_authz::{Caller, CapturedOperation, Policy, Principal, TokenGrant};
 use orch_db::queries::jobs::{JobRow, NewJob, kind};
 use orch_db::{
     Conn,
@@ -26,6 +26,9 @@ use serde_json::json;
 
 use super::runner::{Done, Failure, Job, MakeError, Phase, Phased, Stop, Undone, initial_progress};
 use crate::{Engine, EngineError, commands::Outgoing, unit::Unit};
+
+pub mod operation;
+pub mod publication_authority;
 
 /// The ordering is shared by the API and automatic first-input preparation.
 pub const PHASES: [Phase; 4] = [
@@ -200,6 +203,18 @@ async fn credential_if_present(
     )
 }
 
+/// Shared interpretation of the existing source-preparation choice. Scheduling and creator
+/// admission use this same predicate before the source writer stores the frozen choice.
+#[must_use]
+pub fn preparation_pending(
+    prepare: Option<bool>,
+    worktree: bool,
+    repository: bool,
+    running: bool,
+) -> bool {
+    worktree || (prepare.unwrap_or(true) && (repository || !running || prepare == Some(true)))
+}
+
 /// Stores the creation choice before its first input, without contacting a machine.
 pub async fn freeze(
     unit: &mut Unit<'_>,
@@ -214,11 +229,12 @@ pub async fn freeze(
         .await?
         .ok_or_else(|| EngineError::unreadable("the source environment disappeared"))?;
     let frozen = resolved(&mut *unit.conn, thread).await?;
-    let preparing = worktree.is_some()
-        || (prepare.unwrap_or(true)
-            && (frozen.repository_url.is_some()
-                || env.status != "running"
-                || prepare == Some(true)));
+    let preparing = preparation_pending(
+        prepare,
+        worktree.is_some(),
+        frozen.repository_url.is_some(),
+        env.status == "running",
+    );
     let info = SourceInfo {
         kind: if worktree.is_some() {
             SourceKind::Worktree
@@ -240,14 +256,36 @@ pub async fn freeze(
         reason: (prepare == Some(false)).then(|| "source_skipped".to_owned()),
     };
     let seq = unit.stamp(thread).await?;
-    source::set_source(
-        &mut *unit.conn,
-        thread,
-        &json!({ "info": info, "source": frozen, "prepare": preparing, "worktree": worktree,
-        "caller": caller.user(), "token": caller.grant().and_then(|grant| grant.token()) }),
-        seq,
-    )
-    .await?;
+    let creator_origin = caller
+        .admitted_operation()
+        .filter(|selection| {
+            matches!(
+                *selection,
+                "ThreadCreate"
+                    | "TopicCreate.with_thread"
+                    | "TopicInputScheduleCreate"
+                    | "InputScheduleUpdate.definition"
+            )
+        })
+        .map(|_| CapturedOperation::capture(&caller.clone().with_admin_mode(false)))
+        .transpose()
+        .map_err(EngineError::unreadable)?;
+    let mut value = with_creator_origin(
+        json!({ "info": info, "source": frozen, "prepare": preparing, "worktree": worktree,
+            "caller": caller.user(), "token": caller.grant().and_then(|grant| grant.token()) }),
+        creator_origin.as_ref(),
+        None,
+        None,
+    );
+    if creator_origin.as_ref().is_some_and(|origin| {
+        matches!(
+            origin.operation(),
+            "ThreadCreate" | "TopicCreate.with_thread"
+        )
+    }) {
+        value["creator_environment_generation"] = json!(env.generation);
+    }
+    source::set_source(&mut *unit.conn, thread, &value, seq).await?;
     Ok(())
 }
 
@@ -290,6 +328,11 @@ impl Engine {
             .ok_or_else(|| EngineError::unreadable("the source thread disappeared"))?;
         if current.source != thread.source || current.environment_id != Some(environment) {
             return Ok(());
+        }
+        if accepted_creator_generation(frozen)?.is_some_and(|accepted| accepted != env.generation) {
+            return Err(EngineError::unreadable(
+                "The accepted source environment was replaced before preparation.",
+            ));
         }
         let choice: RepositorySource = serde_json::from_value(frozen["source"].clone())?;
         let worktree: Option<orch_api_contract::source::WorktreeChoice> = frozen
@@ -354,6 +397,8 @@ impl Engine {
                 .get("token")
                 .cloned()
                 .and_then(|value| serde_json::from_value(value).ok()),
+            creator_origin: creator_origin(frozen)?,
+            scheduled_input: scheduled_input(frozen)?,
             action,
         };
         begin(&mut tx, plan, self.inner.clock.now())
@@ -373,7 +418,67 @@ pub struct Plan {
     pub thread: Option<Id>,
     pub caller: Id,
     pub token: Option<Id>,
+    /// The accepted creator's immutable boundary; absent on historical and unrelated file jobs.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub creator_origin: Option<CapturedOperation>,
+    /// Actual accepted scheduled input; its stored authority retains every independent origin.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub scheduled_input: Option<Id>,
     pub action: Action,
+}
+
+// An absent historical origin keeps its existing path. A present invalid origin never becomes
+// a session or a legacy token reconstructed without the accepted operation's policy ceiling.
+fn creator_origin(value: &Json) -> Result<Option<CapturedOperation>, EngineError> {
+    value
+        .get("creator_origin")
+        .cloned()
+        .map(serde_json::from_value)
+        .transpose()
+        .map_err(Into::into)
+}
+
+fn scheduled_input(value: &Json) -> Result<Option<Id>, EngineError> {
+    value
+        .get("scheduled_input")
+        .cloned()
+        .map(serde_json::from_value)
+        .transpose()
+        .map_err(Into::into)
+}
+
+fn with_creator_origin(
+    mut value: Json,
+    origin: Option<&CapturedOperation>,
+    input: Option<Id>,
+    previous: Option<&Json>,
+) -> Json {
+    if let Some(origin) = origin {
+        value["creator_origin"] = json!(origin);
+    }
+    if let Some(input) = input {
+        value["scheduled_input"] = json!(input);
+    }
+    if origin.is_some() || input.is_some() {
+        for field in [
+            "creator_environment_generation",
+            "scheduled_environment_generation",
+        ] {
+            if let Some(previous) = previous.and_then(|previous| previous.get(field)) {
+                value[field] = previous.clone();
+            }
+        }
+    }
+    value
+}
+
+fn accepted_creator_generation(value: &Json) -> Result<Option<i32>, EngineError> {
+    value
+        .get("creator_environment_generation")
+        .cloned()
+        .map(serde_json::from_value)
+        .transpose()
+        .map_err(Into::into)
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -424,8 +529,18 @@ impl Action {
 /// Inserts one serialized file job while the API's current action guard still holds.
 pub async fn begin(
     conn: &mut Conn,
+    plan: Plan,
+    now: chrono::DateTime<chrono::Utc>,
+) -> Result<JobRow, MakeError> {
+    begin_before(conn, plan, now, || Ok(())).await
+}
+
+/// The same native writer with a live cut after its complete native preparation and before INSERT.
+pub async fn begin_before(
+    conn: &mut Conn,
     mut plan: Plan,
     now: chrono::DateTime<chrono::Utc>,
+    before: impl FnOnce() -> Result<(), Box<dyn std::error::Error + Send + Sync>>,
 ) -> Result<JobRow, MakeError> {
     environments::hosting::lock_environment(conn, plan.environment)
         .await?
@@ -515,6 +630,7 @@ pub async fn begin(
         },
     ))
     .map_err(|error| orch_db::DbError::Other(sqlx::Error::Decode(error.into())))?;
+    before().map_err(EngineError::BeforeEffect)?;
     let job = rows::insert(
         conn,
         &NewJob {
@@ -561,8 +677,8 @@ pub async fn begin(
             .stamp(thread)
             .await
             .map_err(|error| orch_db::DbError::Other(sqlx::Error::Decode(error.into())))?;
-        source::set_source(&mut *unit.conn, row.node_id, &json!({ "info": info, "source": frozen, "prepare": true,
-            "caller": plan.caller, "token": plan.token, "credential_home": row.topic_id, "native_plan": plan }), seq).await?;
+        source::set_source(&mut *unit.conn, row.node_id, &with_creator_origin(json!({ "info": info, "source": frozen, "prepare": true,
+            "caller": plan.caller, "token": plan.token, "credential_home": row.topic_id, "native_plan": plan }), plan.creator_origin.as_ref(), plan.scheduled_input, row.source.as_ref()), seq).await?;
         unit.finish()
             .await
             .map_err(|error| orch_db::DbError::Other(sqlx::Error::Decode(error.into())))?;
@@ -577,7 +693,7 @@ pub async fn begin(
     ) = (plan.thread, &plan.action)
     {
         let mut unit = Unit::new(conn, now);
-        threads::lock(&mut *unit.conn, thread)
+        let row = threads::lock(&mut *unit.conn, thread)
             .await?
             .ok_or(MakeError::NoEnvironment)?;
         let info = SourceInfo {
@@ -597,8 +713,13 @@ pub async fn begin(
         source::set_source(
             &mut *unit.conn,
             thread,
-            &json!({ "info": info, "source": frozen, "prepare": true, "worktree": body.choice,
+            &with_creator_origin(
+                json!({ "info": info, "source": frozen, "prepare": true, "worktree": body.choice,
             "caller": plan.caller, "token": plan.token, "native_plan": plan }),
+                plan.creator_origin.as_ref(),
+                plan.scheduled_input,
+                row.source.as_ref(),
+            ),
             seq,
         )
         .await?;
@@ -611,7 +732,79 @@ pub async fn begin(
 
 /// Rechecks current caller rights and the frozen binding before a native effect.
 pub async fn principal(conn: &mut Conn, job: &Job, plan: &Plan) -> Result<Principal, Stop> {
-    load_principal(conn, job, plan.caller, plan.token).await
+    let row = job.row().await?;
+    if operation::is_restricted(&row) {
+        return operation::principal_at(conn, &row, plan, Time::new(job.now())).await;
+    }
+    principal_at(conn, plan, Time::new(job.now())).await
+}
+
+async fn principal_at(conn: &mut Conn, plan: &Plan, now: Time) -> Result<Principal, Stop> {
+    if plan.scheduled_input.is_some() {
+        return Err(Failure::new(
+            "access.denied",
+            "Scheduled source authority needs every original boundary.",
+        )
+        .into());
+    }
+    if let Some(origin) = &plan.creator_origin {
+        let thread = plan.thread.ok_or_else(|| {
+            Failure::new(
+                "access.denied",
+                "The accepted creator source has no thread.",
+            )
+        })?;
+        if origin.user() != plan.caller
+            || !matches!(
+                plan.action,
+                Action::Prepare { .. } | Action::Worktree { .. }
+            )
+        {
+            return Err(
+                Failure::new("access.denied", "The accepted creator source is invalid.").into(),
+            );
+        }
+        let caller = crate::operation_scope::creator_files::restore(
+            conn,
+            origin,
+            thread,
+            plan.environment,
+            matches!(plan.action, Action::Worktree { .. }),
+            now,
+        )
+        .await?
+        .ok_or_else(|| {
+            Failure::new(
+                "access.denied",
+                "The accepted creator no longer permits this file operation.",
+            )
+        })?;
+        return Principal::load(conn, caller, now)
+            .await
+            .map_err(EngineError::from)
+            .map_err(Into::into);
+    }
+    // The existing loader pins person then token. Inspect the modern marker only after those
+    // locks, so a legacy-to-modern scope change cannot slip between detection and restoration.
+    let principal = load_principal_at(conn, plan.caller, plan.token, now).await?;
+    if let Some(token) = plan.token {
+        let scoped: Option<bool> = sqlx::query_scalar(
+            "SELECT operation_scope IS NOT NULL FROM api_tokens WHERE id=$1 AND user_id=$2",
+        )
+        .bind(token)
+        .bind(plan.caller)
+        .fetch_optional(&mut *conn)
+        .await
+        .map_err(orch_db::DbError::from)?;
+        if scoped == Some(true) {
+            return Err(Failure::new(
+                "access.denied",
+                "This scoped file operation has no accepted creator origin.",
+            )
+            .into());
+        }
+    }
+    Ok(principal)
 }
 
 /// Loads the current token row for a frozen file act, including a fork's recorded-state copy.
@@ -620,6 +813,15 @@ pub(crate) async fn load_principal(
     job: &Job,
     user: Id,
     token: Option<Id>,
+) -> Result<Principal, Stop> {
+    load_principal_at(conn, user, token, Time::new(job.now())).await
+}
+
+pub(crate) async fn load_principal_at(
+    conn: &mut Conn,
+    user: Id,
+    token: Option<Id>,
+    now: Time,
 ) -> Result<Principal, Stop> {
     // Personal token writers use this person's UPDATE lock, not the policy
     // barrier. Pin the person before reading their frozen act's current token.
@@ -637,7 +839,7 @@ pub(crate) async fn load_principal(
         .into());
     }
     let caller = if let Some(id) = token {
-        let row = source::job_token(conn, id, user, job.now())
+        let row = source::job_token(conn, id, user, now.get())
             .await?
             .ok_or_else(|| {
                 Failure::new(
@@ -654,16 +856,27 @@ pub(crate) async fn load_principal(
     } else {
         Caller::session(user)
     };
-    Principal::load(conn, caller, Time::new(job.now()))
+    Principal::load(conn, caller, now)
         .await
         .map_err(EngineError::from)
         .map_err(Into::into)
 }
 
 pub async fn check(job: &Job, plan: &Plan) -> Result<(), Stop> {
+    if operation::received(job, plan).await? || publication_authority::received(job, plan).await? {
+        return Ok(());
+    }
     // An existing directory needs only a read. The effect rechecks write authority after stat
     // when the directory is missing; a machine refusing writes may still keep an existing checkout.
-    check_with_write(job, plan, requires_write(plan), None).await
+    let checked = check_with_write(job, plan, requires_write(plan), None).await;
+    if matches!(&checked,Err(Stop::Failed(failure)) if failure.code!=super::runner::INTERNAL)
+        && publication_authority::received(job, plan).await?
+    {
+        // The actual ACK may have arrived while the current forward gate was waiting.
+        // Reconciliation still proves the exact owned frame and ordinary ending fences.
+        return Ok(());
+    }
+    checked
 }
 
 fn requires_write(plan: &Plan) -> bool {
@@ -711,10 +924,36 @@ async fn matching_target(
     plan: &Plan,
     pending: Option<(&JobRow, Id)>,
 ) -> Result<Option<environments::workspace::EnvironmentRow>, EngineError> {
-    let Some(env) = environments::workspace::environment(conn, plan.environment).await? else {
+    if let Some((owner, runtime)) = pending {
+        return matching_provision_target(
+            conn,
+            owner,
+            plan.environment,
+            plan.machine,
+            plan.generation,
+            runtime,
+        )
+        .await;
+    }
+    Ok(environments::workspace::environment(conn, plan.environment)
+        .await?
+        .filter(|env| env.generation == plan.generation && env.machine_id == Some(plan.machine)))
+}
+
+/// Current candidate facts shared by source and initial-copy jobs. This is the original pending
+/// target check, not authorization: callers separately restore every accepted credential origin.
+pub(crate) async fn matching_provision_target(
+    conn: &mut Conn,
+    owner: &JobRow,
+    environment: Id,
+    machine: Id,
+    generation: i32,
+    runtime: Id,
+) -> Result<Option<environments::workspace::EnvironmentRow>, EngineError> {
+    let Some(env) = environments::workspace::environment(conn, environment).await? else {
         return Ok(None);
     };
-    let matches = if let Some((owner, runtime)) = pending {
+    let matches = {
         // The publication transaction pins this candidate's identity through its metadata write.
         // The pre-command check uses the same short lock and commits before any machine wait.
         let exists: Option<Id> =
@@ -728,7 +967,7 @@ async fn matching_target(
         }
         let owning = owner.kind == kind::ENVIRONMENT_PROVISION
             && owner.is_open()
-            && owner.environment_id == Some(plan.environment)
+            && owner.environment_id == Some(environment)
             && owner
                 .plan
                 .get("runtime")
@@ -738,24 +977,22 @@ async fn matching_target(
             && owner.plan.get("generation").and_then(Json::as_i64)
                 == Some(i64::from(env.generation))
             && match owner.plan.get("mode").and_then(Json::as_str) {
-                Some("make") => env.generation.checked_add(1) == Some(plan.generation),
-                Some("start") => env.generation == plan.generation,
+                Some("make") => env.generation.checked_add(1) == Some(generation),
+                Some("start") => env.generation == generation,
                 _ => false,
             };
         if env.status != "provisioning" || !owning {
             false
         } else {
-            let candidate = environments::hosting::live_runtime(conn, plan.environment).await?;
+            let candidate = environments::hosting::live_runtime(conn, environment).await?;
             candidate.is_some_and(|row| {
                 row.id == runtime
-                    && row.environment_id == Some(plan.environment)
-                    && row.machine_id == Some(plan.machine)
-                    && row.generation == plan.generation
+                    && row.environment_id == Some(environment)
+                    && row.machine_id == Some(machine)
+                    && row.generation == generation
                     && matches!(row.state.as_str(), "creating" | "running")
             })
         }
-    } else {
-        env.generation == plan.generation && env.machine_id == Some(plan.machine)
     };
     Ok(matches.then_some(env))
 }
@@ -766,6 +1003,13 @@ async fn check_with_write(
     write: bool,
     pending: Option<Id>,
 ) -> Result<(), Stop> {
+    let owner = job.row().await?;
+    if operation::is_restricted(&owner) {
+        if operation::received(job, plan).await? {
+            return Ok(());
+        }
+        return operation::check(job, plan, write).await;
+    }
     let mut tx = job.engine().db().begin().await?;
     orch_db::queries::transaction_guard::lock_action(&mut tx).await?;
     check_in(&mut tx, job, plan, write, pending).await?;
@@ -781,7 +1025,67 @@ async fn check_in(
     write: bool,
     pending: Option<Id>,
 ) -> Result<(), Stop> {
-    let principal = principal(conn, job, plan).await?;
+    let owner = rows::job(conn, job.id()).await?.ok_or(Stop::Lost)?;
+    if operation::is_restricted(&owner) {
+        if operation::reconcile_at(conn, &owner, plan).await? {
+            return Ok(());
+        }
+        return operation::before_mutation(conn, job, plan, write).await;
+    }
+    check_at(conn, job.id(), Time::new(job.now()), plan, write, pending).await
+}
+
+async fn check_at(
+    conn: &mut Conn,
+    job: Id,
+    now: Time,
+    plan: &Plan,
+    write: bool,
+    pending: Option<Id>,
+) -> Result<(), Stop> {
+    let principal = if let Some(input) = plan.scheduled_input {
+        if !crate::inputs::scheduled_source_authorized(
+            conn,
+            input,
+            plan.thread.ok_or_else(|| {
+                Failure::new("access.denied", "The scheduled source has no thread.")
+            })?,
+            plan.environment,
+            matches!(plan.action, Action::Worktree { .. }),
+            now,
+            plan.caller,
+            plan.creator_origin.as_ref(),
+        )
+        .await?
+        {
+            return Err(Failure::new(
+                "access.denied",
+                "The scheduled source is no longer authorized.",
+            )
+            .into());
+        }
+        None
+    } else {
+        let owner = rows::job(conn, job).await?;
+        if let Some(owner) = owner.as_ref().filter(|row| operation::is_restricted(row)) {
+            Some(operation::principal_at(conn, owner, plan, now).await?)
+        } else if let Some(owner) = owner.filter(publication_authority::is_restricted) {
+            Some(publication_authority::principal(conn, &owner, plan, now).await?)
+        } else {
+            Some(principal_at(conn, plan, now).await?)
+        }
+    };
+    check_native_at(conn, job, plan, write, pending, principal.as_ref()).await
+}
+
+pub(crate) async fn check_native_at(
+    conn: &mut Conn,
+    job: Id,
+    plan: &Plan,
+    write: bool,
+    pending: Option<Id>,
+    principal: Option<&Principal>,
+) -> Result<(), Stop> {
     let permission = if matches!(
         plan.action,
         Action::Prepare { .. } | Action::Worktree { .. }
@@ -790,26 +1094,28 @@ async fn check_in(
     } else {
         Permission::FilesManage
     };
-    let allowed = orch_authz::resources::check(
-        conn,
-        &principal,
-        ObjectRef {
-            kind: ObjectKind::Environment,
-            id: plan.environment,
-        },
-        permission,
-        Policy::default(),
-    )
-    .await
-    .map_err(EngineError::from)?;
-    if !matches!(allowed, Decision::Allowed { .. }) {
-        return Err(Failure::new(
-            "access.denied",
-            "You no longer have permission to complete this file operation.",
+    if let Some(principal) = &principal {
+        let allowed = orch_authz::resources::check(
+            conn,
+            principal,
+            ObjectRef {
+                kind: ObjectKind::Environment,
+                id: plan.environment,
+            },
+            permission,
+            Policy::default(),
         )
-        .into());
+        .await
+        .map_err(EngineError::from)?;
+        if !matches!(allowed, Decision::Allowed { .. }) {
+            return Err(Failure::new(
+                "access.denied",
+                "You no longer have permission to complete this file operation.",
+            )
+            .into());
+        }
     }
-    let env = target(conn, job.id(), plan, pending).await?;
+    let env = target(conn, job, plan, pending).await?;
     if write && !env.remote_write {
         return Err(Failure::new(
             "workspace.remote_write_disabled",
@@ -837,6 +1143,23 @@ async fn check_in(
     {
         let row = threads::thread(conn, thread).await?.filter(|row| row.environment_id == Some(plan.environment))
             .ok_or_else(|| Failure::new("conflict.stale_preflight", "The thread changed environment while its files were being prepared. Review it and try again."))?;
+        if row
+            .source
+            .as_ref()
+            .map(accepted_creator_generation)
+            .transpose()?
+            .flatten()
+            .is_some_and(|accepted| {
+                accepted != plan.generation
+                    && !(pending.is_some() && accepted == 0 && env.generation == 0)
+            })
+        {
+            return Err(Failure::new(
+                "conflict.stale_preflight",
+                "The accepted source environment generation changed.",
+            )
+            .into());
+        }
         if let Action::Prepare { directory, .. } = &plan.action
             && row.workspace_dir != *directory
         {
@@ -857,11 +1180,413 @@ async fn check_in(
     Ok(())
 }
 
+/// Existing durable job ownership is the only association used by the dispatcher. A command
+/// without creator evidence retains its ordinary path; present creator evidence must be exact.
+/// Callers hold the normal action barrier and re-read the unacknowledged command under lock.
+pub async fn creator_command_authorized(
+    conn: &mut Conn,
+    command: Id,
+    machine: Id,
+    key: Option<&str>,
+    kind: &str,
+    body: &Json,
+    now: Time,
+) -> Result<bool, EngineError> {
+    let owners = rows::lock_source_command_owners(conn, command).await?;
+    if owners.is_empty() {
+        return Ok(true);
+    }
+    if owners.len() != 1 {
+        return Ok(false);
+    }
+    let Some(owner) = rows::job(conn, owners[0]).await? else {
+        return Ok(false);
+    };
+    if publication_authority::is_restricted(&owner) {
+        return publication_authority::command_authorized(
+            conn, &owner, command, machine, key, kind, body, now,
+        )
+        .await;
+    }
+    if matches!(owner.kind.as_str(), kind::GIT_COMMIT | kind::GIT_PUSH) {
+        // Historical ordinary jobs retain their path, while a modernized token with no
+        // accepted original operation must never acquire an unrestricted native dispatch.
+        let plan: Plan = serde_json::from_value(owner.plan.clone())?;
+        return match principal_at(conn, &plan, now).await {
+            Ok(_) => Ok(true),
+            Err(Stop::Failed(failure)) if failure.code == super::runner::INTERNAL => Err(
+                EngineError::unreadable("Git publication authority could not be checked."),
+            ),
+            Err(Stop::Failed(_) | Stop::Cancelled | Stop::Lost) => Ok(false),
+        };
+    }
+    let native = owner.plan.get("creator_command");
+    let expected_creator = owner.kind == kind::WORKSPACE_PREPARE
+        && ["creator_origin", "scheduled_input"]
+            .iter()
+            .any(|field| owner.plan.get(*field).is_some_and(|value| !value.is_null()));
+    let Some(native) = native.filter(|value| !value.is_null()) else {
+        if owner.kind == kind::WORKSPACE_PREPARE
+            && let Some(token) = owner
+                .plan
+                .get("token")
+                .and_then(Json::as_str)
+                .and_then(|token| token.parse::<Id>().ok())
+        {
+            let Some(user) = owner
+                .plan
+                .get("caller")
+                .and_then(Json::as_str)
+                .and_then(|user| user.parse::<Id>().ok())
+            else {
+                return Ok(false);
+            };
+            let present: Option<Id> =
+                sqlx::query_scalar("SELECT id FROM users WHERE id=$1 FOR KEY SHARE")
+                    .bind(user)
+                    .fetch_optional(&mut *conn)
+                    .await
+                    .map_err(orch_db::DbError::from)?;
+            if present.is_none() {
+                return Ok(false);
+            }
+            let scoped: Option<bool> = sqlx::query_scalar(
+                "SELECT operation_scope IS NOT NULL FROM api_tokens WHERE id=$1 AND user_id=$2 FOR SHARE",
+            )
+            .bind(token)
+            .bind(user)
+            .fetch_optional(&mut *conn)
+            .await
+            .map_err(orch_db::DbError::from)?;
+            if scoped != Some(false) {
+                return Ok(false);
+            }
+        }
+        return Ok(!expected_creator);
+    };
+    if native.get("id") != Some(&json!(command)) {
+        // Another phase may have completed and already reserved the next command. Its private
+        // evidence cannot be lent to an older, still unacknowledged command.
+        return Ok(false);
+    }
+    let plan: Plan = serde_json::from_value(native.get("plan").cloned().unwrap_or(Json::Null))?;
+    if plan.creator_origin.is_none() && plan.scheduled_input.is_none() {
+        return Ok(false);
+    }
+    let runtime: Option<Id> =
+        serde_json::from_value(native.get("runtime").cloned().unwrap_or(Json::Null))?;
+    if !owner.is_open()
+        || owner.cancel_requested()
+        || owner.environment_id != Some(plan.environment)
+        || plan.machine != machine
+        || SerialKey::Environment(plan.environment).wire().as_deref() != key
+        || owner.plan.pointer("/active_command/id") != Some(&json!(command))
+        || owner.plan.pointer("/active_command/machine") != Some(&json!(machine))
+        || owner
+            .plan
+            .pointer("/active_command/kind")
+            .and_then(Json::as_str)
+            != Some(kind)
+        || !creator_body(&plan, owner.id, kind, body)?
+    {
+        return Ok(false);
+    }
+    let Some(thread) = plan.thread else {
+        return Ok(false);
+    };
+    let Some(current) = threads::lock(conn, thread).await? else {
+        return Ok(false);
+    };
+    let Some(source) = current.source.as_ref() else {
+        return Ok(false);
+    };
+    let info: SourceInfo = serde_json::from_value(source.get("info").unwrap_or(source).clone())?;
+    if source.get("native_plan") != Some(&json!(plan))
+        || !matches!(info.state, SourceState::Pending | SourceState::Preparing)
+    {
+        return Ok(false);
+    }
+    let owned = if let Some(runtime) = runtime {
+        let effect = crate::ids::derived(
+            "source.provision.files",
+            &[owner.id.as_bytes(), thread.as_bytes()],
+        );
+        owner.kind == kind::ENVIRONMENT_PROVISION
+            && match &plan.action {
+                Action::Prepare { effect_id, .. } => *effect_id == Some(effect),
+                Action::Worktree { body, .. } => body.job_id == effect,
+                _ => false,
+            }
+            && matching_target(conn, &plan, Some((&owner, runtime)))
+                .await?
+                .is_some()
+    } else {
+        owner.kind == kind::WORKSPACE_PREPARE
+            && owner.node_id == Some(thread)
+            && info.job.as_ref().map(|job| job.id) == Some(owner.id)
+            && serde_json::to_value(serde_json::from_value::<Plan>(owner.plan.clone())?)?
+                == json!(plan)
+    };
+    if !owned {
+        return Ok(false);
+    }
+    match check_at(conn, owner.id, now, &plan, requires_write(&plan), runtime).await {
+        Ok(()) => Ok(true),
+        // A failed authority, attempt or lifecycle check refuses publication rather than
+        // rebuilding a less restricted caller. The dispatcher emits its existing safe refusal.
+        Err(Stop::Failed(failure)) if failure.code == super::runner::INTERNAL => Err(
+            EngineError::unreadable("Creator source authority could not be checked."),
+        ),
+        Err(Stop::Failed(_)) | Err(Stop::Cancelled | Stop::Lost) => Ok(false),
+    }
+}
+
+/// Export actual current identities only after the exact existing first-send recipe check.
+/// Historical/system paths retain the existing loader; present scoped provenance never falls back.
+pub async fn creator_command_current_callers(
+    conn: &mut Conn,
+    command: Id,
+    machine: Id,
+    key: Option<&str>,
+    kind: &str,
+    body: &Json,
+    clock: &dyn orch_types::Clock,
+) -> Result<Option<Vec<(Option<Caller>, Option<Time>)>>, EngineError> {
+    let known = rows::lock_source_command_owners(conn, command).await?;
+    if known.len() == 1 {
+        if let Some(owner) = rows::job(conn, known[0]).await?
+            && operation::is_restricted(&owner)
+        {
+            let Some(private) =
+                orch_db::queries::link::command_with_authority(conn, command).await?
+            else {
+                return Ok(None);
+            };
+            if private.command.machine_id != machine
+                || private.command.serial_key() != key
+                || private.command.kind != kind
+                || private.command.body != *body
+            {
+                return Ok(None);
+            }
+            let Some(value) = private.authority else {
+                return Ok(None);
+            };
+            let authority: crate::commands::CommandAuthority = serde_json::from_value(value)?;
+            if let crate::commands::CommandAuthority::SourcePreparation(authority) = authority {
+                return authority
+                    .current_callers(conn, &private.command, clock)
+                    .await;
+            }
+            return Ok(None);
+        }
+    }
+    if !creator_command_authorized(conn, command, machine, key, kind, body, clock.time()).await? {
+        return Ok(None);
+    }
+    let owners = rows::lock_source_command_owners(conn, command).await?;
+    if owners.is_empty() {
+        return Ok(Some(Vec::new()));
+    }
+    if owners.len() != 1 {
+        return Ok(None);
+    }
+    let Some(owner) = rows::job(conn, owners[0]).await? else {
+        return Ok(None);
+    };
+    if publication_authority::is_restricted(&owner) {
+        return publication_authority::current_callers(conn, &owner, clock).await;
+    }
+    let native = owner
+        .plan
+        .get("creator_command")
+        .filter(|value| !value.is_null());
+    if native.is_none()
+        && !matches!(
+            owner.kind.as_str(),
+            kind::WORKSPACE_PREPARE | kind::GIT_COMMIT | kind::GIT_PUSH
+        )
+    {
+        // Another job family's ordinary frame is not a source recipe or caller loan.
+        return Ok(Some(Vec::new()));
+    }
+    let plan: Plan = if let Some(native) = native {
+        serde_json::from_value(native.get("plan").cloned().unwrap_or(Json::Null))?
+    } else {
+        serde_json::from_value(owner.plan.clone())?
+    };
+    if let Some(input) = plan.scheduled_input {
+        let Some(thread) = plan.thread else {
+            return Ok(None);
+        };
+        return crate::inputs::scheduled_source_current_callers(
+            conn,
+            input,
+            thread,
+            plan.caller,
+            plan.creator_origin.as_ref(),
+            clock,
+        )
+        .await;
+    }
+    if let Some(origin) = &plan.creator_origin {
+        return Ok(origin
+            .restore_current(conn, clock)
+            .await?
+            .map(|caller| vec![(Some(caller), None)]));
+    }
+    let principal = match principal_at(conn, &plan, clock.time()).await {
+        Ok(principal) => principal,
+        Err(Stop::Failed(failure)) if failure.code == super::runner::INTERNAL => {
+            return Err(EngineError::unreadable(
+                "Creator source authority could not be checked.",
+            ));
+        }
+        Err(_) => return Ok(None),
+    };
+    Ok(orch_authz::CapturedCaller::capture(principal.caller())
+        .restore_current(conn, clock)
+        .await?
+        .map(|caller| vec![(Some(caller), None)]))
+}
+
+fn creator_body(plan: &Plan, job: Id, kind: &str, body: &Json) -> Result<bool, EngineError> {
+    let expected = match &plan.action {
+        Action::Prepare {
+            directory,
+            source,
+            credential,
+            destination,
+            effect_id,
+        } => match kind {
+            "fs.stat" => json!(FsStat {
+                environment_id: plan.environment,
+                mount: None,
+                path: directory.clone()
+            }),
+            "fs.mkdir" if !directory.is_empty() => json!(FsMkdir {
+                environment_id: plan.environment,
+                path: directory.clone()
+            }),
+            "git.prepare" => {
+                let Some(url) = &source.repository_url else {
+                    return Ok(false);
+                };
+                json!(GitPrepare {
+                    environment_id: plan.environment,
+                    job_id: effect_id.unwrap_or(job),
+                    directory: directory.clone(),
+                    repository_url: url.clone(),
+                    branch: source.branch.clone(),
+                    destination: destination.clone(),
+                    credential: credential.map(Secret::Ref)
+                })
+            }
+            _ => return Ok(false),
+        },
+        Action::Worktree {
+            body: worktree,
+            record_days,
+            max_bytes,
+            ..
+        } => match kind {
+            "git.worktree" => json!(worktree),
+            "fs.record" => {
+                let Some(snapshot_id) = worktree.snapshot_id else {
+                    return Ok(false);
+                };
+                json!(FsRecord {
+                    environment_id: plan.environment,
+                    snapshot_id,
+                    directory: worktree.choice.repository_dir.clone(),
+                    kind: RecordKind::Turn,
+                    record_days: *record_days,
+                    max_bytes: *max_bytes
+                })
+            }
+            _ => return Ok(false),
+        },
+        _ => return Ok(false),
+    };
+    Ok(*body == expected)
+}
+
+pub(crate) async fn lock_attempt_at(
+    conn: &mut Conn,
+    owner: &JobRow,
+    plan: &Plan,
+    runtime: Option<Id>,
+) -> Result<Option<threads::ThreadRow>, EngineError> {
+    let (frozen, directory, worktree) = match &plan.action {
+        Action::Prepare {
+            source, directory, ..
+        } => (source, directory, None),
+        Action::Worktree { source, body, .. } => {
+            (source, &body.choice.directory, Some(&body.choice))
+        }
+        _ => return Ok(None),
+    };
+    let Some(thread) = plan.thread else {
+        return Ok(None);
+    };
+    let Some(row) = threads::lock(conn, thread).await? else {
+        return Ok(None);
+    };
+    let Some(value) = row.source.as_ref() else {
+        return Ok(None);
+    };
+    let info: SourceInfo = serde_json::from_value(value.get("info").unwrap_or(value).clone())?;
+    let native_plan = serde_json::to_value(&plan)?;
+    if row.environment_id != Some(plan.environment)
+        || row.workspace_dir != *directory
+        || !matches!(info.state, SourceState::Pending | SourceState::Preparing)
+        || value.get("source") != Some(&json!(frozen))
+        || value.get("worktree").filter(|value| !value.is_null())
+            != worktree.map(|choice| json!(choice)).as_ref()
+        || value.get("native_plan") != Some(&native_plan)
+    {
+        return Ok(None);
+    }
+    let pending = if let Some(runtime) = runtime {
+        // Inline preparation belongs to the provisioning parent and its derived native effect;
+        // it legitimately has no standalone source job in SourceInfo.
+        let effect = crate::ids::derived(
+            "source.provision.files",
+            &[owner.id.as_bytes(), thread.as_bytes()],
+        );
+        let owns_effect = match &plan.action {
+            Action::Prepare { effect_id, .. } => *effect_id == Some(effect),
+            Action::Worktree { body, .. } => body.job_id == effect,
+            _ => false,
+        };
+        if !owns_effect {
+            return Ok(None);
+        }
+        Some((owner, runtime))
+    } else {
+        if owner.kind != kind::WORKSPACE_PREPARE
+            || owner.node_id != Some(thread)
+            || owner.environment_id != Some(plan.environment)
+            || info.job.as_ref().map(|job| job.id) != Some(owner.id)
+            || serde_json::to_value(serde_json::from_value::<Plan>(owner.plan.clone())?)?
+                != native_plan
+        {
+            return Ok(None);
+        }
+        None
+    };
+    if matching_target(conn, &plan, pending).await?.is_none() {
+        return Ok(None);
+    }
+    Ok(Some(row))
+}
+
 #[derive(Debug, Clone)]
 pub struct Preparing {
     engine: Engine,
     plan: Plan,
     provisioning_runtime: Option<Id>,
+    operation: Option<operation::Request>,
 }
 impl Preparing {
     pub fn of(engine: Engine, row: &JobRow) -> Result<Self, EngineError> {
@@ -870,7 +1595,53 @@ impl Preparing {
             engine,
             plan,
             provisioning_runtime: None,
+            operation: operation::Request::from_job(row)?,
         })
+    }
+
+    /// Keep the original source recipe attached to the exact job command before the ordinary
+    /// job runner records active_command and makes it visible to the durable dispatcher.
+    async fn command(&self, job: &Job, command: Outgoing) -> Result<Json, Stop> {
+        if self.plan.creator_origin.is_some() || self.plan.scheduled_input.is_some() {
+            check_with_write(
+                job,
+                &self.plan,
+                requires_write(&self.plan),
+                self.provisioning_runtime,
+            )
+            .await?;
+            let mut tx = self.engine.db().begin().await?;
+            let owner = job.lock_owned(&mut tx).await?.ok_or(Stop::Lost)?;
+            if let Some(reason) = super::runner::abort_reason(&owner)? {
+                return Err(reason);
+            }
+            if self.lock_attempt(&mut tx, &owner).await?.is_none() {
+                return Err(Failure::new(
+                    "conflict.stale_preflight",
+                    "The creator source changed before its command.",
+                )
+                .into());
+            }
+            rows::merge_plan(
+                &mut tx,
+                job.id(),
+                &json!({"creator_command": {
+                    "id": command.id, "plan": self.plan, "runtime": self.provisioning_runtime,
+                }}),
+                job.now(),
+            )
+            .await?;
+            tx.commit().await.map_err(orch_db::DbError::from)?;
+        }
+        let mut command = job.prepare_command(command).await?;
+        if let Some(origin) = &self.operation {
+            let row = job.row().await?;
+            let authority = operation::SourceCommand::capture(&row, origin, &command)?;
+            command.authority = Some(crate::commands::CommandAuthority::source_preparation(
+                authority,
+            ));
+        }
+        job.command(command).await
     }
 
     /// Pins the current source attempt after the caller has locked its authoritative job claim.
@@ -880,68 +1651,7 @@ impl Preparing {
         conn: &mut Conn,
         owner: &JobRow,
     ) -> Result<Option<threads::ThreadRow>, EngineError> {
-        let (frozen, directory, worktree) = match &self.plan.action {
-            Action::Prepare {
-                source, directory, ..
-            } => (source, directory, None),
-            Action::Worktree { source, body, .. } => {
-                (source, &body.choice.directory, Some(&body.choice))
-            }
-            _ => return Ok(None),
-        };
-        let Some(thread) = self.plan.thread else {
-            return Ok(None);
-        };
-        let Some(row) = threads::lock(conn, thread).await? else {
-            return Ok(None);
-        };
-        let Some(value) = row.source.as_ref() else {
-            return Ok(None);
-        };
-        let info: SourceInfo = serde_json::from_value(value.get("info").unwrap_or(value).clone())?;
-        let native_plan = serde_json::to_value(&self.plan)?;
-        if row.environment_id != Some(self.plan.environment)
-            || row.workspace_dir != *directory
-            || !matches!(info.state, SourceState::Pending | SourceState::Preparing)
-            || value.get("source") != Some(&json!(frozen))
-            || value.get("worktree").filter(|value| !value.is_null())
-                != worktree.map(|choice| json!(choice)).as_ref()
-            || value.get("native_plan") != Some(&native_plan)
-        {
-            return Ok(None);
-        }
-        let pending = if let Some(runtime) = self.provisioning_runtime {
-            // Inline preparation belongs to the provisioning parent and its derived native effect;
-            // it legitimately has no standalone source job in SourceInfo.
-            let effect = crate::ids::derived(
-                "source.provision.files",
-                &[owner.id.as_bytes(), thread.as_bytes()],
-            );
-            let owns_effect = match &self.plan.action {
-                Action::Prepare { effect_id, .. } => *effect_id == Some(effect),
-                Action::Worktree { body, .. } => body.job_id == effect,
-                _ => false,
-            };
-            if !owns_effect {
-                return Ok(None);
-            }
-            Some((owner, runtime))
-        } else {
-            if owner.kind != kind::WORKSPACE_PREPARE
-                || owner.node_id != Some(thread)
-                || owner.environment_id != Some(self.plan.environment)
-                || info.job.as_ref().map(|job| job.id) != Some(owner.id)
-                || serde_json::to_value(serde_json::from_value::<Plan>(owner.plan.clone())?)?
-                    != native_plan
-            {
-                return Ok(None);
-            }
-            None
-        };
-        if matching_target(conn, &self.plan, pending).await?.is_none() {
-            return Ok(None);
-        }
-        Ok(Some(row))
+        lock_attempt_at(conn, owner, &self.plan, self.provisioning_runtime).await
     }
 
     // No transaction survives the native cleanup wait. Publication checks this again afterwards.
@@ -1015,6 +1725,12 @@ impl Preparing {
         if let Some(reason) = super::runner::abort_reason(&owner)? {
             return Err(reason);
         }
+        if self.operation.is_some() {
+            if owner.plan.get("file_prepare_started") == Some(&json!(self.plan)) {
+                return Ok(());
+            }
+            operation::before_mutation(&mut tx, job, &self.plan, true).await?;
+        }
         if self.plan.thread.is_some() && self.lock_attempt(&mut tx, &owner).await?.is_none() {
             return Err(Failure::new(
                 "conflict.stale_preflight",
@@ -1052,10 +1768,18 @@ impl Preparing {
                 effect_id,
             } => {
                 let effect = effect_id.unwrap_or(job.id());
-                let existing = job
+                let existing = self
                     .command(
+                        job,
                         Outgoing::new(
-                            crate::ids::derived("source.stat", &[effect.as_bytes()]),
+                            if self.operation.is_some() {
+                                crate::ids::derived(
+                                    "source.stat",
+                                    &[effect.as_bytes(), job.id().as_bytes()],
+                                )
+                            } else {
+                                crate::ids::derived("source.stat", &[effect.as_bytes()])
+                            },
                             self.plan.machine,
                             SerialKey::Environment(self.plan.environment),
                             &FsStat {
@@ -1105,8 +1829,9 @@ impl Preparing {
                             credential: credential.map(Secret::Ref),
                         };
                         self.mark_prepare_started(job).await?;
-                        let value = job
+                        let value = self
                             .command(
+                                job,
                                 Outgoing::new(
                                     crate::ids::derived(
                                         "git.prepare",
@@ -1123,9 +1848,17 @@ impl Preparing {
                     } else {
                         self.mark_prepare_started(job).await?;
                         if !directory.is_empty() {
-                            job.command(
+                            self.command(
+                                job,
                                 Outgoing::new(
-                                    crate::ids::derived("source.mkdir", &[effect.as_bytes()]),
+                                    if self.operation.is_some() {
+                                        crate::ids::derived(
+                                            "source.mkdir",
+                                            &[effect.as_bytes(), job.id().as_bytes()],
+                                        )
+                                    } else {
+                                        crate::ids::derived("source.mkdir", &[effect.as_bytes()])
+                                    },
                                     self.plan.machine,
                                     SerialKey::Environment(self.plan.environment),
                                     &FsMkdir {
@@ -1163,7 +1896,8 @@ impl Preparing {
                 serde_json::to_value(info).map_err(EngineError::from)?
             }
             Action::Commit { body } => {
-                job.command(
+                self.command(
+                    job,
                     Outgoing::new(
                         crate::ids::derived("git.commit", &[job.id().as_bytes()]),
                         self.plan.machine,
@@ -1195,8 +1929,9 @@ impl Preparing {
                     {
                         // Ask the original native identity first. A completed worktree can
                         // return its frozen answer after capture expiry; no new capture is made.
-                        let result = job
+                        let result = self
                             .command(
+                                job,
                                 Outgoing::new(
                                     crate::ids::derived(
                                         "git.worktree.retry",
@@ -1233,8 +1968,9 @@ impl Preparing {
                         env_generation: self.plan.generation, label: "Current files for own attempt", selection: &json!({ "include": [body.choice.repository_dir], "exclude": [] }),
                         created_by: Some(self.plan.caller), at: job.now() }, &body.choice.repository_dir, "turn").await?;
                     tx.commit().await.map_err(orch_db::DbError::from)?;
-                    let value = job
+                    let value = self
                         .command(
+                            job,
                             Outgoing::new(
                                 crate::ids::derived(
                                     "worktree.record-current",
@@ -1298,7 +2034,8 @@ impl Preparing {
                     }
                     tx.commit().await.map_err(orch_db::DbError::from)?;
                 }
-                job.command(
+                self.command(
+                    job,
                     Outgoing::new(
                         crate::ids::derived(
                             "git.worktree",
@@ -1313,7 +2050,8 @@ impl Preparing {
                 .await?
             }
             Action::Push { body } => {
-                job.command(
+                self.command(
+                    job,
                     Outgoing::new(
                         crate::ids::derived("git.push", &[job.id().as_bytes()]),
                         self.plan.machine,
@@ -1425,8 +2163,13 @@ impl Preparing {
             source::set_source(
                 &mut *unit.conn,
                 thread,
-                &json!({ "info": info, "source": frozen, "prepare": true, "worktree": worktree,
+                &with_creator_origin(
+                    json!({ "info": info, "source": frozen, "prepare": true, "worktree": worktree,
                 "caller": self.plan.caller, "token": self.plan.token, "native_plan": self.plan }),
+                    self.plan.creator_origin.as_ref(),
+                    self.plan.scheduled_input,
+                    row.source.as_ref(),
+                ),
                 seq,
             )
             .await?;
@@ -1461,9 +2204,11 @@ impl Preparing {
                     .into());
                 }
             };
-            self.engine
-                .refresh_git_repository(self.plan.environment, directory, job.id())
-                .await?;
+            if publication_authority::reconciliation_current(job, &self.plan).await? {
+                self.engine
+                    .refresh_git_repository(self.plan.environment, directory, job.id())
+                    .await?;
+            }
             let mut tx = self.engine.db().begin().await?;
             let saved = job.lock_owned(&mut tx).await?.ok_or(Stop::Lost)?;
             if let Some(reason) = super::runner::abort_reason(&saved)? {
@@ -1552,6 +2297,150 @@ impl Preparing {
         orch_db::audit::append(conn, &entry, &orch_db::audit::Origin::default(), job.now()).await?;
         Ok(())
     }
+}
+
+/// Publish only the first successfully activated candidate as the accepted creator's
+/// environment generation. The enclosing provision commit already owns the lifecycle barrier;
+/// this helper rechecks its claim, exact runtime and all source-attempt identities under lock.
+/// It never advances scheduled source authority or a previously activated generation.
+pub(crate) async fn publish_creator_generation(
+    conn: &mut Conn,
+    job: &Job,
+    environment: Id,
+    runtime: Id,
+    machine: Id,
+    previous_generation: i32,
+) -> Result<usize, EngineError> {
+    if previous_generation != 0 {
+        return Ok(0);
+    }
+    let owner = job
+        .lock_owned(conn)
+        .await?
+        .ok_or_else(|| EngineError::unreadable("The first activation claim was lost."))?;
+    if owner.kind != kind::ENVIRONMENT_PROVISION
+        || !owner.is_open()
+        || owner.cancel_requested()
+        || owner.environment_id != Some(environment)
+        || owner.plan.get("mode").and_then(Json::as_str) != Some("make")
+        || owner.plan.get("generation").and_then(Json::as_i64) != Some(0)
+        || owner.plan.get("runtime") != Some(&json!(runtime))
+    {
+        return Err(EngineError::unreadable(
+            "The first activation no longer owns its candidate.",
+        ));
+    }
+    let published = environments::workspace::environment(conn, environment)
+        .await?
+        .ok_or_else(|| EngineError::unreadable("The activated environment disappeared."))?;
+    let candidate = environments::hosting::live_runtime(conn, environment)
+        .await?
+        .ok_or_else(|| EngineError::unreadable("The activated candidate disappeared."))?;
+    if published.status != "running"
+        || published.machine_id != Some(machine)
+        || candidate.id != runtime
+        || candidate.kind != "environment"
+        || candidate.environment_id != Some(environment)
+        || candidate.machine_id != Some(machine)
+        || candidate.state != "running"
+        || candidate.generation <= 0
+        || candidate.generation != published.generation
+    {
+        return Err(EngineError::unreadable(
+            "The published first activation does not match its candidate.",
+        ));
+    }
+    let ids = source::lock_creator_generation_threads(conn, environment).await?;
+    let mut count = 0;
+    for thread in ids {
+        let current = threads::thread(conn, thread)
+            .await?
+            .ok_or_else(|| EngineError::unreadable("The activated source thread disappeared."))?;
+        let Some(value) = current.source.as_ref() else {
+            continue;
+        };
+        // Existing/scheduled definitions never acquire a fresh generation from this publication.
+        let (Ok(None), Ok(Some(0)), Ok(Some(origin))) = (
+            scheduled_input(value),
+            accepted_creator_generation(value),
+            creator_origin(value),
+        ) else {
+            continue;
+        };
+        if !matches!(
+            origin.operation(),
+            "ThreadCreate" | "TopicCreate.with_thread"
+        ) {
+            continue;
+        }
+        let Ok(info) =
+            serde_json::from_value::<SourceInfo>(value.get("info").unwrap_or(value).clone())
+        else {
+            continue;
+        };
+        if current.environment_id != Some(environment)
+            || current.workspace_dir != info.directory
+            || !matches!(info.state, SourceState::Ready)
+        {
+            continue;
+        }
+        if let Some(raw) = value.get("native_plan") {
+            let Ok(plan) = serde_json::from_value::<Plan>(raw.clone()) else {
+                continue;
+            };
+            let effect = crate::ids::derived(
+                "source.provision.files",
+                &[owner.id.as_bytes(), thread.as_bytes()],
+            );
+            let same_source = match &plan.action {
+                Action::Prepare {
+                    effect_id,
+                    source,
+                    directory,
+                    ..
+                } => {
+                    *effect_id == Some(effect)
+                        && *directory == current.workspace_dir
+                        && value.get("source") == Some(&json!(source))
+                }
+                Action::Worktree { body, source, .. } => {
+                    body.job_id == effect
+                        && body.choice.directory == current.workspace_dir
+                        && value.get("source") == Some(&json!(source))
+                        && value.get("worktree") == Some(&json!(body.choice))
+                }
+                _ => false,
+            };
+            if plan.environment != environment
+                || plan.machine != machine
+                || plan.generation != candidate.generation
+                || plan.thread != Some(thread)
+                || plan.scheduled_input.is_some()
+                || plan.creator_origin.as_ref() != Some(&origin)
+                || plan.caller != origin.user()
+                || !same_source
+                || info.job.as_ref().map(|reference| reference.id) != Some(owner.id)
+                || owner
+                    .plan
+                    .pointer(&format!("/file_publications/{thread}"))
+                    .and_then(Json::as_bool)
+                    != Some(true)
+            {
+                continue;
+            }
+        } else if value.get("prepare").and_then(Json::as_bool) != Some(false)
+            || value
+                .get("worktree")
+                .is_some_and(|worktree| !worktree.is_null())
+        {
+            // An explicit skipped preparation has no native recipe. Pending/default source work
+            // must have the exact completed native recipe above before the unit is committed.
+            continue;
+        }
+        source::set_creator_environment_generation(conn, thread, candidate.generation).await?;
+        count += 1;
+    }
+    Ok(count)
 }
 
 /// The provisioning job proves the fresh workspace volume and prepares it before init.
@@ -1666,6 +2555,7 @@ pub async fn provision_files(
         let mut preparing = Preparing {
             engine: job.engine().clone(),
             provisioning_runtime: Some(runtime),
+            operation: None,
             plan: Plan {
                 environment,
                 generation,
@@ -1680,6 +2570,8 @@ pub async fn provision_files(
                     .get("token")
                     .cloned()
                     .and_then(|value| serde_json::from_value(value).ok()),
+                creator_origin: creator_origin(value)?,
+                scheduled_input: scheduled_input(value)?,
                 action,
             },
         };
@@ -1727,6 +2619,8 @@ pub async fn provision_files(
                     || previous.thread != Some(thread)
                     || previous.caller != preparing.plan.caller
                     || previous.token != preparing.plan.token
+                    || previous.creator_origin != preparing.plan.creator_origin
+                    || previous.scheduled_input != preparing.plan.scheduled_input
                     || !same_choice
                 {
                     return Err(Failure::new(
@@ -1752,12 +2646,15 @@ pub async fn provision_files(
         let current = threads::lock(&mut tx, thread)
             .await?
             .ok_or_else(|| Failure::new("not_found", "a source thread disappeared"))?;
+        let candidate = matching_target(&mut tx, &preparing.plan, Some((&owner, runtime))).await?;
         if current.source.as_ref() != Some(value)
             || current.environment_id != Some(environment)
             || current.workspace_dir != info.directory
-            || matching_target(&mut tx, &preparing.plan, Some((&owner, runtime)))
-                .await?
-                .is_none()
+            || candidate.is_none()
+            || accepted_creator_generation(value)?.is_some_and(|accepted| {
+                accepted != generation
+                    && !(accepted == 0 && candidate.as_ref().is_some_and(|env| env.generation == 0))
+            })
         {
             return Err(Failure::new(
                 "conflict.stale_preflight",
@@ -1814,6 +2711,7 @@ pub(crate) async fn undo_provision_sources(job: &Job, why: &Stop) -> Result<(), 
                 engine: job.engine().clone(),
                 plan,
                 provisioning_runtime: Some(runtime),
+                operation: None,
             };
             if preparing.lock_attempt(&mut tx, &owner).await?.is_some() {
                 attempts.push(preparing);
@@ -1981,9 +2879,10 @@ impl Phased for Preparing {
                         _ => "workspace.source_failed",
                     }.to_owned()) };
                 let seq = unit.stamp(thread).await?;
-                source::set_source(&mut *unit.conn, thread, &json!({ "info": info, "source": frozen, "prepare": true, "worktree": worktree,
+                source::set_source(&mut *unit.conn, thread, &with_creator_origin(json!({ "info": info, "source": frozen, "prepare": true, "worktree": worktree,
                     "caller": self.plan.caller, "token": self.plan.token, "credential_home": row.source.as_ref().and_then(|source|source.get("credential_home")).cloned().unwrap_or_else(||json!(row.topic_id)),
-                    "native_plan": retry_plan, "native_result": native_result, "native_started": native_started }), seq).await?;
+                    "native_plan": retry_plan, "native_result": native_result, "native_started": native_started }),
+                    self.plan.creator_origin.as_ref(), self.plan.scheduled_input, row.source.as_ref()), seq).await?;
                 unit.wake(thread);
                 let finished = unit.finish().await?; self.engine.commit(tx, finished).await?; Ok::<_, EngineError>(())
             }.await;
@@ -2007,8 +2906,81 @@ impl Phased for Preparing {
 mod attempt_tests;
 
 #[cfg(test)]
+mod creator_generation_tests;
+
+#[cfg(test)]
+mod publication_tests;
+
+#[cfg(test)]
 mod tests {
     use super::*;
+
+    #[tokio::test]
+    #[allow(clippy::unwrap_used, reason = "a control fails by panicking")]
+    async fn an_existing_environment_generation_is_frozen_before_the_source_plan_is_built() {
+        use orch_access_contract::key_scope::{KeyAction, KeyFacet, KeyTargetKind};
+        for replaced in [false, true] {
+            let world = crate::test_common::World::observed().await;
+            let thread = world.thread("Accepted source generation").await;
+            let engine = world.engine();
+            engine.stop();
+            let mut tx = world.pool.begin().await.unwrap();
+            let environment = environments::workspace::environment(&mut tx, world.environment)
+                .await
+                .unwrap()
+                .unwrap();
+            let parent = crate::operation_scope::targets::node(&mut tx, world.topic)
+                .await
+                .unwrap();
+            let caller = Caller::session(world.ada)
+                .admit_facets(&[KeyFacet {
+                    operation: "ThreadCreate".into(),
+                    action: KeyAction::Write,
+                    resource_kind: KeyTargetKind::Object(ObjectKind::Thread),
+                    target: parent,
+                }])
+                .unwrap()
+                .into_caller();
+            let mut unit = Unit::new(&mut tx, world.clock.now());
+            freeze(
+                &mut unit,
+                &caller,
+                thread,
+                world.environment,
+                "web",
+                Some(true),
+                None,
+            )
+            .await
+            .unwrap();
+            unit.finish().await.unwrap();
+            tx.commit().await.unwrap();
+            if replaced {
+                sqlx::query("UPDATE environments SET generation=generation+1 WHERE id=$1")
+                    .bind(world.environment)
+                    .execute(world.pool.pool())
+                    .await
+                    .unwrap();
+            }
+            let mut conn = world.pool.acquire().await.unwrap();
+            let frozen = threads::thread(&mut conn, thread).await.unwrap().unwrap();
+            assert_eq!(
+                frozen.source.as_ref().unwrap()["creator_environment_generation"],
+                json!(environment.generation)
+            );
+            drop(conn);
+            let result = engine.prepare_pending_source(&frozen).await;
+            assert_eq!(result.is_ok(), !replaced);
+            let mut conn = world.pool.acquire().await.unwrap();
+            let jobs = rows::open_of_environment(&mut conn, world.environment)
+                .await
+                .unwrap();
+            assert_eq!(jobs.len(), usize::from(!replaced));
+            assert_eq!(world.commands.issued_of("fs.stat"), 0);
+            assert_eq!(world.commands.issued_of("git.prepare"), 0);
+            assert_eq!(world.commands.issued_of("git.worktree"), 0);
+        }
+    }
 
     #[test]
     fn request_links_encode_branches_and_unknown_hosts_stay_manual() {

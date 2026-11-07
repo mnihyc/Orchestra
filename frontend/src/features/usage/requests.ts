@@ -1,6 +1,7 @@
 /** Pause and resume of the live request log, with stable rows while arrivals wait. */
 import type { UsageEvent } from '@/generated/api-types';
 import type { UsageFilters } from '@/api/usage';
+import { matchesTier } from './tier';
 
 export interface RequestLog {
   paused: boolean;
@@ -48,7 +49,7 @@ export function matchesRequest(row: UsageEvent, filters: UsageFilters): boolean 
   return same(filters.user_id, row.user?.id) && same(filters.model, row.model) && same(filters.provider_id, row.provider.id)
     && same(filters.harness_kind, row.harness_kind) && same(filters.environment_kind, row.environment_kind)
     && same(filters.project_id, row.project.id) && same(filters.topic_id, row.topic.id) && same(filters.thread_id, row.thread?.id)
-    && same(filters.effort, row.effort) && same(filters.tier, row.tier) && same(filters.program, row.access_program)
+    && same(filters.effort, row.effort) && matchesTier(row, filters) && same(filters.program, row.access_program)
     && (filters.outcome === 'errors' ? outcome !== 'done' && outcome !== 'forced' && outcome !== 'running' && outcome !== 'not_measured' : filters.outcome === 'not_measured' ? row.timing?.outcome.state !== 'told' : same(filters.outcome, outcome))
     && same(filters.turn_id, row.turn_id);
 }

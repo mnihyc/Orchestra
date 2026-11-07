@@ -773,6 +773,12 @@ impl orch_connector_core::programs::Handler for Programs {
                     Self::retire(services, &entry).await?;
                 }
             }
+            MachineProgramsCommand::ConfirmHarness { .. }
+            | MachineProgramsCommand::RemoveHarness { .. } => {
+                return Err(error(
+                    "Local harness selections are handled by the connector's policy.",
+                ));
+            }
         }
         Ok(self.snapshot(&services.policy))
     }

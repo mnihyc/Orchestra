@@ -20,10 +20,11 @@ import { FilterBar } from '@/ui/FilterBar';
 import { useStore } from 'zustand';
 
 import { client } from '@/api/client';
+import { orgOverviewQuery } from '@/api/orgOverview';
 import { childrenQuery, orgBySlugQuery } from '@/api/nodes';
 import { PlaceReadme } from '@/features/documents/Readme';
 import { ActivityFeed, OrgActivity } from '@/features/org/Activity';
-import { UsageSection } from '@/features/usage/Board';
+import { UsageSection, useUsageBoardParams } from '@/features/usage/Board';
 import { Members } from '@/features/settings/org/Members';
 import { DepartmentCard, ProjectCard } from '@/features/org/ProjectCards';
 import { OrgWork } from '@/features/org/Work';
@@ -80,6 +81,13 @@ function HomeSkeleton() {
 
 function Overview({ org, onTab }: { org: Org; onTab: (tab: OrgTab) => void }) {
   const [participating, setParticipating] = useState(false);
+  const usage = useUsageBoardParams(org.id);
+  // The aggregate owns this opening. Later control changes use their native
+  // keyed reader and must not reset another section's already loaded pages.
+  const [initial] = useState(() => ({ participating: false, usage }));
+  const opening = useQuery(orgOverviewQuery(org.id, initial));
+  if (opening.isPending) return <SkeletonRows rows={4} />;
+  if (opening.isError) return <ErrorState compact error={opening.error} retrying={opening.isRefetching} onRetry={() => void opening.refetch()} />;
   return <div className="flex flex-col gap-6">
     <OrgWork key={org.id} org={org} />
     <FilterBar participation={<ParticipationFilter checked={participating} onCheckedChange={setParticipating} />} />

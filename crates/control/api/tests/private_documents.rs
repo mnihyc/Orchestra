@@ -9,6 +9,7 @@ mod desk;
 mod places;
 mod support;
 
+use crate::support::FullPermissionPageReply;
 use desk::{Desk, body};
 use orch_api_contract::access::{PermissionPageGet, PermissionPageUpdate};
 use orch_api_contract::common::{ErrorCode, Listed};
@@ -33,7 +34,7 @@ async fn name_page_manager(
         .ok();
     desk.world.app.call(PermissionPageUpdate, &[&"documents", &document]).token(&maker.token)
         .raw_body(&json!({"expected_revision":page.revision,"rows":[{"permission":"access.manage","add":[{"holder":{"kind":"user","id":manager.id()}}]}]}))
-        .send().await.ok();
+        .send().await.full_permission_page().ok();
 }
 
 #[tokio::test]

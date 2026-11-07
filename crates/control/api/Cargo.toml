@@ -8,7 +8,12 @@ rust-version.workspace = true
 repository.workspace = true
 publish.workspace = true
 
+[features]
+default = []
+test-observers = ["orch-link/test-observers"]
+
 [dependencies]
+blake3.workspace = true
 argon2.workspace = true
 async-trait.workspace = true
 axum.workspace = true

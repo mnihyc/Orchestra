@@ -1,10 +1,13 @@
 ---
 title: 连接一台机器
-screens: /resources/machines, /resources/machines/$id, /resources/hosts
-keywords: 连接, 电脑, 安装, 连接器, 节点, 用户服务, 系统服务, 前台, 多实例, 数据目录, connect, connector, node
+screens: /resources/machines, /resources/machines/$id, /resources/hosts, /resources/hosts/$id, /resources/environments/$id, /thread/$threadId, /admin/$section
+keywords: 连接, 电脑, 安装, 连接器, 节点, 用户服务, 系统服务, 前台, 多实例, 数据目录, 网关, 区域, 自动, 延迟, tunnel.gateway_unreachable, connect, connector, node
 heading_id.1-选择这台机器做什么: 1-choose-what-runs-here
 heading_id.2-选择账号和运行方式: 2-choose-its-account-and-lifetime
 heading_id.通过代理连接: behind-a-proxy
+heading_id.选择网关: choose-a-gateway
+heading_id.网关列表: gateway-catalogue
+heading_id.隧道网关: tunnel-gateway
 heading_id.3-执行命令等待机器出现: 3-connect-and-wait-for-its-name
 heading_id.修改驱动设置: change-driver-settings
 heading_id.4-重新登记同一台机器: 4-enroll-the-same-machine-again
@@ -19,6 +22,37 @@ heading_id.5-停止或完整移除: 5-stop-or-remove-it
 **提供方**保管模型凭据；这三种角色可共用一个连接器。**节点**是另一个程序，在 Linux
 主机上创建受管环境。选择你有权添加机器的位置。连接机器并不等于共享它的全部文件夹。
 目录环境目前可用于 Linux。macOS 和 Windows 连接器仍可连接并使用其他角色。
+
+## 选择网关
+
+添加机器和添加主机的表单都提供**网关**：**自动**或已公布的名称。命令把这个选择交给安装程序。
+自动模式从正在安装的机器测量，选择已测往返延迟最低的网关，并在主连接重新连接时再次测量。
+浏览器不会代替目标机器测量；健康的主连接也不会在后台迁移。
+
+指定的网关即使不可用或已从列表移除，仍会保持选择。需要替换时，在机器的本地控制台或安装程序中
+明确更改。不带网关参数重新登记时，会保留原有选择。机器或主机概览中的**连接器**卡片显示已报告的
+主网关和选择方式。自动模式还显示各网关的测量值和测量时间；**尚未测量**不表示零延迟。
+**刷新**读取最新报告，并保留原来的测量时间。
+
+## 网关列表
+
+系统管理员在**管理 → 网关**中编辑名称、区域和经过验证的入口。一个稳定标识对应一个网关，
+多个入口地址是它的别名。区域是管理员填写的说明。重命名或修改地址不会改变按标识保存的选择。
+编辑列表只公布选择，不会安装网关或迁移已连接的机器。
+
+编辑器保留打开时审阅的版本。其他管理员先修改列表时，保存会被拒绝，草稿仍留在表单中。
+取消、刷新并审阅当前列表后再保存。移除指定的网关不会让机器自动改为自动模式。
+
+## 隧道网关
+
+工具隧道可使用与连接器主网关不同的网关。线程在二者不同时显示已确认连接的网关；环境的
+“线程”行可分别展开各线程的网关详情。同一个共享环境不代表所有线程共用一个网关。
+**连接中**表示尚未确认连接；**尚未报告**也不代表首选候选网关已经连接。展开**隧道网关**可查看
+当前报告，使用**刷新**可再次读取。
+
+机器无法连通同一网关时，页面会说明工作仍保留，并列出尝试过的网关和安全的失败详情。
+检查机器是否能够访问这些网关，再使用正常的恢复操作。回退用于连接失败或重置后的下一次连接，
+不会把已打开的隧道迁移到另一个网关，也不会改变任一机器保存的主网关选择。中断的工具不会被悄悄重复执行，切换网关也不会改变凭据或访问权限。
 
 ## 2. 选择账号和运行方式
 

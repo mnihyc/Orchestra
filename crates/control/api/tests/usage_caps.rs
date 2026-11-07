@@ -126,13 +126,21 @@ fn running(node: Option<Id>, amount: &str) -> CapInput {
 }
 
 async fn create(world: &World, by: &Who, input: &CapInput) -> Reply<UsageCap> {
-    world
+    let reply = world
         .app
         .call(UsageCapCreate, &[])
         .token(&by.token)
         .body(input)
         .send()
-        .await
+        .await;
+    Reply {
+        status: reply.status,
+        headers: reply.headers,
+        raw: reply.raw,
+        body: reply
+            .body
+            .map(|value| value.into_full().expect("ordinary cap content")),
+    }
 }
 
 async fn made(world: &World, by: &Who, input: &CapInput) -> UsageCap {
@@ -156,13 +164,21 @@ fn update_body(revision: i64) -> UsageCapUpdateBody {
 }
 
 async fn change(world: &World, by: &Who, cap: Id, body: &UsageCapUpdateBody) -> Reply<UsageCap> {
-    world
+    let reply = world
         .app
         .call(UsageCapUpdate, &[&cap])
         .token(&by.token)
         .body(body)
         .send()
-        .await
+        .await;
+    Reply {
+        status: reply.status,
+        headers: reply.headers,
+        raw: reply.raw,
+        body: reply
+            .body
+            .map(|value| value.into_full().expect("ordinary cap content")),
+    }
 }
 
 fn list_query(node: Option<Id>, provider: Option<Id>, system: bool) -> UsageCapListQuery {

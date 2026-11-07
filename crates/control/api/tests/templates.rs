@@ -190,6 +190,8 @@ async fn make(world: &World, by: &Who, body: &TemplateCreateBody) -> Template {
         .send()
         .await
         .ok()
+        .into_full()
+        .unwrap()
 }
 
 async fn list(world: &World, by: &Who, query: &TemplateListQuery) -> Vec<String> {
