@@ -35,6 +35,7 @@ import { Craft } from './craft.ts';
 import { Day100World } from './day100.ts';
 import { ExportWorld } from './export.ts';
 import * as fixtures from './fixtures.ts';
+import { executionDisplay } from './thread-display.ts';
 import { FirstStepsWorld } from './first-steps.ts';
 import { NotificationWorld } from './notifications.ts';
 import { Places } from './places.ts';
@@ -337,6 +338,7 @@ export class World {
     this.away.reset();
     this.firstSteps = new FirstStepsWorld(this);
     this.users.inbox = this.notifications;
+    this.users.onJoin = (listener) => this.requestFeeds.prime(listener);
     this.outbox = [];
     this.delayMs = scenario.delayMs ?? 0;
     this.confirmAddresses = scenario.confirmAddresses ?? false;
@@ -1106,6 +1108,13 @@ export class World {
       if (base === undefined) continue;
       tree.seq += 1;
       const row: TreeNode = { ...base, ...change, tree_seq: tree.seq };
+      // Older tree controls report execution facts. Complete their native projection
+      // before any reader (including name/tag search) sees the changed row.
+      if (row.thread !== null) row.thread = {
+        ...row.thread,
+        display: row.thread.display ?? executionDisplay(row.thread.state, { seq: row.thread.activity_seq, blocked_reason: row.thread.blocked_reason }),
+        attention: row.thread.attention ?? { uncommitted: null, unpushed: null, failed: false, as_of: null, stale: false, reason: null },
+      };
       tree.nodes.set(row.id, row);
       rows.push(row);
     }

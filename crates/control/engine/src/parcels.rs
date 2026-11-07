@@ -27,7 +27,7 @@ use crate::manifest::{
     DEFAULT_FILE_MODE, Entry, EntryKind, Header, MANIFEST_VERSION, Manifest, build,
 };
 use crate::sessions::StartSnapshot;
-use crate::sharing::{FileWritten, ParcelFault, Parcels};
+use crate::sharing::{BeforeParcel, FileWritten, ParcelFailure, ParcelFault, Parcels};
 use async_trait::async_trait;
 use bytes::Bytes;
 use orch_blob_contract::store::{read_all, stream_of};
@@ -104,6 +104,23 @@ impl Parcels for WorkspaceParcels {
             .withdraw_copy(conn, copy)
             .await
             .map_err(fault)
+    }
+
+    async fn withdraw_before(
+        &self,
+        conn: &mut Conn,
+        copy: &CopyRow,
+        before: BeforeParcel<'_>,
+    ) -> Result<(), ParcelFailure> {
+        use orch_authz::pages::EffectFailure;
+        let engine = self.engine().map_err(EffectFailure::Native)?;
+        engine
+            .withdraw_copy_before(conn, copy, before)
+            .await
+            .map_err(|error| match error {
+                EffectFailure::Native(error) => EffectFailure::Native(fault(error)),
+                EffectFailure::BeforeEffect(error) => EffectFailure::BeforeEffect(error),
+            })
     }
 
     async fn write_file(
@@ -409,6 +426,73 @@ impl Engine {
         Ok(())
     }
 
+    /// Checked form of the same frozen copy cleanup; no command or blob supplier is repeated.
+    pub(crate) async fn withdraw_copy_before(
+        &self,
+        conn: &mut Conn,
+        copy: &CopyRow,
+        before: BeforeParcel<'_>,
+    ) -> Result<(), orch_authz::pages::EffectFailure<EngineError, EngineError>> {
+        use orch_authz::pages::EffectFailure::{BeforeEffect, Native};
+        let Some(parcel) = share_rows::copy_parcel_of(conn, copy.id)
+            .await
+            .map_err(EngineError::from)
+            .map_err(Native)?
+        else {
+            return Ok(());
+        };
+        match parcel.state.as_str() {
+            PENDING => {
+                if let Some(manifest) = parcel.manifest {
+                    let hashes = self.listed_hashes(&manifest).await.map_err(Native)?;
+                    if storage::prepare_unpin_blobs(conn, &hashes)
+                        .await
+                        .map_err(EngineError::from)
+                        .map_err(Native)?
+                    {
+                        before().map_err(BeforeEffect)?;
+                        storage::unpin_blobs(conn, &hashes, self.inner.clock.now())
+                            .await
+                            .map_err(EngineError::from)
+                            .map_err(Native)?;
+                    }
+                }
+            }
+            DELIVERED => {
+                if let Some(environment) = parcel.environment_id
+                    && let Some(command) = self
+                        .prepare_remove_copy(conn, copy.thread_id, &parcel, environment)
+                        .await
+                        .map_err(Native)?
+                {
+                    let result =
+                        self.inner
+                            .commands
+                            .issue_before(
+                                command,
+                                Box::new(move || {
+                                    before().map_err(|error| match error {
+                                        EngineError::BeforeEffect(error) => error,
+                                        other => Box::new(other)
+                                            as Box<dyn std::error::Error + Send + Sync>,
+                                    })
+                                }),
+                            )
+                            .await;
+                    match result {
+                        Ok(()) => {}
+                        Err(crate::commands::CommandsError::BeforeEffect(error)) => {
+                            return Err(BeforeEffect(EngineError::BeforeEffect(error)));
+                        }
+                        Err(error) => return Err(Native(EngineError::from(error))),
+                    }
+                }
+            }
+            _ => {}
+        }
+        Ok(())
+    }
+
     /// Asks the machine of `environment` to remove the directory a copy was written into, and that alone. The
     /// command is not waited for: the copy is taken back in the transaction that asked, and the directory goes
     /// when the machine takes the command up.
@@ -419,19 +503,34 @@ impl Engine {
         parcel: &CopyParcel,
         environment: Id,
     ) -> Result<(), EngineError> {
+        if let Some(command) = self
+            .prepare_remove_copy(conn, thread, parcel, environment)
+            .await?
+        {
+            self.inner.commands.issue(command).await?;
+        }
+        Ok(())
+    }
+    async fn prepare_remove_copy(
+        &self,
+        conn: &mut Conn,
+        thread: Id,
+        parcel: &CopyParcel,
+        environment: Id,
+    ) -> Result<Option<Outgoing>, EngineError> {
         let Some(row) = threads::thread(conn, thread).await? else {
-            return Ok(());
+            return Ok(None);
         };
         let Some(place) = environments::environment(conn, environment).await? else {
-            return Ok(());
+            return Ok(None);
         };
         let Some(machine) = place.machine_id else {
             tracing::warn!(copy = %parcel.id, "a copy taken back lies in an environment that is on no machine; its directory stays");
-            return Ok(());
+            return Ok(None);
         };
         let relative = parcel.path.trim_matches('/');
         if relative.is_empty() {
-            return Ok(());
+            return Ok(None);
         }
         let command_id = ids::derived(
             "fs.remove.copy",
@@ -450,8 +549,7 @@ impl Engine {
                 recursive: true,
             },
         )?;
-        self.inner.commands.issue(command).await?;
-        Ok(())
+        Ok(Some(command))
     }
 
     /// Writes the bytes an agent downloads at `path` under its thread's directory, where nothing is there yet.

@@ -6,9 +6,12 @@
 )]
 
 mod binding_support;
+#[path = "binding_options/native_scopes.rs"]
+mod native_scopes;
 mod places;
 mod rig;
 mod support;
+mod thread_history_scope;
 
 use binding_support::{
     a_directory_on_a_machine, another_environment, another_provider, names, offering_plain,
@@ -620,7 +623,9 @@ async fn an_environment_that_has_served_only_other_topics_gives_a_new_directory_
         })
         .send()
         .await
-        .ok();
+        .ok()
+        .into_full()
+        .unwrap();
     let options = options_for(&s, &s.ada, thread).await;
     let listed = options
         .environments

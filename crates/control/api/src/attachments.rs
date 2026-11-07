@@ -70,6 +70,72 @@ impl From<ApiError> for Refused {
 /// How a request that names a finished upload is read: the hash of what arrived and a name.
 pub type Reference = fn(&[u8]) -> Option<(Hash, String)>;
 
+/// One consumed native body, before any existing referenced bytes are inspected.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Staged {
+    input: StagedInput,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+enum StagedInput {
+    Supplied(Taken),
+    Reference { hash: Hash, name: String },
+}
+
+impl Staged {
+    /// The actual content identity supplied or named by this body.
+    #[must_use]
+    pub fn hash(&self) -> Hash {
+        match &self.input {
+            StagedInput::Supplied(taken) => taken.meta.hash,
+            StagedInput::Reference { hash, .. } => *hash,
+        }
+    }
+    /// The native validated request name.
+    #[must_use]
+    pub fn name(&self) -> &str {
+        match &self.input {
+            StagedInput::Supplied(taken) => &taken.name,
+            StagedInput::Reference { name, .. } => name,
+        }
+    }
+    /// True only when this request actually supplied the bytes.
+    #[must_use]
+    pub fn supplied_bytes(&self) -> bool {
+        matches!(&self.input, StagedInput::Supplied(_))
+    }
+
+    /// Inspect a native reference only after its ordinary/key source boundary admitted it.
+    /// This performs no custody, registration or pin write and must not run in retryable preparation.
+    pub async fn measure(&self, ctx: &Ctx, place_limit: i64) -> Result<Taken, Refused> {
+        let meta = match &self.input {
+            StagedInput::Supplied(taken) => taken.meta,
+            StagedInput::Reference { hash, .. } => {
+                let size = ctx
+                    .app
+                    .blobs
+                    .store()
+                    .size(hash)
+                    .await
+                    .map_err(ApiError::internal)?
+                    .ok_or_else(ApiError::not_found)?;
+                BlobMeta { hash: *hash, size }
+            }
+        };
+        if meta.size > place_limit {
+            return Err(Refused::TooLarge {
+                limit: place_limit,
+                by_request: false,
+            });
+        }
+        Ok(Taken {
+            meta,
+            name: self.name().to_owned(),
+            supplied_bytes: self.supplied_bytes(),
+        })
+    }
+}
+
 /// The refusal of a body that is larger than a request carries.
 #[must_use]
 pub fn over_a_request(limit: i64) -> ApiError {
@@ -89,6 +155,23 @@ pub async fn take(
     place_limit: i64,
     reference: Reference,
 ) -> Result<Taken, Refused> {
+    let staged = stage(ctx, body, place_limit, reference).await?;
+    if !staged.supplied_bytes() {
+        let (mut tx, guard) = transaction_guard::begin(ctx).await?;
+        require(&mut tx, guard.principal(), &staged.hash()).await?;
+        return staged.measure(ctx, place_limit).await;
+    }
+    staged.measure(ctx, place_limit).await
+}
+
+/// Consume the bounded body once. A JSON reference is parsed without size/content/sniff IO.
+/// Supplied bytes use the original unreferenced physical staging store and limits.
+pub async fn stage(
+    ctx: &Ctx,
+    body: Body,
+    place_limit: i64,
+    reference: Reference,
+) -> Result<Staged, Refused> {
     if let Some(name) = crate::routes::threads::uploads::filename_of(ctx) {
         let name = uploads::clean_name(FILENAME_HEADER, &name)?;
         let request_limit = i64::try_from(MAX_BODY_BYTES).unwrap_or(i64::MAX);
@@ -100,10 +183,12 @@ pub async fn take(
             .store_stream(body.into_data_stream(), limit)
             .await
         {
-            Ok(meta) => Ok(Taken {
-                meta,
-                name,
-                supplied_bytes: true,
+            Ok(meta) => Ok(Staged {
+                input: StagedInput::Supplied(Taken {
+                    meta,
+                    name,
+                    supplied_bytes: true,
+                }),
             }),
             Err(BlobsError::TooLarge { limit }) => Err(Refused::TooLarge { limit, by_request }),
             Err(other) => Err(uploads::stored_badly(other).into()),
@@ -119,26 +204,8 @@ pub async fn take(
         )
     })?;
     let name = uploads::clean_name("name", &name)?;
-    let (mut tx, guard) = transaction_guard::begin(ctx).await?;
-    require(&mut tx, guard.principal(), &blob).await?;
-    let size = ctx
-        .app
-        .blobs
-        .store()
-        .size(&blob)
-        .await
-        .map_err(ApiError::internal)?
-        .ok_or_else(ApiError::not_found)?;
-    if size > place_limit {
-        return Err(Refused::TooLarge {
-            limit: place_limit,
-            by_request: false,
-        });
-    }
-    Ok(Taken {
-        meta: BlobMeta { hash: blob, size },
-        name,
-        supplied_bytes: false,
+    Ok(Staged {
+        input: StagedInput::Reference { hash: blob, name },
     })
 }
 
@@ -189,10 +256,98 @@ pub async fn retain(
     principal: &Principal,
     taken: &Taken,
 ) -> ApiResult<()> {
-    references::lock_blobs(conn, &[taken.meta.hash]).await?;
-    if !taken.supplied_bytes {
-        require(conn, principal, &taken.meta.hash).await?;
+    let prepared = prepare_retention(conn, principal, taken).await?;
+    match apply_retention(ctx, conn, principal, prepared, || {
+        Ok::<(), std::convert::Infallible>(())
+    })
+    .await
+    {
+        Ok(result) => result,
+        Err(never) => match never {},
     }
+}
+
+/// The original custody/registration footprint, owned by its exact native transaction and actor.
+pub struct Retention {
+    taken: Taken,
+    transaction: String,
+    user: orch_types::Id,
+}
+
+async fn transaction(conn: &mut Conn) -> ApiResult<String> {
+    Ok(sqlx::query_scalar("SELECT pg_current_xact_id()::text")
+        .fetch_one(conn)
+        .await
+        .map_err(orch_db::DbError::from)?)
+}
+
+/// Acquire the same native blob/source footprint without registering custody or a pin.
+pub async fn prepare_retention(
+    conn: &mut Conn,
+    principal: &Principal,
+    taken: &Taken,
+) -> ApiResult<Retention> {
+    references::lock_blobs(conn, &[taken.meta.hash]).await?;
+    let prepared = Retention {
+        taken: taken.clone(),
+        transaction: transaction(conn).await?,
+        user: principal.user(),
+    };
+    require_retention(conn, principal, &prepared).await?;
+    Ok(prepared)
+}
+
+/// Repeat the ordinary source gate with the current actor after the completed footprint.
+pub async fn require_retention(
+    conn: &mut Conn,
+    principal: &Principal,
+    prepared: &Retention,
+) -> ApiResult<()> {
+    if principal.user() != prepared.user {
+        return Err(ApiError::internal("attachment custody changed its actor"));
+    }
+    if !prepared.taken.supplied_bytes {
+        require(conn, principal, &prepared.taken.meta.hash).await?;
+    }
+    Ok(())
+}
+
+/// Consume the original custody writer with an opaque cut at its actual first registration.
+pub async fn apply_retention<E, F>(
+    ctx: &Ctx,
+    conn: &mut Conn,
+    principal: &Principal,
+    prepared: Retention,
+    before: F,
+) -> Result<ApiResult<()>, E>
+where
+    F: FnOnce() -> Result<(), E>,
+{
+    let checked: ApiResult<()> = async {
+        if !orch_db::queries::transaction_guard::in_transaction(conn)
+            || transaction(conn).await? != prepared.transaction
+            || principal.user() != prepared.user
+        {
+            return Err(ApiError::internal(
+                "attachment custody belongs to another transaction or actor",
+            ));
+        }
+        Ok(())
+    }
+    .await;
+    if let Err(error) = checked {
+        return Ok(Err(error));
+    }
+    before()?;
+    Ok(finish_retention(ctx, conn, principal, &prepared.taken).await)
+}
+
+async fn finish_retention(
+    ctx: &Ctx,
+    conn: &mut Conn,
+    principal: &Principal,
+    taken: &Taken,
+) -> ApiResult<()> {
     ctx.app
         .blobs
         .register(conn, taken.meta, principal.now().get())

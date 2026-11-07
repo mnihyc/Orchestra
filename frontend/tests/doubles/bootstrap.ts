@@ -26,5 +26,6 @@ export async function bootstrap(world: World, person: Person, authorization?: st
     read_states: await read<NonNullable<MeBootstrapReply['read_states']>>('/me/read-states'),
     subscriptions: await read<NonNullable<MeBootstrapReply['subscriptions']>>('/me/subscriptions'),
     notification_summary: await read<MeBootstrapReply['notification_summary']>('/notifications/summary'),
+    permission_catalogue: await read<NonNullable<MeBootstrapReply['permission_catalogue']>>('/permissions'),
   };
 }

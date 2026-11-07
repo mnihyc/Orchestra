@@ -51,7 +51,7 @@ pub const DEFAULT_GIT_SCHEMES: [&str; 3] = ["https", "http", "git"];
 pub const DEFAULT_REQUEST_TIMEOUT_SECS: u64 = 120;
 
 // SHA-256 image content IDs have 256 bits written in hexadecimal.
-const IMAGE_DIGEST_HEX_BYTES: usize = 64;
+pub(crate) const IMAGE_DIGEST_HEX_BYTES: usize = 64;
 
 fn default_socket() -> String {
     DEFAULT_SOCKET.to_owned()

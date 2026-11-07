@@ -66,7 +66,7 @@ for (const locale of ['en', 'zh-CN'] as const) for (const theme of ['light', 'da
 
 it('does not accept an invitation while the account switch is pending', async () => {
   await setLocale('en');
-  const pending = deferred<void>();
+  const pending = deferred<undefined>();
   calls.signOut.mockReturnValueOnce(pending.promise);
   show(<Invitation token="valid" system="Workshop" />);
   await userEvent.click(await screen.findByRole('button', { name: i18n.t('auth.invite.notYou') }));

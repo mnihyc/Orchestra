@@ -13,8 +13,9 @@ import { waitForJob } from '@/realtime/queryFeeds';
 import { newActKey } from '@/lib/requests';
 import { toast } from '@/ui/Toast';
 import { useErrorText } from '@/ui/errorText';
+import type { AgentAccessChoice } from '@/generated/api-types';
 
-export function useForkNow(threadId: string): { start: (toTurn?: number) => void; pending: boolean } {
+export function useForkNow(threadId: string): { start: (toTurn?: number, agentAccess?: AgentAccessChoice) => void; pending: boolean } {
   const { t } = useTranslation();
   const failureText = useErrorText();
   const navigate = useNavigate();
@@ -22,8 +23,9 @@ export function useForkNow(threadId: string): { start: (toTurn?: number) => void
   // The request and the job it starts are one act: it ends when the job does, and then the new thread opens, even
   // where the place it was asked from is gone by then.
   const start = useMutation({
-    mutationFn: async (toTurn: number | undefined) => {
-      const reply = await forkNow(threadId, newActKey(), toTurn);
+    mutationFn: async ({ toTurn, agentAccess }: { toTurn: number | undefined; agentAccess: AgentAccessChoice | undefined }) => {
+      const key = newActKey();
+      const reply = agentAccess === undefined ? await forkNow(threadId, key, toTurn) : await forkNow(threadId, key, toTurn, agentAccess);
       return { job: await waitForJob(queryClient, reply.job), thread: reply.thread_id };
     },
     onSuccess: ({ job, thread }) => {
@@ -32,5 +34,5 @@ export function useForkNow(threadId: string): { start: (toTurn?: number) => void
     },
     onError: (error) => toast({ tone: 'danger', title: t('change.forkNow.failed'), description: failureText(error).message }),
   });
-  return { start: (toTurn?: number) => start.mutate(toTurn), pending: start.isPending };
+  return { start: (toTurn?: number, agentAccess?: AgentAccessChoice) => start.mutate({ toTurn, agentAccess }), pending: start.isPending };
 }

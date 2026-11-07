@@ -12,6 +12,10 @@
 
 pub mod credentials;
 pub mod endpoint;
+pub mod parameters;
 pub mod protocol;
 pub mod translator;
 pub mod usage;
+
+/// Protocol-declared hosted search request mapping.
+pub mod web_search;

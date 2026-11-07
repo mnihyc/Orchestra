@@ -88,7 +88,9 @@ async fn a_subscription_kept_to_one_driver_tells_that_driver_and_runs_on_their_a
         .token(&s.eve.token)
         .send()
         .await
-        .ok();
+        .ok()
+        .into_full()
+        .expect("this ordinary model-use control requires its full native input reply");
     assert_eq!(ran.author.as_ref().unwrap().id, s.dan.id());
     assert_eq!(ran.run_as.as_ref().unwrap().id, s.eve.id());
     let start = s.rig.turn_start(thread, 0).await;

@@ -37,6 +37,7 @@ const BODIES: Record<SectionId, Body> = {
   'sign-in': lazy(() => import('@/features/admin/SignIn').then((module) => ({ default: module.SignIn }))),
   email: lazy(() => import('@/features/admin/Channels').then((module) => ({ default: module.Channels }))),
   hosts: lazy(() => import('@/features/admin/Hosts').then((module) => ({ default: module.Hosts }))),
+  gateways: lazy(() => import('@/features/admin/Gateways').then((module) => ({ default: module.Gateways }))),
   runtimes: lazy(() => import('@/features/admin/Runtimes').then((module) => ({ default: module.Runtimes }))),
   templates: lazy(() => import('@/features/admin/Templates').then((module) => ({ default: module.Templates }))),
   mcp: lazy(() => import('@/features/admin/Mcp').then((module) => ({ default: module.Mcp }))),

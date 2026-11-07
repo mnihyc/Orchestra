@@ -9,6 +9,9 @@ mod places;
 mod resources;
 mod support;
 
+#[path = "kmounts_files/machine_scopes.rs"]
+mod machine_scopes;
+
 use orch_api_contract::access::NewResourceAccess;
 use orch_api_contract::common::ErrorCode;
 use orch_api_contract::mounts::*;
@@ -40,6 +43,8 @@ async fn named_mount(world: &World, person: &places::Who, home: Id, name: &str) 
         .send()
         .await
         .ok()
+        .into_full()
+        .unwrap()
 }
 
 async fn own_page(
@@ -756,7 +761,7 @@ async fn a_seed_read_only_mount_creates_its_owners_page_and_advances_authority()
         .send()
         .await;
     assert_eq!(reply.status, http::StatusCode::OK, "{:?}", reply.body);
-    let made = reply.ok();
+    let made = reply.ok().into_full().unwrap();
     assert_eq!(made.base.name, "shared-notes");
     assert_eq!(made.target, "/mnt/notes");
     assert!(made.read_only && made.locations.is_empty());
@@ -802,7 +807,9 @@ async fn a_mount_is_created_listed_changed_and_removed_with_its_current_revision
         .body(&create_body(c.acme))
         .send()
         .await
-        .ok();
+        .ok()
+        .into_full()
+        .unwrap();
     assert_eq!(made.owner.as_ref().unwrap().id, c.viewer.id());
     assert!(made.read_only && made.locations.is_empty());
     let read = world
@@ -905,7 +912,9 @@ async fn a_person_adds_only_their_own_machine_location_and_other_readers_do_not_
         .body(&create_body(c.acme))
         .send()
         .await
-        .ok();
+        .ok()
+        .into_full()
+        .unwrap();
     let machine = orch_db::queries::resources::access_fixtures::insert_persons_machine(
         &mut *world.conn().await,
         c.viewer.id(),
@@ -1024,7 +1033,9 @@ async fn an_enabled_mount_says_where_it_is_used_and_deletion_changes_nothing() {
         .body(&create_body(c.acme))
         .send()
         .await
-        .ok();
+        .ok()
+        .into_full()
+        .unwrap();
     world
         .set_at(
             orch_settings::Target::Node(c.acme),
@@ -1093,7 +1104,9 @@ async fn a_mounts_manager_sets_what_plans_preselect_and_says_what_a_locations_da
         .body(&create_body(c.acme))
         .send()
         .await
-        .ok();
+        .ok()
+        .into_full()
+        .unwrap();
     assert_eq!(
         made.default_fate,
         MountFate::AsIs,
@@ -1225,7 +1238,9 @@ async fn data_a_copy_displaced_is_listed_until_whoever_may_remove_that_location_
         .body(&create_body(c.acme))
         .send()
         .await
-        .ok();
+        .ok()
+        .into_full()
+        .unwrap();
     let machine = orch_db::queries::resources::access_fixtures::insert_persons_machine(
         &mut *world.conn().await,
         c.viewer.id(),

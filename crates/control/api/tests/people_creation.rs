@@ -9,6 +9,7 @@ mod desk;
 mod places;
 mod support;
 
+use crate::support::FullPermissionPageReply;
 use desk::Desk;
 use orch_api_contract::access::{
     AccessChoice, HolderInput, PageChange, PageChangeName, PermissionPageUpdate,
@@ -150,6 +151,7 @@ async fn a_private_source_is_refused_until_view_is_held_then_copy_has_fresh_owne
         })
         .send()
         .await
+        .full_permission_page()
         .ok();
     let made = desk
         .world
@@ -159,7 +161,9 @@ async fn a_private_source_is_refused_until_view_is_held_then_copy_has_fresh_owne
         .body(&body)
         .send()
         .await
-        .ok();
+        .ok()
+        .into_full()
+        .expect("this native creation control requires its full response");
     assert_eq!(made.base.owner.id, bea.id());
     assert_eq!(made.base.title, "Private source");
     let copied = desk.sync(&bea, made.base.id).await;
@@ -179,7 +183,9 @@ async fn a_private_source_is_refused_until_view_is_held_then_copy_has_fresh_owne
         .body(&body)
         .send()
         .await
-        .ok();
+        .ok()
+        .into_full()
+        .expect("this native creation control requires its full response");
     assert_eq!(again.base.id, made.base.id);
     assert_eq!(desk.words(&bea, made.base.id).await, ["Current text"]);
 }
@@ -200,7 +206,9 @@ async fn copied_files_have_fresh_references_independent_pins_and_survive_removal
         .bytes(payload)
         .send()
         .await
-        .ok();
+        .ok()
+        .into_full()
+        .expect("this native creation control requires its full response");
     let block = NewBlock {
         id: new_id(),
         block_type: BlockType::File,
@@ -248,7 +256,9 @@ async fn copied_files_have_fresh_references_independent_pins_and_survive_removal
         .body(&body)
         .send()
         .await
-        .ok();
+        .ok()
+        .into_full()
+        .expect("this native creation control requires its full response");
     assert_ne!(copy.files[0].id, kept.id);
     let copied = desk.sync(&desk.ada, copy.base.id).await;
     // Props without optional members have the same wire shape for images and files; the block's
@@ -268,7 +278,9 @@ async fn copied_files_have_fresh_references_independent_pins_and_survive_removal
         .body(&body)
         .send()
         .await
-        .ok();
+        .ok()
+        .into_full()
+        .expect("this native creation control requires its full response");
     let after: i32 = sqlx::query_scalar("SELECT pin_count FROM blobs WHERE hash=$1")
         .bind(source_hash.as_bytes().as_slice())
         .fetch_one(&desk.world.db.pool)
@@ -400,7 +412,9 @@ async fn a_copy_larger_than_one_operation_batch_is_one_visible_document_with_all
         })
         .send()
         .await
-        .ok();
+        .ok()
+        .into_full()
+        .expect("this native creation control requires its full response");
     assert_eq!(desk.words(&desk.ada, made.base.id).await.len(), count);
     assert_eq!(
         desk.words(&desk.ada, made.base.id).await,

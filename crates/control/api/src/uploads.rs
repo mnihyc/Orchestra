@@ -9,7 +9,7 @@
 //! routes of the internal listener ([`crate::content`]); both leave their bytes in files of the
 //! uploads directory ([`crate::blobs`]) until the whole is there.
 
-use crate::blobs::{Blobs, BlobsError, discard, write_piece};
+use crate::blobs::{Blobs, BlobsError, discard, prepare_piece};
 use crate::middleware::requests::{ApiError, ApiResult};
 use crate::middleware::transaction_guard;
 use crate::registry::Ctx;
@@ -25,6 +25,8 @@ use orch_db::queries::storage::{self, SessionRow};
 use orch_db::queries::uploads as references;
 use orch_settings::Place;
 use orch_types::{Id, new_id};
+
+pub(crate) mod session_operation;
 
 /// How long an upload in pieces has to be finished in: a day, as the design says; the collection of
 /// content removes a session that ran out together with the file of its pieces.
@@ -159,18 +161,48 @@ async fn own_session(
 ) -> ApiResult<SessionRow> {
     let session = storage::lock_session(conn, id)
         .await?
-        .filter(|session| session.user_id == user)
         .ok_or_else(ApiError::not_found)?;
+    check_session(&session, user, now)?;
+    Ok(session)
+}
+
+/// The native owner/lifetime rule shared by preparation and the serialized writer.
+pub(crate) fn check_session(session: &SessionRow, user: Id, now: DateTime<Utc>) -> ApiResult<()> {
+    if session.user_id != user {
+        return Err(ApiError::not_found());
+    }
     if session.expires_at < now {
         return Err(ApiError::new(ErrorCode::Gone, "this upload ran out"));
     }
-    Ok(session)
+    Ok(())
+}
+
+/// The guarded source must be the very row whose native writer lock is held.
+fn check_locked_session(
+    ctx: &Ctx,
+    guard: &transaction_guard::Guard,
+    locked: &SessionRow,
+) -> ApiResult<()> {
+    if crate::key_operations::native::modern(guard.principal().caller()) {
+        let ready =
+            guard.operation_data::<crate::key_operations::native::Prepared<SessionRow>>()?;
+        if ready.value != *locked {
+            return Err(ApiError::internal(
+                "the locked upload session changed its prepared source",
+            ));
+        }
+    }
+    check_session(locked, guard.user().id(), guard.now().get())?;
+    check_session(locked, guard.user().id(), ctx.app.clock.now())?;
+    guard.check_deadline(ctx)
 }
 
 /// Cancels a person's session after any in-flight piece, then discards its temporary file.
 pub async fn cancel(ctx: &Ctx, id: Id) -> ApiResult<()> {
-    let (mut tx, guard) = transaction_guard::begin(ctx).await?;
-    own_session(&mut tx, id, guard.user().id(), guard.now().get()).await?;
+    let (mut tx, initial) = transaction_guard::begin(ctx).await?;
+    let locked = own_session(&mut tx, id, initial.user().id(), initial.now().get()).await?;
+    let (ctx, guard) = transaction_guard::after_wait(ctx, &mut tx).await?;
+    check_locked_session(&ctx, &guard, &locked)?;
     sqlx::query("UPDATE upload_sessions SET cancelled_at=$2 WHERE id=$1")
         .bind(id)
         .bind(guard.now().get())
@@ -178,7 +210,7 @@ pub async fn cancel(ctx: &Ctx, id: Id) -> ApiResult<()> {
         .await
         .map_err(DbError::from)?;
     tx.commit().await.map_err(DbError::from)?;
-    discard(&ctx.app.blobs.part_of_session(id)).await;
+    discard(&ctx.app.blobs.part_of_session(locked.id)).await;
     Ok(())
 }
 
@@ -193,9 +225,11 @@ pub async fn put_piece(
     if len > chunk_bytes() {
         return Err(too_large(chunk_bytes()));
     }
-    let app = &ctx.app;
-    let (mut tx, guard) = transaction_guard::begin(ctx).await?;
-    let session = own_session(&mut tx, id, guard.user().id(), guard.now().get()).await?;
+    let app = ctx.app.clone();
+    let (mut tx, initial) = transaction_guard::begin(ctx).await?;
+    let session = own_session(&mut tx, id, initial.user().id(), initial.now().get()).await?;
+    let (current, guard) = transaction_guard::after_wait(ctx, &mut tx).await?;
+    check_locked_session(&current, &guard, &session)?;
     if offset != session.received {
         return Err(out_of_place(session.received));
     }
@@ -210,9 +244,13 @@ pub async fn put_piece(
         .make_uploads_dir()
         .await
         .map_err(ApiError::internal)?;
-    write_piece(&app.blobs.part_of_session(id), session.received, piece)
+    let file = prepare_piece(&app.blobs.part_of_session(id), session.received)
         .await
         .map_err(ApiError::internal)?;
+    // Opening the file may wait, but it has not truncated the existing prefix or written a new byte.
+    let (current, guard) = transaction_guard::after_wait(&current, &mut tx).await?;
+    check_locked_session(&current, &guard, &session)?;
+    file.write(piece).await.map_err(ApiError::internal)?;
     storage::advance_session(&mut tx, id, end).await?;
     tx.commit().await.map_err(DbError::from)?;
     Ok(UploadSessionPutReply { received: end })
@@ -221,10 +259,11 @@ pub async fn put_piece(
 /// Ends an upload in pieces: the whole is hashed, put in the store and recorded, and the upload is
 /// over.
 pub async fn complete(ctx: &Ctx, id: Id) -> ApiResult<UploadedBlob> {
-    let app = &ctx.app;
-    let (mut tx, guard) = transaction_guard::begin(ctx).await?;
-    let now = guard.now().get();
-    let session = own_session(&mut tx, id, guard.user().id(), now).await?;
+    let app = ctx.app.clone();
+    let (mut tx, initial) = transaction_guard::begin(ctx).await?;
+    let session = own_session(&mut tx, id, initial.user().id(), initial.now().get()).await?;
+    let (ctx, guard) = transaction_guard::after_wait(ctx, &mut tx).await?;
+    check_locked_session(&ctx, &guard, &session)?;
     if session.received != session.size {
         return Err(out_of_place(session.received));
     }
@@ -250,9 +289,20 @@ pub async fn complete(ctx: &Ctx, id: Id) -> ApiResult<UploadedBlob> {
         .put_file(&part, hash, size)
         .await
         .map_err(stored_badly)?;
+    // Hashing and the store consume the native file once. Unreferenced staging bytes
+    // grant no custody: restore the same caller after those waits before publishing it.
+    let (ctx, guard) = transaction_guard::after_wait(&ctx, &mut tx).await?;
+    check_locked_session(&ctx, &guard, &session)?;
+    let now = guard.now().get();
     app.blobs
         .register(&mut tx, BlobMeta { hash, size }, now)
         .await?;
+    // The rollbackable blob catalogue stage also takes the hash's native writer
+    // lock (including a concurrent first insertion). Every custody writer takes
+    // that lock before its reference; refresh after it before retaining any bytes.
+    let (ctx, guard) = transaction_guard::after_wait(&ctx, &mut tx).await?;
+    check_locked_session(&ctx, &guard, &session)?;
+    let now = guard.now().get();
     references::remember(&mut tx, guard.user().id(), &hash, now).await?;
     // A closed session keeps only a short-lived progress receipt, never upload authority or partial bytes.
     sqlx::query("UPDATE upload_sessions SET completed_at=$2,expires_at=$3 WHERE id=$1")

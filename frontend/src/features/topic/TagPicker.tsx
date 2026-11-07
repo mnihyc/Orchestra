@@ -29,14 +29,15 @@ export function TagPicker({ place, allowed }: { place: Node; allowed: boolean })
   const [name, setName] = useState('');
   const [created, setCreated] = useState<Tag | null>(null);
   const [scopeId, setScopeId] = useState(place.id);
-  const available = useQuery({ ...tagsQuery(place.id), enabled: allowed });
+  const [open, setOpen] = useState(false);
+  const available = useQuery({ ...tagsQuery(place.id), enabled: allowed && open });
   const scopes = place.path.filter((node) => !node.redacted);
   const placeName = (node: Tag['node']): string => {
     if (node.redacted || node.name === null) return t('access.place.hidden');
     const index = place.path.findIndex((step) => step.id === node.id);
     return index < 0 ? node.name : place.path.slice(0, index + 1).map((step) => step.redacted ? t('access.place.hidden') : step.name ?? t('access.place.hidden')).join(' / ');
   };
-  const places = useQueries({ queries: scopes.map((node) => ({ ...nodeQuery(node.id), enabled: allowed })) });
+  const places = useQueries({ queries: scopes.map((node) => ({ ...nodeQuery(node.id), enabled: allowed && open })) });
   const scope = places.flatMap((query) => query.data ?? []).find((node) => node.id === scopeId);
   const canDefine = scope !== undefined && holds(scope.access, `${scope.kind}.manage`);
   const chosen = new Set(place.tags.map((tag) => tag.id));
@@ -57,7 +58,7 @@ export function TagPicker({ place, allowed }: { place: Node; allowed: boolean })
     },
     onSuccess: (tag) => { setCreated(tag); apply(tag); },
   });
-  const limits = useQuery({ ...settingsQuery(place.id), enabled: allowed });
+  const limits = useQuery({ ...settingsQuery(place.id), enabled: allowed && open });
   const limit = limits.data?.find((row) => row.key === 'tags.max_per_place')?.value;
   const most = typeof limit === 'number' ? limit : null;
   const busy = define.isPending || assign.isPending;
@@ -66,7 +67,7 @@ export function TagPicker({ place, allowed }: { place: Node; allowed: boolean })
     <div className="flex flex-wrap items-center gap-1" aria-busy={busy || undefined}>
       {place.tags.map((tag) => <TagChip key={tag.id} name={tag.name} color={tag.color} {...(allowed && !busy ? { onRemove: () => assign.mutate([...chosen].filter((id) => id !== tag.id)) } : {})} />)}
       {busy && <LoaderCircle className="animate-spin text-text-subtle" role="img" aria-label={t('places.menu.working')} />}
-      {allowed && <Popover label={t('placeTags.title')} trigger={<Button size="sm" variant="ghost" icon={<Tags aria-hidden />}>{place.tags.length === 0 ? t('placeTags.add') : t('placeTags.edit')}</Button>} className="flex w-[min(22rem,calc(100vw-2rem))] max-w-full flex-col gap-3">
+      {allowed && <Popover open={open} onOpenChange={setOpen} label={t('placeTags.title')} trigger={<Button size="sm" variant="ghost" icon={<Tags aria-hidden />}>{place.tags.length === 0 ? t('placeTags.add') : t('placeTags.edit')}</Button>} className="flex w-[min(22rem,calc(100vw-2rem))] max-w-full flex-col gap-3">
         <Input label={t('day100.tags.name')} value={name} disabled={busy || created !== null} onChange={(event) => setName(event.target.value)} autoComplete="off" />
         {available.isPending ? <SkeletonRows rows={2} /> : available.isError ? <ErrorState compact error={available.error} onRetry={() => void available.refetch()} /> : <>
           {available.data.filter((tag) => tag.id !== created?.id && (typed === '' || tag.name.toLocaleLowerCase().includes(typed.toLocaleLowerCase()))).map((tag) => <Checkbox key={tag.id} presentation="picker"

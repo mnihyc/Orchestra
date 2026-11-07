@@ -13,7 +13,7 @@ use crate::middleware::authorization::{self, refusals};
 use crate::middleware::requests::{ApiError, ApiResult};
 use crate::middleware::transaction_guard;
 use crate::registry::{Ctx, Registry};
-use crate::routes::access::page::same;
+use crate::routes::access::page::{NameBounds, same};
 use crate::routes::nodes::{invalid, placed, policy_at, view};
 use crate::sign_in::origin;
 use crate::thread_markers::{self, Line};
@@ -29,11 +29,11 @@ use orch_db::secrets::MasterKey;
 use orch_db::{Conn, DbError};
 use orch_settings::secrets::{self, Owner, SecretError};
 use orch_settings::validation::{self, Need};
-use orch_settings::write::{Clear, Write, WriteError, clear, write};
-use orch_settings::{Place, SettingView, Target, resolve_all};
+use orch_settings::write::{Write, WriteError};
+use orch_settings::{Place, SettingView, Target};
 use orch_settings_contract::registry::{self, Invalid, Scope, keys};
-use orch_types::{Id, Json, Time};
-use std::collections::{HashMap, HashSet};
+use orch_types::{Id, Json};
+use std::collections::HashSet;
 use std::sync::OnceLock;
 
 /// Where a deployment keeps the master key that seals secrets, when no key
@@ -44,7 +44,9 @@ const MASTER_KEY_PATH: &str = "/run/secrets/orch_master_key";
 
 static MASTER_KEY: OnceLock<MasterKey> = OnceLock::new();
 
+mod editing;
 pub(crate) mod reach;
+pub(crate) mod readers;
 
 /// Gives the key that secrets are sealed under, for composition and for
 /// tests. The first key given stays.
@@ -70,15 +72,28 @@ pub fn mount(registry: &mut Registry) {
         .on(api::SettingRegistryGet, registry_get)
         .on(api::NodeSettingList, setting_list)
         .on(api::NodeSettingReachGet, reach::at_node)
-        .on(api::NodeSettingSet, setting_set)
-        .on(api::NodeSettingDelete, setting_delete)
+        .on_with_operation(
+            api::NodeSettingSet,
+            crate::key_operations::native::effects::prepare::<editing::Set>,
+            setting_set,
+        )
+        .on_with_operation(
+            api::NodeSettingDelete,
+            crate::key_operations::native::effects::prepare::<editing::Clear>,
+            setting_delete,
+        )
         .on(api::NodeSecretList, secret_list)
         .on(api::NodeSecretSet, secret_set)
         .on(api::NodeSecretDelete, secret_delete);
 }
 
 /// The registry, as the API's definitions.
-async fn registry_get(_ctx: Ctx, (): (), (): ()) -> ApiResult<Vec<api::SettingDef>> {
+pub(crate) async fn registry_get(_ctx: Ctx, (): (), (): ()) -> ApiResult<Vec<api::SettingDef>> {
+    registry_definitions()
+}
+
+/// Static registry projection for readers with their own SystemRead admission.
+pub(crate) fn registry_definitions() -> ApiResult<Vec<api::SettingDef>> {
     registry::all()
         .iter()
         .map(|def| {
@@ -251,25 +266,7 @@ async fn shown(
     principal: &Principal,
     views: Vec<(SettingView, bool)>,
 ) -> ApiResult<Vec<api::ResolvedSetting>> {
-    let mut ids: Vec<Id> = views.iter().flat_map(|(view, _)| view.nodes()).collect();
-    ids.sort_unstable();
-    ids.dedup();
-    let refs: HashMap<Id, NodeRef> = view::refs(conn, principal, &ids, Policy::default()).await?;
-    views
-        .into_iter()
-        .map(|(view, permitted)| {
-            let setting = view.into_setting(permitted).map_node(|id| {
-                refs.get(&id).cloned().unwrap_or(NodeRef {
-                    thread_display: None,
-                    id,
-                    kind: NodeKind::Org,
-                    name: None,
-                    redacted: true,
-                })
-            });
-            same(&setting).ok_or_else(|| ApiError::internal("a setting does not read as the API's"))
-        })
-        .collect()
+    readers::settings_shown(conn, principal, views, &NameBounds::default()).await
 }
 
 /// Every key valid at or below the node, as it holds there.
@@ -277,25 +274,15 @@ pub(crate) async fn setting_list(ctx: Ctx, (): (), (): ()) -> ApiResult<Vec<api:
     let id = ctx.id("id")?;
     let mut conn = ctx.app.db.acquire().await?;
     let principal = authorization::principal(&ctx, &mut conn).await?;
-    let (_, kind) = placed(&mut conn, id).await?;
-    let policy = policy_at(&mut conn, id).await?;
-    let holds = Holds::of(&mut conn, &principal, id, kind, policy).await?;
-    let views = resolve_all(&mut conn, Place::Node(id))
-        .await
-        .map_err(ApiError::internal)?;
-    let scope = scope_of(kind);
-    let paired = views
-        .into_iter()
-        .map(|view| {
-            let need = validation::need_for_node(view.def(), scope, id, holds.thread_environment());
-            let permitted = need.is_some_and(|need| holds.meets(need));
-            (view, permitted)
-        })
-        .collect();
-    let mut rows = shown(&mut conn, &principal, paired).await?;
-    add_automation_reason(&mut conn, id, &mut rows).await?;
-    add_mode_choices(&ctx, &mut conn, &principal, Place::Node(id), &mut rows).await?;
-    Ok(rows)
+    let prepared = readers::prepare_settings(&mut conn, &principal, id).await?;
+    readers::show_settings(
+        &ctx,
+        &mut conn,
+        &principal,
+        &prepared,
+        &NameBounds::default(),
+    )
+    .await
 }
 
 /// A bound thread uses its own profile. Unbound scopes use profiles the ordinary resource
@@ -395,7 +382,10 @@ pub(crate) async fn add_mode_choices(
     let mut applied = Vec::<ApprovalMode>::new();
     let mut sandbox = Vec::<SandboxMode>::new();
     for agent in agents {
-        let Ok(Some(descriptor)) = orch_engine::harnesses::descriptor_of(&agent) else {
+        // A global Auto registration does not prove another program or build. Preserve the
+        // existing union of usable profiles, each limited by its current native build evidence.
+        let Ok(Some(descriptor)) = orch_engine::harnesses::current_descriptor(conn, &agent).await
+        else {
             continue;
         };
         for mode in &descriptor.approval_modes {
@@ -493,7 +483,33 @@ pub(crate) async fn write_failed(
     node: Id,
     error: WriteError,
 ) -> ApiError {
+    if crate::key_operations::native::modern(principal.caller()) {
+        // These native failure operands contain existing content. Their sparse form keeps
+        // the same failure without invoking the rich current-value/reference renderer.
+        match &error {
+            WriteError::Stale { .. } => {
+                return ApiError::new(
+                    ErrorCode::ConflictStaleRevision,
+                    "the setting was changed since it was read",
+                );
+            }
+            WriteError::Locked { .. } => {
+                return ApiError::new(ErrorCode::AccessLocked, "a lock above decides this setting");
+            }
+            WriteError::SideThread => {
+                return ApiError::new(
+                    ErrorCode::ThreadSide,
+                    "a side thread has no settings of its own",
+                );
+            }
+            _ => {}
+        }
+    }
     match error {
+        WriteError::OperationRefused => ApiError::new(
+            ErrorCode::AuthzDenied,
+            "the original operation no longer permits this setting write",
+        ),
         WriteError::Db(error) => error.into(),
         WriteError::NotFound => ApiError::not_found(),
         WriteError::Invalid(Invalid::UnknownKey(_)) => ApiError::not_found(),
@@ -627,13 +643,14 @@ async fn must_hold(
             }
         }
         Need::OnNode { permission, node } => {
-            authorization::require(
+            authorization::require_projected(
                 conn,
                 principal,
                 node,
                 authorization::exact(permission),
                 Act::Use,
                 policy,
+                crate::key_operations::native::modern(principal.caller()),
             )
             .await
         }
@@ -643,13 +660,14 @@ async fn must_hold(
             permission,
             environment,
         } => {
-            authorization::require_resource(
+            authorization::require_resource_projected(
                 conn,
                 principal,
                 ResourceKind::Environment,
                 environment,
                 permission,
                 Policy::default(),
+                crate::key_operations::native::modern(principal.caller()),
             )
             .await
         }
@@ -657,13 +675,14 @@ async fn must_hold(
             permission,
             provider,
         } => {
-            authorization::require_resource(
+            authorization::require_resource_projected(
                 conn,
                 principal,
                 ResourceKind::Provider,
                 provider,
                 permission,
                 Policy::default(),
+                crate::key_operations::native::modern(principal.caller()),
             )
             .await
         }
@@ -679,7 +698,31 @@ pub(crate) async fn permit(
     key: &str,
     policy: Policy,
 ) -> ApiResult<bool> {
-    let needs = validation::needs(conn, key, Target::Node(node))
+    let needs = setting_needs(conn, node, key).await?;
+    permit_needs(conn, principal, needs, policy, None).await
+}
+
+/// The same needs evaluator for a server-owned node effect of an ordinary
+/// administrative operation. This proof cannot be supplied in a request.
+pub(crate) async fn permit_admin_operation(
+    conn: &mut Conn,
+    administration: &crate::key_operations::admin::AdministrativeNode<'_>,
+    key: &str,
+    policy: Policy,
+) -> ApiResult<bool> {
+    let needs = setting_needs(conn, administration.node(), key).await?;
+    permit_needs(
+        conn,
+        administration.principal(),
+        needs,
+        policy,
+        Some(administration),
+    )
+    .await
+}
+
+async fn setting_needs(conn: &mut Conn, node: Id, key: &str) -> ApiResult<validation::Needs> {
+    validation::needs(conn, key, Target::Node(node))
         .await
         .map_err(|error| match error {
             WriteError::Invalid(Invalid::UnknownKey(_)) => ApiError::not_found(),
@@ -688,8 +731,22 @@ pub(crate) async fn permit(
             }
             WriteError::NotFound => ApiError::not_found(),
             other => ApiError::internal(other),
-        })?;
-    must_hold(conn, principal, needs.value, policy).await?;
+        })
+}
+
+async fn permit_needs(
+    conn: &mut Conn,
+    principal: &Principal,
+    needs: validation::Needs,
+    policy: Policy,
+    administration: Option<&crate::key_operations::admin::AdministrativeNode<'_>>,
+) -> ApiResult<bool> {
+    if !administration.is_some_and(|proof| proof.covers(needs.value)) {
+        must_hold(conn, principal, needs.value, policy).await?;
+    }
+    if administration.is_some_and(|proof| proof.covers(needs.lock)) {
+        return Ok(true);
+    }
     Ok(match needs.lock {
         Need::SystemAdmin => principal.is_system_admin(),
         Need::OnNode { permission, node } => {
@@ -708,6 +765,7 @@ async fn answer(
     principal: &Principal,
     node: Id,
     view: SettingView,
+    bounds: &NameBounds,
 ) -> ApiResult<api::ResolvedSetting> {
     let policy = policy_at(conn, node).await?;
     let (_, kind) = placed(conn, node).await?;
@@ -715,7 +773,8 @@ async fn answer(
     let need =
         validation::need_for_node(view.def(), scope_of(kind), node, holds.thread_environment());
     let permitted = need.is_some_and(|need| holds.meets(need));
-    let mut rows = shown(conn, principal, vec![(view, permitted)]).await?;
+    let mut rows =
+        readers::settings_shown(conn, principal, vec![(view, permitted)], bounds).await?;
     add_automation_reason(conn, node, &mut rows).await?;
     rows.into_iter()
         .next()
@@ -817,6 +876,15 @@ async fn may_run_what_it_runs(conn: &mut Conn, principal: &Principal, thread: Id
     };
     match usable::check_binding(conn, principal, &ask, &policies).await {
         Ok(BindingDecision::Allowed(_)) => Ok(()),
+        Ok(BindingDecision::Refused(refusal))
+            if crate::key_operations::native::modern(principal.caller()) =>
+        {
+            Err(ApiError::new(
+                ErrorCode::AuthzDenied,
+                "the caller lacks the required permission",
+            )
+            .with("required", refusal.required.as_str()))
+        }
         Ok(BindingDecision::Refused(refusal)) => Err(refusals::denied(conn, *refusal).await?),
         Ok(BindingDecision::Blocked(blockers)) => blockers
             .into_iter()
@@ -993,97 +1061,11 @@ async fn thread_changed(
 
 /// Writes a key at a node.
 async fn setting_set(
-    mut ctx: Ctx,
+    ctx: Ctx,
     (): (),
     body: api::NodeSettingSetBody,
-) -> ApiResult<api::ResolvedSetting> {
-    let node = ctx.id("id")?;
-    let key = ctx.param("key")?.to_owned();
-    let (mut tx, guard) = transaction_guard::begin(&ctx).await?;
-    ctx.now = guard.now().get();
-    let principal = guard.principal();
-    let (_, kind) = placed(&mut tx, node).await?;
-    let policy = policy_at(&mut tx, node).await?;
-    let may_lock = permit(&mut tx, principal, node, &key, policy).await?;
-    super::resources::validation::setting(&ctx.app.engine, &key, &body.value)?;
-    let before = before_on_a_thread(&mut tx, node, kind, &key).await?;
-    let written = write(
-        &mut tx,
-        &Write {
-            actor: Actor::User(principal.user()),
-            target: Target::Node(node),
-            key: &key,
-            value: body.value,
-            locked: body.locked,
-            expected_revision: body.expected_revision,
-            may_lock,
-            origin: &origin(&ctx),
-        },
-        ctx.now,
-    )
-    .await;
-    let written = match written {
-        Ok(written) => written,
-        Err(error) => return Err(write_failed(&mut tx, principal, node, error).await),
-    };
-    if written.changed && key == keys::AGENT_INSTRUCTIONS {
-        // Standing instructions that would leave a thread here, or one made here, told more than it may be are
-        // refused, and the write with them: nothing of it is committed. Which thread is not said.
-        let past = orch_engine::sessions::standing_past_limit(&mut tx, node)
-            .await
-            .map_err(ApiError::internal)?;
-        if let Some(characters) = past {
-            let limit = orch_engine::sessions::STANDING_LIMIT;
-            let scope = view::refs(&mut tx, principal, &[node], Policy::default())
-                .await?
-                .remove(&node);
-            return Err(Problem::new(
-                ErrorCode::SettingsInstructionsTooLarge,
-                format!(
-                    "the standing instructions would come to {characters} characters with their headings, and {limit} is the most"
-                ),
-            )
-            .with("limit", limit)
-            .with("characters", characters)
-            .with("scope", scope)
-            .into());
-        }
-    }
-    if written.changed {
-        if key == keys::ENV_MOUNTS {
-            let environments =
-                orch_db::queries::environments::hosting::environments_under(&mut tx, node).await?;
-            orch_db::queries::resources::mounts::changed(&mut tx, &environments, ctx.now).await?;
-        }
-        orch_db::queries::hierarchy::stamp(&mut tx, node).await?;
-        if let Some(before) = before {
-            thread_changed(&mut tx, ctx.now, principal, node, &key, before).await?;
-        }
-    }
-    let mut reply = answer(&mut tx, principal, node, written.view).await?;
-    add_mode_choices(
-        &ctx,
-        &mut tx,
-        principal,
-        Place::Node(node),
-        std::slice::from_mut(&mut reply),
-    )
-    .await?;
-    tx.commit().await.map_err(DbError::from)?;
-    if key == keys::AUTH_SECOND_STEP {
-        second_step_policy_changed(&ctx).await;
-    }
-    if key == keys::ENV_MOUNTS
-        && let Err(error) = ctx.app.engine.mount_scope_changed(node).await
-    {
-        tracing::warn!(node = %node, %error, "inherited mount changes remain pending");
-    }
-    if (key == keys::ENV_RESOURCES || key == keys::RUNTIME_RESOURCES)
-        && let Err(error) = ctx.app.engine.resource_scope_changed(node).await
-    {
-        tracing::warn!(%node,%error,"inherited resource changes remain pending");
-    }
-    Ok(reply)
+) -> ApiResult<api::NodeSettingWriteResponse> {
+    editing::run::<orch_engine::setting_operations::Set>(ctx, (), body).await
 }
 
 /// After `auth.second_step` changed at a place: work held for its authors' second step is looked at
@@ -1096,71 +1078,11 @@ pub(crate) async fn second_step_policy_changed(ctx: &Ctx) {
 
 /// Takes back what was written at a node, so that the key is inherited.
 async fn setting_delete(
-    mut ctx: Ctx,
+    ctx: Ctx,
     query: api::NodeSettingDeleteQuery,
     (): (),
-) -> ApiResult<api::ResolvedSetting> {
-    let node = ctx.id("id")?;
-    let key = ctx.param("key")?.to_owned();
-    let (mut tx, guard) = transaction_guard::begin(&ctx).await?;
-    ctx.now = guard.now().get();
-    let principal = guard.principal();
-    let (_, kind) = placed(&mut tx, node).await?;
-    let policy = policy_at(&mut tx, node).await?;
-    let may_lock = permit(&mut tx, principal, node, &key, policy).await?;
-    let before = before_on_a_thread(&mut tx, node, kind, &key).await?;
-    let cleared = clear(
-        &mut tx,
-        &Clear {
-            actor: Actor::User(principal.user()),
-            target: Target::Node(node),
-            key: &key,
-            expected_revision: query.expected_revision,
-            may_lock,
-            origin: &origin(&ctx),
-        },
-        ctx.now,
-    )
-    .await;
-    let cleared = match cleared {
-        Ok(cleared) => cleared,
-        Err(error) => return Err(write_failed(&mut tx, principal, node, error).await),
-    };
-    if cleared.changed {
-        if key == keys::ENV_MOUNTS {
-            let environments =
-                orch_db::queries::environments::hosting::environments_under(&mut tx, node).await?;
-            orch_db::queries::resources::mounts::changed(&mut tx, &environments, ctx.now).await?;
-        }
-        orch_db::queries::hierarchy::stamp(&mut tx, node).await?;
-        if let Some(before) = before {
-            thread_changed(&mut tx, ctx.now, principal, node, &key, before).await?;
-        }
-    }
-    let mut reply = answer(&mut tx, principal, node, cleared.view).await?;
-    add_mode_choices(
-        &ctx,
-        &mut tx,
-        principal,
-        Place::Node(node),
-        std::slice::from_mut(&mut reply),
-    )
-    .await?;
-    tx.commit().await.map_err(DbError::from)?;
-    if key == keys::AUTH_SECOND_STEP {
-        second_step_policy_changed(&ctx).await;
-    }
-    if key == keys::ENV_MOUNTS
-        && let Err(error) = ctx.app.engine.mount_scope_changed(node).await
-    {
-        tracing::warn!(node = %node, %error, "inherited mount changes remain pending");
-    }
-    if (key == keys::ENV_RESOURCES || key == keys::RUNTIME_RESOURCES)
-        && let Err(error) = ctx.app.engine.resource_scope_changed(node).await
-    {
-        tracing::warn!(%node,%error,"inherited resource changes remain pending");
-    }
-    Ok(reply)
+) -> ApiResult<api::NodeSettingWriteResponse> {
+    editing::run::<orch_engine::setting_operations::Clear>(ctx, query, ()).await
 }
 
 // ---- secrets ----
@@ -1189,29 +1111,17 @@ async fn secrets_shown(
     principal: &Principal,
     list: Vec<secrets::SecretInfo>,
 ) -> ApiResult<Vec<api::SecretInfo>> {
-    let ids: Vec<Id> = list.iter().filter_map(|info| info.node).collect();
-    let refs = view::refs(conn, principal, &ids, Policy::default()).await?;
-    Ok(list
-        .into_iter()
-        .map(|info| api::SecretInfo {
-            name: info.name,
-            node: info.node.and_then(|node| refs.get(&node).cloned()),
-            rotated_at: Some(Time::new(info.rotated_at.unwrap_or(info.created_at))),
-        })
-        .collect())
+    readers::secrets_shown(conn, principal, list, &NameBounds::default()).await
 }
 
 /// The names of the secrets that apply at a node, resolved down the
 /// hierarchy.
-async fn secret_list(ctx: Ctx, (): (), (): ()) -> ApiResult<Vec<api::SecretInfo>> {
+pub(crate) async fn secret_list(ctx: Ctx, (): (), (): ()) -> ApiResult<Vec<api::SecretInfo>> {
     let node = ctx.id("id")?;
     let mut conn = ctx.app.db.acquire().await?;
     let principal = authorization::principal(&ctx, &mut conn).await?;
-    let list = match secrets::list(&mut conn, Owner::Node(node)).await {
-        Ok(list) => list,
-        Err(error) => return Err(secret_failed(&mut conn, node, error).await),
-    };
-    secrets_shown(&mut conn, &principal, list).await
+    let prepared = readers::prepare_secrets(&mut conn, &principal, node).await?;
+    readers::show_secrets(&mut conn, &principal, &prepared, &NameBounds::default()).await
 }
 
 /// Writes a secret at a node.
@@ -1288,22 +1198,7 @@ pub(crate) async fn resolved_keys(
     id: Id,
     keys: &[&str],
 ) -> ApiResult<Vec<api::ResolvedSetting>> {
-    let (_, kind) = placed(conn, id).await?;
-    let policy = policy_at(conn, id).await?;
-    let holds = Holds::of(conn, principal, id, kind, policy).await?;
-    let views = resolve_all(conn, Place::Node(id))
-        .await
-        .map_err(ApiError::internal)?;
-    let scope = scope_of(kind);
-    let paired = views
-        .into_iter()
-        .filter(|view| keys.contains(&view.def().key))
-        .map(|view| {
-            let need = validation::need_for_node(view.def(), scope, id, holds.thread_environment());
-            let permitted = need.is_some_and(|need| holds.meets(need));
-            (view, permitted)
-        })
-        .collect();
+    let paired = readers::resolved_views(conn, principal, id, Some(keys)).await?;
     shown(conn, principal, paired).await
 }
 

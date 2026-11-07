@@ -8,6 +8,7 @@
 mod desk;
 mod places;
 mod support;
+use support::FullRequestReply;
 
 use axum::body::Body;
 use bytes::Bytes;
@@ -169,6 +170,7 @@ async fn a_request_the_ledger_names_guarded_cannot_answer_without_asking_again()
 /// Ada shares the topic's documents, to read, with the agents of the topic itself.
 fn documents_of_the_topic(desk: &Desk, client: &str) -> serde_json::Value {
     serde_json::to_value(ShareWithAgents {
+        viewers_read: None,
         read_first: None,
         what: ShareWhat::Node(ShareWhatNode {
             node_id: desk.topic,
@@ -339,6 +341,7 @@ async fn asked(desk: &Desk, rae: &Who) -> Id {
         .body(&interact_on_the_project(desk))
         .send()
         .await
+        .full_request()
         .ok()
         .approvals[0]
         .id

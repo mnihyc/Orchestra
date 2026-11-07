@@ -6,6 +6,8 @@
 )]
 
 mod common;
+#[path = "initial_files/creator_authority.rs"]
+mod creator_authority;
 mod hosting;
 
 use common::World;

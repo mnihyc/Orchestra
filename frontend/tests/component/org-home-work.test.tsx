@@ -25,6 +25,7 @@ import type * as Screen from '@/shell/screen';
 import { ACME, acmeTree, me, memberAccess, org, userRef } from '../doubles/fixtures';
 import { executionDisplay } from '../doubles/thread-display';
 import { show } from './support';
+import { overviewFixture } from './overview-fixture';
 
 const calls = vi.hoisted(() => ({
   place: null as Org | null, hits: [] as NameHit[], setupData: null as FirstSteps | null,
@@ -46,6 +47,16 @@ vi.mock('@/api/search', async (original) => {
     calls.searched(search);
     return { ...api.namesQuery(search), queryFn: () => calls.names(), staleTime: Infinity };
   } };
+});
+vi.mock('@/api/orgOverview', async (original) => {
+  const actual = await original<typeof import('@/api/orgOverview')>();
+  return { ...actual, orgOverviewQuery: (...args: Parameters<typeof actual.orgOverviewQuery>) => ({
+    ...actual.orgOverviewQuery(...args), queryFn: () => {
+      const org = calls.place ?? root;
+      const setup = org.org_kind === 'team' && org.parent_id === null && org.access.owns ? calls.setupData : null;
+      return Promise.resolve(overviewFixture(org, [], { items: calls.hits, partial: false }, setup));
+    },
+  }) };
 });
 vi.mock('@/api/nodes', async (original) => {
   const api = await original<typeof Nodes>();
@@ -72,7 +83,7 @@ vi.mock('@tanstack/react-router', async (original) => ({ ...await original<typeo
     <a {...anchor} href={params?.threadId === undefined ? '#place' : `/thread/${params.threadId}`} data-route={to}>{children}</a>,
 }));
 vi.mock('@/features/org/Activity', () => ({ ActivityFeed: () => null, OrgActivity: () => <p>Activity body</p> }));
-vi.mock('@/features/usage/Board', () => ({ UsageSection: () => null }));
+vi.mock('@/features/usage/Board', async (original) => ({ ...await original<typeof import('@/features/usage/Board')>(), UsageSection: () => null }));
 vi.mock('@/features/org/ProjectCards', () => ({ DepartmentCard: () => <p>Department summary</p>, ProjectCard: () => <p>Project summary</p> }));
 vi.mock('@/features/settings/org/Members', () => ({ Members: () => <p>Members body</p> }));
 vi.mock('@/features/navigation/NodeMenu', () => ({ NodeMenuButton: () => null }));

@@ -83,7 +83,8 @@ export function offeredOnly(parameters: ModelParameters, locale: string, t: TFun
   const programs = [...new Set([...(parameters.offered?.access_programs ?? []), ...(suggestion ? (parameters.access_programs ?? []) : [])])].filter((program) => !switched.includes(program));
   const largest = suggestion ? (parameters.offered?.context_max ?? parameters.context_max) : (parameters.context_max === undefined || parameters.context_max === null ? parameters.offered?.context_max : null);
   const bigger = largest !== undefined && largest !== null ? [t('models.list.contextUpTo', { largest: formatContext(largest, locale) })] : [];
-  return [...speeds, ...programs.map((program) => accessProgramDisplayName(program, t)), ...bigger];
+  const search = (parameters.offered?.web_search ?? []).filter((mode) => !(suggestion ? [] : parameters.web_search ?? []).includes(mode)).map((mode) => t('webSearch.modeNamed', { mode }));
+  return [...search, ...speeds, ...programs.map((program) => accessProgramDisplayName(program, t)), ...bigger];
 }
 
 /** What a model can be run with here, a line for each thing: efforts, context, images, the speeds and programs that are on and what is offered and not yet on, and the rate. */
@@ -91,6 +92,8 @@ export function Summary({ parameters }: { parameters: ModelParameters }) {
   const { t } = useTranslation();
   const locale = useAppearance((state) => state.locale);
   const lines: string[] = [];
+  if ((parameters.web_search ?? []).length > 0) lines.push(t('webSearch.enabledModes', { modes: parameters.web_search?.join(', ') }));
+  if (parameters.rate?.web_search_per_call !== undefined && parameters.rate.web_search_per_call !== null) lines.push(t('webSearch.priceNamed', { price: parameters.rate.web_search_per_call }));
   if ((parameters.efforts ?? []).length > 0) lines.push(t('providers.models.efforts', { list: (parameters.efforts ?? []).join(', ') }));
   const window = parameters.context_window;
   const largest = parameters.context_max;

@@ -108,16 +108,16 @@ fn wrong_source(at: FoundEntry, tree: &Tree) -> Refusal {
             "An earlier document version can only be restored on its own. Select the current document for other operations."
         }
         FoundEntry::File(Where::Conversation(_)) => {
-            "Conversations are managed by people. Select a document or document folder."
+            "Use archive, unarchive, fork or delete for a thread. Document commands need a document or document folder."
         }
         FoundEntry::File(Where::NodeChat(_) | Where::PeopleChat(_))
         | FoundEntry::Directory(Where::Messages(_) | Where::PeopleChatDir(_)) => {
-            "Chats are managed by people. Select a document or document folder."
+            "To delete a chat message, use delete with its chat path and message_id. A chat itself is not deleted or moved by this tool."
         }
         FoundEntry::Directory(Where::Place(id))
             if tree.place(id).is_some_and(|place| place.kind == "thread") =>
         {
-            "Threads are managed by people. Select a document or document folder."
+            "Use archive, unarchive, fork or delete for a thread. Document commands need a document or document folder."
         }
         FoundEntry::Directory(Where::Place(_)) => {
             "Places are managed by people. Select a document or document folder."
@@ -145,6 +145,12 @@ impl Engine {
                 Command::Move => domain::Command::Move,
                 Command::Delete => domain::Command::Delete,
                 Command::Restore => domain::Command::Restore,
+                Command::Archive | Command::Unarchive | Command::Fork => {
+                    return Ok(Err(Refusal::new(
+                        Code::WrongKind,
+                        "This command needs a thread path.",
+                    )));
+                }
             },
             items: Vec::new(),
             to: None,
@@ -326,9 +332,15 @@ impl Engine {
         ) {
             return Ok(answer);
         }
-        let answer = self
-            .manage_document_tree(call, thread, &asked, confirm.as_deref())
-            .await?;
+        let answer = if let Some(answer) = self
+            .manage_session_or_chat(call, thread, &asked, confirm.as_deref())
+            .await?
+        {
+            answer
+        } else {
+            self.manage_document_tree(call, thread, &asked, confirm.as_deref())
+                .await?
+        };
         lock(&self.inner.manage_plans).remember(
             call.thread,
             &call.call_ref,
@@ -426,6 +438,7 @@ impl Engine {
                         made: self.inner.clock.now(),
                         asked: asked.clone(),
                         stamp: Some(plan.stamp),
+                        shared_stamp: None,
                     },
                     self.inner.clock.now(),
                 );
@@ -508,15 +521,7 @@ impl Engine {
                 .collect(),
             people_chats: Vec::new(),
         };
-        let reach = Reach::load(
-            conn,
-            asking.agent.clone(),
-            asking.policy,
-            asking.now,
-            &things,
-        )
-        .await?
-        .with_document_policy(asking.documents_policy);
+        let reach = Reach::load_current(conn, asking.agent.clone(), asking.now, &things).await?;
         let counts = rows
             .iter()
             .map(|row| {
@@ -669,6 +674,7 @@ impl Engine {
             paths: vec![source.to_owned()],
             to: Some(format!("{to}/")),
             name: Some(name.to_owned()),
+            message_id: None,
         };
         let mut tx = orch_db::queries::transaction_guard::request_scope(
             orch_db::queries::transaction_guard::Scope::Creation,

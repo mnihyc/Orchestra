@@ -66,6 +66,7 @@ impl EnrollTransport for System<'_> {
         )
         .map_err(|error| EnrollError::Unreachable(error.to_string()))?;
         Ok(EnrollReply {
+            gateways: Vec::new(),
             machine_id: enrolled.machine_id,
             certificate_pem: enrolled.certificate.pem(),
             ca_pem: self.pki.authority().certificate_pem(),
@@ -86,6 +87,61 @@ impl EnrollTransport for System<'_> {
     ) -> Result<RenewReply, EnrollError> {
         Err(EnrollError::Unreachable("not part of this test".to_owned()))
     }
+}
+
+#[tokio::test]
+async fn an_unknown_selected_gateway_is_refused_without_spending_the_enrollment_token() {
+    let manual = ManualClock::new(chrono::Utc.with_ymd_and_hms(2026, 11, 6, 8, 0, 0).unwrap());
+    let clock: Arc<dyn Clock> = Arc::new(manual.clone());
+    let pki = TestPki::new(Arc::clone(&clock));
+    let system = System {
+        pki: &pki,
+        ledger: MemoryLedger::new(),
+        clock: manual,
+    };
+    let directory = tempfile::tempdir().unwrap();
+    let data = DataDir::open(directory.path()).unwrap();
+    data.update_config(|config| {
+        config.connector.gateway = orch_link_contract::gateways::GatewayChoice {
+            selection: orch_link_contract::gateways::GatewaySelection::Selected,
+            gateway_id: Some("missing".into()),
+        }
+    })
+    .unwrap();
+    let inputs = EnrollInputs {
+        address: "https://orch.test".into(),
+        token: system.token(),
+        name: "selected-enrollment".into(),
+        roles: vec![Role::Agent],
+        platform: Platform {
+            os: Os::Linux,
+            arch: Arch::X86_64,
+        },
+        connector_version: "0.1.0".into(),
+        managed: false,
+    };
+    assert!(matches!(
+        enroll(&inputs, &data, &system, clock.as_ref()).await,
+        Err(EnrollError::Config(_))
+    ));
+    assert!(!data.is_enrolled());
+    assert_eq!(
+        data.config(|_| None)
+            .unwrap()
+            .connector
+            .gateway
+            .gateway_id
+            .as_deref(),
+        Some("missing")
+    );
+    data.update_config(|config| config.connector.gateway = Default::default())
+        .unwrap();
+    assert!(
+        enroll(&inputs, &data, &system, clock.as_ref())
+            .await
+            .is_ok(),
+        "the unspent token must still enroll when the local choice is corrected"
+    );
 }
 
 #[tokio::test]
@@ -429,6 +485,9 @@ async fn a_foreground_connector_or_node_adopts_a_saved_replacement_without_anoth
         .save(&data.identity_dir())
         .unwrap();
         let record = EnrollmentRecord {
+            gateway_measured_at: None,
+            gateways: Vec::new(),
+            gateway_measurements: Vec::new(),
             server_endpoints: vec![Hub::endpoint()],
             machine_id: id,
             name: "Kept".into(),

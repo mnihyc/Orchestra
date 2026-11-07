@@ -7,6 +7,15 @@
 //! a person in answers with an [`AuthResult`]: a short-lived access token for
 //! the browser to keep in memory, beside the session cookie it was given.
 
+use crate::operations::{
+    FacetSpec as Facet, OperationSpec as Op, TargetResolver as Target, VariantSpec as Variant,
+};
+use orch_access_contract::key_scope::KeyAction::{Manage, Read, Write};
+use orch_access_contract::key_scope::KeyIdentityKind as I;
+use orch_access_contract::key_scope::KeyTargetKind::{Identity, Object};
+use orch_access_contract::permissions::ObjectKind as K;
+
+use orch_access_contract::key_scope::{KeyPlaceExclusion, KeyRule};
 use orch_types::{Id, Time};
 use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
@@ -235,6 +244,9 @@ pub struct MeBootstrapReply {
     pub subscriptions: Vec<crate::personal::MeSubscription>,
     /// Their inbox counters and outside delivery status.
     pub notification_summary: crate::notifications::NotificationSummaryGetReply,
+    /// The release's permission vocabulary, identical to the native catalogue read.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub permission_catalogue: Option<crate::access::PermissionCatalogueGetReply>,
 }
 
 /// Fresh authority after personal-feed admission, without reloading preferences or Inbox state.
@@ -298,6 +310,15 @@ pub struct ApiTokenInfo {
     pub name: String,
     /// What it is allowed to do.
     pub scopes: Vec<String>,
+    /// Explicit operation rules; None is a stored legacy permission-scope key.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub rules: Option<Vec<KeyRule>>,
+    /// Server-retained issuance ceilings; each rule union is required independently.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub constraints: Vec<Vec<KeyRule>>,
+    /// Server-retained existing refusal/lifetime ceilings, in addition to current place policy.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub excluded_places: Vec<KeyPlaceExclusion>,
     /// The node it is limited to, if it is limited to one.
     pub node: Option<NodeRef>,
     /// When it was made.
@@ -318,6 +339,53 @@ pub struct TokenCreated {
     pub info: ApiTokenInfo,
     /// The answer repeats a creation that was made already: revoke it and make another to get a secret.
     pub already_created: bool,
+}
+
+/// A committed operation acknowledgement without pre-existing resource content.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+pub struct TokenCreateReceipt {
+    /// The response is an acknowledgement rather than a full resource projection.
+    pub projection: crate::common::ReceiptProjection,
+    /// The credential that was made.
+    pub token_id: Id,
+    /// The newly generated secret, once; null on an idempotent replay.
+    pub token: Option<String>,
+    /// When the credential was created.
+    pub created_at: Time,
+    /// Its accepted expiry, or null for no fixed expiry.
+    pub expires_at: Option<Time>,
+    /// Whether this acknowledges an earlier successful issuance.
+    pub already_created: bool,
+}
+
+crate::common::full_or_receipt! {
+    /// The existing full reply, or its explicit restricted receipt.
+    #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+    pub enum TokenCreateResponse {
+        /// The full ordinary response.
+        Full(TokenCreated),
+        /// A successful outcome with no existing resource content.
+        Receipt(TokenCreateReceipt),
+    }
+}
+
+impl TokenCreateResponse {
+    /// Preserve a fresh issuance secret while restricting pre-existing metadata on this response.
+    #[must_use]
+    pub fn project(created: TokenCreated, receipt_only: bool) -> Self {
+        if receipt_only {
+            Self::Receipt(TokenCreateReceipt {
+                projection: crate::common::ReceiptProjection::Receipt,
+                token_id: created.info.id,
+                token: created.token,
+                created_at: created.info.created_at,
+                expires_at: created.info.expires_at,
+                already_created: created.already_created,
+            })
+        } else {
+            Self::full(created)
+        }
+    }
 }
 
 /// A fresh proof of who the caller is, given in the request that does a sensitive act: the password,
@@ -341,6 +409,64 @@ pub struct SensitiveProof {
     /// One unused recovery code, instead of a current authenticator code.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub recovery_code: Option<String>,
+}
+
+/// One safe action/target from the shared operation resolver. Historical target names are never stored.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+pub struct ApiTokenActivityFacet {
+    /// Canonical shared operation/variant.
+    pub operation: String,
+    /// Existing business action, not inferred from a method or route.
+    pub action: orch_access_contract::key_scope::KeyAction,
+    /// Actual business resource family.
+    pub resource_kind: orch_access_contract::key_scope::KeyTargetKind,
+    /// Safe governing identity; no request path, query or content.
+    pub target: orch_access_contract::key_scope::KeyObjectRef,
+    /// Its name only where the reader's current ordinary access permits knowing it.
+    pub target_name: Option<String>,
+}
+
+/// A bounded recent authenticated key call; the existing audit trail remains separate.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+pub struct ApiTokenActivity {
+    /// Record identity.
+    pub id: Id,
+    /// Server call time.
+    pub at: Time,
+    /// Stable entry operation ID.
+    pub operation: String,
+    /// Server-selected canonical variant, absent when validation never resolved one.
+    pub selection: Option<String>,
+    /// Exact safe action/target metadata; an org reader receives only that org's slice.
+    pub facets: Vec<ApiTokenActivityFacet>,
+    /// Declared HTTP/protocol method.
+    pub method: String,
+    /// Declared route template or protocol label; never a raw URL.
+    pub route: String,
+    /// Exact response or protocol status, including socket closure status.
+    pub status: u16,
+    /// Stable outcome/error code only, never a message or response body.
+    pub error_code: Option<String>,
+    /// Marked only by an actual replay producer.
+    pub replayed: bool,
+    /// Monotonic duration through the known outcome.
+    pub duration_ms: u64,
+    /// Existing request identity.
+    pub request_id: String,
+    /// Source IP under the existing account/audit privacy rules.
+    pub ip: Option<String>,
+}
+
+/// Pages at most the most recent hundred calls, with nothing older than seven days.
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+#[serde(deny_unknown_fields)]
+pub struct ApiTokenActivityQuery {
+    /// At most one hundred; ordinary page size when omitted.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub limit: Option<u32>,
+    /// Bound recent-list snapshot and timestamp/identity cursor.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub cursor: Option<String>,
 }
 
 /// A token that can reach an org, as the org's managers see it: never its secret.
@@ -636,8 +762,9 @@ pub struct MeIdentityLinkReply {
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
 #[serde(deny_unknown_fields)]
 pub struct MePasswordChangeBody {
-    /// The password they have now.
-    pub current_password: String,
+    /// Their current password for a browser or legacy credential; an admitted explicit key authenticates the account.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub current_password: Option<String>,
     /// The password to have.
     pub new_password: String,
 }
@@ -747,15 +874,17 @@ pub struct MeTotpEnableReply {
 #[serde(deny_unknown_fields)]
 pub struct MeRecoveryCodesRegenerateBody {
     /// Their password or scoped identity-provider proof, with their second step.
-    pub proof: SensitiveProof,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub proof: Option<SensitiveProof>,
 }
 
 /// Switches the authenticator app off.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
 #[serde(deny_unknown_fields)]
 pub struct MeTotpDisableBody {
-    /// Their password.
-    pub password: String,
+    /// Their password for a browser or legacy credential; unnecessary for an admitted explicit key.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub password: Option<String>,
     /// A code of the app, or one unused saved recovery code.
     pub code: String,
 }
@@ -786,8 +915,9 @@ pub struct MeEmailCodeEnableBody {
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
 #[serde(deny_unknown_fields)]
 pub struct MeEmailCodeDisableBody {
-    /// Their password.
-    pub password: String,
+    /// Their password for a browser or legacy credential; unnecessary for an admitted explicit key.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub password: Option<String>,
     /// A mailed code, or one of their authenticator.
     pub code: String,
 }
@@ -802,104 +932,230 @@ pub struct ApiTokenCreateBody {
     /// use none.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub scopes: Option<Vec<String>>,
+    /// Explicit operation/action/target rules, already expanded from a preset. Cannot be mixed
+    /// with legacy scopes/node_id. Omitting both modes creates an operation-scoped deny-all key.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub rules: Option<Vec<KeyRule>>,
     /// Limits it to one node and what is inside.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub node_id: Option<Id>,
     /// When it stops working; never, when left out.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub expires_at: Option<Time>,
-    /// The maker's fresh proof of who they are, in this request.
-    pub proof: SensitiveProof,
+    /// The browser maker's existing fresh proof. An explicitly admitted scoped-key act is
+    /// authenticated by that credential and does not submit another browser/password proof.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub proof: Option<SensitiveProof>,
 }
 
 crate::endpoints! {
     /// Answers `ok` when the API can reach its database.
-    HealthGet: GET "/health", Public, none, none, raw, 200;
+    HealthGet: GET "/health", Public, none, none, raw, 200,
+        operation Op::public();
     /// Tells a client what it may know before anybody has signed in.
-    MetaGet: GET "/meta", Public, none, none, json Meta, 200;
+    MetaGet: GET "/meta", Public, none, none, json Meta, 200,
+        operation Op::public();
     /// Makes the first system administrator, while the system still needs one.
-    SetupCreate: POST "/setup", Public, none, json SetupCreateBody, json AuthResult, 200;
+    SetupCreate: POST "/setup", Public, none, json SetupCreateBody, json AuthResult, 200,
+        operation Op::protocol();
     /// Registers a user: answers `201` with a session, or `202` when the address is to be confirmed first.
     AuthRegister: POST "/auth/register", Public, none, json AuthRegisterBody, json AuthRegisterReply, 201,
-        responses [201 => AuthRegisterResult, 202 => VerificationRequired];
+        responses [201 => AuthRegisterResult, 202 => VerificationRequired],
+        operation Op::protocol();
     /// Checks whether a public username or root-org slug is free, without accepting an email address.
-    AuthNameAvailabilityGet: GET "/auth/name-availability", Public, query AuthNameAvailabilityGetQuery, none, json AuthNameAvailabilityGetReply, 200;
+    AuthNameAvailabilityGet: GET "/auth/name-availability", Public, query AuthNameAvailabilityGetQuery, none, json AuthNameAvailabilityGetReply, 200,
+        operation Op::protocol();
     /// Signs a person in with one proof, or two where they have a second step.
-    AuthLogin: POST "/auth/login", Public, none, json AuthLoginBody, json AuthResult, 200;
+    AuthLogin: POST "/auth/login", Public, none, json AuthLoginBody, json AuthResult, 200,
+        operation Op::protocol();
     /// Mails a sign-in code where one may be sent; answers `202` whatever the name.
-    AuthEmailCodeSend: POST "/auth/email-code", Public, none, json AuthEmailCodeSendBody, none, 202;
+    AuthEmailCodeSend: POST "/auth/email-code", Public, none, json AuthEmailCodeSendBody, none, 202,
+        operation Op::protocol();
     /// Gives a new access token to the browser that holds the session cookie.
-    AuthRefresh: POST "/auth/refresh", Cookie, none, none, json AuthResult, 200;
+    AuthRefresh: POST "/auth/refresh", Cookie, none, none, json AuthResult, 200,
+        operation Op::protocol();
     /// Ends the session of the browser and revokes it.
-    AuthLogout: POST "/auth/logout", Cookie, none, none, none, 204;
+    AuthLogout: POST "/auth/logout", Cookie, none, none, none, 204,
+        operation Op::protocol();
     /// Mails a link to reset a password; answers `202` whatever the address.
-    AuthRecoveryStart: POST "/auth/recovery", Public, none, json AuthRecoveryStartBody, none, 202;
+    AuthRecoveryStart: POST "/auth/recovery", Public, none, json AuthRecoveryStartBody, none, 202,
+        operation Op::protocol();
     /// Checks that a reset link is still usable without consuming it or revealing its account.
-    AuthRecoveryCheck: GET "/auth/recovery/{token}", Public, none, none, none, 204;
+    AuthRecoveryCheck: GET "/auth/recovery/{token}", Public, none, none, none, 204,
+        operation Op::protocol();
     /// Sets a new password with the token of a reset link and revokes every session of the user.
-    AuthRecoveryConfirm: POST "/auth/recovery/confirm", Public, none, json AuthRecoveryConfirmBody, none, 204;
+    AuthRecoveryConfirm: POST "/auth/recovery/confirm", Public, none, json AuthRecoveryConfirmBody, none, 204,
+        operation Op::protocol();
     /// Confirms an address with the token of the link that was mailed.
-    AuthEmailVerify: POST "/auth/verify-email", Public, none, json AuthEmailVerifyBody, none, 204;
+    AuthEmailVerify: POST "/auth/verify-email", Public, none, json AuthEmailVerifyBody, none, 204,
+        operation Op::protocol();
     /// Mails the confirmation link again; answers `202` whatever the name.
-    AuthEmailVerifyResend: POST "/auth/verify-email/resend", Public, none, json AuthEmailVerifyResendBody, none, 202;
+    AuthEmailVerifyResend: POST "/auth/verify-email/resend", Public, none, json AuthEmailVerifyResendBody, none, 202,
+        operation Op::protocol();
     /// Reads the signed-in person.
-    MeGet: GET "/me", User, none, none, json Me, 200;
+    MeGet: GET "/me", User, none, none, json Me, 200,
+        operation Op::single(Read, &[Identity(I::Account)], Target::CurrentAccount);
     /// Loads the browser shell's personal data in one request; trees and chat contents stay lazy.
-    MeBootstrapGet: GET "/me/bootstrap", Session, none, none, json MeBootstrapReply, 200;
+    MeBootstrapGet: GET "/me/bootstrap", Session, none, none, json MeBootstrapReply, 200,
+        operation Op::facets(&[
+            Facet::required(Read, &[Identity(I::Account)], Target::CurrentAccount),
+            Facet::response_content(&[Object(K::Org)], Target::ResolvedCollection("account_organizations")),
+            Facet::response_content(&[Object(K::Org), Object(K::Project), Object(K::Topic), Object(K::Thread), Object(K::Document), Object(K::DocumentContainer), Object(K::Provider), Object(K::Agent), Object(K::Environment), Object(K::Host), Object(K::Machine), Object(K::Template), Object(K::McpServer), Object(K::Mount), Object(K::Skill)], Target::ResolvedCollection(crate::account_sources::ORGANIZATION_CONTEXT_ROLE)),
+            Facet::response_content(&[Object(K::Org), Object(K::Project), Object(K::Topic), Object(K::Thread)], Target::ResolvedCollection("favorite_nodes")),
+            Facet::response_content(&[Object(K::Org)], Target::ResolvedCollection("favorite_names_orgs")),
+            Facet::response_content(&[Object(K::Project)], Target::ResolvedCollection("favorite_names_projects")),
+            Facet::response_content(&[Object(K::Topic)], Target::ResolvedCollection("favorite_names_topics")),
+            Facet::response_content(&[Object(K::Thread)], Target::ResolvedCollection("favorite_names_threads")),
+            Facet::response_content(&[Object(K::Thread)], Target::ResolvedCollection("read_state_threads")),
+            Facet::response_content(&[Object(K::Org), Object(K::Project), Object(K::Topic), Object(K::Thread)], Target::ResolvedCollection("subscription_nodes")),
+            Facet::response_content(&[Identity(I::Chat)], Target::ResolvedCollection("personal_state_chats")),
+        ]);
     /// Retakes current person, session mode, organizations and Meta after a feed is admitted.
-    MeAuthorityGet: GET "/me/authority", Session, none, none, json MeAuthorityReply, 200;
+    MeAuthorityGet: GET "/me/authority", Session, none, none, json MeAuthorityReply, 200,
+        operation Op::facets(&[
+            Facet::required(Read, &[Identity(I::Account)], Target::CurrentAccount),
+            Facet::response_content(&[Object(K::Org)], Target::ResolvedCollection("account_organizations")),
+            Facet::response_content(&[Object(K::Org), Object(K::Project), Object(K::Topic), Object(K::Thread), Object(K::Document), Object(K::DocumentContainer), Object(K::Provider), Object(K::Agent), Object(K::Environment), Object(K::Host), Object(K::Machine), Object(K::Template), Object(K::McpServer), Object(K::Mount), Object(K::Skill)], Target::ResolvedCollection(crate::account_sources::ORGANIZATION_CONTEXT_ROLE)),
+        ]);
     /// Changes what the signed-in person set for themself, an address included.
-    MeUpdate: PATCH "/me", User, none, json MeUpdateBody, json Me, 200;
+    MeUpdate: PATCH "/me", User, none, json MeUpdateBody, json Me, 200,
+        operation Op::variants(&[
+            Variant {
+                name: "profile",
+                selector: "profile or interface fields are present and email is absent",
+                facets: &[
+                    Facet::required(Write, &[Identity(I::Account)], Target::CurrentAccount),
+                    Facet::response_content(&[Identity(I::Account)], Target::CurrentAccount),
+                ],
+            },
+            Variant {
+                name: "security",
+                selector: "email is present, including explicit null, and profile or interface fields are absent",
+                facets: &[
+                    Facet::required(Manage, &[Identity(I::Account)], Target::CurrentAccount),
+                    Facet::response_content(&[Identity(I::Account)], Target::CurrentAccount),
+                ],
+            },
+            Variant {
+                name: "profile_and_security",
+                selector: "email and profile or interface fields are both present",
+                facets: &[
+                    Facet::required(Write, &[Identity(I::Account)], Target::CurrentAccount),
+                    Facet::required(Manage, &[Identity(I::Account)], Target::CurrentAccount),
+                    Facet::response_content(&[Identity(I::Account)], Target::CurrentAccount),
+                ],
+            },
+        ]);
     /// Sends the browser to an identity provider to sign in.
-    AuthOidcStart: GET "/auth/oidc/{key}/start", Public, query AuthOidcStartQuery, none, raw, 302;
+    AuthOidcStart: GET "/auth/oidc/{key}/start", Public, query AuthOidcStartQuery, none, raw, 302,
+        operation Op::protocol();
     /// Finishes a sign-in through an identity provider and sets the session cookie.
-    AuthOidcCallback: GET "/auth/oidc/{key}/callback", Public, query AuthOidcCallbackQuery, none, raw, 302;
+    AuthOidcCallback: GET "/auth/oidc/{key}/callback", Public, query AuthOidcCallbackQuery, none, raw, 302,
+        operation Op::protocol();
     /// Begins linking an identity provider to the signed-in user.
-    MeIdentityLink: POST "/me/identities/{key}/link", User, none, none, json MeIdentityLinkReply, 200;
+    MeIdentityLink: POST "/me/identities/{key}/link", User, none, none, json MeIdentityLinkReply, 200,
+        operation Op::single(Manage, &[Identity(I::Account)], Target::CurrentAccount);
     /// Unlinks an identity, unless that would leave no way to sign in.
-    MeIdentityDelete: DELETE "/me/identities/{key}", User, none, none, none, 204;
+    MeIdentityDelete: DELETE "/me/identities/{key}", User, none, none, none, 204,
+        operation Op::single(Manage, &[Identity(I::Account)], Target::CurrentAccount);
     /// Changes the password and revokes the other sessions.
-    MePasswordChange: POST "/me/password", User, none, json MePasswordChangeBody, none, 204;
+    MePasswordChange: POST "/me/password", User, none, json MePasswordChangeBody, none, 204,
+        operation Op::single(Manage, &[Identity(I::Account)], Target::CurrentAccount);
     /// Begins the setup of an authenticator app and returns its secret.
-    MeTotpSetup: POST "/me/totp/setup", User, none, json MeTotpSetupBody, json MeTotpSetupReply, 200;
+    MeTotpSetup: POST "/me/totp/setup", User, none, json MeTotpSetupBody, json MeTotpSetupReply, 200,
+        operation Op::single(Manage, &[Identity(I::Account)], Target::CurrentAccount);
     /// Switches the authenticator app on.
-    MeTotpEnable: POST "/me/totp/enable", User, none, json MeTotpEnableBody, json MeTotpEnableReply, 200;
+    MeTotpEnable: POST "/me/totp/enable", User, none, json MeTotpEnableBody, json MeTotpEnableReply, 200,
+        operation Op::single(Manage, &[Identity(I::Account)], Target::CurrentAccount);
     /// Reads only backup-code metadata and available second proofs, never saved code values.
-    MeRecoveryCodesGet: GET "/me/recovery-codes", Session, none, none, json RecoveryCodeStatus, 200;
+    MeRecoveryCodesGet: GET "/me/recovery-codes", Session, none, none, json RecoveryCodeStatus, 200,
+        operation Op::single(Read, &[Identity(I::Account)], Target::CurrentAccount);
     /// Replaces every older authenticator recovery code; plaintext is returned once, never read later.
-    MeRecoveryCodesRegenerate: POST "/me/recovery-codes", Session, none, json MeRecoveryCodesRegenerateBody, json RecoveryCodeBatch, 200;
+    MeRecoveryCodesRegenerate: POST "/me/recovery-codes", Session, none, json MeRecoveryCodesRegenerateBody, json RecoveryCodeBatch, 200,
+        operation Op::single(Manage, &[Identity(I::Account)], Target::CurrentAccount);
     /// Switches the authenticator app off.
-    MeTotpDisable: POST "/me/totp/disable", User, none, json MeTotpDisableBody, none, 204;
+    MeTotpDisable: POST "/me/totp/disable", User, none, json MeTotpDisableBody, none, 204,
+        operation Op::single(Manage, &[Identity(I::Account)], Target::CurrentAccount);
     /// Mails a code to the confirmed address, to make it a second step.
-    MeEmailCodeSend: POST "/me/email-code/send", User, none, json MeEmailCodeSendBody, none, 202;
+    MeEmailCodeSend: POST "/me/email-code/send", User, none, json MeEmailCodeSendBody, none, 202,
+        operation Op::single(Manage, &[Identity(I::Account)], Target::CurrentAccount);
     /// Makes a mailed code a second step of the signed-in person.
-    MeEmailCodeEnable: POST "/me/email-code/enable", User, none, json MeEmailCodeEnableBody, none, 204;
+    MeEmailCodeEnable: POST "/me/email-code/enable", User, none, json MeEmailCodeEnableBody, none, 204,
+        operation Op::single(Manage, &[Identity(I::Account)], Target::CurrentAccount);
     /// Stops a mailed code being a second step.
-    MeEmailCodeDisable: POST "/me/email-code/disable", User, none, json MeEmailCodeDisableBody, none, 204;
+    MeEmailCodeDisable: POST "/me/email-code/disable", User, none, json MeEmailCodeDisableBody, none, 204,
+        operation Op::single(Manage, &[Identity(I::Account)], Target::CurrentAccount);
     /// Gives this browser session's second proof, which the orgs that require one wait for.
-    MeSecondStepVerify: POST "/me/second-step/verify", Session, none, json MeSecondStepVerifyBody, json Me, 200;
+    MeSecondStepVerify: POST "/me/second-step/verify", Session, none, json MeSecondStepVerifyBody, json Me, 200,
+        operation Op::protocol();
     /// Reads this browser session's explicit administrator mode.
-    MeAdminModeGet: GET "/me/admin-mode", Session, none, none, json AdminMode, 200;
+    MeAdminModeGet: GET "/me/admin-mode", Session, none, none, json AdminMode, 200,
+        operation Op::browser_elevation();
     /// Changes this browser session's explicit administrator mode; enabling needs current administration standing.
-    MeAdminModeSet: PUT "/me/admin-mode", Session, none, json AdminModeSetBody, json AdminMode, 200;
+    MeAdminModeSet: PUT "/me/admin-mode", Session, none, json AdminModeSetBody, json AdminMode, 200,
+        operation Op::browser_elevation();
     /// Rechecks and records an opening of a cached private view using this session's native reach.
-    MeAdminOpening: POST "/me/admin-openings", Session, none, json AdminOpeningBody, none, 204;
+    MeAdminOpening: POST "/me/admin-openings", Session, none, json AdminOpeningBody, none, 204,
+        operation Op::browser_elevation();
     /// Lists the sessions of the signed-in person.
-    MeSessionList: GET "/me/sessions", User, none, none, json Vec<SessionInfo>, 200;
+    /// Reading the account collection requires its Read scope; each returned credential also needs this operation's own Read scope. Account self alone does not reveal its credentials.
+    MeSessionList: GET "/me/sessions", User, none, none, json Vec<SessionInfo>, 200,
+        operation Op::facets(&[
+            Facet::required(Read, &[Identity(I::Session)], Target::CurrentAccount),
+            Facet::response_content(&[Identity(I::Session)], Target::ResolvedCollection("listed_sessions")),
+        ]);
     /// Signs the person out of every other browser, retaining exactly the session that makes this request.
-    MeSessionOthersDelete: DELETE "/me/sessions", Session, none, none, json Vec<SessionInfo>, 200;
+    MeSessionOthersDelete: DELETE "/me/sessions", Session, none, none, json Vec<SessionInfo>, 200,
+        operation Op::facets(&[
+            Facet::required(Manage, &[Identity(I::Session)], Target::ResolvedCollection("selected_sessions")),
+            Facet::response_content(&[Identity(I::Session)], Target::ResolvedCollection("remaining_sessions")),
+        ]);
     /// Ends one of the sessions of the signed-in person.
-    MeSessionDelete: DELETE "/me/sessions/{id}", User, none, none, none, 204;
+    MeSessionDelete: DELETE "/me/sessions/{id}", User, none, none, none, 204,
+        operation Op::legacy_tokens(&[], &Op::single(Manage, &[Identity(I::Session)], Target::Path("id")));
     /// Lists the API tokens of the signed-in person.
-    MeTokenList: GET "/me/tokens", User, none, none, json Vec<ApiTokenInfo>, 200;
-    /// Makes an API token with the maker's fresh proof; its secret is shown once, and only to a browser session.
-    MeTokenCreate: POST "/me/tokens", Session, none, json ApiTokenCreateBody, json TokenCreated, 200;
+    /// Reading the account collection requires its Read scope; each returned credential also needs this operation's own Read scope. Account self alone does not reveal its credentials.
+    MeTokenList: GET "/me/tokens", User, none, none, json Vec<ApiTokenInfo>, 200,
+        operation Op::facets(&[
+            Facet::required(Read, &[Identity(I::Key)], Target::CurrentAccount),
+            Facet::response_content(&[Identity(I::Key)], Target::ResolvedCollection("listed_keys")),
+            Facet::response_content(&[Object(K::Org)], Target::ResolvedCollection("key_scope_orgs")),
+            Facet::response_content(&[Object(K::Project)], Target::ResolvedCollection("key_scope_projects")),
+            Facet::response_content(&[Object(K::Topic)], Target::ResolvedCollection("key_scope_topics")),
+            Facet::response_content(&[Object(K::Thread)], Target::ResolvedCollection("key_scope_threads")),
+        ]);
+    /// Reads this account's owned key history, including authenticated refusals and replays.
+    MeTokenActivityList: GET "/me/tokens/{id}/activity", User, query ApiTokenActivityQuery, none, json crate::common::Page<ApiTokenActivity>, 200,
+        operation Op::single(Read, &[Identity(I::Key)], Target::Resolved("owned_key"));
+    /// Reads only the selected organization's recorded activity facets under current membership management.
+    OrgTokenActivityList: GET "/orgs/{id}/tokens/{token_id}/activity", Permission("members.manage"), query ApiTokenActivityQuery, none, json crate::common::Page<ApiTokenActivity>, 200,
+        operation Op::single(Read, &[Identity(I::Key)], Target::Resolved("activity_org"));
+    /// Makes a key through the shared authorized account operation; its secret is shown once.
+    MeTokenCreate: POST "/me/tokens", Session, none, json ApiTokenCreateBody, json TokenCreateResponse, 200,
+        operation Op::receipt(&Op::returning(Manage, &[Identity(I::Key)], Target::CurrentAccount));
     /// Revokes an API token.
-    MeTokenDelete: DELETE "/me/tokens/{id}", User, none, none, none, 204;
+    MeTokenDelete: DELETE "/me/tokens/{id}", User, none, none, none, 204,
+        operation Op::returning(Manage, &[Identity(I::Key)], Target::Resolved("owned_key"));
     /// Lists the tokens that can reach anything in an org, with whether each is refused here or lives too long for it.
-    OrgTokenList: GET "/orgs/{id}/tokens", Permission("members.manage"), query OrgTokenListQuery, none, json crate::common::Page<OrgToken>, 200;
+    /// Organization governance admits the inventory operation; each full credential additionally
+    /// needs this operation's own Read on its real Key/owning Account, not an invented org placement.
+    OrgTokenList: GET "/orgs/{id}/tokens", Permission("members.manage"), query OrgTokenListQuery, none, json crate::common::Page<OrgToken>, 200,
+        operation Op::facets(&[
+            Facet::required(Manage, &[Identity(I::Key)], Target::Resolved("org_keys")),
+            Facet::response_content(&[Identity(I::Key)], Target::ResolvedCollection("listed_keys")),
+            Facet::response_content(&[Object(K::Org)], Target::ResolvedCollection("key_scope_orgs")),
+            Facet::response_content(&[Object(K::Project)], Target::ResolvedCollection("key_scope_projects")),
+            Facet::response_content(&[Object(K::Topic)], Target::ResolvedCollection("key_scope_topics")),
+            Facet::response_content(&[Object(K::Thread)], Target::ResolvedCollection("key_scope_threads")),
+        ]);
     /// Refuses a token in an org and everything inside it, without revoking it elsewhere.
-    OrgTokenRefuse: POST "/orgs/{id}/tokens/{token_id}/refuse", Permission("members.manage"), none, none, none, 204;
+    /// Its empty acknowledgement remains available with Manage; names in an ordinary
+    /// refusal additionally follow this operation's Read on the actual governing org.
+    OrgTokenRefuse: POST "/orgs/{id}/tokens/{token_id}/refuse", Permission("members.manage"), none, none, none, 204,
+        operation Op::facets(&[
+            Facet::required(Manage, &[Identity(I::Key)], Target::Resolved("org_key")),
+            Facet::response_content(&[Object(K::Org)], Target::Resolved("refusal_org")),
+        ]);
 }
 
 /// Pages the tokens that reach an org.
@@ -926,11 +1182,16 @@ mod tests {
             "proof": { "password": "my own long phrase", "totp": "123456" }
         }))
         .unwrap();
-        assert_eq!(asked.proof.totp.as_deref(), Some("123456"));
-        assert_eq!(asked.proof.identity_proof, None);
+        assert_eq!(
+            asked.proof.as_ref().unwrap().totp.as_deref(),
+            Some("123456")
+        );
+        assert_eq!(asked.proof.as_ref().unwrap().identity_proof, None);
+        let key_request: ApiTokenCreateBody =
+            serde_json::from_value(json!({ "name": "deploy", "rules": [] })).unwrap();
         assert!(
-            serde_json::from_value::<ApiTokenCreateBody>(json!({ "name": "deploy" })).is_err(),
-            "a token is never made without a proof in the same request"
+            key_request.proof.is_none(),
+            "scoped-key authentication supplies no browser proof; browser enforcement remains in the shared producer"
         );
         let info = json!({
             "id": "0199d1a8-7f3c-7a1e-8b3a-1c2d3e4f5a01", "name": "deploy", "scopes": ["thread.view"],
@@ -1076,12 +1337,49 @@ mod tests {
         let replace: MeRecoveryCodesRegenerateBody =
             serde_json::from_value(json!({"proof":{"password":"long", "recovery_code":"saved"}}))
                 .unwrap();
-        assert_eq!(replace.proof.recovery_code.as_deref(), Some("saved"));
+        assert_eq!(
+            replace
+                .proof
+                .as_ref()
+                .and_then(|proof| proof.recovery_code.as_deref()),
+            Some("saved")
+        );
         let start: AuthOidcStartQuery =
             serde_json::from_value(json!({"sensitive_purpose":"recovery_codes"})).unwrap();
         assert_eq!(
             start.sensitive_purpose,
             Some(SensitivePurpose::RecoveryCodes)
         );
+    }
+
+    #[test]
+    fn token_receipts_preserve_the_new_secret_and_hide_existing_metadata_on_replay() {
+        let info = json!({
+            "id":"00000000-0000-0000-0000-000000000001", "name":"Private earlier key name",
+            "scopes":["doc.view"],
+            "node":{"id":"00000000-0000-0000-0000-000000000002", "kind":"project", "name":"Private project name", "redacted":false},
+            "created_at":"2026-11-01T00:00:00Z", "last_used_at":null, "expires_at":null
+        });
+        for (secret, replay) in [(Some("new-secret-once"), false), (None, true)] {
+            let full: TokenCreated = serde_json::from_value(json!({
+                "token":secret, "info":info, "already_created":replay
+            }))
+            .unwrap();
+            let original = serde_json::to_value(&full).unwrap();
+            assert_eq!(
+                serde_json::to_value(TokenCreateResponse::project(full.clone(), false)).unwrap(),
+                original
+            );
+            let receipt = serde_json::to_value(TokenCreateResponse::project(full, true)).unwrap();
+            assert_eq!(receipt["projection"], "receipt");
+            assert_eq!(receipt["token"], json!(secret));
+            assert_eq!(receipt["already_created"], replay);
+            assert!(receipt.get("info").is_none());
+            assert!(!receipt.to_string().contains("Private"));
+            assert!(matches!(
+                serde_json::from_value::<TokenCreateResponse>(receipt).unwrap(),
+                TokenCreateResponse::Receipt(_)
+            ));
+        }
     }
 }

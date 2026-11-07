@@ -36,6 +36,15 @@ async fn opening_a_chat_keeps_its_native_conversation_and_only_the_callers_draft
         .send()
         .await
         .ok();
+    // Establish the entitled ordinary readers before the aggregate so a broken
+    // opening cannot hide a fixture/admission failure behind its first error.
+    let expected_sync = room.sync(&room.ada, room.chat).await;
+    let expected_draft = app
+        .call(ChatDraftGet, &[&room.chat])
+        .token(&room.ada.token)
+        .send()
+        .await
+        .ok();
     let opened = app
         .call(ChatOpeningGet, &[&room.chat])
         .token(&room.ada.token)
@@ -43,15 +52,8 @@ async fn opening_a_chat_keeps_its_native_conversation_and_only_the_callers_draft
         .send()
         .await
         .ok();
-    assert_eq!(opened.sync, room.sync(&room.ada, room.chat).await);
-    assert_eq!(
-        opened.draft,
-        app.call(ChatDraftGet, &[&room.chat])
-            .token(&room.ada.token)
-            .send()
-            .await
-            .ok()
-    );
+    assert_eq!(opened.sync, expected_sync);
+    assert_eq!(opened.draft, expected_draft);
     let other = app
         .call(ChatOpeningGet, &[&room.chat])
         .token(&room.bea.token)
@@ -100,6 +102,7 @@ async fn a_named_topic_never_admits_its_unreadable_parent_chat() {
             scope: Some(NodeKind::Project),
             chat_id: Some(chat_world::chat_of(&room.world, &room.ada, room.project).await),
             limit: Some(10),
+            ..Default::default()
         })
         .send()
         .await

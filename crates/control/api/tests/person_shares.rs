@@ -9,6 +9,8 @@ mod desk;
 mod places;
 mod reader_diagnostics;
 mod support;
+use crate::support::FullPermissionPageReply;
+use support::FullRoleReply as _;
 
 use desk::Desk;
 use orch_api_contract::access::{NodeRoleCreate, PermissionPageUpdate};
@@ -35,6 +37,7 @@ async fn give(desk: &Desk, object: &str, id: Id, to: &places::Who) {
         )
         .send()
         .await
+        .full_permission_page()
         .ok();
 }
 
@@ -47,7 +50,7 @@ async fn the_card_reads_real_roles_and_pages_once_and_opens_a_readable_document(
     // Several permissions on one object still make one card row.
     desk.world.app.call(NodeRoleCreate, &[&desk.topic]).token(&desk.ada.token)
         .raw_body(&json!({"subject":{"kind":"user","id":bob.id()},"role":"viewer"}))
-        .send().await.ok();
+        .send().await.full_role().ok();
     let mut body = desk::body("A private plan");
     body.access = Some(orch_api_contract::documents::NewDocumentAccess::Private);
     let doc = desk.make_body(&desk.ada, body).await.ok();
@@ -156,7 +159,9 @@ async fn a_direct_folder_share_is_discoverable_by_both_people_without_giving_its
         })
         .send()
         .await
-        .ok();
+        .ok()
+        .into_full()
+        .unwrap();
     let id = match created.entries.first().map(|entry| entry.item) {
         Some(DocumentTreeItem::Container(id)) => id,
         _ => return Err("folder receipt absent".into()),

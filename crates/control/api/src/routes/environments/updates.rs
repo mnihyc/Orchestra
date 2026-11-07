@@ -328,9 +328,24 @@ pub(crate) async fn audience(
     principal: &Principal,
     threads: &[Id],
 ) -> ApiResult<orch_api_contract::forks::UpdateAudience> {
+    audience_bounded(ctx, conn, principal, threads, None).await
+}
+
+/// The same notification audience, within this operation's current optional name sources.
+pub(crate) async fn audience_bounded(
+    ctx: &Ctx,
+    conn: &mut Conn,
+    principal: &Principal,
+    threads: &[Id],
+    bounds: Option<&crate::routes::access::page::NameBounds>,
+) -> ApiResult<orch_api_contract::forks::UpdateAudience> {
     let affected = affected_people(conn, threads, ctx.user()?.id()).await?;
-    let refs =
-        crate::routes::nodes::view::refs(conn, principal, threads, Policy::default()).await?;
+    let refs = match bounds {
+        Some(bounds) => bounds.refs(conn, principal, threads).await?,
+        None => {
+            crate::routes::nodes::view::refs(conn, principal, threads, Policy::default()).await?
+        }
+    };
     let all: std::collections::BTreeSet<_> = affected.iter().map(|(_, person)| *person).collect();
     let visible: std::collections::BTreeSet<_> = affected
         .iter()
@@ -397,6 +412,51 @@ pub(crate) async fn keep_batch(
     recipes: &[Recipe],
     providers: bool,
 ) -> ApiResult<()> {
+    keep_batch_plan(
+        ctx,
+        conn,
+        id,
+        node,
+        json!({"recipes":recipes,"providers":providers}),
+    )
+    .await
+}
+
+/// Provider runtime batches retain their exact accepted preview in the existing private row.
+pub(crate) async fn keep_provider_batch(
+    ctx: &Ctx,
+    conn: &mut Conn,
+    id: Id,
+    recipes: &[Recipe],
+    origin: &orch_authz::CapturedOperation,
+) -> ApiResult<()> {
+    if origin.operation() != "ProviderRuntimeUpdateBatchPreflight"
+        || origin.user() != ctx.user()?.id()
+        || recipes.iter().any(|recipe| {
+            !matches!(recipe.target, Target::Provider(_)) || recipe.by != origin.user()
+        })
+    {
+        return Err(ApiError::internal(
+            "the provider batch preview origin does not match its recipes",
+        ));
+    }
+    keep_batch_plan(
+        ctx,
+        conn,
+        id,
+        None,
+        json!({"recipes":recipes,"providers":true,"provider_update_origins":[origin]}),
+    )
+    .await
+}
+
+async fn keep_batch_plan(
+    ctx: &Ctx,
+    conn: &mut Conn,
+    id: Id,
+    node: Option<Id>,
+    plan: orch_types::Json,
+) -> ApiResult<()> {
     jobs::forks::save_preflight(
         conn,
         &PreflightRow {
@@ -405,7 +465,7 @@ pub(crate) async fn keep_batch(
             node_id: node,
             environment_id: None,
             created_by: ctx.user()?.id(),
-            plan: json!({"recipes":recipes,"providers":providers}),
+            plan,
             expires_at: updates::expires(ctx.now),
             created_at: ctx.now,
         },
@@ -452,7 +512,11 @@ pub(crate) async fn batch_drafts(
             )
             .await
             .map_err(refused)?;
-        if draft.recipe.old != recipe.old || draft.recipe.hash != recipe.hash {
+        if draft.recipe.old != recipe.old
+            || draft.recipe.hash != recipe.hash
+            || providers
+                && (draft.recipe.host != recipe.host || draft.recipe.template != recipe.template)
+        {
             return Err(ApiError::new(
                 ErrorCode::ConflictStaleRevision,
                 "a unit or its selected target changed after this batch was planned; review a new plan",

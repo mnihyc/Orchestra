@@ -7,7 +7,7 @@
 //! is a chip to a document they cannot read. This is looked up once for a
 //! whole answer, in a few statements however many blocks it holds.
 
-use std::collections::HashMap;
+use std::collections::{BTreeMap, BTreeSet, HashMap};
 
 use crate::middleware::authorization::refusals::user_refs;
 use crate::middleware::requests::{ApiError, ApiResult};
@@ -35,38 +35,22 @@ use orch_documents::describe;
 use orch_documents::position::Position;
 use orch_types::{Id, Time};
 
-/// Captures missing labels from the author's current readable names before storing newly written content.
-pub async fn label_written<T: serde::Serialize + serde::de::DeserializeOwned>(
-    conn: &mut Conn,
-    principal: &Principal,
-    content: T,
-) -> ApiResult<T> {
-    fn references(value: &serde_json::Value, out: &mut Vec<Inline>) {
-        match value {
-            serde_json::Value::Object(object)
-                if object.get("type").and_then(serde_json::Value::as_str) == Some("ref") =>
-            {
-                if let Ok(reference) = serde_json::from_value(value.clone()) {
-                    out.push(reference);
-                }
-            }
-            serde_json::Value::Object(object) => {
-                for value in object.values() {
-                    references(value, out);
-                }
-            }
-            serde_json::Value::Array(items) => {
-                for value in items {
-                    references(value, out);
-                }
-            }
-            _ => {}
-        }
-    }
-    fn fill(
-        value: &mut serde_json::Value,
-        labels: &HashMap<(InlineRefKind, Id, Option<String>), String>,
-    ) {
+/// The resource whose already-readable label is copied into a newly written reference.
+/// Attached files retain their actual document/chat owner from the ordinary Cast producer.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
+pub(crate) enum WrittenLabelSource {
+    /// A node's current name.
+    Node(Id),
+    /// A document's title or an attached file's name.
+    Document(Id),
+    /// A chat's current name or a file carried by one of its messages.
+    Chat(Id),
+}
+
+type WrittenReference = (InlineRefKind, Id, Option<String>);
+
+fn missing_label_references<T: serde::Serialize>(content: &T) -> ApiResult<Vec<Inline>> {
+    fn missing(value: &serde_json::Value, out: &mut Vec<Inline>) {
         match value {
             serde_json::Value::Object(object)
                 if object.get("type").and_then(serde_json::Value::as_str) == Some("ref") =>
@@ -74,50 +58,259 @@ pub async fn label_written<T: serde::Serialize + serde::de::DeserializeOwned>(
                 if !object
                     .get("label")
                     .is_some_and(serde_json::Value::is_string)
-                    && let Ok(Inline::Ref { kind, id, path, .. }) =
-                        serde_json::from_value(serde_json::Value::Object(object.clone()))
-                    && let Some(label) = labels.get(&(kind, id, path))
+                    && let Ok(reference) = serde_json::from_value(value.clone())
                 {
-                    object.insert("label".to_owned(), serde_json::Value::String(label.clone()));
+                    out.push(reference);
                 }
             }
             serde_json::Value::Object(object) => {
-                for value in object.values_mut() {
-                    fill(value, labels);
+                for value in object.values() {
+                    missing(value, out);
                 }
             }
             serde_json::Value::Array(items) => {
                 for value in items {
-                    fill(value, labels);
+                    missing(value, out);
                 }
             }
             _ => {}
         }
     }
-    let mut value = serde_json::to_value(content).map_err(ApiError::internal)?;
+    let value = serde_json::to_value(content).map_err(ApiError::internal)?;
     let mut refs = Vec::new();
-    references(&value, &mut refs);
-    if !refs.is_empty() {
+    missing(&value, &mut refs);
+    Ok(refs)
+}
+
+async fn reference_candidates(
+    conn: &mut Conn,
+    refs: &[Inline],
+) -> ApiResult<Vec<WrittenLabelSource>> {
+    let mut sources = BTreeSet::new();
+    let mut files = Vec::new();
+    let mut chats = Vec::new();
+    for reference in refs {
+        let Inline::Ref { kind, id, .. } = reference else {
+            continue;
+        };
+        match kind {
+            InlineRefKind::Node => {
+                sources.insert(WrittenLabelSource::Node(*id));
+            }
+            InlineRefKind::Document => {
+                sources.insert(WrittenLabelSource::Document(*id));
+            }
+            InlineRefKind::Chat => {
+                sources.insert(WrittenLabelSource::Chat(*id));
+                chats.push(*id);
+            }
+            InlineRefKind::File => files.push(*id),
+            InlineRefKind::EnvironmentFile => {}
+        }
+    }
+    if !chats.is_empty() {
+        for chat in orch_db::queries::chats::chats(conn, &chats).await? {
+            if chat.name.is_none() {
+                sources.extend(chat.node_id.map(WrittenLabelSource::Node));
+            }
+        }
+    }
+    if !files.is_empty() {
+        sources.extend(
+            ReferenceFileRows::sources(conn, &files)
+                .await?
+                .into_values()
+                .flatten(),
+        );
+    }
+    Ok(sources.into_iter().collect())
+}
+
+async fn scoped_references(
+    conn: &mut Conn,
+    mut refs: Vec<Inline>,
+    allowed: &BTreeSet<WrittenLabelSource>,
+) -> ApiResult<Vec<Inline>> {
+    let files: Vec<Id> = refs
+        .iter()
+        .filter_map(|reference| match reference {
+            Inline::Ref {
+                kind: InlineRefKind::File,
+                id,
+                ..
+            } => Some(*id),
+            _ => None,
+        })
+        .collect();
+    let file_sources = ReferenceFileRows::sources(conn, &files).await?;
+    refs.retain(|reference| match reference {
+        Inline::Ref { kind, id, .. } => match kind {
+            InlineRefKind::Node => allowed.contains(&WrittenLabelSource::Node(*id)),
+            InlineRefKind::Document => allowed.contains(&WrittenLabelSource::Document(*id)),
+            InlineRefKind::Chat => allowed.contains(&WrittenLabelSource::Chat(*id)),
+            InlineRefKind::File => file_sources
+                .get(id)
+                .is_some_and(|sources| sources.iter().any(|source| allowed.contains(source))),
+            InlineRefKind::EnvironmentFile => true,
+        },
+        _ => false,
+    });
+    Ok(refs)
+}
+
+fn visit_inline(content: &BlockContent, mut visit: impl FnMut(&Inline)) {
+    match content {
+        BlockContent::Inline(runs) => runs.iter().for_each(&mut visit),
+        BlockContent::Rows(rows) => {
+            for cell in rows.iter().flat_map(|row| &row.cells) {
+                cell.content.iter().for_each(&mut visit);
+            }
+        }
+    }
+}
+
+/// The exact labels the existing visibility producer would materialize for this input.
+/// Keep this value with the operation's checked sources so applying it cannot discover a new source.
+#[derive(Debug, Default)]
+pub(crate) struct WrittenLabels {
+    labels: HashMap<WrittenReference, String>,
+    sources: Vec<WrittenLabelSource>,
+}
+
+impl WrittenLabels {
+    /// Uses the ordinary name/visibility producer. Explicit labels are supplied content and cause
+    /// no source lookup. An unreadable/missing reference produces neither a label nor a source.
+    pub(crate) async fn capture<T: serde::Serialize>(
+        conn: &mut Conn,
+        principal: &Principal,
+        content: &T,
+    ) -> ApiResult<Self> {
+        Self::capture_for_sources(conn, principal, content, None).await
+    }
+
+    /// Candidate governing identities before name/visibility evaluation. This uses the same stored
+    /// file relations as Cast; it supplies no names and decides no key or account permission.
+    pub(crate) async fn candidates<T: serde::Serialize>(
+        conn: &mut Conn,
+        content: &T,
+    ) -> ApiResult<Vec<WrittenLabelSource>> {
+        reference_candidates(conn, &missing_label_references(content)?).await
+    }
+
+    /// `allowed` is the shared operation planner's admitted candidate set, never request data.
+    /// Optional labels outside it remain absent; a newly discovered file owner cannot enter it.
+    pub(crate) async fn capture_allowed<T: serde::Serialize>(
+        conn: &mut Conn,
+        principal: &Principal,
+        content: &T,
+        allowed: &[WrittenLabelSource],
+    ) -> ApiResult<Self> {
+        Self::capture_for_sources(conn, principal, content, Some(allowed)).await
+    }
+
+    async fn capture_for_sources<T: serde::Serialize>(
+        conn: &mut Conn,
+        principal: &Principal,
+        content: &T,
+        allowed: Option<&[WrittenLabelSource]>,
+    ) -> ApiResult<Self> {
+        let mut refs = missing_label_references(content)?;
+        let allowed = allowed.map(|sources| sources.iter().copied().collect::<BTreeSet<_>>());
+        if let Some(allowed) = &allowed {
+            refs = scoped_references(conn, refs, allowed).await?;
+        }
+        if refs.is_empty() {
+            return Ok(Self::default());
+        }
         let mut wanted = Wanted::default();
         wanted.runs(&refs);
-        let cast = Cast::load(conn, principal, wanted, Policy::default()).await?;
-        let labels = cast
-            .expand(refs)
-            .into_iter()
-            .filter_map(|inline| match inline {
-                Inline::Ref {
-                    kind,
-                    id,
-                    path,
-                    name: Some(Some(name)),
-                    ..
-                } => Some(((kind, id, path), name)),
-                _ => None,
-            })
-            .collect();
-        fill(&mut value, &labels);
+        let cast =
+            Cast::load_for_labels(conn, principal, wanted, Policy::default(), allowed.as_ref())
+                .await?;
+        let mut labels = HashMap::new();
+        let mut sources = std::collections::BTreeSet::new();
+        for inline in cast.expand(refs) {
+            let Inline::Ref {
+                kind,
+                id,
+                path,
+                name: Some(Some(name)),
+                ..
+            } = inline
+            else {
+                continue;
+            };
+            let source = cast.materialized_source(kind, id)?;
+            if source.iter().any(|source| {
+                allowed
+                    .as_ref()
+                    .is_some_and(|allowed| !allowed.contains(source))
+            }) {
+                continue;
+            }
+            sources.extend(source);
+            labels.insert((kind, id, path), name);
+        }
+        Ok(Self {
+            labels,
+            sources: sources.into_iter().collect(),
+        })
     }
-    serde_json::from_value(value).map_err(ApiError::internal)
+
+    /// Actual eligible sources, for the shared operation resolver's target binding.
+    pub(crate) fn sources(&self) -> &[WrittenLabelSource] {
+        &self.sources
+    }
+
+    /// Applies only the captured values, without another name or permission lookup. Supplied
+    /// labels remain untouched, including an explicitly empty one.
+    pub(crate) fn apply<T: serde::Serialize + serde::de::DeserializeOwned>(
+        &self,
+        content: T,
+    ) -> ApiResult<T> {
+        fn fill(value: &mut serde_json::Value, labels: &HashMap<WrittenReference, String>) {
+            match value {
+                serde_json::Value::Object(object)
+                    if object.get("type").and_then(serde_json::Value::as_str) == Some("ref") =>
+                {
+                    if !object
+                        .get("label")
+                        .is_some_and(serde_json::Value::is_string)
+                        && let Ok(Inline::Ref { kind, id, path, .. }) =
+                            serde_json::from_value(serde_json::Value::Object(object.clone()))
+                        && let Some(label) = labels.get(&(kind, id, path))
+                    {
+                        object.insert("label".to_owned(), serde_json::Value::String(label.clone()));
+                    }
+                }
+                serde_json::Value::Object(object) => {
+                    for value in object.values_mut() {
+                        fill(value, labels);
+                    }
+                }
+                serde_json::Value::Array(items) => {
+                    for value in items {
+                        fill(value, labels);
+                    }
+                }
+                _ => {}
+            }
+        }
+        let mut value = serde_json::to_value(content).map_err(ApiError::internal)?;
+        fill(&mut value, &self.labels);
+        serde_json::from_value(value).map_err(ApiError::internal)
+    }
+}
+
+/// Captures missing labels from the author's current readable names before storing newly written content.
+pub async fn label_written<T: serde::Serialize + serde::de::DeserializeOwned>(
+    conn: &mut Conn,
+    principal: &Principal,
+    content: T,
+) -> ApiResult<T> {
+    WrittenLabels::capture(conn, principal, &content)
+        .await?
+        .apply(content)
 }
 
 /// What a reader's answer is going to name.
@@ -216,24 +409,89 @@ impl Wanted {
         self.content(&blocks::content_from_json(&row.content));
     }
 
-    /// Who wrote a comment, who reacted to it, and what it names.
-    pub fn comment(&mut self, row: &CommentRow) {
+    fn comment_people(&mut self, row: &CommentRow) {
         self.users.push(row.author_id);
         for each in row.reaction_list() {
             self.users.extend(each.users);
         }
+    }
+
+    /// Who wrote a comment, who reacted to it, and what it names.
+    pub fn comment(&mut self, row: &CommentRow) {
+        self.comment_people(row);
         if let Ok(runs) = serde_json::from_value::<Vec<Inline>>(row.content.clone()) {
             self.runs(&runs);
         }
     }
+}
 
-    /// Who started a discussion, who resolved it, and what is said in it.
-    pub fn discussion(&mut self, full: &Full) {
-        self.users.push(full.discussion.created_by);
-        self.users.extend(full.discussion.resolved_by);
-        for each in &full.comments {
-            self.comment(each);
+/// The existing attached/carried file label producer's exact stored associations.
+struct ReferenceFileRows {
+    attached: Vec<(Id, Id, String)>,
+    carried: Vec<(Id, Id, i32, orch_types::Json)>,
+}
+
+impl ReferenceFileRows {
+    /// Governing identities only: no filename or carried message content is read before scope filtering.
+    async fn sources(
+        conn: &mut Conn,
+        files: &[Id],
+    ) -> ApiResult<HashMap<Id, Vec<WrittenLabelSource>>> {
+        if files.is_empty() {
+            return Ok(HashMap::new());
         }
+        let attached: Vec<(Id, Id)> =
+            sqlx::query_as("SELECT id,document_id FROM document_files WHERE id=ANY($1)")
+                .bind(files)
+                .fetch_all(&mut *conn)
+                .await
+                .map_err(orch_db::DbError::from)?;
+        let carried: Vec<(Id, Id)> = sqlx::query_as("SELECT f.id,f.chat_id FROM chat_file_references f JOIN chat_messages m ON m.id=f.message_id WHERE f.id=ANY($1) AND m.deleted_at IS NULL")
+            .bind(files).fetch_all(&mut *conn).await.map_err(orch_db::DbError::from)?;
+        let mut sources: HashMap<Id, Vec<WrittenLabelSource>> = HashMap::new();
+        for (file, document) in attached {
+            sources
+                .entry(file)
+                .or_default()
+                .push(WrittenLabelSource::Document(document));
+        }
+        for (file, chat) in carried {
+            sources
+                .entry(file)
+                .or_default()
+                .push(WrittenLabelSource::Chat(chat));
+        }
+        Ok(sources)
+    }
+
+    async fn load(
+        conn: &mut Conn,
+        files: &[Id],
+        allowed: Option<&BTreeSet<WrittenLabelSource>>,
+    ) -> ApiResult<Self> {
+        let documents = allowed.map(|sources| {
+            sources
+                .iter()
+                .filter_map(|source| match source {
+                    WrittenLabelSource::Document(id) => Some(*id),
+                    _ => None,
+                })
+                .collect::<Vec<_>>()
+        });
+        let chats = allowed.map(|sources| {
+            sources
+                .iter()
+                .filter_map(|source| match source {
+                    WrittenLabelSource::Chat(id) => Some(*id),
+                    _ => None,
+                })
+                .collect::<Vec<_>>()
+        });
+        let attached = sqlx::query_as("SELECT id,document_id,name FROM document_files WHERE id=ANY($1) AND ($2::uuid[] IS NULL OR document_id=ANY($2))")
+            .bind(files).bind(documents.as_deref()).fetch_all(&mut *conn).await.map_err(orch_db::DbError::from)?;
+        let carried = sqlx::query_as("SELECT f.id,f.chat_id,f.carried,m.content FROM chat_file_references f JOIN chat_messages m ON m.id=f.message_id WHERE f.id=ANY($1) AND m.deleted_at IS NULL AND ($2::uuid[] IS NULL OR f.chat_id=ANY($2))")
+            .bind(files).bind(chats.as_deref()).fetch_all(&mut *conn).await.map_err(orch_db::DbError::from)?;
+        Ok(Self { attached, carried })
     }
 }
 
@@ -245,29 +503,101 @@ pub struct Cast {
     titles: HashMap<Id, Option<String>>,
     /// The name of each chat a chip names, where the reader may read the chat: its own, or its place's.
     chats: HashMap<Id, Option<String>>,
+    chat_name_nodes: HashMap<Id, Id>,
     files: HashMap<Id, String>,
+    file_sources: HashMap<Id, WrittenLabelSource>,
     environments: HashMap<Id, String>,
+    reference_sources: Option<BTreeSet<WrittenLabelSource>>,
 }
 
 impl Cast {
+    /// One block source walk, with any stored version authors supplied by its caller.
+    /// Ordinary DTO construction remains `block`; only external live names are bounded.
+    pub(super) async fn for_blocks(
+        conn: &mut Conn,
+        principal: &Principal,
+        mut wanted: Wanted,
+        rows: &[BlockRow],
+        policy: Policy,
+        allowed: Option<&[WrittenLabelSource]>,
+    ) -> ApiResult<Self> {
+        let Some(allowed) = allowed else {
+            for row in rows {
+                wanted.block(row);
+            }
+            return Self::load(conn, principal, wanted, policy).await;
+        };
+        let allowed: BTreeSet<_> = allowed.iter().copied().collect();
+        let mut refs = Vec::new();
+        for row in rows {
+            wanted.users.extend(row.updated_by);
+            wanted.nodes.extend(row.updated_by_thread);
+            visit_inline(&blocks::content_from_json(&row.content), |run| match run {
+                Inline::Mention { user_id, .. } => wanted.user(*user_id),
+                Inline::Ref { .. } => refs.push(run.clone()),
+                _ => {}
+            });
+        }
+        wanted.runs(&scoped_references(conn, refs, &allowed).await?);
+        Self::load_for_labels(conn, principal, wanted, policy, Some(&allowed)).await
+    }
+
+    /// One comment source walk for standalone windows and discussions. Ordinary
+    /// DTO construction remains `comment`; only live external label lookup is bounded.
+    async fn for_comments(
+        conn: &mut Conn,
+        principal: &Principal,
+        mut wanted: Wanted,
+        comments: &[&CommentRow],
+        policy: Policy,
+        allowed: Option<&[WrittenLabelSource]>,
+    ) -> ApiResult<Self> {
+        let Some(allowed) = allowed else {
+            for row in comments {
+                wanted.comment(row);
+            }
+            return Self::load(conn, principal, wanted, policy).await;
+        };
+        let allowed: BTreeSet<_> = allowed.iter().copied().collect();
+        let mut refs = Vec::new();
+        for row in comments {
+            wanted.comment_people(row);
+            for run in
+                serde_json::from_value::<Vec<Inline>>(row.content.clone()).unwrap_or_default()
+            {
+                match run {
+                    Inline::Mention { user_id, .. } => wanted.user(user_id),
+                    Inline::Ref { .. } => refs.push(run),
+                    _ => {}
+                }
+            }
+        }
+        wanted.runs(&scoped_references(conn, refs, &allowed).await?);
+        Self::load_for_labels(conn, principal, wanted, policy, Some(&allowed)).await
+    }
+
     /// Looks up everything `wanted` names, for `principal`.
     pub async fn load(
         conn: &mut Conn,
         principal: &Principal,
-        mut wanted: Wanted,
+        wanted: Wanted,
         policy: Policy,
     ) -> ApiResult<Self> {
-        let attached: Vec<(Id, Id, String)> =
-            sqlx::query_as("SELECT id,document_id,name FROM document_files WHERE id=ANY($1)")
-                .bind(&wanted.files)
-                .fetch_all(&mut *conn)
-                .await
-                .map_err(orch_db::DbError::from)?;
+        Self::load_for_labels(conn, principal, wanted, policy, None).await
+    }
+
+    pub(crate) async fn load_for_labels(
+        conn: &mut Conn,
+        principal: &Principal,
+        mut wanted: Wanted,
+        policy: Policy,
+        allowed: Option<&BTreeSet<WrittenLabelSource>>,
+    ) -> ApiResult<Self> {
+        let ReferenceFileRows { attached, carried } =
+            ReferenceFileRows::load(conn, &wanted.files, allowed).await?;
         wanted
             .documents
             .extend(attached.iter().map(|(_, owner, _)| *owner));
-        let carried: Vec<(Id, Id, i32, orch_types::Json)> = sqlx::query_as("SELECT f.id,f.chat_id,f.carried,m.content FROM chat_file_references f JOIN chat_messages m ON m.id=f.message_id WHERE f.id=ANY($1) AND m.deleted_at IS NULL")
-            .bind(&wanted.files).fetch_all(&mut *conn).await.map_err(orch_db::DbError::from)?;
         wanted
             .chats
             .extend(carried.iter().map(|(_, owner, _, _)| *owner));
@@ -282,7 +612,19 @@ impl Cast {
             list.dedup();
         }
         let users = user_refs(conn, &wanted.users).await?;
-        let nodes = view::refs(conn, principal, &wanted.nodes, policy).await?;
+        let nodes = match allowed {
+            None => view::refs(conn, principal, &wanted.nodes, policy).await?,
+            Some(allowed) => {
+                let nodes: BTreeSet<Id> = allowed
+                    .iter()
+                    .filter_map(|source| match source {
+                        WrittenLabelSource::Node(id) => Some(*id),
+                        _ => None,
+                    })
+                    .collect();
+                view::refs_with_name_sources(conn, principal, &wanted.nodes, policy, &nodes).await?
+            }
+        };
         let mut titles: HashMap<Id, Option<String>> = HashMap::new();
         if !wanted.documents.is_empty() {
             let named: HashMap<Id, String> = rows::get_many(conn, &wanted.documents)
@@ -304,6 +646,7 @@ impl Cast {
             }
         }
         let mut chats: HashMap<Id, Option<String>> = HashMap::new();
+        let mut chat_name_nodes = HashMap::new();
         if !wanted.chats.is_empty() {
             let rows = orch_db::queries::chats::chats(conn, &wanted.chats).await?;
             let readable = orch_authz::chats::listed_access(conn, principal, &rows)
@@ -312,6 +655,11 @@ impl Cast {
             let places: Vec<Id> = rows.iter().filter_map(|row| row.node_id).collect();
             let named = view::refs(conn, principal, &places, policy).await?;
             for row in rows {
+                if row.name.is_none()
+                    && let Some(node) = row.node_id
+                {
+                    chat_name_nodes.insert(row.id, node);
+                }
                 let name = row.name.clone().or_else(|| {
                     row.node_id
                         .and_then(|node| named.get(&node))
@@ -321,9 +669,11 @@ impl Cast {
             }
         }
         let mut files = HashMap::new();
+        let mut file_sources = HashMap::new();
         for (id, owner, name) in attached {
             if titles.get(&owner).is_some_and(Option::is_some) {
                 files.insert(id, name);
+                file_sources.insert(id, WrittenLabelSource::Document(owner));
             }
         }
         for (id, owner, slot, content) in carried {
@@ -336,6 +686,7 @@ impl Cast {
                     .and_then(|at| super::references::chat_files(parts).into_iter().nth(at))
             {
                 files.insert(id, name);
+                file_sources.insert(id, WrittenLabelSource::Chat(owner));
             }
         }
         let mut environments = HashMap::new();
@@ -363,8 +714,11 @@ impl Cast {
             nodes,
             titles,
             chats,
+            chat_name_nodes,
             files,
+            file_sources,
             environments,
+            reference_sources: allowed.cloned(),
         })
     }
 
@@ -425,6 +779,67 @@ impl Cast {
         }
     }
 
+    fn materialized_source(
+        &self,
+        kind: InlineRefKind,
+        id: Id,
+    ) -> ApiResult<Vec<WrittenLabelSource>> {
+        let mut sources: Vec<_> = match kind {
+            InlineRefKind::Node => Some(WrittenLabelSource::Node(id)),
+            InlineRefKind::Document => Some(WrittenLabelSource::Document(id)),
+            InlineRefKind::Chat => Some(WrittenLabelSource::Chat(id)),
+            InlineRefKind::File => Some(*self.file_sources.get(&id).ok_or_else(|| {
+                ApiError::internal("a materialized file name has no governing source")
+            })?),
+            // A workspace basename comes from the submitted/stored path, not an external name.
+            InlineRefKind::EnvironmentFile => None,
+        }
+        .into_iter()
+        .collect();
+        if kind == InlineRefKind::Chat
+            && let Some(node) = self.chat_name_nodes.get(&id)
+        {
+            sources.push(WrittenLabelSource::Node(*node));
+        }
+        Ok(sources)
+    }
+
+    fn reference_name(&self, kind: InlineRefKind, id: Id, path: Option<&str>) -> Option<String> {
+        if let Some(allowed) = &self.reference_sources {
+            if kind == InlineRefKind::Chat
+                && self
+                    .chat_name_nodes
+                    .get(&id)
+                    .is_some_and(|node| !allowed.contains(&WrittenLabelSource::Node(*node)))
+            {
+                return None;
+            }
+            let source = match kind {
+                InlineRefKind::Node => Some(WrittenLabelSource::Node(id)),
+                InlineRefKind::Document => Some(WrittenLabelSource::Document(id)),
+                InlineRefKind::Chat => Some(WrittenLabelSource::Chat(id)),
+                InlineRefKind::File => self.file_sources.get(&id).copied(),
+                InlineRefKind::EnvironmentFile => None,
+            };
+            if source.is_some_and(|source| !allowed.contains(&source))
+                || (kind == InlineRefKind::File && source.is_none())
+            {
+                return None;
+            }
+        }
+        match kind {
+            InlineRefKind::Node => self.node(id).and_then(|node| node.name),
+            InlineRefKind::Document => self.titles.get(&id).cloned().flatten(),
+            InlineRefKind::Chat => self.chats.get(&id).cloned().flatten(),
+            InlineRefKind::File => self.files.get(&id).cloned(),
+            InlineRefKind::EnvironmentFile => self
+                .environments
+                .get(&id)
+                .and(path)
+                .map(|path| path.rsplit('/').next().unwrap_or(path).to_owned()),
+        }
+    }
+
     /// Inline content with what a reader is given besides it: the person a
     /// mention names, and the name of a chip where they may know it.
     #[must_use]
@@ -444,17 +859,7 @@ impl Cast {
                     label,
                     ..
                 } => {
-                    let name = match kind {
-                        InlineRefKind::Node => self.node(id).and_then(|node| node.name),
-                        InlineRefKind::Document => self.titles.get(&id).cloned().flatten(),
-                        InlineRefKind::Chat => self.chats.get(&id).cloned().flatten(),
-                        InlineRefKind::File => self.files.get(&id).cloned(),
-                        InlineRefKind::EnvironmentFile => self
-                            .environments
-                            .get(&id)
-                            .and(path.as_ref())
-                            .map(|path| path.rsplit('/').next().unwrap_or(path).to_owned()),
-                    };
+                    let name = self.reference_name(kind, id, path.as_deref());
                     Inline::Ref {
                         display,
                         kind,
@@ -601,6 +1006,97 @@ pub async fn blocks_about(
         .collect())
 }
 
+/// A frozen full-block projection and the external reference names it actually materialized.
+/// Stored labels, snapshot text, props and all ordinary block fields are preserved.
+#[derive(Debug)]
+pub(crate) struct ProjectedBlocks {
+    pub(crate) blocks: Vec<DocumentBlock>,
+    sources: Vec<WrittenLabelSource>,
+}
+
+impl ProjectedBlocks {
+    /// All references in the stored touched rows, including already-labeled references and rows
+    /// touched only by a move/props change. No input-only candidate list can replace this.
+    pub(crate) async fn candidates(
+        conn: &mut Conn,
+        list: &[BlockRow],
+    ) -> ApiResult<Vec<WrittenLabelSource>> {
+        let mut refs = Vec::new();
+        for row in list {
+            visit_inline(&blocks::content_from_json(&row.content), |run| {
+                if matches!(run, Inline::Ref { .. }) {
+                    refs.push(run.clone());
+                }
+            });
+        }
+        let mut sources: BTreeSet<_> = reference_candidates(conn, &refs)
+            .await?
+            .into_iter()
+            .collect();
+        sources.extend(
+            list.iter()
+                .filter(|row| row.updated_by.is_none())
+                .filter_map(|row| row.updated_by_thread)
+                .map(WrittenLabelSource::Node),
+        );
+        Ok(sources.into_iter().collect())
+    }
+
+    /// Reuses Cast and its ordinary visibility rules, with trusted same-operation source facts
+    /// restricting dynamic reference and agent-attribution node names. Stored agent names and
+    /// public user identity semantics stay unchanged.
+    pub(crate) async fn capture_allowed(
+        conn: &mut Conn,
+        principal: &Principal,
+        list: &[BlockRow],
+        policy: Policy,
+        allowed: &[WrittenLabelSource],
+    ) -> ApiResult<Self> {
+        let cast = Cast::for_blocks(
+            conn,
+            principal,
+            Wanted::default(),
+            list,
+            policy,
+            Some(allowed),
+        )
+        .await?;
+        let blocks: Vec<_> = list.iter().map(|row| cast.block(row)).collect();
+        let mut materialized = Vec::new();
+        for block in &blocks {
+            visit_inline(&block.content, |run| {
+                if let Inline::Ref {
+                    kind,
+                    id,
+                    name: Some(Some(_)),
+                    ..
+                } = run
+                {
+                    materialized.push((*kind, *id));
+                }
+            });
+        }
+        let mut sources = BTreeSet::new();
+        for (kind, id) in materialized {
+            sources.extend(cast.materialized_source(kind, id)?);
+        }
+        for block in &blocks {
+            if let Some(Author::Agent(agent)) = &block.updated_by {
+                named_node_source(&agent.thread, &mut sources);
+            }
+        }
+        Ok(Self {
+            blocks,
+            sources: sources.into_iter().collect(),
+        })
+    }
+
+    /// Only names actually returned require response-stage source binding.
+    pub(crate) fn sources(&self) -> &[WrittenLabelSource] {
+        &self.sources
+    }
+}
+
 /// Blocks as a reader is shown them, with the names looked up once.
 pub async fn blocks_for(
     conn: &mut Conn,
@@ -608,11 +1104,7 @@ pub async fn blocks_for(
     list: &[BlockRow],
     policy: Policy,
 ) -> ApiResult<Vec<DocumentBlock>> {
-    let mut wanted = Wanted::default();
-    for row in list {
-        wanted.block(row);
-    }
-    let cast = Cast::load(conn, principal, wanted, policy).await?;
+    let cast = Cast::for_blocks(conn, principal, Wanted::default(), list, policy, None).await?;
     Ok(list.iter().map(|row| cast.block(row)).collect())
 }
 
@@ -624,16 +1116,170 @@ pub async fn discussions_for(
     fulls: &[Full],
     policy: Policy,
 ) -> ApiResult<Vec<DocumentDiscussion>> {
+    discussions_bounded(conn, principal, document, fulls, policy, None).await
+}
+
+/// Exact reference candidates in existing comments; quoted/stored text creates no source read.
+pub(crate) async fn discussion_sources(
+    conn: &mut Conn,
+    fulls: &[Full],
+) -> ApiResult<Vec<WrittenLabelSource>> {
+    let refs = comment_references(fulls.iter().flat_map(|full| &full.comments));
+    reference_candidates(conn, &refs).await
+}
+
+pub(crate) async fn comment_sources(
+    conn: &mut Conn,
+    comments: &[CommentRow],
+) -> ApiResult<Vec<WrittenLabelSource>> {
+    let refs = comment_references(comments.iter());
+    reference_candidates(conn, &refs).await
+}
+
+fn comment_references<'a>(comments: impl Iterator<Item = &'a CommentRow>) -> Vec<Inline> {
+    comments
+        .flat_map(|row| {
+            serde_json::from_value::<Vec<Inline>>(row.content.clone()).unwrap_or_default()
+        })
+        .filter(|run| matches!(run, Inline::Ref { .. }))
+        .collect()
+}
+
+/// The same discussion producer with only live external labels restricted by operation facts.
+pub(crate) async fn discussions_bounded(
+    conn: &mut Conn,
+    principal: &Principal,
+    document: Id,
+    fulls: &[Full],
+    policy: Policy,
+    allowed: Option<&[WrittenLabelSource]>,
+) -> ApiResult<Vec<DocumentDiscussion>> {
+    Ok(
+        discussions_projection(conn, principal, document, fulls, policy, allowed)
+            .await?
+            .0,
+    )
+}
+
+/// The same native discussion projection, with an optional witness of actual live names.
+pub(crate) async fn discussions_projection(
+    conn: &mut Conn,
+    principal: &Principal,
+    document: Id,
+    fulls: &[Full],
+    policy: Policy,
+    allowed: Option<&[WrittenLabelSource]>,
+) -> ApiResult<(Vec<DocumentDiscussion>, Vec<WrittenLabelSource>)> {
     let mut wanted = Wanted::default();
     for full in fulls {
-        wanted.discussion(full);
+        wanted.user(full.discussion.created_by);
+        wanted.users.extend(full.discussion.resolved_by);
     }
-    let cast = Cast::load(conn, principal, wanted, policy).await?;
+    let comments = fulls
+        .iter()
+        .flat_map(|full| &full.comments)
+        .collect::<Vec<_>>();
+    let cast = Cast::for_comments(conn, principal, wanted, &comments, policy, allowed).await?;
     let about = blocks_about(conn, document, fulls).await?;
-    Ok(fulls
+    let discussions: Vec<_> = fulls
         .iter()
         .filter_map(|full| cast.discussion(full, &about))
-        .collect())
+        .collect();
+    let sources = if allowed.is_some() {
+        comment_projection_sources(&cast, discussions.iter().flat_map(|full| &full.comments))?
+    } else {
+        Vec::new()
+    };
+    Ok((discussions, sources))
+}
+
+/// A standalone comment window uses that same ordinary/bounded Cast, without
+/// fetching the other comments or metadata of its document.
+pub(crate) async fn comments_bounded(
+    conn: &mut Conn,
+    principal: &Principal,
+    comments: &[CommentRow],
+    policy: Policy,
+    allowed: Option<&[WrittenLabelSource]>,
+) -> ApiResult<Vec<DocumentComment>> {
+    Ok(
+        comments_projection(conn, principal, comments, policy, allowed)
+            .await?
+            .0,
+    )
+}
+
+/// The same native standalone comment producer, exposing only the names it materialized.
+pub(crate) async fn comments_projection(
+    conn: &mut Conn,
+    principal: &Principal,
+    comments: &[CommentRow],
+    policy: Policy,
+    allowed: Option<&[WrittenLabelSource]>,
+) -> ApiResult<(Vec<DocumentComment>, Vec<WrittenLabelSource>)> {
+    let rows = comments.iter().collect::<Vec<_>>();
+    let cast =
+        Cast::for_comments(conn, principal, Wanted::default(), &rows, policy, allowed).await?;
+    let comments: Vec<_> = comments
+        .iter()
+        .filter_map(|row| cast.comment(row))
+        .collect();
+    let sources = if allowed.is_some() {
+        comment_projection_sources(&cast, &comments)?
+    } else {
+        Vec::new()
+    };
+    Ok((comments, sources))
+}
+
+fn comment_projection_sources<'a>(
+    cast: &Cast,
+    comments: impl IntoIterator<Item = &'a DocumentComment>,
+) -> ApiResult<Vec<WrittenLabelSource>> {
+    let mut sources = BTreeSet::new();
+    for run in comments.into_iter().flat_map(|comment| &comment.content) {
+        if let Inline::Ref {
+            kind,
+            id,
+            name: Some(Some(_)),
+            ..
+        } = run
+        {
+            sources.extend(cast.materialized_source(*kind, *id)?);
+        }
+    }
+    Ok(sources.into_iter().collect())
+}
+
+/// Protected live identities used by the complete document metadata, before any name projection.
+pub(crate) async fn document_name_sources(
+    conn: &mut Conn,
+    row: &DocumentRow,
+    listed: &Listed,
+) -> ApiResult<crate::routes::access::page::NameSources> {
+    let mut names = crate::routes::access::page::NameSources::default();
+    for source in ProjectedDocumentRef::candidates(conn, row, listed).await? {
+        if let WrittenLabelSource::Node(id) = source {
+            names.nodes.insert(id);
+        }
+    }
+    for file in rows::files(conn, row.id).await? {
+        if file.added_by.is_none() {
+            names.nodes.extend(file.added_by_thread);
+        }
+    }
+    let graph =
+        orch_authz::engine::Graph::load(conn, &names.nodes.iter().copied().collect::<Vec<_>>())
+            .await
+            .map_err(ApiError::internal)?;
+    names.nodes.extend(graph.nodes().map(|node| node.id));
+    names.containers.extend(
+        rows::containers::ancestors_many(conn, &[row.id])
+            .await?
+            .into_iter()
+            .map(|row| row.id),
+    );
+    Ok(names)
 }
 
 /// The page state of the engine as the API words it.
@@ -706,8 +1352,23 @@ pub async fn refs(
     now: DateTime<Utc>,
     policy: Policy,
 ) -> ApiResult<Vec<DocumentRef>> {
+    Ok(
+        refs_with_name_sources(conn, principal, entries, now, policy, None)
+            .await?
+            .0,
+    )
+}
+
+async fn refs_with_name_sources(
+    conn: &mut Conn,
+    principal: &Principal,
+    entries: &[(DocumentRow, Listed)],
+    now: DateTime<Utc>,
+    policy: Policy,
+    allowed: Option<&BTreeSet<WrittenLabelSource>>,
+) -> ApiResult<(Vec<DocumentRef>, Vec<WrittenLabelSource>)> {
     if entries.is_empty() {
-        return Ok(Vec::new());
+        return Ok((Vec::new(), Vec::new()));
     }
     let ids: Vec<Id> = entries.iter().map(|(row, _)| row.id).collect();
     let owners = rows::owner_counts(conn, &ids, now).await?;
@@ -735,13 +1396,54 @@ pub async fn refs(
     for (thread, _) in agents.values() {
         wanted.node(*thread);
     }
-    let cast = Cast::load(conn, principal, wanted, policy).await?;
     let marker_places: HashMap<_, _> = entries
         .iter()
         .filter_map(|(row, listed)| listed.admin_access.map(|place| (row.id, place)))
         .collect();
-    let admin_markers = view::named_admin_access(conn, principal, &marker_places).await?;
-    entries
+    let marker_ids: Vec<Id> = marker_places
+        .values()
+        .filter_map(|reach| reach.place.node())
+        .collect();
+    let marker_graph = if !marker_ids.is_empty() {
+        let graph = orch_authz::engine::Graph::load(conn, &marker_ids)
+            .await
+            .map_err(ApiError::internal)?;
+        for id in &marker_ids {
+            if let Some(node) = graph.get(*id) {
+                wanted.nodes.extend(node.path.iter().copied());
+            }
+        }
+        Some(graph)
+    } else {
+        None
+    };
+    let cast = Cast::load_for_labels(conn, principal, wanted, policy, allowed).await?;
+    let admin_markers = match allowed {
+        None => view::named_admin_access(conn, principal, &marker_places).await?,
+        Some(_) => {
+            let mut qualified = HashMap::new();
+            for id in &marker_ids {
+                if let Some(node) = cast.node(*id) {
+                    let named = if node.name.is_some() {
+                        marker_graph
+                            .as_ref()
+                            .and_then(|graph| view::qualified_from(graph, &cast.nodes, *id))
+                            .unwrap_or(node)
+                    } else {
+                        node
+                    };
+                    qualified.insert(*id, named);
+                }
+            }
+            marker_places
+                .iter()
+                .filter_map(|(id, reach)| {
+                    view::admin_access(*reach, &qualified).map(|marker| (*id, marker))
+                })
+                .collect()
+        }
+    };
+    let documents = entries
         .iter()
         .map(|(row, listed)| {
             let owner = cast
@@ -797,7 +1499,168 @@ pub async fn refs(
                 deleted: row.deleted_at.is_some(),
             })
         })
-        .collect()
+        .collect::<ApiResult<Vec<_>>>()?;
+    let mut sources = BTreeSet::new();
+    for document in &documents {
+        named_node_source(&document.node, &mut sources);
+        for author in [Some(&document.created_by), document.updated_by.as_ref()]
+            .into_iter()
+            .flatten()
+        {
+            if let Author::Agent(agent) = author {
+                named_node_source(&agent.thread, &mut sources);
+            }
+        }
+        if let Some(marker) = &document.admin_access
+            && let orch_api_contract::nodes::NodeOrSystem::Node(node) = &marker.place
+            && node.name.is_some()
+            && let Some(graph) = &marker_graph
+            && let Some(place) = graph.get(node.id)
+            && !place
+                .path
+                .iter()
+                .any(|id| graph.get(*id).is_some_and(|node| node.deleted))
+        {
+            for id in &place.path {
+                if let Some(node) = cast.node(*id) {
+                    named_node_source(&node, &mut sources);
+                }
+            }
+        }
+    }
+    Ok((documents, sources.into_iter().collect()))
+}
+
+fn named_node_source(node: &NodeRef, sources: &mut BTreeSet<WrittenLabelSource>) {
+    if node.name.is_some() || node.thread_display.is_some() {
+        sources.insert(WrittenLabelSource::Node(node.id));
+    }
+}
+
+/// The existing document-reference projection with its actual protected external node names.
+#[derive(Debug)]
+pub(crate) struct ProjectedDocumentRef {
+    pub(crate) document: DocumentRef,
+    sources: Vec<WrittenLabelSource>,
+}
+
+impl ProjectedDocumentRef {
+    /// Parent and stored agent-attribution identities, plus qualified provenance path identities.
+    pub(crate) async fn candidates(
+        conn: &mut Conn,
+        row: &DocumentRow,
+        listed: &Listed,
+    ) -> ApiResult<Vec<WrittenLabelSource>> {
+        Ok(
+            Self::candidates_many(conn, &[(row.clone(), listed.clone())])
+                .await?
+                .remove(&row.id)
+                .unwrap_or_default(),
+        )
+    }
+
+    /// The same raw parent, last-agent and inspection provenance in one native batch.
+    pub(crate) async fn candidates_many(
+        conn: &mut Conn,
+        entries: &[(DocumentRow, Listed)],
+    ) -> ApiResult<BTreeMap<Id, Vec<WrittenLabelSource>>> {
+        if entries.is_empty() {
+            return Ok(BTreeMap::new());
+        }
+        let attributed: Vec<_> = entries
+            .iter()
+            .filter(|(row, _)| row.updated_by.is_none() && row.doc_seq > 0)
+            .map(|(row, _)| row.id)
+            .collect();
+        let agents = if attributed.is_empty() {
+            HashMap::new()
+        } else {
+            rows::last_agents(conn, &attributed).await?
+        };
+        let marker_ids: Vec<_> = entries
+            .iter()
+            .filter_map(|(_, listed)| listed.admin_access.and_then(|reach| reach.place.node()))
+            .collect();
+        let graph = orch_authz::engine::Graph::load(conn, &marker_ids)
+            .await
+            .map_err(ApiError::internal)?;
+        Ok(entries
+            .iter()
+            .map(|(row, listed)| {
+                let mut nodes = BTreeSet::from([row.node_id]);
+                if row.created_by_agent.is_some() {
+                    nodes.extend(row.created_by_thread);
+                }
+                if row.updated_by.is_none() && row.doc_seq > 0 {
+                    nodes.extend(agents.get(&row.id).map(|(thread, _)| *thread));
+                }
+                if let Some(id) = listed.admin_access.and_then(|reach| reach.place.node())
+                    && let Some(node) = graph.get(id)
+                {
+                    nodes.extend(node.path.iter().copied());
+                }
+                (
+                    row.id,
+                    nodes.into_iter().map(WrittenLabelSource::Node).collect(),
+                )
+            })
+            .collect())
+    }
+
+    /// Public UserRef identities and stored document/agent text retain their existing meaning.
+    /// Disallowed protected node names become typed identity-only refs before construction.
+    pub(crate) async fn capture_allowed(
+        conn: &mut Conn,
+        principal: &Principal,
+        row: &DocumentRow,
+        listed: &Listed,
+        now: DateTime<Utc>,
+        policy: Policy,
+        allowed: &[WrittenLabelSource],
+    ) -> ApiResult<Self> {
+        let (mut documents, sources) = Self::capture_many_allowed(
+            conn,
+            principal,
+            &[(row.clone(), listed.clone())],
+            now,
+            policy,
+            allowed,
+        )
+        .await?;
+        let document = documents
+            .pop()
+            .ok_or_else(|| ApiError::internal("a document could not be shown"))?;
+        Ok(Self { document, sources })
+    }
+
+    /// The ordinary native batch projection with its actual protected source identities.
+    pub(crate) async fn capture_many(
+        conn: &mut Conn,
+        principal: &Principal,
+        entries: &[(DocumentRow, Listed)],
+        now: DateTime<Utc>,
+        policy: Policy,
+    ) -> ApiResult<(Vec<DocumentRef>, Vec<WrittenLabelSource>)> {
+        refs_with_name_sources(conn, principal, entries, now, policy, None).await
+    }
+
+    /// One native batch projection and its actual named sources, under the same trusted
+    /// source set. Lists must not rebuild the owner/count/author/Cast queries per document.
+    pub(crate) async fn capture_many_allowed(
+        conn: &mut Conn,
+        principal: &Principal,
+        entries: &[(DocumentRow, Listed)],
+        now: DateTime<Utc>,
+        policy: Policy,
+        allowed: &[WrittenLabelSource],
+    ) -> ApiResult<(Vec<DocumentRef>, Vec<WrittenLabelSource>)> {
+        let allowed = allowed.iter().copied().collect();
+        refs_with_name_sources(conn, principal, entries, now, policy, Some(&allowed)).await
+    }
+
+    pub(crate) fn sources(&self) -> &[WrittenLabelSource] {
+        &self.sources
+    }
 }
 
 /// A document without its blocks, as the caller reads it.
@@ -850,13 +1713,42 @@ pub async fn document(
     now: DateTime<Utc>,
     policy: Policy,
 ) -> ApiResult<Document> {
-    let base = reference(conn, principal, row, listed, now, policy).await?;
+    document_bounded(conn, principal, row, listed, now, policy, None, None).await
+}
+
+/// The same full document producer with existing typed name bounds; stored content is unchanged.
+pub(crate) async fn document_bounded(
+    conn: &mut Conn,
+    principal: &Principal,
+    row: &DocumentRow,
+    listed: &Listed,
+    now: DateTime<Utc>,
+    policy: Policy,
+    names: Option<&crate::routes::access::page::NameBounds>,
+    sources: Option<&[WrittenLabelSource]>,
+) -> ApiResult<Document> {
+    let names = names.filter(|names| names.limited);
+    let base = match sources.filter(|_| names.is_some()) {
+        Some(sources) => {
+            ProjectedDocumentRef::capture_allowed(
+                conn, principal, row, listed, now, policy, sources,
+            )
+            .await?
+            .document
+        }
+        None => reference(conn, principal, row, listed, now, policy).await?,
+    };
     let admin_access = base.admin_access.clone();
     let files = rows::files(conn, row.id).await?;
-    let path = view::ways(conn, principal, &[row.node_id], policy)
-        .await?
-        .remove(&row.node_id)
-        .unwrap_or_default();
+    let path = match names {
+        Some(names) => {
+            view::ways_with_name_sources(conn, principal, &[row.node_id], policy, &names.nodes)
+                .await?
+        }
+        None => view::ways(conn, principal, &[row.node_id], policy).await?,
+    }
+    .remove(&row.node_id)
+    .unwrap_or_default();
     let mut wanted = Wanted::default();
     for file in &files {
         wanted.users.extend(file.added_by);
@@ -868,17 +1760,36 @@ pub async fn document(
     {
         wanted.node(id);
     }
-    let cast = Cast::load(conn, principal, wanted, policy).await?;
+    let allowed = sources
+        .filter(|_| names.is_some())
+        .map(|sources| sources.iter().copied().collect());
+    let cast = Cast::load_for_labels(conn, principal, wanted, policy, allowed.as_ref()).await?;
     let act_places: Vec<Id> = listed
         .admin_place
         .and_then(orch_access_contract::roles::PlaceRef::node)
         .into_iter()
         .collect();
-    let act_places = view::qualified_refs(conn, principal, &act_places, policy).await?;
+    let act_places = match names {
+        Some(names) => names.qualified_refs(conn, principal, &act_places).await?,
+        None => view::qualified_refs(conn, principal, &act_places, policy).await?,
+    };
     let settings = DocSettings::at(conn, row.node_id).await?;
-    let location =
-        crate::routes::document_tree::metadata::location(conn, principal, row, Time::new(now))
-            .await?;
+    let location = match names {
+        Some(names) => {
+            crate::routes::document_tree::metadata::location_with_name_sources(
+                conn,
+                principal,
+                row,
+                Time::new(now),
+                &names.containers,
+            )
+            .await?
+        }
+        None => {
+            crate::routes::document_tree::metadata::location(conn, principal, row, Time::new(now))
+                .await?
+        }
+    };
     let permissions: Vec<String> = listed
         .held
         .iter()
@@ -886,6 +1797,13 @@ pub async fn document(
         .filter(|name| name.starts_with("doc.") || name.starts_with("access."))
         .collect();
     Ok(Document {
+        // A failed independent reader remains available through its ordinary endpoint;
+        // it must not prevent reading the admitted document and its blocks.
+        link_settings: if row.deleted_at.is_none() {
+            crate::routes::links::tabs(conn, principal, row).await.ok()
+        } else {
+            None
+        },
         inspection: None,
         base,
         path,

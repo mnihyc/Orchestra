@@ -46,6 +46,7 @@ fn main() -> ExitCode {
 
 fn enrollment_of(arguments: &Enrollment) -> anyhow::Result<composition::Enrollment> {
     Ok(composition::Enrollment {
+        gateway: arguments.gateway.clone(),
         delegate_policy: arguments.delegate_policy,
         url: arguments.url.clone(),
         token: token_of(arguments.token.as_deref(), arguments.token_file.as_deref())?,
@@ -55,6 +56,7 @@ fn enrollment_of(arguments: &Enrollment) -> anyhow::Result<composition::Enrollme
 
 async fn run(args: Args) -> anyhow::Result<()> {
     let command = args.command.unwrap_or(Command::Run(Enrollment {
+        gateway: None,
         delegate_policy: false,
         url: None,
         token: None,

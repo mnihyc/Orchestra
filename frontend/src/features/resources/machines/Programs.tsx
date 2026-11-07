@@ -5,11 +5,14 @@ import { useState } from 'react';
 import { useTranslation } from 'react-i18next';
 import { EmptyState } from '@/ui/EmptyState';
 import { changeMachinePrograms,machineProgramsKey,machineProgramsQuery } from '@/api/machinePrograms';
+import { machineKey } from '@/api/resources';
+import { machineProgramsProjection } from '@/api/cache';
 import { ApiError } from '@/api/client';
 import type { Machine,MachineProgram,MachineProgramKind,MachinePrograms,MachineProgramsCommand } from '@/generated/api-types';
 import { TaskGuideLink } from '@/features/help/TaskGuideLink';
 import { CommandBox } from '@/features/resources/Facts';
-import { readMachineFacts } from '@/features/resources/machines/facts';
+import { harnessPolicyDelegated, readMachineFacts, type FoundHarness } from '@/features/resources/machines/facts';
+import { policyCommand } from '@/features/resources/machines/Policy';
 import { FACT_MEMBERS } from '@/features/resources/providers/details';
 import { machineProgramName } from '@/features/resources/machines/programNames';
 import { useHarnessTitle } from '@/features/resources/harnesses';
@@ -131,18 +134,30 @@ export function RegisterMachineProgram({machineId,kind,onRegistered,onClose}:{ma
 }
 
 /** This tab alone subscribes to program data; hidden tabs create no query or native request. */
-export function MachineProgramsTab({machine}:{machine:Pick<Machine,'id'|'facts'|'roles'|'role_management'>}) {
+export function MachineProgramsTab({machine}:{machine:Pick<Machine,'id'|'facts'|'roles'|'role_management'> & Partial<Pick<Machine,'installation'|'platform_os'|'access'>>}) {
   const {t}=useTranslation();
   const client=useQueryClient();
-  const query=useQuery(machineProgramsQuery(machine.id));
-  const harnesses=readMachineFacts(machine.facts).harnesses;
-  const harnessTitle=useHarnessTitle(harnesses.length>0);
+  const held=client.getQueryState<Machine>(machineKey(machine.id));
+  const projected=held?.data===machine?machineProgramsProjection(machine.facts,machine.access):null;
+  const query=useQuery({...machineProgramsQuery(machine.id),...(projected===null?{}:{initialData:projected,initialDataUpdatedAt:held?.dataUpdatedAt})});
+  const facts=readMachineFacts(machine.facts);
+  const harnesses=facts.harnesses;
+  const discovered=facts.discoveredHarnesses ?? [];
+  const nativeReported=facts.discoveredHarnesses!==null || facts.searchedHarnessKinds!==null || harnesses.length>0;
+  const nativeRole=machine.roles.some((role)=>role==='environment' || role==='agent');
+  const nativeRelevant=nativeReported || nativeRole;
+  const harnessTitle=useHarnessTitle(harnesses.length+discovered.length>0);
   const [enrolling,setEnrolling]=useState(false);
   const [kind,setKind]=useState<MachineProgramKind>('agent');
   const [adding,setAdding]=useState(false);
   const [removing,setRemoving]=useState<MachineProgram|null>(null);
+  const [unconfirming,setUnconfirming]=useState<FoundHarness|null>(null);
   const apply=useMutation({mutationFn:(body:MachineProgramsCommand)=>changeMachinePrograms(machine.id,body),onSuccess:(answer)=>{
-    client.setQueryData(machineProgramsKey(machine.id),answer);setRemoving(null);
+    client.setQueryData(machineProgramsKey(machine.id),answer);
+    if(answer.machine_view!==null && answer.machine_view!==undefined)client.setQueryData(machineKey(machine.id),answer.machine_view);
+    setRemoving(null);setUnconfirming(null);
+  },onError:(error,body)=>{
+    if((body.action==='confirm_harness' || body.action==='remove_harness') && error instanceof ApiError && error.is('policy.not_delegated'))setUnconfirming(null);
   }});
   if(query.isPending) return <SkeletonRows rows={3}/>;
   if(query.isError) return <ErrorState title={t('machinePrograms.readFailed')} error={query.error} retrying={query.isRefetching} onRetry={()=>void query.refetch()}/>;
@@ -151,17 +166,39 @@ export function MachineProgramsTab({machine}:{machine:Pick<Machine,'id'|'facts'|
   const canChangeRoles=roles?.supported===true && roles.delegated && roles.enabled;
   const kinds=programs.capabilities.filter((capability)=>capability.supported);
   const selected=kinds.some((capability)=>capability.kind===kind)?kind:kinds[0]?.kind ?? kind;
+  const nativeAction=apply.variables?.action==='confirm_harness' || apply.variables?.action==='remove_harness';
+  const nativeKept=!(harnessPolicyDelegated(facts)) || (nativeAction && apply.error instanceof ApiError && apply.error.is('policy.not_delegated'));
+  const nativeManage=programs.can_manage && nativeRole && !nativeKept;
+  const nativeRows=[...harnesses.map((harness)=>({harness,confirmed:true})),...discovered.map((harness)=>({harness,confirmed:false}))];
+  const currentHarnessPolicy=facts.policy?.['agent.harnesses'];
+  const actualPolicyCommand=machine.installation?.commands.policy;
+  const refresh=programs.can_manage && (kinds.length>0 || nativeRelevant);
   return <div className="flex flex-col gap-4">
-    <div className="flex flex-wrap items-center gap-2">
-      {programs.can_manage && kinds.length>0 && <>
-        <Select label={t('machinePrograms.contract')} value={selected} onValueChange={setKind}
-          options={kinds.map((capability)=>({value:capability.kind,name:t(`machinePrograms.kinds.${capability.kind}.name`),description:t(`machinePrograms.kinds.${capability.kind}.description`)}))}/>
-        <Button onClick={()=>setAdding(true)}>{t('machinePrograms.add')}</Button>
-        <Button pending={apply.isPending && apply.variables.action==='reload'} onClick={()=>apply.mutate({action:'reload'})}>{t('machinePrograms.reload')}</Button>
-      </>}
-      <ProgramsHelp/>
+    <div className="flex flex-wrap items-end gap-2">
+      {programs.can_manage && kinds.length>0 && <Select label={t('machinePrograms.contract')} value={selected} onValueChange={setKind}
+          options={kinds.map((capability)=>({value:capability.kind,name:t(`machinePrograms.kinds.${capability.kind}.name`),description:t(`machinePrograms.kinds.${capability.kind}.description`)}))}/>}
+      <div className="flex min-w-0 flex-wrap items-center gap-2">
+        {programs.can_manage && kinds.length>0 && <Button onClick={()=>setAdding(true)}>{t('machinePrograms.add')}</Button>}
+        {refresh && <Button pending={apply.isPending && apply.variables.action==='reload'} onClick={()=>apply.mutate({action:'reload'})}>{t(nativeReported || kinds.length===0?'machinePrograms.nativeRefresh':'machinePrograms.reload')}</Button>}
+        <ProgramsHelp/>
+      </div>
     </div>
-    {kinds.length===0 && <EmptyState compact title={t(programs.capabilities.length===0 && !machine.roles.includes('node')?'machinePrograms.notReported':'machinePrograms.roleNeeded')}
+    {nativeRelevant && <section aria-labelledby="machine-native-harnesses" className="flex flex-col gap-2">
+      <h3 id="machine-native-harnesses" className="font-medium">{t('machinePrograms.nativeTitle')}</h3>
+      {nativeRows.length===0?<StateLine compact message={t(facts.searchedHarnessKinds===null?'machinePrograms.nativeNotReported':facts.searchedHarnessKinds.length===0?'machinePrograms.nativeNotSearched':'machinePrograms.nativeEmpty')}/>:
+        <ul className="divide-y divide-border rounded-lg border border-border">{nativeRows.map(({harness,confirmed})=><li key={`${harness.kind}:${harness.path}`} className="flex flex-wrap items-start gap-3 px-3 py-2">
+          <div className="min-w-0 flex-1"><p className="flex min-h-(--control-sm) flex-wrap items-baseline gap-x-3 gap-y-1"><span className="font-medium">{harnessTitle(harness.kind)}</span>
+            <span className="text-sm text-text-muted">{harness.version==='' || harness.version==='unknown'?t('machinePrograms.nativeUnknownVersion'):harness.version}</span>
+            <span className="text-sm text-text-muted">{t(confirmed?'machinePrograms.nativeConfirmed':'machinePrograms.nativeFound')}</span></p><PathValue path={harness.path}/></div>
+          {nativeManage && harness.path!=='' && <Button size="sm" disabled={apply.isPending} onClick={()=>confirmed?setUnconfirming(harness):apply.mutate({action:'confirm_harness',kind:harness.kind,path:harness.path})}>{t(confirmed?'machinePrograms.nativeRemove':'machinePrograms.nativeUse')}</Button>}
+        </li>)}</ul>}
+      {programs.can_manage && !nativeRole && <p className="text-sm text-text-muted">{t('machinePrograms.nativeRoleNeeded')}</p>}
+      {programs.can_manage && nativeKept && <div className="flex flex-col gap-2 text-sm text-text-muted"><p>{t(facts.policy===null?'machinePrograms.nativeCommandNotReported':'machinePrograms.nativeKept')}</p>
+        {facts.policy!==null && (actualPolicyCommand!==undefined && Array.isArray(currentHarnessPolicy)?<CommandBox command={policyCommand('agent.harnesses',currentHarnessPolicy,actualPolicyCommand,machine.platform_os==='windows')} label={t('machines.policy.copy')}/>:
+          <p>{t('machinePrograms.nativeCommandNotReported')}</p>)}
+      </div>}
+    </section>}
+    {kinds.length===0 && !nativeRelevant && <EmptyState compact title={t(programs.capabilities.length===0 && !machine.roles.includes('node')?'machinePrograms.notReported':'machinePrograms.roleNeeded')}
       action={programs.can_manage?canChangeRoles?<Button asChild><Link to="/resources/machines/$id" params={{id:machine.id}} search={{tab:'overview'}}>{t('machineRoles.edit')}</Link></Button>:<Button onClick={()=>setEnrolling(true)}>{t('machinePrograms.addConnector')}</Button>:undefined}/>}
     {programs.entries.length===0?(kinds.length===0?null:<EmptyState compact title={t('machinePrograms.empty')} />):
       <ul aria-label={t('machinePrograms.title')} className="divide-y divide-border rounded-lg border border-border">
@@ -187,16 +224,15 @@ export function MachineProgramsTab({machine}:{machine:Pick<Machine,'id'|'facts'|
         })}
       </ul>}
     {programs.entries.some((entry)=>entry.origin==='local') && <p className="text-sm text-text-muted">{t('machinePrograms.localEntry',{file:programs.config_file ?? t('machinePrograms.localConfiguration')})}</p>}
-    {harnesses.length>0 && <section aria-labelledby="machine-installed-harnesses"><h3 id="machine-installed-harnesses" className="mb-2 font-medium">{t('machinePrograms.installedHarnesses')}</h3>
-      <ul className="divide-y divide-border rounded-lg border border-border">{harnesses.map((harness)=><li key={`${harness.kind}:${harness.path}`} className="flex flex-wrap items-baseline gap-x-3 gap-y-1 px-3 py-2">
-        <span>{harnessTitle(harness.kind)}</span>{harness.version!=='' && harness.version!=='unknown' && <span className="text-sm text-text-muted">{harness.version}</span>}<PathValue path={harness.path}/>
-      </li>)}</ul></section>}
-    {apply.isError && removing===null && <ProgramError error={apply.error}/>}
+    {apply.isError && removing===null && unconfirming===null && <ProgramError error={apply.error}/>}
     {adding && <RegisterMachineProgram machineId={machine.id} kind={selected} onRegistered={()=>setAdding(false)} onClose={()=>setAdding(false)}/>}
     {enrolling && <AddMachineDialog onClose={()=>setEnrolling(false)}/>}
     {removing!==null && <ConfirmDialog open onOpenChange={(open)=>!open && setRemoving(null)} title={t('machinePrograms.removeTitle',{name:machineProgramName(removing)})}
       confirmLabel={t('machinePrograms.remove')} danger pending={apply.isPending} error={apply.isError && programFailure(apply.error)===undefined?apply.error:undefined}
       onConfirm={()=>apply.mutate({action:'remove',kind:removing.kind,name:removing.name})}>{t('machinePrograms.removeBody')}
         {apply.isError && programFailure(apply.error)!==undefined && <ProgramError error={apply.error}/>}</ConfirmDialog>}
+    {unconfirming!==null && <ConfirmDialog open onOpenChange={(open)=>!open && !apply.isPending && setUnconfirming(null)} title={t('machinePrograms.nativeRemoveTitle',{name:harnessTitle(unconfirming.kind)})}
+      confirmLabel={t('machinePrograms.nativeRemove')} danger pending={apply.isPending} error={apply.isError?apply.error:undefined}
+      onConfirm={()=>apply.mutate({action:'remove_harness',kind:unconfirming.kind,path:unconfirming.path})}>{t('machinePrograms.nativeRemoveBody')}</ConfirmDialog>}
   </div>;
 }

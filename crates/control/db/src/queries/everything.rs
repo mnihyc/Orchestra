@@ -104,7 +104,7 @@ pub struct Cursor {
 }
 
 /// What a page of the inventory supplies before public references are assembled.
-#[derive(Debug, sqlx::FromRow)]
+#[derive(Debug, Clone, sqlx::FromRow)]
 pub struct Row {
     /// Shared name relevance, kept in the keyset position.
     pub relevance: i32,
@@ -340,8 +340,40 @@ pub async fn resource_counts(
     conn: &mut Conn,
     grants: &Json,
 ) -> Result<Vec<(String, i64)>, DbError> {
+    Ok(resource_count_rows(conn, grants, false)
+        .await?
+        .into_iter()
+        .map(|row| (row.kind, row.count))
+        .collect())
+}
+
+/// Native count and, only when requested, the exact counted identities for operation admission.
+#[derive(Debug, sqlx::FromRow)]
+pub struct ResourceCount {
+    /// Existing native resource-family word.
+    pub kind: String,
+    /// Native SQL count, without rich resource reads.
+    pub count: i64,
+    /// Exactly those counted rows, populated only for the scoped operation footprint.
+    pub ids: Vec<Id>,
+}
+
+/// Counts and actual identities use the same SQL and lifecycle/facade/visibility conditions.
+pub async fn resource_counts_with_ids(
+    conn: &mut Conn,
+    grants: &Json,
+) -> Result<Vec<ResourceCount>, DbError> {
+    resource_count_rows(conn, grants, true).await
+}
+
+async fn resource_count_rows(
+    conn: &mut Conn,
+    grants: &Json,
+    identities: bool,
+) -> Result<Vec<ResourceCount>, DbError> {
     Ok(sqlx::query_as(include_str!("resource_counts.sql"))
         .bind(grants)
+        .bind(identities)
         .fetch_all(conn)
         .await?)
 }
@@ -449,5 +481,30 @@ pub async fn explain(conn: &mut Conn, ask: &Query<'_>) -> Result<Json, DbError> 
     .bind(ask.navigation.hide_done)
     .bind(ask.navigation.keep)
     .fetch_one(conn)
+    .await?)
+}
+
+/// At most one real main-thread identity per selected native Topic, in one bulk read.
+/// This primes effect-free projection preparation; it is never an allow list of all threads.
+pub async fn main_thread_samples(
+    conn: &mut Conn,
+    places: &[Id],
+    exact_nodes: &[Id],
+) -> Result<Vec<AccessSeed>, DbError> {
+    Ok(sqlx::query_as(
+        "SELECT 'node'::text kind, sample.node_id id FROM nodes topic
+         CROSS JOIN LATERAL (
+           SELECT t.node_id FROM threads t JOIN nodes n ON n.id=t.node_id
+            WHERE t.topic_id=topic.id AND t.side_of IS NULL
+              AND n.kind='thread' AND n.parent_id=topic.id AND n.deleted_at IS NULL
+              AND NOT (n.id=ANY($2))
+              AND NOT EXISTS (SELECT 1 FROM nodes gone WHERE gone.id=ANY(n.path) AND gone.deleted_at IS NOT NULL)
+            ORDER BY t.node_id LIMIT 1
+         ) sample
+         WHERE topic.id=ANY($1) AND topic.kind='topic' AND topic.deleted_at IS NULL",
+    )
+    .bind(places)
+    .bind(exact_nodes)
+    .fetch_all(conn)
     .await?)
 }

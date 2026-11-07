@@ -7,9 +7,12 @@
 
 mod places;
 mod rig;
+#[path = "threads_adopt/scopes.rs"]
+mod scopes;
 mod support;
 
 use orch_api_contract::common::ErrorCode;
+use orch_api_contract::environment::EnvironmentGet;
 use orch_api_contract::nodes::{
     AdoptPlan, FieldSource, ThreadAdopt, ThreadAdoptBody, ThreadAdoptPreview,
 };
@@ -148,6 +151,7 @@ async fn adopt(
         .call(ThreadAdopt, &[&s.tree.topic.base.id])
         .token(&by.token)
         .body(&ThreadAdoptBody {
+            agent_access: None,
             provider_id: s.on.provider,
             agent_id: s.on.agent,
             native_session_ref: native.to_owned(),
@@ -813,6 +817,7 @@ async fn plan(
         .call(ThreadAdoptPreview, &[&s.tree.topic.base.id])
         .token(&s.ada.token)
         .body(&ThreadAdoptBody {
+            agent_access: None,
             provider_id: s.on.provider,
             agent_id: s.on.agent,
             native_session_ref: native.to_owned(),
@@ -838,6 +843,27 @@ async fn the_plan_says_where_it_would_stand_the_model_and_the_history_before_any
     assert_eq!(planned.turns, 2);
     assert_eq!(planned.name, "Fix the login");
     assert_eq!(planned.adopted_thread_id, None);
+    let access = planned
+        .agent_access
+        .as_ref()
+        .expect("the admitted selected-topic preview carries actual source bounds");
+    assert_eq!(
+        access
+            .choices
+            .iter()
+            .map(|choice| choice.where_)
+            .collect::<Vec<_>>(),
+        [
+            orch_api_contract::nodes::AgentAccessWhere::Nothing,
+            orch_api_contract::nodes::AgentAccessWhere::Thread,
+            orch_api_contract::nodes::AgentAccessWhere::Topic,
+            orch_api_contract::nodes::AgentAccessWhere::Project,
+        ]
+    );
+    assert!(
+        access.choices[1].parts.timeline.is_none(),
+        "the new thread's conversation is intrinsic, not another gift"
+    );
     let threads: i64 =
         sqlx::query_scalar("SELECT count(*) FROM segments WHERE native_session_ref = 'native-a'")
             .fetch_one(s.rig.db.pool())
@@ -848,12 +874,20 @@ async fn the_plan_says_where_it_would_stand_the_model_and_the_history_before_any
     // A session whose folder is registered nowhere: the plan names the folder to register first.
     let elsewhere = plan(&s, "native-b", None).await.ok();
     assert_eq!(elsewhere.environment, None);
+    assert!(
+        elsewhere.agent_access.is_none(),
+        "an unregistered environment has no invented prospective bounds"
+    );
     assert_eq!(elsewhere.register_first.as_deref(), Some("/elsewhere/api"));
 
     // Once adopted, the plan names the thread that has it.
     let thread = adopt(&s, &s.ada, "native-a", None, None).await.ok();
     let after = plan(&s, "native-a", None).await.ok();
     assert_eq!(after.adopted_thread_id, Some(thread.base.id));
+    assert!(
+        after.agent_access.is_none(),
+        "an existing adopted holder receives no new creation offer"
+    );
 }
 
 #[tokio::test]
@@ -868,6 +902,7 @@ async fn the_plan_tells_nothing_to_those_who_may_not_adopt() {
         .call(ThreadAdoptPreview, &[&s.tree.topic.base.id])
         .token(&s.cai.token)
         .body(&ThreadAdoptBody {
+            agent_access: None,
             provider_id: s.on.provider,
             agent_id: s.on.agent,
             native_session_ref: "native-a".to_owned(),
@@ -963,21 +998,50 @@ async fn what_making_a_thread_needs_is_asked_and_the_harness_tells_nothing_to_th
         0,
         "the machine was not asked for the sessions of somebody who may not use the provider"
     );
-    // Somebody who may use the provider and manages no environment of the machine finds none to put it in,
-    // and one who names an environment they do not manage is refused for it.
+    // Use of the provider alone finds no usable environment. Naming one still requires its Use.
     let none = adopt(&s, &s.eve, "native-a", None, None).await.problem();
     assert_eq!(none.code, ErrorCode::EnvironmentNoneUsable);
     let not_theirs = adopt(&s, &s.eve, "native-a", Some(work), None)
         .await
         .problem();
     assert_eq!(not_theirs.code, ErrorCode::AuthzDenied);
-    assert!(missing_permissions(&not_theirs).contains(&"environment.manage".to_owned()));
+    assert!(missing_permissions(&not_theirs).contains(&"environment.use".to_owned()));
+    s.rig
+        .lets_use("environment", work, "environment.use", &s.eve, json!({}))
+        .await;
+    let held = s
+        .rig
+        .world
+        .app
+        .call(EnvironmentGet, &[&work])
+        .token(&s.eve.token)
+        .send()
+        .await
+        .ok()
+        .access
+        .permissions;
+    assert!(
+        held.iter()
+            .any(|permission| permission == "environment.use")
+    );
+    assert!(
+        !held
+            .iter()
+            .any(|permission| permission == "environment.manage")
+    );
+    let made = adopt(&s, &s.eve, "native-a", Some(work), None).await.ok();
+    assert_eq!(
+        made.environment.as_ref().map(|environment| environment.id),
+        Some(work)
+    );
+    assert_eq!(made.base.owner.id, s.eve.id());
     let anonymous = s
         .rig
         .world
         .app
         .call(ThreadAdopt, &[&s.tree.topic.base.id])
         .body(&ThreadAdoptBody {
+            agent_access: None,
             provider_id: s.on.provider,
             agent_id: s.on.agent,
             native_session_ref: "native-a".to_owned(),

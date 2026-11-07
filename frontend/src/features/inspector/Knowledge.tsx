@@ -6,7 +6,7 @@ import { ChevronDown, ChevronRight, FileText, Folder, Lock, Pencil, Plus } from 
 import { useState } from 'react';
 import { useTranslation } from 'react-i18next';
 import { sharedTreeQuery, threadSharedQuery } from '@/api/share';
-import { DocumentPolicy } from '@/features/people/DocumentPolicy';
+import { AgentKnowledgeNotice } from '@/features/people/AgentKnowledgeNotice';
 import { IsolationBadge } from '@/features/thread/BindingSummary';
 import type { SharedEntry, Thread } from '@/generated/api-types';
 import type { ViewProps } from '@/features/workbench/views';
@@ -48,13 +48,13 @@ function Knowledge({ thread }: { thread: Thread }) {
   const shares = useQuery(threadSharedQuery(thread.id));
   const [sharing, setSharing] = useState(false);
   return <div className="h-full overflow-auto p-3" data-testid="thread-knowledge">
-    <DocumentPolicy topicId={thread.parent_id ?? thread.id} />
+    <AgentKnowledgeNotice />
     {thread.binding?.isolation.orch_tools.offered === false && <div className="pb-3"><IsolationBadge thread={thread} /></div>}
     <Button size="sm" onClick={() => setSharing(true)}>{t('threadViews.knowledge.share')}</Button>
     {shares.error !== null && <ErrorState compact error={shares.error} onRetry={() => void shares.refetch()} />}
-    {shares.data !== undefined && <><p className="py-3 text-sm text-text-muted">{t(`threadViews.knowledge.policy.${shares.data.policy}`)}</p>
+    {shares.data !== undefined && <>
       {shares.data.read_first_paths.length > 0 && <section aria-label={t('people.readFirst')} className="pb-3"><h3 className="text-sm font-semibold">{t('people.readFirst')}</h3><p className="text-xs text-text-muted">{t('people.readFirstHint')}</p><ul>{shares.data.read_first_paths.slice(0, 5).map((material) => <li key={material.id} className="break-all font-mono text-xs">{material.path}</li>)}</ul>{shares.data.read_first_paths.length > 5 && <p className="text-xs text-text-muted">{t('people.moreMaterial')}</p>}</section>}
-      {shares.data.shares.filter((share) => share.mode === 'snapshot').map((share) => <p key={share.id} className="pb-2 text-sm">{t('threadViews.knowledge.copy', { name: share.by.display_name })}</p>)}</>}
+      {shares.data.shares.filter((share) => share.mode === 'snapshot').map((share) => <p key={share.id} className="pb-2 text-sm">{t('threadViews.knowledge.copy', { name: (share.by?.display_name ?? '').length > 0 ? share.by?.display_name : t('agentContributions.giverUnavailable') })}</p>)}</>}
     <Branch threadId={thread.id} />
     {sharing && <ShareToAgent thread={thread} onClose={() => setSharing(false)} />}
   </div>;

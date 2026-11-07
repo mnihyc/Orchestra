@@ -9,6 +9,9 @@ mod places;
 mod resources;
 mod support;
 
+#[path = "loss/recipient_scopes.rs"]
+mod recipient_scopes;
+
 use orch_access_contract::{decisions::ObjectRef, permissions::ObjectKind};
 use orch_api_contract::{common::ErrorCode, loss::*};
 use orch_authz::ownership::{NewAccess, start_resource};

@@ -114,11 +114,11 @@ export function isFiltered(search: ProjectSearch): boolean {
   );
 }
 
-function TagsFilter({ tags, chosen, onChange }: { tags: readonly Tag[]; chosen: readonly string[]; onChange: (tags: string[]) => void }) {
+function TagsFilter({ tags, chosen, pending, error, onRetry, onOpenChange, onChange }: { tags: readonly Tag[]; chosen: readonly string[]; pending: boolean; error: unknown; onRetry: () => void; onOpenChange: (open: boolean) => void; onChange: (tags: string[]) => void }) {
   const { t } = useTranslation();
   return (
     <Popover
-      label={t('places.project.tags')}
+      label={t('places.project.tags')} onOpenChange={onOpenChange}
       trigger={
         <Button size="sm" icon={<Tags aria-hidden />}>
           {t('places.project.tags')}
@@ -127,7 +127,7 @@ function TagsFilter({ tags, chosen, onChange }: { tags: readonly Tag[]; chosen: 
       }
       className="flex min-w-(--menu-min-width) flex-col gap-3"
     >
-      {tags.length === 0 ? (
+      {pending ? <SkeletonGroup><Skeleton className="h-5 w-32" /></SkeletonGroup> : error !== null ? <ErrorAlert error={error} action={<Button size="sm" onClick={onRetry}>{t('common.tryAgain')}</Button>} /> : tags.length === 0 ? (
         <EmptyState compact title={t('places.project.noTags')} />
       ) : (
         tags.map((tag) => (
@@ -189,7 +189,8 @@ function ProjectScreen({ projectId, search, onSearch: navigate }: ProjectProps) 
   const userId = useStore(client.session, (state) => state.userId);
   const query = useQuery(projectQuery(projectId));
   const project = query.data;
-  const tags = useQuery(tagsQuery(projectId));
+  const [tagsOpen, setTagsOpen] = useState(false);
+  const tags = useQuery({ ...tagsQuery(projectId), enabled: tagsOpen || (search.tag?.length ?? 0) > 0 });
   const view = search.view ?? 'list';
   const onSearch = useCallback((patch: Partial<ProjectSearch>) => {
     if (patch.view === 'activity') { navigate({ ...search, ...patch }); return; }
@@ -300,7 +301,7 @@ function ProjectScreen({ projectId, search, onSearch: navigate }: ProjectProps) 
                 ]}
               />
             )}
-            <TagsFilter tags={tags.data ?? []} chosen={search.tag ?? []} onChange={(next) => onSearch({ tag: next.length === 0 ? undefined : next })} />
+            <TagsFilter tags={tags.data ?? []} chosen={search.tag ?? []} pending={tags.isPending} error={tags.error} onRetry={() => void tags.refetch()} onOpenChange={setTagsOpen} onChange={(next) => onSearch({ tag: next.length === 0 ? undefined : next })} />
             <Menu label={t('places.project.attention')}
               trigger={<Button size="sm" variant="secondary">{t('places.project.attention')}{': '}{choiceOption(t, `attention.${search.attention ?? 'any'}`).name}</Button>}
               entries={[{ type: 'radio', id: 'attention', label: t('places.project.attention'), value: search.attention ?? 'any',

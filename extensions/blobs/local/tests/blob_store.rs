@@ -65,6 +65,10 @@ fn make_writable(path: &Path) {
     #[cfg(not(unix))]
     {
         let mut permissions = std::fs::metadata(path).unwrap().permissions();
+        #[allow(
+            clippy::permissions_set_readonly_false,
+            reason = "this non-Unix branch clears the read-only attribute; Unix sets an explicit mode above"
+        )]
         permissions.set_readonly(false);
         std::fs::set_permissions(path, permissions).unwrap();
     }
