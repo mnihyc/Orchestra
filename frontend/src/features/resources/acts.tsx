@@ -304,16 +304,18 @@ export function useSelection<Row>(rows: readonly Row[], keyOf: (row: Row) => str
   };
 }
 
+const selectionFrame = 'inline-flex min-h-(--control-sm) items-center [&>div]:self-center [&_.choice-toggle]:mt-0';
+
 /** The box that ticks one row, named by the row. */
 export function RowBox({ name, checked, onChange }: { name: string; checked: boolean; onChange: (on: boolean) => void }) {
   const { t } = useTranslation();
-  return <Checkbox label={<span className="sr-only">{t('resources.bulk.select', { name })}</span>} checked={checked} onCheckedChange={onChange} />;
+  return <div className={selectionFrame}><Checkbox presentation="compact" label={<span className="sr-only">{t('resources.bulk.select', { name })}</span>} checked={checked} onCheckedChange={onChange} /></div>;
 }
 
 /** The box at the head of the column, which ticks every row there is. */
 export function AllBox({ checked, onChange }: { checked: boolean | 'indeterminate'; onChange: (on: boolean) => void }) {
   const { t } = useTranslation();
-  return <Checkbox label={<span className="sr-only">{t('resources.bulk.selectAll')}</span>} checked={checked} onCheckedChange={onChange} />;
+  return <div className={selectionFrame}><Checkbox presentation="compact" label={<span className="sr-only">{t('resources.bulk.selectAll')}</span>} checked={checked} onCheckedChange={onChange} /></div>;
 }
 
 /** The acts the ticked rows share, above the table. */

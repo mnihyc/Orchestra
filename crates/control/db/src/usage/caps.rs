@@ -230,10 +230,9 @@ const SAME_IDENTITY: &str = "node_id IS NOT DISTINCT FROM $1::uuid AND provider_
         AND subject_role IS NOT DISTINCT FROM $5::text AND split = $6 AND models = $7 AND harness_kinds = $8
         AND meter = $9 AND period IS NOT DISTINCT FROM $10::text AND tiers = $11";
 
-/// Makes a cap, unless one of the same node, provider, subject, split, models, tiers, harness kinds, meter
-/// and period is there: then nothing is made and the answer is none. Two requests that make the same cap at once
-/// make one.
-pub async fn insert(conn: &mut Conn, new: &NewCap<'_>) -> Result<Option<CapRow>, DbError> {
+/// Holds the existing native duplicate-identity serialization footprint before an insert.
+/// The fields match the duplicate predicate; this changes no cap and invents no new lock key.
+pub async fn lock_insert(conn: &mut Conn, new: &NewCap<'_>) -> Result<(), DbError> {
     sqlx::query("SELECT pg_advisory_xact_lock(hashtextextended($1, 0))")
         .bind(format!(
             "usage_cap:{:?}:{:?}:{}:{:?}:{:?}:{}:{:?}:{:?}:{:?}:{}:{:?}",
@@ -251,6 +250,21 @@ pub async fn insert(conn: &mut Conn, new: &NewCap<'_>) -> Result<Option<CapRow>,
         ))
         .execute(&mut *conn)
         .await?;
+    Ok(())
+}
+
+/// Makes a cap through the same identity serialization and duplicate check.
+pub async fn insert(conn: &mut Conn, new: &NewCap<'_>) -> Result<Option<CapRow>, DbError> {
+    insert_before(conn, new, || Ok(())).await
+}
+
+/// The opaque check runs after the native identity wait, immediately before insertion.
+pub async fn insert_before<E: From<DbError>>(
+    conn: &mut Conn,
+    new: &NewCap<'_>,
+    before: impl FnOnce() -> Result<(), E>,
+) -> Result<Option<CapRow>, E> {
+    lock_insert(conn, new).await.map_err(DbError::from)?;
     let sql = format!("SELECT id FROM usage_caps WHERE {SAME_IDENTITY}");
     let existing: Option<Id> = sqlx::query_scalar(sqlx::AssertSqlSafe(sql))
         .bind(new.node_id)
@@ -265,10 +279,12 @@ pub async fn insert(conn: &mut Conn, new: &NewCap<'_>) -> Result<Option<CapRow>,
         .bind(new.period)
         .bind(new.tiers)
         .fetch_optional(&mut *conn)
-        .await?;
+        .await
+        .map_err(DbError::from)?;
     if existing.is_some() {
         return Ok(None);
     }
+    before()?;
     let sql = format!(
         "INSERT INTO usage_caps (id, node_id, provider_id, subject_kind, subject_id, subject_role, split, models,
                 harness_kinds, meter, period, counted_from, amount, at_limit, warn_percent, uncounted, note, created_by,
@@ -300,13 +316,24 @@ pub async fn insert(conn: &mut Conn, new: &NewCap<'_>) -> Result<Option<CapRow>,
             .bind(new.at)
             .bind(new.tiers)
             .fetch_one(conn)
-            .await?,
+            .await
+            .map_err(DbError::from)?,
     ))
 }
 
 /// The cap `id`.
 pub async fn get(conn: &mut Conn, id: Id) -> Result<Option<CapRow>, DbError> {
     let sql = format!("SELECT {CAP_COLUMNS} FROM usage_caps WHERE id = $1");
+    Ok(sqlx::query_as(sqlx::AssertSqlSafe(sql))
+        .bind(id)
+        .fetch_optional(conn)
+        .await?)
+}
+
+/// Serializes a native cap change after the same counting lock used by its running limit.
+pub async fn lock(conn: &mut Conn, id: Id) -> Result<Option<CapRow>, DbError> {
+    lock_for_counting(conn, &[id]).await?;
+    let sql = format!("SELECT {CAP_COLUMNS} FROM usage_caps WHERE id=$1 FOR UPDATE");
     Ok(sqlx::query_as(sqlx::AssertSqlSafe(sql))
         .bind(id)
         .fetch_optional(conn)
@@ -359,11 +386,24 @@ pub async fn update(
     change: &Change<'_>,
     at: DateTime<Utc>,
 ) -> Result<Updated, DbError> {
+    update_before(conn, id, expected_revision, change, at, || Ok(())).await
+}
+
+/// The opaque check follows the native row/duplicate preparation and precedes the update.
+pub async fn update_before<E: From<DbError>>(
+    conn: &mut Conn,
+    id: Id,
+    expected_revision: i64,
+    change: &Change<'_>,
+    at: DateTime<Utc>,
+    before: impl FnOnce() -> Result<(), E>,
+) -> Result<Updated, E> {
     let sql = format!("SELECT {CAP_COLUMNS} FROM usage_caps WHERE id = $1 FOR UPDATE");
     let current: Option<CapRow> = sqlx::query_as(sqlx::AssertSqlSafe(sql))
         .bind(id)
         .fetch_optional(&mut *conn)
-        .await?;
+        .await
+        .map_err(DbError::from)?;
     let Some(current) = current else {
         return Ok(Updated::Gone);
     };
@@ -394,7 +434,8 @@ pub async fn update(
             .bind(tiers)
             .bind(id)
             .fetch_optional(&mut *conn)
-            .await?;
+            .await
+            .map_err(DbError::from)?;
         if same.is_some() {
             return Ok(Updated::Exists);
         }
@@ -440,7 +481,12 @@ pub async fn update(
         .push(" WHERE id = ")
         .push_bind(id)
         .push(format!(" RETURNING {CAP_COLUMNS}"));
-    let changed: CapRow = query.build_query_as().fetch_one(conn).await?;
+    before()?;
+    let changed: CapRow = query
+        .build_query_as()
+        .fetch_one(conn)
+        .await
+        .map_err(DbError::from)?;
     Ok(Updated::Done(Box::new(changed)))
 }
 

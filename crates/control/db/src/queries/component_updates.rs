@@ -2,7 +2,7 @@
 
 use crate::{Conn, DbError};
 use chrono::{DateTime, Utc};
-use orch_types::Id;
+use orch_types::{Id, Json};
 
 /// The latest update's progress; the running version still comes from the authenticated hello.
 #[derive(Debug, Clone, sqlx::FromRow)]
@@ -113,6 +113,7 @@ pub async fn request(
     lock(conn, machine).await?;
     let changed = sqlx::query("INSERT INTO component_updates(machine_id,recommended_version,state,requested_by,requested_at,updated_at)
         VALUES($1,$2,'queued',$3,$4,$4) ON CONFLICT(machine_id) DO UPDATE SET
+          request_id=excluded.request_id,origin=NULL,origin_required=false,
           recommended_version=excluded.recommended_version,state='queued',detail=NULL,command_id=NULL,
           requested_by=excluded.requested_by,requested_at=excluded.requested_at,updated_at=excluded.updated_at
         WHERE component_updates.state NOT IN ('queued','updating')")
@@ -181,4 +182,56 @@ pub async fn waiting(conn: &mut Conn, machine: Id) -> Result<Vec<Id>, DbError> {
 pub async fn pending(conn: &mut Conn) -> Result<Vec<UpdateRow>, DbError> {
     Ok(sqlx::query_as("SELECT machine_id,recommended_version,state,detail,command_id FROM component_updates WHERE state IN ('queued','updating') ORDER BY machine_id")
         .fetch_all(conn).await?)
+}
+
+/// Private provenance of the actual current request; it is never a public progress view.
+#[derive(Debug, Clone, sqlx::FromRow)]
+pub struct OriginRow {
+    /// The actual newly filed request, preserved across its reconnect journals.
+    pub request_id: Id,
+    /// Its physical program.
+    pub machine_id: Id,
+    /// The recommendation accepted by this request.
+    pub recommended_version: String,
+    /// The account that requested it, absent for independent automatic work.
+    pub requested_by: Option<Id>,
+    /// Original native operation and immutable source association.
+    pub origin: Option<Json>,
+    /// Known modern work cannot become an old request when its provenance is lost.
+    pub origin_required: bool,
+    /// Native lifecycle state of this same request.
+    pub state: String,
+    /// Actual journal identity, once it is granted.
+    pub command_id: Option<Id>,
+}
+
+/// The actual request identity and private source on this connection.
+pub async fn origin(conn: &mut Conn, machine: Id) -> Result<Option<OriginRow>, DbError> {
+    Ok(sqlx::query_as("SELECT request_id,machine_id,recommended_version,requested_by,origin,origin_required,state,command_id FROM component_updates WHERE machine_id=$1")
+        .bind(machine).fetch_optional(conn).await?)
+}
+
+/// Bind only the fresh request made by this writer, without adopting another queued request.
+pub async fn bind_origin(
+    conn: &mut Conn,
+    request: Id,
+    machine: Id,
+    origin: &Json,
+) -> Result<bool, DbError> {
+    Ok(sqlx::query("UPDATE component_updates SET origin=$3,origin_required=true WHERE request_id=$1 AND machine_id=$2 AND state IN ('queued','refused') AND origin IS NULL AND NOT origin_required")
+        .bind(request).bind(machine).bind(origin).execute(conn).await?.rows_affected()==1)
+}
+
+/// End only this exact still-pending request; an older grant cannot release its successor.
+pub async fn finish_request(
+    conn: &mut Conn,
+    request: Id,
+    machine: Id,
+    state: &str,
+    detail: Option<&str>,
+    now: DateTime<Utc>,
+) -> Result<bool, DbError> {
+    lock(conn, machine).await?;
+    Ok(sqlx::query("UPDATE component_updates SET state=$3,detail=$4,updated_at=$5 WHERE request_id=$1 AND machine_id=$2 AND state IN ('queued','updating')")
+        .bind(request).bind(machine).bind(state).bind(detail).bind(now).execute(conn).await?.rows_affected()>0)
 }

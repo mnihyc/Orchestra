@@ -15,11 +15,44 @@ use orch_db::{Conn, sequences};
 use orch_types::{Id, Seq};
 use std::collections::{BTreeMap, BTreeSet};
 
+/// A transport-owned check at the first attempted mutation, never an authority or a lease.
+#[derive(Default)]
+pub(crate) struct FirstEffect<'a> {
+    check: Option<Box<dyn FnOnce() -> Result<(), EngineError> + Send + 'a>>,
+}
+
+impl std::fmt::Debug for FirstEffect<'_> {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("FirstEffect")
+            .field("pending", &self.check.is_some())
+            .finish()
+    }
+}
+
+impl<'a> FirstEffect<'a> {
+    pub(crate) fn new(check: impl FnOnce() -> Result<(), EngineError> + Send + 'a) -> Self {
+        Self {
+            check: Some(Box::new(check)),
+        }
+    }
+    pub(crate) fn pending(&self) -> bool {
+        self.check.is_some()
+    }
+
+    pub(crate) fn check(&mut self) -> Result<(), EngineError> {
+        match self.check.take() {
+            Some(check) => check(),
+            None => Ok(()),
+        }
+    }
+}
+
 /// The work of one transaction.
 #[derive(Debug)]
 pub struct Unit<'c> {
     /// The connection of the transaction.
     pub conn: &'c mut Conn,
+    pub(crate) first_effect: FirstEffect<'c>,
     now: DateTime<Utc>,
     touched: BTreeMap<Id, Seq>,
     wakes: BTreeSet<Id>,
@@ -41,12 +74,29 @@ impl<'c> Unit<'c> {
     pub fn new(conn: &'c mut Conn, now: DateTime<Utc>) -> Self {
         Self {
             conn,
+            first_effect: FirstEffect::default(),
             now,
             touched: BTreeMap::new(),
             wakes: BTreeSet::new(),
             approval_deciders: BTreeSet::new(),
             source_checked: false,
         }
+    }
+
+    /// The same transaction with one entry-point check immediately before its first mutation.
+    /// Native validation remains native; accepted reconciliation never runs the check again.
+    pub fn with_first_effect(
+        conn: &'c mut Conn,
+        now: DateTime<Utc>,
+        check: impl FnOnce() -> Result<(), EngineError> + Send + 'c,
+    ) -> Self {
+        let mut unit = Self::new(conn, now);
+        unit.first_effect = FirstEffect::new(check);
+        unit
+    }
+
+    pub(crate) fn before_effect(&mut self) -> Result<(), EngineError> {
+        self.first_effect.check()
     }
 
     /// The moment the work is done at.
@@ -59,11 +109,17 @@ impl<'c> Unit<'c> {
     /// locked from now until the transaction ends.
     pub async fn stamp(&mut self, thread: Id) -> Result<Seq, EngineError> {
         self.check_tool_source().await?;
+        self.before_effect()?;
         let seq = sequences::next(&mut *self.conn, thread)
             .await?
             .ok_or_else(|| EngineError::unreadable(format!("there is no thread {thread}")))?;
         self.touched.insert(thread, seq);
         Ok(seq)
+    }
+
+    /// The number this unit gave `thread`, if it stamped it.
+    pub fn seq_given(&self, thread: Id) -> Option<Seq> {
+        self.touched.get(&thread).copied()
     }
 
     /// Holds a fresh own-tool source through this transaction's effects and commit.

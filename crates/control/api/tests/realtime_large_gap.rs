@@ -1,3 +1,4 @@
+#![recursion_limit = "256"]
 //! A live reader repairs a gap larger than a sync frame through paged HTTP without missing or repeated text.
 #![allow(
     clippy::unwrap_used,

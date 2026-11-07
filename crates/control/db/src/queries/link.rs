@@ -183,10 +183,31 @@ pub async fn insert_command(
     command: &NewCommand<'_>,
     at: DateTime<Utc>,
 ) -> Result<bool, DbError> {
+    insert_command_with_authority(conn, command, at, None).await
+}
+
+/// Stores private login evidence atomically with a new command. ON CONFLICT preserves every
+/// canonical field, including absent evidence; retrying an ID cannot replace its accepted caller.
+pub async fn insert_command_with_login_authority(
+    conn: &mut Conn,
+    command: &NewCommand<'_>,
+    at: DateTime<Utc>,
+    authority: Option<&Json>,
+) -> Result<bool, DbError> {
+    insert_command_with_authority(conn, command, at, authority).await
+}
+
+/// One private typed evidence slot, using the established column and canonical first-write rule.
+pub async fn insert_command_with_authority(
+    conn: &mut Conn,
+    command: &NewCommand<'_>,
+    at: DateTime<Utc>,
+    authority: Option<&Json>,
+) -> Result<bool, DbError> {
     let inserted = sqlx::query(
-        "INSERT INTO commands (id, machine_id, kind, body, serial_key, deadline_at, created_at, updated_at)
+        "INSERT INTO commands (id, machine_id, kind, body, serial_key, deadline_at, created_at, updated_at, login_authority, authority_required)
          VALUES ($1, $2, $3, CASE WHEN jsonb_typeof($4::jsonb) = 'object'
-                    THEN $4::jsonb - '$key' ELSE $4::jsonb END, $5, $6, $7, $7)
+                    THEN $4::jsonb - '$key' ELSE $4::jsonb END, $5, $6, $7, $7, $8, $9)
          ON CONFLICT (id) DO NOTHING",
     )
     .bind(command.id)
@@ -196,6 +217,8 @@ pub async fn insert_command(
     .bind(command.serial_key.or_else(|| command.body.get("$key").and_then(Json::as_str)))
     .bind(command.deadline_at)
     .bind(at)
+    .bind(authority)
+    .bind(authority.is_some())
     .execute(&mut *conn)
     .await?
     .rows_affected();
@@ -206,12 +229,96 @@ pub async fn insert_command(
     Ok(inserted > 0)
 }
 
+/// Private login-origin evidence is deliberately excluded from CommandRow and wire/DTO projections.
+pub async fn command_login_authority(conn: &mut Conn, id: Id) -> Result<Option<Json>, DbError> {
+    command_authority(conn, id).await
+}
+
+/// The established private value, never inferred from a wire body or a missing field.
+pub async fn command_authority(conn: &mut Conn, id: Id) -> Result<Option<Json>, DbError> {
+    Ok(
+        sqlx::query_scalar::<_, Option<Json>>("SELECT login_authority FROM commands WHERE id=$1")
+            .bind(id)
+            .fetch_optional(conn)
+            .await?
+            .flatten(),
+    )
+}
+
+/// Independent private marker: losing required evidence cannot turn a new command into old work.
+pub async fn command_authority_required(conn: &mut Conn, id: Id) -> Result<bool, DbError> {
+    Ok(
+        sqlx::query_scalar("SELECT authority_required FROM commands WHERE id=$1")
+            .bind(id)
+            .fetch_optional(conn)
+            .await?
+            .unwrap_or(false),
+    )
+}
+
+/// Server-private row/envelope read; unlike CommandRow it cannot be serialized to a DTO.
+#[derive(sqlx::FromRow)]
+pub struct CommandWithAuthority {
+    /// Existing canonical public/native fields.
+    #[sqlx(flatten)]
+    pub command: CommandRow,
+    /// Original private evidence from the same statement.
+    pub authority: Option<Json>,
+}
+impl std::fmt::Debug for CommandWithAuthority {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str("CommandWithAuthority([private])")
+    }
+}
+
+/// Read canonical command and private value atomically without expanding public CommandRow.
+pub async fn command_with_authority(
+    conn: &mut Conn,
+    id: Id,
+) -> Result<Option<CommandWithAuthority>, DbError> {
+    Ok(sqlx::query_as(concat!(
+        "SELECT ",
+        command_columns!(),
+        ",login_authority AS authority FROM commands WHERE id=$1"
+    ))
+    .bind(id)
+    .fetch_optional(conn)
+    .await?)
+}
+
+/// Lock the same private canonical record at its existing unaccepted publication checkpoint.
+pub async fn lock_command_with_authority(
+    conn: &mut Conn,
+    id: Id,
+) -> Result<Option<CommandWithAuthority>, DbError> {
+    Ok(sqlx::query_as(concat!(
+        "SELECT ",
+        command_columns!(),
+        ",login_authority AS authority FROM commands WHERE id=$1 FOR UPDATE"
+    ))
+    .bind(id)
+    .fetch_optional(conn)
+    .await?)
+}
+
 /// The command `id`.
 pub async fn command(conn: &mut Conn, id: Id) -> Result<Option<CommandRow>, DbError> {
     Ok(sqlx::query_as(concat!(
         "SELECT ",
         command_columns!(),
         " FROM commands WHERE id = $1"
+    ))
+    .bind(id)
+    .fetch_optional(conn)
+    .await?)
+}
+
+/// Locks one canonical command while its deferred first-send authorization is checked.
+pub async fn lock_command(conn: &mut Conn, id: Id) -> Result<Option<CommandRow>, DbError> {
+    Ok(sqlx::query_as(concat!(
+        "SELECT ",
+        command_columns!(),
+        " FROM commands WHERE id=$1 FOR UPDATE"
     ))
     .bind(id)
     .fetch_optional(conn)
@@ -401,6 +508,8 @@ pub async fn forget_result(conn: &mut Conn, id: Id) -> Result<bool, DbError> {
 /// each of its commands again by its identifier, and would otherwise send it once more. A row another
 /// transaction holds is left for the next time. Unsettled own-tool native effects and their
 /// read-only queue fences remain until completion is known, even after their caller's job ends.
+/// Successful custody-transfer receipts remain while their provider still holds that custody,
+/// so a retry can prove its actual moved material; ordinary reaping resumes when custody ends.
 pub async fn purge_finished(
     conn: &mut Conn,
     before: DateTime<Utc>,
@@ -412,6 +521,11 @@ pub async fn purge_finished(
             WHERE c.state IN ('succeeded', 'failed', 'expired', 'cancelled')
               AND c.updated_at < $1
               AND c.kind <> ALL($2)
+              AND NOT (c.kind IN ('agent.credential.return','provider.credential.accept')
+                  AND c.state='succeeded' AND c.result IS NOT NULL
+                  AND EXISTS(SELECT 1 FROM providers p WHERE p.id::text=c.body->>'provider_id'
+                      AND p.deleted_at IS NULL AND p.held_by_environment_id IS NOT NULL
+                      AND c.created_at >= p.held_since))
               AND NOT EXISTS (SELECT 1 FROM thread_tool_commands e JOIN thread_tool_calls t ON t.answer_id=e.answer_id
                                 WHERE (NOT e.settled OR (NOT t.completed AND NOT t.retired)) AND (e.command_id=c.id OR e.fence_id=c.id OR
                                      (c.kind='node.runtime.remove' AND c.machine_id=e.retirement_machine_id

@@ -244,6 +244,7 @@ async fn a_system_completion_uses_the_same_cached_presentation_as_a_forwarded_ca
         .succeed(
             &p.provider_key(),
             &ProviderComplete {
+                model_parameters: Some(Default::default()),
                 params: None,
                 provider_id: p.rig.provider,
                 purpose: CompletionPurpose::Summary,

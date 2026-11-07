@@ -1,3 +1,4 @@
+#![recursion_limit = "256"]
 //! Model-request feeds use the same scope and per-record access cuts as historical usage records.
 #![allow(
     clippy::unwrap_used,

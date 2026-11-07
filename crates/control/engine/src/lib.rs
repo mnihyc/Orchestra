@@ -23,6 +23,7 @@
 //! caps, the tools of the `orch` server. Until they exist each of those
 //! blocks or refuses, and never lets a turn through unchecked.
 
+#![recursion_limit = "256"]
 #![forbid(unsafe_code)]
 
 // In-crate regression tests share the integration fixture's real database and scripted link.
@@ -38,13 +39,16 @@ pub mod approvals;
 pub mod archive;
 mod audit_facts;
 pub mod background;
+pub mod background_wake;
 pub mod binding;
 pub mod browsers;
+pub mod build_checks;
 mod cache_cleanup;
 pub mod calls;
 pub mod capabilities;
 pub mod caps;
 pub mod commands;
+pub mod component_update_origin;
 pub mod config;
 pub mod context_fill;
 pub mod continuations;
@@ -54,6 +58,8 @@ pub mod delivery;
 pub mod displays;
 pub mod document_tree;
 pub mod engine;
+pub mod environment_creation;
+pub mod environment_mcp;
 pub mod environments;
 pub mod error;
 pub mod export_layout;
@@ -96,6 +102,7 @@ pub mod native_actions;
 pub mod network;
 pub mod notifications;
 pub mod operation_access;
+pub mod operation_scope;
 pub mod parcels;
 pub mod paste;
 pub mod places;
@@ -130,6 +137,7 @@ pub mod schedule;
 pub mod selection;
 pub mod semantic;
 pub mod sessions;
+pub mod setting_operations;
 pub mod sharing;
 pub mod shells;
 pub mod side_threads;
@@ -139,6 +147,7 @@ mod source_retention;
 pub mod storage;
 mod streaming;
 pub mod summaries;
+pub mod template_imports;
 pub mod temporary_environments;
 pub mod thread_move;
 pub mod token_density;
@@ -158,3 +167,10 @@ pub use error::EngineError;
 #[cfg(test)]
 #[path = "../tests/common/mod.rs"]
 mod test_common;
+
+// The unchanged hosting test fixture uses the integration fixture's canonical root name.
+#[cfg(test)]
+use test_common as common;
+#[cfg(test)]
+#[path = "approvals/live_controls.rs"]
+mod approval_live_controls;

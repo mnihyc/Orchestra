@@ -11,14 +11,24 @@ tokio::task_local! { static RETAINED_READ: Vec<Id>; }
 ///
 /// A scope opened inside another adds to it: what the request was admitted to read (a document and the
 /// node it is beside, say) stays admitted for every part of its work, which may admit more for a part.
-pub async fn read_scope<T>(ids: &[Id], work: impl std::future::Future<Output = T>) -> T {
-    let mut admitted = RETAINED_READ.try_with(Clone::clone).unwrap_or_default();
-    for id in ids {
-        if !admitted.contains(id) {
-            admitted.push(*id);
+pub fn read_scope<T>(
+    ids: &[Id],
+    work: impl std::future::Future<Output = T>,
+) -> impl std::future::Future<Output = T> {
+    // Allocate before constructing the async wrapper: boxing inside an async
+    // function would still retain its complete work argument in the initial state.
+    let work = Box::pin(work);
+    async move {
+        // Inherit when polled, so a child constructed before its parent is entered
+        // still sees the exact retained objects that parent admitted.
+        let mut admitted = RETAINED_READ.try_with(Clone::clone).unwrap_or_default();
+        for id in ids {
+            if !admitted.contains(id) {
+                admitted.push(*id);
+            }
         }
+        RETAINED_READ.scope(admitted, work).await
     }
-    RETAINED_READ.scope(admitted, work).await
 }
 
 /// Whether this exact object was admitted for a read-only retained-content request.
@@ -683,4 +693,34 @@ pub async fn snapshot_names(
         }
     }
     Ok(())
+}
+
+#[cfg(test)]
+mod scope_tests {
+    use super::*;
+
+    #[tokio::test]
+    async fn a_preconstructed_child_inherits_only_its_active_parents_retained_objects() {
+        let parent = Id::from_u128(1);
+        let child = Id::from_u128(2);
+        let unrelated = Id::from_u128(3);
+        let child_ids = [child];
+        let child_scope = read_scope(&child_ids, async {
+            assert!(retained_read(parent));
+            assert!(retained_read(child));
+            assert!(!retained_read(unrelated));
+        });
+        assert!(!retained_read(parent));
+        assert!(!retained_read(child));
+        read_scope(&[parent], async {
+            assert!(retained_read(parent));
+            assert!(!retained_read(child));
+            child_scope.await;
+            assert!(retained_read(parent));
+            assert!(!retained_read(child));
+        })
+        .await;
+        assert!(!retained_read(parent));
+        assert!(!retained_read(child));
+    }
 }

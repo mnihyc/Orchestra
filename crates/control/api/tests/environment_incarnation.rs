@@ -1,3 +1,4 @@
+#![recursion_limit = "256"]
 //! Opaque workspace source metadata follows the existing native full/limited environment doors.
 
 mod places;
@@ -90,7 +91,9 @@ impl Scene {
             })
             .send()
             .await
-            .ok();
+            .ok()
+            .into_full()
+            .expect("ordinary directory registration retains full native content");
         let environment = made.base.id;
         let thread = new_id();
         {
@@ -179,6 +182,8 @@ impl Scene {
             .send()
             .await
             .ok()
+            .into_full()
+            .unwrap()
     }
 }
 

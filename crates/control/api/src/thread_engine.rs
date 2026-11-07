@@ -54,10 +54,12 @@ fn outcome_of(outcome: CommandOutcome) -> Outcome {
 /// Why a command could not be handled, in the engine's words.
 fn commands_error(error: DispatchError) -> CommandsError {
     match error {
+        DispatchError::BeforeEffect(error) => CommandsError::BeforeEffect(error),
         DispatchError::UnknownMachine => CommandsError::UnknownMachine,
         DispatchError::Revoked => CommandsError::Revoked,
         DispatchError::Stopping => CommandsError::Stopping,
         DispatchError::Body(error) => CommandsError::Body(error.to_string()),
+        DispatchError::AuthorityMismatch => CommandsError::AuthorityMismatch,
         other => CommandsError::Other(other.to_string()),
     }
 }
@@ -74,6 +76,16 @@ fn stage_of(state: &str) -> Stage {
 
 #[async_trait]
 impl Commands for DispatchCommands {
+    async fn retained_return_source(
+        &self,
+        id: Id,
+    ) -> Result<Option<orch_engine::credentials::handover_authority::ReturnSource>, CommandsError>
+    {
+        self.dispatcher
+            .retained_return_source(id)
+            .await
+            .map_err(commands_error)
+    }
     async fn retained_body(&self, id: Id) -> Result<Option<orch_types::Json>, CommandsError> {
         Ok(self
             .dispatcher
@@ -91,9 +103,14 @@ impl Commands for DispatchCommands {
             .status(id)
             .await
             .map_err(commands_error)?
-            .map(|row| orch_engine::commands::RetainedCommand {
-                machine: row.machine_id,
-                body: row.body,
+            .map(|row| {
+                let key = row.serial_key().map(str::to_owned);
+                orch_engine::commands::RetainedCommand {
+                    machine: row.machine_id,
+                    kind: row.kind,
+                    key,
+                    body: row.body,
+                }
             }))
     }
     async fn observe(&self, command: Outgoing) -> Result<Outcome, CommandsError> {
@@ -132,19 +149,26 @@ impl Commands for DispatchCommands {
             .map_err(commands_error)
     }
 
-    async fn issue(&self, command: Outgoing) -> Result<(), CommandsError> {
-        self.dispatcher
-            .issue_stored(StoredCommand {
-                id: Some(command.id),
-                machine: command.machine,
-                kind: command.kind.as_str().to_owned(),
-                key: command.key.wire(),
-                deadline: command.deadline,
-                body: command.body,
-            })
-            .await
-            .map(|_| ())
-            .map_err(commands_error)
+    async fn issue_prepared(
+        &self,
+        command: Outgoing,
+        before: Option<orch_engine::commands::BeforeCommand<'_>>,
+    ) -> Result<(), CommandsError> {
+        let stored = StoredCommand {
+            authority: command.authority,
+            id: Some(command.id),
+            machine: command.machine,
+            kind: command.kind.as_str().to_owned(),
+            key: command.key.wire(),
+            deadline: command.deadline,
+            body: command.body,
+        };
+        match before {
+            Some(before) => self.dispatcher.issue_stored_before(stored, before).await,
+            None => self.dispatcher.issue_stored(stored).await,
+        }
+        .map(|_| ())
+        .map_err(commands_error)
     }
 
     async fn status(&self, id: Id) -> Result<Option<Info>, CommandsError> {
@@ -233,7 +257,41 @@ impl EventApplier for EngineApplier {
             .map_err(apply_error)
     }
 
-    fn committed(&self, _machine: Id, delivery: &Delivery) {
+    fn committed(&self, machine: Id, delivery: &Delivery) {
+        let recheck = match delivery.stream {
+            Stream::Env { environment_id }
+                if delivery
+                    .events
+                    .iter()
+                    .any(|event| event.kind == "env.facts") =>
+            {
+                Some((None, Some(environment_id)))
+            }
+            Stream::Machine
+                if delivery
+                    .events
+                    .iter()
+                    .any(|event| event.kind == "machine.facts") =>
+            {
+                Some((Some(machine), None))
+            }
+            Stream::Harness { .. }
+                if delivery.events.iter().any(|event| {
+                    matches!(event.kind.as_str(), "harness.status" | "harness.descriptor")
+                }) =>
+            {
+                Some((Some(machine), None))
+            }
+            _ => None,
+        };
+        if let Some((machine, environment)) = recheck {
+            let engine = self.engine.clone();
+            tokio::spawn(async move {
+                if let Err(error) = engine.reevaluate_bindings(machine, environment).await {
+                    tracing::warn!(%error,"committed build facts could not recheck waiting bindings");
+                }
+            });
+        }
         if let Stream::Env { environment_id } = delivery.stream {
             let browser_changed = delivery.events.iter().any(|e| e.kind == "browser.state");
             let display_changed = delivery.events.iter().any(|e| e.kind == "display.state");

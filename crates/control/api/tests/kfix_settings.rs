@@ -8,6 +8,8 @@
 mod places;
 mod rig;
 mod support;
+use support::FullSettingReply;
+use support::FullTokenReply as _;
 
 use orch_api_contract::auth::{ApiTokenCreateBody, MeTokenCreate};
 use orch_api_contract::common::ErrorCode;
@@ -38,6 +40,7 @@ async fn put(
         })
         .send()
         .await
+        .full_setting()
 }
 
 async fn take_back(
@@ -53,6 +56,7 @@ async fn take_back(
         .token(&who.token)
         .send()
         .await
+        .full_setting()
 }
 
 async fn model_of(s: &Scene, thread: Id) -> Option<String> {
@@ -180,17 +184,19 @@ async fn a_policy_is_written_with_settings_manage_alone_and_where_a_thread_start
         .call(MeTokenCreate, &[])
         .token(&s.ada.token)
         .body(&ApiTokenCreateBody {
+            rules: None,
             name: "Rules only".to_owned(),
             scopes: Some(vec!["settings.manage".to_owned()]),
             node_id: Some(org),
             expires_at: None,
-            proof: orch_api_contract::auth::SensitiveProof {
+            proof: Some(orch_api_contract::auth::SensitiveProof {
                 password: Some(support::PASSWORD.to_owned()),
                 ..Default::default()
-            },
+            }),
         })
         .send()
         .await
+        .full_token()
         .ok()
         .token
         .expect("the first answer carries the secret");
@@ -207,6 +213,7 @@ async fn a_policy_is_written_with_settings_manage_alone_and_where_a_thread_start
         })
         .send()
         .await
+        .full_setting()
         .ok();
     assert_eq!(written.value, Some(json!(false)));
     s.rig
@@ -216,6 +223,7 @@ async fn a_policy_is_written_with_settings_manage_alone_and_where_a_thread_start
         .token(&rules)
         .send()
         .await
+        .full_setting()
         .ok();
 
     // Where a thread starts in its environment is the environment's to decide: Eve manages the

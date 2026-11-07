@@ -48,12 +48,95 @@ impl Purpose {
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct Proven {
     session: Option<Id>,
+    key_authenticated: bool,
     code_to_spend: Option<Vec<u8>>,
     step_to_accept: Option<i64>,
     recovery_to_spend: Option<Vec<u8>>,
     recovery_management: Option<(Vec<u8>, Vec<u8>)>,
     identity_proof: Option<Vec<u8>>,
     target: Option<Id>,
+}
+
+/// Whether this account is authenticated by the current operation's explicit key
+/// admission. This chooses the existing proof mechanism; it grants no permission.
+/// The shared registry installs the original caller only after actual operation
+/// admission, and the action guard still rechecks it before any effect.
+///
+/// Every retained legacy ceiling keeps its historical password/browser behavior.
+/// Checked-empty operations retain their exact selection and declared action/resource
+/// evidence from the shared builder; an empty facet list alone proves nothing.
+pub(crate) fn key_proves_account(ctx: &Ctx, authed: &Authed) -> ApiResult<bool> {
+    if authed.is_session() {
+        return Ok(false);
+    }
+    match ctx.admitted_caller() {
+        Some(caller) => key_proves_account_as(ctx, authed, caller),
+        None => {
+            let caller = crate::middleware::authorization::caller_of(authed)?;
+            if caller
+                .grant()
+                .is_none_or(|grant| grant.requires_legacy_compatibility())
+            {
+                Ok(false)
+            } else {
+                Err(key_admission_required())
+            }
+        }
+    }
+}
+
+fn key_admission_required() -> ApiError {
+    ApiError::new(
+        ErrorCode::AuthzDenied,
+        "this operation needs the key's current scope admission",
+    )
+}
+
+/// The same proof mechanism at the actual read/action checkpoint, including any
+/// retained legacy ceiling acquired while the request waited. No proof-mode flag
+/// is accepted from the wire, and a prepared caller never replaces this current one.
+pub(crate) fn key_proves_account_as(
+    ctx: &Ctx,
+    authed: &Authed,
+    admitted: &orch_authz::Caller,
+) -> ApiResult<bool> {
+    let Via::Token { token_id, .. } = &authed.via else {
+        return Ok(false);
+    };
+    let authenticated = crate::middleware::authorization::caller_of(authed)?;
+    let Some(current) = authenticated.grant() else {
+        return Ok(false);
+    };
+    let grant = admitted.grant().ok_or_else(key_admission_required)?;
+    if current.requires_legacy_compatibility() || grant.requires_legacy_compatibility() {
+        return Ok(false);
+    }
+    let selection = admitted
+        .admitted_operation()
+        .ok_or_else(key_admission_required)?;
+    let operation =
+        orch_api_contract::operations::for_route(&ctx.route).map_err(ApiError::internal)?;
+    let selected = operation
+        .variants
+        .iter()
+        .any(|variant| variant.operation == selection);
+    let facets = admitted
+        .admitted_facets()
+        .ok_or_else(key_admission_required)?;
+    let checked_empty = admitted
+        .admitted_empty_facets()
+        .is_some_and(|required| !required.is_empty());
+    if token_id.is_nil()
+        || admitted.user() != authed.id()
+        || admitted.as_admin()
+        || !grant.token_ids().any(|id| id == *token_id)
+        || !selected
+        || operation.delegation != orch_api_contract::operations::Delegation::Business
+        || (facets.is_empty() && !checked_empty)
+    {
+        return Err(key_admission_required());
+    }
+    Ok(true)
 }
 
 /// Looks at the fresh proof `proof` given by `authed` for `purpose`. Nothing is spent here: the act
@@ -64,6 +147,12 @@ pub async fn prove(
     proof: &SensitiveProof,
     purpose: Purpose,
 ) -> ApiResult<Proven> {
+    if key_proves_account(ctx, authed)? {
+        return Ok(Proven {
+            key_authenticated: true,
+            ..Proven::default()
+        });
+    }
     let Via::Session { session_id } = authed.via else {
         return Err(ApiError::new(
             ErrorCode::AuthSessionRequired,
@@ -172,6 +261,12 @@ pub async fn prove(
 }
 
 impl Proven {
+    /// Whether a shared key admission substituted for caller reauthentication.
+    /// The credential producer rechecks this against its current action guard.
+    pub(crate) fn key_authenticated(&self) -> bool {
+        self.key_authenticated
+    }
+
     /// The same proof, for an act on the service identity `target`: an identity provider's proof made for
     /// another identity's token, or for the person's own, is not spent here.
     #[must_use]

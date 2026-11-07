@@ -1,3 +1,4 @@
+#![recursion_limit = "256"]
 //! Binding previews use stored reports, one request connection and no action locks, even while several browser pages are open.
 #![allow(
     clippy::unwrap_used,

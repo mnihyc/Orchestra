@@ -6,6 +6,7 @@
 )]
 
 mod support;
+use support::FullTokenReply as _;
 
 use async_trait::async_trait;
 use chrono::Duration;
@@ -192,14 +193,15 @@ async fn come_back(world: &World, state: &str, mark: &str, code: &str) -> String
 
 fn token_with(proof: &str) -> ApiTokenCreateBody {
     ApiTokenCreateBody {
+        rules: None,
         name: "deploy".to_owned(),
         scopes: Some(vec!["thread.view".to_owned()]),
         node_id: None,
         expires_at: None,
-        proof: SensitiveProof {
+        proof: Some(SensitiveProof {
             identity_proof: Some(proof.to_owned()),
             ..SensitiveProof::default()
-        },
+        }),
     }
 }
 
@@ -229,6 +231,7 @@ async fn a_fresh_sign_in_at_the_linked_provider_gives_one_proof_that_makes_one_t
         .body(&token_with(&proof))
         .send()
         .await
+        .full_token()
         .ok();
     assert!(made.token.is_some());
     // Spent: it makes no second token, and the callback's state served once.
@@ -239,6 +242,7 @@ async fn a_fresh_sign_in_at_the_linked_provider_gives_one_proof_that_makes_one_t
         .body(&token_with(&proof))
         .send()
         .await
+        .full_token()
         .problem();
     assert_eq!(again.code, ErrorCode::AuthReauthenticationRequired);
     let replayed = come_back(&world, &state, &mark, &format!("at:{now}:sub-ada")).await;

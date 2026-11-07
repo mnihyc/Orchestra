@@ -1,0 +1,13 @@
+test -p orch-api-core --test forks
+test -p orch-api-core --test threads_adopt
+test -p orch-api-core --test hosted_environments
+test -p orch-api-core --test links
+test -p orch-api-core --test loss
+test -p orch-api-core --test imports
+test -p orch-api-core --test runtime_updates
+test -p orch-api-core --test exports
+test -p orch-api-core --test chat_files
+test -p orch-api-core --test trace_walk
+test -p orch-api-core --test thread_terminalization
+test -p orch-api-core --test thread_history_scale
+test -p orch-api-core --test agents_receiving_place

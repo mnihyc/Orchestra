@@ -1,3 +1,4 @@
+#![recursion_limit = "256"]
 //! A thread made into another over HTTP: planned and carried out as a switch or a fork, several at once, and the quick form that is a side thread; each request is served for whoever may make the change it asks for and refused to the rest, and a plan that is old, blocked or somebody else's is never carried out.
 #![allow(
     clippy::unwrap_used,
@@ -9,6 +10,20 @@ mod binding_support;
 mod places;
 mod rig;
 mod support;
+mod thread_history_scope;
+
+#[path = "forks/batch_cancel_scopes.rs"]
+mod batch_cancel_scopes;
+#[path = "forks/batch_native_scopes.rs"]
+mod batch_native_scopes;
+#[path = "forks/batch_preflight_native_scopes.rs"]
+mod batch_preflight_native_scopes;
+#[path = "forks/confirmed_native_scopes.rs"]
+mod confirmed_native_scopes;
+#[path = "forks/preflight_native_scopes.rs"]
+mod preflight_native_scopes;
+#[path = "forks/side_native_scopes.rs"]
+mod side_native_scopes;
 
 use binding_support::{a_directory_on_a_machine, another_environment, another_provider};
 use orch_api_contract::common::ErrorCode;
@@ -30,7 +45,7 @@ use orch_link_contract::commands::{
 };
 use orch_types::{Id, Json};
 use places::{Who, give_role, make_topic};
-use rig::{MODEL, Scene, descriptor, eventually};
+use rig::{MODEL, Scene, descriptor, eventually, queue_environment};
 use serde_json::json;
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
@@ -46,6 +61,10 @@ async fn switched_off_targets_have_their_blockers_for_provider_profile_model_and
         .await
         .unwrap();
     let plan = w.plan(&w.s.ada, thread, &request).await.ok();
+    assert!(
+        plan.agent_access.is_none(),
+        "a switch is not another creation gift"
+    );
     assert!(
         plan.blockers
             .iter()
@@ -348,6 +367,7 @@ impl Forks {
             topic_id: None,
             name: None,
             access: None,
+            agent_access: None,
             history: None,
             to: Some(ForkTo {
                 provider_id: Some(self.provider),
@@ -378,7 +398,8 @@ impl Forks {
     }
 
     async fn plan(&self, by: &Who, thread: Id, request: &ForkRequest) -> Reply<ForkPlan> {
-        self.s
+        let reply = self
+            .s
             .rig
             .world
             .app
@@ -386,7 +407,13 @@ impl Forks {
             .token(&by.token)
             .body(request)
             .send()
-            .await
+            .await;
+        Reply {
+            status: reply.status,
+            headers: reply.headers,
+            raw: reply.raw,
+            body: reply.body.map(|value| value.into_full().unwrap()),
+        }
     }
 
     async fn carry_out(&self, by: &Who, thread: Id, plan: &ForkPlan) -> Reply<Job> {
@@ -493,7 +520,9 @@ impl Forks {
             })
             .send()
             .await
-            .ok();
+            .ok()
+            .into_full()
+            .unwrap();
         let thread = made.base.id;
         self.s
             .exchange(thread, 0, "Plan the work", "The plan is ready")
@@ -510,7 +539,13 @@ impl Forks {
             .token(&by.token)
             .body(body)
             .send()
-            .await
+            .await;
+        Reply {
+            status: reply.status,
+            headers: reply.headers,
+            raw: reply.raw,
+            body: reply.body.map(|value| value.into_full().unwrap()),
+        }
     }
 
     async fn batch_create(&self, by: &Who, plan: &ForkBatchPlan) -> Reply<ForkBatch> {
@@ -784,6 +819,10 @@ async fn a_fork_is_theirs_who_makes_it_and_needs_what_starting_a_thread_there_ne
     // A reader holds the right to fork as shipped, and cannot start a thread in the topic.
     let reader = w.plan(&s.cai, source, &w.fork()).await.ok();
     assert!(
+        reader.agent_access.is_some(),
+        "the admitted fork preview needs no parent binding-options door"
+    );
+    assert!(
         blocker_codes(&reader).contains(&"access"),
         "{:?}",
         reader.blockers
@@ -796,6 +835,12 @@ async fn a_fork_is_theirs_who_makes_it_and_needs_what_starting_a_thread_there_ne
     let plan = w.plan(&s.eve, source, &w.fork()).await.ok();
     assert!(plan.blockers.is_empty(), "{:?}", plan.blockers);
     assert_eq!(plan.history.method, HistoryMethod::NativeFork);
+    let access = plan
+        .agent_access
+        .as_ref()
+        .expect("a new fork carries genuine source availability");
+    assert_eq!(access.choices.len(), 4);
+    assert!(access.choices[1].parts.timeline.is_none());
     assert_eq!(plan.owner.before, None);
     assert_eq!(plan.owner.after.id, s.eve.id());
     assert!(plan.locks.is_empty(), "a fork holds nothing");
@@ -827,6 +872,45 @@ async fn a_fork_is_theirs_who_makes_it_and_needs_what_starting_a_thread_there_ne
     let plan = w.plan(&s.ada, source, &fresh).await.ok();
     assert_eq!(plan.history.method, HistoryMethod::Nothing);
     assert_eq!(plan.history.turns, 0);
+}
+
+#[tokio::test]
+async fn a_fork_offer_uses_the_selected_topics_preset_and_leaves_no_preview_page() {
+    use orch_api_contract::nodes::AgentAccessWhere;
+    let w = Forks::new().await;
+    let source = w.thread_with_history("Selected destination").await;
+    let destination = make_topic(
+        &w.s.rig.world,
+        &w.s.ada,
+        w.s.tree.project.base.id,
+        "Destination",
+    )
+    .await
+    .base
+    .id;
+    w.s.rig
+        .world
+        .set_at(
+            orch_settings::Target::Node(destination),
+            orch_settings_contract::registry::keys::THREADS_AGENT_ACCESS,
+            json!({"where":"nothing", "parts":{}}),
+        )
+        .await;
+    let mut request = w.fork();
+    request.topic_id = Some(destination);
+    let before: (i64, i64, i64) = sqlx::query_as("SELECT (SELECT count(*) FROM nodes),(SELECT count(*) FROM chats),(SELECT count(*) FROM permission_entries)")
+        .fetch_one(w.s.rig.db.pool()).await.unwrap();
+    let plan = w.plan(&w.s.ada, source, &request).await.ok();
+    assert_eq!(
+        plan.agent_access.as_ref().unwrap().preset.where_,
+        AgentAccessWhere::Nothing
+    );
+    let after: (i64, i64, i64) = sqlx::query_as("SELECT (SELECT count(*) FROM nodes),(SELECT count(*) FROM chats),(SELECT count(*) FROM permission_entries)")
+        .fetch_one(w.s.rig.db.pool()).await.unwrap();
+    assert_eq!(
+        after, before,
+        "a kept fork plan stores no prospective thread, chat or human page"
+    );
 }
 
 // ---------------------------------------------------------------- several at once
@@ -1069,7 +1153,7 @@ async fn a_side_thread_is_started_by_one_request_listed_and_closed_and_it_refuse
     // One request makes it, with the message queued in it.
     let made = start(&s.ada, parent, say("A quick question", "q-1")).await;
     assert_eq!(made.status.as_u16(), 201);
-    let made = good("the first side thread", made);
+    let made = good("the first side thread", made).into_full().unwrap();
     let side = made.thread.base.id;
     assert_eq!(made.thread.side_of.as_ref().map(|of| of.id), Some(parent));
     assert_eq!(made.thread.side_from_turn, Some(1));
@@ -1079,7 +1163,9 @@ async fn a_side_thread_is_started_by_one_request_listed_and_closed_and_it_refuse
     let again = good(
         "the same request again",
         start(&s.ada, parent, say("A quick question", "q-1")).await,
-    );
+    )
+    .into_full()
+    .unwrap();
     assert_eq!(again.thread.base.id, side);
     assert_eq!(again.input.id, made.input.id);
     assert_eq!(
@@ -1211,7 +1297,7 @@ async fn side_threads_are_limited_by_the_setting_of_the_place_and_the_refusal_li
             });
         async move { call.send().await }
     };
-    let first = start("one").await.ok().thread.base.id;
+    let first = start("one").await.ok().into_full().unwrap().thread.base.id;
     let refused = start("two").await.problem();
     assert_eq!(refused.code, ErrorCode::ThreadSideLimit);
     assert_eq!(refused.extra["open"], json!([first]));
@@ -1588,7 +1674,10 @@ async fn enable_holds_waiting_messages_by_default_and_runs_them_only_when_select
     use orch_link_contract::events::TurnOutcome;
     for kind in ["provider", "model", "agent", "environment"] {
         for run_waiting in [false, true] {
-            let w = Forks::new().await;
+            let mut w = Forks::new().await;
+            if kind == "environment" {
+                w.s.on.environment = queue_environment(&w.s).await;
+            }
             let thread = w.thread_with_history("Paused queue").await;
             let model: Id = sqlx::query_scalar(
                 "SELECT id FROM provider_models WHERE provider_id=$1 AND model_name=$2",
@@ -1741,7 +1830,42 @@ async fn enable_holds_waiting_messages_by_default_and_runs_them_only_when_select
                     .ok();
             }
             for (index, input) in inputs.iter().enumerate() {
-                let turn = w.s.rig.turn_start(thread, index + 1).await;
+                let nth = index + 1;
+                let phase = if run_waiting {
+                    "after_enable"
+                } else {
+                    "after_queue_resume"
+                };
+                let rig = &w.s.rig;
+                let previous = Mutex::new(None::<Json>);
+                let found = Mutex::new(None);
+                let label = format!(
+                    "turn.start number {nth}: kind={kind} run_waiting={run_waiting} phase={phase}"
+                );
+                eventually(&label, || async {
+                    let snapshot: Json = sqlx::query_scalar(
+                        "SELECT jsonb_build_object('state',t.state,'blocked_reason',t.blocked_reason,
+                            'blocked_detail',t.blocked_detail,'queue_held',t.queue_held,
+                            'environment_status',e.status,'lifecycle',e.facts#>>'{environment_descriptor,lifecycle}',
+                            'has_runtime',EXISTS(SELECT 1 FROM runtimes r WHERE r.environment_id=e.id
+                                AND r.successor_of IS NULL AND r.state NOT IN ('retired','removed')))
+                         FROM threads t LEFT JOIN environments e ON e.id=t.environment_id WHERE t.node_id=$1",
+                    )
+                    .bind(thread)
+                    .fetch_one(rig.db.pool())
+                    .await
+                    .unwrap();
+                    let mut last = previous.lock().unwrap();
+                    if last.as_ref() != Some(&snapshot) {
+                        eprintln!("enable queue wait: kind={kind} run_waiting={run_waiting} phase={phase} input={input} nth={nth} snapshot={snapshot}");
+                        *last = Some(snapshot);
+                    }
+                    let next = rig.turn_starts(thread).get(nth).cloned();
+                    let done = next.is_some();
+                    *found.lock().unwrap() = next;
+                    done
+                }).await;
+                let turn = found.into_inner().unwrap().expect("a turn start was seen");
                 let authored: (Id, Id) =
                     sqlx::query_as("SELECT input_id,audit_for_user_id FROM turns WHERE id=$1")
                         .bind(turn.turn_id)
@@ -1763,5 +1887,74 @@ async fn enable_holds_waiting_messages_by_default_and_runs_them_only_when_select
                 w.s.rig.wait_turn(turn.turn_id, "completed").await;
             }
         }
+    }
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_quick_fork_honors_the_confirmed_agent_choice_instead_of_replacing_it_with_the_preset() {
+    use orch_api_contract::forks::{ForkNowBody, ThreadForkNow};
+    use orch_api_contract::nodes::{AgentAccessChoice, AgentAccessWhere};
+    use orch_api_contract::share::ShareParts;
+
+    let w = Forks::new().await;
+    let source = w.thread_with_history("Quick fork choices").await;
+    w.s.rig
+        .world
+        .set_at(
+            orch_settings::Target::Node(w.s.tree.topic.base.id),
+            orch_settings_contract::registry::keys::THREADS_AGENT_ACCESS,
+            json!({"where":"topic", "parts":{"documents":"edit"}}),
+        )
+        .await;
+    for explicit_nothing in [true, false] {
+        let made =
+            w.s.rig
+                .world
+                .app
+                .call(ThreadForkNow, &[&source])
+                .token(&w.s.ada.token)
+                .body(&ForkNowBody {
+                    name: Some(
+                        if explicit_nothing {
+                            "Quick with Nothing"
+                        } else {
+                            "Quick with the preset"
+                        }
+                        .into(),
+                    ),
+                    agent_access: explicit_nothing.then_some(AgentAccessChoice {
+                        where_: AgentAccessWhere::Nothing,
+                        parts: ShareParts::default(),
+                    }),
+                    ..ForkNowBody::default()
+                })
+                .send()
+                .await
+                .ok();
+        let done = w.ended(&w.s.ada, made.job.id).await;
+        assert_eq!(done.state, JobState::Succeeded, "{done:?}");
+        let gifts: Vec<(Id, String)> = sqlx::query_as("SELECT object_id,permission FROM permission_entries WHERE holder_kind='agents' AND holder_id=$1 AND removed_at IS NULL ORDER BY object_id,permission")
+            .bind(made.thread_id).fetch_all(w.s.rig.db.pool()).await.unwrap();
+        if explicit_nothing {
+            assert!(
+                gifts.is_empty(),
+                "the explicit choice must survive the shortcut: {gifts:?}"
+            );
+        } else {
+            assert!(
+                !gifts.is_empty(),
+                "omission still accepts the current creation preset"
+            );
+            assert!(
+                gifts
+                    .iter()
+                    .all(|(object, permission)| *object == w.s.tree.topic.base.id
+                        && matches!(permission.as_str(), "doc.view" | "doc.edit"))
+            );
+            assert!(gifts.iter().any(|(_, permission)| permission == "doc.edit"));
+        }
+        let thread = w.read(&w.s.ada, made.thread_id).await;
+        assert_eq!(thread.base.owner.id, w.s.ada.id());
+        assert!(thread.base.access.owns);
     }
 }

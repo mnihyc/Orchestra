@@ -9,6 +9,7 @@
  * A cap that is made carries the key of the act, so that a second attempt after a lost answer makes nothing
  * twice; a change names the revision the person saw.
  */
+import { suppliedRead } from '@/api/readScheduler';
 import { ADMIN_QUERY } from '@/api/queryAuthority';
 import { infiniteQueryOptions, type QueryClient, queryOptions } from '@tanstack/react-query';
 
@@ -40,6 +41,7 @@ import type {
 export interface UsageFilters {
   effort?: string;
   tier?: string;
+  tier_unknown?: boolean;
   program?: string;
   outcome?: UsageOutcomeFilter;
   org_id?: string;
@@ -131,6 +133,7 @@ export const healthQuery = (providerId: string) => queryOptions({
 export const usageQuery = (params: UsageParams) =>
   queryOptions({
     queryKey: usageKeys.analytics(params),
+    ...suppliedRead(usageKeys.analytics(params)),
     queryFn: ({ signal }): Promise<UsageAnalytics> =>
       ok(
         api.GET('/usage', {

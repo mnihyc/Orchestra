@@ -1,3 +1,4 @@
+#![recursion_limit = "256"]
 //! The feed of a document over a real socket: the blocks of each accepted change in order, what a reader that missed some is sent, discussions, who has the document open and who is writing where, and the end of a feed when access or the document goes.
 #![allow(
     clippy::unwrap_used,
@@ -55,6 +56,8 @@ impl Office {
             .send()
             .await
             .ok()
+            .into_full()
+            .unwrap()
             .base
             .id
     }
@@ -77,6 +80,8 @@ impl Office {
             .send()
             .await
             .ok()
+            .into_full()
+            .expect("the browser session receives the full document reply")
     }
 
     /// A person with a role on the topic, and their token.

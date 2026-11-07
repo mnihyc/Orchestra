@@ -9,8 +9,11 @@ pub(crate) mod approval_items;
 pub mod background;
 pub mod binding;
 pub mod calls;
+pub(crate) mod content_reply;
 pub mod context;
 pub mod continuations;
+pub(crate) mod creation_operation;
+mod creator_discovery;
 pub mod drive;
 pub mod export;
 pub mod goals;
@@ -19,10 +22,12 @@ pub mod make;
 pub mod model_inputs;
 pub mod native;
 mod opening;
+mod operation;
 pub mod parameters;
 pub mod raw;
 pub mod read;
 mod read_history;
+mod read_operation;
 pub mod rules;
 pub mod source;
 pub mod uploads;
@@ -81,6 +86,10 @@ pub async fn one(ctx: &Ctx, conn: &mut Conn, thread: Id) -> ApiResult<Thread> {
 /// Why a thread could not be made, as the problem a client acts on.
 pub async fn create_failed(conn: &mut Conn, error: CreateThreadError) -> ApiError {
     match error {
+        CreateThreadError::OperationScope => ApiError::new(
+            ErrorCode::AuthzDenied,
+            "the key does not allow the complete creation",
+        ),
         CreateThreadError::NoSuchTopic => ApiError::not_found(),
         CreateThreadError::Denied(refusal) => match refusals::denied(conn, *refusal).await {
             Ok(error) | Err(error) => error,
@@ -142,6 +151,7 @@ pub async fn create_failed(conn: &mut Conn, error: CreateThreadError) -> ApiErro
         CreateThreadError::Setting(message) | CreateThreadError::Page(message) => {
             ApiError::invalid("", &message)
         }
+        CreateThreadError::AgentAccess(error) => super::share::failed(conn, *error).await,
         CreateThreadError::FirstInput { thread, error } => input_failed(conn, thread, *error).await,
         CreateThreadError::Internal(error) => ApiError::engine(error),
     }
@@ -237,6 +247,59 @@ pub async fn input_failed(conn: &mut Conn, thread: Id, error: InputError) -> Api
         .with("state", state)
         .with("state_detail", detail),
         InputError::Internal(error) => ApiError::engine(error),
+    }
+}
+
+/// Restricted mutation failures retain their operational code without building named existing objects.
+pub(crate) async fn input_failed_projected(
+    conn: &mut Conn,
+    thread: Id,
+    error: InputError,
+    receipt_only: bool,
+) -> ApiError {
+    if !receipt_only {
+        return input_failed(conn, thread, error).await;
+    }
+    match error {
+        InputError::Denied(refusal) => ApiError::new(
+            ErrorCode::AuthzDenied,
+            "the caller lacks the required permission",
+        )
+        .with("required", refusal.required.as_str())
+        .with("object", refusal.object),
+        InputError::Archived => ApiError::new(
+            ErrorCode::NodeArchived,
+            "this is archived, and so is read-only",
+        ),
+        InputError::AlreadyDecided(_) => ApiError::new(
+            ErrorCode::ApprovalAlreadyDecided,
+            "The request was decided already",
+        ),
+        InputError::NotHeld { state, .. } => ApiError::new(
+            ErrorCode::InputNotHeld,
+            "the input is not held for its files",
+        )
+        .with("state", state),
+        InputError::Native(orch_engine::native_actions::NativeError::Denied(refusal)) => {
+            ApiError::new(
+                ErrorCode::AuthzDenied,
+                "the caller lacks the required permission",
+            )
+            .with("required", refusal.required.as_str())
+            .with("object", refusal.object)
+        }
+        safe @ (InputError::Native(_)
+        | InputError::NotFound
+        | InputError::Empty
+        | InputError::TooLong
+        | InputError::Invalid(_)
+        | InputError::SteerUnsupported
+        | InputError::PlanUnsupported
+        | InputError::NotPending { .. }
+        | InputError::NotTheAuthor
+        | InputError::StaleQueue { .. }
+        | InputError::InactiveContinuation { .. }
+        | InputError::Internal(_)) => input_failed(conn, thread, safe).await,
     }
 }
 

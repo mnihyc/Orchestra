@@ -148,7 +148,9 @@ async fn a_short_environment_address_agrees_across_surfaces_finds_the_same_ident
             .body(&body)
             .send()
             .await
-            .ok();
+            .ok()
+            .into_full()
+            .unwrap();
         assert_eq!(changed.base.id, id);
         projections(
             &world,

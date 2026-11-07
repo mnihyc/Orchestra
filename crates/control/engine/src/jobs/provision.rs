@@ -50,6 +50,14 @@ use serde_json::json;
 use std::collections::BTreeMap;
 use std::time::Duration;
 
+mod creator_authority;
+pub use creator_authority::remember_command as remember_creator_command;
+pub use creator_authority::retain as retain_creator_provision_origin;
+pub use creator_authority::{
+    command_authorized as creator_command_authorized,
+    command_current_callers as creator_command_current_callers,
+};
+
 /// The phases of making a unit, and where the time usually goes: the image first (a pull or a build
 /// is minutes), then the unit and the wait for its connector. They shape a bar and nothing else.
 const SCHEDULE: Phase = Phase {
@@ -487,18 +495,37 @@ impl Provision {
                 "the template is gone or switched off",
             )
         })?;
-        let principal = Principal::load(
-            &mut tx,
-            Caller::session(
-                plan.pointer("/recovery/by")
-                    .and_then(Json::as_str)
-                    .and_then(|id| id.parse().ok())
-                    .unwrap_or(environment.owner_id),
-            ),
-            Time::new(now),
-        )
-        .await
-        .map_err(EngineError::from)?;
+        let owner = jobs::job(&mut tx, job.id())
+            .await?
+            .ok_or_else(|| EngineError::unreadable("The provision disappeared."))?;
+        let captured = if crate::environment_creation::standalone(&owner) {
+            Some(
+                crate::environment_creation::principal_current(
+                    &mut tx,
+                    &owner,
+                    self.engine.inner.clock.as_ref(),
+                    None,
+                )
+                .await?,
+            )
+        } else {
+            creator_authority::principal(&mut tx, &owner, Time::new(now)).await?
+        };
+        let principal = match captured {
+            Some(principal) => principal,
+            None => Principal::load(
+                &mut tx,
+                Caller::session(
+                    plan.pointer("/recovery/by")
+                        .and_then(Json::as_str)
+                        .and_then(|id| id.parse().ok())
+                        .unwrap_or(environment.owner_id),
+                ),
+                Time::new(now),
+            )
+            .await
+            .map_err(EngineError::from)?,
+        };
         // An environment that has been made stays on the host that has its volumes.
         let previous = if environment.generation > 0 && plan.get("recovery").is_none() {
             env_rows::published_host_of(&mut tx, environment.id).await?
@@ -536,7 +563,7 @@ impl Provision {
         .unwrap_or(IDLE_MINUTES_DEFAULT);
         // A completed environment keeps its admitted own-host/template behavior.
         // Only its initial pending provision is a new placement admission.
-        let listed = if let Some(host) = previous {
+        let mut listed = if let Some(host) = previous {
             places::retained_host_places(
                 &mut tx,
                 &principal,
@@ -566,6 +593,19 @@ impl Provision {
             )
             .await?
         };
+        if crate::environment_creation::standalone(&owner) {
+            let known = crate::environment_creation::known_plan(&mut tx, &owner).await?;
+            crate::environment_creation::bound_candidates(
+                &mut tx,
+                principal.caller(),
+                &known,
+                template.id,
+                &wanted.mounts,
+                &mut listed,
+            )
+            .await
+            .map_err(|error| failed("denied", error.to_string()))?;
+        }
         let chosen = places::choose(&listed, named)
             .cloned()
             .map_err(|none| failed(none.code, none.message))?;
@@ -578,6 +618,26 @@ impl Provision {
             return Err(failed(
                 "no_capacity",
                 "The selected Use entry has no remaining environment capacity.",
+            ));
+        }
+        let principal = if crate::environment_creation::standalone(&owner) {
+            crate::environment_creation::principal_current(
+                &mut tx,
+                &owner,
+                self.engine.inner.clock.as_ref(),
+                Some(chosen.host.id),
+            )
+            .await?
+        } else {
+            principal
+        };
+        if !principal
+            .caller()
+            .key_deadline_allows(self.engine.inner.clock.as_ref())
+        {
+            return Err(failed(
+                "denied",
+                "the original creator key ended before placement",
             ));
         }
         // A unit that failed is taken away before its successor is made, so that two never run at once.
@@ -1606,6 +1666,17 @@ impl Provision {
         let row = jobs::job(&mut tx, job.id())
             .await?
             .ok_or_else(|| EngineError::unreadable("the provisioning job is missing"))?;
+        if self.mode == Mode::Make && current.generation == 0 {
+            crate::jobs::source::publish_creator_generation(
+                &mut tx,
+                job,
+                current.id,
+                placed.runtime.id,
+                machine,
+                current.generation,
+            )
+            .await?;
+        }
         let origin = row
             .plan
             .get("origin")
@@ -1965,6 +2036,7 @@ impl Provision {
 #[async_trait]
 impl Phased for Provision {
     async fn run(&self, job: &Job, phase: &str) -> Result<Done, Stop> {
+        creator_authority::phase(job, phase).await?;
         match phase {
             "schedule" => self.schedule(job).await,
             "image" => self.image(job).await,

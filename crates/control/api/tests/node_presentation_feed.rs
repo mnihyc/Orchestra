@@ -1,3 +1,4 @@
+#![recursion_limit = "256"]
 //! Document placement and visibility changes delivered to two readers' tree feeds, and sidebar state delivered to another device.
 #![allow(
     clippy::unwrap_used,
@@ -6,7 +7,9 @@
 )]
 
 mod realtime_support;
+mod support;
 
+use crate::support::FullPermissionPageReply;
 use orch_api_contract::access::{PageChange, PageChangeWhole, PermissionPageUpdate};
 use orch_api_contract::documents::{
     DocumentDelete, DocumentMove, DocumentMoveBody, DocumentRestore, NodeDocumentCreate,
@@ -149,6 +152,8 @@ async fn a_document_created_deleted_restored_moved_and_made_private_reaches_both
         .send()
         .await
         .ok()
+        .into_full()
+        .unwrap()
         .base
         .id;
     for reader in [&mut ada, &mut bea] {
@@ -167,7 +172,9 @@ async fn a_document_created_deleted_restored_moved_and_made_private_reaches_both
         .raw_body(&serde_json::json!({}))
         .send()
         .await
-        .ok();
+        .ok()
+        .into_full()
+        .unwrap();
     for reader in [&mut ada, &mut bea] {
         counts(reader, &[(rig.topic, 1)]).await;
     }
@@ -178,7 +185,9 @@ async fn a_document_created_deleted_restored_moved_and_made_private_reaches_both
         })
         .send()
         .await
-        .ok();
+        .ok()
+        .into_full()
+        .unwrap();
     for reader in [&mut ada, &mut bea] {
         counts(reader, &[(rig.topic, 0), (rig.project, 1)]).await;
     }
@@ -190,6 +199,7 @@ async fn a_document_created_deleted_restored_moved_and_made_private_reaches_both
         })
         .send()
         .await
+        .full_permission_page()
         .ok();
     for reader in [&mut ada, &mut bea] {
         counts(reader, &[(rig.project, 0)]).await;

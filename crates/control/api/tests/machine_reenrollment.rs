@@ -11,6 +11,7 @@ mod admin_support;
 mod places;
 mod support;
 
+use crate::support::FullPermissionPageReply;
 use orch_api_contract::access::{
     Holder, HolderInput, PageChange, PageChangeAdd, PageChangeRow, PermissionPageGet,
     PermissionPagePreview, PermissionPageUpdate,
@@ -28,22 +29,9 @@ use support::World;
 
 async fn owned_machine(world: &World, owner: &Who) -> Id {
     let mut conn = world.conn().await;
-    let machine = fixtures::insert_persons_machine(&mut conn, owner.id(), "personal laptop")
+    fixtures::insert_persons_machine(&mut conn, owner.id(), "personal laptop")
         .await
-        .unwrap();
-    orch_authz::ownership::start_resource(
-        &mut conn,
-        orch_access_contract::decisions::ObjectRef {
-            kind: orch_access_contract::permissions::ResourceKind::Machine.into(),
-            id: machine,
-        },
-        owner.id(),
-        orch_authz::ownership::NewAccess::Defaults,
-        orch_types::Time::new(world.now()),
-    )
-    .await
-    .unwrap();
-    machine
+        .unwrap()
 }
 
 async fn confirmed_management(world: &World, administrator: &Who, machine: Id) {
@@ -97,6 +85,7 @@ async fn confirmed_management(world: &World, administrator: &Who, machine: Id) {
         .body(&change)
         .send()
         .await
+        .full_permission_page()
         .ok();
     let row = page
         .rows
@@ -132,18 +121,6 @@ async fn a_bound_replacement_command_keeps_the_owned_connectors_named_directory_
     let machine = fixtures::insert_persons_machine(&mut conn, owner.id(), "named laptop")
         .await
         .unwrap();
-    orch_authz::ownership::start_resource(
-        &mut conn,
-        orch_access_contract::decisions::ObjectRef {
-            kind: orch_access_contract::permissions::ResourceKind::Machine.into(),
-            id: machine,
-        },
-        owner.id(),
-        orch_authz::ownership::NewAccess::Defaults,
-        orch_types::Time::new(world.now()),
-    )
-    .await
-    .unwrap();
     sqlx::query("UPDATE machines SET roles=ARRAY['agent'],facts=jsonb_build_object('installation',jsonb_build_object('data_dir',$2::text,'service',null,'executable','/tmp/connector bin/orch-connector')) WHERE id=$1")
         .bind(machine).bind("/tmp/owner's named machine").execute(&mut *conn).await.unwrap();
     drop(conn);
@@ -182,8 +159,7 @@ async fn a_bound_replacement_command_keeps_the_owned_connectors_named_directory_
 }
 
 #[tokio::test]
-async fn an_admin_reenrolls_a_persons_machine_after_the_confirmed_override_names_them_and_records_it()
- {
+async fn a_named_machine_manager_still_needs_ownership_to_issue_its_replacement_identity() {
     let world = World::new().await;
     let ada = person(&world, "ada").await;
     let bea = person(&world, "bea").await;
@@ -258,10 +234,25 @@ async fn an_admin_reenrolls_a_persons_machine_after_the_confirmed_override_names
     .unwrap();
     assert_eq!(effects, (0, 0));
     confirmed_management(&world, &root, machine).await;
-    let token = world
+    let denied = world
         .app
         .call(MachineEnrollmentAgainTokenCreate, &[&machine])
         .token(&root.token)
+        .send()
+        .await
+        .problem();
+    assert_eq!(denied.code, ErrorCode::NotFound);
+    assert_eq!(
+        sqlx::query_scalar::<_, i64>("SELECT count(*) FROM enrollment_tokens")
+            .fetch_one(&world.db.pool)
+            .await
+            .unwrap(),
+        0
+    );
+    let token = world
+        .app
+        .call(MachineEnrollmentAgainTokenCreate, &[&machine])
+        .token(&ada.token)
         .send()
         .await
         .ok();
@@ -271,7 +262,7 @@ async fn an_admin_reenrolls_a_persons_machine_after_the_confirmed_override_names
             .fetch_one(&world.db.pool)
             .await
             .unwrap();
-    assert_eq!(target, (root.id(), machine));
+    assert_eq!(target, (ada.id(), machine));
 }
 
 #[tokio::test]
@@ -287,7 +278,9 @@ async fn removing_a_persons_machine_after_an_admin_override_keeps_the_named_gran
         .token(&root.token)
         .send()
         .await
-        .ok();
+        .ok()
+        .into_full()
+        .expect("ordinary withdrawal keeps its native Machine body");
     assert_eq!(removed.status, MachineStatus::Revoked);
     let record: (Id, bool) = sqlx::query_as(
         "SELECT actor_id,as_admin FROM audit_log WHERE object_id=$1 AND action='machine.revoked'",

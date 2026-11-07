@@ -48,6 +48,9 @@ pub struct PackageArgs {
     /// hashes, the contents of each archive) instead of building one.
     #[arg(long)]
     check: bool,
+    /// Also require a clean checkout of the manifest commit and its exact schema/deployment sources.
+    #[arg(long, requires = "check")]
+    check_source: bool,
     /// Write the manifest of the files the directory holds, keeping what the
     /// existing manifest says of the release itself.
     #[arg(long, conflicts_with = "check")]
@@ -80,12 +83,13 @@ pub struct PackageArgs {
 }
 
 /// The programs compiled for the glibc the services run on.
-const SERVER_PROGRAMS: [&str; 3] = ["orch-api", "orch-gateway", "orch-worker"];
+pub(super) const SERVER_PROGRAMS: [&str; 3] = ["orch-api", "orch-gateway", "orch-worker"];
 /// The bundle of public roots inside the builder image: a service image holds
 /// none, and the services reach public servers (mail, bots, webhooks, push).
 const CA_BUNDLE_IN_IMAGE: &str = "/etc/ssl/certs/ca-certificates.crt";
 /// The installers that go to the connectors' download directory.
-const INSTALLERS: [&str; 3] = ["install.sh", "install.ps1", "install-node.sh"];
+pub(super) const INSTALLERS: [&str; 3] = ["install.sh", "install.ps1", "install-node.sh"];
+pub(super) const DEPLOY_NOTICES: &str = "The deployment scripts are covered by LICENSE. Third-party program notices accompany the server and frontend archives.\n";
 /// The entries the user of an archive reaches in a release.
 const TOOLS_DIR_IN_ZIP: &str = "connectors";
 
@@ -96,6 +100,26 @@ pub fn run(root: &Path, args: &PackageArgs) -> Result<(), ReleaseError> {
     }
     if args.check {
         check_release(&args.out)?;
+        if args.check_source {
+            if !git(root, &["status", "--porcelain"])?.is_empty() {
+                return Err(ReleaseError::Invalid(
+                    "source verification needs a clean candidate checkout".into(),
+                ));
+            }
+            let manifest = Manifest::read(&args.out)?;
+            let problems = super::source::problems(
+                root,
+                &args.out,
+                &manifest,
+                &git(root, &["rev-parse", "HEAD"])?,
+            )?;
+            if !problems.is_empty() {
+                return Err(ReleaseError::NotWhole {
+                    dir: args.out.clone(),
+                    problems: problems.join("\n"),
+                });
+            }
+        }
         if args.require_all_connectors {
             connectors::require_all(
                 &Manifest::read(&args.out)?
@@ -309,7 +333,11 @@ fn build(root: &Path, args: &PackageArgs) -> Result<(), ReleaseError> {
         FILE_MODE,
     ));
     deploy.extend(licence_entries);
-    deploy.push(Entry::bytes("THIRD_PARTY_NOTICES", b"The deployment scripts are covered by LICENSE. Third-party program notices accompany the server and frontend archives.\n".to_vec(), FILE_MODE));
+    deploy.push(Entry::bytes(
+        "THIRD_PARTY_NOTICES",
+        DEPLOY_NOTICES.as_bytes().to_vec(),
+        FILE_MODE,
+    ));
     archive::write_tar_gz(&out.join(&names.deploy), &deploy)?;
 
     if !args.skip_image {
@@ -349,7 +377,7 @@ fn build(root: &Path, args: &PackageArgs) -> Result<(), ReleaseError> {
 
 /// What a deploy bundle leaves out: the state of an installation that lives in
 /// the directory, and anything that could hold a secret.
-fn skipped_in_deploy(path: &str) -> bool {
+pub(super) fn skipped_in_deploy(path: &str) -> bool {
     let first = path.split('/').next().unwrap_or_default();
     if first == "runtime" {
         return true;
@@ -369,7 +397,7 @@ fn skipped_in_deploy(path: &str) -> bool {
 }
 
 /// The builds of the harnesses `deploy/harness-builds.json` pins.
-fn harness_builds(root: &Path) -> Result<Vec<serde_json::Value>, ReleaseError> {
+pub(super) fn harness_builds(root: &Path) -> Result<Vec<serde_json::Value>, ReleaseError> {
     let path = root.join("deploy/harness-builds.json");
     let text = fs::read_to_string(&path).map_err(io_error(&path))?;
     serde_json::from_str(&text).map_err(|source| ReleaseError::Json { path, source })

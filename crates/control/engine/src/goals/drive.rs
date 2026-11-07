@@ -14,7 +14,6 @@ use crate::inputs::{InputError, InputRequest, Made};
 use crate::unit::Unit;
 use orch_api_contract::goals::{GoalCheckedBy, GoalInputFacts, GoalReason};
 use orch_api_contract::threads::{ContentPart, Delivery};
-use orch_authz::Caller;
 use orch_db::queries::goals::{self as rows, GoalRow, status};
 use orch_db::queries::threads::{self, ThreadRow, thread_state};
 use orch_provider_contract::calls::Purpose;
@@ -187,7 +186,7 @@ impl Engine {
             return Ok(None);
         }
         // 7. The next turn.
-        self.continue_goal_in(unit, thread, &goal, None).await?;
+        self.continue_goal_in(unit, thread, &goal).await?;
         Ok(None)
     }
 
@@ -237,14 +236,13 @@ impl Engine {
     }
 
     /// Queues the next turn of a goal where nothing else is in the way, in the name of the person who set it, with
-    /// every check an input passes. Says whether an input was queued. `caller` is the person at the moment of
-    /// setting; the loop's own looks reconstruct the person from what their credential allowed then.
+    /// every check an input passes. The first and later turns both restore every captured setter boundary
+    /// and bind the actual request before the shared writer runs.
     pub(super) async fn continue_goal_in(
         &self,
         unit: &mut Unit<'_>,
         thread: &ThreadRow,
         goal: &GoalRow,
-        caller: Option<&Caller>,
     ) -> Result<bool, EngineError> {
         if thread.current_turn_id.is_some()
             || thread.state != thread_state::IDLE
@@ -258,25 +256,6 @@ impl Engine {
             || self.recovery_in_hand(unit, thread).await?.is_some()
         {
             return Ok(false);
-        }
-        let caller = match caller {
-            Some(caller) => caller.clone(),
-            None => match self.goal_caller(unit, thread, goal).await? {
-                Some(caller) => caller,
-                None => {
-                    stop_in(unit, thread, goal, GoalReason::Access, None).await?;
-                    return Ok(false);
-                }
-            },
-        };
-        // The person who set it must still drive the thread and use its model: their access answers for the turn.
-        match self.check_sender(unit, &caller, thread, true).await {
-            Ok(()) => {}
-            Err(InputError::Denied(_)) => {
-                stop_in(unit, thread, goal, GoalReason::Access, None).await?;
-                return Ok(false);
-            }
-            Err(other) => return Err(map_input(other)),
         }
         let limits = budgets(unit.conn, thread.node_id, goal).await?;
         let not_yet = rows::latest_report(unit.conn, goal.id)
@@ -311,13 +290,27 @@ impl Engine {
             bypass: None,
             plan,
         };
+        let Some(callers) = self.goal_caller(unit, thread, goal, &request).await? else {
+            stop_in(unit, thread, goal, GoalReason::Access, None).await?;
+            return Ok(false);
+        };
+        for caller in callers.callers() {
+            match self.check_sender(unit, caller, thread, true).await {
+                Ok(()) => {}
+                Err(InputError::Denied(_)) => {
+                    stop_in(unit, thread, goal, GoalReason::Access, None).await?;
+                    return Ok(false);
+                }
+                Err(other) => return Err(map_input(other)),
+            }
+        }
         let stored = serde_json::to_value(&facts)?;
         let made = Made {
             source: "goal",
             goal: Some((goal.id, &stored)),
         };
         match self
-            .submit_made_in(unit, &caller, thread.node_id, &request, made)
+            .submit_with_authority_in(unit, &callers, thread.node_id, &request, None, made)
             .await
         {
             Ok(taken) => Ok(taken.submitted.created),

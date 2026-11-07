@@ -51,9 +51,10 @@ async fn create(ctx: Ctx, (): (), (): ()) -> ApiResult<EnrollmentToken> {
         let principal = authorization::principal(&ctx, &mut conn).await?;
         require_machine(&mut conn, &principal, row.id, Permission::AccessOwn).await?;
     }
+    let installation = super::installation_config(&ctx);
     match installer {
-        Installer::Node => super::require_node_installable(&ctx.app.config)?,
-        Installer::Connector => super::require_installable(&ctx.app.config)?,
+        Installer::Node => super::require_node_installable(&installation)?,
+        Installer::Connector => super::require_installable(&installation)?,
     }
     drop(conn);
     let made = ctx
@@ -67,7 +68,7 @@ async fn create(ctx: Ctx, (): (), (): ()) -> ApiResult<EnrollmentToken> {
         })
         .await
         .map_err(|fault| ApiError::internal(format!("{}: {}", fault.code, fault.detail)))?;
-    let mut commands = enrollment_commands(&ctx.app.config, &made.token, installer);
+    let mut commands = enrollment_commands(&installation, &made.token, installer);
     if matches!(installer, Installer::Connector) {
         let roles = row
             .roles

@@ -270,20 +270,36 @@ test('a thread that is blocked has a compact state and says why above the box, a
   expect((await threadHeld(ACME.idleThread)).inputs.map((input) => [input.state, input.content[0]?.text])).toEqual([['pending', 'Try again when the limit is over']]);
 });
 
-test('somebody who may only watch sees the conversation, no composer, and what they would need to work with the thread', async ({ page }) => {
+for (const width of [400, 1440]) for (const theme of ['light', 'dark'] as const) test(`somebody who may only watch keeps the disabled composer, model and effort, and a clickable access request (${width}px ${theme})`, async ({ page }, info) => {
+  await page.setViewportSize({ width, height: 1000 });
+  await page.emulateMedia({ colorScheme: theme });
   await playScene(MAIN, 'waiting');
   await open(page, PEOPLE.vera);
+  await expect(page.locator('html')).toHaveAttribute('data-theme', theme);
   await expect(conversation(page).getByText('Please fix it, and run the tests.')).toBeVisible();
-  await expect(composer(page)).toHaveCount(0);
-  const watching = page.getByRole('region', { name: 'You can watch this thread' });
+  await expect(composer(page)).toBeVisible();
+  await expect(composer(page)).toBeDisabled();
+  await expect(composer(page)).toHaveAttribute('placeholder', 'You can watch this thread');
+  const watching = page.getByRole('group', { name: 'Access needed', exact: true });
   await expect(watching).toBeVisible();
-  await expect(watching).toContainText('to talk to its agent');
+  await expect(watching).toContainText('Interact on');
   await expect(watching.getByRole('button', { name: 'Try again', exact: true })).toHaveCount(0);
   await expect(watching.getByRole('button', { name: 'Request access', exact: true })).toBeVisible();
   const controls = page.getByRole('group', { name: 'Message controls' });
-  await expect(controls).toHaveCount(0);
+  await expect(controls).toBeVisible();
+  await expect(controls.getByRole('button', { name: 'Send', exact: true })).toBeDisabled();
+  const model = controls.getByRole('button', { name: /^Model and effort:/ });
+  await expect(model).toBeDisabled();
+  await expect(model).not.toContainText('No model set');
+  await controls.getByRole('button', { name: 'Send', exact: true }).hover();
+  await expect(page.getByRole('tooltip')).toContainText(english.composer.row.readOnly);
+  await watching.getByRole('button', { name: 'Request access', exact: true }).click();
+  const request = page.getByRole('dialog', { name: 'Request access', exact: true });
+  await expect(request.getByRole('textbox', { name: 'Why do you need it?', exact: true })).toBeEnabled();
+  await page.keyboard.press('Escape');
   await expect(header(page).getByText('Waiting for an answer', { exact: true })).toBeVisible();
   await expect(header(page).getByText('Waiting for you', { exact: true })).toHaveCount(0);
+  await info.attach(`viewer-composer-${width}-${theme}`, { body: await page.screenshot(), contentType: 'image/png' });
 });
 
 for (const viewer of [false, true]) {

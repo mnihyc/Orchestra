@@ -26,6 +26,8 @@ request_timeout_secs = 10
 manifest_max_bytes = 1048576
 
 [api]
+# MiB reserved for each runtime thread; adjust this default up or down as needed.
+worker_stack_mib = 64
 # TLS under the system's own authority; reached only through the web edge.
 bind = "0.0.0.0:8443"
 # Mutual TLS: the gateways' backplane and certificate renewal.
@@ -38,6 +40,7 @@ db_pool = 32
 trusted_proxy_cidrs = [] # Compose supplies its control network; add operator edge/CDN ranges there.
 
 [gateway]
+worker_stack_mib = 64
 # Machines that present client certificates. This is the published port.
 pinned_bind = "[::]:9443"
 # Machines that come through the HTTPS edge, behind the web edge; TLS under the
@@ -60,12 +63,27 @@ managed_endpoint = "wss://gateway.orch.internal:9443"
 url = "wss://gateway.example.com:9443"
 trust = "pinned"
 
+# With several regional gateways, replace the legacy list above with catalogue entries.
+# Every ID must match that gateway's own gateway_id; aliases belong to the same instance.
+# [[gateway.instances]]
+# id = "compose-gateway"
+# label = "Europe"
+# region = "Europe"
+# endpoints = [{ url = "wss://eu.example.com:9443", trust = "pinned" }]
+# [[gateway.instances]]
+# id = "asia"
+# label = "Asia tools"
+# region = "Asia"
+# endpoints = [{ url = "wss://asia.example.com:9443", trust = "pinned" }]
+# Admin gateway edits persist as a system override and take precedence after an API restart.
+
 [link]
 heartbeat_secs = 20
 dead_after_secs = 60
 max_frame_bytes = 262144
 tunnel_window_bytes = 1048576
 tunnel_resume_grace_secs = 60
+tunnel_session_idle_secs = 60                # unused tunnel-only sessions; active work protects them
 tunnel_replay_buffer_bytes = 8388608
 port_connections_max = 64                    # parallel assets/colleagues, bounded per environment
 port_waiting_max = 16                        # a short burst waiting for the ordinary ten-second open result
@@ -80,6 +98,7 @@ port_recent_secs = 900                       # fifteen-minute debugging loop, me
 port_caller_totals = 128                     # bounded caller groups; overflow is Other
 
 [worker]
+worker_stack_mib = 64
 metrics_bind = "0.0.0.0:9102"
 db_pool = 8
 
@@ -124,6 +143,7 @@ service_dns_names = ["api", "gateway", "worker", "gateway.orch.internal"]
 # Legacy driver/port/storage/hook declarations are imported once into its machine policy.
 # Inspect with `orch-node policy show`; change hooks with `orch-node policy set hooks '{...}'`.
 [node]
+worker_stack_mib = 64
 # Registry lookups are opt-in; zero keeps a disconnected host quiet.
 image_check_hours = 0
 # In the stack this is replaced by ORCH_NODE_DATA_DIR in compose.yml: the node

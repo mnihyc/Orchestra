@@ -24,7 +24,7 @@ function surface(element: HTMLElement, visibleStyles: Map<HTMLElement, boolean>)
     }
     if (!visible) return null;
   }
-  return element.closest('[role="dialog"], [role="alertdialog"]') ?? document.body;
+  return element.closest('[data-prompt-current="true"], [aria-modal="true"], .floating-layer') ?? document.body;
 }
 
 function refresh(): void {
@@ -61,8 +61,14 @@ export function useGuideEntry(article: string | null, heading: string | null, ki
       if (!entries.delete(id)) return;
     } else entries.set(id, { element, destination: `${article}#${heading ?? ''}`, kind });
     if (entries.size > 0 && observer === null) {
-      observer = new MutationObserver(refresh);
-      observer.observe(document.body, { childList: true, subtree: true, attributes: true, attributeFilter: ['hidden', 'inert', 'aria-hidden', 'class', 'style', 'open', 'role'] });
+      observer = new MutationObserver((changes) => {
+        // Floating placement and hover styles do not change an unrelated guide's visibility.
+        const affected = changes.some((change) => change.type !== 'attributes'
+          || change.attributeName !== 'class' && change.attributeName !== 'style'
+          || [...entries.values()].some((entry) => change.target.contains(entry.element)));
+        if (affected) refresh();
+      });
+      observer.observe(document.body, { childList: true, subtree: true, attributes: true, attributeFilter: ['hidden', 'inert', 'aria-hidden', 'aria-modal', 'data-prompt-current', 'class', 'style', 'open', 'role'] });
       window.addEventListener('resize', refresh);
     } else if (entries.size === 0) {
       observer?.disconnect(); observer = null;

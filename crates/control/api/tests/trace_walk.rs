@@ -638,7 +638,9 @@ async fn a_person_finds_a_removed_environment_inspects_its_frozen_day_and_restor
         })
         .send()
         .await
-        .ok();
+        .ok()
+        .into_full()
+        .expect("ordinary retained lifecycle result stays full");
     host.wait_for(CommandKind::NodeRuntimeStart, 2).await;
     let repeated = app
         .call(EnvironmentRestore, &[&made.id])
@@ -648,7 +650,9 @@ async fn a_person_finds_a_removed_environment_inspects_its_frozen_day_and_restor
         })
         .send()
         .await
-        .ok();
+        .ok()
+        .into_full()
+        .expect("ordinary retained lifecycle result stays full");
     assert_eq!(repeated.id, job.id);
     let _restored = hosting::enroll(&world, host.started().unwrap()).await;
     let (state, _, error) = hosting::wait_over(&world, job.id).await;

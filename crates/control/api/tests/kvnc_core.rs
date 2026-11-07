@@ -1,3 +1,4 @@
+#![recursion_limit = "256"]
 //! A display opens a real screen, preserves safe history and never grants credentials to its readers.
 #![cfg(unix)]
 #![allow(

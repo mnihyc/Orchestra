@@ -346,6 +346,7 @@ impl Engine {
             self,
             conn,
             &crate::mount_copies::Ask {
+                preparation: None,
                 choices: request.mounts.as_deref().unwrap_or_default(),
                 check_fingerprints: request.check_fingerprints.unwrap_or(false).then(|| {
                     request

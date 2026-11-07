@@ -1,6 +1,8 @@
 /** A reviewed native set stays fixed through paging and confirmation; a new command belongs to a new review. */
 import { fetchBackground } from '@/api/background';
-import type { BackgroundEndRequest, BackgroundEndResult, ThreadBackground } from '@/generated/api-types';
+import type { BackgroundCommand, BackgroundEndRequest, BackgroundEndResult, BackgroundWork, ThreadBackground } from '@/generated/api-types';
+
+export type BackgroundEndTarget = { task: Pick<BackgroundWork, 'id' | 'item_id' | 'turn_id'> } | { command: Pick<BackgroundCommand, 'id' | 'segment_id' | 'item_id' | 'turn_id'> };
 
 /** Reads every page of one snapshot before offering its complete End all count. */
 export async function loadReview(thread: string, signal: AbortSignal): Promise<ThreadBackground> {
@@ -14,6 +16,15 @@ export async function loadReview(thread: string, signal: AbortSignal): Promise<T
     const page = await fetchBackground(thread, cursor, signal);
     if (page.list_ref !== first.list_ref || page.total !== first.total) throw new Error('the native review changed during transfer');
     captured.items.push(...page.items);
+    if (page.wake !== undefined && page.wake !== null) {
+      const tasks = new Map((captured.wake?.tasks ?? []).map((task) => [task.id, task]));
+      for (const task of page.wake.tasks) {
+        const previous = tasks.get(task.id);
+        if (previous !== undefined && (previous.item_id !== task.item_id || previous.turn_id !== task.turn_id || previous.end_id !== null && task.end_id !== null && previous.end_id !== task.end_id)) throw new Error('the native task changed during transfer');
+        tasks.set(task.id, { ...task, end_id: task.end_id ?? previous?.end_id ?? null });
+      }
+      captured.wake = { ...page.wake, tasks: [...tasks.values()] };
+    }
     captured.expires_at = page.expires_at;
     captured.can_end = page.can_end;
     cursor = page.next_cursor;
@@ -22,9 +33,25 @@ export async function loadReview(thread: string, signal: AbortSignal): Promise<T
   return captured;
 }
 
+/** A recorded task is mapped again in this captured review; its old id is never an End command id. */
+export function reviewedTargetRequest(roster: ThreadBackground, target: BackgroundEndTarget): BackgroundEndRequest | null {
+  if ('task' in target) {
+    const task = roster.wake?.tasks.find((task) => task.id === target.task.id && task.item_id === target.task.item_id && task.turn_id === target.task.turn_id);
+    return task?.state === 'running' && task.can_end && typeof task.end_id === 'string' ? reviewedRequest(roster, [task.end_id]) : null;
+  }
+  const command = roster.items.find((command) => command.id === target.command.id && command.segment_id === target.command.segment_id && command.item_id === target.command.item_id && command.turn_id === target.command.turn_id);
+  return command === undefined ? null : reviewedRequest(roster, [command.id]);
+}
+
 /** A partial, unavailable or untransferred set cannot authorize End all. */
 export function canEndAll(roster: ThreadBackground): boolean {
-  return roster.can_end && roster.state === 'live' && roster.list_ref !== null && roster.total !== null && roster.total > 0 && roster.next_cursor === null && roster.items.length === roster.total;
+  return roster.can_end && roster.state === 'live' && roster.list_ref !== null && roster.total !== null && roster.total > 0 && roster.next_cursor === null && roster.items.length === roster.total
+    && roster.items.every((command) => endableInReview(roster, command.id));
+}
+
+function endableInReview(roster: ThreadBackground, id: string): boolean {
+  const task = roster.wake?.tasks.find((task) => task.end_id === id);
+  return task === undefined || task.can_end && task.state === 'running';
 }
 
 /** Captures the request at confirmation, keeping later native work out of the accepted set. */
@@ -35,7 +62,7 @@ export function reviewedRequest(roster: ThreadBackground, ids: readonly string[]
     return count !== null && canEndAll(roster) ? { list_ref: roster.list_ref, all: true, count } : null;
   }
   const selected = new Set(ids);
-  if (selected.size === 0 || selected.size > 200 || selected.size !== ids.length || !ids.every((id) => roster.items.some((item) => item.id === id))) return null;
+  if (selected.size === 0 || selected.size > 200 || selected.size !== ids.length || !ids.every((id) => roster.items.some((item) => item.id === id) && endableInReview(roster, id))) return null;
   return { list_ref: roster.list_ref, command_ids: [...ids] };
 }
 

@@ -9,13 +9,13 @@ import { orgsQuery } from '@/api/nodes';
 import type { NodeRef, UsageEvent } from '@/generated/api-types';
 import { emptyLog, matchesRequest, newestRequests, requestLog } from '@/features/usage/requests';
 import { OUTCOMES, readOutcome } from '@/features/usage/outcomes';
-import { measured, requestSpeed, speedText, timeText } from '@/features/usage/performance';
+import { measured, requestSpeed, requestTokenCount, speedText, timeText } from '@/features/usage/performance';
 import { filtersOf, recordsParams, scopeText, type Span, type UsageScope, type UsageSearch } from '@/features/usage/search';
 import { turnOrdinal } from '@/features/thread/turnLink';
 import { accessProgramDisplayName, effortDisplayName, modelDisplayName } from '@/features/models/names';
 import { programNameIn } from '@/features/resources/programNames';
 import { Facts } from '@/features/resources/Facts';
-import { offeredChoice } from '@/i18n/choices';
+import { tierAvailable, tierFilter, tierId, tierLabel } from './tier';
 import { useFormatContext } from '@/lib/appearance';
 import { formatExact } from '@/lib/time';
 import { socket } from '@/realtime/live';
@@ -110,17 +110,18 @@ export function Requests({ scope, search, span, onSearch, orgChoices = [] }: { s
     return [...new Set([row.timing?.error_message,row.timing?.vendor_words].filter((value):value is string=>typeof value==='string' && value!=='' && value!==code && value!==outcome(row)))];
   };
   const tokens = (row: UsageEvent, output = false) => {
-    const reported = row.timing?.reported_tokens;
-    const n = row.timing === undefined || row.scope !== 'request' ? output ? row.tokens.output_tokens : row.tokens.input_tokens : output ? reported?.output_tokens : reported?.input_tokens;
-    return n === null || n === undefined ? t('usagePerf.dash') : number(n);
+    const n = requestTokenCount(row, output);
+    return n === null ? t('usagePerf.dash') : number(n);
   };
   const harness=(row:UsageEvent)=>row.harness_kind===null ? t('usage.key.noAgent') : programNameIn(row,format.locale) ?? programNameIn(row.agent,format.locale) ?? t('resources.harnessNameUnknown');
   const agentLabel=(row:UsageEvent)=>row.agent?.name===row.harness_kind ? harness(row) : row.agent?.name ?? harness(row);
   const modelFacts=(row:UsageEvent)=>{
+    const searches = row.timing?.web_searches;
     const facts=[
+    ...(searches === undefined || searches.state === 'unsupported' ? [] : [{name:t('webSearch.count'),value:searches.state === 'told' ? number(searches.value) : t('webSearch.unknown')}]),
     ...(scope.kind==='provider'?[]:[{name:t('usage.chip.provider'),value:row.provider.name}]),
     ...(row.harness_kind===null && row.agent===null?[]:[{name:t('usage.chip.agent'),value:agentLabel(row)}]),
-    ...(row.tier===null?[]:[{name:t('usage.chip.tier'),value:offeredChoice(t,'serviceTier',row.tier)?.name??row.tier}]),
+    ...(!tierAvailable(row) || row.tier===null && row.tier_unknown !== true?[]:[{name:t('usage.chip.tier'),value:tierLabel(row,t)}]),
     ...(row.effort===null?[]:[{name:t('usage.chip.effort'),value:effortDisplayName(row.effort,t)}]),
     ...(row.access_program===null || row.access_program===undefined?[]:[{name:t('usage.chip.program'),value:accessProgramDisplayName(row.access_program,t)}]),
     ];
@@ -168,8 +169,10 @@ export function Requests({ scope, search, span, onSearch, orgChoices = [] }: { s
       <legend className="mb-2 text-sm font-medium text-text">{t('usagePerf.requestFilters')}</legend>
       {REQUEST_FILTERS.map((key) => {
       const options = new Map<string, string>();
+      const tierChoices = new Map<string, ReturnType<typeof tierFilter>>();
       if (key === 'org') for (const org of knownOrgs) if (!org.redacted && org.name !== null) options.set(org.id, org.name);
       for (const row of log.rows.values()) {
+        if (key === 'tier' && tierAvailable(row)) tierChoices.set(tierId(row), tierFilter(row));
         const choice = key === 'person' ? row.user === null ? null : [row.user.id, row.user.display_name]
           : key === 'provider' ? [row.provider.id, row.provider.name] : key === 'model' ? [row.model, modelDisplayName(row.model_display,t)]
           : key === 'project' ? row.project.redacted ? null : [row.project.id, row.project.name ?? '']
@@ -177,13 +180,23 @@ export function Requests({ scope, search, span, onSearch, orgChoices = [] }: { s
           : key === 'thread' ? row.thread === null || row.thread.redacted ? null : [row.thread.id, row.thread.name ?? '']
           : key === 'agent' ? row.harness_kind === null ? null : [row.harness_kind, agentLabel(row)]
           : key === 'environment' ? row.environment_kind === null ? null : [row.environment_kind, t(row.environment_kind === 'managed' ? 'usage.key.managed' : 'usage.key.connected')]
-          : key === 'tier' ? [row.tier ?? NO_CHOICE, row.tier===null?t('usage.key.standard'):offeredChoice(t,'serviceTier',row.tier)?.name??row.tier]
+          : key === 'tier' ? !tierAvailable(row) ? null : [tierId(row), tierLabel(row,t)]
           : key === 'effort' ? [row.effort ?? NO_CHOICE, row.effort===null?t('usage.key.noEffort'):effortDisplayName(row.effort,t)]
           : key === 'program' ? [row.access_program ?? NO_CHOICE, row.access_program === null || row.access_program === undefined ? t('usagePerf.noProgram') : accessProgramDisplayName(row.access_program,t)] : null;
         if (choice?.[0] !== undefined && choice[1] !== undefined) options.set(choice[0], choice[1]);
       }
-      if (search[key] !== undefined && !options.has(search[key])) options.set(search[key], key === 'program' ? search[key] === NO_CHOICE ? t('usagePerf.noProgram') : accessProgramDisplayName(search[key],t) : t('usagePerf.selectedFilter'));
-      return <Select key={key} size="sm" label={t(`usage.chip.${key}`)} value={search[key] ?? ALL_FILTER} onValueChange={(value) => onSearch({ [key]: value === ALL_FILTER ? undefined : value })} options={[{ value: ALL_FILTER, name: t('usagePerf.choices.all.name'), description: t('usagePerf.choices.all.description') }, ...[...options].map(([value, label]) => ({ value, name: t('usagePerf.choices.member.name', { name: label }), description: t('usagePerf.choices.member.description', { kind: t(`usage.chip.${key}`) }) }))]} />;
+      const currentTier = { tier: search.tier === 'none' ? null : search.tier, tier_unknown: search.tier_unknown === true };
+      const knownTiers = key === 'tier' && search.tier_unknown === false && search.tier === undefined;
+      const selected = key === 'tier' ? knownTiers ? JSON.stringify({ tier_unknown: false }) : search.tier_unknown === true || search.tier !== undefined ? tierId(currentTier) : ALL_FILTER : search[key] ?? ALL_FILTER;
+      if (key === 'tier' && selected !== ALL_FILTER && !options.has(selected)) {
+        options.set(selected, knownTiers ? t('usage.key.knownTier') : tierLabel(currentTier,t));
+        tierChoices.set(selected, knownTiers ? { tier: undefined, tier_unknown: false } : tierFilter(currentTier));
+      } else if (key !== 'tier' && search[key] !== undefined && !options.has(search[key])) options.set(search[key], key === 'program' ? search[key] === NO_CHOICE ? t('usagePerf.noProgram') : accessProgramDisplayName(search[key],t) : t('usagePerf.selectedFilter'));
+      if (key === 'tier' && options.size === 0) return null;
+      return <Select key={key} size="sm" label={t(`usage.chip.${key}`)} value={selected} onValueChange={(value) => {
+        if (key === 'tier') onSearch(value === ALL_FILTER ? { tier: undefined, tier_unknown: undefined } : tierChoices.get(value) ?? {});
+        else onSearch({ [key]: value === ALL_FILTER ? undefined : value });
+      }} options={[{ value: ALL_FILTER, name: t('usagePerf.choices.all.name'), description: t('usagePerf.choices.all.description') }, ...[...options].map(([value, label]) => ({ value, name: t('usagePerf.choices.member.name', { name: label }), description: t('usagePerf.choices.member.description', { kind: t(`usage.chip.${key}`) }) }))]} />;
     })}</fieldset>
     {(history.isError || liveError) && <ErrorState error={history.error} onRetry={() => { setRetry((before) => before + 1); void history.refetch(); }} />}
     <p role="status" className="text-sm text-text-muted">{t(log.paused ? 'usagePerf.paused' : 'usagePerf.live')}</p>

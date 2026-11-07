@@ -1,3 +1,4 @@
+#![recursion_limit = "256"]
 //! The browser's socket as a protocol: who may open it, what it is closed for, how it is answered when a request is wrong, and how a token that runs out is replaced.
 #![allow(
     clippy::unwrap_used,

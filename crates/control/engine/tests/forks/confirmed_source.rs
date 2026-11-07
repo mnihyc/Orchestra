@@ -30,7 +30,11 @@ impl Commands for SuccessGate {
     async fn observe(&self, command: Outgoing) -> Result<Outcome, CommandsError> {
         self.inner.observe(command).await
     }
-    async fn issue(&self, command: Outgoing) -> Result<(), CommandsError> {
+    async fn issue_prepared(
+        &self,
+        command: Outgoing,
+        before: Option<orch_engine::commands::BeforeCommand<'_>>,
+    ) -> Result<(), CommandsError> {
         if command.kind == CommandKind::SessionOpenFenced
             && command.body["thread_id"] != json!(self.source)
         {
@@ -39,7 +43,7 @@ impl Commands for SuccessGate {
                 *saved = Some(command.clone());
             }
         }
-        self.inner.issue(command).await
+        self.inner.issue_prepared(command, before).await
     }
     async fn wait(&self, id: Id) -> Result<Outcome, CommandsError> {
         let result = self.inner.wait(id).await?;

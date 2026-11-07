@@ -142,3 +142,10 @@ describe('the card with a row put in or taken out', () => {
     expect(cardOf({ 'gpt-6*': other })).toEqual({ 'gpt-6*': other });
   });
 });
+
+it('keeps a search fee in per-call units through editing and rejects an invalid fee', () => {
+  const rate: Rate = { input_per_mtok: '2', cached_input_per_mtok: '0.1', output_per_mtok: '10', web_search_per_call: '0.00075' };
+  const draft = draftOf('model', rate);
+  expect(rateOf(draft)).toEqual(rate);
+  expect(check({ ...draft, webSearch: '-1' }, [], null).webSearch).toBe('usage.rates.faults.number');
+});

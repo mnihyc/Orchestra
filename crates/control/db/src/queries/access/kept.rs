@@ -25,6 +25,12 @@ pub struct Stamp {
 }
 
 impl Stamp {
+    /// The first native role/page expiry that can change these holder sets.
+    #[must_use]
+    pub fn until(&self) -> Option<DateTime<Utc>> {
+        self.until
+    }
+
     /// Whether no role or entry begins or stops counting between the moment the set was worked out at and `at`.
     #[must_use]
     pub fn covers(&self, at: DateTime<Utc>) -> bool {
@@ -37,6 +43,40 @@ impl Stamp {
     pub fn keepable(&self) -> bool {
         self.keepable
     }
+}
+
+/// The existing conservative read-projection deadline over actual page, role and chat rows.
+pub async fn read_deadline(
+    conn: &mut Conn,
+    user: Id,
+    groups: &[Id],
+    member_of: &[Id],
+    now: DateTime<Utc>,
+) -> Result<Option<DateTime<Utc>>, DbError> {
+    Ok(sqlx::query_scalar(
+            "WITH reaching_roles AS (
+                 SELECT expires_at FROM node_roles
+                  WHERE removed_at IS NULL AND (expires_at IS NULL OR expires_at > $4)
+                    AND ((subject_kind = 'user' AND subject_id = $1)
+                      OR (subject_kind = 'group' AND subject_id = ANY($2))
+                      OR (subject_kind = 'members' AND subject_id = ANY($3)))
+             ), ends AS (
+                 SELECT expires_at FROM permission_entries
+                  WHERE removed_at IS NULL AND expires_at > $4
+                    AND (holder_kind = 'everyone'
+                      OR (holder_kind = 'user' AND holder_id = $1)
+                      OR (holder_kind = 'group' AND holder_id = ANY($2))
+                      OR holder_kind = 'role')
+                 UNION ALL SELECT expires_at FROM reaching_roles
+                 UNION ALL SELECT expires_at FROM chat_members WHERE user_id=$1 AND left_at IS NULL AND expires_at>$4
+             ) SELECT min(expires_at) FROM ends",
+        )
+    .bind(user)
+    .bind(groups)
+    .bind(member_of)
+    .bind(now)
+    .fetch_one(conn)
+    .await?)
 }
 
 /// The identities `access_holders` finds for a person now: their groups and places of page-only viewing (each sorted)

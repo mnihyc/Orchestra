@@ -77,6 +77,7 @@ it('resumes sort and filters on this device without restoring the words typed ea
   expect(screen.getByRole('textbox', {name: i18n.t('search.field.label')})).toHaveValue('');
   expect(screen.getByRole('button', {name: i18n.t('search.filters.active', {count: 2})})).toBeVisible();
   expect(calls.requests).toHaveLength(0);
+  expect(screen.getByRole('region', {name: i18n.t('search.results')})).toHaveAttribute('aria-busy', 'false');
   const stored = JSON.parse(readViewChoice('search-return-reader', 'search', 'filters', '')) as Record<string, unknown>;
   expect(stored).toEqual({sort: 'relevance', regex: 'true', with_file: 'true'});
   expect(stored.q).toBeUndefined();
@@ -293,8 +294,10 @@ it('accepts an authoritative order before its payloads and stays unfinished unti
   await start();
   await send({type: 'order', received: 1, items: [{id: 'both', rank: 0.03, found_by: 'both'}]}, hit('both'), source('words'), source('meaning'));
   expect(rows()).toEqual(['both']);
+  expect(screen.getByRole('region', {name: i18n.t('search.results')})).toHaveAttribute('aria-busy', 'true');
   expect(screen.getByRole('status')).toHaveTextContent(i18n.t('search.searching', {count: 1, number: '1'}));
   await send({type: 'cursor', cursor: null});
+  expect(screen.getByRole('region', {name: i18n.t('search.results')})).toHaveAttribute('aria-busy', 'false');
   expect(screen.getByRole('status')).not.toHaveTextContent('Searching');
   expect(screen.getByRole('status')).toHaveTextContent(i18n.t('search.total', {count: 1, number: '1'}));
 });

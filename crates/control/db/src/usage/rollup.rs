@@ -1,7 +1,7 @@
 //! Counted consumption in tokens and credits, tokens without a rate, the rollups by day and by month for every dimension, and reproducible rebuilds.
 //!
 //! **One rule, written once.** The measures of a daily row are one `SELECT` over the ledger rows it stands for
-//! ([`daily_select`]). [`rebuild`] runs it over all of them; [`fold_event`] runs it over the one row that arrived, in
+//! (`daily_select`). [`rebuild`] runs it over all of them; [`fold_event`] runs it over the one row that arrived, in
 //! the transaction that wrote it, and adds what it gives to the row's day and month. A ledger row is written once
 //! and never changed, and only a row that was just written is folded, so each row is added exactly once and the
 //! live tables are what a rebuild makes of the same ledger (`tests/usage_rollup.rs` compares them). Making the
@@ -19,9 +19,10 @@
 //! row that cost nothing. A turn counts once for each daily row it has rows
 //! under, however many requests it made. Only rows that count are folded;
 //! the others are kept in the ledger as trace.
-//! Public turn figures separately count distinct historical turn ids within
-//! the same span/filter/group, including unmetered turns. They cannot be found
-//! by summing the stored meter-key turn counts across days or model choices.
+//! Public turn figures count distinct historical turn memberships from usage_turn_daily,
+//! including unmetered turns. Each UTC hour/attribution membership folds repeated calls,
+//! preserving hourly buckets without scanning the raw ledger. Span/group totals remain
+//! distinct turn identities, never sums of daily or model membership counts.
 //!
 //! **Reading.** [`read`] adds the rollups (or, for a span read by the hour
 //! and for the dimensions the rollups do not keep, the ledger itself) over a
@@ -442,7 +443,7 @@ pub struct Rebuilt {
 /// writers wait for it, and it waits for those that are under way. Run it in a
 /// transaction.
 pub async fn rebuild(conn: &mut Conn, from: Option<NaiveDate>) -> Result<Rebuilt, DbError> {
-    sqlx::query("LOCK TABLE usage_daily, usage_monthly IN SHARE ROW EXCLUSIVE MODE")
+    sqlx::query("LOCK TABLE usage_events, usage_turn_daily, usage_daily, usage_monthly IN SHARE ROW EXCLUSIVE MODE")
         .execute(&mut *conn)
         .await?;
     let (first_day, first_month) = match from {
@@ -457,6 +458,16 @@ pub async fn rebuild(conn: &mut Conn, from: Option<NaiveDate>) -> Result<Rebuilt
         .bind(first_month)
         .execute(&mut *conn)
         .await?;
+    sqlx::query("DELETE FROM usage_turn_daily WHERE $1::date IS NULL OR day >= $1")
+        .bind(first_day)
+        .execute(&mut *conn)
+        .await?;
+    sqlx::query("INSERT INTO usage_turn_daily(day,at,turn_id,org_id,project_id,topic_id,thread_id,purpose,provider_id,user_id,model,effort,tier,access_program,outcome,harness_kind,environment_kind,tier_unknown,tier_unavailable,members)
+      SELECT p.day,p.at,p.turn_id,p.org_id,p.project_id,p.topic_id,p.thread_id,p.purpose,p.provider_id,p.user_id,p.model,p.effort,p.tier,p.access_program,p.outcome,p.harness_kind,p.environment_kind,p.tier_unknown,p.tier_unavailable,count(*) FROM usage_events e
+      CROSS JOIN LATERAL usage_turn_projection(e::usage_events) p
+      WHERE e.turn_id IS NOT NULL AND ($1::date IS NULL OR (e.at AT TIME ZONE 'UTC')::date >= $1)
+      GROUP BY p.day,p.at,p.turn_id,p.org_id,p.project_id,p.topic_id,p.thread_id,p.purpose,p.provider_id,p.user_id,p.model,p.effort,p.tier,p.access_program,p.outcome,p.harness_kind,p.environment_kind,p.tier_unknown,p.tier_unavailable")
+      .bind(first_day).execute(&mut *conn).await?;
     let begins = first_day.map(day_start).transpose()?;
     let daily = sqlx::query(sqlx::AssertSqlSafe(daily_statement(
         "($1::timestamptz IS NULL OR e.at >= $1)",
@@ -531,8 +542,10 @@ pub struct Filter {
     pub org: Option<Id>,
     /// Only this reasoning effort; `none` selects a null value.
     pub effort: Option<String>,
-    /// Only this service tier; `none` selects a null value.
+    /// Only this service tier; `none` selects the known ordinary null tier.
     pub tier: Option<String>,
+    /// Whether the actual tier was omitted by a reporting-aware source after an explicit request.
+    pub tier_unknown: Option<bool>,
     /// Only this access programme; `none` selects a null value.
     pub program: Option<String>,
     /// Only this outcome code; `running` selects provisional rows.
@@ -638,6 +651,76 @@ pub(crate) fn push_filter(query: &mut QueryBuilder<Postgres>, filter: &Filter) {
     }
 }
 
+/// A null historical tier is ordinary unless the retained request/report facts say otherwise.
+/// These predicates only describe the existing measurement envelope; no vendor tier is invented.
+fn unknown_tier_sql() -> String {
+    "usage_tier_unknown(d.tier,d.measurement_states)".to_owned()
+}
+fn unavailable_tier_sql() -> String {
+    "usage_tier_unavailable(d.tier,d.measurement_states)".to_owned()
+}
+
+/// The same factual discriminator for an event's existing measurement envelope.
+#[must_use]
+pub fn tier_unknown(tier: Option<&str>, states: &orch_types::Json) -> bool {
+    explicit_tier(tier, states)
+        && states["reported_service_tier"]["state"].as_str() == Some("empty")
+}
+
+fn explicit_tier(tier: Option<&str>, states: &orch_types::Json) -> bool {
+    tier.is_none()
+        && states["requested_service_tier"]
+            .as_str()
+            .is_some_and(|requested| !matches!(requested, "default" | "standard"))
+}
+
+/// Raw-ledger-only tier filtering. Rollup rows have no measurement envelope.
+/// Missing capability is omitted only when the tier facet itself is requested.
+pub(crate) fn push_tier_filter(query: &mut QueryBuilder<Postgres>, filter: &Filter, by_tier: bool) {
+    if let Some(unknown) = filter.tier_unknown {
+        query
+            .push(if unknown { " AND " } else { " AND NOT " })
+            .push(unknown_tier_sql());
+    } else if filter.tier.as_deref() == Some("none") {
+        query.push(" AND NOT ").push(unknown_tier_sql());
+    }
+    if by_tier || filter.tier_unknown.is_some() || filter.tier.is_some() {
+        query.push(" AND NOT ").push(unavailable_tier_sql());
+    }
+}
+
+/// One bounded indexed probe chooses the existing raw fallback only when a tier-sensitive
+/// read would otherwise merge actual-unreported/unavailable requests into ordinary NULL.
+async fn has_tier_states(
+    conn: &mut Conn,
+    from: NaiveDate,
+    to: NaiveDate,
+    filter: &Filter,
+    providers: Option<&[Id]>,
+) -> Result<bool, DbError> {
+    let mut query = QueryBuilder::<Postgres>::new(
+        "SELECT EXISTS(SELECT 1 FROM usage_events d WHERE (d.counted OR d.outcome IS NOT NULL) AND d.at >= ",
+    );
+    query
+        .push_bind(day_start(from)?)
+        .push(" AND d.at < ")
+        .push_bind(day_start(to.succ_opt().ok_or_else(calendar)?)?);
+    push_filter(&mut query, filter);
+    if let Some(providers) = providers {
+        query
+            .push(" AND d.provider_id = ANY(")
+            .push_bind(providers)
+            .push(")");
+    }
+    query
+        .push(" AND (")
+        .push(unknown_tier_sql())
+        .push(" OR ")
+        .push(unavailable_tier_sql())
+        .push("))");
+    Ok(query.build_query_scalar::<bool>().fetch_one(conn).await?)
+}
+
 // ---------------------------------------------------------------- reading
 
 /// The sums of the counted rows of a span.
@@ -695,6 +778,8 @@ pub struct Cell {
     /// The member of the dimension, as text (an identifier, a name), where the
     /// read was split by one; none for rows that have no such member.
     pub key: Option<String>,
+    /// Only populated when splitting by tier; keeps unknown actual separate from ordinary NULL.
+    pub tier_unknown: bool,
     /// The sums.
     #[sqlx(flatten)]
     pub figures: Figures,
@@ -782,7 +867,11 @@ async fn read_cells(
     read: &Read<'_>,
     count_turns: bool,
 ) -> Result<Vec<Cell>, DbError> {
-    let ledger_source = needs_ledger(read);
+    let by_tier = read.by == Some(UsageDimension::Tier);
+    let ledger_source = needs_ledger(read)
+        || read.filter.tier_unknown.is_some()
+        || ((by_tier || read.filter.tier.is_some())
+            && has_tier_states(conn, read.from, read.to, read.filter, None).await?);
     let mut query = QueryBuilder::<Postgres>::new("SELECT ");
     let mut groups = 0;
     // The bucket.
@@ -819,6 +908,13 @@ async fn read_cells(
             query.push("NULL::text AS key, ");
         }
     }
+    query
+        .push(if ledger_source && by_tier {
+            unknown_tier_sql()
+        } else {
+            "false".to_owned()
+        })
+        .push(" AS tier_unknown, ");
     if ledger_source {
         query.push(ledger_measures());
     } else {
@@ -840,6 +936,9 @@ async fn read_cells(
             .push_bind(read.to);
     }
     push_filter(&mut query, read.filter);
+    if ledger_source {
+        push_tier_filter(&mut query, read.filter, by_tier);
+    }
     // The bucket is the first column of the answer and the member the second, whether or not they are used.
     let mut positions: Vec<&str> = Vec::new();
     if read.bucket.is_some() {
@@ -847,6 +946,9 @@ async fn read_cells(
     }
     if read.by.is_some() {
         positions.push("2");
+    }
+    if by_tier {
+        positions.push("3");
     }
     if groups > 0 {
         query.push(format!(" GROUP BY {}", positions.join(", ")));
@@ -866,19 +968,23 @@ async fn read_cells(
     let mut positions: std::collections::HashMap<_, _> = cells
         .iter()
         .enumerate()
-        .map(|(at, cell)| ((cell.bucket, cell.key.clone()), at))
+        .map(|(at, cell)| ((cell.bucket, cell.key.clone(), cell.tier_unknown), at))
         .collect();
     for cell in &mut cells {
         cell.figures.turns = 0;
     }
     for count in turns {
-        if let Some(at) = positions.get(&(count.bucket, count.key.clone())) {
+        if let Some(at) = positions.get(&(count.bucket, count.key.clone(), count.tier_unknown)) {
             cells[*at].figures.turns = count.turns;
         } else {
-            positions.insert((count.bucket, count.key.clone()), cells.len());
+            positions.insert(
+                (count.bucket, count.key.clone(), count.tier_unknown),
+                cells.len(),
+            );
             cells.push(Cell {
                 bucket: count.bucket,
                 key: count.key,
+                tier_unknown: count.tier_unknown,
                 figures: Figures {
                     turns: count.turns,
                     ..Figures::default()
@@ -893,6 +999,7 @@ async fn read_cells(
 struct TurnCount {
     bucket: Option<DateTime<Utc>>,
     key: Option<String>,
+    tier_unknown: bool,
     turns: i64,
 }
 
@@ -918,19 +1025,47 @@ async fn turn_counts(conn: &mut Conn, read: &Read<'_>) -> Result<Vec<TurnCount>,
     } else {
         query.push("NULL::text AS key, ");
     }
+    let by_tier = read.by == Some(UsageDimension::Tier);
     query
-        .push("count(DISTINCT d.turn_id)::bigint AS turns FROM usage_events d WHERE d.at >= ")
-        .push_bind(day_start(read.from)?)
-        .push(" AND d.at < ")
-        .push_bind(day_start(read.to.succ_opt().ok_or_else(calendar)?)?);
+        .push(if by_tier {
+            "d.tier_unknown".to_owned()
+        } else {
+            "false".to_owned()
+        })
+        .push(" AS tier_unknown, ");
+    query
+        .push("count(DISTINCT d.turn_id)::bigint AS turns FROM usage_turn_daily d WHERE d.day >= ")
+        .push_bind(read.from)
+        .push(" AND d.day <= ")
+        .push_bind(read.to);
     push_filter(&mut query, read.filter);
+    if let Some(unknown) = read.filter.tier_unknown {
+        query.push(if unknown {
+            " AND d.tier_unknown"
+        } else {
+            " AND NOT d.tier_unknown"
+        });
+    } else if read.filter.tier.as_deref() == Some("none") {
+        query.push(" AND NOT d.tier_unknown");
+    }
+    if by_tier || read.filter.tier_unknown.is_some() || read.filter.tier.is_some() {
+        query.push(" AND NOT d.tier_unavailable");
+    }
     if read.bucket.is_some() || read.by.is_some() {
         query.push(if read.bucket.is_some() && read.by.is_some() {
-            " GROUP BY 1,2"
+            if by_tier {
+                " GROUP BY 1,2,3"
+            } else {
+                " GROUP BY 1,2"
+            }
         } else if read.bucket.is_some() {
             " GROUP BY 1"
         } else {
-            " GROUP BY 2"
+            if by_tier {
+                " GROUP BY 2,3"
+            } else {
+                " GROUP BY 2"
+            }
         });
     }
     Ok(query.build_query_as::<TurnCount>().fetch_all(conn).await?)
@@ -951,6 +1086,7 @@ pub async fn window(
         .push(" AND d.at < ")
         .push_bind(until);
     push_filter(&mut query, filter);
+    push_tier_filter(&mut query, filter, false);
     Ok(query.build_query_as::<Figures>().fetch_one(conn).await?)
 }
 
@@ -1034,15 +1170,26 @@ pub async fn comparison(
     struct Combination {
         model: String,
         tier: Option<String>,
+        tier_unknown: bool,
         effort: Option<String>,
         program: Option<String>,
         #[sqlx(flatten)]
         sums: super::performance::Sums,
     }
-    let ledger = filter.outcome.is_some() || filter.turn.is_some();
+    let ledger = filter.outcome.is_some()
+        || filter.turn.is_some()
+        || filter.tier_unknown.is_some()
+        || has_tier_states(conn, from, to, filter, None).await?;
     let mut query = QueryBuilder::<Postgres>::new(
         "SELECT d.model,d.tier,d.effort,d.access_program AS program,",
     );
+    query
+        .push(if ledger {
+            unknown_tier_sql()
+        } else {
+            "false".to_owned()
+        })
+        .push(" AS tier_unknown, ");
     if ledger {
         query.push(ledger_measures());
     } else {
@@ -1062,7 +1209,10 @@ pub async fn comparison(
             .push_bind(to);
     }
     push_filter(&mut query, filter);
-    query.push(" GROUP BY d.model,d.tier,d.effort,d.access_program ORDER BY d.model,d.tier,d.effort,d.access_program");
+    if ledger {
+        push_tier_filter(&mut query, filter, true);
+    }
+    query.push(" GROUP BY d.model,d.tier,d.effort,d.access_program,tier_unknown ORDER BY d.model,d.tier,tier_unknown,d.effort,d.access_program");
     // Legacy usage without an observed request outcome is not a zero-request comparison.
     Ok(query
         .build_query_as::<Combination>()
@@ -1073,6 +1223,7 @@ pub async fn comparison(
         .map(|r| orch_api_contract::usage::UsageComparison {
             model: r.model,
             tier: r.tier,
+            tier_unknown: r.tier_unknown,
             effort: r.effort,
             program: r.program,
             performance: r.sums.figures(),
@@ -1087,11 +1238,15 @@ pub async fn provider_comparisons(
     to: NaiveDate,
     providers: &[Id],
 ) -> Result<Vec<(Id, orch_api_contract::usage::UsageComparison)>, DbError> {
+    if providers.is_empty() {
+        return Ok(Vec::new());
+    }
     #[derive(sqlx::FromRow)]
     struct Combination {
         provider_id: Id,
         model: String,
         tier: Option<String>,
+        tier_unknown: bool,
         effort: Option<String>,
         program: Option<String>,
         #[sqlx(flatten)]
@@ -1100,10 +1255,36 @@ pub async fn provider_comparisons(
     let mut query = QueryBuilder::<Postgres>::new(
         "SELECT d.provider_id,d.model,d.tier,d.effort,d.access_program AS program,",
     );
-    query.push(DAILY_MEASURES)
-        .push(" FROM usage_daily d WHERE d.provider_id = ANY(").push_bind(providers)
-        .push(") AND d.day >= ").push_bind(from).push(" AND d.day <= ").push_bind(to)
-        .push(" GROUP BY d.provider_id,d.model,d.tier,d.effort,d.access_program ORDER BY d.provider_id,d.model,d.tier,d.effort,d.access_program");
+    let filter = Filter::default();
+    let ledger = has_tier_states(conn, from, to, &filter, Some(providers)).await?;
+    query
+        .push(if ledger {
+            unknown_tier_sql()
+        } else {
+            "false".to_owned()
+        })
+        .push(" AS tier_unknown, ");
+    query.push(if ledger {
+        ledger_measures()
+    } else {
+        DAILY_MEASURES.to_owned()
+    });
+    if ledger {
+        query
+            .push(" FROM usage_events d WHERE (d.counted OR d.outcome IS NOT NULL) AND d.at >= ")
+            .push_bind(day_start(from)?)
+            .push(" AND d.at < ")
+            .push_bind(day_start(to.succ_opt().ok_or_else(calendar)?)?);
+        push_tier_filter(&mut query, &filter, true);
+    } else {
+        query
+            .push(" FROM usage_daily d WHERE d.day >= ")
+            .push_bind(from)
+            .push(" AND d.day <= ")
+            .push_bind(to);
+    }
+    query.push(" AND d.provider_id = ANY(").push_bind(providers)
+        .push(") GROUP BY d.provider_id,d.model,d.tier,d.effort,d.access_program,tier_unknown ORDER BY d.provider_id,d.model,d.tier,tier_unknown,d.effort,d.access_program");
     Ok(query
         .build_query_as::<Combination>()
         .fetch_all(conn)
@@ -1116,6 +1297,7 @@ pub async fn provider_comparisons(
                 orch_api_contract::usage::UsageComparison {
                     model: row.model,
                     tier: row.tier,
+                    tier_unknown: row.tier_unknown,
                     effort: row.effort,
                     program: row.program,
                     performance: row.sums.figures(),

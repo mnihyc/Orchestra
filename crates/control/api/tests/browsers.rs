@@ -1,3 +1,4 @@
+#![recursion_limit = "256"]
 //! Browser gates, joining, tickets, view-only input and host-only sitting history over the real browser.
 #![cfg(unix)]
 #![allow(

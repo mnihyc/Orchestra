@@ -19,6 +19,7 @@ import { DetailPages, DetailSections } from '@/features/resources/DetailSections
 import { Secrets } from '@/features/settings/Secrets';
 import { SettingRow, type RowPlace } from '@/features/settings/SettingRow';
 import { ReadOnlySettingsNotice } from '@/features/settings/ReadOnlyNotice';
+import { useDefaultsOpening } from '@/features/settings/defaultsOpening';
 import { localizedSetting } from '@/features/settings/settingText';
 import { byGroup, keysAt, lockAbove, withGroup, type KeyDef } from '@/features/settings/settingsModel';
 import type { ResolvedSetting } from '@/generated/api-types';
@@ -50,6 +51,8 @@ export interface SettingsEditorProps {
 export function SettingsEditor(props: SettingsEditorProps) {
   const location = useViewLocation();
   const wantedKey = new URLSearchParams(location.searchStr).get('setting');
+  const opening = useDefaultsOpening(props.target.kind === 'node' ? props.target.id : null, undefined, props.only === undefined && props.compact !== true && props.secrets === true);
+  if (opening.waiting) return <SkeletonRows rows={6} />;
   // A newly selected URL key is a new editor session; ordinary query updates preserve its draft.
   return <EditorAtKey key={JSON.stringify([location.pathname,wantedKey])} {...props} wantedKey={wantedKey} />;
 }

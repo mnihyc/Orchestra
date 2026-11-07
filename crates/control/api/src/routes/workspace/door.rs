@@ -79,6 +79,17 @@ pub async fn beside(
 pub async fn open(ctx: &Ctx, conn: &mut Conn, thread: Option<Id>) -> ApiResult<Door> {
     let environment = ctx.id("id")?;
     let principal = authorization::principal(ctx, conn).await?;
+    open_with_principal(ctx, conn, environment, thread, principal).await
+}
+
+/// The same native door for a producer that already obtained its current preparation actor.
+pub(super) async fn open_with_principal(
+    ctx: &Ctx,
+    conn: &mut Conn,
+    environment: Id,
+    thread: Option<Id>,
+    principal: Principal,
+) -> ApiResult<Door> {
     let env = rows::environment(conn, environment)
         .await?
         .ok_or_else(ApiError::not_found)?;

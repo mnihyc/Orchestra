@@ -309,7 +309,9 @@ async fn recent_active_respects_kinds_archived_done_and_access_on_each_page() {
         })
         .send()
         .await
-        .ok();
+        .ok()
+        .into_full()
+        .unwrap();
     let mut conn = world.conn().await;
     access::set_row(
         &mut conn,
@@ -492,7 +494,9 @@ async fn recent_documents_keep_their_read_marks_and_the_threads_switch_applies_t
             })
             .send()
             .await
-            .ok();
+            .ok()
+            .into_full()
+            .unwrap();
         documents.push(document.base.id);
     }
     let ask = EverythingListQuery {
@@ -537,6 +541,8 @@ async fn private_project(world: &World, by: &Who, root: Id) -> Id {
         .send()
         .await
         .ok()
+        .into_full()
+        .expect("this control expects the ordinary full project response")
         .base
         .id
 }
@@ -1495,7 +1501,9 @@ async fn thread_document_and_chat_activity_reach_the_tree_inventory_and_finder_w
         })
         .send()
         .await
-        .ok();
+        .ok()
+        .into_full()
+        .unwrap();
     let after_document = listing(&world, &reader, &branch(root)).await;
     assert_eq!(
         after_document

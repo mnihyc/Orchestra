@@ -294,6 +294,8 @@ struct OpenSession {
     continuation_fenced: bool,
     session_key: String,
     running_turn: Option<Id>,
+    background: std::collections::HashSet<String>,
+    awaiting_native: bool,
 }
 
 impl OpenSession {
@@ -337,6 +339,8 @@ impl OpenSession {
                 && retained.native_session_ref == self.native_session_ref
         });
         if self.running_turn.is_some()
+            || !self.background.is_empty()
+            || self.awaiting_native
             || !(self.segment_id == source.segment_id
                 && self.native_session_ref == source.native_session_ref
                 || replace == Some(self.segment_id)
@@ -551,6 +555,22 @@ impl Process {
             .map(|session| session.session_key.clone())
     }
 
+    /// Native work keeps its exact slot while configuration refresh is deferred.
+    pub fn background_running(&self, thread: ThreadId) -> bool {
+        self.state()
+            .sessions
+            .get(&thread)
+            .is_some_and(|session| !session.background.is_empty() || session.awaiting_native)
+    }
+
+    /// The actual native identity of this currently installed session slot.
+    pub fn native_session_ref(&self, thread: ThreadId) -> Option<String> {
+        self.state()
+            .sessions
+            .get(&thread)
+            .map(|session| session.native_session_ref.clone())
+    }
+
     /// Runs one call of the adapter. Calls are one at a time: the adapter is `&mut`.
     pub async fn call<R>(
         &self,
@@ -701,6 +721,8 @@ impl Process {
                 continuation_fenced: false,
                 session_key: binding.session_key.clone(),
                 running_turn: None,
+                background: std::collections::HashSet::new(),
+                awaiting_native: false,
             },
         );
         lock(&self.ctx.threads).insert(binding.thread_id, self.key());
@@ -856,15 +878,41 @@ impl Process {
             return;
         }
         let AdapterEvent::Session {
-            thread_id, event, ..
+            thread_id,
+            segment_id,
+            event,
+            ..
         } = event
         else {
             return;
         };
         match event {
+            SessionEvent::BackgroundTasks(report) => {
+                if let Some(session) = self.state().sessions.get_mut(thread_id)
+                    && session.segment_id == *segment_id
+                {
+                    for task in &report.tasks {
+                        let key = serde_json::json!([task.id, task.run_id]).to_string();
+                        if task.state
+                            == orch_agent_contract::background::BackgroundTaskState::Running
+                        {
+                            session.background.insert(key);
+                        } else {
+                            session.background.remove(&key);
+                        }
+                    }
+                    if report.self_waking && report.tasks.iter().any(|task| task.state.wakes()) {
+                        session.awaiting_native = true;
+                    }
+                    if report.native_idle {
+                        session.awaiting_native = false;
+                    }
+                }
+            }
             SessionEvent::TurnStarted(started) => {
                 if let Some(session) = self.state().sessions.get_mut(thread_id) {
                     session.running_turn = Some(started.turn_id);
+                    session.awaiting_native = false;
                 }
                 self.ctx
                     .ledger
@@ -1818,6 +1866,8 @@ mod tests {
             continuation_fenced: true,
             session_key: "synthetic-session-key".into(),
             running_turn: None,
+            background: std::collections::HashSet::new(),
+            awaiting_native: false,
         }
     }
 
