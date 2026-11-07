@@ -1986,6 +1986,57 @@ export const SETTINGS_REGISTRY: readonly SettingDef[] = [
     "keywords": []
   },
   {
+    "key": "exec.version_overrides",
+    "title": "Any agent version",
+    "description": "Machine program versions that an environment manager allows with any agent version.",
+    "group": "environment",
+    "schema": {
+      "type": "object",
+      "additionalProperties": {
+        "type": "object",
+        "properties": {
+          "path": {
+            "type": "string"
+          },
+          "version": {
+            "type": "string"
+          },
+          "by": {
+            "type": "string",
+            "format": "uuid"
+          },
+          "at": {
+            "type": "string",
+            "format": "date-time"
+          }
+        },
+        "required": [
+          "path",
+          "version",
+          "by",
+          "at"
+        ],
+        "additionalProperties": false
+      }
+    },
+    "class": "parameter",
+    "scopes": [
+      "environment"
+    ],
+    "merge": "replace",
+    "default": {},
+    "example": {
+      "codex": {
+        "path": "/usr/local/bin/codex",
+        "version": "0.165.0",
+        "by": "0199c1a0-0000-7000-8000-00000000000a",
+        "at": "2026-10-31T00:00:00Z"
+      }
+    },
+    "text_key": "day100.builtin.exec.version_overrides",
+    "keywords": []
+  },
+  {
     "key": "exec.offers",
     "title": "Exec offers",
     "description": "What an environment's exec node offers a harness that runs with its provider, in the order in which it is tried.",
@@ -2115,45 +2166,156 @@ export const SETTINGS_REGISTRY: readonly SettingDef[] = [
     }
   },
   {
-    "key": "sharing.agent_reach",
-    "title": "Agents' reach",
-    "description": "Which other threads the agents here may read without anybody sharing them: none, those of their topic, or those of their project.",
+    "key": "threads.background_wake",
+    "title": "Background wake",
+    "description": "Wake when background tasks or subagents finish. Off: results of background work arrive with the next input; a program that cannot keep background work without waking is not offered it. Changes apply to the next session.",
     "group": "agent",
     "schema": {
       "type": "string",
       "enum": [
-        "none",
-        "topic",
-        "project"
+        "on",
+        "off"
       ]
     },
-    "class": "policy",
+    "class": "parameter",
     "scopes": [
       "system",
       "org",
       "project",
-      "topic"
+      "topic",
+      "thread"
     ],
     "merge": "replace",
-    "default": "none",
-    "example": "none",
-    "text_key": "day100.builtin.sharing.agent_reach",
+    "default": "on",
+    "example": "on",
+    "text_key": "day100.builtin.threads.background_wake",
     "keywords": []
   },
   {
-    "key": "sharing.agent_documents",
-    "title": "Topic documents",
-    "description": "Whether agents may read or also edit and create public documents beside their topic and its main threads; private documents, conversations, chats, management and Export keep their own rules.",
+    "key": "threads.agent_access",
+    "title": "Agent access",
+    "description": "The initial access shown when creating a thread: reach and levels for documents, chats and other threads. The creator confirms what they may give. Changes apply to new threads, not existing grants.",
     "group": "agent",
     "schema": {
-      "type": "string",
-      "enum": [
-        "none",
-        "read",
-        "write"
+      "anyOf": [
+        {
+          "type": "object",
+          "properties": {
+            "where": {
+              "type": "string",
+              "enum": [
+                "nothing"
+              ]
+            },
+            "parts": {
+              "type": "object",
+              "properties": {},
+              "required": [],
+              "additionalProperties": false
+            }
+          },
+          "required": [
+            "where",
+            "parts"
+          ],
+          "additionalProperties": false
+        },
+        {
+          "type": "object",
+          "properties": {
+            "where": {
+              "type": "string",
+              "enum": [
+                "thread"
+              ]
+            },
+            "parts": {
+              "type": "object",
+              "properties": {
+                "chat": {
+                  "type": "string",
+                  "enum": [
+                    "read",
+                    "write",
+                    "manage"
+                  ]
+                },
+                "documents": {
+                  "type": "string",
+                  "enum": [
+                    "read",
+                    "edit",
+                    "manage"
+                  ]
+                }
+              },
+              "required": [],
+              "additionalProperties": false
+            }
+          },
+          "required": [
+            "where",
+            "parts"
+          ],
+          "additionalProperties": false
+        },
+        {
+          "type": "object",
+          "properties": {
+            "where": {
+              "type": "string",
+              "enum": [
+                "topic",
+                "project"
+              ]
+            },
+            "parts": {
+              "type": "object",
+              "properties": {
+                "timeline": {
+                  "type": "string",
+                  "enum": [
+                    "read",
+                    "write",
+                    "manage"
+                  ]
+                },
+                "thread_fork": {
+                  "type": "boolean"
+                },
+                "thread_archive": {
+                  "type": "boolean"
+                },
+                "chat": {
+                  "type": "string",
+                  "enum": [
+                    "read",
+                    "write",
+                    "manage"
+                  ]
+                },
+                "documents": {
+                  "type": "string",
+                  "enum": [
+                    "read",
+                    "edit",
+                    "manage"
+                  ]
+                }
+              },
+              "required": [],
+              "additionalProperties": false
+            }
+          },
+          "required": [
+            "where",
+            "parts"
+          ],
+          "additionalProperties": false
+        }
       ]
     },
-    "class": "policy",
+    "class": "parameter",
     "scopes": [
       "system",
       "org",
@@ -2161,9 +2323,19 @@ export const SETTINGS_REGISTRY: readonly SettingDef[] = [
       "topic"
     ],
     "merge": "replace",
-    "default": "write",
-    "example": "write",
-    "text_key": "day100.builtin.sharing.agent_documents",
+    "default": {
+      "where": "topic",
+      "parts": {
+        "documents": "edit"
+      }
+    },
+    "example": {
+      "where": "topic",
+      "parts": {
+        "documents": "edit"
+      }
+    },
+    "text_key": "day100.builtin.threads.agent_access",
     "keywords": []
   },
   {
@@ -4072,32 +4244,6 @@ export const SETTINGS_REGISTRY: readonly SettingDef[] = [
     }
   },
   {
-    "key": "broadcast.agent_scope",
-    "title": "Announcement reach",
-    "description": "How far an agent's announcement may reach: its topic, its project or its nearest org.",
-    "group": "collaboration",
-    "schema": {
-      "type": "string",
-      "enum": [
-        "topic",
-        "project",
-        "org"
-      ]
-    },
-    "class": "policy",
-    "scopes": [
-      "system",
-      "org",
-      "project",
-      "topic"
-    ],
-    "merge": "replace",
-    "default": "topic",
-    "example": "topic",
-    "text_key": "day100.builtin.broadcast.agent_scope",
-    "keywords": []
-  },
-  {
     "key": "capability.recreate_grace_secs",
     "title": "Recreate grace",
     "description": "How many seconds running turns may finish before a recreate interrupts them; 0 interrupts them immediately.",
@@ -5075,6 +5221,10 @@ export const SETTINGS_REGISTRY: readonly SettingDef[] = [
       "additionalProperties": {
         "type": "object",
         "properties": {
+          "web_search_per_call": {
+            "type": "string",
+            "pattern": "^[0-9]+(\\.[0-9]+)?$"
+          },
           "input_per_mtok": {
             "type": "string",
             "pattern": "^[0-9]+(\\.[0-9]+)?$"

@@ -9,6 +9,7 @@
 //! before it is stored.
 
 use crate::chats::{self, Loaded};
+use crate::following::BlobOrigin;
 use crate::mentions;
 use crate::notifications::{self, Told};
 use crate::quotes;
@@ -27,7 +28,7 @@ use orch_db::Conn;
 use orch_db::audit::{self, Actor, Entry};
 use orch_db::queries::chats::{self as rows, ChatRow, Edit, MessageRow, NewMessage};
 use orch_db::queries::hierarchy;
-use orch_types::{Id, Json, Seq};
+use orch_types::{Hash, Id, Json, Seq};
 use serde_json::json;
 use std::collections::HashMap;
 
@@ -240,7 +241,21 @@ pub async fn post(
     input: Post,
     redactor: &Redactor,
 ) -> Result<Written, Error> {
-    write(conn, act, loaded, input, redactor, false).await
+    write(conn, act, loaded, input, redactor, false, None).await
+}
+
+/// Writes through the same producer while retaining the operation planner's selected blob
+/// sources. A selected source is rechecked here; it cannot be replaced by an unbound readable
+/// source or personal retention after the operation was admitted. This restriction grants nothing.
+pub async fn post_with_blob_origins(
+    conn: &mut Conn,
+    act: &Acting<'_>,
+    loaded: &mut Loaded,
+    input: Post,
+    redactor: &Redactor,
+    selected: &[(Hash, BlobOrigin)],
+) -> Result<Written, Error> {
+    write(conn, act, loaded, input, redactor, false, Some(selected)).await
 }
 
 /// Writes a message that holds copies of other messages, which only
@@ -252,7 +267,21 @@ pub(crate) async fn post_copies(
     input: Post,
     redactor: &Redactor,
 ) -> Result<Written, Error> {
-    write(conn, act, loaded, input, redactor, true).await
+    write(conn, act, loaded, input, redactor, true, None).await
+}
+
+/// The same forwarding writer with the shared planner's exact readable byte sources retained.
+/// Revalidation cannot fall back to an unselected source after admission. Unused selected
+/// witnesses impose no requirement on quote-only deliveries, which carry no blob bytes.
+pub(crate) async fn post_copies_with_blob_origins(
+    conn: &mut Conn,
+    act: &Acting<'_>,
+    loaded: &mut Loaded,
+    input: Post,
+    redactor: &Redactor,
+    selected: &[(Hash, BlobOrigin)],
+) -> Result<Written, Error> {
+    write(conn, act, loaded, input, redactor, true, Some(selected)).await
 }
 
 async fn write(
@@ -262,6 +291,7 @@ async fn write(
     input: Post,
     redactor: &Redactor,
     copies: bool,
+    selected: Option<&[(Hash, BlobOrigin)]>,
 ) -> Result<Written, Error> {
     let me = act.user();
     loaded.ensure_send()?;
@@ -285,7 +315,12 @@ async fn write(
     let mut parts = input.parts;
     redactor.mask_parts(&mut parts);
     let largest = attachments::largest(conn, &loaded.row).await?;
-    crate::following::require_blobs(conn, act.principal, &attachments::blobs_in(&parts)).await?;
+    let hashes = attachments::blobs_in(&parts);
+    if let Some(selected) = selected {
+        crate::following::require_blobs_in(conn, act.principal, &hashes, selected).await?;
+    } else {
+        crate::following::require_blobs(conn, act.principal, &hashes).await?;
+    }
     attachments::check(conn, &parts, largest).await?;
     let quoted = quotes::check(conn, act, &loaded.row, &parts).await?;
     if let Some(reply) = input.reply_to
@@ -380,24 +415,47 @@ fn difference(of: &[Id], from: &[Id]) -> Vec<Id> {
     of.iter().copied().filter(|id| !from.contains(id)).collect()
 }
 
-/// Replaces what a message says. Only its author does, while they can still
-/// write in the chat. People who are named now and were not before are counted
-/// and told; the quotes and the files it carries are counted again.
-pub async fn edit(
+/// Native edit observation before source consumption. An unchanged masked body and
+/// recipient set performs no source read, row lock, sequence increment or notification.
+#[derive(Clone)]
+pub struct EditPreparation {
+    found: MessageRow,
+    before: Vec<ChatPart>,
+    parts: Vec<ChatPart>,
+    named: mentions::Named,
+    unchanged: bool,
+}
+
+impl EditPreparation {
+    /// The native exact no-op, including its original message revision.
+    #[must_use]
+    pub fn unchanged(&self) -> Option<&MessageRow> {
+        self.unchanged.then_some(&self.found)
+    }
+
+    /// The actual masked parts whose stored sources a changed edit consumes.
+    #[must_use]
+    pub fn parts(&self) -> &[ChatPart] {
+        &self.parts
+    }
+}
+
+/// Prepare the unchanged native send/author/shape/mask/recipient decisions once.
+/// Callers must not replace this original observation after a later serialization wait.
+pub async fn prepare_edit(
     conn: &mut Conn,
     act: &Acting<'_>,
-    loaded: &mut Loaded,
+    loaded: &Loaded,
     id: Id,
     parts: Vec<ChatPart>,
     redactor: &Redactor,
-) -> Result<MessageRow, Error> {
+) -> Result<EditPreparation, Error> {
     loaded.ensure_send()?;
     let chat = loaded.id();
     let found = live(rows::message(conn, chat, id).await?)?;
     if found.author_id != Some(act.user()) {
         return Err(Error::NotTheAuthor);
     }
-    let observed = found.seq_updated;
     let before = views::parts_of(&found.content);
     check_parts(&parts, Some(&before))?;
     let mut parts = parts;
@@ -406,18 +464,55 @@ pub async fn edit(
     let mut previous = found.mentions.clone();
     previous.sort_unstable();
     previous.dedup();
-    if parts == before && named.users == previous && named.everyone == found.mentions_all {
-        return Ok(found);
+    let unchanged =
+        parts == before && named.users == previous && named.everyone == found.mentions_all;
+    Ok(EditPreparation {
+        found,
+        before,
+        parts,
+        named,
+        unchanged,
+    })
+}
+
+/// A changed edit after the original message observation won its native CAS.
+/// Construction locks Thread, Chat and referenced blob rows; it makes no change.
+pub struct LockedEdit {
+    prepared: EditPreparation,
+    found: MessageRow,
+    thread: Option<Id>,
+    added: Vec<Id>,
+    removed: Vec<Id>,
+}
+
+/// Obtain the native serialization locks without incrementing feed sequences. A
+/// transport may then refresh its existing authority before calling the same writer.
+pub async fn lock_edit(
+    conn: &mut Conn,
+    act: &Acting<'_>,
+    loaded: &mut Loaded,
+    prepared: EditPreparation,
+    selected: Option<&[(Hash, BlobOrigin)]>,
+) -> Result<LockedEdit, Error> {
+    if prepared.unchanged || prepared.found.chat_id != loaded.id() {
+        return Err(Error::Internal(
+            "the edit does not match its changed chat observation".to_owned(),
+        ));
     }
     let largest = attachments::largest(conn, &loaded.row).await?;
-    crate::following::require_blobs(conn, act.principal, &attachments::blobs_in(&parts)).await?;
-    attachments::check(conn, &parts, largest).await?;
-    let quoted = quotes::check(conn, act, &loaded.row, &parts).await?;
-    let old_items: Vec<Id> = quotes::refs_in(&before)
+    let hashes = attachments::blobs_in(&prepared.parts);
+    if let Some(selected) = selected {
+        crate::following::require_blobs_in(conn, act.principal, &hashes, selected).await?;
+    } else {
+        crate::following::require_blobs(conn, act.principal, &hashes).await?;
+    }
+    attachments::check(conn, &prepared.parts, largest).await?;
+    let quoted = quotes::check(conn, act, &loaded.row, &prepared.parts).await?;
+    let old_items: Vec<Id> = quotes::refs_in(&prepared.before)
         .into_iter()
         .map(|(_, item)| item)
         .collect();
-    let new_items: Vec<Id> = quoted
+    let new_items = quoted
         .as_ref()
         .map(|quoted| quoted.items.clone())
         .unwrap_or_default();
@@ -425,18 +520,96 @@ pub async fn edit(
         difference(&new_items, &old_items),
         difference(&old_items, &new_items),
     );
-    let thread = loaded.row.node_id;
-    let thread_seq = match (thread, added.is_empty() && removed.is_empty()) {
-        (Some(thread), false) => Some(quotes::begin(conn, thread).await?),
-        _ => None,
-    };
+    let thread = loaded
+        .row
+        .node_id
+        .filter(|_| !added.is_empty() || !removed.is_empty());
+    if let Some(thread) = thread {
+        orch_db::queries::threads::lock(conn, thread)
+            .await?
+            .ok_or_else(|| Error::Internal("the thread of a chat is not there".to_owned()))?;
+    }
     loaded.lock(conn).await?;
-    let found = live(rows::message(conn, chat, id).await?)?;
-    if found.seq_updated != observed {
+    // These are the same blob rows pin/unpin changes later, in the established
+    // Thread -> Chat -> blob order. Holding them also excludes collection/replacement.
+    let mut all = attachments::blobs_in(&prepared.before);
+    all.extend(hashes);
+    orch_db::queries::uploads::lock_blobs(conn, &all).await?;
+    let found = live(rows::message(conn, loaded.id(), prepared.found.id).await?)?;
+    if found.seq_updated != prepared.found.seq_updated {
         return Err(Error::StaleMessage {
             revision: found.seq_updated,
         });
     }
+    Ok(LockedEdit {
+        prepared,
+        found,
+        thread,
+        added,
+        removed,
+    })
+}
+
+/// Final effect-free native byte/attachment/quote checks, with the original
+/// locked observation. This makes no sequence or content change.
+pub struct CheckedEdit {
+    locked: LockedEdit,
+}
+
+/// Complete all awaited native checks before a transport's final lifetime boundary.
+/// The selected witnesses cannot be replaced by an alternate source or custody.
+pub async fn check_edit(
+    conn: &mut Conn,
+    act: &Acting<'_>,
+    loaded: &Loaded,
+    locked: LockedEdit,
+    selected: Option<&[(Hash, BlobOrigin)]>,
+) -> Result<CheckedEdit, Error> {
+    loaded.ensure_send()?;
+    if locked.found.chat_id != loaded.id() || locked.found.author_id != Some(act.user()) {
+        return Err(Error::NotTheAuthor);
+    }
+    let parts = &locked.prepared.parts;
+    let hashes = attachments::blobs_in(parts);
+    if let Some(selected) = selected {
+        crate::following::require_blobs_in(conn, act.principal, &hashes, selected).await?;
+    } else {
+        crate::following::require_blobs(conn, act.principal, &hashes).await?;
+    }
+    let largest = attachments::largest(conn, &loaded.row).await?;
+    attachments::check(conn, parts, largest).await?;
+    let _checked_quotes = quotes::check(conn, act, &loaded.row, parts).await?;
+    Ok(CheckedEdit { locked })
+}
+
+/// Write the exact checked edit. There is no awaited preparation between entry
+/// and the first thread/chat sequence mutation; transports check their lifetime
+/// immediately before entry, while native callers keep their own authority model.
+pub async fn write_checked_edit(
+    conn: &mut Conn,
+    act: &Acting<'_>,
+    loaded: &mut Loaded,
+    checked: CheckedEdit,
+) -> Result<MessageRow, Error> {
+    let locked = checked.locked;
+    loaded.ensure_send()?;
+    if locked.found.chat_id != loaded.id() || locked.found.author_id != Some(act.user()) {
+        return Err(Error::NotTheAuthor);
+    }
+    let chat = loaded.id();
+    let id = locked.found.id;
+    let EditPreparation {
+        before,
+        parts,
+        named,
+        ..
+    } = locked.prepared;
+    let thread = locked.thread;
+    let thread_seq = match thread {
+        Some(thread) => Some(quotes::begin(conn, thread).await?),
+        None => None,
+    };
+    let (added, removed) = (locked.added, locked.removed);
     let seq = chats::take(conn, chat).await?;
     let content = content_of(&parts)?;
     let search = search_text_of(&parts);
@@ -470,11 +643,41 @@ pub async fn edit(
     }
     attachments::unpin(conn, &before).await?;
     attachments::pin(conn, &parts).await?;
-    let newly = difference(&named.users, &found.mentions);
+    let newly = difference(&named.users, &locked.found.mentions);
     notifications::after_edit(conn, act, loaded, &message, &newly).await?;
     rows::notify(conn, chat, seq).await?;
     loaded.row.next_seq = seq + 1;
     Ok(message)
+}
+
+/// The ordinary native writer reuses the same final checks and exact mutation.
+pub async fn write_edit(
+    conn: &mut Conn,
+    act: &Acting<'_>,
+    loaded: &mut Loaded,
+    locked: LockedEdit,
+    selected: Option<&[(Hash, BlobOrigin)]>,
+) -> Result<MessageRow, Error> {
+    let checked = check_edit(conn, act, loaded, locked, selected).await?;
+    write_checked_edit(conn, act, loaded, checked).await
+}
+
+/// Replaces what a message says through the shared native prepared/locked writer.
+/// The author's exact no-op still returns before consuming any stored source.
+pub async fn edit(
+    conn: &mut Conn,
+    act: &Acting<'_>,
+    loaded: &mut Loaded,
+    id: Id,
+    parts: Vec<ChatPart>,
+    redactor: &Redactor,
+) -> Result<MessageRow, Error> {
+    let prepared = prepare_edit(conn, act, loaded, id, parts, redactor).await?;
+    if let Some(unchanged) = prepared.unchanged() {
+        return Ok(unchanged.clone());
+    }
+    let locked = lock_edit(conn, act, loaded, prepared, None).await?;
+    write_edit(conn, act, loaded, locked, None).await
 }
 
 /// Deletes a message: its author, who can still write in the chat; or, in a
@@ -485,6 +688,29 @@ pub async fn delete(
     act: &Acting<'_>,
     loaded: &mut Loaded,
     id: Id,
+) -> Result<MessageRow, Error> {
+    delete_as(conn, act, loaded, id, Actor::User(act.user())).await
+}
+
+/// Moderates through the same quote, attachment, sequence and tombstone writer. The caller
+/// has already checked the agent's current contribution; the giver's ordinary moderation
+/// is checked again here and never substitutes for that contribution.
+pub async fn delete_by_agent(
+    conn: &mut Conn,
+    act: &Acting<'_>,
+    loaded: &mut Loaded,
+    id: Id,
+    agent: Id,
+) -> Result<MessageRow, Error> {
+    delete_as(conn, act, loaded, id, Actor::Agent(agent)).await
+}
+
+async fn delete_as(
+    conn: &mut Conn,
+    act: &Acting<'_>,
+    loaded: &mut Loaded,
+    id: Id,
+    actor: Actor,
 ) -> Result<MessageRow, Error> {
     let chat = loaded.id();
     let found = rows::message(conn, chat, id)
@@ -500,7 +726,7 @@ pub async fn delete(
         return Ok(found);
     }
     let observed = found.seq_updated;
-    let own = found.author_id == Some(act.user());
+    let own = actor == Actor::User(act.user()) && found.author_id == Some(act.user());
     if own {
         loaded.ensure_send()?;
     } else if !loaded.standing.moderate {
@@ -531,7 +757,11 @@ pub async fn delete(
         });
     }
     let seq = chats::take(conn, chat).await?;
-    let gone = rows::delete_message(conn, id, act.user(), seq, act.now).await?;
+    let by = match actor {
+        Actor::User(user) => Some(user),
+        _ => None,
+    };
+    let gone = rows::delete_message_by(conn, id, by, seq, act.now).await?;
     if let (Some(thread), Some(thread_seq)) = (thread, thread_seq) {
         quotes::record(
             conn,
@@ -549,15 +779,21 @@ pub async fn delete(
     attachments::unpin(conn, &views::parts_of(&found.content)).await?;
     if !own {
         let mut entry = Entry::new(
-            Actor::User(act.user()),
-            orch_db::audit::action!(AuditAction::ChatMessageDeleted).as_str(),
+            actor,
+            if matches!(actor, Actor::Agent(_)) {
+                orch_db::audit::action!(AuditAction::ChatMessageDeletedByAgent).as_str()
+            } else {
+                orch_db::audit::action!(AuditAction::ChatMessageDeleted).as_str()
+            },
             "chat",
             Some(chat),
             "deleted a message that somebody else wrote",
         );
+        entry.history = matches!(actor, Actor::Agent(_));
         entry.node_id = loaded.row.node_id;
         entry.org_id = Some(loaded.row.org_id);
-        entry.details = json!({ "message_id": id, "author": found.author_id });
+        entry.details = json!({ "message_id": id, "author": found.author_id,
+            "giver": matches!(actor, Actor::Agent(_)).then_some(act.user()) });
         audit::append(conn, &entry, act.origin, act.now).await?;
     }
     rows::notify(conn, chat, seq).await?;

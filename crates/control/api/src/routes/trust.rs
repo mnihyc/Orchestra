@@ -8,9 +8,9 @@ use crate::middleware::authorization::refusals;
 use crate::middleware::requests::{ApiError, ApiResult};
 use crate::middleware::transaction_guard;
 use crate::registry::{Ctx, Registry};
-use orch_api_contract::environment::Environment;
 use orch_api_contract::trust::{
-    ConfigTrust, ConfigTrustAnswer, ConfigTrustBody, EnvironmentConfigTrustSet,
+    ConfigTrust, ConfigTrustAnswer, ConfigTrustBody, ConfigTrustReceipt, ConfigTrustResponse,
+    EnvironmentConfigTrustSet,
 };
 use orch_db::Conn;
 use orch_db::queries::trust::{self as rows, answer};
@@ -18,9 +18,15 @@ use orch_engine::approvals::ApprovalError;
 use orch_types::{Id, Time};
 use std::collections::HashMap;
 
+mod native;
+
 /// Binds this module's requests.
 pub fn mount(registry: &mut Registry) {
-    registry.on(EnvironmentConfigTrustSet, set);
+    registry.on_with_optional_operation(
+        EnvironmentConfigTrustSet,
+        crate::key_operations::native::stored_deferred::<native::Trust, _, _>,
+        set,
+    );
 }
 
 /// Each environment's harnesses that found a configuration of their own in its workspace, with the answer given.
@@ -58,15 +64,21 @@ pub(crate) async fn views_of(
 }
 
 /// Answers, or changes the answer, for one harness: Manage on the environment, by a person.
-async fn set(ctx: Ctx, (): (), body: ConfigTrustBody) -> ApiResult<Environment> {
-    let environment = ctx.id("id")?;
-    let harness = ctx.param("harness")?.to_owned();
-    let (tx, guard) = transaction_guard::begin(&ctx).await?;
-    let principal = guard.into_principal();
+async fn set(ctx: Ctx, (): (), body: ConfigTrustBody) -> ApiResult<ConfigTrustResponse> {
+    let (mut tx, initial) = transaction_guard::begin(&ctx).await?;
+    let (ctx, guard, subject) = native::after_wait(&ctx, &mut tx, &initial).await?;
+    let accepted = guard.principal().caller().clone();
     match ctx
         .app
         .engine
-        .set_config_trust_guarded(tx, principal.clone(), environment, &harness, body.answer)
+        .set_config_trust_fenced(
+            tx,
+            guard.principal().clone(),
+            subject.environment,
+            &subject.harness,
+            body.answer,
+            || guard.before_effect(&ctx),
+        )
         .await
     {
         Ok(()) => {}
@@ -75,11 +87,43 @@ async fn set(ctx: Ctx, (): (), body: ConfigTrustBody) -> ApiResult<Environment> 
         }
         Err(ApprovalError::Denied(refusal)) => {
             let mut conn = ctx.app.db.acquire().await?;
-            return Err(refusals::denied(&mut conn, *refusal).await?);
+            return Err(denied(&ctx, &mut conn, *refusal).await?);
         }
         Err(ApprovalError::Invalid(message)) => return Err(ApiError::invalid("answer", &message)),
-        Err(ApprovalError::Internal(error)) => return Err(ApiError::internal(error)),
+        Err(ApprovalError::Internal(error)) => return Err(ApiError::engine(error)),
     }
-    let mut conn = ctx.app.db.acquire().await?;
-    crate::routes::environments::show(&ctx, &mut conn, &principal, environment).await
+    let receipt = ConfigTrustReceipt {
+        projection: orch_api_contract::common::ReceiptProjection::Receipt,
+        environment_id: subject.environment,
+        harness: subject.harness,
+        answer: body.answer,
+    };
+    crate::key_operations::publication::receipt(&ctx, &receipt)?;
+    match crate::key_operations::native::resource_reply::stored::<native::Trust>(&ctx, &accepted)
+        .await?
+    {
+        Some(orch_api_contract::resources::Resource::Environment(environment)) => {
+            Ok(ConfigTrustResponse::Full(Box::new(environment)))
+        }
+        Some(_) => Err(ApiError::internal(
+            "the native trust response is not an Environment",
+        )),
+        None => Ok(ConfigTrustResponse::Receipt(receipt)),
+    }
+}
+
+async fn denied(
+    ctx: &Ctx,
+    conn: &mut Conn,
+    refusal: orch_access_contract::decisions::Refusal,
+) -> ApiResult<ApiError> {
+    if ctx.key_receipt_required() {
+        Ok(ApiError::new(
+            orch_api_contract::common::ErrorCode::AuthzDenied,
+            "a person must manage the environment to answer",
+        )
+        .with("required", "environment.manage"))
+    } else {
+        refusals::denied(conn, refusal).await
+    }
 }

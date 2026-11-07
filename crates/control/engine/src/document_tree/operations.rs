@@ -308,7 +308,22 @@ async fn restore_entries(
     }
 }
 
-async fn apply(
+fn apply(
+    conn: &mut Conn,
+    actor: Actor<'_>,
+    request: &Request,
+    prepared: &prepare::Prepared,
+    operation: Id,
+    now: Time,
+    options: Options,
+) -> impl std::future::Future<Output = Result<(Vec<Item>, Vec<super::Copied>), Error>> {
+    // An unused command branch must not enlarge every enclosing writer future.
+    Box::pin(apply_inner(
+        conn, actor, request, prepared, operation, now, options,
+    ))
+}
+
+async fn apply_inner(
     conn: &mut Conn,
     actor: Actor<'_>,
     request: &Request,
@@ -407,7 +422,28 @@ async fn apply(
     }
 }
 
-async fn execute(
+fn execute(
+    conn: &mut Conn,
+    actor: Actor<'_>,
+    request: &Request,
+    deletion_plan: Option<&MembershipStamp>,
+    now: Time,
+    options: Options,
+    text_copy: Option<&super::TextCopy>,
+) -> impl std::future::Future<Output = Result<Receipt, Error>> {
+    // The operation lives on the heap beneath both savepoint facades.
+    Box::pin(execute_inner(
+        conn,
+        actor,
+        request,
+        deletion_plan,
+        now,
+        options,
+        text_copy,
+    ))
+}
+
+async fn execute_inner(
     conn: &mut Conn,
     actor: Actor<'_>,
     request: &Request,

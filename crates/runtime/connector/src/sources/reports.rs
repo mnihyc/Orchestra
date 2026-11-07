@@ -372,7 +372,16 @@ pub fn read(
                 || (strings(value, &["method"]) && native(name, value)))
             .then(|| value.clone()),
             "extra_usage" => (value.is_null()
-                || (strings(value, &["unit", "disabled_reason"]) && native(name, value)))
+                || (strings(value, &["unit", "disabled_reason"])
+                    && ["used", "limit"].iter().all(|member| {
+                        optional(value.get(*member), |amount| {
+                            decimal(amount)
+                                || amount.as_number().is_some_and(|number| {
+                                    limits::decimal_number(&number.to_string()).is_some()
+                                })
+                        })
+                    })
+                    && native(name, value)))
             .then(|| value.clone()),
             "plan_credits" | "key_usage" | "key_credits" | "key_usage_supported" => {
                 (value.is_null() || native(name, value)).then(|| value.clone())

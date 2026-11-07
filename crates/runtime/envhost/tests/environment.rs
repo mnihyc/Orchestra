@@ -1,4 +1,5 @@
 //! The environment host as a whole, through the functions that carry out the commands: attaching, files, snapshots, watching, manifests, shells and gates.
+#![cfg(target_os = "linux")]
 #![allow(
     clippy::unwrap_used,
     clippy::expect_used,

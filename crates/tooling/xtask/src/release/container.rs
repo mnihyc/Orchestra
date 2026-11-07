@@ -121,6 +121,8 @@ impl Builder {
             .args(["--env", &format!("CARGO_HOME={CARGO_HOME_DIR}")])
             .args(["--env", &format!("CARGO_TARGET_DIR={TARGET_DIR}")])
             .args(["--env", &format!("ORCH_BUILD_NUMBER_DIR={COUNTERS_DIR}")])
+            // CI must read the committed component counters, including inside the native builder.
+            .args(["--env", "GITHUB_ACTIONS"])
             .args(["--env", "CARGO_INCREMENTAL=0"])
             // Keep the caller's build parallelism when compiling inside the distribution image.
             .args(["--env", "CARGO_BUILD_JOBS"])

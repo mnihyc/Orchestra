@@ -8,7 +8,9 @@
 mod places;
 mod rig;
 mod support;
+mod thread_history_scope;
 
+use crate::support::FullPermissionPageReply;
 use orch_api_contract::chats::{
     ChatMessage, ChatMessageCreate, ChatMessageCreateBody, ChatMessageDelete, ChatMessageList,
     ChatMessageListQuery, ChatMessageUpdate, ChatMessageUpdateBody, ChatPart, ForwardCreate,
@@ -61,7 +63,8 @@ async fn send(
     parts: Vec<ChatPart>,
     client: &str,
 ) -> orch_api_core::testing::Reply<orch_api_contract::chats::ChatMessageCreateReply> {
-    s.rig
+    let reply = s
+        .rig
         .world
         .app
         .call(ChatMessageCreate, &[&chat])
@@ -73,7 +76,17 @@ async fn send(
             client_id: client.to_owned(),
         })
         .send()
-        .await
+        .await;
+    orch_api_core::testing::Reply {
+        status: reply.status,
+        headers: reply.headers,
+        raw: reply.raw,
+        body: reply.body.map(|answer| {
+            answer
+                .into_full()
+                .expect("the browser session receives the full chat message reply")
+        }),
+    }
 }
 
 async fn agent_message(s: &Scene, thread: Id) -> Id {
@@ -190,7 +203,9 @@ async fn an_item_quoted_into_the_chat_of_its_thread_is_counted_on_the_item_until
         })
         .send()
         .await
-        .ok();
+        .ok()
+        .into_full()
+        .unwrap();
     assert_eq!(edited.parts.len(), 1);
     assert_eq!(refs_of(&s, item).await.0, 2);
     s.rig
@@ -264,11 +279,13 @@ async fn deleting_while_an_edit_adds_a_quote_preserves_the_reference_until_a_fre
             .token(&token);
         request.send().await
     });
-    // A database lock wait proves the delete read the previous version before this edit commits.
+    // The delete reaches the chat lock after observing the message. A background thread-row
+    // waiter does not prove that this request has reached its own mutation boundary.
     tokio::time::timeout(Duration::from_secs(10), async {
         loop {
             let waiting: bool = sqlx::query_scalar(
-                "SELECT EXISTS (SELECT 1 FROM pg_stat_activity WHERE datname = current_database() AND $1 = ANY(pg_blocking_pids(pid)))",
+                "SELECT EXISTS (SELECT 1 FROM pg_stat_activity WHERE datname = current_database()
+                 AND $1 = ANY(pg_blocking_pids(pid)) AND query LIKE '%FROM chats WHERE id = $1 FOR UPDATE%')",
             )
             .bind(pid)
             .fetch_one(&s.rig.world.db.pool)
@@ -282,6 +299,22 @@ async fn deleting_while_an_edit_adds_a_quote_preserves_the_reference_until_a_fre
     })
     .await
     .expect("the delete waits for the edit");
+    if std::env::var_os("ORCH_TEST_SQL_TIMINGS").is_some() {
+        let blocked = tokio::time::timeout(
+            Duration::from_secs(2),
+            sqlx::query_as::<_, (i32, String)>(
+                "SELECT pid,query FROM pg_stat_activity WHERE datname=current_database()
+                 AND $1=ANY(pg_blocking_pids(pid)) ORDER BY pid",
+            )
+            .bind(pid)
+            .fetch_all(&s.rig.world.db.pool),
+        )
+        .await;
+        eprintln!(
+            "chat delete race: old_revision={} edited_revision={revision} blocked={blocked:?}",
+            message.seq_updated
+        );
+    }
     first.commit().await.unwrap();
     let problem = pending.await.unwrap().problem();
     assert_eq!(problem.code, ErrorCode::ConflictStaleRevision);
@@ -362,6 +395,7 @@ async fn a_thread_mention_is_hidden_from_the_inbox_when_the_thread_becomes_priva
         })
         .send()
         .await
+        .full_permission_page()
         .ok();
     assert!(
         inbox()
@@ -496,7 +530,19 @@ async fn items_of_a_thread_are_forwarded_into_its_own_chat_as_quotes_and_into_no
             .call(ForwardCreate, &[])
             .token(&by.token)
             .body(&body);
-        async move { call.send().await }
+        async move {
+            let reply = call.send().await;
+            orch_api_core::testing::Reply {
+                status: reply.status,
+                headers: reply.headers,
+                body: reply.body.map(|response| {
+                    response
+                        .into_full()
+                        .expect("a browser-session forward keeps its full projection")
+                }),
+                raw: reply.raw,
+            }
+        }
     };
     let sent = call(request(&said, thread.base.chat_id, "a"), &s.cai)
         .await
@@ -538,4 +584,128 @@ async fn items_of_a_thread_are_forwarded_into_its_own_chat_as_quotes_and_into_no
         .await
         .problem();
     assert_eq!(stranger.code, ErrorCode::AuthzDenied);
+}
+
+#[tokio::test]
+async fn editing_a_quote_reads_its_actual_thread_without_delegating_thread_write_or_replaying_cleanup()
+ {
+    use serde_json::{Value, json};
+    use thread_history_scope::{key, rule};
+    let s = Scene::new().await;
+    let thread = s.thread().await;
+    let (id, chat) = (thread.base.id, thread.base.chat_id);
+    s.exchange(id, 0, "A quote source", "The quoted answer")
+        .await;
+    let item = agent_message(&s, id).await;
+    let message = send(
+        &s,
+        &s.cai,
+        chat,
+        vec![text("Before quote")],
+        "scoped-edit-quote",
+    )
+    .await
+    .ok()
+    .message;
+    let request = |token: &str, parts: Vec<ChatPart>| {
+        let call = s
+            .rig
+            .world
+            .app
+            .call(ChatMessageUpdate, &[&chat, &message.id])
+            .token(token)
+            .body(&ChatMessageUpdateBody { parts });
+        async move { call.send_bytes().await }
+    };
+    // Ordinary browser primes establish both native quote addition and removal.
+    assert_eq!(
+        request(&s.cai.token, vec![quote(id, item)])
+            .await
+            .status
+            .as_u16(),
+        200
+    );
+    assert_eq!(refs_of(&s, item).await.0, 1);
+    assert_eq!(
+        request(&s.cai.token, vec![text("Before quote")])
+            .await
+            .status
+            .as_u16(),
+        200
+    );
+    assert_eq!(refs_of(&s, item).await.0, 0);
+    let snapshot = || async {
+        sqlx::query_scalar::<_,Value>("SELECT jsonb_build_object('thread',(SELECT to_jsonb(t) FROM threads t WHERE node_id=$1),'chat',(SELECT to_jsonb(c) FROM chats c WHERE id=$2),'message',(SELECT to_jsonb(m) FROM chat_messages m WHERE id=$3),'item',(SELECT to_jsonb(i) FROM items i WHERE id=$4),'inputs',(SELECT count(*) FROM thread_inputs),'jobs',(SELECT count(*) FROM jobs),'commands',(SELECT count(*) FROM commands))")
+            .bind(id).bind(chat).bind(message.id).bind(item)
+            .fetch_one(&s.rig.world.db.pool).await.unwrap()
+    };
+    let writer = key(
+        &s.rig.world,
+        s.cai.id(),
+        vec![rule("ChatMessageUpdate", "chat", chat, "self", "write")],
+    )
+    .await
+    .unwrap();
+    let before = snapshot().await;
+    for extra in [
+        vec![],
+        vec![rule("ChatMessageCreate", "thread", id, "self", "read")],
+    ] {
+        let mut rules = vec![rule("ChatMessageUpdate", "chat", chat, "self", "write")];
+        rules.extend(extra);
+        let scoped = key(&s.rig.world, s.cai.id(), rules).await.unwrap();
+        let refused = request(&scoped.secret, vec![quote(id, item)]).await;
+        assert!(
+            matches!(refused.status.as_u16(), 403 | 404),
+            "{}",
+            String::from_utf8_lossy(&refused.raw)
+        );
+        assert_eq!(snapshot().await, before);
+    }
+    let reader = key(
+        &s.rig.world,
+        s.cai.id(),
+        vec![
+            rule("ChatMessageUpdate", "chat", chat, "self", "write"),
+            rule("ChatMessageUpdate", "thread", id, "self", "read"),
+        ],
+    )
+    .await
+    .unwrap();
+    let accepted = request(&reader.secret, vec![quote(id, item)]).await;
+    assert_eq!(
+        accepted.status.as_u16(),
+        200,
+        "{}",
+        String::from_utf8_lossy(&accepted.raw)
+    );
+    let receipt: Value = serde_json::from_slice(&accepted.raw).unwrap();
+    assert_eq!(receipt["projection"], "receipt");
+    assert_eq!(receipt["message_id"], json!(message.id));
+    assert_eq!(refs_of(&s, item).await.0, 1);
+    let after = snapshot().await;
+    for key in ["inputs", "jobs", "commands"] {
+        assert_eq!(after[key], before[key]);
+    }
+    // Equal quoted parts consume no new source; removal is the edit's intrinsic index cleanup.
+    let noop = request(&writer.secret, vec![quote(id, item)]).await;
+    assert_eq!(
+        noop.status.as_u16(),
+        200,
+        "{}",
+        String::from_utf8_lossy(&noop.raw)
+    );
+    assert_eq!(snapshot().await, after);
+    let removed = request(&writer.secret, vec![text("Quote removed")]).await;
+    assert_eq!(
+        removed.status.as_u16(),
+        200,
+        "{}",
+        String::from_utf8_lossy(&removed.raw)
+    );
+    assert_eq!(refs_of(&s, item).await.0, 0);
+    let done = snapshot().await;
+    for key in ["inputs", "jobs", "commands"] {
+        assert_eq!(done[key], before[key]);
+    }
 }

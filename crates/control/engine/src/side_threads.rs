@@ -490,15 +490,39 @@ impl Engine {
         kept_as: Option<&forking::KeptAs>,
         now: Time,
     ) -> Result<bool, EngineError> {
-        self.settle_side_in(&mut tx, side, by, now).await?;
-        let closed = forking::close_with_marker(&mut tx, side, why, by, kept_as, now.get()).await?;
+        let parent = self
+            .close_side_thread_before(&mut tx, side, why, by, kept_as, now, || Ok(()))
+            .await?;
         tx.commit().await.map_err(orch_db::DbError::from)?;
-        let Some(closed) = closed else {
+        let Some(parent) = parent else {
             return Ok(false);
         };
-        self.wake(closed.parent);
+        self.wake(parent);
         self.kick();
         Ok(true)
+    }
+
+    /// Same native close inside the entry owner's prepared transaction and first-effect boundary.
+    #[allow(
+        clippy::too_many_arguments,
+        reason = "the existing typed native close operands plus its opaque first-effect check"
+    )]
+    pub async fn close_side_thread_before<'a>(
+        &self,
+        conn: &'a mut orch_db::Conn,
+        side: Id,
+        why: &str,
+        by: Option<Id>,
+        kept_as: Option<&forking::KeptAs>,
+        now: Time,
+        before: impl FnOnce() -> Result<(), EngineError> + Send + 'a,
+    ) -> Result<Option<Id>, EngineError> {
+        self.settle_side_before(conn, side, by, now, before).await?;
+        Ok(
+            forking::close_with_marker(conn, side, why, by, kept_as, now.get())
+                .await?
+                .map(|closed| closed.parent),
+        )
     }
 
     /// Closes the side threads that no turn has been under way in for as long as their place allows

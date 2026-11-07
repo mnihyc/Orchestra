@@ -116,7 +116,7 @@ impl Drop for LocalExecutor {
 
 enum Executor {
     Container(ExecServer),
-    Local(LocalExecutor),
+    Local(Box<LocalExecutor>),
 }
 impl Executor {
     fn address(&self) -> SocketAddr {
@@ -131,7 +131,7 @@ impl Executor {
                 drop(peer);
                 Ok(())
             }
-            Self::Local(peer) => peer.stop().await,
+            Self::Local(peer) => (*peer).stop().await,
         }
     }
 }
@@ -187,9 +187,9 @@ async fn a_remote_executor_uses_the_changed_cwd_on_the_same_native_conversation_
         .await
         .expect("the pinned native image/container is required; this proof never silently skips");
     let peer = if orch_testkit::native_configuration::container_proof_mode(module_path!()) {
-        Executor::Local(
+        Executor::Local(Box::new(
             LocalExecutor::start(rig.home_path(), rig.workspace_path(), &rig.token).await?,
-        )
+        ))
     } else {
         Executor::Container(
             ExecServer::start("session-configuration", rig.workspace_path(), &rig.token).await,
@@ -302,10 +302,10 @@ async fn native_questions_reach_the_person_and_return_content_in_each_admitted_m
         let peer = if separated {
             Some(
                 if orch_testkit::native_configuration::container_proof_mode(module_path!()) {
-                    Executor::Local(
+                    Executor::Local(Box::new(
                         LocalExecutor::start(rig.home_path(), rig.workspace_path(), &rig.token)
                             .await?,
-                    )
+                    ))
                 } else {
                     Executor::Container(
                         ExecServer::start("native-questions", rig.workspace_path(), &rig.token)

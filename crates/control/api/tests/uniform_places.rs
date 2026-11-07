@@ -7,6 +7,8 @@
 mod places;
 mod rig;
 mod support;
+use crate::support::FullArchiveReply as _;
+use support::FullRoleReply as _;
 
 use orch_api_contract::access::{NodeRoleCreate, Role, RoleCreateBody, SubjectInput, SubjectKind};
 use orch_api_contract::common::ErrorCode;
@@ -253,6 +255,7 @@ async fn every_kind_of_place_defines_and_carries_tags_with_the_same_limit_and_ar
         .body(&review)
         .send()
         .await
+        .full_archive()
         .ok();
     let archived = world
         .app
@@ -306,7 +309,9 @@ async fn org_department_project_and_topic_share_announcements_and_equal_clock_pa
         })
         .send()
         .await
-        .ok();
+        .ok()
+        .into_full()
+        .expect("this control expects the ordinary full project response");
     let hidden = make_topic(&world, &owner, private.base.id, "Hidden").await;
     let viewer = person(&world, "viewer").await;
     join(&world, org.base.id, org.base.id, &viewer, "viewer", &owner).await;
@@ -379,6 +384,7 @@ async fn org_department_project_and_topic_share_announcements_and_equal_clock_pa
         .body(&review)
         .send()
         .await
+        .full_archive()
         .ok();
     assert_eq!(
         world
@@ -421,6 +427,7 @@ async fn a_members_subject_round_trips_through_the_api_and_matches_only_the_name
         })
         .send()
         .await
+        .full_role()
         .ok();
     assert_eq!(
         serde_json::to_value(&given).unwrap()["subject"]["kind"],

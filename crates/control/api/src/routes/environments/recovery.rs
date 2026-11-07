@@ -22,12 +22,18 @@ use orch_engine::{
 use orch_types::{Id, Time, new_id};
 use serde::{Deserialize, Serialize};
 
+mod read_sources;
+
 /// Binds independent recovery planning and execution.
 pub fn mount(registry: &mut Registry) {
     registry
         .on(api::EnvironmentRecoverPreflight, preflight)
         .on(api::EnvironmentRecoverCreate, create)
-        .on(api::EnvironmentRecoverGet, batch_get);
+        .on_snapshot_read_with_optional_operation(
+            api::EnvironmentRecoverGet,
+            crate::key_operations::native::selected::<read_sources::Recovered>,
+            crate::key_operations::native::selected_read::<read_sources::Recovered>,
+        );
 }
 
 #[derive(Serialize, Deserialize)]
@@ -53,6 +59,21 @@ struct Stored {
     body: api::EnvironmentRecoverPreflightBody,
     members: Vec<Member>,
     switches: Option<StoredBatch>,
+}
+
+/// The same native affected set that supplied this saved recovery audience.
+pub(crate) fn recipient_subjects(
+    plan: &orch_types::Json,
+) -> ApiResult<Vec<orch_access_contract::decisions::ObjectRef>> {
+    let stored: Stored = serde_json::from_value(plan.clone()).map_err(ApiError::internal)?;
+    Ok(stored
+        .affected
+        .into_iter()
+        .map(|id| orch_access_contract::decisions::ObjectRef {
+            kind: orch_access_contract::permissions::ObjectKind::Environment,
+            id,
+        })
+        .collect())
 }
 
 async fn blockers(error: UpdateError) -> ApiResult<Vec<PlanBlocker>> {
@@ -735,42 +756,4 @@ fn stale() -> ApiError {
         orch_api_contract::common::ErrorCode::ConflictStaleRevision,
         "The source or destination changed; review recovery again",
     )
-}
-
-async fn batch_get(ctx: Ctx, (): (), (): ()) -> ApiResult<EnvironmentBatch> {
-    let batch = ctx.id("batch_id")?;
-    let mut conn = ctx.app.db.acquire().await?;
-    let principal = authorization::principal(&ctx, &mut conn).await?;
-    let rows = jobs::forks::of_batch(&mut conn, batch).await?;
-    if rows.is_empty() {
-        return Err(ApiError::not_found());
-    }
-    let mut shown = Vec::new();
-    for row in rows {
-        let environment = match row.environment_id {
-            Some(id) => Some(id),
-            None => match row.node_id {
-                Some(thread) => orch_db::queries::threads::thread(&mut conn, thread)
-                    .await?
-                    .and_then(|row| row.environment_id),
-                None => None,
-            },
-        };
-        let Some(environment) = environment else {
-            continue;
-        };
-        if let Ok(view) = super::show(&ctx, &mut conn, &principal, environment).await {
-            shown.push(EnvironmentBatchJob {
-                environment: view.base,
-                job: super::jobs::read_for(&mut conn, &principal, row.id).await?,
-            });
-        }
-    }
-    if shown.is_empty() {
-        return Err(ApiError::not_found());
-    }
-    Ok(EnvironmentBatch {
-        batch_id: batch,
-        jobs: shown,
-    })
 }

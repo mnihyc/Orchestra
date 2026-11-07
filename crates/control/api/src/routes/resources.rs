@@ -9,6 +9,10 @@
 //! The requests are bound by kind of resource, each in a module of its own below.
 
 pub mod agents;
+mod collection;
+pub(crate) mod environment_fleet;
+pub(crate) mod environment_places;
+pub(crate) mod environment_read;
 pub mod host_delete;
 pub mod host_maintenance;
 pub mod host_storage;
@@ -21,14 +25,22 @@ pub mod mcp_readers;
 pub mod models;
 pub mod mounts;
 pub mod page;
+pub(crate) mod projection;
+mod provider_aux_readers;
+mod provider_creation;
+mod provider_handover;
+mod provider_list;
 pub mod provider_login;
 pub mod provider_plan;
-mod provider_recovery;
+mod provider_projection;
+pub(crate) mod provider_recovery;
 pub mod provider_resets;
 pub mod provider_runtime;
+mod provider_setup_operation;
 pub(crate) mod provider_sources;
 pub mod provider_updates;
 pub mod providers;
+mod read;
 pub mod sealing;
 pub mod setup;
 pub mod skills;

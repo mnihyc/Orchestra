@@ -44,7 +44,10 @@ struct Args {
 
 fn main() -> anyhow::Result<()> {
     let args = Args::parse();
-    tokio::runtime::Builder::new_multi_thread()
+    #[cfg(feature = "test-observers")]
+    let observer =
+        orch_api_core::test_observers::process::ProcessRecording::from_env("api", &BUILD)?;
+    let result = tokio::runtime::Builder::new_multi_thread()
         .thread_stack_size(WORKER_STACK_BYTES)
         .enable_all()
         .build()?
@@ -55,7 +58,14 @@ fn main() -> anyhow::Result<()> {
                 plain_http: args.plain_http,
             },
             BUILD,
-        )))
+        )));
+    #[cfg(feature = "test-observers")]
+    if result.is_ok()
+        && let Some(observer) = observer
+    {
+        observer.finish()?;
+    }
+    result
 }
 
 #[cfg(test)]

@@ -20,7 +20,7 @@ import { EventCredits } from '@/features/usage/Amounts';
 import { type Span, type UsageScope, type UsageSearch, recordsParams } from '@/features/usage/search';
 import { effortDisplayName, modelDisplayName } from '@/features/models/names';
 import { programNameIn } from '@/features/resources/programNames';
-import { offeredChoice } from '@/i18n/choices';
+import { tierAvailable, tierLabel } from './tier';
 import { useFormatContext } from '@/lib/appearance';
 import { formatNumber, formatTokens } from '@/lib/format';
 import { IconButton } from '@/ui/IconButton';
@@ -131,7 +131,7 @@ function ModelLine({ event,scope }: { event: UsageEvent;scope:UsageScope }) {
   const {t}=useTranslation();
   const parts = [
     ...(event.effort===null?[]:[{name:t('usage.chip.effort'),value:effortDisplayName(event.effort,t)}]),
-    ...(event.tier===null?[]:[{name:t('usage.chip.tier'),value:offeredChoice(t,'serviceTier',event.tier)?.name??event.tier}]),
+    ...(!tierAvailable(event) || event.tier===null && event.tier_unknown !== true?[]:[{name:t('usage.chip.tier'),value:tierLabel(event,t)}]),
     ...(scope.kind==='provider'?[]:[{name:t('usage.chip.provider'),value:event.provider.name}]),
   ];
   return (

@@ -77,6 +77,28 @@ pub async fn lock_environment(conn: &mut Conn, environment: Id) -> Result<bool, 
     )
 }
 
+/// The same opening row that an approval's grant/refusal update serializes.
+/// No target, listener or program is created and no opening changes state.
+pub async fn lock_opening(conn: &mut Conn, id: Id) -> Result<bool, DbError> {
+    Ok(
+        sqlx::query_scalar::<_, Id>("SELECT id FROM port_openings WHERE id=$1 FOR UPDATE")
+            .bind(id)
+            .fetch_optional(conn)
+            .await?
+            .is_some(),
+    )
+}
+
+/// The physical publisher serialization already used by a Host opening's current validation.
+/// It is factual locking only; missing rows retain the native validator's eventual outcome.
+pub async fn lock_publisher_machine(conn: &mut Conn, machine: Id) -> Result<(), DbError> {
+    sqlx::query("SELECT id FROM machines WHERE id=$1 FOR NO KEY UPDATE")
+        .bind(machine)
+        .execute(conn)
+        .await?;
+    Ok(())
+}
+
 /// Locks one target without materializing a pure read's revision-zero row.
 pub async fn lock_target(conn: &mut Conn, environment: Id, port: u16) -> Result<(), DbError> {
     sqlx::query("SELECT pg_advisory_xact_lock(hashtextextended($1,0))")

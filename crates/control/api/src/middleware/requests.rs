@@ -19,6 +19,8 @@ pub struct ApiError {
     pub problem: Box<Problem>,
     /// Seconds after which the caller may try again, where that is known.
     pub retry_after: Option<u64>,
+    /// Trusted database failure category, never inferred from an HTTP status or serialized.
+    database_retry: bool,
 }
 
 /// What a handler returns.
@@ -60,7 +62,26 @@ impl ApiError {
     #[must_use]
     pub fn engine(error: orch_engine::EngineError) -> Self {
         match error {
-            orch_engine::EngineError::Db(DbError::Retry) => DbError::Retry.into(),
+            orch_engine::EngineError::BackgroundRunning(_thread) => Self::new(
+                ErrorCode::PlanBlocked,
+                "Background tasks are still running. Review and end them before changing this session.",
+            )
+            .with(
+                "blockers",
+                [orch_api_contract::forks::PlanBlocker {
+                    code: "background_tasks_running".to_owned(),
+                    message: "Review and end the running background tasks first.".to_owned(),
+                    missing: None,
+                }],
+            ),
+            orch_engine::EngineError::BeforeEffect(error) => match error.downcast::<Self>() {
+                Ok(error) => *error,
+                Err(error) => Self::internal(error),
+            },
+            orch_engine::EngineError::Db(DbError::Retry)
+            | orch_engine::EngineError::Authz(orch_authz::Error::Db(DbError::Retry)) => {
+                DbError::Retry.into()
+            }
             orch_engine::EngineError::MountFingerprint(reason) => Self::new(
                 ErrorCode::PlanBlocked,
                 "the requested content check could not finish",
@@ -97,24 +118,49 @@ impl ApiError {
         self.problem.code
     }
 
+    /// Replace the entire public content-bearing envelope while retaining this
+    /// error's trusted cause category and transport retry metadata.
+    #[must_use]
+    pub(crate) fn without_content(mut self) -> Self {
+        let status = self.problem.status;
+        self.problem = Box::new(Problem::new(
+            self.code(),
+            "the operation could not be completed",
+        ));
+        self.problem.status = status;
+        self
+    }
+
+    /// A real database transaction conflict, for explicitly effect-free read retries only.
+    #[must_use]
+    pub(crate) fn is_database_retry(&self) -> bool {
+        self.database_retry
+    }
+
     /// The answer, for the request `request_id`.
     #[must_use]
-    pub fn into_response_for(mut self, request_id: &str) -> Response {
-        self.problem.request_id = request_id.to_owned();
-        words::prepare(&mut self.problem);
+    pub fn into_response_for(self, request_id: &str) -> Response {
+        let (problem, retry_after) = self.into_parts_for(request_id);
         let status =
-            StatusCode::from_u16(self.problem.status).unwrap_or(StatusCode::INTERNAL_SERVER_ERROR);
-        let body = serde_json::to_vec(&*self.problem).unwrap_or_default();
+            StatusCode::from_u16(problem.status).unwrap_or(StatusCode::INTERNAL_SERVER_ERROR);
+        let body = serde_json::to_vec(&problem).unwrap_or_default();
         let mut response = (status, body).into_response();
         let headers = response.headers_mut();
         headers.insert(header::CONTENT_TYPE, HeaderValue::from_static(PROBLEM_JSON));
         if let Ok(value) = HeaderValue::from_str(request_id) {
             headers.insert(REQUEST_ID_HEADER, value);
         }
-        if let Some(seconds) = self.retry_after {
+        if let Some(seconds) = retry_after {
             headers.insert(header::RETRY_AFTER, HeaderValue::from(seconds));
         }
         response
+    }
+
+    /// The same native problem and retry hint used by an HTTP reply, for a bounded opening member.
+    pub(crate) fn into_parts_for(mut self, request_id: &str) -> (Problem, Option<u64>) {
+        self.problem.request_id = request_id.to_owned();
+        words::prepare(&mut self.problem);
+        (*self.problem, self.retry_after)
     }
 }
 
@@ -123,6 +169,7 @@ impl From<Problem> for ApiError {
         Self {
             problem: Box::new(problem),
             retry_after: None,
+            database_retry: false,
         }
     }
 }
@@ -139,10 +186,14 @@ impl From<DbError> for ApiError {
                     "that name or value is taken; choose another",
                 )
             }
-            DbError::Retry => Self::new(
-                ErrorCode::ConflictStaleRevision,
-                "it was changed at the same moment; try again",
-            ),
+            DbError::Retry => {
+                let mut error = Self::new(
+                    ErrorCode::ConflictStaleRevision,
+                    "it was changed at the same moment; try again",
+                );
+                error.database_retry = true;
+                error
+            }
             // A value a handler let through that the schema's check on its column refuses: the request's
             // fault, at that field, not a failure of the server.
             DbError::Check { table, constraint } => {
@@ -211,6 +262,18 @@ mod check_tests {
             checked_field("lease", "leases_duration_check"),
             "leases_duration_check"
         );
+    }
+
+    #[test]
+    fn only_a_typed_database_conflict_marks_an_effect_free_read_for_retry() {
+        let conflict = ApiError::from(DbError::Retry);
+        let revision = ApiError::new(
+            ErrorCode::ConflictStaleRevision,
+            "an explicit business revision conflict",
+        );
+        assert_eq!(conflict.code(), revision.code());
+        assert!(conflict.is_database_retry());
+        assert!(!revision.is_database_retry());
     }
 
     #[test]

@@ -20,7 +20,7 @@ function Choices({kind='usage',initial={}}:{kind?:'usage' | 'providerUsage';init
     <button onClick={()=>change({view:'usage'})}>Usage</button><button onClick={()=>change({view:'performance'})}>Performance</button><button onClick={()=>change({view:'requests'})}>Requests</button>
     <button onClick={()=>change({show:'tokens',series:'token_kind',bucket:'day'})}>Token chart</button>
     <button onClick={()=>change({show:'first_token',series:'provider',bucket:'hour'})}>Performance chart</button>
-    <button onClick={()=>change({plan:'history',plan_bucket:'hour'})}>Plan history</button>
+    <button onClick={()=>change({plan:'history',plan_metric:'credits',plan_bucket:'hour'})}>Plan history</button>
     <button onClick={()=>change({by:'person',range:'last_week'})}>Table and period</button>
     <button onClick={()=>change({person:'00000000-0000-4000-8000-000000000001',from:'2026-10-01',to:'2026-10-02'})}>Custom and filter</button>
   </>;
@@ -38,12 +38,12 @@ it('restores every chart choice after refresh and a plain visit while preserving
   await user.click(screen.getByRole('button',{name:'Performance chart'}));
   const address=readSearch(JSON.parse(screen.getByLabelText('Address').textContent) as Record<string,unknown>);
   rendered.unmount();rendered=show(<Choices initial={address} />);
-  expect(visible()).toMatchObject({view:'performance',show:'first_token',series:'provider',bucket:'hour',plan:'history',plan_bucket:'hour',by:'person',range:'last_week'});
+  expect(visible()).toMatchObject({view:'performance',show:'first_token',series:'provider',bucket:'hour',plan:'history',plan_metric:'credits',plan_bucket:'hour',by:'person',range:'last_week'});
   await user.click(screen.getByRole('button',{name:'Usage'}));
   expect(visible()).toMatchObject({view:'usage',show:'tokens',series:'token_kind',bucket:'day'});
   await user.click(screen.getByRole('button',{name:'Requests'}));
   rendered.unmount();rendered=show(<Choices />);
-  expect(visible()).toMatchObject({view:'requests',plan:'history',plan_bucket:'hour',by:'person',range:'last_week'});
+  expect(visible()).toMatchObject({view:'requests',plan:'history',plan_metric:'credits',plan_bucket:'hour',by:'person',range:'last_week'});
   rendered.unmount();show(<Choices kind="providerUsage" />);
   expect(visible()).toMatchObject({view:'usage',show:'credits',series:'model',bucket:'auto',plan:'current',plan_bucket:'auto',by:'project',range:'30d'});
 });

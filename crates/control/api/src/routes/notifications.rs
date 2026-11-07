@@ -19,11 +19,14 @@
 pub mod channels;
 mod chat_grants;
 pub mod destinations;
+mod document_jobs;
+mod exception_read;
 pub mod exceptions;
 pub mod grouping;
 pub mod inbox;
 pub(crate) mod person;
 pub mod routing;
+mod subjects;
 pub mod views;
 
 use crate::middleware::requests::ApiResult;
@@ -114,8 +117,9 @@ pub fn mount(registry: &mut Registry) {
         .on(NotificationRead, inbox::read)
         .on(MeNotificationPrefsGet, inbox::prefs_get)
         .on(MeNotificationPrefsSet, inbox::prefs_set)
-        .on(
+        .on_snapshot_read_with_optional_operation(
             orch_api_contract::notifications::MeNotificationExceptionList,
+            crate::key_operations::native::selected::<exception_read::Exceptions>,
             exceptions::list,
         )
         .on(
@@ -129,19 +133,48 @@ pub fn mount(registry: &mut Registry) {
         .on(MeNotificationRouteList, routing::list)
         .on(MeNotificationRouteRemove, routing::remove)
         .on(NotifierList, inbox::notifier_list)
-        .on(NotificationChannelList, channels::list)
+        .on_snapshot_read_with_optional_operation(
+            NotificationChannelList,
+            crate::key_operations::native::selected::<channels::list_read::Channels>,
+            crate::key_operations::native::selected_read::<channels::list_read::Channels>,
+        )
         .on(AdminNotificationChannelCreate, channels::create_system)
         .on(OrgNotificationChannelCreate, channels::create_org)
         .on(MeNotificationChannelCreate, channels::create_own)
-        .on(NotificationChannelUpdate, channels::update)
-        .on(NotificationChannelDelete, channels::delete)
-        .on(NotificationChannelTest, channels::test)
+        .on_with_initial_operation(
+            NotificationChannelUpdate,
+            crate::key_operations::native::effects::initial::<channels::update_operation::Update>,
+            crate::key_operations::native::effects::prepare::<channels::update_operation::Update>,
+            channels::update_operation::run,
+        )
+        .on_with_optional_operation(
+            NotificationChannelDelete,
+            crate::key_operations::native::stored::<channels::operation::StoredChannel, _, _>,
+            channels::delete,
+        )
+        .on_with_optional_operation(
+            NotificationChannelTest,
+            crate::key_operations::native::stored::<channels::operation::StoredChannelTest, _, _>,
+            channels::test,
+        )
         .on(MeNotificationRouteSet, routing::set)
         .on(MeNotificationRouteLinkCreate, routing::link_create)
         .on(MeNotificationRouteDelete, routing::delete)
         .on(NodeDestinationList, destinations::list)
         .on(NodeDestinationCreate, destinations::create)
-        .on(DestinationUpdate, destinations::update)
-        .on(DestinationDelete, destinations::delete)
-        .on(DestinationTest, destinations::test);
+        .on_with_operation(
+            DestinationUpdate,
+            destinations::operation::prepare,
+            destinations::update,
+        )
+        .on_with_operation(
+            DestinationDelete,
+            destinations::operation::prepare,
+            destinations::delete,
+        )
+        .on_with_operation(
+            DestinationTest,
+            destinations::operation::prepare,
+            destinations::test,
+        );
 }

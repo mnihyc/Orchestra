@@ -76,6 +76,26 @@ pub(crate) use tagged;
 tagged! {
     /// A text frame of a session between a machine and a gateway.
     Frame {
+        /// Authenticated catalogue update without changing a healthy primary.
+        Gateways(crate::gateways::GatewayAdvertisement) = "gateways",
+        /// Ask for placement without carrying tunnel data through the API.
+        TunnelRouteAsk(crate::gateways::TunnelRouteAsk) = "tunnel_route_ask",
+        /// The API's frozen carrier plan.
+        TunnelRouteAnswer(crate::gateways::TunnelRouteAnswer) = "tunnel_route_answer",
+        /// Prepare a peer's transport over the primary control connection.
+        TunnelPrepareAsk(Box<crate::gateways::TunnelPrepareAsk>) = "tunnel_prepare_ask",
+        /// API-directed tunnel-only attachment, never a business command.
+        TunnelAttach(Box<crate::gateways::TunnelAttach>) = "tunnel_attach",
+        /// Destination's bounded transport acknowledgement.
+        TunnelAttachResult(crate::gateways::TunnelAttachResult) = "tunnel_attach_result",
+        /// Source's matching prepare acknowledgement.
+        TunnelPrepareAnswer(crate::gateways::TunnelPrepareAnswer) = "tunnel_prepare_answer",
+        /// Retire only this pair's transport reference.
+        TunnelRelease(crate::gateways::TunnelRelease) = "tunnel_release",
+        /// The actual tool carrier, not payload bytes.
+        TunnelSelected(crate::gateways::TunnelSelected) = "tunnel_selected",
+        /// Safe source-bound transport failure, never a tool body.
+        TunnelFailed(Box<crate::gateways::TunnelFailed>) = "tunnel_failed",
         /// The gateway's first word on a new connection.
         Hello(Hello) = "hello",
         /// The machine's answer: who it is.
@@ -172,7 +192,8 @@ impl Frame {
     #[must_use]
     pub const fn family(&self) -> Family {
         match self {
-            Self::Hello(_)
+            Self::Gateways(_)
+            | Self::Hello(_)
             | Self::Auth(_)
             | Self::Ready(_)
             | Self::Reject(_)
@@ -186,7 +207,16 @@ impl Frame {
             | Self::Nak(_)
             | Self::Reset(_)
             | Self::Eph(_) => Family::Stream,
-            Self::Cmd(_)
+            Self::TunnelRouteAsk(_)
+            | Self::TunnelRouteAnswer(_)
+            | Self::TunnelPrepareAsk(_)
+            | Self::TunnelAttach(_)
+            | Self::TunnelAttachResult(_)
+            | Self::TunnelPrepareAnswer(_)
+            | Self::TunnelRelease(_)
+            | Self::TunnelSelected(_)
+            | Self::TunnelFailed(_)
+            | Self::Cmd(_)
             | Self::CmdAck(_)
             | Self::CmdRes(_)
             | Self::CmdCancel(_)
@@ -396,6 +426,32 @@ impl DataFrame {
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn tunnel_preparation_replies_have_distinct_bodies_and_keep_their_flat_wire_shape() {
+        use crate::gateways::{TunnelAttachResult, TunnelPrepareAnswer};
+        let request_id = orch_types::Id::nil();
+        let attached: super::Frame = TunnelAttachResult {
+            request_id,
+            ok: true,
+            detail: None,
+        }
+        .into();
+        let prepared: super::Frame = TunnelPrepareAnswer {
+            request_id,
+            ok: true,
+            detail: None,
+        }
+        .into();
+        assert_eq!(
+            serde_json::to_value(attached).unwrap(),
+            serde_json::json!({"t":"tunnel_attach_result","request_id":request_id,"ok":true,"detail":null})
+        );
+        assert_eq!(
+            serde_json::to_value(prepared).unwrap(),
+            serde_json::json!({"t":"tunnel_prepare_answer","request_id":request_id,"ok":true,"detail":null})
+        );
+    }
+
     use super::*;
     use crate::streams::EvbEntry;
     use crate::version::MAX_FRAME_BYTES;

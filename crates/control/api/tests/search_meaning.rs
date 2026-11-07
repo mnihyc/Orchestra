@@ -2133,3 +2133,429 @@ async fn a_million_document_corpus_reports_words_fused_and_agent_latency() {
         }
     }
 }
+
+async fn stream_key(s: &Scene, document: Id) -> String {
+    use orch_api_core::middleware::authentication::{API_TOKEN_PREFIX, new_token, token_hash};
+    let scope: orch_access_contract::key_scope::KeyScope = serde_json::from_value(json!({"rules":[{"target":{"kind":"document","id":document,"reach":"self"},"allow":[{"operation":"SearchStreamList","actions":["read"]}]}]})).unwrap();
+    assert!(scope.validate().is_empty());
+    let secret = new_token(API_TOKEN_PREFIX);
+    orch_db::queries::identity::create_api_token_scoped(
+        &mut *s.rig.world.conn().await,
+        &orch_db::queries::identity::NewApiToken {
+            id: new_id(),
+            user_id: s.ada.id(),
+            name: "Native semantic reader",
+            token_hash: &token_hash(&secret),
+            scopes: &[],
+            node_id: None,
+            at: s.rig.world.now(),
+            expires_at: Some(s.rig.world.now() + chrono::Duration::hours(1)),
+        },
+        Some(&serde_json::to_value(scope).unwrap()),
+    )
+    .await
+    .unwrap();
+    secret
+}
+
+async fn finish_index(s: &Scene) {
+    for _ in 0..40 {
+        s.rig.engine.keep_indexing().await.unwrap();
+        if s.rig
+            .engine
+            .semantic_state(s.tree.org.base.id)
+            .await
+            .unwrap()
+            .state
+            == "idle"
+        {
+            return;
+        }
+    }
+    panic!("the native bounded index fixture did not become ready");
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn scoped_meaning_uses_its_own_stream_read_and_native_actual_parts_with_the_configured_embedding_writer()
+ {
+    let s = Scene::new().await;
+    script(&s);
+    let wanted = document(
+        &s,
+        "Scoped release guide",
+        "We undo a deployment by restoring the previous release.",
+        false,
+    )
+    .await;
+    let other = document(
+        &s,
+        "Other release guide",
+        "Undo the deployment with the previous release.",
+        false,
+    )
+    .await;
+    let key = stream_key(&s, wanted).await;
+    let lexical = streamed(
+        &s,
+        &key,
+        json!({"q":"undo","document_id":wanted,"sort":"newest"}),
+    )
+    .await;
+    assert_eq!(documents_of(&lexical.items), vec![wanted]);
+    turn_on(&s).await;
+    if s.rig.engine.semantic_available().await.unwrap().is_err() {
+        return;
+    }
+    finish_index(&s).await;
+    set(&s, "search.vector_cache_secs", json!(0)).await;
+    let ordinary = streamed(
+        &s,
+        &s.ada.token,
+        json!({"q":"回滚","kinds":"document","sort":"relevance"}),
+    )
+    .await;
+    assert!(documents_of(&ordinary.items).contains(&wanted));
+    assert!(documents_of(&ordinary.items).contains(&other));
+    let before: Vec<Id> =
+        sqlx::query_scalar("SELECT id FROM usage_events WHERE purpose='embeddings'")
+            .fetch_all(s.rig.db.pool())
+            .await
+            .unwrap();
+    let issued = s.rig.commands.issued_of("provider.embed");
+    let scoped = streamed(
+        &s,
+        &key,
+        json!({"q":"回滚","document_id":wanted,"kinds":"document","sort":"relevance"}),
+    )
+    .await;
+    let documents = documents_of(&scoped.items);
+    assert!(
+        !documents.is_empty(),
+        "the real meaning branch found the selected document without a lexical match"
+    );
+    assert!(documents.iter().all(|id| *id == wanted));
+    assert_eq!(
+        s.rig.commands.issued_of("provider.embed"),
+        issued + 1,
+        "one actual query command, without replaying a source snapshot"
+    );
+    let ids: Vec<Id> = sqlx::query_scalar(
+        "SELECT id FROM usage_events WHERE purpose='embeddings' AND NOT(id=ANY($1))",
+    )
+    .bind(before)
+    .fetch_all(s.rig.db.pool())
+    .await
+    .unwrap();
+    assert_eq!(ids.len(), 1);
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn scoped_meaning_rechecks_the_original_key_after_the_native_provider_wait_before_any_embedding_admission()
+ {
+    use axum::body::Body;
+    use http_body_util::BodyExt;
+    use tower::ServiceExt;
+    let s = Scene::new().await;
+    script(&s);
+    let doc = document(
+        &s,
+        "Scoped provider wait",
+        "We undo a deployment with the previous release.",
+        false,
+    )
+    .await;
+    let key = stream_key(&s, doc).await;
+    let lexical = streamed(
+        &s,
+        &key,
+        json!({"q":"undo","document_id":doc,"sort":"newest"}),
+    )
+    .await;
+    assert!(!lexical.items.is_empty());
+    turn_on(&s).await;
+    if s.rig.engine.semantic_available().await.unwrap().is_err() {
+        return;
+    }
+    finish_index(&s).await;
+    set(&s, "search.vector_cache_secs", json!(0)).await;
+    let provider = s
+        .rig
+        .engine
+        .semantic_state(s.tree.org.base.id)
+        .await
+        .unwrap()
+        .active
+        .unwrap()
+        .provider_id;
+    let mut held = s.rig.db.begin().await.unwrap();
+    let locker: i32 = sqlx::query_scalar("SELECT pg_backend_pid()")
+        .fetch_one(&mut *held)
+        .await
+        .unwrap();
+    sqlx::query("SELECT id FROM providers WHERE id=$1 FOR UPDATE")
+        .bind(provider)
+        .fetch_one(&mut *held)
+        .await
+        .unwrap();
+    let issued = s.rig.commands.issued_of("provider.embed");
+    let admissions: i64 =
+        sqlx::query_scalar("SELECT count(*) FROM summary_calls WHERE purpose='embeddings'")
+            .fetch_one(s.rig.db.pool())
+            .await
+            .unwrap();
+    let query = SearchStreamListQuery {
+        q: "回滚".into(),
+        document_id: Some(doc),
+        kinds: Some("document".into()),
+        sort: Some(SearchSort::Relevance),
+        immediate: Some(true),
+        ..Default::default()
+    };
+    let mut registry = orch_api_core::registry::Registry::new();
+    orch_api_core::routes::mount(&mut registry);
+    let router = registry
+        .into_router_for(orch_api_contract::surface::HttpSurface::Key)
+        .with_state(s.rig.world.app.app.clone());
+    let response = router
+        .oneshot(
+            http::Request::builder()
+                .uri(format!(
+                    "/search/stream?{}",
+                    serde_urlencoded::to_string(&query).unwrap()
+                ))
+                .header("authorization", format!("Bearer {key}"))
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(response.status(), 200);
+    let mut draining = tokio::spawn(async move { response.into_body().collect().await });
+    let waiting = tokio::time::timeout(std::time::Duration::from_secs(30), async {
+        loop {
+            let blocked: bool = sqlx::query_scalar("SELECT EXISTS(SELECT 1 FROM pg_stat_activity WHERE $1=ANY(pg_blocking_pids(pid)) AND query LIKE '%providers%' AND query LIKE '%FOR SHARE%')").bind(locker).fetch_one(s.rig.db.pool()).await.unwrap();
+            if blocked { break true; }
+            if draining.is_finished() { break false; }
+            tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+        }
+    }).await;
+    if !matches!(waiting, Ok(true)) {
+        draining.abort();
+        held.rollback().await.unwrap();
+        let drained = draining.await;
+        panic!("the native provider wait was not reached: {drained:?}");
+    }
+    s.rig.world.advance(chrono::Duration::hours(2));
+    held.rollback().await.unwrap();
+    let result = match tokio::time::timeout(std::time::Duration::from_secs(30), &mut draining).await
+    {
+        Ok(result) => result.unwrap(),
+        Err(error) => {
+            draining.abort();
+            let drained = draining.await;
+            panic!("the released query did not finish: {error}; {drained:?}");
+        }
+    };
+    assert!(
+        result.is_err(),
+        "the original expired reader closes the held raw stream"
+    );
+    assert_eq!(s.rig.commands.issued_of("provider.embed"), issued);
+    let after: i64 =
+        sqlx::query_scalar("SELECT count(*) FROM summary_calls WHERE purpose='embeddings'")
+            .fetch_one(s.rig.db.pool())
+            .await
+            .unwrap();
+    assert_eq!(
+        after, admissions,
+        "the refused first effect creates no embedding admission"
+    );
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn queued_meaning_retains_its_canonical_source_and_current_key_without_revoking_already_accepted_usage()
+ {
+    use axum::body::Body;
+    use http_body_util::BodyExt;
+    use orch_engine::commands::Commands;
+    use tower::ServiceExt;
+    let s = Scene::new().await;
+    script(&s);
+    let doc = document(
+        &s,
+        "Queued scoped query",
+        "Undo a deployment with the previous release.",
+        false,
+    )
+    .await;
+    let key = stream_key(&s, doc).await;
+    assert!(
+        !streamed(
+            &s,
+            &key,
+            json!({"q":"undo","document_id":doc,"sort":"newest"})
+        )
+        .await
+        .items
+        .is_empty()
+    );
+    turn_on(&s).await;
+    if s.rig.engine.semantic_available().await.unwrap().is_err() {
+        return;
+    }
+    finish_index(&s).await;
+    set(&s, "search.vector_cache_secs", json!(0)).await;
+    let old: std::collections::BTreeSet<_> = s
+        .rig
+        .machine
+        .handler
+        .executions()
+        .into_iter()
+        .map(|entry| entry.id)
+        .collect();
+    s.rig.machine.handler.hold(CommandKind::ProviderEmbed);
+    let query = SearchStreamListQuery {
+        q: "回滚".into(),
+        document_id: Some(doc),
+        kinds: Some("document".into()),
+        sort: Some(SearchSort::Relevance),
+        immediate: Some(true),
+        ..Default::default()
+    };
+    let mut registry = orch_api_core::registry::Registry::new();
+    orch_api_core::routes::mount(&mut registry);
+    let router = registry
+        .into_router_for(orch_api_contract::surface::HttpSurface::Key)
+        .with_state(s.rig.world.app.app.clone());
+    let response = router
+        .oneshot(
+            http::Request::builder()
+                .uri(format!(
+                    "/search/stream?{}",
+                    serde_urlencoded::to_string(&query).unwrap()
+                ))
+                .header("authorization", format!("Bearer {key}"))
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(response.status(), 200);
+    let draining = tokio::spawn(async move { response.into_body().collect().await });
+    rig::eventually(
+        "the source-bound generated query is actually accepted",
+        || async {
+            s.rig
+                .machine
+                .handler
+                .executions()
+                .iter()
+                .any(|entry| entry.kind == CommandKind::ProviderEmbed && !old.contains(&entry.id))
+        },
+    )
+    .await;
+    let id = s
+        .rig
+        .machine
+        .handler
+        .executions()
+        .into_iter()
+        .find(|entry| entry.kind == CommandKind::ProviderEmbed && !old.contains(&entry.id))
+        .unwrap()
+        .id;
+    let retained = s.rig.commands.retained_command(id).await.unwrap().unwrap();
+    let authority = s
+        .rig
+        .commands
+        .issued_authority(id)
+        .expect("the actual native query retains authority");
+    let encoded = serde_json::to_value(&authority).unwrap();
+    assert_eq!(encoded["kind"], "semantic_query");
+    let restored: orch_engine::commands::CommandAuthority =
+        serde_json::from_value(encoded.clone()).unwrap();
+    assert_eq!(restored, authority);
+    let mut tx = s.rig.db.begin().await.unwrap();
+    orch_db::queries::link::insert_command_with_authority(
+        &mut tx,
+        &orch_db::queries::link::NewCommand {
+            id,
+            machine_id: retained.machine,
+            kind: &retained.kind,
+            body: &retained.body,
+            serial_key: retained.key.as_deref(),
+            deadline_at: s.rig.world.now() + chrono::Duration::minutes(1),
+        },
+        s.rig.world.now(),
+        Some(&encoded),
+    )
+    .await
+    .unwrap();
+    tx.commit().await.unwrap();
+    let mut row = orch_db::queries::link::command(&mut *s.rig.world.conn().await, id)
+        .await
+        .unwrap()
+        .unwrap();
+    let clock = s.rig.world.app.app.clock.clone();
+    let access = orch_api_core::thread_access::AuthzAccess::new(clock.clone());
+    let mut tx = s.rig.db.begin().await.unwrap();
+    assert!(
+        authority
+            .current_callers(&mut tx, &row, clock.as_ref(), &access)
+            .await
+            .unwrap()
+            .is_some()
+    );
+    tx.rollback().await.unwrap();
+    row.body["inputs"] = json!(["a different generated request"]);
+    let mut tx = s.rig.db.begin().await.unwrap();
+    assert!(
+        authority
+            .current_callers(&mut tx, &row, clock.as_ref(), &access)
+            .await
+            .unwrap()
+            .is_none(),
+        "a new body cannot borrow an older native query's source"
+    );
+    tx.rollback().await.unwrap();
+    row = orch_db::queries::link::command(&mut *s.rig.world.conn().await, id)
+        .await
+        .unwrap()
+        .unwrap();
+    sqlx::query("UPDATE api_tokens SET operation_scope=$2 WHERE token_hash=$1")
+        .bind(orch_api_core::middleware::authentication::token_hash(&key))
+        .bind(json!({"rules":[]}))
+        .execute(s.rig.db.pool())
+        .await
+        .unwrap();
+    let mut tx = s.rig.db.begin().await.unwrap();
+    assert!(
+        authority
+            .current_callers(&mut tx, &row, clock.as_ref(), &access)
+            .await
+            .unwrap()
+            .is_none(),
+        "later unaccepted delivery restores the actual key's current policy"
+    );
+    tx.rollback().await.unwrap();
+    s.rig.machine.handler.release();
+    assert!(
+        tokio::time::timeout(std::time::Duration::from_secs(30), draining)
+            .await
+            .unwrap()
+            .unwrap()
+            .is_err(),
+        "old content is closed when the reader's stream operation ends"
+    );
+    let usage: (i64, i64) = sqlx::query_as(
+        "SELECT count(*),COALESCE(sum(total_tokens),0)::bigint FROM usage_events WHERE id=$1",
+    )
+    .bind(id)
+    .fetch_one(s.rig.db.pool())
+    .await
+    .unwrap();
+    assert_eq!(
+        usage,
+        (1, 3),
+        "the already accepted model call retains exactly its native reported usage"
+    );
+}

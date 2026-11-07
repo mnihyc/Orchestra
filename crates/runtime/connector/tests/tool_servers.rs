@@ -1,4 +1,5 @@
 //! Tool servers of an environment: started by a command, reached through the tunnel of a session's ticket, filtered as their definition says, killed and started again within their budget, and reported failed past it.
+#![cfg(target_os = "linux")]
 #![allow(
     clippy::unwrap_used,
     clippy::expect_used,

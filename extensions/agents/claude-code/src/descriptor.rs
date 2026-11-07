@@ -145,7 +145,8 @@ pub fn capabilities() -> Capabilities {
         // A message written while a turn runs is taken in at the next model request of that turn.
         steer: true,
         interrupt: true,
-        background_commands: false,
+        background_commands: true,
+        turn_changes_require_restart: true,
         approvals: vec![
             HarnessRequestKind::Command,
             HarnessRequestKind::FileChange,
@@ -193,6 +194,24 @@ pub fn capabilities() -> Capabilities {
         // Compaction is announced when it begins and when it ends.
         phases: true,
         provider_facts: crate::provider::fact_kinds(),
+        provider_fact_fields: orch_provider_contract::credit_fields::normalize_reports(
+            [(
+                "extra_usage".to_owned(),
+                [
+                    "enabled",
+                    "used",
+                    "limit",
+                    "used_percent",
+                    "unit",
+                    "decimal_places",
+                    "disabled_reason",
+                    "limit_reached",
+                ]
+                .map(str::to_owned)
+                .to_vec(),
+            )]
+            .into(),
+        ),
         model_discovery: true,
         // In this mode the harness reports no title of its own.
         title: false,
@@ -259,6 +278,11 @@ fn text() -> std::collections::BTreeMap<String, std::collections::BTreeMap<Strin
         (
             "parameters.service_tier.description",
             "程序的快速模式，适用于有此模式的模型：回答更快，每个令牌的价格更高。使用订阅时，它消耗用量额度，而不是套餐。只在提供方的管理者为该模型启用时可用。",
+        ),
+        ("parameters.web_search.title", "网络搜索"),
+        (
+            "parameters.web_search.description",
+            "让模型在提供方启用的模式范围内搜索公开网络。搜索可能另行计费。",
         ),
         ("parameters.context.title", "上下文"),
         (
@@ -521,6 +545,14 @@ mod tests {
             descriptor("2.1.296", false).sandbox_modes,
             [SandboxMode::Workspace, SandboxMode::Open]
         );
+    }
+
+    #[test]
+    fn the_descriptor_reads_and_writes_as_json_without_loss() {
+        let declared = descriptor("2.1.296", false);
+        let written = serde_json::to_value(&declared).unwrap();
+        let read: AgentDescriptor = serde_json::from_value(written).unwrap();
+        assert_eq!(read, declared);
     }
 
     #[test]

@@ -131,6 +131,9 @@ pub struct PortsSet {
 /// What enrolling takes.
 #[derive(Debug, Clone, ClapArgs)]
 pub struct Enrollment {
+    /// Primary gateway: automatic or an advertised gateway ID; selected gateways remain fixed.
+    #[arg(long, value_name = "automatic|ID")]
+    pub gateway: Option<String>,
     /// Hand the node's policy over locally; an enrollment token cannot choose it silently.
     #[arg(long)]
     pub delegate_policy: bool,
@@ -152,4 +155,31 @@ pub struct Enrollment {
     /// What this host is called in the system; the name of the machine when left out.
     #[arg(long, value_name = "NAME")]
     pub name: Option<String>,
+}
+
+#[cfg(test)]
+#[allow(clippy::unwrap_used, clippy::panic, reason = "test assertions")]
+mod gateway_tests {
+    use super::*;
+
+    #[test]
+    fn host_enrollment_accepts_the_same_primary_gateway_choice() {
+        for gateway in ["automatic", "eu"] {
+            let arguments = Args::try_parse_from([
+                "orch-node",
+                "enroll",
+                "--url",
+                "wss://gw.test:9443",
+                "--token",
+                "oenr_fixture",
+                "--gateway",
+                gateway,
+            ])
+            .unwrap();
+            let Some(Command::Enroll(enrollment)) = arguments.command else {
+                panic!("not host enrollment");
+            };
+            assert_eq!(enrollment.gateway.as_deref(), Some(gateway));
+        }
+    }
 }

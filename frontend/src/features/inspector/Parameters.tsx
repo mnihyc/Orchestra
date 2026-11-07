@@ -30,6 +30,8 @@ import { ChoiceLocator, type ChoiceLocatorOption } from '@/ui/ChoiceLocator';
 import { SkeletonRows } from '@/ui/Skeleton';
 import { Switch } from '@/ui/Switch';
 
+import { SchemaInput } from '@/features/resources/templates/SchemaForm';
+
 import { ThreadRules } from '@/features/approvals/ThreadRules';
 
 import { ThreadPanel } from './ThreadPanel';
@@ -47,7 +49,8 @@ interface Declared {
 
 function declared(parameter: ParameterView): Declared {
   const def = (typeof parameter.def === 'object' && parameter.def !== null ? parameter.def : {}) as Record<string, unknown>;
-  const options = Array.isArray(def.options) ? (def.options as { value?: unknown; label?: unknown }[]).filter((one) => typeof one.value === 'string').map((one) => ({ value: String(one.value), label: typeof one.label === 'string' ? one.label : String(one.value) })) : null;
+  const choices = def.resolved_options ?? def.options;
+  const options = Array.isArray(choices) ? (choices as { value?: unknown; label?: unknown }[]).filter((one) => typeof one.value === 'string').map((one) => ({ value: String(one.value), label: typeof one.label === 'string' ? one.label : String(one.value) })) : null;
   return {
     title: typeof def.title === 'string' ? def.title : parameter.key,
     description: typeof def.description === 'string' ? def.description : '',
@@ -83,6 +86,11 @@ export function ParameterRow({ parameter, access, writable, runs, manageReason =
     if (isSettingConflict(error)) setOpen(true);
   };
   const info = declared(parameter);
+  if (parameter.key === 'web_search') {
+    info.title = t('webSearch.title');
+    info.description = t('webSearch.perUseHint');
+    info.options = info.options?.map((option) => ({...option, label: offeredChoice(t, 'webSearch', option.value)?.label ?? option.label})) ?? null;
+  }
   const set = useMutation({
     mutationFn: (value: unknown) => runs.write(parameter.key, value),
     onError: refused,
@@ -95,15 +103,19 @@ export function ParameterRow({ parameter, access, writable, runs, manageReason =
   const locked = parameter.locked_by !== null;
   const can = writable && runs.ready && parameter.writable && !locked;
   const why = !writable && manageReason ? t('inspector.parameters.needsManage', { name: access.thread.owner.display_name }) : null;
-  const current = parameter.value ?? (typeof parameter.def === 'object' && parameter.def !== null ? (parameter.def as Record<string, unknown>).default : null);
+  const definition = typeof parameter.def === 'object' && parameter.def !== null ? parameter.def as Record<string, unknown> : {};
+  const providerFixed = typeof definition.provider_constraint === 'object' && definition.provider_constraint !== null && Object.hasOwn(definition.provider_constraint, 'const');
+  const current = parameter.value ?? definition.resolved_default ?? definition.default ?? null;
   const shownValue = typeof current === 'string' || typeof current === 'number' ? String(current) : '';
-  const isSwitch = info.type === 'bool' || info.type === 'boolean';
+  const constraint = typeof definition.provider_constraint === 'object' && definition.provider_constraint !== null ? definition.provider_constraint as Record<string, unknown> : null;
+  const isSwitch = constraint === null && (info.type === 'bool' || info.type === 'boolean');
   return (
     <li className="flex flex-col gap-1 border-b border-border px-3 py-2 last:border-b-0" data-testid="parameter-row">
       <div className="flex flex-wrap items-center gap-2">
         {isSwitch ? <Switch className="min-w-0 flex-1" label={info.title} checked={current === true} disabled={!can || set.isPending} onCheckedChange={(on) => set.mutate(on)} />
           : <span className="min-w-0 flex-1 text-sm font-medium text-text">{info.title}</span>}
-        <Provenance source={parameter.source} />
+        {!providerFixed && <Provenance source={parameter.source} />}
+        {providerFixed && <span className="text-xs text-text-muted">{t('providerOptions.fixedByProvider')}</span>}
         {locked && (
           <span className="inline-flex items-center gap-1 text-xs text-text-muted" title={t('inspector.parameters.locked')}>
             <Lock aria-hidden />
@@ -120,7 +132,7 @@ export function ParameterRow({ parameter, access, writable, runs, manageReason =
           </span>
         )}
       </div>
-      {!isSwitch && (info.options !== null ? (
+      {constraint !== null ? <SchemaInput root={constraint} schema={constraint} value={current} parts={[parameter.key]} disabled={!can || set.isPending} problems={[]} driver="provider-options" onChange={(value) => set.mutate(value)} /> : !isSwitch && (info.options !== null ? (
         <ChoiceLocator<string>
           size="sm"
           label={info.title}

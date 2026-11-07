@@ -24,6 +24,43 @@ fn only<T>(mut found: Vec<T>) -> T {
     found.remove(0)
 }
 
+/// Compare actual openings without printing credentials, instructions, paths or parameter values.
+fn session_open_evidence(world: &World) -> serde_json::Value {
+    let opens: Vec<_> = world
+        .ordered()
+        .into_iter()
+        .filter(|(_, command)| {
+            matches!(
+                command,
+                Command::SessionOpen(_) | Command::SessionOpenFenced(_)
+            )
+        })
+        .map(|(_, command)| {
+            let body = command.body().unwrap();
+            body.get("session").cloned().unwrap_or(body)
+        })
+        .collect();
+    let changed_fields: Vec<Vec<_>> = opens
+        .windows(2)
+        .map(|pair| {
+            pair[0]
+                .as_object()
+                .unwrap()
+                .keys()
+                .chain(pair[1].as_object().unwrap().keys())
+                .collect::<std::collections::BTreeSet<_>>()
+                .into_iter()
+                .filter(|key| pair[0].get(key.as_str()) != pair[1].get(key.as_str()))
+                .cloned()
+                .collect()
+        })
+        .collect();
+    serde_json::json!({
+        "modes":opens.iter().map(|body| body["mode"].clone()).collect::<Vec<_>>(),
+        "changed_request_fields":changed_fields,
+    })
+}
+
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn a_ready_key_fixture_defers_observation_without_disabling_its_normal_cadence() {
     use orch_db::queries::provider_facts::{ReadSchedule, due_reads};
@@ -222,7 +259,12 @@ async fn a_second_turn_opens_its_own_lease_and_does_not_start_the_provider_again
     assert_ne!(first.turn_id, second.turn_id);
     assert_eq!(world.ran(CommandKind::ProviderStart), 1);
     assert_eq!(world.ran(CommandKind::AgentStart), 1);
-    assert_eq!(world.ran(CommandKind::SessionOpen), 1);
+    assert_eq!(
+        world.ran(CommandKind::SessionOpen),
+        1,
+        "actual native opening comparison: {}",
+        session_open_evidence(&world)
+    );
     assert_eq!(
         world.ordered_kinds()[6..],
         [

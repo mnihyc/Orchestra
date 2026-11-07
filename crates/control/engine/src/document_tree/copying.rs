@@ -36,7 +36,19 @@ pub(super) fn creation_ops(blocks: Vec<NewBlock>) -> Vec<DocumentOp> {
         .collect()
 }
 
-pub(super) async fn copy(
+pub(super) fn copy(
+    conn: &mut Conn,
+    actor: Actor<'_>,
+    request: &Request,
+    prepared: &prepare::Prepared,
+    now: Time,
+    options: Options,
+) -> impl std::future::Future<Output = Result<(Vec<Item>, Vec<Copied>), Error>> {
+    // Keep copy material preparation out of its caller's command state.
+    Box::pin(copy_inner(conn, actor, request, prepared, now, options))
+}
+
+async fn copy_inner(
     conn: &mut Conn,
     actor: Actor<'_>,
     request: &Request,

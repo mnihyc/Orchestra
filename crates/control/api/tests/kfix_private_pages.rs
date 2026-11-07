@@ -8,6 +8,8 @@
 mod desk;
 mod places;
 mod support;
+use crate::support::FullPermissionPageReply;
+use support::FullTokenReply as _;
 
 use desk::Desk;
 use orch_api_contract::access::{
@@ -28,17 +30,19 @@ async fn credential(desk: &Desk, owner: &Who, node: Id, scopes: &[&str]) -> Stri
         .call(MeTokenCreate, &[])
         .token(&owner.token)
         .body(&ApiTokenCreateBody {
+            rules: None,
             name: "Permission inspector".to_owned(),
             scopes: Some(scopes.iter().map(|scope| (*scope).to_owned()).collect()),
             node_id: Some(node),
             expires_at: None,
-            proof: orch_api_contract::auth::SensitiveProof {
+            proof: Some(orch_api_contract::auth::SensitiveProof {
                 password: Some(support::PASSWORD.to_owned()),
                 ..Default::default()
-            },
+            }),
         })
         .send()
         .await
+        .full_token()
         .ok()
         .token
         .expect("the first answer carries the secret")
@@ -138,7 +142,7 @@ async fn an_explicit_page_manager_without_native_mode_reads_the_page_but_no_cont
                     {"permission": "access.manage", "add": [{"holder": {"kind": "user", "id": manager.id()}}, {"holder": {"kind": "user", "id": admin.id()}}]},
                     {"permission": view, "add": [{"holder": {"kind": "user", "id": viewer.id()}}]}
                 ]
-            })).send().await.ok();
+            })).send().await.full_permission_page().ok();
         for who in [&admin, &manager] {
             inspect(&desk, object, id, who.id(), &who.token, view).await;
         }
@@ -203,6 +207,7 @@ async fn private_page_inspection_through_administration_is_never_a_tokens_whatev
             .raw_body(&json!({"whole": "private"}))
             .send()
             .await
+            .full_permission_page()
             .ok();
         for token in [&scoped, &view_only, &elsewhere, &flag_only] {
             let problem = desk

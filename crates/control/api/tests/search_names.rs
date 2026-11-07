@@ -417,6 +417,8 @@ async fn a_tag_inherited_by_a_readable_topic_keeps_its_private_defining_place_re
         .send()
         .await
         .ok()
+        .into_full()
+        .expect("this control expects the ordinary full project response")
         .base
         .id;
     let topic = make_topic(&world, &ada, private, "Readable work")
@@ -511,6 +513,8 @@ async fn folder_paths_and_department_addresses_are_complete() {
         .send()
         .await
         .ok()
+        .into_full()
+        .expect("this control expects the ordinary full project response")
         .base
         .id;
     let topic = make_topic(&world, &ada, folder, "Payment").await.base.id;
@@ -604,6 +608,8 @@ async fn private_names_never_fill_a_page_or_reveal_their_ancestor_names() {
         .send()
         .await
         .ok()
+        .into_full()
+        .expect("this control expects the ordinary full project response")
         .base
         .id;
     let topic = make_topic(&world, &ada, secret, "Vault topic")

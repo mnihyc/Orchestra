@@ -213,7 +213,9 @@ async fn local_embeddings_uses_ordinary_editable_removable_templates_and_provide
         })
         .send()
         .await
-        .ok();
+        .ok()
+        .into_full()
+        .unwrap();
     let id = made.provider.base.id;
     let model = world
         .app
@@ -222,7 +224,9 @@ async fn local_embeddings_uses_ordinary_editable_removable_templates_and_provide
         .body(&preset.model.clone().unwrap())
         .send()
         .await
-        .ok();
+        .ok()
+        .into_full()
+        .expect("a full model reply");
     assert_eq!(model.model_name, "embeddinggemma-2");
     let shown = world
         .app
@@ -348,6 +352,9 @@ async fn keeping_the_current_model_restores_its_prompts_and_chunk_size_together_
         .send()
         .await
         .ok();
+    let kept = kept
+        .into_full()
+        .expect("this ordinary browser control expects the complete native semantic index");
     assert_eq!(kept.active.unwrap().id, generation);
     let mut conn = world.conn().await;
     let chosen = orch_engine::semantic::choice(&mut conn, c.acme)

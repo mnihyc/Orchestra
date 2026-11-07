@@ -86,7 +86,11 @@ fn audience(ctx: &Ctx, principal: &Principal) -> ApiResult<Vec<u8>> {
             token_id,
             scopes,
             node_id,
-        } => serde_json::json!({"token":token_id,"scopes":scopes,"node":node_id}),
+            operation_scope,
+            expires_at,
+        } => {
+            serde_json::json!({"token":token_id,"scopes":scopes,"node":node_id,"operation_scope":operation_scope,"expires_at":expires_at})
+        }
     };
     let bytes = serde_json::to_vec(&(actor.id(), principal.caller().as_admin(), credential))
         .map_err(ApiError::internal)?;
@@ -687,6 +691,25 @@ pub(crate) async fn location(
         basename: entry.entry.basename.clone(),
         ancestors: convert(read.ancestors)?,
     })
+}
+
+/// Keep the ordinary placement/standing cut while supplying only admitted live folder names.
+/// Basename of the document itself is its own stored content; ancestor names belong to folders.
+pub(crate) async fn location_with_name_sources(
+    conn: &mut Conn,
+    principal: &Principal,
+    row: &documents::DocumentRow,
+    now: Time,
+    allowed: &std::collections::BTreeSet<Id>,
+) -> ApiResult<DocumentLocation> {
+    let mut shown = location(conn, principal, row, now).await?;
+    for ancestor in &mut shown.ancestors {
+        if !allowed.contains(&ancestor.id) {
+            ancestor.basename = None;
+            ancestor.title = None;
+        }
+    }
+    Ok(shown)
 }
 
 /// API-only current view; the durable domain receipt remains caller-independent.

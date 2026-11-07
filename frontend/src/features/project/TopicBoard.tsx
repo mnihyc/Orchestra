@@ -64,7 +64,7 @@ function CardFace({ topic, menu = true, showPaths = false }: { topic: Topic; men
     <>
       <div className="flex items-start gap-2"><NodeIcon kind="topic" color={topic.color} own={topic.custom_color} done={topic.status === 'done'} />
         <div className="flex min-w-0 flex-1 flex-col">
-          <PlaceLink place={topic} className="truncate font-medium text-text hover:underline">
+          <PlaceLink place={topic} className="truncate font-medium leading-(--control-sm) text-text hover:underline">
             {topic.name}
           </PlaceLink>
           {topic.description !== '' && <span className="line-clamp-2 text-sm wrap-anywhere text-text-muted">{topic.description}</span>}
@@ -128,6 +128,7 @@ function ColumnView({ column, topics, pendingIds, canMove, dragging, showPaths }
   const { t, i18n } = useTranslation();
   const drop = useDroppable({ id: column });
   const quiet = HEADINGS[column];
+  const heading = column === 'done' ? t('places.board.done') : t(`state.${column}`);
   // While a card is carried the columns it can be dropped in say so, and the others step back.
   const target = dragging !== null && statusOnDrop(dragging, column) !== null;
   return (
@@ -143,11 +144,11 @@ function ColumnView({ column, topics, pendingIds, canMove, dragging, showPaths }
     >
       <h3 id={`column-${column}`} className="flex items-center gap-2 text-base font-medium text-text">
         {quiet === undefined ? <StateIcon state={column === 'done' ? 'done' : column} /> : <quiet.Icon className={quiet.tone} aria-hidden />}
-        {column === 'done' ? t('places.board.done') : t(`state.${column}`)}
+        {heading}
         <span className="text-sm font-normal text-text-muted">{formatNumber(topics.length, i18n.resolvedLanguage ?? i18n.language)}</span>
       </h3>
       {topics.length === 0 ? (
-        <EmptyState compact title={t('places.board.emptyColumn')} />
+        <EmptyState compact title={t('places.board.emptyColumn', { state: heading })} />
       ) : (
         <ul className="flex flex-col gap-2">
           {topics.map((topic) => (

@@ -78,7 +78,7 @@ async fn an_external_reload_cannot_acknowledge_a_concurrently_changed_own_descri
         reload_is_held(&world, job).await;
         if schema_change {
             world
-                .set(world.topic, "broadcast.agent_scope", json!("project"))
+                .set(world.topic, "broadcast.agent_options", json!(["steer"]))
                 .await;
         } else {
             world
@@ -129,7 +129,7 @@ async fn an_external_reload_cannot_acknowledge_a_concurrently_changed_own_descri
         if schema_change {
             assert_eq!(
                 changed["orch_tool_schemas"]["announce"]["properties"]["audience"]["enum"],
-                json!(["followers", "topic", "project"])
+                json!(["followers", "topic", "project", "org"])
             );
         } else {
             assert_eq!(

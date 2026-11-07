@@ -2,7 +2,7 @@
 import type { TFunction } from 'i18next';
 import { useTranslation } from 'react-i18next';
 
-import { ApiError, invitationIssuerAuthorityLost } from '@/api/client';
+import { ApiError, ReceiptAcknowledged, invitationIssuerAuthorityLost } from '@/api/client';
 import type { TranslationKey } from '@/i18n';
 import { apiErrorSentence, hasErrorSentence } from '@/i18n/errors';
 import { useAppearance } from '@/lib/appearance';
@@ -21,6 +21,8 @@ export interface ErrorText {
   status: number | null;
   /** Whether asking again could help. */
   retryable: boolean;
+  /** A successful write with a bounded receipt is not a failure or permission to resend. */
+  acknowledged?: true;
 }
 
 const FAILURE_WORDS: Readonly<Record<string, string | undefined>> = nativeAliases;
@@ -38,6 +40,10 @@ export function errorText(
   t: TFunction,
   context: { locale: string; timeZone?: string | undefined },
 ): ErrorText {
+  if (error instanceof ReceiptAcknowledged) return {
+    message: t('ui.receipt.accepted'), code: 'receipt.acknowledged', requestId: error.requestId === '' ? null : error.requestId,
+    status: error.status, retryable: false, acknowledged: true,
+  };
   if (error instanceof ApiError) {
     const at = error.retryAt === null ? null : formatTimeOfDay(error.retryAt, context);
     const message = invitationIssuerAuthorityLost(error) ? t('auth.invite.issuerAuthorityLost')

@@ -10,6 +10,9 @@ mod places;
 mod rig;
 mod support;
 
+#[path = "exports/scopes.rs"]
+mod scoped_metadata;
+
 use archive_world::{
     Office, entry, entry_with, everything, has, kept, leads_to, links_of, text_of,
 };

@@ -207,10 +207,16 @@ async fn create(
 ) -> ApiResult<PlaceAnnouncementCreateReply> {
     let place = ctx.id("id")?;
     let (tx, guard) = crate::middleware::transaction_guard::begin(&ctx).await?;
+    let principal = guard.principal().clone();
+    let checking = ctx.clone();
     let sent = match ctx
         .app
         .engine
-        .announce_to_place_guarded(tx, guard.into_principal(), place, &request_of(body))
+        .announce_to_place_guarded_before(tx, principal, place, &request_of(body), move || {
+            guard
+                .check_deadline(&checking)
+                .map_err(|error| orch_engine::error::EngineError::BeforeEffect(Box::new(error)))
+        })
         .await
     {
         Ok(sent) => sent,

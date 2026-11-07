@@ -59,6 +59,8 @@ const FETCH_ATTEMPTS: u32 = 3;
 /// Two names fit a compact history line; the complete list stays in its structured record.
 const HISTORY_UPLOAD_NAMES: usize = 2;
 
+mod copy;
+
 /// Binds this module's requests.
 pub fn mount(registry: &mut Registry) {
     registry
@@ -73,7 +75,11 @@ pub fn mount(registry: &mut Registry) {
         .on(EnvironmentUploadFinish, upload_finish)
         .on(EnvironmentFileMkdir, mkdir)
         .on(EnvironmentFileRename, rename)
-        .on(EnvironmentFileCopy, copy)
+        .on_with_operation(
+            EnvironmentFileCopy,
+            crate::key_operations::native::effects::prepare::<copy::Copy>,
+            copy::run,
+        )
         .on(EnvironmentFileDelete, delete);
 }
 
@@ -1072,17 +1078,28 @@ async fn audited(
     summary: &str,
     details: Json,
 ) -> ApiResult<()> {
+    audited_on(ctx, conn, &door.env, action, summary, details).await
+}
+
+async fn audited_on(
+    ctx: &Ctx,
+    conn: &mut orch_db::Conn,
+    env: &orch_db::queries::environments::workspace::EnvironmentRow,
+    action: AuditAction,
+    summary: &str,
+    details: Json,
+) -> ApiResult<()> {
     let mut entry = Entry::new(
         Actor::User(ctx.user()?.id()),
         action.as_str(),
         "environment",
-        Some(door.env.id),
+        Some(env.id),
         summary,
     );
     entry.history = action.is_history_line();
-    entry.node_id = Some(door.env.home_node_id);
-    entry.org_id = Some(door.env.org_id);
-    entry.environment_id = Some(door.env.id);
+    entry.node_id = Some(env.home_node_id);
+    entry.org_id = Some(env.org_id);
+    entry.environment_id = Some(env.id);
     entry.details = details;
     audit::append(conn, &entry, &origin(ctx), ctx.now).await?;
     Ok(())
@@ -1624,45 +1641,6 @@ async fn rename(
         &door,
         orch_db::audit::action!(AuditAction::WorkspaceFileRenamed),
         &said(&ctx, &format!("renamed {from} to {to}"))?,
-        serde_json::json!({ "from": from, "to": to, "size": stat.entry.size, "hash": stat.hash }),
-    )
-    .await?;
-    orch_db::queries::environments::thread_engine::touch_activity(&mut tx, door.env.id, ctx.now)
-        .await?;
-    tx.commit().await.map_err(orch_db::DbError::from)?;
-    Ok(stat)
-}
-
-/// Copies a file, or a directory with what is in it.
-async fn copy(
-    ctx: Ctx,
-    query: orch_api_contract::environment::ThroughThreadQuery,
-    body: FileFromToBody,
-) -> ApiResult<FileStat> {
-    let (from, to) = two_paths(&body)?;
-    let mut conn = ctx.app.db.acquire().await?;
-    let (door, machine) = writer(&ctx, &mut conn, query.thread).await?;
-    drop(conn);
-    let copied = live::run(
-        &ctx,
-        machine,
-        SerialKey::Environment(door.env.id),
-        &FsCopy {
-            environment_id: door.env.id,
-            from: from.clone(),
-            to: to.clone(),
-        },
-    )
-    .await
-    .map_err(|failure| failure.problem(Doing::Copying))?;
-    let stat = copied;
-    let mut tx = ctx.app.db.begin().await?;
-    audited(
-        &ctx,
-        &mut tx,
-        &door,
-        orch_db::audit::action!(AuditAction::WorkspaceFileCopied),
-        &said(&ctx, &format!("copied {from} to {to}"))?,
         serde_json::json!({ "from": from, "to": to, "size": stat.entry.size, "hash": stat.hash }),
     )
     .await?;

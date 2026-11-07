@@ -351,7 +351,7 @@ fn the_first_password_sign_in_after_setup_works_on_a_two_mib_stack() {
                 // This used to carry the full thread-rendering and private-page futures inline.
                 let org = world.app.call(OrgCreate, &[]).token(&result.access_token)
                     .body(&OrgCreateBody { name: "Acme".to_owned(), slug: "acme".to_owned() })
-                    .send().await.ok();
+                    .send().await.ok().into_full().expect("ordinary created organization content");
                 assert_eq!(org.base.name, "Acme");
                 assert_eq!(org.base.owner.id, administrator);
                 assert!(org.base.access.permissions.iter().any(|permission| permission == "org.manage"));

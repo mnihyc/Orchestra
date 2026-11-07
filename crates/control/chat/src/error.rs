@@ -68,6 +68,10 @@ pub enum Error {
         /// The current message revision.
         revision: i64,
     },
+    /// A forward's actual direct-chat destination differs from the effect-free plan.
+    /// Contains no actual destination identity or protected name.
+    #[error("the forward destination changed meanwhile")]
+    StaleDestination,
     /// The caller is suspended where the chat is: altogether, or in that org.
     #[error("the caller is suspended")]
     Suspended {

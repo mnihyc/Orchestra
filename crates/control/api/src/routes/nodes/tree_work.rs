@@ -73,7 +73,7 @@ pub(crate) fn blocked_cause(
     }
     match detail? {
         detail if sessions::is_sandbox_refusal(detail) => Some(TreeBlockedCause::Sandbox),
-        sessions::APPROVAL_NOT_ALLOWED | sessions::APPROVAL_UNSUPPORTED => {
+        detail if sessions::is_approval_mode_refusal(detail) => {
             Some(TreeBlockedCause::ApprovalMode)
         }
         "second_step_required" => Some(TreeBlockedCause::SecondStep),
@@ -133,6 +133,52 @@ mod tests {
             ),
             Some(TreeBlockedCause::ApprovalMode)
         );
+        assert_eq!(
+            blocked_cause(
+                Some("blocked"),
+                Some("binding_invalid"),
+                Some(sessions::APPROVAL_NOT_ALLOWED)
+            ),
+            Some(TreeBlockedCause::ApprovalMode)
+        );
+        for mode in [
+            orch_agent_contract::descriptor::ApprovalMode::Ask,
+            orch_agent_contract::descriptor::ApprovalMode::OnRequest,
+            orch_agent_contract::descriptor::ApprovalMode::Auto,
+            orch_agent_contract::descriptor::ApprovalMode::Bypass,
+        ] {
+            for detail in [
+                sessions::unsupported_approval_detail(mode),
+                sessions::disallowed_approval_detail(mode),
+            ] {
+                assert_eq!(
+                    blocked_cause(Some("blocked"), Some("binding_invalid"), Some(&detail)),
+                    Some(TreeBlockedCause::ApprovalMode)
+                );
+                assert_eq!(
+                    blocked_cause(Some("blocked"), Some("error"), Some(&detail)),
+                    None
+                );
+                assert_eq!(
+                    blocked_cause(
+                        Some("blocked"),
+                        Some("binding_invalid"),
+                        Some(&format!("{detail} Vendor explanation."))
+                    ),
+                    None
+                );
+            }
+        }
+        for detail in [
+            format!("Native: {}", sessions::APPROVAL_UNSUPPORTED),
+            format!("auto: {}", sessions::APPROVAL_UNSUPPORTED),
+            "Auto: the vendor supplied this exact detail".to_owned(),
+        ] {
+            assert_eq!(
+                blocked_cause(Some("blocked"), Some("binding_invalid"), Some(&detail)),
+                None
+            );
+        }
         assert_eq!(
             blocked_cause(
                 Some("blocked"),

@@ -21,7 +21,8 @@ pub async fn accepts_request(
     accepts_context(conn, provider, model, None, None).await
 }
 
-/// Captured source work cannot spend through a profile or environment that is switched off.
+/// Captured source work cannot spend through a disabled resource. Vendor quota
+/// observations remain eligible; configured Orch caps are handled by their producers.
 pub async fn accepts_context(
     conn: &mut Conn,
     provider: Id,
@@ -29,7 +30,7 @@ pub async fn accepts_context(
     agent: Option<Id>,
     environment: Option<Id>,
 ) -> Result<bool, EngineError> {
-    Ok(sqlx::query_scalar("SELECT EXISTS(SELECT 1 FROM providers p JOIN provider_models m ON m.provider_id=p.id AND m.model_name=$2 LEFT JOIN agents a ON a.id=p.agent_id LEFT JOIN environments e ON e.id=p.held_by_environment_id WHERE p.id=$1 AND p.deleted_at IS NULL AND p.status='ready' AND m.enabled AND (a.id IS NULL OR (NOT a.disabled AND a.deleted_at IS NULL)) AND (e.id IS NULL OR (e.status<>'disabled' AND e.deleted_at IS NULL)) AND ($3::uuid IS NULL OR EXISTS(SELECT 1 FROM agents source WHERE source.id=$3 AND NOT source.disabled AND source.deleted_at IS NULL)) AND ($4::uuid IS NULL OR EXISTS(SELECT 1 FROM environments source WHERE source.id=$4 AND source.status<>'disabled' AND source.deleted_at IS NULL)))").bind(provider).bind(model).bind(agent).bind(environment).fetch_one(conn).await.map_err(DbError::from)?)
+    Ok(sqlx::query_scalar("SELECT EXISTS(SELECT 1 FROM providers p JOIN provider_models m ON m.provider_id=p.id AND m.model_name=$2 LEFT JOIN agents a ON a.id=p.agent_id LEFT JOIN environments e ON e.id=p.held_by_environment_id WHERE p.id=$1 AND p.deleted_at IS NULL AND p.status IN ('ready','exhausted') AND m.enabled AND (a.id IS NULL OR (NOT a.disabled AND a.deleted_at IS NULL)) AND (e.id IS NULL OR (e.status<>'disabled' AND e.deleted_at IS NULL)) AND ($3::uuid IS NULL OR EXISTS(SELECT 1 FROM agents source WHERE source.id=$3 AND NOT source.disabled AND source.deleted_at IS NULL)) AND ($4::uuid IS NULL OR EXISTS(SELECT 1 FROM environments source WHERE source.id=$4 AND source.status<>'disabled' AND source.deleted_at IS NULL)))").bind(provider).bind(model).bind(agent).bind(environment).fetch_one(conn).await.map_err(DbError::from)?)
 }
 
 /// A durable stop belongs to the accepted id and survives making its resource available again.

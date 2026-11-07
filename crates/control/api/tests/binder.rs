@@ -19,6 +19,11 @@ use orch_db::Db;
 use orch_testkit::{clock, database::TestDb};
 use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
+use std::collections::HashMap;
+use std::sync::{
+    Arc, LazyLock, Mutex,
+    atomic::{AtomicBool, AtomicUsize, Ordering},
+};
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize, JsonSchema)]
 #[serde(deny_unknown_fields)]
@@ -48,6 +53,54 @@ pub struct ListQuery {
     kind: Vec<String>,
 }
 
+// Deliberately neither Clone nor Serialize: production input DTOs need no new bounds.
+#[derive(Deserialize, JsonSchema)]
+#[serde(deny_unknown_fields)]
+pub struct OperationProbeBody {
+    text: String,
+    #[serde(default = "probe_default")]
+    count: u32,
+}
+fn probe_default() -> u32 {
+    7
+} // Nonzero sentinel distinguishes defaulting from zero.
+
+#[derive(Deserialize, JsonSchema)]
+#[serde(deny_unknown_fields)]
+pub struct OperationProbeQuery {
+    #[serde(default)]
+    tag: Vec<String>,
+}
+
+#[derive(Debug, Serialize, Deserialize, JsonSchema)]
+pub struct OperationProbeReply {
+    text: String,
+    count: u32,
+    tag: Vec<String>,
+    key: bool,
+}
+
+struct ProbeOperands {
+    text: String,
+    count: u32,
+    tag: Vec<String>,
+    user: orch_types::Id,
+    guarded: bool,
+}
+
+#[derive(Default)]
+struct InitialProbe {
+    calls: AtomicUsize,
+    pause: AtomicBool,
+    entered: tokio::sync::Notify,
+    continue_: tokio::sync::Notify,
+}
+static INITIALS: LazyLock<Mutex<HashMap<orch_types::Id, Arc<InitialProbe>>>> =
+    LazyLock::new(Mutex::default);
+fn initial_state(user: orch_types::Id) -> Arc<InitialProbe> {
+    INITIALS.lock().unwrap().entry(user).or_default().clone()
+}
+
 orch_api_contract::endpoints! {
     /// Says which kinds were asked for.
     KindList: GET "/kinds", Public, query ListQuery, none, json EchoReply, 200;
@@ -56,11 +109,183 @@ orch_api_contract::endpoints! {
     /// Says the text back.
     EchoCreate: POST "/echo", Public, none, json EchoBody, json EchoReply, 201;
     /// Says who is calling.
-    WhoGet: GET "/who/{id}", User, query ShoutQuery, none, json EchoReply, 200;
-    /// Done in a browser only.
-    BrowserOnly: POST "/browser-only", Session, none, none, none, 204;
+    WhoGet: GET "/who/{id}", User, query ShoutQuery, none, json EchoReply, 200,
+        operation orch_api_contract::operations::OperationSpec::single(
+            orch_access_contract::key_scope::KeyAction::Read,
+            &[orch_access_contract::key_scope::KeyTargetKind::Identity(orch_access_contract::key_scope::KeyIdentityKind::Account)],
+            orch_api_contract::operations::TargetResolver::CurrentAccount);
+    /// Exercises a browser credential protocol boundary.
+    BrowserOnly: POST "/browser-only", Session, none, none, none, 204,
+        operation orch_api_contract::operations::OperationSpec::Protocol;
     /// Done by the cookie alone.
     CookieOnly: POST "/cookie-only", Cookie, none, none, none, 204;
+    /// Exercises the shared typed producer with request-local operands.
+    OperationProbe: POST "/operation-probe", User, query OperationProbeQuery, json OperationProbeBody, json OperationProbeReply, 200,
+        operation orch_api_contract::operations::OperationSpec::single(
+            orch_access_contract::key_scope::KeyAction::Write,
+            &[orch_access_contract::key_scope::KeyTargetKind::Identity(orch_access_contract::key_scope::KeyIdentityKind::Account)],
+            orch_api_contract::operations::TargetResolver::CurrentAccount);
+}
+
+fn prepare_probe<'a>(
+    ctx: &'a Ctx,
+    conn: &'a mut orch_db::Conn,
+    caller: &'a orch_authz::Caller,
+    query: OperationProbeQuery,
+    body: OperationProbeBody,
+) -> orch_api_core::registry::OperationFuture<'a> {
+    Box::pin(async move {
+        use orch_access_contract::key_scope::{
+            KeyIdentityKind, KeyObjectRef, KeyResolvedTarget, KeyTargetKind,
+        };
+        let kind = KeyTargetKind::Identity(KeyIdentityKind::Account);
+        let target = KeyResolvedTarget {
+            object: KeyObjectRef {
+                kind,
+                id: Some(caller.user()),
+            },
+            node_ancestors: Vec::new(),
+            document_ancestors: Vec::new(),
+            credential_account: None,
+        };
+        let mut plan = orch_api_core::registry::OperationPlan::new(ctx.route, "OperationProbe")?;
+        plan.bind(0, kind, &[target])?;
+        Ok(plan.with_data(ProbeOperands {
+            text: body.text,
+            count: body.count,
+            tag: query.tag,
+            user: caller.user(),
+            guarded: orch_db::queries::transaction_guard::in_transaction(conn),
+        }))
+    })
+}
+
+async fn operation_probe(
+    ctx: Ctx,
+    query: OperationProbeQuery,
+    body: OperationProbeBody,
+) -> ApiResult<OperationProbeReply> {
+    let initial = ctx.operation_data::<ProbeOperands>()?;
+    assert!(
+        !initial.guarded,
+        "preparation is effect-free before the action transaction"
+    );
+    assert!(
+        !format!("{ctx:?}").contains("PRIVATE_PROBE_BODY"),
+        "held input and operands have redacted Debug"
+    );
+    let (tx, guard) = orch_api_core::middleware::transaction_guard::begin(&ctx).await?;
+    let current = guard.operation_data::<ProbeOperands>()?;
+    assert!(
+        current.guarded,
+        "the same resolver runs on the actual guarded connection"
+    );
+    assert_eq!(current.text, body.text);
+    assert_eq!(current.count, body.count);
+    assert_eq!(current.tag, query.tag);
+    assert_eq!(current.user, guard.user().id());
+    assert_eq!(initial.user, current.user);
+    assert!(ctx.operation_data::<ProbeOperands>()?.guarded);
+    let key = guard.principal().caller().grant().is_some();
+    tx.commit().await.map_err(orch_db::DbError::from)?;
+    Ok(OperationProbeReply {
+        text: body.text,
+        count: body.count,
+        tag: query.tag,
+        key,
+    })
+}
+
+fn initial_probe<'a>(
+    ctx: &'a Ctx,
+    caller: &'a orch_authz::Caller,
+    query: OperationProbeQuery,
+    body: OperationProbeBody,
+) -> orch_api_core::registry::OperationInitialFuture<'a> {
+    Box::pin(async move {
+        let mut conn = ctx.app.db.acquire().await?;
+        assert!(!orch_db::queries::transaction_guard::in_transaction(
+            &mut conn
+        ));
+        let base = prepare_probe(ctx, &mut conn, caller, query, body).await?;
+        let principal = base.preparation_principal(ctx, &mut conn, caller).await?;
+        assert_eq!(principal.user(), caller.user());
+        drop(principal);
+        drop(conn);
+        // This wait stands in for the existing external refresh. A test can acquire
+        // the only pool connection here, proving no registry/initial connection survives.
+        let state = initial_state(caller.user());
+        state.entered.notify_one();
+        if state.pause.load(Ordering::SeqCst) {
+            state.continue_.notified().await;
+        }
+        tokio::task::yield_now().await;
+        state.calls.fetch_add(1, Ordering::SeqCst);
+        Ok(())
+    })
+}
+
+fn after_initial<'a>(
+    ctx: &'a Ctx,
+    conn: &'a mut orch_db::Conn,
+    caller: &'a orch_authz::Caller,
+    query: OperationProbeQuery,
+    body: OperationProbeBody,
+) -> orch_api_core::registry::OperationFuture<'a> {
+    Box::pin(async move {
+        assert_eq!(
+            initial_state(caller.user()).calls.load(Ordering::SeqCst),
+            1,
+            "refresh is complete before final resolution and is not run by the guard"
+        );
+        prepare_probe(ctx, conn, caller, query, body).await
+    })
+}
+
+async fn initial_app(world: &World) -> TestApp {
+    // One connection is a deliberate resource witness, not a performance threshold:
+    // retaining the preparation connection would prevent the initializer from entering.
+    let pool = sqlx::postgres::PgPoolOptions::new()
+        .max_connections(1)
+        .acquire_timeout(std::time::Duration::from_secs(30)) // Existing action-guard test bound.
+        .connect_with((*world._db.pool.connect_options()).clone())
+        .await
+        .unwrap();
+    let mut registry = Registry::new();
+    registry.on_with_initial_operation(
+        OperationProbe,
+        initial_probe,
+        after_initial,
+        operation_probe,
+    );
+    TestApp::new(Db::from_pool(pool), world.app.clock.clone(), registry)
+}
+
+async fn rule_probe_key(world: &World) -> (orch_types::Id, String) {
+    let id = orch_types::new_id();
+    let secret = new_token(API_TOKEN_PREFIX);
+    let hash = token_hash(&secret);
+    let scope = serde_json::json!({"rules":[{
+        "target":{"kind":"account","id":world.user,"reach":"self"},
+        "allow":[{"operation":"OperationProbe","actions":["write"]}]
+    }]});
+    orch_db::queries::identity::create_api_token_scoped(
+        &mut world._db.pool.acquire().await.unwrap(),
+        &orch_db::queries::identity::NewApiToken {
+            id,
+            user_id: world.user,
+            name: "Initial preparation control",
+            token_hash: &hash,
+            scopes: &[],
+            node_id: None,
+            at: clock::start(),
+            expires_at: Some(clock::start() + Duration::hours(1)),
+        },
+        Some(&scope),
+    )
+    .await
+    .unwrap();
+    (id, secret)
 }
 
 async fn echo(_: Ctx, (): (), body: EchoBody) -> ApiResult<Answer<EchoReply>> {
@@ -141,6 +366,7 @@ async fn world() -> World {
         .on(CookieOnly, nothing)
         .on(KindList, kinds)
         .on(EchoOptional, echo_optional);
+    registry.on_with_operation(OperationProbe, prepare_probe, operation_probe);
     let app = TestApp::new(Db::from_pool(db.pool.clone()), clock, registry);
     World {
         app,
@@ -193,6 +419,117 @@ async fn a_declared_request_answers_with_its_declared_status_and_reply() {
     assert!(reply.headers.contains_key("x-request-id"));
     assert_eq!(reply.headers["set-cookie"], "seen=1");
     assert_eq!(reply.ok().text, "abab");
+}
+
+#[tokio::test]
+async fn typed_operation_input_defaults_and_original_credentials_survive_fresh_preparation() {
+    let world = world().await;
+    for (token, key) in [(&world.session_token, false), (&world.api_token, true)] {
+        let reply = world
+            .app
+            .call(OperationProbe, &[])
+            .token(token)
+            .raw_query("tag=one&tag=two")
+            .raw_body(&serde_json::json!({"text":"PRIVATE_PROBE_BODY"}))
+            .send()
+            .await
+            .ok();
+        assert_eq!(reply.count, 7);
+        assert_eq!(reply.tag, ["one", "two"]);
+        assert_eq!(reply.key, key, "no key is rebuilt as a session");
+    }
+    let invalid = world
+        .app
+        .call(OperationProbe, &[])
+        .token(&world.api_token)
+        .raw_body(&serde_json::json!({"text":"PRIVATE_PROBE_BODY", "count":"wrong"}))
+        .send()
+        .await
+        .problem();
+    assert_eq!(invalid.code, ErrorCode::RequestInvalid);
+}
+
+#[tokio::test]
+async fn initial_preparation_precedes_final_resolution_for_browser_legacy_and_rule_keys_without_a_held_connection()
+ {
+    let world = world().await;
+    let app = initial_app(&world).await;
+    let (_, rule) = rule_probe_key(&world).await;
+    for (token, key) in [
+        (&world.session_token, false),
+        (&world.api_token, true),
+        (&rule, true),
+    ] {
+        INITIALS.lock().unwrap().remove(&world.user);
+        let reply = app
+            .call(OperationProbe, &[])
+            .token(token)
+            .raw_body(&serde_json::json!({"text":"PRIVATE_PROBE_BODY"}))
+            .send()
+            .await
+            .ok();
+        assert_eq!(reply.key, key);
+        assert_eq!(initial_state(world.user).calls.load(Ordering::SeqCst), 1);
+    }
+    INITIALS.lock().unwrap().remove(&world.user);
+    app.app.db.pool().close().await;
+}
+
+#[tokio::test]
+async fn scope_narrowing_during_external_initial_preparation_stops_final_admission() {
+    let world = world().await;
+    let app = initial_app(&world).await;
+    let (id, key) = rule_probe_key(&world).await;
+    let state = initial_state(world.user);
+    state.pause.store(true, Ordering::SeqCst);
+    let request_app = app.clone();
+    let request_key = key.clone();
+    let running = tokio::spawn(async move {
+        request_app
+            .call(OperationProbe, &[])
+            .token(&request_key)
+            .raw_body(&serde_json::json!({"text":"PRIVATE_PROBE_BODY"}))
+            .send()
+            .await
+    });
+    // The same finite bound as existing action-guard controls; no external service is involved.
+    tokio::time::timeout(std::time::Duration::from_secs(30), state.entered.notified())
+        .await
+        .unwrap();
+    let mut available =
+        tokio::time::timeout(std::time::Duration::from_secs(30), app.app.db.acquire())
+            .await
+            .expect("initial external wait holds no pool connection")
+            .unwrap();
+    sqlx::query("UPDATE api_tokens SET operation_scope=$2 WHERE id=$1")
+        .bind(id)
+        .bind(serde_json::json!({"rules":[]}))
+        .execute(&mut *available)
+        .await
+        .unwrap();
+    drop(available);
+    state.continue_.notify_one();
+    assert_eq!(running.await.unwrap().status, http::StatusCode::FORBIDDEN);
+    assert_eq!(
+        state.calls.load(Ordering::SeqCst),
+        1,
+        "only the admitted safe refresh ran"
+    );
+    INITIALS.lock().unwrap().remove(&world.user);
+    let refused = app
+        .call(OperationProbe, &[])
+        .token(&key)
+        .raw_body(&serde_json::json!({"text":"PRIVATE_PROBE_BODY"}))
+        .send()
+        .await;
+    assert_eq!(refused.status, http::StatusCode::FORBIDDEN);
+    assert_eq!(
+        initial_state(world.user).calls.load(Ordering::SeqCst),
+        0,
+        "known base scope must pass before external work"
+    );
+    INITIALS.lock().unwrap().remove(&world.user);
+    app.app.db.pool().close().await;
 }
 
 #[tokio::test]
@@ -330,7 +667,20 @@ async fn what_is_done_in_a_browser_refuses_a_token_and_a_cookie_request_needs_it
         .send()
         .await
         .problem();
-    assert_eq!(by_token.code, ErrorCode::AuthSessionRequired);
+    assert_eq!(
+        by_token.code,
+        ErrorCode::NotFound,
+        "the browser protocol has no key-plane alias"
+    );
+    let foreign = world
+        .app
+        .call(BrowserOnly, &[])
+        .surface(orch_api_contract::surface::HttpSurface::Browser)
+        .token(&world.api_token)
+        .send()
+        .await
+        .problem();
+    assert_eq!(foreign.code, ErrorCode::AuthInvalidToken);
     assert_eq!(
         world
             .app
