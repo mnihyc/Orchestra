@@ -6,9 +6,14 @@
 )]
 
 mod binding_support;
+#[path = "binding_set/placement_scopes.rs"]
+mod placement_scopes;
 mod places;
+#[path = "binding_set/rebinding_scopes.rs"]
+mod rebinding_scopes;
 mod rig;
 mod support;
+mod thread_history_scope;
 
 use binding_support::{
     a_directory_on_a_machine, another_environment, another_provider, names, offering_plain,
@@ -33,7 +38,8 @@ async fn bind(
     provider: Id,
     arrangement: Option<ArrangementType>,
 ) -> orch_api_core::testing::Reply<Thread> {
-    s.rig
+    let reply = s
+        .rig
         .world
         .app
         .call(ThreadBindingSet, &[&thread])
@@ -46,7 +52,13 @@ async fn bind(
             effort: None,
         })
         .send()
-        .await
+        .await;
+    orch_api_core::testing::Reply {
+        status: reply.status,
+        headers: reply.headers,
+        raw: reply.raw,
+        body: reply.body.map(|value| value.into_full().unwrap()),
+    }
 }
 
 async fn place(
@@ -56,7 +68,8 @@ async fn place(
     choice: EnvironmentChoice,
     directory: Option<&str>,
 ) -> orch_api_core::testing::Reply<Thread> {
-    s.rig
+    let reply = s
+        .rig
         .world
         .app
         .call(ThreadEnvironmentSet, &[&thread])
@@ -66,7 +79,17 @@ async fn place(
             directory: directory.map(str::to_owned),
         })
         .send()
-        .await
+        .await;
+    orch_api_core::testing::Reply {
+        status: reply.status,
+        headers: reply.headers,
+        raw: reply.raw,
+        body: reply.body.map(|value| {
+            value
+                .into_full()
+                .expect("ordinary placement returns its native Thread")
+        }),
+    }
 }
 
 async fn segment_of(s: &Scene, thread: Id) -> (Id, Id, Id, String) {
@@ -110,7 +133,9 @@ async fn a_thread_without_history_is_put_on_another_profile_and_provider_and_its
         })
         .send()
         .await
-        .ok();
+        .ok()
+        .into_full()
+        .unwrap();
     let binding = put.binding.expect("the thread is bound");
     assert_eq!(binding.provider.id, provider);
     assert_eq!(binding.agent.id, agent);
@@ -424,7 +449,9 @@ async fn a_thread_that_joins_an_environment_without_naming_a_directory_gets_the_
         })
         .send()
         .await
-        .ok();
+        .ok()
+        .into_full()
+        .unwrap();
     let put = place(&s, &s.ada, thread, EnvironmentChoice::Use(second), None)
         .await
         .ok();

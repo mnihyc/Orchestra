@@ -66,6 +66,22 @@ items and final turn outcomes must preserve their native correlation ids.
 Keep a tool's normalized payload and its original name, arguments and result.
 Unknown native items become an `other` call or a raw frame rather than vanish.
 
+Retained image bytes and complete raw outputs use `output_directory`, typed image or
+`OutputRef` hashes, and the connector's existing content upload. A native adoption
+record uses the same path: its typed output dependencies are retained before the
+record is published. Hashes inside opaque tool arguments or results are never file
+references. The original temporary record is removed on success, failure or
+cancellation; its retained output cache stays available. The thread's authorized
+blob reader serves these results to the ordinary file viewer.
+
+An image path reported by a tool in an external environment does not authorize a
+read of the adapter's own filesystem. Retain the bytes the native tool actually
+returned, with its exact session, turn and call identity. Codex uses the persisted
+function result in its managed native history for this, including after a cold
+resume, during replay and in adoption records. Its complete original result stays
+available through the ordinary raw-output viewer. Missing or changed source data
+produces an image-result notice and leaves the model's turn outcome intact.
+
 The descriptor drives the available arrangements, approval and sandbox modes,
 parameters, memory placement, sign-in methods, credential forms and model
 facts. Declare only a native behavior that the loaded binary and configuration
@@ -78,6 +94,34 @@ secret inputs and carries them to that runtime. Credential issue, sharing and
 handover follow the same contract as built-ins. Use a disposable synthetic
 credential in deterministic tests; a real subscription run needs its manager's
 own sign-in. Keep telemetry, error reporting and self-update disabled at launch.
+
+The optional startup `provider_kind` is the account's reported API/subscription kind, without a
+credential. A program that needs a process-wide provider identity can use it before any session
+exists. Codex API accounts select one non-vendor identity per account at startup; each session
+still overrides that identity's endpoint with its own admitted loopback URL. The startup-only URL
+has no valid session key and cannot make an upstream call. Native sign-ins keep their own selection.
+
+Session opens and turns may also carry optional `native_model`: the selected `model`, existing
+manager-authored `parameters`, and `capabilities` containing the capability core's exact serialized
+per-thread resolution. It is private control data, separate from chosen public `params`. Adapters
+that do not use it leave it alone; future native-model members are retained, and the capability
+result remains opaque unless an adapter interprets a declared member. It never contains a key,
+native token, credential or a separately inferred route. Missing data does not prove support.
+The engine captures it at the shared session preparation boundary from that turn's current
+model row, composed endpoint/group/model options, inherited capability settings and ordinary
+Use answer. Session and turn commands share that capture; a later model selection gets a fresh
+one. Private endpoint metadata does not grant visibility of the account or replace admission.
+The serialized resolution's `native_config` supplies the program's own setting instructions.
+An adapter applies supported switches as supplied and ignores unknown switches; it never recovers
+private routes or infers native support from an endpoint's address or a model's spelling.
+
+The core's native instruction map is also part of the existing accepted session
+configuration. A changed or removed instruction uses the normal session-opening
+path before the next turn; inspector wording, prices and private route metadata
+are excluded from this comparison. Codex applies the supplied standalone-search
+boolean and remote-compaction protocol (`v2` or `unsupported`) only to the actual
+forwarded provider entry. Native sign-ins keep their own provider configuration.
+Unknown native controls and future protocol values are ignored.
 
 The session gives standing instructions and its actual directory, model,
 parameters, tools, MCP servers and memory location. Instruction files are
@@ -93,6 +137,20 @@ effect, questions must be answerable and nested streams must keep their parent.
 `scripts/harness-canary/conformance` runs the pinned native cases against a
 controlled model with the external network cut. Record any fixture-only cases
 instead of certifying them from a captured frame alone.
+
+## Native profile parameter aliases
+
+An adapter can publish `x_profile_parameters` in its existing descriptor extensions. Version `1`
+contains `bindings`: each has a JSON `pointer` into `AgentProfile.config`, an existing `ParameterDef`
+under `parameter`, and optional exact string aliases under `values`. The declaration stays with the
+program's syntax; shared code does not interpret program or vendor names. Native null values remain
+omitted. Unknown configuration keys and unknown declaration members are preserved.
+
+Preflight validates these explicit startup values with the same model choices, ranges and provider
+`native` schema as ordinary parameters. Managed turn values retain precedence, while the raw startup
+values must also satisfy their declared bounds. Descriptor overrides cannot replace or remove the
+program's mapping. This mechanism validates configuration and never offers a capability, chooses a
+service, changes a default or grants provider access.
 
 ## Model requests
 
@@ -143,3 +201,11 @@ and a terminal outcome for every request. It rejects epoch timestamps, a first-o
 output tokens, and streamed output without a first-output boundary; nullable counts remain valid. The pinned built-in adapters also replay sanitized real streams;
 Codex native conformance compares its generated notification schema. Re-establish these observations when
 upgrading a harness. Without proven boundaries, report unmeasured values rather than plausible numbers.
+
+
+A quantity-only `TurnUsageReport` sets optional `counters_only: true`. Its token
+containers and token allocations are unobserved; the receiver merges model
+capability quantities while retaining prior token totals, context and breakdown.
+Missing markers preserve the program's ordinary reporting declaration, including
+genuine zero-token observations. This uses the same usage event and ledger;
+historical replay must not generate another capability charge.

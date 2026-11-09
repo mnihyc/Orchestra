@@ -6,8 +6,235 @@ use orch_db::queries::hierarchy;
 use orch_types::Json;
 use serde_json::json;
 
+mod operation;
+mod prepared;
+mod scope;
+
 pub(super) fn mount(registry: &mut Registry) {
-    registry.on(NodeBindingOptionsGet, options);
+    registry.on_snapshot_read_with_optional_operation(
+        NodeBindingOptionsGet,
+        crate::key_operations::native::selected::<operation::Options>,
+        crate::key_operations::native::selected_read::<operation::Options>,
+    );
+}
+
+fn bound_ref(node: &mut NodeRef, bounds: &crate::routes::access::page::NameBounds) {
+    if bounds.limited && !bounds.nodes.contains(&node.id) {
+        node.name = None;
+        node.thread_display = None;
+        node.redacted = true;
+    }
+}
+fn bound_summary(summary: &mut AccessSummary, bounds: &crate::routes::access::page::NameBounds) {
+    if let Some(NodeOrSystem::Node(node)) = &mut summary.from {
+        bound_ref(node, bounds);
+    }
+}
+
+async fn render_selected(
+    ctx: &Ctx,
+    conn: &mut Conn,
+    principal: &Principal,
+    value: &operation::Selected,
+) -> ApiResult<BindingOptions> {
+    let context = &value.context;
+    let id = context.node.id;
+    let environment = context.judged.as_ref().map(|(environment, _)| environment);
+    let offers = context.judged.as_ref().map(|(_, offers)| offers);
+    let scope = match context.policy_scope {
+        Some(id) => value
+            .projection
+            .names
+            .refs(conn, principal, &[id])
+            .await?
+            .remove(&id),
+        None => None,
+    };
+    let defaults = defaults_of(conn, principal, id).await?;
+    let mut providers = providers_from(
+        conn,
+        principal,
+        &ctx.app,
+        &Ground {
+            thread: id,
+            settings: &context.settings,
+            environment,
+            offers,
+            orch_tools: &context.orch_tools,
+            scope: scope.as_ref(),
+        },
+        &value.providers,
+        Some(&value.inputs),
+        Some(&value.projection),
+    )
+    .await?;
+    let mut environments = environments_from(
+        conn,
+        principal,
+        &ctx.app,
+        id,
+        Permission::EnvironmentUse,
+        &value.environments,
+        Some(&value.projection),
+    )
+    .await?;
+    if context.node.kind == "project" {
+        for entry in &mut environments {
+            entry.is_default = false;
+            let used_here =
+                orch_db::queries::binding_start::used_in_project(conn, entry.environment.id, id)
+                    .await?;
+            entry.used = if used_here {
+                EnvironmentUse::Project
+            } else if entry.threads > 0 {
+                EnvironmentUse::Elsewhere
+            } else {
+                EnvironmentUse::Unused
+            };
+        }
+    }
+    let (mut access, mut new_environment) = access_of(conn, principal, id).await?;
+    bound_summary(&mut access.managed, &value.projection.names);
+    bound_summary(&mut access.connected, &value.projection.names);
+    bound_summary(&mut new_environment, &value.projection.names);
+    let mut hosts = value.hosts.clone();
+    crate::routes::environments::places::name_host_choices(
+        conn,
+        &mut hosts,
+        Some(&value.projection.names),
+    )
+    .await?;
+    crate::routes::environments::places::group_host_choices(
+        &ctx.app,
+        conn,
+        principal,
+        &mut hosts,
+        Some(&value.projection.names),
+        Some(&value.projection.machines),
+    )
+    .await?;
+    let hosts = hosts.into_iter().map(|host| host.place).collect::<Vec<_>>();
+    if environment.is_some_and(|row| row.id.is_nil())
+        && value.can_create.allowed
+        && !hosts.iter().any(|host| host.usable)
+    {
+        for provider in &mut providers {
+            for agent in &mut provider.agents {
+                if agent.usable {
+                    agent.usable = false;
+                    agent.reason = Some("no_host".to_owned());
+                }
+            }
+        }
+    }
+    let mut source = source_for(conn, principal, id).await?;
+    if let Some(node) = &mut source.from {
+        bound_ref(node, &value.projection.names);
+    }
+    let viewer_setting =
+        orch_settings::resolve(conn, Place::Node(id), keys::THREADS_LET_VIEWERS_IN)
+            .await
+            .map_err(ApiError::internal)?;
+    let viewer_value = viewer_setting
+        .resolved
+        .value
+        .as_ref()
+        .and_then(Json::as_bool)
+        .ok_or_else(|| ApiError::internal("the viewer environment default is not a boolean"))?;
+    let viewer_source = viewer_setting.resolved.source;
+    let mut viewer_node = match viewer_source.node {
+        Some(node) => node_view::refs(conn, principal, &[node], Policy::default())
+            .await?
+            .remove(&node),
+        None => None,
+    };
+    if let Some(node) = &mut viewer_node {
+        bound_ref(node, &value.projection.names);
+    }
+    let viewer_default = orch_api_contract::binding::BindingViewerDefault {
+        value: viewer_value,
+        source: orch_api_contract::settings::SettingSource {
+            scope: serde_json::from_value(
+                serde_json::to_value(viewer_source.scope).map_err(ApiError::internal)?,
+            )
+            .map_err(ApiError::internal)?,
+            node: viewer_node,
+        },
+    };
+    let ids = value
+        .machines
+        .iter()
+        .map(|machine| machine.id)
+        .collect::<Vec<_>>();
+    let refs = machine_refs(&ctx.app, conn, &ids).await?;
+    let owner_ids = value
+        .machines
+        .iter()
+        .filter_map(|row| row.owner_id)
+        .collect::<Vec<_>>();
+    let owners = refusals::user_refs(conn, &owner_ids).await?;
+    let owner_ids = value
+        .machines
+        .iter()
+        .map(|row| (row.id, row.owner_id))
+        .collect::<HashMap<_, _>>();
+
+    let grouped = value
+        .grouping
+        .render(
+            &ctx.app,
+            conn,
+            principal,
+            Some(&value.projection.names),
+            Some(&value.projection.machines),
+        )
+        .await?;
+    let machines = value
+        .machines
+        .iter()
+        .filter_map(|row| refs.get(&row.id).cloned())
+        .map(|machine| BindingMachine {
+            owner: owner_ids
+                .get(&machine.id)
+                .copied()
+                .flatten()
+                .and_then(|id| owners.get(&id).cloned()),
+            grouping: grouped
+                .get(&("machine".to_owned(), machine.id))
+                .cloned()
+                .unwrap_or_default(),
+            environments: environments
+                .iter()
+                .filter(|entry| entry.machine.as_ref().is_some_and(|on| on.id == machine.id))
+                .map(|entry| entry.environment.id)
+                .collect(),
+            machine,
+        })
+        .collect();
+    Ok(BindingOptions {
+        viewer_default: Some(viewer_default),
+        environment_readers: creation::environment_readers(
+            conn,
+            principal,
+            id,
+            &value.query,
+            environment,
+        )
+        .await?,
+        defaults,
+        providers,
+        environments,
+        environment_default: context.environment_default,
+        source,
+        access,
+        agent_access: Some(
+            creation::availability(conn, principal, id, &value.query, environment).await?,
+        ),
+        new_environment,
+        can_create: value.can_create.clone(),
+        hosts,
+        machines,
+    })
 }
 
 async fn allowed(conn: &mut Conn, decision: Decision) -> ApiResult<()> {
@@ -71,11 +298,11 @@ fn strings(value: Option<&Json>) -> Vec<String> {
         .unwrap_or_default()
 }
 
-async fn template_ground(
+async fn template_ground_source(
     conn: &mut Conn,
     principal: &Principal,
     node: &hierarchy::NodeDetail,
-) -> ApiResult<Option<(environments::EnvironmentRow, EnvironmentOffers)>> {
+) -> ApiResult<Option<(environments::EnvironmentRow, EnvironmentOffers, Id)>> {
     let id = setting::<Id>(conn, Place::Node(node.id), keys::ENV_TEMPLATE_ID)
         .await
         .map_err(ApiError::internal)?
@@ -98,6 +325,7 @@ async fn template_ground(
     // No row is made for a preview. Nil identifies this template promise to the shared projector.
     let environment = environments::EnvironmentRow {
         id: Id::nil(),
+        template_id: Some(id),
         name: String::new(),
         owner_id: principal.user(),
         org_id: node.org_id,
@@ -113,177 +341,5 @@ async fn template_ground(
         remove_at: None,
         deleted_at: None,
     };
-    Ok(Some((environment, offers)))
-}
-
-async fn options(ctx: Ctx, query: NodeBindingOptionsGetQuery, (): ()) -> ApiResult<BindingOptions> {
-    if query.environment_new && query.environment_id.is_some() {
-        return Err(invalid(
-            "environment_id",
-            "choose either an existing environment or a new one",
-        ));
-    }
-    let id = ctx.id("id")?;
-    let mut timing = PreviewTiming::new(&ctx, id);
-    let mut connection = ctx.app.db.acquire().await?;
-    timing.phase("connection");
-    let conn = &mut *connection;
-    let principal = authorization::principal(&ctx, conn).await?;
-    let principal = &principal;
-    let node = hierarchy::details(conn, &[id], ctx.now)
-        .await?
-        .into_iter()
-        .next()
-        .filter(|node| node.deleted_at.is_none())
-        .ok_or_else(ApiError::not_found)?;
-    let permission = match node.kind.as_str() {
-        "topic" => Permission::TopicStartThreads,
-        "project" => Permission::ProjectCreateTopics,
-        _ => {
-            return Err(invalid(
-                "id",
-                "a thread starts in a topic, project or folder",
-            ));
-        }
-    };
-    let decision = nodes::check(conn, principal, id, permission, Act::Use, Policy::default())
-        .await
-        .map_err(ApiError::internal)?;
-    allowed(conn, decision).await?;
-    timing.phase("authority");
-    let settings = resolved::load(conn, id).await.map_err(ApiError::internal)?;
-    let environment_default =
-        match setting::<String>(conn, Place::Node(id), keys::ENV_THREAD_DEFAULT)
-            .await
-            .map_err(ApiError::internal)?
-            .as_deref()
-        {
-            Some("fresh") => EnvironmentDefault::Fresh,
-            _ => EnvironmentDefault::Shared,
-        };
-    let mut environments = environments_of(
-        conn,
-        principal,
-        &ctx.app,
-        id,
-        id,
-        Permission::EnvironmentUse,
-    )
-    .await?;
-    let existing = match query.environment_id {
-        Some(environment) => Some(chosen_environment(conn, principal, environment, id).await?),
-        None if !query.environment_new && environment_default == EnvironmentDefault::Shared => {
-            match setting::<Id>(conn, Place::Node(id), keys::ENV_DEFAULT_ID)
-                .await
-                .map_err(ApiError::internal)?
-            {
-                Some(environment) => {
-                    // The shared list already says whether the caller can use the environment now.
-                    if environments
-                        .iter()
-                        .any(|entry| entry.environment.id == environment && entry.usable)
-                    {
-                        Some(chosen_environment(conn, principal, environment, id).await?)
-                    } else {
-                        None
-                    }
-                }
-                None => None,
-            }
-        }
-        None => None,
-    };
-    let judged = match existing {
-        Some(environment) => {
-            let offers = binding::environment_offers(conn, &environment)
-                .await
-                .map_err(ApiError::internal)?;
-            Some((environment, offers))
-        }
-        None => template_ground(conn, principal, &node).await?,
-    };
-    let environment = judged.as_ref().map(|(environment, _)| environment);
-    let offers = judged.as_ref().map(|(_, offers)| offers);
-    let mut orch_tools = OrchToolsOf::read(
-        conn,
-        id,
-        environment.filter(|row| !row.id.is_nil()).map(|row| row.id),
-    )
-    .await?;
-    if let Some(row) = environment.filter(|row| row.id.is_nil()) {
-        orch_tools.environment_off = row.config["exec.orch_tools"] == false;
-    }
-    let scope = match binding::allowed_set_at(conn, id)
-        .await
-        .map_err(ApiError::internal)?
-    {
-        Some(node) => node_view::refs(conn, principal, &[node], Policy::default())
-            .await?
-            .remove(&node),
-        None => None,
-    };
-    let defaults = defaults_of(conn, principal, id).await?;
-    timing.phase("settings_and_environment");
-    let mut providers = providers_of(
-        conn,
-        principal,
-        &ctx.app,
-        &Ground {
-            thread: id,
-            settings: &settings,
-            environment,
-            offers,
-            orch_tools: &orch_tools,
-            scope: scope.as_ref(),
-        },
-    )
-    .await?;
-    timing.phase("providers");
-    if node.kind == "project" {
-        for entry in &mut environments {
-            entry.is_default = false;
-            let used_here =
-                orch_db::queries::binding_start::used_in_project(conn, entry.environment.id, id)
-                    .await?;
-            entry.used = if used_here {
-                EnvironmentUse::Project
-            } else if entry.threads > 0 {
-                EnvironmentUse::Elsewhere
-            } else {
-                EnvironmentUse::Unused
-            };
-        }
-    }
-    let (access, new_environment) = access_of(conn, principal, id).await?;
-    timing.phase("defaults_and_access");
-    let can_create = can_create_in(conn, principal, id, id).await?;
-    let hosts = hosts_for(&ctx, conn, principal, id, &can_create).await;
-    if environment.is_some_and(|row| row.id.is_nil())
-        && can_create.allowed
-        && !hosts.iter().any(|host| host.usable)
-    {
-        for provider in &mut providers {
-            for agent in &mut provider.agents {
-                if agent.usable {
-                    agent.usable = false;
-                    agent.reason = Some("no_host".to_owned());
-                }
-            }
-        }
-    }
-    let mut answer = BindingOptions {
-        defaults,
-        providers,
-        environments,
-        environment_default,
-        source: source_for(conn, principal, id).await?,
-        access,
-        new_environment,
-        can_create,
-        hosts,
-        machines: Vec::new(),
-    };
-    answer.machines = machines_for(&ctx, conn, principal, &answer.environments).await?;
-    timing.phase("placement_and_source");
-    Ok(answer)
+    Ok(Some((environment, offers, template.id)))
 }

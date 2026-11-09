@@ -8,7 +8,15 @@
 mod places;
 mod resources;
 mod support;
+mod thread_history_scope;
 
+#[path = "skills/creation_replays.rs"]
+mod creation_replays;
+#[path = "skills/read_scopes.rs"]
+mod read_scopes;
+
+use crate::support::FullSkillVersionReply as _;
+use futures::FutureExt as _;
 use std::io::Write;
 
 use orch_api_contract::access::NewResourceAccess;
@@ -103,6 +111,8 @@ async fn make(world: &World, by: &Who, home: Id, name: &str) -> Skill {
         .send()
         .await
         .ok()
+        .into_full()
+        .expect("this native creation control requires its full response")
 }
 
 #[tokio::test]
@@ -371,6 +381,7 @@ async fn whoever_manages_a_skill_adds_versions_that_keep_its_name() {
             from: uploaded(next, "keeper.tar.gz"),
         })
         .send()
+        .map(|reply| reply.full_skill_version())
         .await
         .ok();
     assert_eq!(version.version.number, 2);
@@ -383,6 +394,7 @@ async fn whoever_manages_a_skill_adds_versions_that_keep_its_name() {
             from: uploaded(renamed, "other.tar.gz"),
         })
         .send()
+        .map(|reply| reply.full_skill_version())
         .await
         .problem();
     assert_eq!(problem.code, ErrorCode::RequestValueRefused);
@@ -401,6 +413,7 @@ async fn whoever_manages_a_skill_adds_versions_that_keep_its_name() {
             from: uploaded(theirs, "keeper.tar.gz"),
         })
         .send()
+        .map(|reply| reply.full_skill_version())
         .await;
     assert!(!refused.status.is_success(), "{:?}", refused.status);
 }
@@ -538,7 +551,9 @@ async fn a_skill_begun_in_orch_is_a_draft_until_its_managers_publish_it() {
         })
         .send()
         .await
-        .ok();
+        .ok()
+        .into_full()
+        .expect("this native creation control requires its full response");
     assert!(skill.latest.is_none());
     assert_eq!(skill.versions, 0);
     assert!(skill.draft.is_some());
@@ -574,6 +589,7 @@ async fn a_skill_begun_in_orch_is_a_draft_until_its_managers_publish_it() {
             expected_revision: edited.info.revision,
         })
         .send()
+        .map(|reply| reply.full_skill_version())
         .await
         .ok();
     assert_eq!(published.version.number, 1);
@@ -614,7 +630,9 @@ async fn a_draft_begins_from_a_version_and_a_broken_one_is_kept_and_refused_with
         .body(&SkillDraftCreateBody::default())
         .send()
         .await
-        .ok();
+        .ok()
+        .into_full()
+        .expect("an ordinary manager reads the native draft it started");
     assert_eq!(begun.info.based_on, Some(skill.latest.as_ref().unwrap().id));
     assert_eq!(begun.files.len(), 2);
     let again = world
@@ -644,6 +662,7 @@ async fn a_draft_begins_from_a_version_and_a_broken_one_is_kept_and_refused_with
             expected_revision: broken.info.revision,
         })
         .send()
+        .map(|reply| reply.full_skill_version())
         .await
         .problem();
     assert_eq!(refused.code, ErrorCode::RequestValueRefused);
@@ -689,6 +708,7 @@ async fn a_draft_begins_from_a_version_and_a_broken_one_is_kept_and_refused_with
             expected_revision: fixed.info.revision,
         })
         .send()
+        .map(|reply| reply.full_skill_version())
         .await
         .ok();
     assert_eq!(published.version.number, 2);
@@ -803,7 +823,9 @@ async fn a_repository_is_fetched_by_a_host_the_caller_may_use_and_taken_again_fr
         })
         .send()
         .await
-        .ok();
+        .ok()
+        .into_full()
+        .expect("this native creation control requires its full response");
     answering.await.unwrap();
     assert_eq!(skill.name, "from-git");
     assert!(matches!(
@@ -823,3 +845,6 @@ async fn a_repository_is_fetched_by_a_host_the_caller_may_use_and_taken_again_fr
     assert!(!again.made, "the same files are no new version");
     assert_eq!(again.version.number, 1);
 }
+
+#[path = "skills/create_scopes.rs"]
+mod create_scopes;

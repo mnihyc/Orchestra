@@ -21,6 +21,8 @@ use orch_types::Id;
 /// What a request asks about.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Scope {
+    /// Every counted use, under the existing actual-system administration rule.
+    System,
     /// What the caller used themself, anywhere.
     Me,
     /// A place and everything below it.
@@ -29,16 +31,19 @@ pub enum Scope {
     Provider(Id),
 }
 
-/// Reads the `scope` of a request: `me`, `node:` and an identifier, or `provider:` and an identifier.
+/// Reads the same native usage namespace used by figures, records and live feeds.
 pub fn parse(text: &str) -> ApiResult<Scope> {
     let bad = || {
         ApiError::invalid(
             "scope",
-            "is `me`, `node:` and an identifier, or `provider:` and an identifier",
+            "is `me`, `system`, `node:` and an identifier, or `provider:` and an identifier",
         )
     };
     if text == "me" {
         return Ok(Scope::Me);
+    }
+    if text == "system" {
+        return Ok(Scope::System);
     }
     if let Some(id) = text.strip_prefix("node:") {
         return id.parse().map(Scope::Node).map_err(|_| bad());
@@ -149,6 +154,24 @@ async fn deny(conn: &mut Conn, principal: &Principal, opened: &Opened, what: &st
 pub async fn open(conn: &mut Conn, principal: &Principal, scope: Scope) -> ApiResult<Opened> {
     let caller = principal.user();
     match scope {
+        Scope::System => {
+            match check_view(conn, principal, Home::System, Policy::default()).await {
+                Ok(Verdict::Allowed) => {}
+                Ok(Verdict::Refused(refusal)) => {
+                    return Err(refusals::denied(conn, *refusal).await?);
+                }
+                Ok(Verdict::SystemAdminOnly) => return Err(ApiError::not_found()),
+                Err(error) => return Err(refusals::problem(conn, error).await),
+            }
+            Ok(Opened {
+                scope: "system".into(),
+                depth: UsageDepth::Reports,
+                base: Filter::default(),
+                caller,
+                node: None,
+                has_own_part: true,
+            })
+        }
         Scope::Me => Ok(Opened {
             scope: "me".to_owned(),
             depth: UsageDepth::Own,

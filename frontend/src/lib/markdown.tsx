@@ -9,6 +9,7 @@
 import { Lexer, type Token, type Tokens } from 'marked';
 import { createContext, type ReactNode, useContext } from 'react';
 import { i18n } from '@/i18n';
+import { readOrchLink } from '@/lib/orchLinks';
 
 import { CodeBlock } from '@/ui/CodeBlock';
 import { cx } from '@/ui/cx';
@@ -58,7 +59,9 @@ function LinkView({ href, title, children }: { href: string; title?: string; chi
 /** A link of a message, which follows a local address to the environment's port where the conversation says so. */
 function MessageLink({ href, title, children }: { href: string; title?: string; children: ReactNode }) {
   const rewrite = useContext(LocalAddressRewrite);
-  const target = rewrite?.(href) ?? href;
+  const rewritten = rewrite?.(href) ?? href;
+  const local = readOrchLink(rewritten);
+  const target = local === null ? rewritten : `${local.pathname}${local.search}${local.hash}`;
   const external = !OWN_ADDRESS.test(target.trim());
   return (
     <a
@@ -75,6 +78,7 @@ function MessageLink({ href, title, children }: { href: string; title?: string; 
 /** Whether a link's address is one to follow. */
 export function isSafeHref(href: string): boolean {
   const clean = href.trim();
+  if (clean.includes('\\') || Array.from(clean).some((character) => character.charCodeAt(0) <= 0x1f || character.charCodeAt(0) === 0x7f)) return false;
   return SAFE_SCHEME.test(clean) || OWN_ADDRESS.test(clean);
 }
 
@@ -132,9 +136,9 @@ function inline(tokens: readonly Token[] | undefined, key: string, tail?: Tail):
         const label = image.text === '' ? image.href : image.text;
         out.push(
           isSafeHref(image.href) ? (
-            <a key={at} href={image.href} {...NEW_TAB} className="text-accent-text underline underline-offset-2">
+            <MessageLink key={at} href={image.href}>
               {label}
-            </a>
+            </MessageLink>
           ) : (
             <span key={at}>{label}</span>
           ),

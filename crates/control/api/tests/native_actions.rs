@@ -155,7 +155,9 @@ async fn a_verified_native_input_is_delivered_once_and_its_trail_has_no_argument
         .body(&body)
         .send()
         .await
-        .ok();
+        .ok()
+        .into_full()
+        .expect("a browser-session native input keeps its full projection");
     let repeated = scene
         .rig
         .world
@@ -165,7 +167,9 @@ async fn a_verified_native_input_is_delivered_once_and_its_trail_has_no_argument
         .body(&body)
         .send()
         .await
-        .ok();
+        .ok()
+        .into_full()
+        .expect("a browser-session native input keeps its full projection");
     assert_eq!(accepted.input.id, repeated.input.id);
     let sent = scene.rig.turn_start(thread.base.id, 1).await;
     assert_eq!(sent.native_action, body.native_action);

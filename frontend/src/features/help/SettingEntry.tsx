@@ -35,7 +35,7 @@ function ValueDescription({ shape, settingKey }: { shape: Shape; settingKey: str
 function CurrentSource({ target, def }: { target: SettingsTarget; def: SettingDef }) {
   const { t } = useTranslation();
   const values = useQuery({ ...targetSettingsQuery(target), staleTime: 0, refetchOnMount: 'always' });
-  if (values.isPending || values.isFetching) return <SkeletonRows rows={2} />;
+  if (values.isPending || values.isFetching) return <SkeletonRows read={values} rows={2} />;
   if (values.isError) return <ErrorState compact error={values.error} onRetry={() => void values.refetch()} />;
   const setting = values.data.find((row) => row.key === def.key);
   if (setting === undefined) return <p className="text-sm text-text-muted">{t('helpRelease.sourceMissing')}</p>;

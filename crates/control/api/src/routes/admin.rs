@@ -1,7 +1,7 @@
 //! Management: users and their suspension, a reset link that may switch a second step off, what a new person's own org starts as, root orgs and their two limits, both pools of runtimes and their updates, stored metrics, audit and system state.
 //!
-//! Everything here is the system's own. The binder lets in a browser session only; each handler
-//! then asks the one question the binder cannot, whether that person is a system admin, before it
+//! Everything here is the system's own. Each handler enters the same ordinary administrative
+//! operation gate, which checks current system administration and the credential's admission, before it
 //! reads or changes anything, so that an admin of an org, who is a system admin of nothing, is
 //! refused like anybody else. The acts that change a person's standing are the access engine's
 //! (`orch_authz::standing`), the same functions the operator's command line calls, here with the
@@ -30,21 +30,26 @@ pub mod catalogue;
 pub mod defaults;
 pub mod fleet;
 pub mod identity_providers;
+mod native;
 pub mod orgs;
 pub mod programs;
 pub mod semantic;
+pub mod sessions;
 pub mod settings;
 pub mod system;
+mod token_activity;
+pub mod tokens;
+mod uploads;
 pub mod users;
 
-use crate::middleware::authorization::refusals;
 use crate::middleware::requests::{ApiError, ApiResult};
+use crate::middleware::transaction_guard::{self, Guard};
 use crate::registry::{Ctx, Registry};
 use crate::sign_in;
 use orch_access_contract::audit::AuditAction;
 use orch_api_contract::common::PageQuery;
-use orch_db::Conn;
 use orch_db::audit::Actor;
+use orch_db::{Conn, Tx};
 use orch_types::{Id, Json};
 
 /// Seconds in a day, to keep a span of days from overflowing.
@@ -53,6 +58,10 @@ pub(crate) const SECONDS_PER_DAY: i64 = 86_400;
 /// Binds this module's requests.
 pub fn mount(registry: &mut Registry) {
     users::mount(registry);
+    uploads::mount(registry);
+    tokens::mount(registry);
+    sessions::mount(registry);
+    token_activity::mount(registry);
     orgs::mount(registry);
     semantic::mount(registry);
     settings::mount(registry);
@@ -68,14 +77,15 @@ pub fn mount(registry: &mut Registry) {
 /// The signed-in system admin of this request. Anybody else is refused, whatever else they hold:
 /// an org's Admin is an Admin of that org, and of nothing that is the system's.
 pub(crate) fn admin_of(ctx: &Ctx) -> ApiResult<Id> {
-    let authed = ctx.user()?;
-    if authed.is_system_admin() {
-        Ok(authed.id())
-    } else {
-        Err(refusals::system_admin_only(
-            "only a system admin does this, in a browser session",
-        ))
-    }
+    ctx.ordinary_system_admin()
+}
+
+/// The administrative producer's action checkpoint, using the same transaction guard
+/// as every other operation and its current identity and admitted caller.
+pub(crate) async fn action(ctx: &Ctx) -> ApiResult<(Tx, Guard)> {
+    let (tx, guard) = transaction_guard::begin(ctx).await?;
+    ctx.ordinary_system_admin_with(guard.user(), guard.principal().caller())?;
+    Ok((tx, guard))
 }
 
 /// How many entries a list returns, by the limit it was asked for.

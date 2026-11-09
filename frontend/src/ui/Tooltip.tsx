@@ -7,6 +7,7 @@
 import { Slot, Tooltip as Primitive } from 'radix-ui';
 import { type ComponentPropsWithRef, type ReactNode, useEffect } from 'react';
 
+import { AUTOMATIC_FOCUS } from '@/ui/focus';
 import { Kbd } from '@/ui/Kbd';
 import { ChoicePicker } from '@/ui/Choice';
 import { useTransientLayer } from '@/ui/PromptScope';
@@ -55,7 +56,7 @@ export function Tooltip({ content, shortcut, side = 'top', align = 'center', chi
         // A portalled child card does not focus or hover its ancestor's tooltip trigger.
         onFocus={(event) => {
           handedDown.onFocus?.(event);
-          if (!event.currentTarget.contains(event.target)) event.preventDefault();
+          if (!event.currentTarget.contains(event.target) || event.currentTarget.closest(`[${AUTOMATIC_FOCUS}]`) !== null) event.preventDefault();
         }}
         onPointerMove={(event) => {
           handedDown.onPointerMove?.(event);

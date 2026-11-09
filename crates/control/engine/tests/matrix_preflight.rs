@@ -1,6 +1,7 @@
 //! The combination matrix of failures before a turn: a node that is offline or does not take the agent's role,
-//! a provider switched off, not set up or used up, a model unset or not allowed, an approval mode a place or the agent
+//! a provider switched off or not set up, a model unset or not allowed, an approval mode a place or the agent
 //! does not have, an environment that failed, no arrangement, a usage cap; each combination of them on one thread.
+//! Cached vendor exhaustion is also represented, as an allowed provider status alongside these independent checks.
 //!
 //! Expected: the checks run in their order and the first that fails blocks the thread with its reason;
 //! when that cause clears, the next one in the order is the reason, and when every cause has cleared the same input
@@ -59,12 +60,6 @@ const CAUSES: &[Cause] = &[
         value: "needs_setup",
         check: 5,
         reason: "provider_unavailable",
-    },
-    Cause {
-        dimension: "provider",
-        value: "exhausted",
-        check: 5,
-        reason: "provider_exhausted",
     },
     Cause {
         dimension: "model",
@@ -161,9 +156,6 @@ async fn break_it(world: &World, thread: Id, cause: &Cause) {
                 .exec("UPDATE providers SET status = 'needs_setup'")
                 .await
         }
-        ("provider", _) => world
-            .exec("UPDATE providers SET status = 'exhausted', status_detail = 'this month is used'")
-            .await,
         ("model", "not_set") => world.unset(thread, keys::AGENT_MODEL).await,
         ("model", "disabled_on_provider") => {
             world
@@ -244,6 +236,14 @@ async fn run(case: &Case) -> Result<(), matrix_kit::Failure> {
     // already on its way when a break is declared would store the declaration it was answered with.
     let world = World::observed().await;
     let thread = world.thread("Matrix").await;
+    let observed_quota = case.is("provider", "exhausted");
+    if observed_quota {
+        // This allowed dimension must set real stored facts. Merely dropping
+        // its old failure cause would silently run these cases as ready instead.
+        world
+            .exec("UPDATE providers SET status = 'exhausted', status_detail = 'Earlier vendor quota report'")
+            .await;
+    }
     let mut causes: Vec<&Cause> = CAUSES
         .iter()
         .filter(|cause| case.is(cause.dimension, cause.value))
@@ -286,6 +286,18 @@ async fn run(case: &Case) -> Result<(), matrix_kit::Failure> {
     let start = world.turn_start(thread, 0).await;
     if common::words_after_where(&start.text) != words {
         return Err(failure(words.clone(), SOURCE, start.text.clone()));
+    }
+    if observed_quota {
+        let status: String = world
+            .scalar("SELECT status FROM providers WHERE id=$1", world.provider)
+            .await;
+        if status != "exhausted" {
+            return Err(failure(
+                "native dispatch with the cached vendor quota still recorded",
+                SOURCE,
+                status,
+            ));
+        }
     }
     world.answer(thread, &start, "m0", "Done.").await;
     world
@@ -335,6 +347,10 @@ fn the_matrix() -> Matrix {
 
 #[test]
 fn every_combination_of_failures_blocks_with_the_first_in_the_order_and_clears_cause_by_cause() {
+    let _ = tracing_subscriber::fmt()
+        .with_max_level(tracing::Level::WARN)
+        .with_test_writer()
+        .try_init();
     let matrix = the_matrix();
     // The provider, the model and the node interact in the order of checks 4 to 11: their whole product.
     let cases = matrix.cases(5, &[&["provider", "model", "machine"]], 20_261_015, 24);

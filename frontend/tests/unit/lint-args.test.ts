@@ -1,10 +1,11 @@
 /** Explicit lint arguments reach the original ESLint command instead of being silently ignored. */
 // @vitest-environment node
 import { expect, it, vi } from 'vitest';
+import type * as ChildProcess from 'node:child_process';
 
 const fake = vi.hoisted(() => ({ spawn: vi.fn(), discover: vi.fn(), batches: vi.fn() }));
 vi.mock('node:child_process', async (original) => {
-  const actual = await original<typeof import('node:child_process')>();
+  const actual = await original<typeof ChildProcess>();
   return { ...actual, default: actual, spawnSync: fake.spawn };
 });
 vi.mock('../../build/lint-plan.ts', () => ({ lintableFiles: fake.discover, lintBatches: fake.batches }));

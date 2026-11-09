@@ -2,7 +2,7 @@
 //! Agent and environment machines are distinct recorded identities, each with one native server.
 
 #[path = "../../../../engine/tests/common/mod.rs"]
-mod common;
+pub(super) mod common;
 #[path = "../../../../engine/tests/native_continuations/mod.rs"]
 mod native_prefix;
 
@@ -67,19 +67,47 @@ pub(super) async fn adoption_read(link: &Link, id: Id) {
 
 /// Route only the separately recorded environment machine through production Dispatcher.
 /// The agent's existing real link, journal, ingress applier and Process witness are retained.
-struct Split {
+pub(super) struct Split {
     original: Arc<dyn Commands>,
     environment_machine: Id,
     dispatcher: Dispatcher,
     native: DispatchCommands,
+    kinds: Option<&'static [CommandKind]>,
 }
 
 impl Split {
+    pub(super) fn selected(
+        original: Arc<dyn Commands>,
+        machine: Id,
+        dispatcher: Dispatcher,
+        kinds: &'static [CommandKind],
+    ) -> Self {
+        Self {
+            original,
+            environment_machine: machine,
+            native: DispatchCommands::new(dispatcher.clone()),
+            dispatcher,
+            kinds: Some(kinds),
+        }
+    }
+
+    fn selected_command(&self, command: &Outgoing) -> bool {
+        command.machine == self.environment_machine
+            && self.kinds.is_none_or(|kinds| kinds.contains(&command.kind))
+    }
+
     async fn is_environment(&self, id: Id) -> Result<bool, CommandsError> {
         self.dispatcher
             .status(id)
             .await
-            .map(|row| row.is_some_and(|row| row.machine_id == self.environment_machine))
+            .map(|row| {
+                row.is_some_and(|row| {
+                    row.machine_id == self.environment_machine
+                        && self
+                            .kinds
+                            .is_none_or(|kinds| kinds.iter().any(|kind| kind.as_str() == row.kind))
+                })
+            })
             .map_err(|_| {
                 CommandsError::Other("the command's recorded machine could not be read".into())
             })
@@ -88,15 +116,29 @@ impl Split {
 
 #[async_trait::async_trait]
 impl Commands for Split {
-    async fn issue(&self, command: Outgoing) -> Result<(), CommandsError> {
-        if command.machine == self.environment_machine {
-            self.native.issue(command).await
+    async fn issue_prepared(
+        &self,
+        command: Outgoing,
+        mut before: Option<orch_engine::commands::BeforeCommand<'_>>,
+    ) -> Result<(), CommandsError> {
+        if self.selected_command(&command) {
+            if let Some(result) = super::input_deliveries::collide(
+                &self.dispatcher,
+                &self.native,
+                &command,
+                &mut before,
+            )
+            .await
+            {
+                return result;
+            }
+            self.native.issue_prepared(command, before).await
         } else {
-            self.original.issue(command).await
+            self.original.issue_prepared(command, before).await
         }
     }
     async fn observe(&self, command: Outgoing) -> Result<Outcome, CommandsError> {
-        if command.machine == self.environment_machine {
+        if self.selected_command(&command) {
             self.native.observe(command).await
         } else {
             self.original.observe(command).await
@@ -141,7 +183,8 @@ impl Commands for Split {
         }
     }
     fn hears_behind(&self, machine: Id, stream: &Stream) -> bool {
-        if machine == self.environment_machine {
+        // Selected-command proofs keep the original agent's event ingress unchanged.
+        if self.kinds.is_none() && machine == self.environment_machine {
             self.native.hears_behind(machine, stream)
         } else {
             self.original.hears_behind(machine, stream)
@@ -306,6 +349,7 @@ async fn a_real_guarded_selection_and_gc_can_finish_before_the_old_cancelled_dis
                 environment_machine: machine,
                 dispatcher: dispatch.clone(),
                 native: DispatchCommands::new(dispatch),
+                kinds: None,
             })
         })
         .await;
@@ -381,7 +425,8 @@ async fn a_real_guarded_selection_and_gc_can_finish_before_the_old_cancelled_dis
         thread_id: thread,
         segment_id: segment,
     };
-    world.machine.publish(&stream,&Event::OrchToolCall(OrchToolCall {turn_id:start.turn_id,call_ref:"create-dispatch-source".into(),attempt:None,
+    world.machine.publish(&stream,&Event::OrchToolCall(OrchToolCall {
+                    deadline: None,turn_id:start.turn_id,call_ref:"create-dispatch-source".into(),attempt:None,
         tool:OrchTool::EditDocument,arguments:json!({"command":"create","path":"docs/dispatcher.md","markdown":"Original source material."})})).await;
     let created = answer(&world, thread, "create-dispatch-source").await?;
     assert!(created.error.is_none());
@@ -416,6 +461,7 @@ async fn a_real_guarded_selection_and_gc_can_finish_before_the_old_cancelled_dis
         .publish(
             &stream,
             &Event::OrchToolCall(OrchToolCall {
+                deadline: None,
                 turn_id: start.turn_id,
                 call_ref: call.into(),
                 attempt: None,
@@ -648,6 +694,7 @@ async fn a_real_guarded_selection_and_gc_can_finish_before_the_old_cancelled_dis
         .publish(
             &stream,
             &Event::OrchToolCall(OrchToolCall {
+                deadline: None,
                 turn_id: start.turn_id,
                 call_ref: call.into(),
                 attempt: Some(attempt),

@@ -1,7 +1,9 @@
 ---
+group: resources
 title: Temporary environments
 screens: /resources/environments, /resources/environments/$id, /resources/templates/$id, /resources/hosts/$id, /thread/$threadId, /inbox
 keywords: temporary, disposable, ephemeral, environment, idle, keep, export, download, archive, retry, failed setup, 临时, 一次性, 环境, 空闲, 保留, 导出, 归档, 重试
+summary: Create a temporary environment and keep or export its work before deletion.
 ---
 
 # Temporary environments

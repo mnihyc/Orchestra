@@ -125,15 +125,18 @@ async fn invalid_patterns_and_unconfigured_failover_candidates_are_refused_when_
         .token(&scene.ada.token)
         .body(&NodeSettingSetBody {
             value: json!(9),
-            locked: Some(true),
+            locked: None,
             expected_revision: None,
         })
         .send()
         .await
         .ok();
+    let saved = saved
+        .into_full()
+        .expect("this ordinary control expects the complete native setting");
     assert_eq!(saved.value, Some(json!(9)));
-    assert!(saved.own.unwrap().locked);
-    let refused = scene
+    assert!(!saved.own.unwrap().locked);
+    let child = scene
         .rig
         .world
         .app
@@ -146,6 +149,27 @@ async fn invalid_patterns_and_unconfigured_failover_candidates_are_refused_when_
         })
         .send()
         .await
-        .problem();
-    assert_eq!(refused.code, ErrorCode::AccessLocked);
+        .ok()
+        .into_full()
+        .expect("the ordinary writer reads its deferred recovery limit");
+    assert_eq!(child.value, Some(json!(9)));
+    assert_eq!(child.own.as_ref().map(|own| &own.value), Some(&json!(10)));
+    assert!(child.locked_by.is_none());
+    let tighter = scene
+        .rig
+        .world
+        .app
+        .call(NodeSettingSet, &[&node, &"calls.repeat_limit"])
+        .token(&scene.ada.token)
+        .body(&NodeSettingSetBody {
+            value: json!(4),
+            locked: None,
+            expected_revision: child.own.as_ref().map(|own| own.revision),
+        })
+        .send()
+        .await
+        .ok()
+        .into_full()
+        .expect("the ordinary writer may tighten its recovery limit");
+    assert_eq!(tighter.value, Some(json!(4)));
 }

@@ -8,6 +8,7 @@
 mod places;
 mod support;
 
+use crate::support::FullPermissionPageReply;
 use orch_api_contract::access::{
     HolderInput, NodeDefaultsUpdate, PageChange, PageChangeAdd, PageChangeRow, Role,
 };
@@ -95,6 +96,7 @@ async fn invitation_summaries_include_creation_rights_given_without_contribution
         })
         .send()
         .await
+        .full_permission_page()
         .ok();
     let facts = world
         .app

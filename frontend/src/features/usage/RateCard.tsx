@@ -35,6 +35,7 @@ import { ErrorAlert, ErrorState } from '@/ui/ErrorState';
 import { Input } from '@/ui/Input';
 import { SkeletonRows } from '@/ui/Skeleton';
 import { Switch } from '@/ui/Switch';
+import { StateLine } from '@/ui/StateLine';
 import { type Column, Table } from '@/ui/Table';
 
 export interface RateCardProps {
@@ -56,7 +57,7 @@ interface Opened {
 }
 
 /** What the switch for estimates and the worth of a unit of the catalogue are, and the line that says where the catalogue came from. */
-function Estimates({ node, table, manage, revisions, bare }: { node: RateCardProps['node']; table: RateTable; manage: boolean; revisions: { estimates: number | null; scale: number | null }; bare: boolean }) {
+function Estimates({ node, table, manage, revisions, bare, blockedReason }: { node: RateCardProps['node']; table: RateTable; manage: boolean; revisions: { estimates: number | null; scale: number | null }; bare: boolean; blockedReason: string | undefined }) {
   const { t } = useTranslation();
   const { locale } = useFormatContext();
   const queryClient = useQueryClient();
@@ -86,8 +87,10 @@ function Estimates({ node, table, manage, revisions, bare }: { node: RateCardPro
         label={t('usage.rates.estimates')}
         hint={on ? t('usage.rates.estimatesOn') : t('usage.rates.estimatesOff')}
         checked={on}
-        disabled={!manage || switchEstimates.isPending}
-        onCheckedChange={(next) => switchEstimates.mutate(next)}
+        disabled={!manage || blockedReason !== undefined || switchEstimates.isPending}
+        tooltip={blockedReason}
+        aria-description={blockedReason}
+        onCheckedChange={(next) => { if (manage && blockedReason === undefined) switchEstimates.mutate(next); }}
       />
       {switchEstimates.isError && <ErrorAlert error={switchEstimates.error} />}
       <p className="flex flex-wrap items-center gap-x-3 gap-y-1 text-sm text-text-muted">
@@ -96,14 +99,14 @@ function Estimates({ node, table, manage, revisions, bare }: { node: RateCardPro
           {t('usage.rates.see')}
         </Button>
       </p>
-      <Scale key={table.catalogue.scale} node={node} current={table.catalogue.scale} manage={manage} revision={revisions.scale} />
+      <Scale key={table.catalogue.scale} node={node} current={table.catalogue.scale} manage={manage} revision={revisions.scale} blockedReason={blockedReason} />
       <CatalogueDialog open={seeing} onOpenChange={setSeeing} />
     </div>
   );
 }
 
 /** What one unit of the catalogue is worth here, in credits: one number, changed in place. */
-export function Scale({ node, current, manage, revision }: { node: { id:string | null }; current: string; manage: boolean; revision: number | null }) {
+export function Scale({ node, current, manage, revision, blockedReason }: { node: { id:string | null }; current: string; manage: boolean; revision: number | null; blockedReason?: string | undefined }) {
   const { t } = useTranslation();
   const queryClient = useQueryClient();
   const [typed, setTyped] = useState(current);
@@ -116,7 +119,7 @@ export function Scale({ node, current, manage, revision }: { node: { id:string |
     <form
       onSubmit={(event) => {
         event.preventDefault();
-        if (valid && manage) write.mutate();
+        if (valid && manage && blockedReason === undefined && !write.isPending) write.mutate();
       }}
     >
       <div className="flex max-w-[28rem] items-start gap-2">
@@ -124,13 +127,13 @@ export function Scale({ node, current, manage, revision }: { node: { id:string |
           label={t('usage.rates.scale')}
           hint={t('usage.rates.scaleHint')}
           value={typed}
-          readOnly={!manage}
+          readOnly={!manage || blockedReason !== undefined}
           inputMode="decimal"
           onChange={(event) => setTyped(event.target.value)}
           error={typed.trim() !== '' && !valid ? t('usage.rates.faults.scale') : write.error instanceof ApiError ? write.error.faults().find((one) => one.path === 'value')?.message : undefined}
           fieldClassName="min-w-0 flex-1"
         />
-        {manage && <Button type="submit" className="mt-6 shrink-0" variant="primary" pending={write.isPending} disabled={!valid || typed.trim() === current}>
+        {manage && <Button type="submit" className="mt-6 shrink-0" variant="primary" pending={write.isPending} disabled={blockedReason !== undefined || !valid || typed.trim() === current} reason={blockedReason}>
           {t('usage.rates.scaleSave')}
         </Button>}
       </div>
@@ -167,8 +170,11 @@ export function RateCard({ node, manage, bare = false, className }: RateCardProp
   const card: Card = cardOf(row(RATE_SETTINGS.card)?.value);
   const revisions = { card: row(RATE_SETTINGS.card)?.revision ?? null, estimates: row(RATE_SETTINGS.estimates)?.revision ?? null, scale: row(RATE_SETTINGS.scale)?.revision ?? null };
   const ready = !manage || settings.isSuccess;
+  const blockedReason = ready ? undefined : t(settings.isPending ? 'common.loading' : 'implicitAvailability.rateSettingsFailed');
+  const privateSettings = settings.error instanceof ApiError && [401, 403, 404, 410].includes(settings.error.status);
 
   const open = (mode: RateMode, source: RateTableModel) => {
+    if (!ready) return;
     const match = source.match ?? patternFor(source.model_name);
     const mine = card[match];
     const base = mine ?? source.rate;
@@ -183,6 +189,7 @@ export function RateCard({ node, manage, bare = false, className }: RateCardProp
       // What a column that does not fit would have said is told under the model's name.
       cell: (model, shown) => {
         const extras = [
+          ...(shown.has('webSearch') || model.rate?.web_search_per_call === undefined || model.rate.web_search_per_call === null ? [] : [t('webSearch.priceNamed', {price:creditsPerMtok(model.rate.web_search_per_call,locale)})]),
           ...(shown.has('cacheWrite') || model.rate?.cache_write_per_mtok === undefined || model.rate.cache_write_per_mtok === null ? [] : [t('usage.rates.cacheWriteIs', { price: creditsPerMtok(model.rate.cache_write_per_mtok, locale) })]),
           ...(shown.has('speeds') || speedsOf(model, locale, t) === '–' ? [] : [speedsOf(model, locale, t)]),
           ...(shown.has('large') || stepsOf(model, locale, t) === '–' ? [] : [stepsOf(model, locale, t)]),
@@ -199,6 +206,7 @@ export function RateCard({ node, manage, bare = false, className }: RateCardProp
     { id: 'input', header: t('usage.rates.col.input'), align: 'end', cell: (model) => (model.rate === null ? '–' : creditsPerMtok(model.rate.input_per_mtok, locale)) },
     { id: 'cached', header: t('usage.rates.col.cached'), align: 'end', from: 'sm', cell: (model) => (model.rate === null ? '–' : creditsPerMtok(model.rate.cached_input_per_mtok, locale)) },
     { id: 'output', header: t('usage.rates.col.output'), align: 'end', cell: (model) => (model.rate === null ? '–' : creditsPerMtok(model.rate.output_per_mtok, locale)) },
+    { id: 'webSearch', header: t('webSearch.price'), align: 'end', from: 'lg', cell: (model) => creditsOrDash(model.rate?.web_search_per_call, locale) },
     { id: 'cacheWrite', header: t('usage.rates.col.cacheWrite'), align: 'end', from: 'lg', cell: (model) => creditsOrDash(model.rate?.cache_write_per_mtok, locale) },
     { id: 'speeds', header: t('usage.rates.col.speeds'), from: 'lg', cell: (model) => speedsOf(model, locale, t) },
     { id: 'large', header: t('usage.rates.col.large'), from: 'lg', cell: (model) => stepsOf(model, locale, t) },
@@ -224,15 +232,15 @@ export function RateCard({ node, manage, bare = false, className }: RateCardProp
               </Link>
             </Button>
           ) : !manage ? null : model.source === null ? (
-            <Button size="sm" disabled={!ready} onClick={() => open('add', model)}>
+            <Button size="sm" disabled={!ready} reason={blockedReason} onClick={() => open('add', model)}>
               {t('usage.rates.add')}
             </Button>
           ) : model.source === 'rate_card' ? (
-            <Button size="sm" disabled={!ready} onClick={() => open('edit', model)}>
+            <Button size="sm" disabled={!ready} reason={blockedReason} onClick={() => open('edit', model)}>
               {t('usage.rates.edit')}
             </Button>
           ) : (
-            <Button size="sm" disabled={!ready} onClick={() => open('copy', model)}>
+            <Button size="sm" disabled={!ready} reason={blockedReason} onClick={() => open('copy', model)}>
               {t('usage.rates.copy')}
             </Button>
           )}
@@ -244,12 +252,12 @@ export function RateCard({ node, manage, bare = false, className }: RateCardProp
   const unratedFirst = (rates.data?.models ?? []).toSorted((one, other) => Number(other.source === null) - Number(one.source === null) || other.unrated_tokens - one.unrated_tokens || one.display_name.localeCompare(other.display_name, locale));
 
   const body = rates.isPending ? (
-    <SkeletonRows rows={4} />
+    <SkeletonRows read={rates} rows={4} />
   ) : rates.isError ? (
     <ErrorState compact error={rates.error} retrying={rates.isRefetching} onRetry={() => void rates.refetch()} />
   ) : (
     <div className="flex flex-col gap-3">
-      <Estimates node={node} table={rates.data} manage={manage} revisions={revisions} bare={bare} />
+      <Estimates node={node} table={rates.data} manage={manage} revisions={revisions} bare={bare} blockedReason={blockedReason} />
       <div className={cx('flex flex-col gap-2', !bare && 'px-4')}>
         <p className="text-sm text-text-muted">{t('usage.rates.unit')}</p>
         {unratedFirst.length === 0 ? (
@@ -272,7 +280,10 @@ export function RateCard({ node, manage, bare = false, className }: RateCardProp
         </div>
       )}
       <div className={cx(!bare && 'pt-2')}>{body}</div>
-      {opened !== null && <RateDialog node={node} mode={opened.mode} initial={opened.initial} replacing={opened.replacing} card={card} revision={revisions.card} onClose={() => setOpened(null)} />}
+      {manage && settings.isPending && <SkeletonRows read={settings} rows={2} />}
+      {manage && settings.isError && (privateSettings ? <StateLine compact message={t('implicitAvailability.detailsUnavailable')} />
+        : <ErrorState compact message={t('implicitAvailability.rateSettingsFailed')} error={settings.error} retrying={settings.isRefetching} onRetry={() => void settings.refetch()} />)}
+      {opened !== null && <RateDialog node={node} mode={opened.mode} initial={opened.initial} replacing={opened.replacing} card={card} revision={revisions.card} unavailableReason={blockedReason} onClose={() => setOpened(null)} />}
     </section>
   );
 }

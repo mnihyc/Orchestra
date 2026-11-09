@@ -5,6 +5,8 @@
     reason = "a test fails by panicking"
 )]
 
+#[path = "uploads/native_scopes.rs"]
+mod native_scopes;
 mod places;
 mod support;
 mod workspace;
@@ -1058,6 +1060,133 @@ async fn attaching_needs_the_right_to_interact_with_the_thread() {
 }
 
 // ---------------------------------------------------------------- what a thread carries, served
+
+#[tokio::test]
+async fn retained_tool_outputs_use_the_thread_reader_but_opaque_hashes_do_not()
+-> Result<(), Box<dyn std::error::Error>> {
+    use orch_engine::{
+        ingest::{ItemSpec, add_item},
+        unit::Unit,
+    };
+    let site = Site::new().await;
+    let bytes = b"complete native tool output";
+    let output = site
+        .app()
+        .app
+        .blobs
+        .put_bytes(bytes::Bytes::from_static(bytes))
+        .await?;
+    let opaque = site
+        .app()
+        .app
+        .blobs
+        .put_bytes(bytes::Bytes::from_static(b"unrelated private bytes"))
+        .await?;
+    let payload = json!({"title":"gallery: render", "started_at":orch_types::Time::new(site.world.now()),
+        "duration_ms":null, "tool":{"kind":"mcp", "server":"gallery", "tool":"render",
+            "arguments":{"blob":opaque.hash}, "result":{"blob":opaque.hash}, "error":null},
+        "raw":{"name":"mcpToolCall", "input":{"inline":"{}", "total_len":2, "truncated":false, "blob":null},
+            "output":{"inline":"", "total_len":output.size, "truncated":true, "blob":output.hash}, "is_error":false}});
+    let mut tx = site.app().app.db.begin().await?;
+    // Native blob arrival records physical metadata before the item's retention trigger.
+    for blob in [&output, &opaque] {
+        let _ = orch_db::queries::storage::register_blob(
+            &mut tx,
+            &blob.hash,
+            blob.size,
+            site.world.now(),
+        )
+        .await?;
+    }
+
+    let segment: Id = sqlx::query_scalar("SELECT current_segment_id FROM threads WHERE node_id=$1")
+        .bind(site.thread)
+        .fetch_one(&mut *tx)
+        .await?;
+    let mut unit = Unit::new(&mut tx, site.world.now());
+    let item = add_item(
+        &mut unit,
+        &ItemSpec {
+            thread: site.thread,
+            segment,
+            turn: None,
+            stream: "main",
+            parent: None,
+            kind: "tool_call",
+            status: "completed",
+            author: None,
+            payload: &payload,
+            native_ref: Some("retained-result"),
+        },
+    )
+    .await?
+    .ok_or("the source tool item was inserted")?;
+    unit.finish().await?;
+    tx.commit().await?;
+    let mut conn = site.world.conn().await;
+    let opaque_is_indexed: bool = sqlx::query_scalar(
+        "SELECT EXISTS(SELECT 1 FROM thread_item_blob_refs WHERE item_id=$1 AND blob=$2)",
+    )
+    .bind(item.id)
+    .bind(opaque.hash.as_bytes().as_slice())
+    .fetch_one(&mut *conn)
+    .await?;
+    assert!(
+        opaque_is_indexed,
+        "the retention index alone is not read authority"
+    );
+    drop(conn);
+
+    let read = blob_of_thread(&site, &site.vic, &output.hash, false).await;
+    assert_eq!(read.status, http::StatusCode::OK);
+    assert_eq!(read.raw.as_ref(), bytes);
+    assert!(
+        read.headers["content-type"]
+            .to_str()?
+            .starts_with("text/plain")
+    );
+    assert_eq!(read.headers["cache-control"], "private, no-cache");
+    assert_eq!(read.headers["vary"], "Authorization, Cookie");
+    let preview = site
+        .app()
+        .call(ThreadBlobGet, &[&site.thread, &output.hash])
+        .token(&site.vic.token)
+        .query(&ThreadBlobGetQuery {
+            preview: Some(true),
+            ..Default::default()
+        })
+        .send_bytes()
+        .await;
+    assert_eq!(preview.status, http::StatusCode::OK);
+    let preview: serde_json::Value = serde_json::from_slice(&preview.raw)?;
+    assert_eq!(preview["state"], "ready");
+    assert_eq!(preview["is_text"], true);
+    assert!(
+        preview["text"]
+            .as_str()
+            .is_some_and(|text| text.contains("complete native tool output"))
+    );
+    let range = site
+        .app()
+        .call(ThreadBlobGet, &[&site.thread, &output.hash])
+        .token(&site.vic.token)
+        .header("range", "bytes=0-7")
+        .send_bytes()
+        .await;
+    assert_eq!(range.status, http::StatusCode::PARTIAL_CONTENT);
+    assert_eq!(range.raw.as_ref(), &bytes[..8]);
+
+    assert_eq!(
+        blob_of_thread(&site, &site.vic, &opaque.hash, false)
+            .await
+            .status,
+        http::StatusCode::NOT_FOUND
+    );
+    let denied = blob_of_thread(&site, &site.eve, &output.hash, false).await;
+    assert!(!denied.status.is_success());
+    assert!(!String::from_utf8_lossy(&denied.raw).contains("complete native tool output"));
+    Ok(())
+}
 
 async fn blob_of_thread(
     site: &Site,

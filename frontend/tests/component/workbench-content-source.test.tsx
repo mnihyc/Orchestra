@@ -21,7 +21,7 @@ interface Reply { text: string; truncated: boolean }
 interface Gate { promise: Promise<Reply>; resolve: (reply: Reply) => void }
 const rig = vi.hoisted(() => ({
   environments: new Map<string, Environment>(), envCalls: [] as string[],
-  reads: [] as { environmentId: string; threadId: string | null; staged: boolean }[],
+  reads: [] as { environmentId: string; threadId: string | null; staged: boolean; itemId?: string }[],
   gates: new Map<string, Gate>(), changes: [] as EnvironmentChange[],
 }));
 vi.mock('@/realtime/live', async (original) => ({ ...await original<typeof Live>(), useThreadFeed: () => undefined }));
@@ -38,12 +38,15 @@ vi.mock('@/api/workspace', async (original) => {
       return rig.gates.get(`${door.environmentId}:${door.threadId ?? 'own'}:${staged}`)?.promise
         ?? Promise.resolve({ text: patch(`actual ${door.environmentId} ${door.threadId ?? 'own'}`), truncated: false });
     },
-    changesQuery: (door: Workspace.Door, all: boolean) => ({ ...actual.changesQuery(door, all), queryFn: () => {
-      rig.reads.push({ ...door, staged: false }); return Promise.resolve(rig.changes);
+    changesQuery: (door: Workspace.Door, all: boolean, turnId?: string, itemId?: string) => ({ ...actual.changesQuery(door, all, turnId, itemId), queryFn: () => {
+      rig.reads.push({ ...door, staged: false, ...(itemId === undefined ? {} : { itemId }) });
+      // The ordinary endpoint returns only the latest row of a path, not all its history.
+      return Promise.resolve(itemId === undefined ? rig.changes.filter((row, index) => rig.changes.findIndex((other) => other.path === row.path) === index)
+        : rig.changes.filter((row) => row.item_id === itemId));
     } }),
   };
 });
-vi.mock('@/features/source/Review', () => ({ CommentOnLines: () => null }));
+vi.mock('@/features/source/Review', async (original) => ({ ...await original<object>(), CommentOnLines: () => null }));
 vi.mock('@/ui/DiffView', () => ({ DiffView: ({ diff }: { diff: string | null }) => <output aria-label="Actual difference">{diff}</output> }));
 
 const savedSession = client.session.getState();
@@ -140,6 +143,6 @@ it('recorded differences retain the actual item rather than selecting another la
   draw('change');
   expect(await screen.findByLabelText('Actual difference')).toHaveTextContent('actual recorded item A');
   expect(screen.getByLabelText('Actual difference')).not.toHaveTextContent('wrong latest same path');
-  expect(rig.reads).toEqual([{ environmentId: 'workspace-a', threadId: thread.id, staged: false }]);
+  expect(rig.reads).toEqual([{ environmentId: 'workspace-a', threadId: thread.id, staged: false, itemId: 'recorded-item-a' }]);
   expect(rig.envCalls).toEqual([]);
 });

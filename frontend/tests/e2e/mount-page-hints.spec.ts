@@ -1,3 +1,4 @@
+import { unjudgedProvenance } from '../doubles/resource-grouping';
 /** A mount's page says what plans preselect for it, what each location's data is, and the data a copy displaced. */
 import { expect, test } from '@playwright/test';
 import words from '../../src/i18n/en.json' with { type: 'json' };
@@ -19,7 +20,7 @@ test.beforeEach(async () => { await scenario(); });
 for (const width of [1280, 390]) {
   test(`a mount's page shows its default, a location's hint and kept data that is purged once named (${width}px)`, async ({ page }) => {
     await page.setViewportSize({ width, height: 900 });
-    const mount: Mount = {
+    const mount: Mount = { ...unjudgedProvenance(),
       id: MOUNT, name: 'datasets', address: 'acme.ada.datasets', description: 'Shared data', org_id: ACME.org, owner: ADA, home,
       target: '/mnt/data', read_only: true, enabled: true, default_fate: 'copy', revision: 3,
       access: { admin_only: [], participating: true, permissions: ['mount.view', 'mount.use', 'mount.manage'], administers: false, through: [{ kind: 'owner' }] },

@@ -207,6 +207,32 @@ pub struct Origin {
 tokio::task_local! { static REQUEST_ORIGIN: Origin; }
 tokio::task_local! { static AGENT_TURN: (Id,Id); }
 tokio::task_local! { static ADMIN_MODE: Cell<Option<Id>>; }
+tokio::task_local! { static LINK_ORIGIN: LinkAttribution; }
+
+/// Trusted actor attribution for a validated explicit link grant, never a message-send receipt.
+#[derive(Debug, Clone, serde::Serialize)]
+pub struct LinkAttribution {
+    #[serde(flatten)]
+    source: orch_access_contract::audit::LinkOrigin,
+    by: Id,
+}
+
+/// Native grant owners call this after validating the real source context and their actual actor.
+/// An inner ordinary writer with no additional source keeps its outer grant's attribution.
+pub async fn scope_link_origin<T>(
+    source: Option<orch_access_contract::audit::LinkOrigin>,
+    by: Id,
+    work: impl std::future::Future<Output = T>,
+) -> T {
+    match source {
+        Some(source) => {
+            LINK_ORIGIN
+                .scope(LinkAttribution { source, by }, work)
+                .await
+        }
+        None => work.await,
+    }
+}
 
 /// Retains the original tool-call turn while its asynchronous action is answered.
 pub async fn scope_agent_turn<T>(
@@ -253,6 +279,20 @@ pub async fn append(
     at: DateTime<Utc>,
 ) -> Result<Id, DbError> {
     let mut entry = entry.clone();
+    if let Ok(link) = LINK_ORIGIN.try_with(Clone::clone)
+        && matches!(entry.actor, Actor::User(by) if by == link.by)
+        && let Json::Object(details) = &mut entry.details
+    {
+        let value = match link.source {
+            orch_access_contract::audit::LinkOrigin::Chat { chat_id } => {
+                serde_json::json!({"kind":"chat","chat_id":chat_id,"by":link.by})
+            }
+            orch_access_contract::audit::LinkOrigin::ThreadInput { thread_id } => {
+                serde_json::json!({"kind":"thread_input","thread_id":thread_id,"by":link.by})
+            }
+        };
+        details.insert("link_origin".into(), value);
+    }
     crate::queries::trace::snapshot_names(conn, &mut entry).await?;
     crate::queries::trace::deletion_details(conn, &mut entry).await?;
     let inherited = current_origin();
@@ -343,6 +383,15 @@ pub async fn append(
     .execute(&mut *conn)
     .await?;
     crate::queries::trace::changed(conn, &entry, &facts, at).await?;
+    if let (Actor::User(account), Some(object)) = (entry.actor, entry.object_id)
+        && entry
+            .action
+            .parse::<orch_access_contract::audit::AuditAction>()
+            .is_ok_and(|action| action.kind() == orch_access_contract::audit::AuditKind::Made)
+    {
+        crate::idempotency::creation::observe(conn, Some(account), entry.object_kind, object)
+            .await?;
+    }
     Ok(id)
 }
 

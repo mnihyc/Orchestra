@@ -116,3 +116,123 @@ async fn a_personal_read_notice_never_carries_state_past_the_recipients_current_
     rig.server.stop().await;
     Ok(())
 }
+
+fn reported_thread(thread: &Value, state: &str) {
+    assert_eq!(thread["kind"], "thread");
+    assert!(
+        thread.get("topic_id").is_some(),
+        "a full thread, not a name reference"
+    );
+    reported_display(&thread["display"], state);
+}
+
+fn reported_display(display: &Value, state: &str) {
+    assert!(
+        display.is_object(),
+        "every full thread projection includes display"
+    );
+    assert_eq!(display["state"], state);
+    for field in [
+        "seq",
+        "read_seq",
+        "queued_inputs",
+        "held_inputs",
+        "waiting_inputs",
+        "waiting_for_answer",
+        "blocked_reason",
+        "finished_at",
+    ] {
+        assert!(
+            display.get(field).is_some(),
+            "the presentation includes {field}"
+        );
+    }
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn full_thread_http_and_live_readers_always_send_the_actual_display() -> Proof {
+    let rig = Rig::new().await;
+    let thread = rig.thread("Display across every full read").await;
+    let turn = rig.send(thread, "Show running work").await;
+    rig.begin_message(thread, &turn, "answer").await;
+    let http = reqwest::Client::new();
+    let paths = [
+        (format!("nodes/{thread}"), ""),
+        (format!("threads/{thread}/sync"), "/thread"),
+        (format!("threads/{thread}/sync?since=0"), "/thread"),
+        (
+            format!("threads/{thread}/sync?continuation_id={thread}"),
+            "/thread",
+        ),
+        (format!("threads/{thread}/opening"), "/sync/thread"),
+    ];
+    for (path, pointer) in paths {
+        let request = http
+            .get(format!("http://{}/api/v1/{path}", rig.server.addr))
+            .bearer_auth(&rig.token);
+        let response = request.send().await?;
+        assert!(
+            response.status().is_success(),
+            "{path}: {}",
+            response.text().await?
+        );
+        let body: Value = response.json().await?;
+        reported_thread(
+            body.pointer(pointer)
+                .expect("the native full-thread location"),
+            "running",
+        );
+    }
+    let tree_request = http
+        .get(format!(
+            "http://{}/api/v1/orgs/{}/tree",
+            rig.server.addr, rig.root
+        ))
+        .bearer_auth(&rig.token);
+    let tree_response = tree_request.send().await?;
+    assert!(
+        tree_response.status().is_success(),
+        "{}",
+        tree_response.text().await?
+    );
+    let tree: Value = tree_response.json().await?;
+    let row = tree["nodes"]
+        .as_array()
+        .expect("native tree rows")
+        .iter()
+        .find(|row| row["id"] == thread.to_string())
+        .expect("the real thread is in its org tree");
+    reported_display(&row["thread"]["display"], "running");
+
+    let mut live = Client::signed_in(rig.server.addr, &rig.token).await;
+    // Request the existing rows explicitly; a cursorless subscription only follows future changes.
+    live.sub(1, &format!("thread:{thread}"), Some(0)).await;
+    let subscribed = live.expect("subscribed").await;
+    assert_eq!(subscribed["mode"], "delta");
+    assert_eq!(subscribed["seq"], 0);
+    live.expect("presence").await;
+    let snapshot = icon(&mut live, "running").await?;
+    assert_eq!(snapshot["prev"], 0);
+    reported_thread(&snapshot["data"]["thread"], "running");
+    let mut org = Client::signed_in(rig.server.addr, &rig.token).await;
+    org.sub(1, &format!("org:{}", rig.root), Some(0)).await;
+    let subscribed = org.expect("subscribed").await;
+    assert_eq!(subscribed["mode"], "delta");
+    assert_eq!(subscribed["seq"], 0);
+    let row = tokio::time::timeout(PATIENCE, async {
+        loop {
+            let frame = org.frame().await;
+            if let Some(row) = frame["data"]["nodes"]
+                .as_array()
+                .and_then(|rows| rows.iter().find(|row| row["id"] == thread.to_string()))
+            {
+                assert_eq!(frame["prev"], 0);
+                break row.clone();
+            }
+        }
+    })
+    .await?;
+    reported_display(&row["thread"]["display"], "running");
+    rig.server.stop().await;
+    Ok(())
+}

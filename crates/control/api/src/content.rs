@@ -6,9 +6,9 @@
 //! machine. An upload is taken only for a kind of command that uploads and only up to the largest
 //! file the system stores; a download is served only for content that the command itself lists
 //! (and, for a command that writes a tree down, the files its list names); at most four transfers
-//! run for a machine at once. The two kinds of content that a machine makes on its own account, the
-//! list of its tree and what a shell printed, name the nil command, which is taken from a machine
-//! that has an environment and for uploads only.
+//! run for a machine at once. Content a machine produces on its own account, including its tree,
+//! shell outputs and retained agent outputs, names the nil command. Environment and agent roles
+//! may probe and upload that content; neither may download on the standing account.
 //!
 //! **A piece is the next piece.** An upload has a row (`blob_uploads`) that says how many bytes
 //! have arrived, and a file where they wait. A piece that begins anywhere else is refused with the
@@ -42,6 +42,34 @@ use orch_pki::certificates::ServiceName;
 use orch_settings::Place;
 use orch_types::{Hash, Id, Json};
 
+mod template_import;
+type ArchiveDelivery =
+    crate::key_operations::native::blob_delivery::Delivery<template_import::Archives>;
+
+fn source_fault(error: crate::middleware::requests::ApiError) -> LinkFault {
+    LinkFault::new(
+        error.problem.status,
+        error.problem.code.as_str(),
+        error.problem.detail,
+    )
+}
+
+async fn archive_check(source: &Option<ArchiveDelivery>) -> Result<(), LinkFault> {
+    if let Some(source) = source {
+        source.check().await.map_err(source_fault)?;
+    }
+    Ok(())
+}
+async fn archive_response(
+    source: Option<ArchiveDelivery>,
+    response: Response,
+) -> Result<Response, LinkFault> {
+    match source {
+        Some(source) => source.response(response).await.map_err(source_fault),
+        None => Ok(response),
+    }
+}
+
 /// The header in which a gateway gives the machine it found a request to be from.
 pub const MACHINE_HEADER: &str = "x-orch-machine";
 
@@ -57,6 +85,7 @@ pub const MAX_BLOB_KEY: &str = "storage.max_blob_bytes";
 
 /// The role a machine has to have for the content it makes on its own account.
 const ENVIRONMENT_ROLE: &str = "environment";
+const AGENT_ROLE: &str = "agent";
 
 /// The routes of the internal listener that serve content.
 pub fn routes() -> Router<App> {
@@ -157,7 +186,50 @@ fn uploads(kind: CommandKind) -> bool {
     takes_uploads(kind) || kind == CommandKind::FsArchiveRead
 }
 
+fn uploads_request(kind: CommandKind, body: &Json) -> bool {
+    uploads(kind)
+        || kind == CommandKind::ProviderGenerate
+            && body.get("capture_native_result").and_then(Json::as_bool) == Some(true)
+}
+
+#[cfg(test)]
+#[test]
+fn native_result_uploads_require_the_exact_capture_command_and_typed_opt_in() {
+    assert!(uploads_request(
+        CommandKind::ProviderGenerate,
+        &serde_json::json!({"capture_native_result":true})
+    ));
+    for value in [
+        serde_json::json!({}),
+        serde_json::json!({"capture_native_result":false}),
+        serde_json::json!({"capture_native_result":"true"}),
+    ] {
+        assert!(!uploads_request(CommandKind::ProviderGenerate, &value));
+    }
+    assert!(!uploads_request(
+        CommandKind::ProviderComplete,
+        &serde_json::json!({"capture_native_result":true})
+    ));
+}
+
 impl Asker {
+    async fn archives(&self, app: &App, hash: Hash) -> Result<Option<ArchiveDelivery>, LinkFault> {
+        if matches!(
+            &self.command,
+            Named::Open {
+                kind: CommandKind::NodeTemplateImport,
+                ..
+            }
+        ) {
+            Ok(Some(
+                template_import::prepare(app, self.machine.id, self.command_id, hash)
+                    .await
+                    .map_err(source_fault)?,
+            ))
+        } else {
+            Ok(None)
+        }
+    }
     /// Whether the command lets the machine do `wants`; content for a download is judged apart
     /// ([`Asker::lists`]).
     fn permits(&self, wants: Wants) -> bool {
@@ -166,10 +238,12 @@ impl Asker {
                 .machine
                 .roles
                 .iter()
-                .any(|role| role == ENVIRONMENT_ROLE),
+                .any(|role| role == ENVIRONMENT_ROLE || role == AGENT_ROLE),
             (Named::Standing, Wants::Download) => false,
-            (Named::Open { kind, .. }, Wants::Upload) => uploads(*kind),
-            (Named::Open { kind, .. }, Wants::Download) => serves_downloads(*kind),
+            (Named::Open { kind, body }, Wants::Upload) => uploads_request(*kind, body),
+            (Named::Open { kind, .. }, Wants::Download) => {
+                serves_downloads(*kind) || *kind == CommandKind::ProviderService
+            }
             (Named::Open { kind, .. }, Wants::Probe) => uploads(*kind) || serves_downloads(*kind),
         }
     }
@@ -180,6 +254,20 @@ impl Asker {
         let Named::Open { kind, body } = &self.command else {
             return Ok(false);
         };
+        if *kind == CommandKind::ProviderService {
+            let request: orch_link_contract::commands::ProviderService =
+                serde_json::from_value(body.clone())
+                    .map_err(|error| LinkFault::internal(&error))?;
+            return Ok(request.input_images.iter().any(|part| matches!(part,
+                orch_model_contract::generation::GenerationPart::ImageRef { blob, .. } if blob == hash)));
+        }
+        if *kind == CommandKind::ProviderGenerate {
+            let request: orch_link_contract::commands::ProviderGenerate =
+                serde_json::from_value(body.clone())
+                    .map_err(|error| LinkFault::internal(&error))?;
+            return Ok(request.input.messages.iter().flat_map(|message|&message.content).any(|part|
+                matches!(part,orch_model_contract::generation::GenerationPart::ImageRef {blob,..} if blob==hash)));
+        }
         if listed_hashes(body).contains(hash) {
             return Ok(true);
         }
@@ -300,6 +388,7 @@ async fn probe(
     if !asker.permits(Wants::Probe) {
         return Err(denied(Wants::Probe));
     }
+    let source = asker.archives(&app, hash).await?;
     if let Some(size) = app
         .blobs
         .store()
@@ -307,20 +396,24 @@ async fn probe(
         .await
         .map_err(|e| LinkFault::internal(&e))?
     {
-        return Ok(progress_reply(
-            StatusCode::OK,
-            BlobProgress {
-                received: size,
-                complete: true,
-            },
-        ));
+        return archive_response(
+            source,
+            progress_reply(
+                StatusCode::OK,
+                BlobProgress {
+                    received: size,
+                    complete: true,
+                },
+            ),
+        )
+        .await;
     }
     let mut conn = app
         .db
         .acquire()
         .await
         .map_err(|e| LinkFault::internal(&e))?;
-    match storage::upload(&mut conn, &hash)
+    let result = match storage::upload(&mut conn, &hash)
         .await
         .map_err(|e| LinkFault::internal(&e))?
     {
@@ -336,6 +429,14 @@ async fn probe(
             "not_found",
             "the system holds none of that",
         )),
+    };
+    drop(conn);
+    match result {
+        Ok(response) => archive_response(source, response).await,
+        Err(error) => {
+            archive_check(&source).await?;
+            Err(error)
+        }
     }
 }
 
@@ -387,6 +488,7 @@ async fn download(
     if !asker.permits(Wants::Download) || !asker.lists(&app, &hash).await? {
         return Err(denied(Wants::Download));
     }
+    let source = asker.archives(&app, hash).await?;
     let transfer = app
         .blobs
         .begin_transfer(asker.machine.id)
@@ -395,6 +497,7 @@ async fn download(
     let read = match app.blobs.read(&hash, range).await {
         Ok(read) => read,
         Err(BlobError::NotFound(_)) => {
+            archive_check(&source).await?;
             return Err(LinkFault::new(
                 404,
                 "not_found",
@@ -406,9 +509,12 @@ async fn download(
             if let Ok(value) = HeaderValue::from_str(&unsatisfied_content_range(size)) {
                 response.headers_mut().insert(header::CONTENT_RANGE, value);
             }
-            return Ok(response);
+            return archive_response(source, response).await;
         }
-        Err(error) => return Err(LinkFault::internal(&error)),
+        Err(error) => {
+            archive_check(&source).await?;
+            return Err(LinkFault::internal(&error));
+        }
     };
     if let Ok(mut conn) = app.db.acquire().await
         && let Err(error) = storage::touch_blob(&mut conn, &hash, app.clock.now()).await
@@ -440,7 +546,7 @@ async fn download(
     };
     let mut response = (status, body).into_response();
     response.headers_mut().extend(response_headers);
-    Ok(response)
+    archive_response(source, response).await
 }
 
 // ---------------------------------------------------------------- PUT

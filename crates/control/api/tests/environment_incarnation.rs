@@ -80,7 +80,7 @@ impl Scene {
             .token(&people.admin.token)
             .body(&MachineEnvironmentCreateBody {
                 data_sources: None,
-                home_id: people.acme,
+                home_id: Some(people.acme),
                 name: "Private workspace".into(),
                 root: "/srv/ada/first".into(),
                 home_node_id: Some(topic),
@@ -90,7 +90,9 @@ impl Scene {
             })
             .send()
             .await
-            .ok();
+            .ok()
+            .into_full()
+            .map_err(|_| "ordinary directory registration must retain full native content")?;
         let environment = made.base.id;
         let thread = new_id();
         {
@@ -171,7 +173,8 @@ impl Scene {
     }
 
     async fn update(&self, body: Value) -> Environment {
-        self.world
+        let result = self
+            .world
             .app
             .call(EnvironmentUpdate, &[&self.environment])
             .token(&self.people.admin.token)
@@ -179,6 +182,11 @@ impl Scene {
             .send()
             .await
             .ok()
+            .into_full();
+        let Ok(environment) = result else {
+            panic!("ordinary environment updates must retain full native content");
+        };
+        environment
     }
 }
 

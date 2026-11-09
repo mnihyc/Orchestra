@@ -239,6 +239,27 @@ async fn assert_search_display(
     thread: orch_types::Id,
     expected: Option<&ThreadDisplay>,
 ) -> Proof {
+    // The shipped small-scope entrance and a one-place hint budget's global fallback must agree.
+    for scope_candidates in [30_000, 1] {
+        scene
+            .rig
+            .world
+            .set(
+                "search.word_tuning",
+                json!({"scope_candidates":scope_candidates,"tiers":{}}),
+            )
+            .await;
+        assert_search_display_at_current_tuning(scene, token, thread, expected).await?;
+    }
+    Ok(())
+}
+
+async fn assert_search_display_at_current_tuning(
+    scene: &rig::Scene,
+    token: &str,
+    thread: orch_types::Id,
+    expected: Option<&ThreadDisplay>,
+) -> Proof {
     for text in ["State answer", "Fix login"] {
         let query: SearchListQuery = serde_json::from_value(json!({
             "q": text, "sort": "relevance", "immediate": true
@@ -487,7 +508,7 @@ async fn completed_work_has_one_reader_specific_icon_on_lists_references_and_the
     )
     .await?;
     assert_search_display(&scene, &scene.bea.token, thread, None).await?;
-    // No View means no preview or icon facts, even though this caller knows the identity.
+    // A known unreadable reference has an unavailable card without current metadata or icon facts.
     let denied = app
         .call(ReferencePreviewGet, &[])
         .token(&scene.bea.token)
@@ -500,9 +521,20 @@ async fn completed_work_has_one_reader_specific_icon_on_lists_references_and_the
         })
         .send()
         .await;
-    assert_eq!(denied.status, 404);
+    let unavailable = denied.ok();
+    assert!(unavailable.unavailable.is_some());
+    assert!(unavailable.title.is_empty() && unavailable.description.is_empty());
     assert!(
-        !serde_json::to_value(denied.problem())?
+        unavailable.thread_display.is_none()
+            && unavailable.node_kind.is_none()
+            && unavailable.place.is_none()
+            && unavailable.updated_at.is_none()
+            && unavailable.updated_by.is_none()
+            && unavailable.part.is_none()
+            && unavailable.file.is_none()
+    );
+    assert!(
+        !serde_json::to_value(unavailable)?
             .to_string()
             .contains("finished_at")
     );

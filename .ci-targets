@@ -1,0 +1,13 @@
+# Central runs on diag-26 = batch-26-pre 7c746fde2 + every lane head at 15:25Z (pre-split). Leading NAME=value words are settings.
+# ci-browser: the three node cases after 27d9427a6
+test -p orch-node --test environment an_environment_made_over_http_is_a_container_whose_connector_enrolls_and_a_thread_in_it_runs_a_turn -- --exact --nocapture
+test -p orch-node --test images a_dockerfile_is_built_by_the_daemon_with_its_steps_told_to_the_job_and_a_failed_build_keeps_its_log -- --exact --nocapture
+test -p orch-node --test lifecycle -- --nocapture
+# held-plan-ws: DIAG25-COMMANDS.txt after a6682b015
+test -p orch-adapter-claude-code --test background_wake -- --nocapture
+test -p orch-adapter-claude-code --test input_prefix an_empty_native_prefix_preserves_the_complete_first_model_input -- --exact --nocapture
+test -p orch-adapter-claude-code --test upgrade_compatibility both_published_sdk_corpora_replay_every_supported_scenario_through_its_real_consumer -- --exact --nocapture
+test -p orch-testkit --lib prefix_history::tests:: -- --nocapture
+# ci-triage-c: the delegation traces after 1b12bc0e2
+test ORCH_TEST_SERVICE_TRACE=1 -p orch-engine --lib tools::source::tests::image_services::delegation:: -- --nocapture --test-threads=1
+test -p orch-engine --lib tools::capability_service::failure:: -- --nocapture

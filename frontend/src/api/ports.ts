@@ -1,3 +1,4 @@
+import { suppliedRead } from '@/api/readScheduler';
 /** The Ports door requests: current snapshots, guarded openings, stored publication plans and entry codes. */
 import { queryOptions } from '@tanstack/react-query';
 import { ApiError, api, ok } from '@/api/client';
@@ -69,7 +70,7 @@ export async function previewPublication(id: string, port: number, transports: V
 export async function publishPort(id: string, port: number, client_id: string, preflight_id: string, _http: View.PortHttp): Promise<View.PortOpening> { return openingView((await createOpening(id, port, client_id, preflight_id)).opening); }
 /** The opening's revision goes in the body, as the contract has it. */
 export async function closePort(opening: View.PortOpening): Promise<View.PortOpening> { return openingView(await ok(api.DELETE('/port-openings/{opening_id}', { params: { path: { opening_id: opening.id } }, body: { expected_revision: opening.revision } }))); }
-export function enterPort(id: string, port: number): Promise<{ url: string; expires_at: string }> { return ok(api.POST('/environments/{id}/ports/{port}/enter', { params: portPath(id, port), body: {} })); }
+export function enterPort(id: string, port: number, clientKey: string = crypto.randomUUID()): Promise<{ url: string; expires_at: string }> { return ok(api.POST('/environments/{id}/ports/{port}/enter', { params: portPath(id, port), headers: { 'Idempotency-Key': clientKey }, body: {} })); }
 export function updatePortProgram(id: string, port: number, program: PortProgram, expected_revision: number): Promise<PortTarget> { return ok(api.PATCH('/environments/{id}/ports/{port}/program', { params: portPath(id, port), body: { program, expected_revision } })); }
 export const portConnectionsQuery = (environmentId: string, openingId: string, insidePort?: number) => queryOptions({ queryKey: ['port-connections', environmentId, openingId, insidePort] as const, retry: false, queryFn: async ({ signal }): Promise<View.PortConnections> => connectionsView(await ok(api.GET('/environments/{id}/ports/connections', { params: { path: { id: environmentId }, query: { opening_id: openingId, ...(insidePort === undefined ? {} : { inside_port: insidePort }) } }, signal }))) });
 /** The same live reader narrows either to an opening or a port, including own uses with no opening. */
@@ -104,7 +105,7 @@ export async function decidePortRequest(request: View.PortRequest, decision: Por
 }
 
 export async function readPortApproval(id: string): Promise<PortApproval> { return portApproval(await ok(api.GET('/approvals/{id}', { params: { path: { id } } }))); }
-export const outsideOpeningsQuery = (id: string) => ({ queryKey: ['outside-port-openings', id] as const, initialPageParam: null as string | null, retry: false as const, queryFn: ({ pageParam, signal }: { pageParam: string | null; signal: AbortSignal }): Promise<PortOpeningPage> => ok(api.GET('/nodes/{id}/port-openings', { params: { path: { id }, ...(pageParam === null ? {} : { query: { cursor: pageParam } }) }, signal })), getNextPageParam: (page: PortOpeningPage) => page.next_cursor ?? undefined });
+export const outsideOpeningsQuery = (id: string) => ({ queryKey: ['outside-port-openings', id] as const, ...suppliedRead(['outside-port-openings', id]), initialPageParam: null as string | null, retry: false as const, queryFn: ({ pageParam, signal }: { pageParam: string | null; signal: AbortSignal }): Promise<PortOpeningPage> => ok(api.GET('/nodes/{id}/port-openings', { params: { path: { id }, ...(pageParam === null ? {} : { query: { cursor: pageParam } }) }, signal })), getNextPageParam: (page: PortOpeningPage) => page.next_cursor ?? undefined });
 /** Grants the environment one audience's port capability: agents' requests of that kind then open without a card. */
 export function grantPortCapability(id: string, key: string): Promise<PortCapability> { return ok(api.PUT('/environments/{id}/ports/capabilities/{key}', { params: { path: { id, key } } })); }
 /** Takes a port capability back as every capability is taken back; what it opened stays until it is closed. */

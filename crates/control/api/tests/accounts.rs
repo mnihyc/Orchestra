@@ -12,8 +12,8 @@ use orch_api_contract::auth::{
     AuthEmailVerify, AuthEmailVerifyBody, AuthEmailVerifyResend, AuthEmailVerifyResendBody,
     AuthLogout, AuthRecoveryConfirm, AuthRecoveryConfirmBody, AuthRecoveryStart,
     AuthRecoveryStartBody, AuthRefresh, AuthRegister, AuthRegisterBody, AuthRegisterReply,
-    AuthResult, BannerLevel, LinkTrust, MeGet, MetaGet, RegistrationMode, SetupCreate,
-    SetupCreateBody, VerificationRequired,
+    AuthResult, AuthSessionRestore, BannerLevel, LinkTrust, MeGet, MetaGet, RegistrationMode,
+    SetupCreate, SetupCreateBody, VerificationRequired,
 };
 use orch_api_contract::common::{CSRF_HEADER, ErrorCode};
 use orch_api_contract::nodes::{OrgCreate, OrgCreateBody};
@@ -45,6 +45,7 @@ async fn register(
         .call(AuthRegister, &[])
         .peer(std::net::SocketAddr::new(ip.parse().unwrap(), 0))
         .body(&AuthRegisterBody {
+            accepted_terms_hash: None,
             accept_invitation: false,
             username: username.to_owned(),
             display_name: "Ada Lovelace".to_owned(),
@@ -68,7 +69,7 @@ fn registered(reply: Reply<AuthRegisterReply>) -> AuthResult {
 }
 
 async fn setup(world: &World, username: &str) -> Reply<AuthResult> {
-    world
+    let reply = world
         .app
         .call(SetupCreate, &[])
         .body(&SetupCreateBody {
@@ -79,7 +80,17 @@ async fn setup(world: &World, username: &str) -> Reply<AuthResult> {
             timezone: None,
         })
         .send()
-        .await
+        .await;
+    Reply {
+        status: reply.status,
+        headers: reply.headers,
+        raw: reply.raw,
+        body: reply.body.map(|value| {
+            value
+                .into_full()
+                .expect("ordinary setup returns its first session")
+        }),
+    }
 }
 
 /// An invitation to the system, for whoever holds the token.
@@ -195,6 +206,8 @@ async fn the_public_metadata_tells_what_a_client_may_know_before_anybody_has_sig
     assert!(meta.needs_setup && meta.local_login && !meta.mail && !meta.email_code_login);
     assert_eq!(meta.registration_mode, RegistrationMode::Invite);
     assert_eq!(meta.locales, vec![Locale::En, Locale::ZhCn]);
+    assert_eq!(meta.public_url, "https://orch.test");
+    assert!(meta.alternate_urls.is_empty());
     assert!(
         meta.banner.is_none()
             && meta.push_public_key.is_none()
@@ -267,6 +280,21 @@ async fn the_public_metadata_tells_what_a_client_may_know_before_anybody_has_sig
     );
     world.set("auth.local_login", json!(false)).await;
     assert!(!world.app.call(MetaGet, &[]).send().await.ok().local_login);
+}
+
+#[tokio::test]
+async fn metadata_publishes_the_deployments_browser_addresses_without_guessing_ips() {
+    let mut config = orch_config::server::ServerConfig::default();
+    config.system.public_url = "https://public.example.test".to_owned();
+    config.system.alternate_urls = vec![
+        "https://inside.example.test:8443".to_owned(),
+        "http://192.0.2.15:8080".to_owned(),
+    ];
+    let expected = config.system.alternate_urls.clone();
+    let world = World::with(config).await;
+    let meta = world.app.call(MetaGet, &[]).send().await.ok();
+    assert_eq!(meta.public_url, "https://public.example.test");
+    assert_eq!(meta.alternate_urls, expected);
 }
 
 #[tokio::test]
@@ -351,7 +379,7 @@ fn the_first_password_sign_in_after_setup_works_on_a_two_mib_stack() {
                 // This used to carry the full thread-rendering and private-page futures inline.
                 let org = world.app.call(OrgCreate, &[]).token(&result.access_token)
                     .body(&OrgCreateBody { name: "Acme".to_owned(), slug: "acme".to_owned() })
-                    .send().await.ok();
+                    .send().await.ok().into_full().expect("ordinary created organization content");
                 assert_eq!(org.base.name, "Acme");
                 assert_eq!(org.base.owner.id, administrator);
                 assert!(org.base.access.permissions.iter().any(|permission| permission == "org.manage"));
@@ -490,6 +518,7 @@ async fn a_new_person_starts_in_the_language_their_browser_asks_for_among_the_tw
             .call(AuthRegister, &[])
             .header("accept-language", languages)
             .body(&AuthRegisterBody {
+                accepted_terms_hash: None,
                 accept_invitation: false,
                 username: username.to_owned(),
                 display_name: "Ada".to_owned(),
@@ -788,6 +817,7 @@ async fn registration_refuses_what_does_not_fit_and_names_it_all_at_once() {
         .app
         .call(AuthRegister, &[])
         .body(&AuthRegisterBody {
+            accepted_terms_hash: None,
             accept_invitation: false,
             username: "Ada Lovelace".to_owned(),
             display_name: "  ".to_owned(),
@@ -817,6 +847,7 @@ async fn registration_and_a_reset_refuse_a_commonly_used_password_and_make_or_sp
         .app
         .call(AuthRegister, &[])
         .body(&AuthRegisterBody {
+            accepted_terms_hash: None,
             accept_invitation: false,
             username: "ada".to_owned(),
             display_name: "Ada Lovelace".to_owned(),
@@ -925,6 +956,7 @@ async fn ten_registrations_an_hour_may_be_asked_of_one_address() {
             .call(AuthRegister, &[])
             .peer(std::net::SocketAddr::new(ip.parse().unwrap(), 0))
             .body(&AuthRegisterBody {
+                accepted_terms_hash: None,
                 accept_invitation: false,
                 username: "x".to_owned(),
                 display_name: "X".to_owned(),
@@ -1176,6 +1208,46 @@ async fn a_reset_link_a_system_admin_made_for_a_lost_second_step_switches_it_off
             .await
             .contains(&"auth.second_step_cleared".to_owned())
     );
+}
+
+#[tokio::test]
+async fn anonymous_cookie_discovery_is_quiet_and_a_real_cookie_keeps_its_existing_authority() {
+    let world = World::new().await;
+    let missing_header = world
+        .app
+        .call(AuthSessionRestore, &[])
+        .send()
+        .await
+        .problem();
+    assert_eq!(
+        (missing_header.status, missing_header.code),
+        (403, ErrorCode::AuthCsrf)
+    );
+    let anonymous = world
+        .app
+        .call(AuthSessionRestore, &[])
+        .header(CSRF_HEADER, "1")
+        .send()
+        .await;
+    assert_eq!(anonymous.status, 200);
+    assert!(anonymous.headers.get("set-cookie").is_none());
+    assert!(anonymous.ok().is_none());
+    let ada = world.person("ada").await;
+    let signed = world.sign_in(&ada).await;
+    let restored = world
+        .app
+        .call(AuthSessionRestore, &[])
+        .header(CSRF_HEADER, "1")
+        .header("cookie", &signed.browser())
+        .send()
+        .await
+        .ok()
+        .unwrap();
+    assert_eq!(restored.user.user.id, ada.id);
+    assert!(!restored.access_token.is_empty());
+    // Explicit renewal keeps the original refusal and response contract.
+    let absent = refresh(&world, "").await.problem();
+    assert_eq!((absent.status, absent.code), (401, ErrorCode::AuthRequired));
 }
 
 #[tokio::test]

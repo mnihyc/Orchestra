@@ -303,7 +303,11 @@ async fn place_and_document_descriptions_share_ranking_and_an_exhausted_older_de
         .execute(&mut *conn)
         .await
         .unwrap();
-    sqlx::query("UPDATE documents SET description='quilldawn reference',description_source='user' WHERE id=$1").bind(document).execute(&mut *conn).await.unwrap();
+    sqlx::query("UPDATE documents SET description='quilldawn reference' WHERE id=$1")
+        .bind(document)
+        .execute(&mut *conn)
+        .await
+        .unwrap();
     drop(conn);
     let mut cursor = None;
     let mut ids = Vec::new();
@@ -858,7 +862,7 @@ async fn entries_rank_by_title_description_heading_and_body_then_how_many_rows_m
             .document_beside(topic, &format!("{filler} 五"), &[words])
             .await;
         let mut conn = world.pool.acquire().await.unwrap();
-        sqlx::query("UPDATE documents SET description=$2, description_source='user' WHERE id=$1")
+        sqlx::query("UPDATE documents SET description=$2 WHERE id=$1")
             .bind(described)
             .bind(format!("关于 {words} 的说明"))
             .execute(&mut *conn)
@@ -918,4 +922,90 @@ async fn entries_rank_by_title_description_heading_and_body_then_how_many_rows_m
         }
         assert_eq!(paged, order, "{words}: pages follow the ranking");
     }
+}
+
+#[tokio::test]
+async fn one_resolved_search_budget_reaches_the_native_schema_executor_and_cursor() {
+    let p = a_place_to_search().await;
+    for (key, value) in [
+        ("orch_tools.search_query_chars", 2000),
+        ("orch_tools.search_results", 201),
+        ("orch_tools.search_context", 6),
+    ] {
+        p.world.set(p.reader, key, json!(value)).await;
+    }
+    // 202 is the smallest fixture that distinguishes a 201-hit answer and its remaining cursor.
+    let body = "before6\nbefore5\nbefore4\nbefore3\nbefore2\nbefore1\nneedle\nafter1\nafter2\nafter3\nafter4\nafter5\nafter6";
+    for index in 0..202 {
+        p.world
+            .document_beside(p.topic, &format!("Budget {index}"), &[body])
+            .await;
+    }
+    let first = ok(search(
+        &p,
+        json!({"query":"needle","regex":true,"kinds":["documents"],"max_results":201}),
+    )
+    .await);
+    assert_eq!(
+        hits(&first).len(),
+        201,
+        "the executor does not clamp to the shipped 200 after accepting 201"
+    );
+    let cursor = first["next_cursor"]
+        .as_str()
+        .expect("one unread entry remains");
+    let second = ok(search(&p,json!({"query":"needle","regex":true,"kinds":["documents"],"max_results":201,"cursor":cursor})).await);
+    assert_eq!(hits(&second).len(), 1);
+    assert!(second["next_cursor"].is_null());
+    let ids: std::collections::BTreeSet<_> = hits(&first)
+        .into_iter()
+        .chain(hits(&second))
+        .map(|hit| hit["id"].as_str().unwrap())
+        .collect();
+    assert_eq!(ids.len(), 202, "every entry is delivered once");
+    let open = p
+        .world
+        .seen
+        .of_kind(orch_link_contract::commands::CommandKind::SessionOpen)
+        .into_iter()
+        .find_map(|command| match command {
+            orch_link_contract::commands::Command::SessionOpen(open)
+                if open.thread_id == p.reader =>
+            {
+                Some(open)
+            }
+            _ => None,
+        })
+        .expect("the actual reader session opened");
+    assert_eq!(
+        open.orch_tool_schemas["search_shared"]["properties"]["query"]["maxLength"],
+        2000
+    );
+    assert_eq!(
+        open.orch_tool_schemas["search_shared"]["properties"]["max_results"]["maximum"],
+        201
+    );
+    assert_eq!(
+        open.orch_tool_schemas["search_shared"]["properties"]["context"]["maximum"],
+        6
+    );
+    let context = ok(search(&p,json!({"query":"needle","regex":true,"path":hits(&first)[0]["path"],"max_results":1,"context":6,"snippets":true})).await);
+    let snippet = hits(&context)[0]["snippet"].as_str().unwrap();
+    assert!(snippet.contains("before6"), "{snippet}");
+    assert!(snippet.contains("after6"), "{snippet}");
+    let long = search(
+        &p,
+        json!({"query":"x".repeat(1001),"regex":true,"kinds":["documents"]}),
+    )
+    .await;
+    assert!(long.error.is_none(), "{long:?}");
+    p.world
+        .set(p.reader, "orch_tools.search_results", json!(200))
+        .await;
+    let refused = search(&p, json!({"query":"needle","max_results":201})).await;
+    assert_eq!(
+        refused.error.unwrap().code,
+        "invalid",
+        "a later call resolves the changed budget"
+    );
 }

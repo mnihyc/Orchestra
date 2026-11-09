@@ -103,6 +103,22 @@ pub async fn cut_versions(
 /// nothing names and that were put in longer ago than `[retention] blob_grace_hours`, whose pins
 /// on their bytes are let go.
 pub async fn purge(db: &Db, clock: &dyn Clock, config: &ServerConfig) -> Result<Purged, DbError> {
+    let lease =
+        orch_db::queries::job_leases::Lease::for_run(PURGE_JOB, ChronoDuration::minutes(10));
+    if !lease.hold(db, clock.now()).await? {
+        return Ok(Purged::default());
+    }
+    let result = purge_held(db, clock, config, &lease).await;
+    lease.release(db).await?;
+    result
+}
+async fn purge_held(
+    db: &Db,
+    clock: &dyn Clock,
+    config: &ServerConfig,
+    lease: &orch_db::queries::job_leases::Lease,
+) -> Result<Purged, DbError> {
+    use orch_db::queries::{document_purge_progress as progress, transaction_guard};
     let now = clock.now();
     let blocks_before = before(
         now,
@@ -116,25 +132,92 @@ pub async fn purge(db: &Db, clock: &dyn Clock, config: &ServerConfig) -> Result<
             .ok()
             .and_then(ChronoDuration::try_hours),
     );
+    let batches_before = before(now, Some(BATCH_RECORDS_KEPT));
     let mut done = Purged::default();
-    {
-        let mut tx = db.begin().await?;
-        // Blocks first: a file that only a block purged now named is free to go below.
-        done.documents = rows::purge_removed_blocks(&mut tx, blocks_before).await?;
-        done.batch_records =
-            rows::purge_batch_records(&mut tx, before(now, Some(BATCH_RECORDS_KEPT))).await?;
-        tx.commit().await.map_err(DbError::from)?;
-    }
-    let unnamed = {
-        let mut conn = db.acquire().await?;
-        rows::unnamed_files(&mut conn, files_before, BATCH).await?
-    };
-    for (document, file) in unnamed {
-        let mut tx = db.begin().await?;
-        if rows::release_unnamed_file(&mut tx, document, file, files_before, now).await? {
-            done.files += 1;
+    loop {
+        if !lease.hold(db, clock.now()).await? {
+            break;
+        }
+        let mut tx = transaction_guard::scope(false, db.begin()).await?;
+        transaction_guard::lock_action(&mut tx).await?;
+        let Some(mut cursor) = progress::open(
+            &mut tx,
+            lease,
+            clock,
+            blocks_before,
+            batches_before,
+            files_before,
+        )
+        .await?
+        else {
+            break;
+        };
+        let mut page = Purged::default();
+        let mut finished = false;
+        match cursor.phase.as_str() {
+            "documents" => {
+                let candidates =
+                    rows::maintenance_page(&mut tx, cursor.after_document, BATCH).await?;
+                if candidates.is_empty() {
+                    cursor.phase = "files".into();
+                } else {
+                    let ids = candidates.iter().map(|(id, _)| *id).collect::<Vec<_>>();
+                    page.documents =
+                        rows::purge_removed_blocks_among(&mut tx, cursor.blocks_before, &ids)
+                            .await?;
+                    page.batch_records =
+                        rows::purge_batch_records_among(&mut tx, cursor.batches_before, &ids)
+                            .await?;
+                    cursor.after_document = candidates.last().map(|(id, _)| *id);
+                }
+            }
+            "files" => {
+                let after = cursor.after_file_at.zip(cursor.after_file);
+                let files =
+                    rows::unnamed_files_page(&mut tx, cursor.files_before, after, BATCH).await?;
+                if files.is_empty() {
+                    finished = true;
+                } else {
+                    for (document, file, _) in &files {
+                        if rows::release_unnamed_file(
+                            &mut tx,
+                            *document,
+                            *file,
+                            cursor.files_before,
+                            clock.now(),
+                        )
+                        .await?
+                        {
+                            page.files += 1;
+                        }
+                    }
+                    if let Some((_, id, at)) = files.last() {
+                        cursor.after_file = Some(*id);
+                        cursor.after_file_at = Some(*at);
+                    }
+                }
+            }
+            _ => {
+                return Err(DbError::Rule {
+                    constraint: "document_purge_phase".into(),
+                });
+            }
+        }
+        let held = if finished {
+            progress::finish(&mut tx, lease, clock).await?
+        } else {
+            progress::save(&mut tx, lease, clock, &cursor).await?
+        };
+        if !held {
+            break;
         }
         tx.commit().await.map_err(DbError::from)?;
+        done.documents += page.documents;
+        done.batch_records += page.batch_records;
+        done.files += page.files;
+        if finished {
+            break;
+        }
     }
     Ok(done)
 }
@@ -163,14 +246,11 @@ pub fn start(app: &Arc<AppState>, stop: &CancellationToken) -> Vec<tokio::task::
         tokio::spawn(async move {
             let every = interval_of(&app.config, PURGE_JOB, PURGE_EVERY);
             run_every(every, &stop, || async {
-                locked(&app.db, app.clock.as_ref(), PURGE_JOB, || async {
-                    let purged = purge(&app.db, app.clock.as_ref(), &app.config).await?;
-                    if purged != Purged::default() {
-                        tracing::info!(?purged, "what no document needed any more was removed");
-                    }
-                    Ok(())
-                })
-                .await
+                let purged = purge(&app.db, app.clock.as_ref(), &app.config).await?;
+                if purged != Purged::default() {
+                    tracing::info!(?purged, "what no document needed any more was removed");
+                }
+                Ok(())
             })
             .await;
         })

@@ -5,8 +5,12 @@
  * changes who is in it; a group's people must be members of the root org. A group taken away takes
  * with it the roles it held and the entries that named it, and the dialog says so before it asks.
  */
+import { linkTo } from '@/lib/links';
+import { copyText } from '@/ui/clipboard';
+import { Menu, type MenuEntry } from '@/ui/Menu';
+import { usePageContext } from '@/features/workbench/pageContext';
 import { useMutation, useQuery } from '@tanstack/react-query';
-import { Pencil, Plus, Trash2, UserPlus, UsersRound, X } from 'lucide-react';
+import { Ellipsis, Pencil, Plus, Trash2, UserPlus, UsersRound, X } from 'lucide-react';
 import { useState } from 'react';
 import { useTranslation } from 'react-i18next';
 
@@ -102,17 +106,22 @@ function GroupDialog({ org, group, onClose }: { org: Org; group: Group | null; o
 function GroupMembers({ org, group, mayManage, onClose }: { org: Org; group: Group; mayManage: boolean; onClose: () => void }) {
   const { t } = useTranslation();
   const people = useQuery(groupHoldersQuery(group.id));
+  const metadata = useQuery(groupsQuery(group.org_id, false));
+  const current = metadata.data?.find((row) => row.id === group.id) ?? group;
+  const refresh = () => { void metadata.refetch(); void people.refetch(); };
   const [query, setQuery] = useState('');
   const found = useCandidates(query, org.org_id, { kinds: ['user', 'group', 'role', 'members'], thing: org.name, placeId: org.id });
   const inside = new Set((people.data ?? []).map((holder) => holderKey(holder)));
   const add = useMutation({
-    mutationFn: (member: Candidate) => addGroupHolder(group.id, member.input),
+    mutationFn: (member: Candidate) => addGroupHolder(group.id, member.input, current.revision),
     onSuccess: (_none, person) => {
       setQuery('');
-      toast({ tone: 'success', title: t('members.groups.added', { name: person.name, group: group.name }) });
+      refresh();
+      toast({ tone: 'success', title: t('members.groups.added', { name: person.name, group: current.name }) });
     },
+    onError: refresh,
   });
-  const take = useMutation({ mutationFn: (holder: Holder) => removeGroupHolder(group.id, inputOf(holder)) });
+  const take = useMutation({ mutationFn: (holder: Holder) => removeGroupHolder(group.id, inputOf(holder)), onSuccess: refresh, onError: refresh });
   const groups = found.groups.map((section) => ({ ...section, options: section.options.map((option) => {
     const candidate = found.byValue.get(option.value);
     return { ...option, disabled: candidate !== undefined && inside.has(holderKey(candidate.input)) ? t('members.groups.alreadyIn') : option.disabled };
@@ -121,7 +130,7 @@ function GroupMembers({ org, group, mayManage, onClose }: { org: Org; group: Gro
     <Dialog
       open
       onOpenChange={(next) => !next && onClose()}
-      title={t('members.groups.membersTitle', { name: group.name })}
+      title={t('members.groups.membersTitle', { name: current.name })}
       description={t('members.groups.membersLead')}
       size="lg"
       footer={<Button onClick={onClose}>{t('common.close')}</Button>}
@@ -145,7 +154,7 @@ function GroupMembers({ org, group, mayManage, onClose }: { org: Org; group: Gro
         </div>}
         {add.error !== null && <ErrorAlert error={add.error} />}
         {people.isPending ? (
-          <SkeletonRows rows={3} />
+          <SkeletonRows read={people} rows={3} />
         ) : people.isError ? (
           <ErrorState compact error={people.error} retrying={people.isRefetching} onRetry={() => void people.refetch()} />
         ) : people.data.length === 0 ? (
@@ -173,7 +182,11 @@ export function Groups({ org }: { org: Org }) {
   const [under, setUnder] = useState(false);
   const list = useQuery(groupsQuery(org.id, under));
   const [editing, setEditing] = useState<Group | 'new' | null>(null);
-  const [looking, setLooking] = useState<Group | null>(null);
+  const selected = usePageContext()?.target.search.group;
+  const selectionScope = JSON.stringify([org.id, selected]);
+  const [inspection, setInspection] = useState<{ scope: string; group: Group | null } | null>(null);
+  const looking = inspection?.scope === selectionScope ? inspection.group : typeof selected === 'string' ? list.data?.find((group) => group.id === selected) ?? null : null;
+  const setLooking = (group: Group | null) => setInspection({ scope: selectionScope, group });
   const [removing, setRemoving] = useState<Group | null>(null);
   const may = holds(org.access, 'members.manage');
   const reason = takes(t, 'members.manage', org.name, org.owner);
@@ -184,6 +197,9 @@ export function Groups({ org }: { org: Org }) {
       setRemoving(null);
     },
   });
+  const entriesFor = (group: Group): MenuEntry[] => [
+    { id: 'copy-link', action: 'copyLink', label: t('actions.copyLink.label'), onSelect: () => void copyText(linkTo({ kind: 'group', id: group.id, orgId: group.org_id }), t('common.linkCopied')) },
+  ];
   const columns: Column<Group>[] = [
     {
       id: 'name',
@@ -207,6 +223,7 @@ export function Groups({ org }: { org: Org }) {
           <Button size="sm" variant="ghost" icon={<UsersRound aria-hidden />} onClick={() => setLooking(group)} aria-label={t('members.groups.openMembers', { name: group.name })}>
             {t('members.groups.membersButton')}
           </Button>
+          <Menu label={t('resources.act.menuOf', { name: group.name })} entries={entriesFor(group)} trigger={<IconButton size="sm" label={t('resources.act.menuOf', { name: group.name })} icon={<Ellipsis aria-hidden />} />} />
           {may && group.org_id === org.id && (
             <>
               <IconButton size="sm" label={t('members.groups.edit', { name: group.name })} icon={<Pencil aria-hidden />} onClick={() => setEditing(group)} />
@@ -232,13 +249,13 @@ export function Groups({ org }: { org: Org }) {
     >
       {org.org_count > 0 && <Switch label={t('members.groups.under')} checked={under} onCheckedChange={setUnder} className="items-center gap-3" />}
       {list.isPending ? (
-        <SkeletonRows rows={3} />
+        <SkeletonRows read={list} rows={3} />
       ) : list.isError ? (
         <ErrorState compact error={list.error} retrying={list.isRefetching} onRetry={() => void list.refetch()} />
       ) : list.data.length === 0 ? (
         <EmptyState compact icon={<UserPlus aria-hidden />} title={t('members.groups.none', { name: org.name })} description={may ? t('members.groups.noneAbout') : undefined} />
       ) : (
-        <Table label={t('members.groups.table', { name: org.name })} columns={columns} rows={list.data} rowKey={(group) => group.id} />
+        <Table label={t('members.groups.table', { name: org.name })} columns={columns} rows={list.data} rowKey={(group) => group.id} rowMenu={{ label: (group) => t('resources.act.menuOf', { name: group.name }), entries: entriesFor }} />
       )}
       {editing !== null && <GroupDialog org={org} group={editing === 'new' ? null : editing} onClose={() => setEditing(null)} />}
       {looking !== null && <GroupMembers org={org} group={looking} mayManage={may} onClose={() => setLooking(null)} />}

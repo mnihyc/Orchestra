@@ -70,7 +70,7 @@ not corrected, and a harness that cannot render its catalogue leaves a manager t
 | [performance](src/performance.rs) | Codex request boundaries and FIFO token reports, without provider-specific timing arithmetic. |
 | [failure](src/failure.rs) | What the app-server says when a turn fails, taken in whole: its typed kind and status before its sentences, the moment a limit ends from the rate limits it reports, and the vendor's words kept as they were said. |
 | [approvals](src/approvals.rs) | Map harness approval and user-input requests. |
-| [review](src/review.rs) | Native Auto review completions, model declarations and provider policy refusal. Auto is undeclared until the shared trial gate is verified. |
+| [review](src/review.rs) | Native Auto review completions, the fixed `codex-auto-review` model and provider policy refusal. Auto requires native build conformance and access to that reviewer model. |
 | [provider](src/provider.rs) | Sign-in on the provider (a code, an existing sign-in file given as text or by its path inside the runtime, a workspace token), the workspace restriction, usage facts and model suggestions. |
 | [discovery](src/discovery.rs) | Sessions found in a Codex home; the MCP servers of its own configuration, the home's and a directory's, by name, and one definition read out for an import. |
 | [history](src/history.rs) | Neutral conversion of a carried conversation into the Responses items a new thread is told. |
@@ -79,3 +79,7 @@ not corrected, and a harness that cannot render its catalogue leaves a manager t
 | [parameters](src/parameters.rs) | Map effort and eligible neutral parameters to Codex fields; the speeds and access programs Codex offers for a model, which a provider enables before a thread shows them. |
 
 Goal mode is Orch's own and is the same for every program, so the harness's native goal feature stays off: the base configuration of every home Orch makes and the configuration of each thread's session carry `features.goals = false`, and the checkpoint preparation treats a thread whose goals feature is disabled as having no native goal to continue. Orch keeps a goal going itself, by inputs the engine writes in the name of the person who set it.
+
+Forwarded native feature switches are declared by the program and provider extensions and selected by the single capability registry. The adapter consumes only that captured public configuration. Standalone search and V2 compaction are endpoint facts, not guesses from routing names. A separate native search request also requires the same captured model, route and mode at the credential holder; service and disabled choices cannot use that route. Program default leaves native overrides unset; provider model defaults and explicit choices keep their existing resolution.
+
+The ordinary Web search parameter uses the shared managed-search definition so an explicitly available provider service can be chosen even without primary native search. The capability resolver narrows its declared choices to current support, access and backend facts. Unset keeps the existing native/default behavior and selects no paid service. Literal profile `/web_search` bindings retain the legacy native-only definition, including the provider's native schema; `service` never becomes a raw SDK configuration value.

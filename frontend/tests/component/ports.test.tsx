@@ -76,7 +76,8 @@ describe('Ports shows what the environment actually knows', () => {
     const grants = screen.getByTestId('port-grants');
     expect(within(grants).getByTestId('port-grant-link')).toHaveTextContent('Granted to this environment by Tester');
     expect(within(grants).getByTestId('port-grant-host')).toHaveTextContent('Denied by the capability policy');
-    expect(within(within(grants).getByTestId('port-grant-host')).queryByRole('button')).not.toBeInTheDocument();
+    expect(within(within(grants).getByTestId('port-grant-host')).getByRole('button', { name: 'Grant to this environment' })).toHaveAttribute('aria-disabled', 'true');
+    expect(within(within(grants).getByTestId('port-grant-host')).getByRole('button', { name: 'Take back' })).toHaveAttribute('aria-disabled', 'true');
     expect(within(within(grants).getByTestId('port-grant-link')).getByRole('button', { name: 'Take back' })).toBeVisible();
     await userEvent.click(within(within(grants).getByTestId('port-grant-place')).getByRole('button', { name: 'Grant to this environment' }));
     expect(grant).not.toHaveBeenCalled();

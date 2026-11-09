@@ -33,7 +33,18 @@ async fn a_turn_of_plain_text_streams_into_neutral_events_and_ends() {
 
     assert_eq!(said(&events), "You said: say hi please");
     let order = kinds(&events);
-    assert_eq!(order.first(), Some(&"turn.started"), "{order:?}");
+    let started = events
+        .iter()
+        .position(|event| matches!(event, SessionEvent::TurnStarted(_)))
+        .expect("the actual turn starts");
+    assert!(
+        events[..started].iter().all(|event| matches!(event,
+            SessionEvent::ItemCompleted(item)
+                if item.payload["marker"] == "harness_changed"
+                    && item.payload["data"]["turn_id"].is_null()
+        )),
+        "only passive native observations may precede the turn: {order:?}"
+    );
     assert!(
         order.contains(&"item.delta"),
         "the text streams in pieces: {order:?}"
@@ -65,6 +76,39 @@ async fn a_turn_of_plain_text_streams_into_neutral_events_and_ends() {
     );
     assert_eq!(requests[0].body["model"], "mock-large");
 
+    rig.adapter.stop().await.unwrap();
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn an_absent_resolved_effort_omits_the_native_default_and_clears_a_previous_effort() {
+    let mut rig = Rig::new()
+        .await
+        .expect("the pinned harness image is required");
+    rig.start_quick().await;
+    rig.open().await;
+    for effort in [None, Some("high"), None] {
+        let before = rig.model.requests().len();
+        let mut turn = rig.turn("hello");
+        turn.effort = effort.map(str::to_owned);
+        rig.adapter.start_turn(turn).await.unwrap();
+        let events = rig.until_the_turn_ends().await;
+        assert_eq!(outcome(&events), TurnOutcome::Completed, "{events:?}");
+        assert_eq!(said(&events), "You said: hello");
+        let requests = rig.model.requests();
+        let current: Vec<_> = requests[before..]
+            .iter()
+            .filter(|request| request.body.get("messages").is_some())
+            .collect();
+        assert!(!current.is_empty(), "the native turn reached the model");
+        for request in current {
+            assert_eq!(
+                request.body.pointer("/output_config/effort").cloned(),
+                effort.map(serde_json::Value::from),
+                "the request carries exactly the resolved effort: {:?}",
+                request.body
+            );
+        }
+    }
     rig.adapter.stop().await.unwrap();
 }
 
@@ -266,8 +310,8 @@ async fn a_failure_of_the_model_ends_the_turn_with_a_typed_error() {
         ("error not_found", "model_unavailable", false),
         ("error authentication", "provider_unauthorized", false),
         ("error billing", "provider_exhausted", false),
-        ("error server", "provider_busy", true),
-        ("error rate_limit retry-after=none", "provider_busy", true),
+        ("error server", "overloaded", true),
+        ("error rate_limit retry-after=none", "rate_limited", true),
     ];
     for (script, code, retryable) in cases {
         // A failed turn leaves its message unanswered, and the harness joins it to the next one: each case
@@ -320,9 +364,9 @@ async fn a_sub_agent_works_in_a_stream_of_its_own_inside_the_call_that_started_i
     rig.open().await;
     let inner = "#!mock\\nsay Sub-agent speaking.\\ntool Bash {\\\"command\\\":\\\"mkdir -p sub && echo x > sub/x\\\"}\\nthen\\nsay sub done";
     let script = format!(
-        "#!mock\nsay Starting a sub-agent.\ntool Agent {{\"description\":\"Look around\",\"prompt\":\"{inner}\",\"subagent_type\":\"general-purpose\"}}\nthen\nsay The sub-agent said: {{{{result}}}}\n"
+        "#!mock\nsay Starting a sub-agent.\ntool Agent {{\"description\":\"Look around\",\"prompt\":\"{inner}\",\"subagent_type\":\"general-purpose\",\"run_in_background\":false}}\nthen\nsay The sub-agent said: {{{{result}}}}\n"
     );
-    let (_, events) = rig.run_deciding(&script, common::allow).await;
+    let (_, mut events) = rig.run_deciding(&script, common::allow).await;
 
     let agent = events
         .iter()
@@ -362,10 +406,29 @@ async fn a_sub_agent_works_in_a_stream_of_its_own_inside_the_call_that_started_i
             .iter()
             .all(|item| item.parent_native_ref.as_deref() == Some(agent.0.as_str()))
     );
+    let child_completions: Vec<_> = events
+        .iter()
+        .filter_map(|event| match event {
+            SessionEvent::ItemCompleted(done)
+                if in_sub.iter().any(|item| item.native_ref == done.native_ref) =>
+            {
+                Some(done)
+            }
+            _ => None,
+        })
+        .collect();
     assert!(
         std::fs::metadata(rig.work.path().join("sub/x")).is_ok(),
-        "its command ran"
+        "its command ran; child completions: {child_completions:#?}"
     );
+    if !events.iter().any(
+        |event| matches!(event, SessionEvent::ItemCompleted(done) if done.native_ref == agent.0),
+    ) {
+        // A native task's terminal receipt can follow the main result. Observe its actual
+        // close within the rig's existing event budget, without sending another input.
+        let parent = agent.0.clone();
+        events.extend(rig.until(|event| matches!(event, SessionEvent::ItemCompleted(done) if done.native_ref == parent), 90).await);
+    }
     let finished = events.iter().find_map(|event| match event {
         SessionEvent::ItemCompleted(done) if done.native_ref == agent.0 => Some(done),
         _ => None,
@@ -468,7 +531,10 @@ async fn a_compaction_is_announced_as_a_phase_when_it_begins_and_when_it_is_over
     assert!(
         !events.iter().any(|event| matches!(
             event,
-            SessionEvent::ItemStarted(item) if matches!(item.content, orch_agent_contract::events::ItemContent::Marker(_))
+            SessionEvent::ItemStarted(item) if matches!(item.content,
+                orch_agent_contract::events::ItemContent::Marker(
+                    orch_agent_contract::events::MarkerPayload::Compacted { .. }
+                ))
         )),
         "the engine writes the marker, with its duration, when the phase ends"
     );
@@ -537,6 +603,7 @@ async fn an_image_of_the_turn_goes_to_the_model_beside_its_text() {
         blob: orch_types::Hash::of(&bytes),
         media_type: "image/png".into(),
         name: "pixel.png".into(),
+        workspace_path: None,
         path: Some(path.display().to_string()),
     }];
     rig.adapter.start_turn(turn).await.unwrap();

@@ -96,6 +96,71 @@ async fn something_that_is_not_a_token_is_refused_and_nothing_is_kept() {
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn a_native_result_reports_its_known_search_zero_through_the_shared_counter_hook() {
+    let mut rig = Rig::new()
+        .await
+        .expect("the candidate native harness image is required");
+    rig.model.set_credential(Some(PASTED));
+    let env = BTreeMap::from([
+        ("CLAUDE_CODE_MAX_RETRIES".into(), "1".into()),
+        ("ANTHROPIC_BASE_URL".into(), rig.model.url()),
+    ]);
+    rig.start(json!({}), env).await;
+    rig.adapter.login(token_request(PASTED)).await.unwrap();
+    rig.logins_until(|state| state.state == LoginStateKind::Completed, 20)
+        .await;
+    let mut spec = rig.spec(SessionMode::New, None);
+    spec.provider = ProviderAccess::Native {
+        provider_id: new_id(),
+    };
+    spec.settings.raw_events = true;
+    rig.open_with(spec).await;
+    for words in [
+        "#!mock\nsay No search was needed\n",
+        "#!mock\nsay Still no search\n",
+    ] {
+        let (_, events) = rig.run(words).await;
+        assert_eq!(outcome(&events), TurnOutcome::Completed);
+        let models = events
+            .iter()
+            .filter_map(|event| match event {
+                SessionEvent::UsageUpdated(usage) => usage.report.as_ref(),
+                _ => None,
+            })
+            .flat_map(|report| &report.models)
+            .collect::<Vec<_>>();
+        let native_counts: Vec<_> = events
+            .iter()
+            .filter_map(|event| match event {
+                SessionEvent::RawFrame(frame)
+                    if frame.direction == orch_adapter_claude_code::events::FROM_HARNESS
+                        && frame.payload["type"] == "result" =>
+                {
+                    Some(json!({
+                        "modelUsage": frame.payload.get("modelUsage"),
+                        "usage": frame.payload.get("usage"),
+                    }))
+                }
+                _ => None,
+            })
+            .collect();
+        assert!(
+            models
+                .iter()
+                .any(|model| model.counts.get("web_search") == Some(&0)),
+            "the real result's explicit native zero must be retained: {models:?}; native counts: {native_counts:#?}"
+        );
+    }
+    assert!(
+        rig.model
+            .requests()
+            .iter()
+            .any(|request| request.body.get("messages").is_some())
+    );
+    rig.adapter.stop().await.unwrap();
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn a_token_that_was_pasted_is_what_the_turns_present_and_signing_out_takes_it_away() {
     let Some(mut rig) = Rig::new().await else {
         return;

@@ -43,8 +43,8 @@ pub(super) async fn retain_original(job: &Job, fork: &Forking) -> Result<(), Sto
         return Ok(());
     };
     let (mut snapshot, environment_machine) = {
-        let mut conn = job.engine().db().acquire().await?;
-        source::authorize(&mut conn, job, &fork.recipe, &source, None).await?;
+        let mut conn = job.engine().db().begin().await?;
+        let authorized = source::authorize(&mut conn, job, &fork.recipe, &source, None).await?;
         let thread = threads::thread(&mut conn, source.thread)
             .await?
             .ok_or_else(|| {
@@ -86,12 +86,17 @@ pub(super) async fn retain_original(job: &Job, fork: &Forking) -> Result<(), Sto
         let mut recipe = fork.recipe.clone();
         recipe.new_thread = None;
         recipe.new_segment = segment;
-        recipe.forkplan.to.agent = recipe.forkplan.from.agent.clone();
-        recipe.forkplan.to.provider = recipe.forkplan.from.provider.clone();
+        recipe.forkplan.to.agent = recipe.forkplan.from.agent().cloned().ok_or_else(|| {
+            failed(
+                "history_source_changed",
+                "A program has no native session to recover",
+            )
+        })?;
+        recipe.forkplan.to.provider = recipe.forkplan.from.provider().clone();
         recipe.forkplan.to.arrangement =
             serde_json::from_value(json!(old.arrangement)).map_err(EngineError::from)?;
         recipe.forkplan.to.environment = ForkPlanTarget::Existing(
-            recipe.forkplan.from.environment.clone().ok_or_else(|| {
+            recipe.forkplan.from.environment().cloned().ok_or_else(|| {
                 failed(
                     "history_source_changed",
                     "The original environment reference is unavailable.",
@@ -119,6 +124,9 @@ pub(super) async fn retain_original(job: &Job, fork: &Forking) -> Result<(), Sto
             )
             .await?;
         snapshot.segment = old;
+        authorized.check(job.engine().inner.clock.as_ref())?;
+        conn.commit().await.map_err(orch_db::DbError::from)?;
+        authorized.check(job.engine().inner.clock.as_ref())?;
         (snapshot, environment.machine_id)
     };
     snapshot.segment.native_session_ref = Some(native.clone());

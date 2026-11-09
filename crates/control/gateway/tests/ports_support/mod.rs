@@ -313,7 +313,7 @@ async fn start_api(
     .unwrap();
     // A restart takes the same port back, as the program would: the gateway
     // dials an address it was given.
-    let bind = loopback(port.unwrap_or_else(reserve_port));
+    let bind = loopback(port.unwrap_or(0));
     let listener = bind_with_retry(&bind).await;
     let port = listener.local_addr().unwrap().port();
     let stop = CancellationToken::new();
@@ -344,8 +344,8 @@ async fn start_gateway(
     world_clock: &Arc<dyn Clock>,
     secrets: &Secrets,
     api_port: u16,
-    pinned: Option<SocketAddr>,
-    edge: Option<SocketAddr>,
+    pinned: TcpListener,
+    edge: TcpListener,
     identity: Option<TlsIdentity>,
 ) -> Running {
     let settings = Settings {
@@ -365,8 +365,6 @@ async fn start_gateway(
         clock: Arc::clone(world_clock),
     })
     .unwrap();
-    let pinned = bind_with_retry(&pinned.map_or_else(|| loopback(0), |a| a.to_string())).await;
-    let edge = bind_with_retry(&edge.map_or_else(|| loopback(0), |a| a.to_string())).await;
     let (pinned_addr, edge_addr) = (pinned.local_addr().unwrap(), edge.local_addr().unwrap());
     let running = gateway.clone();
     let task = tokio::spawn(async move { running.run(pinned, edge).await });
@@ -396,11 +394,14 @@ impl World {
                 .await
                 .unwrap()
         };
-        // The ports of the gateway are known before the API is, because the
-        // API tells machines about them when they enroll.
-        let pinned_port = reserve_port();
-        let edge_port = reserve_port();
+        // Own both advertised addresses through API startup and gateway handoff.
+        // Dropping a port probe would let another fixture take the same address.
+        let pinned = bind_with_retry(&loopback(0)).await;
+        let edge = bind_with_retry(&loopback(0)).await;
+        let pinned_port = pinned.local_addr().unwrap().port();
+        let edge_port = edge.local_addr().unwrap().port();
         let mut config = ServerConfig::default();
+        config.gateway.gateway_id = "test-gateway".to_owned();
         config.gateway.endpoints = vec![
             orch_config::server::GatewayEndpoint {
                 url: format!("wss://127.0.0.1:{pinned_port}"),
@@ -424,15 +425,7 @@ impl World {
             None,
         )
         .await;
-        let gateway = start_gateway(
-            &clock,
-            &secrets,
-            api.port,
-            Some(loopback(pinned_port).parse().unwrap()),
-            Some(loopback(edge_port).parse().unwrap()),
-            None,
-        )
-        .await;
+        let gateway = start_gateway(&clock, &secrets, api.port, pinned, edge, None).await;
         gateway.gateway.wait_for_backplane().await;
         Self {
             db,
@@ -496,12 +489,14 @@ impl World {
     pub async fn restart_gateway(&mut self) {
         let (pinned, edge) = (self.gateway.pinned, self.gateway.edge);
         self.gateway.stop().await;
+        let pinned = bind_with_retry(&pinned.to_string()).await;
+        let edge = bind_with_retry(&edge.to_string()).await;
         self.gateway = start_gateway(
             &self.clock,
             &self.secrets,
             self.api.port,
-            Some(pinned),
-            Some(edge),
+            pinned,
+            edge,
             None,
         )
         .await;
@@ -621,9 +616,19 @@ impl World {
             Arc::clone(&self.clock),
         )
         .unwrap();
-        let dialer = TlsDialer::new(Some(self.pinned_config(enrolled)), Some(public));
+        let pinned = self.pinned_config(enrolled);
+        let prober = orch_connector_core::gateway_selection::HttpsGatewayProber::new(
+            Arc::clone(&pinned),
+            Arc::clone(&public),
+            &self.secrets.ca_certificate(),
+            Arc::clone(&self.clock),
+        )
+        .unwrap();
+        let dialer =
+            TlsDialer::new(Some(pinned), Some(public)).with_gateway_prober(Arc::new(prober));
         let link = MachineLink::start(
             MachineConfig {
+                gateway: Default::default(),
                 hosted_endpoints: None,
                 follow_system_endpoints: false,
                 machine_id: enrolled.identity.machine_id,

@@ -6,6 +6,7 @@ heading_id.阅读收件箱: read-your-inbox
 heading_id.选择何时接收提醒: choose-when-to-be-told
 heading_id.发送公告: send-an-announcement
 heading_id.查看结果: follow-the-result
+summary: 阅读收件箱通知、选择通知渠道，并查看公告的投递结果。
 ---
 
 # 阅读通知和发送公告

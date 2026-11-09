@@ -155,6 +155,14 @@ fn lock<T>(mutex: &Mutex<T>) -> MutexGuard<'_, T> {
     mutex.lock().unwrap_or_else(PoisonError::into_inner)
 }
 
+fn option_values(options: &[ConfigOption]) -> Json {
+    let mut values = serde_json::Map::new();
+    for option in options {
+        values.insert(option.id.clone(), option.current.clone());
+    }
+    Json::Object(values)
+}
+
 fn extra_on(learned: &Learned, state: &State, extra: Extra) -> bool {
     learned.has(extra) && !state.off.contains(&extra)
 }
@@ -352,6 +360,10 @@ impl Session {
             }
             let mut ended = false;
             match message {
+                Incoming::Malformed { detail } => {
+                    let events = lock(&self.state).mapper.protocol_error(&detail);
+                    self.emit(events);
+                }
                 Incoming::Notification { method, params } => self.on_notification(&method, &params),
                 Incoming::Request { id, method, params } => self.on_request(id, &method, params),
                 Incoming::Answer { tag, result } => self.on_prompt_answer(tag, result),
@@ -409,10 +421,10 @@ impl Session {
             | wire::orch::PLAN_REFUSED
             | wire::client::ELICITATION_COMPLETE => {}
             "$/cancel_request" => {}
-            other => tracing::debug!(
-                method = other,
-                "a notification of the agent that means nothing to Orch"
-            ),
+            other => {
+                let events = lock(&self.state).mapper.unrecognized(other);
+                self.emit(events);
+            }
         }
     }
 
@@ -424,11 +436,18 @@ impl Session {
                     update.get("currentModeId").and_then(Json::as_str),
                     state.modes.as_mut(),
                 ) {
+                    let previous = json!(modes.current);
                     modes.current = id.to_owned();
+                    let events = state.mapper.configuration("mode", previous, json!(id));
+                    self.emit(events);
                 }
             }
             Some("config_option_update") => {
+                let previous = option_values(&state.options);
                 state.options = ConfigOption::read_all(update.get("configOptions"));
+                let value = option_values(&state.options);
+                let events = state.mapper.configuration("settings", previous, value);
+                self.emit(events);
             }
             Some("user_message_chunk" | "available_commands_update") => {}
             _ => {
@@ -552,6 +571,8 @@ impl Session {
                     crate::rpc::METHOD_NOT_FOUND,
                     &format!("{other} is not a method this client has"),
                 );
+                let events = lock(&self.state).mapper.unrecognized(other);
+                self.emit(events);
             }
         }
     }
@@ -838,21 +859,32 @@ impl Session {
     ) -> Result<Vec<Json>, AdapterError> {
         let mut blocks = vec![wire::text_block(text)];
         for image in images {
+            let native = self.env.program.images.unwrap_or(
+                self.learned
+                    .initialized
+                    .agent_capabilities
+                    .prompt_capabilities
+                    .image,
+            );
+            if !native {
+                let path = image.workspace_path.as_deref().ok_or_else(|| invalid(
+                    "the image must be delivered into the environment before a file-only prompt",
+                ))?;
+                // The controller's existing file preparation owns this path and its write.
+                // The connector's cache path is not a path in a separated environment.
+                blocks.push(wire::text_block(&format!(
+                    "Attached image file: {} ({})",
+                    serde_json::to_string(path)
+                        .map_err(|_| invalid("the image path could not be encoded"))?,
+                    image.media_type,
+                )));
+                continue;
+            }
             let Some(path) = &image.path else {
                 return Err(invalid(
                     "an image of a turn is given as a file the adapter reads",
                 ));
             };
-            if !self
-                .learned
-                .initialized
-                .agent_capabilities
-                .prompt_capabilities
-                .image
-                && self.env.program.images != Some(true)
-            {
-                return Err(AdapterError::Unsupported("input_images".to_owned()));
-            }
             let bytes = std::fs::read(path).map_err(|error| {
                 invalid(&format!("the image {path} could not be read: {error}"))
             })?;

@@ -1,3 +1,4 @@
+import type { SearchHit, SearchStreamEvent } from '../../src/generated/api-types';
 /** Search and finding in a conversation at work: words looked for in what was said, kept to a place and to kinds, results with the words marked and opened at the hit, more read as the reader comes to the end, and the bar that finds inside one thread. */
 import { expect, type Page, type Request, test } from '@playwright/test';
 
@@ -338,3 +339,36 @@ test('the finder lists find in the conversation among the commands of a thread',
   await page.getByRole('option', { name: /Find in the conversation/ }).click();
   await expect(page.getByRole('search', { name: 'Find in the conversation' })).toBeVisible();
 });
+
+for (const locale of ['en', 'zh-CN'] as const) for (const theme of ['light', 'dark'] as const) for (const width of [400, 1440]) {
+  test(`keeps a name-only thread result free of private work facts (${locale}/${theme}/${width})`, async ({ page }) => {
+    await page.setViewportSize({ width, height: 1000 });
+    await page.emulateMedia({ colorScheme: theme });
+    await signIn(page);
+    if (locale === 'zh-CN') {
+      await page.goto('/settings/interface');
+      await page.getByRole('combobox', { name: 'Language', exact: true }).click();
+      await page.getByRole('option', { name: '简体中文', exact: true }).click();
+      await expect(page.locator('html')).toHaveAttribute('lang', locale);
+    }
+    const name = locale === 'en' ? 'Quiet reference' : '仅有名称的引用';
+    const node = { id: MAIN, kind: 'thread' as const, name, redacted: false };
+    const hit: SearchHit = { kind: 'name', node, path: [node], href: `/thread/${MAIN}`, at: MADE_AT,
+      snippet: locale === 'en' ? 'A name without a readable work state' : '仅有名称，没有可读的工作状态', matches: [] };
+    const events: SearchStreamEvent[] = [
+      { type: 'options', meaning_pause_ms: 0, page_size: 20, reorder_window_secs: 0 },
+      { type: 'hit', id: 'quiet-reference', hit, found_by: 'words' },
+      { type: 'order', received: 1, items: [{ id: 'quiet-reference', found_by: 'words', rank: 1 }] },
+      { type: 'source', source: 'words', state: 'done', received: 1, reason: null },
+      { type: 'source', source: 'meaning', state: 'done', received: 0, reason: null },
+      { type: 'cursor', cursor: null },
+    ];
+    await page.route('**/api/v1/search/stream?**', (route) => route.fulfill({ contentType: 'application/x-ndjson', body: events.map((event) => JSON.stringify(event)).join('\n') + '\n' }));
+    await page.goto(`/search?q=${encodeURIComponent(name)}`);
+    const reference = page.getByRole('link', { name, exact: true });
+    await expect(reference).toBeVisible();
+    await expect(reference.locator('svg.lucide-message-square-text')).toHaveCount(1);
+    await expect(reference.locator('[data-work-state]')).toHaveCount(0);
+    await expect(reference.getByRole('img')).toHaveCount(0);
+  });
+}

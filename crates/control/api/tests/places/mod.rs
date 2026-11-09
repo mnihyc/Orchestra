@@ -148,6 +148,8 @@ pub async fn make_org(world: &World, by: &Who, name: &str, slug: &str) -> Org {
         .send()
         .await
         .ok()
+        .into_full()
+        .expect("ordinary created organization content")
 }
 
 /// Makes an org inside `parent`, as `by`.
@@ -166,6 +168,8 @@ pub async fn make_department(world: &World, by: &Who, parent: Id, name: &str, sl
         .send()
         .await
         .ok()
+        .into_full()
+        .expect("ordinary created organization content")
 }
 
 /// Makes a project in `org`, as `by`.
@@ -182,6 +186,8 @@ pub async fn make_project(world: &World, by: &Who, org: Id, name: &str) -> Proje
         .send()
         .await
         .ok()
+        .into_full()
+        .expect("this control expects the ordinary full project response")
 }
 
 /// Makes a topic in `project`, as `by`.
@@ -200,6 +206,9 @@ pub async fn make_topic(world: &World, by: &Who, project: Id, name: &str) -> Top
     match reply {
         TopicCreateReply::Topic(topic) => topic,
         TopicCreateReply::WithThread(both) => both.topic,
+        TopicCreateReply::Receipt(_) | TopicCreateReply::ThreadReceipt(_) => {
+            panic!("this browser control expects the full topic response")
+        }
     }
 }
 

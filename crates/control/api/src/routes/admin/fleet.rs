@@ -8,25 +8,33 @@
 //! the plugins it loaded.
 
 use super::{SECONDS_PER_DAY, admin_of, invalid};
-use crate::middleware::authorization;
+use crate::key_operations::{native, targets};
 use crate::middleware::requests::{ApiError, ApiResult};
 use crate::registry::{Ctx, Registry};
+use crate::routes::access::page::{NameBounds, NameSources};
 use crate::routes::resources::LIST_LIMIT;
 use crate::routes::resources::view::{
-    Holding, accesses, addresses, environment_refs, machine_refs, parse, provider_refs,
+    Holding, PreparedAccess, accesses_prepared, addresses_with_names, environment_refs_with_names,
+    machine_refs, parse, prepare_accesses, provider_refs_with_names,
 };
 use chrono::{DateTime, Duration, Utc};
+use futures::future::BoxFuture;
 use orch_access_contract::decisions::Held;
+use orch_access_contract::key_scope::KeyTargetKind;
+use orch_access_contract::permissions::ObjectKind;
 use orch_access_contract::permissions::{Permission, ResourceKind};
 use orch_api_contract::admin::{
     AdminHostList, AdminMetricList, AdminMetricListQuery, AdminPlugin, AdminPluginList,
     AdminRuntimeList, AdminRuntimeListQuery, METRIC_MAX_POINTS, METRIC_STEP_MINUTES,
     MetricResolution, MetricSeries, PluginState, Runtime,
 };
+use orch_api_contract::admin_sources::{self as sources, Source};
 use orch_api_contract::environment::{Amounts, HostStorage, TemplateRef, WhenFull};
+use orch_api_contract::operation_sources::Declaration;
 use orch_api_contract::resources::{
     Host, HostDriver, HostRef, HostRunning, HostWhenFull, MachineRef, UnitKind,
 };
+use orch_authz::Caller;
 use orch_authz::nodes::Page;
 use orch_authz::{Policy, Principal, resources};
 use orch_db::Conn;
@@ -54,8 +62,12 @@ const CONFIGURED_ONLY: &str =
 /// Binds this module's requests.
 pub fn mount(registry: &mut Registry) {
     registry
-        .on(AdminHostList, hosts)
-        .on(AdminRuntimeList, runtimes)
+        .on_snapshot_read_with_optional_operation(AdminHostList, native::selected::<Hosts>, hosts)
+        .on_snapshot_read_with_optional_operation(
+            AdminRuntimeList,
+            native::selected::<Runtimes>,
+            runtimes,
+        )
         .on(AdminMetricList, metric_series)
         .on(AdminPluginList, plugins);
 }
@@ -163,13 +175,173 @@ fn storages_of(value: &Json) -> Vec<HostStorage> {
 
 /// Every host of the system, as the Admin of all of them reads them.
 async fn hosts(ctx: Ctx, (): (), (): ()) -> ApiResult<Vec<Host>> {
-    admin_of(&ctx)?;
-    let mut conn = ctx.app.db.acquire().await?;
-    let principal = authorization::principal(&ctx, &mut conn).await?;
-    let ids = management::host_ids(&mut conn).await?;
-    let rows = queries::hosts(&mut conn, &ids, principal.user()).await?;
-    let standing = standings(&mut conn, &principal).await?;
-    host_views(&ctx, &mut conn, &principal, rows, &standing).await
+    native::selected_read::<Hosts>(ctx, (), ()).await
+}
+struct Hosts;
+struct PreparedHosts {
+    rows: Vec<HostRow>,
+    standing: HashMap<Id, Standing>,
+    access: PreparedAccess,
+    retention: crate::routes::resources::hosts::PreparedRetention,
+    names: NameBounds,
+}
+impl native::Selected for Hosts {
+    type Source = Source;
+    type Query = ();
+    type Value = PreparedHosts;
+    type Reply = Vec<Host>;
+    const DECLARATION: &'static Declaration<Source> = &sources::HOSTS;
+    fn select<'a>(
+        ctx: &'a Ctx,
+        conn: &'a mut Conn,
+        caller: &'a Caller,
+        _query: &'a (),
+    ) -> BoxFuture<'a, ApiResult<(PreparedHosts, Vec<native::Facts<Source>>)>> {
+        Box::pin(prepare_hosts(ctx, conn, caller))
+    }
+    fn require<'a>(
+        ctx: &'a Ctx,
+        _conn: &'a mut Conn,
+        principal: &'a Principal,
+    ) -> BoxFuture<'a, ApiResult<()>> {
+        Box::pin(async move { super::native::require(ctx, principal) })
+    }
+    fn render<'a>(
+        ctx: &'a Ctx,
+        conn: &'a mut Conn,
+        principal: &'a Principal,
+        value: &'a PreparedHosts,
+    ) -> BoxFuture<'a, ApiResult<Vec<Host>>> {
+        Box::pin(host_views(ctx, conn, principal, value))
+    }
+    fn check_opened<'a>(
+        _ctx: &'a Ctx,
+        _conn: &'a mut Conn,
+        _principal: &'a Principal,
+        _query: &'a (),
+        old: &'a PreparedHosts,
+        fresh: &'a PreparedHosts,
+    ) -> BoxFuture<'a, ApiResult<bool>> {
+        Box::pin(async move {
+            Ok(old.rows.iter().all(|row| {
+                fresh.rows.iter().any(|current| {
+                    row.id == current.id
+                        && row.machine_id == current.machine_id
+                        && row.home_id == current.home_id
+                })
+            }) && old.access.preserves_authority(&fresh.access)
+                && old.retention.preserves_sources(&fresh.retention))
+        })
+    }
+}
+async fn prepare_hosts(
+    ctx: &Ctx,
+    conn: &mut Conn,
+    caller: &Caller,
+) -> ApiResult<(PreparedHosts, Vec<native::Facts<Source>>)> {
+    let ids = management::host_ids(conn).await?;
+    let candidates = queries::hosts(conn, &ids, caller.user()).await?;
+    let mut rows = Vec::new();
+    let mut results = Vec::new();
+    for row in candidates {
+        let host = super::native::resource(conn, ObjectKind::Host, row.id).await?;
+        if super::native::permits(
+            ctx,
+            &sources::HOSTS,
+            caller,
+            Source::Results,
+            KeyTargetKind::Object(ObjectKind::Host),
+            &host,
+        )? {
+            results.push((KeyTargetKind::Object(ObjectKind::Host), host));
+            rows.push(row);
+        }
+    }
+    let mut facts = vec![super::native::collection(Source::Results, results)];
+    let known = native::bind_known(ctx, &sources::HOSTS, &facts)?;
+    let principal = native::preparation_principal(ctx, conn, caller, &known).await?;
+    let standing = standings(conn, &principal).await?;
+    let ids = rows.iter().map(|r| r.id).collect::<Vec<_>>();
+    let managed = ids
+        .iter()
+        .copied()
+        .filter(|id| {
+            standing.get(id).is_some_and(|s| {
+                s.held
+                    .iter()
+                    .any(|held| held.permission == Permission::HostManage)
+            })
+        })
+        .collect::<Vec<_>>();
+    let mut retention =
+        crate::routes::resources::hosts::prepare_retention(ctx, conn, &principal, &ids, &managed)
+            .await?;
+    let access = prepare_accesses(conn, &holdings(&rows, &standing)).await?;
+    let (retained_names, environments) = retention.sources();
+    let mut names = access.names.clone();
+    names.nodes.extend(retained_names.nodes);
+    names.nodes.extend(rows.iter().filter_map(|r| r.home_id));
+    let mut allowed_environments = std::collections::BTreeSet::new();
+    let mut retained_facts = Vec::new();
+    for id in environments {
+        let target = super::native::resource(conn, ObjectKind::Environment, id).await?;
+        if super::native::permits(
+            ctx,
+            &sources::HOSTS,
+            caller,
+            Source::Names,
+            KeyTargetKind::Object(ObjectKind::Environment),
+            &target,
+        )? {
+            allowed_environments.insert(id);
+            retained_facts.push((KeyTargetKind::Object(ObjectKind::Environment), target));
+        }
+    }
+    let address_ids = ids
+        .iter()
+        .copied()
+        .chain(allowed_environments.iter().copied())
+        .collect::<Vec<_>>();
+    names.nodes.extend(
+        orch_authz::resources::address_name_sources(conn, &address_ids)
+            .await
+            .map_err(ApiError::internal)?,
+    );
+    let (bounds, mut name_facts) =
+        super::native::names(ctx, conn, caller, &sources::HOSTS, names).await?;
+    name_facts
+        .groups
+        .extend(super::native::collection(Source::Names, retained_facts).groups);
+    if native::modern(caller) {
+        retention.bound_names(bounds.clone(), allowed_environments);
+    }
+    facts.push(name_facts);
+    Ok((
+        PreparedHosts {
+            rows,
+            standing,
+            access,
+            retention,
+            names: bounds,
+        },
+        facts,
+    ))
+}
+fn holdings<'a>(rows: &'a [HostRow], standing: &'a HashMap<Id, Standing>) -> Vec<Holding<'a>> {
+    rows.iter()
+        .filter_map(|row| {
+            standing.get(&row.id).map(|s| Holding {
+                admin_only: &s.admin_only,
+                admin_access: s.admin_access,
+                admin_place: s.admin_place,
+                participating: s.participating,
+                id: row.id,
+                owner: s.owner,
+                administers: s.administers,
+                held: &s.held,
+            })
+        })
+        .collect()
 }
 
 /// What the caller holds on each host there is, a page of the engine's list at a time.
@@ -214,53 +386,31 @@ async fn host_views(
     ctx: &Ctx,
     conn: &mut Conn,
     principal: &Principal,
-    rows: Vec<HostRow>,
-    standing: &HashMap<Id, Standing>,
+    prepared: &PreparedHosts,
 ) -> ApiResult<Vec<Host>> {
-    let ids: Vec<Id> = rows.iter().map(|row| row.id).collect();
-    let managed: Vec<Id> = ids
-        .iter()
-        .copied()
-        .filter(|id| {
-            standing.get(id).is_some_and(|standing| {
-                standing
-                    .held
-                    .iter()
-                    .any(|held| held.permission == Permission::HostManage)
-            })
-        })
-        .collect();
-    let kept_data =
-        crate::routes::resources::hosts::kept_data_of(ctx, conn, principal, &managed).await?;
-    let kept_layers = crate::routes::resources::hosts::kept_layers_of(conn, &ids, ctx.now).await?;
-    let addresses = addresses(conn, &ids).await?;
+    let rows = prepared.rows.clone();
+    let ids = rows.iter().map(|r| r.id).collect::<Vec<_>>();
+    let bounds = prepared.names.limited.then_some(&prepared.names);
+    let (kept_data, kept_layers) = prepared.retention.render(conn, principal).await?;
+    let addresses = addresses_with_names(conn, &ids, bounds).await?;
     let people: Vec<Id> = rows.iter().filter_map(|row| row.owner_id).collect();
     let people = crate::middleware::authorization::refusals::user_refs(conn, &people).await?;
     let homes: Vec<Id> = rows.iter().filter_map(|row| row.home_id).collect();
-    let homes =
-        crate::routes::nodes::view::refs(conn, principal, &homes, Policy::default()).await?;
+    let homes = prepared.names.refs(conn, principal, &homes).await?;
     let machines: Vec<Id> = rows.iter().map(|row| row.machine_id).collect();
     let machines = machine_refs(&ctx.app, conn, &machines).await?;
     let system: Option<String> = setting(conn, Place::System, keys::HOSTS_WHEN_FULL)
         .await
         .map_err(ApiError::internal)?;
     let system: WhenFull = parse(system.as_deref().unwrap_or("warn"))?;
-    let holdings: Vec<Holding<'_>> = rows
-        .iter()
-        .filter_map(|row| {
-            standing.get(&row.id).map(|each| Holding {
-                admin_only: &each.admin_only,
-                admin_access: each.admin_access,
-                admin_place: each.admin_place,
-                participating: each.participating,
-                id: row.id,
-                owner: each.owner,
-                administers: each.administers,
-                held: &each.held,
-            })
-        })
-        .collect();
-    let access = accesses(conn, principal, &holdings).await?;
+    let access = accesses_prepared(
+        conn,
+        principal,
+        &holdings(&rows, &prepared.standing),
+        &prepared.access,
+        bounds,
+    )
+    .await?;
     rows.into_iter()
         .map(|row| {
             let own = row
@@ -269,6 +419,10 @@ async fn host_views(
                 .map(parse::<WhenFull>)
                 .transpose()?;
             Ok(Host {
+                provenance: orch_api_contract::resource_groups::ResourceProvenance {
+                    origin_machine: machines.get(&row.machine_id).cloned(),
+                    availability: Vec::new(),
+                },
                 lost_at: row.lost_at.map(orch_types::Time::new),
                 full: None,
                 usage: None,
@@ -333,32 +487,180 @@ async fn host_views(
 
 /// The runtimes of both pools, whoever's they are.
 async fn runtimes(ctx: Ctx, query: AdminRuntimeListQuery, (): ()) -> ApiResult<Vec<Runtime>> {
-    admin_of(&ctx)?;
-    let mut conn = ctx.app.db.acquire().await?;
+    native::selected_read::<Runtimes>(ctx, query, ()).await
+}
+struct Runtimes;
+struct PreparedRuntimes {
+    rows: Vec<management::RuntimeRow>,
+    names: NameBounds,
+}
+impl native::Selected for Runtimes {
+    type Source = Source;
+    type Query = AdminRuntimeListQuery;
+    type Value = PreparedRuntimes;
+    type Reply = Vec<Runtime>;
+    const DECLARATION: &'static Declaration<Source> = &sources::RUNTIMES;
+    fn select<'a>(
+        ctx: &'a Ctx,
+        conn: &'a mut Conn,
+        caller: &'a Caller,
+        query: &'a Self::Query,
+    ) -> BoxFuture<'a, ApiResult<(Self::Value, Vec<native::Facts<Source>>)>> {
+        Box::pin(prepare_runtimes(ctx, conn, caller, query))
+    }
+    fn require<'a>(
+        ctx: &'a Ctx,
+        _conn: &'a mut Conn,
+        principal: &'a Principal,
+    ) -> BoxFuture<'a, ApiResult<()>> {
+        Box::pin(async move { super::native::require(ctx, principal) })
+    }
+    fn render<'a>(
+        ctx: &'a Ctx,
+        conn: &'a mut Conn,
+        _principal: &'a Principal,
+        value: &'a Self::Value,
+    ) -> BoxFuture<'a, ApiResult<Self::Reply>> {
+        Box::pin(runtime_views(ctx, conn, value))
+    }
+    fn check_opened<'a>(
+        _ctx: &'a Ctx,
+        _conn: &'a mut Conn,
+        _principal: &'a Principal,
+        _query: &'a Self::Query,
+        old: &'a Self::Value,
+        fresh: &'a Self::Value,
+    ) -> BoxFuture<'a, ApiResult<bool>> {
+        Box::pin(async move {
+            Ok(old.rows.iter().all(|row| {
+                fresh.rows.iter().any(|new| {
+                    row.id == new.id
+                        && row.kind == new.kind
+                        && row.environment_id == new.environment_id
+                        && row.provider_id == new.provider_id
+                        && row.host_id == new.host_id
+                        && row.machine_id == new.machine_id
+                        && row.template_id == new.template_id
+                })
+            }))
+        })
+    }
+}
+async fn prepare_runtimes(
+    ctx: &Ctx,
+    conn: &mut Conn,
+    caller: &Caller,
+    query: &AdminRuntimeListQuery,
+) -> ApiResult<(PreparedRuntimes, Vec<native::Facts<Source>>)> {
     let kind = query.kind.map(|kind| match kind {
         UnitKind::Environment => "environment",
         UnitKind::Provider => "provider",
     });
-    let rows = management::runtimes(&mut conn, query.host_id, kind).await?;
+    let candidates = management::runtimes(conn, query.host_id, kind).await?;
+    let mut rows = Vec::new();
+    let mut results = Vec::new();
+    let mut references = Vec::new();
+    let mut units = Vec::new();
+    for row in candidates {
+        let unit = match (row.kind.as_str(), row.environment_id, row.provider_id) {
+            ("environment", Some(id), None) => (ObjectKind::Environment, id),
+            ("provider", None, Some(id)) => (ObjectKind::Provider, id),
+            _ => {
+                return Err(ApiError::internal(
+                    "a native runtime has no unique unit subject",
+                ));
+            }
+        };
+        let target = super::native::resource(conn, unit.0, unit.1).await?;
+        let mut related = vec![
+            (
+                KeyTargetKind::Object(ObjectKind::Host),
+                super::native::resource(conn, ObjectKind::Host, row.host_id).await?,
+            ),
+            (
+                KeyTargetKind::Object(ObjectKind::Template),
+                super::native::resource(conn, ObjectKind::Template, row.template_id).await?,
+            ),
+        ];
+        if let Some(id) = row.machine_id {
+            related.push((
+                KeyTargetKind::Object(ObjectKind::Machine),
+                targets::machine_subject(conn, id).await?,
+            ));
+        }
+        let mut allowed = super::native::permits(
+            ctx,
+            &sources::RUNTIMES,
+            caller,
+            Source::Results,
+            KeyTargetKind::Object(unit.0),
+            &target,
+        )?;
+        for (family, target) in &related {
+            allowed &= super::native::permits(
+                ctx,
+                &sources::RUNTIMES,
+                caller,
+                Source::References,
+                *family,
+                target,
+            )?;
+        }
+        if allowed {
+            results.push((KeyTargetKind::Object(unit.0), target));
+            references.extend(related);
+            units.push(unit.1);
+            rows.push(row);
+        }
+    }
+    let mut names = NameSources::default();
+    names.nodes.extend(
+        orch_authz::resources::address_name_sources(conn, &units)
+            .await
+            .map_err(ApiError::internal)?,
+    );
+    let (names, name_facts) =
+        super::native::names(ctx, conn, caller, &sources::RUNTIMES, names).await?;
+    Ok((
+        PreparedRuntimes { rows, names },
+        vec![
+            super::native::collection(Source::Results, results),
+            super::native::collection(Source::References, references),
+            name_facts,
+        ],
+    ))
+}
+async fn runtime_views(
+    ctx: &Ctx,
+    conn: &mut Conn,
+    prepared: &PreparedRuntimes,
+) -> ApiResult<Vec<Runtime>> {
+    let rows = prepared.rows.clone();
     let machine_ids: Vec<Id> = rows.iter().filter_map(|row| row.machine_id).collect();
     let environment_ids: Vec<Id> = rows.iter().filter_map(|row| row.environment_id).collect();
     let provider_ids: Vec<Id> = rows.iter().filter_map(|row| row.provider_id).collect();
-    let machines = machine_refs(&ctx.app, &mut conn, &machine_ids).await?;
-    let environments = environment_refs(
-        &mut conn,
+    let machines = machine_refs(&ctx.app, conn, &machine_ids).await?;
+    let environments = environment_refs_with_names(
+        conn,
         &environment_ids,
         &[],
         orch_types::Time::new(ctx.now),
+        prepared.names.limited.then_some(&prepared.names),
     )
     .await?;
-    let providers = provider_refs(&mut conn, &provider_ids, &[]).await?;
+    let providers = provider_refs_with_names(
+        conn,
+        &provider_ids,
+        &[],
+        prepared.names.limited.then_some(&prepared.names),
+    )
+    .await?;
     let runtime_ids: Vec<Id> = rows.iter().map(|row| row.id).collect();
-    let networks =
-        crate::routes::environments::network::of_runtimes(&mut conn, &runtime_ids).await?;
+    let networks = crate::routes::environments::network::of_runtimes(conn, &runtime_ids).await?;
     let updates = ctx
         .app
         .engine
-        .pending_runtime_updates(&mut conn, &runtime_ids)
+        .pending_runtime_updates(conn, &runtime_ids)
         .await
         .map_err(ApiError::internal)?;
     rows.into_iter()

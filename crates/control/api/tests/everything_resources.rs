@@ -6,7 +6,13 @@
 )]
 
 mod places;
+mod rig;
 mod support;
+
+#[path = "everything_resources/figures_scopes.rs"]
+mod figures_scopes;
+#[path = "everything_resources/library_people_scopes.rs"]
+mod library_people_scopes;
 
 use orch_access_contract::{decisions::ObjectRef, permissions::ResourceKind};
 use orch_api_contract::{
@@ -77,6 +83,71 @@ async fn read(world: &World, by: &Who, query: &EverythingListQuery) -> Page<Ever
         .send()
         .await
         .ok()
+}
+
+#[tokio::test]
+async fn every_resource_row_carries_its_stored_home_and_keeps_availability_context_explicit() {
+    let world = World::new().await;
+    let owner = person(&world, "grouping-owner").await;
+    let root = make_org(&world, &owner, "Grouping home", "grouping-home")
+        .await
+        .base
+        .id;
+    // Read Machines before Hosts, whose enrolled facade contributes another Machine row.
+    for kind in [
+        "machine",
+        "provider",
+        "agent",
+        "environment",
+        "template",
+        "mcp_server",
+        "mount",
+        "skill",
+        "host",
+    ] {
+        let id = resource(&world, &owner, root, kind, &format!("grouped-{kind}")).await;
+        let mut ask = query(kind);
+        ask.resource_details = None;
+        let page = read(&world, &owner, &ask).await;
+        let row = page
+            .items
+            .iter()
+            .find(|row| row.id == id.to_string())
+            .unwrap();
+        let grouping = row.grouping.as_ref().unwrap();
+        assert_eq!(grouping.home.as_ref().unwrap().id, root, "{kind}");
+        assert!(
+            grouping.availability.is_empty(),
+            "no execution machine was judged"
+        );
+        let wire = serde_json::to_value(row).unwrap();
+        assert_eq!(wire["home"]["id"], root.to_string());
+        assert_eq!(wire["availability"], serde_json::json!([]));
+        assert!(wire.get("origin_machine").is_some());
+        let detailed = read(&world, &owner, &query(kind)).await;
+        let full = detailed
+            .items
+            .iter()
+            .find(|row| row.id == id.to_string())
+            .unwrap();
+        let full = serde_json::to_value(full.resource.as_ref().unwrap()).unwrap();
+        let full = &full["value"];
+        assert_eq!(full["home"]["id"], root.to_string(), "{kind} picker home");
+        assert!(full.get("origin_machine").is_some(), "{kind} picker origin");
+        assert_eq!(
+            full["availability"],
+            serde_json::json!([]),
+            "{kind} has no execution context"
+        );
+        if kind == "host" {
+            let machine: Id = sqlx::query_scalar("SELECT machine_id FROM hosts WHERE id=$1")
+                .bind(id)
+                .fetch_one(&world.db.pool)
+                .await
+                .unwrap();
+            assert_eq!(grouping.origin_machine.as_ref().unwrap().id, machine);
+        }
+    }
 }
 
 #[tokio::test]
@@ -533,11 +604,9 @@ async fn every_resource_view_nests_owned_managed_use_and_view_rows_before_pagina
     let world = World::new().await;
     let reader = person(&world, "library-reader").await;
     let giver = person(&world, "library-giver").await;
-    let root = make_org(&world, &reader, "Library", "library")
-        .await
-        .base
-        .id;
-    join(&world, root, root, &giver, "viewer", &reader).await;
+    // The reader must not inherit Interactor from owning this resource home.
+    let root = make_org(&world, &giver, "Library", "library").await.base.id;
+    join(&world, root, root, &reader, "viewer", &giver).await;
     for kind in [
         "provider",
         "agent",
@@ -552,17 +621,11 @@ async fn every_resource_view_nests_owned_managed_use_and_view_rows_before_pagina
         let managed = resource(&world, &giver, root, kind, &format!("managed-{kind}")).await;
         let view = resource(&world, &giver, root, kind, &format!("view-{kind}")).await;
         let prefix = if kind == "mcp_server" { "mcp" } else { kind };
-        let use_row = if kind == "environment" {
-            None
-        } else {
-            Some(resource(&world, &giver, root, kind, &format!("use-{kind}")).await)
-        };
+        // Use is distinct from View for every kind, including environments.
+        let used = resource(&world, &giver, root, kind, &format!("use-{kind}")).await;
         {
             let mut conn = world.conn().await;
-            for (id, level) in [(managed, "manage"), (view, "view")]
-                .into_iter()
-                .chain(use_row.map(|id| (id, "use")))
-            {
+            for (id, level) in [(managed, "manage"), (view, "view"), (used, "use")] {
                 orch_db::queries::access::testing::add_entry(
                     &mut conn,
                     &orch_db::queries::access::PageKey::new(kind, id, "live"),
@@ -579,10 +642,8 @@ async fn every_resource_view_nests_owned_managed_use_and_view_rows_before_pagina
         for (scope, expected) in [
             (ProviderListScope::Mine, vec![own]),
             (ProviderListScope::Managed, vec![own, managed]),
-            (
-                ProviderListScope::Viewable,
-                [vec![own, managed, view], use_row.into_iter().collect()].concat(),
-            ),
+            (ProviderListScope::Viewable, vec![own, managed, used, view]),
+            (ProviderListScope::Usable, vec![own, managed, used]),
         ] {
             let page = read(
                 &world,
@@ -594,26 +655,28 @@ async fn every_resource_view_nests_owned_managed_use_and_view_rows_before_pagina
                 },
             )
             .await;
+            if kind == "environment" && scope == ProviderListScope::Viewable {
+                let view_id = view.to_string();
+                let row = page.items.iter().find(|row| row.id == view_id).unwrap();
+                let Some(EverythingResource::Environment(environment)) = row.resource.as_ref()
+                else {
+                    panic!("the View-only environment has its readable resource projection");
+                };
+                let permissions = &environment.access.permissions;
+                assert!(permissions.iter().any(|p| p == "environment.view"));
+                assert!(
+                    !permissions
+                        .iter()
+                        .any(|p| p == "environment.use" || p == "environment.manage"),
+                    "View-only fixture must not inherit Use or Manage: {permissions:?}"
+                );
+            }
             let got: std::collections::HashSet<_> = page.items.into_iter().map(|r| r.id).collect();
             assert_eq!(
                 got,
                 expected.into_iter().map(|id| id.to_string()).collect(),
                 "{kind} {scope:?}"
             );
-        }
-        if let Some(used) = use_row {
-            let page = read(
-                &world,
-                &reader,
-                &EverythingListQuery {
-                    resource_view: Some(ProviderListScope::Usable),
-                    limit: Some(50),
-                    ..query(kind)
-                },
-            )
-            .await;
-            assert_eq!(page.items.len(), 3, "{kind}: mine, managed and use");
-            assert!(page.items.iter().any(|r| r.id == used.to_string()));
         }
     }
 }

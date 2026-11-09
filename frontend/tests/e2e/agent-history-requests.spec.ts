@@ -44,7 +44,7 @@ async function observe(browser: Browser, address: string, width: number, surface
     const writes = surface === 'setting' ? await historySetting(page) : [];
     if (surface === 'check') await historyBuilds(page);
     const provider = surface === 'provider' ? await programExitProvider() : undefined;
-    const path = surface === 'timeline' ? `/thread/${ACME.mainThread}` : surface === 'setting' ? '/org/acme.research/settings/policies' : surface === 'provider' && provider !== undefined ? provider.path : '/admin/harnesses';
+    const path = surface === 'timeline' ? `/thread/${ACME.mainThread}` : surface === 'setting' ? '/org/acme.research/settings/defaults' : surface === 'provider' && provider !== undefined ? provider.path : '/admin/harnesses';
     const ready = async () => {
       if (surface === 'timeline') await expect(page.locator('[data-item="existing-person"]')).toBeVisible();
       else if (surface === 'setting') await expect(page.locator(`[data-setting="${HISTORY_KEY}"]`).getByRole('spinbutton')).toHaveValue('7');

@@ -8,7 +8,12 @@ rust-version.workspace = true
 repository.workspace = true
 publish.workspace = true
 
+[features]
+default = []
+test-observers = ["orch-link/test-observers"]
+
 [dependencies]
+blake3.workspace = true
 argon2.workspace = true
 async-trait.workspace = true
 axum.workspace = true
@@ -61,6 +66,7 @@ orch-types.workspace = true
 orch-worker-core.workspace = true
 p256.workspace = true  # the registry's signature of an npm package version
 rand.workspace = true
+regex.workspace = true
 rustix.workspace = true
 # The agent programs' release channels are read from here (a mirror where the server cannot reach the vendors).
 reqwest.workspace = true

@@ -5,6 +5,8 @@ import { useRef, useState } from 'react';
 import { useTranslation } from 'react-i18next';
 
 import { downloadImportReport, importKeys, importQuery, importReportQuery } from '@/api/imports';
+import { ADMIN_QUERY, queryAuthorityAllows } from '@/api/queryAuthority';
+import { AsAdminMark } from '@/ui/AsAdminMark';
 import { client } from '@/api/client';
 import { isPlainClick } from '@/features/chat/open';
 import { canSaveImportReport, chooseImportReportFile } from '@/features/people/importReportFile';
@@ -44,21 +46,21 @@ function reportFilter(filter: ReportFilter): ImportReportListQuery {
   return {};
 }
 
-export function ImportReport({ id, onOpen }: { id: string; onOpen?: () => void }) {
+export function ImportReport({ id, onOpen, inspectOnly = false }: { id: string; onOpen?: () => void; inspectOnly?: boolean }) {
   const { t } = useTranslation();
   const locale = useAppearance((state) => state.locale);
   const cache = useQueryClient();
   const owner = useRef({ user: client.session.getState().userId, reader: client.session.getState().readerVersion ?? 0 });
   const owns = () => {
     const session = client.session.getState();
-    return session.userId === owner.current.user && (session.readerVersion ?? 0) === owner.current.reader;
+    return session.userId === owner.current.user && (session.readerVersion ?? 0) === owner.current.reader && (!inspectOnly || queryAuthorityAllows(cache, ADMIN_QUERY.meta));
   };
   const [savedFilter, rememberFilter] = useViewChoice<string>('import-report', 'filter', 'all', id);
   const [filter, setFilter] = useState<ReportFilter>(() => REPORT_FILTERS.includes(savedFilter as ReportFilter) ? savedFilter as ReportFilter : 'all');
   const [undoing, setUndoing] = useState(false);
   const [received, setReceived] = useState<number | null>(null);
-  const record = useQuery(importQuery(id));
-  const reportOptions = importReportQuery(id, reportFilter(filter));
+  const record = useQuery(importQuery(id, inspectOnly));
+  const reportOptions = importReportQuery(id, reportFilter(filter), inspectOnly);
   const report = useInfiniteQuery({ ...reportOptions, maxPages: 1, enabled: record.data !== undefined && record.data.state !== 'pending' });
   const download = useMutation({
     mutationFn: async (format: ImportReportFormat) => {
@@ -76,7 +78,7 @@ export function ImportReport({ id, onOpen }: { id: string; onOpen?: () => void }
     },
     onSettled: () => { if (owns()) setReceived(null); },
   });
-  if (record.isPending) return <SkeletonRows rows={4} />;
+  if (record.isPending) return <SkeletonRows read={record} rows={4} />;
   if (record.isError) return <ErrorState compact error={record.error} onRetry={() => void record.refetch()} />;
   const item = record.data;
   const columns: Column<ImportReportRow>[] = [
@@ -91,6 +93,7 @@ export function ImportReport({ id, onOpen }: { id: string; onOpen?: () => void }
   ];
   const rows = report.data?.pages.flatMap((page) => page.items) ?? [];
   return <div className="flex min-w-0 flex-col gap-4">
+    {item.admin_access !== undefined && item.admin_access !== null && <AsAdminMark of={item.admin_access.place} />}
     <p className="text-sm text-text-muted tabular-nums">{t(`importWizard.report.${STATE_WORDS[item.state]}`)} · {importActionSummary(item.actions, t, locale)}</p>
     {item.failure !== null && <ErrorAlert error={item.failure} message={item.failure.code === 'internal' ? item.failure.message : importReason(item.failure, t, locale)} />}
     <ImportReasons reasons={item.losses} label={t('importWizard.review.notImported')} />
@@ -105,17 +108,17 @@ export function ImportReport({ id, onOpen }: { id: string; onOpen?: () => void }
           { id: 'csv', label: t('importWizard.report.downloadCsv'), disabled: canSaveImportReport() ? false : t('importWizard.report.directSaveNeeded'), onSelect: () => download.mutate('csv') },
         ]} />
       {item.state !== 'undone' && item.node !== null && !item.node.redacted && item.node.name !== null && <Button asChild><PlaceLink place={{ id: item.node.id, kind: item.node.kind }} onClick={(event) => { if (isPlainClick(event)) onOpen?.(); }}>{t('importWizard.report.openPlace', { place: item.node.name })}</PlaceLink></Button>}
-      {(item.state === 'done' || item.state === 'failed' || item.state === 'cancelled') && <Button variant="danger-ghost" onClick={() => setUndoing(true)}>{t('importWizard.undo.action')}</Button>}
+      {!inspectOnly && (item.state === 'done' || item.state === 'failed' || item.state === 'cancelled') && <Button variant="danger-ghost" onClick={() => setUndoing(true)}>{t('importWizard.undo.action')}</Button>}
     </div>
     {received !== null && <p role="status" className="text-sm text-text-muted tabular-nums">{t('importWizard.report.downloading', { bytes: formatBytes(received, locale) })}</p>}
     {download.isError && <ErrorAlert error={download.error} />}
-    {item.state === 'pending' ? <StateLine compact message={t('importWizard.report.preparing')} /> : report.isPending ? <SkeletonRows rows={4} />
+    {item.state === 'pending' ? <StateLine compact message={t('importWizard.report.preparing')} /> : report.isPending ? <SkeletonRows read={report} rows={4} />
       : report.isError && rows.length === 0 ? <ErrorState compact error={report.error} onRetry={() => void report.refetch()} />
       : rows.length === 0 ? <StateLine compact message={t('importWizard.report.empty')} />
       : <Table key={filter} label={t('importWizard.report.title')} columns={columns} rows={rows} rowKey={(row) => String(row.position)} boundedIdentity virtual />}
     <ImportPagination first={(report.data?.pageParams[0] !== null && report.data?.pageParams[0] !== undefined)} more={report.hasNextPage} loading={report.isFetching}
       error={report.isFetchNextPageError ? report.error : null} onMore={() => void report.fetchNextPage()} onFirst={() => void cache.resetQueries({ queryKey: reportOptions.queryKey, exact: true })} />
-    {undoing && <ImportUndo id={id} onClose={() => setUndoing(false)} onStarted={(job) => {
+    {!inspectOnly && undoing && <ImportUndo id={id} onClose={() => setUndoing(false)} onStarted={(job) => {
       watchImport(job, item.node?.id ?? null, false, true, id);
       void cache.invalidateQueries({ queryKey: importKeys.one(id), exact: true });
       void cache.invalidateQueries({ queryKey: importKeys.mine(), exact: true });

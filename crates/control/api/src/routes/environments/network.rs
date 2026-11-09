@@ -14,6 +14,64 @@ use orch_db::queries::network::{self as rows, RuntimeNetworkRow};
 use orch_types::{Id, Json};
 
 use crate::middleware::requests::ApiResult;
+use crate::routes::access::page::NameBounds;
+
+/// One ordinary network resolution before its optional live source names are projected.
+#[derive(Clone)]
+pub(crate) struct PreparedNetwork {
+    state: NetworkState,
+    sources: Option<Vec<(Option<Id>, Vec<String>)>>,
+}
+
+impl PreparedNetwork {
+    pub(crate) fn preserves_sources(&self, fresh: &Self) -> bool {
+        self.sources == fresh.sources
+    }
+
+    pub(crate) fn name_sources(&self) -> impl Iterator<Item = Id> + '_ {
+        self.sources.iter().flatten().filter_map(|(node, _)| *node)
+    }
+
+    pub(super) fn through_thread(&self) -> NetworkState {
+        cut(self.state.clone())
+    }
+
+    pub(crate) async fn project(
+        &self,
+        conn: &mut Conn,
+        principal: Option<&Principal>,
+        bounds: Option<&NameBounds>,
+    ) -> ApiResult<NetworkState> {
+        let Some(sources) = &self.sources else {
+            return Ok(self.state.clone());
+        };
+        let nodes: Vec<Id> = self.name_sources().collect();
+        let refs = match (principal, bounds) {
+            (Some(principal), Some(bounds)) => bounds.refs(conn, principal, &nodes).await?,
+            (Some(principal), None) => {
+                crate::routes::nodes::view::refs(
+                    conn,
+                    principal,
+                    &nodes,
+                    orch_authz::Policy::default(),
+                )
+                .await?
+            }
+            (None, _) => HashMap::new(),
+        };
+        let mut state = self.state.clone();
+        state.sources = sources
+            .iter()
+            .map(
+                |(node, hosts)| orch_api_contract::environment::NetworkStateSource {
+                    scope: node.and_then(|id| refs.get(&id).filter(|node| !node.redacted).cloned()),
+                    hosts: hosts.clone(),
+                },
+            )
+            .collect();
+        Ok(state)
+    }
+}
 
 /// What a template's `network` member asks for: the network it stands on and its egress.
 fn asked(template_network: Option<&Json>) -> (UnitNetworkMode, EgressMode) {
@@ -90,6 +148,20 @@ pub(crate) async fn of_environments(
     ids: &[Id],
     _connected: &[Id],
 ) -> ApiResult<HashMap<Id, NetworkState>> {
+    let prepared = prepare_environments(conn, ids).await?;
+    let mut states = HashMap::new();
+    for (id, network) in prepared {
+        states.insert(id, network.project(conn, Some(principal), None).await?);
+    }
+    Ok(states)
+}
+
+/// The same current runtime/policy producer, retaining only actual value-source identities
+/// until the operation admits its optional source labels on this exact snapshot connection.
+pub(super) async fn prepare_environments(
+    conn: &mut Conn,
+    ids: &[Id],
+) -> ApiResult<HashMap<Id, PreparedNetwork>> {
     let found = rows::of_environments(conn, ids).await?;
     let machines: HashMap<_, _> = orch_db::queries::environment_facts::of_many(conn, ids)
         .await?
@@ -99,9 +171,12 @@ pub(crate) async fn of_environments(
     for id in ids {
         let row = found.iter().find(|row| row.environment_id == Some(*id));
         let state = if machines.get(id).is_some_and(|m| m.attaches()) {
-            state_of(None, true)
+            PreparedNetwork {
+                state: state_of(None, true),
+                sources: Some(Vec::new()),
+            }
         } else {
-            projected(conn, row, Some(principal)).await?
+            prepare(conn, row).await?
         };
         states.insert(*id, state);
     }
@@ -135,14 +210,29 @@ async fn projected(
     row: Option<&RuntimeNetworkRow>,
     principal: Option<&Principal>,
 ) -> ApiResult<NetworkState> {
+    prepare(conn, row)
+        .await?
+        .project(conn, principal, None)
+        .await
+}
+
+async fn prepare(conn: &mut Conn, row: Option<&RuntimeNetworkRow>) -> ApiResult<PreparedNetwork> {
     let mut state = state_of(row, false);
     let Some(row) = row else {
-        return Ok(state);
+        return Ok(PreparedNetwork {
+            state,
+            sources: None,
+        });
     };
     let place = match (row.environment_id, row.provider_id) {
         (Some(id), _) => orch_settings::Place::Environment(id),
         (_, Some(id)) => orch_settings::Place::Provider(id),
-        _ => return Ok(state),
+        _ => {
+            return Ok(PreparedNetwork {
+                state,
+                sources: None,
+            });
+        }
     };
     let view = orch_settings::resolve(
         conn,
@@ -165,28 +255,11 @@ async fn projected(
         state.allowed_hosts = policy.allowed_hosts;
         state.revision = policy.revision;
     }
-    let nodes: Vec<Id> = view
-        .resolved
-        .parts
-        .iter()
-        .filter_map(|part| part.source.node)
-        .collect();
-    let refs = match principal {
-        Some(principal) => {
-            crate::routes::nodes::view::refs(conn, principal, &nodes, orch_authz::Policy::default())
-                .await?
-        }
-        None => HashMap::new(),
-    };
-    state.sources = view
+    let sources = view
         .resolved
         .parts
         .into_iter()
         .map(|part| {
-            let scope = part
-                .source
-                .node
-                .and_then(|id| refs.get(&id).filter(|node| !node.redacted).cloned());
             let hosts = part
                 .value
                 .as_array()
@@ -201,10 +274,13 @@ async fn projected(
                 })
                 .map(str::to_owned)
                 .collect();
-            orch_api_contract::environment::NetworkStateSource { scope, hosts }
+            (part.source.node, hosts)
         })
         .collect();
-    Ok(state)
+    Ok(PreparedNetwork {
+        state,
+        sources: Some(sources),
+    })
 }
 
 /// The actual and requested network shown before a replacement is accepted.
@@ -213,8 +289,30 @@ pub(crate) async fn planned(
     principal: &Principal,
     recipe: &orch_engine::updates::Recipe,
 ) -> ApiResult<NetworkState> {
+    planned_bounded(conn, principal, recipe, None).await
+}
+
+/// The same native planned policy with optional operation-local protected scope names.
+pub(crate) async fn planned_bounded(
+    conn: &mut Conn,
+    principal: &Principal,
+    recipe: &orch_engine::updates::Recipe,
+    bounds: Option<&NameBounds>,
+) -> ApiResult<NetworkState> {
+    prepare_planned(conn, recipe)
+        .await?
+        .project(conn, Some(principal), bounds)
+        .await
+}
+
+/// Current policy and factual value-source nodes, before their names are formatted.
+pub(crate) async fn prepare_planned(
+    conn: &mut Conn,
+    recipe: &orch_engine::updates::Recipe,
+) -> ApiResult<PreparedNetwork> {
     let rows = rows::of_runtimes(conn, &[recipe.old]).await?;
-    let mut state = projected(conn, rows.first(), Some(principal)).await?;
+    let mut prepared = prepare(conn, rows.first()).await?;
+    let state = &mut prepared.state;
     state.required_mode = match recipe.network_policy.mode {
         orch_driver_contract::network::EgressMode::Open => EgressMode::Open,
         orch_driver_contract::network::EgressMode::Restricted => EgressMode::Restricted,
@@ -225,7 +323,7 @@ pub(crate) async fn planned(
         state.reason = Some("The replacement must verify this policy before work resumes; a failed restriction keeps the previous open unit stopped".to_owned());
     }
     state.revision = recipe.network_policy.revision.clone();
-    Ok(state)
+    Ok(prepared)
 }
 
 /// What a reader who reaches an environment only through a thread sees of its network: the mode and whether it
