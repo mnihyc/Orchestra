@@ -1,3 +1,5 @@
+import { homeMoveEntries } from '@/features/duplicate/move';
+import { resourceDuplicateEntries } from '@/features/duplicate/target';
 /** A skill's page: its latest version and where it came from, Update from there, Upload a version; its versions with who made each and when, and their files; its draft; and who may see, use and manage it. */
 import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query';
 import { useNavigate } from '@tanstack/react-router';
@@ -5,7 +7,7 @@ import { GraduationCap, RefreshCw, Trash2, Upload } from 'lucide-react';
 import { useState } from 'react';
 import { useTranslation, Trans } from 'react-i18next';
 import { deleteSkill, reimportSkill, skillKey, skillQuery, skillVersionFileQuery, skillVersionQuery, skillVersionsKey, skillVersionsQuery, updateSkill } from '@/api/skills';
-import { entriesOf, shareAct } from '@/features/resources/acts';
+import { copyLinkAct, entriesOf, shareAct } from '@/features/resources/acts';
 import { useResourceCleanup } from '@/features/storage/acts';
 import { ResourceTabs as Tabs, ResourceHeadingActs as HeadingActs } from '@/features/resources/DetailSections';
 import { Facts } from '@/features/resources/Facts';
@@ -46,6 +48,7 @@ export function OriginWords({ origin }: { origin: SkillOrigin }) {
     case 'git': return <span className="break-all"><Trans i18nKey="resourceDetails.skill.origin.gitReference" values={{ repository: origin.repository, reference: origin.reference }} components={{ repository: <code />, reference: <code /> }} /></span>;
     case 'url': return <span className="break-all">{t('resourceDetails.skill.origin.url', { url: origin.url })}</span>;
     case 'draft': return <span>{t('resourceDetails.skill.origin.draft')}</span>;
+    case 'copy': return <span>{t('resourceDetails.skill.origin.copy')}</span>;
   }
 }
 
@@ -63,14 +66,14 @@ export function SkillScreen({ id, tab, onTab }: { id: string; tab?: SkillTab; on
   const reimport = useMutation({ mutationFn: () => reimportSkill(id), onSuccess: () => { void cache.invalidateQueries({ queryKey: skillKey(id) }); void cache.invalidateQueries({ queryKey: skillVersionsKey(id) }); } });
   const toggle = useMutation({ mutationFn: (enabled: boolean) => updateSkill(id, { enabled, expected_revision: query.data?.revision ?? 0 }), onSuccess: kept });
   const remove = useMutation({ mutationFn: () => deleteSkill(id), onSuccess: () => { void navigate({ to: '/resources/skills' }); } });
-  if (query.data === undefined) return query.error === null ? <SkeletonRows rows={6} /> : <ErrorState error={query.error} onRetry={() => void query.refetch()} />;
+  if (query.data === undefined) return query.error === null ? <SkeletonRows read={query} rows={6} /> : <ErrorState error={query.error} onRetry={() => void query.refetch()} />;
   const skill = query.data;
   const target = { kind: 'skill' as const, id, name: skill.name };
   const manage = holds(skill.access, 'skill.manage');
   const admin = adminSpec(skill, 'skill.manage');
   const shown = tab ?? localTab;
   const latest = skill.latest;
-  const menu = entriesOf([shareAct(t, target, skill.access)], [manage ? { id: 'delete', label: t('resourceDetails.remove'), icon: <Trash2 aria-hidden />, danger: true, run: () => setRemoving(true) } : null], [cleanup.act({ kind: 'skill', id }, manage)]);
+  const menu = [...homeMoveEntries(t, 'skill', skill, { draft: shown === 'draft' }), ...resourceDuplicateEntries(t, 'skill', skill, { draft: shown === 'draft' }), ...entriesOf([copyLinkAct(t, { kind: 'skill', id }), shareAct(t, target, skill.access)], [manage ? { id: 'delete', label: t('resourceDetails.remove'), icon: <Trash2 aria-hidden />, danger: true, run: () => setRemoving(true) } : null], [cleanup.act({ kind: 'skill', id }, manage)])];
   const add = manage ? { id: 'add-version', label: t('resourceDetails.skill.upload'), icon: <Upload aria-hidden />, run: () => setAdding(true) } : null;
   const facts = [
     { name: t('resources.home.label'), value: skill.home.name ?? t('access.place.hidden') },
@@ -124,9 +127,9 @@ function Versions({ skill }: { skill: Skill }) {
   const useFacts=useQuery({...libraryQuery(targets),enabled:versions.isSuccess&&targets.length>0});
   const factsByVersion=new Map(useFacts.data?.map((entry)=>[entry.target.version_id,entry] as const)??[]);
   const [open, setOpen] = useState<string | null>(null);
-  if (versions.data === undefined) return versions.error === null ? <SkeletonRows rows={4} /> : <ErrorState error={versions.error} onRetry={() => void versions.refetch()} />;
+  if (versions.data === undefined) return versions.error === null ? <SkeletonRows read={versions} rows={4} /> : <ErrorState error={versions.error} onRetry={() => void versions.refetch()} />;
   if (versions.data.items.length === 0) return <EmptyState compact title={t('resourceDetails.skill.noVersion')} />;
-  return <>{useFacts.isPending&&<SkeletonRows rows={1}/>} {useFacts.isError&&<ErrorState compact error={useFacts.error} onRetry={()=>void useFacts.refetch()}/>}<ul aria-label={t('resourceDetails.skill.versions')} className="flex flex-col divide-y divide-border rounded-lg border border-border">
+  return <>{useFacts.isPending&&<SkeletonRows read={useFacts} rows={1}/>} {useFacts.isError&&<ErrorState compact error={useFacts.error} onRetry={()=>void useFacts.refetch()}/>}<ul aria-label={t('resourceDetails.skill.versions')} className="flex flex-col divide-y divide-border rounded-lg border border-border">
     {versions.data.items.map((version: SkillVersionInfo) => {const entry=factsByVersion.get(version.id);return <li key={version.id} className="flex min-w-0 flex-col gap-2 px-3 py-2">
       <button type="button" aria-expanded={open === version.id} onClick={() => setOpen(open === version.id ? null : version.id)}
         className="focus-inset flex min-w-0 flex-wrap items-center gap-x-3 gap-y-1 rounded-sm text-left text-sm">
@@ -147,7 +150,7 @@ function VersionFiles({ skillId, versionId }: { skillId: string; versionId: stri
   const { t } = useTranslation();
   const version = useQuery(skillVersionQuery(skillId, versionId));
   const [selected, setSelected] = useState<string | null>(null);
-  if (version.data === undefined) return version.error === null ? <SkeletonRows rows={3} /> : <ErrorState error={version.error} onRetry={() => void version.refetch()} />;
+  if (version.data === undefined) return version.error === null ? <SkeletonRows read={version} rows={3} /> : <ErrorState error={version.error} onRetry={() => void version.refetch()} />;
   const path = selected ?? version.data.files.find((file) => file.path === 'SKILL.md')?.path ?? version.data.files[0]?.path ?? null;
   return <div className="grid min-w-0 gap-3 md:grid-cols-[minmax(12rem,16rem)_minmax(0,1fr)]">
     <ul aria-label={t('resourceDetails.skill.files')} className="flex flex-col rounded-lg border border-border">
@@ -166,7 +169,7 @@ function VersionFiles({ skillId, versionId }: { skillId: string; versionId: stri
 function VersionFile({ skillId, versionId, path }: { skillId: string; versionId: string; path: string }) {
   const { t } = useTranslation();
   const content = useQuery(skillVersionFileQuery(skillId, versionId, path));
-  if (content.data === undefined) return content.error === null ? <SkeletonRows rows={6} /> : <ErrorState error={content.error} onRetry={() => void content.refetch()} />;
+  if (content.data === undefined) return content.error === null ? <SkeletonRows read={content} rows={6} /> : <ErrorState error={content.error} onRetry={() => void content.refetch()} />;
   if (content.data.text === null) return <EmptyState compact title={t('resourceDetails.skill.binary')} />;
   const language = languageOf(path, content.data.text.split('\n', 1)[0] ?? null);
   return <div className="h-96 min-w-0 overflow-hidden rounded-lg border border-border">

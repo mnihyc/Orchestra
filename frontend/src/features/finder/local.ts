@@ -257,7 +257,7 @@ export function helpEntries(articles: readonly Article[]): Entry<HelpEntry>[] {
   const all: HelpEntry[] = articles.filter(articleAvailable).flatMap((article) => [{ article }, ...article.headings.map((heading) => ({ article, heading }))]);
   return entriesOf(all, (entry) =>
     entry.heading === undefined
-      ? { title: entry.article.title, words: entry.article.keywords, detail: '' }
+      ? { title: entry.article.title, words: entry.article.keywords, detail: entry.article.summary ?? '' }
       : { title: entry.heading.text, words: [entry.article.title, ...(entry.heading.keywords ?? [])], detail: '' },
   );
 }
@@ -274,6 +274,7 @@ export function helpCommands(articles: readonly Article[], open: (article: strin
 export function helpRows(entries: readonly Entry<HelpEntry>[], query: string, env: Env, open: (article: string, heading?: string) => void): Scored[] {
   return answer(entries, query).map(({ item, score }) => {
     const title = item.heading?.text ?? item.article.title;
+    const summary = item.article.summary?.trim();
     return {
       score,
       row: {
@@ -281,7 +282,7 @@ export function helpRows(entries: readonly Entry<HelpEntry>[], query: string, en
         group: 'help',
         title,
         marks: markedRanges(title, query),
-        detail: item.heading === undefined ? env.t('finder.help.article') : item.article.title,
+        detail: summary ? (item.heading === undefined ? summary : `${item.article.title} · ${summary}`) : item.heading === undefined ? env.t('finder.help.article') : item.article.title,
         icon: item.heading === undefined ? BookOpen : CircleQuestionMark,
         note: env.t('finder.help.articleNote'),
         beside: true,

@@ -20,10 +20,12 @@ test('explicit enrollment opens one Programs workflow for agent adapters and pro
   if(token===undefined)throw new Error('No token in the displayed command');
   const connected=await fetch(`${DOUBLE}/__double/resources/enroll`,{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({token,name:'Programs machine'})});
   expect(connected.ok).toBeTruthy();
-  await expect(enrollment.getByText('Programs machine has enrolled')).toBeVisible();
-  await enrollment.getByRole('link',{name:'Open',exact:true}).click();
+  await expect(enrollment).toHaveCount(0);
+  await expect(page.getByRole('heading',{name:'Programs machine',level:1,exact:true})).toBeVisible();
   await page.getByRole('tab',{name:/^Registered/u}).click();
-  await page.getByRole('link',{name:'Programs',exact:true}).click();
+  const sections=page.getByRole('tabpanel',{name:'Registered here',exact:true}).getByRole('navigation',{name:'Registered here',exact:true}).filter({has:page.getByRole('link',{name:'Programs',exact:true,includeHidden:true})});
+  await sections.getByRole('combobox',{name:'Registered here',exact:true}).click();
+  await page.getByRole('option',{name:'Programs',exact:true}).click();
   for(const [contract,name,command] of [['Agent adapter','Local agent','/opt/local-agent --stdio'],['Provider source','GPU source','/opt/gpu-source --device 0']] as const){
     await page.getByRole('combobox',{name:'Contract',exact:true}).click();
     await page.getByRole('option',{name:new RegExp(contract,'u')}).click();
@@ -44,11 +46,29 @@ test('explicit enrollment opens one Programs workflow for agent adapters and pro
 
 test('an environment read failure says what could not be read and Retry recovers its stored view',async({page})=>{
   await signIn(page,PEOPLE.ada);
-  const target=new RegExp(`/api/v1/environments/${RUNS_ON.workspace}(?:\\?.*)?$`,'u');
+  const target=new RegExp(`/api/v1/environments/${RUNS_ON.workspace}/sync(?:\\?.*)?$`,'u');
+  const record=(value:unknown):value is Record<string,unknown>=>typeof value==='object' && value!==null && !Array.isArray(value);
+  let unavailable=true;
+  // A valid native row correctly heals an HTTP-only failure; this outage owns both projections.
+  await page.routeWebSocket(/\/api\/v1\/ws(?:\?|$)/u,(socket)=>{
+    const server=socket.connectToServer();
+    server.onMessage((raw)=>{
+      const frame:unknown=JSON.parse(String(raw));
+      if(unavailable && record(frame) && (
+        frame.op==='sync' && frame.feed===`env:${RUNS_ON.workspace}` ||
+        frame.op==='event' && frame.feed===`resource:environment:${RUNS_ON.workspace}` ||
+        frame.op==='event' && frame.feed==='user' && record(frame.data) && frame.data.what==='resources' && frame.data.kind==='environment' && frame.data.id===RUNS_ON.workspace
+      ))return;
+      socket.send(raw);
+    });
+  });
   await page.route(target,(route)=>route.fulfill({status:503,contentType:'application/problem+json',json:{type:'orch:error:source.offline',code:'source.offline',title:'Read failed',status:503,detail:'Stored report unavailable',request_id:'stored-read'}}));
+  const failed=page.waitForResponse(target);
   await page.goto(`/resources/environments/${RUNS_ON.workspace}`);
+  expect((await failed).status()).toBe(503);
   await expect(page.getByRole('alert')).toContainText('Could not read this environment');
-  await page.unroute(target);await page.getByRole('button',{name:'Try again',exact:true}).click();
+  await page.unroute(target);const retried=page.waitForResponse(target);await page.getByRole('button',{name:'Try again',exact:true}).click();
+  expect((await retried).status()).toBe(200);unavailable=false;
   await expect(page.getByRole('heading',{name:'Workspace',level:1,exact:true})).toBeVisible();
 });
 

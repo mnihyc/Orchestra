@@ -4,6 +4,7 @@
  * that document: what they may not do is left out. The acts that need a dialog open it through the
  * one host of the frame, so that the dialog outlives the menu it was asked from.
  */
+import { linkTo, referenceTo } from '@/lib/links';
 import { useQuery } from '@tanstack/react-query';
 import { useNavigate } from '@tanstack/react-router';
 import type { TFunction } from 'i18next';
@@ -35,6 +36,7 @@ export interface DocMenuActions {
   export: () => void;
   requestExport: () => void;
   copyLink: () => void;
+  copyReference: () => void;
   remove: () => void;
   readme?: MenuEntry;
 }
@@ -65,6 +67,7 @@ export function docMenuEntries(doc: Pick<DocPlace, 'archived' | 'owner'>, held: 
   group(
     ...(access === undefined ? [] : [{ id: 'share', label: t('access.menu.share'), icon: <Share2 aria-hidden />, onSelect: act.share }]),
     ...exportEntries({ allowed: access === undefined ? null : holds(access, 'doc.export'), owner: doc.owner, where: 'row', onExport: act.export, onRequest: act.requestExport, t }),
+    { id: 'copy-reference', label: t('people.reference.copy'), onSelect: act.copyReference },
     { id: 'copy-link', label: t('places.menu.copyLink'), icon: <Copy aria-hidden />, onSelect: act.copyLink },
   );
   group(...(holds(access, 'doc.manage') ? [{ id: 'delete', label: t('places.menu.delete'), icon: <Trash2 aria-hidden />, danger: true, onSelect: act.remove }] : []));
@@ -80,7 +83,7 @@ function useDocMenu(doc: DocPlace): MenuEntry[] {
   const place = useQuery({ ...nodeQuery(held?.node.id ?? ''), enabled: held !== undefined }).data;
   const readme = useReadmeEntry(doc, place);
   const target = { kind: 'document' as const, id: doc.id, name: doc.title };
-  const copy = () => copyText(new URL(documentPath(doc.id), location.origin).href, t('common.linkCopied'));
+  const copy = () => copyText(linkTo({ kind: 'document', id: doc.id }), t('common.linkCopied'));
   return docMenuEntries(
     doc,
     held,
@@ -93,6 +96,7 @@ function useDocMenu(doc: DocPlace): MenuEntry[] {
       export: () => openExport(target),
       requestExport: () => requestExportAccess({ ...target, owner: doc.owner }),
       copyLink: () => void copy(),
+      copyReference: () => void copyText(referenceTo({ kind: 'document', id: doc.id, title: doc.title }), t('people.reference.copied')),
       remove: () => openNodeDialog({ type: 'delete-document', doc }),
       ...(readme === null ? {} : { readme }),
     },

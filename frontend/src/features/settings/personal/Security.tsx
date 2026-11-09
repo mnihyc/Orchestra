@@ -550,7 +550,7 @@ function Sessions() {
     <Section id="security-sessions" title={t('security.sessions.title')} lead={t('security.sessions.lead')}
       action={list.data?.some((session) => !session.current) === true ? <Button size="sm" disabled={end.isPending || others.isPending} onClick={() => setEndingOthers(true)}>{t('security.sessions.endOthers')}</Button> : undefined}>
       {list.isPending ? (
-        <SkeletonRows rows={2} />
+        <SkeletonRows read={list} rows={2} />
       ) : list.isError ? (
         <ErrorState compact error={list.error} retrying={list.isRefetching} onRetry={() => void list.refetch()} />
       ) : (
@@ -610,7 +610,7 @@ export function Security() {
   return (
     <PersonalFrame page="security" lead={t('security.lead')}>
       {me.isPending ? (
-        <SkeletonRows rows={4} />
+        <SkeletonRows read={me} rows={4} />
       ) : me.isError ? (
         <ErrorState error={me.error} retrying={me.isRefetching} onRetry={() => void me.refetch()} />
       ) : (

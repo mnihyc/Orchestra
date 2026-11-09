@@ -170,6 +170,8 @@ fn concurrent(provider: Id, subject: CapSubjectInput, amount: &str) -> CapInput 
         subject,
         split,
         models: None,
+        services: None,
+        purposes: None,
         tiers: None,
         harness_kinds: None,
         meter: CapMeter::Running,
@@ -344,6 +346,8 @@ async fn administering_a_private_provider_does_not_disclose_its_choice_usage() {
         .send()
         .await
         .ok()
+        .into_full()
+        .unwrap()
         .provider;
     assert!(provider.choice_usage.is_some());
     let administrative = world

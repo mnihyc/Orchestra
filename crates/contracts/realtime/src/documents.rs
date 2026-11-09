@@ -68,7 +68,7 @@ mod tests {
 
     fn document(seq: i64) -> Value {
         json!({
-            "id": DOC, "title": "Handbook", "description": "How we ship", "description_source": "user",
+            "id": DOC, "title": "Handbook", "description": "How we ship",
             "description_line": "How we ship",
             "node": { "id": "0199d1a8-7f3c-7a1e-8b3a-1c2d3e4f5a20", "kind": "topic", "name": "Plans", "redacted": false },
             "owner": person(), "owners": 1, "created_by": person(), "page": "follows", "seq": seq,

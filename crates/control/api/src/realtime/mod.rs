@@ -33,6 +33,9 @@
 //! not. Growing text is the one thing handed over in process, by the thread
 //! engine, to [`Realtime::sink`].
 
+#[cfg(test)]
+pub(crate) mod background_read_tests;
+
 pub mod background_watches;
 pub mod browsers;
 pub mod chats;
@@ -43,13 +46,18 @@ pub mod documents;
 pub mod environment_watches;
 pub mod environments;
 pub mod ephemeral;
+mod key_reads;
+
 #[cfg(test)]
 mod epoch_handoff_tests;
 #[cfg(test)]
 pub(crate) mod history_read_tests;
 mod machine_views;
+#[cfg(test)]
+mod origin_read_tests;
 mod personal_changes;
 pub mod presence;
+mod publication;
 pub mod raw_traffic;
 pub mod resource_changes;
 mod resource_health;
@@ -57,10 +65,14 @@ pub(crate) mod resource_rows;
 pub mod resources;
 pub mod rfb_filter;
 pub mod server;
+pub(crate) mod source_changes;
 pub mod subscriptions;
 pub mod sync;
 pub mod terminals;
 pub mod threads;
+pub(crate) mod ticket_origin;
+#[cfg(test)]
+mod ticket_scope_tests;
 pub mod topics;
 pub mod tree;
 pub mod usage;
@@ -261,6 +273,28 @@ pub(crate) struct Entry {
     pub(crate) waiting: Vec<LiveDelta>,
     /// Whether a task is passing it on.
     pub(crate) carrying: bool,
+    /// Internal readers wait on the same committed source and shared repair, without a feed grant.
+    pub(crate) changes: watch::Sender<Option<Seq>>,
+}
+
+impl Entry {
+    fn new() -> Self {
+        Self {
+            subs: Vec::new(),
+            notified: 0,
+            running: false,
+            dirty: false,
+            last: None,
+            streaming: None,
+            waiting: Vec::new(),
+            carrying: false,
+            changes: watch::channel(Some(0)).0,
+        }
+    }
+
+    pub(crate) fn unused(&self) -> bool {
+        self.subs.is_empty() && self.changes.receiver_count() == 0
+    }
 }
 
 #[derive(Debug, Default)]

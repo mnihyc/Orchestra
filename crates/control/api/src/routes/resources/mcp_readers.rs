@@ -1,37 +1,21 @@
 //! MCP presets listed with private permission-page destinations and read only with MCP View.
 
-use crate::middleware::authorization::{self, refusals};
 use crate::middleware::requests::{ApiError, ApiResult};
 use crate::registry::{Ctx, Registry};
-use crate::routes::nodes::view as node_view;
-use crate::routes::resources::view::{Holding, accesses, addresses, machine_refs};
 use orch_access_contract::permissions::{Permission, ResourceKind};
 use orch_api_contract::common::Listed;
 use orch_api_contract::resources::{self as api, McpServer};
 use orch_authz::nodes::Page;
 use orch_authz::{Policy, resources};
-use orch_types::{Id, Json};
+use orch_types::Id;
+
+mod operation;
 
 /// Binds the read requests, independently of the connectors that create or update presets.
 pub(super) fn mount(registry: &mut Registry) {
     registry
-        .on(api::McpServerList, list)
-        .on(api::McpServerGet, get);
-}
-
-#[derive(sqlx::FromRow)]
-struct Row {
-    id: Id,
-    name: String,
-    description: String,
-    org_id: Option<Id>,
-    home_id: Option<Id>,
-    owner_id: Option<Id>,
-    machine_id: Option<Id>,
-    spec: Json,
-    enabled: bool,
-    imported: bool,
-    revision: i64,
+        .on_with_optional_operation(api::McpServerList, operation::list, operation::read_list)
+        .on_with_optional_operation(api::McpServerGet, operation::get, operation::read_get);
 }
 
 pub(crate) async fn views(
@@ -40,87 +24,27 @@ pub(crate) async fn views(
     principal: &orch_authz::Principal,
     seen: &[resources::Seen],
 ) -> ApiResult<Vec<McpServer>> {
+    views_in(ctx, conn, principal, seen, None).await
+}
+
+async fn views_in(
+    ctx: &Ctx,
+    conn: &mut orch_db::Conn,
+    principal: &orch_authz::Principal,
+    seen: &[resources::Seen],
+    environment: Option<Id>,
+) -> ApiResult<Vec<McpServer>> {
     let ids: Vec<_> = seen.iter().map(|each| each.resource.id).collect();
-    let rows: Vec<Row> = sqlx::query_as("SELECT id,name,description,org_id,home_id,owner_id,machine_id,spec,enabled,imported,revision
-        FROM mcp_servers WHERE id = ANY($1) AND environment_id IS NULL AND deleted_at IS NULL ORDER BY id")
-        .bind(&ids).fetch_all(&mut *conn).await.map_err(orch_db::DbError::from)?;
-    let owners = refusals::user_refs(
-        conn,
-        &rows
-            .iter()
-            .filter_map(|row| row.owner_id)
-            .collect::<Vec<_>>(),
-    )
-    .await?;
-    let homes = node_view::refs(
+    let mut prepared = super::mcp::projection::prepare(
         conn,
         principal,
-        &rows
-            .iter()
-            .filter_map(|row| row.home_id)
-            .collect::<Vec<_>>(),
-        Policy::default(),
+        &ids,
+        Some(seen),
+        super::mcp::projection::Style::Presets,
     )
     .await?;
-    let machines = machine_refs(
-        &ctx.app,
-        conn,
-        &rows
-            .iter()
-            .filter_map(|row| row.machine_id)
-            .collect::<Vec<_>>(),
-    )
-    .await?;
-    let addresses = addresses(conn, &ids).await?;
-    let holdings: Vec<_> = seen
-        .iter()
-        .map(|each| Holding {
-            admin_only: &each.admin_only,
-            admin_access: each.admin_access,
-            admin_place: each.admin_place,
-            participating: each.participating,
-            id: each.resource.id,
-            owner: each.owner,
-            administers: each.administers,
-            held: &each.held,
-        })
-        .collect();
-    let access = accesses(conn, principal, &holdings).await?;
-    let enabled: std::collections::HashMap<Id, i64> = sqlx::query_as::<_, (Id, i64)>(
-        "SELECT wanted.id,
-          (SELECT count(*) FROM settings s JOIN nodes n ON n.id=s.node_id AND n.deleted_at IS NULL WHERE s.key='mcp.enabled' AND s.value->>wanted.id::text='true') +
-          (SELECT count(*) FROM environments e WHERE e.deleted_at IS NULL AND e.config->'mcp.enabled'->>wanted.id::text='true')
-         FROM unnest($1::uuid[]) wanted(id)",
-    ).bind(&ids).fetch_all(&mut *conn).await.map_err(orch_db::DbError::from)?.into_iter().collect();
-    let mut imported_views = std::collections::HashMap::new();
-    for row in rows.iter().filter(|row| row.imported) {
-        imported_views.insert(
-            row.id,
-            super::mcp::show(ctx, conn, principal, row.id).await?,
-        );
-    }
-    rows.into_iter().map(|row| {
-        if let Some(mut view) = imported_views.remove(&row.id) {
-            view.access = access.get(&row.id).cloned().ok_or_else(|| ApiError::internal("the MCP import's access was not read"))?;
-            return Ok(view);
-        }
-        let spec = if row.machine_id.is_some() {
-            serde_json::json!({"transport": row.spec.get("transport").cloned().unwrap_or(Json::Null)})
-        } else { row.spec.clone() };
-        Ok(McpServer {
-            offerings: Vec::new(),
-            enabled_places: Some(if row.enabled { enabled.get(&row.id).copied().unwrap_or_default() } else { 0 }),
-            id: row.id, name: row.name, description: row.description, org_id: row.org_id,
-            owner: row.owner_id.and_then(|id| owners.get(&id).cloned()),
-            home: row.home_id.and_then(|id| homes.get(&id).cloned()),
-            address: addresses.get(&row.id).cloned().unwrap_or_default(),
-            machine: row.machine_id.and_then(|id| machines.get(&id).cloned()),
-            environment: None,
-            imported: None,
-            spec, enabled: row.enabled, revision: row.revision,
-            access: access.get(&row.id).cloned().ok_or_else(|| ApiError::internal("the MCP preset's access was not read"))?,
-        })
-    }).collect()
+    prepared.context = environment;
+    super::mcp::projection::render(ctx, conn, principal, &prepared, None).await
 }
 
 async fn candidates(
@@ -151,32 +75,55 @@ async fn candidates(
     Ok(all)
 }
 
-async fn list(
-    ctx: Ctx,
-    query: api::McpServerListQuery,
-    (): (),
+fn query_scope<'a>(
+    conn: &'a mut orch_db::Conn,
+    _principal: &'a orch_authz::Principal,
+    mut seen: Vec<resources::Seen>,
+    query: &'a api::McpServerListQuery,
+) -> futures::future::BoxFuture<'a, ApiResult<Vec<resources::Seen>>> {
+    Box::pin(async move {
+        if let Some(org) = query.org_id {
+            let homes: Vec<_> = seen.iter().filter_map(|each| each.resource.home).collect();
+            let inside =
+                orch_db::queries::resources::routes::homes_under(conn, org, &homes).await?;
+            seen.retain(|each| each.resource.home.is_none_or(|home| inside.contains(&home)));
+        }
+        Ok(seen)
+    })
+}
+
+async fn ordinary_list(
+    ctx: &Ctx,
+    conn: &mut orch_db::Conn,
+    principal: &orch_authz::Principal,
+    query: &api::McpServerListQuery,
 ) -> ApiResult<Vec<Listed<McpServer>>> {
-    let mut conn = ctx.app.db.acquire().await?;
-    let principal = authorization::principal(&ctx, &mut conn).await?;
-    let mut seen = candidates(&mut conn, &principal).await?;
-    if let Some(org) = query.org_id {
-        let homes: Vec<_> = seen.iter().filter_map(|each| each.resource.home).collect();
-        let inside =
-            orch_db::queries::resources::routes::homes_under(&mut conn, org, &homes).await?;
-        seen.retain(|each| each.resource.home.is_none_or(|home| inside.contains(&home)));
-    }
-    let private = super::hidden_items(&mut conn, &principal, &mut seen).await?;
+    require_context(conn, principal, query.environment_id).await?;
+    let seen = candidates(conn, principal).await?;
+    let mut seen = query_scope(conn, principal, seen, query).await?;
+    let private = super::hidden_items(conn, principal, &mut seen).await?;
     Ok(super::listed(
-        views(&ctx, &mut conn, &principal, &seen).await?,
+        views_in(ctx, conn, principal, &seen, query.environment_id).await?,
         private,
     ))
 }
 
-async fn get(ctx: Ctx, (): (), (): ()) -> ApiResult<McpServer> {
-    let id = ctx.id("id")?;
-    let mut conn = ctx.app.db.acquire().await?;
-    let principal = authorization::principal(&ctx, &mut conn).await?;
-    read_for(&ctx, &mut conn, &principal, id).await
+async fn require_context(
+    conn: &mut orch_db::Conn,
+    principal: &orch_authz::Principal,
+    environment: Option<Id>,
+) -> ApiResult<()> {
+    if let Some(id) = environment {
+        super::require(
+            conn,
+            principal,
+            ResourceKind::Environment,
+            id,
+            Permission::EnvironmentView,
+        )
+        .await?;
+    }
+    Ok(())
 }
 
 /// The same preset/imported view and native permissions for HTTP and a resource event.

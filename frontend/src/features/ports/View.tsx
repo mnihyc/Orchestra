@@ -17,7 +17,7 @@ export function PortsView() {
   const allowed = state.kind === 'ready' && state.access.thread.environment_permissions.includes('ports.view');
   const query = useQuery({ ...environmentQuery(id ?? ''), enabled: id !== null && allowed });
   if (!allowed) return null;
-  if (query.isPending) return <SkeletonRows rows={4} />;
+  if (query.isPending) return <SkeletonRows read={query} rows={4} />;
   if (query.isError) return <ErrorState compact error={query.error} onRetry={() => void query.refetch()} />;
   return <div className="h-full overflow-auto"><PortsPanel environment={query.data} browser={portsBrowser(query.data, showBrowserBeside)} /></div>;
 }

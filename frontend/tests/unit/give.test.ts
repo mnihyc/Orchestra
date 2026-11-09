@@ -2,7 +2,7 @@
 import type { TFunction } from 'i18next';
 import { describe, expect, it } from 'vitest';
 
-import { areasOf, levelOfParts, mayGiveParts, partsOfLevel, readOnly, sameParts, stepOf, withStep } from '@/features/access/agentShares';
+import { advancedGiven, partsInAreas, sharePartsValue, hasAgentParts, withAdvanced, areasOf, levelOfParts, mayGiveParts, partsOfLevel, readOnly, sameParts, stepOf, withStep } from '@/features/access/agentShares';
 import { askToLetIn, letInChange, offerFor } from '@/features/access/doors';
 import { firstChoice, highestChoice, highestRole, keptLine, mayGiveAsRole, mayGiveChoice, sharingIsKept, whyNot } from '@/features/access/gives';
 import type { Dependency, PageGives, PermissionPage, UserRef } from '@/generated/api-types';
@@ -27,7 +27,7 @@ function page(gives: Partial<PageGives>, more: Partial<PermissionPage> = {}): Pe
     depends: [],
     reaches: null,
     covers: null,
-    gives: { choices: [], roles: [], agents: [], holders_share: true, ...gives },
+    gives: { choices: [], roles: [], agents: [], holders_share: true, ...gives, agent_parts: gives.agent_parts ?? {} },
     rows: [],
     ...more,
   };
@@ -89,12 +89,12 @@ describe('what sharing with agents comes to', () => {
     expect(areasOf('document', 'inside')).toEqual(['documents']);
   });
 
-  it('makes Can view read in every area, Can edit write there and edit documents, and Can manage add the documents themselves and nothing for conversations or chats', () => {
+  it('makes Can view read in every area, Can edit write there and edit documents, and Can manage manage all selected areas', () => {
     const areas = areasOf('topic', 'inside');
     expect(partsOfLevel('view', areas)).toEqual({ timeline: 'read', chat: 'read', documents: 'read' });
     expect(partsOfLevel('edit', areas)).toEqual({ timeline: 'write', chat: 'write', documents: 'edit' });
-    expect(partsOfLevel('manage', areas)).toEqual({ timeline: 'write', chat: 'write', documents: 'manage' });
-    expect(partsOfLevel('manage', ['chat'])).toEqual({ chat: 'write' });
+    expect(partsOfLevel('manage', areas)).toEqual({ timeline: 'manage', chat: 'manage', documents: 'manage' });
+    expect(partsOfLevel('manage', ['chat'])).toEqual({ chat: 'manage' });
   });
 
   it('names the everyday choice that parts amount to, and none for areas at different levels or an area left out', () => {
@@ -108,12 +108,13 @@ describe('what sharing with agents comes to', () => {
 
   it('lets a reader share only what they may do themself: reading for a share to read, writing for one to write, and managing for one that manages', () => {
     const edit = { timeline: 'write', chat: 'write', documents: 'edit' } as const;
-    expect(mayGiveParts(edit, ['view', 'edit'])).toBe(true);
-    expect(mayGiveParts(edit, ['view'])).toBe(false);
-    expect(mayGiveParts({ documents: 'manage' }, ['view', 'edit'])).toBe(false);
-    expect(mayGiveParts({ documents: 'manage' }, ['view', 'edit', 'manage'])).toBe(true);
+    expect(mayGiveParts(edit, edit)).toBe(true);
+    expect(mayGiveParts(edit, partsOfLevel('view', areasOf('topic', 'inside')))).toBe(false);
+    expect(mayGiveParts({ documents: 'manage' }, edit)).toBe(false);
+    expect(mayGiveParts({ documents: 'edit' }, { documents: 'edit' })).toBe(true);
+    expect(mayGiveParts({ documents: 'manage' }, { documents: 'manage' })).toBe(true);
     // A share that names nothing needs nothing.
-    expect(mayGiveParts({}, [])).toBe(true);
+    expect(mayGiveParts({}, {})).toBe(true);
   });
 
   it('changes one area at a time and leaves the others as they were', () => {
@@ -123,6 +124,21 @@ describe('what sharing with agents comes to', () => {
     expect(withStep(before, 'chat', 0)).toEqual({ timeline: 'read', documents: 'edit' });
     expect(stepOf('timeline', withStep(before, 'timeline', 2))).toBe(2);
     expect(sameParts(before, { timeline: 'read', chat: 'read', documents: 'edit' })).toBe(true);
+  });
+
+  it('retains independent advanced acts without turning them into Manage or a copy', () => {
+    const fork = withAdvanced({ timeline: 'read' }, 'thread_fork', true);
+    expect(fork).toEqual({ timeline: 'read', thread_fork: true });
+    expect(hasAgentParts({ thread_archive: true })).toBe(true);
+    expect(levelOfParts(fork, ['timeline'])).toBeNull();
+    expect(mayGiveParts(fork, { timeline: 'read', thread_fork: true })).toBe(true);
+    expect(mayGiveParts(fork, { timeline: 'read' })).toBe(false);
+    expect(advancedGiven({ timeline: 'manage' }, 'thread_archive')).toBe(true);
+    expect(withStep(fork, 'chat', 3)).toEqual({ timeline: 'read', chat: 'manage', thread_fork: true });
+    expect(partsInAreas(fork, ['chat', 'documents'])).toEqual({});
+    expect(readOnly(fork)).toEqual({ timeline: 'read' });
+    expect(sharePartsValue({ timeline: 'manage', thread_archive: true })).toEqual({ timeline: 'manage', thread_archive: true });
+    expect(sharePartsValue({ thread_archive: 'manage' })).toBeNull();
   });
 
   it('gives a copy no write: whatever is shared is shared to read', () => {

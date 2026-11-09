@@ -8,7 +8,13 @@
 //! are listed. A thread's parameters are its model, its effort and the other
 //! parameters of its agent, each with whether the caller may change it.
 
-use orch_types::{Json, Revision, Time};
+use crate::operations::{FacetSpec as Facet, OperationSpec as Op, TargetResolver as Target};
+use orch_access_contract::key_scope::KeyAction::{Manage, Read};
+use orch_access_contract::key_scope::KeyIdentityKind as I;
+use orch_access_contract::key_scope::KeyTargetKind::{Identity, Object};
+use orch_access_contract::permissions::ObjectKind as K;
+
+use orch_types::{Id, Json, Revision, Time};
 use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
 
@@ -71,6 +77,14 @@ pub enum SettingMerge {
     Append,
     /// The smallest value.
     Min,
+    /// The largest number among the scopes that set the key.
+    Max,
+    /// Permission is on only when every setting scope allows it.
+    All,
+    /// Protection is on when any setting scope requires it.
+    Any,
+    /// The strictest declared choice; the schema lists strictest last.
+    Stricter,
 }
 
 /// A setting as the registry defines it.
@@ -263,6 +277,9 @@ pub struct ResolvedSetting {
     /// Why this resolved setting does not apply to the selected harness, where one is selected.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub not_applicable_reason: Option<String>,
+    /// The selected program's declared display name for an inapplicable program setting.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub not_applicable_program: Option<String>,
     /// Values that can be chosen for this setting with its bound or usable reported agents. An empty
     /// list offers none; absence leaves the registry schema in force. Stored values stay visible.
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -308,6 +325,9 @@ pub struct ModelOption {
     pub display_name: String,
     /// What the model can do on this provider, its efforts among it.
     pub parameters: ModelParameters,
+    /// Effective provider option schemas, including declared tier/program lists; keyed by protocol.
+    #[serde(default, skip_serializing_if = "std::collections::BTreeMap::is_empty")]
+    pub option_constraints: std::collections::BTreeMap<String, Json>,
     /// What its tokenizer comes to, for the estimates where nobody counted.
     pub token_estimate: crate::programs::TokenEstimate,
     /// Whether the caller may use it.
@@ -404,6 +424,9 @@ pub struct ThreadSubagentLimits {
 /// What can be set on a thread's agent, and what it is now.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize, JsonSchema)]
 pub struct ThreadParameters {
+    /// The same declaration-derived routes used by capability planning; private backend intent is omitted.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub capabilities: Vec<orch_provider_contract::capabilities::Resolution>,
     /// The provider's ordinary resource view for a caller with provider View, shared by model options and status items.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub provider: Option<crate::resources::Provider>,
@@ -433,7 +456,7 @@ pub struct ApprovalReviewer {
     pub model: String,
     /// Whether the harness reported this model rather than the adapter declaring its default.
     pub reported: bool,
-    /// Whether review usage is reported separately. Otherwise it is inside the harness's totals.
+    /// Whether review usage is reported separately. False does not establish whether the harness's totals include it.
     pub usage_apart: bool,
 }
 
@@ -468,17 +491,38 @@ pub struct NodeSecretSetBody {
     pub value: String,
 }
 
+/// An accepted native setting edit with no existing effective value, source name or choices.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+pub struct NodeSettingReceipt {
+    pub projection: crate::common::ReceiptProjection,
+    pub node_id: Id,
+    pub key: String,
+    pub own_revision: Option<Revision>,
+    pub changed: bool,
+}
+crate::common::full_or_receipt! {
+    /// The ordinary effective setting or its accepted native identity/revision acknowledgement.
+    #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+    pub enum NodeSettingWriteResponse {
+        Full(ResolvedSetting),
+        Receipt(NodeSettingReceipt),
+    }
+}
+
 crate::endpoints! {
     /// Lists every setting there is, with its schema, class, scopes and merge rule.
-    SettingRegistryGet: GET "/settings/registry", User, none, none, json Vec<SettingDef>, 200;
+    SettingRegistryGet: GET "/settings/registry", User, none, none, json Vec<SettingDef>, 200,
+        operation Op::single(Read, &[Identity(I::System)], Target::System);
     /// Lists every setting that is valid at or below a node, as it resolves there.
     NodeSettingList: GET "/nodes/{id}/settings", Permission("node.view"), none, none, json Vec<ResolvedSetting>, 200;
     /// Counts where a setting still applies below this place and lists readable overriding places.
     NodeSettingReachGet: GET "/nodes/{id}/settings/{key}/reach", Permission("node.view"), query PageQuery, none, json SettingReach, 200;
     /// Writes a setting at a node, by the rule of its class and the scope written.
-    NodeSettingSet: PUT "/nodes/{id}/settings/{key}", Rule("by the key's class and the scope written; for the two keys about where a thread runs, environment.manage on its environment"), none, json NodeSettingSetBody, json ResolvedSetting, 200;
+    NodeSettingSet: PUT "/nodes/{id}/settings/{key}", Rule("by the key's class and the scope written; for the two keys about where a thread runs, environment.manage on its environment"), none, json NodeSettingSetBody, json NodeSettingWriteResponse, 200,
+        operation Op::receipt(&Op::facets(crate::settings_sources::NODE_EDIT_FACETS));
     /// Removes a value written at a node, so that the setting is inherited again.
-    NodeSettingDelete: DELETE "/nodes/{id}/settings/{key}", Rule("by the key's class and the scope written"), query NodeSettingDeleteQuery, none, json ResolvedSetting, 200;
+    NodeSettingDelete: DELETE "/nodes/{id}/settings/{key}", Rule("by the key's class and the scope written"), query NodeSettingDeleteQuery, none, json NodeSettingWriteResponse, 200,
+        operation Op::receipt(&Op::facets(crate::settings_sources::NODE_EDIT_FACETS));
     /// Lists the names of the secrets that apply at a node, resolved down the hierarchy.
     NodeSecretList: GET "/nodes/{id}/secrets", Permission("node.view"), none, none, json Vec<SecretInfo>, 200;
     /// Writes a secret at a node.
@@ -486,23 +530,35 @@ crate::endpoints! {
     /// Deletes a secret of a node.
     NodeSecretDelete: DELETE "/nodes/{id}/secrets/{name}", Permission("settings.manage"), none, none, none, 204;
     /// Reads a thread's model, effort and other parameters, with what the caller may change.
-    ThreadParameterGet: GET "/threads/{id}/parameters", Permission("node.view"), none, none, json ThreadParameters, 200;
+    ThreadParameterGet: GET "/threads/{id}/parameters", Permission("node.view"), none, none, json ThreadParameters, 200,
+        operation Op::single(Read, &[Object(K::Thread)], Target::PermissionObject);
     /// Lists the settings of scope environment as they resolve for one environment.
-    EnvironmentSettingList: GET "/environments/{id}/settings", Rule("any permission on the environment"), none, none, json Vec<ResolvedSetting>, 200;
+    EnvironmentSettingList: GET "/environments/{id}/settings", Rule("any permission on the environment"), none, none, json Vec<ResolvedSetting>, 200,
+        operation Op::facets(&[
+            Facet::required(Read, &[Object(K::Environment)], Target::TypedPath { parameter: "id", kind: Object(K::Environment) }),
+            Facet::response_content(&[Object(K::Org)], Target::ResolvedCollection("environment_setting_orgs")),
+            Facet::response_content(&[Object(K::Project)], Target::ResolvedCollection("environment_setting_projects")),
+            Facet::response_content(&[Object(K::Topic)], Target::ResolvedCollection("environment_setting_topics")),
+            Facet::response_content(&[Object(K::Thread)], Target::ResolvedCollection("environment_setting_threads")),
+        ]);
     /// Lists the settings of scope provider as they resolve for one provider.
-    ProviderSettingList: GET "/providers/{id}/settings", Rule("any permission on the provider"), none, none, json Vec<ResolvedSetting>, 200;
+    ProviderSettingList: GET "/providers/{id}/settings", Rule("any permission on the provider"), none, none, json Vec<ResolvedSetting>, 200,
+        operation Op::facets(&crate::resources::provider_aux_read_facets());
     /// Lists the host's maintenance settings and the system defaults they follow.
     HostSettingList: GET "/hosts/{id}/settings", Permission("host.view"), none, none, json Vec<ResolvedSetting>, 200;
     /// Changes one host maintenance setting without bypassing a system lock.
-    HostSettingSet: PUT "/hosts/{id}/settings/{key}", Permission("host.manage"), none, json NodeSettingSetBody, json ResolvedSetting, 200;
+    HostSettingSet: PUT "/hosts/{id}/settings/{key}", Permission("host.manage"), none, json NodeSettingSetBody, json ResolvedSetting, 200,
+        operation Op::returning(Manage, &[Object(K::Host)], Target::PermissionObject);
     /// Makes one host maintenance setting follow the system again.
-    HostSettingDelete: DELETE "/hosts/{id}/settings/{key}", Permission("host.manage"), query NodeSettingDeleteQuery, none, json ResolvedSetting, 200;
+    HostSettingDelete: DELETE "/hosts/{id}/settings/{key}", Permission("host.manage"), query NodeSettingDeleteQuery, none, json ResolvedSetting, 200,
+        operation Op::returning(Manage, &[Object(K::Host)], Target::PermissionObject);
     /// Lists the names of the secrets an environment is given: those of its home and its own.
     EnvironmentSecretList: GET "/environments/{id}/secrets", Permission("environment.manage"), none, none, json Vec<SecretInfo>, 200;
     /// Writes a secret of one environment alone.
     EnvironmentSecretSet: PUT "/environments/{id}/secrets/{name}", Permission("environment.manage"), none, json NodeSecretSetBody, json SecretInfo, 200;
     /// Deletes a secret of one environment.
-    EnvironmentSecretDelete: DELETE "/environments/{id}/secrets/{name}", Permission("environment.manage"), none, none, none, 204;
+    EnvironmentSecretDelete: DELETE "/environments/{id}/secrets/{name}", Permission("environment.manage"), none, none, none, 204,
+        operation Op::returning(Manage, &[Object(K::Environment)], Target::TypedPath { parameter: "id", kind: Object(K::Environment) });
 }
 
 #[cfg(test)]

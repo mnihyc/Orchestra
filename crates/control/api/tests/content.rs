@@ -677,7 +677,32 @@ async fn a_machine_with_an_environment_uploads_the_list_of_its_tree_under_no_com
 }
 
 #[tokio::test]
-async fn content_made_on_a_machines_own_account_is_for_uploading_only_and_for_machines_with_an_environment()
+async fn an_agent_only_machine_uploads_retained_outputs_on_its_standing_account_but_cannot_download()
+ {
+    let depot = Depot::new().await;
+    let agent = Depot::add_machine(&depot.world, &["agent"]).await;
+    let bytes = bytes_of(2_501);
+    let hash = Hash::of(&bytes);
+    let missing = depot.content.missing(agent, Id::nil(), &[hash]).await;
+    assert_eq!(missing.status, StatusCode::OK);
+    let uploaded = depot.content.upload(agent, Id::nil(), &bytes, 1_024).await;
+    assert_eq!(uploaded, hash);
+    assert_eq!(
+        depot.app().blobs.store().size(&hash).await.unwrap(),
+        Some(2_501)
+    );
+    assert_eq!(
+        depot
+            .content
+            .get(agent, Id::nil(), &hash, None)
+            .await
+            .status,
+        StatusCode::FORBIDDEN
+    );
+}
+
+#[tokio::test]
+async fn content_made_on_a_machines_own_account_is_for_uploading_only_and_requires_a_producing_role()
  {
     let depot = Depot::new().await;
     let bytes = bytes_of(100);
@@ -701,7 +726,7 @@ async fn content_made_on_a_machines_own_account_is_for_uploading_only_and_for_ma
     assert_eq!(
         up.status,
         StatusCode::FORBIDDEN,
-        "only a machine that has an environment has a tree to list"
+        "a provider-only machine produces no standing environment or agent output"
     );
 }
 

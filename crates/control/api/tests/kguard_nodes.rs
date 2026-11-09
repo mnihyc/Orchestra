@@ -91,7 +91,9 @@ impl Scenario {
             })
             .send()
             .await
-            .ok();
+            .ok()
+            .into_full()
+            .unwrap();
         let topic = make_topic(&world, &owner, project.base.id, "Topic").await;
         Self {
             world,
@@ -1303,12 +1305,13 @@ async fn a_revocation_committed_while_the_guarded_side_thread_close_waits_refuse
         .await
         .expect("a revocation does not wait for the guarded close")
         .unwrap();
+    let before = snapshot(&s.world).await;
     // ...and the close, which decided under the authority it ended, cannot commit after it.
     blocker.rollback().await.unwrap();
     let response = action.await.unwrap().unwrap();
-    assert_eq!(response.status(), StatusCode::CONFLICT);
+    assert_eq!(response.status(), StatusCode::FORBIDDEN);
     let answer = response_json(response).await;
-    assert_eq!(answer["code"], "conflict.stale_revision");
+    assert_eq!(answer["code"], "authz.denied");
     let deleted: bool =
         sqlx::query_scalar("SELECT deleted_at IS NOT NULL FROM nodes WHERE id = $1")
             .bind(side)
@@ -1319,6 +1322,12 @@ async fn a_revocation_committed_while_the_guarded_side_thread_close_waits_refuse
         !deleted,
         "a close refused at its commit leaves the side thread"
     );
+    let after = snapshot(&s.world).await;
+    assert_eq!(
+        after["audit_log"], before["audit_log"],
+        "a refused close adds no audit of a close"
+    );
+    assert_eq!(after, before, "a refused close writes no business effects");
 }
 
 #[tokio::test]

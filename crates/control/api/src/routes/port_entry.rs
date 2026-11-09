@@ -9,12 +9,10 @@
 //! that verify a caller's assertion are served to anybody: they are public.
 
 use crate::middleware::requests::{ApiError, ApiResult};
-use crate::middleware::transaction_guard;
-use crate::ports_runtime::BrowserEntry;
 use crate::registry::{Ctx, Registry};
 use crate::routes::ports::{
-    address, entries, entry_proof, environment, listening, may_use, may_use_link, observed, parse,
-    parse_link, proof_matches,
+    entries, entry_proof, environment, listening, may_use_link, observed, parse, parse_link,
+    proof_matches,
 };
 use axum::body::Body;
 use axum::extract::ws::{Message, Utf8Bytes, WebSocket, WebSocketUpgrade};
@@ -70,10 +68,22 @@ pub(crate) fn port_signer() -> &'static PortAssertionSigner {
 /// Binds the entries that do not go through the browser route.
 pub fn mount(registry: &mut Registry) {
     registry
+        .creation(
+            api::EnvironmentPortEnter,
+            crate::routes::interactive_tickets::creation::<
+                crate::routes::interactive_tickets::PortEntries,
+            >(),
+        )
         .on(api::PortAssertionKeysGet, keys)
         .on(api::PortLinkUseCreate, link_use)
         .on(api::PortLinkInspect, inspect)
-        .on(api::EnvironmentPortEnter, enter)
+        .on_with_operation(
+            api::EnvironmentPortEnter,
+            crate::key_operations::native::effects::prepare::<
+                crate::routes::ports::admission_operation::Enter,
+            >,
+            enter,
+        )
         .on_raw(api::PortLinkLanding, landing)
         .on_socket(api::PortUseSocket, socket);
 }
@@ -210,54 +220,9 @@ async fn inspect(ctx: Ctx, (): (), body: PortLinkInspectBody) -> ApiResult<PortL
 async fn enter(
     ctx: Ctx,
     (): (),
-    body: EnvironmentPortEnterBody,
-) -> ApiResult<EnvironmentPortEnterReply> {
-    let id = ctx.id("id")?;
-    let port: u16 = ctx
-        .param("port")?
-        .parse()
-        .map_err(|_| ApiError::not_found())?;
-    let address = address(&ctx, id, port).ok_or_else(|| {
-        ApiError::new(
-            ErrorCode::PortsUnavailable,
-            "this installation has no ports domain: use the helper, or Here",
-        )
-    })?;
-    let (mut tx, guard) = transaction_guard::begin(&ctx).await?;
-    if !guard.user().is_session() {
-        return Err(ApiError::new(
-            ErrorCode::AuthSessionRequired,
-            "a port's name is entered from a browser session, not with a token",
-        ));
-    }
-    let env = environment(&mut tx, id).await?;
-    may_use(
-        &mut tx,
-        guard.principal(),
-        &env,
-        port,
-        PortTransport::Tcp,
-        body.opening_id,
-    )
-    .await?;
-    tx.commit().await.map_err(orch_db::DbError::from)?;
-    let now = guard.now();
-    let expires_at =
-        Time::new(now.get() + chrono::Duration::seconds(crate::ports_runtime::USE_SECONDS));
-    let code = ctx.app.cache.ports().enter_code(
-        BrowserEntry {
-            person: Some(guard.principal().user()),
-            environment: env.id,
-            port,
-            opening: body.opening_id,
-            expires: expires_at,
-        },
-        now,
-    );
-    Ok(EnvironmentPortEnterReply {
-        url: format!("{address}{}?code={code}", crate::ports_browser::ENTER_PATH),
-        expires_at,
-    })
+    _body: EnvironmentPortEnterBody,
+) -> ApiResult<api::EnvironmentPortEnterResponse> {
+    crate::routes::ports::admission_operation::enter(ctx).await
 }
 
 /// `GET /ports/links/{opening_id}`: the landing of a link, which is the same generic page for every
@@ -283,6 +248,10 @@ async fn landing(ctx: Ctx, (): (), _body: Body) -> ApiResult<Response> {
 /// `GET /ws/ports/{use_id}`: the raw socket of one admitted use. The use is taken, and its channel
 /// opened, before the upgrade, so that a refused or spent use is an ordinary answer.
 async fn socket(ctx: Ctx, query: PortUseSocketQuery, upgrade: WebSocketUpgrade) -> Response {
+    let surface = match ctx.http_surface() {
+        Ok(surface) => surface,
+        Err(error) => return error.into_response_for(&ctx.request_id),
+    };
     let id = match ctx.id("use_id") {
         Ok(id) => id,
         Err(error) => return error.into_response_for(&ctx.request_id),
@@ -297,7 +266,7 @@ async fn socket(ctx: Ctx, query: PortUseSocketQuery, upgrade: WebSocketUpgrade) 
         .app
         .cache
         .ports()
-        .open_channel(id, &query.ticket, outside)
+        .open_channel(id, &query.ticket, outside, surface)
         .await
     {
         Ok(tunnel) => upgrade

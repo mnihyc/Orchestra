@@ -14,6 +14,7 @@ use orch_api_contract::{
 };
 use orch_types::{Id, Time};
 use serde_json::json;
+use support::FullTokenReply as _;
 use support::World;
 
 async fn world() -> World {
@@ -34,6 +35,8 @@ async fn make(world: &World, who: &places::Who, node: Id, title: &str) -> Docume
         .send()
         .await
         .ok()
+        .into_full()
+        .unwrap()
 }
 
 #[tokio::test]
@@ -68,7 +71,9 @@ async fn document_acts_keep_their_event_time_place_and_no_content_before_and_aft
         })
         .send()
         .await
-        .ok();
+        .ok()
+        .into_full()
+        .unwrap();
     world
         .app
         .call(DocumentDelete, &[&id])
@@ -85,7 +90,9 @@ async fn document_acts_keep_their_event_time_place_and_no_content_before_and_aft
         })
         .send()
         .await
-        .ok();
+        .ok()
+        .into_full()
+        .unwrap();
     world
         .app
         .call(DocumentDelete, &[&id])
@@ -243,7 +250,9 @@ async fn deleted_document_inspection_is_daily_read_only_and_an_old_event_cannot_
         })
         .send()
         .await
-        .ok();
+        .ok()
+        .into_full()
+        .unwrap();
     world
         .app
         .call(DocumentDelete, &[&id])
@@ -321,17 +330,19 @@ async fn a_deleted_child_requires_its_own_restore_guard_and_a_parent_is_restored
         .call(orch_api_contract::auth::MeTokenCreate, &[])
         .token(&ada.token)
         .body(&orch_api_contract::auth::ApiTokenCreateBody {
+            rules: None,
             name: "Only the child".to_owned(),
             scopes: Some(vec!["*".to_owned()]),
             node_id: Some(topic.base.id),
             expires_at: None,
-            proof: orch_api_contract::auth::SensitiveProof {
+            proof: Some(orch_api_contract::auth::SensitiveProof {
                 password: Some(support::PASSWORD.to_owned()),
                 ..Default::default()
-            },
+            }),
         })
         .send()
         .await
+        .full_token()
         .ok()
         .token
         .expect("the first answer carries the secret");
@@ -779,6 +790,8 @@ async fn provider_endpoint_history_keeps_only_canonical_hosts_after_changes_and_
         .send()
         .await
         .ok()
+        .into_full()
+        .unwrap()
         .provider;
     let id = created.base.id;
     let refused=world.app.call(ProviderUpdate,&[&id]).token(&ada.token).raw_body(&json!({"expected_revision":created.revision,"upstreams":[{"protocol":"openai-responses","base_url":"https://someone:private-credential@API.Example.TEST/private?key=private-query","options":{}}]})).send().await.problem();

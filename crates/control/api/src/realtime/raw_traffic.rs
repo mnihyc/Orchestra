@@ -328,7 +328,7 @@ pub(crate) async fn begin(
     });
     sub.connection()
         .outbox
-        .push_frame(sub.tag(), frame.encode().map_err(Fail::other)?);
+        .push_control(sub.tag(), frame.encode().map_err(Fail::other)?);
     Ok(current)
 }
 

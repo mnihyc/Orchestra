@@ -10,7 +10,6 @@
 //! so accepting a suggestion puts what it lists under `offered` and enables none of it. The groups a manager
 //! puts a model in are the names by which a cap, an allowlist or an entry's models name several at once.
 
-use crate::middleware::authorization;
 use crate::middleware::requests::{ApiError, ApiResult};
 use crate::registry::{Ctx, Registry};
 use crate::routes::access::page::same;
@@ -21,7 +20,7 @@ use orch_access_contract::audit::AuditAction;
 use orch_access_contract::permissions::Permission;
 use orch_api_contract::common::ErrorCode;
 use orch_api_contract::resources::{
-    self as api, MODEL_GROUP_NAME_MAX, MODEL_GROUPS_MAX, ModelParameters, ModelSuggestion,
+    self as api, MODEL_GROUP_NAME_MAX, MODEL_GROUPS_DEFAULT, ModelParameters, ModelSuggestion,
     ProviderModel, is_model_group_name,
 };
 use orch_db::DbError;
@@ -39,12 +38,29 @@ const DISPLAY_NAME_MAX_CHARS: usize = 120;
 /// Binds this module's requests.
 pub fn mount(registry: &mut Registry) {
     registry
-        .on(api::ProviderModelList, list)
-        .on(api::ProviderModelCreate, create)
-        .on(api::ProviderModelUpdate, update)
+        .on_with_operation(
+            api::ProviderModelList,
+            crate::key_operations::direct::declared,
+            list,
+        )
+        .on_with_operation(
+            api::ProviderModelCreate,
+            crate::key_operations::direct::declared,
+            create,
+        )
+        .creation(api::ProviderModelCreate, model_creation_binding())
+        .on_with_operation(
+            api::ProviderModelUpdate,
+            crate::key_operations::direct::declared,
+            update,
+        )
         .on(api::ProviderModelDelete, delete)
         .on(api::ProviderModelSuggestionList, suggestions)
-        .on(api::ProviderModelSuggestionAccept, accept);
+        .on_with_operation(
+            api::ProviderModelSuggestionAccept,
+            super::provider_projection::prepare,
+            accept,
+        );
 }
 
 /// A routing name: taken exactly as it is given, so long as it is something that can be sent.
@@ -98,17 +114,20 @@ fn clash(
         .map(|model| model.id)
 }
 
-fn exists(existing: Id) -> ApiError {
-    ApiError::new(
+fn exists(ctx: &Ctx, existing: Id) -> ApiError {
+    let error = ApiError::new(
         ErrorCode::ConflictExists,
         "this provider has a model by that name already",
-    )
-    .with("existing_id", existing)
+    );
+    if ctx.key_receipt_required() {
+        error
+    } else {
+        error.with("existing_id", existing)
+    }
 }
 
-/// The groups of a model as they are kept: each once, in the order they were written. A name that is not
-/// 1 to [`MODEL_GROUP_NAME_MAX`] of `a-z`, `0-9`, `-` and `_` beginning with a letter or a digit, or more than
-/// [`MODEL_GROUPS_MAX`] groups, is refused.
+/// Groups retain their written order without duplicates. Names use one to MODEL_GROUP_NAME_MAX
+/// lower-case letters, digits, '-' and '_', starting with a letter or digit.
 fn clean_groups(path: &str, groups: &[String]) -> ApiResult<Vec<String>> {
     let mut kept: Vec<String> = Vec::new();
     for (index, group) in groups.iter().enumerate() {
@@ -124,13 +143,28 @@ fn clean_groups(path: &str, groups: &[String]) -> ApiResult<Vec<String>> {
             kept.push(group.clone());
         }
     }
-    if kept.len() > MODEL_GROUPS_MAX {
+    Ok(kept)
+}
+
+fn check_group_count(path: &str, groups: &[String], maximum: i64) -> ApiResult<()> {
+    if i64::try_from(groups.len()).unwrap_or(i64::MAX) > maximum {
         return Err(invalid(
             path,
-            &format!("a model is in at most {MODEL_GROUPS_MAX} groups"),
+            &format!("a model is in at most {maximum} groups here"),
         ));
     }
-    Ok(kept)
+    Ok(())
+}
+
+pub(super) async fn group_limit(conn: &mut orch_db::Conn, home: Id) -> ApiResult<i64> {
+    orch_settings::get::<i64>(
+        conn,
+        orch_settings::Place::Node(home),
+        orch_settings_contract::registry::keys::PROVIDERS_MODEL_GROUPS_MAX,
+    )
+    .await
+    .map_err(ApiError::internal)
+    .map(|value| value.unwrap_or(MODEL_GROUPS_DEFAULT))
 }
 
 /// What an entry's parameters may not be, for the refusals the model requests give: a default that is not
@@ -138,6 +172,35 @@ fn clean_groups(path: &str, groups: &[String]) -> ApiResult<Vec<String>> {
 /// `context_max` below the model's own window, a `default_context` above `context_max` or given without
 /// one, and a size that is no size.
 fn check_parameters(parameters: &ModelParameters) -> ApiResult<()> {
+    parameters
+        .check_option_schemas()
+        .map_err(|reason| invalid("parameters.request_options", reason))?;
+    if parameters
+        .web_search_modes()
+        .iter()
+        .any(|mode| !matches!(mode.as_str(), "disabled" | "cached" | "indexed" | "live"))
+    {
+        return Err(invalid(
+            "parameters.web_search",
+            "search modes are disabled, cached, indexed or live",
+        ));
+    }
+    if parameters
+        .default_web_search
+        .as_deref()
+        .is_some_and(|mode| {
+            mode != "disabled"
+                && !parameters
+                    .web_search_modes()
+                    .iter()
+                    .any(|enabled| enabled == mode)
+        })
+    {
+        return Err(invalid(
+            "parameters.default_web_search",
+            "the default search mode must be enabled on the model",
+        ));
+    }
     for (member, size) in [
         ("context_window", parameters.context_window),
         ("context_max", parameters.context_max),
@@ -173,6 +236,25 @@ fn check_parameters(parameters: &ModelParameters) -> ApiResult<()> {
         return Err(invalid(
             "parameters.default_service_tier",
             "a speed a thread starts with is one of the speeds enabled on the model",
+        ));
+    }
+    if let Some(mode) = &parameters.default_reasoning_mode
+        && !parameters.reasoning_modes().contains(mode)
+    {
+        return Err(invalid(
+            "parameters.default_reasoning_mode",
+            "a reasoning mode a thread starts with is one of the modes enabled on the model",
+        ));
+    }
+    if let Some(tier) = &parameters.default_capacity_tier
+        && !parameters
+            .capacity_tiers()
+            .iter()
+            .any(|enabled| &enabled.id == tier)
+    {
+        return Err(invalid(
+            "parameters.default_capacity_tier",
+            "a capacity tier a thread starts with is one of the tiers enabled on the model",
         ));
     }
     if let Some(program) = &parameters.default_access_program
@@ -223,7 +305,7 @@ fn parameters_json(parameters: &ModelParameters) -> ApiResult<Json> {
 async fn list(ctx: Ctx, (): (), (): ()) -> ApiResult<Vec<ProviderModel>> {
     let id = ctx.id("id")?;
     let mut conn = ctx.app.db.acquire().await?;
-    let principal = authorization::principal(&ctx, &mut conn).await?;
+    let principal = ctx.operation_principal(&mut conn).await?;
     provider_for(&mut conn, &principal, id, Permission::ProviderView).await?;
     queries::models_of(&mut conn, &[id])
         .await?
@@ -233,47 +315,259 @@ async fn list(ctx: Ctx, (): (), (): ()) -> ApiResult<Vec<ProviderModel>> {
 }
 
 /// Adds a model to a provider, enabled.
-async fn create(ctx: Ctx, (): (), body: api::ProviderModelCreateBody) -> ApiResult<ProviderModel> {
+async fn create(
+    ctx: Ctx,
+    (): (),
+    body: api::ProviderModelCreateBody,
+) -> ApiResult<api::ProviderModelWriteResponse> {
     let id = ctx.id("id")?;
-    clean_routing_name("model_name", &body.model_name)?;
-    let display = clean_display_name("display_name", body.display_name.as_deref().unwrap_or(""))?;
-    let asked = body.parameters.clone().unwrap_or_default();
-    check_parameters(&asked)?;
-    let groups = clean_groups("groups", body.groups.as_deref().unwrap_or_default())?;
-    let parameters = parameters_json(&asked)?;
+    let definition = definition(&body)?;
     // The provider's Manage is asked again in the transaction that writes, once the body has come.
-    let (ctx, mut tx, _principal) = crate::routes::nodes::action(&ctx).await?;
+    let (ctx, mut tx, principal) = crate::routes::nodes::action(&ctx).await?;
     let row = queries::providers(&mut tx, &[id])
         .await?
         .pop()
         .ok_or_else(ApiError::not_found)?;
+    check_group_count(
+        "groups",
+        &definition.groups,
+        group_limit(&mut tx, row.home_id).await?,
+    )?;
     let models = queries::models_of(&mut tx, &[id]).await?;
-    if let Some(existing) = clash(&models, Some(&body.model_name), Some(&display), None) {
-        return Err(exists(existing));
+    if let Some(existing) = clash(
+        &models,
+        Some(&definition.routing),
+        Some(&definition.display),
+        None,
+    ) {
+        return Err(exists(&ctx, existing));
     }
+    let model = insert_native(&ctx, &mut tx, &row, &definition).await?;
+    orch_db::idempotency::creation::observe(&mut tx, Some(principal.user()), MODEL_CREATION, model)
+        .await?;
+    tx.commit().await.map_err(DbError::from)?;
+    model_reply(&ctx, principal.caller(), id, model, false).await
+}
+
+#[derive(Clone)]
+pub(crate) struct Definition {
+    routing: String,
+    display: String,
+    parameters: Json,
+    groups: Vec<String>,
+    enabled: bool,
+}
+fn definition(body: &api::ProviderModelCreateBody) -> ApiResult<Definition> {
+    clean_routing_name("model_name", &body.model_name)?;
+    let display = clean_display_name("display_name", body.display_name.as_deref().unwrap_or(""))?;
+    let asked = body.parameters.clone().unwrap_or_default();
+    check_parameters(&asked)?;
+    Ok(Definition {
+        routing: body.model_name.clone(),
+        display,
+        parameters: parameters_json(&asked)?,
+        groups: clean_groups("groups", body.groups.as_deref().unwrap_or_default())?,
+        enabled: true,
+    })
+}
+/// Source rows already identify the readable configuration. No discovery or usage is retained.
+pub(crate) fn copied_definitions(rows: &[ModelRow]) -> ApiResult<Vec<Definition>> {
+    let mut routing = std::collections::BTreeSet::new();
+    let mut display = std::collections::BTreeSet::new();
+    let mut prepared = Vec::with_capacity(rows.len());
+    for row in rows {
+        let mut next = definition(&api::ProviderModelCreateBody {
+            model_name: row.model_name.clone(),
+            display_name: Some(row.display_name.clone()),
+            parameters: Some(
+                serde_json::from_value(row.parameters.clone()).map_err(ApiError::internal)?,
+            ),
+            groups: Some(row.groups.clone()),
+        })?;
+        if !routing.insert(next.routing.clone())
+            || !next.display.is_empty() && !display.insert(next.display.to_lowercase())
+        {
+            return Err(invalid("models", "the copied model names must be distinct"));
+        }
+        next.enabled = row.enabled;
+        prepared.push(next);
+    }
+    Ok(prepared)
+}
+/// A genuinely new provider has no old models or paused users. Validate the whole batch
+/// against its current native group limit before using the same ordinary model writer.
+pub(crate) async fn copy_into_new(
+    ctx: &Ctx,
+    conn: &mut orch_db::Conn,
+    provider: Id,
+    definitions: &[Definition],
+) -> ApiResult<()> {
+    if definitions.is_empty() {
+        return Ok(());
+    }
+    let row = queries::providers(conn, &[provider])
+        .await?
+        .pop()
+        .ok_or_else(ApiError::not_found)?;
+    if !queries::models_of(conn, &[provider]).await?.is_empty() {
+        return Err(ApiError::internal(
+            "the new provider already has model configuration",
+        ));
+    }
+    let limit = group_limit(conn, row.home_id).await?;
+    for definition in definitions {
+        check_group_count("groups", &definition.groups, limit)?;
+    }
+    for definition in definitions {
+        insert_native(ctx, conn, &row, definition).await?;
+    }
+    Ok(())
+}
+async fn insert_native(
+    ctx: &Ctx,
+    conn: &mut orch_db::Conn,
+    row: &ProviderRow,
+    definition: &Definition,
+) -> ApiResult<Id> {
     let model = orch_types::new_id();
     queries::insert_model(
-        &mut tx,
+        conn,
         &NewModel {
             id: model,
-            provider_id: id,
-            model_name: &body.model_name,
-            display_name: &display,
-            parameters: &parameters,
-            groups: &groups,
+            provider_id: row.id,
+            model_name: &definition.routing,
+            display_name: &definition.display,
+            parameters: &definition.parameters,
+            groups: &definition.groups,
             source: "manual",
             created_by: ctx.user()?.id(),
         },
         ctx.now,
     )
     .await?;
-    models_changed(&ctx, &mut tx, &row, json!({ "added": [body.model_name] })).await?;
-    refresh_standing(&ctx, &mut tx, id).await?;
-    let added = queries::model_of(&mut tx, id, model)
+    if !definition.enabled {
+        queries::change_model(
+            conn,
+            row.id,
+            model,
+            &ModelChange {
+                enabled: Some(false),
+                ..Default::default()
+            },
+            ctx.now,
+        )
+        .await?;
+    }
+    models_changed(ctx, conn, row, json!({"added":[definition.routing]})).await?;
+    refresh_standing(ctx, conn, row.id).await?;
+    Ok(model)
+}
+
+const MODEL_CREATION: &str = "provider_model";
+fn model_creation_binding() -> crate::middleware::idempotency::Creation<
+    (),
+    api::ProviderModelCreateBody,
+    api::ProviderModelWriteResponse,
+> {
+    crate::middleware::idempotency::Creation {
+        kind: MODEL_CREATION,
+        replay: replay_model_creation,
+        identity: |value| {
+            let model = match value {
+                api::ProviderModelWriteResponse::Full(v) => v.id,
+                api::ProviderModelWriteResponse::Receipt(v) => v.model_id,
+            };
+            Ok(orch_db::idempotency::creation::Created {
+                kind: MODEL_CREATION.into(),
+                id: model,
+                data: Json::Null,
+            })
+        },
+    }
+}
+fn replay_model_creation(
+    ctx: Ctx,
+    (): (),
+    _: api::ProviderModelCreateBody,
+    created: orch_db::idempotency::creation::Created,
+) -> futures::future::BoxFuture<'static, ApiResult<api::ProviderModelWriteResponse>> {
+    Box::pin(async move {
+        if created.kind != MODEL_CREATION {
+            return Err(ApiError::internal(
+                "the accepted provider model kind changed",
+            ));
+        }
+        let provider = ctx.id("id")?;
+        let receipt = api::ProviderModelWriteResponse::Receipt(api::ProviderModelWriteReceipt {
+            projection: orch_api_contract::common::ReceiptProjection::Receipt,
+            provider_id: provider,
+            model_id: created.id,
+        });
+        crate::key_operations::publication::receipt(&ctx, &receipt)?;
+        let ctx = ctx.for_completed_replay_projection();
+        let current = crate::middleware::authorization::caller_of(ctx.user()?)?;
+        match model_reply(&ctx, &current, provider, created.id, true).await {
+            Ok(value) => Ok(value),
+            Err(e) if matches!(e.code(), ErrorCode::NotFound | ErrorCode::AuthzDenied) => {
+                Ok(receipt)
+            }
+            Err(e) => Err(e),
+        }
+    })
+}
+
+/// Project the actual current model only through this write's optional Provider Read.
+async fn model_reply(
+    ctx: &Ctx,
+    accepted: &orch_authz::Caller,
+    provider: Id,
+    model: Id,
+    replaying: bool,
+) -> ApiResult<api::ProviderModelWriteResponse> {
+    let full = crate::key_operations::completed_projection::run(ctx, async {
+        let mut reading = ctx.app.db.begin_snapshot().await?;
+        let full = if replaying {
+            super::provider_projection::read_completed_replay(
+                ctx,
+                &mut reading,
+                accepted,
+                provider,
+                move |conn, _, _| Box::pin(current_model(conn, provider, model)),
+            )
+            .await?
+        } else {
+            super::provider_projection::read(
+                ctx,
+                &mut reading,
+                accepted,
+                provider,
+                move |conn, _, _| Box::pin(current_model(conn, provider, model)),
+            )
+            .await?
+        };
+        reading.commit().await.map_err(DbError::from)?;
+        Ok(full)
+    })
+    .await?;
+    Ok(match full {
+        Some(model) => api::ProviderModelWriteResponse::full(model),
+        None => api::ProviderModelWriteResponse::Receipt(api::ProviderModelWriteReceipt {
+            projection: orch_api_contract::common::ReceiptProjection::Receipt,
+            provider_id: provider,
+            model_id: model,
+        }),
+    })
+}
+
+async fn current_model(
+    conn: &mut orch_db::Conn,
+    provider: Id,
+    model: Id,
+) -> ApiResult<api::ProviderModel> {
+    let row = queries::model_of(conn, provider, model)
         .await?
-        .ok_or_else(|| ApiError::internal("a model was added and is not there"))?;
-    tx.commit().await.map_err(DbError::from)?;
-    model_view(&added)
+        .ok_or_else(ApiError::not_found)?;
+    model_view(&row)
 }
 
 /// Writes the audit row of a change to the models a provider lists.
@@ -305,7 +599,7 @@ async fn update(
     ctx: Ctx,
     query: orch_api_contract::resource_facts::ResourcePauseQuery,
     body: api::ProviderModelUpdateBody,
-) -> ApiResult<ProviderModel> {
+) -> ApiResult<api::ProviderModelWriteResponse> {
     let id = ctx.id("id")?;
     let note = super::impact::note(query.note.as_deref())?;
     if note.is_some() && body.enabled != Some(false) {
@@ -337,10 +631,15 @@ async fn update(
     let stored = queries::model_of(&mut tx, id, model_id)
         .await?
         .ok_or_else(ApiError::not_found)?;
+    if let Some(groups) = &groups
+        && groups.iter().any(|group| !stored.groups.contains(group))
+    {
+        check_group_count("groups", groups, group_limit(&mut tx, row.home_id).await?)?;
+    }
     if let Some(display) = &display {
         let models = queries::models_of(&mut tx, &[id]).await?;
         if let Some(existing) = clash(&models, None, Some(display), Some(model_id)) {
-            return Err(exists(existing));
+            return Err(exists(&ctx, existing));
         }
     }
     // What the harness or the endpoint last reported stays when a manager writes what is on.
@@ -473,7 +772,7 @@ async fn update(
             .await
             .map_err(ApiError::internal)?;
     }
-    model_view(&changed)
+    model_reply(&ctx, principal.caller(), id, model_id, false).await
 }
 
 /// Removes a model from a provider.
@@ -573,7 +872,11 @@ async fn suggestions(ctx: Ctx, (): (), (): ()) -> ApiResult<Vec<ModelSuggestion>
         .pop()
         .ok_or_else(ApiError::not_found)?;
     drop(conn);
-    discover(&ctx, &row).await
+    let found = discover(&ctx, &row).await?;
+    let (mut tx, guard) = Box::pin(crate::middleware::transaction_guard::begin(&ctx)).await?;
+    provider_for(&mut tx, guard.principal(), id, Permission::ProviderManage).await?;
+    tx.commit().await.map_err(DbError::from)?;
+    Ok(found)
 }
 
 /// What a suggestion becomes when it is accepted: the speeds and access programs it lists, and a context
@@ -583,9 +886,24 @@ async fn suggestions(ctx: Ctx, (): (), (): ()) -> ApiResult<Vec<ModelSuggestion>
 fn accepted_parameters(suggested: &ModelParameters) -> ApiResult<Json> {
     let mut parameters = suggested.clone();
     let mut offered = parameters.offered.take().unwrap_or_default();
+    if let Some(modes) = parameters.web_search.take() {
+        offered.web_search.get_or_insert(modes);
+    }
+    if let Some(lifetimes) = parameters.cache_lifetimes.take() {
+        offered.cache_lifetimes.get_or_insert(lifetimes);
+    }
+    parameters.default_web_search = None;
+    if let Some(modes) = parameters.reasoning_modes.take() {
+        offered.reasoning_modes.get_or_insert(modes);
+    }
+    parameters.default_reasoning_mode = None;
     if let Some(tiers) = parameters.service_tiers.take() {
         offered.service_tiers.get_or_insert(tiers);
     }
+    if let Some(tiers) = parameters.capacity_tiers.take() {
+        offered.capacity_tiers.get_or_insert(tiers);
+    }
+    parameters.default_capacity_tier = None;
     if let Some(programs) = parameters.access_programs.take() {
         offered.access_programs.get_or_insert(programs);
     }
@@ -595,16 +913,14 @@ fn accepted_parameters(suggested: &ModelParameters) -> ApiResult<Json> {
     parameters.default_service_tier = None;
     parameters.default_access_program = None;
     parameters.default_context = None;
+    parameters.request_options = None;
     // A context that is no more than the model's own window offers nothing.
     if let (Some(largest), Some(window)) = (offered.context_max, parameters.context_window)
         && largest <= window
     {
         offered.context_max = None;
     }
-    if offered.service_tiers.is_some()
-        || offered.access_programs.is_some()
-        || offered.context_max.is_some()
-    {
+    if offered != api::ModelOffered::default() {
         parameters.offered = Some(offered);
     }
     parameters_json(&parameters)
@@ -616,7 +932,7 @@ async fn accept(
     ctx: Ctx,
     (): (),
     body: api::ProviderModelSuggestionAcceptBody,
-) -> ApiResult<api::ProviderModelSuggestionAcceptReply> {
+) -> ApiResult<api::ProviderModelSuggestionAcceptResponse> {
     let id = ctx.id("id")?;
     let mut conn = ctx.app.db.acquire().await?;
     let row = queries::providers(&mut conn, &[id])
@@ -625,6 +941,8 @@ async fn accept(
         .ok_or_else(ApiError::not_found)?;
     drop(conn);
     let found = discover(&ctx, &row).await?;
+    // A completed discovery cannot lend its old authority to validation or writes.
+    let (ctx, mut tx, principal) = crate::routes::nodes::action(&ctx).await?;
     let mut chosen: Vec<&ModelSuggestion> = Vec::new();
     for (index, name) in body.model_names.iter().enumerate() {
         let Some(suggestion) = found.iter().find(|each| &each.model_name == name) else {
@@ -640,8 +958,6 @@ async fn accept(
             chosen.push(suggestion);
         }
     }
-    // Discovery may take a while; the provider's Manage is asked again in the transaction that writes.
-    let (ctx, mut tx, principal) = crate::routes::nodes::action(&ctx).await?;
     let mut models = queries::models_of(&mut tx, &[id]).await?;
     let mut added: Vec<Id> = Vec::new();
     for suggestion in chosen {
@@ -660,7 +976,7 @@ async fn accept(
                     "these suggestions have the same display name; add one and rename it before adding the other",
                 ));
             }
-            return Err(exists(existing));
+            return Err(exists(&ctx, existing));
         }
         let model = orch_types::new_id();
         let parameters = accepted_parameters(&suggestion.parameters)?;
@@ -697,15 +1013,52 @@ async fn accept(
         .await?;
         refresh_standing(&ctx, &mut tx, id).await?;
     }
-    let models = queries::models_of(&mut tx, &[id]).await?;
-    let added = models
-        .iter()
-        .filter(|model| added.contains(&model.id))
-        .map(model_view)
-        .collect::<ApiResult<Vec<_>>>()?;
-    let provider = super::providers::show(&ctx, &mut tx, &principal, id).await?;
     tx.commit().await.map_err(DbError::from)?;
-    Ok(api::ProviderModelSuggestionAcceptReply { added, provider })
+    let projection = ctx.clone();
+    let actual = added.clone();
+    let full = crate::key_operations::completed_projection::run(&ctx, async {
+        let mut reading = ctx.app.db.begin_snapshot().await?;
+        let full = super::provider_projection::read(
+            &ctx,
+            &mut reading,
+            principal.caller(),
+            id,
+            move |conn, reader, prepared| {
+                Box::pin(async move {
+                    let models = queries::models_of(conn, &[id]).await?;
+                    let added = models
+                        .iter()
+                        .filter(|model| actual.contains(&model.id))
+                        .map(model_view)
+                        .collect::<ApiResult<Vec<_>>>()?;
+                    let provider = super::providers::show_prepared(
+                        &projection,
+                        conn,
+                        reader,
+                        prepared.ok_or_else(|| {
+                            ApiError::internal("the bounded provider projection is absent")
+                        })?,
+                    )
+                    .await?;
+                    Ok(api::ProviderModelSuggestionAcceptReply { added, provider })
+                })
+            },
+        )
+        .await?;
+        reading.commit().await.map_err(DbError::from)?;
+        Ok(full)
+    })
+    .await?;
+    Ok(match full {
+        Some(full) => api::ProviderModelSuggestionAcceptResponse::full(full),
+        None => api::ProviderModelSuggestionAcceptResponse::Receipt(
+            api::ProviderModelSuggestionAcceptReceipt {
+                projection: orch_api_contract::common::ReceiptProjection::Receipt,
+                provider_id: id,
+                model_ids: added,
+            },
+        ),
+    })
 }
 
 #[cfg(test)]
@@ -796,7 +1149,65 @@ mod tests {
     }
 
     #[test]
-    fn a_group_is_named_plainly_once_and_at_most_eight_of_them() {
+    fn reasoning_starts_require_enablement_and_suggestions_only_offer_them() {
+        let mut parameters = ModelParameters {
+            reasoning_modes: Some(vec!["pro".into()]),
+            default_reasoning_mode: Some("pro".into()),
+            ..Default::default()
+        };
+        assert!(check_parameters(&parameters).is_ok());
+        let accepted = accepted_parameters(&parameters).unwrap();
+        assert!(accepted.get("reasoning_modes").is_none());
+        assert!(accepted.get("default_reasoning_mode").is_none());
+        assert_eq!(
+            accepted["offered"]["reasoning_modes"],
+            serde_json::json!(["pro"])
+        );
+        parameters.reasoning_modes = None;
+        let error = check_parameters(&parameters).unwrap_err();
+        assert!(
+            error
+                .problem
+                .detail
+                .starts_with("parameters.default_reasoning_mode:")
+        );
+    }
+
+    #[test]
+    fn capacity_starts_require_enablement_and_suggestions_never_open_capacity() {
+        let mut parameters = ModelParameters {
+            capacity_tiers: Some(vec![tier("auto")]),
+            default_capacity_tier: Some("auto".into()),
+            ..Default::default()
+        };
+        assert!(check_parameters(&parameters).is_ok());
+        let accepted = accepted_parameters(&parameters).unwrap();
+        assert!(accepted.get("capacity_tiers").is_none());
+        assert!(accepted.get("default_capacity_tier").is_none());
+        assert_eq!(accepted["offered"]["capacity_tiers"][0]["id"], "auto");
+        parameters.capacity_tiers = None;
+        assert!(
+            check_parameters(&parameters)
+                .unwrap_err()
+                .problem
+                .detail
+                .starts_with("parameters.default_capacity_tier:")
+        );
+    }
+
+    #[test]
+    fn accepting_a_cache_lifetime_suggestion_only_offers_the_additional_lifetime() {
+        let parameters = ModelParameters {
+            cache_lifetimes: Some(vec!["1h".into()]),
+            ..Default::default()
+        };
+        let accepted = accepted_parameters(&parameters).unwrap();
+        assert!(accepted.get("cache_lifetimes").is_none());
+        assert_eq!(accepted["offered"]["cache_lifetimes"], json!(["1h"]));
+    }
+
+    #[test]
+    fn group_names_are_deduplicated_and_the_current_configured_count_is_independent() {
         let names = |words: &[&str]| {
             words
                 .iter()
@@ -814,8 +1225,12 @@ mod tests {
         assert!(clean_groups("groups", &names(&[""])).is_err());
         assert!(clean_groups("groups", &["g".repeat(41)]).is_err());
         let nine: Vec<String> = (0..9).map(|n| format!("g{n}")).collect();
-        assert!(clean_groups("groups", &nine).is_err());
-        assert!(clean_groups("groups", &nine[..8]).is_ok());
+        let groups = clean_groups("groups", &nine).unwrap();
+        assert!(check_group_count("groups", &groups, MODEL_GROUPS_DEFAULT).is_err());
+        assert!(check_group_count("groups", &groups[..8], MODEL_GROUPS_DEFAULT).is_ok());
+        assert!(check_group_count("groups", &groups, 9).is_ok());
+        assert!(check_group_count("groups", &[], 0).is_ok());
+        assert!(check_group_count("groups", &groups, 0).is_err());
     }
 
     #[test]
@@ -845,6 +1260,7 @@ mod tests {
         let same = ModelParameters {
             context_window: Some(272_000),
             offered: Some(api::ModelOffered {
+                web_search: None,
                 context_max: Some(272_000),
                 ..api::ModelOffered::default()
             }),
@@ -854,6 +1270,23 @@ mod tests {
             accepted_parameters(&same).unwrap().get("offered").is_none(),
             "a context no larger than the window offers nothing"
         );
+    }
+
+    #[test]
+    fn accepting_a_report_without_enabled_options_preserves_its_future_facts() {
+        let suggested: ModelParameters = serde_json::from_value(json!({
+            "offered":{"report":{"capabilities":{"pdf_input":{"supported":true},"future_capability":{"supported":true}},
+            "output_max":64000,"lifecycle":"deprecated","retires_at":"2027-01-01T00:00:00Z","future_member":{"kept":true}}}
+        })).unwrap();
+        let kept = accepted_parameters(&suggested).unwrap();
+        assert_eq!(
+            kept["offered"],
+            serde_json::to_value(&suggested.offered).unwrap()
+        );
+        assert!(kept.get("web_search").is_none());
+        assert!(kept.get("service_tiers").is_none());
+        assert!(kept.get("context_max").is_none());
+        assert!(check_parameters(&suggested).is_ok());
     }
 
     #[test]
@@ -875,5 +1308,18 @@ mod tests {
         let plain = accepted_parameters(&ModelParameters::default()).unwrap();
         assert!(plain.get("offered").is_none());
         let _ = ModelOffered::default();
+    }
+    #[test]
+    fn search_offers_never_enable_the_tool_or_its_default() {
+        let suggested: ModelParameters =
+            serde_json::from_value(json!({"web_search":["live"],"default_web_search":"live"}))
+                .unwrap();
+        let accepted = accepted_parameters(&suggested).unwrap();
+        assert_eq!(accepted["offered"]["web_search"], json!(["live"]));
+        assert!(accepted.get("web_search").is_none());
+        assert!(accepted.get("default_web_search").is_none());
+        let invalid: ModelParameters =
+            serde_json::from_value(json!({"default_web_search":"live"})).unwrap();
+        assert!(check_parameters(&invalid).is_err());
     }
 }

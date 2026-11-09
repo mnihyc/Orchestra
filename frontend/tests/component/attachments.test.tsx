@@ -23,7 +23,7 @@ describe('attachment chips', () => {
     const remove = vi.fn();
     const parts: ContentPart[] = [{ type: 'image', blob: 'a'.repeat(64), name: 'screen.png', media_type: 'image/png' }];
     show(<AttachmentChips parts={parts} onRemove={remove} imageIncompatible onChangeModel={change} />);
-    expect(screen.getByRole('status')).toHaveTextContent('This model receives the image as a file');
+    expect(screen.getByRole('status')).toHaveTextContent('Image will be sent as a file');
     fireEvent.click(screen.getByRole('button', { name: 'Change model' }));
     expect(change).toHaveBeenCalledOnce();
     fireEvent.click(screen.getByRole('button', { name: 'Remove screen.png' }));

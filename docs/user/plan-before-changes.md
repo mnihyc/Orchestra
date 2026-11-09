@@ -1,7 +1,9 @@
 ---
+group: work
 title: Plan and goals
 screens: /thread/$threadId, /approvals, /org/$slug/settings/$section, /project/$projectId/settings, /admin/$section
 keywords: Plan, Proceed, Keep planning, plan mode, approval, read only, thread.plan_first, thread.plan_answered_by, goal, /goal, Done when, keep working, thread.goal.max_turns, thread.goal.max_minutes, thread.goal.max_credits, summary.handoff_input_share
+summary: Review an agent’s plan before changes and use goals to guide continued work.
 ---
 
 # Plan and goals

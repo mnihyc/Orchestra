@@ -89,7 +89,7 @@ fn claude_code_recorded_windows_and_extra_usage_keep_vendor_units_and_overage() 
         [130.0, 72.0, 4.0]
     );
     let extra = after.extra_usage.unwrap();
-    assert_eq!(extra.used, Some(400.0));
+    assert_eq!(extra.used, Some("400".to_owned()));
     assert_eq!(extra.unit.as_deref(), Some("USD"));
     assert_eq!(extra.decimal_places, Some(2));
     assert_eq!(after.field_times["windows.secondary:sonnet"], at());
@@ -123,7 +123,10 @@ fn claude_native_control_observations_keep_the_same_members_after_the_source_rea
         Some("2026-10-14T09:00:00.000Z".parse().unwrap())
     );
     let extra = after.extra_usage.unwrap();
-    assert_eq!((extra.limit, extra.used), (Some(5000.0), Some(123.0)));
+    assert_eq!(
+        (extra.limit, extra.used),
+        (Some("5000".to_owned()), Some("123".to_owned()))
+    );
     assert_eq!(extra.unit.as_deref(), Some("USD"));
     assert_eq!(
         extra.decimal_places, None,

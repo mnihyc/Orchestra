@@ -29,12 +29,14 @@ import { holds } from '@/lib/permissions';
 import { Button } from '@/ui/Button';
 import { ErrorAlert } from '@/ui/ErrorState';
 import { Select } from '@/ui/Select';
+import { ResourcePicker } from '@/ui/ResourcePicker';
 import { cx } from '@/ui/cx';
 
 import { type Missing, modelName, type Picks, type Resolved, settingsToKeep } from './choices';
 import type { StartOptions } from '@/api/start';
 import { RequestDefault } from './RequestDefault';
 import { agentWhy, arrangementWhy, providerWhy } from './words';
+import { ProgramReport } from './ProgramReport';
 
 /** A place whose defaults decide what the threads made in the place run on, and whether the person may write them there. */
 export interface Scope {
@@ -42,6 +44,8 @@ export interface Scope {
   kind: 'topic' | 'project' | 'org';
   name: string;
   may: boolean;
+  /** A displayed default destination is still being admitted. */
+  pending?: boolean;
 }
 
 /**
@@ -49,15 +53,15 @@ export interface Scope {
  * the project a topic lies in, and the org it lies in; each with whether the person may write there. Writing a default is a
  * parameter of the place, which is its manager's to set.
  */
-export function useScopes(node: Topic | Project): Scope[] {
+export function useScopes(node: Topic | Project, needed = true): Scope[] {
   const org = [...node.path].reverse().find((entry) => entry.kind === 'org') ?? null;
   const project = node.kind === 'topic' ? node.parent_id : null;
-  const above = useQuery({ ...nodeQuery(project ?? ''), enabled: project !== null });
-  const orgNode = useQuery({ ...nodeQuery(org?.id ?? ''), enabled: org !== null });
+  const above = useQuery({ ...nodeQuery(project ?? ''), enabled: needed && project !== null });
+  const orgNode = useQuery({ ...nodeQuery(org?.id ?? ''), enabled: needed && org !== null });
   return [
     { id: node.id, kind: node.kind, name: node.name, may: holds(node.access, `${node.kind}.manage`) },
-    ...(project === null ? [] : [{ id: project, kind: 'project' as const, name: above.data?.name ?? '', may: holds(above.data?.access, 'project.manage') }]),
-    ...(org === null ? [] : [{ id: org.id, kind: 'org' as const, name: org.name ?? '', may: holds(orgNode.data?.access, 'org.manage') }]),
+    ...(project === null ? [] : [{ id: project, kind: 'project' as const, name: above.data?.name ?? '', may: holds(above.data?.access, 'project.manage'), pending: needed && above.isPending }]),
+    ...(org === null ? [] : [{ id: org.id, kind: 'org' as const, name: org.name ?? '', may: holds(orgNode.data?.access, 'org.manage'), pending: needed && orgNode.isPending }]),
   ];
 }
 
@@ -138,6 +142,7 @@ export function MissingDefault({ place, node, options, resolved, picks, onPick, 
   const first = resolved.missing[0];
   const waiting = resolved.waiting;
   const chosenProvider = resolved.provider;
+  const failedProgram = first?.kind === 'agent' ? first.unusable ?? resolved.agents.find((row) => row.entry.program_report?.status === 'error') : undefined;
   const whole = first === undefined;
   // What a choice settles is asked quietly; what no choice here can settle (no environment, no way of placing the agent) is a warning.
   const stuck = first?.kind === 'environment' || first?.kind === 'arrangement';
@@ -179,28 +184,33 @@ export function MissingDefault({ place, node, options, resolved, picks, onPick, 
         <span>{sentence}</span>
       </p>
 
+      {failedProgram?.entry.program_report?.status === 'error' && chosenProvider !== null && <details>
+        <summary className="cursor-pointer text-text-muted">{t('start.agent.programDetails', { agent: failedProgram.entry.agent.name })}</summary>
+        <div className="mt-2"><ProgramReport agent={failedProgram.entry} provider={chosenProvider.entry.provider} /></div>
+      </details>}
+
       {choice !== null && (
         <div className="flex flex-wrap items-start gap-3">
           {(choice.kind === 'provider' || picks.provider !== null) && (
-            <Select
+            <ResourcePicker pickerKey="start-missing-provider"
               label={missingProviderContext ? t(providers.isError ? 'startFlow.providerLocationsFailure' : 'startFlow.providerLocationsLoading') : t('start.provider.title')}
               value={chosenProvider?.id ?? ''}
               placeholder={t('start.missing.pickProvider')}
               disabled={options.defaults.locked || missingProviderContext}
               onValueChange={(next) => onPick({ provider: next, agent: null, model: null, effort: null, arrangement: null })}
-              options={resolved.providers.filter((row) => row.choosable).map((row) => ({ value: row.id, label: providerNames.get(row.id) ?? row.entry.provider.name }))}
+              options={resolved.providers.filter((row) => row.choosable).map((row) => ({ value: row.id, name: providerNames.get(row.id) ?? row.entry.provider.name, resource:{kind:'provider',id:row.id,data:row.entry} }))}
               fieldClassName="min-w-(--field-narrow) flex-1"
             />
           )}
           {chosenProvider !== null && resolved.agents.some((row) => row.startable) && (choice.kind === 'agent' || picks.agent !== null) && (
-            <Select
+            <ResourcePicker pickerKey="start-missing-profile"
               label={t('start.agent.title')}
               value={resolved.agent?.id ?? ''}
               placeholder={t('start.missing.pickAgent')}
               onValueChange={(next) => onPick({ agent: next, arrangement: null })}
               options={resolved.agents.filter((row) => row.startable).map((row) => {
                 const program = programNameIn(row.entry.agent, i18n.resolvedLanguage ?? i18n.language) ?? t('resources.harnessNameUnknown');
-                return { value: row.id, label: row.entry.agent.name, description: program === row.entry.agent.name || program === t('resources.harnessNameUnknown') ? undefined : program };
+                return { value: row.id, name: row.entry.agent.name, resource:{kind:'agent',id:row.id,data:row.entry}, description: program === row.entry.agent.name || program === t('resources.harnessNameUnknown') ? undefined : program };
               })}
               fieldClassName="min-w-(--field-narrow) flex-1"
             />

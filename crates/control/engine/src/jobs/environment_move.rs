@@ -38,6 +38,11 @@ use serde::{Deserialize, Serialize};
 use serde_json::json;
 use std::collections::{BTreeMap, HashSet};
 
+mod choice;
+pub(crate) mod notice;
+/// The native effect-free destination/source selector used before move measurements.
+pub use choice::{MoveChoice, select_destination};
+
 /// Move weights make the workspace transfer the largest part of the progress bar.
 pub const PHASES: [Phase; 8] = [
     Phase {
@@ -150,6 +155,11 @@ mod selection_tests {
     }
 }
 
+/// Retained actual node move confirmation sources.
+pub mod authority;
+/// Private native preparation evidence supplied by the environment lifecycle producer.
+pub mod preparation;
+
 /// Durable destination and source information for a move.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct MoveRecipe {
@@ -185,6 +195,7 @@ pub struct MoveRecipe {
 }
 
 /// The plan of a move before names and visibility are filled by HTTP.
+#[derive(Clone)]
 pub struct MoveDraft {
     /// What is kept or detached on the target, including its actual mode and any reason.
     pub mounts: Vec<orch_api_contract::forks::PlanMount>,
@@ -220,62 +231,22 @@ impl Engine {
                 given,
             )
             .await?;
-        let state = envs::environment(conn, environment)
-            .await?
-            .ok_or(UpdateError::NotFound)?;
-        if request
-            .template_id
-            .is_some_and(|template| Some(template) != state.template_id)
-        {
-            return Err(UpdateError::Invalid("A move keeps the current unit template. Change its template through an update before moving it.".into()));
-        }
-        let selection = move_selection(
-            request.files.as_ref(),
-            state.facts.get("index").and_then(Json::as_str) == Some("live"),
-        )?;
-        let old = envs::runtime(conn, common.recipe.old)
-            .await?
-            .ok_or(UpdateError::NotFound)?;
-        let kept_image = old
-            .kept_image
-            .as_ref()
-            .map(|image| {
-                serde_json::from_value::<orch_driver_contract::kept::KeptImage>(image.clone())
-            })
-            .transpose()
-            .map_err(EngineError::from)?;
-        let image_bytes = kept_image
-            .as_ref()
-            .map_or(0, |image| image.total_bytes.max(image.bytes));
-        let mut template = hosts::template(conn, common.recipe.template)
-            .await?
-            .ok_or(UpdateError::NotFound)?;
-        template.spec = common.recipe.definition.clone();
-        template.driver.clone_from(&old.driver);
-        let mut wanted =
-            crate::places::wanted(conn, state.home_node_id, template, &state.config).await?;
-        // A move may deliberately detach mounts absent on another host; its plan says which.
-        wanted.mounts.clear();
-        let places = crate::places::host_places_for_environment(
+        let MoveChoice {
+            state,
+            old,
+            destination,
+            selection,
+            kept_image,
+            image_bytes,
+        } = select_destination(
             conn,
             principal,
-            &crate::places::Ask {
-                home: state.home_node_id,
-                wanted: &wanted,
-                current: Some(old.host_id),
-                minutes_idle: crate::places::IDLE_MINUTES_DEFAULT,
-                now: self.inner.clock.now(),
-            },
             environment,
+            &common.recipe,
+            request,
+            self.inner.clock.time(),
         )
         .await?;
-        let other: Vec<_> = places
-            .into_iter()
-            .filter(|p| p.host.id != old.host_id)
-            .collect();
-        let destination = crate::places::choose(&other, request.host_id)
-            .map_err(|e| UpdateError::Blocked(vec![updates::blocker(e.code, e.message)]))?
-            .clone();
         let mut blockers = common
             .blockers
             .into_iter()
@@ -346,6 +317,7 @@ impl Engine {
             self,
             conn,
             &crate::mount_copies::Ask {
+                preparation: None,
                 choices: request.mounts.as_deref().unwrap_or_default(),
                 check_fingerprints: request.check_fingerprints.unwrap_or(false).then(|| {
                     request
@@ -441,6 +413,7 @@ impl Engine {
         .await
         {
             Ok(home) => home,
+            Err(error @ EngineError::BeforeEffect(_)) => return Err(error.into()),
             Err(_) => {
                 if private_views.iter().any(|view| view.carried) {
                     blockers.push(updates::blocker("volume_measurement_unavailable", "the old host could not measure the whole home/private volumes; no carry can be confirmed"));
@@ -457,6 +430,7 @@ impl Engine {
         .await
         {
             Ok(measured) => measured,
+            Err(error @ EngineError::BeforeEffect(_)) => return Err(error.into()),
             Err(_) => {
                 blockers.push(updates::blocker("file_states_copy_unavailable", "the complete recorded-state store must be measured and carried before this move can start"));
                 orch_api_contract::forks::FilesPlanFileStates {
@@ -759,17 +733,28 @@ impl Engine {
 }
 
 /// Queues a move with the same shared holds as a replacement.
-pub async fn queue(
+/// Native move operands after the common lifecycle/thread hold preparation.
+#[derive(Clone)]
+pub struct PreparedQueue {
+    recipe: MoveRecipe,
+    replacement: crate::jobs::recreate::PreparedQueue,
+}
+impl PreparedQueue {
+    /// Actual frozen native move recipe.
+    pub fn recipe(&self) -> &MoveRecipe {
+        &self.recipe
+    }
+}
+/// Prepare the existing common lock/hold footprint before operation admission.
+pub async fn prepare_queue(
     conn: &mut Conn,
     draft: MoveDraft,
-    batch: Option<Id>,
-    now: chrono::DateTime<chrono::Utc>,
-) -> Result<jobs::JobRow, UpdateError> {
+) -> Result<PreparedQueue, UpdateError> {
     if !draft.blockers.is_empty() {
         return Err(UpdateError::Blocked(draft.blockers));
     }
-    let recipe = draft.recipe;
-    let row = crate::jobs::recreate::queue(
+    let mut recipe = draft.recipe;
+    let replacement = crate::jobs::recreate::prepare_queue(
         conn,
         Draft {
             recipe: recipe.replacement.clone(),
@@ -778,10 +763,35 @@ pub async fn queue(
             lost: Vec::new(),
             blockers: Vec::new(),
         },
-        batch,
-        now,
     )
     .await?;
+    recipe.replacement = replacement.recipe().clone();
+    Ok(PreparedQueue {
+        recipe,
+        replacement,
+    })
+}
+/// The ordinary native entrypoint keeps the same prepared writer.
+pub async fn queue(
+    conn: &mut Conn,
+    draft: MoveDraft,
+    batch: Option<Id>,
+    now: chrono::DateTime<chrono::Utc>,
+) -> Result<jobs::JobRow, UpdateError> {
+    let prepared = prepare_queue(conn, draft).await?;
+    queue_prepared(conn, prepared, batch, now, || Ok(())).await
+}
+/// Apply that exact native move after its once-only first-effect check.
+pub async fn queue_prepared(
+    conn: &mut Conn,
+    prepared: PreparedQueue,
+    batch: Option<Id>,
+    now: chrono::DateTime<chrono::Utc>,
+    before: impl FnOnce() -> Result<(), UpdateError>,
+) -> Result<jobs::JobRow, UpdateError> {
+    let recipe = prepared.recipe;
+    let row = crate::jobs::recreate::queue_prepared(conn, prepared.replacement, batch, now, before)
+        .await?;
     let plan = serde_json::to_value(&recipe).map_err(EngineError::from)?;
     let progress = serde_json::to_value(initial_progress(&PHASES)).map_err(EngineError::from)?;
     let row = jobs::changes::make_move(conn, row.id, &plan, &progress, now).await?;
@@ -1191,13 +1201,19 @@ impl Moving {
             .await?
             .ok_or_else(|| fail("environment_gone", "the environment is gone"))?;
         orch_db::queries::transaction_guard::lock_authority(&mut tx).await?;
-        let principal = Principal::load(
-            &mut tx,
-            orch_authz::Caller::session(self.recipe.replacement.by),
-            orch_types::Time::new(job.now()),
-        )
-        .await
-        .map_err(EngineError::from)?;
+        let principal = if authority::present(&row) {
+            authority::principal(&mut tx, &row, job.engine().inner.clock.as_ref())
+                .await
+                .map_err(|error| fail("access.denied", error.to_string()))?
+        } else {
+            Principal::load(
+                &mut tx,
+                orch_authz::Caller::session(self.recipe.replacement.by),
+                orch_types::Time::new(job.now()),
+            )
+            .await
+            .map_err(EngineError::from)?
+        };
         let mut template = hosts::template(&mut tx, self.recipe.replacement.template)
             .await?
             .ok_or_else(|| fail("template_unavailable", "The destination template is gone."))?;
@@ -1271,6 +1287,8 @@ impl Moving {
             .await?,
         )
         .map_err(EngineError::from)?;
+        let (from_host, from_machine) =
+            crate::views::environment_location_refs(&mut tx, self.environment()).await?;
         // The copies' locations become the destination's before the candidate does, so that only the environments
         // that had the mount there before are told their location changed.
         crate::mount_copies::commit(
@@ -1357,12 +1375,26 @@ impl Moving {
             from: old.workspace_root,
             to: after.workspace_root.clone(),
         };
+        let (to_host, to_machine) =
+            crate::views::environment_location_refs(&mut tx, self.environment()).await?;
+        let move_notice = notice::MoveNotice::prepare(
+            &mut tx,
+            &from_row.facts,
+            &to_row.facts,
+            &self.recipe.mount_decisions.detached,
+            self.recipe.files.missing.count,
+        )
+        .await?;
         let marker = orch_api_contract::threads::MarkerPayload::EnvironmentMoved(
             orch_api_contract::threads::MarkerEnvironmentMoved {
+                from_host,
+                from_machine,
+                to_host,
+                to_machine,
                 from,
                 to,
                 path_map,
-                mounts_detached: Vec::new(),
+                mounts_detached: move_notice.detached.clone(),
                 by,
             },
         );
@@ -1395,6 +1427,7 @@ impl Moving {
             self.recipe.replacement.by,
             self.recipe.files.home.is_some(),
             false,
+            Some(&move_notice),
         )
         .await?;
         let mut audit = orch_db::audit::Entry::new(
@@ -1621,10 +1654,13 @@ impl Moving {
 #[async_trait]
 impl Phased for Moving {
     async fn run(&self, job: &Job, phase: &str) -> Result<Done, Stop> {
+        if phase != "cleanup" {
+            authority::guard(job).await?;
+        }
         match phase {
-            "lock" => self.lock(job).await,
-            "provision" => self.provision(job).await,
-            "copy" => self.copy(job).await,
+            "lock" => Box::pin(self.lock(job)).await,
+            "provision" => Box::pin(self.provision(job)).await,
+            "copy" => Box::pin(self.copy(job)).await,
             "history" => {
                 let plan = job.plan().await?;
                 let next: Id =
@@ -1638,7 +1674,7 @@ impl Phased for Moving {
                     .ok_or_else(|| fail("runtime_gone", "The destination unit is gone"))?
                     .generation;
                 drop(conn);
-                crate::recovery::prepare_histories(
+                Box::pin(crate::recovery::prepare_histories(
                     job,
                     self.environment(),
                     machine,
@@ -1647,13 +1683,13 @@ impl Phased for Moving {
                     })?,
                     generation,
                     self.recipe.files.home.is_some(),
-                )
+                ))
                 .await
             }
-            "after_up" => super::after_up::run(job).await,
-            "verify" => self.verify(job).await,
-            "commit" => self.commit(job).await,
-            "cleanup" => self.cleanup(job).await,
+            "after_up" => Box::pin(super::after_up::run(job)).await,
+            "verify" => Box::pin(self.verify(job)).await,
+            "commit" => Box::pin(self.commit(job)).await,
+            "cleanup" => Box::pin(self.cleanup(job)).await,
             _ => Err(fail("internal", format!("a move has no phase {phase}"))),
         }
     }

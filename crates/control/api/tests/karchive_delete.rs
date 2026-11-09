@@ -8,6 +8,8 @@
 mod places;
 mod rig;
 mod support;
+use crate::support::FullArchiveReply as _;
+use support::FullTokenReply as _;
 
 use orch_api_contract::common::ErrorCode;
 use orch_api_contract::nodes::{Node, NodeArchive, NodeGet, NodeUnarchive};
@@ -123,6 +125,8 @@ async fn a_side_thread_is_closed_by_its_maker_parent_page_manager_or_environment
         .send()
         .await
         .ok()
+        .into_full()
+        .unwrap()
         .base
         .id;
     let mut conn = scene.rig.db.acquire().await.unwrap();
@@ -188,17 +192,19 @@ async fn a_side_thread_is_closed_by_its_maker_parent_page_manager_or_environment
         .call(orch_api_contract::auth::MeTokenCreate, &[])
         .token(&scene.bea.token)
         .body(&orch_api_contract::auth::ApiTokenCreateBody {
+            rules: None,
             name: "Read only".to_owned(),
             scopes: Some(vec!["thread.view".to_owned()]),
             node_id: None,
             expires_at: None,
-            proof: orch_api_contract::auth::SensitiveProof {
+            proof: Some(orch_api_contract::auth::SensitiveProof {
                 password: Some(support::PASSWORD.to_owned()),
                 ..Default::default()
-            },
+            }),
         })
         .send()
         .await
+        .full_token()
         .ok();
     let refused = scene
         .rig
@@ -247,6 +253,7 @@ async fn a_new_engine_delivers_archive_controls_committed_by_a_stopped_predecess
         .body(&places::archive_body(&scene.rig.world, &scene.ada.token, thread, true).await)
         .send()
         .await
+        .full_archive()
         .ok();
     assert_eq!(scalar(&scene,"SELECT count(*) FROM commands WHERE body->>'thread_id'=$1::uuid::text AND kind='session.close'",thread).await,1);
     let clock = Arc::clone(&scene.rig.world.app.app.clock);
@@ -343,6 +350,7 @@ async fn archiving_a_running_thread_cancels_its_queue_and_approvals_once_and_kee
         .body(&places::archive_body(&scene.rig.world, &scene.ada.token, thread, true).await)
         .send()
         .await
+        .full_archive()
         .ok();
     assert!(matches!(archived.node, Node::Thread(ref row) if row.base.archived));
     settled(&scene, thread).await;
@@ -370,6 +378,7 @@ async fn archiving_a_running_thread_cancels_its_queue_and_approvals_once_and_kee
         .body(&places::archive_body(&scene.rig.world, &scene.ada.token, thread, true).await)
         .send()
         .await
+        .full_archive()
         .ok();
     assert_eq!(scene.rig.seen.of_kind(CommandKind::SessionClose).len(), 1);
     assert_eq!(scene.rig.seen.of_kind(CommandKind::TurnInterrupt).len(), 1);
@@ -407,6 +416,7 @@ async fn archiving_a_running_thread_cancels_its_queue_and_approvals_once_and_kee
         .body(&places::archive_body(&scene.rig.world, &scene.ada.token, thread, false).await)
         .send()
         .await
+        .full_archive()
         .ok();
     settled(&scene, thread).await;
     assert_eq!(scene.rig.turn_starts(thread).len(), 1);
@@ -486,7 +496,9 @@ async fn idle_and_running_ordinary_threads_can_be_deleted_and_restored_archived_
             .token(&scene.ada.token)
             .send()
             .await
-            .ok();
+            .ok()
+            .into_full()
+            .expect("ordinary thread restoration keeps its full Node");
         assert!(matches!(restored,Node::Thread(ref row) if row.base.archived));
         assert_eq!(scene.rig.turn_starts(thread).len(), usize::from(running));
         settled(&scene, thread).await;
@@ -527,6 +539,7 @@ async fn archiving_a_place_settles_its_threads_but_leaves_their_environment_regi
         )
         .send()
         .await
+        .full_archive()
         .ok();
     for thread in [first, second] {
         settled(&scene, thread).await;
@@ -555,6 +568,7 @@ async fn archiving_a_place_settles_its_threads_but_leaves_their_environment_regi
         )
         .send()
         .await
+        .full_archive()
         .ok();
     assert_eq!(scene.rig.turn_starts(first).len(), 1);
     assert_eq!(scene.rig.turn_starts(second).len(), 1);
@@ -930,6 +944,7 @@ async fn repeating_an_older_archive_settles_work_that_its_hierarchy_only_impleme
         .body(&places::archive_body(&scene.rig.world, &scene.ada.token, thread, true).await)
         .send()
         .await
+        .full_archive()
         .ok();
     settled(&scene, thread).await;
     eventually("legacy native session closed", || async {
@@ -945,6 +960,7 @@ async fn repeating_an_older_archive_settles_work_that_its_hierarchy_only_impleme
         .body(&places::archive_body(&scene.rig.world, &scene.ada.token, thread, true).await)
         .send()
         .await
+        .full_archive()
         .ok();
     assert_eq!(scene.rig.seen.of_kind(CommandKind::SessionClose).len(), 1);
     scene.rig.engine.stop();

@@ -7,8 +7,12 @@ it are + for uploads and references, the agent's binding, model and effort, the 
 the context ring that opens its breakdown. The phone row names the actual agent, the model and
 compact spacing; the full current binding, effort and ring values stay in their tooltips, open pickers
 and accessible names. Send and Stop use the same ordinary small control height as the model and mode
-pickers, retain their intrinsic width and stand at the right end. A viewer gets the watch notice with
-the access reason and no composer controls; narrow-thread bottom tabs yield to the conversation.
+pickers, retain their intrinsic width and stand at the right end. A viewer keeps that same composer:
+the box and attachment controls are disabled, the model and effort remain visible, and Send keeps its
+disabled reason. `ViewerAccessLine.tsx` names the missing access and its native givers in one compact
+row; Request access opens the existing request form with those permissions, model/effort options and
+thread prefilled. Without a giver there is no request action. Archived threads keep their archive
+line, and retained read-only inspections have no composer. Narrow-thread bottom tabs yield to the conversation.
 What is written is kept per
 thread, and on the server so that it is there on another device. Every waiting input, including the first
 and those held by Stop, a cap or files, stands once in the queue above the composer. Its author edits its
@@ -77,7 +81,7 @@ cannot retain the tab stop. A reader without permission to manage still sees the
 - `Controls.tsx`: The next turn's controls beside its message: attachments, binding, model, permission mode, context and delivery.
 - `ApprovalMode.tsx`: The thread's native permission mode, chosen from its harness and place's offered modes with the current setting revision.
 - `DeliveryControl.tsx`: One split action: Send when idle, Stop while a turn runs, with explicit queue, steer and interruption choices.
-- `DeliveryMenu.tsx`: Queue, steer and interrupt for whoever may drive the thread; Ask on the side; broadcast choices.
+- `DeliveryMenu.tsx`: Queue, steer and interrupt for whoever may drive the thread; Side thread; broadcast choices.
 - `ModelEffort.tsx`: Model, by its display name, and reasoning effort chosen together at the composer; applies from the next turn.
 - `SpeedAndAccess.tsx`: Speed and access: the faster speeds and the access programs that a manager of the provider enabled for this model, and nothing that was only offered.
 - `QueueTray.tsx`: One queue for every waiting input: author edits, delivery, Send now, removal and pointer or keyboard ordering.
@@ -95,3 +99,5 @@ cannot retain the tab stop. A reader without permission to manage still sees the
 - `modelState.ts`: What a thread runs with in speed, access and context, worked out from what its agent publishes, what its model's entry opens and what the thread itself chose; and what a change of model leaves of those choices.
 - `runsWith.ts`: What a thread runs with, read and changed: the parameters of its agent with the thread's own choices among them, kept current as the thread's history says they changed, and the writes of a choice.
 - `RanWith.tsx`: What a turn ran with beyond its model and effort, for the turn's footer: the speed, the access program and the context it was started with, as it recorded them.
+
+The compact approval/sandbox/Plan row marks an inherited place default. Both native mode pickers use the same parameter/settings cache and one revision-guarded mode writer; sandbox choices come only from available_values. A current-session native divergence is named separately as the program last reported it, and a newer agreeing report retires that line. Nothing guesses the mode from the program name or an old segment. Ordinary sends and Send review share planningFor; an explicit Plan choice wins over the first-message default, whose unread state holds Send with its reason and a retry on failure.

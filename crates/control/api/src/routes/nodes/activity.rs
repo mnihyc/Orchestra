@@ -90,6 +90,7 @@ async fn names(
     conn: &mut orch_db::Conn,
     principal: &orch_authz::Principal,
     rows: &[&AuditRow],
+    reading: Option<&super::overview::Reading<'_>>,
 ) -> ApiResult<Names> {
     let people: Vec<Id> = rows
         .iter()
@@ -153,9 +154,24 @@ async fn names(
             objects.insert(each.id, (!each.deleted).then_some(each.name));
         }
     }
+    let named = match reading {
+        Some(reading) => {
+            reading
+                .name_bounds(conn, &nodes)
+                .await?
+                .refs(conn, principal, &nodes)
+                .await?
+        }
+        None => view::refs(conn, principal, &nodes, Policy::default()).await?,
+    };
+    if let Some(reading) = reading {
+        for node in named.values() {
+            reading.reference(conn, node).await?;
+        }
+    }
     Ok(Names {
         people: user_refs(conn, &people).await?,
-        nodes: view::refs(conn, principal, &nodes, Policy::default()).await?,
+        nodes: named,
         objects,
     })
 }
@@ -166,6 +182,19 @@ async fn activity_list(
     query: NodeActivityListQuery,
     (): (),
 ) -> ApiResult<Page<ActivityEntry>> {
+    let mut conn = ctx.app.db.acquire().await?;
+    let principal = authorization::principal(&ctx, &mut conn).await?;
+    read_in(&ctx, &mut conn, &principal, query, None).await
+}
+
+/// The native summary selector and cursor, sharing the opening's current snapshot.
+pub(crate) async fn read_in(
+    ctx: &Ctx,
+    conn: &mut orch_db::Conn,
+    principal: &orch_authz::Principal,
+    query: NodeActivityListQuery,
+    reading: Option<&super::overview::Reading<'_>>,
+) -> ApiResult<Page<ActivityEntry>> {
     let id = ctx.id("id")?;
     let page = PageQuery {
         limit: query.limit,
@@ -173,9 +202,7 @@ async fn activity_list(
     };
     let limit = usize::try_from(page.limit()).unwrap_or(usize::MAX);
     let mut after = cursor_of(query.cursor.as_deref())?;
-    let mut conn = ctx.app.db.acquire().await?;
-    let principal = authorization::principal(&ctx, &mut conn).await?;
-    let (_, kind) = placed(&mut conn, id).await?;
+    let (_, kind) = placed(conn, id).await?;
     if kind == NodeKind::Thread {
         return Err(invalid(
             "id",
@@ -194,7 +221,7 @@ async fn activity_list(
     let since = query.since.map(Time::get);
     let mut kept: Vec<activity::Row> = Vec::new();
     loop {
-        let rows = activity::read(&mut conn, id, since, after, batch, summary, &actions).await?;
+        let rows = activity::read(conn, id, since, after, batch, summary, &actions).await?;
         let exhausted = i64::try_from(rows.len()).is_ok_and(|count| count < batch);
         let Some(last) = rows.last() else {
             break;
@@ -215,9 +242,17 @@ async fn activity_list(
             .collect::<HashSet<_>>()
             .into_iter()
             .collect();
+        let about = match reading {
+            Some(reading) => reading
+                .select_nodes(conn, &about)
+                .await?
+                .into_iter()
+                .collect(),
+            None => about,
+        };
         let viewable: HashSet<Id> = orch_authz::nodes::holding(
-            &mut conn,
-            &principal,
+            conn,
+            principal,
             &about,
             PermissionName::OfNode(NodePermission::View),
             Act::Use,
@@ -228,10 +263,38 @@ async fn activity_list(
         .into_iter()
         .map(|each| each.id)
         .collect();
+        let rows = if let Some(reading) = reading {
+            let mut selected = Vec::new();
+            for row in rows {
+                let visible = row.base.node_id.is_some_and(|id| viewable.contains(&id))
+                    || row.node_removed && row.parent_id.is_some_and(|id| viewable.contains(&id));
+                if !visible {
+                    continue;
+                }
+                if is_separate_object(&row.base.object_kind) {
+                    let Some(kind) =
+                        crate::routes::access::subject::kind_of_word(&row.base.object_kind)
+                    else {
+                        continue;
+                    };
+                    let Some(id) = row.base.object_id else {
+                        continue;
+                    };
+                    if !reading.object(conn, kind, id).await? {
+                        continue;
+                    }
+                }
+                selected.push(row);
+            }
+            selected
+        } else {
+            rows
+        };
         let named = names(
-            &mut conn,
-            &principal,
+            conn,
+            principal,
             &rows.iter().map(|row| &row.base).collect::<Vec<_>>(),
+            reading,
         )
         .await?;
         kept.extend(rows.into_iter().filter(|row| {
@@ -257,11 +320,32 @@ async fn activity_list(
     let more = kept.len() > limit;
     kept.truncate(limit);
     let named = names(
-        &mut conn,
-        &principal,
+        conn,
+        principal,
         &kept.iter().map(|row| &row.base).collect::<Vec<_>>(),
+        reading,
     )
     .await?;
+    if let Some(reading) = reading {
+        for node in named.nodes.values() {
+            reading.reference(conn, node).await?;
+        }
+        reading
+            .remember_node_ids(
+                conn,
+                &kept
+                    .iter()
+                    .filter_map(|row| {
+                        if row.node_removed {
+                            row.parent_id
+                        } else {
+                            row.base.node_id
+                        }
+                    })
+                    .collect::<Vec<_>>(),
+            )
+            .await?;
+    }
     let items = kept
         .iter()
         .filter_map(|each| {

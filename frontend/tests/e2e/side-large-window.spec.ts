@@ -82,11 +82,11 @@ test('a full 200-item side window remains usable inline and in its own panel', a
   await openHistory(page);
   const draft = page.getByRole('textbox', { name: 'Message to the agent', exact: true });
   await draft.fill('Keep the parent draft during the large side read');
-  await page.locator('[data-thread-header]').getByRole('button', { name: 'Ask on the side…', exact: true }).click();
-  const ask = page.getByRole('dialog', { name: 'Ask on the side', exact: true });
+  await page.locator('[data-thread-header]').getByRole('button', { name: 'Side thread…', exact: true }).click();
+  const ask = page.getByRole('dialog', { name: 'Side thread', exact: true });
   await ask.getByRole('textbox', { name: 'What to ask' }).fill('Review the retained side history');
   const inlineStart = await page.evaluate(() => performance.now());
-  await ask.getByRole('button', { name: 'Ask', exact: true }).click();
+  await ask.getByRole('button', { name: 'Start side thread', exact: true }).click();
   const lane = conversation(page).locator('[data-side-lane]');
   try { await expect(lane.locator('[data-item]')).toHaveCount(200); }
   catch (error) { console.warn('side-opening-diagnostic', JSON.stringify({ openings, writes, errors, frames })); throw error; }

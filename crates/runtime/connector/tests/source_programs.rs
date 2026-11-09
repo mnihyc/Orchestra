@@ -89,18 +89,14 @@ async fn one_negotiated_program_supplies_both_interfaces_and_a_duplicate_never_r
     let mut programs = Programs::default();
     programs.register("example", Arc::clone(&program)).unwrap();
     assert!(programs.register("example", Arc::clone(&program)).is_err());
-    assert!(
-        programs
-            .register("openrouter", Arc::clone(&program))
-            .is_err()
-    );
+    assert!(programs.register("adapter", Arc::clone(&program)).is_err());
     assert!(
         programs
             .register(
                 "alias",
                 Arc::new(Example {
                     calls: Arc::clone(&calls),
-                    name: "deepseek".to_owned()
+                    name: "endpoints".to_owned()
                 })
             )
             .is_err()

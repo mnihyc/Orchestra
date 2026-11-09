@@ -4,26 +4,26 @@
 //! environment or a job about it stamps it, and the announcement arrives on every API process when
 //! the transaction commits. A frame holds what `GET /environments/{id}/sync` answers from the
 //! reader's number on, read by the same list of members in one snapshot, so that the socket and the
-//! request never say two things: the environment whole, and the jobs stamped after the number.
+//! request never say two things: the environment whole, its permitted Library facts, and the jobs stamped after the number.
 //!
 //! Who may follow it is who may read the environment: whoever holds a permission on it, and whoever
 //! holds none and may view a thread bound to it, who is shown the thread's cut of it (the current
 //! job's progress, and nothing of its logs, results or people). A reader whose standing changes is
 //! told to load the feed again, as every durable feed's reader is.
 
-use crate::middleware::authentication::{Authed, Caller, Via};
+use crate::middleware::authentication::Caller;
 use crate::realtime::subscriptions::{Access, principal_of};
 use crate::realtime::sync::{Frame, Head, Rows};
 use crate::realtime::{Fail, Inner};
 use crate::registry::Ctx;
 use crate::routes::environments::{reading, sync as state};
-use crate::syncs::{self, Reading};
+use crate::syncs::Reading;
 use orch_api_contract::common::ErrorCode;
 use orch_api_contract::environment::{EnvironmentSyncGet, EnvironmentSyncGetReply};
 use orch_api_contract::routes::Endpoint;
 use orch_authz::Principal;
 use orch_db::Conn;
-use orch_db::queries::{feeds, identity};
+use orch_db::queries::feeds;
 use orch_realtime_contract::feeds::{EnvData, SyncData};
 use orch_realtime_contract::sync::FeedHead;
 use orch_types::{Id, Seq};
@@ -116,7 +116,9 @@ pub(crate) async fn read(
         return Ok(Rows::Nothing);
     };
     let mut conn = feeds::begin_reading(&inner.db).await?;
-    let Some(principal) = principal_of(inner, &mut conn, person).await? else {
+    let Some((principal, authed)) =
+        super::subscriptions::reader_of(inner, &mut conn, person).await?
+    else {
         return Ok(Rows::Nothing);
     };
     let Some((_, seq)) = feeds::environment_seqs(&mut conn, &[environment])
@@ -135,19 +137,12 @@ pub(crate) async fn read(
         // nothing is sent meanwhile.
         Err(_) => return Ok(Rows::Nothing),
     };
-    let Some(user) = identity::user_by_id(&mut conn, person).await? else {
-        return Ok(Rows::Nothing);
-    };
     // A context for the projection alone: the reader's authority is `principal`, and nothing is
     // written through it.
-    let caller = Caller::User(Arc::new(Authed {
-        as_admin: principal.caller().as_admin(),
-        user,
-        via: Via::Session {
-            session_id: Id::nil(),
-        },
-    }));
-    let ctx = Ctx::for_tool(app, caller, EnvironmentSyncGet::ROUTE, environment);
+    let caller = Caller::User(Arc::new(authed));
+    let ctx = Ctx::for_tool(app, caller, EnvironmentSyncGet::ROUTE, environment)
+        .with_admitted_caller(principal.caller().clone())
+        .map_err(Fail::other)?;
     let reply: EnvironmentSyncGetReply = {
         let mut reading = Reading {
             ctx: &ctx,
@@ -158,7 +153,7 @@ pub(crate) async fn read(
             seq,
             since: Some(after),
         };
-        syncs::put_together(state::MEMBERS, &mut reading)
+        state::put_together(&mut reading)
             .await
             .map_err(Fail::other)?
     };
@@ -168,6 +163,7 @@ pub(crate) async fn read(
     Ok(Rows::Frame(Box::new(Frame {
         data: SyncData::Env(EnvData {
             environment: Some(reply.environment),
+            library: Some(reply.library),
             jobs: Some(reply.jobs),
         }),
         highest: reply.seq,

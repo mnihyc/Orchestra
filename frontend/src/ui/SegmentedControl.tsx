@@ -1,8 +1,9 @@
 /** Shared SegmentedControl component (navigation); primitives are wrapped here.
  *
- * A choice among a few things that are all in view, one of which is always chosen: a theme, a
+ * A choice among a few things that are all in view: a theme, a
  * density, a way of looking at a list. The arrow keys go from one to the next. Short names alone
  * determine the buttons' widths; descriptions open only in that option's hover/focus tooltip.
+ * A choice not reported yet is null, leaving every segment unselected until it is known or chosen.
  */
 import { RadioGroup } from 'radix-ui';
 import { type ReactNode, useRef } from 'react';
@@ -24,7 +25,7 @@ export type Segment<Value extends string> = ChoiceName & ChoiceDetails & {
 export interface SegmentedControlProps<Value extends string> {
   /** What is being chosen, for a screen reader. */
   label: string;
-  value: Value;
+  value: Value | null;
   onValueChange: (value: Value) => void;
   segments: readonly Segment<Value>[];
   size?: 'sm' | 'md';
@@ -52,7 +53,7 @@ export function SegmentedControl<Value extends string>({
       ref={group}
       data-segmented=""
       aria-label={label}
-      value={value}
+      value={value ?? ''}
       // A real radio group selects on arrow navigation and never clears the chosen value.
       onValueChange={(next) => onValueChange(next as Value)}
       onKeyDownCapture={(event)=>{

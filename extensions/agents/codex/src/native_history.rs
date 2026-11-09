@@ -12,7 +12,10 @@ use serde_json::json;
 
 use crate::protocol::{MAX_FRAME_BYTES, METHOD_NOT_FOUND, Rpc, RpcError};
 
+mod results;
 mod spool;
+pub(crate) use results::{ResultItem, Results};
+pub(crate) use spool::CancelOnDrop;
 
 // Match the control-plane batch size while bounding each indexed native response independently.
 const INVENTORY_PAGE: usize = 200;

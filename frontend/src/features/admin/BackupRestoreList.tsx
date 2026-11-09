@@ -51,7 +51,7 @@ function Group({ group }: { group: BackupInventoryGroup }) {
 export function BackupRestoreList({ expected }: { expected: DatabaseBackupRecord | null }) {
   const { t } = useTranslation();
   const query = useQuery(backupRestoreListQuery);
-  if (query.isPending) return <SkeletonRows rows={5} />;
+  if (query.isPending) return <SkeletonRows read={query} rows={5} />;
   if (query.isError) return <ErrorState compact error={query.error} onRetry={() => void query.refetch()} retrying={query.isRefetching} />;
   const list = query.data;
   if (list === null) return <EmptyState compact icon={<FileText aria-hidden />} title={t('backupRestore.none')} description={t('backupRestore.noneAbout')} />;

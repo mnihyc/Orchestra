@@ -62,7 +62,8 @@ async fn changes(
     } else {
         door.thread
     };
-    let found = rows::latest_changes(&mut conn, door.env.id, thread, query.turn_id).await?;
+    let found =
+        rows::latest_changes(&mut conn, door.env.id, thread, query.turn_id, query.item_id).await?;
     let changes = found
         .into_iter()
         .map(|row| {

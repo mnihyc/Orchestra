@@ -54,6 +54,71 @@ pub fn is_decimal(text: &str) -> bool {
     digits(whole) && fraction.is_none_or(digits)
 }
 
+/// A JSON number token as bounded decimal text, without a floating-point conversion.
+/// Exponents are expanded only when the established amount bound can hold the result.
+#[must_use]
+pub fn decimal_number(token: &str) -> Option<String> {
+    let token = token.trim();
+    let raw: &serde_json::value::RawValue = serde_json::from_str(token).ok()?;
+    if raw.get().starts_with('"')
+        || !(token.starts_with('-') || token.starts_with(|c: char| c.is_ascii_digit()))
+    {
+        return None;
+    }
+    let (mantissa, exponent) = token
+        .split_once(['e', 'E'])
+        .map_or(Some((token, 0_i32)), |(m, e)| {
+            e.parse().ok().map(|e| (m, e))
+        })?;
+    let negative = mantissa.starts_with('-');
+    let unsigned = mantissa.strip_prefix('-').unwrap_or(mantissa);
+    let (whole, fraction) = unsigned.split_once('.').unwrap_or((unsigned, ""));
+    if whole.is_empty()
+        || !whole
+            .bytes()
+            .chain(fraction.bytes())
+            .all(|byte| byte.is_ascii_digit())
+    {
+        return None;
+    }
+    if whole.len().checked_add(fraction.len())? > DECIMAL_MAX_CHARS {
+        return None;
+    }
+    let digits = format!("{whole}{fraction}");
+    let point = i64::try_from(whole.len())
+        .ok()?
+        .checked_add(i64::from(exponent))?;
+    let size = if point <= 0 {
+        2_i64
+            .checked_sub(point)?
+            .checked_add(i64::try_from(digits.len()).ok()?)?
+    } else if point >= i64::try_from(digits.len()).ok()? {
+        point
+    } else {
+        i64::try_from(digits.len()).ok()?.checked_add(1)?
+    };
+    if size + i64::from(negative) > i64::try_from(DECIMAL_MAX_CHARS).ok()? {
+        return None;
+    }
+    let decimal = if point <= 0 {
+        format!("0.{}{digits}", "0".repeat(usize::try_from(-point).ok()?))
+    } else if point >= i64::try_from(digits.len()).ok()? {
+        format!(
+            "{digits}{}",
+            "0".repeat(usize::try_from(point).ok()? - digits.len())
+        )
+    } else {
+        let point = usize::try_from(point).ok()?;
+        format!("{}.{}", &digits[..point], &digits[point..])
+    };
+    let text = if negative {
+        format!("-{decimal}")
+    } else {
+        decimal
+    };
+    is_decimal(&text).then_some(text)
+}
+
 /// `text` with every one of `secrets` replaced by [`REDACTED`], the longest first so that one secret that
 /// holds another is replaced whole, cut to [`ERROR_MESSAGE_MAX_CHARS`] characters.
 #[must_use]
@@ -85,6 +150,30 @@ mod tests {
         }
         assert!(!is_decimal(&"9".repeat(DECIMAL_MAX_CHARS + 1)));
         assert!(is_decimal(&"9".repeat(DECIMAL_MAX_CHARS)));
+    }
+
+    #[test]
+    fn exact_json_numbers_keep_digits_and_bound_exponent_expansion() {
+        for (token, exact) in [
+            ("9007199254740993.1250", "9007199254740993.1250"),
+            ("1.234567890123456789e20", "123456789012345678900"),
+            ("-1e-6", "-0.000001"),
+            ("0", "0"),
+        ] {
+            assert_eq!(decimal_number(token).as_deref(), Some(exact));
+        }
+        for invalid in [
+            "null",
+            "true",
+            "\"12\"",
+            "NaN",
+            "1e2147483647",
+            "1e-2147483648",
+            "01",
+            "+1",
+        ] {
+            assert!(decimal_number(invalid).is_none(), "{invalid}");
+        }
     }
 
     #[test]

@@ -5,10 +5,11 @@
 //! orgs the threads belong to, and whether or not the reader can see those threads. Who reaches only
 //! through threads the reader may not view is counted, and not named.
 
-use crate::middleware::authorization::{self, refusals};
+use super::reach_operation;
+use crate::middleware::authorization::refusals;
 use crate::middleware::requests::{ApiError, ApiResult};
-use crate::registry::{Ctx, Registry};
-use crate::routes::nodes::view as node_view;
+use crate::registry::{Ctx, OperationFuture, Registry};
+use crate::routes::access::page::NameBounds;
 use orch_access_contract::decisions::ObjectRef;
 use orch_access_contract::permissions::{ObjectKind, Permission};
 use orch_api_contract::environment::{
@@ -16,12 +17,82 @@ use orch_api_contract::environment::{
     ReachThrough,
 };
 use orch_authz::environments::{self, Reaching};
-use orch_authz::{Policy, resources};
+use orch_authz::{Caller, Policy, resources};
+use orch_db::{Conn, DbError};
 use orch_types::Id;
+use std::collections::BTreeSet;
 
 /// Binds this module's requests.
 pub fn mount(registry: &mut Registry) {
-    registry.on(api::EnvironmentReachGet, get);
+    registry.on_with_operation(api::EnvironmentReachGet, operation, get);
+}
+
+struct PreparedReach {
+    reach: environments::Reach,
+    names: NameBounds,
+}
+
+fn operation<'a>(
+    ctx: &'a Ctx,
+    conn: &'a mut Conn,
+    caller: &'a Caller,
+    (): (),
+    (): (),
+) -> OperationFuture<'a> {
+    Box::pin(async move {
+        let mut plan = reach_operation::root(ctx, conn, caller).await?;
+        let principal = plan.preparation_principal(ctx, conn, caller).await?;
+        let environment = ctx.id("id")?;
+        let object = ObjectRef {
+            kind: ObjectKind::Environment,
+            id: environment,
+        };
+        let holding = match resources::effective(conn, &principal, object, Policy::default()).await
+        {
+            Ok(effective) => effective.owner || effective.administers || !effective.held.is_empty(),
+            Err(orch_authz::Error::NotFound(_)) => false,
+            Err(error) => {
+                return Err(reach_operation::error(
+                    caller,
+                    refusals::problem(conn, error).await,
+                ));
+            }
+        };
+        if !holding {
+            return Err(ApiError::not_found());
+        }
+        let mut reach = environments::reach(conn, &principal, environment, Policy::default())
+            .await
+            .map_err(ApiError::internal)?;
+        let ids: BTreeSet<Id> = reach
+            .people
+            .iter()
+            .flat_map(|person| &person.through)
+            .filter_map(|way| match way {
+                Reaching::Thread(id) => Some(*id),
+                _ => None,
+            })
+            .collect();
+        let selected =
+            reach_operation::threads(conn, caller, &mut plan, "reach_threads", &ids).await?;
+        for person in &mut reach.people {
+            person.through.retain(|way| match way {
+                Reaching::Thread(id) => selected.contains(id),
+                _ => true,
+            });
+        }
+        // The existing hidden count belongs to this Environment. Scope-omitted ways neither
+        // expose an otherwise absent person nor inflate that ordinary unreadable aggregate.
+        reach.people.retain(|person| !person.through.is_empty());
+        let names = NameBounds {
+            limited: caller
+                .grant()
+                .is_some_and(|grant| grant.operation_scope().is_some()),
+            nodes: selected,
+            ..Default::default()
+        };
+        Ok(plan.with_data(PreparedReach { reach, names }))
+    })
 }
 
 /// The permission of an environment's own page that lets a person in, as the contract names it.
@@ -42,25 +113,14 @@ fn page_permission(permission: Permission) -> Option<ReachPagePermission> {
 
 /// Everybody who can reach into the environment now, and how, for whoever holds any permission on it.
 async fn get(ctx: Ctx, (): (), (): ()) -> ApiResult<EnvironmentReach> {
-    let environment = ctx.id("id")?;
-    let mut conn = ctx.app.db.acquire().await?;
-    let principal = authorization::principal(&ctx, &mut conn).await?;
-    let object = ObjectRef {
-        kind: ObjectKind::Environment,
-        id: environment,
-    };
-    let holding = match resources::effective(&mut conn, &principal, object, Policy::default()).await
-    {
-        Ok(effective) => effective.owner || effective.administers || !effective.held.is_empty(),
-        Err(orch_authz::Error::NotFound(_)) => false,
-        Err(error) => return Err(refusals::problem(&mut conn, error).await),
-    };
-    if !holding {
-        return Err(ApiError::not_found());
-    }
-    let reach = environments::reach(&mut conn, &principal, environment, Policy::default())
-        .await
-        .map_err(ApiError::internal)?;
+    crate::key_operations::snapshot_read::run(ctx, snapshot).await
+}
+
+async fn snapshot(ctx: Ctx) -> ApiResult<EnvironmentReach> {
+    let mut conn = ctx.app.db.begin_snapshot().await?;
+    let principal = ctx.operation_principal(&mut conn).await?;
+    let prepared = ctx.operation_data::<PreparedReach>()?;
+    let reach = &prepared.reach;
     let users: Vec<Id> = reach.people.iter().map(|person| person.user).collect();
     let users = refusals::user_refs(&mut conn, &users).await?;
     let mut threads: Vec<Id> = reach
@@ -74,23 +134,23 @@ async fn get(ctx: Ctx, (): (), (): ()) -> ApiResult<EnvironmentReach> {
         .collect();
     threads.sort_unstable();
     threads.dedup();
-    let refs = node_view::refs(&mut conn, &principal, &threads, Policy::default()).await?;
+    let refs = prepared.names.refs(&mut conn, &principal, &threads).await?;
     let mut people: Vec<ReachPerson> = Vec::with_capacity(reach.people.len());
-    for person in reach.people {
+    for person in &reach.people {
         let Some(user) = users.get(&person.user).cloned() else {
             continue;
         };
         let through = person
             .through
-            .into_iter()
+            .iter()
             .filter_map(|way| match way {
                 Reaching::Owner => Some(ReachThrough::Owner),
                 Reaching::SourceOwner => Some(ReachThrough::SourceOwner),
                 Reaching::Page(permission) => {
-                    page_permission(permission).map(|permission| ReachThrough::Page { permission })
+                    page_permission(*permission).map(|permission| ReachThrough::Page { permission })
                 }
                 Reaching::Thread(thread) => {
-                    refs.get(&thread)
+                    refs.get(thread)
                         .cloned()
                         .map(|thread| ReachThrough::Thread {
                             thread,
@@ -107,8 +167,10 @@ async fn get(ctx: Ctx, (): (), (): ()) -> ApiResult<EnvironmentReach> {
         (&one.user.display_name, &one.user.username)
             .cmp(&(&other.user.display_name, &other.user.username))
     });
-    Ok(EnvironmentReach {
+    let shown = EnvironmentReach {
         people,
         hidden: reach.hidden,
-    })
+    };
+    conn.commit().await.map_err(DbError::from)?;
+    Ok(shown)
 }

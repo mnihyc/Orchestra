@@ -1,7 +1,9 @@
 ---
+group: resources
 title: Run commands after a unit starts
 screens: /resources/environments, /resources/providers, /resources/templates
 keywords: how do I run a command after start, Commands after start, after_up, env.after_up, runtime.after_up, runtime.storage, runtime.needs, env.variables, runtime.variables, argv, timeout, read-only root
+summary: Configure commands that run inside a unit after connection and before it becomes ready.
 ---
 
 # Run commands after a unit starts

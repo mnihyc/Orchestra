@@ -581,3 +581,161 @@ async fn the_key_of_an_api_provider_is_issued_as_it_is_sealed_to_the_machine_tha
     );
     let _ = RESPONSES;
 }
+
+#[tokio::test]
+async fn an_owner_move_hands_over_the_renewable_sign_in_once_without_a_thread_or_lease() {
+    use orch_link_contract::commands::{
+        MachineKey, ProviderCredentialAccept, ProviderCredentialCopy, ProviderCredentialHandover,
+        ProviderCredentialIssue, SealedCredential,
+    };
+    let source = rig().await;
+    let target = rig().await;
+    signed_in(&source).await;
+    start_harness(&target, source.rig.agent).await;
+    let original: MachineKey = serde_json::from_value(machine(&source)).unwrap();
+    let recipient: MachineKey = serde_json::from_value(machine(&target)).unwrap();
+    let purpose = ProviderCredentialCopy {
+        job_id: new_id(),
+        source_provider_id: source.rig.provider,
+        target_provider_id: target.rig.provider,
+        headers: Vec::new(),
+        handover: Some(ProviderCredentialHandover {
+            profile: source.rig.agent,
+            form: "fake_login".into(),
+            original,
+            returning: false,
+        }),
+    };
+    let issue = ProviderCredentialIssue {
+        lease_id: None,
+        copy: Some(purpose.clone()),
+        provider_id: source.rig.provider,
+        form: "fake_login".into(),
+        recipient,
+        return_credential: None,
+    };
+    let first = source.rig.succeed(&source.provider_key(), &issue).await;
+    let again = source.rig.succeed(&source.provider_key(), &issue).await;
+    assert_eq!(
+        first, again,
+        "the same owner job never asks its harness to issue another renewable login"
+    );
+    let issued: SealedCredential = serde_json::from_value(first).unwrap();
+    assert_eq!(issued.form, "fake_login");
+    assert!(issued.expires_at.is_none());
+    assert!(
+        !serde_json::to_string(&issued)
+            .unwrap()
+            .contains("the-login-material-of-the-subscription")
+    );
+    let accept = ProviderCredentialAccept {
+        provider_id: target.rig.provider,
+        copy: Some(purpose),
+        form: issued.form,
+        credential: issued.credential,
+        expires_at: None,
+    };
+    target.rig.succeed(&target.provider_key(), &accept).await;
+    target.rig.succeed(&target.provider_key(), &accept).await;
+}
+#[tokio::test]
+async fn an_owned_move_return_uses_the_actual_installed_sign_in_and_can_recover_before_installation()
+ {
+    use orch_link_contract::commands::{
+        MachineKey, ProviderCredentialAccept, ProviderCredentialCopy, ProviderCredentialHandover,
+        ProviderCredentialIssue, SealedCredential,
+    };
+    for installed in [false, true] {
+        let source = rig().await;
+        let target = rig().await;
+        signed_in(&source).await;
+        start_harness(&target, source.rig.agent).await;
+        let original: MachineKey = serde_json::from_value(machine(&source)).unwrap();
+        let recipient: MachineKey = serde_json::from_value(machine(&target)).unwrap();
+        let purpose = ProviderCredentialCopy {
+            job_id: new_id(),
+            source_provider_id: source.rig.provider,
+            target_provider_id: target.rig.provider,
+            headers: Vec::new(),
+            handover: Some(ProviderCredentialHandover {
+                profile: source.rig.agent,
+                form: "fake_login".into(),
+                original: original.clone(),
+                returning: false,
+            }),
+        };
+        let issued: SealedCredential = serde_json::from_value(
+            source
+                .rig
+                .succeed(
+                    &source.provider_key(),
+                    &ProviderCredentialIssue {
+                        lease_id: None,
+                        copy: Some(purpose.clone()),
+                        provider_id: source.rig.provider,
+                        form: "fake_login".into(),
+                        recipient,
+                        return_credential: None,
+                    },
+                )
+                .await,
+        )
+        .unwrap();
+        if installed {
+            target
+                .rig
+                .succeed(
+                    &target.provider_key(),
+                    &ProviderCredentialAccept {
+                        provider_id: target.rig.provider,
+                        copy: Some(purpose.clone()),
+                        form: issued.form.clone(),
+                        credential: issued.credential.clone(),
+                        expires_at: None,
+                    },
+                )
+                .await;
+        }
+        let mut returning = purpose;
+        returning.handover.as_mut().unwrap().returning = true;
+        let returned: SealedCredential = serde_json::from_value(
+            target
+                .rig
+                .succeed(
+                    &target.provider_key(),
+                    &ProviderCredentialIssue {
+                        lease_id: None,
+                        copy: Some(returning.clone()),
+                        provider_id: target.rig.provider,
+                        form: "fake_login".into(),
+                        recipient: original,
+                        return_credential: Some(issued),
+                    },
+                )
+                .await,
+        )
+        .unwrap();
+        source
+            .rig
+            .succeed(
+                &source.provider_key(),
+                &ProviderCredentialAccept {
+                    provider_id: source.rig.provider,
+                    copy: Some(returning),
+                    form: returned.form,
+                    credential: returned.credential,
+                    expires_at: None,
+                },
+            )
+            .await;
+        // The normal leased path can now issue from its original native login again.
+        let lease = open_lease(&source, "handover", "fake_login").await;
+        source
+            .rig
+            .succeed(
+                &source.provider_key(),
+                &issue_body(&source, lease, "fake_login", &machine(&target)),
+            )
+            .await;
+    }
+}

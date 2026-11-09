@@ -1,3 +1,5 @@
+import { homeMoveEntries } from '@/features/duplicate/move';
+import { resourceDuplicateEntries } from '@/features/duplicate/target';
 /** What can be done with a template, from its row in the list and from its own page: enable or disable, open, edit, rename, copy its link and delete, each only where the reader may.
  *
  * The same acts serve the button and the menu at the end of a row, the menu under the right mouse button, the
@@ -94,14 +96,14 @@ export function useTemplateActs(options: { onTab?: (template: Template, tab: Tem
     const edit: Act | null = manage ? { id: 'edit', label: t('resources.act.edit'), icon: <Pencil aria-hidden />, run: () => setAsked({ what: 'edit', template }) } : null;
     const rename: Act | null = manage ? { id: 'rename', label: t('resources.act.rename'), icon: <TextCursorInput aria-hidden />, shortcut: 'F2', run: () => setAsked({ what: 'rename', template }) } : null;
     const share = shareAct(t, { kind: 'template', id: template.id, name: template.name }, template.access);
-    const copy: Act = { id: 'copy-link', label: t('resources.act.copyLink'), icon: <Copy aria-hidden />, run: () => copyLink(`/resources/templates/${template.id}`) };
+    const copy: Act = { id: 'copy-link', label: t('resources.act.copyLink'), icon: <Copy aria-hidden />, run: () => copyLink({ kind: 'template', id: template.id }) };
     const del: Act | null = manage
       ? { id: 'delete', label: t('resources.act.delete'), icon: <Trash2 aria-hidden />, danger: true, disabled: template.units > 0 ? t('templates.danger.deleteUsed', { count: template.units }) : false, run: () => setAsked({ what: 'delete', template }) }
       : null;
     return {
       primary: enable ?? open,
       edit,
-      entries: entriesOf([open], [enable, disable], [edit, rename], [share, copy], [del], [cleanup.act({kind:'template',id:template.id}, manage)]),
+      entries: [...homeMoveEntries(t, 'template', template), ...resourceDuplicateEntries(t, 'template', template), ...entriesOf([open], [enable, disable], [edit, rename], [share, copy], [del], [cleanup.act({kind:'template',id:template.id}, manage)])],
       keys: keysOf(rename),
       busy: busy(template.id),
     };

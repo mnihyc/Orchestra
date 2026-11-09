@@ -11,6 +11,7 @@ publish.workspace = true
 [dependencies]
 orch-blob-contract.workspace = true
 orch-driver-contract.workspace = true
+orch-link.workspace = true
 orch-settings-contract.workspace = true
 orch-types.workspace = true
 async-trait.workspace = true

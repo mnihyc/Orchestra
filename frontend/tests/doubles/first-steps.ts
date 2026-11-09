@@ -76,7 +76,7 @@ export class FirstStepsWorld implements Part {
         created_by: document.created_by, deleted: document.deleted, discussion_level: document.discussion_level,
         files_bytes: document.files_bytes,
         id: document.id, node: document.node, open_discussions: document.open_discussions,
-        description: document.description, description_source: document.description_source,
+        description: document.description,
         description_line: document.description_line,
         owner: document.owner, owners: document.owners, page: document.page, seen_seq: document.seen_seq,
         seq: document.seq, title: document.title, updated_at: document.updated_at,
@@ -138,8 +138,8 @@ export class FirstStepsWorld implements Part {
       step('models', models === undefined ? 'not_done' : 'models_enabled', models === undefined ? null : ref(org), this.action(person, org, models === undefined ? `/resources/providers?org_id=${org.id}` : `/resources/providers/${models.id}?tab=models`, 'settings.manage')),
       step('work', answer === undefined ? 'not_done' : 'answered_once', answer === undefined ? null : ref(answer), this.action(person, org, answer === undefined ? `/org/${org.address}` : `/thread/${answer.id}`, answer === undefined ? 'org.interact' : null), answer !== undefined && this.scriptedThreads.has(answer.id)),
     ];
-    // The current server has not supplied the shared outward-status helper; never fabricate a configured tick.
-    if (answer !== undefined) steps.push({ ...step('away', 'unknown', null, { url: '/settings/notifications', allowed: true, reason: null }), state: 'unknown' });
+    const outside = answer === undefined || this.unknown ? null : this.world.away.outsideFor(person, org.id);
+    if (answer !== undefined) steps.push(step('away', outside?.ways.some((way) => way.state === 'ready') === true ? 'outward_enabled' : 'not_done', null, { url: '/settings/notifications', allowed: true, reason: null }));
     if (mode !== 'solo') {
       const members = this.world.places.memberList(person, org.id, new URLSearchParams()).items;
       const invitations = this.world.places.access(person, org.id).permissions.includes('members.manage') ? this.world.places.handle(person, 'GET', '/invitations', new URLSearchParams({ org_id: org.id }), {})?.body as { uses: number; revoked: boolean }[] | undefined : undefined;

@@ -67,8 +67,63 @@ struct ResourceEnding {
     registration: bool,
 }
 
+/// What the native deletion kept about a managed resource; no response DTO is a restoration source.
+#[derive(serde::Serialize, serde::Deserialize)]
+struct ResourceBefore {
+    kind: String,
+    id: Id,
+    disabled: bool,
+}
+
+/// Corroborated native restoration rows, frozen before their first effect.
+pub struct PreparedHomeRestoration {
+    node: Id,
+    resources: Vec<resources::AccessFacts>,
+}
+impl PreparedHomeRestoration {
+    #[must_use]
+    pub fn resources(&self) -> &[resources::AccessFacts] {
+        &self.resources
+    }
+}
+
+/// The native ending's immutable ownership/registration operands, never a deserialized plan.
+pub struct PreparedMemberEnding {
+    root: Id,
+    user: Id,
+    domain: Id,
+    ownership: ownership::PreparedEnding,
+    registrations: Vec<resources::AccessFacts>,
+    member_nodes: Vec<Id>,
+    destinations: Vec<Id>,
+}
+impl PreparedMemberEnding {
+    #[must_use]
+    pub fn domain(&self) -> Id {
+        self.domain
+    }
+    #[must_use]
+    pub fn plan(&self) -> &ownership::Plan {
+        self.ownership.plan()
+    }
+    #[must_use]
+    pub fn registrations(&self) -> &[resources::AccessFacts] {
+        &self.registrations
+    }
+    #[must_use]
+    pub fn member_nodes(&self) -> &[Id] {
+        &self.member_nodes
+    }
+    #[must_use]
+    pub fn destinations(&self) -> &[Id] {
+        &self.destinations
+    }
+}
+/// Preserve the exact entry owner's first-effect failure alongside native membership errors.
+pub type EndFailure<E> = orch_authz::pages::EffectFailure<EndError, E>;
+
 impl Engine {
-    /// Carries out the resource side of a membership ending in the API's guarded transaction.
+    /// The original caller uses the same native prepared ending and opaque writer.
     pub async fn end_member_resources_in(
         &self,
         conn: &mut Conn,
@@ -78,6 +133,30 @@ impl Engine {
         choices: &HashMap<Id, Disposal>,
         origin: &orch_db::audit::Origin,
     ) -> Result<Leaving, EndError> {
+        let prepared = self
+            .prepare_member_ending_in(conn, actor, root, user, choices)
+            .await?;
+        match self
+            .end_prepared_member_in(conn, actor, &prepared, choices, origin, || {
+                Ok::<(), std::convert::Infallible>(())
+            })
+            .await
+        {
+            Ok(ended) => Ok(ended),
+            Err(EndFailure::Native(error)) => Err(error),
+            Err(EndFailure::BeforeEffect(never)) => match never {},
+        }
+    }
+
+    /// Holds the existing native membership, thread, page and destination footprint before effects.
+    pub async fn prepare_member_ending_in(
+        &self,
+        conn: &mut Conn,
+        actor: &Principal,
+        root: Id,
+        user: Id,
+        choices: &HashMap<Id, Disposal>,
+    ) -> Result<PreparedMemberEnding, EndError> {
         let domain: Option<Id> = sqlx::query_scalar(
             "SELECT domain_id FROM org_members WHERE org_id=$1 AND user_id=$2 FOR UPDATE",
         )
@@ -88,27 +167,97 @@ impl Engine {
         .map_err(DbError::from)?;
         let domain = domain.ok_or(EndError::NotFound)?;
         let owned = resources::owned_by(conn, root, user, actor.now().get()).await?;
-        let owned_ids: Vec<_> = owned.iter().map(|row| row.object_id).collect();
-        // Thread rows precede node/resource rows, as they do in ordinary lifecycle settlement.
-        let affected:Vec<Id>=sqlx::query_scalar("SELECT t.node_id FROM threads t JOIN nodes n ON n.id=t.node_id
+        let registrations = resources::registrations_of_member(conn, root, user).await?;
+        let member_nodes = orch_db::queries::access::owned_nodes(conn, root, user).await?;
+        let mut owned = owned;
+        let mut registrations = registrations;
+        let mut member_nodes = member_nodes;
+        loop {
+            let owned_ids: Vec<_> = owned
+                .iter()
+                .map(|row| row.object_id)
+                .chain(registrations.iter().map(|row| row.id))
+                .collect();
+            // Thread rows precede node/resource rows, as they do in ordinary lifecycle settlement.
+            let affected:Vec<Id>=sqlx::query_scalar("SELECT t.node_id FROM threads t JOIN nodes n ON n.id=t.node_id
             WHERE n.org_id=$1 OR t.environment_id=ANY($2) OR t.provider_id=ANY($2) OR t.agent_id=ANY($2) ORDER BY t.node_id")
             .bind(root).bind(&owned_ids).fetch_all(&mut *conn).await.map_err(DbError::from)?;
-        threads::tools::lock_threads(conn, &affected).await?;
-        for row in &owned {
-            match row.object_kind.as_str() {
-                "node" => {
-                    hierarchy::lock(conn, row.object_id).await?;
+            threads::tools::lock_threads(conn, &affected).await?;
+            let mut anchors = vec![root, domain];
+            anchors.extend(owned.iter().filter_map(|row| row.anchor));
+            anchors.extend(member_nodes.iter().map(|row| row.id));
+            let node_rows = hierarchy::with_ancestors(conn, &anchors).await?;
+            let ids = node_rows
+                .into_iter()
+                .map(|row| row.id)
+                .collect::<std::collections::BTreeSet<_>>();
+            for id in ids {
+                hierarchy::lock(conn, id).await?;
+            }
+            let machines = registrations
+                .iter()
+                .filter_map(|row| row.machine_id)
+                .collect::<std::collections::BTreeSet<_>>()
+                .into_iter()
+                .collect::<Vec<_>>();
+            sqlx::query("SELECT id FROM machines WHERE id=ANY($1) ORDER BY id FOR UPDATE")
+                .bind(&machines)
+                .fetch_all(&mut *conn)
+                .await
+                .map_err(DbError::from)?;
+            let mut pages = std::collections::BTreeMap::new();
+            for row in &owned {
+                let kind: ObjectKind = if row.object_kind == "node" {
+                    row.thing_kind.parse::<ObjectKind>()
+                } else {
+                    row.object_kind.parse::<ObjectKind>()
                 }
-                "document" => {
-                    sqlx::query("SELECT id FROM documents WHERE id=$1 FOR UPDATE")
-                        .bind(row.object_id)
-                        .fetch_all(&mut *conn)
-                        .await
-                        .map_err(DbError::from)?;
-                }
-                kind => {
-                    resources::lock_resource(conn, kind, row.object_id).await?;
-                }
+                .map_err(|error| EngineError::unreadable(error.to_string()))?;
+                pages.insert(
+                    (row.object_id, kind),
+                    ObjectRef {
+                        kind,
+                        id: row.object_id,
+                    },
+                );
+            }
+            for row in &registrations {
+                let kind = row
+                    .kind
+                    .parse::<ObjectKind>()
+                    .map_err(|error| EngineError::unreadable(error.to_string()))?;
+                pages.insert((row.id, kind), ObjectRef { kind, id: row.id });
+            }
+            for object in pages.into_values() {
+                let target = if object.kind.node().is_some() {
+                    orch_authz::pages::Target::Live(object.id)
+                } else {
+                    orch_authz::pages::Target::Resource(object)
+                };
+                orch_authz::pages::lock_change_target(conn, target).await?;
+            }
+            let fresh_owned = resources::owned_by(conn, root, user, actor.now().get()).await?;
+            let fresh_registrations = resources::registrations_of_member(conn, root, user).await?;
+            let fresh_nodes = orch_db::queries::access::owned_nodes(conn, root, user).await?;
+            let same_owned = owned
+                .iter()
+                .map(|row| (&row.object_kind, row.object_id))
+                .eq(fresh_owned
+                    .iter()
+                    .map(|row| (&row.object_kind, row.object_id)));
+            let same_registrations = registrations
+                .iter()
+                .map(|row| (&row.kind, row.id))
+                .eq(fresh_registrations.iter().map(|row| (&row.kind, row.id)));
+            let same_nodes = member_nodes
+                .iter()
+                .map(|row| row.id)
+                .eq(fresh_nodes.iter().map(|row| row.id));
+            owned = fresh_owned;
+            registrations = fresh_registrations;
+            member_nodes = fresh_nodes;
+            if same_owned && same_registrations && same_nodes {
+                break;
             }
         }
         let at = Time::new(self.inner.clock.now());
@@ -153,7 +302,10 @@ impl Engine {
                 }));
             }
         }
-        let plan = ownership::plan_leaving(conn, &actor, root, user, Policy::default()).await?;
+        let ownership =
+            ownership::prepare_ending_rows(conn, &actor, root, user, Policy::default(), owned)
+                .await?;
+        let plan = ownership.plan();
         for (id, choice) in choices {
             let Some(passing) = plan.things.iter().find(|passing| {
                 passing.object.id == *id
@@ -169,9 +321,68 @@ impl Engine {
                 validate_remove(conn, passing.object).await?;
             }
         }
-        let ownership =
-            ownership::end_membership(conn, &actor, root, user, choices, Policy::default(), origin)
-                .await?;
+        let mut destinations = plan
+            .things
+            .iter()
+            .filter_map(|passing| match passing.fate {
+                ownership::Fate::PassedOn { org, .. } => Some(org),
+                _ => None,
+            })
+            .collect::<std::collections::BTreeSet<_>>();
+        destinations.extend(
+            member_nodes
+                .iter()
+                .filter(|row| row.deleted && row.alone)
+                .filter_map(|row| row.lies_in),
+        );
+        Ok(PreparedMemberEnding {
+            root,
+            user,
+            domain,
+            ownership,
+            registrations,
+            member_nodes: member_nodes.into_iter().map(|row| row.id).collect(),
+            destinations: destinations.into_iter().collect(),
+        })
+    }
+
+    /// Applies exactly the native prepared ending; the callback reaches its first ownership write.
+    pub async fn end_prepared_member_in<E: Send, F: FnOnce() -> Result<(), E> + Send>(
+        &self,
+        conn: &mut Conn,
+        actor: &Principal,
+        prepared: &PreparedMemberEnding,
+        choices: &HashMap<Id, Disposal>,
+        origin: &orch_db::audit::Origin,
+        before_effect: F,
+    ) -> Result<Leaving, EndFailure<E>> {
+        let ownership = ownership::end_prepared_membership_fenced(
+            conn,
+            actor,
+            &prepared.ownership,
+            choices,
+            origin,
+            before_effect,
+        )
+        .await
+        .map_err(|error| match error {
+            ownership::EndFailure::Native(error) => EndFailure::Native(EndError::Ownership(error)),
+            ownership::EndFailure::BeforeEffect(error) => EndFailure::BeforeEffect(error),
+        })?;
+        self.finish_member_ending_in(conn, actor, prepared, ownership, origin)
+            .await
+            .map_err(EndFailure::Native)
+    }
+
+    async fn finish_member_ending_in(
+        &self,
+        conn: &mut Conn,
+        actor: &Principal,
+        prepared: &PreparedMemberEnding,
+        ownership: ownership::Ended,
+        origin: &orch_db::audit::Origin,
+    ) -> Result<Leaving, EndError> {
+        let (root, user, at) = (prepared.root, prepared.user, actor.now());
         let cancelled = self
             .cancel_member_work_in(conn, root, user, actor.user(), at)
             .await?;
@@ -200,7 +411,7 @@ impl Engine {
         }
         // Registrations can belong to a shared or another person's page: the machine remains
         // its owner's, so every registration from that personal machine is withdrawn here.
-        for registration in resources::registrations_of_member(conn, root, user).await? {
+        for registration in &prepared.registrations {
             if !unregistered.contains(&registration.id) {
                 let kind = registration
                     .kind
@@ -246,6 +457,33 @@ impl Engine {
         origin: &orch_db::audit::Origin,
     ) -> Result<(Vec<Id>, Json), EndError> {
         let facts = resources::resources_under_home(conn, node).await?;
+        self.end_home_resource_facts_in(conn, &facts, to, by, at, origin)
+            .await
+    }
+
+    /// The deletion writer consumes the same native resource rows its scope preparation held.
+    pub async fn end_prepared_home_resources_in(
+        &self,
+        conn: &mut Conn,
+        prepared: &crate::archive::deletion::Prepared,
+        to: Option<Id>,
+        by: Id,
+        at: Time,
+        origin: &orch_db::audit::Origin,
+    ) -> Result<(Vec<Id>, Json), EndError> {
+        self.end_home_resource_facts_in(conn, prepared.resources(), to, by, at, origin)
+            .await
+    }
+
+    async fn end_home_resource_facts_in(
+        &self,
+        conn: &mut Conn,
+        facts: &[resources::AccessFacts],
+        to: Option<Id>,
+        by: Id,
+        at: Time,
+        origin: &orch_db::audit::Origin,
+    ) -> Result<(Vec<Id>, Json), EndError> {
         let mut environments = Vec::new();
         let mut kept = Vec::new();
         for fact in facts {
@@ -270,7 +508,11 @@ impl Engine {
                 .await
                 .map_err(DbError::from)?;
             } else {
-                kept.push(json!({"kind":fact.kind,"id":fact.id,"disabled":fact.disabled}));
+                kept.push(ResourceBefore {
+                    kind: fact.kind.clone(),
+                    id: fact.id,
+                    disabled: fact.disabled,
+                });
                 let kind = fact
                     .kind
                     .parse::<ObjectKind>()
@@ -316,11 +558,7 @@ impl Engine {
             return Ok(());
         }
         let remove = disposal == Disposal::Remove;
-        let affected:Vec<Id>=sqlx::query_scalar("SELECT t.node_id FROM threads t JOIN nodes n ON n.id=t.node_id
-            WHERE n.deleted_at IS NULL AND (t.provider_id=$1 OR t.environment_id=$1 OR t.agent_id=$1
-                OR EXISTS(SELECT 1 FROM runtimes r WHERE r.host_id=$1 AND r.successor_of IS NULL AND r.state NOT IN ('retired','removed')
-                    AND (r.environment_id=t.environment_id OR r.provider_id=t.provider_id))) ORDER BY t.node_id")
-            .bind(object.id).fetch_all(&mut *conn).await.map_err(DbError::from)?;
+        let affected = resources::ending_threads(conn, object.id).await?;
         if !affected.is_empty() {
             let mut unit = crate::unit::Unit::new(conn, at.get());
             self.settle_in(&mut unit, &affected, Some(by), "disabled", false)
@@ -638,46 +876,85 @@ impl Engine {
         Ok(())
     }
 
-    /// Enables only resources this deletion switched off, keeping managed units stopped.
-    pub async fn restore_home_resources_in(
+    /// Selects the native saved resources against their actual current kind/home and prospective live nodes.
+    pub async fn prepare_home_restoration_in(
         &self,
         conn: &mut Conn,
         node: Id,
         deletion: Option<Id>,
-        at: Time,
-    ) -> Result<(), EngineError> {
+        restored: &[Id],
+    ) -> Result<PreparedHomeRestoration, EngineError> {
         let Some(deletion) = deletion else {
-            return Ok(());
+            return Ok(PreparedHomeRestoration {
+                node,
+                resources: Vec::new(),
+            });
         };
-        let saved:Option<Json>=sqlx::query_scalar("SELECT details->'resources_before' FROM audit_log WHERE action='node.deleted'
-            AND object_id=$1 AND details->>'deletion_id'=$2::uuid::text ORDER BY at DESC,id DESC LIMIT 1")
+        let saved: Option<Json> = sqlx::query_scalar("SELECT details->'resources_before' FROM audit_log WHERE action='node.deleted' AND object_id=$1 AND details->>'deletion_id'=$2::uuid::text ORDER BY at DESC,id DESC LIMIT 1")
             .bind(node).bind(deletion).fetch_optional(&mut *conn).await.map_err(DbError::from)?.flatten();
-        for one in saved
+        let before = saved
             .as_ref()
             .and_then(Json::as_array)
             .into_iter()
             .flatten()
-        {
-            if one.get("disabled").and_then(Json::as_bool) != Some(false) {
-                continue;
-            }
-            let (Some(kind), Some(id)) = (
-                one.get("kind").and_then(Json::as_str),
-                one.get("id")
-                    .and_then(Json::as_str)
-                    .and_then(|id| id.parse::<Id>().ok()),
-            ) else {
-                continue;
-            };
-            let Some(table) = table_of(kind) else {
-                continue;
-            };
-            let home = if kind == "environment" {
+            .filter_map(|one| serde_json::from_value::<ResourceBefore>(one.clone()).ok())
+            .filter(|one| !one.disabled && table_of(&one.kind).is_some())
+            .collect::<Vec<_>>();
+        let ids = before.iter().map(|one| one.id).collect::<Vec<_>>();
+        let mut facts = resources::resource_facts(conn, &ids).await?;
+        facts.retain(|fact| {
+            before
+                .iter()
+                .any(|one| one.id == fact.id && one.kind == fact.kind)
+        });
+        facts.sort_by_key(|fact| (fact.id, fact.kind.clone()));
+        for fact in &facts {
+            resources::lock_resource(conn, &fact.kind, fact.id).await?;
+        }
+        // Reload only actual saved identities after their row locks, preserving native prospective liveness.
+        let mut facts = resources::resource_facts(conn, &ids).await?;
+        facts.retain(|fact| {
+            before
+                .iter()
+                .any(|one| one.id == fact.id && one.kind == fact.kind)
+        });
+        let homes = facts
+            .iter()
+            .filter_map(|fact| fact.home_id)
+            .collect::<Vec<_>>();
+        let homes = hierarchy::with_ancestors(conn, &homes).await?;
+        facts.retain(|fact| {
+            fact.home_id.is_some_and(|home| {
+                homes.iter().any(|row| {
+                    row.id == home
+                        && row.path.contains(&node)
+                        && (row.deleted_at.is_none() || restored.contains(&home))
+                })
+            })
+        });
+        Ok(PreparedHomeRestoration {
+            node,
+            resources: facts,
+        })
+    }
+
+    /// Enables only the exact native saved members this restore prepared, keeping units stopped.
+    pub async fn restore_prepared_home_resources_in(
+        &self,
+        conn: &mut Conn,
+        prepared: &PreparedHomeRestoration,
+        at: Time,
+    ) -> Result<(), EngineError> {
+        for fact in &prepared.resources {
+            let table = table_of(&fact.kind).ok_or_else(|| {
+                EngineError::unreadable("a saved restoration resource has no table")
+            })?;
+            let home = if fact.kind == "environment" {
                 "home_node_id"
             } else {
                 "home_id"
             };
-            let change = match kind {
+            let change = match fact.kind.as_str() {
                 "provider" => {
                     "status=CASE WHEN status='disabled' THEN 'needs_setup' ELSE status END"
                 }
@@ -687,11 +964,25 @@ impl Engine {
                 "host" | "agent" => "disabled=false",
                 _ => "enabled=true",
             };
-            sqlx::query(sqlx::AssertSqlSafe(format!("UPDATE {table} x SET {change},revision=revision+1,updated_at=$3
-                WHERE x.id=$1 AND EXISTS(SELECT 1 FROM nodes n WHERE n.id=x.{home} AND $2=ANY(n.path) AND n.deleted_at IS NULL)")))
-                .bind(id).bind(node).bind(at.get()).execute(&mut *conn).await.map_err(DbError::from)?;
+            sqlx::query(sqlx::AssertSqlSafe(format!("UPDATE {table} x SET {change},revision=revision+1,updated_at=$3 WHERE x.id=$1 AND EXISTS(SELECT 1 FROM nodes n WHERE n.id=x.{home} AND $2=ANY(n.path) AND n.deleted_at IS NULL)")))
+                .bind(fact.id).bind(prepared.node).bind(at.get()).execute(&mut *conn).await.map_err(DbError::from)?;
         }
         Ok(())
+    }
+
+    /// The original native caller consumes the same actual saved-resource preparation.
+    pub async fn restore_home_resources_in(
+        &self,
+        conn: &mut Conn,
+        node: Id,
+        deletion: Option<Id>,
+        at: Time,
+    ) -> Result<(), EngineError> {
+        let prepared = self
+            .prepare_home_restoration_in(conn, node, deletion, &[])
+            .await?;
+        self.restore_prepared_home_resources_in(conn, &prepared, at)
+            .await
     }
 }
 

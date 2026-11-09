@@ -1,7 +1,7 @@
 //! Personal-state event values projected after commit without enlarging database notifications.
 
 use super::{Connection, Fail, Inner};
-use crate::middleware::authentication::{Authed, Caller, Via};
+use crate::middleware::authentication::Caller;
 use crate::registry::Ctx;
 use orch_api_contract::routes::Endpoint;
 use orch_realtime_contract::feeds::UserEvent;
@@ -87,23 +87,17 @@ pub(crate) async fn project(
         if let Some(app) = inner.app() {
             let mut conn = inner.db.acquire().await?;
             let before = orch_db::queries::access::epoch(&mut conn).await?;
-            if let Some(principal) =
-                super::subscriptions::principal_for_connection(inner, &mut conn, connection).await?
-                && let Some(user) =
-                    orch_db::queries::identity::user_by_id(&mut conn, connection.user).await?
+            if let Some((principal, authed)) =
+                super::subscriptions::reader_for_connection(inner, &mut conn, connection).await?
             {
                 let ctx = Ctx::for_tool(
                     app,
-                    Caller::User(Arc::new(Authed {
-                        as_admin: principal.caller().as_admin(),
-                        user,
-                        via: Via::Session {
-                            session_id: connection.session(),
-                        },
-                    })),
+                    Caller::User(Arc::new(authed)),
                     orch_api_contract::resources::MachineEnrollmentStatusGet::ROUTE,
                     Id::nil(),
-                );
+                )
+                .with_admitted_caller(principal.caller().clone())
+                .map_err(Fail::other)?;
                 let projected = crate::routes::resources::machines::enrollment::show(
                     &ctx, &mut conn, &principal, receipt,
                 )

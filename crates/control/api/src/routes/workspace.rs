@@ -21,6 +21,7 @@ pub(crate) mod pages;
 pub mod paths;
 pub mod problems;
 pub mod restores;
+pub(crate) mod snapshot_read;
 pub mod snapshots;
 pub mod source;
 

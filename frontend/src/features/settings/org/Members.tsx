@@ -51,7 +51,9 @@ import { Textarea } from '@/ui/Textarea';
 import { toast } from '@/ui/Toast';
 import { TracePerson, useTraceEntry } from '@/features/trace/Person';
 import { scopeOf } from '@/features/trace/params';
+import { MemberTerms } from '@/features/auth/Terms';
 import { InheritedMembers } from './InheritedMembers';
+import { MessagesSection } from '@/features/admin-messages/Sent';
 
 /** Whether an invitation can still be used: not taken back, not past its time, not used up. */
 export function isPending(invitation: Invitation, now: number): boolean {
@@ -100,7 +102,7 @@ function ChangeRole({ member, onClose }: { member: Member; onClose: () => void }
         {roles.isError ? (
           <ErrorState compact error={roles.error} retrying={roles.isRefetching} onRetry={() => void roles.refetch()} />
         ) : roles.isPending ? (
-          <SkeletonRows rows={1} />
+          <SkeletonRows read={roles} rows={1} />
         ) : (
           <Select label={t('places.invite.role')} value={role} onValueChange={setRole} options={INVITED_ROLES.map((value) => ({ value, ...choiceOption(t, `accessRole.${value}`) }))} />
         )}
@@ -161,7 +163,7 @@ function Invitations({ org }: { org: Org }) {
     },
   });
   const pending = (list.data ?? []).filter((invitation) => isPending(invitation, now));
-  if (list.isPending) return <SkeletonRows rows={2} />;
+  if (list.isPending) return <SkeletonRows read={list} rows={2} />;
   if (list.isError) return <ErrorState compact error={list.error} retrying={list.isRefetching} onRetry={() => void list.refetch()} />;
   if (pending.length === 0) return <EmptyState compact title={t('places.members.noInvitations')} />;
   const columns: Column<Invitation>[] = [
@@ -253,7 +255,7 @@ export function Members({ org }: { org: Org }) {
   if (acting !== null && !(acting.act === 'role' ? mayChangeRole : acting.act === 'end' ? mayManage || acting.member.user.id === me : mayManage)) setActing(null);
   const list = useInfiniteQuery(membersQuery(org.id, { direct, q: settled }));
   const members = list.data?.pages.flatMap((page) => page.items) ?? [];
-  const held = useQuery({ ...suspensionsQuery(org.id), enabled: mayManage });
+  const held = useQuery({ ...suspensionsQuery(org.id), staleTime: 0, enabled: mayManage && members.some((member) => member.suspended) });
   const reasons = new Map<string, Suspension>((held.data ?? []).map((suspension) => [suspension.user.id, suspension]));
 
   const resume = useMutation({
@@ -277,6 +279,7 @@ export function Members({ org }: { org: Org }) {
               {member.is_owner && <Badge>{t('places.members.owner')}</Badge>}
               {member.suspended && <Badge tone="warning">{t('places.members.suspended')}</Badge>}
             </span>
+            {mayManage && <MemberTerms member={member} />}
             {!shown.has(MEMBER_ROLE_COLUMN) && <span className="text-sm text-text-muted">{t(`roles.${member.role}`)}</span>}
             {member.suspended && suspension !== undefined && (
               <span className="text-sm text-text-muted">
@@ -398,7 +401,7 @@ export function Members({ org }: { org: Org }) {
           {org.org_count > 0 && <Switch label={t('places.members.direct')} checked={direct} onCheckedChange={setDirect} className="items-center gap-3" />}
         </FilterBar>
         {list.isPending ? (
-          <SkeletonRows rows={4} />
+          <SkeletonRows read={list} rows={4} />
         ) : list.isError && members.length === 0 ? (
           <ErrorState compact error={list.error} retrying={list.isRefetching} onRetry={() => void list.refetch()} />
         ) : members.length === 0 ? settled === '' && org.depth > 0 ? null : (
@@ -421,6 +424,7 @@ export function Members({ org }: { org: Org }) {
       )}
 
       {mayManage && <Outsiders org={org} />}
+      {mayManage && <MessagesSection key={org.id} scope={{ kind: 'org', id: org.id, name: org.name }} />}
 
       {inviting && mayManage && taking && <InviteDialog target={{ kind: 'org', org }} open onClose={() => setInviting(false)} />}
       {acting?.act === 'role' && <ChangeRole member={acting.member} onClose={() => setActing(null)} />}

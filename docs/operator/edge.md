@@ -61,9 +61,15 @@ the stack, put company authority PEMs in `config/ca-certificates/`, run `openssl
 restart the callers. This supplements the bundled public roots without changing Compose or disabling
 verification. Standalone processes use the host's certificate store.
 
+Forward `/api/v1/` for browser sessions and `/openapi/v1/` for API keys unchanged,
+including `/api/v1/ws` and `/openapi/v1/ws`. A proxy must preserve the path prefix
+and support WebSocket upgrades on both roots. The updater retains an existing
+`deploy/nginx.conf`; merge the shipped key-route blocks when upgrading an older
+installation. Installer downloads stay at `/api/v1/downloads/`.
+
 For Cloudflare, keep WebSockets enabled. Its [WebSocket documentation](https://developers.cloudflare.com/network/websockets/)
-explains that a CDN deployment may drop established sockets; Orch reconnects. Exclude `/api/` and
-`/link/` from caching, browser challenges and script rewriting: machines cannot answer a browser
+explains that a CDN deployment may drop established sockets; Orch reconnects. Exclude `/api/`,
+`/openapi/` and `/link/` from caching, browser challenges and script rewriting: machines cannot answer a browser
 challenge, and the page's content policy rejects injected scripts. Name the actual proxies in
 `trusted_proxy_cidrs`, using [Cloudflare's current published ranges](https://www.cloudflare.com/ips/)
 where applicable. The direct 9443 door needs a DNS-only record or IP because it is outside
@@ -90,12 +96,13 @@ Example addresses block enrollment commands until `public_url` and `[[gateway.en
 ## What the front must do
 
 - Proxy everything to the web edge's address.
-- Pass WebSocket upgrades for `/api/v1/ws` (the realtime socket, and the terminals under it) and for
+- Pass WebSocket upgrades for `/api/v1/ws` (browser sessions), `/openapi/v1/ws` (account keys),
+  their existing ticket continuations, and for
   `/link/v1/session` (the machines that come in through this front).
 - Allow request bodies of 8 MiB. Nothing the product sends is larger: the browser and the connectors send bigger
   content in pieces of at most 4 MiB. (apache2 puts no limit on a proxied body unless you set one; nginx
   limits to 1 MiB unless `client_max_body_size` says more.)
-- Not buffer or cache `/api/` and `/link/`.
+- Not buffer or cache `/api/`, `/openapi/` and `/link/`. Route both API prefixes to the same API service.
 - Keep idle connections for at least 60 s. The realtime socket is silent between a person's actions, and a front
   that cuts it earlier makes the page reconnect all the time.
 - Forward the client's address in `X-Forwarded-For`, and say that the page was reached over HTTPS

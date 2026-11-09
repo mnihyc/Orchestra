@@ -5,8 +5,12 @@
     reason = "a test fails by panicking"
 )]
 
+#[path = "document_import_files/creation_replays.rs"]
+mod creation_replays;
 mod desk;
 mod places;
+#[path = "document_import_files/scopes.rs"]
+mod scopes;
 mod support;
 
 use desk::Desk;
@@ -88,6 +92,8 @@ async fn import(
         .send()
         .await
         .ok()
+        .into_full()
+        .expect("the ordinary import keeps its complete native report")
 }
 
 fn zip(entries: &[(&str, &[u8])]) -> Vec<u8> {

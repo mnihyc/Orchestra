@@ -248,7 +248,10 @@ async fn request_after(
     let mut registry = Registry::new();
     orch_api_core::routes::mount(&mut registry);
     registry
-        .into_router()
+        .into_router_for(
+            orch_api_contract::surface::HttpSurface::for_token(&who.token)
+                .expect("known fixture credential"),
+        )
         .with_state(world.app.app.clone())
         .oneshot(
             Request::builder()
@@ -604,7 +607,10 @@ async fn context(scenario: &Scenario) -> Ctx {
         }
     });
     let response = registry
-        .into_router()
+        .into_router_for(
+            orch_api_contract::surface::HttpSurface::for_token(&scenario.writer.token)
+                .expect("known fixture credential"),
+        )
         .with_state(scenario.world.app.app.clone())
         .oneshot(
             Request::builder()
@@ -876,7 +882,10 @@ fn cost_router(scenario: &Scenario, guarded: bool) -> axum::Router {
         }
     });
     registry
-        .into_router()
+        .into_router_for(
+            orch_api_contract::surface::HttpSurface::for_token(&scenario.writer.token)
+                .expect("known fixture credential"),
+        )
         .with_state(scenario.world.app.app.clone())
 }
 
@@ -953,7 +962,10 @@ async fn personal_context(world: &World, who: &Who) -> Ctx {
         }
     });
     let response = registry
-        .into_router()
+        .into_router_for(
+            orch_api_contract::surface::HttpSurface::for_token(&who.token)
+                .expect("known fixture credential"),
+        )
         .with_state(world.app.app.clone())
         .oneshot(
             Request::builder()
