@@ -1,7 +1,9 @@
 //! Native ingress, real guarded selection and source/effect ordering, without vendor-history claims.
 
+mod image_services;
 #[path = "../../../tests/native_continuations/mod.rs"]
 mod native;
+mod web_services;
 
 use super::*;
 use crate::test_common as common;
@@ -32,6 +34,99 @@ use std::{
 use tokio::sync::{Semaphore, oneshot};
 
 type Proof<T = ()> = Result<T, Box<dyn std::error::Error + Send + Sync>>;
+
+static PREPARED_SERVICE_INPUTS: OnceLock<Mutex<HashMap<Id, Json>>> = OnceLock::new();
+
+/// Exercise the public consumer port inside the actual native ingress task and its admitted Source.
+pub(crate) async fn prepared_service_result(
+    engine: &Engine,
+    call: &CallContext,
+    capability: &str,
+) -> Option<Result<Json, EngineError>> {
+    let input = PREPARED_SERVICE_INPUTS
+        .get()?
+        .lock()
+        .ok()?
+        .remove(&call.thread)?;
+    Some(
+        async {
+            let mut invalid = input.clone();
+            invalid["model"] = json!("an unoffered model");
+            if engine
+                .execute_prepared_capability_service(call, capability, invalid)
+                .await
+                .is_ok()
+            {
+                return Err(EngineError::ToolCallIdentity);
+            }
+            let accepted = engine
+                .execute_prepared_capability_service(call, capability, input.clone())
+                .await?;
+            let expected = accepted.project(200)?;
+            let receipt = accepted.receipt().clone();
+            let pin: i32 = sqlx::query_scalar("SELECT b.pin_count FROM thread_tool_service_results r JOIN blobs b ON b.hash=r.result_blob WHERE r.answer_id=$1")
+                .bind(super::Source::captured()?.answer()).fetch_one(&mut *engine.db().acquire().await?).await.map_err(orch_db::DbError::from)?;
+            if pin <= 0 { return Err(EngineError::ToolCallIdentity); }
+            // The materializer lost its in-memory packet after a destination failure.
+            drop(accepted);
+            super::reap(engine, None).await?;
+            orch_db::queries::link::purge_finished(
+                &mut *engine.db().acquire().await?,
+                engine.inner.clock.now() + chrono::Duration::days(1),
+                engine.inner.config.sweep_batch,
+            )
+            .await?;
+            let restored = engine
+                .read_accepted_capability_result(call, &receipt)
+                .await?;
+            if restored.project(200)? != expected {
+                return Err(EngineError::ToolCallIdentity);
+            }
+            let record = serde_json::to_value(&restored)?;
+            let repeated = engine
+                .execute_prepared_capability_service(call, capability, input.clone())
+                .await?;
+            if serde_json::to_value(repeated)? != record {
+                return Err(EngineError::ToolCallIdentity);
+            }
+            let mut wrong = input.clone();
+            wrong["query"] = json!("a different generation intent");
+            if engine
+                .execute_prepared_capability_service(call, capability, wrong)
+                .await
+                .is_ok()
+            {
+                return Err(EngineError::ToolCallIdentity);
+            }
+            let mut wrong_receipt = serde_json::to_value(&receipt)?;
+            wrong_receipt["owner"]["turn"] = json!(new_id());
+            let wrong_receipt = serde_json::from_value(wrong_receipt)?;
+            if engine
+                .read_accepted_capability_result(call, &wrong_receipt)
+                .await
+                .is_ok()
+            {
+                return Err(EngineError::ToolCallIdentity);
+            }
+            engine
+                .release_accepted_capability_result(call, &receipt)
+                .await?;
+            if engine
+                .read_accepted_capability_result(call, &receipt)
+                .await
+                .is_ok()
+                || engine
+                    .execute_prepared_capability_service(call, capability, input)
+                    .await
+                    .is_ok()
+            {
+                return Err(EngineError::ToolCallIdentity);
+            }
+            Ok(expected)
+        }
+        .await,
+    )
+}
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub(crate) enum Point {
@@ -330,13 +425,68 @@ struct Scene {
 }
 
 impl Scene {
+    async fn lend_document(
+        &self,
+        conn: &mut orch_db::Conn,
+        document: Id,
+        permission: &str,
+    ) -> Proof<Id> {
+        use orch_db::queries::access::{self, NewEntry, PageKey};
+        let id = new_id();
+        access::insert_entry(
+            conn,
+            &NewEntry {
+                id,
+                page: &PageKey::new("document", document, "live"),
+                profile: "any",
+                permission,
+                holder_kind: "agents",
+                holder_id: Some(self.thread),
+                holder_role: None,
+                options: &json!({}),
+                expires_at: None,
+                note: "",
+                source: "page",
+                created_by: Some(self.world.ada),
+                at: self.world.clock.now(),
+            },
+        )
+        .await?;
+        Ok(id)
+    }
+
     async fn new() -> Proof<Self> {
         Self::configured(false).await
     }
 
     async fn configured(display: bool) -> Proof<Self> {
-        let world = common::World::new().await;
+        Self::configured_with_web_services(display, false).await
+    }
+
+    async fn configured_with_web_services(display: bool, web: bool) -> Proof<Self> {
+        Self::configured_with_web_modes(display, web, false).await
+    }
+
+    async fn configured_with_web_modes(display: bool, web: bool, fetch: bool) -> Proof<Self> {
+        Self::configured_with_web_clock(display, web, fetch, None).await
+    }
+
+    async fn configured_with_web_clock(
+        display: bool,
+        web: bool,
+        fetch: bool,
+        clock: Option<Arc<dyn orch_types::Clock>>,
+    ) -> Proof<Self> {
+        let world = match clock {
+            Some(clock) => common::World::with_clock(clock).await,
+            None => common::World::new().await,
+        };
         let mut descriptor = common::descriptor();
+        if web {
+            descriptor["parameters"] = serde_json::to_value(vec![
+                orch_agent_contract::parameters::web_search_capability_parameter(None, true),
+            ])?;
+        }
         descriptor["capabilities"]["native_input_prefix"] = json!("turn_start");
         descriptor["capabilities"]["orch_tools"] = json!("mcp");
         descriptor["capabilities"]["mcp"] =
@@ -359,6 +509,9 @@ impl Scene {
             ))
         });
         let thread = world.thread("Native source tools").await;
+        if web {
+            web_services::install(&world, thread, fetch).await?;
+        }
         let directory = tempfile::tempdir()?;
         tokio::fs::create_dir_all(directory.path().join("out")).await?;
         let bytes = Bytes::from_static(b"original\0source\xffbytes");
@@ -645,7 +798,6 @@ impl Scene {
     /// A person's actual creation, rather than this agent's intrinsically exportable document.
     async fn shared_download_target(&mut self) -> Proof {
         use crate::document_tree::{self, Actor, Directory};
-        use orch_db::queries::access::{PageKey, testing as grants};
         let id = new_id();
         let mut tx = self.world.pool.begin().await?;
         let principal = Principal::load(
@@ -668,16 +820,7 @@ impl Scene {
         assert_eq!(created.document.created_by, Some(self.world.ada));
         assert_eq!(created.document.created_by_thread, None);
         for permission in ["doc.view", "doc.edit"] {
-            grants::add_entry(
-                &mut tx,
-                &PageKey::new("document", id, "live"),
-                "any",
-                permission,
-                ("agents", Some(self.thread), None),
-                None,
-                self.world.clock.now(),
-            )
-            .await?;
+            self.lend_document(&mut tx, id, permission).await?;
         }
         orch_db::queries::access::bump_epoch(&mut tx).await?;
         tx.commit().await?;
@@ -737,6 +880,7 @@ impl Scene {
                     segment_id: source.segment_id,
                 },
                 &Event::OrchToolCall(OrchToolCall {
+                    deadline: None,
                     turn_id: turn,
                     call_ref: call.into(),
                     attempt,
@@ -1019,6 +1163,90 @@ impl Scene {
         ]
         .map(|kind| self.world.began(kind))
     }
+}
+
+#[tokio::test]
+async fn a_paid_tool_restores_original_input_origins_and_never_invents_missing_provenance() -> Proof
+{
+    let scene = Scene::new().await?;
+    let engine = scene.world.engine();
+    let mut tx = scene.world.pool.begin().await?;
+    let machine: Id = sqlx::query_scalar("SELECT machine_id FROM segments WHERE id=$1")
+        .bind(scene.source.segment_id)
+        .fetch_one(&mut *tx)
+        .await?;
+    let call = CallContext {
+        machine,
+        thread: scene.thread,
+        turn: scene.start.turn_id,
+        call_ref: "original-paid-origins".into(),
+        attempt: None,
+        tool: orch_agent_contract::events::OrchTool::ListShared,
+        arguments: json!({}),
+    };
+    let (source, _) = Source::load(&mut tx, &call).await?;
+    tx.commit().await?;
+    source
+        .scope(async {
+            super::admit(&engine, &call).await?;
+            let mut tx = scene.world.pool.begin().await?;
+            let origins = super::original_callers(
+                &mut tx,
+                &call,
+                engine.inner.clock.as_ref(),
+                engine.inner.access.as_ref(),
+            )
+            .await?;
+            assert_eq!(origins.actor(), scene.world.ada);
+            assert!(
+                origins.callers().len() >= 2,
+                "author and actor origins remain conjunctive"
+            );
+            assert!(
+                origins
+                    .callers()
+                    .iter()
+                    .all(|caller| caller.user() == scene.world.ada)
+            );
+            assert_eq!(origins.attribution().turn_id, scene.start.turn_id);
+            assert_eq!(origins.attribution().segment_id, scene.source.segment_id);
+            sqlx::query("UPDATE thread_inputs SET submission_authority=NULL WHERE id=$1")
+                .bind(scene.input)
+                .execute(&mut *tx)
+                .await?;
+            assert!(
+                matches!(
+                    super::original_callers(
+                        &mut tx,
+                        &call,
+                        engine.inner.clock.as_ref(),
+                        engine.inner.access.as_ref()
+                    )
+                    .await,
+                    Err(EngineError::StaleToolSource)
+                ),
+                "a missing original origin never falls back to an owner session"
+            );
+            // Roll back this deliberately removed provenance; the native scene remains its original one.
+            tx.rollback().await?;
+            Ok::<_, Box<dyn std::error::Error + Send + Sync>>(())
+        })
+        .await?;
+    let mut conn = scene.world.pool.acquire().await?;
+    assert!(
+        matches!(
+            super::original_callers(
+                &mut conn,
+                &call,
+                engine.inner.clock.as_ref(),
+                engine.inner.access.as_ref()
+            )
+            .await,
+            Err(EngineError::StaleToolSource)
+        ),
+        "receipt metadata alone is no admitted tool dispatch"
+    );
+    Ok(())
 }
 
 #[tokio::test]
@@ -1382,7 +1610,6 @@ async fn download_peer(
     scene: &Scene,
     hold: bool,
 ) -> Proof<(Arc<UnjoinedWrite>, std::path::PathBuf, Id)> {
-    use orch_db::queries::access::{PageKey, testing as access};
     use orch_link_contract::commands::ExpectedHash;
     use std::io::Write;
     let native_bytes = Arc::new(Mutex::new(None::<(Hash, Bytes)>));
@@ -1395,16 +1622,13 @@ async fn download_peer(
         release: Semaphore::new(0),
     });
     scene.world.machine.link.serve(native.clone());
-    let export = access::add_entry(
-        &mut *scene.world.pool.acquire().await?,
-        &PageKey::new("document", scene.document, "live"),
-        "any",
-        "doc.export",
-        ("agents", Some(scene.thread), None),
-        None,
-        scene.world.clock.now(),
-    )
-    .await?;
+    let export = scene
+        .lend_document(
+            &mut *scene.world.pool.acquire().await?,
+            scene.document,
+            "doc.export",
+        )
+        .await?;
     scene
         .world
         .engine()

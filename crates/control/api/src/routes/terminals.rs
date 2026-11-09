@@ -16,8 +16,9 @@
 use super::workspace::door;
 use crate::middleware::authorization::{self, refusals};
 use crate::middleware::requests::{ApiError, ApiResult};
-use crate::realtime::terminals::{Door, Told, agent_socket, shell_socket};
-use crate::registry::{Ctx, Registry};
+use crate::middleware::transaction_guard;
+use crate::realtime::terminals::{Told, agent_socket, shell_socket};
+use crate::registry::{Ctx, OperationFuture, Registry};
 use crate::sign_in::origin;
 use axum::body::Body;
 use axum::response::Response;
@@ -34,7 +35,7 @@ use orch_api_contract::terminals::{
     TerminalNotAllowedReason, TerminalSession, TerminalState, TerminalTicket,
 };
 use orch_api_contract::users::UserRef;
-use orch_authz::environments::{Shell, may_close_shell, may_open_shell, may_read_recording};
+use orch_authz::environments::{Shell, may_close_shell, may_open_shell};
 use orch_authz::{Policy, Principal, resources};
 use orch_db::Conn;
 use orch_db::queries::terminals::{self as rows, After, SessionRow, Which};
@@ -48,15 +49,42 @@ use std::collections::HashMap;
 /// The largest screen, in either direction, that a shell is opened with: what the machine takes.
 const SIZE_MAX: u16 = 1_000;
 
+mod agent_operation;
+mod close_operation;
+mod create_operation;
+mod recording_operation;
+
 /// Binds this module's requests.
 pub fn mount(registry: &mut Registry) {
     registry
+        .creation(
+            api::EnvironmentTerminalCreate,
+            create_operation::replay_binding(),
+        )
         .on(api::EnvironmentTerminalList, list)
-        .on(api::EnvironmentTerminalCreate, create)
-        .on(api::TerminalTicketCreate, ticket)
-        .on(api::TerminalClose, close)
-        .on(api::AgentTerminalTicketCreate, agent_ticket)
-        .on_raw(api::TerminalRecordingGet, recording)
+        .on_with_operation(
+            api::EnvironmentTerminalCreate,
+            crate::key_operations::native::effects::prepare::<create_operation::Create>,
+            create,
+        )
+        .creation(api::TerminalTicketCreate, super::interactive_tickets::creation::<super::interactive_tickets::TerminalTickets>())
+        .creation(api::AgentTerminalTicketCreate, super::interactive_tickets::creation::<super::interactive_tickets::AgentTerminalTickets>())
+        .on_with_operation(api::TerminalTicketCreate, ticket_operation, ticket)
+        .on_with_operation(
+            api::TerminalClose,
+            crate::key_operations::native::effects::prepare::<close_operation::Close>,
+            close,
+        )
+        .on_with_operation(
+            api::AgentTerminalTicketCreate,
+            crate::key_operations::native::effects::prepare::<agent_operation::Agent>,
+            agent_ticket,
+        )
+        .on_raw_read_with_optional_operation(
+            api::TerminalRecordingGet,
+            crate::key_operations::native::selected::<recording_operation::Recording>,
+            recording,
+        )
         .on_socket(api::TerminalAttach, shell_socket)
         .on_socket(api::AgentTerminalAttach, agent_socket);
 }
@@ -288,15 +316,27 @@ fn refused_by_machine(error: &orch_link_contract::commands::CommandError) -> Api
 
 /// An open that did not come to a shell, as the person is told.
 async fn open_failed(conn: &mut Conn, shells: &Shells, error: OpenError) -> ApiResult<ApiError> {
+    match error {
+        OpenError::Engine(error) => Ok(ApiError::engine(error)),
+        other => open_failed_observed(conn, shells, &other, None).await,
+    }
+}
+
+async fn open_failed_observed(
+    conn: &mut Conn,
+    shells: &Shells,
+    error: &OpenError,
+    busy: Option<&HashMap<Id, bool>>,
+) -> ApiResult<ApiError> {
     Ok(match error {
         OpenError::NoEnvironment | OpenError::WrongThread => ApiError::not_found(),
-        OpenError::NotAllowed(reason) => not_allowed(reason),
-        OpenError::BadDirectory(why) => ApiError::invalid("cwd", &why),
+        OpenError::NotAllowed(reason) => not_allowed(*reason),
+        OpenError::BadDirectory(why) => ApiError::invalid("cwd", why),
         OpenError::NotYours(_) => {
             ApiError::invalid("close", "names a shell that is not yours here")
         }
         OpenError::AtLimit(at) => {
-            let mine = views(conn, shells, &at.mine).await?;
+            let mine = views_observed(conn, shells, &at.mine, busy).await?;
             ApiError::new(
                 ErrorCode::ConflictExists,
                 "this many shells are open already; close one to open another",
@@ -312,11 +352,15 @@ async fn open_failed(conn: &mut Conn, shells: &Shells, error: OpenError) -> ApiR
             .with("open", at.open)
             .with("people", at.people)
         }
+        OpenError::OriginClosed => ApiError::new(
+            ErrorCode::AuthzDenied,
+            "the accepted shell creation no longer satisfies its current scope or native door",
+        ),
         OpenError::Unreachable(why) => ApiError::new(
             ErrorCode::SourceOffline,
             format!("the machine could not be reached: {why}"),
         ),
-        OpenError::Refused(error) => refused_by_machine(&error),
+        OpenError::Refused(error) => refused_by_machine(error),
         OpenError::Engine(error) => ApiError::internal(error),
     })
 }
@@ -325,82 +369,10 @@ async fn open_failed(conn: &mut Conn, shells: &Shells, error: OpenError) -> ApiR
 /// and gives the ticket to attach to it.
 async fn create(
     ctx: Ctx,
-    query: ThroughThreadQuery,
-    body: EnvironmentTerminalCreateBody,
-) -> ApiResult<EnvironmentTerminalCreateReply> {
-    let environment = ctx.id("id")?;
-    let person = ctx.user()?.id();
-    if !(1..=SIZE_MAX).contains(&body.cols) {
-        return Err(ApiError::invalid(
-            "cols",
-            "is the width of the screen, 1 to 1000",
-        ));
-    }
-    if !(1..=SIZE_MAX).contains(&body.rows) {
-        return Err(ApiError::invalid(
-            "rows",
-            "is the height of the screen, 1 to 1000",
-        ));
-    }
-    let mut conn = ctx.app.db.acquire().await?;
-    let principal = authorization::principal(&ctx, &mut conn).await?;
-    if rows::site(&mut conn, environment).await?.is_none() {
-        return Err(ApiError::not_found());
-    }
-    match may_open_shell(&mut conn, &principal, environment, Policy::default()).await {
-        Ok(Decision::Allowed { .. }) => {}
-        Ok(Decision::Refused(refusal)) => return Err(refusals::denied(&mut conn, refusal).await?),
-        Err(error) => return Err(refusals::problem(&mut conn, error).await),
-    }
-    // The thread it is opened beside gives nothing: it has to be one that runs there and that the
-    // caller may view, and says where the shell starts.
-    if let Some(thread) = query.thread {
-        door::beside(&mut conn, &principal, environment, thread).await?;
-    }
-    drop(conn);
-    let shells = ctx.app.engine.shells();
-    let request = OpenRequest {
-        person,
-        environment,
-        through: query.thread,
-        cols: body.cols,
-        rows: body.rows,
-        directory: body.cwd,
-        close: body.close.unwrap_or_default(),
-        origin: origin(&ctx),
-    };
-    // A screen that has a shell the person gives up is told why before it goes.
-    let sockets = ctx.app.realtime.terminals();
-    let about = |row: &SessionRow, _: Ending| {
-        sockets.tell(row.id, Told::Over(TerminalClosedReason::ClosedByUser));
-    };
-    let opened = match shells.open(request, &about).await {
-        Ok(opened) => opened,
-        Err(error) => {
-            let mut conn = ctx.app.db.acquire().await?;
-            return Err(open_failed(&mut conn, &shells, error).await?);
-        }
-    };
-    let TerminalTicket {
-        ticket,
-        ticket_expires_at,
-    } = ctx.app.realtime.terminals().issue(
-        ctx.app.clock.now(),
-        person,
-        Door::Shell(opened.session.id),
-    );
-    let mut conn = ctx.app.db.acquire().await?;
-    let session = views(&mut conn, &shells, std::slice::from_ref(&opened.session))
-        .await?
-        .into_iter()
-        .next()
-        .ok_or_else(|| ApiError::internal("a shell that was opened is not shown"))?;
-    Ok(EnvironmentTerminalCreateReply {
-        session,
-        ticket,
-        ticket_expires_at,
-        closed: opened.closed,
-    })
+    _query: ThroughThreadQuery,
+    _body: EnvironmentTerminalCreateBody,
+) -> ApiResult<api::EnvironmentTerminalCreateResponse> {
+    create_operation::run(ctx).await
 }
 
 /// What a person who lost what a shell was opened by is told: a shell that is lost is ended at once, as
@@ -439,15 +411,41 @@ async fn lost(
 
 /// Gives a new ticket to attach to a shell again, from this browser or another. Only its opener has
 /// one, and only while they still pass the gates it was opened under.
-async fn ticket(ctx: Ctx, (): (), (): ()) -> ApiResult<TerminalTicket> {
+fn ticket_operation<'a>(
+    ctx: &'a Ctx,
+    conn: &'a mut Conn,
+    _caller: &'a orch_authz::Caller,
+    (): (),
+    (): (),
+) -> OperationFuture<'a> {
+    Box::pin(async move {
+        let row = rows::get(conn, ctx.id("terminal_id")?)
+            .await?
+            .ok_or_else(ApiError::not_found)?;
+        super::interactive_tickets::plan(ctx, conn, "TerminalTicketCreate", row.environment_id)
+            .await
+    })
+}
+
+async fn ticket(ctx: Ctx, (): (), (): ()) -> ApiResult<api::TerminalTicketCreateResponse> {
     let id = ctx.id("terminal_id")?;
-    let person = ctx.user()?.id();
-    let mut conn = ctx.app.db.acquire().await?;
+    let (mut conn, guard) = transaction_guard::begin(&ctx).await?;
+    let caller = guard.principal().caller().clone();
+    let person = caller.user();
+    let environment = *guard.operation_data::<Id>()?;
+    let mut ctx = ctx;
+    ctx.caller =
+        crate::middleware::authentication::Caller::User(std::sync::Arc::new(guard.user().clone()));
+    ctx.now = guard.now().into();
+    let ctx = ctx.with_admitted_caller(caller)?;
     let row = rows::get(&mut conn, id)
         .await?
-        .filter(|row| row.opened_by == person && row.state == rows::state::OPEN)
+        .filter(|row| {
+            row.environment_id == environment
+                && row.opened_by == person
+                && row.state == rows::state::OPEN
+        })
         .ok_or_else(ApiError::not_found)?;
-    let principal = authorization::principal(&ctx, &mut conn).await?;
     let holding = ctx
         .app
         .engine
@@ -456,92 +454,58 @@ async fn ticket(ctx: Ctx, (): (), (): ()) -> ApiResult<TerminalTicket> {
         .await
         .map_err(ApiError::internal)?;
     if holding != Holding::Yes {
-        return Err(lost(&ctx, &mut conn, &principal, &row, holding).await?);
+        // The existing ordinary opener-loss cleanup owns native IO; no transaction spans it.
+        conn.commit().await.map_err(orch_db::DbError::from)?;
+        let mut conn = ctx.app.db.acquire().await?;
+        return Err(lost(&ctx, &mut conn, guard.principal(), &row, holding).await?);
     }
-    Ok(ctx
-        .app
-        .realtime
-        .terminals()
-        .issue(ctx.app.clock.now(), person, Door::Shell(id)))
+    let site = rows::site(&mut conn, row.environment_id)
+        .await?
+        .ok_or_else(ApiError::not_found)?;
+    let mut issued = ctx.app.realtime.terminals().issue_shell_pending(
+        &ctx,
+        id,
+        row.environment_id,
+        site.machine_id,
+        row.env_generation,
+    )?;
+    super::interactive_tickets::record::<super::interactive_tickets::TerminalTickets>(
+        &mut issued,
+        &ctx,
+        &mut conn,
+    )
+    .await?;
+    conn.commit().await.map_err(orch_db::DbError::from)?;
+    Ok(api::TerminalTicketCreateResponse::Full(Box::new(
+        issued.publish()?,
+    )))
 }
 
 /// Closes a shell: its opener may, and so may whoever manages its environment. Closing one that is
 /// closed answers with it as it is.
-async fn close(ctx: Ctx, (): (), (): ()) -> ApiResult<TerminalSession> {
-    let id = ctx.id("terminal_id")?;
-    let person = ctx.user()?.id();
-    let mut conn = ctx.app.db.acquire().await?;
-    let row = rows::get(&mut conn, id)
-        .await?
-        .ok_or_else(ApiError::not_found)?;
-    if row.opened_by != person {
-        let principal = authorization::principal(&ctx, &mut conn).await?;
-        let shell = Shell {
-            environment: row.environment_id,
-            thread: row.thread_id,
-            opened_by: row.opened_by,
-        };
-        let may = may_close_shell(&mut conn, &principal, &shell, Policy::default())
-            .await
-            .map_err(ApiError::internal)?;
-        if !may {
-            return Err(ApiError::not_found());
-        }
-    }
-    drop(conn);
-    let shells = ctx.app.engine.shells();
-    if row.is_live() {
-        // The screen is told why before the shell goes, so that it says what was done and not what it
-        // sees first of the shell going away.
-        ctx.app
-            .realtime
-            .terminals()
-            .tell(id, Told::Over(TerminalClosedReason::ClosedByUser));
-        shells
-            .finish(id, Ending::CLOSED, &origin(&ctx))
-            .await
-            .map_err(ApiError::internal)?;
-    }
-    let mut conn = ctx.app.db.acquire().await?;
-    let row = rows::get(&mut conn, id)
-        .await?
-        .ok_or_else(ApiError::not_found)?;
-    views(&mut conn, &shells, std::slice::from_ref(&row))
-        .await?
-        .into_iter()
-        .next()
-        .ok_or_else(|| ApiError::internal("a shell that was closed is not shown"))
+async fn close(ctx: Ctx, (): (), (): ()) -> ApiResult<api::TerminalCloseResponse> {
+    close_operation::run(ctx).await
 }
 
 /// What a shell last printed, as it was kept when it closed: for its opener, for whoever manages its
 /// environment, and for whoever holds `audit.view` on the thread it was opened from.
 async fn recording(ctx: Ctx, (): (), _body: Body) -> ApiResult<Response> {
-    let id = ctx.id("terminal_id")?;
     let person = ctx.user()?.id();
-    let mut conn = ctx.app.db.acquire().await?;
-    let row = rows::get(&mut conn, id)
-        .await?
-        .ok_or_else(ApiError::not_found)?;
-    let principal = authorization::principal(&ctx, &mut conn).await?;
-    let shell = Shell {
-        environment: row.environment_id,
-        thread: row.thread_id,
-        opened_by: row.opened_by,
-    };
-    let reading = may_read_recording(&mut conn, &principal, &shell, Policy::default())
-        .await
-        .map_err(ApiError::internal)?;
-    if !reading.allowed || row.is_live() || row.recording().is_none() {
-        return Err(ApiError::not_found());
-    }
-    drop(conn);
+    let selected = crate::key_operations::native::selected_read::<recording_operation::Recording>(
+        ctx.clone(),
+        (),
+        (),
+    )
+    .await?;
+    recording_operation::retain_ordinary(&ctx, &selected)?;
+    let row = selected.subject.row;
     let shells = ctx.app.engine.shells();
     let content = shells
         .recording(&row)
         .await
         .map_err(ApiError::internal)?
         .ok_or_else(ApiError::not_found)?;
-    if reading.audited {
+    if selected.subject.authority != orch_authz::environments::RecordingAuthority::Opener {
         shells
             .note_read(&row, person, &origin(&ctx))
             .await
@@ -564,64 +528,7 @@ async fn recording(ctx: Ctx, (): (), _body: Body) -> ApiResult<Response> {
 async fn agent_ticket(
     ctx: Ctx,
     (): (),
-    body: AgentTerminalTicketCreateBody,
-) -> ApiResult<TerminalTicket> {
-    let thread = ctx.id("id")?;
-    let person = ctx.user()?.id();
-    let control = body.control.unwrap_or(false);
-    let mut conn = ctx.app.db.acquire().await?;
-    let principal = authorization::principal(&ctx, &mut conn).await?;
-    let environment = threads::thread(&mut conn, thread)
-        .await?
-        .filter(|row| row.deleted_at.is_none())
-        .and_then(|row| row.environment_id)
-        .ok_or_else(ApiError::not_found)?;
-    authorization::require_resource(
-        &mut conn,
-        &principal,
-        ResourceKind::Environment,
-        environment,
-        Permission::TerminalView,
-        Policy::default(),
-    )
-    .await?;
-    if control {
-        authorization::require_resource(
-            &mut conn,
-            &principal,
-            ResourceKind::Environment,
-            environment,
-            Permission::TerminalManage,
-            Policy::default(),
-        )
-        .await?;
-    }
-    let screen = ctx
-        .app
-        .engine
-        .shells()
-        .agent_screen(&mut conn, thread)
-        .await
-        .map_err(ApiError::internal)?;
-    let declared = screen.map(|screen| screen.declared);
-    let fits = match declared {
-        Some(AgentTerminal::Interactive) => true,
-        Some(AgentTerminal::View) => !control,
-        Some(AgentTerminal::None) | None => false,
-    };
-    if !fits {
-        return Err(ApiError::new(
-            ErrorCode::CapabilityUnsupported,
-            if control {
-                "the agent declares no terminal that can be typed into"
-            } else {
-                "the agent declares no terminal of its own"
-            },
-        ));
-    }
-    Ok(ctx.app.realtime.terminals().issue(
-        ctx.app.clock.now(),
-        person,
-        Door::Agent { thread, control },
-    ))
+    _body: AgentTerminalTicketCreateBody,
+) -> ApiResult<api::TerminalTicketCreateResponse> {
+    agent_operation::run(ctx).await
 }

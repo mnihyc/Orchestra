@@ -10,8 +10,12 @@ mod places;
 mod rig;
 mod support;
 
+use crate::support::FullCommentCreationReply as _;
+use crate::support::FullDiscussionCreationReply as _;
+use crate::support::FullPermissionPageReply;
 use chrono::Duration;
 use desk::{Desk, rewrite, text};
+use futures::FutureExt as _;
 use orch_api_contract::access::{
     HolderInput, PageChange, PageChangeOwners, PageChangeWhole, PermissionPageUpdate,
 };
@@ -58,6 +62,7 @@ async fn start(desk: &Desk, who: &Who, document: Id, block: Id, client: Id) -> D
             client_id: client.to_string(),
         })
         .send()
+        .map(|reply| reply.full_discussion())
         .await
         .ok()
 }
@@ -72,6 +77,7 @@ async fn answer(desk: &Desk, who: &Who, document: Id, discussion: Id, words: &st
             client_id: new_id().to_string(),
         })
         .send()
+        .map(|reply| reply.full_comment())
         .await
         .ok();
 }
@@ -339,6 +345,7 @@ async fn pw_01_a_lost_reader_gets_no_new_discussion_notice_and_no_retained_excer
         })
         .send()
         .await
+        .full_permission_page()
         .ok();
     start(&desk, &desk.ada, doc.base.id, blocks[0].id, new_id()).await;
     assert_eq!(notices(&desk.world, writer.id()).await[0].2, last);
@@ -411,7 +418,9 @@ async fn pw_01_an_agent_block_writer_names_its_current_first_owner_without_an_ag
         })
         .send()
         .await
-        .ok();
+        .ok()
+        .into_full()
+        .unwrap();
     let initial = scene
         .rig
         .world
@@ -464,6 +473,7 @@ async fn pw_01_an_agent_block_writer_names_its_current_first_owner_without_an_ag
         })
         .send()
         .await
+        .full_permission_page()
         .ok();
     let inputs: i64 = sqlx::query_scalar("SELECT count(*) FROM thread_inputs WHERE thread_id = $1")
         .bind(thread.base.id)
@@ -483,6 +493,7 @@ async fn pw_01_an_agent_block_writer_names_its_current_first_owner_without_an_ag
             client_id: new_id().to_string(),
         })
         .send()
+        .map(|reply| reply.full_discussion())
         .await
         .ok();
     assert_eq!(notices(&scene.rig.world, next_owner.id()).await.len(), 1);
@@ -536,6 +547,13 @@ async fn pw_01_every_member_of_an_owners_group_hears_a_new_discussion_even_beyon
             .unwrap();
         owners.push(user);
     }
+    // These users existed when the controlled discussion event was accepted.
+    sqlx::query("UPDATE users SET created_at=$2 WHERE id=ANY($1)")
+        .bind(&owners)
+        .bind(desk.world.now())
+        .execute(&mut *conn)
+        .await
+        .unwrap();
     drop(conn);
     desk.world
         .app
@@ -551,8 +569,50 @@ async fn pw_01_every_member_of_an_owners_group_hears_a_new_discussion_even_beyon
         })
         .send()
         .await
+        .full_permission_page()
         .ok();
     let opened = start(&desk, &reader, doc.base.id, blocks[0].id, new_id()).await;
+    let job: Id = sqlx::query_scalar("SELECT id FROM jobs WHERE kind='document_notices' AND (plan->'notice'->>'discussion')::uuid=$1")
+        .bind(opened.id).fetch_one(&desk.world.db.pool).await.unwrap();
+    desk.world.app.app.engine.start();
+    type NoticeJobState = (
+        String,
+        Option<String>,
+        i64,
+        Option<Id>,
+        Option<Id>,
+        Option<chrono::DateTime<chrono::Utc>>,
+    );
+    let previous = std::sync::Mutex::new(None);
+    rig::eventually("the group owners' durable notice job finishes", || async {
+        let state: NoticeJobState = sqlx::query_as(
+            "SELECT state,progress->>'phase',COALESCE((plan->>'processed')::bigint,0),
+                (plan->>'after')::uuid,(plan#>>'{runner,id}')::uuid,
+                (plan#>>'{runner,until}')::timestamptz FROM jobs WHERE id=$1",
+        )
+            .bind(job)
+            .fetch_one(&desk.world.db.pool)
+            .await
+            .unwrap();
+        {
+            let mut last = previous.lock().unwrap();
+            if last.as_ref() != Some(&state) {
+                let after_advanced = last
+                    .as_ref()
+                    .and_then(|before| before.3.zip(state.3))
+                    .map(|(before, after)| after > before);
+                let runner_changed = last.as_ref().is_some_and(|before| before.4 != state.4);
+                eprintln!(
+                    "document notice job: state={} phase={:?} processed={} has_after={} after_advanced={after_advanced:?} has_runner={} runner_changed={runner_changed} runner_until={:?} now={}",
+                    state.0, state.1, state.2, state.3.is_some(), state.4.is_some(), state.5, desk.world.now(),
+                );
+                *last = Some(state.clone());
+            }
+        }
+        assert_ne!(state.0, "failed");
+        state.0 == "succeeded"
+    })
+    .await;
     let notified: Vec<Id> = sqlx::query_scalar("SELECT user_id FROM notifications WHERE kind = 'doc.comment' AND (data->>'discussion_id')::uuid = $1")
         .bind(opened.id).fetch_all(&desk.world.db.pool).await.unwrap();
     assert_eq!(notified.len(), GROUP_OWNERS + 1);

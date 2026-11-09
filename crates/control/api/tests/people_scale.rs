@@ -8,7 +8,10 @@ mod desk;
 mod places;
 mod support;
 
+use crate::support::FullCommentCreationReply as _;
+use crate::support::FullPermissionPageReply;
 use desk::Desk;
+use futures::FutureExt as _;
 use orch_api_contract::access::{
     AccessChoice, HolderInput, PageChange, PageChangeName, PermissionPageUpdate,
 };
@@ -82,6 +85,7 @@ async fn a_large_discussion_job_resumes_after_one_committed_page_without_replayi
         })
         .send()
         .await
+        .full_permission_page()
         .ok();
     sqlx::query("INSERT INTO document_states(user_id,document_id,discussion_level) SELECT md5('people-job:'||g)::uuid,$1,'all' FROM generate_series(1,205)g")
         .bind(doc.base.id).execute(&mut *conn).await.unwrap();
@@ -114,6 +118,7 @@ async fn a_large_discussion_job_resumes_after_one_committed_page_without_replayi
             client_id: new_id().to_string(),
         })
         .send()
+        .map(|reply| reply.full_comment())
         .await
         .ok();
     let id: Id = sqlx::query_scalar("SELECT id FROM jobs WHERE kind='document_notices'")
@@ -172,7 +177,9 @@ async fn a_large_discussion_job_resumes_after_one_committed_page_without_replayi
         .token(&desk.ada.token)
         .send()
         .await
-        .ok();
+        .ok()
+        .into_full()
+        .expect("ordinary cancellation keeps the full job");
     let listed = desk
         .world
         .app
@@ -314,6 +321,7 @@ async fn mention_continuations_hold_one_page_and_keep_all_readers_before_nonread
         })
         .send()
         .await
+        .full_permission_page()
         .ok();
     let mut cursor = None;
     let mut seen = Vec::new();

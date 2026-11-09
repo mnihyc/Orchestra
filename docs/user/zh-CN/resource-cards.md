@@ -5,6 +5,7 @@ keywords: 资源卡片, 检查, 选项, 提供方, 模型, 主机, 环境, 负�
 heading_id.检查选项: inspect-a-choice
 heading_id.结合来源阅读信息: read-facts-with-their-source
 heading_id.理解缺失信息和阻塞原因: understand-missing-or-blocked-facts
+summary: 查看资源和选项的报告数据、来源及不可用原因。
 ---
 
 # 查看资源卡片和选项

@@ -7,7 +7,8 @@
 
 mod common;
 mod hosting;
-mod native_tools;
+mod shared;
+use shared::native_tools;
 
 use common::{World, eventually, queued, turn_ended};
 use orch_authz::Caller;
@@ -21,6 +22,8 @@ use std::time::Duration;
 async fn a_world_whose_agent_takes_tools() -> World {
     let world = World::new().await;
     native_tools::enable(&world).await;
+    // Delivery fixtures explicitly lend Send to the agents of this topic through the normal rows.
+    shared::share_threads_inside(&world, world.topic, world.topic, true).await;
     native_tools::existing_workspace(&world);
     world
 }
@@ -70,7 +73,7 @@ async fn a_world_with_all_native_tools() -> (World, hosting::ScriptedHost, hosti
         &mut conn,
         host.machine,
         &json!(facts),
-        (0, 0),
+        (None, None),
         1.0,
         world.clock.now(),
     )
@@ -246,13 +249,13 @@ async fn a_session_is_opened_with_the_tools_the_thread_enables_that_are_built() 
     );
     assert!(
         open.instructions
-            .contains("\n\nOrch's tools: read what your topic permits"),
+            .contains("\n\nOrch's tools: read your own conversation and what the team currently shares with you"),
         "the guide names the tools after the preamble: {}",
         open.instructions
     );
     assert!(
         open.instructions
-            .contains("announce tells every thread of your topic")
+            .contains("announce tells the threads you may message in your topic")
     );
     assert!(!open.instructions.contains("send_message"));
 }
@@ -297,18 +300,19 @@ async fn prompts_no_duplicates_a_session_says_the_frames_the_guide_and_where_it_
 }
 
 #[tokio::test]
-async fn every_tool_that_is_built_is_offered_while_the_thread_enables_all_of_them() {
+async fn the_default_offers_built_shared_tools_and_docs_but_no_personal_read_delegation() {
     let (world, _host, _unit) = a_world_with_all_native_tools().await;
     let thread = world.thread("Repro").await;
     let open = open_session(&world, thread).await;
     let built: Vec<&str> = orch_engine::tools::definitions::BUILT
         .iter()
+        .filter(|tool| !tool.is_owner_read())
         .map(|tool| tool.name())
         .collect();
     assert_eq!(
         serde_json::to_value(&open.orch_tools).unwrap(),
         json!(built),
-        "as the setting ships, a thread enables them all"
+        "the owner delegation is off as shipped; public help is always offered"
     );
     assert!(
         open.orch_tools.contains(&OrchTool::ManageShared),
@@ -326,14 +330,16 @@ async fn no_tools_are_offered_to_a_harness_that_takes_no_mcp_server() {
 }
 
 #[tokio::test]
-async fn no_tools_are_offered_where_the_setting_enables_none_or_the_environment_switches_them_off()
-{
+async fn an_empty_shared_tool_choice_keeps_docs_and_the_environment_switch_still_stops_mcp() {
     let world = a_world_whose_agent_takes_tools().await;
     world
         .set(world.topic, "orch_tools.enabled", json!([]))
         .await;
     let thread = world.thread("Repro").await;
-    assert!(open_session(&world, thread).await.orch_tools.is_empty());
+    assert_eq!(
+        open_session(&world, thread).await.orch_tools,
+        vec![OrchTool::OrchDocs]
+    );
 
     let other = a_world_whose_agent_takes_tools().await;
     other
@@ -1066,34 +1072,30 @@ async fn an_agent_interrupts_a_running_turn_where_the_topic_lets_it_and_the_turn
 }
 
 #[tokio::test]
-async fn an_audience_of_the_project_is_refused_while_the_topic_keeps_agents_to_it() {
+async fn a_project_audience_selects_candidates_without_a_separate_permission_setting() {
     let world = a_world_whose_agent_takes_tools().await;
     let sender = world.thread("Build").await;
+    let other_topic = world.topic("Elsewhere").await;
+    let other = shared::thread_in_topic(&world, other_topic, "Recipient").await;
+    let before: i64 = world
+        .scalar("SELECT count(*) FROM items WHERE thread_id=$1", other)
+        .await;
     let result = call(
         &world,
         sender,
         OrchTool::Announce,
-        json!({ "title": "To all", "audience": "project" }),
+        json!({"title":"To authorized recipients","audience":"project"}),
     )
     .await;
-    let (code, message) = refused(&result);
-    assert_eq!(code, "invalid");
-    assert!(message.contains("broadcast.agent_scope"), "{message}");
-
-    world
-        .set(world.root, "broadcast.agent_scope", json!("project"))
+    assert!(result.error.is_none(), "{result:?}");
+    assert_eq!(result.result.expect("a result")["audience"], "project");
+    let after: i64 = world
+        .scalar("SELECT count(*) FROM items WHERE thread_id=$1", other)
         .await;
-    let other_topic = world.topic("Elsewhere").await;
-    let _ = other_topic;
-    let allowed = call(
-        &world,
-        sender,
-        OrchTool::Announce,
-        json!({ "title": "To all", "audience": "project" }),
-    )
-    .await;
-    assert!(allowed.error.is_none(), "{allowed:?}");
-    assert_eq!(allowed.result.expect("a result")["audience"], "project");
+    assert_eq!(
+        after, before,
+        "the broader selection adds no authority over the other topic"
+    );
 }
 
 #[tokio::test]
@@ -1450,14 +1452,11 @@ async fn announcement_schema_follows_the_place_and_refreshes_only_before_the_nex
     let schema = &first.orch_tool_schemas["announce"];
     assert_eq!(
         schema["properties"]["audience"]["enum"],
-        json!(["followers", "topic"])
+        json!(["followers", "topic", "project", "org"])
     );
     assert!(schema["properties"].get("delivery").is_none());
     assert!(schema["properties"].get("wake_idle").is_none());
     let before = world.seen.of_kind(CommandKind::SessionOpen).len();
-    world
-        .set(world.project, "broadcast.agent_scope", json!("project"))
-        .await;
     world
         .set(
             world.topic,
@@ -1502,7 +1501,7 @@ async fn announcement_schema_follows_the_place_and_refreshes_only_before_the_nex
         .unwrap();
     assert_eq!(
         last.orch_tool_schemas["announce"]["properties"]["audience"]["enum"],
-        json!(["followers", "topic", "project"])
+        json!(["followers", "topic", "project", "org"])
     );
     assert_eq!(
         last.orch_tool_schemas["announce"]["properties"]["delivery"]["enum"],

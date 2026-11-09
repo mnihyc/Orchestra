@@ -85,6 +85,7 @@ fn gone(row: &hierarchy::TreeRow, kind: NodeKind) -> TreeNode {
         color: None,
         custom_color: None,
         docs: 0,
+        docs_seq: 0,
         archived: false,
         restricted: false,
         deleted: true,
@@ -235,6 +236,11 @@ pub(crate) async fn read(
                 custom_color: row.custom_color.clone(),
                 docs: if readable_docs.contains(&row.id) {
                     row.docs
+                } else {
+                    0
+                },
+                docs_seq: if readable_docs.contains(&row.id) {
+                    row.docs_seq
                 } else {
                     0
                 },

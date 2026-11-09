@@ -605,7 +605,7 @@ export class ExportWorld implements Part {
         if (view.kind === 'thread') threads.push(view);
       }
     }
-    return { status: 200, body: { announcements: [], complete: true, jobs: [], seq: 1, since: null, threads, topic } };
+    return { status: 200, body: { announcements: [], input_schedules: [], complete: true, jobs: [], seq: 1, since: null, threads, topic } };
   }
 
   // ---------------------------------------------------------------- the part

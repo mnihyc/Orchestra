@@ -1,0 +1,72 @@
+[
+  {
+    "id": 501,
+    "method": "item/commandExecution/requestApproval",
+    "params": {
+      "kind": "humanCommand",
+      "threadId": "thr_1",
+      "turnId": "turn_1",
+      "itemId": "checkpoint-parent",
+      "startedAtMs": 1501,
+      "approvalId": "fresh-501",
+      "environmentId": null,
+      "reason": "A managed prompt-user rule requires a fresh human decision",
+      "command": "deploy --dry-run",
+      "cwd": "/workspace",
+      "commandActions": [],
+      "proposedExecpolicyAmendment": null,
+      "proposedNetworkPolicyAmendments": null
+    }
+  },
+  {
+    "id": 502,
+    "method": "item/commandExecution/requestApproval",
+    "params": {
+      "kind": "humanCommand",
+      "threadId": "thr_1",
+      "turnId": "turn_1",
+      "itemId": "checkpoint-parent",
+      "startedAtMs": 1502,
+      "approvalId": "fresh-502",
+      "environmentId": null,
+      "reason": "A managed prompt-user rule requires a fresh human decision",
+      "command": "deploy --dry-run",
+      "cwd": "/workspace",
+      "commandActions": [],
+      "proposedExecpolicyAmendment": null,
+      "proposedNetworkPolicyAmendments": null
+    }
+  },
+  {
+    "id": 503,
+    "method": "item/commandExecution/requestApproval",
+    "params": {
+      "kind": "command",
+      "threadId": "thr_1",
+      "turnId": "turn_1",
+      "itemId": "network-parent",
+      "startedAtMs": 1503,
+      "approvalId": "network-503",
+      "environmentId": null,
+      "reason": "The managed network policy needs a decision",
+      "networkApprovalContext": {
+        "host": "api.example.invalid",
+        "protocol": "https"
+      },
+      "command": null,
+      "cwd": null,
+      "commandActions": null,
+      "proposedExecpolicyAmendment": null,
+      "proposedNetworkPolicyAmendments": [
+        {
+          "host": "api.example.invalid",
+          "action": "allow"
+        },
+        {
+          "host": "api.example.invalid",
+          "action": "deny"
+        }
+      ]
+    }
+  }
+]

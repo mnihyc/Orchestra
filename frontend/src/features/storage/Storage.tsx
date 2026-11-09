@@ -32,6 +32,7 @@ import { StatusDot } from '@/ui/StatusDot';
 import { Table, type Column } from '@/ui/Table';
 import { Tooltip } from '@/ui/Tooltip';
 import { UserChip } from '@/ui/UserChip';
+import { StorageOpening } from './Artifacts';
 import { STORAGE_DIMENSIONS, STORAGE_KINDS, STORAGE_WHYS, storageRequest, type StoragePatch, type StorageSearch } from './search';
 
 /** Radix reserves an empty value for no selection; All is a real local choice. */
@@ -130,6 +131,7 @@ export function Storage({ search, onSearch, onCleanup, onScopeUnavailable, onRep
   const columns: Column<KeptRecord>[] = [
     ...(onCleanup === undefined ? [] : [{id:'selected',header:<Checkbox label={<span className="sr-only">{t('storage.selectAll')}</span>} checked={rows.length > 0 && rows.every((row) => selected.has(row.id))} onCheckedChange={(value) => setSelected(value ? new Set(rows.map((row) => row.id)) : new Set())} />,className:'w-9',cell:(row:KeptRecord) => <Checkbox label={<span className="sr-only">{t('storage.select', {name:row.name || t(`storage.kinds.${row.kind}`)})}</span>} checked={selected.has(row.id)} onCheckedChange={(value) => setSelected((before) => {const next=new Set(before);if(value)next.add(row.id);else next.delete(row.id);return next;})} />}]),
     {id:'name',header:t('storage.name'),grow:true,cell:(row,shown) => <div className="flex min-w-0 flex-col gap-1"><RecordName row={row} /><span className="text-sm text-text-muted">{t(`storage.kinds.${row.kind}`)}</span>{!shown.has(COLUMN.why) && <Reason row={row} />}{!shown.has(COLUMN.bytes) && <span className="text-sm text-text-muted">{row.bytes === null ? '—' : formatBytes(row.bytes,locale)}</span>}{!shown.has(COLUMN.owner) && row.owner !== null && <UserChip user={row.owner} />}{!shown.has(COLUMN.where) && <Where row={row} />}{!shown.has(COLUMN.dependents) && <Dependents row={row} />}{!shown.has(COLUMN.observed) && <RelativeTime at={row.observed_at} className="text-sm text-text-muted" />}</div>},
+    {id:'open',header:t('adminArtifacts.open'),hideHeader:true,align:'end',cell:(row) => <StorageOpening row={row} />},
     {id:'why',header:t('storage.why'),from:'sm',cell:(row) => <Reason row={row} />},
     {id:'bytes',header:t('storage.size'),from:'sm',align:'end',cell:(row) => row.bytes === null ? <Tooltip content={t('storage.notMeasured')}><span>—</span></Tooltip> : <span className="tabular-nums">{formatBytes(row.bytes,locale)}</span>},
     {id:'where',header:t('storage.where'),from:'lg',cell:(row) => <Where row={row} />},
@@ -156,10 +158,10 @@ export function Storage({ search, onSearch, onCleanup, onScopeUnavailable, onRep
   };
   return <ReportFrame title={t('storage.title')} icon={<HardDrive aria-hidden />} filters={filters} actions={<ArticleGuideLink article="storage-cleanup" heading="storage-report" title={t('storage.guide')} />}>
     {scopeBlocked ? <StateLine title={t('storage.adminOnly')} action={<AdminModeEnableAction />} /> : null}
-    {scopeBlocked ? null : query.isPending ? <SkeletonRows rows={6} /> : query.isError && data === undefined ? <ErrorState error={query.error} onRetry={() => void query.refetch()} /> : data === undefined ? null : <>
+    {scopeBlocked ? null : query.isPending ? <SkeletonRows read={query} rows={6} /> : query.isError && data === undefined ? <ErrorState error={query.error} onRetry={() => void query.refetch()} /> : data === undefined ? null : <>
       {data.unavailable.map((source,index) => <StateLine key={`${source.host?.id ?? 'server'}:${index}`} title={source.host?.name ?? t('storage.system')} message={t(`storage.sources.${source.reason}`,{defaultValue:source.reason})} />)}
       <ul aria-label={t('storage.figures')} className="grid grid-cols-1 gap-3 sm:grid-cols-3 xl:grid-cols-5"><ReportFigure label={t('storage.totalKept')} value={sizeOf(data.totals,locale,data.unavailable.length > 0)} />{STORAGE_WHYS.map((why) => <ReportFigure key={why} label={t(`storage.whys.${why}`)} value={sizeOf(data.breakdowns.find((table)=>table.by==='why')?.rows.find((row)=>row.key===why)?.totals ?? {items:0,bytes:0,unknown:0},locale,data.unavailable.length > 0)} />)}</ul>
-      <ReportBreakdowns label={t('storage.breakdowns')} value={by} onValueChange={(by) => onSearch({by})} tabs={STORAGE_DIMENSIONS.map((dimension) => ({value:dimension,label:t(`storage.dimensions.${dimension}`),panel:table(dimension)}))} />
+      <ReportBreakdowns label={t('storage.breakdowns')} value={by} onValueChange={(by) => onSearch({by})} tabs={STORAGE_DIMENSIONS.map((dimension) => ({value:dimension,label:t(`storage.grouping.${dimension}`),panel:table(dimension)}))} />
       <ReportRecords id="storage-records" title={t('storage.records')} about={<span className="text-sm text-text-muted">{t('storage.recordSummary',{records:formatNumber(data.totals.items,locale),unmeasured:formatNumber(data.totals.unknown,locale)})}</span>} actions={onCleanup === undefined ? undefined : <Button size="sm" disabled={selected.size === 0} onClick={() => onCleanup([...selected])}>{t('storage.clean')}</Button>}>
         {rows.length === 0 ? <EmptyState compact icon={<HardDrive aria-hidden />} title={t('storage.empty')} /> : <Table boundedIdentity label={t('storage.records')} columns={columns} rows={rows} rowKey={(row) => row.id} />}
         <Pagination hasMore={query.hasNextPage} loading={query.isFetchingNextPage} error={query.isFetchNextPageError ? query.error : undefined} onMore={() => void query.fetchNextPage()} />

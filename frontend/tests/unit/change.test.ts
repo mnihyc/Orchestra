@@ -44,6 +44,16 @@ describe('the request that a choice makes', () => {
     expect(changesSomething({ ...none, directory: ' sub ' })).toBe(true);
   });
 
+  it('distinguishes an untouched directory from an explicitly selected workspace root', () => {
+    const untouched = initialChoices('replace');
+    expect(requestOf(untouched)).not.toHaveProperty('directory');
+    expect(changesSomething(untouched)).toBe(false);
+    expect(requestOf({ ...untouched, directory: '' })).toEqual({ result: 'replace', directory: '' });
+    expect(changesSomething({ ...untouched, directory: '' })).toBe(true);
+    expect(requestOf({ ...untouched, directory: ' apps/project ' }).directory).toBe('apps/project');
+    expect(requestOf({ ...untouched, directory: null })).not.toHaveProperty('directory');
+  });
+
   it('takes the history of a fork up to the turn of the message it was asked from, and nothing of it from before the first', () => {
     expect(requestOf(initialChoices('new', 3))).toEqual({ result: 'new', history: { mode: 'range', to_turn: 3 } });
     expect(requestOf(initialChoices('new', 0))).toEqual({ result: 'new', history: { mode: 'none' } });

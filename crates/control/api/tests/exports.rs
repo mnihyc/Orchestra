@@ -10,6 +10,12 @@ mod places;
 mod rig;
 mod support;
 
+#[path = "exports/scopes.rs"]
+mod scoped_metadata;
+
+#[path = "exports/admin_custody.rs"]
+mod administrative_custody;
+
 use archive_world::{
     Office, entry, entry_with, everything, has, kept, leads_to, links_of, text_of,
 };
@@ -132,8 +138,9 @@ async fn an_archive_is_planned_asked_for_listed_fetched_and_removed_by_its_perso
     assert_eq!(o.remove(cai, id).await.status, 404);
     let stranger = &o.s.bea;
     assert_eq!(o.fetch(stranger, id).await.status, 404);
-    // Not even a system admin: it is nobody's but its person's.
+    // Administration without its explicit browser mode does not open private custody.
     let admin = places::admin(&o.s.rig.world, "root").await;
+    places::admin_mode(&o.s.rig.world, &admin, false).await;
     assert_eq!(o.fetch(&admin, id).await.status, 404);
     assert_eq!(o.read(&admin, id).await.problem().status, 404);
     assert_eq!(o.remove(&admin, id).await.status, 404);
@@ -582,6 +589,8 @@ async fn upload(o: &Office, document: Id, name: &str, bytes: &[u8]) -> DocumentF
         .send()
         .await
         .ok()
+        .into_full()
+        .expect("this native creation control requires its full response")
 }
 
 /// A top-level block that shows a file of the document.

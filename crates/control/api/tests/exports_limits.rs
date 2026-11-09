@@ -68,7 +68,9 @@ async fn place_with(config: ServerConfig) -> Place {
         })
         .send()
         .await
-        .ok();
+        .ok()
+        .into_full()
+        .unwrap();
     Place {
         world,
         ada,
@@ -79,13 +81,24 @@ async fn place_with(config: ServerConfig) -> Place {
 
 impl Place {
     async fn ask(&self, by: &Who) -> Reply<Job> {
-        self.world
+        let reply = self
+            .world
             .app
             .call(NodeExportCreate, &[&self.org])
             .token(&by.token)
             .body(&everything())
             .send()
-            .await
+            .await;
+        Reply {
+            status: reply.status,
+            headers: reply.headers,
+            raw: reply.raw,
+            body: reply.body.map(|answer| {
+                answer
+                    .into_full()
+                    .expect("an ordinary export returns its job")
+            }),
+        }
     }
 
     async fn list(&self, by: &Who) -> Page<orch_api_contract::exports::Export> {

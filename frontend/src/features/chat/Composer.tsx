@@ -7,6 +7,8 @@
  * is typed is local first and kept as a draft. Files use resumable uploads and references retain
  * their origin. Where the reader may not write, a sentence stands in its place.
  */
+import { LinkSharing, useLinkSharing } from '@/features/sharing/LinkSharing';
+import { chatLinkPlace } from '@/features/sharing/linkPlan';
 import { useQuery } from '@tanstack/react-query';
 import { CornerUpLeft, Paperclip, SendHorizontal, Smile, X } from 'lucide-react';
 import { type KeyboardEvent, type RefObject, useEffect, useId, useLayoutEffect, useRef, useState } from 'react';
@@ -65,7 +67,7 @@ export interface ComposerProps {
 export function Composer({ chat, draft, replyingTo, inputRef, onEditLast, placeholder, onAsk }: ComposerProps) {
   const { t } = useTranslation();
   const shown = useViewShown();
-  const { chat: current } = useChatContext();
+  const { chat: current, me } = useChatContext();
   const knownPlaces = useKnownPlaces();
   const entry = useChatEntry(chat.id);
   const listId = useId();
@@ -94,6 +96,7 @@ export function Composer({ chat, draft, replyingTo, inputRef, onEditLast, placeh
   const agentMention = parts.some((part) => part.type === 'mention' && part.target.kind === 'agent');
   const audience = useQuery({ ...mentionAudienceQuery(chat.id, parts, draft.replyTo), enabled: shown && hasMention });
   const confirming = hasMention && (!audience.isSuccess || audience.isFetching);
+  const sharing = useLinkSharing({ origin: { kind: 'chat', chat_id: chat.id }, placeId: chatLinkPlace(chat), sender: me, extraAgents: audience.data?.agent_asks?.map((ask) => ask.thread) }, parts, shown && chat.can.send);
   const sendLabel = hasMention && (audience.data?.count ?? 0) > BROAD_AUDIENCE ? t('people.sendTell', { count: audience.data?.count }) : t('chat.send');
   const replyAuthor = replyingTo?.author;
   const agentReply = replyAuthor !== null && replyAuthor !== undefined && 'agent' in replyAuthor ? replyAuthor : null;
@@ -122,12 +125,13 @@ export function Composer({ chat, draft, replyingTo, inputRef, onEditLast, placeh
 
   const submit = () => {
     const parts = partsOfDraft(draft);
-    if (parts.length === 0 || uploads.blocked || pastes.blocked || fileDrops.blocked || confirming || (agentMention && typeof audience.data?.agent_review !== 'string')) return;
-    if (agentMention && typeof audience.data?.agent_review === 'string') send(chat.id, parts, draft.replyTo, draft.mentions, audience.data.agent_review);
-    else if ((draft.mentions?.length ?? 0) > 0) send(chat.id, parts, draft.replyTo, draft.mentions);
-    else send(chat.id, parts, draft.replyTo);
-    draft.clear();
-    setCaret(0);
+    if (parts.length === 0 || uploads.blocked || pastes.blocked || fileDrops.blocked || confirming || sharing.blocked || (agentMention && typeof audience.data?.agent_review !== 'string')) return;
+    void sharing.send(() => {
+      if (agentMention && typeof audience.data?.agent_review === 'string') send(chat.id, parts, draft.replyTo, draft.mentions, audience.data.agent_review);
+      else if ((draft.mentions?.length ?? 0) > 0) send(chat.id, parts, draft.replyTo, draft.mentions);
+      else send(chat.id, parts, draft.replyTo);
+      draft.clear(); setCaret(0);
+    });
   };
 
   const choose = (option: Candidate) => {
@@ -218,7 +222,7 @@ export function Composer({ chat, draft, replyingTo, inputRef, onEditLast, placeh
           {t('chat.composer.hint')}
         </span>
         {open && <MentionPicker id={listId} options={options} active={chosen} onChoose={choose} pending={found.isPending} error={found.error} />}
-        <DropTarget label={t('uploads.target.chat')} countLabel={(values) => t('uploads.target.chatCount', values)} onDrop={(data) => {
+        <DropTarget disabled={sharing.busy} label={t('uploads.target.chat')} countLabel={(values) => t('uploads.target.chatCount', values)} onDrop={(data) => {
           const reference = droppedReference(data);
           if (reference !== null) {
             const next = insertAtSelection(draft.text, reference, inputRef.current);
@@ -230,6 +234,7 @@ export function Composer({ chat, draft, replyingTo, inputRef, onEditLast, placeh
           <textarea
             ref={inputRef}
             rows={1}
+            disabled={sharing.busy}
             value={draft.text}
             aria-label={placeholder}
             placeholder={t('chat.composer.placeholder')}
@@ -278,10 +283,11 @@ export function Composer({ chat, draft, replyingTo, inputRef, onEditLast, placeh
               }}
             />
           </Popover>
-          <IconButton size="sm" variant="secondary" label={sendLabel} title={sendLabel} icon={<SendHorizontal aria-hidden />} disabled={empty || uploads.blocked || pastes.blocked || fileDrops.blocked || confirming || (agentMention && typeof audience.data?.agent_review !== 'string')} onClick={submit} />
+          <IconButton size="sm" variant="secondary" label={sendLabel} title={sendLabel} icon={<SendHorizontal aria-hidden />} disabled={empty || uploads.blocked || pastes.blocked || fileDrops.blocked || confirming || sharing.blocked || (agentMention && typeof audience.data?.agent_review !== 'string')} onClick={submit} />
         </div>
         </DropTarget>
       </div>
+      <LinkSharing sharing={sharing} />
       <div role="status" className={cx('text-xs text-text-subtle', hasStatus ? 'flex flex-wrap items-center justify-between gap-x-2' : 'sr-only')}>
         {uploadStatus !== '' && <span>{uploadStatus}</span>}
         {draftStatus !== '' && <span className="inline-flex items-center gap-2">{draftStatus}{draft.saving === 'failed' && draft.retry !== undefined && <Button size="sm" variant="ghost" onClick={draft.retry}>{t('common.tryAgain')}</Button>}</span>}

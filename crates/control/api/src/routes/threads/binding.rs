@@ -8,7 +8,6 @@
 //! is when one is not allowed. A thread that has history is not bound again here: it is switched,
 //! and the request says so.
 
-use super::one;
 use crate::middleware::authorization::{self, refusals};
 use crate::middleware::requests::{ApiError, ApiResult};
 use crate::middleware::transaction_guard;
@@ -33,15 +32,15 @@ use orch_agent_contract::descriptor::{
 use orch_api_contract::access::{AccessSummary, Holder};
 use orch_api_contract::binding::{
     Arrangement, ArrangementType, BindingAccess, BindingAgent, BindingCanCreate, BindingDefaults,
-    BindingEnvironment, BindingMachine, BindingOptions, BindingProvider, CredentialHolder,
-    CredentialPath, EnvironmentChoice, EnvironmentDefault, EnvironmentUse, HarnessPlace, Isolation,
-    IsolationOrchTools, IsolationTools, Metering, ModelEnforcement, NotAllowedBy, OrchToolsReason,
-    ThreadBindingOptionsGet, ThreadBindingSet, ThreadBindingSetBody, ThreadEnvironmentSet,
-    ThreadEnvironmentSetBody,
+    BindingEnvironment, BindingMachine, BindingOptions, BindingProgramReport, BindingProvider,
+    CredentialHolder, CredentialPath, EnvironmentChoice, EnvironmentDefault, EnvironmentUse,
+    HarnessPlace, Isolation, IsolationOrchTools, IsolationTools, Metering, ModelEnforcement,
+    NotAllowedBy, OrchToolsReason, ThreadBindingOptionsGet, ThreadBindingSet, ThreadBindingSetBody,
+    ThreadEnvironmentSet, ThreadEnvironmentSetBody,
 };
 use orch_api_contract::common::ErrorCode;
 use orch_api_contract::nodes::{NodeOrSystem, NodeRef};
-use orch_api_contract::resources::{AgentRef, HostRef, ProviderRef};
+use orch_api_contract::resources::{AgentRef, HarnessStatus, HostRef, ProviderRef};
 use orch_api_contract::settings::{ModelOption, ModelOptionReason, ModelParameters};
 use orch_api_contract::threads::Thread;
 use orch_authz::nodes::Page;
@@ -52,6 +51,7 @@ use orch_db::queries::environments::binding as environment_choice;
 use orch_db::queries::environments::routes as environment_queries;
 use orch_db::queries::environments::thread_engine as environments;
 use orch_db::queries::resources::models_of_provider;
+use orch_db::queries::resources::routes::{HarnessProcessRow, harness_processes};
 use orch_db::queries::resources::thread_engine::{self as engine_rows, AgentRow, ProviderRow};
 use orch_db::queries::threads::{self as thread_rows, binding as history};
 use orch_engine::binding::{
@@ -69,6 +69,12 @@ use serde::de::DeserializeOwned;
 use std::collections::HashMap;
 use std::time::Instant;
 
+mod ask_models;
+mod choice_window;
+pub(crate) mod creation;
+mod grouping;
+mod placement;
+mod rebinding;
 mod start;
 
 /// The reason a provider or a profile is not offered because the caller's pages give them no use
@@ -117,8 +123,17 @@ pub fn mount(registry: &mut Registry) {
     start::mount(registry);
     registry
         .on(ThreadBindingOptionsGet, options)
-        .on(ThreadBindingSet, bind)
-        .on(ThreadEnvironmentSet, place);
+        .on_with_initial_operation(
+            ThreadBindingSet,
+            crate::key_operations::native::effects::initial::<rebinding::Bind>,
+            rebinding::prepare,
+            rebinding::run,
+        )
+        .on_with_operation(
+            ThreadEnvironmentSet,
+            crate::key_operations::native::effects::prepare::<placement::PlaceThread>,
+            placement::run,
+        );
 }
 
 /// A word of one contract as the same word of another.
@@ -207,90 +222,6 @@ async fn rebind_failed(conn: &mut Conn, thread: Id, error: RebindError) -> ApiEr
 }
 
 // ---------------------------------------------------------------- binding a thread
-
-/// Binds a thread that has no history to an agent profile and a provider, with a model and an
-/// effort if the caller names them. The caller needs `thread.manage`, and their own use of the
-/// profile and of the provider with the model and effort; a thread that has history is switched.
-async fn bind(ctx: Ctx, (): (), body: ThreadBindingSetBody) -> ApiResult<Thread> {
-    let thread = ctx.id("id")?;
-    let new = Rebind {
-        agent: body.agent_id,
-        provider: body.provider_id,
-        arrangement: body
-            .arrangement
-            .and_then(|word| same::<_, AgentArrangement>(&word)),
-        model: body.model,
-        effort: body.effort,
-    };
-    let mut discovered = false;
-    let bound = loop {
-        let (tx, guard) = transaction_guard::begin(&ctx).await?;
-        let bound = ctx
-            .app
-            .engine
-            .bind_thread_guarded(tx, guard.into_principal(), thread, new.clone())
-            .await;
-        if matches!(&bound, Err(RebindError::AgentNotReported)) && !discovered {
-            discovered = true;
-            let environment = {
-                let mut conn = ctx.app.db.acquire().await?;
-                thread_rows::thread(&mut conn, thread)
-                    .await?
-                    .and_then(|row| row.environment_id)
-            };
-            if matches!(
-                ctx.app
-                    .engine
-                    .learn_descriptor(new.agent, new.provider, environment)
-                    .await
-                    .map_err(ApiError::engine)?,
-                Learning::Known
-            ) {
-                continue;
-            }
-        }
-        break bound;
-    };
-    let mut conn = ctx.app.db.acquire().await?;
-    if let Err(error) = bound {
-        return Err(rebind_failed(&mut conn, thread, error).await);
-    }
-    one(&ctx, &mut conn, thread).await
-}
-
-/// Puts a thread that has no history into an environment, and into a directory of it. A new
-/// environment is made by the requests that make environments, and named here with `use`.
-async fn place(ctx: Ctx, (): (), body: ThreadEnvironmentSetBody) -> ApiResult<Thread> {
-    let thread = ctx.id("id")?;
-    let environment = match body.choice {
-        EnvironmentChoice::Use(environment) => environment,
-        EnvironmentChoice::New(_) => {
-            return Err(invalid(
-                "new",
-                "an environment is made by its own request, and named here with `use`",
-            ));
-        }
-    };
-    let (tx, guard) = transaction_guard::begin(&ctx).await?;
-    let placed = ctx
-        .app
-        .engine
-        .place_thread_guarded(
-            tx,
-            guard.into_principal(),
-            thread,
-            Replace {
-                environment,
-                directory: body.directory,
-            },
-        )
-        .await;
-    let mut conn = ctx.app.db.acquire().await?;
-    if let Err(error) = placed {
-        return Err(rebind_failed(&mut conn, thread, error).await);
-    }
-    one(&ctx, &mut conn, thread).await
-}
 
 // ---------------------------------------------------------------- what may be chosen
 
@@ -485,7 +416,7 @@ fn model_options(
     rows: Vec<orch_db::queries::resources::ProviderModelRow>,
     settings: &Resolved,
     entry: Option<&orch_access_contract::permissions::ProviderUse>,
-) -> Vec<ModelOption> {
+) -> ApiResult<Vec<ModelOption>> {
     rows.into_iter()
         .map(|row| {
             let reason = if !row.enabled {
@@ -503,7 +434,15 @@ fn model_options(
             } else {
                 None
             };
-            ModelOption {
+            let parameters: ModelParameters =
+                orch_provider_contract::models::composed_model_parameters(
+                    &row.parameters,
+                    &row.groups,
+                    &row.option_layers,
+                    None,
+                )
+                .map_err(ApiError::internal)?;
+            Ok(ModelOption {
                 token_estimate: orch_engine::token_density::of(&row.model_name),
                 groups: row.groups.clone(),
                 display_name: if row.display_name.is_empty() {
@@ -511,14 +450,26 @@ fn model_options(
                 } else {
                     row.display_name.clone()
                 },
-                parameters: serde_json::from_value::<ModelParameters>(row.parameters)
-                    .unwrap_or_default(),
+                option_constraints: orch_model_contract::parameters::constraint_catalogue(
+                    &parameters,
+                ),
+                parameters,
                 model_name: row.model_name,
                 allowed: reason.is_none(),
                 reason,
-            }
+            })
         })
         .collect()
+}
+
+/// The same native model/Use/policy choices for a no-environment Ask. This
+/// deliberately has no topic/project creation gate and borrows no such authority.
+pub(crate) async fn ask_models(
+    conn: &mut Conn,
+    principal: &Principal,
+    root: Id,
+) -> ApiResult<Vec<orch_api_contract::ask::AskModelOption>> {
+    ask_models::read(conn, principal, root).await
 }
 
 /// Whether the profile can reach what the provider serves; an unreported keeper still remains visible.
@@ -543,34 +494,44 @@ struct Ground<'a> {
 
 /// The providers the caller can see, each with whether they may use it, its models, and the
 /// profiles that could run on it with every arrangement.
-async fn providers_of(
+struct ProviderCandidates {
+    seen: resources::Listing<resources::Seen>,
+    agents_seen: resources::Listing<resources::Seen>,
+    may_use: resources::Listing<usable::Usables>,
+    may_use_agent: resources::Listing<usable::Usables>,
+    policies: Policies,
+}
+
+struct ChoiceProjection {
+    names: crate::routes::access::page::NameBounds,
+    hosts: std::collections::BTreeSet<Id>,
+    machines: std::collections::BTreeSet<Id>,
+}
+
+async fn provider_candidates(
     conn: &mut Conn,
     principal: &Principal,
-    app: &crate::state::AppState,
-    ground: &Ground<'_>,
-) -> ApiResult<Vec<BindingProvider>> {
-    let page = Page {
-        after: None,
-        limit: LIST_LIMIT,
-    };
-    let seen = resources::visible(
+    thread: Id,
+    bounds: Option<&dyn choice_window::Bounds>,
+) -> ApiResult<ProviderCandidates> {
+    let seen = choice_window::select(
         conn,
-        principal,
-        ResourceKind::Provider,
-        page,
-        Policy::default(),
+        &choice_window::Visible {
+            principal,
+            kind: ResourceKind::Provider,
+        },
+        bounds,
     )
-    .await
-    .map_err(ApiError::internal)?;
-    let agents_seen = resources::visible(
+    .await?;
+    let agents_seen = choice_window::select(
         conn,
-        principal,
-        ResourceKind::Agent,
-        page,
-        Policy::default(),
+        &choice_window::Visible {
+            principal,
+            kind: ResourceKind::Agent,
+        },
+        bounds,
     )
-    .await
-    .map_err(ApiError::internal)?;
+    .await?;
     let homes: Vec<Id> = seen
         .items
         .iter()
@@ -578,27 +539,206 @@ async fn providers_of(
         .filter_map(|each| each.resource.home)
         .collect();
     let policies = policies_for(conn, &homes).await?;
-    let may_use = usable::usable_list(
+    let may_use = choice_window::select(
         conn,
-        principal,
-        ResourceKind::Provider,
-        Some(ground.thread),
-        &policies,
-        page,
+        &choice_window::Usable {
+            principal,
+            kind: ResourceKind::Provider,
+            thread,
+            policies: &policies,
+            manage_environments: false,
+        },
+        bounds,
     )
-    .await
-    .map_err(ApiError::internal)?;
-    let may_use_agent = usable::usable_list(
+    .await?;
+    let may_use_agent = choice_window::select(
         conn,
-        principal,
-        ResourceKind::Agent,
-        Some(ground.thread),
-        &policies,
-        page,
+        &choice_window::Usable {
+            principal,
+            kind: ResourceKind::Agent,
+            thread,
+            policies: &policies,
+            manage_environments: false,
+        },
+        bounds,
     )
-    .await
-    .map_err(ApiError::internal)?;
+    .await?;
 
+    Ok(ProviderCandidates {
+        seen,
+        agents_seen,
+        may_use,
+        may_use_agent,
+        policies,
+    })
+}
+
+struct ProviderInputs {
+    agents: Vec<(AgentRow, Option<AgentDescriptor>)>,
+    providers: HashMap<Id, ProviderRow>,
+    programs: Vec<HarnessProcessRow>,
+}
+
+fn program_report(
+    inputs: &ProviderInputs,
+    provider: &ProviderRow,
+    agent: Id,
+) -> Option<BindingProgramReport> {
+    let rank = |status: &str| match status {
+        "online" => 0,
+        "starting" => 1,
+        "error" => 2,
+        "offline" => 3,
+        _ => 4,
+    };
+    let process = inputs
+        .programs
+        .iter()
+        .filter(|process| {
+            process.provider_id == provider.id
+                && process.agent_id == agent
+                && provider
+                    .machine_id
+                    .is_none_or(|machine| process.machine_id == machine)
+        })
+        .min_by(|one, other| {
+            rank(&one.status)
+                .cmp(&rank(&other.status))
+                .then_with(|| other.last_active_at.cmp(&one.last_active_at))
+                .then_with(|| one.machine_id.cmp(&other.machine_id))
+        })?;
+    let status = match process.status.as_str() {
+        "online" => HarnessStatus::Online,
+        "starting" => HarnessStatus::Starting,
+        "error" => HarnessStatus::Error,
+        "offline" => HarnessStatus::Offline,
+        _ => return None,
+    };
+    Some(BindingProgramReport {
+        status,
+        detail: process.status_detail.clone(),
+    })
+}
+
+fn agent_offered(
+    agent: &AgentRow,
+    descriptor: Option<&AgentDescriptor>,
+    provider: &ProviderRow,
+) -> bool {
+    match descriptor {
+        Some(descriptor) => runs_on(descriptor, provider, agent),
+        None => {
+            let served = binding::serves(provider);
+            let native_only = served
+                .iter()
+                .any(|access| matches!(access, Serves::Native { .. }))
+                && !served
+                    .iter()
+                    .any(|access| matches!(access, Serves::Forwarded { .. }));
+            !native_only || provider.agent_id == Some(agent.id)
+        }
+    }
+}
+
+async fn provider_inputs(
+    conn: &mut Conn,
+    candidates: &ProviderCandidates,
+) -> ApiResult<ProviderInputs> {
+    let agent_ids = candidates
+        .agents_seen
+        .items
+        .iter()
+        .map(|row| row.resource.id)
+        .collect::<Vec<_>>();
+    let provider_ids = candidates
+        .seen
+        .items
+        .iter()
+        .map(|row| row.resource.id)
+        .collect::<Vec<_>>();
+    let mut agent_rows: Vec<(AgentRow, Option<AgentDescriptor>)> = Vec::new();
+    for id in &agent_ids {
+        if let Some(row) = engine_rows::agent(conn, *id)
+            .await?
+            .filter(|row| row.deleted_at.is_none())
+        {
+            let descriptor = descriptor_of(&row).map_err(ApiError::internal)?;
+            agent_rows.push((row, descriptor));
+        }
+    }
+    // Reuse the same provider rows throughout this projection and batch only the new program builds.
+    let mut provider_rows = HashMap::new();
+    for id in &provider_ids {
+        if let Some(row) = engine_rows::provider(conn, *id)
+            .await?
+            .filter(|row| row.deleted_at.is_none())
+        {
+            provider_rows.insert(*id, row);
+        }
+    }
+    // The ordinary provider process reader requires Manage. Apply the same gate before
+    // reading any process details, within the already admitted native choice window.
+    let inspectable: Vec<Id> = candidates
+        .seen
+        .items
+        .iter()
+        .filter(|each| {
+            each.held
+                .iter()
+                .any(|held| held.permission == Permission::ProviderManage)
+        })
+        .map(|each| each.resource.id)
+        .collect();
+    let programs = if inspectable.is_empty() {
+        Vec::new()
+    } else {
+        harness_processes(conn, &inspectable).await?
+    };
+    Ok(ProviderInputs {
+        agents: agent_rows,
+        providers: provider_rows,
+        programs,
+    })
+}
+
+async fn providers_of(
+    conn: &mut Conn,
+    principal: &Principal,
+    app: &crate::state::AppState,
+    ground: &Ground<'_>,
+) -> ApiResult<Vec<BindingProvider>> {
+    let candidates = provider_candidates(conn, principal, ground.thread, None).await?;
+    providers_from(conn, principal, app, ground, &candidates, None, None).await
+}
+
+async fn providers_from(
+    conn: &mut Conn,
+    principal: &Principal,
+    app: &crate::state::AppState,
+    ground: &Ground<'_>,
+    candidates: &ProviderCandidates,
+    selected_inputs: Option<&ProviderInputs>,
+    projection: Option<&ChoiceProjection>,
+) -> ApiResult<Vec<BindingProvider>> {
+    let ProviderCandidates {
+        seen,
+        agents_seen,
+        may_use,
+        may_use_agent,
+        policies,
+    } = candidates;
+    let owner_ids = seen
+        .items
+        .iter()
+        .chain(agents_seen.items.iter())
+        .filter_map(|row| row.resource.first_owner)
+        .collect::<Vec<_>>();
+    let owners = refusals::user_refs(conn, &owner_ids).await?;
+    let agent_owners = agents_seen
+        .items
+        .iter()
+        .map(|row| (row.resource.id, row.resource.first_owner))
+        .collect::<HashMap<_, _>>();
     let provider_ids: Vec<Id> = seen.items.iter().map(|each| each.resource.id).collect();
     let agent_ids: Vec<Id> = agents_seen
         .items
@@ -610,21 +750,41 @@ async fn providers_of(
         .into_iter()
         .map(|(_, each)| (each.id, each))
         .collect();
+    let subjects = provider_ids
+        .iter()
+        .map(|&id| ("provider".to_owned(), id))
+        .chain(agent_ids.iter().map(|&id| ("agent".to_owned(), id)))
+        .collect::<Vec<_>>();
+    let grouped = grouping::metadata(app, conn, principal, &subjects, projection).await?;
     let agent_names: HashMap<Id, AgentRef> = agent_refs(app, conn, &agent_ids, &[])
         .await?
         .into_iter()
         .map(|(_, each)| (each.id, each))
         .collect();
-    let mut agent_rows: Vec<(AgentRow, Option<AgentDescriptor>)> = Vec::new();
-    for id in &agent_ids {
-        if let Some(row) = engine_rows::agent(conn, *id)
-            .await?
-            .filter(|row| row.deleted_at.is_none())
-        {
-            let descriptor = descriptor_of(&row).map_err(ApiError::internal)?;
-            agent_rows.push((row, descriptor));
+    let owned_inputs;
+    let inputs = match selected_inputs {
+        Some(inputs) => inputs,
+        None => {
+            owned_inputs = provider_inputs(conn, candidates).await?;
+            &owned_inputs
         }
-    }
+    };
+    let agent_rows = &inputs.agents;
+    let provider_rows = &inputs.providers;
+    let program_facts = if let Some(environment) = ground.environment {
+        let providers: Vec<_> = provider_rows.values().collect();
+        let agents: Vec<_> = agent_rows
+            .iter()
+            .filter_map(|(agent, descriptor)| {
+                descriptor.as_ref().map(|descriptor| (agent, descriptor))
+            })
+            .collect();
+        binding::prepare_machine_programs(conn, environment, &providers, &agents)
+            .await
+            .map_err(ApiError::internal)?
+    } else {
+        None
+    };
 
     let policy_def = orch_settings_contract::registry::get(keys::PROVIDERS_ALLOWED)
         .ok_or_else(|| ApiError::internal("the provider policy is not registered"))?;
@@ -641,14 +801,19 @@ async fn providers_of(
         .iter()
         .filter_map(|part| part.source.node)
         .collect();
-    let policy_names = node_view::refs(conn, principal, &policy_places, Policy::default()).await?;
+    let policy_names = match projection {
+        Some(projection) => {
+            projection
+                .names
+                .refs(conn, principal, &policy_places)
+                .await?
+        }
+        None => node_view::refs(conn, principal, &policy_places, Policy::default()).await?,
+    };
     let mut listed = Vec::new();
     for each in &seen.items {
         let id = each.resource.id;
-        let Some(row) = engine_rows::provider(conn, id)
-            .await?
-            .filter(|row| row.deleted_at.is_none())
-        else {
+        let Some(row) = provider_rows.get(&id).cloned() else {
             continue;
         };
         let Some(name) = provider_names.get(&id).cloned() else {
@@ -688,9 +853,12 @@ async fn providers_of(
             models_of_provider(conn, id).await?,
             ground.settings,
             granted.as_ref(),
-        );
+        )?;
         let mut agents = Vec::new();
-        for (agent, descriptor) in &agent_rows {
+        for (agent, descriptor) in agent_rows {
+            if !agent_offered(agent, descriptor.as_ref(), &row) {
+                continue;
+            }
             let Some(agent_name) = agent_names.get(&agent.id).cloned() else {
                 continue;
             };
@@ -705,42 +873,57 @@ async fn providers_of(
             } else {
                 None
             };
+            let report = program_report(inputs, &row, agent.id);
             let Some(descriptor) = descriptor else {
-                // Nothing is known of what its harness can be placed in until it reports.
-                let served = binding::serves(&row);
-                let native_only = served
-                    .iter()
-                    .any(|access| matches!(access, Serves::Native { .. }))
-                    && !served
-                        .iter()
-                        .any(|access| matches!(access, Serves::Forwarded { .. }));
-                if native_only && row.agent_id != Some(agent.id) {
-                    continue;
-                }
+                // A stored failure is an answer, not a discovery that is still pending.
+                let failed = report
+                    .as_ref()
+                    .is_some_and(|report| report.status == HarnessStatus::Error);
                 agents.push(BindingAgent {
+                    owner: agent_owners
+                        .get(&agent.id)
+                        .copied()
+                        .flatten()
+                        .and_then(|id| owners.get(&id).cloned()),
+                    grouping: grouped
+                        .get(&("agent".to_owned(), agent.id))
+                        .cloned()
+                        .unwrap_or_default(),
                     agent: agent_name,
                     usable: false,
-                    reason: Some(HARNESS_UNREPORTED.to_owned()),
+                    reason: Some(
+                        agent_reason
+                            .unwrap_or(if failed {
+                                "harness_error"
+                            } else {
+                                HARNESS_UNREPORTED
+                            })
+                            .to_owned(),
+                    ),
+                    program_report: report,
                     arrangements: Vec::new(),
                 });
                 continue;
             };
-            if !runs_on(descriptor, &row, agent) {
-                continue;
-            }
             let arrangements = match (ground.environment, ground.offers) {
                 (Some(environment), Some(offers)) => {
                     let facts = binding::Facts {
                         descriptor,
                         provider: &row,
-                        environment,
+                        environment: Some(environment),
                         offers: offers.offers.clone(),
                         settings: ground.settings,
                         entry: entry_types.clone(),
                         colocated: offers.colocated.clone(),
-                        runtime: binding::runtime_facts(conn, agent, &row, environment)
-                            .await
-                            .map_err(ApiError::internal)?,
+                        runtime: binding::runtime_facts_prepared(
+                            conn,
+                            agent,
+                            &row,
+                            environment,
+                            program_facts.as_ref(),
+                        )
+                        .await
+                        .map_err(ApiError::internal)?,
                     };
                     let orch_tools = ground.orch_tools.of(descriptor);
                     let place = binding::initial_place(conn, &facts)
@@ -774,10 +957,22 @@ async fn providers_of(
                         .unwrap_or_else(|| "binding_incompatible".to_owned())
                 })
             });
+            let mut metadata = grouped
+                .get(&("agent".to_owned(), agent.id))
+                .cloned()
+                .unwrap_or_default();
+            metadata.availability = grouping::arrangements(ground, projection, &arrangements);
             agents.push(BindingAgent {
+                owner: agent_owners
+                    .get(&agent.id)
+                    .copied()
+                    .flatten()
+                    .and_then(|id| owners.get(&id).cloned()),
+                grouping: metadata,
                 agent: agent_name,
                 usable: reason.is_none(),
                 reason,
+                program_report: report,
                 arrangements,
             });
         }
@@ -787,7 +982,22 @@ async fn providers_of(
             Some(id) => policy_names.get(&id).cloned().map(NodeOrSystem::Node),
             None => Some(NodeOrSystem::SYSTEM),
         });
+        let mut metadata = grouped
+            .get(&("provider".to_owned(), id))
+            .cloned()
+            .unwrap_or_default();
+        let arrangements = agents
+            .iter()
+            .flat_map(|agent| agent.arrangements.iter())
+            .cloned()
+            .collect::<Vec<_>>();
+        metadata.availability = grouping::arrangements(ground, projection, &arrangements);
         listed.push(BindingProvider {
+            owner: each
+                .resource
+                .first_owner
+                .and_then(|id| owners.get(&id).cloned()),
+            grouping: metadata,
             provider: name,
             usable: reason.is_none() && policy_source.is_none(),
             reason: if policy_source.is_some() {
@@ -811,6 +1021,55 @@ const ENVIRONMENT_MANAGE_REQUIRED: &str = "environment_manage_required";
 
 /// The environments the caller may start a thread in, this topic's first, each with what a thread would
 /// get there; then those they only see, with the reason that asks for their Use.
+struct EnvironmentCandidates {
+    ids: Vec<Id>,
+    placeable: std::collections::HashSet<Id>,
+}
+
+async fn environment_candidates(
+    conn: &mut Conn,
+    principal: &Principal,
+    thread: Id,
+    required: Permission,
+    bounds: Option<&dyn choice_window::Bounds>,
+) -> ApiResult<EnvironmentCandidates> {
+    let policies = Policies::everywhere(ResourcePolicy {
+        owners_name_outsiders: false,
+        shared_subscriptions: None,
+    });
+    let managed = choice_window::select(
+        conn,
+        &choice_window::Usable {
+            principal,
+            kind: ResourceKind::Environment,
+            thread,
+            policies: &policies,
+            manage_environments: required == Permission::EnvironmentManage,
+        },
+        bounds,
+    )
+    .await?;
+    let mut ids: Vec<Id> = managed.items.iter().map(|each| each.resource.id).collect();
+    let placeable: std::collections::HashSet<Id> = ids.iter().copied().collect();
+    let seen = choice_window::select(
+        conn,
+        &choice_window::Visible {
+            principal,
+            kind: ResourceKind::Environment,
+        },
+        bounds,
+    )
+    .await?;
+    let already: std::collections::HashSet<Id> = ids.iter().copied().collect();
+    ids.extend(
+        seen.items
+            .iter()
+            .map(|each| each.resource.id)
+            .filter(|id| !already.contains(id)),
+    );
+    Ok(EnvironmentCandidates { ids, placeable })
+}
+
 async fn environments_of(
     conn: &mut Conn,
     principal: &Principal,
@@ -819,48 +1078,51 @@ async fn environments_of(
     thread: Id,
     required: Permission,
 ) -> ApiResult<Vec<BindingEnvironment>> {
-    let page = Page {
-        after: None,
-        limit: LIST_LIMIT,
-    };
-    let policies = Policies::everywhere(ResourcePolicy {
-        owners_name_outsiders: false,
-        shared_subscriptions: None,
-    });
-    let managed = if required == Permission::EnvironmentManage {
-        usable::manageable_environments(conn, principal, Some(thread), &policies, page).await
+    let candidates = environment_candidates(conn, principal, thread, required, None).await?;
+    environments_from(conn, principal, app, topic, required, &candidates, None).await
+}
+
+fn environment_reason(
+    row: &environment_queries::EnvironmentFull,
+    placeable: bool,
+    required: Permission,
+) -> Option<&'static str> {
+    if row.remove_at.is_some() {
+        Some(BEING_REMOVED)
+    } else if row.status == "lost" {
+        Some("environment_lost")
+    } else if row.status == "disabled" {
+        Some(DISABLED)
+    } else if row.status == "failed" || row.status == "removed" {
+        Some("environment_failed")
+    } else if !placeable {
+        Some(if required == Permission::EnvironmentUse {
+            ENVIRONMENT_USE_REQUIRED
+        } else {
+            ENVIRONMENT_MANAGE_REQUIRED
+        })
     } else {
-        usable::usable_list(
-            conn,
-            principal,
-            ResourceKind::Environment,
-            Some(thread),
-            &policies,
-            page,
-        )
-        .await
+        None
     }
-    .map_err(ApiError::internal)?;
-    let mut ids: Vec<Id> = managed.items.iter().map(|each| each.resource.id).collect();
-    let placeable: std::collections::HashSet<Id> = ids.iter().copied().collect();
-    let seen = orch_authz::resources::visible(
-        conn,
-        principal,
-        ResourceKind::Environment,
-        page,
-        Policy::default(),
-    )
-    .await
-    .map_err(ApiError::internal)?;
-    let already: std::collections::HashSet<Id> = ids.iter().copied().collect();
-    ids.extend(
-        seen.items
-            .iter()
-            .map(|each| each.resource.id)
-            .filter(|id| !already.contains(id)),
-    );
-    let rows = environment_queries::environments(conn, &ids).await?;
+}
+
+async fn environments_from(
+    conn: &mut Conn,
+    principal: &Principal,
+    app: &crate::state::AppState,
+    topic: Id,
+    required: Permission,
+    candidates: &EnvironmentCandidates,
+    projection: Option<&ChoiceProjection>,
+) -> ApiResult<Vec<BindingEnvironment>> {
+    let placeable = &candidates.placeable;
+    let rows = environment_queries::environments(conn, &candidates.ids).await?;
     let ids: Vec<Id> = rows.iter().map(|row| row.id).collect();
+    let subjects = ids
+        .iter()
+        .map(|&id| ("environment".to_owned(), id))
+        .collect::<Vec<_>>();
+    let grouped = grouping::metadata(app, conn, principal, &subjects, projection).await?;
     let uses = history::environment_uses(conn, &ids, topic).await?;
     let hosts = environment_choice::hosts_of(conn, &ids).await?;
     let default = environment_queries::default_for(conn, &ids)
@@ -877,7 +1139,17 @@ async fn environments_of(
         .map(|(_, each)| (each.id, each))
         .collect();
     let host_ids: Vec<Id> = hosts.iter().map(|(_, host, _)| *host).collect();
-    let host_addresses = addresses(conn, &host_ids).await?;
+    let host_addresses = match projection {
+        Some(projection) => {
+            crate::routes::resources::view::addresses_with_names(
+                conn,
+                &host_ids,
+                Some(&projection.names),
+            )
+            .await?
+        }
+        None => addresses(conn, &host_ids).await?,
+    };
     let machine_ids: Vec<Id> = rows
         .iter()
         .filter(|row| row.placement == "connected")
@@ -887,7 +1159,10 @@ async fn environments_of(
     let mut topic_ids: Vec<Id> = uses.iter().flat_map(|each| each.topics.clone()).collect();
     topic_ids.sort_unstable();
     topic_ids.dedup();
-    let topic_refs = node_view::refs(conn, principal, &topic_ids, Policy::default()).await?;
+    let topic_refs = match projection {
+        Some(projection) => projection.names.refs(conn, principal, &topic_ids).await?,
+        None => node_view::refs(conn, principal, &topic_ids, Policy::default()).await?,
+    };
 
     let mut listed: Vec<(u8, BindingEnvironment)> = Vec::new();
     for row in &rows {
@@ -895,23 +1170,7 @@ async fn environments_of(
             continue;
         };
         let used_here = uses.iter().find(|each| each.environment == row.id);
-        let reason = if row.remove_at.is_some() {
-            Some(BEING_REMOVED)
-        } else if row.status == "lost" {
-            Some("environment_lost")
-        } else if row.status == "disabled" {
-            Some(DISABLED)
-        } else if row.status == "failed" || row.status == "removed" {
-            Some("environment_failed")
-        } else if !placeable.contains(&row.id) {
-            Some(if required == Permission::EnvironmentUse {
-                ENVIRONMENT_USE_REQUIRED
-            } else {
-                ENVIRONMENT_MANAGE_REQUIRED
-            })
-        } else {
-            None
-        };
+        let reason = environment_reason(row, placeable.contains(&row.id), required);
         let (viewable, hidden): (Vec<NodeRef>, i64) = used_here.map_or((Vec::new(), 0), |used| {
             let mut shown = Vec::new();
             let mut hidden = 0_i64;
@@ -934,10 +1193,34 @@ async fn environments_of(
         listed.push((
             group,
             BindingEnvironment {
+                owner: Some(environment.owner.clone()),
+                grouping: {
+                    let mut metadata = grouped
+                        .get(&("environment".to_owned(), row.id))
+                        .cloned()
+                        .unwrap_or_default();
+                    if let Some(machine_id) = row
+                        .machine_id
+                        .filter(|id| projection.is_none_or(|p| p.machines.contains(id)))
+                    {
+                        let reason = environment_reason(row, true, required).map(str::to_owned);
+                        metadata.availability.push(
+                            orch_api_contract::resource_groups::ResourceMachineAvailability {
+                                machine_id,
+                                available: reason.is_none(),
+                                reason,
+                            },
+                        );
+                    }
+                    metadata
+                },
                 environment,
                 host: hosts
                     .iter()
                     .find(|(environment, _, _)| *environment == row.id)
+                    .filter(|(_, host, _)| {
+                        projection.is_none_or(|projection| projection.hosts.contains(host))
+                    })
                     .map(|(_, host, name)| HostRef {
                         id: *host,
                         name: name.clone(),
@@ -946,6 +1229,9 @@ async fn environments_of(
                 machine: row
                     .machine_id
                     .filter(|_| row.placement == "connected")
+                    .filter(|machine| {
+                        projection.is_none_or(|projection| projection.machines.contains(machine))
+                    })
                     .and_then(|machine| machines.get(&machine).cloned()),
                 threads: used_here.map_or(0, |used| used.threads),
                 usable: reason.is_none(),
@@ -1341,12 +1627,15 @@ async fn options(ctx: Ctx, (): (), (): ()) -> ApiResult<BindingOptions> {
     let source = source_for(&mut conn, &principal, thread).await?;
     timing.phase("placement_and_source");
     Ok(BindingOptions {
+        viewer_default: None,
+        environment_readers: None,
         defaults,
         providers,
         environments,
         environment_default,
         source,
         access,
+        agent_access: None,
         new_environment,
         can_create,
         hosts,
@@ -1389,6 +1678,7 @@ pub(super) async fn hosts_for(
         return Vec::new();
     }
     match crate::routes::environments::host_choices(
+        &ctx.app,
         conn,
         principal,
         home,
@@ -1416,10 +1706,33 @@ pub(super) async fn machines_for(
         orch_db::queries::resources::routes::machines_of(&mut *conn, principal.user()).await?;
     let ids: Vec<Id> = own.iter().map(|row| row.id).collect();
     let refs = machine_refs(&ctx.app, conn, &ids).await?;
+    let owner_ids = own
+        .iter()
+        .filter_map(|row| row.owner_id)
+        .collect::<Vec<_>>();
+    let owners = refusals::user_refs(conn, &owner_ids).await?;
+    let owner_ids = own
+        .iter()
+        .map(|row| (row.id, row.owner_id))
+        .collect::<HashMap<_, _>>();
+    let subjects = ids
+        .iter()
+        .map(|&id| ("machine".to_owned(), id))
+        .collect::<Vec<_>>();
+    let grouped = grouping::metadata(&ctx.app, conn, principal, &subjects, None).await?;
     Ok(own
         .iter()
         .filter_map(|row| refs.get(&row.id).cloned())
         .map(|machine| BindingMachine {
+            owner: owner_ids
+                .get(&machine.id)
+                .copied()
+                .flatten()
+                .and_then(|id| owners.get(&id).cloned()),
+            grouping: grouped
+                .get(&("machine".to_owned(), machine.id))
+                .cloned()
+                .unwrap_or_default(),
             environments: environments
                 .iter()
                 .filter(|entry| entry.machine.as_ref().is_some_and(|on| on.id == machine.id))

@@ -1,3 +1,5 @@
+import { homeMoveEntries } from '@/features/duplicate/move';
+import { resourceDuplicateEntries } from '@/features/duplicate/target';
 /** What can be done with a provider, from its row in the list and from its own page: take the next step of setting it up, open, switch on or off, edit, rename, copy its link and delete, each only where the reader may.
  *
  * The same acts serve the button and the menu at the end of a row, the menu under the right mouse button, the
@@ -80,13 +82,13 @@ export function useProviderActs(options: { onTab?: (provider: Provider, tab: Pro
     const disable: Act | null = manage && provider.status !== 'disabled' ? { id: 'disable', label: t('resources.act.disable'), icon: <Ban aria-hidden />, run: () => setAsked({ what: 'disable', provider }) } : null;
     const rename: Act | null = manage ? { id: 'rename', label: t('resources.act.rename'), icon: <TextCursorInput aria-hidden />, shortcut: 'F2', run: () => setAsked({ what: 'rename', provider }) } : null;
     const share = shareAct(t, { kind: 'provider', id: provider.id, name: provider.name }, provider.access);
-    const copy: Act = { id: 'copy-link', label: t('resources.act.copyLink'), icon: <Copy aria-hidden />, run: () => copyLink(`/resources/providers/${provider.id}`) };
+    const copy: Act = { id: 'copy-link', label: t('resources.act.copyLink'), icon: <Copy aria-hidden />, run: () => copyLink({ kind: 'provider', id: provider.id }) };
     const switchThreads: Act = {id:'switch-threads',label:t('resources.act.switchThreads'),icon:<ArrowRightLeft aria-hidden />,run:()=>openChange({kind:'provider',id:provider.id,name:provider.name},{kind:'switch'})};
     const del: Act | null = manage ? { id: 'delete', label: t('resources.act.delete'), icon: <Trash2 aria-hidden />, danger: true, run: () => setAsked({ what: 'delete', provider }) } : null;
     return {
       primary: next ?? enable ?? open,
       edit: null,
-      entries: entriesOf([open], where === 'row' ? [next, enable, disable] : [], [rename], [switchThreads], [share, copy], [del], [cleanup.act({kind:'provider',id:provider.id}, manage)]),
+      entries: [...homeMoveEntries(t, 'provider', provider), ...resourceDuplicateEntries(t, 'provider', provider), ...entriesOf([open], where === 'row' ? [next, enable, disable] : [], [rename], [switchThreads], [share, copy], [del], [cleanup.act({kind:'provider',id:provider.id}, manage)])],
       keys: keysOf(rename),
       busy: busy(provider.id),
     };

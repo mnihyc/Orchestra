@@ -26,7 +26,7 @@ use support::World;
 
 /// Asks to make the team org `slug`, as `by`.
 async fn make(world: &World, by: &Who, slug: &str) -> Reply<Org> {
-    world
+    let reply = world
         .app
         .call(OrgCreate, &[])
         .token(&by.token)
@@ -35,7 +35,17 @@ async fn make(world: &World, by: &Who, slug: &str) -> Reply<Org> {
             slug: slug.to_owned(),
         })
         .send()
-        .await
+        .await;
+    Reply {
+        status: reply.status,
+        headers: reply.headers,
+        raw: reply.raw,
+        body: reply.body.map(|value| {
+            value
+                .into_full()
+                .expect("ordinary created organization content")
+        }),
+    }
 }
 
 /// `by` gives `to` an invitation to make a team org.

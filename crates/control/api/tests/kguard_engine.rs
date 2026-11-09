@@ -388,10 +388,15 @@ fn descriptor() -> Json {
     descriptor
 }
 
-fn router(world: &World) -> axum::Router {
+fn router(world: &World, token: &str) -> axum::Router {
     let mut registry = Registry::new();
     orch_api_core::routes::mount(&mut registry);
-    registry.into_router().with_state(world.app.app.clone())
+    registry
+        .into_router_for(
+            orch_api_contract::surface::HttpSurface::for_token(token)
+                .expect("known fixture credential"),
+        )
+        .with_state(world.app.app.clone())
 }
 
 fn request(who: &Who, method: &str, path: &str, body: Body) -> Request<Body> {
@@ -429,7 +434,7 @@ async fn delayed(scene: &Scene, method: &str, path: &str, value: Json) -> (Statu
         Ok::<_, std::io::Error>(Bytes::from(serde_json::to_vec(&value).unwrap()))
     }));
     reply(
-        router(&scene.world)
+        router(&scene.world, &scene.writer.token)
             .oneshot(request(&scene.writer, method, path, body))
             .await
             .unwrap(),
@@ -456,8 +461,12 @@ async fn locked_request(scene: &Scene, method: &str, path: &str, body: Body) -> 
     orch_db::queries::transaction_guard::lock_person(&mut block, scene.writer.id())
         .await
         .unwrap();
-    let action =
-        tokio::spawn(router(&scene.world).oneshot(request(&scene.writer, method, path, body)));
+    let action = tokio::spawn(router(&scene.world, &scene.writer.token).oneshot(request(
+        &scene.writer,
+        method,
+        path,
+        body,
+    )));
     tokio::time::timeout(LOCK_WAIT, async {
         loop {
             let waiting: bool = sqlx::query_scalar(
@@ -744,7 +753,7 @@ async fn a_recycle_rechecks_authority_for_each_stop_after_an_earlier_unit_took_t
                 format!("/nodes/{}/environments/recycle", scene.home)
             };
             let (status, value) = reply(
-                router(&scene.world)
+                router(&scene.world, &scene.writer.token)
                     .oneshot(request(
                         &scene.writer,
                         "POST",
@@ -948,8 +957,9 @@ async fn refresh_restart_sign_out_and_deletion_need_permission_at_the_engine_dec
                     },
                     "{operation}: {value}"
                 );
-                let at: chrono::DateTime<chrono::Utc> = sqlx::query_scalar("SELECT at FROM audit_log WHERE object_id = $1 AND details->>'decision' = 'accepted'")
-                    .bind(provider).fetch_one(&scene.world.db.pool).await.unwrap();
+                // Deletion records its committed event; the other operations record an accepted engine decision.
+                let at: chrono::DateTime<chrono::Utc> = sqlx::query_scalar("SELECT at FROM audit_log WHERE object_id=$1 AND (($2 AND action='provider.deleted') OR (NOT $2 AND details->>'decision'='accepted'))")
+                    .bind(provider).bind(operation == "delete").fetch_one(&scene.world.db.pool).await.unwrap();
                 assert_eq!(
                     at,
                     scene.world.now(),
@@ -962,7 +972,25 @@ async fn refresh_restart_sign_out_and_deletion_need_permission_at_the_engine_dec
                     "delete" => assert!(!current["deleted_at"].is_null()),
                     _ => unreachable!(),
                 }
-                if matches!(operation, "logout" | "delete") {
+                if operation == "delete" {
+                    let stops: Vec<(Option<Id>, Json)> = sqlx::query_as(
+                        "SELECT created_by,plan FROM jobs WHERE kind='resource_quiesce'",
+                    )
+                    .fetch_all(&scene.world.db.pool)
+                    .await
+                    .unwrap();
+                    assert_eq!(
+                        stops.len(),
+                        1,
+                        "deletion retains its accepted native cleanup"
+                    );
+                    assert_eq!(stops[0].0, Some(scene.writer.id()));
+                    let plan = &stops[0].1;
+                    assert_eq!(plan["committed"], true);
+                    assert_eq!(plan["quiesce"]["target"]["object"]["id"], json!(provider));
+                    assert_eq!(plan["quiesce"]["deleted"], true);
+                    assert_eq!(plan["quiesce"]["logout"], true);
+                } else if operation == "logout" {
                     assert_eq!(played.seen_of(CommandKind::ProviderLogout).len(), 1);
                 }
             }
@@ -1182,7 +1210,7 @@ async fn a_subscription_registered_from_a_machine_requires_the_callers_current_a
         let body = Body::from_stream(stream::once(async move {
             clock.advance(Duration::seconds(2));
             if loses_use {
-                sqlx::query("UPDATE api_tokens SET scopes = ARRAY['provider.view'] WHERE id = $1")
+                sqlx::query("UPDATE api_tokens SET scopes = ARRAY['provider.view','machine.view','machine.use','agent.view'] WHERE id = $1")
                     .bind(token)
                     .execute(&pool)
                     .await
@@ -1196,7 +1224,7 @@ async fn a_subscription_registered_from_a_machine_requires_the_callers_current_a
             ))
         }));
         let (status, value) = reply(
-            router(&scene.world)
+            router(&scene.world, &scene.writer.token)
                 .oneshot(request(
                     &scene.writer,
                     "POST",

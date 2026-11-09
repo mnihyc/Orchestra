@@ -23,6 +23,7 @@ export function staticPageName(target: PageTarget, t: TFunction): Pick<TabName, 
     case '/everything/': return { title: t('everything.title'), icon: ListTree };
     case '/search/': return { title: t('screens.search.title'), icon: Search };
     case '/inbox/': return { title: t('screens.inbox.title'), icon: Inbox };
+    case '/messages/$id/': return { title: t('adminMessages.messages'), icon: Inbox };
     case '/approvals/': return { title: t('screens.approvals.title'), icon: ShieldCheck };
     case '/shared/': return { title: t('screens.shared.title'), icon: Share2 };
     case '/storage/': return { title: t('storage.title'), icon: HardDrive };

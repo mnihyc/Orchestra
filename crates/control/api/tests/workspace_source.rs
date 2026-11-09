@@ -5,7 +5,11 @@
     reason = "a test fails by panicking"
 )]
 
+#[path = "workspace_snapshots/scope_helpers.rs"]
+mod keys;
 mod places;
+#[path = "workspace_source/restore_scopes.rs"]
+mod restore_scopes;
 mod support;
 mod workspace;
 
@@ -41,10 +45,18 @@ impl orch_api_core::testing::Machine for RestoreReader {
         let request: orch_link_contract::source::FsRestorePlan =
             serde_json::from_value(command.body.clone())
                 .map_err(|error| CommandError::new(ErrorCode::Internal, error.to_string()))?;
+        // A native private plan retains the recording limits from its actual planning command.
+        let (Some(record_days), Some(max_bytes)) = (request.record_days, request.max_bytes) else {
+            return Err(CommandError::new(
+                ErrorCode::Conflict,
+                "the restore fixture requires the command's frozen recording limits",
+            ));
+        };
         self.reads.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
         let bytes = serde_json::to_vec(&json!({ "snapshot_id": request.snapshot_id, "target_manifest": self.manifest,
             "directory": request.directory, "generation": 1, "namespace_fingerprint": Hash::of(b"complete native namespace"),
             "ignore_fingerprint": Hash::of(b"current native coverage"),
+            "record_policy": { "record_days": record_days, "max_bytes": max_bytes },
             "current": [{ "p": "code", "t": "f", "x": 0o644, "h": Hash::of(b"later"), "l": null }] })).unwrap();
         let plan = self
             .content
@@ -57,13 +69,13 @@ impl orch_api_core::testing::Machine for RestoreReader {
     }
 }
 
-#[tokio::test]
-async fn restore_preflight_shows_unknown_later_changes_and_rechecks_generation_and_expiry_before_any_apply()
- {
-    use orch_api_contract::source::{
-        EnvironmentFilesRestore, EnvironmentFilesRestoreBody, EnvironmentRestorePreflight,
-        EnvironmentRestorePreflightBody,
-    };
+async fn restore_fixture() -> (Site, orch_types::Id, std::sync::Arc<RestoreReader>) {
+    if std::env::var_os("ORCH_TEST_RESTORE_ERRORS").is_some() {
+        let _ = tracing_subscriber::fmt()
+            .with_max_level(tracing::Level::ERROR)
+            .with_test_writer()
+            .try_init();
+    }
     use orch_blob_contract::store::stream_of;
     use orch_db::queries::{source, storage};
     use orch_link_contract::source::{FsRecordResult, RecordState};
@@ -150,7 +162,20 @@ async fn restore_preflight_shows_unknown_later_changes_and_rechecks_generation_a
         reads: std::sync::atomic::AtomicUsize::new(0),
     });
     site.power_on_with(reader.clone());
+    (site, snapshot, reader)
+}
+
+#[tokio::test]
+async fn restore_preflight_shows_unknown_later_changes_and_rechecks_generation_and_expiry_before_any_apply()
+ {
+    use orch_api_contract::source::{
+        EnvironmentFilesRestore, EnvironmentFilesRestoreBody, EnvironmentRestorePreflight,
+        EnvironmentRestorePreflightBody,
+    };
+    let (site, snapshot, reader) = restore_fixture().await;
+    let now = site.world.now();
     let request = EnvironmentRestorePreflightBody {
+        overwrite: Vec::new(),
         snapshot_id: snapshot,
         options: None,
     };
@@ -177,7 +202,9 @@ async fn restore_preflight_shows_unknown_later_changes_and_rechecks_generation_a
         .body(&request)
         .send()
         .await
-        .ok();
+        .ok()
+        .into_full()
+        .unwrap();
     assert_eq!(plan.snapshot.id, snapshot);
     assert_eq!(plan.directory, "web");
     assert!(plan.undo_available);
@@ -292,6 +319,8 @@ async fn source_retry_keeps_the_original_repository_branch_native_identity_and_d
         thread: Some(site.thread),
         caller: site.ada.id(),
         token: None,
+        creator_origin: None,
+        scheduled_input: None,
         action: Action::Prepare {
             directory: thread.workspace_dir,
             source: frozen.clone(),

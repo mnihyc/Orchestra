@@ -46,6 +46,30 @@ pub async fn chat_of(world: &World, by: &Who, node: Id) -> Id {
 }
 
 impl Room {
+    /// Chat levels include their lower levels; an empty View row cannot subtract a higher grant.
+    pub async fn inherit_chat_area(&self, node: Id, inherit: bool) {
+        use orch_access_contract::permissions::Permission;
+        let mut conn = self.world.conn().await;
+        for permission in
+            std::iter::once(Permission::ChatView).chain(Permission::ChatView.held_through())
+        {
+            orch_db::queries::access::write_row(
+                &mut conn,
+                &orch_db::queries::access::RowWrite {
+                    page: &orch_db::queries::access::PageKey::new("node", node, "live"),
+                    profile: "any",
+                    permission: permission.as_str(),
+                    inherit,
+                    locked: false,
+                },
+                Some(self.ada.id()),
+                self.world.now(),
+            )
+            .await
+            .unwrap();
+        }
+    }
+
     pub async fn new() -> Self {
         let world = World::new().await;
         let ada = person(&world, "ada").await;
@@ -96,7 +120,8 @@ impl Room {
         parts: Vec<ChatPart>,
         client_id: &str,
     ) -> Reply<ChatMessageCreateReply> {
-        self.world
+        let reply = self
+            .world
             .app
             .call(ChatMessageCreate, &[&chat])
             .token(&by.token)
@@ -107,7 +132,17 @@ impl Room {
                 client_id: client_id.to_owned(),
             })
             .send()
-            .await
+            .await;
+        Reply {
+            status: reply.status,
+            headers: reply.headers,
+            raw: reply.raw,
+            body: reply.body.map(|answer| {
+                answer
+                    .into_full()
+                    .expect("the browser session receives the full chat message reply")
+            }),
+        }
     }
 
     /// `by` reads the chat.
@@ -128,12 +163,16 @@ impl Room {
             .call(OrgChatCreate, &[&self.root])
             .token(&by.token)
             .body(&OrgChatCreateBody {
+                visibility: None,
+                home_id: None,
                 user_ids: vec![other.id()],
                 name: None,
             })
             .send()
             .await
             .ok()
+            .into_full()
+            .expect("a native browser opening keeps the full chat")
     }
 
     /// `by` opens a group with `others`; the chat.
@@ -143,12 +182,16 @@ impl Room {
             .call(OrgChatCreate, &[&self.root])
             .token(&by.token)
             .body(&OrgChatCreateBody {
+                visibility: None,
+                home_id: None,
                 user_ids: others.iter().map(|other| other.id()).collect(),
                 name: name.map(str::to_owned),
             })
             .send()
             .await
             .ok()
+            .into_full()
+            .expect("a native browser opening keeps the full chat")
     }
 
     /// What `by` sees of the chat now, from the start.

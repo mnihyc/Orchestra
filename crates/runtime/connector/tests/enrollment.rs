@@ -19,6 +19,7 @@ use orch_link_contract::enrollment::{
     Endpoint, EnrollReply, EnrollReplySystem, EnrollRequest, EnrollmentToken, RenewReply,
     RenewRequest,
 };
+use orch_link_contract::gateways::{GatewayDiscovery, GatewayInstance};
 use orch_link_contract::session::{Arch, Os, Platform, Role};
 use orch_pki::enrollment::{MachineIdentity, MemoryLedger, TokenGrant, TokenPurpose, issue_token};
 use orch_testkit::doubles::controller::ScriptedController;
@@ -33,6 +34,7 @@ struct System<'a> {
     pki: &'a TestPki,
     ledger: MemoryLedger,
     clock: ManualClock,
+    gateways: Vec<GatewayInstance>,
 }
 
 impl System<'_> {
@@ -51,6 +53,29 @@ impl System<'_> {
 
 #[async_trait]
 impl EnrollTransport for System<'_> {
+    async fn gateways(
+        &self,
+        _address: &str,
+        _token: &EnrollmentToken,
+    ) -> Result<Option<GatewayDiscovery>, EnrollError> {
+        Ok((!self.gateways.is_empty()).then(|| GatewayDiscovery {
+            ca_pem: self.pki.authority().certificate_pem(),
+            gateways: self.gateways.clone(),
+        }))
+    }
+
+    async fn enroll_at(
+        &self,
+        endpoint: &Endpoint,
+        token: &EnrollmentToken,
+        request: &EnrollRequest,
+    ) -> Result<EnrollReply, EnrollError> {
+        if endpoint != &Hub::endpoint() {
+            return Err(EnrollError::Unreachable("this entrance is offline".into()));
+        }
+        self.enroll(&endpoint.url, token, request).await
+    }
+
     async fn enroll(
         &self,
         _address: &str,
@@ -66,6 +91,7 @@ impl EnrollTransport for System<'_> {
         )
         .map_err(|error| EnrollError::Unreachable(error.to_string()))?;
         Ok(EnrollReply {
+            gateways: self.gateways.clone(),
             machine_id: enrolled.machine_id,
             certificate_pem: enrolled.certificate.pem(),
             ca_pem: self.pki.authority().certificate_pem(),
@@ -89,7 +115,64 @@ impl EnrollTransport for System<'_> {
 }
 
 #[tokio::test]
-async fn a_connector_given_a_token_enrolls_then_holds_its_session_and_says_what_it_offers() {
+async fn an_unknown_selected_gateway_is_refused_without_spending_the_enrollment_token() {
+    let manual = ManualClock::new(chrono::Utc.with_ymd_and_hms(2026, 11, 6, 8, 0, 0).unwrap());
+    let clock: Arc<dyn Clock> = Arc::new(manual.clone());
+    let pki = TestPki::new(Arc::clone(&clock));
+    let system = System {
+        pki: &pki,
+        ledger: MemoryLedger::new(),
+        clock: manual,
+        gateways: Vec::new(),
+    };
+    let directory = tempfile::tempdir().unwrap();
+    let data = DataDir::open(directory.path()).unwrap();
+    data.update_config(|config| {
+        config.connector.gateway = orch_link_contract::gateways::GatewayChoice {
+            selection: orch_link_contract::gateways::GatewaySelection::Selected,
+            gateway_id: Some("missing".into()),
+        }
+    })
+    .unwrap();
+    let inputs = EnrollInputs {
+        address: "https://orch.test".into(),
+        token: system.token(),
+        name: "selected-enrollment".into(),
+        roles: vec![Role::Agent],
+        platform: Platform {
+            os: Os::Linux,
+            arch: Arch::X86_64,
+        },
+        connector_version: "0.1.0".into(),
+        managed: false,
+    };
+    assert!(matches!(
+        enroll(&inputs, &data, &system, clock.as_ref()).await,
+        Err(EnrollError::Config(_))
+    ));
+    assert!(!data.is_enrolled());
+    assert_eq!(
+        data.config(|_| None)
+            .unwrap()
+            .connector
+            .gateway
+            .gateway_id
+            .as_deref(),
+        Some("missing")
+    );
+    data.update_config(|config| config.connector.gateway = Default::default())
+        .unwrap();
+    assert!(
+        enroll(&inputs, &data, &system, clock.as_ref())
+            .await
+            .is_ok(),
+        "the unspent token must still enroll when the local choice is corrected"
+    );
+}
+
+#[tokio::test]
+async fn a_fresh_connector_without_measurements_enrolls_and_connects_through_an_advertised_gateway()
+{
     let manual = ManualClock::new(
         chrono::Utc
             .with_ymd_and_hms(2026, 10, 11, 12, 0, 0)
@@ -102,6 +185,23 @@ async fn a_connector_given_a_token_enrolls_then_holds_its_session_and_says_what_
         pki: &pki,
         ledger: MemoryLedger::new(),
         clock: manual.clone(),
+        gateways: vec![
+            GatewayInstance {
+                id: "offline".into(),
+                label: "Preferred entrance".into(),
+                region: "Europe".into(),
+                endpoints: vec![Endpoint {
+                    url: "wss://offline.test:9443".into(),
+                    trust: orch_link_contract::enrollment::Trust::Pinned,
+                }],
+            },
+            GatewayInstance {
+                id: "test-gateway".into(),
+                label: "Available entrance".into(),
+                region: "Asia".into(),
+                endpoints: vec![Hub::endpoint()],
+            },
+        ],
     };
 
     // First run: nothing but a directory, an address and a token.
@@ -122,6 +222,9 @@ async fn a_connector_given_a_token_enrolls_then_holds_its_session_and_says_what_
     };
     let enrolled = enroll(&inputs, &data, &system, &manual).await.unwrap();
     assert!(data.is_enrolled());
+    assert_eq!(enrolled.record.gateways, system.gateways);
+    assert!(enrolled.record.gateway_measurements.is_empty());
+    assert!(enrolled.record.gateway_measured_at.is_none());
     for file in ["key.pem", "cert.pem", "ca.pem"] {
         assert!(data.identity_dir().join(file).is_file(), "{file} is kept");
     }
@@ -175,6 +278,12 @@ async fn a_connector_given_a_token_enrolls_then_holds_its_session_and_says_what_
         .await
         .expect("the connector never got a session");
     assert!(hub.session_of(enrolled.record.machine_id).is_some());
+    assert_eq!(
+        connector.link().gateway_id().as_deref(),
+        Some("test-gateway")
+    );
+    assert!(connector.link().gateway_measurements().is_empty());
+    assert!(connector.link().gateway_status().measured_at.is_none());
     let status = connector.link().status().borrow().clone();
     assert!(
         matches!(&status, LinkStatus::Connected { endpoint, .. } if endpoint == &Hub::endpoint().url),
@@ -308,6 +417,7 @@ async fn every_connection_refreshes_system_addresses_without_overwriting_an_owne
             pki: &pki,
             ledger: MemoryLedger::new(),
             clock: manual.clone(),
+            gateways: Vec::new(),
         };
         let directory = tempfile::tempdir().unwrap();
         let data = DataDir::open(directory.path()).unwrap();
@@ -429,6 +539,9 @@ async fn a_foreground_connector_or_node_adopts_a_saved_replacement_without_anoth
         .save(&data.identity_dir())
         .unwrap();
         let record = EnrollmentRecord {
+            gateway_measured_at: None,
+            gateways: Vec::new(),
+            gateway_measurements: Vec::new(),
             server_endpoints: vec![Hub::endpoint()],
             machine_id: id,
             name: "Kept".into(),
@@ -456,6 +569,7 @@ async fn a_foreground_connector_or_node_adopts_a_saved_replacement_without_anoth
             pki: &pki,
             ledger: MemoryLedger::new(),
             clock: manual.clone(),
+            gateways: Vec::new(),
         };
         let make = |identity: MachineIdentity| {
             let config = data.config(|_| None)?;

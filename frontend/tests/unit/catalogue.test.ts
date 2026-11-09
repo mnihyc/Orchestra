@@ -8,15 +8,12 @@ import englishText from '@/i18n/en.json?raw';
 import chinese from '@/i18n/zh-CN.json';
 import chineseText from '@/i18n/zh-CN.json?raw';
 import { SETTINGS_REGISTRY } from '@/generated/settings-registry';
-
-interface Catalogue {
-  [key: string]: string | Catalogue;
-}
+import type { Catalogue, CatalogueBranch, CatalogueValue } from './catalogue-shape';
 
 /** Every text of a catalogue by its dotted key. */
-function texts(catalogue: Catalogue, prefix = ''): Map<string, string> {
+function texts(catalogue: CatalogueBranch, prefix = ''): Map<string, string> {
   const found = new Map<string, string>();
-  for (const [key, value] of Object.entries(catalogue)) {
+  for (const [key, value] of Object.entries<CatalogueValue>(catalogue)) {
     const path = prefix === '' ? key : `${prefix}.${key}`;
     if (typeof value === 'string') found.set(path, value);
     else for (const [inner, text] of texts(value, path)) found.set(inner, text);
@@ -110,11 +107,11 @@ function copiedEnglishKeys(englishTexts: Map<string, string>, chineseTexts: Map<
 }
 
 /** Active screen writers may keep their pairs with their own choice namespace. */
-function choicePaths(node: Catalogue, path = ''): string[] {
-  const name = typeof node.name === 'string';
-  const description = typeof node.description === 'string';
+function choicePaths(node: CatalogueBranch, path = ''): string[] {
+  const name = !Array.isArray(node) && typeof node.name === 'string';
+  const description = !Array.isArray(node) && typeof node.description === 'string';
   const here = name && description || /choice/i.test(path) && (name || description) ? [path] : [];
-  return [...here, ...Object.entries(node).flatMap(([key, value]) => typeof value === 'string' ? [] : choicePaths(value, path === '' ? key : `${path}.${key}`))];
+  return [...here, ...Object.entries<CatalogueValue>(node).flatMap(([key, value]) => typeof value === 'string' ? [] : choicePaths(value, path === '' ? key : `${path}.${key}`))];
 }
 
 describe('the catalogues', () => {

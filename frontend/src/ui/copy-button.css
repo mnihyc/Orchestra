@@ -1,0 +1,7 @@
+/* Plain text/value-and-copy rows share the first text baseline, including wrapped labels.
+   Mixed toolbars retain their own control alignment; floating copies do not affect their parent. */
+@layer utilities {
+  :where(.flex, .inline-flex):not(.flex-col, .flex-col-reverse):has(> button[data-copy-control]:not(.absolute, .fixed)):not(:has(button:not([data-copy-control]), input, select, textarea, [role="button"], [role="combobox"])) {
+    align-items: baseline;
+  }
+}

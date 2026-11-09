@@ -226,6 +226,20 @@ pub async fn record(
     summary: &str,
     details: Json,
 ) -> ApiResult<()> {
+    record_identified(ctx, conn, actor, action, object, summary, details)
+        .await
+        .map(|_| ())
+}
+/// The same native audit producer when its durable event is an operation's accepted identity.
+pub(crate) async fn record_identified(
+    ctx: &Ctx,
+    conn: &mut Conn,
+    actor: Actor,
+    action: AuditAction,
+    object: Option<Id>,
+    summary: &str,
+    details: Json,
+) -> ApiResult<Id> {
     let mut entry = Entry::new(
         actor,
         action.as_str(),
@@ -235,8 +249,9 @@ pub async fn record(
     );
     entry.history = action.is_history_line();
     entry.details = details;
-    audit::append(conn, &entry, &origin(ctx), ctx.now).await?;
-    Ok(())
+    audit::append(conn, &entry, &origin(ctx), ctx.now)
+        .await
+        .map_err(Into::into)
 }
 
 /// A cookie, with the attributes every cookie of the sign-in carries: out of

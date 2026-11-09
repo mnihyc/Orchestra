@@ -9,6 +9,7 @@ mod desk;
 mod places;
 mod support;
 
+use crate::support::FullPermissionPageReply;
 use desk::Desk;
 use orch_access_contract::decisions::ObjectRef;
 use orch_access_contract::permissions::ObjectKind;
@@ -66,6 +67,8 @@ async fn office() -> Office {
         .send()
         .await
         .ok()
+        .into_full()
+        .unwrap()
         .provider
         .base
         .id;
@@ -115,6 +118,7 @@ async fn name_on(
         .body(&naming(person, choice))
         .send()
         .await
+        .full_permission_page()
         .ok();
 }
 
@@ -468,6 +472,7 @@ async fn the_people_behind_a_holder_of_a_resource_s_page_are_listed_only_for_a_h
         })
         .send()
         .await
+        .full_permission_page()
         .ok();
     let people: PermissionPeopleListReply = office
         .desk
@@ -581,6 +586,7 @@ async fn a_node_is_served_as_before_and_a_chat_or_a_made_up_kind_is_answered_pla
             .body(&PageChange::default())
             .send()
             .await
+            .full_permission_page()
             .problem();
         assert_eq!(change.code, ErrorCode::NotFound, "{plural}");
     }
@@ -981,6 +987,7 @@ async fn what_a_role_held_above_gives_inside_a_place_is_told_as_that_role_with_t
         })
         .send()
         .await
+        .full_permission_page()
         .ok();
     let held = holds(&office, ada, "nodes", topic, rae.id()).await.ok();
     assert_eq!(held.role, Some(Role::Viewer), "she holds the role above");

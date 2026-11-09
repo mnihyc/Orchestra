@@ -12,7 +12,6 @@
 use super::{admin_of, record};
 use crate::middleware::authorization::{self, refusals};
 use crate::middleware::requests::{ApiError, ApiResult};
-use crate::middleware::transaction_guard;
 use crate::registry::{Ctx, Registry};
 use crate::routes::access::page::permission_page;
 use crate::sign_in::origin;
@@ -93,10 +92,19 @@ async fn update(mut ctx: Ctx, (): (), body: PageChange) -> ApiResult<PermissionP
         ));
     }
     let resets = change.whole == Some(stored::Whole::Reset);
-    let (mut tx, guard) = transaction_guard::begin(&ctx).await?;
-    ctx.now = guard.now().get();
+    let (mut tx, _) = super::action(&ctx).await?;
+    let disclosure = crate::thread_read_tools::sharing::Before::system(
+        &ctx.app,
+        &mut tx,
+        &("system-defaults", &body),
+    )
+    .await?;
+    let (current, guard) = crate::middleware::transaction_guard::after_wait(&ctx, &mut tx).await?;
+    ctx = current;
+    admin_of(&ctx)?;
     let admin = guard.user().id();
     let principal = guard.principal();
+    guard.check_deadline(&ctx)?;
     let changed = pages::change(
         &mut tx,
         principal,
@@ -135,6 +143,7 @@ async fn update(mut ctx: Ctx, (): (), body: PageChange) -> ApiResult<PermissionP
         )
         .await?;
     }
+    disclosure.require(&ctx, &mut tx).await?;
     let page = read(&ctx, &mut tx, principal).await?;
     tx.commit().await.map_err(DbError::from)?;
     Ok(page)

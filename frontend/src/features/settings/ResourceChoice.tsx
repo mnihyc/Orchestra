@@ -1,3 +1,4 @@
+import { ResourcePicker } from '@/ui/ResourcePicker';
 /** Template and host settings use authorized names; the containing native row owns every write. */
 import { useQuery } from '@tanstack/react-query';
 import { useState } from 'react';
@@ -7,7 +8,6 @@ import type { Host, Template } from '@/generated/api-types';
 import type { ValueControlProps } from '@/features/settings/ValueControl';
 import { holds } from '@/lib/permissions';
 import { ErrorState } from '@/ui/ErrorState';
-import { Select } from '@/ui/Select';
 import { ResourceChip, resourceChoice } from '@/features/resource-facts/ResourceFacts';
 
 export function isResourceSetting(key: string | undefined): boolean {
@@ -48,10 +48,10 @@ export function ResourceSettingChoice({ settingKey, value, label, onChange, onEd
   // Radix does not accept an empty option value; this sentinel never leaves the control.
   const automatic = '\u0000automatic-host';
   return <div className="flex min-w-0 flex-col gap-2">
-    <Select label={label} hideLabel size="sm" value={selected === '' && !template ? automatic : selected} open={open && !query.isError && !(template && query.isSuccess && rows?.length === 0)} onOpenChange={setOpen}
+    <ResourcePicker pickerKey="settings.ResourceChoice" label={label} hideLabel size="sm" value={selected === '' && !template ? automatic : selected} open={open && !query.isError && !(template && query.isSuccess && rows?.length === 0)} onOpenChange={setOpen}
       valueLabel={selected === '' ? undefined : current?.name ?? chosen.data?.name ?? t(chosen.isError ? 'settings.resourceChoice.unavailable' : 'common.loading')}
       placeholder={open && query.isPending ? t('common.loading') : placeholder ?? t('settings.resourceChoice.choose')}
-      disabled={disabled} error={error}
+      disabled={disabled} error={error} loading={query.isFetching}
       options={[
         ...(!template ? [{ value: automatic, label: t('providerRuntime.autoHost') }] : []),
         ...(rows ?? []).filter((row) => row.available || row.id === selected).map((row) => ({ value: row.id, label: row.name, ...resourceChoice(row.subject), disabled: !row.available })),

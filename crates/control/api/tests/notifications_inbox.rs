@@ -81,6 +81,102 @@ fn titles(page: &orch_api_contract::common::Page<Notification>) -> Vec<&str> {
 }
 
 #[tokio::test]
+async fn a_legacy_provider_job_opens_its_real_provider_in_both_inbox_views() {
+    let world = World::new().await;
+    let ada = person(&world, "ada").await;
+    let org = make_org(&world, &ada, "Acme", "acme").await;
+    let mut conn = world.conn().await;
+    let provider = orch_db::queries::resources::access_fixtures::insert_resource(
+        &mut conn,
+        "provider",
+        Some(ada.id()),
+        Some(org.base.id),
+        "Scripted model",
+    )
+    .await
+    .unwrap();
+    let job = orch_types::new_id();
+    sqlx::query("INSERT INTO jobs (id,kind,provider_id,state,created_by,finished_at) VALUES ($1,'provider_provision',$2,'failed',$3,now())")
+        .bind(job).bind(provider).bind(ada.id()).execute(&mut *conn).await.unwrap();
+    let notice = announce(
+        &mut conn,
+        &NewNotification {
+            user_id: ada.id(),
+            kind: "job.finished",
+            node_id: None,
+            thread_id: None,
+            approval_id: None,
+            chat_id: None,
+            title: "Scripted model: A job failed",
+            body: "",
+            data: &json!({"job_id":job,"state":"failed"}),
+            dedupe_key: "legacy-provider-job",
+            at: world.now(),
+        },
+    )
+    .await
+    .unwrap()
+    .unwrap();
+    drop(conn);
+    for group_by in [None, Some(NotificationGrouping::Place)] {
+        let page = list(
+            &world,
+            &ada,
+            &NotificationListQuery {
+                group_by,
+                ..Default::default()
+            },
+        )
+        .await;
+        let row = page.items.iter().find(|row| row.id == notice.id).unwrap();
+        assert_eq!(row.url, format!("/resources/providers/{provider}"));
+    }
+    let stored: serde_json::Value =
+        sqlx::query_scalar("SELECT data FROM notifications WHERE id=$1")
+            .bind(notice.id)
+            .fetch_one(&mut *world.conn().await)
+            .await
+            .unwrap();
+    assert!(
+        stored.get("path").is_none(),
+        "projecting a legacy destination does not rewrite the notice"
+    );
+    let bea = person(&world, "bea").await;
+    let mut conn = world.conn().await;
+    let unrelated = announce(
+        &mut conn,
+        &NewNotification {
+            user_id: bea.id(),
+            kind: "job.finished",
+            node_id: None,
+            thread_id: None,
+            approval_id: None,
+            chat_id: None,
+            title: "A job failed",
+            body: "",
+            data: &json!({"job_id":job,"state":"failed"}),
+            dedupe_key: "unrelated-job",
+            at: world.now(),
+        },
+    )
+    .await
+    .unwrap()
+    .unwrap();
+    drop(conn);
+    let shown = list(&world, &bea, &NotificationListQuery::default()).await;
+    assert_eq!(
+        shown
+            .items
+            .iter()
+            .find(|row| row.id == unrelated.id)
+            .unwrap()
+            .url,
+        "/inbox",
+        "another person's job identifier cannot disclose its provider"
+    );
+}
+
+#[tokio::test]
 async fn chat_notices_disappear_when_the_recipient_can_no_longer_read_the_chat() {
     let room = Room::new().await;
     let group = room

@@ -17,7 +17,6 @@ use orch_access_contract::permissions::Permission;
 use orch_api_contract::browsers::{
     BROWSER_TICKET_SECONDS, BrowserAttachQuery, BrowserTicketCreateReply,
 };
-use orch_authz::{Caller, Principal};
 use orch_db::queries::browsers as rows;
 use orch_engine::browsers::{BrowserActions, SITTING_GAP};
 use orch_link::tunnels::channel::Tunnel;
@@ -29,8 +28,8 @@ use serde_json::json;
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::sync::{mpsc, watch};
 
-use crate::middleware::authentication::{Via, new_token, token_hash};
-use crate::middleware::authorization;
+use super::ticket_origin::{CurrentCaller, Origin};
+use crate::middleware::authentication::{new_token, token_hash};
 use crate::middleware::requests::{ApiError, ApiResult};
 use crate::registry::Ctx;
 use crate::routes::browsers as views;
@@ -61,10 +60,13 @@ fn lock<T>(mutex: &Mutex<T>) -> std::sync::MutexGuard<'_, T> {
 
 #[derive(Clone)]
 struct Ticket {
+    id: Id,
+    surface: orch_api_contract::surface::HttpSurface,
     browser: Id,
-    user: Id,
-    caller: Caller,
-    via: Via,
+    environment: Id,
+    machine: Option<Id>,
+    generation: i32,
+    origin: Origin,
     control: bool,
     expires: DateTime<Utc>,
 }
@@ -200,33 +202,90 @@ impl Sockets {
         ctx: &Ctx,
         browser: Id,
         control: bool,
+        environment: Id,
+        machine: Option<Id>,
+        generation: i32,
     ) -> ApiResult<BrowserTicketCreateReply> {
+        self.ticket_pending(ctx, browser, control, environment, machine, generation)?
+            .publish()
+    }
+
+    pub(crate) fn ticket_pending(
+        &self,
+        ctx: &Ctx,
+        browser: Id,
+        control: bool,
+        environment: Id,
+        machine: Option<Id>,
+        generation: i32,
+    ) -> ApiResult<crate::middleware::idempotency::memory::Reservation<BrowserTicketCreateReply>>
+    {
+        let id = orch_types::new_id();
         let token = new_token("bt_");
         let expires = ctx.now + Span::seconds(i64::from(BROWSER_TICKET_SECONDS));
-        let authed = ctx.user()?;
+        let origin = Origin::capture(ctx)?;
+        let selection = if control {
+            "BrowserTicketCreate.control"
+        } else {
+            "BrowserTicketCreate.view"
+        };
+        if origin.operation() != Some(selection) {
+            return Err(ApiError::internal(
+                "a bound native ticket needs its actual selected operation",
+            ));
+        }
         let mut tickets = lock(&self.tickets);
         tickets.retain(|_, t| t.expires > ctx.now);
         tickets.insert(
             token_hash(&token),
             Ticket {
+                id,
+                surface: ctx.http_surface()?,
                 browser,
-                user: authed.id(),
-                caller: authorization::caller_of(authed)?,
-                via: authed.via.clone(),
+                environment,
+                machine,
+                generation,
+                origin,
                 control,
                 expires,
             },
         );
-        Ok(BrowserTicketCreateReply {
-            ticket: token,
-            ticket_expires_at: Time::new(expires),
-        })
+        drop(tickets);
+        let hash = token_hash(&token);
+        let tickets = self.tickets.clone();
+        Ok(crate::middleware::idempotency::memory::Reservation::new(
+            id,
+            BrowserTicketCreateReply {
+                ticket: token,
+                ticket_expires_at: Time::new(expires),
+            },
+            move || {
+                let mut tickets = lock(&tickets);
+                if tickets.get(&hash).is_some_and(|ticket| ticket.id == id) {
+                    tickets.remove(&hash);
+                }
+            },
+        ))
     }
 
-    fn redeem(&self, browser: Id, token: &str, now: DateTime<Utc>) -> Option<Ticket> {
-        lock(&self.tickets)
-            .remove(&token_hash(token))
-            .filter(|t| t.browser == browser && t.expires > now)
+    fn redeem(
+        &self,
+        browser: Id,
+        token: &str,
+        now: DateTime<Utc>,
+        surface: orch_api_contract::surface::HttpSurface,
+    ) -> Option<Ticket> {
+        let mut tickets = lock(&self.tickets);
+        let hash = token_hash(token);
+        if tickets
+            .get(&hash)
+            .is_none_or(|held| held.surface != surface)
+        {
+            return None;
+        }
+        tickets
+            .remove(&hash)
+            .filter(|held| held.browser == browser && held.expires > now)
     }
 
     /// Those who sent input recently, counted once even with several sockets.
@@ -488,36 +547,53 @@ impl Sockets {
         let _ = group.outgoing.send(value).await;
     }
 
-    async fn gates(app: &App, ticket: &Ticket) -> ApiResult<(bool, bool, bool)> {
-        let mut conn = app.db.acquire().await?;
-        let now = app.clock.now();
-        let valid: bool = match ticket.via {
-            Via::Session { session_id } => rows::session_live(&mut conn, session_id, now).await?,
-            Via::Token { token_id, .. } => rows::token_live(&mut conn, token_id, now).await?,
+    async fn gates(
+        app: &App,
+        ticket: &Ticket,
+    ) -> ApiResult<(bool, bool, bool, Option<CurrentCaller>)> {
+        let mut conn = app.db.begin_snapshot().await?;
+        let Some((caller, session_deadline)) = ticket
+            .origin
+            .restore_current(&mut conn, app.clock.as_ref())
+            .await?
+        else {
+            return Ok((false, false, false, None));
         };
-        if !valid {
-            return Ok((false, false, false));
-        }
-        let principal =
-            match Principal::load(&mut conn, ticket.caller.clone(), Time::new(now)).await {
-                Ok(p) => p,
-                Err(_) => return Ok((false, false, false)),
-            };
         let Some(row) = rows::get(&mut conn, ticket.browser).await? else {
-            return Ok((false, false, false));
+            return Ok((false, false, false, None));
         };
         let Some(site) = rows::site(&mut conn, row.environment_id).await? else {
-            return Ok((false, false, false));
+            return Ok((false, false, false, None));
         };
-        if row.state != "open"
+        if row.environment_id != ticket.environment
+            || row.env_generation != ticket.generation
+            || site.machine_id != ticket.machine
+            || row.state != "open"
             || row.env_generation != site.generation
             || orch_engine::browsers::Browsers::off(&mut conn, &site)
                 .await
                 .map_err(ApiError::internal)?
                 .is_some()
         {
-            return Ok((false, false, false));
+            return Ok((false, false, false, None));
         }
+        let Some((principal, scope_control)) = ticket
+            .origin
+            .principal(
+                &mut conn,
+                caller,
+                row.environment_id,
+                if ticket.control {
+                    "BrowserTicketCreate.control"
+                } else {
+                    "BrowserTicketCreate.view"
+                },
+                app.clock.as_ref(),
+            )
+            .await?
+        else {
+            return Ok((false, false, false, None));
+        };
         let view = views::holds(
             &mut conn,
             &principal,
@@ -526,6 +602,7 @@ impl Sockets {
         )
         .await?;
         let control = ticket.control
+            && scope_control
             && views::holds(
                 &mut conn,
                 &principal,
@@ -541,10 +618,75 @@ impl Sockets {
                 Permission::FilesView,
             )
             .await?;
-        Ok((view, control, files))
+        conn.commit().await.map_err(orch_db::DbError::from)?;
+        let caller = principal.caller().clone();
+        if !super::ticket_origin::deadline_allows(&caller, session_deadline, app.clock.as_ref()) {
+            return Ok((false, false, false, None));
+        }
+        Ok((view, control, files, Some((caller, session_deadline))))
+    }
+
+    async fn publish_frame(
+        app: &App,
+        ticket: &Ticket,
+        socket: &mut WebSocket,
+        mut frame: BrowserServerFrame,
+    ) -> ApiResult<bool> {
+        super::publication::send(socket, app.clock.as_ref(), async {
+            let (view, control, _, current) = Self::gates(app, ticket).await?;
+            if !view
+                || (!control
+                    && matches!(
+                        frame,
+                        BrowserServerFrame::Dialog { .. }
+                            | BrowserServerFrame::Chooser { .. }
+                            | BrowserServerFrame::Copied { .. }
+                    ))
+            {
+                return Ok(None);
+            }
+            let Some(current) = current else {
+                return Ok(None);
+            };
+            if let BrowserServerFrame::Ready { control: shown, .. } = &mut frame {
+                *shown = control;
+            }
+            Ok(Some((
+                Message::Text(serde_json::to_string(&frame).unwrap_or_default().into()),
+                current,
+            )))
+        })
+        .await
+    }
+
+    async fn publish_picture(
+        app: &App,
+        ticket: &Ticket,
+        socket: &mut WebSocket,
+        picture: Bytes,
+    ) -> ApiResult<bool> {
+        super::publication::send(socket, app.clock.as_ref(), async {
+            let (view, _, _, current) = Self::gates(app, ticket).await?;
+            Ok(view
+                .then_some(current)
+                .flatten()
+                .map(|current| (Message::Binary(picture), current)))
+        })
+        .await
     }
 
     async fn socket(&self, app: App, ticket: Ticket, mut socket: WebSocket) {
+        // A withdrawn ticket must not open the shared native door first.
+        if !matches!(Self::gates(&app, &ticket).await, Ok((true, _, _, _))) {
+            let _ = send(
+                &mut socket,
+                &BrowserServerFrame::Closed {
+                    reason: BrowserClosedReason::Revoked,
+                },
+            )
+            .await;
+            return;
+        }
         let group = match self.ensure(&app, ticket.browser).await {
             Ok(g) => g,
             Err(_) => {
@@ -569,7 +711,7 @@ impl Sockets {
         let Some(ready) = ready_rx.borrow().clone() else {
             return;
         };
-        let (view, mut control, _) = match Self::gates(&app, &ticket).await {
+        let (view, mut control, _, _) = match Self::gates(&app, &ticket).await {
             Ok(g) => g,
             Err(_) => return,
         };
@@ -589,7 +731,7 @@ impl Sockets {
         lock(&group.state).viewers.insert(
             id,
             Viewer {
-                user: ticket.user,
+                user: ticket.origin.user(),
                 watch: None,
                 control,
                 metadata,
@@ -598,18 +740,28 @@ impl Sockets {
         );
         self.count(&app, &group).await;
         let people = self.people(&app, &group).await;
-        if send(
-            &mut socket,
-            &BrowserServerFrame::Ready {
-                control,
-                tabs: ready.tabs,
-                viewport: ready.viewport,
-                people,
-            },
-        )
-        .await
-        .is_err()
-        {
+        if !matches!(
+            Self::publish_frame(
+                &app,
+                &ticket,
+                &mut socket,
+                BrowserServerFrame::Ready {
+                    control,
+                    tabs: ready.tabs,
+                    viewport: ready.viewport,
+                    people,
+                },
+            )
+            .await,
+            Ok(true)
+        ) {
+            let _ = send(
+                &mut socket,
+                &BrowserServerFrame::Closed {
+                    reason: Self::ending(&app, ticket.browser).await,
+                },
+            )
+            .await;
             self.depart(&app, &group, id).await;
             return;
         }
@@ -625,7 +777,7 @@ impl Sockets {
                             let frame=match serde_json::from_str::<BrowserClientFrame>(&text) {Ok(frame)=>frame,Err(_)=>{let _=send(&mut socket,&BrowserServerFrame::Error{code:BrowserSocketError::Invalid,detail:"This is not a browser frame.".to_owned()}).await;continue;}};
                             if let BrowserClientFrame::Ping{n}=frame {let _=send(&mut socket,&BrowserServerFrame::Pong{n}).await;continue;}
                             if let BrowserClientFrame::Ack{n}=frame {if in_flight==Some(n){in_flight=None;}continue;}
-                            let (view,now_control,now_files)=match Self::gates(&app,&ticket).await {Ok(g)=>g,Err(_)=>break};
+                            let (view,now_control,now_files,_)=match Self::gates(&app,&ticket).await {Ok(g)=>g,Err(_)=>break};
                             if !view {let _=send(&mut socket,&BrowserServerFrame::Closed{reason:Self::ending(&app,ticket.browser).await}).await;break;}
                             if control!=now_control {
                                 let tab={let mut state=lock(&group.state);state.viewers.get_mut(&id).and_then(|v|{v.control=now_control;v.watch.as_ref().map(|w|w.tab.clone())})};
@@ -635,15 +787,35 @@ impl Sockets {
                             if frame.needs_control()&&!control {let _=send(&mut socket,&BrowserServerFrame::Error{code:BrowserSocketError::ViewOnly,detail:"This ticket can only watch.".to_owned()}).await;continue;}
                             if needs_files(&frame)&&!files {let _=send(&mut socket,&BrowserServerFrame::Error{code:BrowserSocketError::NotAllowed,detail:"This input also needs files.view on the environment.".to_owned()}).await;continue;}
                             if let BrowserClientFrame::Watch{tab,width,height,dpr}=&frame {
+                                // Updating an existing viewer is the read-owned registration;
+                                // later aggregate maintenance represents all still-live viewers.
+                                let (view,now_control,_,current)=match Self::gates(&app,&ticket).await{Ok(g)=>g,Err(_)=>break};
+                                if !view{let _=send(&mut socket,&BrowserServerFrame::Closed{reason:Self::ending(&app,ticket.browser).await}).await;break;}
+                                let Some((caller,session))=current else{break};control=now_control;
                                 if *width==0||*height==0||!dpr.is_finite()||*dpr<=0.0 {let _=send(&mut socket,&BrowserServerFrame::Error{code:BrowserSocketError::Invalid,detail:"A watch needs a positive panel size and density.".to_owned()}).await;continue;}
                                 let exists={let state=lock(&group.state);state.ready.as_ref().is_some_and(|r|r.tabs.iter().any(|t|t.id==*tab))};
                                 if !exists {let _=send(&mut socket,&BrowserServerFrame::Error{code:BrowserSocketError::NoSuchTab,detail:"That tab no longer exists.".to_owned()}).await;continue;}
-                                let old={let mut state=lock(&group.state);let Some(viewer)=state.viewers.get_mut(&id) else {break;};viewer.control=control;let old=viewer.watch.replace(Watch{tab:tab.clone(),width:*width,height:*height,dpr:*dpr});viewer.picture.send_replace(None);old};
+                                let registered={let mut state=lock(&group.state);let Some(viewer)=state.viewers.get_mut(&id) else {break;};
+                                    if !super::ticket_origin::deadline_allows(&caller,session,app.clock.as_ref()){None}else{
+                                        viewer.control=control;let old=viewer.watch.replace(Watch{tab:tab.clone(),width:*width,height:*height,dpr:*dpr});viewer.picture.send_replace(None);Some(old)
+                                    }
+                                };
+                                let Some(old)=registered else{let _=send(&mut socket,&BrowserServerFrame::Closed{reason:Self::ending(&app,ticket.browser).await}).await;break;};
                                 in_flight=None;pic_rx.borrow_and_update();
                                 if let Some(old)=old {Self::aggregate(&group,&old.tab).await;}Self::aggregate(&group,tab).await;
                             } else {
-                                self.input(&app,&group,ticket.user,&frame);
-                                if group.outgoing.send(serde_json::to_value(&frame).unwrap_or(Json::Null)).await.is_err() {break;}
+                                let accepted=super::publication::enqueue(&group.outgoing,app.clock.as_ref(),async {
+                                    let (view,control,files,current)=Self::gates(&app,&ticket).await?;
+                                    if !view || (frame.needs_control()&&!control) || (needs_files(&frame)&&!files){return Ok(None)}
+                                    Ok(current.map(|current|(serde_json::to_value(&frame).unwrap_or(Json::Null),current)))
+                                }).await;
+                                if !matches!(accepted,Ok(true)){
+                                    let Ok((view,control,files,_))=Self::gates(&app,&ticket).await else{break};
+                                    if !view{let _=send(&mut socket,&BrowserServerFrame::Closed{reason:Self::ending(&app,ticket.browser).await}).await;break;}
+                                    let (code,detail)=if frame.needs_control()&&!control{(BrowserSocketError::ViewOnly,"This ticket can only watch.")}else if needs_files(&frame)&&!files{(BrowserSocketError::NotAllowed,"This input also needs files.view on the environment.")}else{break};
+                                    let _=send(&mut socket,&BrowserServerFrame::Error{code,detail:detail.to_owned()}).await;continue;
+                                }
+                                self.input(&app,&group,ticket.origin.user(),&frame);
                                 let _=app.engine.browsers().used(ticket.browser).await;
                             }
                         }
@@ -653,22 +825,26 @@ impl Sockets {
                         Message::Pong(_)=>{},
                     }
                 }
-                frame=meta_rx.recv()=>{let Some(frame)=frame else {break;};let Ok((view,control,_))=Self::gates(&app,&ticket).await else {break;};if !view {let _=send(&mut socket,&BrowserServerFrame::Closed{reason:Self::ending(&app,ticket.browser).await}).await;break;}
-                    if !control&&matches!(frame,BrowserServerFrame::Dialog{..}|BrowserServerFrame::Chooser{..}|BrowserServerFrame::Copied{..}){continue;}let closed=matches!(frame,BrowserServerFrame::Closed{..});if send(&mut socket,&frame).await.is_err()||closed{break;}}
+                frame=meta_rx.recv()=>{let Some(frame)=frame else {break;};let Ok((view,control,_,_))=Self::gates(&app,&ticket).await else {break;};if !view {let _=send(&mut socket,&BrowserServerFrame::Closed{reason:Self::ending(&app,ticket.browser).await}).await;break;}
+                    if !control&&matches!(frame,BrowserServerFrame::Dialog{..}|BrowserServerFrame::Chooser{..}|BrowserServerFrame::Copied{..}){continue;}let closed=matches!(frame,BrowserServerFrame::Closed{..});match Self::publish_frame(&app,&ticket,&mut socket,frame).await {
+                        Ok(true)=>{},
+                        Ok(false)=>{let Ok((view,_,_,_))=Self::gates(&app,&ticket).await else{break};if !view{let _=send(&mut socket,&BrowserServerFrame::Closed{reason:Self::ending(&app,ticket.browser).await}).await;break;}},
+                        Err(_)=>break,
+                    }if closed{break;}}
                 changed=pic_rx.changed(),if in_flight.is_none()=>{
-                    if changed.is_err(){break;}let Ok((view,_,_))=Self::gates(&app,&ticket).await else {break;};if !view {let _=send(&mut socket,&BrowserServerFrame::Closed{reason:Self::ending(&app,ticket.browser).await}).await;break;}
-                    let picture=pic_rx.borrow_and_update().clone();if let Some(picture)=picture {in_flight=PictureHeader::decode(&picture).map(|h|h.n);if socket.send(Message::Binary(picture)).await.is_err(){break;}}
+                    if changed.is_err(){break;}let Ok((view,_,_,_))=Self::gates(&app,&ticket).await else {break;};if !view {let _=send(&mut socket,&BrowserServerFrame::Closed{reason:Self::ending(&app,ticket.browser).await}).await;break;}
+                    let picture=pic_rx.borrow_and_update().clone();if let Some(picture)=picture {in_flight=PictureHeader::decode(&picture).map(|h|h.n);if !matches!(Self::publish_picture(&app,&ticket,&mut socket,picture).await,Ok(true)){let _=send(&mut socket,&BrowserServerFrame::Closed{reason:Self::ending(&app,ticket.browser).await}).await;break;}}
                 }
                 _=keeper.tick()=>{
-                    let (view,now_control,now_files)=match Self::gates(&app,&ticket).await {Ok(g)=>g,Err(_)=>break};
+                    let (view,now_control,now_files,_)=match Self::gates(&app,&ticket).await {Ok(g)=>g,Err(_)=>break};
                     if !view {let _=send(&mut socket,&BrowserServerFrame::Closed{reason:Self::ending(&app,ticket.browser).await}).await;break;}
                     if control&&!now_control {
                         let tab={let mut state=lock(&group.state);state.viewers.get_mut(&id).and_then(|v|{v.control=false;v.watch.as_ref().map(|w|w.tab.clone())})};
                         if let Some(tab)=tab {Self::aggregate(&group,&tab).await;}
-                        let ready=lock(&group.state).ready.clone();if let Some(ready)=ready {let people=self.people(&app,&group).await;let _=send(&mut socket,&BrowserServerFrame::Ready{control:false,tabs:ready.tabs,viewport:ready.viewport,people}).await;}
+                        let ready=lock(&group.state).ready.clone();if let Some(ready)=ready {let people=self.people(&app,&group).await;let _=Self::publish_frame(&app,&ticket,&mut socket,BrowserServerFrame::Ready{control:false,tabs:ready.tabs,viewport:ready.viewport,people}).await;}
                     }
                     control=now_control;let _=now_files;
-                    let people=self.people(&app,&group).await;if send(&mut socket,&BrowserServerFrame::People{watching:people.watching,driving:people.driving}).await.is_err(){break;}
+                    let people=self.people(&app,&group).await;if !matches!(Self::publish_frame(&app,&ticket,&mut socket,BrowserServerFrame::People{watching:people.watching,driving:people.driving}).await,Ok(true)){let _=send(&mut socket,&BrowserServerFrame::Closed{reason:Self::ending(&app,ticket.browser).await}).await;break;}
                     let _=app.engine.browsers().used(ticket.browser).await;
                 }
             }
@@ -899,7 +1075,7 @@ async fn attach_checked(
     let browser = ctx.id("browser_id")?;
     let sockets = ctx.app.realtime.browsers().clone();
     let ticket = sockets
-        .redeem(browser, &query.ticket, ctx.now)
+        .redeem(browser, &query.ticket, ctx.now, ctx.http_surface()?)
         .ok_or_else(|| {
             ApiError::new(
                 orch_api_contract::common::ErrorCode::Gone,
@@ -1015,9 +1191,102 @@ pub(crate) fn recover(app: &App) {
     });
 }
 
+/// Test-only observation of the ACTUAL stored HTTP ticket and ordinary redemption predicate.
+/// No synthetic caller, metadata constructor or alternate authorization is installed.
+#[cfg(test)]
+pub(super) async fn ticket_scope_probe(
+    app: &App,
+    target: Id,
+    token: &str,
+) -> ApiResult<Option<(bool, bool)>> {
+    let sockets = app.realtime.browsers();
+    let Some(ticket) = sockets.redeem(
+        target,
+        token,
+        app.clock.now(),
+        orch_api_contract::surface::HttpSurface::Key,
+    ) else {
+        return Ok(None);
+    };
+    let (view, control, _, _) = Sockets::gates(app, &ticket).await?;
+    Ok(Some((view, control)))
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::middleware::authentication::Via;
+    use orch_authz::Caller;
+    #[test]
+    fn surface_ticket_foreign_redemption_cannot_consume_either_origin() {
+        use orch_api_contract::surface::HttpSurface;
+        for surface in [HttpSurface::Browser, HttpSurface::Key] {
+            let user = orch_types::new_id();
+            let target = orch_types::new_id();
+            let now = Utc::now();
+            let token = "synthetic-transport-ticket";
+            let token_id = orch_types::new_id();
+            let (caller, via) = match surface {
+                HttpSurface::Browser => (
+                    Caller::session(user),
+                    Via::Session {
+                        session_id: orch_types::new_id(),
+                    },
+                ),
+                HttpSurface::Key => {
+                    let grant = orch_authz::TokenGrant::from_stored_scope(
+                        &["*".to_owned()],
+                        None,
+                        None,
+                        None,
+                    )
+                    .unwrap();
+                    (
+                        Caller::token(user, grant.for_token(token_id)),
+                        Via::Token {
+                            token_id,
+                            scopes: vec!["*".to_owned()],
+                            node_id: None,
+                            operation_scope: None,
+                            expires_at: None,
+                        },
+                    )
+                }
+            };
+            let sockets = Sockets::default();
+            lock(&sockets.tickets).insert(
+                token_hash(token),
+                Ticket {
+                    id: orch_types::new_id(),
+                    surface,
+                    browser: target,
+                    environment: orch_types::new_id(),
+                    machine: Some(orch_types::new_id()),
+                    generation: 1,
+                    origin: Origin::from_caller(&caller, &via).unwrap(),
+                    control: false,
+                    expires: now + Span::seconds(30),
+                },
+            );
+            let foreign = if surface == HttpSurface::Browser {
+                HttpSurface::Key
+            } else {
+                HttpSurface::Browser
+            };
+            assert!(sockets.redeem(target, token, now, foreign).is_none());
+            let kept = sockets
+                .redeem(target, token, now, surface)
+                .expect("wrong plane must leave the original ticket");
+            assert_eq!(kept.surface, surface);
+            assert_eq!(kept.origin.user(), user);
+            assert!(!kept.control);
+            assert!(
+                sockets.redeem(target, token, now, surface).is_none(),
+                "same-plane use remains single-use"
+            );
+        }
+    }
+
     #[test]
     fn file_navigation_and_workspace_chooser_paths_need_the_files_door() {
         let navigate = BrowserClientFrame::Navigate {

@@ -142,7 +142,7 @@ test('administrator reach is the same session act, once in each direction, and i
   await expect(finder.locator('[data-value^="commands:account.admin."]')).toHaveCount(0);
 });
 
-test('Ask on the side opens the ordinary form for the fixture with a verified read-only reader', async ({ page }) => {
+test('Side thread opens the ordinary form for the fixture with a verified read-only reader', async ({ page }) => {
   await signIn(page); await page.goto(`/thread/${ACME.mainThread}`);
   const finder = await open(page, 'en', '> ask side');
   const ask = finder.locator('[data-value="commands:thread.side-ask"]'); await expect(ask).toBeVisible();

@@ -66,7 +66,7 @@ export function LinksPanel({ documentId, seq, enabled = true }: { documentId: st
   const chosen = picked ?? stored;
   const choose = (tab: string) => { setPicked(tab); remember(tab); };
   if (!enabled) return null;
-  if (tabs.isPending) return <SkeletonRows rows={LOADING_ROWS} />;
+  if (tabs.isPending) return <SkeletonRows read={tabs} rows={LOADING_ROWS} />;
   if (tabs.isError) return <ErrorAlert error={tabs.error} action={<Button size="sm" onClick={() => void tabs.refetch()}>{t('common.tryAgain')}</Button>} />;
   if (shown.length === 0) return null;
   const active: LinksTab = shown.find((tab) => tab === chosen) ?? shown[0] ?? 'referenced_by';

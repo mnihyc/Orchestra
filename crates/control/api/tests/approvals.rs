@@ -8,6 +8,7 @@
 mod places;
 mod rig;
 mod support;
+use support::FullApprovalReply;
 
 use orch_api_contract::approvals::{
     Approval, ApprovalCancel, ApprovalDecide, ApprovalDecision, ApprovalGet, ApprovalKind,
@@ -99,6 +100,7 @@ async fn an_environments_ports_manager_decides_port_place_but_its_thread_manager
         .body(&decision)
         .send()
         .await
+        .full_approval()
         .problem();
     assert_eq!(refused.code, ErrorCode::AuthzDenied);
     assert_eq!(refused.extra["required"], "ports.manage");
@@ -111,6 +113,7 @@ async fn an_environments_ports_manager_decides_port_place_but_its_thread_manager
         .body(&decision)
         .send()
         .await
+        .full_approval()
         .ok();
     assert_eq!(decided.approval.state, ApprovalState::Approved);
     assert_eq!(
@@ -161,6 +164,7 @@ async fn a_thread_manager_without_the_capabilitys_approver_scope_cannot_decide_i
             .body(&decision)
             .send()
             .await
+            .full_approval()
             .problem();
         assert_eq!(refused.code, ErrorCode::AuthzDenied);
         let state: String = sqlx::query_scalar("SELECT state FROM approvals WHERE id = $1")
@@ -324,7 +328,7 @@ async fn the_first_decision_wins_the_harness_is_told_once_and_the_turn_goes_on()
             .call(ApprovalDecide, &[&waiting.id])
             .token(&who.token)
             .body(&decision);
-        async move { call.send().await }
+        async move { call.send().await.full_approval() }
     };
     let decided = decide(&s.ada, allow()).await.ok();
     assert_eq!(decided.state, ApprovalState::Approved);
@@ -391,7 +395,7 @@ async fn an_option_that_denies_denies_and_a_decision_that_does_not_fit_the_reque
             .call(ApprovalDecide, &[&waiting.id])
             .token(&s.ada.token)
             .body(&decision);
-        async move { call.send().await }
+        async move { call.send().await.full_approval() }
     };
     let wrong = decide(ApprovalDecision::Answers(HarnessAnswersDecision {
         answers: std::collections::BTreeMap::new(),
@@ -435,6 +439,7 @@ async fn answering_what_the_agent_asks_is_managing_the_thread_and_driving_it_is_
             .body(&allow())
             .send()
             .await
+            .full_approval()
             .problem();
         assert_eq!(refused.code, ErrorCode::AuthzDenied, "{who:?}");
         assert!(missing_permissions(&refused).contains(&"thread.manage".to_owned()));
@@ -572,6 +577,7 @@ async fn a_request_for_access_is_taken_back_by_the_person_who_asked_and_decided_
         .token(&s.ada.token)
         .send()
         .await
+        .full_approval()
         .problem();
     assert_eq!(other.code, ErrorCode::AuthzDenied);
     let decide = app
@@ -580,6 +586,7 @@ async fn a_request_for_access_is_taken_back_by_the_person_who_asked_and_decided_
         .raw_body(&json!({ "approve": true }))
         .send()
         .await
+        .full_approval()
         .problem();
     assert_eq!(decide.code, ErrorCode::AuthzDenied);
     let taken = app
@@ -587,6 +594,7 @@ async fn a_request_for_access_is_taken_back_by_the_person_who_asked_and_decided_
         .token(&s.bea.token)
         .send()
         .await
+        .full_approval()
         .ok();
     assert_eq!(taken.state, ApprovalState::Cancelled);
     let again = app
@@ -594,6 +602,7 @@ async fn a_request_for_access_is_taken_back_by_the_person_who_asked_and_decided_
         .token(&s.bea.token)
         .send()
         .await
+        .full_approval()
         .problem();
     assert_eq!(again.code, ErrorCode::ApprovalAlreadyDecided);
     // What a harness asks is no request for access.
@@ -608,6 +617,7 @@ async fn a_request_for_access_is_taken_back_by_the_person_who_asked_and_decided_
         .token(&s.ada.token)
         .send()
         .await
+        .full_approval()
         .problem();
     assert_eq!(harness.code, ErrorCode::RequestInvalid);
 }
@@ -649,6 +659,7 @@ async fn a_question_keeps_invalid_answers_pending_and_exposes_answered_in_every_
         .body(&valid)
         .send()
         .await
+        .full_approval()
         .problem();
     assert_eq!(denied.code, ErrorCode::AuthzDenied);
     for answers in [
@@ -668,6 +679,7 @@ async fn a_question_keeps_invalid_answers_pending_and_exposes_answered_in_every_
             .body(&invalid)
             .send()
             .await
+            .full_approval()
             .problem();
         assert_eq!(refusal.code, ErrorCode::RequestInvalid);
         let unchanged = s
@@ -691,6 +703,7 @@ async fn a_question_keeps_invalid_answers_pending_and_exposes_answered_in_every_
         .body(&valid)
         .send()
         .await
+        .full_approval()
         .ok();
     assert_eq!(answered.state, ApprovalState::Answered);
     assert!(!answered.can_decide && !answered.decided_automatically);
@@ -747,6 +760,7 @@ async fn a_question_keeps_invalid_answers_pending_and_exposes_answered_in_every_
         .body(&valid)
         .send()
         .await
+        .full_approval()
         .problem();
     assert_eq!(late.code, ErrorCode::ApprovalAlreadyDecided);
     assert_eq!(late.extra["current"]["state"], "answered");

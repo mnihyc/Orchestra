@@ -3,8 +3,13 @@
  * The articles are the files of `docs/user/`, built into the application. This reads one of them; it
  * knows nothing of where they come from, so that the same reading serves the build and the tests.
  * A file may begin with a block between two lines of three dashes, which says what a title and a
- * heading cannot: `screens` (the routes it belongs to) and `keywords` (more words to find it by).
+ * heading cannot: `screens` (the routes it belongs to), `keywords` (more words to find it by), and an
+ * authored `summary` in that body's own language.
  */
+import { Lexer, Parser, TextRenderer, type Token, type Tokens } from 'marked';
+
+export const ARTICLE_GROUPS = ['getting-started', 'work', 'access', 'resources', 'providers', 'operations', 'settings'] as const;
+export type ArticleGroup = typeof ARTICLE_GROUPS[number];
 
 export interface Heading {
   /** The anchor of the heading inside its article. */
@@ -20,12 +25,16 @@ export interface Article {
   /** The file's name without its ending: the address of the article is `/help/<id>`. */
   id: string;
   title: string;
+  /** A short summary authored in this article's own language, never generated from its body. */
+  summary?: string;
   headings: Heading[];
   keywords: string[];
   /** The routes it belongs to, as the table of routes writes them (`/inbox`, `/thread/$threadId`). */
   screens: string[];
   /** Implementer articles appear together under Build your own. */
   section?: 'build-your-own';
+  /** The catalogue section, shared by all authored languages of this article. */
+  group?: ArticleGroup;
   /** Relative Markdown links in an implementer directory have a separate article namespace. */
   linkPrefix?: string;
   /** Static contract-schema assets shipped with this guide, keyed by their relative link. */
@@ -38,7 +47,7 @@ export interface Article {
   language?: string;
 }
 
-export type ArticleTranslation = Pick<Article, 'title' | 'headings' | 'keywords' | 'body'>;
+export type ArticleTranslation = Pick<Article, 'title' | 'summary' | 'headings' | 'keywords' | 'body'>;
 
 /** Selects an authored body without mutating the English source or guessing a translation. */
 export function articleInLanguage(article: Article, language: string): Article {
@@ -47,8 +56,11 @@ export function articleInLanguage(article: Article, language: string): Article {
   const chosen = Object.keys(alternatives).find((one) => one.toLowerCase() === requested)
     ?? Object.keys(alternatives).find((one) => one.split('-')[0]?.toLowerCase() === requested.split('-')[0]);
   const text = chosen === undefined ? undefined : alternatives[chosen];
-  return text === undefined ? { ...article, language: 'en' }
-    : { ...article, ...text, keywords: [...article.keywords, ...text.keywords], language: chosen ?? 'en' };
+  if (text === undefined) return { ...article, language: 'en' };
+  // An authored translation must supply its own summary; the English text cannot fill that field.
+  const localized = { ...article, ...text, keywords: [...article.keywords, ...text.keywords], language: chosen ?? 'en' };
+  if (text.summary === undefined) delete localized.summary;
+  return localized;
 }
 
 export function articleMatchesLanguage(article: Article, language: string): boolean {
@@ -113,16 +125,49 @@ export function readArticle(id: string, source: string): Article {
       headings.push({ id: anchor, text, level, ...(aliases === undefined ? {} : { keywords: listOf(aliases) }) });
     }
   }
+  const group = ARTICLE_GROUPS.find((group) => group === meta.group);
   return {
     id: meta.id ?? id,
     title: meta.title ?? (title === '' ? id : title),
+    ...(meta.summary === undefined ? {} : { summary: meta.summary }),
     headings,
     keywords: listOf(meta.keywords ?? ''),
     screens: listOf(meta.screens ?? ''),
     body,
+    ...(group === undefined ? {} : { group }),
     ...(meta.section === 'build-your-own' ? { section: 'build-your-own' as const } : {}),
     ...(meta.link_prefix === undefined ? {} : { linkPrefix: meta.link_prefix }),
   };
+}
+
+/** The first authored prose line, with inline markup read as text rather than another link. */
+export function articleFirstLine(article: Pick<Article, 'body'>): string {
+  const paragraph = (tokens: readonly Token[]): Tokens.Paragraph | undefined => {
+    for (const token of tokens) {
+      if (isParagraph(token)) return token;
+      if (isQuote(token)) { const first = paragraph(token.tokens); if (first !== undefined) return first; }
+    }
+    return undefined;
+  };
+  const first = paragraph(Lexer.lex(article.body));
+  if (first === undefined) return '';
+  const parser = new Parser(), renderer = new TextRenderer();
+  const inline = (tokens: Token[]): string => parser.parseInline(tokens, renderer);
+  renderer.strong = ({ tokens }) => inline(tokens);
+  renderer.em = ({ tokens }) => inline(tokens);
+  renderer.del = ({ tokens }) => inline(tokens);
+  renderer.link = ({ tokens }) => inline(tokens);
+  renderer.html = () => '';
+  return inline(first.tokens).replace(/\s+/g, ' ').trim();
+}
+
+function isParagraph(token: Token): token is Tokens.Paragraph { return token.type === 'paragraph'; }
+function isQuote(token: Token): token is Tokens.Blockquote { return token.type === 'blockquote'; }
+
+/** A written summary where present; older implementer articles keep their existing prose preview. */
+export function articlePreview(article: Pick<Article, 'summary' | 'body'>): string {
+  const summary = article.summary?.trim();
+  return summary === undefined || summary === '' ? articleFirstLine(article) : summary;
 }
 
 /** The guide follows a reader's first work, then configuration and operation. */
@@ -133,8 +178,10 @@ export interface Guide {
 /** Known workflows have an authored order; extension articles follow them by stable id. */
 const FIRST_USE = [
   'getting-started', 'connect-a-machine', 'add-a-provider', 'register-your-program', 'temporary-environments', 'message-queue',
-  'workflows', 'files-and-attachments', 'finding-things', 'who-can-see-and-do-what',
-  'how-approvals-work', 'resources', 'provider-details', 'write-an-environment-template',
+  'workflows', 'files-and-attachments', 'finding-things', 'ask', 'who-can-see-and-do-what',
+  'how-approvals-work', 'running-thread-views', 'restore-files-before-a-message', 'group-chats', 'link-sharing',
+  'organization-terms', 'messages-from-admins', 'resources', 'resource-groups', 'duplicate-resources', 'mcp-import-and-use',
+  'switch-and-move-environments', 'admin-inspection', 'provider-web-search', 'provider-details', 'write-an-environment-template',
   'choose-machine-storage', 'commands-after-start', 'change-a-running-environment', 'recover-lost-work',
   'let-agents-open-ports', 'settings-and-usage', 'speed-first-output-and-errors', 'updates',
   'provider-readme', 'provider-credential', 'provider-facts', 'provider-models', 'provider-resets',
@@ -153,7 +200,8 @@ export function makeGuide(sources: Record<string, string>, files: Readonly<Recor
       const alternatives: Record<string, ArticleTranslation> = {};
       for (const one of localized) {
         const text = one.articles.find((candidate) => candidate.id === article.id);
-        if (text !== undefined) alternatives[one.language] = { title: text.title, headings: text.headings, keywords: text.keywords, body: text.body };
+        if (text !== undefined) alternatives[one.language] = { title: text.title, headings: text.headings, keywords: text.keywords, body: text.body,
+          ...(text.summary === undefined ? {} : { summary: text.summary }) };
       }
       return Object.keys(alternatives).length === 0 ? article : { ...article, translations: alternatives };
     })

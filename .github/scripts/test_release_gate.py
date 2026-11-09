@@ -11,54 +11,46 @@ from unittest.mock import patch
 import subprocess
 
 from release_assemble import assemble, assemble_checked
-from release_gate import compare, eligibility, waivers
-from release_publish import check_draft_assets, check_existing_draft, main as publish
+from release_gate import compare, eligibility
+from release_ci import status
+from release_publish import check_release_assets, check_existing_release, is_latest, main as publish
 
 HEAD = "a" * 40
 
 
 class ReleaseGateTests(unittest.TestCase):
     def green(self, **changes):
-        return {"id": 7, "head_sha": HEAD, "event": "push", "status": "completed", "conclusion": "success", **changes}
+        return {"id": 7, "head_sha": HEAD, "head_branch": "v1.2.3", "event": "push", "status": "completed", "conclusion": "success", **changes}
 
-    def test_the_tag_must_name_this_commit_and_advance_published_versions(self):
-        self.assertEqual(eligibility("v1.2.3", HEAD, HEAD, [{"tag_name": "v1.2.2", "draft": False}], [self.green()]), 7)
-        for tag, tagged, old in [("1.2.3", HEAD, "v1.2.2"), ("v1.2.3", "b" * 40, "v1.2.2"),
-                                 ("v1.2.3", HEAD, "v1.2.3"), ("v1.2.3-rc.1", HEAD, "v1.2.3")]:
-            with self.subTest(tag=tag, tagged=tagged, old=old), self.assertRaises(ValueError):
-                eligibility(tag, HEAD, tagged, [{"tag_name": old, "draft": False}], [self.green()])
+    def test_the_tag_must_name_this_commit_and_latest_follows_version_order(self):
+        eligibility("v1.2.3", HEAD, HEAD)
+        for tag, tagged in [("1.2.3", HEAD), ("v1.2.3", "b" * 40)]:
+            with self.subTest(tag=tag, tagged=tagged), self.assertRaises(ValueError):
+                eligibility(tag, HEAD, tagged)
         self.assertLess(compare("v1.2.3-rc.9", "v1.2.3-rc.10"), 0)
         self.assertGreater(compare("v1.10.0", "v1.9.9"), 0)
+        self.assertTrue(is_latest("v1.2.3", [{"tag_name": "v1.2.2", "draft": False}]))
+        self.assertFalse(is_latest("v1.2.3", [{"tag_name": "v1.3.0", "draft": False}]))
+        self.assertFalse(is_latest("v1.2.3-rc.1", []))
 
     def test_an_older_green_run_cannot_hide_a_later_failed_or_unfinished_run(self):
-        for later in [self.green(id=8, status="in_progress", conclusion=None), self.green(id=8, conclusion="failure")]:
-            with self.subTest(later=later), self.assertRaisesRegex(ValueError, "most recent CI"):
-                eligibility("v1.2.3", HEAD, HEAD, [], [self.green(), later])
-        with self.assertRaisesRegex(ValueError, "no CI run"):
-            eligibility("v1.2.3", HEAD, HEAD, [], [self.green(head_sha="b" * 40)])
+        self.assertIsNone(status("v1.2.3", HEAD, [self.green(), self.green(id=8, status="in_progress", conclusion=None)]))
+        for conclusion in ("failure", "cancelled"):
+            with self.subTest(conclusion=conclusion), self.assertRaisesRegex(ValueError, conclusion):
+                status("v1.2.3", HEAD, [self.green(), self.green(id=8, conclusion=conclusion)])
+        self.assertIsNone(status("v1.2.3", HEAD, [self.green(head_sha="b" * 40)]))
 
-    def test_only_a_listed_tag_goes_without_green_ci_and_it_keeps_every_other_check(self):
-        listed = waivers("# tag and reason\nv1.2.3 built beside its first CI run\n\n")
-        self.assertEqual(listed, {"v1.2.3": "built beside its first CI run"})
-        reason = listed.get("v1.2.3")
-        self.assertIsNone(eligibility("v1.2.3", HEAD, HEAD, [], [], reason))
-        self.assertIsNone(eligibility("v1.2.3", HEAD, HEAD, [], [self.green(conclusion="failure")], reason))
-        self.assertEqual(eligibility("v1.2.3", HEAD, HEAD, [], [self.green()], reason), 7)
-        with self.assertRaisesRegex(ValueError, "no CI run"):
-            eligibility("v1.2.4", HEAD, HEAD, [], [], listed.get("v1.2.4"))
-        with self.assertRaisesRegex(ValueError, "HEAD"):
-            eligibility("v1.2.3", HEAD, "b" * 40, [], [], reason)
-        with self.assertRaisesRegex(ValueError, "advance"):
-            eligibility("v1.2.3", HEAD, HEAD, [{"tag_name": "v1.2.3", "draft": False}], [], reason)
-        with self.assertRaisesRegex(ValueError, "no reason"):
-            waivers("v1.2.3\n")
+    def test_ci_must_match_both_the_tag_and_its_commit(self):
+        self.assertIsNone(status("v1.2.3", HEAD, []))
+        self.assertIsNone(status("v1.2.3", HEAD, [self.green(head_branch="main")]))
+        self.assertIsNone(status("v1.2.3", HEAD, [self.green(event="pull_request")]))
+        self.assertEqual(status("v1.2.3", HEAD, [self.green()])["id"], 7)
 
-    def test_completing_a_draft_checks_its_tag_not_the_tag_creation_default(self):
+    def test_completing_a_release_checks_its_tag_not_the_tag_creation_default(self):
         draft = {"draft": True, "target_commitish": "main"}
-        check_existing_draft(draft, True, HEAD, HEAD)
-        for current, published, tagged in [({"draft": False}, True, HEAD), (draft, False, HEAD), (draft, True, "b" * 40)]:
-            with self.subTest(current=current, published=published, tagged=tagged), self.assertRaises(ValueError):
-                check_existing_draft(current, published, tagged, HEAD)
+        check_existing_release(draft, HEAD, HEAD)
+        with self.assertRaises(ValueError):
+            check_existing_release(draft, "b" * 40, HEAD)
 
     def test_an_existing_published_release_is_refused_before_any_image_is_published(self):
         with tempfile.TemporaryDirectory() as name:
@@ -73,7 +65,7 @@ class ReleaseGateTests(unittest.TestCase):
             argv = ["release_publish.py", "--release", str(directory), "--repo", "example/orch", "--images", str(directory)]
             with patch.object(sys, "argv", argv), patch.dict(os.environ, {"PUBLISH_IMAGES": "true"}), \
                     patch("release_publish.subprocess.run", side_effect=command), patch("release_publish.run", return_value=json.dumps({"sha": HEAD})):
-                with self.assertRaisesRegex(ValueError, "existing release"):
+                with self.assertRaisesRegex(ValueError, "asset set"):
                     publish()
 
     def test_an_existing_draft_has_exactly_the_verified_assets(self):
@@ -82,15 +74,17 @@ class ReleaseGateTests(unittest.TestCase):
             (directory / "version.json").write_text("{}")
             (directory / "payload").write_bytes(b"release bytes")
             digest = "sha256:" + hashlib.sha256(b"release bytes").hexdigest()
-            draft = {"assets": [{"name": "version.json"}, {"name": "payload", "digest": digest}]}
-            check_draft_assets(draft, directory)
+            manifest_digest = "sha256:" + hashlib.sha256(b"{}").hexdigest()
+            draft = {"assets": [{"name": "version.json", "digest": manifest_digest}, {"name": "payload", "digest": digest}]}
+            check_release_assets(draft, directory)
             with self.assertRaisesRegex(ValueError, "asset set"):
-                check_draft_assets({"assets": draft["assets"] + [{"name": "unreviewed"}]}, directory)
+                check_release_assets({"assets": draft["assets"] + [{"name": "unreviewed"}]}, directory)
             with self.assertRaisesRegex(ValueError, "asset set"):
-                check_draft_assets({"assets": draft["assets"][:-1]}, directory)
+                check_release_assets({"assets": draft["assets"][:-1]}, directory)
+            self.assertEqual(check_release_assets({"assets": draft["assets"][:-1]}, directory, partial=True), ["payload"])
             (directory / "payload").write_bytes(b"different bytes")
-            with self.assertRaisesRegex(ValueError, "draft asset differs"):
-                check_draft_assets(draft, directory)
+            with self.assertRaisesRegex(ValueError, "release asset differs"):
+                check_release_assets(draft, directory)
 
     def test_an_unavailable_release_api_does_not_start_image_publication(self):
         with tempfile.TemporaryDirectory() as name:

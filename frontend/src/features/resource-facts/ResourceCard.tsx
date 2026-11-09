@@ -1,4 +1,6 @@
 /** Compact resource detail bodies and their permitted quick actions, mounted only by an open inspection card. */
+import { CardSharing } from '@/features/access/CardSharing';
+import { CardHome, cardHome } from '@/features/navigation/CardHome';
 import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query';
 import { useTranslation } from 'react-i18next';
 import { useState } from 'react';
@@ -179,7 +181,7 @@ export default function ResourceCard({ subject }: { subject: ResourceSubject }) 
   const environmentId = subject.kind === 'environment' ? subject.environment.id : '';
   // A passing card becoming kept shares its in-flight read with the new layer.
   const modelNeedsDetails = subject.kind === 'model' && providerId !== '' && (Object.keys(subject.model.parameters).length === 0 || subject.usage === undefined);
-  const provider = useQuery({ ...providerQuery(providerId, { keepReading: true }), enabled: subject.kind === 'provider' && !fullProvider(subject.provider) || modelNeedsDetails });
+  const provider = useQuery({ ...providerQuery(providerId, { keepReading: true }), enabled: subject.kind === 'provider' && !fullProvider(subject.provider) || subject.kind === 'model' });
   const host = useQuery({ ...hostQuery(hostId, { keepReading: true }), enabled: subject.kind === 'host' && !fullHost(subject.host) });
   const environment = useQuery({ ...environmentQuery(environmentId, { keepReading: true }), enabled: subject.kind === 'environment' && !fullEnvironment(subject.environment) });
   let content;
@@ -206,11 +208,13 @@ export default function ResourceCard({ subject }: { subject: ResourceSubject }) 
   const named = resolved.kind === 'provider' ? resolved.provider : resolved.kind === 'host' ? resolved.host
     : resolved.kind === 'environment' ? resolved.environment : resolved.kind === 'mount' ? resolved.mount
       : resolved.kind === 'mcp_server' ? resolved.server : resolved.kind === 'template' ? resolved.template
-        : resolved.kind === 'agent' ? resolved.agent : resolved.kind === 'skill' ? resolved.skill : null;
-  const home = named !== null && 'home' in named ? named.home : null;
+        : resolved.kind === 'agent' ? resolved.agent : resolved.kind === 'skill' ? resolved.skill : provider.data ?? null;
+  const home = cardHome(named !== null && 'home' in named ? named.home : null);
+  const ownDetails = resolved.kind === 'provider' || resolved.kind === 'host' || resolved.kind === 'environment' || resolved.kind === 'model';
   return <div className="flex w-[min(20rem,calc(100vw-2rem))] max-w-full flex-col gap-3 p-3" data-resource-card={subject.kind}>
-    <div className="flex min-w-0 flex-col gap-1"><div className="flex min-w-0 items-center gap-1"><h3 className="min-w-0 text-base font-semibold wrap-anywhere"><a href={resourceAddress(resolved)} className="hover:underline">{resourceName(resolved)}</a></h3><Hint id="resource-facts" popover /></div><ResourceHint subject={resolved} /></div>
-    {home?.name !== undefined && home.name !== null && <p className="text-sm text-text-muted wrap-anywhere">{home.name}</p>}
+    <div className="flex min-w-0 flex-col gap-1"><div className="flex min-w-0 items-center gap-1"><h3 className="min-w-0 text-base font-semibold wrap-anywhere"><a href={resourceAddress(resolved)} className="hover:underline">{resourceName(resolved)}</a></h3><Hint id="resource-facts" popover /></div><ResourceHint subject={resolved} wrap /></div>
+    {ownDetails && home !== null && <CardHome place={home} />}
     {content}
+    {(resolved.kind === 'provider' || resolved.kind === 'host' || resolved.kind === 'environment' || resolved.kind === 'model') && named !== null && <CardSharing target={{ kind: resolved.kind === 'model' ? 'provider' : resolved.kind, id: named.id, name: named.name }} />}
   </div>;
 }

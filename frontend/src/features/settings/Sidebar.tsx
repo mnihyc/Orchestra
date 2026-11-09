@@ -47,7 +47,7 @@ function PlaceSettingsSidebar({ scope }: { scope: PlaceSettingsNavigation }) {
   const project = useQuery({ ...projectQuery(scope.kind === 'project' ? scope.id : ''), enabled: shown && scope.kind === 'project' });
   const topic = useQuery({ ...topicQuery(scope.kind === 'topic' ? scope.id : ''), enabled: shown && scope.kind === 'topic' });
   const query = scope.kind === 'org' ? byId ? idOrg : org : scope.kind === 'project' ? project : topic;
-  if (query.isPending) return <SkeletonRows rows={4} className="p-3" />;
+  if (query.isPending) return <SkeletonRows read={query} rows={4} className="p-3" />;
   if (query.isError) return <ErrorState compact error={query.error} onRetry={() => void query.refetch()} />;
   const node = query.data;
   if (scope.kind === 'org' && node.kind !== 'org') return null;

@@ -31,12 +31,14 @@ type Body = LazyExoticComponent<ComponentType<SectionProps>>;
 const BODIES: Record<SectionId, Body> = {
   system: lazy(() => import('@/features/admin/System').then((module) => ({ default: module.System }))),
   overview: lazy(() => import('@/features/admin/Overview').then((module) => ({ default: module.Overview }))),
+  tokens: lazy(() => import('@/features/admin/Tokens').then((module) => ({ default: module.Tokens }))),
   users: lazy(() => import('@/features/admin/Users').then((module) => ({ default: module.Users }))),
   orgs: lazy(() => import('@/features/admin/Organizations').then((module) => ({ default: module.Organizations }))),
   everything: lazy(() => import('@/features/admin/Everything').then((module) => ({ default: module.Everything }))),
   'sign-in': lazy(() => import('@/features/admin/SignIn').then((module) => ({ default: module.SignIn }))),
   email: lazy(() => import('@/features/admin/Channels').then((module) => ({ default: module.Channels }))),
   hosts: lazy(() => import('@/features/admin/Hosts').then((module) => ({ default: module.Hosts }))),
+  gateways: lazy(() => import('@/features/admin/Gateways').then((module) => ({ default: module.Gateways }))),
   runtimes: lazy(() => import('@/features/admin/Runtimes').then((module) => ({ default: module.Runtimes }))),
   templates: lazy(() => import('@/features/admin/Templates').then((module) => ({ default: module.Templates }))),
   mcp: lazy(() => import('@/features/admin/Mcp').then((module) => ({ default: module.Mcp }))),
@@ -92,16 +94,16 @@ export function Management({ section, search, onSearch }: ManagementProps) {
       : { title: t('admin.title'), icon: ShieldUser },
   );
 
-  if (me.isPending) return <SkeletonRows className="p-6" rows={4} />;
+  if (me.isPending) return <SkeletonRows read={me} className="p-6" rows={4} />;
   if (me.isError) return <ErrorState error={me.error} retrying={me.isRefetching} onRetry={() => void me.refetch()} />;
   if (!me.data.is_system_admin) return <Refusal />;
-  if (mode.isPending) return <SkeletonRows className="p-6" rows={4} />;
+  if (mode.isPending) return <SkeletonRows read={mode} className="p-6" rows={4} />;
   if (mode.isError) return <ErrorState error={mode.error} onRetry={() => void mode.refetch()} />;
   if (!mode.data.as_admin) return <Page><PageHeader title={t('admin.title')} /><div className="flex flex-wrap items-center gap-2"><AdminModeEnableAction /></div></Page>;
 
   const Body = BODIES[id];
   return (
-    <SettingsFrame title={t(`admin.sections.${id}.title`)} lead={t(`admin.sections.${id}.lead`)}
+    <SettingsFrame title={t(`admin.sections.${id}.title`)} lead={id === 'tokens' ? undefined : t(`admin.sections.${id}.lead`)}
       label={t('admin.nav.label')} current={id} items={managementSections(t)}>
           <div data-management-content>
           <ErrorBoundary

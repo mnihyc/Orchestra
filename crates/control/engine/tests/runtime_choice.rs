@@ -370,7 +370,8 @@ fn the_memory_a_guest_costs_beyond_its_limit_is_counted_when_a_host_is_judged_fu
         ..unit("runc", "running")
     };
     assert_eq!(
-        orch_engine::places::declared_with_overhead(&[chosen.clone()], &drivers).memory_mb
+        orch_engine::places::declared_with_overhead(std::slice::from_ref(&chosen), &drivers)
+            .memory_mb
             - orch_engine::places::declared_of(&[chosen]).memory_mb,
         320,
         "an environment's own choice counts over its template's"

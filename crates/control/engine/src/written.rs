@@ -25,7 +25,7 @@
 use orch_api_contract::threads::{
     AnnouncementCategory, AnnouncementFrom, ContentPart, ExportDetail, Forwarded, ForwardedAuthor,
     ForwardedFrom, Item, ItemPayload, ItemStatus, MarkerPayload, OutputRef, PlanStepStatus,
-    ToolCallPayload, ToolPayload, Turn, TurnState, UserMessagePayload,
+    ToolCallPayload, ToolPayload, Turn, TurnState, UserMessagePayload, WebAction,
 };
 use orch_chat::written::size_text;
 use orch_documents::references::{self, Typed, Writing};
@@ -328,12 +328,6 @@ fn plural(count: usize, one: &str, many: &str) -> String {
 
 // ---------------------------------------------------------------- the pieces of a turn
 
-/// A block of the text of a turn: a paragraph that stands alone, or lines of a list that run together.
-enum Block {
-    Paragraph(String),
-    Lines(String),
-}
-
 /// What a person sent, written: their words under their name, then one line for each file or image it carried.
 /// `directory` is where the files of this turn lie; `carried` counts the files of the turn's inputs so far, which is
 /// what `in-<n>-<name>` numbers.
@@ -493,7 +487,7 @@ fn kind_title(tool: &ToolPayload) -> String {
         ToolPayload::FileRead { path, .. } => format!("Read `{path}`"),
         ToolPayload::FileSearch { query, .. } => format!("Searched for `{query}`"),
         ToolPayload::Mcp { server, tool, .. } => format!("Called {server}.{tool}"),
-        ToolPayload::WebSearch { query, .. } => format!("Searched the web for `{query}`"),
+        ToolPayload::WebSearch { query, action, .. } => web_action_title(action.as_ref(), query),
         ToolPayload::WebFetch { url, .. } => format!("Fetched {url}"),
         ToolPayload::Image { name, .. } => format!(
             "Looked at an image{}",
@@ -515,6 +509,27 @@ fn kind_title(tool: &ToolPayload) -> String {
                 .unwrap_or_default()
         ),
         ToolPayload::Other { name, .. } => format!("Called {name}"),
+    }
+}
+
+fn web_action_title(action: Option<&WebAction>, query: &str) -> String {
+    match action {
+        Some(WebAction::OpenPage { url }) => url
+            .as_deref()
+            .map_or_else(|| "Open page".to_owned(), |url| format!("Open page: {url}")),
+        Some(WebAction::FindInPage { url, pattern }) => {
+            let pattern = pattern
+                .as_deref()
+                .map(|pattern| format!(": `{pattern}`"))
+                .unwrap_or_default();
+            let address = url
+                .as_deref()
+                .map(|url| format!(" in <{url}>"))
+                .unwrap_or_default();
+            format!("Find in page{pattern}{address}")
+        }
+        Some(WebAction::Other) => "Web action".to_owned(),
+        _ => format!("Searched the web for `{query}`"),
     }
 }
 
@@ -632,8 +647,16 @@ fn step_details(out: &mut String, call: &ToolCallPayload, turn: i64, step: usize
                 );
             }
         }
-        ToolPayload::WebSearch { query, results } => {
-            let _ = writeln!(out, "{INDENT}looked for `{query}`");
+        ToolPayload::WebSearch {
+            action,
+            query,
+            results,
+        } => {
+            if action.is_none() || matches!(action, Some(WebAction::Search)) {
+                let _ = writeln!(out, "{INDENT}looked for `{query}`");
+            } else {
+                let _ = writeln!(out, "{INDENT}{}", web_action_title(action.as_ref(), query));
+            }
             for result in results.iter().take(WEB_RESULTS_SHOWN) {
                 let _ = writeln!(out, "{INDENT}- {} <{}>", result.title, result.url);
             }
@@ -745,6 +768,52 @@ pub fn marker_words(marker: &MarkerPayload) -> String {
         })
     };
     let words = match marker {
+        M::HarnessChanged(m) => {
+            let subject = m
+                .subject
+                .as_deref()
+                .map(|subject| format!(" ({subject})"))
+                .unwrap_or_default();
+            let value = m
+                .value
+                .as_str()
+                .or_else(|| m.value.get("status").and_then(Json::as_str))
+                .or_else(|| m.value.get("mode").and_then(Json::as_str));
+            format!(
+                "{} {} {}{}{}{}",
+                m.program,
+                if m.changed { "changed" } else { "reported" },
+                m.change.replace('_', " "),
+                subject,
+                value.map(|value| format!(": {value}")).unwrap_or_default(),
+                if m.next_turn {
+                    "; applies to future turns"
+                } else {
+                    ""
+                }
+            )
+        }
+        M::BackgroundWake(wake) => format!(
+            "{}: {}",
+            if wake.admitted {
+                "Woken by"
+            } else {
+                "Completion waiting"
+            },
+            wake.causes
+                .iter()
+                .map(|task| format!(
+                    "{} {}",
+                    task.label,
+                    if task.state == orch_api_contract::native::BackgroundTaskState::Failed {
+                        "failed"
+                    } else {
+                        "finished"
+                    }
+                ))
+                .collect::<Vec<_>>()
+                .join(", ")
+        ),
         M::ResourceResumed(m) => format!(
             "{} enabled {}: {}{}",
             human(&m.by),
@@ -863,7 +932,17 @@ pub fn marker_words(marker: &MarkerPayload) -> String {
             m.provider.name
         ),
         M::Switched(m) => format!("{} switched what it runs on", human(&m.by)),
+        M::ForkedFrom(m) if m.by_agent.is_some() => format!(
+            "An agent forked it from {} for {}",
+            node(&m.thread),
+            human(&m.by)
+        ),
         M::ForkedFrom(m) => format!("{} forked it from {}", human(&m.by), node(&m.thread)),
+        M::Forked(m) if m.by_agent.is_some() => format!(
+            "An agent forked {} from it for {}",
+            node(&m.into),
+            human(&m.by)
+        ),
         M::Forked(m) => format!("{} forked {} from it", human(&m.by), node(&m.into)),
         M::EnvironmentRecreated(m) => {
             format!("Its environment was made again from {}", m.template.name)
@@ -1056,11 +1135,8 @@ fn ended_words(turn: &Turn) -> String {
 }
 
 /// The heading of a turn.
-fn heading(part: &Part<'_>) -> String {
-    let turn = part.turn;
-    let began = turn
-        .started_at
-        .or_else(|| part.items.first().map(|item| item.created_at));
+fn heading(turn: &Turn, first: Option<Time>) -> String {
+    let began = turn.started_at.or(first);
     let mut out = format!("## Turn {}", turn.ordinal);
     if let Some(began) = began {
         let _ = write!(out, " · {}", minute(began));
@@ -1076,80 +1152,6 @@ fn heading(part: &Part<'_>) -> String {
     out
 }
 
-/// A turn in brief: when it was and how it ended in the heading, who asked and the opening of what, the opening of
-/// the agent's last message, and how much it did.
-fn brief_lines(part: &Part<'_>) -> Vec<String> {
-    let mut lines = Vec::new();
-    let asked = part.items.iter().find_map(|item| match &item.payload {
-        ItemPayload::UserMessage(message) => {
-            let who = item
-                .author
-                .as_ref()
-                .map_or_else(|| "Orch".to_owned(), human);
-            let text: Vec<&str> = message
-                .parts
-                .iter()
-                .filter_map(|part| match part {
-                    ContentPart::Text { text } => Some(text.as_str()),
-                    ContentPart::Forwarded(copy) => Some(copy.text.as_str()),
-                    _ => None,
-                })
-                .collect();
-            Some((who, text.join(" ")))
-        }
-        _ => None,
-    });
-    if let Some((who, text)) = asked {
-        lines.push(format!("**{who}:** {}", opening(&text, BRIEF_ASKED_CHARS)));
-    }
-    let answered = part
-        .items
-        .iter()
-        .rev()
-        .find_map(|item| match &item.payload {
-            ItemPayload::AgentMessage(message) if !message.text.trim().is_empty() => {
-                Some(message.text.clone())
-            }
-            _ => None,
-        });
-    if let Some(text) = answered {
-        lines.push(format!(
-            "**{}:** {}",
-            part.agent,
-            opening(&text, BRIEF_ANSWER_CHARS)
-        ));
-    }
-    let steps = part
-        .items
-        .iter()
-        .filter(|item| matches!(item.payload, ItemPayload::ToolCall(_)))
-        .count();
-    let mut changed: Vec<&str> = Vec::new();
-    for item in &part.items {
-        if let ItemPayload::ToolCall(call) = &item.payload
-            && let ToolPayload::FileChange { changes } = &call.tool
-        {
-            for change in changes {
-                if !changed.contains(&change.path.as_str()) {
-                    changed.push(&change.path);
-                }
-            }
-        }
-    }
-    if steps > 0 || !changed.is_empty() {
-        let mut counts = plural(steps, "step", "steps");
-        if !changed.is_empty() {
-            let _ = write!(
-                counts,
-                " · {}",
-                plural(changed.len(), "file changed", "files changed")
-            );
-        }
-        lines.push(counts);
-    }
-    lines
-}
-
 /// Whether an item is of the main stream: what is written of a conversation. Sub-agents' items and the agent's
 /// reasoning are never.
 fn is_written(item: &Item) -> bool {
@@ -1160,128 +1162,45 @@ fn is_written(item: &Item) -> bool {
 /// One turn, written at a depth: its heading, then what was said and done in it.
 #[must_use]
 pub fn turn_text(part: &Part<'_>, beside: &Beside, detail: Detail) -> String {
-    let items: Vec<&Item> = part
+    fn infallible<T>(value: Result<T, std::convert::Infallible>) -> T {
+        match value {
+            Ok(value) => value,
+            Err(never) => match never {},
+        }
+    }
+    let first = part
         .items
         .iter()
-        .copied()
+        .find(|item| is_written(item))
+        .map(|item| item.created_at);
+    let plan = part
+        .items
+        .iter()
         .filter(|item| is_written(item))
-        .collect();
-    let part = Part {
-        turn: part.turn,
-        agent: part.agent,
-        items,
-    };
-    let mut out = heading(&part);
-    out.push('\n');
-    if detail == Detail::Brief {
-        for line in brief_lines(&part) {
-            out.push('\n');
-            out.push_str(&line);
-        }
-        out.push('\n');
-        return out;
+        .enumerate()
+        .filter_map(|(index, item)| matches!(item.payload, ItemPayload::Plan(_)).then_some(index))
+        .last();
+    let mut out = String::new();
+    let mut writer = infallible(TurnWriter::new(
+        |piece| {
+            out.push_str(piece);
+            Ok::<(), std::convert::Infallible>(())
+        },
+        part.turn,
+        part.agent,
+        detail,
+        first,
+        plan,
+    ));
+    for item in &part.items {
+        infallible(writer.push(item, beside));
     }
-    let turn = part.turn.ordinal;
-    let last_plan = part
-        .items
-        .iter()
-        .rposition(|item| matches!(item.payload, ItemPayload::Plan(_)));
-    let mut blocks: Vec<Block> = Vec::new();
-    let mut carried = 0_usize;
-    let mut step = 0_usize;
-    let push_line = |blocks: &mut Vec<Block>, text: String| {
-        if let Some(Block::Lines(lines)) = blocks.last_mut() {
-            lines.push('\n');
-            lines.push_str(text.trim_end_matches('\n'));
-        } else {
-            blocks.push(Block::Lines(text.trim_end_matches('\n').to_owned()));
-        }
-    };
-    for (at, item) in part.items.iter().enumerate() {
-        match &item.payload {
-            ItemPayload::UserMessage(message) => {
-                let who = match (&item.author, message.source) {
-                    (Some(user), _) => human(user),
-                    (None, _) => "Orch".to_owned(),
-                };
-                blocks.push(Block::Paragraph(said_by_person(
-                    &who,
-                    message,
-                    &files_in(beside.directory(), turn),
-                    &mut carried,
-                )));
-            }
-            ItemPayload::AgentMessage(message) => {
-                if !message.text.trim().is_empty() {
-                    blocks.push(Block::Paragraph(format!(
-                        "**{}:** {}",
-                        part.agent,
-                        message.text.trim()
-                    )));
-                }
-            }
-            ItemPayload::Plan(_) => {
-                if Some(at) == last_plan
-                    && let Some(text) = plan_text(item)
-                {
-                    blocks.push(Block::Paragraph(text));
-                }
-            }
-            ItemPayload::ToolCall(call) => {
-                step += 1;
-                let title = if call.title.trim().is_empty() {
-                    kind_title(&call.tool)
-                } else {
-                    call.title.trim().to_owned()
-                };
-                let mut line = format!("- {title}{}", ending_of(item, call));
-                if detail == Detail::Full {
-                    let mut details = String::new();
-                    step_details(&mut details, call, turn, step, beside);
-                    if !details.is_empty() {
-                        line.push('\n');
-                        line.push_str(details.trim_end_matches('\n'));
-                    }
-                }
-                push_line(&mut blocks, line);
-            }
-            ItemPayload::Approval(_) => {
-                if detail == Detail::Full
-                    && let Some(line) = approval_line(item, beside)
-                {
-                    push_line(&mut blocks, line);
-                }
-            }
-            ItemPayload::Announcement(_) => {
-                if let Some(text) = announcement_text(item) {
-                    blocks.push(Block::Paragraph(text));
-                }
-            }
-            ItemPayload::Marker(marker) => {
-                if detail == Detail::Full {
-                    push_line(&mut blocks, format!("- — {} —", marker_words(marker)));
-                }
-            }
-            ItemPayload::Error(error) => {
-                blocks.push(Block::Paragraph(format!(
-                    "**Error:** {}",
-                    error.message.trim()
-                )));
-            }
-            ItemPayload::Reasoning(_) => {}
-        }
-    }
-    for block in blocks {
-        out.push('\n');
-        match block {
-            Block::Paragraph(text) | Block::Lines(text) => {
-                out.push_str(&text);
-                out.push('\n');
-            }
-        }
-    }
+    infallible(writer.finish());
     out
 }
+
+mod turn_writer;
+pub(crate) use turn_writer::TurnWriter;
 
 /// A conversation written: its head, the line that says which turns these are, and the turns as they were
 /// written. `first` and `to` are the numbers of the first and last turn given, `last` the number of the last
@@ -1948,8 +1867,101 @@ pub async fn read_chat_in(
         files,
         WrittenHead::Range,
         None,
+        None,
+        None,
     )
     .await
+}
+
+/// Live node-name candidates of the whole chat, using the same stored rows as its ordinary reader.
+/// No node names are looked up here; snapshots already stored in forwarded parts remain snapshots.
+pub(crate) async fn chat_name_sources(
+    conn: &mut orch_db::Conn,
+    chat: Id,
+) -> Result<Vec<Id>, crate::error::EngineError> {
+    let last = orch_db::queries::shares::chat_total(conn, chat).await?;
+    if last == 0 {
+        return Ok(Vec::new());
+    }
+    let rows = orch_db::queries::shares::chat_messages_numbered(conn, chat, 1, last).await?;
+    let refs: Vec<_> = rows.iter().map(|row| &row.row).collect();
+    Ok(orch_chat::views::threads_of(&refs))
+}
+
+/// Native chat export operands and source revision, before any text/name formatting or file IO.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ChatExportSources {
+    pub(crate) format: orch_api_contract::threads::ExportFormat,
+    pub(crate) chat: Id,
+    pub(crate) span: Option<(i64, i64)>,
+    pub(crate) stamp: String,
+    pub(crate) names: Vec<Id>,
+}
+impl ChatExportSources {
+    #[must_use]
+    pub fn chat(&self) -> Id {
+        self.chat
+    }
+    #[must_use]
+    pub fn range(&self) -> (Option<i64>, Option<i64>) {
+        self.span.map_or((Some(1), Some(0)), |(first, last)| {
+            (Some(first), Some(last))
+        })
+    }
+    #[must_use]
+    pub fn name_candidates(&self) -> &[Id] {
+        &self.names
+    }
+}
+
+/// The same native chat text producer, under its already selected range and current name bound.
+pub async fn read_chat_export(
+    conn: &mut orch_db::Conn,
+    sources: &ChatExportSources,
+    title: &str,
+    allowed: Option<&std::collections::HashSet<Id>>,
+) -> Result<Read, crate::error::EngineError> {
+    read_chat_piece(
+        conn,
+        sources.chat,
+        title,
+        sources.range(),
+        Detail::Normal,
+        None,
+        None,
+        WrittenHead::Range,
+        None,
+        allowed,
+        None,
+    )
+    .await
+}
+
+/// The whole snapshot chat under a trusted source-name bound. The ordinary body renderer is
+/// unchanged; unallowed current node names never enter its lookup map.
+pub(crate) async fn read_copy_chat_with_names(
+    conn: &mut orch_db::Conn,
+    chat: Id,
+    title: &str,
+    files: Option<&str>,
+    allowed: &std::collections::HashSet<Id>,
+) -> Result<(Read, Vec<Id>), crate::error::EngineError> {
+    let mut used = Vec::new();
+    let read = read_chat_piece(
+        conn,
+        chat,
+        title,
+        (None, None),
+        Detail::Normal,
+        None,
+        files,
+        WrittenHead::Range,
+        None,
+        Some(allowed),
+        Some(&mut used),
+    )
+    .await?;
+    Ok((read, used))
 }
 
 /// The same for one reader: each reference the messages name is written as `writings` has it for that reader, and
@@ -1978,6 +1990,8 @@ pub(crate) async fn read_chat_for(
         files,
         WrittenHead::Range,
         writings,
+        None,
+        None,
     )
     .await
 }
@@ -2007,14 +2021,18 @@ pub(crate) async fn chat_references(
     Ok(out)
 }
 
-/// One window of an archive's chat under the heading of the whole export.
-pub(crate) async fn read_chat_window(
+#[allow(
+    clippy::too_many_arguments,
+    reason = "the existing native archive window and its trusted name bound"
+)]
+pub(crate) async fn read_chat_window_with_names(
     conn: &mut orch_db::Conn,
     chat: Id,
     title: &str,
     range: (i64, i64),
     files: &str,
     heading: Option<(i64, i64)>,
+    allowed: Option<&std::collections::HashSet<Id>>,
 ) -> Result<Read, crate::error::EngineError> {
     read_chat_piece(
         conn,
@@ -2027,6 +2045,8 @@ pub(crate) async fn read_chat_window(
         heading.map_or(WrittenHead::None, |(first, to)| {
             WrittenHead::Export(first, to)
         }),
+        None,
+        allowed,
         None,
     )
     .await
@@ -2046,6 +2066,8 @@ async fn read_chat_piece(
     files: Option<&str>,
     heading: WrittenHead,
     writings: Option<&HashMap<Typed, Writing>>,
+    allowed_node_names: Option<&std::collections::HashSet<Id>>,
+    mut used_node_names: Option<&mut Vec<Id>>,
 ) -> Result<Read, crate::error::EngineError> {
     use orch_chat::views::{Lookups, messages as message_views};
     use orch_chat::written::{Detail as ChatDetail, Written as ChatWritten, render, render_body};
@@ -2083,9 +2105,15 @@ async fn read_chat_piece(
     for person in threads::people(conn, &orch_chat::views::people_of(&refs)).await? {
         lookups.people.insert(person.id, user_ref(&person));
     }
-    let agent_threads = orch_chat::views::threads_of(&refs);
+    let agent_threads: Vec<_> = orch_chat::views::threads_of(&refs)
+        .into_iter()
+        .filter(|id| allowed_node_names.is_none_or(|allowed| allowed.contains(id)))
+        .collect();
     if !agent_threads.is_empty() {
         for place in rows::places(conn, &agent_threads).await? {
+            if let Some(used) = used_node_names.as_mut() {
+                used.push(place.id);
+            }
             lookups.nodes.insert(
                 place.id,
                 orch_api_contract::nodes::NodeRef {
@@ -2220,6 +2248,16 @@ pub async fn chat_records(
     chat: Id,
     range: (Option<i64>, Option<i64>),
 ) -> Result<Vec<orch_api_contract::chats::ChatMessage>, crate::error::EngineError> {
+    chat_records_with_names(conn, chat, range, None).await
+}
+
+/// The same native records; unselected live node labels never enter the formatter's lookup map.
+pub async fn chat_records_with_names(
+    conn: &mut orch_db::Conn,
+    chat: Id,
+    range: (Option<i64>, Option<i64>),
+    allowed: Option<&std::collections::HashSet<Id>>,
+) -> Result<Vec<orch_api_contract::chats::ChatMessage>, crate::error::EngineError> {
     use orch_chat::views::{Lookups, messages as message_views};
     use orch_db::queries::{chats as chat_rows, shares as rows, threads};
     let last = rows::chat_total(conn, chat).await?;
@@ -2248,7 +2286,10 @@ pub async fn chat_records(
     for person in threads::people(conn, &orch_chat::views::people_of(&refs)).await? {
         lookups.people.insert(person.id, user_ref(&person));
     }
-    let agent_threads = orch_chat::views::threads_of(&refs);
+    let mut agent_threads = orch_chat::views::threads_of(&refs);
+    if let Some(allowed) = allowed {
+        agent_threads.retain(|id| allowed.contains(id));
+    }
     if !agent_threads.is_empty() {
         for place in rows::places(conn, &agent_threads).await? {
             lookups.nodes.insert(
@@ -2271,6 +2312,26 @@ mod tests {
     use super::*;
     use orch_types::new_id;
     use serde_json::json;
+
+    #[test]
+    fn harness_change_history_keeps_named_facts_without_dumping_native_configuration() {
+        let marker = |change: &str, value: Json| {
+            serde_json::from_value::<MarkerPayload>(json!({"marker":"harness_changed","data":{"program":"Codex","change":change,"subject":"Native label","previous":{"state":"unsupported"},"value":value,"expected":{"state":"unsupported"},"changed":true,"diverged":false,"next_turn":true,"turn_id":null,"reported_at":"2026-10-15T00:00:00Z"}})).unwrap()
+        };
+        let model = marker_words(&marker("model", json!("Actual model")));
+        assert!(model.contains("Codex"));
+        assert!(model.contains("Actual model"));
+        assert!(model.contains("future turns"));
+        let status = marker_words(&marker(
+            "mcp_startup",
+            json!({"status":"failed","config":{"authorization":"private-value"},"input":"private-input"}),
+        ));
+        assert!(status.contains("Native label"));
+        assert!(status.contains("failed"));
+        assert!(!status.contains("private-value"));
+        assert!(!status.contains("private-input"));
+        assert!(!status.contains("authorization"));
+    }
 
     fn person(name: &str) -> Json {
         json!({
@@ -2419,6 +2480,35 @@ mod tests {
             items: items.iter().collect(),
         };
         turn_text(&part, &Beside::default(), detail)
+    }
+
+    #[test]
+    fn written_page_actions_keep_their_target_and_pattern_without_becoming_web_searches() {
+        let items = [
+            call(
+                1,
+                "",
+                "completed",
+                json!({"kind":"web_search", "query":"", "results":[],
+                "action":{"type":"open_page", "url":"https://docs.example.invalid/guide"}}),
+            ),
+            call(
+                2,
+                "",
+                "completed",
+                json!({"kind":"web_search", "query":"", "results":[],
+                "action":{"type":"find_in_page", "url":"https://docs.example.invalid/guide", "pattern":"harvest"}}),
+            ),
+        ];
+        for detail in [Detail::Normal, Detail::Full] {
+            let text = written(&items, detail);
+            assert!(text.contains("Open page: https://docs.example.invalid/guide"));
+            assert!(
+                text.contains("Find in page: `harvest` in <https://docs.example.invalid/guide>")
+            );
+            assert!(!text.contains("Searched the web"));
+            assert!(!text.contains("looked for"));
+        }
     }
 
     #[test]

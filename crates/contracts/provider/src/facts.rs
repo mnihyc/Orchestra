@@ -150,10 +150,14 @@ pub struct AvailableResets {
 pub struct ExtraUsage {
     /// Whether extra spending is enabled.
     pub enabled: bool,
-    /// The spending limit, where known.
-    pub limit: Option<f64>,
-    /// What has been used, where known.
-    pub used: Option<f64>,
+    /// The spending limit, as exact decimal text in the source's unit and scale.
+    #[serde(default, deserialize_with = "decimal_amount")]
+    #[schemars(schema_with = "decimal_amount_schema")]
+    pub limit: Option<String>,
+    /// What has been used, as exact decimal text in the source's unit and scale.
+    #[serde(default, deserialize_with = "decimal_amount")]
+    #[schemars(schema_with = "decimal_amount_schema")]
+    pub used: Option<String>,
     /// How much is used, in percent.
     pub used_percent: Option<f64>,
     /// The vendor's currency or unit, where supplied.
@@ -164,6 +168,39 @@ pub struct ExtraUsage {
     pub disabled_reason: Option<String>,
     /// Whether its spending limit is reached.
     pub limit_reached: Option<bool>,
+}
+
+/// Match the existing decoder's legacy input acceptance without widening canonical output.
+/// Provider extension schemas describe Deserialize; normalized OpenAPI uses Serialize.
+fn decimal_amount_schema(generator: &mut schemars::SchemaGenerator) -> schemars::Schema {
+    let canonical = schemars::json_schema!({
+        "type": ["string", "null"],
+        "maxLength": crate::limits::DECIMAL_MAX_CHARS,
+        "pattern": r"^-?[0-9]+(\.[0-9]+)?$"
+    });
+    if matches!(
+        &generator.settings().contract,
+        schemars::generate::Contract::Deserialize
+    ) {
+        schemars::json_schema!({"anyOf": [canonical.to_value(), {
+            "type": "number",
+            "description": "Legacy numeric input; the source reader checks bounded decimal normalization."
+        }]})
+    } else {
+        canonical
+    }
+}
+
+/// Older stored/source numeric amounts remain readable; new writers use decimal text.
+fn decimal_amount<'de, D: Deserializer<'de>>(deserializer: D) -> Result<Option<String>, D::Error> {
+    let value = Option::<serde_json::Value>::deserialize(deserializer)?;
+    Ok(match value {
+        Some(serde_json::Value::String(value)) => {
+            crate::limits::is_decimal(&value).then_some(value)
+        }
+        Some(serde_json::Value::Number(value)) => crate::limits::decimal_number(&value.to_string()),
+        _ => None,
+    })
 }
 
 /// What a vendor tells an ordinary API key about its own spending.
@@ -357,7 +394,8 @@ pub struct ProviderFacts {
     pub key_usage: Option<KeyUsage>,
     /// The credits of the whole account, where told.
     pub key_credits: Option<KeyCredits>,
-    /// The vendor's explicit permission for ordinary included usage; null is no proof of recovery.
+    /// The vendor's last reported eligibility for included usage, with its observation time.
+    /// This is not an Orch admission gate: external resets or credits can admit later requests.
     pub ordinary_usage_allowed: Option<bool>,
     /// True only when the vendor authenticated this observation with the provider's credential.
     /// False or null is local knowledge or no proof; a cached earlier observation proves no new recovery.
@@ -368,7 +406,8 @@ pub struct ProviderFacts {
 }
 
 impl ProviderFacts {
-    /// Whether the vendor has refused included usage; a percentage alone is no admission decision.
+    /// Whether the stored vendor observation reports exhaustion. This never decides
+    /// whether Orch dispatches a later request; percentages and balances stay separate.
     #[must_use]
     pub fn is_exhausted(&self) -> bool {
         self.ordinary_usage_allowed == Some(false) || self.limit_reached.is_some()
@@ -523,12 +562,25 @@ pub enum MemberState {
     /// The source does not declare it, and it was never told.
     #[default]
     Unsupported,
+    /// Unsupported with a declared, actionable reason, rather than an error or a pending read.
+    UnsupportedBecause {
+        /// Why this member is not currently offered.
+        reason: FactUnavailableReason,
+    },
     /// The source declares it, and it was never told.
     NotReadYet,
     /// It was told as `null` or `[]`: none offered.
     Empty,
     /// It was told with a value.
     Told,
+}
+
+/// Reasons a source-declared member cannot currently be offered.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize, JsonSchema)]
+#[serde(rename_all = "snake_case")]
+pub enum FactUnavailableReason {
+    /// The source requires its own separate administrative credential.
+    NeedsAdminKey,
 }
 
 impl MemberState {
@@ -699,6 +751,7 @@ pub fn normalize(facts: &mut ProviderFacts) {
         },
         spend_id,
     );
+    crate::credit_fields::remember_told(facts);
 }
 
 /// The id of a balance.

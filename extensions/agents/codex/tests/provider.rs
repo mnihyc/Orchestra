@@ -41,7 +41,7 @@ async fn a_sign_in_given_as_text_is_kept_in_the_home_and_the_harness_reports_its
     else {
         return;
     };
-    rig.boot().await;
+    rig.boot_subscription().await;
     assert_eq!(
         rig.adapter.provider_facts().await.unwrap(),
         ProviderFacts::default(),
@@ -84,7 +84,7 @@ async fn a_sign_in_given_as_text_is_kept_in_the_home_and_the_harness_reports_its
 
     // The sign-in outlives the process and the adapter.
     rig.adapter.stop().await.unwrap();
-    rig.boot().await;
+    rig.boot_subscription().await;
     let again = rig.adapter.provider_facts().await.unwrap();
     assert_eq!(again.identity.as_deref(), Some("dana@example.com"));
     assert_eq!(
@@ -110,7 +110,7 @@ async fn a_sign_in_by_the_path_of_a_file_in_the_runtime_is_taken_too() {
     else {
         return;
     };
-    rig.boot().await;
+    rig.boot_subscription().await;
     let given = rig.workspace_path().join("given-auth.json");
     std::fs::write(&given, fake_auth_json("lee@example.com", "pro", "acct-2")).unwrap();
     rig.adapter
@@ -138,7 +138,7 @@ async fn what_is_not_a_sign_in_is_refused_without_touching_the_home_or_the_runni
     else {
         return;
     };
-    rig.boot().await;
+    rig.boot_subscription().await;
     rig.drain();
     for (values, why) in [
         (
@@ -198,6 +198,7 @@ async fn a_sign_in_of_another_workspace_than_the_providers_is_signed_out_by_the_
         return;
     };
     let mut start = rig.agent_start();
+    start.provider_kind = Some(orch_agent_contract::descriptor::ProviderKind::Subscription);
     start.provider_config = json!({ "workspace_id": "acct-team" });
     rig.adapter.start(start, rig.sink.clone()).await.unwrap();
     let config = std::fs::read_to_string(rig.home_path().join("config.toml")).unwrap();
@@ -248,7 +249,7 @@ async fn the_models_the_harness_lists_are_suggestions_with_what_each_offers_and_
     let Some(mut rig) = Rig::start("models").await else {
         return;
     };
-    rig.boot().await;
+    rig.boot_subscription().await;
     let models = rig.adapter.discover_models().await.unwrap();
     let sol = models
         .iter()

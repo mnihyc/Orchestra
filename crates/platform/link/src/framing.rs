@@ -2,7 +2,7 @@
 //!
 //! A session runs over anything that carries whole messages in order in both
 //! directions, which is what a WebSocket does. This module says what that is
-//! ([`Connection`]: a half that sends, a half that receives, and what is
+//! ([`Connection`](crate::framing::Connection): a half that sends, a half that receives, and what is
 //! known of the other end), reads frames off it and writes frames onto it.
 //!
 //! **Data does not hold up control.** What is to be sent waits in three
@@ -105,6 +105,10 @@ pub trait MessageSink: Send {
 /// The half of a connection that receives.
 #[async_trait]
 pub trait MessageSource: Send {
+    #[cfg(feature = "test-observers")]
+    fn inbound_observer(&self) -> Option<Arc<crate::test_observers::QueueGauge>> {
+        None
+    }
     /// The next message, `None` when the other end closed the connection.
     async fn recv(&mut self) -> Result<Option<Message>, TransportError>;
 }
@@ -112,6 +116,8 @@ pub trait MessageSource: Send {
 /// What is known of the other end of a connection before a word is said.
 #[derive(Debug, Clone, Default)]
 pub struct PeerInfo {
+    /// Purpose negotiated by the WebSocket subprotocol, before machine authentication.
+    pub purpose: orch_link_contract::gateways::SessionPurpose,
     /// The address it connected from; on the machine's side, `None`.
     pub remote_ip: Option<IpAddr>,
     /// The host name the machine connected to, without a port: the
@@ -270,14 +276,13 @@ pub struct Measurements {
 }
 
 impl Measurements {
-    /// The figures as a machine reports them in its facts, zero where
-    /// nothing has been seen yet.
+    /// The figures as reported in machine facts, retaining each sample's presence.
     #[must_use]
     pub fn as_facts(&self) -> MachineFactsRates {
         MachineFactsRates {
-            up_bps: self.up_bps.unwrap_or(0).saturating_mul(BITS_PER_BYTE),
-            down_bps: self.down_bps.unwrap_or(0).saturating_mul(BITS_PER_BYTE),
-            round_trip_ms: self.round_trip_ms.unwrap_or(0),
+            up_bps: self.up_bps.map(|rate| rate.saturating_mul(BITS_PER_BYTE)),
+            down_bps: self.down_bps.map(|rate| rate.saturating_mul(BITS_PER_BYTE)),
+            round_trip_ms: self.round_trip_ms,
         }
     }
 }
@@ -360,6 +365,8 @@ pub struct Outgoing {
     events: mpsc::UnboundedSender<Message>,
     data: mpsc::UnboundedSender<Message>,
     datagrams: mpsc::UnboundedSender<Datagram>,
+    #[cfg(feature = "test-observers")]
+    observed: [Arc<crate::test_observers::QueueGauge>; 4],
 }
 
 /// The queues the writer takes from.
@@ -369,6 +376,17 @@ pub struct Queues {
     events: mpsc::UnboundedReceiver<Message>,
     data: mpsc::UnboundedReceiver<Message>,
     datagrams: mpsc::UnboundedReceiver<Datagram>,
+    #[cfg(feature = "test-observers")]
+    observed: [Arc<crate::test_observers::QueueGauge>; 4],
+}
+
+#[cfg(feature = "test-observers")]
+impl Drop for Queues {
+    fn drop(&mut self) {
+        for queue in &self.observed {
+            drop(queue.receiver());
+        }
+    }
 }
 
 /// A set of three queues, for a writer.
@@ -378,18 +396,25 @@ pub fn queues() -> (Outgoing, Queues) {
     let (events_tx, events) = mpsc::unbounded_channel();
     let (data_tx, data) = mpsc::unbounded_channel();
     let (datagram_tx, datagrams) = mpsc::unbounded_channel();
+    #[cfg(feature = "test-observers")]
+    let observed = ["link.control", "link.events", "link.data", "link.datagrams"]
+        .map(crate::test_observers::QueueGauge::new);
     (
         Outgoing {
             control: control_tx,
             events: events_tx,
             data: data_tx,
             datagrams: datagram_tx,
+            #[cfg(feature = "test-observers")]
+            observed: observed.clone(),
         },
         Queues {
             control,
             events,
             data,
             datagrams,
+            #[cfg(feature = "test-observers")]
+            observed,
         },
     )
 }
@@ -402,49 +427,52 @@ pub struct SessionOver;
 impl Outgoing {
     /// Queues a leased UDP packet without waiting or consuming stream credit.
     pub fn datagram(&self, packet: Datagram) -> Result<(), SessionOver> {
-        self.datagrams.send(packet).map_err(|_| SessionOver)
+        #[cfg(feature = "test-observers")]
+        let bytes = Some(packet.frame.payload.len() + PortDatagram::HEADER_BYTES);
+        #[cfg(feature = "test-observers")]
+        self.observed[3].enqueue(bytes);
+        self.datagrams.send(packet).map_err(|_| {
+            #[cfg(feature = "test-observers")]
+            self.observed[3].failed_enqueue(bytes);
+            SessionOver
+        })
     }
     /// Queues a control frame: it goes before anything else.
     pub fn control(&self, frame: &Frame, max_frame_bytes: usize) -> Result<(), SessionOver> {
-        self.queue(&self.control, frame, max_frame_bytes)
+        self.queue(&self.control, 0, frame, max_frame_bytes)
     }
 
     /// Queues a frame of events.
     pub fn events(&self, frame: &Frame, max_frame_bytes: usize) -> Result<(), SessionOver> {
-        self.queue(&self.events, frame, max_frame_bytes)
+        self.queue(&self.events, 1, frame, max_frame_bytes)
     }
 
     /// Queues a frame of tunnel data.
     pub fn data(&self, frame: &DataFrame, max_frame_bytes: usize) -> Result<(), SessionOver> {
         let bytes = frame.encode(max_frame_bytes).map_err(|_| SessionOver)?;
-        self.data
-            .send(Message::Binary(bytes))
-            .map_err(|_| SessionOver)
+        self.send_to(&self.data, 2, Message::Binary(bytes))
     }
 
     /// Queues a text frame that has to arrive in order with the data before
     /// it: the end of a stream, a clean close.
     pub fn ordered(&self, frame: &Frame, max_frame_bytes: usize) -> Result<(), SessionOver> {
-        self.queue(&self.data, frame, max_frame_bytes)
+        self.queue(&self.data, 2, frame, max_frame_bytes)
     }
 
     /// Queues a binary frame that is already written.
     pub fn data_bytes(&self, bytes: Bytes) -> Result<(), SessionOver> {
-        self.data
-            .send(Message::Binary(bytes))
-            .map_err(|_| SessionOver)
+        self.send_to(&self.data, 2, Message::Binary(bytes))
     }
 
     /// Queues text that is already written, as a control frame.
     pub fn control_text(&self, text: String) -> Result<(), SessionOver> {
-        self.control
-            .send(Message::Text(text))
-            .map_err(|_| SessionOver)
+        self.send_to(&self.control, 0, Message::Text(text))
     }
 
     fn queue(
         &self,
         queue: &mpsc::UnboundedSender<Message>,
+        lane: usize,
         frame: &Frame,
         max_frame_bytes: usize,
     ) -> Result<(), SessionOver> {
@@ -452,7 +480,24 @@ impl Outgoing {
             tracing::error!(%error, "a frame was not sent");
             SessionOver
         })?;
-        queue.send(Message::Text(text)).map_err(|_| SessionOver)
+        self.send_to(queue, lane, Message::Text(text))
+    }
+
+    fn send_to(
+        &self,
+        queue: &mpsc::UnboundedSender<Message>,
+        _lane: usize,
+        message: Message,
+    ) -> Result<(), SessionOver> {
+        #[cfg(feature = "test-observers")]
+        let bytes = Some(message.len());
+        #[cfg(feature = "test-observers")]
+        self.observed[_lane].enqueue(bytes);
+        queue.send(message).map_err(|_| {
+            #[cfg(feature = "test-observers")]
+            self.observed[_lane].failed_enqueue(bytes);
+            SessionOver
+        })
     }
 
     /// Whether the writer is gone.
@@ -486,29 +531,39 @@ pub async fn write_loop(
         }
         // Alternate ready TCP and UDP after control/events; neither data kind
         // can starve the other or hold a control frame behind its full store.
-        let (message, packet) = if udp_next {
+        let (message, packet, _lane) = if udp_next {
             tokio::select! {
                 biased;
-                Some(message) = queues.control.recv() => (message,None),
+                Some(message) = queues.control.recv() => (message,None,0),
                 () = ended.cancelled() => break,
-                Some(message) = queues.events.recv() => (message,None),
-                Some(packet) = queues.datagrams.recv() => match packet.frame.encode() {Ok(bytes)=>(Message::Binary(bytes),Some(packet)),Err(_)=>continue},
-                Some(message) = queues.data.recv() => (message,None),
+                Some(message) = queues.events.recv() => (message,None,1),
+                Some(packet) = queues.datagrams.recv() => match packet.frame.encode() {Ok(bytes)=>(Message::Binary(bytes),Some(packet),3),Err(_)=>{
+                        #[cfg(feature = "test-observers")]
+                        drop(queues.observed[3].selected(Some(packet.frame.payload.len() + PortDatagram::HEADER_BYTES)));
+                        continue;
+                    }},
+                Some(message) = queues.data.recv() => (message,None,2),
                 else => break,
             }
         } else {
             tokio::select! {
                 biased;
-                Some(message) = queues.control.recv() => (message,None),
+                Some(message) = queues.control.recv() => (message,None,0),
                 () = ended.cancelled() => break,
-                Some(message) = queues.events.recv() => (message,None),
-                Some(message) = queues.data.recv() => (message,None),
-                Some(packet) = queues.datagrams.recv() => match packet.frame.encode() {Ok(bytes)=>(Message::Binary(bytes),Some(packet)),Err(_)=>continue},
+                Some(message) = queues.events.recv() => (message,None,1),
+                Some(message) = queues.data.recv() => (message,None,2),
+                Some(packet) = queues.datagrams.recv() => match packet.frame.encode() {Ok(bytes)=>(Message::Binary(bytes),Some(packet),3),Err(_)=>{
+                        #[cfg(feature = "test-observers")]
+                        drop(queues.observed[3].selected(Some(packet.frame.payload.len() + PortDatagram::HEADER_BYTES)));
+                        continue;
+                    }},
                 else => break,
             }
         };
         udp_next = packet.is_none();
         let bytes = message.len();
+        #[cfg(feature = "test-observers")]
+        let observed_send = queues.observed[_lane].selected(Some(bytes));
         if let Err(error) = sink.send(message).await {
             result = Err(error);
             break 'writing;
@@ -517,13 +572,19 @@ pub async fn write_loop(
             packet.delivered();
         }
         meter.observe_sent(bytes, Instant::now());
+        #[cfg(feature = "test-observers")]
+        observed_send.complete();
     }
     if result.is_ok() {
         while let Ok(message) = queues.control.try_recv() {
+            #[cfg(feature = "test-observers")]
+            let observed_send = queues.observed[0].selected(Some(message.len()));
             if let Err(error) = sink.send(message).await {
                 result = Err(error);
                 break;
             }
+            #[cfg(feature = "test-observers")]
+            observed_send.complete();
         }
     }
     sink.close().await;
@@ -557,6 +618,24 @@ pub async fn read_loop(
     ports: orch_link_contract::version::PortLimits,
     meter: Arc<LinkMeter>,
 ) {
+    #[cfg(feature = "test-observers")]
+    let observed = source.inbound_observer();
+    let send = |item: Inbound| {
+        #[cfg(feature = "test-observers")]
+        let bytes = crate::test_observers::inbound_bytes(&item);
+        #[cfg(feature = "test-observers")]
+        if let Some(queue) = &observed {
+            queue.enqueue(bytes);
+        }
+        let result = inbound.send(item);
+        #[cfg(feature = "test-observers")]
+        if result.is_err()
+            && let Some(queue) = &observed
+        {
+            queue.failed_enqueue(bytes);
+        }
+        result
+    };
     // This additional session boundary is conservative for a machine with
     // several environments; no unbounded inbox can precede their own stores.
     let udp = Arc::new(UdpBudget::for_limits(&ports));
@@ -564,11 +643,11 @@ pub async fn read_loop(
         let message = match source.recv().await {
             Ok(Some(message)) => message,
             Ok(None) => {
-                let _ = inbound.send(Inbound::Lost(None));
+                let _ = send(Inbound::Lost(None));
                 return;
             }
             Err(error) => {
-                let _ = inbound.send(Inbound::Lost(Some(error)));
+                let _ = send(Inbound::Lost(Some(error)));
                 return;
             }
         };
@@ -598,7 +677,7 @@ pub async fn read_loop(
             },
         };
         let broken = matches!(item, Inbound::Broken(_));
-        if inbound.send(item).is_err() || broken {
+        if send(item).is_err() || broken {
             return;
         }
     }
@@ -614,4 +693,44 @@ pub async fn send_frame(
     let text = frames::encode(frame, max_frame_bytes)
         .map_err(|error| TransportError::Io(error.to_string()))?;
     sink.send(Message::Text(text)).await
+}
+
+#[cfg(test)]
+#[allow(clippy::unwrap_used, reason = "test assertions")]
+mod measurement_presence_tests {
+    use super::*;
+    use serde_json::json;
+
+    #[test]
+    fn facts_keep_absence_zero_and_independent_direction_samples() {
+        for (measured, expected) in [
+            (Measurements::default(), json!({})),
+            (
+                Measurements {
+                    round_trip_ms: Some(16),
+                    up_bps: None,
+                    down_bps: Some(0),
+                },
+                json!({"round_trip_ms":16,"down_bps":0}),
+            ),
+            (
+                Measurements {
+                    round_trip_ms: Some(0),
+                    up_bps: Some(5),
+                    down_bps: None,
+                },
+                json!({"round_trip_ms":0,"up_bps":40}),
+            ),
+            (
+                Measurements {
+                    round_trip_ms: None,
+                    up_bps: Some(i64::MAX),
+                    down_bps: Some(1),
+                },
+                json!({"up_bps":i64::MAX,"down_bps":8}),
+            ),
+        ] {
+            assert_eq!(serde_json::to_value(measured.as_facts()).unwrap(), expected);
+        }
+    }
 }
