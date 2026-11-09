@@ -91,10 +91,10 @@ export function useEnv(showCard: (hit: NameHit) => void, ready = true): Env {
 }
 
 /** What a group of names is asked for, and whether it is asked for at all. */
-function useNames(wanted: boolean, query: string, kinds: readonly NameHit['kind'][], limit: number, starred = false) {
+function useNames(wanted: boolean, query: string, kinds: readonly NameHit['kind'][], limit: number, starred = false, orgId?: string) {
   const participating = useFinder((state) => state.participating);
   // The recents are asked for at every opening: where the reader went a moment ago is what they look for.
-  const search = useQuery({ ...namesQuery({ q: query, kinds, limit, participating, starred }), select: (page) => page, enabled: wanted, ...(query === '' ? { staleTime: 0 } : {}) });
+  const search = useQuery({ ...namesQuery({ q: query, kinds, limit, participating, starred, ...(orgId === undefined ? {} : { orgId }) }), select: (page) => page, enabled: wanted, ...(query === '' ? { staleTime: 0 } : {}) });
   return { hits: wanted ? search.data?.items : undefined, partial: wanted && search.data?.partial === true, fetching: wanted && search.isFetching, error: wanted && search.isError ? search.error : null };
 }
 
@@ -111,6 +111,7 @@ export interface Answers {
 }
 
 export interface AnswerInput {
+  orgId?: string;
   commandPrefix?: string | null;
   /** Whether the finder is open: nothing is asked of the server while it is not. */
   active: boolean;
@@ -127,7 +128,7 @@ export interface AnswerInput {
 }
 
 /** Every group's rows for what is typed. */
-export function useAnswers({ active, mode, query, env, searchRow, helpForScreen, commandsHere, commandPrefix, metadataReady = true }: AnswerInput): Answers {
+export function useAnswers({ active, mode, query, env, searchRow, helpForScreen, commandsHere, commandPrefix, orgId: searchOrg, metadataReady = true }: AnswerInput): Answers {
   const { t } = env;
   const { i18n } = useTranslation();
   const typed = query !== '';
@@ -140,11 +141,11 @@ export function useAnswers({ active, mode, query, env, searchRow, helpForScreen,
   const wantResources = active && everywhere && typed;
   const wantRecent = active && everywhere && !typed;
 
-  const go = useNames(wantGo, rested, PLACE_KINDS, NAMES_ASKED);
-  const people = useNames(wantPeople, rested, PEOPLE_KINDS, NAMES_ASKED);
-  const resources = useNames(wantResources, rested, RESOURCE_KINDS, NAMES_ASKED);
-  const recent = useNames(wantRecent, '', ALL_NAME_KINDS, RECENTS_ASKED);
-  const favorites = useNames(wantRecent, '', ALL_NAME_KINDS, NAMES_ASKED, true);
+  const go = useNames(wantGo, rested, PLACE_KINDS, NAMES_ASKED, false, searchOrg);
+  const people = useNames(wantPeople, rested, PEOPLE_KINDS, NAMES_ASKED, false, searchOrg);
+  const resources = useNames(wantResources, rested, RESOURCE_KINDS, NAMES_ASKED, false, searchOrg);
+  const recent = useNames(wantRecent, '', ALL_NAME_KINDS, RECENTS_ASKED, false, searchOrg);
+  const favorites = useNames(wantRecent, '', ALL_NAME_KINDS, NAMES_ASKED, true, searchOrg);
 
   // What the page holds.
   const commands = useCommands();

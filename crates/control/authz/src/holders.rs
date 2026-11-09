@@ -8,7 +8,16 @@
 //! matching needs of them, read once; the people behind a holder, which a
 //! page shows only as a name, are found by [`people_of`].
 
+mod account_facts;
+mod audiences;
 mod kept;
+mod plain_roles;
+
+pub(crate) use account_facts::{AccountFacts, FrameSubject};
+
+pub use audiences::{
+    audience_people, given_role_people, group_people, holder_audiences, role_head_counts,
+};
 
 use crate::Error;
 use crate::engine::{Frame, Graph, Site};
@@ -39,9 +48,17 @@ pub struct Principal {
     memberships: Memberships,
     member_of: Vec<Id>,
     second_step: Option<crate::suspension::SecondStepHold>,
+    holder_deadline: Option<Time>,
 }
 
 impl Principal {
+    /// Narrow a freshly checked native source without replacing its ordinary facts or
+    /// second-step hold. The exact current proof class and all credential bounds survive.
+    pub fn within_source(mut self, ceiling: &Caller) -> Result<Self, crate::KeyScopeRefusal> {
+        self.caller = ceiling.narrow_source_admission(&self.caller)?;
+        Ok(self)
+    }
+
     /// This person's ordinary pages, preserving second-step holds but never a session's
     /// native administrator reach. Used to filter focus before a list is paged.
     pub async fn ordinary(&self, conn: &mut Conn) -> Result<Self, Error> {
@@ -77,10 +94,15 @@ impl Principal {
         let user = caller.user();
         // A stored token is kept out, besides its subtree, of the orgs that refused it and of the places
         // whose longest admitted life it exceeds: read now, so that a refusal holds from the next request.
-        let stored_token = caller.grant().and_then(crate::TokenGrant::token);
-        let caller = match stored_token {
-            Some(token) => {
-                let places = orch_db::queries::tokens::blocked(conn, token)
+        let token_ids: Vec<_> = caller
+            .grant()
+            .into_iter()
+            .flat_map(crate::TokenGrant::token_ids)
+            .collect();
+        let mut places = Vec::new();
+        for token in token_ids {
+            places.extend(
+                orch_db::queries::tokens::blocked(conn, token)
                     .await?
                     .into_iter()
                     .filter_map(|at| match (at.refused, at.org, at.max_days) {
@@ -90,35 +112,31 @@ impl Principal {
                         }
                         _ => None,
                     })
-                    .collect();
-                caller.with_kept_out(places)
-            }
-            None => caller,
-        };
-        let facts = access::principal(conn, user)
-            .await?
-            .ok_or(Error::NoSuchUser(user))?;
-        let memberships = Memberships::load(conn, user).await?;
-        // Kept between requests while nothing they are worked out from has changed (`kept`).
-        let sets = kept::holder_sets(
-            conn,
-            user,
-            now,
-            facts.is_system_admin && caller.carries_system_admin(),
-        )
-        .await?;
-        let (groups, viewers) = (sets.groups.clone(), sets.viewers.clone());
-        let member_of = memberships.member_of();
+                    .collect::<Vec<_>>(),
+            );
+        }
+        let caller = caller.with_kept_out(places);
+        let AccountFacts {
+            suspension,
+            flag,
+            groups,
+            viewers,
+            memberships,
+            member_of,
+            holder_deadline,
+            ..
+        } = AccountFacts::for_caller(conn, user, now, caller.carries_system_admin()).await?;
         Ok(Self {
             caller,
             now,
-            suspension: Suspension::new(facts.status == "suspended", facts.suspended_in),
-            flag: facts.is_system_admin,
+            suspension,
+            flag,
             groups,
             viewers,
             memberships,
             member_of,
             second_step: None,
+            holder_deadline,
         })
     }
 
@@ -144,6 +162,23 @@ impl Principal {
     #[must_use]
     pub fn now(&self) -> Time {
         self.now
+    }
+
+    /// Earliest actual authority expiry, including the native holder graph's role/page stamp.
+    /// This is a factual invalidation boundary, not a lease or an authorization decision.
+    pub async fn read_deadline(&self, conn: &mut Conn) -> Result<Option<Time>, Error> {
+        let at = orch_db::queries::access::kept::read_deadline(
+            conn,
+            self.user(),
+            self.groups(),
+            self.member_of(),
+            self.now().get(),
+        )
+        .await?;
+        Ok(match (self.holder_deadline, at.map(Time::new)) {
+            (Some(a), Some(b)) => Some(a.min(b)),
+            (a, b) => a.or(b),
+        })
     }
 
     /// Where they are suspended.
@@ -189,6 +224,14 @@ impl Principal {
         self.flag && self.caller.carries_system_admin()
     }
 
+    /// Current account standing for an explicitly declared system-administration operation.
+    /// This is not the browser's private-access override; resource decisions continue to use
+    /// `is_system_admin`/`Caller::as_admin`, which remain false for every key.
+    #[must_use]
+    pub fn has_system_admin_standing(&self) -> bool {
+        self.flag && !self.suspension.altogether()
+    }
+
     /// The person, for matching the holders of a row.
     #[must_use]
     pub fn person(&self) -> Person<'_> {
@@ -207,14 +250,7 @@ impl Principal {
         holder: &Holder,
         role_at: impl FnOnce(Option<Id>) -> Option<Role>,
     ) -> bool {
-        if let Holder::Role {
-            role: Role::Viewer,
-            at: Some(place),
-        } = holder
-        {
-            return self.is_viewer_of(*place);
-        }
-        holder.matches(&self.person(), role_at)
+        FrameSubject::is_held_by(self, holder, role_at)
     }
 }
 
@@ -260,7 +296,7 @@ pub async fn owner_people(
     if !groups.is_empty() {
         // Ownership is a complete set, even when a group's visible roster pages.
         // A page-size limit must not remove an owner's rights or notices.
-        for (_, user) in access::group_people(conn, &groups, i64::MAX, now.get()).await? {
+        for (_, user) in group_people(conn, &groups, now).await? {
             users.push(user);
         }
     }
@@ -274,7 +310,7 @@ pub async fn owner_people(
 /// The people who hold Admin at each of the places `places` by being given
 /// it or as owners of it, not those who hold it from above, who are further
 /// away: each with the index in `places` of the place they hold it at. The
-/// places lie in one tree. Three statements, however many places.
+/// places lie in one tree; source membership is checked before an audience is returned.
 pub async fn admins_at(
     conn: &mut Conn,
     frame: &Frame<'_>,
@@ -284,12 +320,11 @@ pub async fn admins_at(
         return Ok(Vec::new());
     }
     let mut found: Vec<(usize, Id)> = Vec::new();
-    for (place, user) in access::people_given_role(
+    for (place, user) in given_role_people(
         conn,
         places,
         &[Role::Admin.as_str().to_owned()],
-        frame.now().get(),
-        SCAN_MOST,
+        frame.now(),
     )
     .await?
     {
@@ -315,7 +350,7 @@ pub async fn admins_at(
     }
     if !groups.is_empty() {
         let ids: Vec<Id> = groups.iter().map(|(_, group)| *group).collect();
-        for (group, user) in access::group_people(conn, &ids, SCAN_MOST, now.get()).await? {
+        for (group, user) in group_people(conn, &ids, now).await? {
             for (at, _) in groups
                 .iter()
                 .filter(|(_, owner_group)| *owner_group == group)
@@ -355,13 +390,11 @@ pub async fn people_of(
 ) -> Result<Vec<Id>, Error> {
     match *holder {
         Holder::User { id } => Ok(vec![id]),
-        Holder::Group { id } => Ok(
-            access::group_people(conn, &[id], SCAN_MOST, frame.now().get())
-                .await?
-                .into_iter()
-                .map(|(_, user)| user)
-                .collect(),
-        ),
+        Holder::Group { id } => Ok(group_people(conn, &[id], frame.now())
+            .await?
+            .into_iter()
+            .map(|(_, user)| user)
+            .collect()),
         Holder::Members { id } => Ok(access::org_member_people(conn, id, SCAN_MOST).await?),
         Holder::Role { role, at } => {
             let Some(place) = at.or(site.role_place) else {
@@ -378,42 +411,56 @@ pub async fn people_of(
             {
                 return Ok(Vec::new());
             }
-            let on_the_way: Vec<(Id, Id)> = frame
-                .graph()
-                .places_on(node)
-                .into_iter()
-                .map(|place| (place.id, place.root))
-                .collect();
-            let places = vec![place];
-            let roles: Vec<String> = Role::ALL
-                .iter()
-                .filter(|held| held.includes(role))
-                .map(|held| held.as_str().to_owned())
-                .collect();
-            let mut people: Vec<Id> = access::people_in_roles(
+            Ok(audience_people(
                 conn,
-                &places,
-                &roles,
-                frame.now().get(),
-                SCAN_MOST,
-                at.is_some(),
+                &[access::HolderPeopleQuery {
+                    kind: if role == Role::Viewer && at.is_some() {
+                        "visible"
+                    } else {
+                        "role"
+                    },
+                    id: Some(place),
+                    role: role.as_str(),
+                }],
+                frame.now(),
             )
             .await?
             .into_iter()
             .map(|(_, user)| user)
-            .collect();
-            for (place, root) in on_the_way {
-                if role != Role::Viewer || at.is_none() {
-                    people.extend(owner_people(conn, frame, place, Some(root)).await?);
-                }
-            }
-            if role != Role::Viewer || at.is_none() {
-                people.extend(access::system_admin_people(conn, SCAN_MOST).await?);
-            }
-            Ok(people)
+            .collect())
         }
         Holder::Everyone | Holder::Node { .. } | Holder::Agents { .. } => Ok(Vec::new()),
     }
+}
+
+/// Current ordinary human viewers of one explicitly named thread. The inverse walk is
+/// seeded at that thread; source candidates are checked through the same current Frame.
+/// This names a whole audience (including its head count), so it must not use a preview cap.
+pub async fn thread_viewer_people(
+    conn: &mut Conn,
+    thread: Id,
+    now: Time,
+) -> Result<Vec<Id>, Error> {
+    let graph = Graph::load(conn, &[thread]).await?;
+    let Some(_) = graph
+        .site_of(thread)
+        .filter(|site| site.kind == orch_access_contract::permissions::ObjectKind::Thread)
+    else {
+        return Ok(Vec::new());
+    };
+    Ok(audience_people(
+        conn,
+        &[access::HolderPeopleQuery {
+            kind: "visible",
+            id: Some(thread),
+            role: "viewer",
+        }],
+        now,
+    )
+    .await?
+    .into_iter()
+    .map(|(_, user)| user)
+    .collect())
 }
 
 /// A concrete current path from a holder to this person, for the page's Reaches explanation.
@@ -438,6 +485,7 @@ pub async fn chain(
         },
         other => other,
     };
+    let membership = Frame::for_holders(conn, principal, &[first]).await?;
     let mut pending = std::collections::VecDeque::from([vec![first]]);
     while let Some(path) = pending.pop_front() {
         let Some(last) = path.last().copied() else {
@@ -451,7 +499,7 @@ pub async fn chain(
                     id: principal.user(),
                 })
             }
-            Holder::Group { id } if principal.groups().contains(&id) => {
+            Holder::Group { id } if membership.holder_matches(&last, None) => {
                 for member in access::group_holders(conn, id).await? {
                     if let Some(id) = member.user_id {
                         next.push(Holder::User { id });
@@ -473,9 +521,6 @@ pub async fn chain(
                 role,
                 at: Some(place),
             } => {
-                if role == Role::Viewer && !implicit_viewer && !principal.is_viewer_of(place) {
-                    continue;
-                }
                 let graph = Graph::load(conn, &[place]).await?;
                 let Some(site) = graph.site_of(place) else {
                     continue;
@@ -497,7 +542,11 @@ pub async fn chain(
                     &wanted,
                 )
                 .await?;
-                if role == Role::Viewer && principal.is_viewer_of(place) {
+                let viewer = frame.person_views(place);
+                if role == Role::Viewer && !implicit_viewer && !viewer {
+                    continue;
+                }
+                if role == Role::Viewer && viewer {
                     for permission in &wanted {
                         for named in frame.matching(&site, *permission, None) {
                             next.push(match named.entry.holder {
@@ -508,6 +557,18 @@ pub async fn chain(
                                 other => other,
                             });
                         }
+                    }
+                    if frame.owns(&site) {
+                        next.extend(
+                            frame
+                                .owner_entries(site.id)
+                                .iter()
+                                .filter(|entry| {
+                                    entry.counts(principal.now())
+                                        && frame.holder_matches(&entry.holder, site.role_place)
+                                })
+                                .map(|entry| entry.holder),
+                        );
                     }
                 }
                 if let Some(held) = frame.role_at(place).filter(|held| held.role.includes(role)) {
@@ -524,26 +585,18 @@ pub async fn chain(
                                     .iter()
                                     .filter(|entry| {
                                         entry.counts(principal.now())
-                                            && principal.is_held_by(&entry.holder, |_| None)
+                                            && frame.holder_matches(&entry.holder, None)
                                     })
                                     .map(|entry| entry.holder),
                             );
                         } else {
-                            let rows = access::roles_reaching(
-                                conn,
-                                &[from],
-                                principal.user(),
-                                principal.groups(),
-                                principal.member_of(),
-                                principal.now().get(),
-                            )
-                            .await?;
+                            let rows = access::roles_in(conn, from, principal.now().get()).await?;
                             for row in rows.into_iter().filter(|row| {
                                 row.role
                                     .parse::<Role>()
                                     .is_ok_and(|given| given.includes(role))
                             }) {
-                                next.push(match row.subject_kind.as_str() {
+                                let subject = match row.subject_kind.as_str() {
                                     "user" => Holder::User { id: row.subject_id },
                                     "group" => Holder::Group { id: row.subject_id },
                                     "members" => Holder::Members { id: row.subject_id },
@@ -555,7 +608,10 @@ pub async fn chain(
                                         None => continue,
                                     },
                                     _ => continue,
-                                });
+                                };
+                                if frame.holder_matches(&subject, None) {
+                                    next.push(subject);
+                                }
                             }
                         }
                     } else {
@@ -742,10 +798,15 @@ async fn notification_owners(
                 user: Some(id),
                 ..Default::default()
             },
-            Holder::Group { id } => access::NotificationPeopleSource {
-                group: Some(id),
-                ..Default::default()
-            },
+            Holder::Group { id } => {
+                people.extend(
+                    group_people(conn, &[id], frame.now())
+                        .await?
+                        .into_iter()
+                        .map(|(_, user)| user),
+                );
+                continue;
+            }
             _ => continue,
         };
         people.extend(notification_people(conn, source, frame.now()).await?);
@@ -794,6 +855,36 @@ pub async fn notification_holder_with(
     holder: &Holder,
     owners: &mut OwnersFound,
 ) -> Result<Vec<Id>, Error> {
+    if let Holder::Group { id } = *holder {
+        return Ok(group_people(conn, &[id], frame.now())
+            .await?
+            .into_iter()
+            .map(|(_, user)| user)
+            .collect());
+    }
+    if let Holder::Role {
+        role,
+        at: Some(place),
+    } = *holder
+    {
+        return Ok(audience_people(
+            conn,
+            &[access::HolderPeopleQuery {
+                kind: if role == Role::Viewer {
+                    "visible"
+                } else {
+                    "role"
+                },
+                id: Some(place),
+                role: role.as_str(),
+            }],
+            frame.now(),
+        )
+        .await?
+        .into_iter()
+        .map(|(_, user)| user)
+        .collect());
+    }
     let source = match *holder {
         Holder::User { id } => access::NotificationPeopleSource {
             user: Some(id),

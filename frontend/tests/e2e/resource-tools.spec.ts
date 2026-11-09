@@ -1,7 +1,9 @@
+import { unjudgedProvenance } from '../doubles/resource-grouping';
+import chinese from '../../src/i18n/zh-CN.json' with { type: 'json' };
 /** MCP and mount routes show real forms, revision refusals and a volume's explicit destructive confirmation. */
 import { expect, type Page, test } from '@playwright/test';
 import words from '../../src/i18n/en.json' with { type: 'json' };
-import type { McpServer, Mount, NameHit } from '../../src/generated/api-types';
+import type { EnvironmentMcp, McpServer, Mount, NameHit } from '../../src/generated/api-types';
 import { ACME, RUNS_ON } from '../doubles/fixtures';
 import { ADA } from '../doubles/thread-scenes';
 import { bodySent, scenario, signIn } from './support';
@@ -26,7 +28,7 @@ test('Add MCP server opens its real ordinary form without a missing-label crash 
 /** The browser consumes a served hit; native HTTP proofs check that Names/Everything build this same address. */
 async function openServedName(page: Page, named: Pick<NameHit, 'kind' | 'id' | 'name' | 'href'>) {
   const hit: NameHit = { ...named, tag: null, thread_attention: null, color: null, custom_color: null,
-    address: null, username: null, avatar: null, path: [], owner: ADA, archived: false, recent: false };
+    address: null, username: null, avatar: null, path: [], home_path: [], owner: ADA, archived: false, recent: false };
   await page.route('**/api/v1/search/names**', async (route) => {
     const query = new URL(route.request().url()).searchParams;
     const q = query.get('q') ?? '';
@@ -44,7 +46,7 @@ async function openServedName(page: Page, named: Pick<NameHit, 'kind' | 'id' | '
 }
 
 test('a preset opens from its list, rejects invalid JSON, and preserves an edit refused at a stale revision', async ({ page }) => {
-  let server: McpServer = { id: MCP, name: 'code-tools', description: 'Code tools', org_id: ACME.org, owner: ADA, home, address: 'acme.ada.code-tools', machine: null, environment: null, imported: null, spec: { transport: 'stdio', command: ['tools'] }, enabled: true, revision: 7, access: { admin_only: [], participating: true, permissions: ['mcp.view', 'mcp.use', 'mcp.manage'], administers: false, through: [{ kind: 'owner' }] } };
+  let server: McpServer = { ...unjudgedProvenance(), id: MCP, name: 'code-tools', description: 'Code tools', org_id: ACME.org, owner: ADA, home, address: 'acme.ada.code-tools', machine: null, environment: null, imported: null, spec: { transport: 'stdio', command: ['tools'] }, enabled: true, revision: 7, access: { admin_only: [], participating: true, permissions: ['mcp.view', 'mcp.use', 'mcp.manage'], administers: false, through: [{ kind: 'owner' }] } };
   const writes: Record<string, unknown>[] = [];
   let stale = true;
   await page.route('**/api/v1/mcp-servers**', async (route) => {
@@ -80,7 +82,7 @@ test('a preset opens from its list, rejects invalid JSON, and preserves an edit 
 });
 
 test('a mount shows its target and uses, and deleting a volume requires its actual name', async ({ page }) => {
-  const mount: Mount = { id: MOUNT, name: 'datasets', address: 'acme.ada.datasets', description: 'Shared data', org_id: ACME.org, owner: ADA, home, target: '/mnt/data', read_only: true, enabled: true, default_fate: 'as_is', kept: [], revision: 3, access: { admin_only: [], participating: true, permissions: ['mount.view', 'mount.use', 'mount.manage'], administers: false, through: [{ kind: 'owner' }] }, locations: [{ machine: { id: RUNS_ON.laptop, name: 'host-1', online: true, platform_os: 'linux', placement: 'managed' }, host: { id: RUNS_ON.buildHost, name: 'host-1', address: 'host-1' }, kind: 'volume', storage: null, source: 'volume-1', data_kind: null, can_remove: true, created_by: ADA, created_at: '2026-10-14T08:00:00Z' }] };
+  const mount: Mount = { ...unjudgedProvenance(), id: MOUNT, name: 'datasets', address: 'acme.ada.datasets', description: 'Shared data', org_id: ACME.org, owner: ADA, home, target: '/mnt/data', read_only: true, enabled: true, default_fate: 'as_is', kept: [], revision: 3, access: { admin_only: [], participating: true, permissions: ['mount.view', 'mount.use', 'mount.manage'], administers: false, through: [{ kind: 'owner' }] }, locations: [{ machine: { id: RUNS_ON.laptop, name: 'host-1', online: true, platform_os: 'linux', placement: 'managed' }, host: { id: RUNS_ON.buildHost, name: 'host-1', address: 'host-1' }, kind: 'volume', storage: null, source: 'volume-1', data_kind: null, can_remove: true, created_by: ADA, created_at: '2026-10-14T08:00:00Z' }] };
   let removed = '';
   await page.route('**/api/v1/mounts**', async (route) => {
     const request = route.request();
@@ -137,3 +139,44 @@ test('moving an environment’s home names the new place and changes it under th
   expect(body.home_node_id).toBe(ACME.fixLogin);
   expect(body.expected_revision).toBeGreaterThan(0);
 });
+
+for (const locale of ['en', 'zh-CN'] as const) for (const theme of ['light', 'dark'] as const) for (const width of [400, 1440]) {
+  test(`reviews an HTTP MCP discovery in its own language without importing (${locale}/${theme}/${width})`, async ({ page }) => {
+    await page.setViewportSize({ width, height: 1000 });
+    await page.emulateMedia({ colorScheme: theme });
+    await signIn(page);
+    if (locale === 'zh-CN') {
+      await page.goto('/settings/interface');
+      await page.getByRole('combobox', { name: 'Language', exact: true }).click();
+      await page.getByRole('option', { name: '简体中文', exact: true }).click();
+      await expect(page.locator('html')).toHaveAttribute('lang', locale);
+    }
+    const copy = locale === 'en' ? words : chinese;
+    const discovery: EnvironmentMcp = { applies: 'next_turn', servers: [], import: { allowed: true, reason: null }, found: [
+      { source: 'codex', scope: 'user', name: 'http-proof', transport: 'http', directory: null, imported: null },
+    ] };
+    await page.route('**/api/v1/environments/*/mcp', (route) => route.fulfill({ json: discovery }));
+    const imports: string[] = [];
+    page.on('request', (request) => { if (request.method() === 'POST' && /\/environments\/[^/]+\/mcp\/imports$/.test(new URL(request.url()).pathname)) imports.push(request.url()); });
+    await page.goto('/resources/mcp');
+    await page.getByRole('button', { name: copy.resourceDetails.mcp.add, exact: true }).click();
+    const loaded = page.waitForResponse((response) => response.request().method() === 'GET' && new URL(response.url()).pathname.endsWith('/environments'));
+    await page.getByRole('menuitem', { name: copy.mcpImport.fromMachine, exact: true }).click();
+    const response = await loaded;
+    const rows: unknown = await response.json();
+    if (!Array.isArray(rows)) throw new Error('The native environment list supplies readable rows.');
+    const environment: unknown = rows.find((row: unknown) => typeof row === 'object' && row !== null && 'id' in row && row.id === RUNS_ON.workspace);
+    if (typeof environment !== 'object' || environment === null || !('name' in environment) || typeof environment.name !== 'string'
+      || !('machine' in environment) || typeof environment.machine !== 'object' || environment.machine === null
+      || !('name' in environment.machine) || typeof environment.machine.name !== 'string') throw new Error('The import fixture needs its actual environment and machine names.');
+    const chooser = page.getByRole('dialog', { name: copy.mcpImport.fromMachine, exact: true });
+    await chooser.getByRole('combobox', { name: copy.mcpImport.environment, exact: true }).click();
+    await page.getByRole('option', { name: `${environment.machine.name} / ${environment.name}`, exact: true }).click();
+    const found = chooser.getByRole('region', { name: copy.mcpImport.found, exact: true });
+    await found.getByRole('button', { name: copy.mcpImport.import, exact: true }).click();
+    const preview = page.getByRole('dialog', { name: copy.mcpImport.title, exact: true });
+    await expect(preview.getByText(copy.mcpImport.transports.http, { exact: true })).toBeVisible();
+    await expect(preview.getByText(copy.mcpImport.stayOnMachine, { exact: true })).toBeVisible();
+    expect(imports).toEqual([]);
+  });
+}

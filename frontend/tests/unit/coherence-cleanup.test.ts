@@ -37,7 +37,7 @@ function setting(key: string, value: unknown): ResolvedSetting {
   return { key, value, own: null, source: { scope: 'system', node: null }, locked_by: null, writable: true, parts: [] };
 }
 
-const visited: NameHit = { id: 'topic-one', kind: 'topic', name: 'Fix login', path: [], recent: true, archived: false,
+const visited: NameHit = { home_path: [], id: 'topic-one', kind: 'topic', name: 'Fix login', path: [], recent: true, archived: false,
   address: null, avatar: null, owner: null, username: null, color: null, custom_color: null, tag: null, thread_attention: null };
 
 describe('the registry replaces the last screen refreshes', () => {

@@ -5,7 +5,7 @@ export interface DuplicateAllowance {
   selectors: string[];
   reason: string;
 }
-export interface LayoutInput { duplicateAllowList: DuplicateAllowance[]; rawValues: string[]; fullValueDisclosure?: { reason: string }; mode?: 'choices' | 'icons'; settle?: boolean; pointerTarget?: string; afterInput?: { kind: 'key' | 'pointer'; sequence: number } }
+export interface LayoutInput { duplicateAllowList: DuplicateAllowance[]; rawValues: string[]; fullValueDisclosure?: { reason: string }; mode?: 'choices' | 'icons'; settle?: boolean; pointerTarget?: string; afterInput?: { kind: 'key' | 'pointer'; sequence: number }; cutWithin?: string }
 export interface LayoutFault { rule: string; text: string; selectors: string[]; detail: string }
 export interface CutValue { selector: string; focus: string; text: string; title: string | null }
 export interface LayoutResult { faults: LayoutFault[]; cuts: CutValue[]; allowances: string[]; icons: string[]; menus: string[] }
@@ -216,7 +216,7 @@ export async function inspectLayout(input: LayoutInput): Promise<LayoutResult> {
       .find((value) => value !== undefined && value !== null && value.trim() !== '');
     return normalize(name ?? '');
   };
-  const repeatedRow = 'li,tr,[role="row"],[role="treeitem"],[role="listitem"],[role="option"],[role="menuitem"],[role="menuitemradio"],[role="menuitemcheckbox"],[data-item],[data-timeline-row]';
+  const repeatedRow = 'li,tr,[role="row"],[role="treeitem"],[role="listitem"],[role="option"],[role="menuitem"],[role="menuitemradio"],[role="menuitemcheckbox"],[data-item],[data-footer],[data-timeline-row]';
   // A transient layer is read on its own, apart from the page or layer beneath it.
   // Identify actual native layers and shared floating content, never particular words.
   // Duplicates within one layer retain every ordinary action, row and content check.
@@ -232,6 +232,16 @@ export async function inspectLayout(input: LayoutInput): Promise<LayoutResult> {
   function inRepeatedRow(element: Element): boolean {
     const row = element.closest(repeatedRow);
     return row !== null && layerOf(row) === layerOf(element);
+  }
+  // A modal owns input until it closes. Keep static page rules below, but exercise
+  // only its controls and its own portalled controls while the backdrop covers the page.
+  const prompt = Array.from(document.querySelectorAll<HTMLElement>('[data-prompt-current="true"]')).find((element) => visible(element))
+    ?? Array.from(document.querySelectorAll<HTMLElement>('[role="dialog"][aria-modal="true"],[role="alertdialog"][aria-modal="true"],dialog:modal')).reverse().find((element) => visible(element));
+  function receivesInput(element: Element): boolean {
+    if (element.closest('[inert]') !== null) return false;
+    if (prompt === undefined || prompt.contains(element)) return true;
+    const owner = element.closest('[data-prompt-owner]')?.getAttribute('data-prompt-owner');
+    return owner !== undefined && owner !== null && owner === prompt.getAttribute('data-prompt-id');
   }
   const technical = 'pre,code,kbd,input,textarea,[contenteditable="true"],[data-user-content],.cm-editor,.xterm';
   // One CSS pixel permits fractional rectangle rounding, as in the other geometry rules.
@@ -323,8 +333,13 @@ export async function inspectLayout(input: LayoutInput): Promise<LayoutResult> {
     const editableBoundary = element.closest('[contenteditable]');
     const interfaceText = control !== null && control !== content || editableBoundary !== null && editableBoundary !== content && editableBoundary.getAttribute('contenteditable') === 'false';
     if (content?.getAttribute('data-content-role') === 'source' && !interfaceText) continue;
+    const definition = control === null ? element.closest('dd') : null;
+    const pair = definition?.parentElement;
+    // A native definition value belongs to its term, just as a table value belongs
+    // to its row. Captions/controls and duplicate values inside one pair still compare.
+    const definitionRow = pair?.matches('dl > div') === true && Array.from(pair.children).some((child) => child.tagName === 'DT') ? pair : null;
     const block = content?.getAttribute('data-content-role') === 'document' && !interfaceText
-      ? element.closest('[data-ob="block"],[data-ob="leaf"]') ?? content : null;
+      ? element.closest('[data-ob="block"],[data-ob="leaf"]') ?? content : definitionRow;
     let scope = 0;
     if (block !== null) { scope = contentScopes.get(block) ?? contentScopes.size + 1; contentScopes.set(block, scope); }
     const text = directText(element);
@@ -541,6 +556,10 @@ export async function inspectLayout(input: LayoutInput): Promise<LayoutResult> {
 
   for (const element of elements) {
     if (element.closest('[role="tooltip"],[data-tooltip-content],input,textarea') !== null) continue;
+    if (!receivesInput(element)) continue;
+    // The initial page pass owns its keyboard disclosures. A later picker pass
+    // owns its newly exposed values while that picker holds the input boundary.
+    if (input.cutWithin !== undefined && element.closest(input.cutWithin) === null) continue;
     const manual = originalValue(element);
     const text = normalize(manual ?? renderedText(element));
     const clipped = losesText(element);
@@ -554,12 +573,41 @@ export async function inspectLayout(input: LayoutInput): Promise<LayoutResult> {
 
   // An editor's noneditable toolbar owns ordinary visible labels; its enclosing editable
   // document must not make those labels disappear from their icon-alignment check.
-  function firstLine(row: HTMLElement, button: HTMLElement): DOMRect | null {
+  // Classify ownership in layout coordinates, so translating a broken button cannot
+  // make it escape its real line. Actual alignment still uses the painted Range/SVG.
+  function flowBand(element: HTMLElement): { top: number; bottom: number } {
+    let top = 0;
+    for (let item = element; ;) {
+      const style = styleOf(item);
+      const relative = style.position === 'relative'
+        ? (style.top !== 'auto' ? parseFloat(style.top) : -(parseFloat(style.bottom) || 0)) : 0;
+      top += item.offsetTop - relative;
+      const parent: Element | null = item.offsetParent;
+      if (!(parent instanceof HTMLElement)) break;
+      top += parent.clientTop;
+      item = parent;
+    }
+    const style = styleOf(element);
+    const unmargined = top - (parseFloat(style.marginTop) || 0);
+    return { top: Math.min(top, unmargined), bottom: Math.max(top, unmargined) + element.offsetHeight + Math.max(0, parseFloat(style.marginBottom) || 0) };
+  }
+  function firstLine(row: HTMLElement, button: HTMLElement, wrapping: boolean): DOMRect | null {
+    const buttonBand = wrapping ? flowBand(button) : null;
     const walker = document.createTreeWalker(row, NodeFilter.SHOW_TEXT);
     for (let node = walker.nextNode(); node !== null; node = walker.nextNode()) {
       const parent = node.parentElement;
       if (parent === null || button.contains(parent) || parent.closest('[role="tooltip"],svg,input,textarea') !== null || parent.closest('[contenteditable]')?.getAttribute('contenteditable') === 'true' || normalize(node.textContent ?? '') === '' || !visible(parent)) continue;
       const range = document.createRange(); range.selectNodeContents(node);
+      if (buttonBand !== null) {
+        let band = flowBand(parent);
+        if (parent === row) {
+          const text = range.getBoundingClientRect(), container = boxOf(row);
+          band = { top: band.top + text.top - container.top, bottom: band.top + text.bottom - container.top };
+        }
+        // Another wrap line or the label above somebody else's field is not
+        // this icon's inline text. A multiline heading retains its FIRST line.
+        if (Math.min(band.bottom, buttonBand.bottom) <= Math.max(band.top, buttonBand.top)) continue;
+      }
       const line = Array.from(range.getClientRects()).find((rect) => rect.width > 0 && rect.height > 0);
       if (line !== undefined) return line;
     }
@@ -584,8 +632,17 @@ export async function inspectLayout(input: LayoutInput): Promise<LayoutResult> {
         if (independent) break;
         continue;
       }
-      const line = firstLine(row, button);
-      if (line === null) { if (independent) break; continue; }
+      const wrapping = flex && style.flexWrap !== 'nowrap';
+      if (wrapping) {
+        const box = boxOf(icon), control = boxOf(button);
+        const offset = Math.abs(box.top + box.height / 2 - control.top - control.height / 2);
+        if (offset >= 1) {
+          fail('icon-centre', nameOf(button), [button], `Icon is ${offset.toFixed(2)}px off its button centre; required less than 1px.`);
+          break;
+        }
+      }
+      const line = firstLine(row, button, wrapping);
+      if (line === null) { if (independent || wrapping) break; continue; }
       const box = boxOf(icon);
       const offset = Math.abs(box.top + box.height / 2 - line.top - line.height / 2);
       if (offset >= 1) fail('icon-centre', nameOf(button), [button, row], `Icon is ${offset.toFixed(2)}px off the first text-line centre; required less than 1px.`);
@@ -603,11 +660,11 @@ export async function inspectLayout(input: LayoutInput): Promise<LayoutResult> {
     return `[${attribute}="${id}"]`;
   }
   const icons = Array.from(document.querySelectorAll('button,[role="button"]')).filter((button): button is HTMLElement =>
-    button instanceof HTMLElement && visible(button, true) && button.closest('[role="tooltip"],[data-tooltip-content]') === null &&
+    button instanceof HTMLElement && receivesInput(button) && visible(button, true) && button.closest('[role="tooltip"],[data-tooltip-content]') === null &&
     button.querySelector('svg') !== null && normalize(renderedText(button)) === '' && !['absolute', 'fixed'].includes(styleOf(button).position))
     .map((button) => interactionProbe(button, 'icon'));
   const menus = Array.from(document.querySelectorAll('[aria-haspopup="menu"],[aria-haspopup="listbox"],[role="combobox"][aria-haspopup="dialog"]'))
-    .filter((element): element is HTMLElement => element instanceof HTMLElement && visible(element, true) && !element.matches(':disabled,[aria-disabled="true"]'))
+    .filter((element): element is HTMLElement => element instanceof HTMLElement && receivesInput(element) && visible(element, true) && !element.matches(':disabled,[aria-disabled="true"]'))
     .map((element) => interactionProbe(element, 'menu'));
   document.documentElement.setAttribute('data-layout-interaction-sequence', String(probeSequence));
   return { faults, cuts, allowances, icons, menus };

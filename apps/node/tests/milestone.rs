@@ -1,4 +1,5 @@
 //! The first thing the node has to get right, against a real Docker daemon, a real gateway and a real API: a managed runtime made through the node from a small image, its connector enrolled with the single-use token it was given and online at the API.
+// The engine's futures this fixture awaits are deep; the default query depth does not lay them out.
 #![allow(
     clippy::unwrap_used,
     clippy::expect_used,
@@ -15,7 +16,7 @@ async fn a_runtime_made_through_the_node_enrolls_with_its_single_use_token_and_i
     let Some(lab) = Lab::start().await else {
         return;
     };
-    let mut world = World::start(&lab.bridge).await;
+    let mut world = World::start(&lab).await;
     let mut node = NodeUnderTest::start(&world, &lab).await;
     let (api, host) = (world.api.link.clone(), node.machine_id);
     eventually("the node to be online at the API", || {

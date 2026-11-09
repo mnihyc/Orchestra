@@ -303,6 +303,13 @@ pub enum Report {
         /// Why.
         reason: String,
     },
+    /// A tool server cannot run until a missing startup requirement is restored.
+    McpUnavailable {
+        /// The name the server is offered under.
+        name: String,
+        /// The missing requirement.
+        reason: String,
+    },
     /// A tool server that crashed runs again.
     McpRestarted {
         /// The name the server is offered under.
@@ -323,6 +330,7 @@ impl Report {
                 | Self::PtyExited(_)
                 | Self::Facts(_)
                 | Self::McpFailed { .. }
+                | Self::McpUnavailable { .. }
                 | Self::McpRestarted { .. }
         )
     }
@@ -418,6 +426,8 @@ pub struct HostSettings {
     pub managed: Option<ManagedPlaces>,
     /// The harness builds the environment has.
     pub tools: Vec<ToolRef>,
+    /// Current confirmed machine paths, never taken from an environment's configuration or variables.
+    pub local_programs: BTreeMap<String, String>,
     /// The most the unit may use, as its driver set it.
     pub unit_limits: Resources,
     /// The shell a person gets, when the machine's own is not wanted.
@@ -450,6 +460,7 @@ impl HostSettings {
             watch: WatchMode::Native,
             managed: None,
             tools: Vec::new(),
+            local_programs: BTreeMap::new(),
             unit_limits: Resources::default(),
             shell: None,
             generation: 0,
@@ -774,9 +785,10 @@ impl Environment {
     pub fn context(&self) -> EnvironmentContext {
         let facts = self.facts();
         let settings = self.host.upgrade().map(|host| host.settings());
-        let (tools, _unit_limits, tools_dir, data_dir) = match &settings {
+        let (tools, local_programs, _unit_limits, tools_dir, data_dir) = match &settings {
             Some(settings) => (
                 settings.tools.clone(),
+                settings.local_programs.clone(),
                 settings.unit_limits,
                 settings
                     .managed
@@ -790,7 +802,13 @@ impl Environment {
                     .to_string_lossy()
                     .into_owned(),
             ),
-            None => (Vec::new(), Resources::default(), None, String::new()),
+            None => (
+                Vec::new(),
+                BTreeMap::new(),
+                Resources::default(),
+                None,
+                String::new(),
+            ),
         };
         EnvironmentContext {
             process_launcher: self.processes.launcher(),
@@ -801,6 +819,7 @@ impl Environment {
             home: Some(facts.home.clone()).filter(|home| !home.is_empty()),
             tools_dir,
             tools,
+            local_programs,
             mounts: self.mounts.roots(),
             user: facts.user.clone(),
             shell: orch_agent_contract::facts::ShellInfo {
@@ -857,6 +876,7 @@ impl Environment {
                     ServerState::Running { .. } => ("running", None),
                     ServerState::Stopped => ("stopped", None),
                     ServerState::Failed { reason } => ("failed", Some(reason)),
+                    ServerState::Unavailable { reason } => ("unavailable", Some(reason)),
                 };
                 orch_link_contract::events::EnvironmentFactsMcpServer {
                     server_id: server.server_id,
@@ -869,6 +889,7 @@ impl Environment {
             .collect();
         facts.index = self.index.state().mode();
         facts.index_reason = self.index.state().reason();
+        facts.index_entry_limit = self.index.state().entry_limit();
         facts.mounts = self.mounts.facts();
         facts.clone()
     }
@@ -1412,6 +1433,33 @@ impl EnvHost {
             tokio::spawn(async move {
                 browsers.set_allowed(gates.browser).await;
             });
+        }
+    }
+
+    /// Updates only selections made by the machine's owner. Held tool caches keep their build.
+    pub async fn set_local_programs(&self, programs: BTreeMap<String, String>) {
+        {
+            let mut settings = self
+                .inner
+                .settings
+                .write()
+                .unwrap_or_else(PoisonError::into_inner);
+            settings.local_programs.clone_from(&programs);
+        }
+        let environments = self.environments();
+        // Retire every old endpoint before any fresh native capability probe can delay another one.
+        futures::future::join_all(environments.iter().map(|environment| {
+            let programs = &programs;
+            async move {
+                environment
+                    .executors
+                    .stop_changed_programs(programs, &environment.context())
+                    .await;
+            }
+        }))
+        .await;
+        for environment in environments {
+            environment.announce_facts().await;
         }
     }
 
@@ -3028,6 +3076,28 @@ impl EnvHost {
         })
     }
 
+    /// Holds tracked writers under this exact native job identity.
+    pub async fn proc_suspend_owned(
+        &self,
+        body: &orch_link_contract::commands::ProcSuspendOwned,
+    ) -> Result<ProcHeldResult> {
+        let environment = self.environment(body.environment_id)?;
+        let owner = body.owner_id;
+        let processes = blocking(move || environment.processes.suspend_owned(owner)).await?;
+        Ok(ProcHeldResult { processes })
+    }
+
+    /// Releases only this native job's existing held process identities.
+    pub async fn proc_resume_owned(
+        &self,
+        body: &orch_link_contract::commands::ProcResumeOwned,
+    ) -> Result<ProcHeldResult> {
+        let environment = self.environment(body.environment_id)?;
+        let owner = body.owner_id;
+        let processes = blocking(move || environment.processes.resume_owned(owner)).await?;
+        Ok(ProcHeldResult { processes })
+    }
+
     /// `watch.set`: says which measurements are wanted and how often. Measurements that are not
     /// asked for are not taken.
     pub async fn watch_set(&self, body: &WatchSet) -> Result<()> {
@@ -3233,6 +3303,39 @@ impl EnvHost {
             .await
     }
 
+    /// Whether the current executor comes from this machine's confirmed policy selection.
+    pub async fn executor_uses_local_program(&self, environment_id: Id, kind: &str) -> bool {
+        let Ok(environment) = self.environment(environment_id) else {
+            return false;
+        };
+        environment
+            .executors
+            .uses_local_program(kind, &environment.context())
+            .await
+    }
+
+    /// Ensures one admitted build or restarts the exact endpoint a tool exchange had captured.
+    pub async fn executor_ensure_at_version(
+        &self,
+        environment_id: Id,
+        kind: &str,
+        version: Option<&str>,
+        registered: Option<&ExecutorEndpoint>,
+    ) -> Result<ExecutorEndpoint> {
+        let environment = self.environment(environment_id)?;
+        let allowed = self.inner.settings().exec_offers_allowed;
+        environment
+            .executors
+            .ensure_at_version(
+                kind,
+                allowed.as_deref(),
+                &environment.context(),
+                version,
+                registered,
+            )
+            .await
+    }
+
     /// The protocol an executor of an environment speaks to a harness, if the environment has it.
     pub async fn executor_protocol(
         &self,
@@ -3278,8 +3381,14 @@ impl EnvHost {
     ) -> Result<McpStartResult> {
         let (environment_id, name, origin, definition) = match body {
             McpStart::Given(given) => {
+                if given.preset && given.server_id.is_none() {
+                    return Err(HostError::Unsupported(
+                        "a preset names its registered server".to_owned(),
+                    ));
+                }
                 let spec: McpServerSpec = given.spec.clone();
                 let definition = McpDefinition {
+                    http_credentials: None,
                     spec,
                     secrets: secrets
                         .iter()
@@ -3291,12 +3400,14 @@ impl EnvHost {
                         })
                         .collect(),
                 };
-                // A definition that arrives with the command is written from Orch, whichever page it came
-                // from, and runs as the user the connector runs as: it takes the machine's permission.
                 (
                     given.environment_id,
                     given.name.clone(),
-                    Origin::Own,
+                    if given.preset {
+                        Origin::Preset
+                    } else {
+                        Origin::Own
+                    },
                     definition,
                 )
             }
@@ -3318,7 +3429,7 @@ impl EnvHost {
             home: Some(PathBuf::from(&facts.home))
                 .filter(|home| !facts.home.is_empty() && home.is_dir()),
         };
-        environment
+        let outcome = environment
             .mcp_host
             .start_identified(
                 &name,
@@ -3330,8 +3441,9 @@ impl EnvHost {
                     McpStart::Local(local) => Some(local.server_id),
                 },
             )
-            .await?;
+            .await;
         environment.announce_facts().await;
+        outcome?;
         Ok(McpStartResult {
             service: crate::mcp::service_of(&name),
         })
@@ -3353,12 +3465,12 @@ impl EnvHost {
         environment.mcp_host.endpoint(name).await
     }
 
-    /// Why the tool server `name` of an environment cannot be reached, when it was given up on.
+    /// Why the tool server `name` cannot be reached after failure or a missing requirement.
     #[must_use]
     pub fn mcp_failure(&self, environment_id: Id, name: &str) -> Option<String> {
         let environment = self.environment(environment_id).ok()?;
         match environment.mcp.get(name)?.state {
-            ServerState::Failed { reason } => Some(reason),
+            ServerState::Failed { reason } | ServerState::Unavailable { reason } => Some(reason),
             _ => None,
         }
     }
@@ -3385,9 +3497,103 @@ impl EnvHost {
         definition: &McpDefinition,
         tools: Option<i64>,
     ) -> Result<McpImportResult> {
-        self.environment(body.environment_id)?
+        if body.stored.is_some() || body.transfer.is_some() {
+            return Err(HostError::Unsupported(
+                "a stored copy cannot borrow an offering import".into(),
+            ));
+        }
+        let environment = body.environment_id.ok_or_else(|| {
+            HostError::Unsupported("an offering import needs its actual environment".into())
+        })?;
+        self.environment(environment)?
             .mcp
             .import(body, definition, tools)
+    }
+    /// Copy an exact managed native snapshot, subject to the current machine import policy.
+    pub fn mcp_stored_copy(&self, body: &McpImport) -> Result<McpImportResult> {
+        if body.environment_id.is_some()
+            || body.expected_fingerprint.is_some()
+            || body.transfer.is_some()
+        {
+            return Err(HostError::Unsupported(
+                "a stored copy cannot borrow an environment offering".into(),
+            ));
+        }
+        let source = body.stored.as_ref().ok_or_else(|| {
+            HostError::Unsupported("a stored copy needs its actual server source".into())
+        })?;
+        let settings = self
+            .inner
+            .settings
+            .read()
+            .unwrap_or_else(PoisonError::into_inner);
+        if !settings.mcp.import {
+            return Err(HostError::McpImportDisabled);
+        }
+        crate::mcp::copy_stored(&settings.data_dir, body.server_id, source)
+    }
+    /// Read the same native snapshot for a recipient-sealed transfer; nothing is filed here.
+    pub fn mcp_transfer_read(&self, body: &McpImport) -> Result<(McpDefinition, McpImportResult)> {
+        if body.environment_id.is_some()
+            || body.expected_fingerprint.is_some()
+            || !matches!(
+                body.transfer,
+                Some(orch_link_contract::commands::McpSnapshotTransfer::Issue { .. })
+            )
+        {
+            return Err(HostError::Unsupported(
+                "a snapshot issue is not an environment offering".into(),
+            ));
+        }
+        let source = body
+            .stored
+            .as_ref()
+            .filter(|source| source.server_id != body.server_id)
+            .ok_or_else(|| {
+                HostError::Unsupported("a snapshot issue needs its distinct saved source".into())
+            })?;
+        let settings = self
+            .inner
+            .settings
+            .read()
+            .unwrap_or_else(PoisonError::into_inner);
+        if !settings.mcp.import {
+            return Err(HostError::McpImportDisabled);
+        }
+        let definition = crate::mcp::stored_snapshot(&settings.data_dir, source)?;
+        let reply = crate::mcp::result_of(&definition, None);
+        Ok((definition, reply))
+    }
+    /// Keep the opened sealed snapshot through the same native private copy writer.
+    pub fn mcp_transfer_receive(
+        &self,
+        body: &McpImport,
+        definition: &McpDefinition,
+    ) -> Result<McpImportResult> {
+        if body.environment_id.is_some()
+            || body.expected_fingerprint.is_some()
+            || !matches!(
+                body.transfer,
+                Some(orch_link_contract::commands::McpSnapshotTransfer::Receive { .. })
+            )
+            || body
+                .stored
+                .as_ref()
+                .is_none_or(|source| source.server_id == body.server_id)
+        {
+            return Err(HostError::Unsupported(
+                "a snapshot receive needs its exact new copy".into(),
+            ));
+        }
+        let settings = self
+            .inner
+            .settings
+            .read()
+            .unwrap_or_else(PoisonError::into_inner);
+        if !settings.mcp.import {
+            return Err(HostError::McpImportDisabled);
+        }
+        crate::mcp::keep_snapshot(&settings.data_dir, body.server_id, definition)
     }
 }
 
@@ -3917,6 +4123,7 @@ async fn attach(
         mcp_servers: Vec::new(),
         index: index.state().mode(),
         index_reason: index.state().reason(),
+        index_entry_limit: index.state().entry_limit(),
         mounts: mounts.facts(),
         private_views: false,
         suspend: platform::CAN_SUSPEND,
@@ -4038,6 +4245,7 @@ fn start_background(
         let mut facts = lock(&environment.facts);
         facts.index = environment.index.state().mode();
         facts.index_reason = environment.index.state().reason();
+        facts.index_entry_limit = environment.index.state().entry_limit();
     }
     for watch in lock(&environment.watches).values() {
         watcher.watch_dir(&watch.dir.under(&root));

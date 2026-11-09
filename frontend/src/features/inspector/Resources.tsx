@@ -70,7 +70,7 @@ function ResourcesPanel({ access }: { access: WorkspaceAccess }) {
   const query = useQuery(samplesQuery(access.door));
   useStatsFeed(access.door);
   if (query.error !== null && query.data === undefined) return <ErrorState compact className="h-full" error={query.error} onRetry={() => void query.refetch()} />;
-  if (query.data === undefined) return <SkeletonRows rows={4} />;
+  if (query.data === undefined) return <SkeletonRows read={query} rows={4} />;
   const samples = query.data.map((sample) => ({
     ...sample,
     cpu_percent: nonNegative(sample.cpu_percent),

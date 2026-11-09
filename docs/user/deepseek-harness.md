@@ -1,7 +1,9 @@
 ---
+group: providers
 title: DeepSeek Harness
 screens: /resources/agents, /resources/agents/$id, /thread/$threadId, /admin/$section
 keywords: DeepSeek Harness, dsh, DeepSeek, OpenRouter, Agent Client Protocol, privacy, telemetry, streaming, plugin, program, key, provider
+summary: Run DeepSeek Harness with Orch’s providers, tools, approvals and environment boundaries.
 ---
 
 # DeepSeek Harness

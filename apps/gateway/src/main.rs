@@ -8,8 +8,10 @@
 
 mod composition;
 
+use anyhow::Context;
 use clap::Parser;
 use orch_build_info::BuildInfo;
+use orch_config::{RuntimeComponent, ServerConfig};
 use std::path::PathBuf;
 
 const BUILD: BuildInfo = BuildInfo::new(
@@ -18,10 +20,6 @@ const BUILD: BuildInfo = BuildInfo::new(
     env!("ORCH_RELEASE_TAG"),
     env!("ORCH_SERVER_BUILD_NUMBER"),
 );
-
-// Debug request and service futures can exhaust Tokio's default 2 MiB stack;
-// keep 8 MiB for runtime workers and blocking tasks as a server-wide guard.
-const WORKER_STACK_BYTES: usize = 8 * 1024 * 1024;
 
 /// The Orch gateway: where machines connect.
 #[derive(Parser)]
@@ -39,15 +37,24 @@ struct Args {
 
 fn main() -> anyhow::Result<()> {
     let args = Args::parse();
-    tokio::runtime::Builder::new_multi_thread()
-        .thread_stack_size(WORKER_STACK_BYTES)
+    #[cfg(feature = "test-observers")]
+    let observer =
+        orch_gateway_core::test_observers::process::ProcessRecording::from_env("gateway", &BUILD)?;
+    let config: ServerConfig = orch_config::load(&args.config)
+        .with_context(|| format!("reading {}", args.config.display()))?;
+    let worker_stack_bytes = config.worker_stack_bytes(RuntimeComponent::Gateway)?;
+    let result = tokio::runtime::Builder::new_multi_thread()
+        .thread_stack_size(worker_stack_bytes)
         .enable_all()
         .build()?
-        .block_on(Box::pin(composition::run(
-            &args.config,
-            &args.secrets_dir,
-            BUILD,
-        )))
+        .block_on(Box::pin(composition::run(config, &args.secrets_dir, BUILD)));
+    #[cfg(feature = "test-observers")]
+    if result.is_ok()
+        && let Some(observer) = observer
+    {
+        observer.finish()?;
+    }
+    result
 }
 
 #[cfg(test)]

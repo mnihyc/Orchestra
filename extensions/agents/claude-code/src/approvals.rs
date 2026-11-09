@@ -94,13 +94,37 @@ pub struct PermissionAsk {
     pub agent_id: Option<String>,
     /// The harness's sentence on it.
     pub description: Option<String>,
+    /// Native content elicitation keeps its own response protocol inside the same pending approvals.
+    elicitation: bool,
 }
 
 impl PermissionAsk {
-    /// Reads a control request of the kind `can_use_tool`; `None` for any other request.
+    /// Reads native tool permission or MCP content elicitation through the existing approval queue.
     #[must_use]
     pub fn from_frame(frame: &Frame) -> Option<Self> {
         let request = frame.get("request")?;
+        if request.get("subtype")?.as_str()? == "elicitation" {
+            let server = request.get("mcp_server_name")?.as_str()?.to_owned();
+            if server.is_empty() {
+                return None;
+            }
+            let message = request.get("message")?.as_str()?.to_owned();
+            return Some(Self {
+                control_id: frame.text("request_id")?.to_owned(),
+                tool_name: server,
+                input: request.clone(),
+                tool_use_id: request
+                    .get("tool_use_id")
+                    .and_then(Json::as_str)
+                    .map(str::to_owned),
+                agent_id: request
+                    .get("agent_id")
+                    .and_then(Json::as_str)
+                    .map(str::to_owned),
+                description: Some(message),
+                elicitation: true,
+            });
+        }
         if request.get("subtype")?.as_str()? != "can_use_tool" {
             return None;
         }
@@ -120,12 +144,16 @@ impl PermissionAsk {
                 .get("description")
                 .and_then(Json::as_str)
                 .map(str::to_owned),
+            elicitation: false,
         })
     }
 
     /// What kind of approval this is.
     #[must_use]
     pub fn kind(&self) -> HarnessRequestKind {
+        if self.elicitation {
+            return HarnessRequestKind::McpElicitation;
+        }
         if self.tool_name == EXIT_PLAN_TOOL {
             return HarnessRequestKind::Plan;
         }
@@ -133,6 +161,7 @@ impl PermissionAsk {
             Family::Command => HarnessRequestKind::Command,
             Family::Edit | Family::Write | Family::NotebookEdit => HarnessRequestKind::FileChange,
             Family::Question => HarnessRequestKind::UserInput,
+            Family::Other => HarnessRequestKind::Other,
             _ => HarnessRequestKind::Permissions,
         }
     }
@@ -153,6 +182,38 @@ impl PermissionAsk {
         let kind = self.kind();
         let reason = self.description.clone();
         let (options, detail) = match kind {
+            HarnessRequestKind::Other => (
+                allow_or_deny(),
+                HarnessRequestDetail::Other {
+                    summary: self
+                        .description
+                        .clone()
+                        .unwrap_or_else(|| format!("Allow {}?", self.tool_name)),
+                    raw: json!({"tool":self.tool_name,"input":self.input}),
+                },
+            ),
+            HarnessRequestKind::McpElicitation => {
+                let mut message = self.description.clone().unwrap_or_default();
+                if self.input.get("mode").and_then(Json::as_str) == Some("url")
+                    && let Some(url) = self.input.get("url").and_then(Json::as_str)
+                {
+                    message.push('\n');
+                    message.push_str(url);
+                }
+                (
+                    Vec::new(),
+                    HarnessRequestDetail::McpElicitation {
+                        native_item_ref: self.tool_use_id.clone(),
+                        server: self.tool_name.clone(),
+                        message,
+                        schema: self
+                            .input
+                            .get("requested_schema")
+                            .cloned()
+                            .unwrap_or_else(|| json!({})),
+                    },
+                )
+            }
             HarnessRequestKind::Command => (
                 allow_or_deny(),
                 HarnessRequestDetail::Command {
@@ -206,7 +267,11 @@ impl PermissionAsk {
         ApprovalRequested {
             turn_id,
             request_ref: self.control_id.clone(),
-            title: approval_title(self, &family, ctx),
+            title: if self.elicitation {
+                format!("{} requests input", self.tool_name)
+            } else {
+                approval_title(self, &family, ctx)
+            },
             request: HarnessRequest {
                 request_kind: kind,
                 options,
@@ -217,6 +282,20 @@ impl PermissionAsk {
 
     /// The answer to give the harness for a person's decision.
     pub fn answer(&self, decision: &ApprovalDecision) -> Result<Json, AdapterError> {
+        if self.elicitation {
+            let ApprovalDecision::Elicitation { action, content } = decision else {
+                return Err(AdapterError::Unsupported(
+                    "MCP elicitation requires accept, decline or cancel".to_owned(),
+                ));
+            };
+            let mut answer = json!({"action":action});
+            if self.input.get("mode").and_then(Json::as_str) != Some("url")
+                && let Some(content) = content
+            {
+                answer["content"] = content.clone();
+            }
+            return Ok(answer);
+        }
         match decision {
             ApprovalDecision::Option { option_id, note } => match option_id.as_str() {
                 OPTION_ALLOW_ONCE | OPTION_PROCEED => Ok(self.allow()),
@@ -257,6 +336,9 @@ impl PermissionAsk {
     /// The answer when nobody can decide: the process is going away, or the mode says never to ask.
     #[must_use]
     pub fn refusal(&self, why: &str) -> Json {
+        if self.elicitation {
+            return json!({"action":"cancel"});
+        }
         json!({ "behavior": "deny", "message": why })
     }
 }
@@ -427,6 +509,70 @@ mod tests {
                          "tool_use_id": "toolu_1", "description": "Say hello" }
         })))
         .unwrap()
+    }
+
+    fn elicitation() -> PermissionAsk {
+        PermissionAsk::from_frame(&Frame::from_value(json!({"type":"control_request","request_id":"elicitation-1","request":{"subtype":"elicitation","mcp_server_name":"issues","message":"Choose a project","requested_schema":{"type":"object","properties":{"project":{"type":"string","enum":["one","two"]}},"required":["project"]}}}))).unwrap()
+    }
+    #[test]
+    fn native_mcp_elicitation_uses_the_existing_human_form_and_its_original_control_identity() {
+        let ask = elicitation();
+        let turn = new_id();
+        let approval = ask.approval(turn, &ctx());
+        assert_eq!(ask.kind(), HarnessRequestKind::McpElicitation);
+        assert_eq!(approval.turn_id, turn);
+        assert_eq!(approval.request_ref, "elicitation-1");
+        assert!(approval.request.options.is_empty());
+        let HarnessRequestDetail::McpElicitation {
+            server,
+            message,
+            schema,
+            ..
+        } = approval.request.detail
+        else {
+            panic!("the native form stays a content approval");
+        };
+        assert_eq!(server, "issues");
+        assert_eq!(message, "Choose a project");
+        assert_eq!(schema, ask.input["requested_schema"]);
+        let decision: ApprovalDecision =
+            serde_json::from_value(json!({"action":"accept","content":{"project":"two"}})).unwrap();
+        assert_eq!(
+            ask.answer(&decision).unwrap(),
+            json!({"action":"accept","content":{"project":"two"}})
+        );
+        let wrong: ApprovalDecision =
+            serde_json::from_value(json!({"option_id":"allow_once"})).unwrap();
+        assert!(
+            ask.answer(&wrong).is_err(),
+            "a tool allowance cannot fabricate a form answer"
+        );
+    }
+    #[test]
+    fn declined_cancelled_and_withdrawn_elicitations_use_content_protocol_responses() {
+        let ask = elicitation();
+        for action in ["decline", "cancel"] {
+            let decision: ApprovalDecision =
+                serde_json::from_value(json!({"action":action})).unwrap();
+            assert_eq!(ask.answer(&decision).unwrap(), json!({"action":action}));
+        }
+        assert_eq!(ask.refusal("the turn ended"), json!({"action":"cancel"}));
+        assert!(!matches!(
+            ask.kind(),
+            HarnessRequestKind::Command | HarnessRequestKind::Permissions
+        ));
+    }
+    #[test]
+    fn a_url_elicitation_keeps_the_native_url_and_never_invents_form_content() {
+        let ask=PermissionAsk::from_frame(&Frame::from_value(json!({"type":"control_request","request_id":"url-1","request":{"subtype":"elicitation","mcp_server_name":"accounts","mode":"url","message":"Sign in at this address","url":"https://example.invalid/consent","elicitation_id":"native-url-1"}}))).unwrap();
+        let approval = ask.approval(new_id(), &ctx());
+        let HarnessRequestDetail::McpElicitation { message, .. } = approval.request.detail else {
+            panic!("an elicitation approval");
+        };
+        assert!(message.contains("https://example.invalid/consent"));
+        let decision: ApprovalDecision =
+            serde_json::from_value(json!({"action":"accept","content":{}})).unwrap();
+        assert_eq!(ask.answer(&decision).unwrap(), json!({"action":"accept"}));
     }
 
     #[test]

@@ -894,3 +894,491 @@ async fn use_at_two_speeds_is_two_rows_in_both_rollups_and_the_figures_by_speed_
     tx.commit().await.unwrap();
     assert_eq!(before, both(&mut conn).await);
 }
+
+/// Mixed retained measurement envelopes, independent of provider identity. The ledger
+/// still owns all consumption; only tier-specific grouping needs its reporting state.
+async fn tier_reporting_world() -> (TestDb, Db, chrono::NaiveDate, Id) {
+    let (test, db) = world().await;
+    let mut conn = db.acquire().await.unwrap();
+    let place = attribution(&Pool::new(), &mut Dice(3), new_id());
+    let noon = Utc.with_ymd_and_hms(2026, 10, 5, 12, 0, 0).unwrap();
+    let cases = [
+        (None, 1, json!({})),
+        (
+            None,
+            2,
+            json!({"requested_service_tier":"default","reported_service_tier":{"state":"told","value":"default"}}),
+        ),
+        (
+            None,
+            4,
+            json!({"requested_service_tier":"priority","reported_service_tier":{"state":"told","value":"standard"}}),
+        ),
+        (
+            Some("priority"),
+            8,
+            json!({"requested_service_tier":"priority","reported_service_tier":{"state":"told","value":"priority"}}),
+        ),
+        (
+            None,
+            16,
+            json!({"requested_service_tier":"auto","reported_service_tier":{"state":"empty"}}),
+        ),
+        (
+            None,
+            32,
+            json!({"requested_service_tier":"custom-choice","reported_service_tier":{"state":"empty"}}),
+        ),
+        (
+            None,
+            64,
+            json!({"requested_service_tier":"priority","reported_service_tier":{"state":"unsupported"}}),
+        ),
+        (
+            None,
+            128,
+            json!({"requested_service_tier":"auto","reported_service_tier":{"state":"unread"}}),
+        ),
+        (None, 256, json!({"requested_service_tier":"priority"})),
+    ];
+    for (tier, tokens, states) in cases {
+        let id = new_id();
+        record(&mut conn, &at_tier(id, noon, &place, tier, tokens))
+            .await
+            .unwrap();
+        // Existing immutable-envelope fixtures include states introduced after historical
+        // rows were recorded; raw reporting metadata never changes token attribution.
+        sqlx::query("UPDATE usage_events SET measurement_states=$2,outcome='done',speed_milli=1000,generation_ms=1000,streamed_output_tokens=1 WHERE id=$1")
+            .bind(id).bind(states).execute(&mut *conn).await.unwrap();
+    }
+    drop(conn);
+    let mut tx = db.begin().await.unwrap();
+    rollup::rebuild(&mut tx, None).await.unwrap();
+    tx.commit().await.unwrap();
+    (test, db, noon.date_naive(), place.provider_id)
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn actual_unreported_tier_is_separate_from_historical_ordinary_and_unavailable() {
+    let (_test, db, day, _) = tier_reporting_world().await;
+    let mut conn = db.acquire().await.unwrap();
+    let filter = Filter::default();
+    let read = |bucket, by| Read {
+        from: day,
+        to: day,
+        filter: &filter,
+        bucket,
+        by,
+        under: None,
+    };
+    let total = rollup::read(&mut conn, &read(None, None)).await.unwrap();
+    assert_eq!(
+        total[0].figures.total_tokens, 511,
+        "unavailable tier reporting never drops consumption totals"
+    );
+    for bucket in [None, Some(UsageBucket::Hour), Some(UsageBucket::Day)] {
+        let rows = rollup::read(&mut conn, &read(bucket, Some(UsageDimension::Tier)))
+            .await
+            .unwrap();
+        let mut got: Vec<_> = rows
+            .iter()
+            .map(|row| (row.key.clone(), row.figures.total_tokens))
+            .collect();
+        got.sort();
+        assert_eq!(
+            got,
+            vec![(None, 7), (None, 48), (Some("priority".into()), 8)],
+            "ordinary, actual-unreported and unavailable are distinct at every bucket granularity"
+        );
+    }
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn raw_unread_and_unsupported_tier_facts_never_create_tier_facets_or_zero_cut_buckets() {
+    let (_test, db) = world().await;
+    let mut conn = db.acquire().await.unwrap();
+    let place = attribution(&Pool::new(), &mut Dice(3), new_id());
+    let noon = Utc.with_ymd_and_hms(2026, 10, 5, 12, 0, 0).unwrap();
+    for (tier, tokens, states) in [
+        (None, 1, json!({})),
+        (
+            Some("priority"),
+            2,
+            json!({"reported_service_tier":{"state":"told","value":"priority"}}),
+        ),
+        (
+            Some("retained-old-tier"),
+            4,
+            json!({"reported_service_tier":{"state":"unread"}}),
+        ),
+        (
+            Some("retained-old-tier"),
+            8,
+            json!({"wire_protocol":"unsupported-wire","reported_service_tier":{"state":"unsupported"}}),
+        ),
+        (None, 0, json!({"reported_service_tier":{"state":"unread"}})),
+    ] {
+        let id = new_id();
+        record(&mut conn, &at_tier(id, noon, &place, tier, tokens))
+            .await
+            .unwrap();
+        sqlx::query("UPDATE usage_events SET measurement_states=$2 WHERE id=$1")
+            .bind(id)
+            .bind(states)
+            .execute(&mut *conn)
+            .await
+            .unwrap();
+    }
+    let day = noon.date_naive();
+    let filter = Filter::default();
+    for bucket in [None, Some(UsageBucket::Hour), Some(UsageBucket::Day)] {
+        let rows = rollup::read(
+            &mut conn,
+            &Read {
+                from: day,
+                to: day,
+                filter: &filter,
+                bucket,
+                by: Some(UsageDimension::Tier),
+                under: None,
+            },
+        )
+        .await
+        .unwrap();
+        let mut got: Vec<_> = rows
+            .iter()
+            .map(|row| (row.key.clone(), row.figures.total_tokens))
+            .collect();
+        got.sort();
+        assert_eq!(got, [(None, 1), (Some("priority".to_owned()), 2)]);
+    }
+    let totals = rollup::read(
+        &mut conn,
+        &Read {
+            from: day,
+            to: day,
+            filter: &filter,
+            bucket: Some(UsageBucket::Hour),
+            by: None,
+            under: None,
+        },
+    )
+    .await
+    .unwrap();
+    assert_eq!(
+        totals[0].figures.total_tokens, 15,
+        "unavailable facets still retain consumption"
+    );
+    for (tier, expected) in [("retained-old-tier", 0), ("priority", 2)] {
+        let filter = Filter {
+            tier: Some(tier.to_owned()),
+            ..Filter::default()
+        };
+        let selected = rollup::read(
+            &mut conn,
+            &Read {
+                from: day,
+                to: day,
+                filter: &filter,
+                bucket: None,
+                by: None,
+                under: None,
+            },
+        )
+        .await
+        .unwrap();
+        assert_eq!(
+            selected
+                .iter()
+                .map(|row| row.figures.total_tokens)
+                .sum::<i64>(),
+            expected,
+            "a named-tier drilldown uses the actual reporting capability too"
+        );
+    }
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn ordinary_tier_drilldown_never_selects_unreported_or_unsupported_requests() {
+    let (_test, db, day, _) = tier_reporting_world().await;
+    let mut conn = db.acquire().await.unwrap();
+    let filter = Filter {
+        tier: Some("none".into()),
+        ..Filter::default()
+    };
+    let rows = rollup::read(
+        &mut conn,
+        &Read {
+            from: day,
+            to: day,
+            filter: &filter,
+            bucket: None,
+            by: None,
+            under: None,
+        },
+    )
+    .await
+    .unwrap();
+    assert_eq!(
+        rows[0].figures.total_tokens, 7,
+        "ordinary NULL drilldown follows actual/default or historical ordinary facts only"
+    );
+    let events = ledger::list(
+        &mut conn,
+        &ledger::Listing {
+            from: Some(day.and_hms_opt(0, 0, 0).unwrap().and_utc()),
+            until: Some(
+                (day + Duration::days(1))
+                    .and_hms_opt(0, 0, 0)
+                    .unwrap()
+                    .and_utc(),
+            ),
+            filter: &filter,
+            counted: None,
+            newest_first: false,
+            after: None,
+            limit: 20,
+        },
+    )
+    .await
+    .unwrap();
+    assert_eq!(
+        events.iter().map(|row| row.total_tokens).sum::<i64>(),
+        7,
+        "the exact ledger drilldown and chart select the same records"
+    );
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn model_and_provider_performance_keep_the_same_actual_tier_reporting_groups() {
+    let (_test, db, day, provider) = tier_reporting_world().await;
+    let mut conn = db.acquire().await.unwrap();
+    let filter = Filter::default();
+    let rows = rollup::comparison(&mut conn, day, day, &filter)
+        .await
+        .unwrap();
+    let mut got: Vec<_> = rows
+        .iter()
+        .map(|row| (row.tier.clone(), row.performance.requests))
+        .collect();
+    got.sort();
+    assert_eq!(
+        got,
+        vec![(None, 2), (None, 3), (Some("priority".into()), 1)],
+        "unreported actual tiers cannot become the ordinary performance baseline; unsupported reporting has no tier comparison"
+    );
+    let rows = rollup::provider_comparisons(&mut conn, day, day, &[provider])
+        .await
+        .unwrap();
+    let mut providers: Vec<_> = rows
+        .iter()
+        .map(|(id, row)| {
+            assert_eq!(*id, provider);
+            (row.tier.clone(), row.performance.requests)
+        })
+        .collect();
+    providers.sort();
+    assert_eq!(
+        providers, got,
+        "batched provider comparisons use the identical grouping state"
+    );
+}
+
+#[tokio::test]
+async fn exact_turn_memberships_compress_retries_and_survive_ledger_update_delete_and_rebuild() {
+    let (_test, db) = world().await;
+    let mut conn = db.acquire().await.unwrap();
+    let pool = Pool::new();
+    let mut dice = Dice(17);
+    let turn = new_id();
+    let place = attribution(&pool, &mut dice, turn);
+    let at = Utc.with_ymd_and_hms(2026, 11, 5, 12, 0, 0).unwrap();
+    let first = new_id();
+    for number in 0..64 {
+        let id = if number == 0 { first } else { new_id() };
+        assert!(
+            record(
+                &mut conn,
+                &row(id, at, &place, used(0, 0), None, None, false)
+            )
+            .await
+            .unwrap()
+        );
+    }
+    assert!(
+        !record(
+            &mut conn,
+            &row(first, at, &place, used(0, 0), None, None, false)
+        )
+        .await
+        .unwrap()
+    );
+    let membership: (i64, i64) = sqlx::query_as(
+        "SELECT count(*),sum(members)::bigint FROM usage_turn_daily WHERE turn_id=$1",
+    )
+    .bind(turn)
+    .fetch_one(&mut *conn)
+    .await
+    .unwrap();
+    assert_eq!(
+        membership,
+        (1, 64),
+        "unmetered repeated rows share one exact membership"
+    );
+    let filter = Filter {
+        thread: Some(place.thread_id),
+        ..Filter::default()
+    };
+    let read = Read {
+        from: at.date_naive(),
+        to: at.date_naive(),
+        filter: &filter,
+        bucket: None,
+        by: None,
+        under: None,
+    };
+    assert_eq!(
+        rollup::read(&mut conn, &read).await.unwrap()[0]
+            .figures
+            .turns,
+        1
+    );
+    sqlx::query("UPDATE usage_events SET measurement_states=$2,outcome='done' WHERE id=$1")
+        .bind(first)
+        .bind(
+            json!({"requested_service_tier":"priority","reported_service_tier":{"state":"empty"}}),
+        )
+        .execute(&mut *conn)
+        .await
+        .unwrap();
+    let membership: (i64, i64) = sqlx::query_as(
+        "SELECT count(*),sum(members)::bigint FROM usage_turn_daily WHERE turn_id=$1",
+    )
+    .bind(turn)
+    .fetch_one(&mut *conn)
+    .await
+    .unwrap();
+    assert_eq!(
+        membership,
+        (2, 64),
+        "moving a nullable tier/outcome key decrements its prior membership"
+    );
+    sqlx::query("DELETE FROM usage_events WHERE id=$1")
+        .bind(first)
+        .execute(&mut *conn)
+        .await
+        .unwrap();
+    let membership: (i64, i64) = sqlx::query_as(
+        "SELECT count(*),sum(members)::bigint FROM usage_turn_daily WHERE turn_id=$1",
+    )
+    .bind(turn)
+    .fetch_one(&mut *conn)
+    .await
+    .unwrap();
+    assert_eq!(membership, (1, 63));
+    let before:Json=sqlx::query_scalar("SELECT jsonb_agg(body ORDER BY body::text) FROM(SELECT to_jsonb(d) body FROM usage_turn_daily d) source").fetch_one(&mut *conn).await.unwrap();
+    drop(conn);
+    let mut tx = db.begin().await.unwrap();
+    rollup::rebuild(&mut tx, None).await.unwrap();
+    tx.commit().await.unwrap();
+    let mut conn = db.acquire().await.unwrap();
+    let after:Json=sqlx::query_scalar("SELECT jsonb_agg(body ORDER BY body::text) FROM(SELECT to_jsonb(d) body FROM usage_turn_daily d) source").fetch_one(&mut *conn).await.unwrap();
+    assert_eq!(after, before);
+    sqlx::query("DELETE FROM usage_events WHERE turn_id=$1")
+        .bind(turn)
+        .execute(&mut *conn)
+        .await
+        .unwrap();
+    let left: i64 = sqlx::query_scalar("SELECT count(*) FROM usage_turn_daily WHERE turn_id=$1")
+        .bind(turn)
+        .fetch_one(&mut *conn)
+        .await
+        .unwrap();
+    assert_eq!(left, 0);
+}
+
+#[tokio::test]
+async fn membership_turn_reads_preserve_hour_day_span_and_model_identity_without_raw_ledger_access()
+{
+    let (_test, db) = world().await;
+    let mut conn = db.acquire().await.unwrap();
+    let pool = Pool::new();
+    let mut dice = Dice(23);
+    let turn = new_id();
+    let place = attribution(&pool, &mut dice, turn);
+    let at = Utc.with_ymd_and_hms(2026, 11, 5, 23, 0, 0).unwrap();
+    for when in [
+        at,
+        at + Duration::minutes(10),
+        at + Duration::hours(1),
+        at + Duration::hours(2),
+    ] {
+        record(
+            &mut conn,
+            &row(new_id(), when, &place, used(0, 0), None, None, false),
+        )
+        .await
+        .unwrap();
+    }
+    let mut later = row(
+        new_id(),
+        at + Duration::hours(2),
+        &place,
+        used(0, 0),
+        None,
+        None,
+        false,
+    );
+    later.model = "changed-model";
+    record(&mut conn, &later).await.unwrap();
+    let filter = Filter {
+        thread: Some(place.thread_id),
+        ..Filter::default()
+    };
+    let mut read = Read {
+        from: at.date_naive(),
+        to: (at + Duration::days(1)).date_naive(),
+        filter: &filter,
+        bucket: None,
+        by: None,
+        under: None,
+    };
+    assert_eq!(
+        rollup::read(&mut conn, &read).await.unwrap()[0]
+            .figures
+            .turns,
+        1,
+        "one turn stays one across UTC days and model choices"
+    );
+    read.bucket = Some(UsageBucket::Hour);
+    let hours = rollup::read(&mut conn, &read).await.unwrap();
+    assert_eq!(hours.iter().map(|cell| cell.figures.turns).sum::<i64>(), 3);
+    read.bucket = Some(UsageBucket::Day);
+    let days = rollup::read(&mut conn, &read).await.unwrap();
+    assert_eq!(days.iter().map(|cell| cell.figures.turns).sum::<i64>(), 2);
+    read.bucket = None;
+    read.by = Some(UsageDimension::Model);
+    let models = rollup::read(&mut conn, &read).await.unwrap();
+    assert_eq!(models.iter().map(|cell| cell.figures.turns).sum::<i64>(), 2);
+    // The ordinary day/span path needs only its real maintained projections.
+    // Renaming the actual ledger makes an accidental raw turn scan fail immediately.
+    drop(conn);
+    let mut tx = db.begin().await.unwrap();
+    sqlx::query("ALTER TABLE usage_events RENAME TO retained_usage_events")
+        .execute(&mut *tx)
+        .await
+        .unwrap();
+    let read = Read {
+        from: at.date_naive(),
+        to: (at + Duration::days(1)).date_naive(),
+        filter: &filter,
+        bucket: None,
+        by: None,
+        under: None,
+    };
+    assert_eq!(
+        rollup::read(&mut tx, &read).await.unwrap()[0].figures.turns,
+        1
+    );
+    tx.rollback().await.unwrap();
+}

@@ -1,0 +1,29 @@
+/** Merging the program creator must keep schedule preparation free of immediate creation. */
+import { cleanup, screen, waitFor } from '@testing-library/react';
+import userEvent from '@testing-library/user-event';
+import { afterEach, beforeEach, expect, it, vi } from 'vitest';
+import type * as AskApi from '@/api/ask';
+import type * as Nodes from '@/api/nodes';
+import type * as Threads from '@/api/threads';
+import { NewThreadDialog } from '@/features/start/BindingDialog';
+import type { PlaceRef } from '@/features/navigation/places';
+import type { CreateThread } from '@/generated/api-types';
+import { i18n, setLocale } from '@/i18n';
+import { show } from './support';
+const calls = vi.hoisted(() => ({ create: vi.fn<typeof Threads.createThread>() }));
+vi.mock('@/api/threads', async (original) => ({ ...await original<typeof Threads>(), createThread: calls.create }));
+vi.mock('@/api/nodes', async (original) => ({ ...await original<typeof Nodes>(), nodeQuery: () => ({ queryKey: ['program-preparation-topic'], queryFn: () => Promise.resolve({ kind: 'topic', org_id: 'root' }) }) }));
+vi.mock('@/api/ask', async (original) => ({ ...await original<typeof AskApi>(), askModelsQuery: () => ({ queryKey: ['program-preparation-models'], queryFn: () => Promise.resolve({ models: [], default_model: null }) }) }));
+vi.mock('@/features/ask/ModelChoice', () => ({ AskModelChoice: () => null }));
+const parent: PlaceRef = { id: 'topic', name: 'Topic', kind: 'topic', parentId: 'project', archived: false, status: 'open', folder: false };
+beforeEach(() => vi.clearAllMocks());
+afterEach(async () => { cleanup(); await setLocale('en'); });
+for (const locale of ['en', 'zh-CN'] as const) it(`restores program setup and chooses it without creating a thread (${locale})`, async () => {
+  await setLocale(locale); const chosen = vi.fn<(config: CreateThread) => void>(), close = vi.fn(), user = userEvent.setup();
+  show(<NewThreadDialog parent={parent} open onClose={close} prepare={{ initial: { program: { id: 'orch', model: null }, name: 'Later program', access: 'private' }, onChoose: chosen }} />);
+  expect(await screen.findByRole('textbox', { name: i18n.t('start.options.name') })).toHaveValue('Later program');
+  expect(screen.queryByRole('textbox', { name: i18n.t('start.message.title') })).not.toBeInTheDocument();
+  const confirm = screen.getByRole('button', { name: i18n.t('sendLater.useSetup') }); await waitFor(() => expect(confirm).toBeEnabled()); await user.click(confirm);
+  expect(chosen).toHaveBeenCalledExactlyOnceWith({ program: { id: 'orch' }, name: 'Later program', access: 'private' });
+  expect(calls.create).not.toHaveBeenCalled(); expect(close).toHaveBeenCalledOnce();
+});

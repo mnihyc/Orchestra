@@ -21,6 +21,8 @@ pub struct ScheduleRow {
     pub content: Json,
     /// Optional private native selection.
     pub native_action: Option<Json>,
+    /// Private captured definition origins; never projected as schedule metadata.
+    pub definition_authority: Option<Json>,
     /// Explicit civil timing.
     pub timing: Json,
     /// Active, paused, finished or deleted.
@@ -68,6 +70,16 @@ pub struct RunRow {
     pub started_at: Option<DateTime<Utc>>,
 }
 
+/// The exact retained occurrence used to revalidate an accepted input's producer relationship.
+pub async fn run_by_id(conn: &mut Conn, id: Id) -> Result<Option<RunRow>, DbError> {
+    Ok(
+        sqlx::query_as("SELECT * FROM input_schedule_runs WHERE id=$1")
+            .bind(id)
+            .fetch_optional(conn)
+            .await?,
+    )
+}
+
 /// Reads a schedule, taking its row lock for a mutation or due claim when requested.
 pub async fn schedule(conn: &mut Conn, id: Id, lock: bool) -> Result<Option<ScheduleRow>, DbError> {
     let query = if lock {
@@ -93,18 +105,18 @@ pub async fn topic(
 
 /// Inserts a frozen authored definition; caller already checked and pinned its content.
 pub async fn insert(conn: &mut Conn, row: &ScheduleRow) -> Result<(), DbError> {
-    sqlx::query("INSERT INTO input_schedules(id,topic_id,author_id,name,target,content,native_action,timing,state,next_run_at,revision,topic_seq,created_at,updated_at,deleted_at) VALUES($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15)")
+    sqlx::query("INSERT INTO input_schedules(id,topic_id,author_id,name,target,content,native_action,timing,state,next_run_at,revision,topic_seq,created_at,updated_at,deleted_at,definition_authority) VALUES($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16)")
         .bind(row.id).bind(row.topic_id).bind(row.author_id).bind(&row.name).bind(&row.target).bind(&row.content)
         .bind(&row.native_action).bind(&row.timing).bind(&row.state).bind(row.next_run_at).bind(row.revision)
-        .bind(row.topic_seq).bind(row.created_at).bind(row.updated_at).bind(row.deleted_at).execute(conn).await?;
+        .bind(row.topic_seq).bind(row.created_at).bind(row.updated_at).bind(row.deleted_at).bind(&row.definition_authority).execute(conn).await?;
     Ok(())
 }
 
 /// Updates the definition and future state while the caller holds its row lock.
 pub async fn update(conn: &mut Conn, row: &ScheduleRow) -> Result<(), DbError> {
-    sqlx::query("UPDATE input_schedules SET name=$2,target=$3,content=$4,native_action=$5,timing=$6,state=$7,next_run_at=$8,revision=$9,topic_seq=$10,updated_at=$11,deleted_at=$12 WHERE id=$1")
+    sqlx::query("UPDATE input_schedules SET name=$2,target=$3,content=$4,native_action=$5,timing=$6,state=$7,next_run_at=$8,revision=$9,topic_seq=$10,updated_at=$11,deleted_at=$12,definition_authority=$13 WHERE id=$1")
         .bind(row.id).bind(&row.name).bind(&row.target).bind(&row.content).bind(&row.native_action).bind(&row.timing)
-        .bind(&row.state).bind(row.next_run_at).bind(row.revision).bind(row.topic_seq).bind(row.updated_at).bind(row.deleted_at)
+        .bind(&row.state).bind(row.next_run_at).bind(row.revision).bind(row.topic_seq).bind(row.updated_at).bind(row.deleted_at).bind(&row.definition_authority)
         .execute(conn).await?;
     Ok(())
 }

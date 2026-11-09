@@ -1,0 +1,137 @@
+{
+  "ClientRequest": {
+    "initialize": [
+      "clientInfo",
+      "capabilities"
+    ],
+    "config/read": [
+      "includeLayers"
+    ],
+    "thread/start": [
+      "model",
+      "modelProvider",
+      "cwd",
+      "config",
+      "approvalPolicy",
+      "sandbox"
+    ],
+    "thread/resume": [
+      "threadId",
+      "model",
+      "modelProvider",
+      "cwd",
+      "config"
+    ],
+    "thread/fork": [
+      "threadId",
+      "model",
+      "modelProvider",
+      "cwd",
+      "config"
+    ],
+    "turn/start": [
+      "threadId",
+      "input",
+      "model",
+      "effort",
+      "approvalPolicy",
+      "sandboxPolicy"
+    ],
+    "turn/steer": [
+      "threadId",
+      "input",
+      "expectedTurnId"
+    ],
+    "turn/interrupt": [
+      "threadId",
+      "turnId"
+    ],
+    "thread/compact/start": [
+      "threadId"
+    ],
+    "thread/unsubscribe": [
+      "threadId"
+    ]
+  },
+  "ServerNotification": {
+    "item/started": [
+      "threadId",
+      "turnId",
+      "item"
+    ],
+    "item/completed": [
+      "threadId",
+      "turnId",
+      "item"
+    ],
+    "turn/started": [
+      "threadId",
+      "turn"
+    ],
+    "turn/completed": [
+      "threadId",
+      "turn"
+    ],
+    "item/agentMessage/delta": [
+      "threadId",
+      "turnId",
+      "itemId",
+      "delta"
+    ],
+    "turn/plan/updated": [
+      "threadId",
+      "turnId",
+      "plan"
+    ],
+    "thread/tokenUsage/updated": [
+      "threadId",
+      "turnId",
+      "tokenUsage"
+    ],
+    "error": [
+      "threadId",
+      "turnId",
+      "error"
+    ],
+    "mcpServer/startupStatus/updated": [
+      "name",
+      "status"
+    ]
+  },
+  "ServerRequest": {
+    "item/commandExecution/requestApproval": [
+      "threadId",
+      "turnId",
+      "itemId",
+      "command",
+      "cwd",
+      "reason",
+      "kind",
+      "networkApprovalContext"
+    ],
+    "item/fileChange/requestApproval": [
+      "threadId",
+      "turnId",
+      "itemId",
+      "reason",
+      "grantRoot"
+    ],
+    "item/permissions/requestApproval": [
+      "threadId",
+      "turnId",
+      "itemId",
+      "permissions"
+    ],
+    "item/tool/requestUserInput": [
+      "threadId",
+      "turnId",
+      "itemId",
+      "questions"
+    ],
+    "mcpServer/elicitation/request": [
+      "threadId",
+      "serverName",
+      "message"
+    ]
+  }
+}

@@ -17,7 +17,7 @@ for (const width of [1100, 400]) for (const locale of ['en', 'zh-CN'] as const) 
     await page.setViewportSize({ width, height: 1000 }); await page.emulateMedia({ colorScheme: theme });
     await signIn(page); await language(page, locale);
     const toggle = () => width === 400 ? page.locator('[data-container-choice="left:navigation"]') : page.getByRole('button', { name: /^(Left bar|左栏)$/, exact: true });
-    for (const path of ['/org/acme/settings/general', '/org/acme.research/settings/members', `/project/${ACME.web}/settings?section=tags`, `/topic/${ACME.fixLogin}?tab=settings&section=policies`]) {
+    for (const path of ['/org/acme/settings/general', '/org/acme.research/settings/members', `/project/${ACME.web}/settings?section=tags`, `/topic/${ACME.fixLogin}?tab=settings&section=defaults`]) {
       await page.goto(path);
       const frame = page.locator('[data-settings-frame]');
       const nav = frame.locator('[data-section-nav]');
@@ -75,7 +75,8 @@ for (const width of [1100, 400]) for (const locale of ['en', 'zh-CN'] as const) 
     await expect(page.getByRole('menuitem', { name: /^(Copy link|复制链接)$/, exact: true })).toBeVisible();
     await expect(page.getByRole('menuitem', { name: /^(Hide|隐藏)$/, exact: true })).toBeVisible();
     await page.keyboard.press('Escape');
-    await left.getByRole('button', { name: /^(Add a view|添加视图)$/, exact: true }).click();
+    if (width === 400) await left.getByRole('button', { name: /^(Close|关闭)$/, exact: true }).press('Enter');
+    await page.locator('[data-screen-titlebar]').getByRole('button', { name: /^(Add a view|添加视图)$/, exact: true }).click();
     const chooser = page.getByRole('dialog', { name: /^(Views|视图)$/, exact: true });
     await expect(chooser.getByRole('heading', { name: /^(Views|视图)$/, exact: true })).toBeVisible();
     await expect(chooser.locator('[cmdk-group-heading], [data-choice-description], [data-choice-layout]')).toHaveCount(0);

@@ -1,3 +1,4 @@
+import { homeMoveEntries } from '@/features/duplicate/move';
 /** What can be done with a machine, from its row in the list and from its own page: enroll it again, refresh what it reports, open, edit, rename, copy its link and revoke it.
  *
  * A machine belongs to the person who enrolled it, who is the only one who sees it here, so every act is theirs
@@ -95,7 +96,7 @@ export function useMachineActs(): MachineActs {
     };
     const edit: Act = { id: 'edit', label: t('resources.act.edit'), icon: <Pencil aria-hidden />, run: () => ask('edit', machine) };
     const rename: Act = { id: 'rename', label: t('resources.act.rename'), icon: <TextCursorInput aria-hidden />, shortcut: 'F2', run: () => ask('rename', machine) };
-    const copy: Act = { id: 'copy-link', label: t('resources.act.copyLink'), icon: <Copy aria-hidden />, run: () => copyLink(`/resources/machines/${machine.id}`) };
+    const copy: Act = { id: 'copy-link', label: t('resources.act.copyLink'), icon: <Copy aria-hidden />, run: () => copyLink({ kind: 'machine', id: machine.id }) };
     const revokeAct: Act = { id: 'revoke', label: t('resources.act.revoke'), icon: <ShieldOff aria-hidden />, danger: true, disabled: active ? false : t('machines.revoke.already'), run: () => ask('revoke', machine) };
     const declare: Act | null = !machine.online && machine.lost_at === undefined && (machine.owner?.id === me.data?.id || machine.access?.admin_only?.includes('machine.manage')===true) ? { id: 'declare-lost', label: t('loss.declareMenu'), icon: <TriangleAlert aria-hidden />, danger: true, run: () => setAsked({ what: 'lost', machine }) } : null;
     const recover: Act | null = machine.lost_at !== undefined && (machine.owner?.id === me.data?.id || machine.access?.admin_only?.includes('machine.manage')===true) ? { id: 'recover', label: t('loss.recover'), icon: <ArrowRightLeft aria-hidden />, run: () => openChange({ kind: 'machine', id: machine.id }, { kind: 'recover' }) } : null;
@@ -103,7 +104,7 @@ export function useMachineActs(): MachineActs {
       // What a machine that lost its enrollment needs is a way back; one that is well, to be asked what it reports; one that is away, to be opened.
       primary: updateNow ?? (manages ? machine.lost_at !== undefined ? recover : lost !== null ? again : active && machine.online ? reload : open : open),
       edit: manages ? edit : null,
-      entries: manages ? entriesOf([open], [updateNow, machine.lost_at === undefined ? again : null, reload, recover], [edit, rename], [copy], [declare, revokeAct], [cleanup.act({kind:'machine',id:machine.id},manages)]) : entriesOf([open],[copy],[cleanup.act({kind:'machine',id:machine.id},false)]),
+      entries: [...homeMoveEntries(t, 'machine', machine), ...(manages ? entriesOf([open], [updateNow, machine.lost_at === undefined ? again : null, reload, recover], [edit, rename], [copy], [declare, revokeAct], [cleanup.act({kind:'machine',id:machine.id},manages)]) : entriesOf([open],[copy],[cleanup.act({kind:'machine',id:machine.id},false)]))],
       keys: manages ? keysOf(rename) : {},
       busy: busy(machine.id),
     };

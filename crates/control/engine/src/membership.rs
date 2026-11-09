@@ -13,7 +13,7 @@ use orch_types::{Id, Json};
 use std::collections::{HashMap, HashSet};
 
 mod actions;
-pub use actions::{EndError, Leaving};
+pub use actions::{EndError, EndFailure, Leaving, PreparedHomeRestoration, PreparedMemberEnding};
 
 /// Pending work cancelled by an ending; running turns are left to finish.
 #[derive(Debug, Default, serde::Serialize)]
@@ -160,6 +160,71 @@ pub struct Holdings {
     pub pending: i64,
 }
 
+/// Native managed-resource selection, before reference formatting.
+pub struct ManagedHolding {
+    /// The exact native resource and current placement/ownership facts.
+    pub source: AccessFacts,
+    pub threads: i64,
+    pub shared_with: i64,
+    pub personal_sign_in: bool,
+}
+
+/// Native registration selection, before machine/reference formatting.
+pub struct RegisteredHolding {
+    pub source: AccessFacts,
+    pub threads: i64,
+}
+
+/// One immutable native membership preview supplies full references or count/ID projections.
+pub struct PreparedHoldings {
+    resources: Vec<ManagedHolding>,
+    registrations: Vec<RegisteredHolding>,
+    pub shared_resources: i64,
+    pub pending: i64,
+}
+
+impl PreparedHoldings {
+    #[must_use]
+    pub fn resources(&self) -> &[ManagedHolding] {
+        &self.resources
+    }
+
+    #[must_use]
+    pub fn registrations(&self) -> &[RegisteredHolding] {
+        &self.registrations
+    }
+
+    /// The existing native full result, without repeating selection or aggregate queries.
+    #[must_use]
+    pub fn render(&self) -> Holdings {
+        Holdings {
+            resources: self
+                .resources
+                .iter()
+                .map(|row| HoldingsResource {
+                    object: named(&row.source),
+                    threads: row.threads,
+                    shared_with: row.shared_with,
+                    personal_sign_in: row.personal_sign_in,
+                })
+                .collect(),
+            registrations: self
+                .registrations
+                .iter()
+                .filter_map(|row| {
+                    row.source.machine_id.map(|machine| Registration {
+                        object: named(&row.source),
+                        machine,
+                        threads: row.threads,
+                    })
+                })
+                .collect(),
+            shared_resources: self.shared_resources,
+            pending: self.pending,
+        }
+    }
+}
+
 /// Resources and work affected by ending this exact membership.
 pub async fn holdings(
     conn: &mut Conn,
@@ -167,6 +232,16 @@ pub async fn holdings(
     user: Id,
     at: DateTime<Utc>,
 ) -> Result<Holdings, EngineError> {
+    Ok(prepare_holdings(conn, root, user, at).await?.render())
+}
+
+/// Select the same native ending footprint and counts before constructing named references.
+pub async fn prepare_holdings(
+    conn: &mut Conn,
+    root: Id,
+    user: Id,
+    at: DateTime<Utc>,
+) -> Result<PreparedHoldings, EngineError> {
     let owned = resources::owned_by(conn, root, user, at).await?;
     let facts = resources::resources_in_root(conn, root).await?;
     let registered = resources::registrations_of_member(conn, root, user).await?;
@@ -199,8 +274,8 @@ pub async fn holdings(
             continue;
         };
         let (threads, shared_with) = counts.get(&row.object_id).copied().unwrap_or_default();
-        resources.push(HoldingsResource {
-            object: named(fact),
+        resources.push(ManagedHolding {
+            source: fact.clone(),
             threads,
             shared_with,
             personal_sign_in: fact.subscription && fact.owner_id == Some(user),
@@ -209,9 +284,8 @@ pub async fn holdings(
     let registrations = registered
         .iter()
         .filter_map(|fact| {
-            fact.machine_id.map(|machine| Registration {
-                object: named(fact),
-                machine,
+            fact.machine_id.map(|_| RegisteredHolding {
+                source: fact.clone(),
                 threads: counts.get(&fact.id).map_or(0, |counts| counts.0),
             })
         })
@@ -223,7 +297,7 @@ pub async fn holdings(
         AND (EXISTS(SELECT 1 FROM nodes n WHERE n.id=COALESCE(a.node_id,a.thread_id,a.approver_node_id) AND n.org_id=$1)
             OR a.object_id=ANY($3))")
         .bind(root).bind(user).bind(resource_ids).fetch_one(&mut *conn).await.map_err(DbError::from)?;
-    Ok(Holdings {
+    Ok(PreparedHoldings {
         resources,
         registrations,
         shared_resources,

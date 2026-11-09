@@ -1,3 +1,4 @@
+import { homeMoveEntries } from '@/features/duplicate/move';
 /** What can be done with a host, from its row in the list and from its own page: pause it or resume it, open, edit, rename, copy its link and delete, each only where the reader may.
  *
  * A host is paused when it should take no new environments and resumed when it should take them again; what
@@ -16,7 +17,7 @@ import { DeclareLostDialog } from '@/features/resources/DeclareLost';
 import { updateHost } from '@/api/resources';
 import { useComponentUpdateAct } from '@/features/resources/ComponentUpdate';
 import { openChange } from '@/features/change/target';
-import { type Act, type BulkAct, entriesOf, keysOf, type ListActs, type RowActs, useBusy, useCopyLink, shareAct } from '@/features/resources/acts';
+import { type Act, type BulkAct, entriesOf, managedAct, keysOf, type ListActs, type RowActs, useBusy, useCopyLink, shareAct } from '@/features/resources/acts';
 import { EditHost } from '@/features/resources/hosts/Edit';
 import { RemoveHostDialog } from '@/features/resources/hosts/Remove';
 import type { Host } from '@/generated/api-types';
@@ -56,12 +57,12 @@ export function useHostActs(options: { afterDelete?: () => void; onSettings?: (h
 
   const actsOf = (host: Host, where: 'row' | 'page'): RowActs & { edit: Act | null } => {
     const manage = holds(host.access, 'host.manage');
+    const guarded = (act: Act | null) => managedAct(act, manage, t('resources.act.manageRequired'));
     const updateNow = componentUpdate({kind:'host',id:host.id,update:host.software_update,manage,online:host.machine.online,admin:adminSpec(host,'host.manage')});
     const open: Act | null =
       where === 'row' ? { id: 'open', label: t('resources.act.open'), icon: <ArrowRight aria-hidden />, run: () => void navigate({ to: '/resources/hosts/$id', params: { id: host.id } }) } : null;
     const resume: Act | null =
-      manage && host.lost_at === undefined && !host.schedulable
-        ? {
+      guarded(host.lost_at === undefined && !host.schedulable ? {
             id: 'resume',
             label: t('resources.act.resume'),
             description: t('resources.act.resumeWhy'),
@@ -71,11 +72,9 @@ export function useHostActs(options: { afterDelete?: () => void; onSettings?: (h
                 const updated = await setSchedulable(host, true);
                 toast({ tone: 'success', title: t('hosts.settings.opened', { name: updated.name }) });
               }),
-          }
-        : null;
+          } : null);
     const pause: Act | null =
-      manage && host.schedulable
-        ? {
+      guarded(host.schedulable ? {
             id: 'pause',
             label: t('resources.act.pause'),
             description: t('resources.act.pauseWhy'),
@@ -85,21 +84,20 @@ export function useHostActs(options: { afterDelete?: () => void; onSettings?: (h
                 const updated = await setSchedulable(host, false);
                 toast({ tone: 'success', title: t('hosts.settings.closed', { name: updated.name }) });
               }),
-          }
-        : null;
-    const edit: Act | null = manage ? { id: 'edit', label: t('resources.act.edit'), icon: <Pencil aria-hidden />, run: () => editSettings(host) } : null;
-    const rename: Act | null = manage ? { id: 'rename', label: t('resources.act.rename'), icon: <TextCursorInput aria-hidden />, shortcut: 'F2', run: () => setAsked({ what: 'rename', host }) } : null;
+          } : null);
+    const edit: Act | null = guarded({ id: 'edit', label: t('resources.act.edit'), icon: <Pencil aria-hidden />, run: () => editSettings(host) });
+    const rename: Act | null = guarded({ id: 'rename', label: t('resources.act.rename'), icon: <TextCursorInput aria-hidden />, shortcut: 'F2', run: () => setAsked({ what: 'rename', host }) });
     const share = shareAct(t, { kind: 'host', id: host.id, name: host.name }, host.access);
-    const copy: Act = { id: 'copy-link', label: t('resources.act.copyLink'), icon: <Copy aria-hidden />, run: () => copyLink(`/resources/hosts/${host.id}`) };
-    const del: Act | null = manage ? { id: 'delete', label: t('resources.act.delete'), icon: <Trash2 aria-hidden />, danger: true, run: () => setAsked({ what: 'delete', host }) } : null;
+    const copy: Act = { id: 'copy-link', label: t('resources.act.copyLink'), icon: <Copy aria-hidden />, run: () => copyLink({ kind: 'host', id: host.id }) };
+    const del: Act | null = guarded({ id: 'delete', label: t('resources.act.delete'), icon: <Trash2 aria-hidden />, danger: true, run: () => setAsked({ what: 'delete', host }) });
     // What is idle on the host, stopped to make room: the list is read first, and nothing stops before it is confirmed.
-    const recycle: Act | null = manage ? { id: 'recycle', label: t('change.menu.recycle'), icon: <Recycle aria-hidden />, run: () => openChange({ kind: 'host', id: host.id, name: host.name }, { kind: 'recycle' }) } : null;
-    const declare: Act | null = manage && !host.machine.online && host.lost_at === undefined ? { id: 'declare-lost', label: t('loss.declareMenu'), icon: <TriangleAlert aria-hidden />, danger: true, run: () => setAsked({ what: 'lost', host }) } : null;
-    const moveAll: Act | null = manage ? { id: 'move-all', label: t(host.lost_at === undefined ? 'loss.moveAll' : 'loss.recover'), icon: <ArrowRightLeft aria-hidden />, run: () => openChange({ kind: 'host', id: host.id }, { kind: 'recover' }) } : null;
+    const recycle: Act | null = guarded({ id: 'recycle', label: t('change.menu.recycle'), icon: <Recycle aria-hidden />, run: () => openChange({ kind: 'host', id: host.id, name: host.name }, { kind: 'recycle' }) });
+    const declare: Act | null = guarded(!host.machine.online && host.lost_at === undefined ? { id: 'declare-lost', label: t('loss.declareMenu'), icon: <TriangleAlert aria-hidden />, danger: true, run: () => setAsked({ what: 'lost', host }) } : null);
+    const moveAll: Act | null = guarded({ id: 'move-all', label: t(host.lost_at === undefined ? 'loss.moveAll' : 'loss.recover'), icon: <ArrowRightLeft aria-hidden />, run: () => openChange({ kind: 'host', id: host.id }, { kind: 'recover' }) });
     return {
-      primary: updateNow ?? resume ?? open,
+      primary: manage ? (updateNow ?? resume ?? open) : open,
       edit,
-      entries: entriesOf([open], [updateNow, resume, pause], [edit, rename], [recycle, moveAll], [share, copy], [declare, del], [cleanup.act({kind:'host',id:host.id}, manage)]),
+      entries: [...homeMoveEntries(t, 'host', host), ...entriesOf([open], [updateNow, resume, pause], [edit, rename], [recycle, moveAll], [share, copy], [declare, del], [cleanup.act({kind:'host',id:host.id}, manage)])],
       keys: keysOf(rename),
       busy: busy(host.id),
     };

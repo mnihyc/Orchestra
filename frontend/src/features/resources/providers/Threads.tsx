@@ -92,7 +92,7 @@ export function ProviderThreads({ provider }: { provider: Provider }) {
       }
     >
       {list.isPending ? (
-        <SkeletonRows rows={3} />
+        <SkeletonRows read={list} rows={3} />
       ) : list.isError && items.length === 0 ? (
         <ErrorState compact error={list.error} retrying={list.isRefetching} onRetry={() => void list.refetch()} />
       ) : items.length === 0 && hidden === 0 ? (

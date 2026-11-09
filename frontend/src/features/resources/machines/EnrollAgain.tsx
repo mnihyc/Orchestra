@@ -115,7 +115,7 @@ export function EnrollAgainDialog({ machine, onClose }: { machine: Machine; onCl
           <ErrorAlert error={make.error} />
         ) : made === undefined || !mayShow ? (
           <div aria-busy="true">
-            <SkeletonRows rows={3} />
+            <SkeletonRows read={make} rows={3} />
           </div>
         ) : watch.isError ? <ErrorAlert error={watch.error} /> : enrolled ? (
           <InlineAlert tone="success" title={t('machines.again.done', { name: machine.name })}>
