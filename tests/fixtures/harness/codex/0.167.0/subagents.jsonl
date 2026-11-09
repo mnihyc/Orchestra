@@ -1,0 +1,6 @@
+{"direction":"from_harness","frame":{"method":"turn/started","params":{"threadId":"fixture-thread","turn":{"id":"fixture-turn","status":"inProgress","items":[]}}}}
+{"direction":"from_harness","frame":{"method":"item/completed","params":{"threadId":"fixture-thread","turnId":"fixture-turn","completedAtMs":5,"item":{"type":"collabAgentToolCall","id":"fixture-spawn","tool":"spawnAgent","status":"completed","senderThreadId":"fixture-thread","receiverThreadIds":["fixture-child"],"agentsStates":{"fixture-child":{"status":"running"}},"prompt":"Read the fixture","model":null,"reasoningEffort":null}}}}
+{"direction":"from_harness","frame":{"method":"turn/started","params":{"threadId":"fixture-child","turn":{"id":"fixture-child-turn","status":"inProgress","items":[]}}}}
+{"direction":"from_harness","frame":{"method":"item/completed","params":{"threadId":"fixture-child","turnId":"fixture-child-turn","completedAtMs":5,"item":{"type":"agentMessage","id":"fixture-child-message","text":"Child reply","phase":"final"}}}}
+{"direction":"from_harness","frame":{"method":"turn/completed","params":{"threadId":"fixture-child","turn":{"id":"fixture-child-turn","status":"completed","items":[],"error":null}}}}
+{"direction":"from_harness","frame":{"method":"turn/completed","params":{"threadId":"fixture-thread","turn":{"id":"fixture-turn","status":"completed","error":null,"items":[]}}}}

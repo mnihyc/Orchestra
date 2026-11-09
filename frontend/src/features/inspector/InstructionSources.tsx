@@ -49,7 +49,7 @@ export function InstructionSources({ threadId }: { threadId: string }) {
   const { t } = useTranslation();
   const owner = useViewInstance()?.id;
   const query = useQuery(threadInstructionsQuery(threadId));
-  if (query.data === undefined) return query.error === null ? <SkeletonRows rows={2} /> : <ErrorState compact error={query.error} onRetry={() => void query.refetch()} />;
+  if (query.data === undefined) return query.error === null ? <SkeletonRows read={query} rows={2} /> : <ErrorState compact error={query.error} onRetry={() => void query.refetch()} />;
   const { sources, standing } = query.data;
   return <details className="border-b border-border px-3 py-2" data-testid="instruction-sources">
     <summary className="cursor-pointer text-sm font-medium">

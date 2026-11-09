@@ -1,3 +1,4 @@
+import { unplacedGrouping } from '../doubles/resource-grouping';
 /** Move choices follow reported services and machine policy, with one exclusive selection. */
 import { screen } from '@testing-library/react';
 import userEvent from '@testing-library/user-event';
@@ -6,7 +7,7 @@ import { HostChoices } from '@/features/change/Where';
 import type { MoveMachine } from '@/generated/api-types';
 import { show } from './support';
 
-const machine: MoveMachine = { machine: { id: 'personal', name: 'Team workstation', online: true, placement: 'connected', platform_os: 'linux' }, host: null, usable: true, reasons: [] };
+const machine: MoveMachine = { ...unplacedGrouping(), machine: { id: 'personal', name: 'Team workstation', online: true, placement: 'connected', platform_os: 'linux' }, host: null, usable: true, reasons: [] };
 
 it('offers an enabled directory destination through the same move choice', async () => {
   const onMachine = vi.fn();

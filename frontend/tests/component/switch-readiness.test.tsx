@@ -1,10 +1,11 @@
 /** The confirmation explains every wait or refusal beside Switch and rejects an old plan. */
-import { screen, waitFor } from '@testing-library/react';
+import { screen, waitFor, within } from '@testing-library/react';
 import userEvent from '@testing-library/user-event';
 import { afterEach, beforeEach, expect, it, vi } from 'vitest';
 
 import { ThreadChange } from '@/features/change/ThreadChange';
 import type { ForkPlan, ForkRequest, PlanBlocker, Thread } from '@/generated/api-types';
+import { retainedResources } from './plan-resource-fixtures';
 import { i18n, setLocale } from '@/i18n';
 import { show } from './support';
 
@@ -25,7 +26,7 @@ vi.mock('@/features/change/Depends', () => ({ Depends: () => null }));
 function answer(blockers: PlanBlocker[] = []): ForkPlan {
   return { result: 'replace', source: { name: 'Login' }, from: { provider: { id: 'current', name: 'Current' } },
     to: { provider: { id: 'next', name: 'Next' }, agent: { id: 'agent' }, model: 'shared-route', effort: null, environment: { id: 'environment', name: 'Workspace' } },
-    expires_at: new Date(Date.now() + 60_000).toISOString(), preflight_id: 'review', locks: [], blockers, depends: [], turn_running: false,
+    expires_at: new Date(Date.now() + 60_000).toISOString(), preflight_id: 'review', locks: [], blockers, depends: [], turn_running: false, mounts: [], mcp: [],
     options: { active_turn: 'wait', wait_minutes: 10 }, history: { report: { fidelity: 'lossless', by_kind: {}, items_total: 0, dropped: [], warnings: [] } } } as unknown as ForkPlan;
 }
 beforeEach(() => {
@@ -37,6 +38,19 @@ beforeEach(() => {
 afterEach(async () => { await setLocale('en'); });
 
 for (const locale of ['en', 'zh-CN'] as const) {
+  it('keeps named retained resources visible in the compact switch plan ('+locale+')', async () => {
+    await setLocale(locale);
+    state.answer = { ...answer(), ...retainedResources() };
+    show(<ThreadChange threadId="thread" kind="switch" toTurn={null} focus={null} job={null} say={null} open onClose={() => undefined} />);
+    await userEvent.click(await screen.findByRole('button', { name: 'Choose next provider' }));
+    const stays = await screen.findByRole('region', { name: i18n.t('change.lists.stays') });
+    expect(stays).toHaveTextContent(i18n.t('mcpPlan.kept', { name: 'Research' }));
+    expect(stays).toHaveTextContent('Shared data');
+    expect(within(stays).getAllByRole('listitem')).toHaveLength(2);
+    expect(screen.queryByRole('region', { name: i18n.t('change.lists.changes') })).not.toBeInTheDocument();
+    expect(state.start).not.toHaveBeenCalled();
+  });
+
   it(`names a required background count on the disabled confirmation (${locale})`, async () => {
     await setLocale(locale);
     state.answer = answer([{ code: 'measurement_pending', message: 'Waiting for the source count.' }]);

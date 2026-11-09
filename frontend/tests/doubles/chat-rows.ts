@@ -1,5 +1,6 @@
 /** Rows of a chat as the real API answers them: a chat, a message, a person's state in a chat; made with the defaults of an ordinary one, for the fake API and for the unit tests. */
-import type { Chat, ChatMessage, ChatState, UserRef } from '../../src/generated/api-types.ts';
+import type { Chat } from '../../src/api/chat-contract.ts';
+import type { ChatMessage, ChatState, UserRef } from '../../src/generated/api-types.ts';
 
 /** The moment the rows are "written" at, plus a number of seconds: fixed, so that nothing depends on the day a test runs. */
 export function at(seconds: number): string {
@@ -50,6 +51,7 @@ export function chat(more: Partial<Chat> = {}): Chat {
   return {
     id: '00000000-0000-4000-8009-000000000001',
     kind: 'node',
+    visibility: more.kind === 'group' || more.kind === 'direct' ? 'private' : 'public',
     org_id: '00000000-0000-4000-8002-000000000064',
     node: { id: '00000000-0000-4000-8003-000000000003', kind: 'topic', name: 'Fix login', redacted: false },
     name: null,

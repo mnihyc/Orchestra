@@ -79,7 +79,7 @@ export class PeopleWorld implements Part {
         if (found !== undefined && this.world.access.isHolder(found, { kind:'role', role:target.role, at:{id:target.node_id,kind:'org',name:null,redacted:true}, count:0 }, target.node_id)) named.add(found.me.id);
       }
       if (target.kind === 'group') {
-        const groups = this.world.access.handle(person, 'GET', `/orgs/${chat.org_id}/groups`, new URLSearchParams(), {})?.body as { id:string; name:string; description:string; org_id:string; member_count:number }[] | undefined;
+        const groups = this.world.access.handle(person, 'GET', `/orgs/${chat.org_id}/groups`, new URLSearchParams(), {})?.body as { id:string; name:string; description:string; org_id:string; member_count:number; revision:number }[] | undefined;
         const group = groups?.find((group) => group.id === target.id);
         if (group !== undefined) for (const reader of readers) {
           const found = this.world.people.get(reader.name);
@@ -129,7 +129,7 @@ export class PeopleWorld implements Part {
       choices.push({ ...base, target: { kind: 'role', node_id: scope, role: 'viewer' }, name: 'Everyone here', count, available: broad, reason: broad ? null : 'Only managers may name roles and groups here. Acme decides.' });
       const developers = users.filter((reader) => reader.me.id !== person.me.id && this.world.access.isHolder(reader, {kind:'role',role:'developer',at:{id:scope,kind:'org',name:null,redacted:true},count:0},scope));
       if (developers.length > 0) choices.push({ ...base, target: { kind: 'role', node_id: chat.node?.id ?? chat.org_id, role: 'developer' }, name: 'Developers', count: developers.length, available: broad, reason: broad ? null : 'Only managers may name roles and groups here. Acme decides.' });
-      const groups = this.world.access.handle(person, 'GET', `/orgs/${chat.org_id}/groups`, new URLSearchParams(), {})?.body as { id:string; name:string; description:string; org_id:string; member_count:number }[] | undefined;
+      const groups = this.world.access.handle(person, 'GET', `/orgs/${chat.org_id}/groups`, new URLSearchParams(), {})?.body as { id:string; name:string; description:string; org_id:string; member_count:number; revision:number }[] | undefined;
       for (const group of groups ?? []) {
         const count = users.filter((reader) => reader.me.id !== person.me.id && this.world.access.isHolder(reader, {kind:'group',group},scope)).length;
         if (count > 0) choices.push({ ...base, target: { kind: 'group', id: group.id }, name: group.name, count, available: broad, reason: broad ? null : 'Only managers may name roles and groups here. Acme decides.' });

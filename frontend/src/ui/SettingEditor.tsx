@@ -61,8 +61,9 @@ export function SettingEditor({ summary, label, children, open, onOpenChange, di
   return <SettingRow {...row}
     value={placement === 'inline' ? <div data-setting-inline-editor className="flex min-w-0 max-w-full flex-col gap-2">
       <div className="flex min-w-0 max-w-full items-start gap-2">
-        <span id={`${id}-summary`} hidden={expanded} className="min-w-0 self-center">{summary}</span>
+        <span id={`${id}-summary`} hidden={expanded} className="min-w-0">{summary}</span>
         <IconButton ref={trigger} data-setting-editor-trigger size="sm" label={label} icon={<Pencil aria-hidden />} aria-expanded={expanded} aria-controls={id}
+          className="relative top-[calc((1lh-var(--control-sm))/2)]"
           aria-describedby={`${id}-summary`} pending={disabled} onClick={() => change(!expanded)} />
       </div>
       {editor}

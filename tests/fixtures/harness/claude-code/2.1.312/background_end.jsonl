@@ -1,0 +1,12 @@
+{"direction":"to_harness","frame":{"type":"control_request","request_id":{"$replay_capture":"initialize"},"request":{"subtype":"initialize"}},"subset":true}
+{"direction":"from_harness","frame":{"type":"control_response","response":{"subtype":"success","request_id":{"$replay_ref":"initialize"},"response":{}}}}
+{"direction":"from_harness","frame":{"type":"system","subtype":"init","session_id":"00000000-0000-0000-0000-000000000004","model":"mock-large","uuid":"init","mcp_servers":[]}}
+{"direction":"to_harness","frame":{"type":"user","message":{"role":"user","content":[{"type":"text","text":"Corpus input"}]},"uuid":"00000000-0000-0000-0000-000000000003"},"subset":true}
+{"direction":"from_harness","frame":{"type":"assistant","parent_tool_use_id":null,"message":{"id":"message","role":"assistant","content":[{"type":"tool_use","id":"tool","name":"Bash","input":{"command":"fixture background","run_in_background":true}}]}}}
+{"direction":"from_harness","frame":{"type":"user","parent_tool_use_id":null,"message":{"role":"user","content":[{"type":"tool_result","tool_use_id":"tool","content":"Launched"}]},"tool_use_result":{"backgroundTaskId":"task"}}}
+{"direction":"from_harness","frame":{"type":"system","subtype":"task_started","session_id":"00000000-0000-0000-0000-000000000004","task_id":"task","run_id":"run-1","tool_use_id":"tool","task_type":"local_bash","is_backgrounded":true,"description":"Fixture task"}}
+{"direction":"to_harness","frame":{"type":"control_request","request_id":{"$replay_capture":"stop"},"request":{"subtype":"stop_task","task_id":"task"}},"subset":true}
+{"direction":"from_harness","frame":{"type":"control_response","response":{"subtype":"success","request_id":{"$replay_ref":"stop"},"response":{}}}}
+{"direction":"from_harness","frame":{"type":"system","subtype":"task_notification","session_id":"00000000-0000-0000-0000-000000000004","task_id":"task","run_id":"run-1","tool_use_id":"tool","status":"stopped","summary":"Fixture terminal","exit_code":0}}
+{"direction":"from_harness","frame":{"type":"control_request","request_id":"corpus-barrier","request":{"subtype":"hook_callback","callback_id":"orch-instructions-loaded","input":{}}}}
+{"direction":"to_harness","frame":{"type":"control_response","response":{"subtype":"success","request_id":"corpus-barrier","response":{}}},"subset":true}

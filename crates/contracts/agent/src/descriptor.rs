@@ -573,9 +573,15 @@ pub struct Capabilities {
     pub steer: bool,
     /// A running turn can be stopped.
     pub interrupt: bool,
+    /// The program accepts an explicit prompt-cache lifetime for its main conversation.
+    #[serde(default)]
+    pub prompt_cache_ttl: bool,
     /// Live native session commands can be listed and individually ended without model input.
     #[serde(default)]
     pub background_commands: bool,
+    /// Turn model, effort or confinement changes require a new native process.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub turn_changes_require_restart: bool,
     /// The kinds of approval it asks for.
     pub approvals: Vec<HarnessRequestKind>,
     /// It runs sub-agents of its own.
@@ -597,6 +603,9 @@ pub struct Capabilities {
     pub reasoning_summary: bool,
     /// It takes images.
     pub input_images: bool,
+    /// Its own image generation can be enabled explicitly for one session.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub image_generation: bool,
     /// How it takes the reasoning effort.
     pub effort: EffortSupport,
     /// It can list the MCP servers its harness's own configuration names, and read the definition of one
@@ -629,6 +638,14 @@ pub struct Capabilities {
     pub phases: bool,
     /// The facts it reports of its provider.
     pub provider_facts: Vec<ProviderFactKind>,
+    /// Optional normalized credit field declarations, passed through to the facts source.
+    /// Older adapters may omit this without changing their current unknown-state behavior.
+    #[serde(
+        default,
+        skip_serializing_if = "BTreeMap::is_empty",
+        deserialize_with = "orch_provider_contract::credit_fields::deserialize_reports"
+    )]
+    pub provider_fact_fields: BTreeMap<String, Vec<String>>,
     /// It can list the models of its provider.
     pub model_discovery: bool,
     /// It reports a title for a session.
@@ -732,6 +749,21 @@ pub struct AgentDescriptor {
     /// Members that belong to the implementation, kept and never interpreted.
     #[serde(flatten)]
     pub extensions: Extensions,
+}
+
+impl AgentDescriptor {
+    /// Per-access capability facts owned by this program extension. Missing facts declare no support.
+    /// The extension key is additive, so older stored descriptors keep their exact meaning.
+    #[must_use]
+    pub fn capability_program(&self) -> orch_provider_contract::capabilities::Program {
+        self.extensions
+            .get("x_capability_program")
+            .and_then(|value| serde_json::from_value(value.clone()).ok())
+            .unwrap_or_else(|| orch_provider_contract::capabilities::Program {
+                title: self.harness.name.clone(),
+                ..Default::default()
+            })
+    }
 }
 
 /// What is wrong with a descriptor.
@@ -955,6 +987,15 @@ impl AgentDescriptor {
     pub fn with_overrides(&self, overrides: &Json) -> Result<Self, serde_json::Error> {
         let mut merged = serde_json::to_value(self)?;
         merge_patch(&mut merged, overrides);
+        // Native profile mappings describe the program's real syntax, not an overrideable limit.
+        let key = crate::profile_parameters::EXTENSION;
+        if let Some(merged) = merged.as_object_mut() {
+            if let Some(value) = self.extensions.get(key) {
+                merged.insert(key.to_owned(), value.clone());
+            } else {
+                merged.remove(key);
+            }
+        }
         if let Some(modes) = merged
             .get_mut("approval_modes")
             .and_then(Json::as_array_mut)
@@ -965,11 +1006,22 @@ impl AgentDescriptor {
                     .is_some_and(|mode| self.approval_modes.contains(&mode))
             });
         }
+        // A profile cannot turn a process-bound native setting into a live update.
+        if self.capabilities.turn_changes_require_restart
+            && let Some(capabilities) = merged.get_mut("capabilities").and_then(Json::as_object_mut)
+        {
+            capabilities.insert("turn_changes_require_restart".to_owned(), Json::Bool(true));
+        }
         // A manager may turn proven native control off, but cannot manufacture its conformance proof.
         if !self.capabilities.background_commands
             && let Some(capabilities) = merged.get_mut("capabilities").and_then(Json::as_object_mut)
         {
             capabilities.insert("background_commands".to_owned(), Json::Bool(false));
+        }
+        if !self.capabilities.image_generation
+            && let Some(capabilities) = merged.get_mut("capabilities").and_then(Json::as_object_mut)
+        {
+            capabilities.insert("image_generation".to_owned(), Json::Bool(false));
         }
         if !self.capabilities.import_native
             && let Some(capabilities) = merged.get_mut("capabilities").and_then(Json::as_object_mut)
@@ -1031,7 +1083,7 @@ mod tests {
     /// A descriptor of the first built-in adapter, as it is published.
     fn codex() -> Json {
         let capabilities = json!({
-          "steer": true, "interrupt": true, "background_commands": false,
+          "steer": true, "interrupt": true, "background_commands": false, "prompt_cache_ttl": false,
           "approvals": ["command", "file_change", "permissions", "user_input", "mcp_elicitation"],
           "subagents": true, "plan": true, "plan_mode": true,
           "plan_mechanics": { "proposal": "item", "proceed": "message" },
@@ -1079,6 +1131,21 @@ mod tests {
           "capabilities": capabilities,
           "parameters": []
         })
+    }
+
+    #[test]
+    fn an_override_cannot_manufacture_native_image_generation() {
+        let mut descriptor: AgentDescriptor = serde_json::from_value(codex()).unwrap();
+        assert!(!descriptor.capabilities.image_generation);
+        let raised = descriptor
+            .with_overrides(&json!({"capabilities":{"image_generation":true}}))
+            .unwrap();
+        assert!(!raised.capabilities.image_generation);
+        descriptor.capabilities.image_generation = true;
+        let disabled = descriptor
+            .with_overrides(&json!({"capabilities":{"image_generation":false}}))
+            .unwrap();
+        assert!(!disabled.capabilities.image_generation);
     }
 
     #[test]

@@ -45,6 +45,11 @@ const TICK: Duration = Duration::from_millis(250);
 
 /// What a person is typing.
 enum Input {
+    /// A shared labelled gateway selector; pending enrollment retains its private token here.
+    Gateway {
+        pending: Option<enrollment::Parsed>,
+        options: Vec<crate::gateway_selector::GatewayOption>,
+    },
     /// A directory to offer environments in.
     Root(String),
     /// A system address or a complete copied enrollment command; never displayed verbatim.
@@ -135,6 +140,12 @@ impl State {
 
     /// The rows of the screen shown now; the first of them that can be chosen and changed are its own.
     fn rows(&self) -> Vec<String> {
+        if let Some(Input::Gateway { options, .. }) = &self.input {
+            return options
+                .iter()
+                .map(crate::gateway_selector::option_line)
+                .collect();
+        }
         match self.screen {
             0 => self.start_rows(),
             1 => {
@@ -242,6 +253,15 @@ impl State {
                 "System    {} ({})",
                 record.system.name, record.system.public_url
             ));
+            if let Ok(config) = data.config(|_| None) {
+                rows.push(format!(
+                    "Primary gateway choice   {} · press g to choose",
+                    crate::gateway_selector::choice_name(
+                        &config.connector.gateway,
+                        &record.gateways
+                    )
+                ));
+            }
         }
         match &self.status {
             Ok(status) => {
@@ -288,6 +308,9 @@ impl State {
     /// The sentence of what the screen's keys do.
     fn help(&self) -> &'static str {
         match self.screen {
+            0 if DataDir::enrolled_at(&self.dir) => {
+                "g chooses the primary gateway and reconnects; r reads again; q leaves"
+            }
             0 if !DataDir::enrolled_at(&self.dir) => {
                 "e enrolls from a pasted address/token or the whole Add machine command; q leaves"
             }
@@ -304,6 +327,9 @@ impl State {
     }
 
     fn act(&mut self, key: KeyCode) -> bool {
+        if matches!(&self.input, Some(Input::Gateway { .. })) {
+            return self.gateway_key(key);
+        }
         if self.input.is_some() {
             match key {
                 KeyCode::Char(character) => self.paste(&character.to_string()),
@@ -313,6 +339,7 @@ impl State {
                             Input::Root(text) | Input::Enroll(text) | Input::Token(_, text) => {
                                 text.pop();
                             }
+                            Input::Gateway { .. } => {}
                         }
                     }
                 }
@@ -323,13 +350,14 @@ impl State {
                         Ok(parsed) if parsed.token.is_none() => {
                             self.input = Some(Input::Token(parsed, String::new()))
                         }
-                        Ok(parsed) => self.message = Some(self.enroll(parsed)),
+                        Ok(parsed) => self.begin_enrollment(parsed),
                         Err(error) => self.message = Some(error.to_string()),
                     },
                     Some(Input::Token(mut parsed, token)) => {
                         parsed.token = Some(token.trim().to_owned());
-                        self.message = Some(self.enroll(parsed));
+                        self.begin_enrollment(parsed);
                     }
+                    Some(Input::Gateway { .. }) => {}
                     None => {}
                 },
                 _ => {}
@@ -353,6 +381,9 @@ impl State {
             KeyCode::Char('e') if self.screen == 0 && !DataDir::enrolled_at(&self.dir) => {
                 self.input = Some(Input::Enroll(String::new()))
             }
+            KeyCode::Char('g') if self.screen == 0 && DataDir::enrolled_at(&self.dir) => {
+                self.choose_primary()
+            }
             KeyCode::Char('d') if self.screen == 1 => self.message = Some(self.remove_root()),
             KeyCode::Char('f') if self.screen == 2 => self.message = Some(self.forget()),
             KeyCode::Char('i') if self.screen == 2 => self.message = Some(self.import()),
@@ -369,6 +400,7 @@ impl State {
         if let Some(input) = &mut self.input {
             let text = match input {
                 Input::Root(text) | Input::Enroll(text) | Input::Token(_, text) => text,
+                Input::Gateway { .. } => return,
             };
             if text.len().saturating_add(pasted.len()) <= enrollment::MAX_TEXT_BYTES {
                 text.push_str(pasted);
@@ -381,20 +413,152 @@ impl State {
         }
     }
 
+    fn begin_enrollment(&mut self, parsed: enrollment::Parsed) {
+        if let Err(message) = parsed.validate_target(&self.dir) {
+            self.message = Some(message);
+            return;
+        }
+        if parsed.gateway.is_some() || DataDir::enrolled_at(&self.dir) {
+            self.message = Some(self.enroll(parsed));
+            return;
+        }
+        let token = parsed.token.clone().unwrap_or_default();
+        if token.is_empty() {
+            self.message = Some("Paste the enrollment token too.".into());
+            return;
+        }
+        let result = (|| -> Result<_, String> {
+            let data = DataDir::open(&self.dir).map_err(|error| error.to_string())?;
+            let choice = data
+                .config(|_| None)
+                .map_err(|error| error.to_string())?
+                .connector
+                .gateway;
+            let clock: std::sync::Arc<dyn orch_types::Clock> =
+                std::sync::Arc::new(orch_types::SystemClock);
+            let transport = crate::enrollment::HttpsEnroll::new(clock, None);
+            let mut options = self
+                .handle
+                .block_on(crate::gateway_selector::enrollment_options(
+                    &data,
+                    &parsed.address,
+                    &token,
+                    &transport,
+                    true,
+                ))
+                .map_err(|error| error.to_string().replace(&token, "[redacted]"))?;
+            crate::gateway_selector::retain_current(&mut options, &choice);
+            Ok((choice, options))
+        })();
+        match result {
+            Ok((choice, options)) => {
+                self.selected.select(Some(
+                    options
+                        .iter()
+                        .position(|row| row.choice == choice)
+                        .unwrap_or(0),
+                ));
+                self.input = Some(Input::Gateway {
+                    pending: Some(parsed),
+                    options,
+                });
+            }
+            Err(message) => self.message = Some(message),
+        }
+    }
+
+    fn choose_primary(&mut self) {
+        let result = match self.ask(&Request::Gateways) {
+            Ok(Reply::Gateways {
+                choice, options, ..
+            }) => Ok((choice, options)),
+            _ => (|| -> Result<_, String> {
+                let data = DataDir::open(&self.dir).map_err(|error| error.to_string())?;
+                let choice = data
+                    .config(|_| None)
+                    .map_err(|error| error.to_string())?
+                    .connector
+                    .gateway;
+                let record = data.record().map_err(|error| error.to_string())?;
+                let mut options = crate::gateway_selector::options(
+                    &record.gateways,
+                    &record.gateway_measurements,
+                );
+                crate::gateway_selector::retain_current(&mut options, &choice);
+                Ok((choice, options))
+            })(),
+        };
+        match result {
+            Ok((choice, options)) => {
+                self.selected.select(Some(
+                    options
+                        .iter()
+                        .position(|row| row.choice == choice)
+                        .unwrap_or(0),
+                ));
+                self.input = Some(Input::Gateway {
+                    pending: None,
+                    options,
+                });
+            }
+            Err(message) => self.message = Some(message),
+        }
+    }
+
+    fn gateway_key(&mut self, key: KeyCode) -> bool {
+        match key {
+            KeyCode::Down => self.move_by(1),
+            KeyCode::Up => self.move_by(-1),
+            KeyCode::Char(number @ '1'..='9') => {
+                let index = usize::from(number as u8 - b'1');
+                if index < self.rows().len() {
+                    self.selected.select(Some(index));
+                }
+            }
+            KeyCode::Esc => {
+                self.input = None;
+                self.selected.select(Some(0));
+            }
+            KeyCode::Enter => {
+                let index = self.selected.selected().unwrap_or(0);
+                let Some(Input::Gateway { pending, options }) = self.input.take() else {
+                    return true;
+                };
+                self.selected.select(Some(0));
+                let Some(choice) = options.get(index).map(|row| row.choice.clone()) else {
+                    return true;
+                };
+                if let Some(parsed) = pending {
+                    let saved = DataDir::open(&self.dir).and_then(|data| {
+                        data.update_config(|config| config.connector.gateway = choice)
+                    });
+                    self.message = Some(match saved {
+                        Ok(()) => self.enroll(parsed),
+                        Err(error) => error.to_string(),
+                    });
+                } else {
+                    self.message = Some(match self.ask(&Request::SelectGateway { choice: choice.clone() }) {
+                        Ok(Reply::Done { said }) => said,
+                        Ok(Reply::Error { message }) => message,
+                        Ok(_) => "The runner returned an unexpected gateway answer.".into(),
+                        Err(_) => match DataDir::open(&self.dir).and_then(|data| data.update_config(|config| config.connector.gateway = choice)) {
+                            Ok(()) => "Primary gateway choice saved. Start or restart this instance to use it.".into(),
+                            Err(error) => error.to_string(),
+                        },
+                    });
+                }
+            }
+            _ => {}
+        }
+        true
+    }
+
     fn enroll(&self, parsed: enrollment::Parsed) -> String {
         use crate::enrollment::{EnrollInputs, HttpsEnroll, enroll_with_choices};
-        use orch_link_contract::enrollment_choices::{
-            CONNECTOR_NODE_REFUSAL, EnrollmentChoices, connector_roles,
-        };
+        use orch_link_contract::enrollment_choices::{EnrollmentChoices, connector_roles};
         use std::sync::Arc;
-        if parsed.node {
-            return CONNECTOR_NODE_REFUSAL.to_owned();
-        }
-        if let Some(named) = &parsed.data_dir {
-            let chosen = std::path::absolute(named).ok();
-            if chosen != std::path::absolute(&self.dir).ok() {
-                return "The pasted command names another data directory. Open its console or paste only the address and token here.".to_owned();
-            }
+        if let Err(message) = parsed.validate_target(&self.dir) {
+            return message;
         }
         let result = (|| -> Result<String, String> {
             let data = DataDir::open(&self.dir).map_err(|error| error.to_string())?;
@@ -428,6 +592,17 @@ impl State {
             )
             .map_err(str::to_owned)?;
             let clock: Arc<dyn orch_types::Clock> = Arc::new(orch_types::SystemClock);
+            let transport = HttpsEnroll::new(clock.clone(), None);
+            self.handle
+                .block_on(crate::gateway_selector::configure_enrollment(
+                    &data,
+                    &parsed.address,
+                    token,
+                    &transport,
+                    parsed.gateway.as_deref(),
+                    false,
+                ))
+                .map_err(|error| error.to_string().replace(token, "[redacted]"))?;
             let inputs = EnrollInputs {
                 address: parsed.address.clone(),
                 token: token.to_owned(),
@@ -443,11 +618,7 @@ impl State {
             let enrolled = self
                 .handle
                 .block_on(enroll_with_choices(
-                    &inputs,
-                    &data,
-                    &HttpsEnroll::new(clock.clone(), None),
-                    &*clock,
-                    &choices,
+                    &inputs, &data, &transport, &*clock, &choices,
                 ))
                 .map_err(|error| error.to_string().replace(token, "[redacted]"))?;
             let said = format!(
@@ -478,6 +649,7 @@ impl State {
 
     fn footer(&self) -> Vec<String> {
         match &self.input {
+            Some(Input::Gateway { pending, .. }) => vec!["Up/Down chooses; Enter confirms; Esc cancels.".into(), if pending.is_some() { "A selected gateway stays fixed; Automatic remeasures on reconnect.".into() } else { "Changing the choice reconnects this machine's primary session.".into() }],
             Some(Input::Root(text)) => vec![format!("Directory to offer: {text}_"),"Enter adds it, Esc leaves it".to_owned()],
             Some(Input::Enroll(text)) => vec![format!("Paste a system address or its enrollment command: {} characters entered (hidden)",text.chars().count()),
                 "Enter continues; then enrolls and starts the per-user service (unless the command says --no-service). Esc cancels.".to_owned()],
@@ -544,6 +716,7 @@ impl State {
             return "Choose a server.".to_owned();
         };
         let said = match self.ask(&Request::McpImport {
+            as_name: None,
             name: server.name,
             from: Some(server.harness),
             place: Some(server.place),
@@ -630,11 +803,13 @@ fn draw(frame: &mut Frame, state: &mut State) {
     frame.render_widget(tabs, top);
     let items: Vec<ListItem> = state.rows().into_iter().map(ListItem::new).collect();
     let list = List::new(items)
-        .block(
-            Block::default()
-                .borders(Borders::ALL)
-                .title(format!(" {} ", SCREENS[state.screen])),
-        )
+        .block(Block::default().borders(Borders::ALL).title(
+            if matches!(&state.input, Some(Input::Gateway { .. })) {
+                " Gateway for this machine ".into()
+            } else {
+                format!(" {} ", SCREENS[state.screen])
+            },
+        ))
         .highlight_style(Style::default().add_modifier(Modifier::REVERSED))
         .highlight_symbol("> ");
     frame.render_stateful_widget(list, body, &mut state.selected);
@@ -689,6 +864,32 @@ pub fn in_a_terminal() -> bool {
 mod tests {
     use super::*;
     use std::path::Path;
+
+    #[test]
+    fn gateway_selector_navigation_and_escape_do_not_rewrite_the_local_choice() {
+        let directory = tempfile::tempdir().unwrap();
+        let data = DataDir::open(directory.path()).unwrap();
+        let choice = orch_link_contract::gateways::GatewayChoice {
+            selection: orch_link_contract::gateways::GatewaySelection::Selected,
+            gateway_id: Some("eu".into()),
+        };
+        data.update_config(|config| config.connector.gateway = choice.clone())
+            .unwrap();
+        let before = std::fs::read(data.config_path()).unwrap();
+        let (_runtime, mut state) = state(directory.path());
+        let mut options = crate::gateway_selector::options(&[], &[]);
+        crate::gateway_selector::retain_current(&mut options, &choice);
+        state.input = Some(Input::Gateway {
+            pending: None,
+            options,
+        });
+        state.selected.select(Some(1));
+        assert!(state.act(KeyCode::Up));
+        assert_eq!(state.selected.selected(), Some(0));
+        assert!(state.act(KeyCode::Esc));
+        assert!(state.input.is_none());
+        assert_eq!(std::fs::read(data.config_path()).unwrap(), before);
+    }
 
     /// A console on `dir`, with the runtime its requests would run on, kept alive beside it.
     fn state(dir: &Path) -> (tokio::runtime::Runtime, State) {

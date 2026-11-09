@@ -79,7 +79,7 @@ function ProcessesPanel({ access }: { access: WorkspaceAccess }) {
   }, [query.data, mine, access.thread.id]);
 
   if (query.error !== null && query.data === undefined) return <ErrorState compact className="h-full" error={query.error} onRetry={() => void query.refetch()} />;
-  if (query.data === undefined) return <SkeletonRows rows={5} />;
+  if (query.data === undefined) return <SkeletonRows read={query} rows={5} />;
 
   const send = () => {
     if (asked === null) return;

@@ -45,6 +45,7 @@ use crate::tools::shared::Target;
 use crate::tools::tree::Where;
 use crate::tools::workspace_files::{WorkspaceFile, path_refusal, same_workspace};
 use crate::tools::{Answer, CallContext};
+use futures::future::BoxFuture;
 use orch_access_contract::audit::AuditAction;
 use orch_api_contract::documents::{
     DOCUMENT_DESCRIPTION_MAX_CHARS, DOCUMENT_TITLE_MAX_CHARS, DocumentFileChange,
@@ -594,106 +595,109 @@ impl Engine {
     }
 
     /// `edit_document`: the call of an agent.
-    pub(crate) async fn edit_document_call(
-        &self,
-        call: &CallContext,
-        thread: &ThreadRow,
-    ) -> Result<Answer, EngineError> {
-        if let Err(refusal) = check_command(&call.arguments) {
-            return Ok(refusal.into());
-        }
-        let arguments: Arguments = match serde_json::from_value(call.arguments.clone()) {
-            Ok(arguments) => arguments,
-            Err(error) => return Ok(Refusal::invalid(error.to_string()).into()),
-        };
-        // A text that is a file of the workspace is read, with the files it names, before anything is changed.
-        let source = match (&arguments.file, arguments.command.as_str()) {
-            (Some(file), "create" | "rewrite" | "insert") => {
-                match self
-                    .read_source(thread, file, arguments.format.as_deref())
-                    .await?
-                {
-                    Ok(source) => Some(source),
-                    Err(refusal) => return Ok(refusal.into()),
-                }
+    pub(crate) fn edit_document_call<'a>(
+        &'a self,
+        call: &'a CallContext,
+        thread: &'a ThreadRow,
+    ) -> BoxFuture<'a, Result<Answer, EngineError>> {
+        Box::pin(async move {
+            if let Err(refusal) = check_command(&call.arguments) {
+                return Ok(refusal.into());
             }
-            _ => None,
-        };
-        if arguments.command == "import" {
-            return Box::pin(self.import_documents(thread, &arguments, call)).await;
-        }
-        let outcome = if arguments.command == "create" {
-            Box::pin(self.create_document(thread, &arguments, call, source)).await?
-        } else if arguments.command == "rename" {
-            let title = arguments.title.as_deref().unwrap_or_default().trim();
-            if title.is_empty()
-                || title.chars().count()
-                    > usize::try_from(DOCUMENT_TITLE_MAX_CHARS).unwrap_or(usize::MAX)
-            {
-                return Ok(Refusal::invalid(format!(
+            let arguments: Arguments = match serde_json::from_value(call.arguments.clone()) {
+                Ok(arguments) => arguments,
+                Err(error) => return Ok(Refusal::invalid(error.to_string()).into()),
+            };
+            // A text that is a file of the workspace is read, with the files it names, before anything is changed.
+            let source = match (&arguments.file, arguments.command.as_str()) {
+                (Some(file), "create" | "rewrite" | "insert") => {
+                    match self
+                        .read_source(thread, file, arguments.format.as_deref())
+                        .await?
+                    {
+                        Ok(source) => Some(source),
+                        Err(refusal) => return Ok(refusal.into()),
+                    }
+                }
+                _ => None,
+            };
+            if arguments.command == "import" {
+                return Box::pin(self.import_documents(thread, &arguments, call)).await;
+            }
+            let outcome = if arguments.command == "create" {
+                Box::pin(self.create_document(thread, &arguments, call, source)).await?
+            } else if arguments.command == "rename" {
+                let title = arguments.title.as_deref().unwrap_or_default().trim();
+                if title.is_empty()
+                    || title.chars().count()
+                        > usize::try_from(DOCUMENT_TITLE_MAX_CHARS).unwrap_or(usize::MAX)
+                {
+                    return Ok(Refusal::invalid(format!(
                     "The title of a document is from 1 to {DOCUMENT_TITLE_MAX_CHARS} characters."
                 ))
                 .into());
-            }
-            self.rename_document_for_edit(thread, call, &arguments.path, title)
-                .await?
-                .map(|(document, path)| {
-                    (
-                        Done {
-                            document,
-                            created: false,
-                            references: Json::Null,
-                            said: Json::Null,
-                        },
-                        path,
-                    )
-                })
-        } else {
-            let attachment = if arguments.command == "attach" {
-                match self.prepare_document_attachment(thread, &arguments).await? {
-                    Ok(file) => Some(file),
-                    Err(refusal) => return Ok(refusal.into()),
                 }
+                self.rename_document_for_edit(thread, call, &arguments.path, title)
+                    .await?
+                    .map(|(document, path)| {
+                        (
+                            Done {
+                                document,
+                                created: false,
+                                references: Json::Null,
+                                said: Json::Null,
+                            },
+                            path,
+                        )
+                    })
             } else {
-                None
+                let attachment = if arguments.command == "attach" {
+                    match self.prepare_document_attachment(thread, &arguments).await? {
+                        Ok(file) => Some(file),
+                        Err(refusal) => return Ok(refusal.into()),
+                    }
+                } else {
+                    None
+                };
+                #[cfg(test)]
+                if attachment.is_some() {
+                    super::source::tests::pause(call, super::source::tests::Point::Prepared).await;
+                }
+                self.change_document(thread, &arguments, attachment.as_ref(), source)
+                    .await?
             };
-            #[cfg(test)]
-            if attachment.is_some() {
-                super::source::tests::pause(call, super::source::tests::Point::Prepared).await;
+            let (done, path) = match outcome {
+                Ok(done) => done,
+                Err(refusal) => return Ok(refusal.into()),
+            };
+            let mut conn = self.inner.db.acquire().await?;
+            let blocks = documents::live(&mut conn, done.document.id).await?;
+            let known =
+                documents::known_for(&mut conn, &blocks, &crate::written::files_beside(&path))
+                    .await?;
+            let shown: Vec<_> = blocks.iter().map(documents::block_of).collect();
+            let count = documents::pieces_of(&shown, &known).count;
+            let files =
+                i64::try_from(rows::files(&mut conn, done.document.id).await?.len()).unwrap_or(0);
+            let mut answer = json!({
+                "path": path,
+                "id": done.document.id,
+                "created": done.created,
+                "seq": done.document.doc_seq,
+                "version": done.document.version,
+                "blocks": count,
+                "files": files,
+            });
+            if !done.references.is_null() {
+                answer["references"] = done.references.clone();
             }
-            self.change_document(thread, &arguments, attachment.as_ref(), source)
-                .await?
-        };
-        let (done, path) = match outcome {
-            Ok(done) => done,
-            Err(refusal) => return Ok(refusal.into()),
-        };
-        let mut conn = self.inner.db.acquire().await?;
-        let blocks = documents::live(&mut conn, done.document.id).await?;
-        let known =
-            documents::known_for(&mut conn, &blocks, &crate::written::files_beside(&path)).await?;
-        let shown: Vec<_> = blocks.iter().map(documents::block_of).collect();
-        let count = documents::pieces_of(&shown, &known).count;
-        let files =
-            i64::try_from(rows::files(&mut conn, done.document.id).await?.len()).unwrap_or(0);
-        let mut answer = json!({
-            "path": path,
-            "id": done.document.id,
-            "created": done.created,
-            "seq": done.document.doc_seq,
-            "version": done.document.version,
-            "blocks": count,
-            "files": files,
-        });
-        if !done.references.is_null() {
-            answer["references"] = done.references.clone();
-        }
-        if let (Some(fields), Some(said)) = (answer.as_object_mut(), done.said.as_object()) {
-            for (name, value) in said {
-                fields.insert(name.clone(), value.clone());
+            if let (Some(fields), Some(said)) = (answer.as_object_mut(), done.said.as_object()) {
+                for (name, value) in said {
+                    fields.insert(name.clone(), value.clone());
+                }
             }
-        }
-        Ok(Answer::Done(answer))
+            Ok(Answer::Done(answer))
+        })
     }
 
     /// Makes a document at a path in a docs directory.
@@ -702,7 +706,7 @@ impl Engine {
         thread: &ThreadRow,
         arguments: &Arguments,
         call: &CallContext,
-        mut source: Option<Imported>,
+        source: Option<Imported>,
     ) -> Result<Result<(Done, String), Refusal>, EngineError> {
         if let Some(source) = &arguments.from {
             return Ok(Box::pin(self.copy_document_for_edit(
@@ -724,6 +728,17 @@ impl Engine {
                 )
             }));
         }
+        Box::pin(self.create_text_document(thread, arguments, call, source)).await
+    }
+
+    /// Keeps ordinary text creation state separate from the compatibility copy path.
+    async fn create_text_document(
+        &self,
+        thread: &ThreadRow,
+        arguments: &Arguments,
+        call: &CallContext,
+        mut source: Option<Imported>,
+    ) -> Result<Result<(Done, String), Refusal>, EngineError> {
         let asked = arguments.path.trim().trim_end_matches('/');
         let Some((directory, last)) = asked.rsplit_once('/') else {
             return Ok(Err(Refusal::invalid(

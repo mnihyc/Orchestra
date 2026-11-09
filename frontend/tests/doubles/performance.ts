@@ -3,9 +3,9 @@ import type { RequestTiming, UsagePerformance } from '../../src/generated/api-ty
 import { providerError } from '../../src/features/usage/outcomes.ts';
 
 export function timingFixture(changes: Partial<RequestTiming> = {}): RequestTiming {
-  return { subagent: false, asked: null, first_output: null, end: null, reported_tokens: { input_tokens: 100, cached_input_tokens: 20, cache_write_tokens: null, output_tokens: 64, reasoning_tokens: 0, total_tokens: 164 }, output_streamed: true, vendor_words: null,
+  return { requested_service_tier: null, reported_service_tier: { state: 'unsupported' }, subagent: false, asked: null, first_output: null, end: null, reported_tokens: { input_tokens: 100, cached_input_tokens: 20, cache_write_tokens: null, output_tokens: 64, reasoning_tokens: 0, total_tokens: 164 }, output_streamed: true, vendor_words: null,
     speed_milli: { state: 'told', value: 64_000 }, streamed_tokens: { state: 'told', value: 64 }, reasoning_hidden: false,
-    first_token_ms: { state: 'told', value: 512 }, generation_ms: { state: 'told', value: 1000 }, request_ms: { state: 'told', value: 1512 }, outcome: { state: 'told', value: 'done' }, error_message: null, ...changes };
+    first_token_ms: { state: 'told', value: 512 }, generation_ms: { state: 'told', value: 1000 }, request_ms: { state: 'told', value: 1512 }, outcome: { state: 'told', value: 'done' }, web_searches: { state: 'unsupported' }, error_message: null, ...changes };
 }
 
 /** Same published bucket resolution as the real route, using already-measured fixture values. */

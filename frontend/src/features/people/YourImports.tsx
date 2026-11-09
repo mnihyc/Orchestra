@@ -55,7 +55,7 @@ function SourceNamePages({ id }: { id: string }) {
   const options = importFileNamesQuery(id, SOURCE_NAMES_PAGE);
   const names = useInfiniteQuery({ ...options, maxPages: 1 });
   const page = names.data?.pages[0];
-  if (page === undefined) return names.isError ? <ErrorState compact error={names.error} retrying={names.isRefetching} onRetry={() => void names.refetch()} /> : <SkeletonRows rows={3} />;
+  if (page === undefined) return names.isError ? <ErrorState compact error={names.error} retrying={names.isRefetching} onRetry={() => void names.refetch()} /> : <SkeletonRows read={names} rows={3} />;
   return <>
     <ul className="flex min-w-0 flex-col gap-1">{page.items.map((name, index) => <li key={`${name}:${index}`} className="break-all text-sm">{name}</li>)}</ul>
     <ImportPagination first={names.data?.pageParams[0] !== null && names.data?.pageParams[0] !== undefined} more={names.hasNextPage} loading={names.isFetching}
@@ -114,8 +114,11 @@ export function YourImports() {
   const make = <Button icon={<FileUp aria-hidden />} onClick={() => openImport()}>{t('importWizard.mine.import')}</Button>;
   return <PersonalFrame page="imports" lead={t('importWizard.mine.lead')}>
     <div className="flex min-w-0 flex-col gap-3">
-      {rows.length > 0 && <div className="flex justify-end">{make}</div>}
-      {list.isPending ? <SkeletonRows rows={4} /> : list.isError && rows.length === 0 ? <ErrorState compact error={list.error} retrying={list.isRefetching} onRetry={() => void list.refetch()} />
+      <div className="flex flex-wrap items-center justify-end gap-2">
+        <Button size="sm" variant="ghost" asChild><a href="/settings/exports">{t('importWizard.mine.exports')}</a></Button>
+        {rows.length > 0 && make}
+      </div>
+      {list.isPending ? <SkeletonRows read={list} rows={4} /> : list.isError && rows.length === 0 ? <ErrorState compact error={list.error} retrying={list.isRefetching} onRetry={() => void list.refetch()} />
         : rows.length === 0 ? <EmptyState icon={<FileUp aria-hidden />} title={t('importWizard.mine.empty')} action={make} />
         : <Table label={t('importWizard.mine.title')} columns={columns} rows={rows} rowKey={(row) => row.id} boundedIdentity rowMenu={{ label: (row) => t('importWizard.mine.menuFor', { name: name(row) }), entries }} />}
       <ImportPagination first={(list.data?.pageParams[0] !== null && list.data?.pageParams[0] !== undefined)} more={list.hasNextPage} loading={list.isFetching}

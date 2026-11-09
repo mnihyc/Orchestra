@@ -8,7 +8,8 @@ import type * as OpenView from '@/features/workbench/openView';
 import { NOT_PICKING, TimelineContextValue, type TimelineContext } from '@/features/timeline/context';
 import { ToolCallRow } from '@/features/timeline/items/ToolCall';
 import { SubagentChips } from '@/features/timeline/SubagentChips';
-import { SubagentLane } from '@/features/timeline/SubagentLane';
+import { ViewOpeningContext } from '@/features/workbench/viewOpening';
+import { SubagentLane, SubagentPanel } from '@/features/timeline/SubagentLane';
 import { timelineUi, useTimelineUi } from '@/features/timeline/state';
 import { buildRows } from '@/features/timeline/rows';
 import type { Item, Thread, ThreadItemListReply } from '@/generated/api-types';
@@ -16,6 +17,7 @@ import { i18n, setLocale } from '@/i18n';
 import { defaultThreadRead } from '@/realtime/threadScope';
 import { threadViewOf, threadWriter } from '@/realtime/stores/thread';
 import { ACME } from '../doubles/fixtures';
+import { backgroundWork } from '../doubles/background-wake';
 import { World } from '../doubles/world';
 import { agentMessage, change, command, fileChange, LOGIN_DIFF, toolCall, turn } from '../doubles/thread-rows';
 import { show } from './support';
@@ -34,7 +36,7 @@ function parent(state: 'running' | 'completed' = 'running', model?: string) {
   const item = toolCall('review-call', { kind: 'subagent', child_stream: STREAM, name: 'reviewer', role: 'review', prompt: 'Review the redirect.', state, ...(model === undefined ? {} : { model }) },
     { turn: 'turn-1', title: 'Review', status: state === 'running' ? 'in_progress' : 'completed' });
   if (item.kind !== 'tool_call') throw new Error('The tool fixture must return a tool call');
-  return item;
+  return { ...item, thread_id: THREAD, segment_id: 'segment-1', seq_created: 1, seq_updated: 1 };
 }
 
 function numbered(item: Item, seq: number): Item { return { ...item, thread_id: THREAD, segment_id: 'segment-1', seq_created: seq, seq_updated: seq }; }
@@ -79,7 +81,7 @@ describe('a sub-agent lane', () => {
     await waitFor(() => expect(calls.read).toHaveBeenCalledTimes(1));
   });
 
-  it('names the model its program says the sub-agent runs on, and nothing where it says none', async () => {
+  it('names the model its program says the sub-agent runs on, and nothing where it says none', () => {
     draw(true);
     const lane = screen.getByRole('region', { name: 'Sub-agent reviewer' });
     expect(lane.querySelector('[data-subagent-model]')).toBeNull();
@@ -284,4 +286,82 @@ describe('a sub-agent lane', () => {
     act(() => threadWriter.apply(THREAD, { items: [{ ...numbered(parent('completed'), 1), seq_updated: 22 }] }));
     expect(screen.queryByRole('group', { name: 'Running sub-agents' })).not.toBeInTheDocument();
   });
+});
+
+it('keeps the named task on its existing child lane and separates native End from opening the lane', async () => {
+  const task = backgroundWork({ id: 'recorded-review', kind: 'subagent', item_id: 'review-call', turn_id: 'turn-1', label: 'Authentication reviewer' });
+  const end = vi.fn();
+  show(<SubagentChips threadId={THREAD} tasks={[task]} mayEnd onEnd={end} />);
+  expect(screen.getAllByRole('button', { name: i18n.t('timeline.subagent.jump', { name: task.label }) })).toHaveLength(1);
+  await userEvent.click(screen.getByRole('button', { name: i18n.t('backgroundWake.endNamed', { name: task.label }) }));
+  expect(end).toHaveBeenCalledExactlyOnceWith(task);
+  expect(calls.panel).not.toHaveBeenCalled();
+  await userEvent.click(screen.getByRole('button', { name: i18n.t('timeline.subagent.jump', { name: task.label }) }));
+  expect(calls.panel).toHaveBeenCalledWith('subagent', expect.objectContaining({ thread: THREAD, item: 'review-call' }));
+});
+
+it('keeps an unsupported or lost subagent named without advertising End or reviving its running state', () => {
+  const task = backgroundWork({ id: 'recorded-review', kind: 'subagent', item_id: 'review-call', turn_id: 'turn-1', label: 'Authentication reviewer', can_end: false, state: 'lost' });
+  show(<SubagentChips threadId={THREAD} tasks={[task]} mayEnd onEnd={vi.fn()} />);
+  expect(screen.getByRole('button', { name: i18n.t('timeline.subagent.jump', { name: task.label }) })).toHaveTextContent(i18n.t('backgroundWake.states.lost'));
+  expect(screen.queryByRole('button', { name: i18n.t('backgroundWake.endNamed', { name: task.label }) })).not.toBeInTheDocument();
+});
+
+it('does not restore a finished background child from a stale running transcript row', () => {
+  const previous = threadViewOf(THREAD).turns.get('turn-1');
+  if (previous === undefined) throw new Error('The child needs its retained source turn.');
+  act(() => threadWriter.apply(THREAD, { turns: [{ ...turn('turn-1', { ordinal: 1, state: 'completed', inputId: 'input-1' }), seq_updated: previous.seq_updated + 1 }] }));
+  show(<SubagentChips threadId={THREAD} tasks={[]} mayEnd onEnd={vi.fn()} />);
+  expect(screen.queryByRole('group', { name: i18n.t('timeline.subagent.running') })).not.toBeInTheDocument();
+});
+
+
+it.each(['en', 'zh-CN'] as const)('keeps a foreign parent and an unavailable child stream from opening a reader in %s', async (locale) => {
+  await setLocale(locale);
+  const row = parent();
+  const foreign = { ...row, thread_id: 'another-thread' };
+  const view = show(<TimelineContextValue.Provider value={context}><SubagentLane item={foreign} /></TimelineContextValue.Provider>);
+  expect(view.container.querySelector('[data-conversation-lane]')).toBeNull();
+  expect(calls.read).not.toHaveBeenCalled();
+  const tool = row.payload.tool;
+  if (tool.kind !== 'subagent') throw new Error('The fixture has a subagent tool');
+  const unavailable = { ...row, payload: { ...row.payload, tool: { ...tool, child_stream: '' } } };
+  view.rerender(<TimelineContextValue.Provider value={context}><SubagentLane item={unavailable} /></TimelineContextValue.Provider>);
+  expect(screen.getByRole('status')).toHaveTextContent(i18n.t('timeline.subagent.unavailable'));
+  expect(calls.read).not.toHaveBeenCalled();
+});
+
+it('does not acquire the owned subagent reader while its workbench view is hidden', () => {
+  const view = show(<ViewOpeningContext.Provider value={null}><SubagentPanel area="right" tab={{ id: 'hidden-child', view: 'subagent', of: { thread: THREAD, item: 'review-call' } }} /></ViewOpeningContext.Provider>);
+  expect(view.container.querySelector('[data-subagent-panel]')).toBeNull();
+  expect(calls.read).not.toHaveBeenCalled();
+});
+
+it('keeps the native Open in panel act visible with its reason when the child stream is unavailable', async () => {
+  const row = parent(), tool = row.payload.tool;
+  if (tool.kind !== 'subagent') throw new Error('The fixture has a subagent tool');
+  act(() => threadWriter.apply(THREAD, { items: [{ ...row, seq_updated: 24, payload: { ...row.payload, tool: { ...tool, child_stream: '' } } }] }));
+  draw(true);
+  const open = screen.getByRole('button', { name: i18n.t('timeline.subagent.openPanel') });
+  expect(open).toHaveAttribute('aria-disabled', 'true');
+  await userEvent.click(open);
+  expect(calls.panel).not.toHaveBeenCalled();
+  expect(calls.read).not.toHaveBeenCalled();
+});
+
+it.each(['en', 'zh-CN'] as const)('inspects two concurrently running child lanes without mixing their logs or adding a composer in %s', async (locale) => {
+  await setLocale(locale);
+  const first = parent(), tool = first.payload.tool;
+  if (tool.kind !== 'subagent') throw new Error('The fixture has a subagent tool');
+  const second = { ...first, id: 'tester-call', payload: { ...first.payload, tool: { ...tool, child_stream: 'sub:tester', name: 'tester' } } };
+  show(<TimelineContextValue.Provider value={context}><SubagentLane item={first} panel /><SubagentLane item={second} panel /></TimelineContextValue.Provider>);
+  const review = screen.getByRole('log', { name: i18n.t('timeline.subagent.activity', { name: 'reviewer' }) });
+  const testing = screen.getByRole('log', { name: i18n.t('timeline.subagent.activity', { name: 'tester' }) });
+  expect(review).toHaveTextContent('The redirect is safe on the same origin.');
+  expect(review).not.toHaveTextContent('Only the tester');
+  expect(testing).toHaveTextContent('Only the tester sees this stream.');
+  expect(testing).not.toHaveTextContent('The redirect is safe');
+  expect(screen.queryByRole('textbox')).toBeNull();
+  await waitFor(() => expect(calls.read).toHaveBeenCalledTimes(2));
+  expect(new Set(calls.read.mock.calls.map((call) => call[1]))).toEqual(new Set([STREAM, 'sub:tester']));
 });

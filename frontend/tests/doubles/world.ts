@@ -6,6 +6,7 @@
  */
 import { createHash, randomUUID } from 'node:crypto';
 import type { IncomingMessage } from 'node:http';
+import { treeNode, treeThread, type TreeChange } from './tree-node.ts';
 
 import type {
   AuthResult,
@@ -29,6 +30,7 @@ import { DisplaysWorld } from './displays.ts';
 import { Change } from './change.ts';
 import { Chats } from './chats.ts';
 import { Documents } from './documents.ts';
+import { Summaries } from './summaries.ts';
 import { previewReference } from './references.ts';
 import { PeopleWorld } from './people.ts';
 import { Craft } from './craft.ts';
@@ -220,6 +222,7 @@ export class World {
   announcements: AnnouncementsWorld = new AnnouncementsWorld(this);
   /** The pages of blocks written beside a node, their comments, versions and the signs of who is writing. */
   documents: Documents = new Documents(this);
+  summaries: Summaries = new Summaries(this);
   craft: Craft = new Craft(this);
   /** What an environment holds that a screen looks into: its files, Git, processes, resources and shells, and the outline and parameters of a thread. */
   workspace: WorkspaceWorld = new WorkspaceWorld(this);
@@ -287,6 +290,7 @@ export class World {
       { name: 'profile', part: this.profiles },
       { name: 'places', part: this.places },
       { name: 'documents', part: this.documents },
+      { name: 'summaries', part: this.summaries },
       { name: 'craft', part: this.craft },
       { name: 'search', part: this.search },
     ];
@@ -331,12 +335,14 @@ export class World {
     this.everything.reset();
     this.announcements.reset();
     this.documents = new Documents(this);
+    this.summaries = new Summaries(this);
     this.peopleWork = new PeopleWorld(this);
     this.workspace = new WorkspaceWorld(this);
     this.notifications.reset();
     this.away.reset();
     this.firstSteps = new FirstStepsWorld(this);
     this.users.inbox = this.notifications;
+    this.users.onJoin = (listener) => this.requestFeeds.prime(listener);
     this.outbox = [];
     this.delayMs = scenario.delayMs ?? 0;
     this.confirmAddresses = scenario.confirmAddresses ?? false;
@@ -753,6 +759,12 @@ export class World {
     return { status: 202 };
   }
 
+  restoreSession(cookies: Record<string, string>, csrf: string | undefined): Answer {
+    if (csrf !== '1') return refuse(403, 'auth.csrf', 'the request lacks its header');
+    if (!cookies.orch_session?.startsWith('ors_')) return { status: 200, body: null };
+    return this.refresh(cookies, csrf);
+  }
+
   refresh(cookies: Record<string, string>, csrf: string | undefined): Answer {
     if (csrf !== '1') return refuse(403, 'auth.csrf', 'the request lacks its header');
     const username = this.sessions.get(cookies.orch_session ?? '');
@@ -950,7 +962,7 @@ export class World {
         return refuse(410, 'gone', 'the invitation is no longer good');
       }
       const row = this.trees.get(this.places.rootOf(orgId) ?? '')?.nodes.get(orgId);
-      const preview: InvitationPreview = {
+      const preview: InvitationPreview = { terms: null,
         kind: 'org',
         inviter: invitation.created_by,
         org: { name: row?.name ?? '', slug: this.places.metaOf(orgId).slug ?? '' },
@@ -998,14 +1010,14 @@ export class World {
         const row=this.places.rowOf(nodeId);
         if (row !== undefined) {
           const answer=this.chats.handle(person,'GET',`/chats/${row.chat.id}`,new URLSearchParams(),{});
-          if (answer !== null) { const shown=answer.body as Chat; chat={id:shown.id,kind:shown.kind,org_id:shown.org_id,node:shown.node,name:shown.name}; }
+          if (answer !== null) { const shown=answer.body as Chat; chat={id:shown.id,kind:shown.kind,visibility:shown.visibility,org_id:shown.org_id,node:shown.node,name:shown.name}; }
         }
       }
     }
     if (invited.chatId !== undefined && inviter !== undefined) {
       this.chats.handle(inviter,'PUT',`/chats/${invited.chatId}/members/${person.me.id}`,new URLSearchParams(),{});
       const answer=this.chats.handle(person,'GET',`/chats/${invited.chatId}`,new URLSearchParams(),{});
-      if (answer !== null) { const shown=answer.body as Chat; chat={id:shown.id,kind:shown.kind,org_id:shown.org_id,node:shown.node,name:shown.name}; }
+      if (answer !== null) { const shown=answer.body as Chat; chat={id:shown.id,kind:shown.kind,visibility:shown.visibility,org_id:shown.org_id,node:shown.node,name:shown.name}; }
     }
     if (invited.email !== null) invited.spent = true;
     if (invited.orgId !== null) this.places.join(person.me.username, invited.orgId, invited.preview.role ?? 'viewer');
@@ -1075,7 +1087,7 @@ export class World {
    * is stamped with the next sequence, and whoever follows the tree is sent the rows, unless the
    * frame is to be "lost".
    */
-  changeTree(orgId: string, changes: (Partial<TreeNode> & { id: string })[], lose = false): number {
+  changeTree(orgId: string, changes: TreeChange[], lose = false): number {
     const tree = this.trees.get(orgId);
     if (tree === undefined) return 0;
     const prev = tree.seq;
@@ -1085,27 +1097,20 @@ export class World {
       const base: TreeNode | undefined =
         held ??
         (change.kind !== undefined && change.name !== undefined
-          ? {
+          ? treeNode({
               id: change.id,
               kind: change.kind,
               name: change.name,
-              address: null,
               parent_id: orgId,
-              color: null,
-              docs: 0,
-              archived: false,
-              deleted: false,
-              restricted: false,
-              participating: true,
               chat: { id: randomUUID(), seq: 0 },
-              thread: null,
-              topic: null,
-              tree_seq: 0,
-            }
+            })
           : undefined);
       if (base === undefined) continue;
       tree.seq += 1;
-      const row: TreeNode = { ...base, ...change, tree_seq: tree.seq };
+      const row: TreeNode = {
+        ...base, ...change, tree_seq: tree.seq,
+        thread: change.thread === undefined ? base.thread : change.thread === null ? null : treeThread(change.thread),
+      };
       tree.nodes.set(row.id, row);
       rows.push(row);
     }

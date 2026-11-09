@@ -1,3 +1,4 @@
+import { useSelectedOrg } from '@/shell/org';
 /** Search keeps its visible filter groups, category choices and result actions consistent across languages and themes. */
 import { cleanup, fireEvent, screen, waitFor, within } from '@testing-library/react';
 import userEvent from '@testing-library/user-event';
@@ -67,6 +68,9 @@ function Page({ initial = {} }: { initial?: SearchParams }) {
   const [params, setParams] = useState(initial);
   return <SearchPage params={params} onParams={setParams} />;
 }
+const selectedOrgBefore = useSelectedOrg.getState();
+beforeEach(() => useSelectedOrg.setState({ orgId: '00000000-0000-4000-8000-000000000001' }));
+afterEach(() => useSelectedOrg.setState(selectedOrgBefore));
 beforeEach(() => { vi.clearAllMocks(); calls.names.mockReturnValue([]); calls.read.mockResolvedValue({ items: [hit], next_cursor: null }); });
 afterEach(async () => {
   cleanup(); useAppearance.setState(before); document.documentElement.classList.toggle('dark', darkBefore);
@@ -165,7 +169,7 @@ it('clears filters without changing a legacy category or order', async () => {
 });
 
 it.each(['column', 'sheet'] as const)('filters by owner and edited date in the %s', async (layout) => {
-  calls.names.mockReturnValue([{ kind: 'user', id: ADA.id, name: ADA.display_name, username: ADA.username, avatar: ADA.avatar,
+  calls.names.mockReturnValue([{ home_path: [], kind: 'user', id: ADA.id, name: ADA.display_name, username: ADA.username, avatar: ADA.avatar,
     path: [], owner: null, archived: false, recent: false, color: null, custom_color: null, address: null, tag: null, thread_attention: null }]);
   const view = show(<Page initial={{ q: 'redirect' }} />);
   let filters = view.container.querySelector('aside')!;

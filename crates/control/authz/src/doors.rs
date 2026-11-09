@@ -263,3 +263,37 @@ pub async fn offer(
         holders: holders.to_vec(),
     })
 }
+
+/// The viewers of the actual prospective page, resolved at its real topic rather than the environment.
+/// This is used inside the creator's rolled-back page preview before a real thread is inserted.
+pub(crate) async fn reader_change(
+    conn: &mut Conn,
+    principal: &Principal,
+    thread: Id,
+    environment: Id,
+    policies: &Policies,
+) -> Result<PageChange, Error> {
+    let mut graph = Graph::load(conn, &[thread]).await?;
+    let thread = graph.site_of(thread).ok_or(Error::NotFound(thread))?;
+    let resources = read_into(conn, &mut graph, &[environment]).await?;
+    let resource = resources
+        .iter()
+        .find(|row| row.id == environment)
+        .ok_or(Error::NotFound(environment))?;
+    let site = site_of(&graph, resource).ok_or(Error::NotFound(environment))?;
+    let frame = Frame::load(
+        conn,
+        principal,
+        policies.sharing_at(resource.home),
+        graph,
+        &[thread.clone(), site],
+        &every_permission([ObjectKind::Thread, ObjectKind::Environment]),
+    )
+    .await?;
+    let holders: Vec<Holder> = held_units(&frame, &thread, Permission::ThreadView)
+        .into_iter()
+        .filter_map(|unit| unit.into_iter().next())
+        .collect();
+    serde_json::from_value(serde_json::json!({"name":[{"choice":"full_view","holders":holders}]}))
+        .map_err(|error| Error::Stored(error.to_string()))
+}

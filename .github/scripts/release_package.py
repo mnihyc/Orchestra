@@ -34,7 +34,7 @@ def main():
     for directory in dirs:
         command.extend(["--connectors", str(directory.resolve())])
     subprocess.run(command, check=True)
-    subprocess.run(["cargo", "xtask", "package", "--out", str(args.out.resolve()), "--check", "--require-all-connectors"], check=True)
+    subprocess.run(["cargo", "xtask", "package", "--out", str(args.out.resolve()), "--check", "--check-source", "--require-all-connectors"], check=True)
 
 
 if __name__ == "__main__":
