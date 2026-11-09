@@ -1,73 +1,318 @@
-//! Issuing a machine's replacement enrollment token to its owner or the managers of its host.
+//! Same native replacement token, retained original issuer and optional installation-command Read.
 
 use super::{Installer, enrollment_commands, require_machine};
-use crate::certificates::{TokenFor, TokenRequest};
-use crate::middleware::authorization;
-use crate::middleware::requests::{ApiError, ApiResult};
+use crate::certificates::NewToken;
+use crate::key_operations::{native, targets};
+use crate::middleware::{
+    authorization,
+    requests::{ApiError, ApiResult},
+    transaction_guard,
+};
 use crate::registry::{Ctx, Registry};
-use orch_access_contract::permissions::{Permission, ResourceKind};
-use orch_api_contract::resources::{EnrollmentToken, MachineEnrollmentAgainTokenCreate};
-use orch_authz::Policy;
-use orch_db::queries::resources::{self, reenrollment};
+use futures::future::BoxFuture;
+use orch_access_contract::{
+    key_scope::KeyTargetKind,
+    permissions::{ObjectKind, Permission, ResourceKind},
+};
+use orch_api_contract::{
+    common::ReceiptProjection,
+    machine_sources::{self as sources, Source},
+    operation_sources::Declaration,
+    resources::{
+        EnrollmentToken, MachineEnrollmentAgainReceipt, MachineEnrollmentAgainResponse,
+        MachineEnrollmentAgainTokenCreate,
+    },
+};
+use orch_authz::{Policy, Principal};
+use orch_db::{
+    Conn, DbError,
+    queries::resources::{self, MachineRow, reenrollment},
+};
+use orch_engine::enrollment_authority::AgainOrigin;
+use orch_types::Id;
 
-pub(super) fn mount(registry: &mut Registry) {
-    registry.on(MachineEnrollmentAgainTokenCreate, create);
+pub(super) struct Reservations;
+#[derive(Clone)]
+pub(super) struct Subject {
+    row: MachineRow,
+    host: Option<Id>,
 }
-
-async fn create(ctx: Ctx, (): (), (): ()) -> ApiResult<EnrollmentToken> {
-    let machine = ctx.id("id")?;
-    let mut conn = ctx.app.db.acquire().await?;
-    let row = resources::machine(&mut conn, machine)
+async fn subject(conn: &mut Conn, id: Id) -> ApiResult<Subject> {
+    let row = resources::machine(conn, id)
         .await?
         .filter(|row| row.deleted_at.is_none())
         .ok_or_else(ApiError::not_found)?;
-    if row.lost_at.is_some() {
-        return Err(ApiError::new(
-            orch_api_contract::common::ErrorCode::PlanBlocked,
-            "A machine declared lost needs a new enrollment and identity",
-        ));
-    }
-    // A host's machine is enrolled again by its node, every other machine by its connector.
-    let host = reenrollment::host_of(&mut conn, machine).await?;
-    let installer = if host.is_some() {
-        Installer::Node
-    } else {
-        Installer::Connector
-    };
-    if let Some(host) = host {
-        let principal = authorization::principal(&ctx, &mut conn).await?;
+    let host = reenrollment::host_of(conn, id).await?;
+    Ok(Subject { row, host })
+}
+async fn require(conn: &mut Conn, principal: &Principal, value: &Subject) -> ApiResult<()> {
+    if let Some(host) = value.host {
         authorization::require_resource(
-            &mut conn,
-            &principal,
+            conn,
+            principal,
             ResourceKind::Host,
             host,
             Permission::HostManage,
             Policy::default(),
         )
-        .await?;
+        .await
     } else {
-        // A person's machine is enrolled again by one of its owners alone: who manages it, an
-        // admin's reach included, does not hand its identity on.
-        let principal = authorization::principal(&ctx, &mut conn).await?;
-        require_machine(&mut conn, &principal, row.id, Permission::AccessOwn).await?;
+        require_machine(conn, principal, value.row.id, Permission::AccessOwn).await
     }
-    match installer {
-        Installer::Node => super::require_node_installable(&ctx.app.config)?,
-        Installer::Connector => super::require_installable(&ctx.app.config)?,
-    }
-    drop(conn);
-    let made = ctx
-        .app
-        .link
-        .certificates()
-        .issue_token(&TokenRequest {
-            created_by: ctx.user()?.id(),
-            purpose: TokenFor::Again { machine },
-            name_hint: None,
+}
+fn preserved(old: &Subject, fresh: &Subject) -> bool {
+    old.row.id == fresh.row.id
+        && old.row.owner_id == fresh.row.owner_id
+        && old.row.host_id == fresh.row.host_id
+        && old.row.runtime_id == fresh.row.runtime_id
+        && old.host == fresh.host
+        && fresh.row.lost_at.is_none()
+        && old.row.roles == fresh.row.roles
+        && old.row.facts.get("installation") == fresh.row.facts.get("installation")
+}
+impl native::Stored for Reservations {
+    type Source = Source;
+    type Value = Subject;
+    const ROWS: &'static [Declaration<Source>] = &[sources::AGAIN];
+    fn load<'a>(
+        ctx: &'a Ctx,
+        conn: &'a mut Conn,
+        _declaration: &'static Declaration<Source>,
+    ) -> BoxFuture<'a, ApiResult<(Subject, Vec<native::Facts<Source>>)>> {
+        Box::pin(async move {
+            let value = subject(conn, ctx.id("id")?).await?;
+            let target = targets::machine_subject(conn, value.row.id).await?;
+            Ok((
+                value,
+                vec![native::Facts::one(
+                    Source::Governor,
+                    KeyTargetKind::Object(ObjectKind::Machine),
+                    target,
+                )],
+            ))
         })
+    }
+    fn require<'a>(
+        _ctx: &'a Ctx,
+        conn: &'a mut Conn,
+        principal: &'a Principal,
+        value: &'a Subject,
+    ) -> BoxFuture<'a, ApiResult<()>> {
+        Box::pin(require(conn, principal, value))
+    }
+}
+struct Issued {
+    machine: Id,
+    made: NewToken,
+}
+struct Projection;
+struct Refusal;
+impl super::acknowledgement::Body for Refusal {
+    type Reply = ();
+    const DECLARATION: &'static Declaration<Source> = &sources::AGAIN;
+    const WITH_MACHINE: bool = false;
+    fn require_read<'a>(
+        _ctx: &'a Ctx,
+        conn: &'a mut Conn,
+        principal: &'a Principal,
+        row: &'a MachineRow,
+    ) -> BoxFuture<'a, ApiResult<()>> {
+        Box::pin(async move {
+            let value = subject(conn, row.id).await?;
+            require(conn, principal, &value).await
+        })
+    }
+    fn render<'a>(
+        _ctx: &'a Ctx,
+        _conn: &'a mut Conn,
+        _principal: &'a Principal,
+        _row: &'a MachineRow,
+        _machine: Option<super::Machine>,
+    ) -> BoxFuture<'a, ApiResult<()>> {
+        Box::pin(async { Ok(()) })
+    }
+}
+impl native::reply::Projection for Projection {
+    type Source = Source;
+    type Input = Issued;
+    type Subject = Subject;
+    type Value = ();
+    type Reply = EnrollmentToken;
+    const READ_SOURCE: Source = Source::Governor;
+    fn declaration(_input: &Issued) -> &'static Declaration<Source> {
+        &sources::AGAIN
+    }
+    fn subject<'a>(
+        _ctx: &'a Ctx,
+        conn: &'a mut Conn,
+        input: &'a Issued,
+    ) -> BoxFuture<'a, ApiResult<(Subject, Vec<native::Facts<Source>>)>> {
+        Box::pin(async move {
+            let value = subject(conn, input.machine).await?;
+            let target = targets::machine_subject(conn, value.row.id).await?;
+            Ok((
+                value,
+                vec![native::Facts::one(
+                    Source::Governor,
+                    KeyTargetKind::Object(ObjectKind::Machine),
+                    target,
+                )],
+            ))
+        })
+    }
+    fn require<'a>(
+        _ctx: &'a Ctx,
+        conn: &'a mut Conn,
+        principal: &'a Principal,
+        _input: &'a Issued,
+        value: &'a Subject,
+    ) -> BoxFuture<'a, ApiResult<()>> {
+        Box::pin(async move {
+            if value.row.lost_at.is_some() {
+                return Err(ApiError::not_found());
+            }
+            require(conn, principal, value).await
+        })
+    }
+    fn prepare<'a>(
+        _ctx: &'a Ctx,
+        _conn: &'a mut Conn,
+        _principal: &'a Principal,
+        _input: &'a Issued,
+        _subject: &'a Subject,
+    ) -> BoxFuture<'a, ApiResult<((), Vec<native::Facts<Source>>)>> {
+        Box::pin(async { Ok(((), Vec::new())) })
+    }
+    fn render<'a>(
+        ctx: &'a Ctx,
+        _conn: &'a mut Conn,
+        _principal: &'a Principal,
+        input: &'a Issued,
+        prepared: &'a native::reply::Prepared<Self>,
+    ) -> BoxFuture<'a, ApiResult<EnrollmentToken>> {
+        Box::pin(async move { response(ctx, &prepared.subject, &input.made) })
+    }
+    fn check_opened<'a>(
+        _ctx: &'a Ctx,
+        _conn: &'a mut Conn,
+        _principal: &'a Principal,
+        _input: &'a Issued,
+        old: &'a native::reply::Prepared<Self>,
+        fresh: &'a native::reply::Prepared<Self>,
+    ) -> BoxFuture<'a, ApiResult<bool>> {
+        Box::pin(async move { Ok(preserved(&old.subject, &fresh.subject)) })
+    }
+}
+
+pub(super) fn mount(registry: &mut Registry) {
+    registry.on_with_optional_operation(
+        MachineEnrollmentAgainTokenCreate,
+        native::stored_deferred::<Reservations, _, _>,
+        create,
+    );
+}
+
+async fn create(ctx: Ctx, (): (), (): ()) -> ApiResult<MachineEnrollmentAgainResponse> {
+    let projection = ctx.clone();
+    match create_on(ctx).await {
+        Ok(value) => Ok(value),
+        Err(error) => Err(super::acknowledgement::refusal::<Refusal>(&projection, error).await?),
+    }
+}
+
+async fn create_on(ctx: Ctx) -> ApiResult<MachineEnrollmentAgainResponse> {
+    let machine = ctx.id("id")?;
+    let (credential, until) = transaction_guard::native_origin(&ctx).await?;
+    let (mut tx, initial) = transaction_guard::begin(&ctx).await?;
+    let value = subject(&mut tx, machine).await?;
+    if value.row.lost_at.is_some() {
+        return Err(ApiError::new(
+            orch_api_contract::common::ErrorCode::PlanBlocked,
+            "A machine declared lost needs a new enrollment and identity",
+        ));
+    }
+    require(&mut tx, initial.principal(), &value).await?;
+    if !resources::lock_resource(&mut tx, "machine", machine).await? {
+        return Err(ApiError::not_found());
+    }
+    sqlx::query("SELECT id FROM hosts WHERE machine_id=$1 FOR SHARE")
+        .bind(machine)
+        .fetch_all(&mut *tx)
+        .await
+        .map_err(DbError::from)?;
+    let (ctx, guard) = transaction_guard::after_wait(&ctx, &mut tx).await?;
+    let value = subject(&mut tx, machine).await?;
+    require(&mut tx, guard.principal(), &value).await?;
+    if value.row.lost_at.is_some() {
+        return Err(ApiError::new(
+            orch_api_contract::common::ErrorCode::PlanBlocked,
+            "A machine declared lost needs a new enrollment and identity",
+        ));
+    }
+    let installation = super::installation_config(&ctx);
+    if value.host.is_some() {
+        super::require_node_installable(&installation)?;
+    } else {
+        super::require_installable(&installation)?;
+    }
+    let service = ctx.app.link.certificates();
+    let prepared: crate::certificates::PreparedAgainToken = service
+        .prepare_again_token(&mut tx, ctx.user()?.id(), machine)
         .await
         .map_err(|fault| ApiError::internal(format!("{}: {}", fault.code, fault.detail)))?;
-    let mut commands = enrollment_commands(&ctx.app.config, &made.token, installer);
+    let issuer = AgainOrigin::capture(
+        &mut tx,
+        guard.principal().caller(),
+        credential,
+        until,
+        prepared.binding(),
+        ctx.app.clock.as_ref(),
+    )
+    .await
+    .map_err(ApiError::engine)?;
+    let made = service
+        .apply_again_token(&mut tx, prepared, &issuer, || guard.check_deadline(&ctx))
+        .await?
+        .map_err(|fault| ApiError::internal(format!("{}: {}", fault.code, fault.detail)))?;
+    let (accepted, until) = issuer
+        .current(&mut tx, ctx.app.clock.as_ref())
+        .await
+        .map_err(ApiError::engine)?
+        .ok_or_else(|| {
+            ApiError::new(
+                orch_api_contract::common::ErrorCode::AuthzDenied,
+                "the original enrollment issuer has ended",
+            )
+        })?;
+    guard.check_deadline(&ctx)?;
+    super::acknowledgement::deadline(&ctx, &accepted, until)?;
+    tx.commit().await.map_err(DbError::from)?;
+    let receipt = MachineEnrollmentAgainResponse::Receipt(MachineEnrollmentAgainReceipt {
+        projection: ReceiptProjection::Receipt,
+        machine_id: machine,
+        token: made.token.clone(),
+        expires_at: made.expires_at,
+        receipt: Some(made.receipt.clone()),
+    });
+    crate::key_operations::publication::receipt(&ctx, &receipt)?;
+    Ok(
+        match native::reply::render::<Projection>(&ctx, &accepted, Issued { machine, made }).await?
+        {
+            Some(value) => MachineEnrollmentAgainResponse::Full(Box::new(value)),
+            None => receipt,
+        },
+    )
+}
+
+fn response(ctx: &Ctx, subject: &Subject, made: &NewToken) -> ApiResult<EnrollmentToken> {
+    let row = &subject.row;
+    let installer = if subject.host.is_some() {
+        Installer::Node
+    } else {
+        Installer::Connector
+    };
+    let installation = super::installation_config(ctx);
+    let mut commands = enrollment_commands(&installation, &made.token, installer);
     if matches!(installer, Installer::Connector) {
         let roles = row
             .roles
@@ -151,9 +396,9 @@ async fn create(ctx: Ctx, (): (), (): ()) -> ApiResult<EnrollmentToken> {
         }
     }
     Ok(EnrollmentToken {
-        receipt: Some(made.receipt),
+        receipt: Some(made.receipt.clone()),
         commands,
-        token: made.token,
+        token: made.token.clone(),
         expires_at: made.expires_at,
     })
 }

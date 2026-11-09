@@ -628,7 +628,7 @@ async fn a_machine_that_is_away_puts_its_api_providers_offline_and_their_return_
         },
     )
     .await;
-    // Somebody switched this one off, and another is in a state of its own.
+    // Disabled is a lifecycle decision; reported vendor exhaustion does not mask machine absence.
     let switched_off = api(
         &mut conn,
         &home,
@@ -689,20 +689,21 @@ async fn a_machine_that_is_away_puts_its_api_providers_offline_and_their_return_
     let moved = sync_presence(&mut conn, now).await.unwrap();
     let mut away = moved.away.clone();
     away.sort();
-    let mut expected = vec![on_a_key, on_a_runtime];
+    let mut expected = vec![on_a_key, on_a_runtime, exhausted];
     expected.sort();
     assert_eq!(away, expected);
     assert!(moved.back.is_empty());
-    let (status, detail, _) = standing(&mut conn, on_a_key).await;
-    assert_eq!(
-        (status.as_str(), detail.as_deref()),
-        ("offline", Some(OFFLINE_DETAIL))
-    );
+    for offline in [on_a_key, on_a_runtime, exhausted] {
+        let (status, detail, _) = standing(&mut conn, offline).await;
+        assert_eq!(
+            (status.as_str(), detail.as_deref()),
+            ("offline", Some(OFFLINE_DETAIL))
+        );
+    }
     for left_alone in [managed, subscription] {
         assert_eq!(standing(&mut conn, left_alone).await.0, "ready");
     }
     assert_eq!(standing(&mut conn, switched_off).await.0, "disabled");
-    assert_eq!(standing(&mut conn, exhausted).await.0, "exhausted");
     // Looking again is not another move.
     let revision = standing(&mut conn, on_a_key).await.2;
     assert_eq!(
@@ -718,7 +719,30 @@ async fn a_machine_that_is_away_puts_its_api_providers_offline_and_their_return_
     assert!(moved.away.is_empty());
     let (status, detail, _) = standing(&mut conn, on_a_key).await;
     assert_eq!((status.as_str(), detail), ("ready", None));
-    assert_eq!(standing(&mut conn, on_a_runtime).await.0, "offline");
+    for offline in [on_a_runtime, exhausted] {
+        assert_eq!(standing(&mut conn, offline).await.0, "offline");
+    }
+
+    // A live active keeper restores both, including the formerly quota-reported provider.
+    set_online(&mut conn, runtime_machine, true).await;
+    let moved = sync_presence(&mut conn, now).await.unwrap();
+    let mut back = moved.back;
+    back.sort();
+    let mut expected_runtime = vec![on_a_runtime, exhausted];
+    expected_runtime.sort();
+    assert_eq!(back, expected_runtime);
+    assert!(moved.away.is_empty());
+    for restored in [on_a_runtime, exhausted] {
+        let (status, detail, _) = standing(&mut conn, restored).await;
+        assert_eq!((status.as_str(), detail), ("ready", None));
+    }
+    // Put both back offline before checking that revocation prevents their return.
+    set_online(&mut conn, runtime_machine, false).await;
+    let moved = sync_presence(&mut conn, now).await.unwrap();
+    let mut away = moved.away;
+    away.sort();
+    assert_eq!(away, expected_runtime);
+    assert!(moved.back.is_empty());
 
     // A machine that was revoked does not bring a provider back, however it reports itself.
     set_online(&mut conn, runtime_machine, true).await;
@@ -728,7 +752,13 @@ async fn a_machine_that_is_away_puts_its_api_providers_offline_and_their_return_
         .await
         .unwrap();
     assert!(sync_presence(&mut conn, now).await.unwrap().back.is_empty());
-    assert_eq!(standing(&mut conn, on_a_runtime).await.0, "offline");
+    for offline in [on_a_runtime, exhausted] {
+        assert_eq!(standing(&mut conn, offline).await.0, "offline");
+    }
+    for left_alone in [managed, subscription] {
+        assert_eq!(standing(&mut conn, left_alone).await.0, "ready");
+    }
+    assert_eq!(standing(&mut conn, switched_off).await.0, "disabled");
 }
 
 #[tokio::test]

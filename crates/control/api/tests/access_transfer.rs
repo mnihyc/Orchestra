@@ -8,6 +8,7 @@
 mod desk;
 mod places;
 mod support;
+use crate::support::FullTransferReply;
 
 use desk::Desk;
 use orch_api_contract::access::{HistoryList, HistoryListQuery, PermissionPage, PermissionPageGet};
@@ -72,6 +73,8 @@ async fn provider_of(firm: &Firm, by: &Who) -> Id {
         .send()
         .await
         .ok()
+        .into_full()
+        .unwrap()
         .provider
         .base
         .id
@@ -96,6 +99,7 @@ async fn pass_on(
         })
         .send()
         .await
+        .full_transfer()
 }
 
 async fn page(firm: &Firm, by: &Who, plural: &str, id: Id) -> PermissionPage {
@@ -359,6 +363,7 @@ async fn nobody_who_is_not_signed_in_hands_anything_over() {
         })
         .send()
         .await
+        .full_transfer()
         .problem();
     assert_eq!(problem.code, ErrorCode::AuthRequired);
 }

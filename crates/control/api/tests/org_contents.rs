@@ -9,6 +9,8 @@
 mod places;
 mod support;
 
+use crate::support::FullTagReply as _;
+use futures::FutureExt as _;
 use orch_api_contract::chats::{
     ChatGet, ChatLevel, ChatListScope, ChatMessageCreate, ChatMessageCreateBody, ChatPart,
     ChatStateSet, ChatStateSetBody, OrgChatList, OrgChatListQuery,
@@ -309,7 +311,9 @@ async fn recent_active_respects_kinds_archived_done_and_access_on_each_page() {
         })
         .send()
         .await
-        .ok();
+        .ok()
+        .into_full()
+        .unwrap();
     let mut conn = world.conn().await;
     access::set_row(
         &mut conn,
@@ -492,7 +496,9 @@ async fn recent_documents_keep_their_read_marks_and_the_threads_switch_applies_t
             })
             .send()
             .await
-            .ok();
+            .ok()
+            .into_full()
+            .unwrap();
         documents.push(document.base.id);
     }
     let ask = EverythingListQuery {
@@ -537,6 +543,8 @@ async fn private_project(world: &World, by: &Who, root: Id) -> Id {
         .send()
         .await
         .ok()
+        .into_full()
+        .expect("this control expects the ordinary full project response")
         .base
         .id
 }
@@ -639,6 +647,7 @@ async fn sharing_a_leaf_supplies_only_the_path_steps_and_names_that_the_finder_w
             color: None,
         })
         .send()
+        .map(|reply| reply.full_tag())
         .await
         .ok();
     let mut conn = world.conn().await;
@@ -1495,7 +1504,9 @@ async fn thread_document_and_chat_activity_reach_the_tree_inventory_and_finder_w
         })
         .send()
         .await
-        .ok();
+        .ok()
+        .into_full()
+        .unwrap();
     let after_document = listing(&world, &reader, &branch(root)).await;
     assert_eq!(
         after_document

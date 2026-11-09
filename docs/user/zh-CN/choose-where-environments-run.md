@@ -7,6 +7,7 @@ heading_id.有哪些组合: which-pairs-exist
 heading_id.每种组合支持什么: what-each-pair-supports
 heading_id.安装的软件何时丢失: when-software-you-installed-is-lost
 heading_id.内置-docker-与开发者工具模板: docker-inside-and-the-developer-tools-template
+summary: 选择提供环境运行能力和隔离边界的主机与运行时。
 ---
 
 # 选择环境运行的位置

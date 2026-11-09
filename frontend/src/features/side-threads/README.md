@@ -1,6 +1,6 @@
 # Side threads
 
-Built: asking on the side. A side thread is the same agent with the same files as its thread, started from a
+Built: starting a side thread. A side thread is the same agent with the same files as its thread, started from a
 message (from the menu of the item, which takes the history up to it) or from the menu or the box of the thread,
 with one line. It is shown under its recorded source turn: a short exchange
 of its own with its own box, folded or closed from there, or kept as a thread of the topic (the wizard of a fork,
@@ -33,7 +33,7 @@ The open list merges its one explicit read with parent start/close markers, with
 Component, row and browser sources cover those states; the joined native browser case requires a fresh
 scripted thread with a verified reading mode and integration-runner evidence, separate from the HTTP double.
 
-- `ask.ts`: Asking on the side: the entry every screen calls, and the one request behind it.
+- `ask.ts`: Starting side thread: the entry every screen calls, and the one request behind it.
 - `availability.ts`: Side-thread availability comes from the thread's verified reading mode and current authority.
 - `AskOnSide.tsx`: The one line that starts a side thread, and what is said when a thread has as many open as it may.
 - `SideLane.tsx`: A side thread beside the conversation: its own short exchange with the same agent, named after its thread, kept by a fork or closed.

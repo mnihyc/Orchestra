@@ -44,7 +44,7 @@ async fn disk_room() -> (Room, TempDir) {
     let mut room = Room::new().await;
     let target = std::env::var_os("CARGO_TARGET_DIR")
         .map(PathBuf::from)
-        .unwrap_or_else(|| PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../../../target"));
+        .unwrap_or_else(|| PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../../target"));
     let directory = tempfile::Builder::new()
         .prefix("kfix-upload-")
         .tempdir_in(target)
@@ -644,7 +644,9 @@ async fn readable_sources_can_be_copied_and_a_revoked_source_cannot_be_used_by_h
         .body(&forward(destination))
         .send()
         .await
-        .ok();
+        .ok()
+        .into_full()
+        .expect("the ordinary forward returns its full projection");
     assert_eq!(forwarded.chats.len(), 1);
     room.world
         .app
@@ -706,7 +708,9 @@ async fn document_attachment_references_require_an_upload_or_a_readable_file_sou
         .raw_body(&json!({ "title": "Private files", "access": "private" }))
         .send()
         .await
-        .ok();
+        .ok()
+        .into_full()
+        .unwrap();
     let public = room
         .world
         .app
@@ -715,7 +719,9 @@ async fn document_attachment_references_require_an_upload_or_a_readable_file_sou
         .raw_body(&json!({ "title": "Readable files" }))
         .send()
         .await
-        .ok();
+        .ok()
+        .into_full()
+        .unwrap();
     let file = raw_file(&room, &room.bea, b"private document bytes").await;
     let foreign = room
         .world
@@ -735,7 +741,9 @@ async fn document_attachment_references_require_an_upload_or_a_readable_file_sou
         .bytes(b"only the private document holds this")
         .send()
         .await
-        .ok();
+        .ok()
+        .into_full()
+        .expect("this native creation control requires its full response");
     let private_hash = Hash::of(b"only the private document holds this");
     assert_eq!(
         reference(&room, &room.cai, private_hash)
@@ -752,7 +760,9 @@ async fn document_attachment_references_require_an_upload_or_a_readable_file_sou
         .bytes(b"readable document file")
         .send()
         .await
-        .ok();
+        .ok()
+        .into_full()
+        .expect("this native creation control requires its full response");
     let readable = reference(&room, &room.cai, Hash::of(b"readable document file"))
         .await
         .ok();

@@ -128,9 +128,17 @@ impl Engine {
     /// Where search by meaning stands for the root org `org`.
     pub async fn semantic_state(&self, org: Id) -> Result<OrgState, EngineError> {
         let mut conn = self.db().acquire().await?;
-        let chosen = choice(&mut conn, org).await?;
-        let ready = rows::vectors_ready(&mut conn).await?;
-        let generations = rows::generations(&mut conn, org).await?;
+        Self::semantic_state_in(&mut conn, org).await
+    }
+
+    /// The same native state reader on its caller's actual snapshot/guarded connection.
+    pub async fn semantic_state_in(
+        conn: &mut orch_db::Conn,
+        org: Id,
+    ) -> Result<OrgState, EngineError> {
+        let chosen = choice(conn, org).await?;
+        let ready = rows::vectors_ready(&mut *conn).await?;
+        let generations = rows::generations(&mut *conn, org).await?;
         let active = generations.iter().find(|row| row.state == "active");
         let building = generations.iter().find(|row| row.state == "building");
         let filling = building.or(active).map(|row| row.id);
@@ -138,11 +146,11 @@ impl Engine {
             .iter()
             .map(|row| (row.id, row.dimensions))
             .collect();
-        let sizes = rows::sizes(&mut conn, org, &lengths, filling, ready.is_ok()).await?;
-        let index = rows::index(&mut conn, org).await?;
+        let sizes = rows::sizes(&mut *conn, org, &lengths, filling, ready.is_ok()).await?;
+        let index = rows::index(&mut *conn, org).await?;
         let rate = index.as_ref().and_then(|row| row.rate);
         let provider_pause = if let Some(named) = &chosen.embeddings {
-            rows::provider_pause_reason(&mut conn, named.provider_id).await?
+            rows::provider_pause_reason(&mut *conn, named.provider_id).await?
         } else {
             None
         };
@@ -189,7 +197,7 @@ impl Engine {
         let (preview_chunks, preview_source_bytes, preview_sources) =
             if state == "waiting" && building.is_some() {
                 let old = rows::sizes(
-                    &mut conn,
+                    &mut *conn,
                     org,
                     &lengths,
                     active.map(|generation| generation.id),
@@ -254,14 +262,23 @@ impl Engine {
     /// An admin's choice to rebuild in place: the generations there are removed, so that a new one is made
     /// where they were; results by meaning cover what is done meanwhile.
     pub async fn semantic_rebuild_in_place(&self, org: Id) -> Result<(), EngineError> {
-        let mut conn = self.db().acquire().await?;
-        let generations = rows::generations(&mut conn, org).await?;
-        drop(conn);
-        for generation in generations {
-            self.drop_generation(generation.id).await?;
-        }
-        let mut conn = self.db().acquire().await?;
-        rows::reset_index(&mut conn, org, self.inner.clock.now()).await?;
+        let mut tx = self.db().begin().await?;
+        rebuild_in_place(&mut tx, org, self.inner.clock.now()).await?;
+        tx.commit().await.map_err(orch_db::DbError::from)?;
         Ok(())
     }
+}
+
+/// Removes the current generations and resets the index in the caller's action transaction.
+/// Request callers retain their existing authority guard on this transaction through commit.
+pub async fn rebuild_in_place(
+    tx: &mut orch_db::Tx,
+    org: Id,
+    at: chrono::DateTime<chrono::Utc>,
+) -> Result<(), EngineError> {
+    for generation in rows::generations(tx, org).await? {
+        rows::drop_generation(tx, generation.id).await?;
+    }
+    rows::reset_index(tx, org, at).await?;
+    Ok(())
 }

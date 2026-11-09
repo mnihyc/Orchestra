@@ -228,8 +228,9 @@ test('a conversation of five thousand items opens at its end in moments, and hol
 
   const times = await page.evaluate((thread) => {
     const note = (window as unknown as { __open: { firstRow: number | null; clicked: number } }).__open;
-    const sync = performance.getEntriesByType('resource').filter((entry) => entry.name.includes(`/threads/${thread}/sync`)).at(-1) as PerformanceResourceTiming | undefined;
-    return { first: note.firstRow, clicked: note.clicked, start: sync?.startTime ?? null, end: sync?.responseEnd ?? null };
+    // Initial rows arrive through the native aggregate opening; sync pages are incremental.
+    const opening = performance.getEntriesByType('resource').filter((entry) => new URL(entry.name).pathname === `/api/v1/threads/${thread}/opening`).at(-1) as PerformanceResourceTiming | undefined;
+    return { first: note.firstRow, clicked: note.clicked, start: opening?.startTime ?? null, end: opening?.responseEnd ?? null };
   }, ACME.depsThread);
   expect(times.first).not.toBeNull();
   expect(times.start).not.toBeNull();

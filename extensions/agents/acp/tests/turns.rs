@@ -449,6 +449,7 @@ async fn an_image_of_a_turn_goes_to_the_agent_as_a_block_of_base64() {
         blob: orch_types::Hash::of(b"x"),
         media_type: "image/png".into(),
         name: "shot.png".into(),
+        workspace_path: None,
         path: Some(path.display().to_string()),
     }];
     rig.adapter.start_turn(turn).await.unwrap();
@@ -457,6 +458,88 @@ async fn an_image_of_a_turn_goes_to_the_agent_as_a_block_of_base64() {
     assert_eq!(prompt[1]["type"], "image");
     assert_eq!(prompt[1]["mimeType"], "image/png");
     assert_eq!(prompt[1]["data"], "iVBORw==");
+}
+
+#[tokio::test]
+async fn a_program_without_image_prompts_receives_the_delivered_environment_file_not_the_cache() {
+    let agent = Agent::new();
+    agent.behavior.lock().unwrap().capabilities["promptCapabilities"]["image"] = json!(false);
+    let mut rig = Rig::start(program(json!({})), agent.clone()).await;
+    assert!(!rig.started.descriptor.capabilities.input_images);
+    let session = rig.session().await;
+    let path = rig.work.path().join(".orch/attachments/shot.png");
+    std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+    let bytes = [137_u8, 80, 78, 71];
+    std::fs::write(&path, bytes).unwrap();
+    let mut turn = rig.turn_of(&session, "look at the attached file");
+    turn.images = vec![orch_agent_contract::session::ImageInput {
+        blob: orch_types::Hash::of(&bytes),
+        media_type: "image/png".into(),
+        name: "shot.png".into(),
+        workspace_path: Some(path.display().to_string()),
+        path: Some("/private-provider-cache/must-not-be-used.png".into()),
+    }];
+    rig.adapter.start_turn(turn).await.unwrap();
+    rig.until(|event| event.is("turn.completed")).await;
+    let prompt = &agent.frames("session/prompt")[0]["params"]["prompt"];
+    assert_eq!(prompt[1]["type"], "text");
+    assert!(
+        prompt[1]["text"]
+            .as_str()
+            .unwrap()
+            .contains(&path.display().to_string())
+    );
+    assert!(prompt[1]["text"].as_str().unwrap().contains("image/png"));
+    assert!(!prompt.to_string().contains("private-provider-cache"));
+    assert!(!prompt.to_string().contains("iVBORw"));
+    assert_eq!(std::fs::read(&path).unwrap(), bytes);
+}
+
+#[tokio::test]
+async fn an_explicit_file_only_image_declaration_uses_the_same_verified_delivery_fact() {
+    let agent = Agent::new();
+    let mut rig = Rig::start(program(json!({"images":false})), agent.clone()).await;
+    assert!(!rig.started.descriptor.capabilities.input_images);
+    let session = rig.session().await;
+    let mut turn = rig.turn_of(&session, "use the prepared file");
+    turn.images = vec![orch_agent_contract::session::ImageInput {
+        blob: orch_types::Hash::of(b"file"),
+        media_type: "image/webp".into(),
+        name: "given.webp".into(),
+        workspace_path: Some("/environment/.orch/attachments/given.webp".into()),
+        path: None,
+    }];
+    rig.adapter.start_turn(turn).await.unwrap();
+    rig.until(|event| event.is("turn.completed")).await;
+    let prompt = &agent.frames("session/prompt")[0]["params"]["prompt"];
+    assert_eq!(prompt[1]["type"], "text");
+    assert!(
+        prompt[1]["text"]
+            .as_str()
+            .unwrap()
+            .contains("/environment/.orch/attachments/given.webp")
+    );
+}
+
+#[tokio::test]
+async fn a_file_only_prompt_cannot_substitute_the_connectors_private_cache_for_delivery() {
+    let agent = Agent::new();
+    agent.behavior.lock().unwrap().capabilities["promptCapabilities"]["image"] = json!(false);
+    let mut rig = Rig::start(program(json!({})), agent.clone()).await;
+    let session = rig.session().await;
+    let mut turn = rig.turn_of(&session, "look");
+    turn.images = vec![orch_agent_contract::session::ImageInput {
+        blob: orch_types::Hash::of(b"file"),
+        media_type: "image/png".into(),
+        name: "shot.png".into(),
+        workspace_path: None,
+        path: Some("/private-provider-cache/shot.png".into()),
+    }];
+    let error = rig.adapter.start_turn(turn).await.unwrap_err();
+    assert!(
+        matches!(error, orch_agent_contract::adapter::AdapterError::Other { code, .. } if code=="invalid_input")
+    );
+    assert!(agent.frames("session/prompt").is_empty());
 }
 
 #[tokio::test]

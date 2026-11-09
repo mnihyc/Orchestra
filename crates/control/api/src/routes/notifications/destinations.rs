@@ -22,8 +22,8 @@ use crate::sign_in;
 use orch_access_contract::audit::AuditAction;
 use orch_access_contract::permissions::Permission;
 use orch_api_contract::notifications::{
-    Destination, DestinationLevel, DestinationUpdateBody, NodeDestinationCreateBody,
-    NotificationKind, NotificationTestReply,
+    Destination, DestinationLevel, DestinationUpdateBody, DestinationUpdateResponse,
+    NodeDestinationCreateBody, NotificationKind, NotificationTestReply,
 };
 use orch_authz::{Act, Policy, Principal};
 use orch_db::audit::{self, Actor, Entry};
@@ -40,6 +40,8 @@ use orch_notifier_contract::descriptor::Target;
 use orch_types::Id;
 use orch_worker_core::channels::{self, config_of_destination, outbound_hosts, seal_secret};
 use serde_json::json;
+
+pub(super) mod operation;
 
 /// The channel a destination is made from unless the request says another.
 const DEFAULT_CHANNEL: &str = "webhook";
@@ -90,8 +92,16 @@ async fn views_of(
     rows: &[DestinationRow],
 ) -> ApiResult<Vec<Destination>> {
     let principal = authorization::principal(ctx, conn).await?;
+    views_of_with_principal(conn, &principal, rows).await
+}
+
+async fn views_of_with_principal(
+    conn: &mut Conn,
+    principal: &Principal,
+    rows: &[DestinationRow],
+) -> ApiResult<Vec<Destination>> {
     let nodes: Vec<Id> = rows.iter().map(|row| row.node_id).collect();
-    let refs = view::refs(conn, &principal, &nodes, Policy::default()).await?;
+    let refs = view::refs(conn, principal, &nodes, Policy::default()).await?;
     let owners: Vec<(&str, Id)> = rows
         .iter()
         .map(|row| (owner::DESTINATION, row.id))
@@ -128,7 +138,7 @@ pub async fn create(
     mut ctx: Ctx,
     (): (),
     body: NodeDestinationCreateBody,
-) -> ApiResult<Destination> {
+) -> ApiResult<orch_api_contract::notifications::DestinationUpdateResponse> {
     let node = ctx.id("id")?;
     let detail = {
         let mut conn = ctx.app.db.acquire().await?;
@@ -244,8 +254,27 @@ pub async fn create(
     let row = rows::destination(&mut tx, id)
         .await?
         .ok_or_else(ApiError::not_found)?;
+    orch_db::idempotency::creation::observe_with(
+        &mut tx,
+        Some(me),
+        "notification_destination",
+        id,
+        json!({"node":row.node_id}),
+    )
+    .await?;
+    let reply = if crate::key_operations::native::modern(guard.principal().caller()) {
+        operation::created(&ctx, &mut tx, guard.principal(), &row).await?
+    } else {
+        orch_api_contract::notifications::DestinationUpdateResponse::full(
+            views_of_with_principal(&mut tx, guard.principal(), std::slice::from_ref(&row))
+                .await?
+                .into_iter()
+                .next()
+                .ok_or_else(ApiError::not_found)?,
+        )
+    };
     tx.commit().await.map_err(DbError::from)?;
-    one_view(&ctx, &row).await
+    Ok(reply)
 }
 
 /// What the audit line of a destination says of it.
@@ -290,20 +319,15 @@ async fn write_audit(conn: &mut Conn, ctx: &Ctx, said: Audited<'_>) -> ApiResult
     Ok(())
 }
 
-async fn one_view(ctx: &Ctx, row: &DestinationRow) -> ApiResult<Destination> {
-    let mut conn = ctx.app.db.acquire().await?;
-    views_of(&mut conn, ctx, std::slice::from_ref(row))
-        .await?
-        .into_iter()
-        .next()
-        .ok_or_else(ApiError::not_found)
-}
-
 /// The destination the path names, for a caller who may manage its node.
 async fn managed(ctx: &Ctx) -> ApiResult<(DestinationRow, NodeDetail)> {
-    let mut conn = ctx.app.db.acquire().await?;
-    let principal = authorization::principal(ctx, &mut conn).await?;
-    managed_in(&mut conn, ctx, &principal).await
+    // Bind the current stored operand before validation, then release all database work.
+    let (mut tx, guard) = transaction_guard::begin(ctx).await?;
+    let mut current = ctx.clone();
+    current.now = guard.now().get();
+    let managed = managed_in(&mut tx, &current, guard.principal()).await?;
+    tx.commit().await.map_err(DbError::from)?;
+    Ok(managed)
 }
 
 async fn managed_in(
@@ -333,7 +357,11 @@ async fn managed_in(
 
 /// Changes a destination. What is left out stays; the secrets named are
 /// replaced and the others kept, and an empty one takes the secret away.
-pub async fn update(mut ctx: Ctx, (): (), body: DestinationUpdateBody) -> ApiResult<Destination> {
+pub async fn update(
+    mut ctx: Ctx,
+    (): (),
+    body: DestinationUpdateBody,
+) -> ApiResult<DestinationUpdateResponse> {
     let (row, _) = managed(&ctx).await?;
     let name = body.name.as_deref().map(checked_name).transpose()?;
     let kinds = body.kinds.as_deref().map(kinds_words).transpose()?;
@@ -350,15 +378,19 @@ pub async fn update(mut ctx: Ctx, (): (), body: DestinationUpdateBody) -> ApiRes
     if body.config.is_some() || body.secrets.is_some() {
         let master_key = master_key()?;
         master = Some(master_key);
-        let (current, allowed) = {
-            let mut conn = ctx.app.db.acquire().await?;
-            let current = config_of_destination(&mut conn, master_key, &row)
+        let (row, current, allowed) = {
+            // The stored node may have changed since the first validation gate. Capture
+            // its row and decrypted inputs under that same existing current guard/lock.
+            let (mut tx, guard) = transaction_guard::begin(&ctx).await?;
+            let mut current_ctx = ctx.clone();
+            current_ctx.now = guard.now().get();
+            let (row, _) = managed_in(&mut tx, &current_ctx, guard.principal()).await?;
+            let current = config_of_destination(&mut tx, master_key, &row)
                 .await
                 .map_err(ApiError::internal)?;
-            let allowed = outbound_hosts(&mut conn)
-                .await
-                .map_err(ApiError::internal)?;
-            (current, allowed)
+            let allowed = outbound_hosts(&mut tx).await.map_err(ApiError::internal)?;
+            tx.commit().await.map_err(DbError::from)?;
+            (row, current, allowed)
         };
         again = Some(
             recheck(Recheck {
@@ -379,6 +411,7 @@ pub async fn update(mut ctx: Ctx, (): (), body: DestinationUpdateBody) -> ApiRes
 
     let (mut tx, guard) = transaction_guard::begin(&ctx).await?;
     ctx.now = guard.now().get();
+    let prepared = guard.operation_data::<operation::PreparedDestination>()?;
     let me = guard.user().id();
     let (row, node) = managed_in(&mut tx, &ctx, guard.principal()).await?;
     let changed = pages::update_destination(
@@ -440,8 +473,9 @@ pub async fn update(mut ctx: Ctx, (): (), body: DestinationUpdateBody) -> ApiRes
     let after = rows::destination(&mut tx, row.id)
         .await?
         .ok_or_else(ApiError::not_found)?;
+    let shown = operation::updated(&ctx, &mut tx, guard.principal(), &prepared, &after).await?;
     tx.commit().await.map_err(DbError::from)?;
-    one_view(&ctx, &after).await
+    Ok(shown)
 }
 
 /// Deletes a destination, with its sealed secrets and what waits to be sent it.

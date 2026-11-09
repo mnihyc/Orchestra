@@ -113,6 +113,15 @@ pub(crate) async fn write(
     row: &rows::ProviderRow,
     given: [Option<&api::SourceChoiceSet>; 3],
 ) -> ApiResult<[bool; 3]> {
+    write_inner(ctx, conn, row, given, true).await
+}
+async fn write_inner(
+    ctx: &Ctx,
+    conn: &mut Conn,
+    row: &rows::ProviderRow,
+    given: [Option<&api::SourceChoiceSet>; 3],
+    require_complete: bool,
+) -> ApiResult<[bool; 3]> {
     let mut choices: ProviderSources =
         serde_json::from_value(row.sources.clone()).map_err(ApiError::internal)?;
     let programs = program_names(conn, row).await?;
@@ -139,23 +148,44 @@ pub(crate) async fn write(
                 "source configuration contains values, never link credential references",
             ));
         }
-        let checked = check_source(
-            element.as_str(),
-            &value,
-            row.kind == "api",
-            http_allowed,
-            &programs,
-        )?;
+        let checked = if require_complete {
+            check_source(
+                element.as_str(),
+                &value,
+                row.kind == "api",
+                http_allowed,
+                &programs,
+            )?
+        } else {
+            check_source_inner(
+                element.as_str(),
+                &value,
+                row.kind == "api",
+                http_allowed,
+                None,
+            )?
+        };
         check_builtin(
             element,
             &choice,
             keeper(row) == Keeper::SignIn,
             &ctx.app.builtin_sources,
         )?;
+        let registered = match choice.by {
+            SourceBy::Default => default_name(row, element, &ctx.app.builtin_sources),
+            SourceBy::Builtin => choice.name.as_deref(),
+            _ => None,
+        }
+        .map(str::to_owned);
+        choice.secret_source = registered
+            .as_ref()
+            .filter(|name| ctx.app.builtin_sources.get(name).is_some())
+            .cloned();
         let old = choices.get(element);
         let same = old.is_some_and(|old| {
             old.by == choice.by
                 && old.name == choice.name
+                && (choice.by != SourceBy::Default || old.secret_source == choice.secret_source)
                 && match (&old.address, &choice.address) {
                     (Some(old), Some(new)) => {
                         old.url == new.url && old.auth == new.auth && old.header == new.header
@@ -169,6 +199,12 @@ pub(crate) async fn write(
         } else {
             None
         };
+        if let Some(entry) = registered
+            .as_deref()
+            .and_then(|name| ctx.app.builtin_sources.get(name))
+        {
+            descriptor = Some((entry.descriptor)());
+        }
         if choice.by == SourceBy::Program
             && let (Some(machine), Some(name)) = (row.key_machine_id, choice.name.as_deref())
             && let Some(reported) = program_descriptor(conn, machine, name).await?
@@ -233,14 +269,16 @@ pub(crate) async fn write(
         }) {
             kept.remove(&authorization);
         }
-        if matches!(
-            choice.by,
-            SourceBy::Default | SourceBy::None | SourceBy::Builtin
-        ) && !given.secrets.is_empty()
+        if (choice.by == SourceBy::None || descriptor.is_none())
+            && matches!(
+                choice.by,
+                SourceBy::Default | SourceBy::None | SourceBy::Builtin
+            )
+            && !given.secrets.is_empty()
         {
             return Err(invalid(
                 &format!("{element}.secrets"),
-                "this built-in source asks for no secret fields",
+                "this source declares no secret fields",
             ));
         }
         for (_, name) in names.iter().filter(|(_, name)| name.starts_with(&prefix)) {
@@ -266,7 +304,7 @@ pub(crate) async fn write(
             }
             for field in &choice.secrets {
                 if !descriptor
-                    .secret_fields()
+                    .secret_fields_for(element)
                     .any(|declared| declared.name == *field)
                 {
                     return Err(invalid(
@@ -292,7 +330,8 @@ pub(crate) async fn write(
                 )
             })?;
             for field in descriptor
-                .secret_fields()
+                .secret_fields_for(element)
+                .filter(|_| require_complete)
                 .filter(|field| field.required && field.default.is_none())
             {
                 if !choice.secrets.contains(&field.name) {
@@ -331,6 +370,7 @@ pub(crate) async fn write(
             row.revision,
             &choices,
             facts_changed || changed[1],
+            facts_changed,
             ctx.now,
         )
         .await?
@@ -362,12 +402,31 @@ pub(crate) async fn write_new(
     id: Id,
     given: Option<&api::NewProviderSources>,
 ) -> ApiResult<()> {
+    write_new_inner(ctx, conn, id, given, true).await
+}
+/// A readable copied definition may deliberately have no source secrets. Its first read
+/// still needs the source's actual credentials and cannot substitute the old provider's values.
+pub(crate) async fn write_copied_definition(
+    ctx: &Ctx,
+    conn: &mut Conn,
+    id: Id,
+    given: Option<&api::NewProviderSources>,
+) -> ApiResult<()> {
+    write_new_inner(ctx, conn, id, given, false).await
+}
+async fn write_new_inner(
+    ctx: &Ctx,
+    conn: &mut Conn,
+    id: Id,
+    given: Option<&api::NewProviderSources>,
+    require_complete: bool,
+) -> ApiResult<()> {
     if let Some(given) = given {
         let row = rows::providers(conn, &[id])
             .await?
             .pop()
             .ok_or_else(ApiError::not_found)?;
-        write(
+        write_inner(
             ctx,
             conn,
             &row,
@@ -376,6 +435,7 @@ pub(crate) async fn write_new(
                 given.models.as_ref(),
                 given.presenter.as_ref(),
             ],
+            require_complete,
         )
         .await?;
     }
@@ -502,6 +562,7 @@ fn builtin_descriptor(
                     reports: orch_provider_contract::FactMember::of_kinds(
                         &adapter.capabilities.provider_facts,
                     ),
+                    field_reports: adapter.capabilities.provider_fact_fields.clone(),
                     spends_resets: adapter.capabilities.provider_facts.contains(
                         &orch_agent_contract::descriptor::ProviderFactKind::AvailableResets,
                     ),
@@ -526,6 +587,7 @@ fn builtin_descriptor(
 pub(crate) struct SourceViews {
     adapters: HashMap<Id, orch_agent_contract::descriptor::AgentDescriptor>,
     programs: HashMap<(Id, String), orch_provider_contract::SourceDescriptor>,
+    profiles: Vec<(Id, Json)>,
 }
 
 impl SourceViews {
@@ -538,6 +600,13 @@ impl SourceViews {
                 .collect::<Vec<_>>(),
         )
         .await?;
+        // Declarations include disabled profiles; only enabled profiles select a home.
+        let mut profiles: Vec<_> = agents
+            .iter()
+            .filter(|row| !row.disabled)
+            .map(|row| (row.id, row.profile.clone()))
+            .collect();
+        profiles.sort_unstable_by_key(|(id, _)| *id);
         let adapters = agents
             .into_iter()
             .filter_map(|row| {
@@ -556,19 +625,23 @@ impl SourceViews {
             .iter()
             .filter_map(|row| row.key_machine_id)
             .collect();
-        let found: Vec<(Id, String, Option<Json>)> = sqlx::query_as(
-            "SELECT m.id, plugin->>'name', plugin->'descriptor'
+        let found: Vec<(Id, String, Option<Json>)> = if machine_ids.is_empty() {
+            Vec::new()
+        } else {
+            sqlx::query_as(
+                "SELECT m.id, plugin->>'name', plugin->'descriptor'
                FROM machines m
                CROSS JOIN LATERAL jsonb_array_elements(
                  CASE WHEN jsonb_typeof(m.facts->'plugins')='array' THEN m.facts->'plugins'
                       ELSE '[]'::jsonb END) plugin
               WHERE m.id=ANY($1) AND m.deleted_at IS NULL
                 AND plugin->>'kind'='provider' AND plugin->>'name' IS NOT NULL",
-        )
-        .bind(machine_ids)
-        .fetch_all(&mut *conn)
-        .await
-        .map_err(DbError::from)?;
+            )
+            .bind(machine_ids)
+            .fetch_all(&mut *conn)
+            .await
+            .map_err(DbError::from)?
+        };
         let programs = found
             .into_iter()
             .filter_map(|(machine, name, value)| {
@@ -581,7 +654,24 @@ impl SourceViews {
                     .map(|descriptor| ((machine, name), descriptor))
             })
             .collect();
-        Ok(Self { adapters, programs })
+        Ok(Self {
+            adapters,
+            programs,
+            profiles,
+        })
+    }
+
+    pub(crate) fn profile_homes(
+        &self,
+    ) -> ApiResult<HashMap<Id, Option<orch_driver_contract::runtime::EnvironmentDataSource>>> {
+        self.profiles
+            .iter()
+            .map(|(id, profile)| {
+                orch_settings::profile_home_in(profile)
+                    .map(|home| (*id, home))
+                    .map_err(ApiError::internal)
+            })
+            .collect()
     }
 }
 
@@ -614,6 +704,13 @@ pub(crate) fn view(
         } else {
             choice.name.clone()
         };
+        if choice.by == SourceBy::Default
+            && choice.secret_source.as_deref() != name.as_deref()
+            && (choice.secret_source.is_some() || !choice.secrets.is_empty())
+        {
+            choice.secrets.clear();
+            choice.config.clear();
+        }
         // A declaration a default learned from another source than the one the rule names is not its own.
         if choice.by == SourceBy::Default
             && choice
@@ -663,6 +760,41 @@ pub(crate) fn view(
         &typed, &declared,
     ))
     .map_err(ApiError::internal)?;
+    states["fields"] = serde_json::to_value(orch_provider_contract::credit_fields::states(
+        &typed,
+        &choices
+            .facts
+            .as_ref()
+            .and_then(|choice| choice.descriptor.as_ref())
+            .and_then(|descriptor| descriptor.facts.as_ref())
+            .map(|facts| facts.field_reports.clone())
+            .unwrap_or_default(),
+    ))
+    .map_err(ApiError::internal)?;
+    if let Some(choice) = &choices.facts
+        && let Some(descriptor) = &choice.descriptor
+    {
+        for member in descriptor.unavailable_members(&choice.secrets) {
+            // A manager's explicit fact override remains that manager's observation, independent of source access.
+            if overridden
+                .iter()
+                .any(|path| path == member.as_str() || path.starts_with(&format!("{member}.")))
+            {
+                continue;
+            }
+            let unavailable = json!(orch_provider_contract::MemberState::UnsupportedBecause {
+                reason: orch_provider_contract::facts::FactUnavailableReason::NeedsAdminKey,
+            });
+            states[member.as_str()] = unavailable.clone();
+            if let Some(fields) = states["fields"].as_object_mut() {
+                for (path, state) in fields {
+                    if path.starts_with(&format!("{member}.")) {
+                        *state = unavailable.clone();
+                    }
+                }
+            }
+        }
+    }
     let lists_models = choices
         .models
         .as_ref()
@@ -876,6 +1008,21 @@ pub(crate) fn check_source(
     http_allowed: bool,
     programs: &[String],
 ) -> ApiResult<CheckedSource> {
+    check_source_inner(
+        element,
+        choice,
+        key_credential,
+        http_allowed,
+        Some(programs),
+    )
+}
+fn check_source_inner(
+    element: &str,
+    choice: &Json,
+    key_credential: bool,
+    http_allowed: bool,
+    programs: Option<&[String]>,
+) -> ApiResult<CheckedSource> {
     let typed: orch_provider_contract::SourceChoice = serde_json::from_value(choice.clone())
         .map_err(|_| {
             invalid(
@@ -916,7 +1063,9 @@ pub(crate) fn check_source(
                 .get("name")
                 .and_then(Json::as_str)
                 .unwrap_or_default();
-            if !programs.iter().any(|registered| registered == name) {
+            if programs
+                .is_some_and(|programs| !programs.iter().any(|registered| registered == name))
+            {
                 return Err(invalid(
                     &format!("{element}.name"),
                     "the program is not registered on the machine that keeps this provider or declared by its selected runtime template",

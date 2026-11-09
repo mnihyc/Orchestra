@@ -63,14 +63,25 @@ async fn forward(
     by: &Who,
     body: &ForwardCreateBody,
 ) -> orch_api_core::testing::Reply<orch_api_contract::chats::ForwardCreateReply> {
-    s.rig
+    let reply = s
+        .rig
         .world
         .app
         .call(ForwardCreate, &[])
         .token(&by.token)
         .body(body)
         .send()
-        .await
+        .await;
+    orch_api_core::testing::Reply {
+        status: reply.status,
+        headers: reply.headers,
+        body: reply.body.map(|response| {
+            response
+                .into_full()
+                .expect("a browser-session forward keeps its full projection")
+        }),
+        raw: reply.raw,
+    }
 }
 
 /// A conversation with one exchange, and another thread to forward to.

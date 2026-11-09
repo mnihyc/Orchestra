@@ -331,6 +331,8 @@ fn change(path: &str, kind: FileChangeKind, diff: Option<String>) -> FileChange 
         None => (None, 0, 0, false),
     };
     FileChange {
+        before: None,
+        after: None,
         path: path.to_owned(),
         change: kind,
         old_path: None,
@@ -360,7 +362,7 @@ pub fn file_changes(view: &ToolView, family: ToolFamily, place: &Place<'_>) -> V
         let old = block.get("oldText").and_then(Json::as_str);
         let shown = shown_path(path, place.directory);
         let diff = unified_diff(&shown, old.unwrap_or_default(), new, old.is_none());
-        out.push(change(
+        let mut recorded = change(
             &shown,
             if old.is_none() {
                 FileChangeKind::Add
@@ -368,7 +370,14 @@ pub fn file_changes(view: &ToolView, family: ToolFamily, place: &Place<'_>) -> V
                 FileChangeKind::Modify
             },
             Some(diff),
+        );
+        recorded.before = Some(old.map_or(
+            orch_agent_contract::events::FileChangeImage::Absent,
+            |text| orch_agent_contract::events::FileChangeImage::Text { text: text.into() },
         ));
+        recorded.after =
+            Some(orch_agent_contract::events::FileChangeImage::Text { text: new.into() });
+        out.push(recorded);
     }
     if !out.is_empty() {
         return out;
@@ -458,6 +467,7 @@ pub fn call_title(view: &ToolView, place: &Place<'_>) -> String {
             ToolFamily::Edit => format!("Edit {}", path_of(&["file_path", "path"])),
             ToolFamily::Write => format!("Write {}", path_of(&["file_path", "path"])),
             ToolFamily::Read => format!("Read {}", path_of(&["file_path", "path"])),
+            ToolFamily::Image => format!("Image: {}", path_of(&["file_path", "path"])),
             ToolFamily::Glob => format!(
                 "Find files {}",
                 text_of(input, "pattern").unwrap_or_default()
@@ -572,6 +582,11 @@ pub fn tool_payload(view: &ToolView, place: &Place<'_>) -> ToolPayload {
         ToolFamily::Edit | ToolFamily::Write => ToolPayload::FileChange {
             changes: file_changes(view, family, place),
         },
+        ToolFamily::Image => ToolPayload::Other {
+            name: view.name.clone(),
+            arguments: (!input.is_null()).then(|| input.clone()),
+            result: ended.then(|| json_or_text(&output)),
+        },
         ToolFamily::Read => {
             let path = ["file_path", "path"]
                 .iter()
@@ -620,6 +635,7 @@ pub fn tool_payload(view: &ToolView, place: &Place<'_>) -> ToolPayload {
             truncated: false,
         },
         ToolFamily::WebSearch => ToolPayload::WebSearch {
+            action: None,
             query: text_of(input, "query").unwrap_or_default().to_owned(),
             results: web_results(&output),
         },

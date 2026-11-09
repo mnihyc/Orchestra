@@ -26,7 +26,7 @@ test('the page tab names the thing once and the title bar holds only its ancesto
     [`/doc/${id(0x30, 8)}`, 'Fee table findings'],
     ['/org/acme/settings/general', 'General'],
     ['/org/acme.research.ml/settings/general', 'General'],
-    [`/project/${ACME.payments}/settings?section=policies`, 'Policies'],
+    [`/project/${ACME.payments}/settings?section=defaults`, 'Policies'],
     [`/topic/${ACME.fixLogin}?tab=settings&section=destinations`, 'Send elsewhere'],
     ['/org/acme/messages', 'Messages'],
     ['/settings/profile', 'Profile'],
@@ -592,7 +592,7 @@ test('secret write and replacement carry the shared Save sign in both languages'
   await signIn(page);
   for (const locale of ['en', 'zh-CN'] as const) {
     const english = locale === 'en';
-    await page.goto(`/project/${ACME.web}/settings?section=policies`); await language(page, locale);
+    await page.goto(`/project/${ACME.web}/settings?section=defaults`); await language(page, locale);
     await page.getByRole('button', { name: english ? 'New secret…' : '新建密钥…', exact: true }).click();
     const write = page.getByRole('button', { name: english ? 'Write secret' : '写入密钥', exact: true });
     await expect(write.locator('[data-action-icon="save"].lucide-save')).toBeVisible();

@@ -62,14 +62,22 @@ impl JournaledCommands {
 
 #[async_trait]
 impl Commands for JournaledCommands {
-    async fn issue(&self, command: Outgoing) -> Result<(), CommandsError> {
+    async fn issue_prepared(
+        &self,
+        command: Outgoing,
+        before: Option<orch_engine::commands::BeforeCommand<'_>>,
+    ) -> Result<(), CommandsError> {
         let now = self.clock.now();
         let deadline = command.deadline.map(Time::get).unwrap_or_else(|| {
             now + chrono::Duration::seconds(i64::from(command.kind.deadline_secs()))
         });
         let key = command.key.wire();
+        let mut conn = self.db.acquire().await.map_err(command_error)?;
+        if let Some(check) = before {
+            check().map_err(CommandsError::BeforeEffect)?;
+        }
         journal::insert_command(
-            &mut *self.db.acquire().await.map_err(command_error)?,
+            &mut conn,
             &NewCommand {
                 id: command.id,
                 machine_id: command.machine,
@@ -82,6 +90,7 @@ impl Commands for JournaledCommands {
         )
         .await
         .map_err(command_error)?;
+        drop(conn);
         self.link.issue(command).await
     }
 
@@ -123,9 +132,14 @@ impl Commands for JournaledCommands {
             journal::command(&mut *self.db.acquire().await.map_err(command_error)?, id)
                 .await
                 .map_err(command_error)?
-                .map(|row| orch_engine::commands::RetainedCommand {
-                    machine: row.machine_id,
-                    body: row.body,
+                .map(|row| {
+                    let key = row.serial_key().map(str::to_owned);
+                    orch_engine::commands::RetainedCommand {
+                        machine: row.machine_id,
+                        kind: row.kind,
+                        key,
+                        body: row.body,
+                    }
                 }),
         )
     }

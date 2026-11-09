@@ -24,6 +24,8 @@ const RESET_PAGE: &str = "reset";
 /// A link that was made.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Made {
+    /// The real native one-time-link row, never its secret.
+    pub id: orch_types::Id,
     /// The address to open, with the secret in it. It is shown once: only its
     /// hash is kept.
     pub url: String,
@@ -50,11 +52,12 @@ pub async fn make(
     now: DateTime<Utc>,
 ) -> Result<Made, DbError> {
     let secret = new_token(EMAIL_TOKEN_PREFIX);
+    let id = orch_types::new_id();
     let expires_at = now + Purpose::Reset.life();
     identity::create_email_token(
         conn,
         &NewEmailToken {
-            id: orch_types::new_id(),
+            id,
             user_id: user.id,
             purpose: Purpose::Reset.stored(),
             token_hash: &token_hash(&secret),
@@ -84,6 +87,7 @@ pub async fn make(
     });
     audit::append(conn, &entry, origin, now).await?;
     Ok(Made {
+        id,
         url: link(config, RESET_PAGE, &secret),
         expires_at,
     })

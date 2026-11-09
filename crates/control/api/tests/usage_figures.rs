@@ -10,6 +10,9 @@ mod resources;
 mod support;
 mod usage_world;
 
+#[path = "usage_figures/system_scope.rs"]
+mod system_scope;
+
 use chrono::{Duration, TimeZone, Utc};
 use orch_api_contract::common::ErrorCode;
 use orch_api_contract::usage::{
@@ -17,6 +20,7 @@ use orch_api_contract::usage::{
     UsageEvent, UsageEventList, UsageEventListQuery, UsageEventOrder, UsageGet, UsageGetQuery,
 };
 use places::{Who, missing_permissions};
+use serde_json::json;
 use support::World;
 use usage_world::{FROM, TODAY, Team, Use, another_thread, spend, spend_in, team};
 
@@ -28,6 +32,7 @@ fn query(scope: &str) -> UsageGetQuery {
         measure: None,
         effort: None,
         tier: None,
+        tier_unknown: None,
         program: None,
         outcome: None,
         scope: scope.to_owned(),
@@ -39,6 +44,8 @@ fn query(scope: &str) -> UsageGetQuery {
         limit: None,
         user_id: None,
         model: None,
+        service: None,
+        purpose: None,
         provider_id: None,
         harness_kind: None,
         environment_kind: None,
@@ -54,6 +61,7 @@ fn events_query(scope: &str) -> UsageEventListQuery {
         org_id: None,
         effort: None,
         tier: None,
+        tier_unknown: None,
         program: None,
         outcome: None,
         include_running: None,
@@ -63,6 +71,8 @@ fn events_query(scope: &str) -> UsageEventListQuery {
         to: TODAY.to_owned(),
         user_id: None,
         model: None,
+        service: None,
+        purpose: None,
         provider_id: None,
         harness_kind: None,
         environment_kind: None,
@@ -106,6 +116,33 @@ async fn measured_spend_at(
     at: chrono::DateTime<Utc>,
 ) {
     use orch_api_contract::usage::{RequestSample, UsageMeasurement};
+    let first_at = first.map(|ms| orch_types::Time::new(at + Duration::milliseconds(ms)));
+    let end = first_at
+        .zip(generation)
+        .map(|(first, ms)| orch_types::Time::new(first.get() + Duration::milliseconds(ms)));
+    let timing = orch_api_contract::performance::request_timing(&RequestSample {
+        asked: Some(at.into()),
+        first_output: first_at,
+        end,
+        output_tokens: Some(output),
+        output_streamed: generation.map(|_| true),
+        outcome: UsageMeasurement::Told {
+            value: outcome.into(),
+        },
+        error_message: (outcome == "provider_busy").then(|| "Rate limited".into()),
+        vendor_words: (outcome == "provider_busy").then(|| "Too many requests".into()),
+        ..Default::default()
+    });
+    record_measured_spend(world, team, output, at, timing).await;
+}
+
+async fn record_measured_spend(
+    world: &World,
+    team: &Team,
+    output: i64,
+    at: chrono::DateTime<Utc>,
+    timing: orch_api_contract::usage::RequestTiming,
+) {
     use orch_db::usage::ledger::{self, Attribution, NewEvent, Tokens};
     let attribution = Attribution {
         org_id: team.acme,
@@ -126,23 +163,6 @@ async fn measured_spend_at(
         effort: Some("high".into()),
         params: serde_json::json!({"cyber_access_program":"research"}),
     };
-    let first_at = first.map(|ms| orch_types::Time::new(at + Duration::milliseconds(ms)));
-    let end = first_at
-        .zip(generation)
-        .map(|(first, ms)| orch_types::Time::new(first.get() + Duration::milliseconds(ms)));
-    let timing = orch_api_contract::performance::request_timing(&RequestSample {
-        asked: Some(at.into()),
-        first_output: first_at,
-        end,
-        output_tokens: Some(output),
-        output_streamed: generation.map(|_| true),
-        outcome: UsageMeasurement::Told {
-            value: outcome.into(),
-        },
-        error_message: (outcome == "provider_busy").then(|| "Rate limited".into()),
-        vendor_words: (outcome == "provider_busy").then(|| "Too many requests".into()),
-        ..Default::default()
-    });
     let mut conn = world.conn().await;
     ledger::record_program(
         &mut conn,
@@ -156,9 +176,21 @@ async fn measured_spend_at(
             model: "perf-model",
             tier: Some("fast"),
             tokens: Tokens {
-                input: 100,
-                cached_input: 0,
-                cache_write: 0,
+                input: timing
+                    .reported_tokens
+                    .as_ref()
+                    .and_then(|tokens| tokens.input_tokens)
+                    .unwrap_or(100),
+                cached_input: timing
+                    .reported_tokens
+                    .as_ref()
+                    .and_then(|tokens| tokens.cached_input_tokens)
+                    .unwrap_or(0),
+                cache_write: timing
+                    .reported_tokens
+                    .as_ref()
+                    .and_then(|tokens| tokens.cache_write_tokens)
+                    .unwrap_or(0),
                 output,
                 reasoning: 0,
                 total: 100 + output,
@@ -1405,5 +1437,574 @@ async fn provider_totals_include_hidden_places_while_only_managers_can_list_thei
             .as_ref()
             .is_some_and(|thread| thread.redacted && thread.name.is_none())),
         "nothing of where the use was is shown to somebody who cannot see it"
+    );
+}
+
+#[tokio::test]
+async fn refined_failure_filters_and_csv_keep_original_request_facts() {
+    use orch_api_contract::usage::{
+        RequestTiming, RequestTokens, UsageMeasurement, UsageOutcomeFilter,
+    };
+    let world = World::new().await;
+    let team = team(&world).await;
+    let at = world.now() - Duration::hours(1);
+    for (code, status, reason) in [
+        ("rate_limited", 429, None),
+        ("overloaded", 503, None),
+        ("stream_interrupted", 200, None),
+        ("model_refused", 403, Some("cyber")),
+    ] {
+        let timing = RequestTiming {
+            outcome: UsageMeasurement::Told { value: code.into() },
+            upstream_status: Some(status),
+            attempt: Some(3),
+            error_reason: reason.map(str::to_owned),
+            provider_request_id: Some(format!("provider-{code}")),
+            reported_tokens: Some(RequestTokens {
+                input_tokens: Some(100),
+                cached_input_tokens: Some(20),
+                cache_write_tokens: Some(10),
+                output_tokens: Some(10),
+                total_tokens: Some(110),
+                ..Default::default()
+            }),
+            web_searches: UsageMeasurement::Told { value: 2 },
+            requested_service_tier: Some("priority".into()),
+            reported_service_tier: UsageMeasurement::Told {
+                value: "default".into(),
+            },
+            ..Default::default()
+        };
+        record_measured_spend(&world, &team, 10, at, timing).await;
+    }
+    for outcome in [
+        UsageOutcomeFilter::RateLimited,
+        UsageOutcomeFilter::Overloaded,
+        UsageOutcomeFilter::StreamInterrupted,
+        UsageOutcomeFilter::ModelRefused,
+    ] {
+        let mut asked = events_query(&format!("node:{}", team.project));
+        asked.outcome = Some(outcome);
+        let page = world
+            .app
+            .call(UsageEventList, &[])
+            .token(&team.admin.token)
+            .query(&asked)
+            .send()
+            .await
+            .ok();
+        assert_eq!(page.items.len(), 1);
+        assert_eq!(
+            page.items[0].timing.outcome.value().map(String::as_str),
+            outcome.code()
+        );
+    }
+    let response = world
+        .app
+        .call(UsageEventList, &[])
+        .token(&team.admin.token)
+        .header("accept", "text/csv")
+        .query(&events_query(&format!("node:{}", team.project)))
+        .send_bytes()
+        .await;
+    let csv = String::from_utf8(response.raw.to_vec()).unwrap();
+    let lines: Vec<_> = csv.lines().collect();
+    let columns: Vec<_> = lines[0].split(',').collect();
+    let index = |name| columns.iter().position(|column| *column == name).unwrap();
+    for name in [
+        "error_reason",
+        "upstream_status",
+        "attempt",
+        "provider_request_id",
+        "thread_owner_id",
+        "cache_write_tokens",
+        "uncached_input_tokens",
+        "web_searches",
+        "requested_service_tier",
+        "reported_service_tier",
+        "tool_calls",
+        "tool_ms",
+    ] {
+        index(name);
+    }
+    let line = lines
+        .iter()
+        .skip(1)
+        .find(|line| line.split(',').nth(index("outcome")) == Some("model_refused"))
+        .unwrap();
+    let value = |name| line.split(',').nth(index(name)).unwrap();
+    assert_eq!(value("error_reason"), "cyber");
+    assert_eq!(value("upstream_status"), "403");
+    assert_eq!(value("attempt"), "3");
+    assert_eq!(value("provider_request_id"), "provider-model_refused");
+    assert_eq!(value("cache_write_tokens"), "10");
+    assert_eq!(value("uncached_input_tokens"), "70");
+    assert_eq!(value("web_searches"), "2");
+    assert_eq!(value("requested_service_tier"), "priority");
+    assert_eq!(value("reported_service_tier"), "default");
+    assert_eq!(value("tool_calls"), "");
+    assert_eq!(value("tool_ms"), "");
+}
+
+#[tokio::test]
+async fn purpose_and_offering_reads_keep_service_units_prices_scope_and_private_group_boundaries() {
+    use orch_api_contract::usage::{
+        RequestTiming, ServiceUnitPrice, ServiceUsage, UsageMeasurement,
+    };
+    use orch_db::usage::ledger::{self, NewSummary, SummaryAttribution, Tokens};
+    let world = World::new().await;
+    let t = team(&world).await;
+    spend(
+        &world,
+        &t,
+        &Use::of(&world, t.boss.id(), 100).rated("2", "provider"),
+    )
+    .await;
+    let id = orch_types::new_id();
+    {
+        let mut conn = world.conn().await;
+        let place = SummaryAttribution {
+            org_id: t.acme,
+            project_id: t.project,
+            topic_id: t.topic,
+            thread_id: Some(t.thread),
+            provider_id: t.provider,
+            entry_id: None,
+            user_id: Some(t.boss.id()),
+        };
+        let timing = RequestTiming {
+            outcome: UsageMeasurement::Told {
+                value: "done".into(),
+            },
+            service_usage: Some(ServiceUsage {
+                offering: "lookup-service".into(),
+                unit: "call".into(),
+                quantity: UsageMeasurement::Told { value: 2 },
+                price: Some(ServiceUnitPrice {
+                    amount: "0.1".into(),
+                    currency: "credits".into(),
+                    unit: "call".into(),
+                }),
+                credits_per_unit: Some("0.1".into()),
+            }),
+            ..Default::default()
+        };
+        assert!(
+            ledger::record_service_own_measured(
+                &mut conn,
+                "web_search",
+                &NewSummary {
+                    id,
+                    at: world.now() - Duration::hours(1),
+                    attribution: &place,
+                    model: "",
+                    tier: None,
+                    tokens: Tokens::default(),
+                    context_tokens: None,
+                    request_ref: Some("actual-service"),
+                    rate: None,
+                    rate_source: Some("provider"),
+                    credits: Some("0.2")
+                },
+                &timing,
+                &["private-offering-group".into()]
+            )
+            .await
+            .unwrap()
+        );
+    }
+    let scope = format!("node:{}", t.project);
+    let mut asked = query(&scope);
+    asked.breakdowns = Some("purpose,offering".into());
+    let answer = figures(&world, &t.admin, &asked).await;
+    assert_eq!(answer.totals.credits, "2.2");
+    assert_eq!(answer.totals.tokens.total_tokens, 100);
+    assert_eq!(answer.totals.service_units["call"].quantity, 2);
+    assert_eq!(breakdown(&answer, UsageDimension::Purpose).rows.len(), 2);
+    let offers = breakdown(&answer, UsageDimension::Offering);
+    assert_eq!(offers.rows.len(), 2);
+    assert!(offers.rows.iter().any(|row| {
+        row.key
+            .offering
+            .as_ref()
+            .is_some_and(|offer| offer.kind == "service" && offer.name == "lookup-service")
+    }));
+    assert!(offers.rows.iter().any(|row| {
+        row.key
+            .offering
+            .as_ref()
+            .is_some_and(|offer| offer.kind == "model" && offer.name == "gpt-6-sol")
+    }));
+    for by in [UsageDimension::Purpose, UsageDimension::Offering] {
+        use orch_api_contract::nodes::{
+            OrgOverviewGet, OrgOverviewGetQuery, OrgOverviewResponse, OverviewPart,
+        };
+        let opened = world
+            .app
+            .call(OrgOverviewGet, &[&t.acme])
+            .token(&t.boss.token)
+            .query(&OrgOverviewGetQuery {
+                from: Some(FROM.into()),
+                to: Some(TODAY.into()),
+                usage_by: Some(by),
+                ..Default::default()
+            })
+            .send()
+            .await
+            .ok();
+        let OrgOverviewResponse::Overview { data } = opened else {
+            panic!("a native organization overview was requested");
+        };
+        let OverviewPart::Ready { data: board } = data.usage else {
+            panic!("the owner can read the native usage board");
+        };
+        assert_eq!(board.totals.credits, "2.2");
+        assert_eq!(board.totals.service_units["call"].quantity, 2);
+        assert_eq!(
+            breakdown(&board, by).rows.len(),
+            2,
+            "the overview keeps the same factual split"
+        );
+    }
+    asked.purpose = Some("web_search".into());
+    asked.service = Some("lookup-service".into());
+    let narrowed = figures(&world, &t.admin, &asked).await;
+    assert_eq!(narrowed.totals.credits, "0.2");
+    assert_eq!(
+        narrowed.totals.turns, 0,
+        "standalone work is no invented turn"
+    );
+    let mut records = events_query(&scope);
+    records.purpose = asked.purpose;
+    records.service = asked.service;
+    let rows = events(&world, &t.admin, &records).await;
+    assert_eq!(rows.len(), 1);
+    assert_eq!(rows[0].id, id);
+    assert_eq!(rows[0].model, "");
+    let public = serde_json::to_value(&rows[0]).unwrap();
+    assert_eq!(
+        public["timing"]["service_usage"]["quantity"],
+        json!({"state":"told","value":2})
+    );
+    assert!(
+        !public.to_string().contains("private-offering-group"),
+        "private recorded group membership is not public timing data"
+    );
+    assert!(
+        events(&world, &t.viewer, &records).await.is_empty(),
+        "new filters never expand a summary reader's record scope"
+    );
+}
+
+/// Read the actual export, including doubled quotes, commas and embedded native newlines.
+fn exported_cells(bytes: &[u8]) -> Vec<Vec<String>> {
+    let text = std::str::from_utf8(bytes).unwrap();
+    let mut chars = text.chars().peekable();
+    let mut quoted = false;
+    let mut field = String::new();
+    let mut row = Vec::new();
+    let mut rows = Vec::new();
+    while let Some(ch) = chars.next() {
+        match ch {
+            '"' if quoted && chars.peek() == Some(&'"') => {
+                chars.next();
+                field.push('"');
+            }
+            '"' => quoted = !quoted,
+            ',' if !quoted => row.push(std::mem::take(&mut field)),
+            '\r' if !quoted && chars.peek() == Some(&'\n') => {
+                chars.next();
+                row.push(std::mem::take(&mut field));
+                rows.push(std::mem::take(&mut row));
+            }
+            '\n' if !quoted => {
+                row.push(std::mem::take(&mut field));
+                rows.push(std::mem::take(&mut row));
+            }
+            _ => field.push(ch),
+        }
+    }
+    assert!(!quoted, "an exported quoted cell must close");
+    assert!(
+        field.is_empty() && row.is_empty(),
+        "every export row ends with a record separator"
+    );
+    let width = rows.first().unwrap().len();
+    assert!(
+        rows.iter().all(|row| row.len() == width),
+        "every export row matches its header"
+    );
+    rows
+}
+
+fn exported_cell<'a>(header: &[String], row: &'a [String], name: &str) -> &'a str {
+    let index = header.iter().position(|column| column == name).unwrap();
+    &row[index]
+}
+
+async fn export_records(world: &World, who: &Who, asked: &UsageEventListQuery) -> Vec<Vec<String>> {
+    let reply = world
+        .app
+        .call(UsageEventList, &[])
+        .token(&who.token)
+        .header("accept", "text/csv")
+        .query(asked)
+        .send_bytes()
+        .await;
+    assert!(
+        reply.status.is_success(),
+        "{}",
+        String::from_utf8_lossy(&reply.raw)
+    );
+    assert!(
+        reply
+            .headers
+            .get("content-type")
+            .unwrap()
+            .to_str()
+            .unwrap()
+            .starts_with("text/csv")
+    );
+    exported_cells(&reply.raw)
+}
+
+async fn export_series(world: &World, who: &Who, asked: &UsageGetQuery) -> Vec<Vec<String>> {
+    let reply = world
+        .app
+        .call(UsageGet, &[])
+        .token(&who.token)
+        .header("accept", "text/csv")
+        .query(asked)
+        .send_bytes()
+        .await;
+    assert!(
+        reply.status.is_success(),
+        "{}",
+        String::from_utf8_lossy(&reply.raw)
+    );
+    assert!(
+        reply
+            .headers
+            .get("content-type")
+            .unwrap()
+            .to_str()
+            .unwrap()
+            .starts_with("text/csv")
+    );
+    exported_cells(&reply.raw)
+}
+
+#[tokio::test]
+async fn service_csv_keeps_native_units_copied_quotes_unknowns_and_the_original_read_scope() {
+    use orch_api_contract::usage::{
+        RequestTiming, ServiceUnitPrice, ServiceUsage, UsageMeasurement,
+    };
+    use orch_db::usage::ledger::{self, NewSummary, SummaryAttribution, Tokens};
+    let world = World::new().await;
+    let t = team(&world).await;
+    spend(
+        &world,
+        &t,
+        &Use::of(&world, t.boss.id(), 100).rated("2", "provider"),
+    )
+    .await;
+    let scope = format!("node:{}", t.project);
+    let all_records = events_query(&scope);
+    let all_series = query(&scope);
+    let ordinary_records = export_records(&world, &t.admin, &all_records).await;
+    let ordinary_series = export_series(&world, &t.admin, &all_series).await;
+    assert!(
+        !ordinary_records[0]
+            .iter()
+            .any(|name| name == "service_usage")
+    );
+    assert!(
+        !ordinary_series[0]
+            .iter()
+            .any(|name| name == "service_units" || name == "unrated_services")
+    );
+    let offering = "=lookup,\"native\"\\exact\n服务";
+    let private_group = "private-service-provenance";
+    let mut observations = Vec::new();
+    {
+        let mut conn = world.conn().await;
+        let place = SummaryAttribution {
+            org_id: t.acme,
+            project_id: t.project,
+            topic_id: t.topic,
+            thread_id: None,
+            provider_id: t.provider,
+            entry_id: None,
+            user_id: Some(t.boss.id()),
+        };
+        for (quantity, quoted, credits) in [
+            (None, true, None),
+            (Some(0), true, Some("0")),
+            (Some(2), true, Some("0.2")),
+            (Some(1), false, None),
+        ] {
+            let id = orch_types::new_id();
+            let timing = RequestTiming {
+                outcome: UsageMeasurement::Told {
+                    value: "done".into(),
+                },
+                service_usage: Some(ServiceUsage {
+                    offering: offering.into(),
+                    unit: "page".into(),
+                    quantity: quantity.map_or(UsageMeasurement::Empty, |value| {
+                        UsageMeasurement::Told { value }
+                    }),
+                    price: quoted.then(|| ServiceUnitPrice {
+                        amount: "0.1".into(),
+                        currency: "credits".into(),
+                        unit: "page".into(),
+                    }),
+                    credits_per_unit: quoted.then(|| "0.1".into()),
+                }),
+                ..Default::default()
+            };
+            assert!(
+                ledger::record_service_own_measured(
+                    &mut conn,
+                    "page_fetch",
+                    &NewSummary {
+                        id,
+                        at: world.now() - Duration::hours(1),
+                        attribution: &place,
+                        model: "",
+                        tier: None,
+                        tokens: Tokens::default(),
+                        context_tokens: None,
+                        request_ref: Some("native-page-read"),
+                        rate: None,
+                        rate_source: quoted.then_some("provider"),
+                        credits
+                    },
+                    &timing,
+                    &[private_group.into()]
+                )
+                .await
+                .unwrap()
+            );
+            observations.push((id, quantity, quoted, credits));
+        }
+    }
+    let mixed = export_records(&world, &t.admin, &all_records).await;
+    assert_eq!(
+        &mixed[0][..ordinary_records[0].len()],
+        ordinary_records[0].as_slice(),
+        "ordinary columns retain their order"
+    );
+    assert_eq!(&mixed[0][ordinary_records[0].len()..], &["service_usage"]);
+    let ordinary_id = exported_cell(&ordinary_records[0], &ordinary_records[1], "id");
+    let unchanged = mixed
+        .iter()
+        .skip(1)
+        .find(|row| exported_cell(&mixed[0], row, "id") == ordinary_id)
+        .unwrap();
+    assert_eq!(
+        &unchanged[..ordinary_records[0].len()],
+        ordinary_records[1].as_slice(),
+        "adding service rows never rewrites a model row"
+    );
+    assert_eq!(exported_cell(&mixed[0], unchanged, "service_usage"), "");
+    let mut requested = events_query(&scope);
+    requested.service = Some(offering.into());
+    requested.purpose = Some("page_fetch".into());
+    let records = export_records(&world, &t.admin, &requested).await;
+    assert_eq!(records.len(), 5);
+    for (id, quantity, quoted, credits) in observations {
+        let row = records
+            .iter()
+            .skip(1)
+            .find(|row| exported_cell(&records[0], row, "id") == id.to_string())
+            .unwrap();
+        assert_eq!(exported_cell(&records[0], row, "purpose"), "page_fetch");
+        assert_eq!(exported_cell(&records[0], row, "model"), "");
+        assert_eq!(exported_cell(&records[0], row, "turn_id"), "");
+        assert_eq!(
+            exported_cell(&records[0], row, "credits"),
+            credits.unwrap_or(""),
+            "missing and measured zero credits differ"
+        );
+        for name in [
+            "input_tokens",
+            "cached_input_tokens",
+            "uncached_input_tokens",
+            "cache_write_tokens",
+            "output_tokens",
+            "reasoning_tokens",
+            "total_tokens",
+        ] {
+            assert_eq!(
+                exported_cell(&records[0], row, name),
+                "",
+                "service units have no fabricated token report"
+            );
+        }
+        let service: serde_json::Value =
+            serde_json::from_str(exported_cell(&records[0], row, "service_usage")).unwrap();
+        assert_eq!(service["offering"], offering);
+        assert_eq!(service["unit"], "page");
+        assert_eq!(
+            service["quantity"],
+            quantity.map_or(
+                json!({"state":"empty"}),
+                |value| json!({"state":"told","value":value})
+            )
+        );
+        if quoted {
+            assert_eq!(
+                service["price"],
+                json!({"amount":"0.1","currency":"credits","unit":"page"})
+            );
+            assert_eq!(service["credits_per_unit"], "0.1");
+        } else {
+            assert!(service.get("price").is_none());
+            assert!(service.get("credits_per_unit").is_none());
+        }
+        assert!(
+            !row.join(",").contains(private_group),
+            "private captured groups never become CSV cells"
+        );
+    }
+    let unread = export_records(&world, &t.viewer, &requested).await;
+    assert_eq!(
+        unread,
+        vec![ordinary_records[0].clone()],
+        "a summary reader gains neither records nor service-presence metadata"
+    );
+    let mut measured = query(&scope);
+    measured.service = Some(offering.into());
+    measured.purpose = Some("page_fetch".into());
+    let series = export_series(&world, &t.admin, &measured).await;
+    assert_eq!(
+        &series[0][..ordinary_series[0].len()],
+        ordinary_series[0].as_slice()
+    );
+    assert_eq!(
+        &series[0][ordinary_series[0].len()..],
+        &["service_units", "unrated_services"]
+    );
+    let observed = series
+        .iter()
+        .skip(1)
+        .filter(|row| exported_cell(&series[0], row, "unrated_services") != "0")
+        .collect::<Vec<_>>();
+    assert_eq!(observed.len(), 1);
+    let row = observed[0];
+    assert_eq!(exported_cell(&series[0], row, "unrated_services"), "2");
+    assert_eq!(
+        serde_json::from_str::<serde_json::Value>(exported_cell(&series[0], row, "service_units"))
+            .unwrap(),
+        json!({"page":{"quantity":3,"known_requests":3,"unknown_requests":1}})
+    );
+    assert_eq!(exported_cell(&series[0], row, "turns"), "0");
+    assert_eq!(exported_cell(&series[0], row, "unrated_tokens"), "0");
+    assert!(
+        !series
+            .iter()
+            .flatten()
+            .any(|cell| cell.contains(private_group))
     );
 }

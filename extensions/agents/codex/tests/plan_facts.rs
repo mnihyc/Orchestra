@@ -181,6 +181,7 @@ async fn boot_at(
         .start(
             AgentStart {
                 provider_id: new_id(),
+                provider_kind: None,
                 agent_id: new_id(),
                 harness_kind: "codex".into(),
                 profile: AgentProfile::default(),
@@ -356,7 +357,7 @@ async fn the_real_harness_accepts_a_chatgpt_access_token_without_renewal_and_nam
     let mut rig = Rig::start_with("plan-access", |launcher| launcher.without_network())
         .await
         .unwrap();
-    rig.boot().await;
+    rig.boot_subscription().await;
     let current = SystemClock.time().get().timestamp();
     let secret = token(true, current - 60, current + 864000);
     rig.adapter.login(login(&secret)).await.unwrap();

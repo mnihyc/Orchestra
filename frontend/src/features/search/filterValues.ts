@@ -19,7 +19,8 @@ export function useFilterValues(params: SearchParams) {
   const creator = useQuery(selectedPersonQuery(params.created_by ?? ''));
   const editor = useQuery(selectedPersonQuery(params.edited_by ?? ''));
   const author = useQuery(selectedPersonQuery(params.author ?? ''));
-  const scope = useQuery({ ...nodeQuery(params.scope ?? ''), enabled: params.scope !== undefined }).data;
+  const scopeRead = useQuery({ ...nodeQuery(params.scope ?? ''), enabled: params.scope !== undefined, retry: false });
+  const scope = scopeRead.data;
   const document = useQuery({ ...referencePreviewQuery({ kind: 'document', id: params.document_id ?? '' }), enabled: params.document_id !== undefined }).data;
   const chat = useQuery({ ...referencePreviewQuery({ kind: 'chat', id: params.chat_id ?? '' }), enabled: params.chat_id !== undefined }).data;
   const people: Record<PersonFilter, UserRef | undefined> = { owner: owner.data, created_by: creator.data, edited_by: editor.data, author: author.data };
@@ -38,7 +39,7 @@ export function useFilterValues(params: SearchParams) {
   const remember = (hit: NameHit | null) => {
     if (hit !== null) setPicked((before) => rememberedFilterNames(before, params, hit));
   };
-  return { people, errors, personName, place, remember };
+  return { people, errors, personName, place, remember, scope, scopeError: scopeRead.error };
 }
 
 export type FilterValues = ReturnType<typeof useFilterValues>;

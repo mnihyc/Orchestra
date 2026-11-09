@@ -1,0 +1,22 @@
+# Central runs on the B26 pre-assembly: batch-25-pre 21bf13818 + every lane head at 13:20Z (diag-25). Leading NAME=value words are settings.
+# ci-triage-c (RUST-B23-late: CAP-DELEGATE engine cases with its gated service trace; the provider-role capability case)
+test ORCH_TEST_SERVICE_TRACE=1 -p orch-engine --lib tools::source::tests::image_services::delegation:: -- --nocapture --test-threads=1
+test -p orch-engine --lib tools::capability_service::failure::tests::native_failure_facts_remain_structured_and_never_become_a_successful_image -- --exact --nocapture
+test -p orch-connector-core --test provider_role native_capability -- --nocapture
+# scope-map-a and provider-ceiling (RUST-B20C: the provider copy case, 500 for 403, with 5c862eaa2's diagnostics)
+test ORCH_TEST_PROVIDER_COPY_ERRORS=1 ORCH_TEST_NATIVE_OPERATIONS=1 -p orch-api-core --test provider_duplicates -- --nocapture --test-threads=1
+# provider-ceiling (the trace purge case with a2d4157cb's diagnostic)
+test ORCH_TEST_PURGE_ERRORS=1 -p orch-api-core --test trace_history completed_records_do_not_hold_deleted_threads_and_shared_bytes_remain_readable -- --exact --nocapture
+# held-page-request (threads_adopt after 027f80513)
+test ORCH_NATIVE_SOURCE_DIAGNOSTIC=1 -p orch-api-core --test threads_adopt -- --nocapture --test-threads=1
+# bg-wake-facts (the batch fork reply and hierarchy native scopes after 6b1fbce39)
+test ORCH_TEST_NATIVE_OPERATIONS=1 -p orch-api-core --test forks a_batch_makes_a_job_for_each_plan_and_is_read_by_those_who_may_and_cancelled_by_its_creator -- --exact --nocapture
+test -p orch-api-core --test hierarchy_native_scopes -- --nocapture
+# gateway-relay-design (RUST-B24-api1 after deae5b6b2)
+test -p orch-api-core --test thread_move --test terminal_close_scopes -- --nocapture
+# scope-map-b (the engine's connected copy after a63922faf)
+test -p orch-engine --test initial_files connected_copy -- --nocapture
+# summaries (after 234df7b0b)
+test -p orch-api-core --test summaries -- --nocapture
+# ci-browser (node sessions after 6a4edda3a)
+test -p orch-node --test milestone --test program --test environment -- --nocapture

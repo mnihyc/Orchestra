@@ -428,6 +428,7 @@ async fn a_second_scheduler_cannot_cut_or_purge_while_the_same_job_is_running() 
 
 #[derive(Default)]
 struct PurgeCounts {
+    events: AtomicUsize,
     settings: AtomicUsize,
     pages: AtomicUsize,
 }
@@ -448,6 +449,7 @@ impl tracing::Subscriber for PurgeReads {
         if event.metadata().target() != "sqlx::query" {
             return;
         }
+        self.0.events.fetch_add(1, Ordering::Relaxed);
         #[derive(Default)]
         struct Sql(String);
         impl tracing::field::Visit for Sql {
@@ -513,6 +515,12 @@ async fn maintenance_documents(world: &World, total: i64) {
 async fn a_page_of_documents_with_one_home_loads_its_settings_once() {
     let world = World::new().await;
     maintenance_documents(&world, 200).await;
+    let witness = PurgeReads::default();
+    sqlx::query("SELECT 1")
+        .execute(&world.test.pool)
+        .with_subscriber(witness.clone())
+        .await
+        .unwrap();
     let reads = PurgeReads::default();
     let done = document_purge::run(
         &world.db,
@@ -525,6 +533,13 @@ async fn a_page_of_documents_with_one_home_loads_its_settings_once() {
     .unwrap()
     .unwrap();
     assert_eq!(done.batches, 200);
+    eprintln!(
+        "SQL observation: direct_query_events={}, purge_events={}, settings={}, pages={}",
+        witness.0.events.load(Ordering::Relaxed),
+        reads.0.events.load(Ordering::Relaxed),
+        reads.0.settings.load(Ordering::Relaxed),
+        reads.0.pages.load(Ordering::Relaxed)
+    );
     assert_eq!(
         reads.0.settings.load(Ordering::Relaxed),
         1,

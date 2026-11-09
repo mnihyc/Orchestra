@@ -4,6 +4,7 @@ import { emptyLog, matchesRequest, newestRequests, requestLog } from '@/features
 import { filtersOf, patchSearch, readSearch } from '@/features/usage/search';
 import { filterValue, isRest, keyLabel } from '@/features/usage/keys';
 import { i18n } from '@/i18n';
+import { timingFixture } from '../doubles/performance';
 import { requestRow } from '../doubles/request-row';
 
 describe('a paused request log', () => {
@@ -58,4 +59,14 @@ it('retains view and programme filters in a shared usage address and distinguish
   expect(isRest({ program: null })).toBe(false);
   expect(filterValue('program', { program: null })).toBe('none');
   expect(keyLabel('program', { program: null }, i18n.t)).toBe('No programme');
+});
+
+
+for(const outcome of ['rate_limited','overloaded','stream_interrupted'] as const)it(`retains and matches the ${outcome} address filter`,()=>{
+  const search=readSearch({view:'requests',outcome});
+  expect(search.outcome).toBe(outcome);
+  const timing=timingFixture({outcome:{state:'told',value:outcome}});
+  const row=requestRow({timing});
+  expect(matchesRequest(row,{outcome})).toBe(true);
+  expect(matchesRequest(row,{outcome:'done'})).toBe(false);
 });

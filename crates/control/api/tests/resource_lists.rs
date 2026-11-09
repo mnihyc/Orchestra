@@ -521,6 +521,8 @@ async fn a_provider(world: &World, c: &Company) -> Id {
         .send()
         .await
         .ok()
+        .into_full()
+        .unwrap()
         .provider
         .base
         .id
@@ -571,6 +573,8 @@ async fn the_settings_of_a_provider_are_what_its_home_resolves_with_its_own_valu
         .call(ProviderUpdate, &[&provider])
         .token(&c.boss.token)
         .body(&ProviderUpdateBody {
+            service_offerings: None,
+            model_group_options: None,
             name: None,
             upstreams: None,
             config: None,

@@ -73,7 +73,14 @@ pub fn status(dir: &Path, adapters: &[&str]) -> anyhow::Result<String> {
     ];
     let endpoints = data.endpoints(&config)?;
     lines.push(format!(
-        "Gateway      {}",
+        "Primary gateway choice   {}",
+        orch_connector_core::gateway_selector::choice_name(
+            &config.connector.gateway,
+            &record.gateways
+        )
+    ));
+    lines.push(format!(
+        "Entrances    {}",
         if endpoints.is_empty() {
             "(none)".to_owned()
         } else {
@@ -107,7 +114,7 @@ pub fn status(dir: &Path, adapters: &[&str]) -> anyhow::Result<String> {
                 .join(", ")
         }
     ));
-    lines.push("Session      known to a running connector only; asking it needs the console, which is not built yet".to_owned());
+    lines.push("Session      open the console to view the running connection".to_owned());
     lines.push(String::new());
     lines.push(policy_lines(&PolicyStore::connected(config, None)?).join("\n"));
     Ok(lines.join("\n"))

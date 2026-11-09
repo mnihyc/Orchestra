@@ -85,11 +85,12 @@ pub enum Making {
     Refused(Why),
 }
 
-/// Whether the caller may make a resource of the kind `kind` whose home is the org `home` (none: a
+/// Whether the caller may make a resource of the kind `kind` whose home is `home` (none: a
 /// resource of the system). `members_make` is the setting `resources.created_by_members` resolved
 /// at that org: the kinds any member may make there as their own; as shipped all five.
 ///
-/// A member makes a resource in their domain, or in an org inside it, and that org is its home.
+/// A member makes a resource in their domain or an org inside it. Providers and skills may also
+/// have a project home there, where the member can work.
 /// Where the kind is left out at that org, or for an agent profile, the caller needs
 /// `settings.manage` on the org. For the system, a system admin; a provider has no such thing.
 pub async fn may_make(
@@ -119,17 +120,24 @@ pub async fn may_make(
         if !kind.can_be_the_systems() {
             return Ok(Making::Refused(Why::NotMadeThisWay));
         }
-        return Ok(if principal.is_system_admin() && caller.permits(manage) {
-            Making::Allowed(Basis::SystemAdmin)
-        } else {
-            Making::Refused(Why::SystemAdminsOnly)
-        });
+        return Ok(
+            if crate::system_administration::on_system(
+                principal,
+                orch_access_contract::key_scope::KeyTargetKind::Object(kind.into()),
+            ) && caller.permits(manage)
+            {
+                Making::Allowed(Basis::SystemAdmin)
+            } else {
+                Making::Refused(Why::SystemAdminsOnly)
+            },
+        );
     };
     let graph = Graph::load(conn, &[home]).await?;
     let node = graph.get(home).ok_or(Error::NotFound(home))?.clone();
     let site = graph.site_of(home).ok_or(Error::NotFound(home))?;
-    // A skill may also belong to a project, whose work it is made for.
-    let project_home = kind == ResourceKind::Skill && node.kind == NodeKind::Project;
+    // Providers and skills can belong to the project whose work they serve.
+    let project_home = matches!(kind, ResourceKind::Skill | ResourceKind::Provider)
+        && node.kind == NodeKind::Project;
     if node.kind != NodeKind::Org && !project_home {
         return Ok(Making::Refused(Why::HomeIsNoOrg));
     }
@@ -177,6 +185,50 @@ pub async fn may_make(
             Some(_) => Why::KeptByAdmins(Box::new(refusal)),
         })),
     }
+}
+
+/// The ordinary native resource creation rule with its actual current home settings.
+/// HTTP creators and later native checkpoints share this resolver and the same `may_make`.
+pub async fn may_make_here(
+    conn: &mut Conn,
+    principal: &Principal,
+    kind: ResourceKind,
+    home: Option<Id>,
+) -> Result<Making, Error> {
+    let setting_error = |error| match error {
+        orch_settings::Error::Db(error) => Error::Db(error),
+        other => Error::Stored(other.to_string()),
+    };
+    let (members, policy) = match home {
+        None => (Vec::new(), Policy::default()),
+        Some(id) => {
+            let at = orch_settings::Place::Node(id);
+            let names = orch_settings::resolver::get::<Vec<String>>(
+                conn,
+                at,
+                "resources.created_by_members",
+            )
+            .await
+            .map_err(setting_error)?
+            .unwrap_or_default();
+            let external = orch_settings::resolver::get::<bool>(conn, at, "sharing.allow_external")
+                .await
+                .map_err(setting_error)?
+                .unwrap_or(true);
+            let holders = orch_settings::resolver::get::<bool>(conn, at, "sharing.allow_holders")
+                .await
+                .map_err(setting_error)?
+                .unwrap_or(true);
+            (
+                names.iter().filter_map(|name| name.parse().ok()).collect(),
+                Policy {
+                    owners_name_outsiders: external,
+                    holders_share: holders,
+                },
+            )
+        }
+    };
+    may_make(conn, principal, kind, home, &members, policy).await
 }
 
 // ---- Whose it is --------------------------------------------------------------------------------
@@ -523,6 +575,17 @@ pub async fn plan_leaving(
     policy: Policy,
 ) -> Result<Plan, Error> {
     let owned = resource_rows::owned_by(conn, root, user, actor.now().get()).await?;
+    plan_leaving_rows(conn, actor, root, user, policy, &owned).await
+}
+
+async fn plan_leaving_rows(
+    conn: &mut Conn,
+    actor: &Principal,
+    root: Id,
+    user: Id,
+    policy: Policy,
+    owned: &[OwnedRow],
+) -> Result<Plan, Error> {
     if owned.is_empty() {
         return Ok(Plan::default());
     }
@@ -549,7 +612,7 @@ pub async fn plan_leaving(
     };
     // The first owners of the orgs a thing may pass to, in the order they are asked.
     let mut candidates: Vec<Id> = Vec::new();
-    for row in &owned {
+    for row in owned {
         if let Some(org) = org_above(row)
             && let Some(facts) = graph.get(org)
         {
@@ -580,7 +643,7 @@ pub async fn plan_leaving(
         })
     };
     let mut things: Vec<Passing> = Vec::new();
-    for row in &owned {
+    for row in owned {
         let object = object_of(row)?;
         let managed_resource = matches!(
             row.object_kind.as_str(),
@@ -758,29 +821,95 @@ async fn set_first(
     }
 }
 
-/// Carries out what [`plan_leaving`] lists, in the caller's transaction, for the membership of
-/// `user` in the tree of the root org `root` that `actor` is ending (the member themself, or an
-/// admin): the Owners rows are changed with their lines of history, the entries that name the
-/// person in the pages of the tree are taken away, and the authorization epoch moves once. The
-/// person's domain, roles and groups, and their pending requests, are the membership's own and
-/// are not touched here. `choices` says, for a managed resource owned alone, whether to disable or
-/// remove it instead of keeping it.
-pub async fn end_membership(
+/// Native ownership facts selected once for the ending of this exact stored membership.
+pub struct PreparedEnding {
+    root: Id,
+    user: Id,
+    plan: Plan,
+    owned: Vec<OwnedRow>,
+}
+
+impl PreparedEnding {
+    /// The exact native transfer/disposal subjects, before any ownership mutation.
+    #[must_use]
+    pub fn plan(&self) -> &Plan {
+        &self.plan
+    }
+}
+
+/// Prepare the existing ownership ending once on its caller's serialized native footprint.
+pub async fn prepare_ending(
     conn: &mut Conn,
     actor: &Principal,
     root: Id,
     user: Id,
-    choices: &HashMap<Id, Disposal>,
     policy: Policy,
-    origin: &audit::Origin,
-) -> Result<Ended, EndError> {
-    let plan = plan_leaving(conn, actor, root, user, policy).await?;
+) -> Result<PreparedEnding, EndError> {
+    let owned = resource_rows::owned_by(conn, root, user, actor.now().get()).await?;
+    prepare_ending_rows(conn, actor, root, user, policy, owned).await
+}
+
+/// Uses the native caller's already selected and serialized ownership rows for both planning and application.
+pub async fn prepare_ending_rows(
+    conn: &mut Conn,
+    actor: &Principal,
+    root: Id,
+    user: Id,
+    policy: Policy,
+    owned: Vec<OwnedRow>,
+) -> Result<PreparedEnding, EndError> {
+    let plan = plan_leaving_rows(conn, actor, root, user, policy, &owned).await?;
     let stuck: Vec<ObjectRef> = plan.stuck().iter().map(|passing| passing.object).collect();
     if !stuck.is_empty() {
         return Err(EndError::Stuck(stuck));
     }
+    Ok(PreparedEnding {
+        root,
+        user,
+        plan,
+        owned,
+    })
+}
+
+/// The existing opaque native first-effect carrier also serves ownership endings.
+pub type EndFailure<E> = crate::pages::EffectFailure<EndError, E>;
+impl<E> From<Error> for EndFailure<E> {
+    fn from(error: Error) -> Self {
+        Self::Native(error.into())
+    }
+}
+impl<E> From<orch_db::DbError> for EndFailure<E> {
+    fn from(error: orch_db::DbError) -> Self {
+        Self::Native(error.into())
+    }
+}
+fn before_membership_write<E, F: FnOnce() -> Result<(), E>>(
+    before: &mut Option<F>,
+) -> Result<(), EndFailure<E>> {
+    match before.take() {
+        Some(check) => check().map_err(EndFailure::BeforeEffect),
+        None => Ok(()),
+    }
+}
+
+/// Carries the same prepared ownership ending through its exact first mutating statement.
+#[allow(
+    clippy::too_many_arguments,
+    reason = "the native ending, attributed writer and opaque first effect"
+)]
+pub async fn end_prepared_membership_fenced<E: Send, F: FnOnce() -> Result<(), E> + Send>(
+    conn: &mut Conn,
+    actor: &Principal,
+    prepared: &PreparedEnding,
+    choices: &HashMap<Id, Disposal>,
+    origin: &audit::Origin,
+    before_effect: F,
+) -> Result<Ended, EndFailure<E>> {
+    let (root, user) = (prepared.root, prepared.user);
     let at = actor.now();
-    let owned = resource_rows::owned_by(conn, root, user, at.get()).await?;
+    let plan = &prepared.plan;
+    let owned = &prepared.owned;
+    let mut before_effect = Some(before_effect);
     let tools = Tools {
         actor: actor.user(),
         root,
@@ -819,6 +948,7 @@ pub async fn end_membership(
                     .is_none()
                     {
                         let id = orch_types::new_id();
+                        before_membership_write(&mut before_effect)?;
                         access::insert_entry(
                             conn,
                             &NewEntry {
@@ -849,6 +979,7 @@ pub async fn end_membership(
                             .await?;
                     }
                 }
+                before_membership_write(&mut before_effect)?;
                 access::remove_entry(conn, row.entry_id, actor.user(), at.get()).await?;
                 tools
                     .line(
@@ -893,14 +1024,38 @@ pub async fn end_membership(
             }
         }
     }
+    before_membership_write(&mut before_effect)?;
     let taken =
         resource_rows::take_entries_naming(conn, root, user, actor.user(), at.get()).await?;
     access::bump_epoch(conn).await?;
     Ok(Ended {
-        passed: plan.things,
+        passed: plan.things.clone(),
         follow_ups,
         entries_taken: taken.len(),
     })
+}
+
+/// Carries out the native ownership plan in the caller's transaction, including its audit rows,
+/// named entries and epoch. Membership roles/groups and pending work remain its caller's tail.
+pub async fn end_membership(
+    conn: &mut Conn,
+    actor: &Principal,
+    root: Id,
+    user: Id,
+    choices: &HashMap<Id, Disposal>,
+    policy: Policy,
+    origin: &audit::Origin,
+) -> Result<Ended, EndError> {
+    let prepared = prepare_ending(conn, actor, root, user, policy).await?;
+    match end_prepared_membership_fenced(conn, actor, &prepared, choices, origin, || {
+        Ok::<(), std::convert::Infallible>(())
+    })
+    .await
+    {
+        Ok(ended) => Ok(ended),
+        Err(EndFailure::Native(error)) => Err(error),
+        Err(EndFailure::BeforeEffect(never)) => match never {},
+    }
 }
 
 /// Whether the caller may end the membership of `user` in the tree of `root`: whoever holds
@@ -1551,6 +1706,70 @@ pub async fn may_restore(
 }
 
 // ---- A fork -------------------------------------------------------------------------------------
+
+/// Carry the production fork's live-page overlay onto its already-created thread.
+/// The normal Birth page has already been applied. Owners remain the new thread's;
+/// row inheritance, locks, entry options and creation provenance stay exactly as the
+/// fork job writes them. Admission belongs to that existing producer.
+pub async fn carry_fork_page(
+    conn: &mut Conn,
+    source: Id,
+    fork: Id,
+    by: Id,
+    at: Time,
+) -> Result<(), orch_db::DbError> {
+    let (from_page, new_page) = (
+        PageKey::new("node", source, "live"),
+        PageKey::new("node", fork, "live"),
+    );
+    let owners = Permission::AccessOwn.as_str();
+    for row in access::stored_rows_of(conn, &from_page)
+        .await?
+        .into_iter()
+        .filter(|row| row.permission != owners)
+    {
+        access::write_row(
+            conn,
+            &RowWrite {
+                page: &new_page,
+                profile: &row.profile,
+                permission: &row.permission,
+                inherit: row.inherit,
+                locked: row.locked,
+            },
+            Some(by),
+            at.get(),
+        )
+        .await?;
+    }
+    for entry in access::entries_of(conn, &from_page)
+        .await?
+        .into_iter()
+        .filter(|entry| entry.permission != owners)
+    {
+        access::insert_entry(
+            conn,
+            &NewEntry {
+                id: orch_types::new_id(),
+                page: &new_page,
+                profile: &entry.profile,
+                permission: &entry.permission,
+                holder_kind: &entry.holder_kind,
+                holder_id: entry.holder_id,
+                holder_role: entry.holder_role.as_deref(),
+                options: &entry.options,
+                expires_at: entry.expires_at,
+                note: &entry.note,
+                source: EntrySource::Creation.as_str(),
+                created_by: Some(by),
+                at: at.get(),
+            },
+        )
+        .await?;
+    }
+    access::bump_epoch(conn).await?;
+    Ok(())
+}
 
 /// How a fork's page starts, as its maker chose.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]

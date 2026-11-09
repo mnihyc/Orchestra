@@ -20,6 +20,7 @@ set -eu
 URL=""
 TOKEN=""
 NAME=""
+GATEWAY=""
 ROLES=""
 DELEGATE_SECTIONS=""
 DATA_DIR=""
@@ -58,6 +59,7 @@ usage() {
   --url              系统地址：HTTPS；HTTP 仅限 127.0.0.0/8、[::1] 或 localhost
   --token            系统显示的一次性注册令牌（oenr_…）
   --name             机器在系统中的名称；省略时使用主机名
+  --gateway          automatic 或网关 ID；可交互时显示标签、区域和实测延迟；手选网关保持固定
   --roles            environment、agent、provider，使用逗号分隔
   --delegate         将选中角色的设置交给 Orch；本机保留值仍然优先
   --data-dir         数据目录；指定路径的实例使用独立服务
@@ -92,6 +94,7 @@ Uninstall without --purge keeps data and identity; nested instances block their 
   --url              HTTPS system address; HTTP only on 127.0.0.0/8, [::1] or localhost
   --token            the enrollment token the system showed (oenr_…)
   --name             what the machine is called in the system (the host's name if left out)
+  --gateway          automatic or a gateway ID; interactive setup shows labels, regions and RTT; selected gateways stay fixed
   --roles            environment,agent,provider (choose one or more, separated by commas)
   --delegate         the selected role sections handed to Orch, separated by commas
   --data-dir         another data directory, identity and service (platform default if left out)
@@ -173,6 +176,8 @@ while [ $# -gt 0 ]; do
     --token=*) TOKEN=${1#--token=}; shift ;;
     --name) needs_value "$1" $#; NAME=$2; shift 2 ;;
     --name=*) NAME=${1#--name=}; shift ;;
+    --gateway) needs_value "$1" $#; GATEWAY=$2; [ -n "$GATEWAY" ] || die "--gateway needs automatic or a gateway ID"; shift 2 ;;
+    --gateway=*) GATEWAY=${1#--gateway=}; [ -n "$GATEWAY" ] || die "--gateway needs automatic or a gateway ID"; shift ;;
     --roles) needs_value "$1" $#; ROLES=$2; shift 2 ;;
     --roles=*) ROLES=${1#--roles=}; shift ;;
     --delegate) needs_value "$1" $#; DELEGATE_SECTIONS=$2; shift 2 ;;
@@ -347,6 +352,7 @@ record_installation() {
 }
 [ -d "$DATA_DIR" ] || MADE_DATA_DIR=1
 set -- enroll --url "$URL" --token "$TOKEN"
+[ -z "$GATEWAY" ] || set -- "$@" --gateway "$GATEWAY"
 [ -z "$NAME" ] || set -- "$@" --name "$NAME"
 [ -z "$ROLES" ] || set -- "$@" --roles "$ROLES"
 [ -z "$DELEGATE_SECTIONS" ] || set -- "$@" --delegate "$DELEGATE_SECTIONS"

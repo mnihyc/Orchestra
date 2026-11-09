@@ -11,24 +11,29 @@
 //!
 //! What the state consists of is [`MEMBERS`], one list, and the only place that names the members.
 
+use crate::key_operations::{admission::Prepared, targets};
 use crate::middleware::authorization::{self, exact};
 use crate::middleware::requests::{ApiError, ApiResult};
-use crate::registry::{Ctx, Registry};
+use crate::registry::{Ctx, OperationFuture, Registry};
 use crate::routes::nodes::{placed, view};
 use crate::syncs::{self, Piece};
 use async_trait::async_trait;
-use orch_access_contract::permissions::Permission;
+use orch_access_contract::key_scope::{
+    KeyIdentityKind, KeyObjectRef, KeyResolvedTarget, KeyTargetKind,
+};
+use orch_access_contract::permissions::{ObjectKind, Permission};
 use orch_api_contract::nodes::{Node, NodeKind};
+use orch_api_contract::routes::Endpoint;
 use orch_api_contract::threads::Thread;
 use orch_api_contract::topics::{TopicSync, TopicSyncGet, TopicSyncGetQuery};
-use orch_authz::{Act, Policy, nodes};
+use orch_authz::{Act, Caller, Policy, nodes};
 use orch_db::DbError;
 use orch_db::queries::jobs::feeds as job_rows;
 use orch_db::queries::threads::tools as announcement_rows;
 use orch_db::queries::{feeds, hierarchy};
 use orch_types::{Id, Seq};
 use serde_json::json;
-use std::collections::HashSet;
+use std::collections::{HashMap, HashSet};
 
 /// How many children of a topic are read at a time: what a screen of a topic holds many times over.
 const THREADS_AT_A_TIME: i64 = 200;
@@ -53,6 +58,86 @@ pub(crate) const MEMBERS: &[&dyn TopicMember] = &[
     &TheInputSchedules,
 ];
 
+// These slots follow the TopicSyncGet declaration. Each collection records only rows
+// actually returned by the ordinary projection, under that same operation selection.
+const THREAD_ROWS: usize = 1;
+const JOB_ROWS: usize = 2;
+const SCHEDULE_ROWS: usize = 3;
+
+pub(crate) async fn root_plan(conn: &mut orch_db::Conn, topic: Id) -> ApiResult<Prepared> {
+    let target = targets::node(conn, topic).await?;
+    if target.object.kind != KeyTargetKind::Object(ObjectKind::Topic) {
+        return Err(ApiError::not_found());
+    }
+    let mut plan = Prepared::new(TopicSyncGet::ROUTE, TopicSyncGet::ROUTE.name)?;
+    plan.bind(0, target.object.kind, &[target])?;
+    Ok(plan)
+}
+
+struct ReadScope {
+    plan: Prepared,
+    caller: Caller,
+    // Request-local current facts from this same snapshot, never a global holder cache.
+    nodes: HashMap<Id, KeyResolvedTarget>,
+    returned: [Vec<KeyResolvedTarget>; 3],
+}
+
+impl ReadScope {
+    async fn new(conn: &mut orch_db::Conn, caller: &Caller, topic: Id) -> ApiResult<Self> {
+        Ok(Self {
+            plan: root_plan(conn, topic).await?,
+            caller: caller.clone(),
+            nodes: HashMap::new(),
+            returned: std::array::from_fn(|_| Vec::new()),
+        })
+    }
+
+    async fn load_nodes(&mut self, conn: &mut orch_db::Conn, ids: &[Id]) -> ApiResult<()> {
+        let missing: Vec<_> = ids
+            .iter()
+            .copied()
+            .filter(|id| !self.nodes.contains_key(id))
+            .collect();
+        if missing.is_empty() {
+            return Ok(());
+        }
+        let graph = match orch_authz::engine::Graph::load(conn, &missing).await {
+            Ok(graph) => graph,
+            Err(error) => return Err(authorization::refusals::problem(conn, error).await),
+        };
+        for id in missing {
+            let site = graph.site_of(id).ok_or_else(ApiError::not_found)?;
+            self.nodes.insert(id, targets::from_site(&graph, &site)?);
+        }
+        Ok(())
+    }
+
+    fn permits(&self, slot: usize, target: &KeyResolvedTarget) -> ApiResult<bool> {
+        self.plan.permits_binding(
+            &self.caller,
+            slot,
+            target.object.kind,
+            std::slice::from_ref(target),
+        )
+    }
+
+    fn include(&mut self, slot: usize, target: KeyResolvedTarget) {
+        self.returned[slot - THREAD_ROWS].push(target);
+    }
+
+    fn finish(mut self) -> ApiResult<Prepared> {
+        for (index, rows) in self.returned.into_iter().enumerate() {
+            let slot = index + THREAD_ROWS;
+            if rows.is_empty() {
+                self.plan.bind_empty(slot)?;
+            } else {
+                self.plan.bind(slot, rows[0].object.kind, &rows)?;
+            }
+        }
+        Ok(self.plan)
+    }
+}
+
 /// What both the HTTP reader and a socket subscriber read a topic with.
 pub(crate) struct Reading<'a> {
     conn: &'a mut orch_db::Conn,
@@ -63,6 +148,7 @@ pub(crate) struct Reading<'a> {
     seq: Seq,
     since: Option<Seq>,
     viewable_threads: Vec<Id>,
+    scope: ReadScope,
 }
 
 /// One member of the same topic projection in HTTP and on the live socket.
@@ -84,6 +170,36 @@ pub(crate) async fn read_for(
     seq: Seq,
     since: Option<Seq>,
 ) -> ApiResult<TopicSync> {
+    let scope = ReadScope::new(conn, principal.caller(), topic).await?;
+    let (reply, plan) = read_scoped(
+        conn,
+        principal,
+        engine,
+        now,
+        TopicWindow { topic, seq, since },
+        scope,
+    )
+    .await?;
+    // The complete footprint belongs to this current read, not the subscription's old admission.
+    plan.admit(principal.caller())?;
+    Ok(reply)
+}
+
+struct TopicWindow {
+    topic: Id,
+    seq: Seq,
+    since: Option<Seq>,
+}
+
+async fn read_scoped(
+    conn: &mut orch_db::Conn,
+    principal: &orch_authz::Principal,
+    engine: &orch_engine::Engine,
+    now: chrono::DateTime<chrono::Utc>,
+    window: TopicWindow,
+    scope: ReadScope,
+) -> ApiResult<(TopicSync, Prepared)> {
+    let TopicWindow { topic, seq, since } = window;
     let ahead = since.is_some_and(|since| since > seq);
     let mut reading = Reading {
         conn,
@@ -94,17 +210,19 @@ pub(crate) async fn read_for(
         seq,
         since: if ahead { Some(seq) } else { since },
         viewable_threads: Vec::new(),
+        scope,
     };
     let mut pieces = Vec::with_capacity(MEMBERS.len());
     for member in MEMBERS {
         pieces.push((member.name(), member.read(&mut reading).await?));
     }
-    syncs::assemble(pieces, seq, since, !ahead)
+    let reply = syncs::assemble(pieces, seq, since, !ahead)?;
+    Ok((reply, reading.scope.finish()?))
 }
 
 /// Binds this module's requests.
 pub(super) fn mount(registry: &mut Registry) {
-    registry.on(TopicSyncGet, sync);
+    registry.on_with_operation(TopicSyncGet, operation, sync);
 }
 
 fn value<T: serde::Serialize>(of: &T) -> ApiResult<serde_json::Value> {
@@ -156,24 +274,56 @@ impl TopicMember for TheThreads {
                 break;
             };
             let ids: Vec<Id> = rows.iter().map(|row| row.id).collect();
-            let seen = view::visible(
+            let viewable = nodes::holding(
                 reading.conn,
                 reading.principal,
                 &ids,
+                exact(Permission::ThreadView),
+                Act::Use,
+                Policy::default(),
+            )
+            .await
+            .map_err(ApiError::internal)?;
+            let visible_ids: Vec<_> = viewable.into_iter().map(|row| row.id).collect();
+            // Job visibility remains ordinary ThreadView even when this key omits Thread rows.
+            reading.viewable_threads.extend(visible_ids.iter().copied());
+            reading.scope.load_nodes(reading.conn, &visible_ids).await?;
+            let mut allowed = Vec::new();
+            for id in visible_ids {
+                let target = reading
+                    .scope
+                    .nodes
+                    .get(&id)
+                    .ok_or_else(ApiError::not_found)?;
+                if reading.scope.permits(THREAD_ROWS, target)? {
+                    allowed.push(id);
+                }
+            }
+            let seen = view::visible(
+                reading.conn,
+                reading.principal,
+                &allowed,
                 reading.now,
                 Policy::default(),
             )
             .await?;
-            threads.extend(seen.into_iter().filter_map(|node| match node {
-                Node::Thread(thread) => Some(thread),
-                _ => None,
-            }));
+            for node in seen {
+                if let Node::Thread(thread) = node {
+                    let target = reading
+                        .scope
+                        .nodes
+                        .get(&thread.base.id)
+                        .cloned()
+                        .ok_or_else(ApiError::not_found)?;
+                    reading.scope.include(THREAD_ROWS, target);
+                    threads.push(thread);
+                }
+            }
             if i64::try_from(rows.len()).unwrap_or(i64::MAX) < THREADS_AT_A_TIME {
                 break;
             }
             after = Some(last);
         }
-        reading.viewable_threads = threads.iter().map(|thread| thread.base.id).collect();
         Ok(Piece::whole(value(&threads)?))
     }
 }
@@ -194,7 +344,29 @@ impl TopicMember for TheInputSchedules {
             reading.since,
         )
         .await?;
-        Ok(Piece::whole(value(&rows)?))
+        let mut allowed = Vec::new();
+        reading
+            .scope
+            .load_nodes(reading.conn, &[reading.subject])
+            .await?;
+        for row in rows {
+            // for_topic selected this stored topic_id; do not use the DTO's optional redacted name.
+            let mut target = reading
+                .scope
+                .nodes
+                .get(&reading.subject)
+                .cloned()
+                .ok_or_else(ApiError::not_found)?;
+            target.object = KeyObjectRef {
+                kind: KeyTargetKind::Identity(KeyIdentityKind::Schedule),
+                id: Some(row.id),
+            };
+            if reading.scope.permits(SCHEDULE_ROWS, &target)? {
+                reading.scope.include(SCHEDULE_ROWS, target);
+                allowed.push(row);
+            }
+        }
+        Ok(Piece::whole(value(&allowed)?))
     }
 }
 
@@ -249,11 +421,23 @@ impl TopicMember for TheJobs {
             .collect()
         };
         let mut jobs = Vec::new();
+        let named: Vec<_> = viewable.iter().copied().collect();
+        reading.scope.load_nodes(reading.conn, &named).await?;
         for row in rows
             .iter()
             .filter(|row| row.node_id.is_some_and(|thread| viewable.contains(&thread)))
         {
-            jobs.push(crate::routes::environments::jobs::view(reading.conn, row).await?);
+            let thread = row.node_id.ok_or_else(ApiError::not_found)?;
+            let parent = reading
+                .scope
+                .nodes
+                .get(&thread)
+                .ok_or_else(ApiError::not_found)?;
+            let target = crate::routes::environments::jobs::subject::identity(row, Some(parent));
+            if reading.scope.permits(JOB_ROWS, &target)? {
+                jobs.push(crate::routes::environments::jobs::view(reading.conn, row).await?);
+                reading.scope.include(JOB_ROWS, target);
+            }
         }
         Ok(Piece::whole(value(&jobs)?))
     }
@@ -326,36 +510,78 @@ impl TopicMember for TheAnnouncements {
     }
 }
 
-/// Brings a client up to date on a topic.
-async fn sync(ctx: Ctx, query: TopicSyncGetQuery, (): ()) -> ApiResult<TopicSync> {
-    let topic = ctx.id("id")?;
-    if query.since.is_some_and(|since| since < 0) {
-        return Err(ApiError::invalid(
-            "since",
-            "is a number of the feed, from 0",
-        ));
-    }
+/// The ordinary projection and its completed footprint from one read snapshot.
+/// Retaining both lets HTTP finish disclosure without running the member readers twice.
+struct PreparedRead {
+    reply: TopicSync,
+    plan: Prepared,
+}
+
+fn operation<'a>(
+    ctx: &'a Ctx,
+    conn: &'a mut orch_db::Conn,
+    caller: &'a Caller,
+    query: TopicSyncGetQuery,
+    (): (),
+) -> OperationFuture<'a> {
+    Box::pin(async move {
+        let topic = ctx.id("id")?;
+        if query.since.is_some_and(|since| since < 0) {
+            return Err(ApiError::invalid(
+                "since",
+                "is a number of the feed, from 0",
+            ));
+        }
+        let scope = ReadScope::new(conn, caller, topic).await?;
+        let principal = scope.plan.preparation_principal(ctx, conn, caller).await?;
+        let (_, kind) = placed(conn, topic).await?;
+        if kind != NodeKind::Topic {
+            return Err(ApiError::not_found());
+        }
+        let seq = feeds::topic_seqs(conn, &[topic])
+            .await?
+            .pop()
+            .map(|(_, seq)| seq)
+            .ok_or_else(ApiError::not_found)?;
+        let (reply, plan) = read_scoped(
+            conn,
+            &principal,
+            &ctx.app.engine,
+            ctx.now,
+            TopicWindow {
+                topic,
+                seq,
+                since: query.since,
+            },
+            scope,
+        )
+        .await?;
+        Ok(plan.clone().with_data(PreparedRead { reply, plan }))
+    })
+}
+
+/// Brings a client up to date on a topic, using the producer freshly rerun on this snapshot.
+async fn sync(ctx: Ctx, _query: TopicSyncGetQuery, (): ()) -> ApiResult<TopicSync> {
     let mut tx = syncs::begin(&ctx).await?;
-    let principal = authorization::principal(&ctx, &mut tx).await?;
-    let (_, kind) = placed(&mut tx, topic).await?;
-    if kind != NodeKind::Topic {
-        return Err(ApiError::not_found());
-    }
-    let seq = feeds::topic_seqs(&mut tx, &[topic])
+    let principal = ctx.operation_principal(&mut tx).await?;
+    let prepared = ctx.operation_data::<PreparedRead>()?;
+    // Preparation cannot disclose rows whose targets are still unknown. The same
+    // snapshot now holds their finished set; use the shared response checkpoint to
+    // recheck the current credential and complete Pending without widening Denied.
+    let reply = prepared
+        .plan
+        .clone()
+        .read_response(&ctx, &mut tx, principal.caller(), |_, _| {
+            let reply = prepared.reply.clone();
+            Box::pin(async move { Ok(reply) })
+        })
         .await?
-        .pop()
-        .map(|(_, seq)| seq)
-        .ok_or_else(ApiError::not_found)?;
-    let reply = read_for(
-        &mut tx,
-        &principal,
-        &ctx.app.engine,
-        ctx.now,
-        topic,
-        seq,
-        query.since,
-    )
-    .await?;
+        .ok_or_else(|| {
+            ApiError::new(
+                orch_api_contract::common::ErrorCode::AuthzDenied,
+                "the key does not allow this topic response",
+            )
+        })?;
     tx.commit().await.map_err(DbError::from)?;
     Ok(reply)
 }

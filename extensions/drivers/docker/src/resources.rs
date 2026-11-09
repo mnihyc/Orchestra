@@ -317,7 +317,34 @@ impl DockerDriver {
             .iter()
             .find(|item| &item.resource == target)
             .ok_or_else(|| DriverError::NotFound("the owned inventory object is absent".into()))?;
-        if selected.busy
+        // Inspect the immutable unit at removal; a list summary can lag an acknowledged stop.
+        let busy = if target.kind == ResourceKind::Unit {
+            let unit = self
+                .daemon
+                .container(&target.id)
+                .await?
+                .ok_or_else(|| DriverError::NotFound("the owned unit is absent".into()))?;
+            let labels = unit
+                .config
+                .as_ref()
+                .and_then(|config| config.labels.as_ref())
+                .cloned()
+                .unwrap_or_default();
+            if unit.id.as_deref() != Some(target.id.as_str()) || !owned(&labels, system) {
+                return Err(DriverError::NotFound(
+                    "the unit no longer belongs to this installation".into(),
+                ));
+            }
+            let state = unit.state.ok_or_else(|| {
+                DriverError::Busy("the unit's current state is unavailable".into())
+            })?;
+            state.running != Some(false)
+                || state.paused != Some(false)
+                || state.restarting != Some(false)
+        } else {
+            selected.busy
+        };
+        if busy
             || inventory
                 .iter()
                 .any(|item| item.depends_on.contains(target))

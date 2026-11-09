@@ -1,10 +1,7 @@
 //! Reviewed host deletion runs independent recovery or removal before detaching native resources and revoking its machine.
 
 use crate::{
-    middleware::{
-        authorization,
-        requests::{ApiError, ApiResult},
-    },
+    middleware::requests::{ApiError, ApiResult},
     registry::{Ctx, Registry},
 };
 use orch_access_contract::{
@@ -35,52 +32,42 @@ use orch_types::{Hash, Id, Time, new_id};
 use serde::{Deserialize, Serialize};
 use serde_json::json;
 
+mod confirmation;
 mod data;
+mod footprint;
+mod preparation;
+mod source;
 
 /// Binds the host's reviewed cascade instead of an empty-host-only control.
 pub fn mount(registry: &mut Registry) {
     registry
-        .on(api::HostDeletePreflight, preflight)
-        .on(api::HostDeleteCreate, create);
+        .on_with_initial_operation(
+            api::HostDeletePreflight,
+            crate::key_operations::native::effects::initial::<preparation::Preview>,
+            crate::key_operations::native::effects::prepare::<preparation::Preview>,
+            preparation::run,
+        )
+        .on_with_initial_operation(
+            api::HostDeleteCreate,
+            crate::key_operations::native::effects::initial::<confirmation::Confirm>,
+            crate::key_operations::native::effects::prepare::<confirmation::Confirm>,
+            confirmation::run,
+        )
+        .creation(api::HostDeleteCreate, confirmation::replay_binding());
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
-#[serde(tag = "action", rename_all = "snake_case")]
-enum EnvironmentAction {
-    Recreate {
-        recipe: Box<recovery::Recipe>,
-    },
-    Move {
-        recipe: Box<environment_move::MoveRecipe>,
-        request: EnvironmentMovePreflightBody,
-    },
-    Portable {
-        recipe: Box<machine_move::Recipe>,
-        request: EnvironmentMovePreflightBody,
-    },
-    Remove {
-        id: Id,
-        revision: i64,
-        lost: bool,
-    },
+use orch_engine::jobs::host_delete::reviewed::{EnvironmentAction, ProviderAction};
+#[derive(Default)]
+struct NativePlans {
+    hosted: std::collections::BTreeMap<Id, environment_move::MoveDraft>,
+    portable: std::collections::BTreeMap<Id, machine_move::Draft>,
+    providers: std::collections::BTreeMap<Id, updates::Draft>,
 }
-#[derive(Debug, Clone, Serialize, Deserialize)]
-#[serde(tag = "action", rename_all = "snake_case")]
-enum ProviderAction {
-    Leave {
-        provider: Id,
-        runtime: Id,
-    },
-    Replace {
-        recipe: Box<updates::Recipe>,
-        host: Id,
-    },
-    Make {
-        recipe: Box<orch_engine::provider_recovery::Recipe>,
-    },
-}
-#[derive(Serialize, Deserialize)]
+
+#[derive(Clone, Serialize, Deserialize)]
 struct Stored {
+    #[serde(default)]
+    observations: orch_engine::jobs::measurement::SavedMeasurements,
     host: Id,
     fingerprint: Hash,
     body: api::HostDeletePreflightBody,
@@ -90,6 +77,19 @@ struct Stored {
     volumes: Vec<operation::Volume>,
     audience: Vec<notifications::OperationRecipient>,
     data: Option<data::Planned>,
+    #[serde(default)]
+    read_environments: Vec<Id>,
+    #[serde(skip)]
+    native: Option<std::sync::Arc<NativePlans>>,
+}
+
+/// The actual Host whose kept cascade supplied the private audience.
+pub(crate) fn recipient_subject(plan: &orch_types::Json) -> ApiResult<ObjectRef> {
+    let stored: Stored = serde_json::from_value(plan.clone()).map_err(ApiError::internal)?;
+    Ok(ObjectRef {
+        kind: orch_access_contract::permissions::ObjectKind::Host,
+        id: stored.host,
+    })
 }
 fn blocked(code: &str, message: impl Into<String>) -> PlanBlocker {
     updates::blocker(code, message)
@@ -201,8 +201,23 @@ async fn build(
     id: Id,
     body: &api::HostDeletePreflightBody,
 ) -> ApiResult<Stored> {
-    let mut tx = ctx.app.db.begin().await?;
-    let host_row = hosts::host(&mut tx, host)
+    let (result, observations) = orch_engine::jobs::measurement::recording::record(build_native(
+        ctx, principal, host, id, body,
+    ))
+    .await;
+    let mut stored = result?;
+    stored.observations = observations;
+    Ok(stored)
+}
+async fn build_native(
+    ctx: &Ctx,
+    principal: &Principal,
+    host: Id,
+    id: Id,
+    body: &api::HostDeletePreflightBody,
+) -> ApiResult<Stored> {
+    let mut tx = ctx.app.db.begin_snapshot().await?;
+    let mut host_row = hosts::host(&mut tx, host)
         .await?
         .ok_or_else(ApiError::not_found)?;
     let mut grants = Vec::new();
@@ -238,12 +253,50 @@ async fn build(
             )
         });
     let inventory_measurement = if facts.inventory.online && !facts.inventory.lost && physical {
+        // The observation can create a native job and file a fresh host inventory. It must finish
+        // before the dependency snapshot that the guarded review will compare with current rows.
+        tx.rollback().await.map_err(DbError::from)?;
         let (inventory, measurement) = ctx
             .app
             .engine
             .host_custody_inventory(host, host_row.machine_id, principal.user())
             .await
             .map_err(ApiError::internal)?;
+        tx = ctx.app.db.begin_snapshot().await?;
+        let current_host = hosts::host(&mut tx, host)
+            .await?
+            .ok_or_else(ApiError::not_found)?;
+        if current_host.machine_id != host_row.machine_id {
+            return Err(ApiError::new(
+                ErrorCode::ConflictStaleRevision,
+                "The host's physical registration changed; review its deletion again",
+            ));
+        }
+        host_row = current_host;
+        grants.clear();
+        add_grant(
+            &mut tx,
+            principal,
+            &mut grants,
+            ObjectRef {
+                kind: ObjectKind::Host,
+                id: host,
+            },
+            Permission::HostManage,
+        )
+        .await?;
+        operation_access::accept(
+            &mut tx,
+            principal,
+            &grants,
+            &orch_db::audit::Origin::default(),
+        )
+        .await
+        .map_err(refused)?;
+        facts = orch_engine::resource_facts::custody::host(&mut tx, host)
+            .await
+            .map_err(ApiError::internal)?
+            .ok_or_else(ApiError::not_found)?;
         if inventory.is_some() {
             facts.native = inventory;
         }
@@ -311,6 +364,7 @@ async fn build(
         };
         tx.rollback().await.map_err(DbError::from)?;
         return Ok(Stored {
+            observations: Default::default(),
             host,
             fingerprint,
             body: body.clone(),
@@ -320,6 +374,8 @@ async fn build(
             volumes: vec![],
             audience: vec![],
             data: None,
+            read_environments: Vec::new(),
+            native: Some(std::sync::Arc::new(NativePlans::default())),
         });
     }
 
@@ -329,6 +385,7 @@ async fn build(
         .execute(&mut *tx)
         .await
         .map_err(DbError::from)?;
+    let mut native = NativePlans::default();
     let mut environment_actions = Vec::new();
     let mut rows = Vec::new();
     let mut recovery_rows = Vec::new();
@@ -472,9 +529,10 @@ async fn build(
                         }
                         if row.blockers.is_empty() {
                             environment_actions.push(EnvironmentAction::Portable {
-                                recipe: Box::new(draft.recipe),
+                                recipe: Box::new(draft.recipe.clone()),
                                 request,
                             });
+                            native.portable.insert(environment.id, draft);
                         }
                     }
                     Err(UpdateError::Blocked(blockers)) => row.blockers = blockers,
@@ -514,9 +572,10 @@ async fn build(
                         }
                         if row.blockers.is_empty() {
                             environment_actions.push(EnvironmentAction::Move {
-                                recipe: Box::new(draft.recipe),
+                                recipe: Box::new(draft.recipe.clone()),
                                 request,
                             });
+                            native.hosted.insert(environment.id, draft);
                         }
                     }
                     Err(UpdateError::Blocked(blockers)) => row.blockers = blockers,
@@ -665,9 +724,10 @@ async fn build(
                             provider_blockers.extend(draft.blockers.clone());
                             if draft.blockers.is_empty() {
                                 provider_actions.push(ProviderAction::Replace {
-                                    recipe: Box::new(draft.recipe),
+                                    recipe: Box::new(draft.recipe.clone()),
                                     host: destination,
                                 });
+                                native.providers.insert(*provider, draft);
                             }
                         }
                         Err(UpdateError::Blocked(blockers)) => provider_blockers.extend(blockers),
@@ -887,7 +947,8 @@ async fn build(
     plan.executable = plan.rows.iter().all(|row| row.blockers.is_empty())
         && plan.data.iter().all(|row| row.blockers.is_empty())
         && plan.erase_blockers.is_empty();
-    Ok(Stored {
+    let stored = Stored {
+        observations: Default::default(),
         host,
         fingerprint,
         body: body.clone(),
@@ -897,64 +958,62 @@ async fn build(
         volumes: vec![],
         audience,
         data: Some(data),
-    })
+        read_environments: managed.into_iter().collect(),
+        native: Some(std::sync::Arc::new(native)),
+    };
+    Ok(stored)
 }
 
-async fn preflight(
-    ctx: Ctx,
-    (): (),
-    body: api::HostDeletePreflightBody,
-) -> ApiResult<api::HostDeletePlan> {
-    let mut conn = ctx.app.db.acquire().await?;
-    let principal = authorization::principal(&ctx, &mut conn).await?;
-    drop(conn);
-    let id = new_id();
-    let stored = build(&ctx, &principal, ctx.id("id")?, id, &body).await?;
-    let plan = stored.plan.clone();
-    let (_, mut tx, principal) = crate::routes::nodes::action(&ctx).await?;
-    operation_access::review(
-        &mut tx,
-        &principal,
-        ObjectRef {
-            kind: ObjectKind::Host,
-            id: stored.host,
-        },
-        Permission::HostManage,
-    )
-    .await
-    .map_err(refused)?;
-    jobs::forks::save_preflight(
-        &mut tx,
-        &jobs::forks::PreflightRow {
-            id,
-            kind: "host_delete".into(),
-            node_id: None,
-            environment_id: None,
-            created_by: principal.user(),
-            plan: serde_json::to_value(&stored).map_err(ApiError::internal)?,
-            expires_at: plan.expires_at.get(),
-            created_at: ctx.now,
-        },
-    )
-    .await?;
-    orch_db::queries::notifications::operations::preview(
-        &mut tx,
-        id,
-        &stored
-            .audience
-            .iter()
-            .map(|person| person.user)
-            .collect::<Vec<_>>(),
-    )
-    .await?;
-    tx.commit().await.map_err(DbError::from)?;
-    Ok(plan)
+pub(super) struct PreparedCreation {
+    preflight: jobs::forks::PreflightRow,
+    origin: operation::authority::Origin,
+    stored: Stored,
+    body: api::HostDeleteCreateBody,
+}
+fn reviewed_environments(stored: &Stored) -> ApiResult<orch_types::Json> {
+    let mut actions = stored.environments.clone();
+    for action in &mut actions {
+        if let EnvironmentAction::Portable { recipe, .. } = action {
+            recipe.token = None;
+        }
+    }
+    serde_json::to_value(actions).map_err(ApiError::internal)
+}
+fn reviewed_providers(stored: &Stored) -> ApiResult<orch_types::Json> {
+    let mut actions = stored.providers.clone();
+    for action in &mut actions {
+        if let ProviderAction::Make { recipe } = action {
+            recipe.token = None;
+        }
+    }
+    serde_json::to_value(actions).map_err(ApiError::internal)
+}
+impl Stored {
+    fn observation(&self) -> Self {
+        let mut value = self.clone();
+        for action in &mut value.environments {
+            if let EnvironmentAction::Portable { recipe, .. } = action {
+                recipe.token = None;
+            }
+        }
+        for action in &mut value.providers {
+            if let ProviderAction::Make { recipe } = action {
+                recipe.token = None;
+            }
+        }
+        value.native = None;
+        value
+    }
 }
 
-async fn create(ctx: Ctx, (): (), body: api::HostDeleteCreateBody) -> ApiResult<Job> {
+async fn prepare_creation(
+    ctx: &Ctx,
+    principal: &Principal,
+    body: api::HostDeleteCreateBody,
+    origin: operation::authority::Origin,
+) -> ApiResult<PreparedCreation> {
     let host = ctx.id("id")?;
     let mut conn = ctx.app.db.acquire().await?;
-    let principal = authorization::principal(&ctx, &mut conn).await?;
     let preflight = jobs::forks::preflight(&mut conn, body.preflight_id)
         .await?
         .filter(|row| {
@@ -969,7 +1028,7 @@ async fn create(ctx: Ctx, (): (), body: api::HostDeleteCreateBody) -> ApiResult<
     if stored.host != host || body.confirm != stored.plan.name {
         return Err(ApiError::invalid("confirm", "type the host's exact name"));
     }
-    let mut fresh = build(&ctx, &principal, host, body.preflight_id, &stored.body).await?;
+    let mut fresh = build(ctx, principal, host, body.preflight_id, &stored.body).await?;
     for (old, new) in stored.environments.iter().zip(&mut fresh.environments) {
         if let (
             EnvironmentAction::Move { recipe: old, .. },
@@ -988,10 +1047,8 @@ async fn create(ctx: Ctx, (): (), body: api::HostDeleteCreateBody) -> ApiResult<
         );
     }
     if fresh.fingerprint != stored.fingerprint
-        || serde_json::to_value(&fresh.environments).map_err(ApiError::internal)?
-            != serde_json::to_value(&stored.environments).map_err(ApiError::internal)?
-        || serde_json::to_value(&fresh.providers).map_err(ApiError::internal)?
-            != serde_json::to_value(&stored.providers).map_err(ApiError::internal)?
+        || reviewed_environments(&fresh)? != reviewed_environments(&stored)?
+        || reviewed_providers(&fresh)? != reviewed_providers(&stored)?
         || fresh.volumes != stored.volumes
         || !stored
             .data
@@ -1033,25 +1090,29 @@ async fn create(ctx: Ctx, (): (), body: api::HostDeleteCreateBody) -> ApiResult<
             ));
         }
     }
-    let mut portable_drafts = std::collections::BTreeMap::new();
-    for action in &stored.environments {
-        if let EnvironmentAction::Portable { recipe, request } = action {
-            let draft = ctx
-                .app
-                .engine
-                .draft_machine_move(&principal, recipe.environment, request, None)
-                .await
-                .map_err(refused)?;
-            if !recipe.same_choice(&draft.recipe) {
-                return Err(ApiError::new(
-                    ErrorCode::ConflictStaleRevision,
-                    "The machine move changed",
-                ));
-            }
-            portable_drafts.insert(recipe.environment, draft);
-        }
-    }
-    let (ctx, mut tx, principal) = crate::routes::nodes::action(&ctx).await?;
+    Ok(PreparedCreation {
+        preflight,
+        origin,
+        stored: fresh,
+        body,
+    })
+}
+
+async fn apply_creation(
+    ctx: &Ctx,
+    mut tx: orch_db::Tx,
+    principal: &Principal,
+    prepared: &PreparedCreation,
+    before: crate::key_operations::native::effects::FirstEffect<'_>,
+) -> ApiResult<Job> {
+    let host = prepared.stored.host;
+    let body = &prepared.body;
+    let preflight = &prepared.preflight;
+    let stored = prepared.stored.clone();
+    let native = stored
+        .native
+        .clone()
+        .ok_or_else(|| ApiError::internal("the native cascade preparation is unavailable"))?;
     orch_db::queries::resources::lock_resource(&mut tx, "host", host).await?;
     let current = jobs::changes::lock_plan(&mut tx, body.preflight_id)
         .await?
@@ -1079,9 +1140,11 @@ async fn create(ctx: Ctx, (): (), body: api::HostDeleteCreateBody) -> ApiResult<
             "The host's inventory changed",
         ));
     }
+    let deadline = before.deadline();
+    before.check()?;
     operation_access::accept(
         &mut tx,
-        &principal,
+        principal,
         &stored.plan.admin_grants,
         &orch_db::audit::Origin::default(),
     )
@@ -1099,6 +1162,8 @@ async fn create(ctx: Ctx, (): (), body: api::HostDeleteCreateBody) -> ApiResult<
     let parent = new_id();
     let batch = new_id();
     let mut children = Vec::new();
+    let mut environment_children = Vec::new();
+    let mut provider_children = Vec::new();
     let notification = notifications::NotificationOperation {
         id: parent,
         kind: "host_delete".into(),
@@ -1111,14 +1176,19 @@ async fn create(ctx: Ctx, (): (), body: api::HostDeleteCreateBody) -> ApiResult<
     // All child acceptance runs under the one explicit notification choice.
     notifications::operation_scope(Some(parent),async {
         for action in stored.environments {
+            let continuing = !matches!(&action, EnvironmentAction::Remove { .. });
             let child=match action {
                 EnvironmentAction::Recreate{recipe}=>Some(recovery::queue(&ctx.app.engine,&mut tx,&recipe,Some(batch),ctx.now).await.map_err(refused)?),
-                EnvironmentAction::Move{recipe,request}=>{let mut draft=ctx.app.engine.draft_move(&mut tx,&principal,recipe.replacement.target.id(),&request,None).await.map_err(refused)?;retain_copy_names(&recipe.mount_decisions,&mut draft.recipe.mount_decisions);if serde_json::to_value(&draft.recipe).map_err(ApiError::internal)?!=serde_json::to_value(&recipe).map_err(ApiError::internal)? {return Err(ApiError::new(ErrorCode::ConflictStaleRevision,"The reviewed environment move changed"));}Some(environment_move::queue(&mut tx,draft,Some(batch),ctx.now).await.map_err(refused)?)},
-                EnvironmentAction::Portable{recipe,..}=>{let draft=portable_drafts.remove(&recipe.environment).ok_or_else(||ApiError::internal("The reviewed machine move is missing"))?;Some(machine_move::queue(&mut tx,&principal,draft,Some(batch),ctx.now).await.map_err(refused)?)},
+                EnvironmentAction::Move{recipe,..}=>{let mut draft=native.hosted.get(&recipe.replacement.target.id()).cloned().ok_or_else(||ApiError::internal("the prepared hosted move is missing"))?;retain_copy_names(&recipe.mount_decisions,&mut draft.recipe.mount_decisions);Some(environment_move::queue(&mut tx,draft,Some(batch),ctx.now).await.map_err(refused)?)},
+                EnvironmentAction::Portable{recipe,..}=>{let draft=native.portable.get(&recipe.environment).cloned().ok_or_else(||ApiError::internal("The reviewed machine move is missing"))?;Some(machine_move::queue(&mut tx,principal,draft,Some(batch),ctx.now).await.map_err(refused)?)},
                 EnvironmentAction::Remove{id,lost,..}=>{if lost{ctx.app.engine.remove_lost_environment_in(&mut tx,id,principal.user(),ctx.now).await.map_err(ApiError::internal)?;None}else{ctx.app.engine.remove_bindings_in(&mut tx,id,principal.user(),Time::new(ctx.now)).await.map_err(ApiError::internal)?;ctx.app.engine.schedule_removal_in(&mut tx,id,ctx.now,principal.user(),Time::new(ctx.now)).await.map_err(crate::routes::environments::removal_schedule_error)?;jobs::open_of_environment(&mut tx,id).await?.into_iter().find(|job|job.kind==jobs::kind::ENVIRONMENT_REMOVE)}},
-            };if let Some(child)=child{children.push(child.id);}
+            };if let Some(child)=child{
+                children.push(child.id);
+                if continuing { environment_children.push(child.id); }
+            }
         }
         for action in stored.providers {
+            let continuing = (!matches!(&action, ProviderAction::Leave { .. })).then(|| action.clone());
             let child=match action {
                 ProviderAction::Leave{provider,runtime}=>{
                     let queued=provider_provision::queue_removal_with_options(&mut tx,ctx.now,provider,runtime,false,Some(principal.user())).await?;
@@ -1126,11 +1196,12 @@ async fn create(ctx: Ctx, (): (), body: api::HostDeleteCreateBody) -> ApiResult<
                     sqlx::query("UPDATE providers SET runtime_unavailable='Its host was removed',status='offline',status_detail='Its host was removed',machine_id=NULL,revision=revision+1,updated_at=$2 WHERE id=$1").bind(provider).bind(ctx.now).execute(&mut *tx).await.map_err(DbError::from)?;
                     match queued{jobs::provider_jobs::Queued::Made(job)=>*job,jobs::provider_jobs::Queued::Running(_)=>return Err(ApiError::new(ErrorCode::PlanBlocked,"Another operation holds a provider")),jobs::provider_jobs::Queued::NoProvider=>return Err(ApiError::not_found())}
                 },
-                ProviderAction::Replace{recipe,host}=>{sqlx::query("UPDATE providers SET runtime_config=runtime_config||jsonb_build_object('runtime.host_id',$2::uuid::text) WHERE id=$1").bind(recipe.target.id()).bind(host).execute(&mut *tx).await.map_err(DbError::from)?;let draft=ctx.app.engine.draft_update(&mut tx,&principal,recipe.target,orch_api_contract::environment::UpdatePreflightReason::Recreate,None).await.map_err(refused)?;recreate::queue(&mut tx,draft,Some(batch),ctx.now).await.map_err(refused)?},
-                ProviderAction::Make{recipe}=>orch_engine::provider_recovery::queue(&ctx.app.engine,&mut tx,&principal,&recipe,ctx.now).await.map_err(refused)?,
+                ProviderAction::Replace{recipe,host}=>{sqlx::query("UPDATE providers SET runtime_config=runtime_config||jsonb_build_object('runtime.host_id',$2::uuid::text) WHERE id=$1").bind(recipe.target.id()).bind(host).execute(&mut *tx).await.map_err(DbError::from)?;let draft=native.providers.get(&recipe.target.id()).cloned().ok_or_else(||ApiError::internal("the prepared provider replacement is missing"))?;recreate::queue(&mut tx,draft,Some(batch),ctx.now).await.map_err(refused)?},
+                ProviderAction::Make{recipe}=>orch_engine::provider_recovery::queue(&ctx.app.engine,&mut tx,principal,&recipe,ctx.now).await.map_err(refused)?,
             };children.push(child.id);
+            if let Some(action) = continuing { provider_children.push((child.id, action)); }
         }
-        if let Some(data)=&stored.data {children.extend(data::queue(&ctx,&mut tx,&principal,data).await?);}
+        if let Some(data)=&stored.data {children.extend(data::queue(ctx,&mut tx,principal,data).await?);}
         Ok::<(),ApiError>(())
     }).await?;
     let recipe = operation::Recipe {
@@ -1152,7 +1223,7 @@ async fn create(ctx: Ctx, (): (), body: api::HostDeleteCreateBody) -> ApiResult<
             node_id: None,
             environment_id: None,
             provider_id: None,
-            plan: &json!({"identity":crate::routes::environments::retained::identity(&ctx)?,"origin":orch_db::audit::current_origin(),"mount_decisions":recipe.custody.as_ref().map(|custody|&custody.copies),"cascade":recipe}),
+            plan: &json!({"identity":crate::routes::environments::retained::identity(ctx)?,"origin":orch_db::audit::current_origin(),"mount_decisions":recipe.custody.as_ref().map(|custody|&custody.copies),"cascade":recipe}),
             progress: &serde_json::to_value(orch_engine::jobs::runner::initial_progress(
                 &operation::PHASES,
             ))
@@ -1162,6 +1233,29 @@ async fn create(ctx: Ctx, (): (), body: api::HostDeleteCreateBody) -> ApiResult<
         ctx.now,
     )
     .await?;
+    operation::authority::retain(
+        &mut tx,
+        &row,
+        &prepared.origin,
+        principal.caller(),
+        ctx.app.clock.as_ref(),
+    )
+    .await
+    .map_err(ApiError::internal)?;
+    for child in environment_children {
+        ctx.app
+            .engine
+            .retain_host_delete_environment_child(&mut tx, &row, child)
+            .await
+            .map_err(ApiError::engine)?;
+    }
+    for (child, action) in provider_children {
+        ctx.app
+            .engine
+            .retain_host_delete_provider_child(&mut tx, &row, child, &action)
+            .await
+            .map_err(ApiError::engine)?;
+    }
     children.push(parent);
     notifications::attach_operation(&mut tx, &children, &notification, ctx.now)
         .await
@@ -1169,8 +1263,10 @@ async fn create(ctx: Ctx, (): (), body: api::HostDeleteCreateBody) -> ApiResult<
     notifications::notify_operation(&mut tx, &notification, "running", ctx.now)
         .await
         .map_err(ApiError::internal)?;
+    confirmation::observed(&mut tx, principal.user(), row.id).await?;
     jobs::forks::forget_preflight(&mut tx, body.preflight_id).await?;
     let result = crate::routes::environments::jobs::view(&mut tx, &row).await?;
+    deadline.check()?;
     tx.commit().await.map_err(DbError::from)?;
     ctx.app.engine.kick();
     Ok(result)

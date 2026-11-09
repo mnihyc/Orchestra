@@ -9,6 +9,7 @@ mod places;
 mod rig;
 mod support;
 
+use crate::support::FullPermissionPageReply;
 use orch_api_contract::access::{
     AccessChoice, EffectiveAccessGet, EffectiveAccessGetQuery, NodeDefaultsUpdate, PageChange,
     PermissionCatalogueGet, PermissionCatalogueGetReply, PermissionPageGet, PermissionPageUpdate,
@@ -117,7 +118,9 @@ async fn every_general_preset_at_creation_gives_a_viewer_role_member_exactly_its
             })
             .send()
             .await
-            .ok();
+            .ok()
+            .into_full()
+            .unwrap();
         let viewer = held(&s, thread.base.id, s.cai.id()).await;
         for (permission, expected) in [
             ("thread.view", level != "private"),
@@ -198,6 +201,7 @@ async fn a_person_added_keeps_their_own_level_when_general_access_is_lowered() {
         .body(&manage)
         .send()
         .await
+        .full_permission_page()
         .ok();
     let mut view = preset(&catalogue, topic, "view");
     view.expected_revision = Some(page.revision);
@@ -223,6 +227,7 @@ async fn a_person_added_keeps_their_own_level_when_general_access_is_lowered() {
         .body(&view)
         .send()
         .await
+        .full_permission_page()
         .ok();
     let viewer = held(&s, thread.base.id, s.cai.id()).await;
     assert!(viewer.contains("thread.view"));
@@ -251,6 +256,7 @@ async fn editing_one_followed_row_freezes_its_other_holders_and_other_rows_follo
         .body(&defaults)
         .send()
         .await
+        .full_permission_page()
         .ok();
     let thread = s.thread().await;
     let page = s
@@ -272,6 +278,7 @@ async fn editing_one_followed_row_freezes_its_other_holders_and_other_rows_follo
         .body(&edit)
         .send()
         .await
+        .full_permission_page()
         .ok();
     assert!(
         !local
@@ -306,6 +313,7 @@ async fn editing_one_followed_row_freezes_its_other_holders_and_other_rows_follo
         .body(&later)
         .send()
         .await
+        .full_permission_page()
         .ok();
     let viewer = held(&s, thread.base.id, s.cai.id()).await;
     assert!(
@@ -341,6 +349,7 @@ async fn an_inherited_entry_exposes_its_end_for_a_local_edit_and_keeps_it_when_c
         .body(&defaults)
         .send()
         .await
+        .full_permission_page()
         .ok();
     let thread = s.thread().await;
     let before = s
@@ -375,6 +384,7 @@ async fn an_inherited_entry_exposes_its_end_for_a_local_edit_and_keeps_it_when_c
         .body(&edit)
         .send()
         .await
+        .full_permission_page()
         .ok();
     let kept = &after
         .rows

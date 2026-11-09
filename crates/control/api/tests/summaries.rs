@@ -9,6 +9,8 @@ mod places;
 mod rig;
 mod support;
 
+use crate::support::FullTagReply as _;
+use futures::FutureExt as _;
 use orch_api_contract::directory::{NodeTagCreate, NodeTagCreateBody};
 use orch_api_contract::forks::{
     ForkHistory, ForkPlan, ForkRequest, ForkResult, HistoryMode, ThreadForkPreflight,
@@ -64,6 +66,18 @@ async fn resume_title(s: &Scene, thread: Id) {
 
 async fn api_provider(s: &Scene) -> Id {
     let provider = new_id();
+    s.rig
+        .machine
+        .handler
+        .on(CommandKind::ProviderStart, move |command| {
+            let Command::ProviderStart(start) = command else {
+                panic!("only a provider start reaches this script");
+            };
+            assert_eq!(start.provider_id, provider);
+            Ok(CommandResult::ProviderStart(
+                orch_link_contract::commands::Empty {},
+            ))
+        });
     // An API provider names at least one upstream (the schema's own check); the call itself reaches the machine.
     sqlx::query("INSERT INTO providers (id,name,owner_id,org_id,home_id,kind,key_machine_id,machine_id,protocols,arrangements,status,upstreams) VALUES ($1,'Summary API',$2,$3,$3,'api',$4,$4,ARRAY['openai-responses'],ARRAY['key_separated'],'ready',$5)")
         .bind(provider).bind(s.ada.id()).bind(s.tree.org.base.id).bind(s.rig.machine_id)
@@ -421,9 +435,7 @@ async fn the_first_turn_updates_auto_fields_defined_tags_and_the_topic_and_count
     .await;
     for (key, value) in [
         ("auto.title", json!("summarizer")),
-        ("auto.description", json!("summarizer")),
         ("auto.tags", json!("summarizer")),
-        ("auto.topic_rollup", json!("rollup")),
     ] {
         s.rig
             .world
@@ -441,6 +453,7 @@ async fn the_first_turn_updates_auto_fields_defined_tags_and_the_topic_and_count
             color: Some(2),
         })
         .send()
+        .map(|reply| reply.full_tag())
         .await
         .ok();
     let id = s.thread().await.base.id;
@@ -453,18 +466,17 @@ async fn the_first_turn_updates_auto_fields_defined_tags_and_the_topic_and_count
         panic!("the conversation remains a thread");
     };
     assert_eq!(thread.base.name, "Repair login redirects");
-    assert_eq!(thread.base.description, "The redirect test now passes");
+    assert_eq!(thread.base.description, "");
     assert!(thread.base.auto_updated_at.is_some());
     let Node::Topic(topic) = places::read(&s.rig.world, &s.ada, s.tree.topic.base.id).await else {
         panic!("the topic remains one");
     };
-    assert_eq!(topic.base.description, "Login fixed; verification remains");
+    assert_eq!(topic.base.description, "");
     assert_eq!(
         topic.base.tags.iter().map(|tag| tag.id).collect::<Vec<_>>(),
         [tag.id]
     );
-    // One request for each field automation keeps on each node: the thread's title, status and tags,
-    // and the topic's status, rolled up from its threads, and its own tags.
+    // Thread title and tags, then topic tags: written descriptions never become model targets.
     let made: Vec<String> = calls
         .lock()
         .unwrap()
@@ -484,7 +496,7 @@ async fn the_first_turn_updates_auto_fields_defined_tags_and_the_topic_and_count
             of("From <tags>"),
             made.len()
         ),
-        (1, 1, 1, 2, 5),
+        (1, 0, 0, 2, 3),
         "{made:#?}"
     );
     let mut recorded = Vec::new();
@@ -527,8 +539,8 @@ async fn the_first_turn_updates_auto_fields_defined_tags_and_the_topic_and_count
     }
     assert_eq!(
         per_node,
-        [3, 2],
-        "the thread's title, status and tags; the topic's status and tags"
+        [2, 1],
+        "the thread's title and tags; the topic's tags"
     );
     let actual = calls
         .lock()
@@ -543,14 +555,14 @@ async fn the_first_turn_updates_auto_fields_defined_tags_and_the_topic_and_count
     );
     let use_rows: (i64, i64) = sqlx::query_as("SELECT count(*),sum(total_tokens)::bigint FROM usage_events WHERE origin='orch' AND purpose='summary' AND counted")
         .fetch_one(s.rig.db.pool()).await.unwrap();
-    assert_eq!(use_rows, (5, 600));
+    assert_eq!(use_rows, (3, 360));
     let rollup: i64 = sqlx::query_scalar(
         "SELECT sum(total_tokens)::bigint FROM usage_daily WHERE purpose='summary'",
     )
     .fetch_one(s.rig.db.pool())
     .await
     .unwrap();
-    assert_eq!(rollup, 600);
+    assert_eq!(rollup, 360);
     assert_eq!(
         s.rig.commands.issued_of("turn.start"),
         1,
@@ -569,7 +581,7 @@ async fn the_first_turn_updates_auto_fields_defined_tags_and_the_topic_and_count
     .unwrap();
     tx.commit().await.unwrap();
     assert_eq!(
-        rebuilt, 600,
+        rebuilt, 360,
         "rebuilt totals include the same actual summary requests"
     );
 }
@@ -684,12 +696,12 @@ async fn no_chosen_producer_or_a_setting_writer_without_provider_use_makes_no_ca
         (0, Some("no summarizer is configured".to_owned()))
     );
     // The summarizer's row is listed where the key is set, the topic and above (a thread lists the keys valid
-    // at a thread), and shows the reason of that place's own attempt: here the topic's rollup, which has no
+    // at a thread), and shows the reason of that place's own attempt: here the topic's tags, which have no
     // producer either.
     let topic = s.tree.topic.base.id;
     s.rig
         .world
-        .set_at(Target::Node(topic), "auto.topic_rollup", json!("rollup"))
+        .set_at(Target::Node(topic), "auto.tags", json!("summarizer"))
         .await;
     let mut conn = s.rig.db.acquire().await.unwrap();
     orch_engine::summaries::due(&mut conn, topic, "refresh", s.rig.world.now())
@@ -769,19 +781,82 @@ async fn malformed_text_is_charged_and_backed_off_while_a_full_shared_cap_skips_
     let id = s.thread().await.base.id;
     resume_title(&s, id).await;
     s.exchange(id, 0, "Work", "Done").await;
-    wait_attempt(&s, id).await;
+    eventually("the failed summary waits for a person without automatic work", || async {
+        sqlx::query_scalar::<_, bool>("SELECT EXISTS(SELECT 1 FROM node_summary_state WHERE node_id=$1 AND last_at IS NOT NULL AND claimed_by IS NULL AND due_at IS NULL AND run_id IS NULL AND reason='calls.servicePaused')")
+            .bind(id).fetch_one(s.rig.db.pool()).await.unwrap()
+    }).await;
     assert_eq!(attempts(&s, id).await.0, 1);
     let delay: i64 = sqlx::query_scalar("SELECT EXTRACT(epoch FROM next_at-last_at)::bigint FROM node_summary_state WHERE node_id=$1")
         .bind(id).fetch_one(s.rig.db.pool()).await.unwrap();
     assert_eq!(delay, 240);
     assert_eq!(s.rig.commands.issued_of("provider.complete"), 1);
+    let charged: (i64, i64) = sqlx::query_as("SELECT count(*),sum(total_tokens)::bigint FROM usage_events WHERE origin='orch' AND purpose='summary' AND counted")
+        .fetch_one(s.rig.db.pool()).await.unwrap();
+    assert_eq!(
+        charged,
+        (1, 120),
+        "unusable output still costs its actual request"
+    );
     s.rig.engine.stop();
     sqlx::query("INSERT INTO usage_caps (id,node_id,meter,period,amount,created_by) VALUES ($1,$2,'tokens','day',120,$3)")
         .bind(new_id()).bind(s.tree.project.base.id).bind(s.ada.id()).execute(s.rig.db.pool()).await.unwrap();
     s.rig.world.advance(chrono::Duration::seconds(241));
-    s.rig.engine.summarize_due(id).await.unwrap();
+    assert!(!s.rig.engine.summarize_due(id).await.unwrap());
+    assert_eq!(s.rig.commands.issued_of("provider.complete"), 1);
+    assert_eq!(attempts(&s, id).await.0, 1);
+    let paused = {
+        let mut conn = s.rig.db.acquire().await.unwrap();
+        orch_engine::calls::read(
+            &mut conn,
+            id,
+            orch_provider_contract::calls::Purpose::Summary,
+        )
+        .await
+        .unwrap()
+        .unwrap()
+    };
+    assert_eq!(paused.state, "waiting");
+    assert_eq!(paused.failure["code"], "harness_error");
+    assert_eq!(paused.rule["id"], "other");
+    assert!(paused.due_at.is_none());
+
+    // The call policy waits for a person; elapsed backoff time alone does not retry.
+    s.rig
+        .world
+        .app
+        .call(NodeAuto, &[&id])
+        .token(&s.ada.token)
+        .body(&NodeAutoBody {
+            field: AutoField::Title,
+            action: AutoAction::Refresh,
+        })
+        .send()
+        .await
+        .ok();
+    let old = {
+        let mut conn = s.rig.db.acquire().await.unwrap();
+        orch_engine::calls::read_root(
+            &mut conn,
+            id,
+            orch_provider_contract::calls::Purpose::Summary,
+            paused.call_key,
+        )
+        .await
+        .unwrap()
+        .unwrap()
+    };
+    assert_eq!(old.state, "dismissed");
+    let _ = s.rig.engine.summarize_due(id).await.unwrap();
+    eventually("the fresh summary records the full shared cap as a skip", || async {
+        sqlx::query_scalar::<_, bool>("SELECT EXISTS(SELECT 1 FROM node_summary_state WHERE node_id=$1 AND last_at=$2 AND claimed_by IS NULL AND run_id IS NULL AND due_at IS NULL AND failures=0 AND reason='A usage cap has no room for summaries')")
+            .bind(id).bind(s.rig.world.now()).fetch_one(s.rig.db.pool()).await.unwrap()
+    }).await;
     assert_eq!(s.rig.commands.issued_of("provider.complete"), 1);
     assert_eq!(attempts(&s, id).await.0, 0, "lack of cap room is a skip");
+    assert_eq!(
+        attempts(&s, id).await.1.as_deref(),
+        Some("A usage cap has no room for summaries")
+    );
 }
 
 #[tokio::test]
@@ -865,7 +940,7 @@ async fn material_sent_to_a_different_explicitly_chosen_provider_is_redacted_bef
 }
 
 #[tokio::test]
-async fn an_installed_rule_producer_can_refresh_the_automatic_description_without_using_a_model() {
+async fn an_installed_rule_producer_can_refresh_the_automatic_title_without_using_a_model() {
     let s = Scene::new().await;
     let id = s.thread().await.base.id;
     s.exchange(id, 0, "Fix login", "The tests pass").await;
@@ -881,7 +956,7 @@ async fn an_installed_rule_producer_can_refresh_the_automatic_description_withou
         .world
         .set_at(
             Target::Node(s.tree.topic.base.id),
-            "auto.description",
+            "auto.title",
             json!("summarizer"),
         )
         .await;
@@ -892,7 +967,7 @@ async fn an_installed_rule_producer_can_refresh_the_automatic_description_withou
         .call(NodeAuto, &[&id])
         .token(&s.ada.token)
         .body(&NodeAutoBody {
-            field: AutoField::Description,
+            field: AutoField::Title,
             action: AutoAction::Refresh,
         })
         .send()
@@ -902,11 +977,12 @@ async fn an_installed_rule_producer_can_refresh_the_automatic_description_withou
     let Node::Thread(thread) = places::read(&s.rig.world, &s.ada, id).await else {
         panic!("a thread");
     };
-    assert_eq!(thread.base.description, "Tests pass; review next");
+    assert_eq!(thread.base.name, "Tests pass; review next");
+    assert_eq!(thread.base.description, "");
     assert_eq!(producer.requests().len(), 1);
     assert_eq!(
         producer.requests()[0].field,
-        orch_summarizer_contract::descriptor::SummaryField::Description
+        orch_summarizer_contract::descriptor::SummaryField::Title
     );
     assert_eq!(s.rig.commands.issued_of("provider.complete"), 0);
 }
@@ -1045,6 +1121,8 @@ async fn preflight(s: &Scene, thread: Id, request: &ForkRequest) -> ForkPlan {
         .send()
         .await
         .ok()
+        .into_full()
+        .unwrap()
 }
 
 #[tokio::test]
@@ -1066,6 +1144,7 @@ async fn the_plan_of_a_summary_shows_what_it_will_send_and_what_that_costs_befor
         topic_id: None,
         name: Some("Trial".to_owned()),
         access: None,
+        agent_access: None,
         history: Some(ForkHistory {
             mode: HistoryMode::Summary,
             from_turn: None,

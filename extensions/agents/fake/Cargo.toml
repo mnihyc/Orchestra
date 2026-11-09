@@ -11,6 +11,7 @@ publish.workspace = true
 [dependencies]
 orch-agent-contract.workspace = true
 orch-agent-programs.workspace = true
+orch-api-contract.workspace = true
 orch-plugin-contract.workspace = true
 orch-types.workspace = true
 async-trait.workspace = true
@@ -24,6 +25,7 @@ tokio-util.workspace = true
 tracing.workspace = true
 
 [dev-dependencies]
+orch-testkit.workspace = true
 tempfile.workspace = true
 tokio = { workspace = true, features = ["test-util"] }
 

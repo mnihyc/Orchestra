@@ -339,6 +339,9 @@ impl AdapterError {
 pub struct AgentStart {
     /// The provider whose harness process this is.
     pub provider_id: Id,
+    /// The account's reported kind, without any credential material. Absent on older callers.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub provider_kind: Option<crate::descriptor::ProviderKind>,
     /// The agent profile.
     pub agent_id: Id,
     /// The harness kind.
@@ -509,9 +512,19 @@ pub struct SinkClosed;
 /// cloned freely, for the tasks that read the harness's output.
 ///
 /// A full node or byte budget suspends its producer; native readers await delivery before reading more.
-#[derive(Debug, Clone)]
+#[derive(Clone)]
 pub struct EventSink {
     sender: crate::flow::Sender<AdapterEvent>,
+    transform: Option<std::sync::Arc<dyn Fn(AdapterEvent) -> AdapterEvent + Send + Sync>>,
+}
+
+impl std::fmt::Debug for EventSink {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("EventSink")
+            .field("sender", &self.sender)
+            .field("transformed", &self.transform.is_some())
+            .finish()
+    }
 }
 
 /// What the host reads of the events an adapter reports.
@@ -546,11 +559,41 @@ impl EventSink {
                 .unwrap_or(usize::MAX)
                 .saturating_add(std::mem::size_of::<AdapterEvent>())
         });
-        (Self { sender }, receiver)
+        (
+            Self {
+                sender,
+                transform: None,
+            },
+            receiver,
+        )
+    }
+
+    /// Transform producer-owned event metadata before the same bounded channel and host-loss signal.
+    /// Composition retains prior transforms; no extra queue or delivery task is introduced.
+    #[must_use]
+    pub fn map_events(
+        &self,
+        transform: impl Fn(AdapterEvent) -> AdapterEvent + Send + Sync + 'static,
+    ) -> Self {
+        let prior = self.transform.clone();
+        Self {
+            sender: self.sender.clone(),
+            transform: Some(std::sync::Arc::new(move |event| {
+                let event = match &prior {
+                    Some(prior) => prior(event),
+                    None => event,
+                };
+                transform(event)
+            })),
+        }
     }
 
     /// Reports an event, waiting for capacity instead of discarding a full-queue item.
     pub async fn emit(&self, event: AdapterEvent) -> Result<(), SinkClosed> {
+        let event = match &self.transform {
+            Some(transform) => transform(event),
+            None => event,
+        };
         self.sender.send(event).await.map_err(|_| SinkClosed)
     }
 
@@ -591,6 +634,12 @@ pub trait AgentAdapter: Send + 'static {
     /// The harness kind it drives, such as `codex`.
     fn kind(&self) -> &'static str;
 
+    /// The retained output cache, whose files are named by their content hash. The host snapshots
+    /// this after start and uploads referenced files before publishing their item events.
+    fn output_directory(&self) -> Option<std::path::PathBuf> {
+        None
+    }
+
     /// The manifest of the program this adapter drives, for an adapter that is not part of Orch: the program says
     /// what it is in the `hello` of its plugin, and the system lists it and checks its builds like any other's. An
     /// adapter that is part of Orch has its manifest in the registry of the programs it ships and answers none.
@@ -619,6 +668,16 @@ pub trait AgentAdapter: Send + 'static {
     ) -> Result<(), String> {
         let _ = evidence;
         Ok(())
+    }
+
+    /// Adapter-owned structural validation of staged native classifier evidence. This does not
+    /// alter decisions or provide model/provider authorization.
+    fn verify_native_classifier(
+        &self,
+        evidence: &crate::conformance::NativeClassifierEvidence<'_>,
+    ) -> Result<(), String> {
+        let _ = evidence;
+        Err("this adapter has no staged-classifier evidence validator".to_owned())
     }
 
     /// Starts the harness or attaches to a running one. Idempotent.
@@ -967,6 +1026,40 @@ mod tests {
     use futures::executor::block_on;
     use serde_json::json;
 
+    #[test]
+    fn startup_account_kind_is_optional_and_has_no_credential_payload()
+    -> Result<(), Box<dyn std::error::Error>> {
+        let old = json!({
+            "provider_id":id(1), "agent_id":id(2), "harness_kind":"fixture",
+            "profile":serde_json::to_value(AgentProfile::default())?, "home":null,
+            "provider_config":{}, "binary":null,
+            "loopback":serde_json::to_value(crate::loopback::Loopback::new(41701,
+                orch_plugin_contract::Secret::new("fixture-existing-loopback-token".to_owned())))?
+        });
+        let mut decoded: AgentStart = serde_json::from_value(old.clone())?;
+        assert!(decoded.provider_kind.is_none());
+        assert_eq!(
+            serde_json::to_value(&decoded)?,
+            old,
+            "old caller wire shape stays unchanged"
+        );
+        decoded.provider_kind = Some(crate::descriptor::ProviderKind::Api);
+        let new = serde_json::to_value(&decoded)?;
+        assert_eq!(new["provider_kind"], "api");
+        let read: AgentStart = serde_json::from_value(new.clone())?;
+        assert_eq!(read.provider_kind, decoded.provider_kind);
+        #[derive(serde::Deserialize)]
+        struct EarlierAdapter {
+            provider_id: Id,
+        }
+        let earlier: EarlierAdapter = serde_json::from_value(new)?;
+        assert_eq!(
+            earlier.provider_id, decoded.provider_id,
+            "an unaware adapter ignores the optional fact"
+        );
+        Ok(())
+    }
+
     /// The least an adapter does: it implements the six methods that every adapter has.
     struct Minimal;
 
@@ -1059,6 +1152,8 @@ mod tests {
         );
         assert_eq!(adapter.kind(), "minimal");
         let turn = TurnStart {
+            native_model: None,
+            native_wake: None,
             plan: false,
             thread_id: id(1),
             turn_id: id(2),
@@ -1262,5 +1357,72 @@ mod tests {
         producer.await.unwrap();
         assert_eq!(sent.load(Ordering::Acquire), EVENTS);
         assert_eq!(sink.sender.usage().items, 0);
+    }
+}
+
+#[cfg(test)]
+mod mapped_sink_tests {
+    use super::*;
+    use crate::facts::{HarnessState, HarnessStatus};
+
+    #[tokio::test]
+    async fn mapped_events_keep_scope_composition_and_the_original_host_loss_signal()
+    -> Result<(), Box<dyn std::error::Error>> {
+        let (sink, mut events) = EventSink::channel();
+        let mapped = sink
+            .map_events(|event| match event {
+                AdapterEvent::Status(mut status) => {
+                    status.sessions_open = status.sessions_open.saturating_add(1);
+                    AdapterEvent::Status(status)
+                }
+                other => other,
+            })
+            .map_events(|event| match event {
+                AdapterEvent::Status(mut status) => {
+                    status.sessions_open = status.sessions_open.saturating_mul(2);
+                    AdapterEvent::Status(status)
+                }
+                other => other,
+            });
+        let status = HarnessStatus {
+            status: HarnessState::Online,
+            detail: None,
+            harness_version: None,
+            sessions_open: 2,
+        };
+        mapped.emit(AdapterEvent::Status(status.clone())).await?;
+        let Some(AdapterEvent::Status(observed)) = events.recv().await else {
+            return Err("mapped status was not delivered".into());
+        };
+        assert_eq!(observed.sessions_open, 6);
+        let thread = orch_types::new_id();
+        let segment = orch_types::new_id();
+        mapped
+            .session(
+                thread,
+                segment,
+                crate::events::SessionEvent::SessionTitle(crate::events::SessionTitle {
+                    title: "Original source".into(),
+                }),
+            )
+            .await?;
+        let Some(AdapterEvent::Session {
+            thread_id,
+            segment_id,
+            event,
+        }) = events.recv().await
+        else {
+            return Err("mapped session was not delivered".into());
+        };
+        assert_eq!((thread_id, segment_id), (thread, segment));
+        assert!(
+            matches!(event,crate::events::SessionEvent::SessionTitle(title) if title.title=="Original source")
+        );
+        drop(events);
+        assert!(mapped.is_closed());
+        assert!(sink.is_closed());
+        assert!(mapped.emit(AdapterEvent::Status(status)).await.is_err());
+        mapped.closed().await;
+        Ok(())
     }
 }
