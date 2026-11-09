@@ -103,20 +103,55 @@ async fn the_most_specific_scope_wins_for_a_replace_key() {
 #[tokio::test]
 async fn of_two_orgs_on_a_path_the_inner_one_is_nearer() {
     let w = World::new().await;
-    w.set(Target::Node(w.root), keys::CHAT_ENABLED, json!(false))
-        .await;
-    w.set(Target::Node(w.department), keys::CHAT_ENABLED, json!(true))
-        .await;
+    w.set(
+        Target::Node(w.root),
+        keys::RETENTION_ARCHIVE_IDLE_DAYS,
+        json!(30),
+    )
+    .await;
+    w.set(
+        Target::Node(w.department),
+        keys::RETENTION_ARCHIVE_IDLE_DAYS,
+        json!(7),
+    )
+    .await;
     let sibling = w.node("project", w.department, "Sibling").await;
-    let view = w.view(Place::Node(sibling), keys::CHAT_ENABLED).await;
-    assert_eq!(view.value(), Some(&json!(true)));
+    let view = w
+        .view(Place::Node(sibling), keys::RETENTION_ARCHIVE_IDLE_DAYS)
+        .await;
+    assert_eq!(view.value(), Some(&json!(7)));
     assert_eq!(view.resolved.source.node, Some(w.department));
     let elsewhere = w.node("project", w.root, "Elsewhere").await;
     assert_eq!(
-        w.value(Place::Node(elsewhere), keys::CHAT_ENABLED).await,
-        Some(json!(false)),
+        w.value(Place::Node(elsewhere), keys::RETENTION_ARCHIVE_IDLE_DAYS)
+            .await,
+        Some(json!(30)),
         "a project of the root org itself is not inside the department"
     );
+}
+
+#[tokio::test]
+async fn a_permission_policy_keeps_an_unlocked_ancestor_refusal_and_the_saved_child_choice() {
+    let w = World::new().await;
+    for key in [keys::CHAT_ENABLED, keys::TERMINAL_ENABLED] {
+        w.set(Target::Node(w.root), key, json!(false)).await;
+        w.set(Target::Node(w.department), key, json!(true)).await;
+        let view = w.view(Place::Node(w.department), key).await;
+        assert_eq!(view.value(), Some(&json!(false)), "{key}");
+        assert_eq!(view.own.as_ref().map(|row| &row.value), Some(&json!(true)));
+        assert_eq!(view.resolved.source.node, Some(w.root));
+        assert_eq!(view.resolved.locked_by, None);
+        w.set(Target::Node(w.root), key, json!(true)).await;
+        assert_eq!(
+            w.value(Place::Node(w.department), key).await,
+            Some(json!(true))
+        );
+        w.set(Target::Node(w.department), key, json!(false)).await;
+        assert_eq!(
+            w.value(Place::Node(w.department), key).await,
+            Some(json!(false))
+        );
+    }
 }
 
 #[tokio::test]
@@ -315,28 +350,36 @@ async fn a_lock_above_decides_whatever_is_set_below_and_what_was_set_below_is_as
 #[tokio::test]
 async fn of_two_locks_the_one_further_up_decides_and_a_lock_does_not_bind_what_is_above_it() {
     let w = World::new().await;
-    w.set(Target::Node(w.root), keys::TERMINAL_ENABLED, json!(true))
-        .await;
+    w.set(
+        Target::Node(w.root),
+        keys::RETENTION_ARCHIVE_IDLE_DAYS,
+        json!(30),
+    )
+    .await;
     w.lock(
         Target::Node(w.project),
-        keys::TERMINAL_ENABLED,
-        json!(false),
+        keys::RETENTION_ARCHIVE_IDLE_DAYS,
+        json!(0),
     )
     .await;
     assert_eq!(
-        w.value(Place::Node(w.topic), keys::TERMINAL_ENABLED).await,
-        Some(json!(false))
+        w.value(Place::Node(w.topic), keys::RETENTION_ARCHIVE_IDLE_DAYS)
+            .await,
+        Some(json!(0))
     );
     assert_eq!(
-        w.value(Place::Node(w.root), keys::TERMINAL_ENABLED).await,
-        Some(json!(true))
+        w.value(Place::Node(w.root), keys::RETENTION_ARCHIVE_IDLE_DAYS)
+            .await,
+        Some(json!(30))
     );
-    w.lock(Target::System, keys::TERMINAL_ENABLED, json!(true))
+    w.lock(Target::System, keys::RETENTION_ARCHIVE_IDLE_DAYS, json!(30))
         .await;
-    let view = w.view(Place::Node(w.topic), keys::TERMINAL_ENABLED).await;
+    let view = w
+        .view(Place::Node(w.topic), keys::RETENTION_ARCHIVE_IDLE_DAYS)
+        .await;
     assert_eq!(
         view.value(),
-        Some(&json!(true)),
+        Some(&json!(30)),
         "the system's lock is further up"
     );
     assert_eq!(

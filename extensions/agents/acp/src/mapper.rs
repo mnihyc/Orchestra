@@ -24,11 +24,12 @@ use std::collections::{HashMap, HashSet};
 use std::path::PathBuf;
 use std::sync::Arc;
 
+use base64::Engine as _;
 use orch_agent_contract::events::{
-    AgentMessagePayload, AgentMessagePhase, BlobRef, ItemCompleted, ItemContent, ItemDelta,
-    ItemStarted, ItemStatus, ItemUpdated, MAIN_STREAM, PlanPayload, PlanStep, PlanStepStatus,
-    ReasoningPayload, SessionEvent, SessionTitle, ToolCallPayload, ToolPayload, TurnCompleted,
-    TurnError, TurnOutcome, TurnPhase, TurnPhaseKind, TurnStarted, UsageUpdated,
+    AgentMessagePayload, AgentMessagePhase, BlobRef, ErrorPayload, ItemCompleted, ItemContent,
+    ItemDelta, ItemStarted, ItemStatus, ItemUpdated, MAIN_STREAM, PlanPayload, PlanStep,
+    PlanStepStatus, ReasoningPayload, SessionEvent, SessionTitle, ToolCallPayload, ToolPayload,
+    TurnCompleted, TurnError, TurnOutcome, TurnPhase, TurnPhaseKind, TurnStarted, UsageUpdated,
 };
 use orch_agent_contract::events::{DeltaField, TokenUsage};
 use orch_agent_contract::requests::UsageRequest;
@@ -130,6 +131,7 @@ struct Turn {
 
 struct Tracked {
     view: ToolView,
+    turn_id: TurnId,
     native_ref: String,
     started: Time,
     last: Json,
@@ -284,10 +286,109 @@ impl Mapper {
         self.turn.is_some()
     }
 
-    /// Turns one `update` of a `session/update` into events. An update that means nothing to a turn gives none.
+    /// Preserve an unknown native name as a passive, counted observation, including outside a turn.
+    pub fn unrecognized(&mut self, name: &str) -> Vec<SessionEvent> {
+        let reference = self.fresh_ref("unrecognized", None);
+        let Ok(mut events) = orch_agent_contract::observations::unrecognized_event(
+            &self.config.program.title,
+            name,
+            self.serial,
+            self.turn_id(),
+            self.clock.time(),
+        ) else {
+            return self.protocol_error("an unrecognized native event could not be represented");
+        };
+        for event in &mut events {
+            match event {
+                SessionEvent::ItemStarted(item) => item.native_ref.clone_from(&reference),
+                SessionEvent::ItemCompleted(item) => item.native_ref.clone_from(&reference),
+                _ => {}
+            }
+        }
+        events
+    }
+
+    /// A malformed frame remains visible even with raw logging disabled; the stream may continue.
+    pub fn protocol_error(&mut self, message: &str) -> Vec<SessionEvent> {
+        self.observed_error("harness_error", message)
+    }
+
+    fn observed_error(&mut self, code: &str, message: &str) -> Vec<SessionEvent> {
+        let reference = self.fresh_ref("protocol-error", None);
+        let payload = ErrorPayload {
+            details: None,
+            window: None,
+            resets_at: None,
+            code: code.into(),
+            message: message.into(),
+            retryable: false,
+        };
+        let mut events = Vec::new();
+        if let Some(turn_id) = self.turn_id() {
+            events.push(SessionEvent::ItemStarted(ItemStarted {
+                turn_id,
+                native_ref: reference.clone(),
+                stream: MAIN_STREAM.into(),
+                parent_native_ref: None,
+                content: ItemContent::Error(payload.clone()),
+            }));
+        }
+        events.push(SessionEvent::ItemCompleted(ItemCompleted {
+            native_ref: reference,
+            status: ItemStatus::Completed,
+            payload: serde_json::to_value(payload).unwrap_or(Json::Null),
+            output_blob: None,
+        }));
+        events
+    }
+
+    /// Keep a program/server configuration report as a fact without changing Orch's requested settings.
+    pub fn configuration(
+        &mut self,
+        change: &str,
+        previous: Json,
+        value: Json,
+    ) -> Vec<SessionEvent> {
+        use orch_agent_contract::events::{MarkerPayload, UsageMeasurement};
+        let reference = self.fresh_ref("configuration", None);
+        let marker = MarkerPayload::HarnessChanged(Box::new(
+            orch_api_contract::threads::MarkerHarnessChanged {
+                program: self.config.program.title.clone(),
+                change: change.into(),
+                subject: None,
+                changed: previous != value,
+                previous: UsageMeasurement::Told { value: previous },
+                value,
+                expected: UsageMeasurement::Unsupported,
+                diverged: false,
+                next_turn: true,
+                turn_id: self.turn_id(),
+                reported_at: self.clock.time(),
+            },
+        ));
+        let mut events = Vec::new();
+        if let Some(turn_id) = self.turn_id() {
+            events.push(SessionEvent::ItemStarted(ItemStarted {
+                turn_id,
+                native_ref: reference.clone(),
+                stream: MAIN_STREAM.into(),
+                parent_native_ref: None,
+                content: ItemContent::Marker(marker.clone()),
+            }));
+        }
+        events.push(SessionEvent::ItemCompleted(ItemCompleted {
+            native_ref: reference,
+            status: ItemStatus::Completed,
+            payload: serde_json::to_value(marker).unwrap_or(Json::Null),
+            output_blob: None,
+        }));
+        events
+    }
+
+    /// Turns one native update into events; future kinds are counted rather than silently dropped.
     pub fn update(&mut self, update: &Json) -> Vec<SessionEvent> {
         let Some(kind) = update.get("sessionUpdate").and_then(Json::as_str) else {
-            return Vec::new();
+            return self.protocol_error("session/update has no string sessionUpdate");
         };
         match kind {
             "agent_message_chunk" => self.chunk(TextKind::Message, update),
@@ -308,7 +409,7 @@ impl Mapper {
                     })]
                 })
                 .unwrap_or_default(),
-            _ => Vec::new(),
+            _ => self.unrecognized(kind),
         }
     }
 
@@ -317,8 +418,10 @@ impl Mapper {
     fn chunk(&mut self, kind: TextKind, update: &Json) -> Vec<SessionEvent> {
         let mut out = Vec::new();
         let Some(turn_id) = self.turn_id() else {
-            tracing::debug!("a chunk of text arrived outside a turn of Orch, and is not reported");
-            return out;
+            return self.observed_error(
+                "harness_diverged",
+                "The managed program emitted model output outside an Orch turn; no new turn was started.",
+            );
         };
         let Some(text) = update.get("content").and_then(content_text) else {
             return out;
@@ -561,7 +664,20 @@ impl Mapper {
             view.status = status;
         }
         if let Some(content) = update.get("content").and_then(Json::as_array) {
-            view.content = content.clone();
+            let mut latest = content.clone();
+            // Text is a replacement snapshot; an image already produced by this call
+            // remains a result even if a later status frame contains only text.
+            for previous in &view.content {
+                if previous.get("type").and_then(Json::as_str) == Some("content")
+                    && previous
+                        .get("content")
+                        .is_some_and(crate::wire::is_image_content)
+                    && !latest.contains(previous)
+                {
+                    latest.push(previous.clone());
+                }
+            }
+            view.content = latest;
         }
         if let Some(locations) = update.get("locations").and_then(Json::as_array) {
             view.locations = locations.clone();
@@ -635,6 +751,7 @@ impl Mapper {
             id.to_owned(),
             Tracked {
                 view,
+                turn_id,
                 native_ref,
                 started,
                 last,
@@ -709,18 +826,117 @@ impl Mapper {
         }
         let ended = self.clock.time();
         let mut payload = self.tool_payload_of(&tracked.view, tracked.started, Some(ended));
-        let blob = self.keep_long_output(&mut payload.tool, &tracked.view);
+        let mut blob = self.keep_long_output(&mut payload.tool, &tracked.view);
         let status = forced.unwrap_or(if tracked.view.status == Status::Failed {
             ItemStatus::Failed
         } else {
             ItemStatus::Completed
         });
-        vec![SessionEvent::ItemCompleted(ItemCompleted {
+        let images = self.keep_images(&tracked.view);
+        let primary_image = matches!(
+            tracked.view.understood,
+            crate::tools::Understood::Family(crate::program::ToolFamily::Image)
+                | crate::tools::Understood::Exec(crate::program::ToolFamily::Image)
+        );
+        let mut extra = Vec::new();
+        for (index, image) in images.into_iter().enumerate() {
+            let (tool, image_blob, image_status) = match image {
+                Ok((tool, image_blob)) if primary_image && index == 0 => {
+                    payload.tool = tool;
+                    blob = Some(image_blob);
+                    continue;
+                }
+                Ok((tool, image_blob)) => (tool, Some(image_blob), status),
+                Err(message) => (
+                    ToolPayload::Other {
+                        name: "image_result".into(),
+                        arguments: None,
+                        result: Some(json!({ "error": message })),
+                    },
+                    None,
+                    ItemStatus::Failed,
+                ),
+            };
+            let native_ref =
+                self.fresh_ref("image", Some(&format!("{}:{index}", tracked.native_ref)));
+            let image = ToolCallPayload {
+                tool,
+                title: "Image result".into(),
+                started_at: tracked.started,
+                duration_ms: payload.duration_ms,
+                raw: payload.raw.clone(),
+            };
+            extra.push(SessionEvent::ItemStarted(ItemStarted {
+                turn_id: tracked.turn_id,
+                native_ref: native_ref.clone(),
+                stream: MAIN_STREAM.into(),
+                parent_native_ref: Some(tracked.native_ref.clone()),
+                content: ItemContent::ToolCall(image.clone()),
+            }));
+            extra.push(SessionEvent::ItemCompleted(ItemCompleted {
+                native_ref,
+                status: image_status,
+                payload: serde_json::to_value(image).unwrap_or(Json::Null),
+                output_blob: image_blob,
+            }));
+        }
+        let mut out = vec![SessionEvent::ItemCompleted(ItemCompleted {
             native_ref: tracked.native_ref,
             status,
             payload: serde_json::to_value(&payload).unwrap_or(Json::Null),
             output_blob: blob,
-        })]
+        })];
+        out.extend(extra);
+        out
+    }
+
+    fn keep_images(&self, view: &ToolView) -> Vec<Result<(ToolPayload, BlobRef), &'static str>> {
+        view.content
+            .iter()
+            .filter_map(|block| {
+                let content = block.get("content")?;
+                if !crate::wire::is_image_content(content) {
+                    return None;
+                }
+                Some((|| {
+                    let (data, media_type) = crate::wire::image_content(content)
+                        .ok_or("The program's image result is missing its bytes or media type.")?;
+                    if !media_type.starts_with("image/") {
+                        return Err(
+                            "The program reported a non-image media type for an image result.",
+                        );
+                    }
+                    let bytes = base64::engine::general_purpose::STANDARD
+                        .decode(data)
+                        .or_else(|_| base64::engine::general_purpose::STANDARD_NO_PAD.decode(data))
+                        .map_err(|_| "The program's image result has invalid base64 data.")?;
+                    if bytes.is_empty() {
+                        return Err("The program's image result has no bytes.");
+                    }
+                    let blob = self.outputs.put(&bytes).map_err(|error| {
+                        tracing::warn!(%error, "an ACP image result could not be retained");
+                        "The image result could not be retained."
+                    })?;
+                    let name = ["file_path", "path"]
+                        .iter()
+                        .find_map(|name| view.raw_input.get(*name).and_then(Json::as_str))
+                        .and_then(|path| std::path::Path::new(path).file_name())
+                        .map(|name| name.to_string_lossy().into_owned());
+                    let text = output_of(view);
+                    Ok((
+                        ToolPayload::Image {
+                            blob: blob.hash,
+                            media_type: media_type.into(),
+                            name,
+                            caption: (!text.is_empty())
+                                .then(|| orch_agent_contract::events::OutputRef::of(&text).inline),
+                            capability: None,
+                        },
+                        blob,
+                    ))
+                })())
+            })
+            .collect()
     }
 
     /// Keeps the whole of an output that is longer than what stays inline, as a file, and says where.
@@ -833,7 +1049,12 @@ impl Mapper {
             }
             None => return Vec::new(),
         };
-        vec![SessionEvent::TurnPhase(TurnPhase { turn_id, kind, at })]
+        vec![SessionEvent::TurnPhase(TurnPhase {
+            turn_id,
+            kind,
+            retry_attempt: None,
+            at,
+        })]
     }
 
     /// The companion plugin says that the agent started or ended compacting.
@@ -891,6 +1112,7 @@ impl Mapper {
         if self.compacting.take().is_some() {
             out.push(SessionEvent::TurnPhase(TurnPhase {
                 turn_id: turn.id,
+                retry_attempt: None,
                 kind: TurnPhaseKind::Working,
                 at: self.clock.time(),
             }));
@@ -935,6 +1157,135 @@ fn add(a: TokenUsage, b: TokenUsage) -> TokenUsage {
 mod tests {
     use super::*;
     use orch_types::ManualClock;
+
+    #[test]
+    fn native_image_tools_keep_bytes_and_media_when_a_later_frame_contains_only_text() {
+        let mut mapper = mapper();
+        let mut program = (*mapper.config.program).clone();
+        program.tools.push(crate::program::ToolRule {
+            names: vec!["read_image".into()],
+            family: crate::program::ToolFamily::Image,
+            argument: Some("file_path".into()),
+        });
+        mapper.config.program = Arc::new(program);
+        mapper.begin_turn(orch_types::new_id(), "t1", "m");
+        let image = json!({"type":"content","content":{"type":"image","mimeType":"image/png","data":"iVBORw=="}});
+        let started = mapper.update(&json!({"sessionUpdate":"tool_call","toolCallId":"image-1","title":"read_image","status":"in_progress","rawInput":{"file_path":"/w/shot.png"},"content":[image]}));
+        let native = match &started[0] {
+            SessionEvent::ItemStarted(item) => item.native_ref.clone(),
+            _ => panic!("the native image call must start"),
+        };
+        let events = mapper.update(&json!({"sessionUpdate":"tool_call_update","toolCallId":"image-1","status":"completed","content":[{"type":"content","content":{"type":"text","text":"Opened the image"}}]}));
+        assert_eq!(events.len(), 1);
+        let SessionEvent::ItemCompleted(item) = &events[0] else {
+            panic!()
+        };
+        assert_eq!(item.native_ref, native);
+        let bytes = [137, 80, 78, 71];
+        let blob = item
+            .output_blob
+            .as_ref()
+            .expect("the image must be uploaded");
+        assert_eq!(blob.hash, Hash::of(&bytes));
+        assert_eq!(blob.size, 4);
+        assert_eq!(
+            std::fs::read(mapper.outputs.directory.join(blob.hash.to_string())).unwrap(),
+            bytes
+        );
+        assert_eq!(item.payload["tool"]["kind"], "image");
+        assert_eq!(item.payload["tool"]["media_type"], "image/png");
+        assert_eq!(item.payload["tool"]["name"], "shot.png");
+        assert_eq!(item.payload["tool"]["caption"], "Opened the image");
+    }
+
+    #[test]
+    fn mcp_results_keep_text_and_every_inline_or_embedded_image_with_the_original_parent() {
+        let mut mapper = mapper();
+        mapper.config.servers.push("pictures".into());
+        mapper.begin_turn(orch_types::new_id(), "t1", "m");
+        let events = mapper.update(&json!({"sessionUpdate":"tool_call","toolCallId":"pictures-1","title":"pictures.take","status":"completed","content":[
+            {"type":"content","content":{"type":"text","text":"Two pictures"}},
+            {"type":"content","content":{"type":"image","mimeType":"image/png","data":"iVBORw=="}},
+            {"type":"content","content":{"type":"resource","resource":{"uri":"file:///unopened.png","mimeType":"image/webp","blob":"d2VicA=="}}}
+        ]}));
+        let parent = match &events[0] {
+            SessionEvent::ItemStarted(item) => &item.native_ref,
+            _ => panic!(),
+        };
+        let mut images = Vec::new();
+        for event in &events {
+            match event {
+                SessionEvent::ItemCompleted(item) if item.native_ref == *parent => {
+                    assert_eq!(item.payload["tool"]["kind"], "mcp");
+                    assert_eq!(item.payload["tool"]["result"], "Two pictures");
+                }
+                SessionEvent::ItemStarted(item) if item.native_ref != *parent => {
+                    assert_eq!(item.parent_native_ref.as_ref(), Some(parent));
+                }
+                SessionEvent::ItemCompleted(item) => {
+                    assert_eq!(item.payload["tool"]["kind"], "image");
+                    let blob = item.output_blob.as_ref().unwrap();
+                    let bytes = std::fs::read(mapper.outputs.directory.join(blob.hash.to_string()))
+                        .unwrap();
+                    assert_eq!(Hash::of(&bytes), blob.hash);
+                    images.push((item.payload["tool"]["media_type"].clone(), bytes));
+                }
+                _ => {}
+            }
+        }
+        assert_eq!(
+            images,
+            vec![
+                (json!("image/png"), vec![137, 80, 78, 71]),
+                (json!("image/webp"), b"webp".to_vec())
+            ]
+        );
+    }
+
+    #[test]
+    fn a_malformed_image_has_a_visible_failed_result_without_hiding_the_tools_text() {
+        let mut mapper = mapper();
+        mapper.begin_turn(orch_types::new_id(), "t1", "m");
+        let events = mapper.update(&json!({"sessionUpdate":"tool_call","toolCallId":"bad-image","title":"other","status":"completed","content":[
+            {"type":"content","content":{"type":"text","text":"Original tool text"}},
+            {"type":"content","content":{"type":"image","mimeType":"image/png","data":"!"}}
+        ]}));
+        let completed: Vec<_> = events
+            .iter()
+            .filter_map(|event| match event {
+                SessionEvent::ItemCompleted(item) => Some(item),
+                _ => None,
+            })
+            .collect();
+        assert_eq!(completed.len(), 2);
+        assert_eq!(completed[0].status, ItemStatus::Completed);
+        assert!(
+            completed[0]
+                .payload
+                .to_string()
+                .contains("Original tool text")
+        );
+        assert_eq!(completed[1].status, ItemStatus::Failed);
+        assert!(completed[1].payload.to_string().contains("invalid base64"));
+        assert!(completed[1].output_blob.is_none());
+    }
+
+    #[test]
+    fn an_image_already_returned_by_an_open_tool_keeps_its_turn_when_the_turn_is_interrupted() {
+        let mut mapper = mapper();
+        let turn = orch_types::new_id();
+        mapper.begin_turn(turn, "t1", "m");
+        mapper.update(&json!({"sessionUpdate":"tool_call","toolCallId":"partial-image","title":"other","status":"in_progress","content":[
+            {"type":"content","content":{"type":"image","mimeType":"image/png","data":"iVBORw=="}}
+        ]}));
+        let (events, _) = mapper.end_turn(TurnOutcome::Interrupted, None);
+        assert!(events.iter().any(|event| matches!(event, SessionEvent::ItemStarted(item) if item.turn_id==turn && matches!(item.content,ItemContent::ToolCall(_)))));
+        assert!(events.iter().any(|event| matches!(event, SessionEvent::ItemCompleted(item) if item.output_blob.is_some() && item.payload["tool"]["kind"]=="image")));
+        assert!(matches!(
+            events.last(),
+            Some(SessionEvent::TurnCompleted(_))
+        ));
+    }
 
     fn mapper() -> Mapper {
         let program = Arc::new(
@@ -1117,12 +1468,20 @@ mod tests {
     }
 
     #[test]
-    fn context_use_is_reported_as_size_and_fill_and_a_chunk_outside_a_turn_is_not_reported() {
+    fn context_use_is_reported_as_size_and_fill_and_a_chunk_outside_a_turn_is_warned_without_model_text()
+     {
         let mut mapper = mapper();
+        let stray = mapper.update(&text_chunk("agent_message_chunk", "m", "stray"));
+        assert_eq!(kinds(&stray), ["item.completed"]);
+        let SessionEvent::ItemCompleted(warning) = &stray[0] else {
+            panic!("an out-of-turn chunk is only a passive diagnostic");
+        };
+        assert_eq!(warning.payload["code"], "harness_diverged");
+        assert_eq!(warning.payload["retryable"], false);
+        assert!(!warning.payload.to_string().contains("stray"));
         assert!(
-            mapper
-                .update(&text_chunk("agent_message_chunk", "m", "stray"))
-                .is_empty()
+            mapper.turn_id().is_none(),
+            "the diagnostic starts no new turn"
         );
         assert!(
             mapper

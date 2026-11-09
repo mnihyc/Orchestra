@@ -1,5 +1,5 @@
 /** Provider help ids are shared by controls, setting entries, search and the content gate. */
-import type { TranslationKey } from '@/i18n';
+import type { TranslationKey } from '../i18n';
 
 export type ProviderGuideId = 'provider-details' | 'commands-after-start' | 'provider-readme'
   | 'provider-facts' | 'provider-models' | 'provider-resets' | 'provider-credential';
@@ -25,6 +25,6 @@ const UNIT_SETTINGS = ['env.after_up', 'runtime.after_up', 'runtime.storage', 'r
 
 export function providerGuidesForSetting(key: string): ProviderGuideId[] {
   if (UNIT_SETTINGS.includes(key)) return ['commands-after-start'];
-  if (key === 'providers.allow_http_upstreams') return ['provider-details'];
+  if (key === 'providers.allow_http_upstreams' || key === 'providers.model_groups_max') return ['provider-details'];
   return [];
 }

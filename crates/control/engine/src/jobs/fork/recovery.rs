@@ -86,12 +86,17 @@ pub(super) async fn retain_original(job: &Job, fork: &Forking) -> Result<(), Sto
         let mut recipe = fork.recipe.clone();
         recipe.new_thread = None;
         recipe.new_segment = segment;
-        recipe.forkplan.to.agent = recipe.forkplan.from.agent.clone();
-        recipe.forkplan.to.provider = recipe.forkplan.from.provider.clone();
+        recipe.forkplan.to.agent = recipe.forkplan.from.agent().cloned().ok_or_else(|| {
+            failed(
+                "history_source_changed",
+                "A program has no native session to recover",
+            )
+        })?;
+        recipe.forkplan.to.provider = recipe.forkplan.from.provider().clone();
         recipe.forkplan.to.arrangement =
             serde_json::from_value(json!(old.arrangement)).map_err(EngineError::from)?;
         recipe.forkplan.to.environment = ForkPlanTarget::Existing(
-            recipe.forkplan.from.environment.clone().ok_or_else(|| {
+            recipe.forkplan.from.environment().cloned().ok_or_else(|| {
                 failed(
                     "history_source_changed",
                     "The original environment reference is unavailable.",

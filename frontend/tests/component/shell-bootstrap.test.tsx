@@ -1,15 +1,18 @@
 /** One shell aggregate satisfies its existing readers before they mount. */
+import type * as LiveModule from '@/realtime/live';
 import { QueryClient, QueryClientProvider, useQuery } from '@tanstack/react-query';
 import { screen } from '@testing-library/react';
 import { beforeEach, expect, it, vi } from 'vitest';
 import { adminModeQuery } from '@/api/adminMode';
+import { permissionsKey, permissionsQuery } from '@/api/access';
+import { notificationPrefsKey, notificationPrefsQuery, notifiersKey, notifiersQuery } from '@/api/notifications';
 import { meQuery, metaKey } from '@/api/auth';
 import { client } from '@/api/client';
 import type * as ClientModule from '@/api/client';
 import { orgsQuery } from '@/api/nodes';
 import { favoritesQuery, meStateQuery } from '@/api/personal';
 import { queryClient as applicationQueries } from '@/api/query';
-import { useShellBootstrap } from '@/shell/bootstrap';
+import { ensureShellBootstrap, useShellBootstrap } from '@/shell/bootstrap';
 import { useSelectedOrg } from '@/shell/org';
 import { useChatStates } from '@/realtime/stores/chat';
 import { useUserStore } from '@/realtime/stores/user';
@@ -18,7 +21,8 @@ import { bootstrap } from '../doubles/bootstrap';
 import { World } from '../doubles/world';
 import { show } from './support';
 
-const calls = vi.hoisted(() => ({ get: vi.fn<(path: string, options?: { signal?: AbortSignal }) => Promise<unknown>>() }));
+const calls = vi.hoisted(() => ({ get: vi.fn<(path: string, options?: { signal?: AbortSignal }) => Promise<unknown>>(), admitted: vi.fn<() => Promise<void>>() }));
+vi.mock('@/realtime/live', async (original) => ({ ...await original<typeof LiveModule>(), ensurePersonalSource: calls.admitted }));
 vi.mock('@/api/client', async (original) => {
   const actual = await original<typeof ClientModule>();
   return { ...actual, api: { ...actual.api, GET: calls.get }, ok: (request: Promise<unknown>) => request };
@@ -31,8 +35,12 @@ beforeEach(async () => {
   data = await bootstrap(world, reader);
   calls.get.mockReset();
   calls.get.mockResolvedValue(data);
+  calls.admitted.mockReset().mockResolvedValue();
 });
 function Readers() {
+  useQuery(permissionsQuery);
+  useQuery(notificationPrefsQuery);
+  useQuery(notifiersQuery);
   const person = useQuery(meQuery).data;
   const orgs = useQuery(orgsQuery).data;
   const favorites = useQuery(favoritesQuery).data;
@@ -60,6 +68,10 @@ it('loads the aggregate once, seeds all shell readers and leaves the Inbox page 
     view.rerender(content);
     expect(calls.get.mock.calls.map(([path]) => path)).toEqual(['/me/bootstrap']);
     expect(cache.getQueryData(metaKey)).toEqual(data.meta);
+    expect(data.permission_catalogue).toBeDefined();
+    expect(cache.getQueryData(permissionsKey)).toEqual(data.permission_catalogue);
+    expect(cache.getQueryData(notificationPrefsKey)).toEqual(data.notification_preferences);
+    expect(cache.getQueryData(notifiersKey)).toEqual(data.notifier_catalogue);
     expect(useChatStates.getState().loaded).toBe(true);
     expect(useUserStore.getState().counters).toEqual({ unread: data.notification_summary.unread, approvalsPending: data.notification_summary.approvals_pending });
     expect(useUserStore.getState().loaded).toBe(false);
@@ -71,4 +83,20 @@ it('loads the aggregate once, seeds all shell readers and leaves the Inbox page 
     useChatStates.setState(chats);
     useSelectedOrg.setState(selected);
   }
+});
+
+it('holds the root loader and shell readers behind the same accepted source without an authority pre-read', async () => {
+  const session = client.session.getState();
+  let admit!: () => void;
+  calls.admitted.mockImplementation(() => new Promise<void>((resolve) => { admit = resolve; }));
+  const cache = new QueryClient({ defaultOptions: applicationQueries.getDefaultOptions() });
+  client.session.setState({ status: 'signed_in', userId: data.person.id });
+  try {
+    const loader = ensureShellBootstrap(cache, data.person.id);
+    await Promise.resolve(); expect(calls.get).not.toHaveBeenCalled();
+    admit(); const opened = await loader;
+    expect(opened.person.id).toBe(data.person.id);
+    expect(await ensureShellBootstrap(cache, data.person.id)).toEqual(opened);
+    expect(calls.get.mock.calls.map(([path]) => path)).toEqual(['/me/bootstrap']);
+  } finally { cache.clear(); client.session.setState(session); }
 });

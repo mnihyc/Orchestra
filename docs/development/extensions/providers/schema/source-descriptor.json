@@ -13,6 +13,13 @@
       "type": "string",
       "description": "What it is, in one sentence."
     },
+    "summary_locales": {
+      "type": "object",
+      "additionalProperties": {
+        "type": "string"
+      },
+      "description": "Optional localized descriptions supplied by the source, with summary as the fallback."
+    },
     "contract": {
       "type": "integer",
       "format": "uint32",
@@ -88,6 +95,17 @@
     "SourceDescriptorFacts": {
       "type": "object",
       "properties": {
+        "admin_credential": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/AdminCredential"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "description": "Optional source-only administrative credential; never used for model requests."
+        },
         "reports": {
           "type": "array",
           "items": {
@@ -95,6 +113,16 @@
           },
           "description": "The members it can tell. A member it does not list is unsupported until it tells it; a name this\ncontract does not know is left out.",
           "default": []
+        },
+        "field_reports": {
+          "type": "object",
+          "additionalProperties": {
+            "type": "array",
+            "items": {
+              "type": "string"
+            }
+          },
+          "description": "Optional closed field lists for normalized credit member/item paths. Omitted paths keep\nlegacy unknown capability; a present value still proves support independently of this list."
         },
         "spends_resets": {
           "type": "boolean",
@@ -126,6 +154,30 @@
         }
       },
       "description": "What a source tells of a provider's facts."
+    },
+    "AdminCredential": {
+      "type": "object",
+      "properties": {
+        "labels": {
+          "type": "object",
+          "additionalProperties": {
+            "type": "string"
+          },
+          "description": "Localized field labels; an extension can call it an admin or management key without core changes."
+        },
+        "reports": {
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/FactMember"
+          },
+          "description": "Members unavailable while this source secret is absent."
+        }
+      },
+      "required": [
+        "labels",
+        "reports"
+      ],
+      "description": "A source declares which members need its separate administrative credential."
     },
     "FactMember": {
       "oneOf": [
@@ -308,6 +360,11 @@
           "type": "string",
           "const": "secret_map",
           "description": "Names with values that are never shown again."
+        },
+        {
+          "type": "string",
+          "const": "json",
+          "description": "A JSON value, retaining nested objects, arrays, numbers, booleans and null."
         }
       ],
       "description": "What kind of value a field takes."

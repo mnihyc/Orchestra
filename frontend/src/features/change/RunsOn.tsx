@@ -1,3 +1,4 @@
+import { ResourcePicker } from '@/ui/ResourcePicker';
 /** Provider, profile, model and effort the result runs on.
  *
  * What a thread runs on, chosen as the dialog that starts a thread chooses it, from the lists the person may use:
@@ -62,7 +63,7 @@ export function agentFor(provider: Provider | undefined, agents: readonly Agent[
 
 /** Why a provider cannot be chosen, in words; `null` for one that can. */
 function providerWhy(provider: Provider, usable: boolean, t: TFunction): string | null {
-  if (provider.status !== 'ready') return t(`start.provider.status.${provider.status}`);
+  if (provider.status !== 'ready' && provider.status !== 'exhausted') return t(`start.provider.status.${provider.status}`);
   if (!usable) return t('start.provider.notYours', { owner: provider.owner.display_name });
   return null;
 }
@@ -123,7 +124,7 @@ export function RunsOn({ thread, choices, onChange, focus = false, compact = fal
     ...(everything.isFetchedAfterMount && !everything.isError ? everything.data ?? [] : []),
     ...(usable.isFetchedAfterMount && !usable.isError ? usable.data ?? [] : []),
   ].map((candidate) => [candidate.id, candidate])).values()], new Map());
-  const ready = known.filter((provider) => usableIds.has(provider.id) && provider.status === 'ready');
+  const ready = known.filter((provider) => usableIds.has(provider.id) && (provider.status === 'ready' || provider.status === 'exhausted'));
   const unusable = known.filter((provider) => !ready.some((one) => one.id === provider.id));
   const provider = known.find((candidate) => candidate.id === runs.providerId);
   const offered = profilesFor(provider, agents.data ?? []);
@@ -161,17 +162,17 @@ export function RunsOn({ thread, choices, onChange, focus = false, compact = fal
       {everything.isPending ? null : known.length === 0 ? (
         <InlineAlert tone="warning">{t('start.provider.none')}</InlineAlert>
       ) : compact ? (
-        <Select label={t('switchChoice.picker')} value={`${runs.providerId}:${runs.agentId}`} onValueChange={choosePair}
+        <ResourcePicker pickerKey="change.RunsOn.switchChoice.picker" label={t('switchChoice.picker')} value={`${runs.providerId}:${runs.agentId}`} onValueChange={choosePair}
           placeholder={thread.binding === null ? t('thread.blocked.unbound') : t('switchChoice.option', { agent: thread.binding.agent.name, provider: thread.binding.provider.name })}
           options={pairs.map((pair) => ({ value: pair.value,
             ...resourceChoice({ kind: 'provider', provider: pair.provider }),
             name: t('switchChoice.option', { agent: pair.agent.name, provider: names.get(pair.provider.id) ?? pair.provider.name }),
-            disabled: !usableIds.has(pair.provider.id) || pair.provider.status !== 'ready' || !hasReported(pair.agent),
+            disabled: !usableIds.has(pair.provider.id) || (pair.provider.status !== 'ready' && pair.provider.status !== 'exhausted') || !hasReported(pair.agent),
             description: <><ResourceHint subject={{ kind: 'provider', provider: pair.provider }} />{!hasReported(pair.agent) ? t('start.agent.unreported') : providerWhy(pair.provider, usableIds.has(pair.provider.id), t)}</>,
           }))} />
       ) : (
         <div className="grid gap-3 sm:grid-cols-2">
-          <Select
+          <ResourcePicker pickerKey="change.RunsOn.change.runs.provider"
             label={t('change.runs.provider')}
             value={runs.providerId}
             onValueChange={choose}
@@ -179,14 +180,14 @@ export function RunsOn({ thread, choices, onChange, focus = false, compact = fal
               value: candidate.id,
               preview: resourcePreview({ kind: 'provider', provider: candidate }),
               name: candidate.id === thread.binding?.provider.id ? t('change.runs.providerNow', { name: names.get(candidate.id) ?? candidate.name }) : names.get(candidate.id) ?? candidate.name,
-              disabled: !usableIds.has(candidate.id) || candidate.status !== 'ready',
+              disabled: !usableIds.has(candidate.id) || (candidate.status !== 'ready' && candidate.status !== 'exhausted'),
               description: <span className="flex flex-col gap-1">
                 <ResourceHint subject={{ kind: 'provider', provider: candidate }} />
                 {providerWhy(candidate, usableIds.has(candidate.id), t) !== null && <span>{providerWhy(candidate, usableIds.has(candidate.id), t)}</span>}
               </span>,
             }))}
           />
-          <Select
+          <ResourcePicker pickerKey="change.RunsOn.change.runs.agent"
             label={t('change.runs.agent')}
             value={runs.agentId}
             disabled={offered.length <= 1}

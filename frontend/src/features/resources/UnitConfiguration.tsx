@@ -164,7 +164,7 @@ export function UnitConfiguration({ pool, id, place, owns = false, templateId, j
     return t('unitConfiguration.effects.policy');
   };
   if (compact) {
-    if (list.isPending) return <SkeletonRows rows={4} />;
+    if (list.isPending) return <SkeletonRows read={list} rows={4} />;
     if (list.isError) return <ErrorState compact error={list.error} onRetry={() => void list.refetch()} />;
     return <div className="flex min-w-0 flex-col gap-4">
       <UnitCommandFailure jobId={jobId} detail={failureDetail} href={`?tab=settings&setting=${commandKey}#unit-after-up`} onOpen={() => setSection('commands')} />
@@ -174,7 +174,7 @@ export function UnitConfiguration({ pool, id, place, owns = false, templateId, j
         }} /> },
         ...(command === undefined ? [] : [{ value: 'commands', label: t('unitConfiguration.commands'), panel: <>
           {afterUp === false && <InlineAlert tone="info">{t('unitConfiguration.commandsPolicyOff')}</InlineAlert>}
-          {managed && template.isError ? <ErrorState compact error={template.error} onRetry={() => void template.refetch()} /> : managed && selectedTemplate !== undefined && template.isPending ? <SkeletonRows rows={2} /> : <AfterStart compact key={`${pool}:${id}`} target={target} setting={command} spec={template.data?.spec}
+          {managed && template.isError ? <ErrorState compact error={template.error} onRetry={() => void template.refetch()} /> : managed && selectedTemplate !== undefined && template.isPending ? <SkeletonRows read={template} rows={2} /> : <AfterStart compact key={`${pool}:${id}`} target={target} setting={command} spec={template.data?.spec}
             templateReadable={selectedTemplate === undefined || template.data !== undefined} templateApplies={managed}
             blockedReason={commands?.supported === false ? commands.reason ?? t('unitConfiguration.commandsUnsupported') : null}
             editable={command.writable && (pool === 'environment' || owns) && commands?.supported !== false} />}
@@ -189,12 +189,12 @@ export function UnitConfiguration({ pool, id, place, owns = false, templateId, j
     {storage!==undefined&&<section id="unit-storage" aria-label={t('machineStorage.title')} className="flex flex-col gap-3">
       <SettingsTable settings={[storage]} label={t('machineStorage.title')} target={target} place={place} runtime={runtime} effectFor={when} />
     </section>}
-    {list.isPending ? <SkeletonRows rows={4} /> : list.isError ? <ErrorState compact error={list.error} onRetry={() => void list.refetch()} /> : <>
+    {list.isPending ? <SkeletonRows read={list} rows={4} /> : list.isError ? <ErrorState compact error={list.error} onRetry={() => void list.refetch()} /> : <>
       <SettingsTable settings={rows} label={t('unitConfiguration.values')} target={target} place={place} runtime={runtime} effectFor={when} />
       {managed && template.isError && <ErrorState compact error={template.error} onRetry={() => void template.refetch()} />}
       {pool === 'provider' && commands?.supported === false && <InlineAlert tone="info">{commands.reason ?? t('unitConfiguration.commandsUnsupported')}</InlineAlert>}
       {afterUp === false && <InlineAlert tone="info">{t('unitConfiguration.commandsPolicyOff')}</InlineAlert>}
-      {managed && selectedTemplate !== undefined && template.isPending ? <SkeletonRows rows={2} /> : command !== undefined && <AfterStart key={`${pool}:${id}`} target={target} setting={command} spec={template.data?.spec}
+      {managed && selectedTemplate !== undefined && template.isPending ? <SkeletonRows read={template} rows={2} /> : command !== undefined && <AfterStart key={`${pool}:${id}`} target={target} setting={command} spec={template.data?.spec}
         templateReadable={selectedTemplate === undefined || template.data !== undefined}
         templateApplies={managed} blockedReason={commands?.supported === false ? commands.reason ?? t('unitConfiguration.commandsUnsupported') : null}
         editable={command.writable && (pool === 'environment' || owns) && commands?.supported !== false} />}

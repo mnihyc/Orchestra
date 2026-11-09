@@ -7,10 +7,14 @@
 #![cfg(target_os = "linux")]
 mod ports_support;
 
+#[path = "ports_walk/native_scopes.rs"]
+mod native_scopes;
+
 use async_trait::async_trait;
 use orch_api_contract::environment::{MachineEnvironmentCreate, MachineEnvironmentCreateBody};
 use orch_api_contract::nodes::{OrgCreate, OrgCreateBody, ProjectCreate, ProjectCreateBody};
 use orch_api_contract::ports::*;
+use orch_api_contract::surface::HttpSurface;
 use orch_api_core::backplane::{ApplyError, EventApplier};
 use orch_api_core::registry::Registry;
 use orch_api_core::testing::TestApp;
@@ -37,10 +41,10 @@ impl orch_api_core::machine_requests::Handler for UnavailablePortReads {
     async fn import(
         &self,
         _machine: Id,
-        request: orch_link_contract::mcp_import::McpImportAsk,
+        request: orch_link_contract::mcp_import::McpLocalAsk,
     ) -> orch_link_contract::mcp_import::McpImportAnswer {
         orch_link_contract::mcp_import::McpImportAnswer {
-            request_id: request.request_id,
+            request_id: request.request_id(),
             server_id: None,
             code: Some("unavailable".into()),
             detail: "the test application hook is unavailable".into(),
@@ -244,6 +248,8 @@ async fn rules_2_3_6_a_manager_admits_a_colleague_the_connector_stops_starts_and
         .send()
         .await
         .ok()
+        .into_full()
+        .expect("ordinary created organization content")
         .base
         .id;
     let project = client
@@ -257,6 +263,8 @@ async fn rules_2_3_6_a_manager_admits_a_colleague_the_connector_stops_starts_and
         .send()
         .await
         .ok()
+        .into_full()
+        .expect("this control expects the ordinary full project response")
         .base
         .id;
     {
@@ -292,6 +300,15 @@ async fn rules_2_3_6_a_manager_admits_a_colleague_the_connector_stops_starts_and
         orch_link_contract::policy::PolicyKey::Ports.to_string(),
     ]);
     let pinned = world.pinned_config(&enrolled);
+    let prober = Arc::new(
+        orch_connector_core::gateway_selection::HttpsGatewayProber::new(
+            pinned.clone(),
+            pinned.clone(),
+            &enrolled.identity.authority,
+            world.clock.clone(),
+        )
+        .unwrap(),
+    );
     let params = || ConnectorParams {
         follow_system_endpoints: true,
         hosted_endpoints: None,
@@ -307,10 +324,10 @@ async fn rules_2_3_6_a_manager_admits_a_colleague_the_connector_stops_starts_and
         endpoints: enrolled.reply.endpoints.clone(),
         roles: vec![Role::Environment],
         managed: false,
-        dialer: Arc::new(orch_link::websocket::TlsDialer::new(
-            Some(pinned.clone()),
-            None,
-        )),
+        dialer: Arc::new(
+            orch_link::websocket::TlsDialer::new(Some(pinned.clone()), None)
+                .with_gateway_prober(prober.clone()),
+        ),
         clock: world.clock.clone(),
         platform: Platform {
             os: Os::Linux,
@@ -346,7 +363,7 @@ async fn rules_2_3_6_a_manager_admits_a_colleague_the_connector_stops_starts_and
         .token(&manager_token)
         .body(&MachineEnvironmentCreateBody {
             data_sources: None,
-            home_id: org,
+            home_id: Some(org),
             name: "Preview service".into(),
             root: work.path().display().to_string(),
             home_node_id: None,
@@ -357,6 +374,8 @@ async fn rules_2_3_6_a_manager_admits_a_colleague_the_connector_stops_starts_and
         .send()
         .await
         .ok()
+        .into_full()
+        .expect("ordinary directory registration retains full native content")
         .base
         .id;
     ports_support::eventually("the actual attached environment is running", || async {
@@ -385,7 +404,9 @@ async fn rules_2_3_6_a_manager_admits_a_colleague_the_connector_stops_starts_and
         .body(&request(port, project))
         .send()
         .await
-        .ok();
+        .ok()
+        .into_full()
+        .expect("the ordinary port review retains its full native plan");
     let body = EnvironmentPortOpeningCreateBody {
         client_id: new_id(),
         preflight_id: plan.preflight_id,
@@ -396,14 +417,18 @@ async fn rules_2_3_6_a_manager_admits_a_colleague_the_connector_stops_starts_and
         .body(&body)
         .send()
         .await
-        .ok();
+        .ok()
+        .into_full()
+        .expect("ordinary opening confirmation retains the native full result");
     let repeated = client
         .call(EnvironmentPortOpeningCreate, &[&env, &port.to_string()])
         .token(&manager_token)
         .body(&body)
         .send()
         .await
-        .ok();
+        .ok()
+        .into_full()
+        .expect("ordinary opening confirmation retains the native full result");
     assert_eq!(first.opening.id, repeated.opening.id);
     let native = connector
         .environment_role()
@@ -473,6 +498,16 @@ async fn rules_2_3_6_a_manager_admits_a_colleague_the_connector_stops_starts_and
         assert!(refused.data.is_none());
         assert!(refused.failure.is_some());
     }
+    native_scopes::scoped_native_uses(
+        &world,
+        &client,
+        &app,
+        colleague,
+        env,
+        port,
+        first.opening.id,
+    )
+    .await;
     let usage = client
         .call(EnvironmentPortUseCreate, &[&env, &port.to_string()])
         .token(&colleague_token)
@@ -482,7 +517,9 @@ async fn rules_2_3_6_a_manager_admits_a_colleague_the_connector_stops_starts_and
         })
         .send()
         .await
-        .ok();
+        .ok()
+        .into_full()
+        .unwrap();
     let ingress = tokio::net::TcpListener::bind(("127.0.0.1", ports_support::reserve_port()))
         .await
         .unwrap();
@@ -493,7 +530,7 @@ async fn rules_2_3_6_a_manager_admits_a_colleague_the_connector_stops_starts_and
     let mut channel = app
         .cache
         .ports()
-        .open_channel(usage.id, &usage.ticket, outside)
+        .open_channel(usage.id, &usage.ticket, outside, HttpSurface::Browser)
         .await
         .unwrap();
     let inside = channel.inside_peer().unwrap();
@@ -516,13 +553,19 @@ async fn rules_2_3_6_a_manager_admits_a_colleague_the_connector_stops_starts_and
         .await
         .ok();
     assert_eq!(live.counts.active, 1);
-    assert_eq!(live.connections.as_ref().unwrap()[0].inside, inside);
-    assert_eq!(
-        live.connections.as_ref().unwrap()[0].outside.port,
-        outside.port()
-    );
+    // The scoped-use exercise above deliberately left recent closed connections.
+    // The native journal pages by id, so its first row need not be the active channel.
+    let connections = live.connections.as_ref().unwrap();
+    let active = connections
+        .iter()
+        .filter(|row| row.ended_at.is_none())
+        .collect::<Vec<_>>();
+    assert_eq!(active.len(), 1);
+    assert_eq!(active[0].inside, inside);
+    assert_eq!(active[0].outside.port, outside.port());
     // These are the actual native peer and actual TLS machine/API path, not a scripted signer.
     // Concurrent reads of one peer must share its one fresh assertion, including its JWS id.
+    let active_id = active[0].id;
     let mut peers = tokio::task::JoinSet::new();
     for _ in 0..16 {
         let (base, token, path) = (
@@ -539,7 +582,7 @@ async fn rules_2_3_6_a_manager_admits_a_colleague_the_connector_stops_starts_and
     let mut assertion = None;
     while let Some(answer) = peers.join_next().await {
         let peer: PortPeer = serde_json::from_value(answer.unwrap()).unwrap();
-        assert_eq!(peer.connection.id, live.connections.as_ref().unwrap()[0].id);
+        assert_eq!(peer.connection.id, active_id);
         assert_eq!(peer.connection.inside, inside);
         assert!(peer.assertion.len() < orch_link_contract::local_ports::PEER_REPLY_BYTES);
         let claims = orch_pki::port_assertions::verify(
@@ -594,7 +637,9 @@ async fn rules_2_3_6_a_manager_admits_a_colleague_the_connector_stops_starts_and
         })
         .send()
         .await
-        .ok();
+        .ok()
+        .into_full()
+        .unwrap();
     let mut manager_stream = tokio::net::TcpStream::connect(ingress.local_addr().unwrap())
         .await
         .unwrap();
@@ -602,7 +647,7 @@ async fn rules_2_3_6_a_manager_admits_a_colleague_the_connector_stops_starts_and
     let mut own_channel = app
         .cache
         .ports()
-        .open_channel(own.id, &own.ticket, manager_peer)
+        .open_channel(own.id, &own.ticket, manager_peer, HttpSurface::Browser)
         .await
         .unwrap();
     let own_closer = own_channel.closer();
@@ -689,7 +734,9 @@ async fn rules_2_3_6_a_manager_admits_a_colleague_the_connector_stops_starts_and
         })
         .send()
         .await
-        .ok();
+        .ok()
+        .into_full()
+        .unwrap();
     let udp_ingress = tokio::net::UdpSocket::bind(("127.0.0.1", ports_support::reserve_port()))
         .await
         .unwrap();
@@ -705,7 +752,7 @@ async fn rules_2_3_6_a_manager_admits_a_colleague_the_connector_stops_starts_and
     let udp_channel = app
         .cache
         .ports()
-        .open_channel(udp_use.id, &udp_use.ticket, peer)
+        .open_channel(udp_use.id, &udp_use.ticket, peer, HttpSurface::Browser)
         .await
         .unwrap();
     assert!(
@@ -805,7 +852,9 @@ async fn rules_2_3_6_a_manager_admits_a_colleague_the_connector_stops_starts_and
         })
         .send()
         .await
-        .ok();
+        .ok()
+        .into_full()
+        .unwrap();
     let mut after_stream = tokio::net::TcpStream::connect(ingress.local_addr().unwrap())
         .await
         .unwrap();
@@ -813,7 +862,7 @@ async fn rules_2_3_6_a_manager_admits_a_colleague_the_connector_stops_starts_and
     let mut after = app
         .cache
         .ports()
-        .open_channel(usage.id, &usage.ticket, after_peer)
+        .open_channel(usage.id, &usage.ticket, after_peer, HttpSurface::Browser)
         .await
         .unwrap();
     let after_closer = after.closer();
@@ -840,7 +889,9 @@ async fn rules_2_3_6_a_manager_admits_a_colleague_the_connector_stops_starts_and
         })
         .send()
         .await
-        .ok();
+        .ok()
+        .into_full()
+        .unwrap();
     assert_eq!(closed.state, PortOpeningState::Closed);
     assert!(after_closer.is_closed());
     ports_support::eventually("a closed peer is no longer an inside identity", || async {

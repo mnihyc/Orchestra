@@ -35,7 +35,7 @@ for (const locale of ['en', 'zh-CN'] as const) it(`names the provider's offered 
   expect(within(group).getByRole('switch', { name: 'daybreakGreen' })).not.toBeChecked();
   await user.click(within(group).getByRole('switch', { name: red }));
   await user.click(within(group).getByRole('switch', { name: standard }));
-  await user.click(within(group).getByRole('combobox', { name: i18n.t('models.editor.startsWith') }));
+  await user.click(within(group).getByRole('combobox', { name: i18n.t('models.editor.defaultProgram') }));
   await user.click(screen.getByRole('option', { name: standard }));
   const form = changed.mock.lastCall?.[0];
   if (form === undefined) throw new Error('The selected program did not update the model form');

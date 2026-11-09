@@ -49,7 +49,7 @@ export function OutlinePanel({ access }: { access: Pick<WorkspaceAccess, 'thread
   const [hidden, setHidden] = useListChoice<readonly OutlineKind[]>(`outline.${threadId}`, 'hidden', []);
   const entries = outlineRows(query.data?.pages.flatMap((page) => page.entries) ?? [], view);
   if (query.error !== null && entries.length === 0) return <ErrorState compact className="h-full" error={query.error} onRetry={() => void query.refetch()} />;
-  if (query.data === undefined && entries.length === 0) return <SkeletonRows rows={5} />;
+  if (query.data === undefined && entries.length === 0) return <SkeletonRows read={query} rows={5} />;
   const groupOf = (entry: OutlineEntry) => KINDS.find((group) => group.includes.some((kind) => entry.kind === kind));
   const present = KINDS.filter((group) => entries.some((entry) => group.includes.some((kind) => entry.kind === kind)));
   const shown = entries.filter((entry) => !hidden.includes(groupOf(entry)?.kind ?? entry.kind));

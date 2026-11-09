@@ -1,3 +1,5 @@
+import { homeMoveEntries } from '@/features/duplicate/move';
+import { resourceDuplicateEntries } from '@/features/duplicate/target';
 /** What can be done with an agent profile, from its row in the list and from its own page: open, switch on or off, edit, rename, copy its link and delete, each only where the reader may.
  *
  * The same acts serve the button and the menu at the end of a row, the menu under the right mouse button, the
@@ -88,12 +90,12 @@ export function useAgentActs(options: { onProfile?: (agent: Agent) => void; afte
     const rename: Act | null = manage ? { id: 'rename', label: t('resources.act.rename'), icon: <TextCursorInput aria-hidden />, shortcut: 'F2', run: () => setAsked({ what: 'rename', agent }) } : null;
     const share = shareAct(t, { kind: 'agent', id: agent.id, name: agent.name }, agent.access);
     const switchThreads:Act={id:'switch-threads',label:t('resources.act.switchThreads'),icon:<ArrowRightLeft aria-hidden />,run:()=>openChange({kind:'agent',id:agent.id,name:agent.name},{kind:'switch'})};
-    const copy: Act = { id: 'copy-link', label: t('resources.act.copyLink'), icon: <Copy aria-hidden />, run: () => copyLink(`/resources/agents/${agent.id}`) };
+    const copy: Act = { id: 'copy-link', label: t('resources.act.copyLink'), icon: <Copy aria-hidden />, run: () => copyLink({ kind: 'agent', id: agent.id }) };
     const del: Act | null = manage ? { id: 'delete', label: t('resources.act.delete'), icon: <Trash2 aria-hidden />, danger: true, run: () => {setTyped('');setAsked({ what: 'delete', agent });} } : null;
     return {
       primary: enable ?? open,
       edit,
-      entries: entriesOf([open], [enable, disable], [switchThreads], [edit, rename], [share, copy], [del]),
+      entries: [...homeMoveEntries(t, 'agent', agent), ...resourceDuplicateEntries(t, 'agent', agent), ...entriesOf([open], [enable, disable], [switchThreads], [edit, rename], [share, copy], [del])],
       keys: keysOf(rename),
       busy: busy(agent.id),
     };
@@ -164,7 +166,7 @@ export function useAgentActs(options: { onProfile?: (agent: Agent) => void; afte
         error={toggle.error ?? undefined}
         onConfirm={() => asked !== null && toggle.mutate({ agent: asked.agent, disabled: true })}
       >
-        <div className="flex flex-col gap-3">{impact.isPending?<SkeletonRows rows={2} />:impact.isError?<ErrorState compact error={impact.error} onRetry={()=>void impact.refetch()} />:<ImpactCounts impact={impact.data} kind="disable" />}<Input label={t('resourceImpact.note')} optional value={pauseNote} onChange={(event)=>setPauseNote(event.target.value)} /></div>
+        <div className="flex flex-col gap-3">{impact.isPending?<SkeletonRows read={impact} rows={2} />:impact.isError?<ErrorState compact error={impact.error} onRetry={()=>void impact.refetch()} />:<ImpactCounts impact={impact.data} kind="disable" />}<Input label={t('resourceImpact.note')} optional value={pauseNote} onChange={(event)=>setPauseNote(event.target.value)} /></div>
       </ConfirmDialog>
       <ConfirmDialog
         open={asked?.what === 'delete'}
@@ -183,7 +185,7 @@ export function useAgentActs(options: { onProfile?: (agent: Agent) => void; afte
         onConfirm={() => asked !== null && remove.mutate(asked.agent)}
       >
         <div className="flex flex-col gap-2">
-          {impact.isPending?<SkeletonRows rows={2} />:impact.isError?<ErrorState compact error={impact.error} onRetry={()=>void impact.refetch()} />:<ImpactCounts impact={impact.data} kind="delete" />}
+          {impact.isPending?<SkeletonRows read={impact} rows={2} />:impact.isError?<ErrorState compact error={impact.error} onRetry={()=>void impact.refetch()} />:<ImpactCounts impact={impact.data} kind="delete" />}
           <span>{t('resourceImpact.deleteKeeps')}</span>
           <Button variant="ghost" size="sm" onClick={()=>{if(asked===null)return;const agent=asked.agent;setAsked(null);openChange({kind:'agent',id:agent.id,name:agent.name},{kind:'switch'});}}>{t('resourceImpact.switchFirst')}</Button>
           <Input label={t('resourceImpact.typeName',{name:impact.data?.name ?? asked?.agent.name})} value={typed} onChange={(event)=>setTyped(event.target.value)} autoComplete="off" />

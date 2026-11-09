@@ -1,3 +1,4 @@
+import { useCardPointerReopen } from '@/ui/inspection';
 /** A reference chip's card: what it names and the part it names, opened by pointer or keyboard as a person's card is, with Open, Open beside and Copy reference.
  *
  * It shows under the pointer and under the keyboard's focus alike, and a click (or Enter) keeps it open until it is
@@ -5,6 +6,10 @@
  * link does. It shares the chip's preview read and checks again when a known grant ends. An unreadable
  * card keeps only the shared label and offers access where the thing allows it.
  */
+import { CardSharing } from '@/features/access/CardSharing';
+import type { AccessTarget } from '@/api/access';
+import { CardHome } from '@/features/navigation/CardHome';
+import { linkTo, referenceTo } from '@/lib/links';
 import { useQuery, useQueryClient } from '@tanstack/react-query';
 import { File as FileIcon, FileText, LockKeyhole, MessageSquareText } from 'lucide-react';
 import { HoverCard, Popover } from 'radix-ui';
@@ -18,7 +23,7 @@ import { AccessCard } from '@/features/approvals/Access';
 import type { Approval } from '@/generated/api-types';
 import { useOpenPath } from '@/features/chat/open';
 import { PLACE_ICONS } from '@/features/navigation/places';
-import { type TypedReference, markdownReference, referenceTarget, referenceText } from '@/features/people/references';
+import { type TypedReference, referenceTarget } from '@/features/people/references';
 import { openContent } from '@/features/workbench/contentNavigation';
 import type { ReferencePreview } from '@/generated/api-types';
 import { AuthorChip } from '@/ui/AuthorChip';
@@ -57,6 +62,7 @@ export function ReferenceCard({ reference, source, label, children, presentation
   const [kept, setKept] = useState(false);
   const [dismissed, setDismissed] = useState(false);
   const restoringFocus = useRef(false);
+  const pointer = useCardPointerReopen();
   const chip = useRef<HTMLDivElement>(null);
   const returnToChip = useRef(false);
   // Asked once the card first opens, and kept: closing and opening it again asks nothing.
@@ -66,6 +72,7 @@ export function ReferenceCard({ reference, source, label, children, presentation
   const menu = menuEntries === undefined ? undefined : <ReferenceMenu entries={entries} more={menuEntries} />;
   const close = () => {
     if (!alive.current) return;
+    pointer.dismiss();
     setKept(false);
     setShown(false);
     setDismissed(true);
@@ -89,14 +96,15 @@ export function ReferenceCard({ reference, source, label, children, presentation
       queueMicrotask(() => { restoringFocus.current = false; });
     });
   }} />;
+  const passing = (shown || viewing !== null) && !kept && !dismissed;
   if (sizes.size === 'large') return <ContextMenu label={t('fileMedia.showAs')} entries={entries} content={menu}>
     <span ref={trigger} tabIndex={0} data-chip-size="large" className="inline-flex max-w-full flex-col rounded-lg border border-border bg-surface align-top">{content}{overlay}</span>
   </ContextMenu>;
   return <ContextMenu label={t('fileMedia.showAs')} entries={entries} content={menu}><span ref={trigger} className="inline-flex max-w-full align-baseline" data-chip-size={sizes.size}>
     {source === undefined && reference !== undefined && asked && (shown || kept) && <ReferenceRead reference={reference} cacheScope={cacheScope} />}
     <Popover.Root open={kept} onOpenChange={(next) => { if (!alive.current || viewing !== null && !next) return; if (next) { setKept(true); setShown(false); setDismissed(false); } else close(); }}>
-      <HoverCard.Root open={(shown || viewing !== null) && !kept && !dismissed} onOpenChange={(next) => { if (!alive.current) return; setShown(next); if (next && !dismissed) setAsked(true); }}>
-        <HoverCard.Trigger asChild onPointerEnter={() => setDismissed(false)} onFocus={(event) => {
+      <HoverCard.Root open={passing} onOpenChange={(next) => { if (!alive.current) return; setShown(next); if (next && !dismissed) setAsked(true); }}>
+        <HoverCard.Trigger asChild onPointerEnter={(event) => { if (!pointer.allowed.current || !(event.target instanceof Node) || !event.currentTarget.contains(event.target)) { event.preventDefault(); return; } setDismissed(false); }} onPointerLeave={pointer.leave} onFocus={(event) => {
           event.preventDefault();
           if (!restoringFocus.current && alive.current) { setDismissed(false); setShown(true); setAsked(true); }
         }}>
@@ -105,13 +113,13 @@ export function ReferenceCard({ reference, source, label, children, presentation
           </Popover.Anchor>
         </HoverCard.Trigger>
         <HoverCard.Portal>
-          <HoverCard.Content data-reference-card="" style={covered ? { display: 'none' } : undefined} sideOffset={6} collisionPadding={8} {...floatingAttachment} className={`z-(--layer-dropdown) [--floating-width:var(--menu-max-width)] overflow-y-auto ${floatingClasses} ${cardClasses}`}>
-            {content}
+          <HoverCard.Content data-reference-card={passing ? '' : undefined} aria-hidden={passing ? undefined : true} style={covered ? { display: 'none' } : undefined} sideOffset={6} collisionPadding={8} {...floatingAttachment} className={`z-(--layer-dropdown) [--floating-width:var(--menu-max-width)] overflow-y-auto ${floatingClasses} ${cardClasses}`}>
+            {passing && content}
           </HoverCard.Content>
         </HoverCard.Portal>
       </HoverCard.Root>
       <Popover.Portal>
-        <Popover.Content data-reference-card="" style={covered ? { display: 'none' } : undefined} sideOffset={6} collisionPadding={8} {...floatingAttachment} aria-label={label}
+        <Popover.Content data-reference-card={kept ? '' : undefined} aria-hidden={kept ? undefined : true} style={covered ? { display: 'none' } : undefined} sideOffset={6} collisionPadding={8} {...floatingAttachment} aria-label={label}
           onInteractOutside={(event) => {
             if (event.target instanceof Node && chip.current?.contains(event.target)) event.preventDefault();
           }}
@@ -123,7 +131,7 @@ export function ReferenceCard({ reference, source, label, children, presentation
             queueMicrotask(() => { restoringFocus.current = false; });
           }}
           className={`z-(--layer-dropdown) [--floating-width:var(--menu-max-width)] overflow-y-auto ${floatingClasses} ${cardClasses}`}>
-          {content}
+          {kept && content}
         </Popover.Content>
       </Popover.Portal>
     </Popover.Root>
@@ -185,20 +193,25 @@ function ReferenceDetails({ reference, cacheScope, enabled, onDone, onOpenFile }
   </div>;
   const target = referenceTarget(preview);
   const part = preview.part;
-  const place = preview.place?.name ?? null;
   const file = preview.file ?? null;
   const enablePath=file?.enable_path;
   const fileSource = referenceSource(preview);
-  const source = fileSource === null ? null : { ...fileSource, reference: referenceText(preview) };
+  const source = fileSource === null ? null : { ...fileSource, reference: referenceTo(preview) };
+  const share: AccessTarget | null = preview.kind === 'file'
+    ? file?.owner_id !== undefined && file.owner_id !== null && (file.owner_kind === 'document' || file.owner_kind === 'chat') ? { kind: file.owner_kind, id: file.owner_id, name: file.owner_name } : null
+    : preview.kind === 'environment_file' ? { kind: 'environment', id: preview.id, name: file?.owner_name ?? preview.title }
+      : preview.kind === 'node' ? preview.node_kind === null ? null : { kind: preview.node_kind, id: preview.id, name: preview.title }
+        : { kind: preview.kind, id: preview.id, name: preview.title };
   return (
     <div className={frame}>
       <div className="flex min-w-0 items-start gap-2">
         <KindIcon preview={preview} />
         <div className="min-w-0">
           <p className="font-medium wrap-anywhere">{preview.title}</p>
-          {file === null && place !== null && <p className="text-sm wrap-anywhere text-text-muted">{place}</p>}
         </div>
       </div>
+      {preview.place !== null && <CardHome place={preview.place} />}
+      {share !== null && <CardSharing target={share} />}
       {preview.description !== '' && <p className="line-clamp-1 text-sm wrap-anywhere text-text-muted">{preview.description.split('\n')[0]}</p>}
       {file !== null && <p className="text-sm text-text-muted wrap-anywhere" data-reference-file="">
         {file.missing ? t('people.reference.fileMissing') : <>
@@ -225,9 +238,10 @@ function ReferenceDetails({ reference, cacheScope, enabled, onDone, onOpenFile }
       )}
       {source === null && <div className="flex flex-wrap gap-2">
         <Hint id="references" popover />
-        <Button size="sm" variant="primary" disabled={file?.missing === true} onClick={() => { onDone(); open(target); }}>{t('people.reference.open')}</Button>
-        <Button size="sm" disabled={file?.missing === true} onClick={() => { onDone(); openContent(target, 'beside'); }}>{t('workbench.workspace.beside')}</Button>
-        <Button size="sm" variant="ghost" onClick={() => void copyText(referenceText(preview), t('people.reference.copied'))}>{t('people.reference.copy')}</Button>
+        <Button size="sm" variant="primary" disabled={file?.missing === true || target === ''} onClick={() => { onDone(); open(target); }}>{t('people.reference.open')}</Button>
+        <Button size="sm" disabled={file?.missing === true || target === ''} onClick={() => { onDone(); openContent(target, 'beside'); }}>{t('workbench.workspace.beside')}</Button>
+        <Button size="sm" variant="ghost" disabled={preview.kind === 'file' && (preview.file?.owner_id === undefined || preview.file.owner_id === null)} onClick={() => void copyText(linkTo(preview), t('common.linkCopied'))}>{t('actions.copyLink.label')}</Button>
+        <Button size="sm" variant="ghost" onClick={() => void copyText(referenceTo(preview), t('people.reference.copied'))}>{t('people.reference.copy')}</Button>
       </div>}
       <ReferenceRequests preview={preview} />
     </div>
@@ -238,8 +252,7 @@ function ReferenceDetails({ reference, cacheScope, enabled, onDone, onOpenFile }
 function DeletedReference({reference}:{reference:TypedReference}) {
   const {t}=useTranslation();
   const number=reference.line??reference.turn??reference.message;
-  const path=reference.kind==='environment_file'?`/${reference.path??''}`:'';
-  const written=markdownReference(t('people.reference.deleted'),`id:${reference.id}${path}${number===undefined?'':`#${number}`}`);
+  const written=referenceTo({ ...reference, label:t('people.reference.deleted') },number===undefined?{}:{number});
   return <>
     <p className="flex items-center gap-2 text-sm text-text-muted"><LockKeyhole aria-hidden className="size-4 shrink-0"/>{t(`people.reference.kinds.${reference.kind}`)}</p>
     <p className="font-medium text-text-muted">{t('people.reference.deleted')}</p>

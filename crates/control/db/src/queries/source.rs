@@ -21,6 +21,35 @@ pub async fn set_source(
     Ok(())
 }
 
+/// Lock the source-bearing threads of one activation in deterministic thread order.
+/// The Engine still decides which accepted source may receive the candidate generation.
+pub async fn lock_creator_generation_threads(
+    conn: &mut Conn,
+    environment: Id,
+) -> Result<Vec<Id>, DbError> {
+    Ok(sqlx::query_scalar(
+        "SELECT node_id FROM threads WHERE environment_id=$1 AND source ? 'creator_environment_generation' ORDER BY node_id FOR UPDATE",
+    )
+    .bind(environment)
+    .fetch_all(conn)
+    .await?)
+}
+
+/// Stamp only the accepted creator's generation under its existing thread row lock.
+/// The caller supplies the generation proven by the owning activation's actual candidate.
+pub async fn set_creator_environment_generation(
+    conn: &mut Conn,
+    thread: Id,
+    generation: i32,
+) -> Result<(), DbError> {
+    sqlx::query("UPDATE threads SET source=jsonb_set(source,'{creator_environment_generation}',$2) WHERE node_id=$1")
+        .bind(thread)
+        .bind(serde_json::json!(generation))
+        .execute(conn)
+        .await?;
+    Ok(())
+}
+
 /// The current stored token grant for a file job, without storing its credential hash in the job.
 pub async fn job_token(
     conn: &mut Conn,
@@ -29,7 +58,8 @@ pub async fn job_token(
     now: chrono::DateTime<chrono::Utc>,
 ) -> Result<Option<super::identity::ApiTokenRow>, DbError> {
     Ok(sqlx::query_as(
-        "SELECT id, user_id, scopes, node_id FROM api_tokens WHERE id = $1 AND user_id = $2
+        "SELECT id, user_id, scopes, operation_scope, node_id, expires_at
+        FROM api_tokens WHERE id = $1 AND user_id = $2
         AND revoked_at IS NULL AND (expires_at IS NULL OR expires_at > $3) FOR SHARE",
     )
     .bind(token)

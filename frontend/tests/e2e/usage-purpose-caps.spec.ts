@@ -1,0 +1,61 @@
+/** The real cap dialog/row/create/edit path, in both product languages and themes. */
+import {expect,test} from '@playwright/test';
+import english from '../../src/i18n/en.json' with {type:'json'};
+import chinese from '../../src/i18n/zh-CN.json' with {type:'json'};
+import {scenario,signIn} from './support.ts';
+import {PLACES} from './usage-support.ts';
+
+for(const locale of ['en','zh-CN'] as const) for(const theme of ['light','dark'] as const) test.describe(`${locale}/${theme}`,()=>{
+  test.use({viewport:{width:400,height:900}});
+  test('a weekly service/purpose credit cap is made, reopened and cleared through its real controls',async({page})=>{
+    await scenario();await page.emulateMedia({colorScheme:theme});await signIn(page);
+    if(locale==='zh-CN') {await page.goto('/settings/interface');await page.getByRole('combobox',{name:/^(Language|语言)$/}).click();await page.getByRole('option',{name:'简体中文',exact:true}).click();}
+    const words=locale==='en'?english:chinese;
+    await page.goto(`/usage?scope=node:${PLACES.web}`);
+    const limits=page.getByRole('region',{name:words.caps.limits.title});
+    await limits.getByRole('button',{name:words.caps.limits.add,exact:true}).click();
+    const dialog=page.getByRole('dialog',{name:words.caps.form.title});
+    await test.info().attach('cap-before-narrow',{body:await dialog.screenshot(),contentType:'image/png'});
+    await dialog.getByRole('combobox',{name:words.caps.form.unit,exact:true}).click();
+    await page.getByRole('option',{name:words.caps.form.units.credits,exact:true}).click();
+    await dialog.getByLabel(words.caps.form.amount,{exact:true}).fill('50');
+    await dialog.getByRole('combobox',{name:words.caps.form.per,exact:true}).click();
+    await page.getByRole('option',{name:words.caps.form.periods.week,exact:true}).click();
+    await dialog.getByRole('combobox',{name:words.caps.form.who,exact:true}).click();
+    await page.getByRole('option',{name:words.caps.form.whoChoices.each,exact:true}).click();
+    const model=dialog.getByRole('combobox',{name:words.caps.form.models,exact:true});
+    await model.fill('fixture-model');await model.press('ArrowDown');await model.press('Enter');
+    await expect(dialog.getByRole('list',{name:words.caps.form.modelsChosen,exact:true})).toContainText('fixture-model');
+    const service=dialog.getByRole('combobox',{name:words.caps.form.services,exact:true});
+    await service.fill('@lookup');await service.press('ArrowDown');await service.press('Enter');
+    const purpose=dialog.getByRole('combobox',{name:words.caps.form.purposes,exact:true});
+    await purpose.fill(words.usage.purposes.summary);await page.getByRole('option',{name:words.usage.purposes.summary,exact:true}).click();
+    await expect(dialog.getByRole('status')).toContainText(words.usage.purposes.summary);
+    await expect(dialog.getByRole('status')).toContainText('lookup');
+    const bounds=await dialog.boundingBox();if(bounds===null) throw new Error('The cap dialog is not visible');expect(bounds.width).toBeLessThanOrEqual(400);
+    await test.info().attach('cap-selected-narrow',{body:await dialog.screenshot(),contentType:'image/png'});
+    const accepted=page.waitForResponse((response)=>response.request().method()==='POST' && new URL(response.url()).pathname==='/api/v1/usage/caps');
+    await dialog.getByRole('button',{name:words.caps.form.make,exact:true}).click();
+    const created=await accepted;expect(created.status()).toBe(201);
+    expect(created.request().postDataJSON()).toMatchObject({meter:'credits',period:'week',amount:'50',split:'each',models:['fixture-model'],services:['@lookup'],purposes:['summary']});
+    await expect(dialog).not.toBeVisible();
+    const row=limits.getByRole('listitem').filter({hasText:'lookup'}).first();
+    await expect(row).toContainText(words.usage.purposes.summary);
+    await page.setViewportSize({width:1280,height:900});
+    const title=await row.locator('p').first().innerText();
+    await row.getByRole('button',{name:words.caps.row.menu.replace('{{name}}',title),exact:true}).click();
+    await page.getByRole('menuitem',{name:words.caps.row.edit,exact:true}).click();
+    const editing=page.getByRole('dialog',{name:words.caps.form.editTitle});
+    await test.info().attach('cap-reopened-desktop',{body:await editing.screenshot(),contentType:'image/png'});
+    await expect(editing.getByRole('list',{name:words.caps.form.modelsChosen,exact:true})).toContainText('fixture-model');
+    await expect(editing.getByRole('list',{name:words.caps.form.services,exact:true})).toContainText('lookup');
+    await expect(editing.getByRole('list',{name:words.caps.form.purposes,exact:true})).toContainText(words.usage.purposes.summary);
+    await editing.getByRole('list',{name:words.caps.form.services,exact:true}).getByRole('button').click();
+    await editing.getByRole('list',{name:words.caps.form.purposes,exact:true}).getByRole('button').click();
+    const changed=page.waitForResponse((response)=>response.request().method()==='PATCH' && new URL(response.url()).pathname.startsWith('/api/v1/usage/caps/'));
+    await editing.getByRole('button',{name:words.caps.form.save,exact:true}).click();
+    const saved=await changed;expect(saved.status()).toBe(200);expect(saved.request().postDataJSON()).toMatchObject({services:[],purposes:[]});
+    await expect(editing).not.toBeVisible();
+    await expect(row).not.toContainText('lookup');
+  });
+});

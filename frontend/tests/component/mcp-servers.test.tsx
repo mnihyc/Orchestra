@@ -1,3 +1,4 @@
+import { unplacedGrouping } from '../doubles/resource-grouping';
 /** A manager can restart one failed server from the same list used on the environment panel and page. */
 import { QueryClient, QueryClientProvider } from '@tanstack/react-query';
 import { act, screen, waitFor, within } from '@testing-library/react';
@@ -15,8 +16,8 @@ afterEach(() => vi.clearAllMocks());
 
 function list(): EnvironmentMcp {
   return { applies:'next_turn', found:[], import:{allowed:false,reason:'policy'}, servers:[
-    { server:{id:'flaky',name:'flaky',address:'team.flaky',machine:null,own:true},from:null,state:'failed',reason:'The server ended (exit status: 7): before crash [masked]',tools:null },
-    { server:{id:'steady',name:'steady',address:'team.steady',machine:null,own:true},from:null,state:'running',reason:null,tools:3 }
+    { ...unplacedGrouping(), server:{id:'flaky',name:'flaky',address:'team.flaky',machine:null,own:true},from:null,state:'failed',reason:'The server ended (exit status: 7): before crash [masked]',tools:null },
+    { ...unplacedGrouping(), server:{id:'steady',name:'steady',address:'team.steady',machine:null,own:true},from:null,state:'running',reason:null,tools:3 }
   ] };
 }
 
@@ -53,16 +54,18 @@ describe('one MCP server restart', () => {
     expect(await screen.findByText('steady')).toBeVisible();
     expect(read).toHaveBeenCalledTimes(3);
   });
-  for (const locale of ['en', 'zh-CN'] as const) for (const theme of ['light', 'dark'] as const) it(`keeps the panel's states visible and its explanation behind one question at ${locale}/${theme}`, async () => {
+  for (const locale of ['en', 'zh-CN'] as const) for (const theme of ['light', 'dark'] as const) it(`keeps states and reported applicability visible with masked details behind one question at ${locale}/${theme}`, async () => {
     const beforeTheme = document.documentElement.getAttribute('data-theme');
     try {
       await setLocale(locale); document.documentElement.dataset.theme = theme;
       read.mockResolvedValue(list()); draw(false, true);
       expect(await screen.findByText('steady')).toBeVisible();
       expect(screen.getByText(i18n.t('mcpServers.states.running'))).toBeVisible();
-      const explanation = i18n.t('mcpServers.applies');
+      expect(screen.getByText(i18n.t('mcpWords.applies.next_turn'))).toBeVisible();
+      const explanation = list().servers[0]?.reason;
+      if (explanation === null || explanation === undefined) throw new Error('This server fixture has a masked diagnostic.');
       expect(screen.queryByText(explanation)).not.toBeInTheDocument();
-      const question = i18n.t('help.hint.label', { term: i18n.t('mcpServers.title') });
+      const question = i18n.t('help.hint.label', { term: i18n.t('mcpWords.details') });
       expect(screen.getAllByRole('button', { name: question })).toHaveLength(1);
       await userEvent.click(screen.getByRole('button', { name: question }));
       expect(screen.getByText(explanation)).toBeVisible();
@@ -80,7 +83,10 @@ describe('one MCP server restart', () => {
     draw(true,compact);
     const flaky = (await screen.findByText('flaky')).closest('li')!;
     expect(within(flaky).getByText('Failed')).toBeVisible();
-    expect(within(flaky).getByText(/exit status: 7/)).toHaveTextContent('[masked]');
+    expect(within(flaky).queryByText(/exit status: 7/)).not.toBeInTheDocument();
+    await userEvent.click(within(flaky).getByRole('button', { name: i18n.t('help.hint.label', { term: i18n.t('mcpWords.details') }) }));
+    expect(screen.getByText(/exit status: 7/)).toHaveTextContent('[masked]');
+    await userEvent.keyboard('{Escape}');
     const steady = screen.getByText('steady').closest('li')!;
     expect(within(steady).getByText('Running')).toBeVisible();
     await userEvent.click(within(flaky).getByRole('button',{name:'Restart'}));

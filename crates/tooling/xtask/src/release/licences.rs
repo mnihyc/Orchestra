@@ -262,11 +262,11 @@ fn append(
 
 /// Generate Rust notices offline from the source cache used by this artifact.
 pub fn collect(root: &Path, builder: &Builder, triples: &[&str]) -> Result<String, ReleaseError> {
+    // Metadata reads package manifests outside the filtered resolve graph. Fetch the complete locked
+    // source set first, including foreign-target packages; the per-target graph still selects notices.
+    builder.cargo(&["fetch", "--locked"], &[])?;
     let mut all = BTreeMap::new();
     for triple in triples {
-        // The build fetched only what it compiled; the workspace's metadata reads every package that resolves for
-        // the platform, so the others are fetched first, at the versions the lock file names.
-        builder.cargo(&["fetch", "--locked", "--target", triple], &[])?;
         let printed = builder.cargo_output(&[
             "metadata",
             "--locked",
@@ -371,7 +371,8 @@ mod tests {
             {"id":"borrow","name":"borrow-or-share","version":"0.2.4","source":"registry+x","license":"MIT-0"},
             {"id":"proptest","name":"proptest","source":"registry+x"},
             {"id":"termwiz","name":"termwiz","source":"registry+x"},
-            {"id":"terminfo","name":"terminfo","source":"registry+x"}
+            {"id":"terminfo","name":"terminfo","source":"registry+x"},
+            {"id":"windows-gnu","name":"windows_x86_64_gnu","version":"0.53.1","license":"MIT","source":"registry+x"}
         ],"resolve":{"nodes":[
             {"id":"app","deps":[{"pkg":"serde","dep_kinds":[{"kind":null}]},{"pkg":"jsonschema","dep_kinds":[{"kind":null}]},{"pkg":"proptest","dep_kinds":[{"kind":"dev"}]}]},
             {"id":"jsonschema","deps":[{"pkg":"borrow","dep_kinds":[{"kind":null}]}]},
@@ -385,11 +386,10 @@ mod tests {
         assert_eq!(found["serde"].name, "serde");
         assert_eq!(found["borrow"].licence, "MIT-0");
         assert_eq!(found["borrow"].version, "0.2.4");
-        assert!(
-            !found
-                .values()
-                .any(|row| matches!(row.name.as_str(), "termwiz" | "terminfo" | "proptest"))
-        );
+        assert!(!found.values().any(|row| matches!(
+            row.name.as_str(),
+            "termwiz" | "terminfo" | "proptest" | "windows_x86_64_gnu"
+        )));
     }
 
     #[test]

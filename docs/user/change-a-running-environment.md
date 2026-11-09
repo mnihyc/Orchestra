@@ -1,7 +1,9 @@
 ---
+group: resources
 title: Change an environment while it runs
 screens: /thread/$threadId, /resources/environments/$id, /resources/templates/$id, /approvals
 keywords: how do I change limits, live environment, resources, mounts, env.resources, env.mounts, env.storage, capability.policy, capability.recreate_grace_secs, mcp.enabled, MCP, restart, failed server, kvm, docker_socket, recreate, update, same image, keep files, memory
+summary: Check which environment changes apply live and which need a restart or recreate.
 ---
 
 # Change an environment while it runs

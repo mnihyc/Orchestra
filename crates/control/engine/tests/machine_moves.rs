@@ -28,6 +28,7 @@ use orch_link_contract::{
     source::{EnvironmentDataPart, FsDataMeasureResult, FsRecordVerifyResult},
 };
 use orch_types::{Hash, Id, Time};
+use serde_json::Value as Json;
 use serde_json::json;
 use std::sync::Arc;
 
@@ -976,4 +977,135 @@ async fn finishing_an_informational_home_count_does_not_change_a_reviewed_move_c
         "the frozen source revision must still match"
     );
     f.world.engine().stop();
+}
+
+#[tokio::test]
+async fn a_directory_transfer_is_a_switch_with_a_copy_and_has_no_old_unit_to_remove() {
+    let f = fixture(true).await;
+    let actor = principal(&f.world).await;
+    let draft = hosting::ready_machine_move(
+        &f.world,
+        &actor,
+        f.world.environment,
+        &request(&f, true),
+        None,
+    )
+    .await
+    .unwrap();
+    assert_eq!(
+        draft.recipe.transfer_kind(),
+        orch_api_contract::forks::EnvironmentTransferKind::SwitchCopy
+    );
+    assert!(!draft.recipe.source_has_unit());
+    let mut tx = f.world.pool.begin().await.unwrap();
+    let row = machine_move::queue(&mut tx, &actor, draft, None, f.world.clock.now())
+        .await
+        .unwrap();
+    assert_eq!(row.plan["transfer_kind"], json!("switch_copy"));
+    assert_eq!(row.plan["source_has_unit"], json!(false));
+    tx.commit().await.unwrap();
+    f.world.engine().kick();
+    assert_job_state(&f.world, row.id, "succeeded").await;
+    let marker: Json = sqlx::query_scalar("SELECT payload FROM items WHERE thread_id=$1 AND kind='marker' AND payload->>'marker'='environment_moved' ORDER BY seq_created DESC LIMIT 1")
+        .bind(f.thread).fetch_one(f.world.pool.pool()).await.unwrap();
+    let marker: orch_api_contract::threads::MarkerPayload = serde_json::from_value(marker).unwrap();
+    let orch_api_contract::threads::MarkerPayload::EnvironmentMoved(marker) = marker else {
+        panic!("native transfer marker")
+    };
+    assert!(marker.from_host.is_none() && marker.to_host.is_none());
+    assert_eq!(
+        marker.from_machine.as_ref().map(|machine| machine.id),
+        Some(f.world.machine_id)
+    );
+    assert_eq!(
+        marker.to_machine.as_ref().map(|machine| machine.id),
+        Some(f.target.id)
+    );
+    let notices: Json = sqlx::query_scalar("SELECT pending_notices FROM threads WHERE node_id=$1")
+        .bind(f.thread)
+        .fetch_one(f.world.pool.pool())
+        .await
+        .unwrap();
+    assert!(
+        notices
+            .to_string()
+            .contains("The environment moved to another machine. Your directory is still")
+    );
+    assert!(
+        notices
+            .to_string()
+            .contains("Processes from before the move are not running here.")
+    );
+    assert_eq!(
+        f.world.began(CommandKind::FsRemove),
+        0,
+        "the borrowed source remains"
+    );
+    assert_eq!(
+        f.world.began(CommandKind::NodeRuntimeRemove),
+        0,
+        "there was no source unit"
+    );
+    f.world.engine().stop();
+}
+
+#[tokio::test]
+async fn directory_move_choices_carry_the_actual_native_machine_availability_without_hiding_it() {
+    let f = fixture(false).await;
+    let actor = principal(&f.world).await;
+    let mut conn = f.world.pool.acquire().await.unwrap();
+    let choices = machine_move::places(
+        &f.world.engine(),
+        &mut conn,
+        &actor,
+        f.world.environment,
+        None,
+    )
+    .await
+    .unwrap();
+    let choice = choices
+        .iter()
+        .find_map(|place| match place {
+            orch_api_contract::environment::EnvironmentMovePlace::Machine(machine)
+                if machine.machine.id == f.target.id =>
+            {
+                Some(machine)
+            }
+            _ => None,
+        })
+        .unwrap();
+    assert_eq!(choice.grouping.availability.len(), 1);
+    assert_eq!(choice.grouping.availability[0].machine_id, f.target.id);
+    assert_eq!(choice.grouping.availability[0].available, choice.usable);
+    sqlx::query("UPDATE machines SET online=false WHERE id=$1")
+        .bind(f.target.id)
+        .execute(&mut *conn)
+        .await
+        .unwrap();
+    let choices = machine_move::places(
+        &f.world.engine(),
+        &mut conn,
+        &actor,
+        f.world.environment,
+        None,
+    )
+    .await
+    .unwrap();
+    let choice = choices
+        .iter()
+        .find_map(|place| match place {
+            orch_api_contract::environment::EnvironmentMovePlace::Machine(machine)
+                if machine.machine.id == f.target.id =>
+            {
+                Some(machine)
+            }
+            _ => None,
+        })
+        .unwrap();
+    assert!(!choice.usable);
+    assert!(!choice.grouping.availability[0].available);
+    assert_eq!(
+        choice.grouping.availability[0].reason,
+        Some(choice.reasons.join(" · "))
+    );
 }

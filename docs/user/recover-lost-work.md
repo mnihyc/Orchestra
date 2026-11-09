@@ -1,7 +1,9 @@
 ---
+group: operations
 title: Recover work after a machine is lost
 screens: /resources/hosts, /resources/hosts/$id, /resources/environments, /resources/environments/$id, /resources/machines, /resources/machines/$id, /resources/mcp/$id, /resources/mounts/$id, /resources/providers/$id, /thread/$threadId, /topic/$topicId, /project/$projectId, /org/$slug, /inbox, /settings/notifications
 keywords: lost, Declare lost, Recover, Move all, Re-create, Switch threads, destination environment, Carry, Notify, MCP, mounts, provider runtime, default environment, delete host
+summary: Declare permanent machine loss, review recovery destinations and notify affected people.
 ---
 
 # Recover work after a machine is lost

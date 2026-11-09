@@ -323,7 +323,7 @@ test('the board stands topics by what needs attention, and a card moves to Done 
   await expect(column(/Needs attention/).getByRole('link', { name: 'Fix login' })).toBeVisible();
   await expect(column(/Idle/).getByRole('link', { name: 'Upgrade deps' })).toBeVisible();
   await expect(column(/Done/).getByRole('link', { name: 'Migrate CI' })).toBeVisible();
-  await expect(column(/Running/).getByText('Nothing here')).toBeVisible();
+  await expect(column(/Running/).getByText('No topics in Running')).toBeVisible();
 
   // Dragging a card into Done sets the status; nothing is moved before the server has answered.
   const card = column(/Idle/).getByRole('listitem').filter({ hasText: 'Upgrade deps' });

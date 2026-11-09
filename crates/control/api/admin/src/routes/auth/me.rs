@@ -1,0 +1,1889 @@
+//! The signed-in person: what they set for themself, their password, their second steps, their sessions and their API tokens.
+//!
+//! A wrong password, or a wrong code, given by a signed-in caller to change
+//! the password or the address or to set up or switch off a second step is
+//! counted for that session alone (or that token), with the limit of signing
+//! in, and refused the same way when it is full: whoever holds a session that
+//! was not theirs gets no more tries at the password than a stranger does.
+
+use crate::key_operations::credentials::key_info as token_info;
+
+use crate::middleware::authentication::API_TOKEN_PREFIX;
+
+use crate::middleware::authentication::Authed;
+
+use crate::middleware::authentication::Via;
+
+use crate::middleware::authentication::new_token;
+
+use crate::middleware::authentication::token_hash;
+
+use crate::middleware::requests::ApiError;
+
+use crate::middleware::requests::ApiResult;
+
+use crate::registry::Answer;
+
+use crate::registry::Ctx;
+
+use crate::registry::OperationFuture;
+
+use crate::registry::OperationPlan;
+
+use crate::registry::Registry;
+
+use crate::sign_in::accounts;
+
+use crate::sign_in::accounts::taken;
+
+use crate::sign_in::login::invalid_credentials;
+
+use crate::sign_in::login::second_step_invalid;
+
+use crate::sign_in::mail;
+
+use crate::sign_in::mail::Addressee;
+
+use crate::sign_in::mail::Link;
+
+use crate::sign_in::mail::Message;
+
+use crate::sign_in::mail::Purpose;
+
+use crate::sign_in::throttle::Who;
+
+use crate::sign_in::throttle::rate_limited;
+
+use crate::sign_in::Limits;
+
+use crate::sign_in::NOT_KEPT;
+
+use crate::sign_in::codes;
+
+use crate::sign_in::passwords;
+
+use crate::sign_in::people;
+
+use crate::sign_in::proofs;
+
+use crate::sign_in::record;
+
+use crate::sign_in::system_policy;
+
+use http::header::CACHE_CONTROL;
+
+use orch_access_contract::audit::AuditAction;
+
+use orch_access_contract::decisions::Decision;
+
+use orch_access_contract::permissions::NodePermission;
+
+use orch_access_contract::permissions::PermissionName;
+
+use orch_api_contract::auth::AdminMode;
+
+use orch_api_contract::auth::AdminModeSetBody;
+
+use orch_api_contract::auth::AdminOpeningBody;
+
+use orch_api_contract::auth::ApiTokenCreateBody;
+
+use orch_api_contract::auth::ApiTokenInfo;
+
+use orch_api_contract::auth::MeAdminModeGet;
+
+use orch_api_contract::auth::MeAdminModeSet;
+
+use orch_api_contract::auth::MeAdminOpening;
+
+use orch_api_contract::auth::MeEmailCodeDisable;
+
+use orch_api_contract::auth::MeEmailCodeDisableBody;
+
+use orch_api_contract::auth::MeEmailCodeEnable;
+
+use orch_api_contract::auth::MeEmailCodeEnableBody;
+
+use orch_api_contract::auth::MeEmailCodeSend;
+
+use orch_api_contract::auth::MeEmailCodeSendBody;
+
+use orch_api_contract::auth::MePasswordChange;
+
+use orch_api_contract::auth::MePasswordChangeBody;
+
+use orch_api_contract::auth::MeRecoveryCodesGet;
+
+use orch_api_contract::auth::MeRecoveryCodesRegenerate;
+
+use orch_api_contract::auth::MeRecoveryCodesRegenerateBody;
+
+use orch_api_contract::auth::MeSecondStepVerify;
+
+use orch_api_contract::auth::MeSecondStepVerifyBody;
+
+use orch_api_contract::auth::MeSessionDelete;
+
+use orch_api_contract::auth::MeSessionList;
+
+use orch_api_contract::auth::MeSessionOthersDelete;
+
+use orch_api_contract::auth::MeTokenCreate;
+
+use orch_api_contract::auth::MeTokenDelete;
+
+use orch_api_contract::auth::MeTokenList;
+
+use orch_api_contract::auth::MeTotpDisable;
+
+use orch_api_contract::auth::MeTotpDisableBody;
+
+use orch_api_contract::auth::MeTotpEnable;
+
+use orch_api_contract::auth::MeTotpEnableBody;
+
+use orch_api_contract::auth::MeTotpEnableReply;
+
+use orch_api_contract::auth::MeTotpSetup;
+
+use orch_api_contract::auth::MeTotpSetupBody;
+
+use orch_api_contract::auth::MeTotpSetupReply;
+
+use orch_api_contract::auth::MeUpdate;
+
+use orch_api_contract::auth::MeUpdateBody;
+
+use orch_api_contract::auth::RecoveryCodeBatch;
+
+use orch_api_contract::auth::RecoveryCodeStatus;
+
+use orch_api_contract::auth::SessionInfo;
+
+use orch_api_contract::auth::SignInProof;
+
+use orch_api_contract::auth::TokenCreateResponse;
+
+use orch_api_contract::auth::TokenCreated;
+
+use orch_api_contract::common::ErrorCode;
+
+use orch_api_contract::common::FieldFault;
+
+use orch_api_contract::common::Problem;
+
+use orch_api_contract::users::EmailCodeUse;
+
+use orch_api_contract::users::Me;
+
+use orch_api_contract::users::TimezoneMode;
+
+use orch_authz::Act;
+
+use orch_authz::Caller;
+
+use orch_authz::Policy;
+
+use orch_authz::Principal;
+
+use orch_authz::nodes;
+
+use orch_db::Conn;
+
+use orch_db::audit::Actor;
+
+use orch_db::queries::access;
+
+use orch_db::queries::identity;
+
+use orch_db::queries::identity::NewApiToken;
+
+use orch_db::queries::identity::ProfileChange;
+
+use orch_db::queries::identity::Reservation;
+
+use orch_db::queries::identity::UserRow;
+
+use orch_types::Id;
+
+use orch_types::Time;
+
+use serde::Serialize;
+
+use serde_json::json;
+
+use std::sync::Arc;
+/// The fewest and the most characters of a display name: what the schema
+/// allows.
+const DISPLAY_NAME_CHARS: std::ops::RangeInclusive<usize> = 1..=64;
+
+/// The twelve identity palette indexes accepted by every avatar control.
+const AVATAR_COLORS: std::ops::RangeInclusive<u16> = 0..=11;
+
+/// Binds this module's requests.
+pub fn mount(registry: &mut Registry) {
+    registry
+        .on(orch_api_contract::auth::MeGet, me_get)
+        .on_snapshot_read_with_optional_initial_operation(
+            orch_api_contract::auth::MeBootstrapGet,
+            super::bootstrap::initial,
+            crate::key_operations::native::selected::<super::bootstrap::Shell>,
+            super::bootstrap::get,
+        )
+        .on_snapshot_read_with_optional_operation(
+            orch_api_contract::auth::MeAuthorityGet,
+            crate::key_operations::native::selected::<super::account_read::Authority>,
+            super::bootstrap::authority,
+        )
+        .on_with_operation(MeUpdate, me_update_operation, me_update)
+        .on(MeAdminModeGet, admin_mode_get)
+        .on(MeAdminModeSet, admin_mode_set)
+        .on(MeAdminOpening, admin_opening)
+        .on(MePasswordChange, password_change)
+        .on(MeTotpSetup, totp_setup)
+        .on(MeTotpEnable, totp_enable)
+        .on(MeRecoveryCodesGet, recovery_codes_get)
+        .on(MeRecoveryCodesRegenerate, recovery_codes_regenerate)
+        .on(MeTotpDisable, totp_disable)
+        .on(MeEmailCodeSend, code_send)
+        .on(MeEmailCodeEnable, code_enable)
+        .on(MeEmailCodeDisable, code_disable)
+        .on(MeSecondStepVerify, second_step_verify)
+        .on_with_operation(MeSessionList, session_list_operation, sessions)
+        .on_with_operation(
+            MeSessionOthersDelete,
+            session_others_operation,
+            session_others_delete,
+        )
+        .on_with_operation(MeSessionDelete, session_delete_operation, session_delete)
+        .on_with_operation(MeTokenList, token_list_operation, tokens)
+        .on(MeTokenCreate, token_create)
+        .on_with_operation(MeTokenDelete, token_delete_operation, token_delete);
+}
+
+fn fault(path: &str, message: &str) -> FieldFault {
+    FieldFault {
+        path: path.to_owned(),
+        message: message.to_owned(),
+    }
+}
+
+async fn admin_mode_get(ctx: Ctx, (): (), (): ()) -> ApiResult<AdminMode> {
+    let (mut tx, guard) = crate::middleware::transaction_guard::begin(&ctx).await?;
+    require_browser(guard.user())?;
+    let available =
+        identity::admin_mode_available(&mut tx, guard.user().id(), guard.now().get()).await?;
+    let reply = AdminMode {
+        as_admin: guard.user().as_admin,
+        available,
+    };
+    tx.commit().await.map_err(orch_db::DbError::from)?;
+    Ok(reply)
+}
+
+async fn admin_opening(ctx: Ctx, (): (), body: AdminOpeningBody) -> ApiResult<()> {
+    crate::middleware::admin_openings::cached(&ctx, &body.kind, body.id, body.opening_id).await
+}
+
+async fn admin_mode_set(ctx: Ctx, (): (), body: AdminModeSetBody) -> ApiResult<AdminMode> {
+    let (mut tx, guard) = crate::middleware::transaction_guard::begin(&ctx).await?;
+    let user = guard.user();
+    require_browser(user)?;
+    let session = current_session(user).ok_or_else(|| {
+        ApiError::new(
+            ErrorCode::AuthSessionRequired,
+            "administrator mode belongs to a browser session",
+        )
+    })?;
+    let now = guard.now().get();
+    let available = identity::admin_mode_available(&mut tx, user.id(), now).await?;
+    if body.as_admin && !available {
+        return Err(ApiError::new(
+            ErrorCode::AuthzDenied,
+            "you administer no place",
+        ));
+    }
+    if user.as_admin != body.as_admin {
+        if !identity::set_session_admin_mode(&mut tx, user.id(), session, body.as_admin, now)
+            .await?
+        {
+            return Err(ApiError::new(
+                ErrorCode::AuthInvalidToken,
+                "this session has ended",
+            ));
+        }
+        orch_db::audit::set_admin_mode(user.id(), body.as_admin);
+        orch_db::sequences::notify_user_event(
+            &mut tx,
+            &[user.id()],
+            &serde_json::to_value(orch_realtime_contract::feeds::UserEvent::AdminMode {
+                session_id: session,
+                as_admin: body.as_admin,
+            })
+            .map_err(ApiError::internal)?,
+        )
+        .await?;
+        record(
+            &ctx,
+            &mut tx,
+            Actor::User(user.id()),
+            orch_db::audit::action!(AuditAction::AuthAdminModeChanged),
+            Some(user.id()),
+            "changed this session's As admin switch",
+            json!({ "session": session, "as_admin": body.as_admin }),
+        )
+        .await?;
+    }
+    tx.commit().await.map_err(orch_db::DbError::from)?;
+    Ok(AdminMode {
+        as_admin: body.as_admin,
+        available,
+    })
+}
+
+/// A member of a body that is a word, as the database keeps it.
+fn word<T: Serialize>(value: Option<&T>) -> Option<String> {
+    value
+        .and_then(|value| serde_json::to_value(value).ok())
+        .and_then(|value| value.as_str().map(str::to_owned))
+}
+
+/// Whose tries these are: the session's, or the token's.
+fn caller_who(authed: &Authed) -> Who {
+    match &authed.via {
+        Via::OwnerRead { source } => Who::caller('n', source.source(), authed.id()),
+        Via::Session { session_id } => Who::caller('s', *session_id, authed.id()),
+        Via::Token { token_id, .. } => Who::caller('t', *token_id, authed.id()),
+    }
+}
+
+/// The session of the request, where it is one.
+fn current_session(authed: &Authed) -> Option<Id> {
+    match authed.via {
+        Via::Session { session_id } => Some(session_id),
+        Via::Token { .. } | Via::OwnerRead { .. } => None,
+    }
+}
+
+/// Passwords and browser sign-ins are managed from a browser sign-in alone.
+fn require_browser(authed: &Authed) -> ApiResult<()> {
+    if authed.is_session() {
+        Ok(())
+    } else {
+        Err(ApiError::new(
+            ErrorCode::AuthSessionRequired,
+            "this is done from a browser sign-in",
+        ))
+    }
+}
+
+/// Human sign-in state cannot be attached to a service identity. This is the
+/// existing subject model, independent of which credential authenticates it.
+fn require_human_credentials(authed: &Authed) -> ApiResult<()> {
+    if authed.user.kind == "human" {
+        Ok(())
+    } else {
+        Err(ApiError::invalid(
+            "",
+            "service identities have no human sign-in credentials",
+        ))
+    }
+}
+
+/// Business account management uses either its browser credential or the
+/// current shared explicit-key admission. Browser session mechanics stay separate.
+fn require_account_credential(ctx: &Ctx, authed: &Authed) -> ApiResult<bool> {
+    let key_authenticated = crate::sign_in::fresh::key_proves_account(ctx, authed)?;
+    if !key_authenticated {
+        require_browser(authed)?;
+    }
+    require_human_credentials(authed)?;
+    Ok(key_authenticated)
+}
+
+/// Counts and looks at a password given by a signed-in caller to change
+/// something. A person who signs in only through an identity provider has no
+/// password to confirm.
+async fn confirm_password(
+    ctx: &Ctx,
+    authed: &Authed,
+    given: Option<&str>,
+    field: &str,
+) -> ApiResult<bool> {
+    if crate::sign_in::fresh::key_proves_account(ctx, authed)? {
+        return Ok(true);
+    }
+    if authed.user.password_hash.is_none() {
+        return Ok(false);
+    }
+    let given = given.ok_or_else(|| ApiError::invalid(field, "is required for this credential"))?;
+    let limits = Limits::of(&ctx.app.config.auth);
+    let mut conn = ctx.app.db.acquire().await?;
+    let who = caller_who(authed);
+    if proofs::password_right(
+        ctx,
+        &mut conn,
+        &limits,
+        &who,
+        Some(&authed.user),
+        given,
+        false,
+    )
+    .await?
+    {
+        Ok(false)
+    } else {
+        Err(invalid_credentials())
+    }
+}
+
+/// A member of a body that was filled in: a form that sends what it left empty as an empty text has
+/// given nothing.
+fn filled(value: &Option<String>) -> Option<&str> {
+    value
+        .as_deref()
+        .map(str::trim)
+        .filter(|text| !text.is_empty())
+}
+
+/// What setting a second step up takes, beside the code that switches it on: the password where the
+/// person has one; where they have none, the one-use proof their identity provider gave this browser
+/// session for setting one up, whose hash is answered so that the act spends it in its transaction.
+/// A person with a password cannot give the identity provider's proof instead.
+async fn setup_proof(
+    ctx: &Ctx,
+    authed: &Authed,
+    password: Option<&str>,
+    identity_proof: Option<&str>,
+) -> ApiResult<(Option<Vec<u8>>, bool)> {
+    use crate::sign_in::fresh::{Purpose, reauthenticate};
+    if crate::sign_in::fresh::key_proves_account(ctx, authed)? {
+        require_human_credentials(authed)?;
+        return Ok((None, true));
+    }
+    if authed.user.password_hash.is_some() {
+        let Some(password) = password else {
+            return Err(reauthenticate(Purpose::SecondStepSetup, "password"));
+        };
+        confirm_password(ctx, authed, Some(password), "password").await?;
+        return Ok((None, false));
+    }
+    let Some(proof) = identity_proof else {
+        return Err(reauthenticate(Purpose::SecondStepSetup, "identity_proof"));
+    };
+    // The proof is bound to the browser session it was made for.
+    require_browser(authed)?;
+    Ok((Some(token_hash(proof)), false))
+}
+
+/// Spends, in the act's transaction, the identity provider's proof that a setup was given: a proof
+/// that was spent already, ran out, or was made for another session or another act refuses it.
+async fn spend_setup_proof(
+    ctx: &Ctx,
+    tx: &mut Conn,
+    authed: &Authed,
+    proof: Option<&[u8]>,
+) -> ApiResult<()> {
+    use crate::sign_in::fresh::{Purpose, reauthenticate};
+    let Some(hash) = proof else {
+        return Ok(());
+    };
+    let spent = match current_session(authed) {
+        Some(session) => {
+            orch_db::queries::tokens::spend_sensitive_proof(
+                tx,
+                hash,
+                session,
+                Purpose::SecondStepSetup.stored(),
+                None,
+                ctx.now,
+            )
+            .await?
+        }
+        None => false,
+    };
+    if spent {
+        Ok(())
+    } else {
+        Err(reauthenticate(Purpose::SecondStepSetup, "identity_proof"))
+    }
+}
+
+/// Notes that this browser session gave its second proof, in the act's transaction: setting a step
+/// up with its confirming code gives it, and the orgs that require one stop waiting for the session.
+async fn stamp_given(ctx: &Ctx, tx: &mut Conn, authed: &Authed) -> ApiResult<()> {
+    if let Some(session) = current_session(authed) {
+        orch_db::queries::tokens::stamp_second_step(tx, session, ctx.now).await?;
+    }
+    Ok(())
+}
+
+/// Reads the signed-in person.
+async fn me_get(ctx: Ctx, (): (), (): ()) -> ApiResult<Me> {
+    let authed = ctx.user()?;
+    let mut conn = ctx.app.db.acquire().await?;
+    people::me(&mut conn, &authed.user, ctx.now).await
+}
+
+/// Changes personal settings, with an address change confirmed separately where mail is available.
+fn me_update_operation<'a>(
+    ctx: &'a Ctx,
+    conn: &'a mut Conn,
+    caller: &'a Caller,
+    (): (),
+    body: MeUpdateBody,
+) -> OperationFuture<'a> {
+    Box::pin(async move {
+        use orch_access_contract::key_scope::{KeyIdentityKind, KeyTargetKind};
+        let profile = body.display_name.is_some()
+            || body.avatar_color.is_some()
+            || body.locale.is_some()
+            || body.timezone.is_some()
+            || body.timezone_mode.is_some()
+            || body.timezone_report.is_some()
+            || body.theme.is_some()
+            || body.density.is_some();
+        let selection = match (profile, body.email.is_some()) {
+            (true, true) => "MeUpdate.profile_and_security",
+            (false, true) => "MeUpdate.security",
+            (_, false) => "MeUpdate.profile",
+        };
+        let target = crate::key_operations::targets::account(conn, caller.user()).await?;
+        let mut operation = OperationPlan::new(ctx.route, selection)?;
+        for index in 0..operation.variant().facets.len() {
+            operation.bind(
+                index,
+                KeyTargetKind::Identity(KeyIdentityKind::Account),
+                std::slice::from_ref(&target),
+            )?;
+        }
+        Ok(operation)
+    })
+}
+
+/// Changes personal settings, with an address change confirmed separately where mail is available.
+async fn me_update(mut ctx: Ctx, (): (), body: MeUpdateBody) -> ApiResult<Me> {
+    let mut faults = Vec::new();
+    let display_name = body.display_name.as_deref().map(str::trim);
+    if display_name.is_some_and(|name| !DISPLAY_NAME_CHARS.contains(&name.chars().count())) {
+        faults.push(fault("display_name", "must be 1 to 64 characters"));
+    }
+    if body
+        .timezone
+        .as_deref()
+        .is_some_and(|zone| zone.parse::<chrono_tz::Tz>().is_err())
+    {
+        faults.push(fault("timezone", "is not the name of a time zone"));
+    }
+    // A browser's own report of its zone names the zone, and is never a choice of a fixed one.
+    let report = body.timezone_report == Some(true);
+    if report && (body.timezone.is_none() || body.timezone_mode == Some(TimezoneMode::Fixed)) {
+        faults.push(fault(
+            "timezone_report",
+            "is a device's report of its zone: it comes with timezone and timezone_mode device",
+        ));
+    }
+    if body
+        .avatar_color
+        .flatten()
+        .is_some_and(|color| !AVATAR_COLORS.contains(&color))
+    {
+        faults.push(fault("avatar_color", "must be from 0 to 11"));
+    }
+    let new_email = body
+        .email
+        .as_ref()
+        .and_then(Option::as_deref)
+        .map(str::trim);
+    if new_email.is_some_and(|email| !accounts::email_fits(email)) {
+        faults.push(fault("email", "is not an address"));
+    }
+    if !faults.is_empty() {
+        return Err(Problem::invalid(faults).into());
+    }
+
+    let (mut tx, guard) = crate::middleware::transaction_guard::begin(&ctx).await?;
+    ctx.now = guard.now().get();
+    let authed = guard.user();
+    let user = &authed.user;
+    let address_change = body.email.as_ref().and_then(|requested| {
+        let requested = requested.as_deref().map(str::trim);
+        match requested {
+            Some(new)
+                if user
+                    .email
+                    .as_deref()
+                    .is_some_and(|old| old.trim().to_lowercase() == new.to_lowercase()) =>
+            {
+                None
+            }
+            other => Some(other),
+        }
+    });
+    if matches!(address_change, Some(Some(_))) {
+        require_human_credentials(authed)?;
+    }
+    if address_change.is_some()
+        && user.password_hash.is_some()
+        && !crate::sign_in::fresh::key_proves_account_as(&ctx, authed, guard.principal().caller())?
+    {
+        let current = body.current_password.as_deref().ok_or_else(|| {
+            ApiError::invalid("current_password", "is needed to change the address")
+        })?;
+        // Count failures on this connection: the guard already holds the user row,
+        // and the lockout notice can update that user's Inbox sequence as well.
+        let limits = Limits::of(&ctx.app.config.auth);
+        let proof = proofs::password_right(
+            &ctx,
+            &mut tx,
+            &limits,
+            &caller_who(authed),
+            Some(user),
+            current,
+            false,
+        )
+        .await;
+        if !matches!(proof, Ok(true)) {
+            // No profile field has been written; failed-try bookkeeping must survive.
+            tx.commit().await.map_err(orch_db::DbError::from)?;
+            return Err(match proof {
+                Err(error) => error,
+                _ => invalid_credentials(),
+            });
+        }
+    }
+    if let Some(Some(new)) = address_change
+        && identity::email_in_use(&mut tx, new, user.id).await?
+    {
+        return Err(ApiError::new(
+            ErrorCode::ConflictExists,
+            "the account change could not be completed",
+        ));
+    }
+    let policy = if address_change.is_some() {
+        Some(system_policy(&mut tx).await?)
+    } else {
+        None
+    };
+    if matches!(address_change, Some(None)) {
+        if user.email_code_on() {
+            return Err(ApiError::invalid(
+                "email",
+                "switch off the mailed second step before clearing the address",
+            ));
+        }
+        let password_works = user.password_hash.is_some()
+            && policy
+                .as_ref()
+                .is_some_and(|policy| policy.local_login || user.is_system_admin);
+        let identity_works: bool = sqlx::query_scalar(
+            "SELECT EXISTS (SELECT 1 FROM user_identities i JOIN identity_providers p
+               ON p.id = i.identity_provider_id WHERE i.user_id = $1 AND p.enabled)",
+        )
+        .bind(user.id)
+        .fetch_one(&mut *tx)
+        .await
+        .map_err(orch_db::DbError::from)?;
+        if !password_works && !identity_works {
+            return Err(ApiError::invalid(
+                "email",
+                "keep another allowed way to sign in before clearing the address",
+            ));
+        }
+    }
+    if let Some(choice) = body.avatar_color {
+        let color = match choice {
+            Some(color) => i16::try_from(color).map_err(ApiError::internal)?,
+            None => identity::avatar_color(user.id),
+        };
+        sqlx::query("UPDATE users SET avatar_color = $2, updated_at = $3 WHERE id = $1")
+            .bind(user.id)
+            .bind(color)
+            .bind(ctx.now)
+            .execute(&mut *tx)
+            .await
+            .map_err(orch_db::DbError::from)?;
+    }
+    // A zone given without a mode is one the person chose, and stays on every device. A device's
+    // report is written apart, and only while the zone still follows the device, so that a report
+    // that arrives after a choice changes nothing.
+    let timezone_mode = match (body.timezone_mode, body.timezone.is_some()) {
+        _ if report => None,
+        (Some(mode), _) => Some(mode),
+        (None, true) => Some(TimezoneMode::Fixed),
+        (None, false) => None,
+    };
+    let mut row = identity::update_profile(
+        &mut tx,
+        user.id,
+        &ProfileChange {
+            display_name,
+            locale: word(body.locale.as_ref()).as_deref(),
+            timezone: body.timezone.as_deref().filter(|_| !report),
+            timezone_mode: word(timezone_mode.as_ref()).as_deref(),
+            theme: word(body.theme.as_ref()).as_deref(),
+            density: word(body.density.as_ref()).as_deref(),
+        },
+        ctx.now,
+    )
+    .await?
+    .ok_or_else(ApiError::not_found)?;
+    if let Some(zone) = body.timezone.as_deref().filter(|_| report)
+        && identity::report_device_timezone(&mut tx, user.id, zone, ctx.now).await?
+    {
+        row = identity::user_by_id(&mut tx, user.id)
+            .await?
+            .ok_or_else(ApiError::not_found)?;
+    }
+    match (address_change, policy) {
+        (Some(Some(new)), Some(policy)) if policy.mail() => {
+            identity::void_email_tokens(&mut tx, user.id, Purpose::Verify.stored(), ctx.now)
+                .await?;
+            mail::send_link(
+                &ctx,
+                &mut tx,
+                policy.mail_channel,
+                &Link {
+                    purpose: Purpose::Verify,
+                    to: Addressee {
+                        user_id: user.id,
+                        email: new,
+                        locale: &row.locale,
+                    },
+                    clear_second_step: false,
+                },
+                true,
+            )
+            .await?;
+            if let (true, Some(old)) = (row.email_confirmed(), row.email.as_deref()) {
+                mail::send_notice(
+                    &ctx,
+                    &mut tx,
+                    policy.mail_channel,
+                    &Addressee {
+                        user_id: user.id,
+                        email: old,
+                        locale: &row.locale,
+                    },
+                    &Message::AddressChanged { new_email: new },
+                )
+                .await?;
+            }
+        }
+        (Some(requested), policy) => {
+            if requested.is_none()
+                && row.email_confirmed()
+                && let (Some(old), Some(policy)) = (row.email.as_deref(), policy.as_ref())
+                && let Some(channel) = policy.mail_channel
+            {
+                identity::queue_mail(&mut tx, mail::CHANNEL_KIND, channel, &json!({
+                    "purpose": "email_changed", "to": old, "user_id": user.id,
+                    "language": row.locale, "data": { "new_email": null },
+                    "subject": format!("The address of your {} account was cleared", ctx.app.config.system.name),
+                    "body": "The address of your account was cleared. Codes and resets no longer go to this address. If this was not you, change your password.",
+                }), ctx.now).await?;
+            }
+            identity::void_email_tokens(&mut tx, user.id, Purpose::Verify.stored(), ctx.now)
+                .await?;
+            identity::void_email_tokens(&mut tx, user.id, Purpose::Reset.stored(), ctx.now).await?;
+            sqlx::query("DELETE FROM sign_in_codes WHERE user_id = $1")
+                .bind(user.id)
+                .execute(&mut *tx)
+                .await
+                .map_err(orch_db::DbError::from)?;
+            let old = row.email.clone();
+            sqlx::query("UPDATE users SET email = $2, email_verified_at = NULL, updated_at = $3 WHERE id = $1")
+                .bind(user.id).bind(requested).bind(ctx.now).execute(&mut *tx)
+                .await.map_err(orch_db::DbError::from).map_err(taken)?;
+            record(
+                &ctx,
+                &mut tx,
+                Actor::User(user.id),
+                AuditAction::AuthEmailChanged,
+                Some(user.id),
+                &format!("the address of {} was changed", user.username),
+                json!({ "from": old, "to": requested, "confirmed": false }),
+            )
+            .await?;
+            orch_authz::epoch::bump(&mut tx)
+                .await
+                .map_err(ApiError::internal)?;
+            row = identity::user_by_id(&mut tx, user.id)
+                .await?
+                .ok_or_else(ApiError::not_found)?;
+        }
+        _ => {}
+    }
+    let me = people::me(&mut tx, &row, ctx.now).await?;
+    tx.commit().await.map_err(orch_db::DbError::from)?;
+    Ok(me)
+}
+
+/// Locks the current personal identity and rejects a proof of a replaced credential state.
+async fn credential_action(ctx: &mut Ctx) -> ApiResult<orch_db::Tx> {
+    credential_action_proven(ctx, false).await
+}
+
+async fn credential_action_with_caller(ctx: &mut Ctx) -> ApiResult<(orch_db::Tx, Caller)> {
+    let (tx, guard) = credential_action_with_guard(ctx, false).await?;
+    Ok((tx, guard.principal().caller().clone()))
+}
+
+async fn credential_action_proven(
+    ctx: &mut Ctx,
+    key_authenticated: bool,
+) -> ApiResult<orch_db::Tx> {
+    credential_action_with_guard(ctx, key_authenticated)
+        .await
+        .map(|(tx, _)| tx)
+}
+
+async fn credential_action_with_guard(
+    ctx: &mut Ctx,
+    key_authenticated: bool,
+) -> ApiResult<(orch_db::Tx, crate::middleware::transaction_guard::Guard)> {
+    let (tx, guard) = crate::middleware::transaction_guard::begin(ctx).await?;
+    let original = &ctx.user()?.user;
+    let current = &guard.user().user;
+    if original.password_hash != current.password_hash
+        || original.totp_secret != current.totp_secret
+        || original.totp_enabled_at != current.totp_enabled_at
+        || original.email_code_at != current.email_code_at
+        || original.email != current.email
+        || original.email_verified_at != current.email_verified_at
+    {
+        return Err(ApiError::new(
+            ErrorCode::AuthInvalidCredentials,
+            "your ways to sign in changed; try again",
+        ));
+    }
+    if key_authenticated {
+        require_human_credentials(guard.user())?;
+    }
+    if key_authenticated
+        && !crate::sign_in::fresh::key_proves_account_as(
+            ctx,
+            guard.user(),
+            guard.principal().caller(),
+        )?
+    {
+        return Err(ApiError::new(
+            ErrorCode::AuthzDenied,
+            "the key's current admission requires its ordinary credential proof",
+        ));
+    }
+    ctx.now = guard.now().get();
+    Ok((tx, guard))
+}
+
+/// Changes the password after rechecking the identity and the proof's credential state.
+async fn password_change(mut ctx: Ctx, (): (), body: MePasswordChangeBody) -> ApiResult<()> {
+    let authed = Arc::clone(ctx.user()?);
+    let credential_key = require_account_credential(&ctx, &authed)?;
+    let user = &authed.user;
+    let password_key = confirm_password(
+        &ctx,
+        &authed,
+        body.current_password.as_deref(),
+        "current_password",
+    )
+    .await?;
+    if let Err(refused) = passwords::check_new(
+        &body.new_password,
+        ctx.app.config.auth.password_min_length,
+        &user.username,
+        user.email.as_deref(),
+    ) {
+        return Err(refused.into_api_error("new_password"));
+    }
+    let hash = passwords::hash(&body.new_password)
+        .await
+        .map_err(ApiError::internal)?;
+    let mut tx = credential_action_proven(&mut ctx, credential_key || password_key).await?;
+    identity::set_password(&mut tx, user.id, &hash, ctx.now).await?;
+    let ended =
+        identity::revoke_sessions_of(&mut tx, user.id, current_session(&authed), ctx.now).await?;
+    record(
+        &ctx,
+        &mut tx,
+        Actor::User(user.id),
+        orch_db::audit::action!(AuditAction::AuthPasswordChanged),
+        Some(user.id),
+        &format!("{} changed their password", user.username),
+        json!({ "sessions_ended": ended }),
+    )
+    .await?;
+    tx.commit().await.map_err(orch_db::DbError::from)?;
+    Ok(())
+}
+
+/// The reply of a setup: the secret in text and as an address an app can read
+/// from a picture, which no cache keeps.
+fn setup_reply(ctx: &Ctx, user: &UserRow, secret: Vec<u8>) -> ApiResult<Answer<MeTotpSetupReply>> {
+    let totp = codes::authenticator(secret, &user.username, &ctx.app.config.system.name)
+        .map_err(ApiError::internal)?;
+    Ok(Answer::from(MeTotpSetupReply {
+        secret: totp.secret().to_base32(),
+        otpauth_url: totp
+            .to_url()
+            .map_err(|error| ApiError::internal(format!("{error:?}")))?,
+    })
+    .header(CACHE_CONTROL, NOT_KEPT))
+}
+
+/// Begins the setup of an authenticator app and returns its secret. Asking
+/// again before it is switched on gives the same secret. It takes the password,
+/// or for a person who has none the one-use proof of their identity provider,
+/// which is spent with the secret it gave.
+async fn totp_setup(
+    mut ctx: Ctx,
+    (): (),
+    body: MeTotpSetupBody,
+) -> ApiResult<Answer<MeTotpSetupReply>> {
+    let authed = Arc::clone(ctx.user()?);
+    let (proof, key_authenticated) = setup_proof(
+        &ctx,
+        &authed,
+        filled(&body.password),
+        filled(&body.identity_proof),
+    )
+    .await?;
+    let mut tx = credential_action_proven(&mut ctx, key_authenticated).await?;
+    spend_setup_proof(&ctx, &mut tx, &authed, proof.as_deref()).await?;
+    // What is stored now, which may have been changed since the request began.
+    let user = identity::user_by_id(&mut tx, authed.id())
+        .await?
+        .ok_or_else(ApiError::not_found)?;
+    if user.totp_on() {
+        return Err(ApiError::new(
+            ErrorCode::ConflictExists,
+            "the authenticator is on already",
+        ));
+    }
+    let secret = match user.totp_secret.as_deref() {
+        Some(sealed) => codes::open_secret(user.id, sealed).map_err(ApiError::internal)?,
+        None => {
+            let secret = codes::new_secret();
+            let sealed = codes::seal_secret(user.id, &secret).map_err(ApiError::internal)?;
+            if identity::put_pending_totp(&mut tx, user.id, &sealed, ctx.now).await? {
+                secret
+            } else {
+                // Another request stored a secret first: that one is the secret.
+                let stored = identity::user_by_id(&mut tx, user.id)
+                    .await?
+                    .ok_or_else(ApiError::not_found)?;
+                let sealed = stored.totp_secret.as_deref().ok_or_else(|| {
+                    ApiError::new(ErrorCode::ConflictExists, "the authenticator is on already")
+                })?;
+                codes::open_secret(user.id, sealed).map_err(ApiError::internal)?
+            }
+        }
+    };
+    tx.commit().await.map_err(orch_db::DbError::from)?;
+    setup_reply(&ctx, &user, secret)
+}
+
+/// Switches the authenticator app on, with a code it shows.
+async fn totp_enable(
+    mut ctx: Ctx,
+    (): (),
+    body: MeTotpEnableBody,
+) -> ApiResult<Answer<MeTotpEnableReply>> {
+    let authed = Arc::clone(ctx.user()?);
+    let limits = Limits::of(&ctx.app.config.auth);
+    let mut conn = ctx.app.db.acquire().await?;
+    let user = identity::user_by_id(&mut conn, authed.id())
+        .await?
+        .ok_or_else(ApiError::not_found)?;
+    if user.totp_on() {
+        return Err(ApiError::new(
+            ErrorCode::ConflictExists,
+            "the authenticator is on already",
+        ));
+    }
+    if user.totp_secret.is_none() {
+        return Err(ApiError::invalid("code", "set the authenticator up first"));
+    }
+    let who = caller_who(&authed);
+    let step =
+        proofs::authenticator_right(&ctx, &mut conn, &limits, &who, &user, &body.code, false)
+            .await?
+            .ok_or_else(second_step_invalid)?;
+    let issued = crate::sign_in::recovery_codes::issue();
+    let hashes = crate::sign_in::recovery_codes::hashes(user.id, &issued)
+        .ok_or_else(|| ApiError::internal("a generated recovery code is malformed"))?;
+    drop(conn);
+    let mut tx = credential_action(&mut ctx).await?;
+    if !identity::enable_totp(&mut tx, user.id, step, ctx.now).await? {
+        return Err(second_step_invalid());
+    }
+    orch_db::queries::recovery_codes::replace(&mut tx, user.id, &hashes, ctx.now).await?;
+    stamp_given(&ctx, &mut tx, &authed).await?;
+    record(
+        &ctx,
+        &mut tx,
+        Actor::User(user.id),
+        orch_db::audit::action!(AuditAction::AuthTotpEnabled),
+        Some(user.id),
+        &format!("{} switched on an authenticator", user.username),
+        json!({}),
+    )
+    .await?;
+    tx.commit().await.map_err(orch_db::DbError::from)?;
+    second_step_set_up(&ctx, user.id).await;
+    let mut conn = ctx.app.db.acquire().await?;
+    let current = identity::user_by_id(&mut conn, user.id)
+        .await?
+        .ok_or_else(ApiError::not_found)?;
+    let me = Box::pin(people::me(&mut conn, &current, ctx.now)).await?;
+    let status = recovery_status(&mut conn, &current, current_session(&authed), ctx.now).await?;
+    Ok(Answer::from(MeTotpEnableReply {
+        me,
+        recovery_codes: RecoveryCodeBatch {
+            codes: issued,
+            status,
+        },
+    })
+    .header(CACHE_CONTROL, NOT_KEPT))
+}
+
+/// The explicit management dialog loads metadata once; no read can recover a plaintext batch.
+async fn recovery_codes_get(ctx: Ctx, (): (), (): ()) -> ApiResult<RecoveryCodeStatus> {
+    let authed = ctx.user()?;
+    let mut conn = ctx.app.db.acquire().await?;
+    let principal = ctx.operation_principal(&mut conn).await?;
+    if !crate::sign_in::fresh::key_proves_account_as(&ctx, authed, principal.caller())? {
+        require_browser(authed)?;
+    }
+    require_human_credentials(authed)?;
+    recovery_status(&mut conn, &authed.user, current_session(authed), ctx.now).await
+}
+
+async fn recovery_status(
+    conn: &mut Conn,
+    user: &UserRow,
+    session: Option<Id>,
+    now: chrono::DateTime<chrono::Utc>,
+) -> ApiResult<RecoveryCodeStatus> {
+    let status = orch_db::queries::recovery_codes::status(conn, user.id).await?;
+    let capabilities = proofs::capabilities_with_recovery(conn, user, status.remaining > 0).await?;
+    let methods = [
+        SignInProof::Totp,
+        SignInProof::RecoveryCode,
+        SignInProof::EmailCode,
+    ]
+    .into_iter()
+    .filter(|proof| capabilities.second(*proof))
+    .collect();
+    let recent_recovery = if let (Some(session), Some(secret)) = (
+        session,
+        user.totp_secret.as_deref().filter(|_| user.totp_on()),
+    ) {
+        let factor = crate::sign_in::recovery_codes::factor_hash(user.id, secret);
+        orch_db::queries::recovery_codes::management(conn, user.id, session, &factor, now)
+            .await?
+            .is_some()
+    } else {
+        false
+    };
+    Ok(RecoveryCodeStatus {
+        remaining: status.remaining,
+        created_at: status.created_at.map(Time::new),
+        methods,
+        recent_recovery,
+    })
+}
+
+/// Replaces the saved backups only after a fresh first and second proof, in one personal transaction.
+async fn recovery_codes_regenerate(
+    mut ctx: Ctx,
+    (): (),
+    body: MeRecoveryCodesRegenerateBody,
+) -> ApiResult<Answer<RecoveryCodeBatch>> {
+    let authed = Arc::clone(ctx.user()?);
+    let key_authenticated = require_account_credential(&ctx, &authed)?;
+    if !authed.user.totp_on() {
+        return Err(ApiError::invalid(
+            "",
+            "set up an authenticator before making recovery codes",
+        ));
+    }
+    let proven = crate::sign_in::fresh::prove(
+        &ctx,
+        &authed,
+        body.proof.as_ref().unwrap_or(&Default::default()),
+        crate::sign_in::fresh::Purpose::RecoveryCodes,
+    )
+    .await?;
+    let issued = crate::sign_in::recovery_codes::issue();
+    let hashes = crate::sign_in::recovery_codes::hashes(authed.id(), &issued)
+        .ok_or_else(|| ApiError::internal("a generated recovery code is malformed"))?;
+    let mut tx =
+        credential_action_proven(&mut ctx, key_authenticated || proven.key_authenticated()).await?;
+    proven
+        .spend(
+            &ctx,
+            &mut tx,
+            authed.id(),
+            crate::sign_in::fresh::Purpose::RecoveryCodes,
+        )
+        .await?;
+    orch_db::queries::recovery_codes::replace(&mut tx, authed.id(), &hashes, ctx.now).await?;
+    record(
+        &ctx,
+        &mut tx,
+        Actor::User(authed.id()),
+        orch_db::audit::action!(AuditAction::AuthRecoveryCodesReplaced),
+        Some(authed.id()),
+        "replaced authenticator recovery codes",
+        json!({ "count": issued.len() }),
+    )
+    .await?;
+    let status = recovery_status(&mut tx, &authed.user, current_session(&authed), ctx.now).await?;
+    tx.commit().await.map_err(orch_db::DbError::from)?;
+    Ok(Answer::from(RecoveryCodeBatch {
+        codes: issued,
+        status,
+    })
+    .header(CACHE_CONTROL, NOT_KEPT))
+}
+
+/// The work of a person that waited for their second step is looked at again now that one is set up: what
+/// may go is released by its thread's ordinary pre-flight, and nothing is started by anything else.
+async fn second_step_set_up(ctx: &Ctx, user: Id) {
+    if let Err(error) = ctx.app.engine.reevaluate_second_step(Some(user)).await {
+        tracing::warn!(%error, "the work that waited for a second step could not be looked at again");
+    }
+}
+
+/// Switches the authenticator app off with the password and an app or saved recovery code.
+async fn totp_disable(mut ctx: Ctx, (): (), body: MeTotpDisableBody) -> ApiResult<()> {
+    let authed = Arc::clone(ctx.user()?);
+    let key_authenticated =
+        confirm_password(&ctx, &authed, body.password.as_deref(), "password").await?;
+    let limits = Limits::of(&ctx.app.config.auth);
+    let mut conn = ctx.app.db.acquire().await?;
+    let user = identity::user_by_id(&mut conn, authed.id())
+        .await?
+        .ok_or_else(ApiError::not_found)?;
+    if !user.totp_on() {
+        return Err(ApiError::invalid("code", "the authenticator is not on"));
+    }
+    let who = caller_who(&authed);
+    let (step, recovery) = if crate::sign_in::recovery_codes::normalize(&body.code).is_some() {
+        (
+            None,
+            Some(
+                proofs::recovery_right(&ctx, &mut conn, &limits, &who, &user, &body.code, false)
+                    .await?
+                    .ok_or_else(second_step_invalid)?,
+            ),
+        )
+    } else {
+        (
+            Some(
+                proofs::authenticator_right(
+                    &ctx, &mut conn, &limits, &who, &user, &body.code, false,
+                )
+                .await?
+                .ok_or_else(second_step_invalid)?,
+            ),
+            None,
+        )
+    };
+    drop(conn);
+    let mut tx = credential_action_proven(&mut ctx, key_authenticated).await?;
+    if let Some(step) = step
+        && !identity::accept_totp_step(&mut tx, user.id, step).await?
+    {
+        return Err(second_step_invalid());
+    }
+    if let Some(hash) = recovery
+        && !orch_db::queries::recovery_codes::spend(&mut tx, user.id, &hash, ctx.now).await?
+    {
+        return Err(second_step_invalid());
+    }
+    identity::disable_totp(&mut tx, user.id, ctx.now).await?;
+    // Without it an org that requires a second step may wait for its setup again.
+    access::bump_epoch(&mut tx).await?;
+    record(
+        &ctx,
+        &mut tx,
+        Actor::User(user.id),
+        orch_db::audit::action!(AuditAction::AuthTotpDisabled),
+        Some(user.id),
+        &format!("{} switched off the authenticator", user.username),
+        json!({}),
+    )
+    .await?;
+    tx.commit().await.map_err(orch_db::DbError::from)?;
+    Ok(())
+}
+
+/// Mails a code to the confirmed address, to make it a second step (with the
+/// password, or for a person who has none the one-use proof of their identity
+/// provider), or to switch it off; and, with neither, for this session to give
+/// its second step where a mailed code is one already. It answers
+/// `403 auth.email_unverified` where the person has no confirmed address, or
+/// the system no mail server to send it with.
+async fn code_send(mut ctx: Ctx, (): (), body: MeEmailCodeSendBody) -> ApiResult<()> {
+    let authed = Arc::clone(ctx.user()?);
+    let (password, identity_proof) = (filled(&body.password), filled(&body.identity_proof));
+    // A code for giving a step the person has needs no other proof: it goes to their own
+    // confirmed address, at the pace of every code.
+    let (proof, key_authenticated) =
+        if password.is_none() && identity_proof.is_none() && authed.user.email_code_on() {
+            (None, false)
+        } else {
+            setup_proof(&ctx, &authed, password, identity_proof).await?
+        };
+    let limits = Limits::of(&ctx.app.config.auth);
+    let mut tx = credential_action_proven(&mut ctx, key_authenticated).await?;
+    spend_setup_proof(&ctx, &mut tx, &authed, proof.as_deref()).await?;
+    let user = identity::user_by_id(&mut tx, authed.id())
+        .await?
+        .ok_or_else(ApiError::not_found)?;
+    let policy = system_policy(&mut tx).await?;
+    let Some(email) = user
+        .email
+        .as_deref()
+        .filter(|_| user.email_confirmed() && policy.mail())
+    else {
+        return Err(ApiError::new(
+            ErrorCode::AuthEmailUnverified,
+            "a code goes to a confirmed address, by a mail server",
+        ));
+    };
+    // The same pace as a code asked for before signing in.
+    let who = Who::named(Some(user.id), "");
+    if let Reservation::Refused { retry_after } =
+        identity::reserve_try(&mut tx, &who.bucket("send"), ctx.now, &limits.send).await?
+    {
+        return Err(rate_limited(retry_after));
+    }
+    let to = Addressee {
+        user_id: user.id,
+        email,
+        locale: &user.locale,
+    };
+    mail::send_code(&ctx, &mut tx, policy.mail_channel, &to, true).await?;
+    tx.commit().await.map_err(orch_db::DbError::from)?;
+    Ok(())
+}
+
+/// Makes a mailed code a second step of the person, with a code just mailed.
+async fn code_enable(mut ctx: Ctx, (): (), body: MeEmailCodeEnableBody) -> ApiResult<()> {
+    let authed = Arc::clone(ctx.user()?);
+    let limits = Limits::of(&ctx.app.config.auth);
+    let mut conn = ctx.app.db.acquire().await?;
+    let user = identity::user_by_id(&mut conn, authed.id())
+        .await?
+        .ok_or_else(ApiError::not_found)?;
+    let uses = people::email_code_uses(&mut conn, Some(&user)).await?;
+    if !uses.contains(&EmailCodeUse::SecondStep) {
+        return Err(ApiError::new(
+            ErrorCode::AuthEmailCodeNotAllowed,
+            "an org of yours does not allow a mailed code as a second step",
+        ));
+    }
+    let who = caller_who(&authed);
+    let hash = proofs::mailed_code_right(
+        &ctx,
+        &mut conn,
+        &limits,
+        &who,
+        Some(&user),
+        &body.code,
+        false,
+    )
+    .await?
+    .ok_or_else(second_step_invalid)?;
+    let mut tx = credential_action(&mut ctx).await?;
+    if !people::email_code_uses(&mut tx, Some(&user))
+        .await?
+        .contains(&EmailCodeUse::SecondStep)
+    {
+        return Err(ApiError::new(
+            ErrorCode::AuthEmailCodeNotAllowed,
+            "an org of yours does not allow a mailed code as a second step",
+        ));
+    }
+    if !identity::spend_sign_in_code(&mut tx, user.id, &hash, ctx.now).await? {
+        return Err(second_step_invalid());
+    }
+    identity::set_email_code_second_step(&mut tx, user.id, Some(ctx.now), ctx.now).await?;
+    stamp_given(&ctx, &mut tx, &authed).await?;
+    record(
+        &ctx,
+        &mut tx,
+        Actor::User(user.id),
+        orch_db::audit::action!(AuditAction::AuthEmailCodeEnabled),
+        Some(user.id),
+        &format!("{} made a mailed code their second step", user.username),
+        json!({}),
+    )
+    .await?;
+    tx.commit().await.map_err(orch_db::DbError::from)?;
+    second_step_set_up(&ctx, user.id).await;
+    Ok(())
+}
+
+/// Stops a mailed code being a second step: it takes the password and a code,
+/// a mailed one or one of the authenticator.
+async fn code_disable(mut ctx: Ctx, (): (), body: MeEmailCodeDisableBody) -> ApiResult<()> {
+    let authed = Arc::clone(ctx.user()?);
+    let key_authenticated =
+        confirm_password(&ctx, &authed, body.password.as_deref(), "password").await?;
+    let limits = Limits::of(&ctx.app.config.auth);
+    let mut conn = ctx.app.db.acquire().await?;
+    let user = identity::user_by_id(&mut conn, authed.id())
+        .await?
+        .ok_or_else(ApiError::not_found)?;
+    let who = caller_who(&authed);
+    // A mailed code has eight characters and an authenticator's six digits,
+    // so the code says which it is; anything else is a wrong mailed code.
+    let mailed = codes::normalize(&body.code).is_some() || !user.totp_on();
+    let (hash, step) = if mailed {
+        let hash = proofs::mailed_code_right(
+            &ctx,
+            &mut conn,
+            &limits,
+            &who,
+            Some(&user),
+            &body.code,
+            false,
+        )
+        .await?
+        .ok_or_else(second_step_invalid)?;
+        (Some(hash), None)
+    } else {
+        let step =
+            proofs::authenticator_right(&ctx, &mut conn, &limits, &who, &user, &body.code, false)
+                .await?
+                .ok_or_else(second_step_invalid)?;
+        (None, Some(step))
+    };
+    // Failure counts were written before the transaction, so a refused proof
+    // keeps its count and cannot wait on this transaction's own user lock.
+    let mut tx = credential_action_proven(&mut ctx, key_authenticated).await?;
+    if let Some(hash) = hash
+        && !identity::spend_sign_in_code(&mut tx, user.id, &hash, ctx.now).await?
+    {
+        return Err(second_step_invalid());
+    }
+    if let Some(step) = step
+        && !identity::accept_totp_step(&mut tx, user.id, step).await?
+    {
+        return Err(second_step_invalid());
+    }
+    identity::set_email_code_second_step(&mut tx, user.id, None, ctx.now).await?;
+    // Without it an org that requires a second step may wait for its setup again.
+    access::bump_epoch(&mut tx).await?;
+    record(
+        &ctx,
+        &mut tx,
+        Actor::User(user.id),
+        orch_db::audit::action!(AuditAction::AuthEmailCodeDisabled),
+        Some(user.id),
+        &format!(
+            "{} stopped using a mailed code as a second step",
+            user.username
+        ),
+        json!({}),
+    )
+    .await?;
+    tx.commit().await.map_err(orch_db::DbError::from)?;
+    Ok(())
+}
+
+/// Gives this browser session's second proof: a code of the authenticator, or a mailed code, where
+/// that is a second step of the person. Counted as a wrong try of this session when it is wrong, and
+/// spent once. From then on the team orgs that require a second step stop waiting for this session;
+/// another session of the person gives its own.
+async fn second_step_verify(mut ctx: Ctx, (): (), body: MeSecondStepVerifyBody) -> ApiResult<Me> {
+    let authed = Arc::clone(ctx.user()?);
+    require_browser(&authed)?;
+    if [&body.totp, &body.email_code, &body.recovery_code]
+        .into_iter()
+        .filter(|value| filled(value).is_some())
+        .count()
+        > 1
+    {
+        return Err(ApiError::invalid("", "give one second-step code"));
+    }
+    let limits = Limits::of(&ctx.app.config.auth);
+    let mut conn = ctx.app.db.acquire().await?;
+    let user = identity::user_by_id(&mut conn, authed.id())
+        .await?
+        .ok_or_else(ApiError::not_found)?;
+    let capabilities = proofs::capabilities(&mut conn, &user).await?;
+    if !capabilities.has_second() {
+        return Err(ApiError::new(
+            ErrorCode::AuthSecondStepSetup,
+            "there is no second step to give: set one up first",
+        )
+        .with("path", crate::sign_in::second_step::SECURITY_PATH));
+    }
+    let who = caller_who(&authed);
+    let (hash, step, recovery) = if let Some(code) =
+        filled(&body.totp).filter(|_| capabilities.second(SignInProof::Totp))
+    {
+        let step = proofs::authenticator_right(&ctx, &mut conn, &limits, &who, &user, code, false)
+            .await?
+            .ok_or_else(second_step_invalid)?;
+        (None, Some(step), None)
+    } else if let Some(code) =
+        filled(&body.email_code).filter(|_| capabilities.second(SignInProof::EmailCode))
+    {
+        let hash =
+            proofs::mailed_code_right(&ctx, &mut conn, &limits, &who, Some(&user), code, false)
+                .await?
+                .ok_or_else(second_step_invalid)?;
+        (Some(hash), None, None)
+    } else if let Some(code) = filled(&body.recovery_code) {
+        let hash = proofs::recovery_right(&ctx, &mut conn, &limits, &who, &user, code, false)
+            .await?
+            .ok_or_else(second_step_invalid)?;
+        (None, None, Some(hash))
+    } else {
+        let methods: Vec<SignInProof> = [
+            SignInProof::Totp,
+            SignInProof::EmailCode,
+            SignInProof::RecoveryCode,
+        ]
+        .into_iter()
+        .filter(|method| capabilities.second(*method))
+        .collect();
+        return Err(crate::sign_in::login::second_step_required(&methods));
+    };
+    let mut tx = credential_action(&mut ctx).await?;
+    let current = proofs::capabilities(&mut tx, &user).await?;
+    if (step.is_some() && !current.second(SignInProof::Totp))
+        || (hash.is_some() && !current.second(SignInProof::EmailCode))
+        || (recovery.is_some() && !current.second(SignInProof::RecoveryCode))
+    {
+        return Err(second_step_invalid());
+    }
+    if let Some(step) = step
+        && !identity::accept_totp_step(&mut tx, user.id, step).await?
+    {
+        return Err(second_step_invalid());
+    }
+    if let Some(hash) = hash
+        && !identity::spend_sign_in_code(&mut tx, user.id, &hash, ctx.now).await?
+    {
+        return Err(second_step_invalid());
+    }
+    let recovered = recovery.is_some();
+    if let Some(hash) = recovery
+        && !orch_db::queries::recovery_codes::spend(&mut tx, user.id, &hash, ctx.now).await?
+    {
+        return Err(second_step_invalid());
+    }
+    stamp_given(&ctx, &mut tx, &authed).await?;
+    if recovered && let Some(session) = current_session(&authed) {
+        crate::sign_in::recovery_codes::grant_management(&mut tx, &user, session, ctx.now).await?;
+    }
+    tx.commit().await.map_err(orch_db::DbError::from)?;
+    people::me(&mut conn, &user, ctx.now).await
+}
+
+/// Lists the sessions of the signed-in person, and marks the one that makes
+/// this request.
+fn session_list_operation<'a>(
+    ctx: &'a Ctx,
+    conn: &'a mut Conn,
+    caller: &'a Caller,
+    (): (),
+    (): (),
+) -> OperationFuture<'a> {
+    Box::pin(async move {
+        use crate::key_operations::credentials::Collection;
+        let collection = Collection::begin(
+            ctx,
+            conn,
+            caller,
+            caller.user(),
+            orch_access_contract::key_scope::KeyIdentityKind::Session,
+        )
+        .await?;
+        let read = collection
+            .sessions(conn, current_session(ctx.user()?))
+            .await?;
+        Ok(read.plan.clone().with_data(read))
+    })
+}
+
+async fn sessions(ctx: Ctx, (): (), (): ()) -> ApiResult<Vec<SessionInfo>> {
+    use crate::key_operations::credentials::{self, Read};
+    let mut tx = orch_db::queries::feeds::begin_reading(&ctx.app.db).await?;
+    let principal = ctx.operation_principal(&mut tx).await?;
+    let read = ctx.operation_data::<Read<Vec<SessionInfo>>>()?;
+    let data = credentials::complete(&ctx, &mut tx, &principal, read.as_ref()).await?;
+    tx.commit().await.map_err(orch_db::DbError::from)?;
+    Ok(data)
+}
+
+async fn session_infos(
+    conn: &mut Conn,
+    user: Id,
+    current: Option<Id>,
+    now: chrono::DateTime<chrono::Utc>,
+) -> ApiResult<Vec<SessionInfo>> {
+    Ok(identity::live_sessions(conn, user, now)
+        .await?
+        .into_iter()
+        .map(|session| SessionInfo {
+            id: session.id,
+            current: Some(session.id) == current,
+            user_agent: session.user_agent,
+            ip: session.ip,
+            created_at: Time::new(session.created_at),
+            last_used_at: Time::new(session.last_used_at),
+            expires_at: Time::new(session.expires_at),
+        })
+        .collect())
+}
+
+/// The actual guarded revoke operands. This never comes from the wire or a
+/// saved preview; the typed operation producer replaces it at each checkpoint.
+struct SessionRevocations {
+    user: Id,
+    keep: Option<Id>,
+    selected: Vec<Id>,
+}
+
+fn session_others_operation<'a>(
+    ctx: &'a Ctx,
+    conn: &'a mut Conn,
+    caller: &'a Caller,
+    (): (),
+    (): (),
+) -> OperationFuture<'a> {
+    Box::pin(async move {
+        use orch_access_contract::key_scope::{KeyIdentityKind, KeyTargetKind};
+        let user = caller.user();
+        let keep = current_session(ctx.user()?);
+        let account = crate::key_operations::targets::account(conn, user).await?;
+        let subjects = identity::unrevoked_session_subjects(conn, user).await?;
+        let mut selected = Vec::new();
+        let mut effects = Vec::new();
+        let mut remaining = Vec::new();
+        for (id, owner) in subjects {
+            let target = crate::key_operations::targets::from_session_subject(&account, id, owner)?;
+            if Some(id) == keep {
+                remaining.push(target);
+            } else {
+                selected.push(id);
+                effects.push(target);
+            }
+        }
+        let mut operation = OperationPlan::new(ctx.route, ctx.route.name)?;
+        let family = KeyTargetKind::Identity(KeyIdentityKind::Session);
+        if effects.is_empty() {
+            operation.bind_empty(0)?;
+        } else {
+            operation.bind(0, family, &effects)?;
+        }
+        if remaining.is_empty() {
+            operation.bind_empty(1)?;
+        } else {
+            operation.bind(1, family, &remaining)?;
+        }
+        Ok(operation.with_data(SessionRevocations {
+            user,
+            keep,
+            selected,
+        }))
+    })
+}
+
+fn session_delete_operation<'a>(
+    ctx: &'a Ctx,
+    conn: &'a mut Conn,
+    caller: &'a Caller,
+    (): (),
+    (): (),
+) -> OperationFuture<'a> {
+    Box::pin(async move {
+        if caller
+            .grant()
+            .is_some_and(|grant| grant.requires_legacy_compatibility())
+        {
+            return Err(ApiError::new(
+                ErrorCode::AuthSessionRequired,
+                "this is done from a browser sign-in",
+            ));
+        }
+        use orch_access_contract::key_scope::{KeyIdentityKind, KeyTargetKind};
+        let user = caller.user();
+        let (id, owner) = identity::unrevoked_session_subject(conn, ctx.id("id")?, user)
+            .await?
+            .ok_or_else(ApiError::not_found)?;
+        let account = crate::key_operations::targets::account(conn, user).await?;
+        let target = crate::key_operations::targets::from_session_subject(&account, id, owner)?;
+        let mut operation = OperationPlan::new(ctx.route, ctx.route.name)?;
+        operation.bind(
+            0,
+            KeyTargetKind::Identity(KeyIdentityKind::Session),
+            &[target],
+        )?;
+        Ok(operation)
+    })
+}
+
+/// Revocation is one personal act, with one reply describing the sessions that remain.
+async fn session_others_delete(mut ctx: Ctx, (): (), (): ()) -> ApiResult<Vec<SessionInfo>> {
+    let authed = Arc::clone(ctx.user()?);
+    let key_authenticated = require_account_credential(&ctx, &authed)?;
+    // A key has no browser session to preserve. The existing writer's None
+    // means all of this account's sessions; it never revokes API keys.
+    let (mut tx, guard) = credential_action_with_guard(&mut ctx, key_authenticated).await?;
+    let operands = guard.operation_data::<SessionRevocations>()?;
+    if operands.user != authed.id() || operands.keep != current_session(&authed) {
+        return Err(ApiError::internal(
+            "the session-revocation operands do not match their guarded owner",
+        ));
+    }
+    let keep = operands.keep;
+    let ended =
+        identity::revoke_session_set(&mut tx, operands.user, &operands.selected, ctx.now).await?;
+    if ended > 0 {
+        record(
+            &ctx,
+            &mut tx,
+            Actor::User(authed.id()),
+            orch_db::audit::action!(AuditAction::AuthOtherSessionsRevoked),
+            Some(authed.id()),
+            "signed out of all other browsers",
+            json!({"sessions_ended":ended,"kept_session":keep}),
+        )
+        .await?;
+    }
+    let sessions = session_infos(&mut tx, authed.id(), keep, ctx.now).await?;
+    tx.commit().await.map_err(orch_db::DbError::from)?;
+    Ok(sessions)
+}
+
+/// Ends one of the sessions of the signed-in person. A session that is not
+/// theirs is none.
+async fn session_delete(mut ctx: Ctx, (): (), (): ()) -> ApiResult<()> {
+    let authed = Arc::clone(ctx.user()?);
+    let key_authenticated = require_account_credential(&ctx, &authed)?;
+    let id = ctx.id("id")?;
+    let mut tx = credential_action_proven(&mut ctx, key_authenticated).await?;
+    if !identity::revoke_session(&mut tx, id, authed.id(), ctx.now).await? {
+        return Err(ApiError::not_found());
+    }
+    record(
+        &ctx,
+        &mut tx,
+        Actor::User(authed.id()),
+        orch_db::audit::action!(AuditAction::AuthSessionRevoked),
+        Some(authed.id()),
+        &format!("{} ended a session", authed.user.username),
+        json!({ "session": id, "this_one": current_session(&authed) == Some(id) }),
+    )
+    .await?;
+    tx.commit().await.map_err(orch_db::DbError::from)?;
+    Ok(())
+}
+
+/// Lists the API tokens of the signed-in person: never the secrets.
+fn token_list_operation<'a>(
+    ctx: &'a Ctx,
+    conn: &'a mut Conn,
+    caller: &'a Caller,
+    (): (),
+    (): (),
+) -> OperationFuture<'a> {
+    Box::pin(async move {
+        use crate::key_operations::credentials::Collection;
+        let collection = Collection::begin(
+            ctx,
+            conn,
+            caller,
+            caller.user(),
+            orch_access_contract::key_scope::KeyIdentityKind::Key,
+        )
+        .await?;
+        let read = collection.keys(conn).await?;
+        Ok(read.plan.clone().with_data(read))
+    })
+}
+
+async fn tokens(ctx: Ctx, (): (), (): ()) -> ApiResult<Vec<ApiTokenInfo>> {
+    use crate::key_operations::credentials::{self, Read};
+    let mut tx = orch_db::queries::feeds::begin_reading(&ctx.app.db).await?;
+    let principal = ctx.operation_principal(&mut tx).await?;
+    let read = ctx.operation_data::<Read<Vec<ApiTokenInfo>>>()?;
+    let data = credentials::complete(&ctx, &mut tx, &principal, read.as_ref()).await?;
+    tx.commit().await.map_err(orch_db::DbError::from)?;
+    Ok(data)
+}
+
+/// Whether the person may see the node, which is what it takes to keep a
+/// token to it. A node they may not see is none to them.
+async fn may_see(ctx: &Ctx, conn: &mut Conn, user: Id, node: Id) -> ApiResult<bool> {
+    let principal = Principal::load(conn, Caller::session(user), Time::new(ctx.now))
+        .await
+        .map_err(ApiError::internal)?;
+    let name = PermissionName::OfNode(NodePermission::View);
+    match nodes::check_named(conn, &principal, node, name, Act::Use, Policy::default()).await {
+        Ok(Decision::Allowed { .. }) | Err(orch_authz::Error::Archived { .. }) => Ok(true),
+        Ok(Decision::Refused(_))
+        | Err(orch_authz::Error::NotFound(_) | orch_authz::Error::Suspended { .. }) => Ok(false),
+        Err(error) => Err(ApiError::internal(error)),
+    }
+}
+
+/// Makes an API token, narrow (no scopes, none of the person's permissions) and with the maker's fresh
+/// proof in this request. The secret is shown here and never again: only its hash is kept, and the same
+/// creation asked again by its key answers what was made, without it.
+async fn token_create(
+    mut ctx: Ctx,
+    (): (),
+    body: ApiTokenCreateBody,
+) -> ApiResult<Answer<TokenCreateResponse>> {
+    use super::tokens;
+    use crate::sign_in::fresh::{self, Purpose};
+    let authed = Arc::clone(ctx.user()?);
+    {
+        let mut tx = credential_action(&mut ctx).await?;
+        let again = tokens::replayed(&ctx, &mut tx, authed.id()).await?;
+        tx.commit().await.map_err(orch_db::DbError::from)?;
+        if let Some(again) = again {
+            return Ok(Answer::from(TokenCreateResponse::project(
+                again,
+                ctx.key_receipt_required(),
+            ))
+            .header(CACHE_CONTROL, NOT_KEPT));
+        }
+    }
+    let asked = tokens::asked(&body, ctx.now)?;
+    let proven = if authed.is_session() {
+        Some(
+            fresh::prove(
+                &ctx,
+                &authed,
+                body.proof.as_ref().unwrap_or(&Default::default()),
+                Purpose::TokenCreate,
+            )
+            .await?,
+        )
+    } else {
+        None
+    };
+
+    let (mut tx, issuer) = credential_action_with_caller(&mut ctx).await?;
+    let asked = asked.for_issuer(&issuer, &ctx.route, authed.id())?;
+    let operation_scope = asked.stored_scope()?;
+    if let Some(node) = body.node_id
+        && !may_see(&ctx, &mut tx, authed.id(), node).await?
+    {
+        return Err(ApiError::not_found());
+    }
+    let place = body
+        .node_id
+        .map_or(orch_settings::Place::System, orch_settings::Place::Node);
+    tokens::within_lifetime(&mut tx, place, ctx.now, asked.expires_at).await?;
+    if let Some(proven) = proven {
+        proven
+            .spend(&ctx, &mut tx, authed.id(), Purpose::TokenCreate)
+            .await?;
+    }
+    let id = orch_types::new_id();
+    let secret = new_token(API_TOKEN_PREFIX);
+    let name = asked.name.as_str();
+    identity::create_api_token_scoped(
+        &mut tx,
+        &NewApiToken {
+            id,
+            user_id: authed.id(),
+            name,
+            token_hash: &token_hash(&secret),
+            scopes: &asked.scopes,
+            node_id: body.node_id,
+            at: ctx.now,
+            expires_at: asked.expires_at,
+        },
+        operation_scope.as_ref(),
+    )
+    .await?;
+    record(
+        &ctx,
+        &mut tx,
+        Actor::User(authed.id()),
+        orch_db::audit::action!(AuditAction::AuthTokenCreated),
+        Some(authed.id()),
+        &format!("{} made the API token {name}", authed.user.username),
+        json!({ "token": id, "name": name, "scopes": asked.scopes, "node_id": body.node_id, "operation_scope": operation_scope,
+                "expires_at": body.expires_at,
+                "issuer_key_ids": issuer.grant().into_iter().flat_map(orch_authz::TokenGrant::token_ids).collect::<Vec<_>>() }),
+    )
+    .await?;
+    let info = if ctx.key_receipt_required() {
+        asked.created_info(id, ctx.now)?
+    } else {
+        identity::api_token_listed(&mut tx, id, authed.id())
+            .await?
+            .map(token_info)
+            .transpose()?
+            .ok_or_else(|| ApiError::internal("a token that was just made is not there"))?
+    };
+    tokens::keep(&ctx, &mut tx, authed.id(), &info).await?;
+    tx.commit().await.map_err(orch_db::DbError::from)?;
+    Ok(Answer::from(TokenCreateResponse::project(
+        TokenCreated {
+            token: Some(secret),
+            info,
+            already_created: false,
+        },
+        ctx.key_receipt_required(),
+    ))
+    .header(CACHE_CONTROL, NOT_KEPT))
+}
+
+fn token_delete_operation<'a>(
+    ctx: &'a Ctx,
+    conn: &'a mut Conn,
+    caller: &'a Caller,
+    (): (),
+    (): (),
+) -> OperationFuture<'a> {
+    Box::pin(async move {
+        use orch_access_contract::key_scope::{KeyIdentityKind, KeyTargetKind};
+        let target =
+            crate::key_operations::targets::key_of_account(conn, ctx.id("id")?, caller.user())
+                .await?;
+        let mut plan = OperationPlan::new(ctx.route, ctx.route.name)?;
+        let family = KeyTargetKind::Identity(KeyIdentityKind::Key);
+        plan.bind(0, family, std::slice::from_ref(&target))?;
+        plan.bind(1, family, &[target])?;
+        Ok(plan)
+    })
+}
+
+/// Revokes an API token of the signed-in person.
+async fn token_delete(mut ctx: Ctx, (): (), (): ()) -> ApiResult<()> {
+    let authed = Arc::clone(ctx.user()?);
+    let id = ctx.id("id")?;
+    let mut tx = credential_action(&mut ctx).await?;
+    if !identity::revoke_api_token(&mut tx, id, authed.id(), ctx.now).await? {
+        return Err(ApiError::not_found());
+    }
+    // What was decided under the token's reach is decided again.
+    access::bump_epoch(&mut tx).await?;
+    record(
+        &ctx,
+        &mut tx,
+        Actor::User(authed.id()),
+        orch_db::audit::action!(AuditAction::AuthTokenRevoked),
+        Some(authed.id()),
+        &format!("{} revoked an API token", authed.user.username),
+        json!({ "token": id }),
+    )
+    .await?;
+    tx.commit().await.map_err(orch_db::DbError::from)?;
+    Ok(())
+}

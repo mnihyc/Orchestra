@@ -1,4 +1,4 @@
-//! A provider's facts and sources as the API shows them: the provider contract's own types, and the few the API keeps under names of its own carry every member of the provider contract's.
+//! A provider's facts and sources as the API shows them: the provider contract's own types, and the few the API keeps under names of its own carry every public member of the provider contract's.
 //!
 //! A balance, a row of spending, a source's descriptor and the members they are made of are the provider
 //! contract's types, which the API re-exports: what the API answers of them is the JSON it answered before for
@@ -81,10 +81,10 @@ fn a_balance_and_a_row_of_spending_are_answered_as_before_with_the_sources_own_m
 
 #[test]
 fn each_type_the_api_keeps_names_every_member_of_the_provider_contracts() {
-    assert_eq!(
-        members::<api::SourceChoice>(),
-        members::<orch_provider_contract::SourceChoice>()
-    );
+    let mut public_source = members::<orch_provider_contract::SourceChoice>();
+    // Encrypted-field recipient binding is server-derived storage metadata, never an API field.
+    assert!(public_source.remove("secret_source"));
+    assert_eq!(members::<api::SourceChoice>(), public_source);
     assert_eq!(
         members::<api::ProviderFactsLimitReached>(),
         members::<provider::LimitReached>()

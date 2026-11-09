@@ -24,7 +24,7 @@ const before = useAppearance.getState();
 const themeBefore = document.documentElement.dataset.theme;
 const darkBefore = document.documentElement.classList.contains('dark');
 const changes: Changes = { busy: false, doing: null, error: null, stale: null, forget: () => undefined, again: () => Promise.resolve(false), run: () => Promise.resolve(false) };
-const crew: Group = { id: 'crew', org_id: 'acme', name: 'Crew', description: '', member_count: 1, place: 'Acme' };
+const crew: Group = { revision: 1, id: 'crew', org_id: 'acme', name: 'Crew', description: '', member_count: 1, place: 'Acme' };
 const target = { kind: 'thread' as const, id: 'thread', name: 'Example', orgId: 'acme' };
 function page(): PermissionPage {
   const base = pageFor();

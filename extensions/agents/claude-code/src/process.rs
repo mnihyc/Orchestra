@@ -19,7 +19,7 @@ use std::sync::{Arc, Mutex, PoisonError};
 
 use futures::StreamExt;
 use orch_agent_contract::flow;
-use tokio::io::{AsyncReadExt, AsyncWriteExt};
+use tokio::io::{AsyncRead, AsyncReadExt, AsyncWrite, AsyncWriteExt};
 use tokio::process::Command;
 use tokio::sync::{Notify, watch};
 use tokio_util::codec::{FramedRead, LinesCodec, LinesCodecError};
@@ -128,6 +128,55 @@ pub struct LaunchSpec {
 pub trait Launcher: Send + Sync + std::fmt::Debug {
     /// The command that starts the program a launch description names. Its standard streams are set by the caller.
     fn command(&self, spec: &LaunchSpec) -> Command;
+    /// Optional native byte transport. The same bounded readers, writer and conversation actor consume it.
+    /// Ordinary launchers keep their existing command path.
+    fn streams(&self, _spec: &LaunchSpec) -> Option<ProcessStreams> {
+        None
+    }
+}
+
+/// Actual process completion, independent of where its native byte streams are carried.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct ProcessStatus {
+    /// Exit code reported by the process.
+    pub code: Option<i32>,
+    /// Signal reported by the operating system.
+    pub signal: Option<i32>,
+}
+
+/// Process control stays independent of backpressured native output.
+#[async_trait::async_trait]
+pub trait ProcessControl: Send {
+    /// Wait for actual completion; None means the process could not report a status.
+    async fn wait(&mut self) -> Option<ProcessStatus>;
+    /// End this exact process, without matching or enumerating other processes.
+    fn kill(&mut self);
+}
+
+/// Streams and control for one native process; a fixture can supply pipes without another protocol parser.
+pub struct ProcessStreams {
+    /// Native stdin.
+    pub stdin: Option<Box<dyn AsyncWrite + Send + Unpin>>,
+    /// Native stdout.
+    pub stdout: Option<Box<dyn AsyncRead + Send + Unpin>>,
+    /// Native diagnostic bytes.
+    pub stderr: Option<Box<dyn AsyncRead + Send + Unpin>>,
+    /// Exact process lifetime.
+    pub control: Box<dyn ProcessControl>,
+}
+
+struct ChildControl(tokio::process::Child);
+#[async_trait::async_trait]
+impl ProcessControl for ChildControl {
+    async fn wait(&mut self) -> Option<ProcessStatus> {
+        self.0.wait().await.ok().map(|status| ProcessStatus {
+            code: status.code(),
+            signal: signal_of(&status),
+        })
+    }
+    fn kill(&mut self) {
+        let _ = self.0.start_kill();
+    }
 }
 
 /// Starts the program on this machine, as it is.
@@ -300,23 +349,43 @@ fn spawn_with_exit_grace(
     events: flow::Sender<(u64, ProcessEvent)>,
     exit_grace: std::time::Duration,
 ) -> Result<Running, SpawnError> {
-    let mut command = launcher.command(spec);
-    command
-        .stdin(Stdio::piped())
-        .stdout(Stdio::piped())
-        .stderr(Stdio::piped())
-        .kill_on_drop(true);
-    let mut child = command.spawn().map_err(|source| SpawnError {
-        program: spec.program.clone(),
-        source,
-    })?;
+    let mut process = if let Some(streams) = launcher.streams(spec) {
+        streams
+    } else {
+        let mut command = launcher.command(spec);
+        command
+            .stdin(Stdio::piped())
+            .stdout(Stdio::piped())
+            .stderr(Stdio::piped())
+            .kill_on_drop(true);
+        let mut child = command.spawn().map_err(|source| SpawnError {
+            program: spec.program.clone(),
+            source,
+        })?;
+        ProcessStreams {
+            stdin: child
+                .stdin
+                .take()
+                .map(|stream| Box::new(stream) as Box<dyn AsyncWrite + Send + Unpin>),
+            stdout: child
+                .stdout
+                .take()
+                .map(|stream| Box::new(stream) as Box<dyn AsyncRead + Send + Unpin>),
+            stderr: child
+                .stderr
+                .take()
+                .map(|stream| Box::new(stream) as Box<dyn AsyncRead + Send + Unpin>),
+            control: Box::new(ChildControl(child)),
+        }
+    };
+    let mut child = process.control;
     let (input_tx, mut input_rx) = flow::channel(|line: &String| line.capacity());
     let (close_tx, mut close_rx) = watch::channel(false);
     let kill = Arc::new(Notify::new());
     let (exit_tx, exit_rx) = watch::channel(false);
     let local_reason = Arc::new(Mutex::new(None::<String>));
 
-    if let Some(mut stdin) = child.stdin.take() {
+    if let Some(mut stdin) = process.stdin.take() {
         let kill = Arc::clone(&kill);
         let local_reason = Arc::clone(&local_reason);
         tokio::spawn(async move {
@@ -355,7 +424,7 @@ fn spawn_with_exit_grace(
     }
 
     let tail: Arc<Mutex<VecDeque<u8>>> = Arc::new(Mutex::new(VecDeque::new()));
-    let stderr_task = child.stderr.take().map(|mut stderr| {
+    let stderr_task = process.stderr.take().map(|mut stderr| {
         let tail = Arc::clone(&tail);
         let label = spec.label.clone();
         tokio::spawn(async move {
@@ -374,7 +443,7 @@ fn spawn_with_exit_grace(
 
     // Process control stays live while a full event queue stops the stdout reader.
     let mut native_exit = exit_rx.clone();
-    let stdout = child.stdout.take();
+    let stdout = process.stdout.take();
     let forward = events.clone();
     let reader_kill = Arc::clone(&kill);
     let reader_reason = Arc::clone(&local_reason);
@@ -424,18 +493,18 @@ fn spawn_with_exit_grace(
         let mut graceful_deadline = None;
         let status = loop {
             tokio::select! {
-                status = child.wait() => break status.ok(),
+                status = child.wait() => break status,
                 _ = controller_kill.notified() => {
-                    let _ = child.start_kill();
-                    break child.wait().await.ok();
+                    child.kill();
+                    break child.wait().await;
                 }
                 _ = stop_rx.changed(), if graceful_deadline.is_none() => {
                     graceful_deadline = Some(tokio::time::Instant::now() + exit_grace);
                 }
                 () = async { if let Some(at) = graceful_deadline { tokio::time::sleep_until(at).await; } },
                     if graceful_deadline.is_some() => {
-                    let _ = child.start_kill();
-                    break child.wait().await.ok();
+                    child.kill();
+                    break child.wait().await;
                 }
             }
         };
@@ -458,8 +527,7 @@ fn spawn_with_exit_grace(
         {
             stderr_tail.push(reason);
         }
-        let (code, signal) =
-            status.map_or((None, None), |status| (status.code(), signal_of(&status)));
+        let (code, signal) = status.map_or((None, None), |status| (status.code, status.signal));
         let _ = events
             .send((
                 generation,

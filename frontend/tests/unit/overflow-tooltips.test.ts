@@ -1,5 +1,6 @@
 /** Cut values remain readable by pointer and keyboard, including content inserted after startup. */
 import { fireEvent } from '@testing-library/dom';
+import { restoreFocusQuietly } from '@/ui/focus';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { hasOwnTooltip, installOverflowTooltips, overflowText, OVERFLOW_REST_MS, textOverflows } from '@/ui/overflowTooltips';
 
@@ -302,4 +303,31 @@ describe('the single delegated reader', () => {
     fireEvent.pointerOver(element); vi.advanceTimersByTime(OVERFLOW_REST_MS);
     expect(tip()).toBeNull();
   });
+});
+
+for (const value of ['This device (Asia/Singapore, UTC+08:00)', '此设备（Asia/Singapore，UTC+08:00）']) {
+  it(`reveals a clipped committed combobox value without treating fields that fit as shortened: ${value}`, () => {
+    const field = document.createElement('input');
+    field.type = 'text'; field.setAttribute('role', 'combobox'); field.value = value;
+    field.style.cssText = 'text-overflow:ellipsis;overflow:hidden;white-space:nowrap';
+    let width = 120;
+    Object.defineProperties(field, {
+      clientWidth: { get: () => width }, scrollWidth: { get: () => 300 },
+      clientHeight: { get: () => 32 }, scrollHeight: { get: () => 32 },
+    });
+    document.body.append(field); install();
+    fireEvent.pointerOver(field, { pointerType: 'mouse' }); vi.advanceTimersByTime(OVERFLOW_REST_MS);
+    expect(tip()).toHaveTextContent(value);
+    field.focus(); expect(tip()).toHaveTextContent(value);
+    expect(field).not.toHaveAttribute('tabindex');
+    width = 320; reportResize(field);
+    expect(tip()).toBeNull();
+    expect(textOverflows(field)).toBe(false);
+  });
+}
+
+it('keeps an automatically restored overflow hint quiet but still reveals the same value on later keyboard focus', () => {
+  const { element } = label(); install();
+  restoreFocusQuietly(element); expect(element).toHaveFocus(); expect(tip()).toBeNull();
+  element.blur(); element.focus(); expect(tip()).toHaveTextContent(overflowText(element));
 });

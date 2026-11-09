@@ -1,4 +1,5 @@
 /** Template and host choices use readable authorized names through the native revisioned setting row. */
+import type { ComponentProps } from 'react';
 import { act, cleanup, screen, waitFor } from '@testing-library/react';
 import userEvent from '@testing-library/user-event';
 import { afterEach, beforeEach, expect, it, vi } from 'vitest';
@@ -23,7 +24,12 @@ vi.mock('@/api/resources', async (load) => { const actual = await load<typeof Re
   templatesQuery: (kind: string) => ({ queryKey: ['named-template-choices', kind], queryFn: reads.templates, staleTime: Infinity }) }; });
 vi.mock('@/api/settings', async (load) => ({ ...await load<typeof SettingsApi>(), putSetting: vi.fn() }));
 vi.mock('@/features/settings/sourceAddress', () => ({ useSourceOrgAddress: () => null }));
-vi.mock('@tanstack/react-router', async (load) => ({ ...await load<object>(), useLocation: () => ({ pathname: '/resources/example', searchStr: '' }) }));
+vi.mock('@tanstack/react-router', async (load) => ({ ...await load<object>(),
+  useLocation: () => ({ pathname: '/resources/example', searchStr: '' }),
+  useNavigate: () => vi.fn(),
+  // This focused setting-write fixture does not mount a router; preserve its real anchors.
+  Link: ({to,params:_params,children,...props}:ComponentProps<'a'>&{to:string;params?:unknown}) => <a {...props} href={to}>{children}</a>,
+}));
 vi.mock('@/features/help/open', () => ({ useHelpOpener: () => vi.fn() }));
 const currentId = '0199c1a0-0000-7000-8000-000000000001', nextId = '0199c1a0-0000-7000-8000-000000000002';
 const initialAppearance = useAppearance.getState(), wasDark = document.documentElement.classList.contains('dark'), previousTheme = document.documentElement.dataset.theme;
@@ -55,7 +61,7 @@ for (const locale of ['en', 'zh-CN'] as const) for (const theme of ['light', 'da
     await setLocale(locale); useAppearance.setState({ theme, resolvedTheme: theme }); document.documentElement.dataset.theme = theme; document.documentElement.classList.toggle('dark', theme === 'dark');
     const user = userEvent.setup(), view = draw(key), template = key.endsWith('.template_id');
     const choice = await screen.findByRole('combobox', { name: view.title });
-    await waitFor(() => expect(choice).toHaveTextContent(template ? 'Research template' : 'Research host'));
+    await waitFor(() => expect(choice).toHaveDisplayValue(template ? 'Research template' : 'Research host'));
     expect(reads.hosts).not.toHaveBeenCalled(); expect(reads.templates).not.toHaveBeenCalled();
     expect(view.container).not.toHaveTextContent(currentId); expect(screen.queryByRole('textbox')).not.toBeInTheDocument(); expect(putSetting).not.toHaveBeenCalled();
     await user.click(choice);
@@ -78,7 +84,7 @@ it('keeps a readable name read-only and conceals an unavailable identifier', asy
 it('keeps host and template inventories asleep for a minute until their actual picker opens', async () => {
   const view = draw('env.host_id');
   const choice = await screen.findByRole('combobox', { name: view.title });
-  await waitFor(() => expect(choice).toHaveTextContent('Research host'));
+  await waitFor(() => expect(choice).toHaveDisplayValue('Research host'));
   expect(reads.hostName).toHaveBeenCalledExactlyOnceWith(currentId);
   vi.useFakeTimers();
   try {
@@ -93,7 +99,7 @@ it('keeps host and template inventories asleep for a minute until their actual p
 
 it('chooses automatic host placement explicitly without sending the menu sentinel', async () => {
   const user = userEvent.setup(), view = draw('env.host_id');
-  const choice = await screen.findByRole('combobox', { name: view.title }); await waitFor(() => expect(choice).toHaveTextContent('Research host'));
+  const choice = await screen.findByRole('combobox', { name: view.title }); await waitFor(() => expect(choice).toHaveDisplayValue('Research host'));
   await user.click(choice); await user.click(screen.getByRole('option', { name: i18n.t('providerRuntime.autoHost') }));
   await waitFor(() => expect(putSetting).toHaveBeenCalledExactlyOnceWith(view.target, 'env.host_id', { value: null, expectedRevision: 7 }));
 });

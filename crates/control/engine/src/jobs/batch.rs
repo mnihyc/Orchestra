@@ -18,13 +18,13 @@
 
 use crate::engine::Engine;
 use crate::error::EngineError;
-use crate::fork_plan::{PlanError, Reach, StoredBatch, StoredMember};
+use crate::fork_plan::{PlanError, PreparedFork, Reach, StoredBatch, StoredMember};
 use crate::jobs::estimates;
 use crate::jobs::runner::read_progress;
 use orch_access_contract::decisions::MissingAccess as Missing;
 use orch_api_contract::forks::{
     AppliedChangeOptions, ForkBatchCounts, ForkBatchPlan, ForkBatchPreflightBody, ForkBatchTarget,
-    ForkCreateBody, ForkEnvironment, ForkPlan, ForkRequest, ForkResult, ForkSkipped, SkipReason,
+    ForkCreateBody, ForkEnvironment, ForkRequest, ForkResult, ForkSkipped, SkipReason,
 };
 use orch_api_contract::nodes::{NodeKind, NodeRef};
 use orch_authz::Caller;
@@ -35,6 +35,9 @@ use orch_types::{Id, new_id};
 
 /// How many jobs of one batch run at once when the setting is not there: what it ships with.
 const PARALLEL_DEFAULT: i64 = 4;
+
+mod confirmation;
+pub use confirmation::{BatchConfirmation, ConfirmationMember, LifecycleConfirmation};
 
 /// A batch that is planned and not yet kept.
 #[derive(Debug, Clone, PartialEq)]
@@ -47,6 +50,101 @@ pub struct BatchDraft {
     pub lacks: Vec<Vec<(usize, Vec<Missing>)>>,
     /// What was asked.
     pub body: ForkBatchPreflightBody,
+    /// Actual native names/configuration entering the selected full plan.
+    pub disclosure: Vec<orch_access_contract::decisions::ObjectRef>,
+}
+
+/// Pure native batch selection. Suppliers and private-plan insertion are separate consumers.
+#[derive(Clone)]
+pub struct PreparedBatch {
+    body: ForkBatchPreflightBody,
+    members: Vec<BatchSelection>,
+    skipped: Vec<ForkSkipped>,
+    new_environment: bool,
+    now: chrono::DateTime<chrono::Utc>,
+}
+#[derive(Clone)]
+pub struct BatchSelection {
+    stored: StoredMember,
+    selected: PreparedFork,
+}
+impl BatchSelection {
+    pub fn selected(&self) -> &PreparedFork {
+        &self.selected
+    }
+    pub fn member(&self) -> &StoredMember {
+        &self.stored
+    }
+}
+impl PreparedBatch {
+    pub fn body(&self) -> &ForkBatchPreflightBody {
+        &self.body
+    }
+    pub fn selections(&self) -> &[BatchSelection] {
+        &self.members
+    }
+    pub fn preserves(&self, current: &Self) -> bool {
+        self.body == current.body
+            && self.skipped == current.skipped
+            && self.members.len() == current.members.len()
+            && self
+                .members
+                .iter()
+                .zip(&current.members)
+                .all(|(old, new)| old.stored == new.stored && old.selected.preserves(&new.selected))
+    }
+}
+
+/// One actual batch membership snapshot; state may advance without changing its sources.
+#[derive(Clone)]
+pub struct BatchCancellation {
+    batch: Id,
+    rows: Vec<JobRow>,
+}
+
+impl BatchCancellation {
+    /// Actual native rows, including already finished members.
+    pub fn rows(&self) -> &[JobRow] {
+        &self.rows
+    }
+
+    /// The same immutable native membership and governors, independently of progress.
+    pub fn preserves(&self, fresh: &Self) -> bool {
+        self.batch == fresh.batch
+            && self.rows.len() == fresh.rows.len()
+            && self.rows.iter().zip(&fresh.rows).all(|(old, new)| {
+                old.id == new.id
+                    && old.kind == new.kind
+                    && old.node_id == new.node_id
+                    && old.environment_id == new.environment_id
+                    && old.provider_id == new.provider_id
+                    && old.batch_id == new.batch_id
+                    && old.created_by == new.created_by
+                    && old.created_at == new.created_at
+            })
+    }
+}
+
+/// The existing native cancellation outcome; cleanup starts only after its transaction commits.
+pub struct BatchMemberCancellation {
+    row: JobRow,
+    ended: bool,
+    asked: bool,
+}
+
+impl BatchMemberCancellation {
+    /// Actual affected member, never a new scope identity.
+    pub fn id(&self) -> Id {
+        self.row.id
+    }
+    /// A queued member ended in this transaction.
+    pub fn ended(&self) -> bool {
+        self.ended
+    }
+    /// A running member accepted the native cancellation request.
+    pub fn asked(&self) -> bool {
+        self.asked
+    }
 }
 
 /// The request for one thread of a batch: a switch in place to what the batch names.
@@ -56,6 +154,7 @@ fn request_of(body: &ForkBatchPreflightBody) -> ForkRequest {
         topic_id: None,
         name: None,
         access: None,
+        agent_access: None,
         history: None,
         to: body.to.clone(),
         environment: body.environment.clone(),
@@ -81,6 +180,22 @@ fn redacted(thread: Id) -> NodeRef {
     }
 }
 
+async fn require_binding_source_read(
+    conn: &mut orch_db::Conn,
+    principal: &orch_authz::Principal,
+    object: orch_access_contract::decisions::ObjectRef,
+) -> Result<(), PlanError> {
+    let may_read = crate::resource_facts::authorities(conn, principal, &[object.id])
+        .await?
+        .into_iter()
+        .any(|row| row.resource.object() == object && (row.readable || row.manageable));
+    if may_read {
+        Ok(())
+    } else {
+        Err(PlanError::NotFound)
+    }
+}
+
 impl Engine {
     /// The most jobs of one batch that run at once, by the setting.
     async fn batch_parallel(&self) -> Result<i64, EngineError> {
@@ -100,10 +215,45 @@ impl Engine {
         caller: &Caller,
         body: &ForkBatchPreflightBody,
     ) -> Result<BatchDraft, PlanError> {
-        let now = self.inner.clock.now();
         let mut conn = self.inner.db.acquire().await?;
+        let prepared = self.prepare_batch_in(&mut conn, caller, body).await?;
+        self.assemble_prepared_batch(&mut conn, caller, &prepared, None)
+            .await
+    }
+
+    /// Selects the actual native members and destinations without running any supplier.
+    pub async fn prepare_batch_in(
+        &self,
+        conn: &mut orch_db::Conn,
+        caller: &Caller,
+        body: &ForkBatchPreflightBody,
+    ) -> Result<PreparedBatch, PlanError> {
+        Box::pin(
+            self.prepare_batch_on::<crate::fork_plan::operation::BatchPreview>(
+                conn, caller, body, false,
+            ),
+        )
+        .await
+    }
+    /// The same native selection, with current candidate facts from its declared batch source.
+    pub async fn prepare_batch_in_with_source<I: crate::fork_plan::operation::Intent>(
+        &self,
+        conn: &mut orch_db::Conn,
+        caller: &Caller,
+        body: &ForkBatchPreflightBody,
+    ) -> Result<PreparedBatch, PlanError> {
+        Box::pin(self.prepare_batch_on::<I>(conn, caller, body, true)).await
+    }
+    async fn prepare_batch_on<I: crate::fork_plan::operation::Intent>(
+        &self,
+        conn: &mut orch_db::Conn,
+        caller: &Caller,
+        body: &ForkBatchPreflightBody,
+        scoped_preparation: bool,
+    ) -> Result<PreparedBatch, PlanError> {
+        let now = self.inner.clock.now();
         let most = orch_settings::get::<i64>(
-            &mut conn,
+            conn,
             orch_settings::Place::System,
             orch_settings_contract::registry::keys::SWITCH_BATCH_THREADS,
         )
@@ -154,13 +304,13 @@ impl Engine {
                 let answer = self
                     .inner
                     .access
-                    .environment_manage(&mut conn, caller.user(), environment)
+                    .environment_manage(conn, caller.user(), environment)
                     .await
                     .map_err(EngineError::from)?;
                 if !answer.is_allowed() {
                     return Err(PlanError::NotFound);
                 }
-                let ids = threads::tools::threads_in_environment(&mut conn, environment).await?;
+                let ids = threads::tools::threads_in_environment(conn, environment).await?;
                 if ids.len() > most {
                     return Err(PlanError::invalid(
                         "all_of_environment",
@@ -175,9 +325,6 @@ impl Engine {
                 use orch_access_contract::decisions::ObjectRef;
                 use orch_access_contract::permissions::{ObjectKind, Permission, PermissionName};
                 use orch_api_contract::resource_facts::{DependentRelation, FactTarget};
-                let principal = orch_authz::Principal::load(&mut conn, caller.clone(), now.into())
-                    .await
-                    .map_err(EngineError::from)?;
                 let object = ObjectRef {
                     kind: if body.all_of_agent.is_some() {
                         ObjectKind::Agent
@@ -186,13 +333,19 @@ impl Engine {
                     },
                     id: source,
                 };
-                let may_read = crate::resource_facts::authorities(&mut conn, &principal, &[source])
-                    .await?
-                    .into_iter()
-                    .any(|row| row.resource.object() == object && (row.readable || row.manageable));
-                if !may_read {
-                    return Err(PlanError::NotFound);
-                }
+                let ordinary = if scoped_preparation
+                    && caller
+                        .grant()
+                        .is_some_and(|grant| grant.operation_scope().is_some())
+                {
+                    None
+                } else {
+                    let principal = orch_authz::Principal::load(conn, caller.clone(), now.into())
+                        .await
+                        .map_err(EngineError::from)?;
+                    require_binding_source_read(conn, &principal, object).await?;
+                    Some(principal)
+                };
                 if let Some(model) = body.source_model_id {
                     let exists: bool = sqlx::query_scalar("SELECT EXISTS(SELECT 1 FROM provider_models WHERE id=$1 AND provider_id=$2)")
                         .bind(model).bind(source).fetch_one(&mut *conn).await.map_err(DbError::from)?;
@@ -201,7 +354,7 @@ impl Engine {
                     }
                 }
                 let facts = crate::resource_facts::target_dependents(
-                    &mut conn,
+                    conn,
                     &FactTarget {
                         object,
                         model_id: body.source_model_id,
@@ -219,8 +372,22 @@ impl Engine {
                             .map(|object| object.id)
                     })
                     .collect();
+                let principal = match ordinary {
+                    Some(principal) => principal,
+                    None => {
+                        let candidate = crate::fork_plan::operation::batch_discovery_caller::<I>(
+                            conn, caller, &ids,
+                        )
+                        .await?;
+                        let principal = orch_authz::Principal::load(conn, candidate, now.into())
+                            .await
+                            .map_err(EngineError::from)?;
+                        require_binding_source_read(conn, &principal, object).await?;
+                        principal
+                    }
+                };
                 let managed = orch_authz::nodes::holding(
-                    &mut conn,
+                    conn,
                     &principal,
                     &ids,
                     PermissionName::Exact(Permission::ThreadManage),
@@ -269,9 +436,7 @@ impl Engine {
         } else {
             Reach::Seen
         };
-        let mut plans: Vec<ForkPlan> = Vec::new();
-        let mut members: Vec<StoredMember> = Vec::new();
-        let mut lacks: Vec<Vec<(usize, Vec<Missing>)>> = Vec::new();
+        let mut members = Vec::new();
         let mut skipped: Vec<ForkSkipped> = excluded
             .into_iter()
             .map(|thread| ForkSkipped {
@@ -288,63 +453,60 @@ impl Engine {
                 thread: redacted(thread),
                 reason,
             };
+            // The actual native source is known before visibility and permission selection.
+            // Missing/deleted native rows keep their original skip and never invent a target.
+            let candidate_caller = if scoped_preparation {
+                if threads::thread(conn, thread)
+                    .await?
+                    .is_none_or(|row| row.deleted_at.is_some())
+                {
+                    skipped.push(skip(SkipReason::NotFound));
+                    continue;
+                }
+                crate::fork_plan::operation::batch_preparation_caller::<I>(
+                    conn,
+                    caller,
+                    whole_environment,
+                    &[thread],
+                )
+                .await?
+            } else {
+                caller.clone()
+            };
             match self
-                .draft_in(&mut conn, caller, thread, &request, reach, None)
+                .prepare_fork_in(conn, &candidate_caller, thread, &request, reach, None, None)
                 .await
             {
-                Ok(mut draft) => {
-                    let hidden = reach == Reach::Environment
-                        && !self.caller_sees(&mut conn, caller, thread, now).await?;
-                    if hidden {
-                        draft.plan.source = redacted(thread);
-                    }
-                    // A thread the caller may not switch is left out and listed.
-                    if draft.lacks.iter().any(|(_, missing)| {
-                        missing.iter().any(|lack| {
-                            lack.permissions.contains(
-                                &orch_access_contract::permissions::Permission::ThreadManage,
-                            )
-                        })
-                    }) {
-                        let mut left_out = skip(SkipReason::NoPermission);
-                        left_out.thread = draft.plan.source.clone();
-                        skipped.push(left_out);
+                Ok(selected) => {
+                    if selected.missing_thread_manage() {
+                        let mut left = skip(SkipReason::NoPermission);
+                        left.thread = if reach == Reach::Environment
+                            && !self
+                                .caller_sees(conn, &candidate_caller, thread, now)
+                                .await?
+                        {
+                            redacted(thread)
+                        } else {
+                            selected.source_ref()
+                        };
+                        skipped.push(left);
                         continue;
                     }
-                    if let Some(ForkEnvironment::New { new }) = &mut request.environment {
-                        // Resolve one shared home rather than each source topic choosing a different environment.
-                        if new.home_node_id.is_none() {
-                            new.home_node_id = threads::thread(&mut conn, thread)
-                                .await?
-                                .map(|thread| thread.topic_id);
-                        }
-                        if new.template_id.is_none()
-                            && let Some(home) = new.home_node_id
-                        {
-                            new.template_id = orch_settings::get::<Id>(
-                                &mut conn,
-                                orch_settings::Place::Node(home),
-                                orch_settings_contract::registry::keys::ENV_TEMPLATE_ID,
-                            )
-                            .await
-                            .map_err(EngineError::from)?;
-                        }
-                        if let orch_api_contract::forks::ForkPlanTarget::Made { new: planned } =
-                            &draft.plan.to.environment
-                            && new.host_id.is_none()
-                            && let orch_api_contract::forks::Place::Host(host) = &planned.place
-                        {
-                            new.host_id = Some(Some(host.host.id));
-                        }
-                    }
-                    lacks.push(draft.lacks.clone());
-                    members.push(StoredMember {
-                        thread,
-                        request: request.clone(),
-                        reach,
-                        source_scope: Some(draft.source_scope.clone()),
+                    selected
+                        .share_environment(conn, &mut request.environment)
+                        .await?;
+                    members.push(BatchSelection {
+                        stored: StoredMember {
+                            thread,
+                            request: request.clone(),
+                            reach,
+                            source_scope: Some(crate::fork_plan::SourceScope::of(
+                                selected.source(),
+                                reach,
+                            )),
+                        },
+                        selected,
                     });
-                    plans.push(draft.plan);
                 }
                 Err(PlanError::NotFound) => skipped.push(skip(SkipReason::NotFound)),
                 Err(PlanError::Archived) => skipped.push(skip(SkipReason::Archived)),
@@ -352,12 +514,61 @@ impl Engine {
                 Err(other) => return Err(other),
             }
         }
-        drop(conn);
+        Ok(PreparedBatch {
+            body: body.clone(),
+            members,
+            skipped,
+            new_environment,
+            now,
+        })
+    }
+
+    /// The existing native supplier half, consuming the exact selected members once.
+    pub async fn assemble_prepared_batch(
+        &self,
+        conn: &mut orch_db::Conn,
+        caller: &Caller,
+        prepared: &PreparedBatch,
+        sources: Option<&[crate::fork_plan::operation::Preparation]>,
+    ) -> Result<BatchDraft, PlanError> {
+        if sources.is_some_and(|sources| sources.len() != prepared.members.len()) {
+            return Err(
+                EngineError::unreadable("the native batch supplier source count changed").into(),
+            );
+        }
+        let mut plans = Vec::new();
+        let mut members = Vec::new();
+        let mut lacks = Vec::new();
+        let skipped = prepared.skipped.clone();
+        let mut disclosure = Vec::new();
+        for (index, member) in prepared.members.iter().enumerate() {
+            let mut draft = self
+                .assemble_prepared_fork_with_source(
+                    conn,
+                    &member.selected,
+                    sources.map(|sources| &sources[index]),
+                )
+                .await?;
+            if member.stored.reach == Reach::Environment
+                && !self
+                    .caller_sees(conn, caller, member.stored.thread, prepared.now)
+                    .await?
+            {
+                draft.plan.source = redacted(member.stored.thread);
+            }
+            lacks.push(draft.lacks);
+            members.push(member.stored.clone());
+            disclosure.extend(draft.disclosure);
+            plans.push(draft.plan);
+        }
         let parallel = self.batch_parallel().await?;
         let executable = plans.iter().filter(|plan| plan.blockers.is_empty()).count();
         let first = plans.first();
-        let options = first.map_or_else(|| default_options(body), |plan| plan.options.clone());
-        let estimate = (if new_environment {
+        let options = first.map_or_else(
+            || default_options(&prepared.body),
+            |plan| plan.options.clone(),
+        );
+        let estimate = (if prepared.new_environment {
             estimates::together_in_new_environment
         } else {
             estimates::together
@@ -369,18 +580,20 @@ impl Engine {
             parallel,
         );
         let target = ForkBatchTarget {
-            provider: body
+            provider: prepared
+                .body
                 .to
                 .as_ref()
                 .and_then(|to| to.provider_id)
                 .and(first.map(|plan| plan.to.provider.clone())),
-            agent: body
+            agent: prepared
+                .body
                 .to
                 .as_ref()
                 .and_then(|to| to.agent_id)
                 .and(first.map(|plan| plan.to.agent.clone())),
-            model: body.to.as_ref().and_then(|to| to.model.clone()),
-            effort: body.to.as_ref().and_then(|to| to.effort.clone()),
+            model: prepared.body.to.as_ref().and_then(|to| to.model.clone()),
+            effort: prepared.body.to.as_ref().and_then(|to| to.effort.clone()),
         };
         let plan = ForkBatchPlan {
             notification: None,
@@ -388,9 +601,10 @@ impl Engine {
             expires_at: first.map_or_else(
                 || {
                     orch_types::Time::new(
-                        now + chrono::Duration::minutes(
-                            orch_api_contract::forks::PREFLIGHT_VALID_MINUTES,
-                        ),
+                        prepared.now
+                            + chrono::Duration::minutes(
+                                orch_api_contract::forks::PREFLIGHT_VALID_MINUTES,
+                            ),
                     )
                 },
                 |plan| plan.expires_at,
@@ -408,7 +622,8 @@ impl Engine {
             plan,
             members,
             lacks,
-            body: body.clone(),
+            body: prepared.body.clone(),
+            disclosure,
         })
     }
 
@@ -442,38 +657,45 @@ impl Engine {
     pub async fn keep_batch_plan(
         &self,
         caller: &Caller,
+        draft: BatchDraft,
+    ) -> Result<ForkBatchPlan, PlanError> {
+        let mut conn = self.inner.db.acquire().await?;
+        self.keep_batch_plan_on(&mut conn, caller, draft, || Ok(()))
+            .await
+    }
+    /// The same audience/private-plan writer at its first INSERT on the actual action connection.
+    pub async fn keep_batch_plan_on(
+        &self,
+        conn: &mut orch_db::Conn,
+        caller: &Caller,
         mut draft: BatchDraft,
+        before: impl FnOnce() -> Result<(), EngineError> + Send,
     ) -> Result<ForkBatchPlan, PlanError> {
         let id = new_id();
         draft.plan.preflight_id = id;
-        let mut conn = self.inner.db.acquire().await?;
         let principal = orch_authz::Principal::load(
-            &mut conn,
+            conn,
             caller.clone(),
             orch_types::Time::new(self.inner.clock.now()),
         )
         .await?;
-        let ids = draft
-            .members
-            .iter()
-            .zip(&draft.plan.plans)
-            .filter(|(_, plan)| plan.blockers.is_empty())
-            .map(|(member, _)| member.thread)
-            .collect::<Vec<_>>();
+        let mut stored = StoredBatch {
+            body: draft.body.clone(),
+            plan: draft.plan.clone(),
+            members: draft.members.clone(),
+        };
+        let ids = stored.recipient_threads();
         let audience =
-            crate::notifications::operation_thread_audience(&mut conn, &principal, &ids).await?;
+            crate::notifications::operation_thread_audience(conn, &principal, &ids).await?;
         draft.plan.notification = Some(orch_api_contract::loss::OperationNotificationPlan {
             preview_id: Some(id),
             people: audience.len() as i64,
             default_on: draft.plan.executable > 0,
         });
-        let stored = StoredBatch {
-            body: draft.body.clone(),
-            plan: draft.plan.clone(),
-            members: draft.members.clone(),
-        };
+        stored.plan = draft.plan.clone();
+        before()?;
         fork_rows::save_preflight(
-            &mut conn,
+            conn,
             &fork_rows::PreflightRow {
                 id,
                 kind: fork_rows::BATCH_PLAN_KIND.to_owned(),
@@ -487,7 +709,7 @@ impl Engine {
         )
         .await?;
         orch_db::queries::notifications::operations::preview(
-            &mut conn,
+            conn,
             id,
             &audience
                 .iter()
@@ -507,7 +729,7 @@ impl Engine {
         body: &ForkCreateBody,
     ) -> Result<(Id, Vec<JobRow>), PlanError> {
         let mut tx = self.inner.db.begin().await?;
-        let row = fork_rows::preflight(&mut tx, body.preflight_id)
+        let row = fork_rows::lock_preflight(&mut tx, body.preflight_id)
             .await?
             .filter(|row| row.kind == fork_rows::BATCH_PLAN_KIND)
             .filter(|row| row.created_by == caller.user())
@@ -528,12 +750,23 @@ impl Engine {
             self.queue_batch_members(&mut tx, caller, &stored, body, batch),
         )
         .await?;
+        Box::pin(self.finish_batch_confirmation(tx, &principal, body, batch, jobs, || Ok(()))).await
+    }
+    pub(super) async fn finish_batch_confirmation(
+        &self,
+        mut tx: orch_db::Tx,
+        principal: &orch_authz::Principal,
+        body: &ForkCreateBody,
+        batch: Id,
+        jobs: Vec<JobRow>,
+        deadline: impl Fn() -> Result<(), EngineError> + Send,
+    ) -> Result<(Id, Vec<JobRow>), PlanError> {
         let actual = jobs
             .iter()
             .filter_map(|job| job.node_id)
             .collect::<Vec<_>>();
         let audience =
-            crate::notifications::operation_thread_audience(&mut tx, &principal, &actual).await?;
+            crate::notifications::operation_thread_audience(&mut tx, principal, &actual).await?;
         let reviewed: Option<Vec<Id>> =
             sqlx::query_scalar("SELECT users FROM operation_recipient_previews WHERE id=$1")
                 .bind(body.preflight_id)
@@ -578,6 +811,7 @@ impl Engine {
         )
         .await?;
         fork_rows::forget_preflight(&mut tx, body.preflight_id).await?;
+        deadline()?;
         tx.commit().await.map_err(orch_db::DbError::from)?;
         self.kick();
         for job in &jobs {
@@ -597,73 +831,53 @@ impl Engine {
         body: &ForkCreateBody,
         batch: Id,
     ) -> Result<Vec<JobRow>, PlanError> {
-        let mut ordered: Vec<&StoredMember> = stored.members.iter().collect();
-        ordered.sort_by_key(|member| member.thread);
-        let mut jobs: Vec<JobRow> = Vec::new();
-        for member in ordered {
-            let Some(thread) = threads::lock(conn, member.thread)
-                .await?
-                .filter(|row| row.deleted_at.is_none())
-            else {
-                continue;
-            };
-            if !member
-                .source_scope
-                .as_ref()
-                .is_some_and(|scope| scope.matches(&thread))
-            {
-                continue;
-            }
-            if crate::locks::held_by(conn, member.thread).await?.is_some() {
-                continue;
-            }
-            let mut request = member.request.clone();
-            if let Some(given) = &body.options {
-                let mut options = request.options.take().unwrap_or_default();
-                options.active_turn = given.active_turn.or(options.active_turn);
-                options.wait_minutes = given.wait_minutes.or(options.wait_minutes);
-                options.verify_timeout_secs =
-                    given.verify_timeout_secs.or(options.verify_timeout_secs);
-                options.keep_previous = given.keep_previous.or(options.keep_previous);
-                options.stop_processes = given.stop_processes.or(options.stop_processes);
-                request.options = Some(options);
-            }
-            let Ok(mut draft) = self
-                .draft_in(
-                    conn,
-                    caller,
-                    member.thread,
-                    &request,
-                    member.reach,
-                    Some(batch),
-                )
-                .await
-            else {
-                continue;
-            };
-            if !draft.is_clear() {
-                continue;
-            }
-            draft.request = request;
-            jobs.push(
-                self.start_fork_job(conn, caller, &thread, draft, Some(batch), body.preflight_id)
-                    .await?,
-            );
+        if !stored.members.is_empty()
+            && stored
+                .members
+                .iter()
+                .all(|member| member.reach == Reach::Environment)
+        {
+            let selected = self
+                .select_lifecycle_confirmation(conn, caller, stored, body, batch, true)
+                .await?;
+            let drafts = self
+                .assemble_lifecycle_confirmation(conn, &selected)
+                .await?;
+            return self
+                .queue_lifecycle_confirmation(conn, caller, &selected, &selected, &drafts)
+                .await;
         }
-        if jobs.is_empty() {
-            return Err(PlanError::NothingExecutable);
-        }
-        if matches!(stored.body.environment, Some(ForkEnvironment::New { .. })) {
-            let maker = jobs.first().ok_or(PlanError::NothingExecutable)?.id;
-            for job in &mut jobs {
-                let patch = serde_json::json!({"batch_environment_job":maker});
-                job_rows::merge_plan(conn, job.id, &patch, self.inner.clock.now()).await?;
-                if let Some(plan) = job.plan.as_object_mut() {
-                    plan.insert("batch_environment_job".to_owned(), serde_json::json!(maker));
-                }
-            }
-        }
-        Ok(jobs)
+        let prepared = Box::pin(self.select_confirmation_members(
+            conn,
+            caller,
+            stored,
+            body,
+            batch,
+            confirmation::Selection {
+                locking: true,
+                declared: false,
+            },
+        ))
+        .await?;
+        let drafts = Box::pin(self.assemble_confirmation_members(conn, &prepared, None)).await?;
+        Box::pin(self.queue_confirmation_members(
+            conn,
+            caller,
+            &prepared,
+            drafts,
+            None,
+            confirmation::Queue {
+                batch,
+                preflight: body.preflight_id,
+                new_environment: matches!(
+                    stored.body.environment,
+                    Some(ForkEnvironment::New { .. })
+                ),
+            },
+            || Ok(()),
+            || Ok(()),
+        ))
+        .await
     }
 
     /// The jobs of a batch, oldest first.
@@ -775,35 +989,88 @@ impl Engine {
     pub async fn cancel_batch(&self, by: Id, batch: Id) -> Result<Vec<JobRow>, EngineError> {
         let rows = self.batch_jobs(batch).await?;
         for row in rows.iter().filter(|row| row.is_open()) {
-            let never_began = row.state == state::QUEUED && row.plan.get("runner").is_none();
-            if never_began {
-                let now = self.inner.clock.now();
-                let (progress, _) = read_progress(row);
-                let mut tx = self.inner.db.begin().await?;
-                let ended = job_rows::finish(
-                    &mut tx,
-                    row.id,
-                    state::CANCELLED,
-                    &serde_json::to_value(&progress)?,
-                    None,
-                    Some(&serde_json::json!({
-                        "code": "cancelled",
-                        "message": "the job was cancelled before it began",
-                        "phase": progress.phase,
-                        "undone": true,
-                    })),
-                    now,
-                )
+            let mut tx = self.inner.db.begin().await?;
+            let Some(current) = job_rows::lock(&mut tx, row.id).await? else {
+                continue;
+            };
+            let result = self
+                .cancel_batch_member_before(&mut tx, &current, by, || Ok(()))
                 .await?;
-                tx.commit().await.map_err(orch_db::DbError::from)?;
-                if ended {
-                    self.after_fork_job(row).await;
-                }
-            } else {
-                self.cancel_job(row.id, by).await?;
-            }
+            tx.commit().await.map_err(DbError::from)?;
+            self.finish_batch_member(&result).await?;
         }
         self.batch_jobs(batch).await
+    }
+
+    /// Select the exact native batch without dispatching or cancelling anything.
+    pub async fn preparing_batch_cancellation(
+        &self,
+        conn: &mut orch_db::Conn,
+        batch: Id,
+    ) -> Result<BatchCancellation, EngineError> {
+        Ok(BatchCancellation {
+            batch,
+            rows: fork_rows::of_batch(conn, batch).await?,
+        })
+    }
+
+    /// The same per-member writer used by ordinary cancellation, on the caller's locked row.
+    /// The callback belongs immediately before the first actual SQL mutation.
+    pub async fn cancel_batch_member_before<F>(
+        &self,
+        conn: &mut orch_db::Conn,
+        row: &JobRow,
+        by: Id,
+        before: F,
+    ) -> Result<BatchMemberCancellation, EngineError>
+    where
+        F: FnOnce() -> Result<(), EngineError> + Send,
+    {
+        let mut result = BatchMemberCancellation {
+            row: row.clone(),
+            ended: false,
+            asked: false,
+        };
+        if !row.is_open() {
+            return Ok(result);
+        }
+        let never_began = row.state == state::QUEUED && row.plan.get("runner").is_none();
+        if never_began {
+            let (progress, _) = read_progress(row);
+            let progress_json = serde_json::to_value(&progress)?;
+            let error = serde_json::json!({"code":"cancelled", "message":"the job was cancelled before it began", "phase":progress.phase, "undone":true});
+            before()?;
+            result.ended = job_rows::finish(
+                conn,
+                row.id,
+                state::CANCELLED,
+                &progress_json,
+                None,
+                Some(&error),
+                self.inner.clock.now(),
+            )
+            .await?;
+        } else {
+            before()?;
+            result.asked =
+                job_rows::request_cancel(conn, row.id, by, self.inner.clock.now()).await?;
+        }
+        Ok(result)
+    }
+
+    /// Complete only the already accepted cancellation's native cleanup and wakeups.
+    pub async fn finish_batch_member(
+        &self,
+        result: &BatchMemberCancellation,
+    ) -> Result<(), EngineError> {
+        if result.ended {
+            self.after_fork_job(&result.row).await;
+        }
+        if result.asked {
+            self.stop_job_command(result.row.id).await?;
+            self.kick();
+        }
+        Ok(())
     }
 }
 

@@ -191,10 +191,10 @@ function AddPeople({ place, open, onClose, givable }: { place: AccessTarget; ope
       dismissible={!give.isPending}
       footer={
         <>
-          <Button disabled={give.isPending} onClick={onClose}>
+          <Button disabled={give.isPending} reason={give.isPending ? t('ui.unavailable.saving') : undefined} onClick={onClose}>
             {t('common.cancel')}
           </Button>
-          <Button variant="primary" pending={give.isPending} blocked={chosen === null} onClick={() => give.mutate()}>
+          <Button variant="primary" pending={give.isPending} blocked={chosen === null} reason={give.isPending ? t('ui.unavailable.saving') : chosen === null ? t('ui.unavailable.recipient') : undefined} onClick={() => give.mutate()}>
             {t('access.roles.give')}
           </Button>
         </>
@@ -275,7 +275,7 @@ export function Roles({ place, onDefaults }: { place: AccessTarget; onDefaults?:
     },
   });
 
-  if (roles.isPending) return <SkeletonRows rows={4} />;
+  if (roles.isPending) return <SkeletonRows read={roles} rows={4} />;
   if (roles.isError) return <ErrorState compact error={roles.error} retrying={roles.isRefetching} onRetry={() => void roles.refetch()} />;
   const own = roles.data.own;
 
@@ -400,12 +400,13 @@ export function Roles({ place, onDefaults }: { place: AccessTarget; onDefaults?:
         title={t('access.roles.endTitle', { name: ending === null ? '' : subjectName(ending.subject, t,label) })}
         footer={
           <>
-            <Button disabled={finish.isPending} onClick={() => setEnding(null)}>
+            <Button disabled={finish.isPending} reason={finish.isPending ? t('ui.unavailable.saving') : undefined} onClick={() => setEnding(null)}>
               {t('common.cancel')}
             </Button>
             <Button
               variant="primary"
               pending={finish.isPending}
+              reason={finish.isPending ? t('ui.unavailable.saving') : undefined}
               onClick={() => ending !== null && finish.mutate({ row: ending, expires: end === '' ? null : new Date(`${end}T23:59:59`).toISOString() })}
             >
               {t('access.roles.endSave')}

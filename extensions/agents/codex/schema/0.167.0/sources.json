@@ -1,0 +1,18 @@
+{
+  "program": "codex",
+  "version": "0.167.0",
+  "commit": "086ccc833bc9cf01024ad2dd6af7dbd421b6bf9a",
+  "provenance": "Published generated schemas from the native program source; downloaded unchanged, not a native transcript or a local generation.",
+  "files": [
+    {
+      "path": "app-server.schema.json",
+      "source": "https://raw.githubusercontent.com/openai/codex/086ccc833bc9cf01024ad2dd6af7dbd421b6bf9a/codex-rs/app-server-protocol/schema/json/codex_app_server_protocol.schemas.json",
+      "sha256": "021462a9bacd117f4cd40c256a4888619d059cec6a65b795198d521ba660e554"
+    },
+    {
+      "path": "config.schema.json",
+      "source": "https://raw.githubusercontent.com/openai/codex/086ccc833bc9cf01024ad2dd6af7dbd421b6bf9a/codex-rs/core/config.schema.json",
+      "sha256": "66ed795352d32f2464778acd2e332b7fafe644246d540cdceec4663c56cfbc16"
+    }
+  ]
+}

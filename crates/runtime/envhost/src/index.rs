@@ -171,6 +171,15 @@ impl IndexState {
         self == Self::Full
     }
 
+    /// The actual entry bound which made this index Live, when it crossed one.
+    #[must_use]
+    pub fn entry_limit(self) -> Option<u64> {
+        match self {
+            Self::Live(LiveReason::TooManyEntries { limit }) => Some(limit),
+            _ => None,
+        }
+    }
+
     /// The stable reason a live tree reports to the server.
     #[must_use]
     pub fn reason(self) -> Option<orch_link_contract::events::IndexReason> {

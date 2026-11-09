@@ -5,7 +5,7 @@
  * is asked to change nothing is told so ("nothing to change"), instead of being sent its own values back.
  * The request is built here and nowhere else.
  */
-import type { ArrangementType, ChangeOptions, CopyInto, FileSelection, ForkEnvironment, ForkHistory, ForkRequest, MountChoice, MountFate, PlanMount, ThreadAccess } from '@/generated/api-types';
+import type { ArrangementType, ChangeOptions, CopyInto, FileSelection, ForkEnvironment, ForkHistory, ForkRequest, MountChoice, MountFate, PlanMount, Thread, ThreadAccess } from '@/generated/api-types';
 
 /** What the person chose for one mount; a mount without one takes its default. */
 export interface MountPick {
@@ -41,7 +41,7 @@ export type FileChoice = { mode: 'all' } | { mode: 'none' } | { mode: 'selection
 export type WhereChoice =
   | { kind: 'same' }
   | { kind: 'use'; id: string; files: FileChoice }
-  | { kind: 'new'; hostId: string | null; name: string; files: FileChoice; home: boolean; privateViews: boolean; onlyMe: boolean };
+  | { kind: 'new'; hostId: string | null; name: string; files: FileChoice; home: boolean; privateViews: boolean; onlyMe: boolean; temporary?: boolean };
 
 /** How much of the history a fork or a switch carries: all of it, up to one turn (what forking from a message asks), a range, a summary, none. */
 export type HistoryChoice = 'all' | 'upto' | 'range' | 'summary' | 'none';
@@ -69,8 +69,8 @@ export interface Choices {
   effort: string | null | undefined;
   arrangement: ArrangementType | null;
   where: WhereChoice;
-  /** The directory the result works in; empty is the source's. */
-  directory: string;
+  /** Null keeps the source directory; an empty string explicitly selects the workspace root. */
+  directory: string | null;
   /** The history; a `null` mode is what the place carries (`thread.switch_history`), which the request leaves to the server. */
   history: { mode: HistoryChoice | null; fromTurn: number | null; toTurn: number | null };
   /** Whether the agent's own notes go along; `null` leaves it to the default. */
@@ -93,7 +93,7 @@ export function initialChoices(result: 'new' | 'replace', toTurn: number | null 
     effort: undefined,
     arrangement: null,
     where: { kind: 'same' },
-    directory: '',
+    directory: null,
     // From the first message of the conversation there is nothing before it to take: the fork starts fresh.
     history: { mode: toTurn === null ? null : toTurn <= 0 ? 'none' : 'upto', fromTurn: null, toTurn: toTurn !== null && toTurn > 0 ? toTurn : null },
     memory: null,
@@ -102,6 +102,13 @@ export function initialChoices(result: 'new' | 'replace', toTurn: number | null 
     options: NO_OPTIONS,
     mounts: {},
   };
+}
+
+/** A built-in source has no current native profile or workspace to inherit. */
+export function initialThreadChoices(thread: Pick<Thread, 'program' | 'environment'>, result: 'new' | 'replace', toTurn: number | null = null): Choices {
+  const choices = initialChoices(result, toTurn);
+  if (thread.program?.id !== 'orch' || thread.environment !== null) return choices;
+  return { ...choices, where: { kind: 'use', id: '', files: { mode: 'none' } }, page: result === 'new' ? 'private' : choices.page };
 }
 
 export const ALL_FILES: FileChoice = { mode: 'all' };
@@ -138,6 +145,7 @@ function environmentOf(where: WhereChoice): ForkEnvironment | null {
           ...(where.home ? { home: true } : {}),
           ...(where.privateViews ? {} : { private_views: false }),
           ...(where.onlyMe ? { access: 'only_me' as const } : {}),
+          ...(where.temporary === true ? { config: { 'env.lifetime': 'thread' } } : {}),
         },
       };
   }
@@ -204,7 +212,7 @@ export function requestOf(choices: Choices, topicId: string | null = null): Fork
     result: choices.result,
     ...(to === null ? {} : { to }),
     ...(where === null ? {} : { environment: where }),
-    ...(choices.directory.trim() === '' ? {} : { directory: choices.directory.trim() }),
+    ...(choices.directory === null ? {} : { directory: choices.directory.trim() }),
     ...(history === null ? {} : { history }),
     ...(choices.memory === null ? {} : { memory: choices.memory }),
     ...(choices.result === 'new' && choices.name.trim() !== '' ? { name: choices.name.trim() } : {}),
@@ -217,7 +225,7 @@ export function requestOf(choices: Choices, topicId: string | null = null): Fork
 
 /** Whether the choices change anything of where or on what the result runs: a switch that does not is not asked for a plan. */
 export function changesSomething(choices: Choices): boolean {
-  return toOf(choices) !== null || choices.where.kind !== 'same' || choices.directory.trim() !== '';
+  return toOf(choices) !== null || choices.where.kind !== 'same' || choices.directory !== null;
 }
 
 /** How many of the parameters differ from where they start, for the mark beside Options. */

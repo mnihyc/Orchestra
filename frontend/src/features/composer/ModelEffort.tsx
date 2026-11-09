@@ -16,7 +16,7 @@ import { useCompactControls } from '@/features/workbench/Narrow';
 import { useMutation } from '@tanstack/react-query';
 import type { TFunction } from 'i18next';
 import { Check, ChevronDown, Lock } from 'lucide-react';
-import { type KeyboardEvent, type ReactNode, useEffect, useRef, useState } from 'react';
+import { type KeyboardEvent, type ReactNode, type Ref, useEffect, useRef, useState } from 'react';
 import { useTranslation } from 'react-i18next';
 
 import { ContextChoice } from '@/features/composer/ContextChoice';
@@ -45,6 +45,7 @@ import { Popover } from '@/ui/Popover';
 import { SkeletonRows } from '@/ui/Skeleton';
 import { toast } from '@/ui/Toast';
 import { Tooltip } from '@/ui/Tooltip';
+import { sameSelectionModel, selectionEffort, selectionWithEffort, type ModelSelection } from './modelSelection';
 
 export interface ModelEffortProps {
   thread: Thread;
@@ -99,6 +100,102 @@ function PickerRow({ name, description, preview, checked, disabled, tabStop, nes
       {content}
     </button></ChoiceCard>}
   </Choice>;
+}
+
+interface OptionDetails { description: ReactNode; preview?: CardPreview }
+/** One row mechanism for a thread and a controlled API-model selection. */
+function ModelOptionRows({ option, identity, selected, effort, disabled, effortSupported, focusKey, onFocus, onModel, onEffort, details, rowRef }: {
+  option: ModelOption; identity: string; selected: boolean; effort: string | null; disabled: boolean; effortSupported: boolean;
+  focusKey: string | null; onFocus: (key: string) => void; onModel: () => void; onEffort: (effort: string) => void;
+  details: (effort: string | null) => OptionDetails; rowRef?: Ref<HTMLLIElement>;
+}) {
+  const { t } = useTranslation();
+  const modelDetails = details(effort);
+  return <li ref={rowRef} role="none" className="flex w-full flex-col">
+    <PickerRow name={optionName(option)} {...modelDetails} checked={selected} disabled={disabled} tabStop={focusKey === choiceKey(identity)}
+      onFocused={() => onFocus(choiceKey(identity))} onChoose={onModel} />
+    {effortSupported && (option.parameters.efforts?.length ?? 0) > 0 && <div role="group" aria-label={t('composer.model.efforts', { model: optionName(option) })} className="flex w-full flex-col">
+      {(option.parameters.efforts ?? []).map((value) => <PickerRow key={value} nested name={effortDisplayName(value, t)} {...details(value)} checked={selected && effort === value}
+        disabled={disabled} tabStop={focusKey === choiceKey(identity, value)} onFocused={() => onFocus(choiceKey(identity, value))} onChoose={() => onEffort(value)} />)}
+    </div>}
+  </li>;
+}
+
+/** IDs are the producer's row identities; equal models may have distinct ordered presets. */
+export interface ModelEffortEntry {
+  id: string;
+  value: ModelSelection;
+  option: ModelOption;
+  providerName: string;
+  reason?: ReactNode;
+}
+export interface ControlledModelEffortProps {
+  choice: {
+    value: ModelSelection | null;
+    entries: readonly ModelEffortEntry[];
+    onChange: (value: ModelSelection | null, entry?: ModelEffortEntry) => void;
+    label: string;
+    selectedId?: string | null;
+    defaultChoice?: { label: string; value: ModelSelection | null };
+    disabled?: boolean;
+    showEffort?: boolean;
+    state?: ReactNode;
+    renderParameters?: (entry: ModelEffortEntry, value: ModelSelection, onChange: (params: unknown) => void, disabled: boolean) => ReactNode;
+  };
+  open?: boolean;
+  onOpenChange?: (open: boolean) => void;
+}
+
+function ControlledModelEffort({ choice, open: controlledOpen, onOpenChange }: ControlledModelEffortProps) {
+  const { t } = useTranslation();
+  const [localOpen, setLocalOpen] = useState(false), [focusKey, setFocusKey] = useState<string | null>(null);
+  const open = controlledOpen ?? localOpen;
+  const show = (next: boolean) => { setLocalOpen(next); onOpenChange?.(next); };
+  const effective = choice.value ?? choice.defaultChoice?.value;
+  const selected = choice.entries.find((entry) => entry.id === choice.selectedId)
+    ?? choice.entries.find((entry) => sameSelectionModel(effective, entry.value) && JSON.stringify(entry.value.params) === JSON.stringify(effective?.params))
+    ?? choice.entries.find((entry) => sameSelectionModel(effective, entry.value));
+  const rawEffort = selectionEffort(effective?.params);
+  const presetEffort = selectionEffort(selected?.value.params);
+  const effort = rawEffort !== undefined ? rawEffort : presetEffort !== undefined ? presetEffort : selected?.option.parameters.default_effort ?? null;
+  const name = selected === undefined ? effective === null || effective === undefined ? '' : modelDisplayName(undefined, t) : optionName(selected.option);
+  const resolved = name === '' ? '' : effort === null || choice.showEffort === false ? name : `${name} (${effortDisplayName(effort, t)})`;
+  const defaultValue = choice.defaultChoice?.value;
+  const defaultEntry = choice.entries.find((entry) => sameSelectionModel(defaultValue, entry.value) && JSON.stringify(entry.value.params) === JSON.stringify(defaultValue?.params))
+    ?? choice.entries.find((entry) => sameSelectionModel(defaultValue, entry.value));
+  const defaultEffort = selectionEffort(defaultValue?.params);
+  const defaultStart = defaultEffort === undefined ? defaultEntry?.option.parameters.default_effort ?? null : defaultEffort;
+  const defaultName = defaultEntry === undefined ? defaultValue === null || defaultValue === undefined ? '' : modelDisplayName(undefined, t) : optionName(defaultEntry.option);
+  const defaultResolved = defaultName === '' ? '' : defaultStart === null ? defaultName : `${defaultName} (${effortDisplayName(defaultStart, t)})`;
+  const label = choice.value === null && choice.defaultChoice !== undefined
+    ? [choice.defaultChoice.label, resolved].filter(Boolean).join(' · ') : resolved || t('composer.model.none');
+  const first = choice.defaultChoice === undefined ? choice.entries.find((entry) => entry.option.allowed)?.id : '$default';
+  const tabStop = focusKey ?? (first === undefined ? null : first === '$default' ? first : choiceKey(first));
+  const choose = (entry: ModelEffortEntry, selectedEffort?: string) => {
+    if (choice.disabled || !entry.option.allowed) return;
+    const base = selected?.id === entry.id && choice.value !== null ? choice.value : entry.value;
+    choice.onChange(selectedEffort === undefined ? { ...entry.value } : { ...base, params: selectionWithEffort(base.params, selectedEffort) }, entry);
+  };
+  return <Popover label={choice.label} open={open} onOpenChange={show} side="top" scroll="children"
+    trigger={<Button action="models" variant="ghost" size="sm" disabled={choice.disabled} aria-label={choice.label} className="max-w-(--chip-width-wide)"><span className="truncate">{label}</span><ChevronDown aria-hidden className="shrink-0" /></Button>}>
+    <div className="flex min-h-0 w-80 max-w-full flex-col gap-3">
+      <ChoiceInspection><ul role="menu" aria-label={t('composer.model.list')} onKeyDown={moveChoiceFocus} className="flex max-h-(--list-max-height) min-h-0 flex-col gap-1 overflow-y-auto">
+        {choice.defaultChoice !== undefined && <li role="none"><PickerRow name={choice.defaultChoice.label} description={defaultResolved} checked={choice.value === null} disabled={choice.disabled === true}
+          tabStop={tabStop === '$default'} onFocused={() => setFocusKey('$default')} onChoose={() => choice.onChange(null)} /></li>}
+        {choice.entries.map((entry) => {
+          const current = selected?.id === entry.id;
+          const own = selectionEffort(entry.value.params);
+          return <ModelOptionRows key={entry.id} option={entry.option} identity={entry.id} selected={choice.value !== null && current}
+            effort={current ? effort : own === undefined ? entry.option.parameters.default_effort ?? null : own} disabled={choice.disabled === true || !entry.option.allowed}
+            effortSupported={choice.showEffort !== false} focusKey={tabStop} onFocus={setFocusKey} onModel={() => choose(entry)} onEffort={(value) => choose(entry, value)}
+            details={() => ({ description: entry.option.allowed ? entry.providerName : entry.reason ?? t(`composer.model.reason.${entry.option.reason ?? 'disabled'}`, { provider: entry.providerName }) })} />;
+        })}
+      </ul></ChoiceInspection>
+      {choice.state}
+      {selected !== undefined && selected.option.allowed && effective !== undefined && effective !== null && choice.renderParameters?.(selected, effective,
+        (params) => { if (!choice.disabled) choice.onChange({ ...effective, params }, selected); }, choice.disabled === true)}
+    </div>
+  </Popover>;
 }
 
 /** What the control says a thread runs with beyond its model and effort: the speed and the access program where they are not the ordinary ones, and the context where a choice of it is open. */
@@ -173,7 +270,7 @@ function Choices({ thread, section }: { thread: Thread; section: Kind | null }) 
     },
   });
 
-  if (runs.pending) return <SkeletonRows rows={3} />;
+  if (runs.pending) return <SkeletonRows reads={runs.reads} rows={3} />;
   if (runs.parameters === undefined) return <ErrorAlert error={runs.failed} />;
   const parameters = runs.parameters;
   const needle = filter.trim().toLowerCase();
@@ -219,26 +316,13 @@ function Choices({ thread, section }: { thread: Thread; section: Kind | null }) 
           {...(writable ? {} : { tabIndex: 0 })}
         >
           {allowed.map((option) => {
-            const efforts = option.parameters.efforts ?? [];
             const isCurrent = option.model_name === parameters.model.value;
             const subject = modelResource(option, thread.binding?.provider.id ?? '', { usage: parameters.provider?.choice_usage, effort: isCurrent ? parameters.effort.value : option.parameters.default_effort, speed: hint(option, isCurrent ? parameters.effort.value : option.parameters.default_effort ?? null), impact: t('resourceFacts.nextTurn') });
-            return (
-              <li key={option.model_name} ref={isCurrent ? currentRow : undefined} role="none" className="flex w-full flex-col">
-                <PickerRow name={optionName(option)} description={<ResourceHint subject={subject} />} preview={resourcePreview(subject)}
-                  checked={isCurrent} disabled={!writable} tabStop={tabStop === choiceKey(option.model_name)} onFocused={() => setFocusKey(choiceKey(option.model_name))}
-                  onChoose={() => change.mutate({ model: option.model_name, effort: option.parameters.default_effort ?? null, option })} />
-                {efforts.length > 0 && effortSupported && (
-                  <div role="group" aria-label={t('composer.model.efforts', { model: optionName(option) })} className="flex w-full flex-col">
-                    {efforts.map((effort) => (
-                      <PickerRow key={effort} nested name={effortDisplayName(effort, t)} description={<ResourceHint subject={{ ...subject, effort, speed: hint(option, effort) }} />} preview={resourcePreview({ ...subject, effort, speed: hint(option, effort) })}
-                        checked={isCurrent && parameters.effort.value === effort} disabled={!writable} tabStop={tabStop === choiceKey(option.model_name, effort)}
-                        onFocused={() => setFocusKey(choiceKey(option.model_name, effort))}
-                        onChoose={() => change.mutate({ model: option.model_name, effort, option })} />
-                    ))}
-                  </div>
-                )}
-              </li>
-            );
+            return <ModelOptionRows key={option.model_name} option={option} identity={option.model_name} selected={isCurrent} effort={isCurrent ? parameters.effort.value : option.parameters.default_effort ?? null}
+              disabled={!writable} effortSupported={effortSupported} focusKey={tabStop} onFocus={setFocusKey} rowRef={isCurrent ? currentRow : undefined}
+              onModel={() => change.mutate({ model: option.model_name, effort: option.parameters.default_effort ?? null, option })}
+              onEffort={(effort) => change.mutate({ model: option.model_name, effort, option })}
+              details={(effort) => { const selected = { ...subject, effort, speed: hint(option, effort) }; return { description: <ResourceHint subject={selected} />, preview: resourcePreview(selected) }; }} />;
           })}
         </ul></ChoiceInspection>
         {notice.length > 0 && (
@@ -283,7 +367,7 @@ function Choices({ thread, section }: { thread: Thread; section: Kind | null }) 
   );
 }
 
-export function ModelEffort({ thread, variant, open, onOpenChange, section = null, compact = false, readOnly = false }: ModelEffortProps) {
+function ThreadModelEffort({ thread, variant, open, onOpenChange, section = null, compact = false, readOnly = false }: ModelEffortProps) {
   const narrow = useCompactControls();
   const { t } = useTranslation();
   const locale = useAppearance((state) => state.locale);
@@ -298,12 +382,14 @@ export function ModelEffort({ thread, variant, open, onOpenChange, section = nul
   const mayManage = holds(thread.access, 'thread.manage');
   const trigger =
     variant === 'composer' ? (
-      <Button action="models" variant="ghost" size="sm" disabled={!bound} aria-label={t('composer.model.change', { model: label === '' ? t('composer.model.none') : label })} className={compact ? cx('w-full min-w-0 max-w-full', narrow ? 'gap-1 px-1 text-xs [&>svg]:hidden' : 'gap-2 px-2 text-sm') : 'max-w-(--chip-width-wide)'}>
-        {compact ? <><span className={cx('min-w-0 truncate text-left', !narrow && 'hidden')}>{name === '' ? t('composer.model.none') : name}</span><span className={cx('min-w-0 truncate', narrow ? 'hidden' : 'inline')}>{label === '' ? t('composer.model.none') : label}</span></> : <span className="truncate">{label === '' ? t('composer.model.none') : label}</span>}
+      <Button action="models" variant="ghost" size="sm" disabled={!bound || readOnly} aria-label={t(readOnly ? 'composer.model.current' : 'composer.model.change', { model: label === '' ? t('composer.model.none') : label })} className={compact ? cx('w-full min-w-0 max-w-full shrink-1', narrow ? 'gap-1 px-1 text-xs [&>svg]:hidden' : 'gap-2 px-2 text-sm') : 'max-w-(--chip-width-wide)'}>
+        {compact ? <><span data-model-name className="min-w-0 flex-1 truncate text-left">{name === '' ? t('composer.model.none') : name}</span>
+          {options.length > 0 && <>{' '}<span data-model-options className="min-w-0 max-w-(--chip-width) shrink-0 truncate text-text-muted">({options.join(t('startFlow.separator'))})</span></>}</>
+          : <span className="truncate">{label === '' ? t('composer.model.none') : label}</span>}
         <ChevronDown aria-hidden className="shrink-0" />
       </Button>
     ) : (
-      <Button action="models" variant="ghost" size="sm" disabled={!bound} aria-label={t('composer.model.change', { model: label === '' ? t('composer.model.none') : label })} className="max-w-(--chip-width)">
+      <Button action="models" variant="ghost" size="sm" disabled={!bound || readOnly} aria-label={t(readOnly ? 'composer.model.current' : 'composer.model.change', { model: label === '' ? t('composer.model.none') : label })} className="max-w-(--chip-width)">
         <span className="truncate text-text-muted">{label === '' ? t('composer.model.none') : label}</span>
         {!mayManage && <Lock className="text-text-subtle" aria-hidden />}
       </Button>
@@ -314,10 +400,15 @@ export function ModelEffort({ thread, variant, open, onOpenChange, section = nul
       trigger={<Tooltip content={label === '' ? undefined : label}>{trigger}</Tooltip>}
       side={variant === 'composer' ? 'top' : 'bottom'}
       className="max-w-[min(20rem,calc(100vw-2rem))]"
-      {...(open === undefined ? {} : { open })}
+      {...(readOnly ? { open: false } : open === undefined ? {} : { open })}
       {...(onOpenChange === undefined ? {} : { onOpenChange })}
     >
       {readOnly ? <p className="text-sm text-text-muted">{t('composer.row.readOnly')}</p> : <Choices thread={thread} section={section} />}
     </Popover>{subject?.model.parameters.context_window !== undefined && subject.model.parameters.context_window !== null && <ResourceName subject={subject} hint={false} className={compact ? 'hidden @sm/composer:inline-flex' : undefined}><ResourceHint subject={subject} className="truncate" /></ResourceName>}</span>
   );
+}
+
+/** Persistence and native reads stay with the caller; both modes share their picker rows. */
+export function ModelEffort(props: ModelEffortProps | ControlledModelEffortProps) {
+  return 'thread' in props ? <ThreadModelEffort {...props} /> : <ControlledModelEffort {...props} />;
 }

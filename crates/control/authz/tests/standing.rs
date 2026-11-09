@@ -625,7 +625,24 @@ async fn manage_of_an_area_holds_the_levels_below_it_and_its_advanced_rows_and_n
     let held = w
         .holds_on(environment_manager, "environment", environment)
         .await;
-    assert_eq!(held.len(), 12, "{held:?}");
+    assert_eq!(
+        held,
+        [
+            P::EnvironmentView,
+            P::EnvironmentUse,
+            P::EnvironmentManage,
+            P::FilesView,
+            P::FilesManage,
+            P::TerminalView,
+            P::TerminalManage,
+            P::BrowserView,
+            P::BrowserManage,
+            P::VncView,
+            P::VncManage,
+            P::PortsView,
+            P::PortsManage,
+        ]
+    );
     for door in [
         P::FilesManage,
         P::TerminalManage,
