@@ -7,6 +7,8 @@
 
 mod places;
 mod support;
+use crate::support::FullPermissionPageReply;
+use support::FullRoleReply as _;
 
 use orch_api_contract::access::{
     AccessChoice, AgentLevel, Holder, HolderInput, NodeDefaultsGet, NodeRoleCreate, NodeRoleList,
@@ -99,6 +101,7 @@ async fn change(
         .body(change)
         .send()
         .await
+        .full_permission_page()
 }
 
 async fn give(
@@ -124,6 +127,7 @@ async fn give(
         })
         .send()
         .await
+        .full_role()
 }
 
 async fn the_policy(world: &World, place: Id, value: bool) {
@@ -424,6 +428,7 @@ async fn a_role_is_given_by_the_rule_of_the_rows_up_to_the_giver_s_own_and_taken
         })
         .send()
         .await
+        .full_role()
         .ok();
     assert_eq!(raised.role, Role::Interactor);
     // Where the place keeps sharing to its owners and to whoever manages its page, Fay gives none, and the owner still does.
@@ -455,7 +460,7 @@ async fn a_role_is_given_by_the_rule_of_the_rows_up_to_the_giver_s_own_and_taken
 }
 
 #[tokio::test]
-async fn the_policy_that_keeps_sharing_to_owners_is_read_at_each_scope_and_a_lock_above_decides() {
+async fn the_policy_that_keeps_sharing_to_owners_only_narrows_until_the_parent_relaxes() {
     let world = World::new().await;
     let f = firm(&world).await;
     let login = make_topic(&world, &f.boss, f.web, "Login").await.base.id;
@@ -491,33 +496,21 @@ async fn the_policy_that_keeps_sharing_to_owners_is_read_at_each_scope_and_a_loc
     )
     .await
     .ok();
-    // On again for the project, which is nearer than the org.
+    // A project's saved choice cannot reopen sharing while its org forbids it.
     the_policy(&world, f.web, true).await;
+    let refused = share(2).await.problem();
+    assert_eq!(refused.code, ErrorCode::AuthzDenied);
+    assert_eq!(refused.extra["required"], "access.manage");
+    assert!(!page(&world, &f.fay, login).await.gives.holders_share);
+    // Relaxing the parent makes the already saved project choice effective.
+    the_policy(&world, f.acme, true).await;
     share(2).await.ok();
-    // Off for the topic, nearer still.
+    // The topic can make the policy stricter again.
     the_policy(&world, login, false).await;
     assert_eq!(share(3).await.problem().code, ErrorCode::AuthzDenied);
-    // A lock at the org decides for everything inside.
+    // A parent refusal needs no lock, even with true saved at both lower scopes.
     the_policy(&world, login, true).await;
-    {
-        let mut conn = world.conn().await;
-        orch_settings::write::write(
-            &mut conn,
-            &orch_settings::write::Write {
-                actor: orch_db::audit::Actor::System,
-                target: Target::Node(f.acme),
-                key: "sharing.allow_holders",
-                value: json!(false),
-                locked: Some(true),
-                expected_revision: None,
-                may_lock: true,
-                origin: &orch_db::audit::Origin::default(),
-            },
-            world.now(),
-        )
-        .await
-        .unwrap();
-    }
+    the_policy(&world, f.acme, false).await;
     assert_eq!(share(3).await.problem().code, ErrorCode::AuthzDenied);
 }
 

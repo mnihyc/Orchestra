@@ -100,7 +100,7 @@ BEGIN
         SELECT e.holder_kind, e.holder_id, '', n.path, n.org_id, NULL
           FROM nodes n JOIN permission_entries e ON e.object_kind = 'node' AND e.object_id = n.id
            AND e.page = 'live' AND e.permission = 'access.own'
-         WHERE w.kind IN ('role','visible') AND n.id = w.id AND n.kind <> 'thread'
+         WHERE w.kind IN ('role','visible') AND n.id = w.id AND (n.kind <> 'thread' OR w.kind = 'visible')
            AND e.holder_kind = 'group' AND e.removed_at IS NULL
            AND (e.expires_at IS NULL OR e.expires_at > sampled_at)
         UNION ALL
@@ -116,7 +116,8 @@ BEGIN
                     WHEN e.holder_kind = 'role' AND e.holder_id IS NOT NULL AND e.holder_role = 'viewer' THEN 'visible'
                     ELSE e.holder_kind END,
                CASE WHEN e.source = 'creation' THEN COALESCE(n.parent_id, n.id)
-                    WHEN e.holder_kind = 'everyone' THEN n.id ELSE COALESCE(e.holder_id, n.id) END,
+                    WHEN e.holder_kind = 'everyone' THEN n.id
+                    ELSE COALESCE(e.holder_id, CASE WHEN n.kind = 'thread' THEN n.parent_id ELSE n.id END) END,
                CASE WHEN e.source <> 'creation' AND e.holder_kind = 'role'
                           AND NOT (e.holder_id IS NOT NULL AND e.holder_role = 'viewer')
                     THEN e.holder_role ELSE '' END,
@@ -152,7 +153,7 @@ BEGIN
                AND NOT EXISTS (SELECT 1 FROM scopes s WHERE s.permission = p.permission AND NOT s.inherit AND s.rank > p.rank
                  AND s.rank <= COALESCE((SELECT min(l.rank) FROM scopes l WHERE l.permission = p.permission AND l.locked), 2147483647))
           ) e
-         WHERE w.kind IN ('visible','reachable') AND n.id = w.id AND n.kind <> 'thread'
+         WHERE w.kind IN ('visible','reachable') AND n.id = w.id AND (n.kind <> 'thread' OR w.kind = 'visible')
            AND (CASE WHEN e.permission IN (n.kind || '.view', n.kind || '.interact', n.kind || '.manage')
                      THEN 'visible' ELSE 'reachable' END) = w.kind
       ) edge
@@ -171,7 +172,7 @@ BEGIN
       SELECT n.path AS owner_path, n.org_id AS owner_root, e.holder_kind, e.holder_id
         FROM nodes n JOIN permission_entries e ON e.object_kind = 'node' AND e.object_id = n.id
          AND e.page = 'live' AND e.permission = 'access.own'
-       WHERE n.id = w.id AND n.kind <> 'thread' AND e.holder_kind IN ('user','group')
+       WHERE n.id = w.id AND (n.kind <> 'thread' OR w.kind = 'visible') AND e.holder_kind IN ('user','group')
          AND e.removed_at IS NULL AND (e.expires_at IS NULL OR e.expires_at > sampled_at)
        OFFSET 0
     ) owner WHERE w.kind IN ('role','visible')
@@ -936,20 +937,6 @@ BEGIN
 END
 $$;
 
-CREATE FUNCTION public.orch_document_summary_due() RETURNS trigger
-    LANGUAGE plpgsql
-    AS $$
-BEGIN
-    INSERT INTO document_summary_state (document_id, due_at, next_at)
-        SELECT d.id, NEW.updated_at, NEW.updated_at FROM documents d
-        WHERE d.id = NEW.document_id AND d.description_source = 'auto' AND d.deleted_at IS NULL
-        ON CONFLICT (document_id) DO UPDATE
-            SET due_at = LEAST(COALESCE(document_summary_state.due_at, EXCLUDED.due_at), EXCLUDED.due_at)
-            WHERE document_summary_state.due_at IS NULL OR EXCLUDED.due_at < document_summary_state.due_at;
-    RETURN NEW;
-END;
-$$;
-
 CREATE FUNCTION public.orch_item_internal_marker() RETURNS trigger
     LANGUAGE plpgsql
     AS $$
@@ -972,9 +959,7 @@ BEGIN
   IF NEW.lost_at IS NULL AND NEW.deleted_at IS NULL THEN RETURN NEW; END IF;
   UPDATE mcp_server_offerings SET state='lost',lost_at=COALESCE(NEW.lost_at,NEW.deleted_at,NEW.updated_at),reason='No machine'
     WHERE machine_id=NEW.id AND state<>'lost';
-  UPDATE mcp_servers s SET machine_id=(SELECT o.machine_id FROM mcp_server_offerings o JOIN machines m ON m.id=o.machine_id
-      WHERE o.server_id=s.id AND o.state='ready' AND m.status='active' AND m.deleted_at IS NULL AND m.lost_at IS NULL ORDER BY o.offered_at,o.machine_id LIMIT 1),
-      revision=revision+1,updated_at=NEW.updated_at
+  UPDATE mcp_servers s SET revision=revision+1,updated_at=NEW.updated_at
     WHERE s.imported AND (s.machine_id=NEW.id OR EXISTS(SELECT 1 FROM mcp_server_offerings o WHERE o.server_id=s.id AND o.machine_id=NEW.id));
   INSERT INTO mount_lost_locations(id,mount_id,machine_id,machine_name,host_name,storage,total_bytes,size_at,lost_at)
     SELECT gen_random_uuid(),l.mount_id,NEW.id,NEW.name,h.name,l.storage,l.last_bytes,l.size_at,COALESCE(NEW.lost_at,NEW.deleted_at,NEW.updated_at)
@@ -991,57 +976,48 @@ END $$;
 CREATE FUNCTION public.orch_mcp_offerings_discovered() RETURNS trigger
     LANGUAGE plpgsql
     AS $$
-DECLARE found jsonb; server uuid; candidates bigint; imported_job uuid; existing_state text; existing_source jsonb; changed integer;
+DECLARE discovered_definition jsonb; server uuid; candidates bigint; existing_state text; canonical_machine uuid; wanted_proposal jsonb; why text; changed integer;
 BEGIN
   IF NEW.machine_id IS NULL OR NEW.deleted_at IS NOT NULL OR NEW.lost_at IS NOT NULL THEN RETURN NEW; END IF;
   IF NOT EXISTS(SELECT 1 FROM machines WHERE id=NEW.machine_id AND status='active' AND deleted_at IS NULL AND lost_at IS NULL) THEN RETURN NEW; END IF;
-  FOR found IN SELECT value FROM jsonb_array_elements(CASE WHEN jsonb_typeof(NEW.facts->'mcp_found')='array' THEN NEW.facts->'mcp_found' ELSE '[]'::jsonb END) ORDER BY value->>'name' LOOP
+  FOR discovered_definition IN SELECT value FROM jsonb_array_elements(CASE WHEN jsonb_typeof(NEW.facts->'mcp_found')='array' THEN NEW.facts->'mcp_found' ELSE '[]'::jsonb END) ORDER BY value->>'name' LOOP
     SELECT count(*),(array_agg(id ORDER BY id))[1] INTO candidates,server FROM mcp_servers
-      WHERE imported AND deleted_at IS NULL AND home_id=NEW.org_id AND COALESCE(spec->'imported'->>'name',name)=found->>'name';
+      WHERE imported AND deleted_at IS NULL AND home_id=NEW.org_id AND COALESCE(spec->'imported'->>'name',name)=discovered_definition->>'name';
     IF candidates<>1 THEN CONTINUE; END IF;
-    PERFORM 1 FROM mcp_servers WHERE id=server FOR UPDATE;
-    SELECT state,source INTO existing_state,existing_source FROM mcp_server_offerings WHERE server_id=server AND machine_id=NEW.machine_id;
-    IF existing_state='ready' THEN
-      IF NOT EXISTS(SELECT 1 FROM mcp_servers WHERE id=server AND spec->'imported'->>'definition_fingerprint'=found->>'definition_fingerprint' AND spec->>'transport'=found->>'transport') THEN
-        UPDATE mcp_server_offerings SET proposal=jsonb_build_object('environment',NEW.id,'source',found,
-          'reason',CASE WHEN found->>'definition_fingerprint' IS NULL OR (SELECT spec->'imported'->>'definition_fingerprint' FROM mcp_servers WHERE id=server) IS NULL THEN 'definition_unknown' ELSE 'different_definition' END),seen_at=NEW.updated_at
-          WHERE server_id=server AND machine_id=NEW.machine_id AND proposal IS DISTINCT FROM jsonb_build_object('environment',NEW.id,'source',found,
-          'reason',CASE WHEN found->>'definition_fingerprint' IS NULL OR (SELECT spec->'imported'->>'definition_fingerprint' FROM mcp_servers WHERE id=server) IS NULL THEN 'definition_unknown' ELSE 'different_definition' END);
-        GET DIAGNOSTICS changed=ROW_COUNT;
-        IF changed>0 THEN UPDATE mcp_servers SET revision=revision+1,updated_at=NEW.updated_at WHERE id=server; END IF;
-      ELSE UPDATE mcp_server_offerings SET seen_at=NEW.updated_at WHERE server_id=server AND machine_id=NEW.machine_id; END IF;
-      CONTINUE;
-    END IF;
-    IF (existing_state IN ('ready','pending') AND existing_source->>'digest'=found->>'digest'
-        AND existing_source->>'definition_fingerprint' IS NOT DISTINCT FROM found->>'definition_fingerprint')
-        OR (existing_state='failed' AND existing_source->>'digest'=found->>'digest') THEN
+    SELECT machine_id INTO canonical_machine FROM mcp_servers WHERE id=server AND imported AND deleted_at IS NULL FOR UPDATE;
+    IF NOT FOUND THEN CONTINUE; END IF;
+    SELECT state INTO existing_state FROM mcp_server_offerings WHERE server_id=server AND machine_id=NEW.machine_id;
+    IF existing_state='ready' AND canonical_machine=NEW.machine_id THEN
+      wanted_proposal:=NULL;
+      IF NOT EXISTS(SELECT 1 FROM mcp_servers WHERE id=server
+          AND spec->'imported'->>'digest'=discovered_definition->>'digest'
+          AND spec->'imported'->>'definition_fingerprint'=discovered_definition->>'definition_fingerprint'
+          AND spec->>'transport'=discovered_definition->>'transport') THEN
+        wanted_proposal:=jsonb_build_object('environment',NEW.id,'source',discovered_definition,
+          'reason',CASE WHEN discovered_definition->>'definition_fingerprint' IS NULL OR (SELECT spec->'imported'->>'definition_fingerprint' FROM mcp_servers WHERE id=server) IS NULL THEN 'definition_unknown' ELSE 'different_definition' END);
+      END IF;
+      UPDATE mcp_server_offerings SET proposal=wanted_proposal,seen_at=NEW.updated_at
+        WHERE server_id=server AND machine_id=NEW.machine_id AND mcp_server_offerings.proposal IS DISTINCT FROM wanted_proposal;
+      GET DIAGNOSTICS changed=ROW_COUNT;
+      IF changed>0 THEN UPDATE mcp_servers SET revision=revision+1,updated_at=NEW.updated_at WHERE id=server; END IF;
       UPDATE mcp_server_offerings SET seen_at=NEW.updated_at WHERE server_id=server AND machine_id=NEW.machine_id;
       CONTINUE;
     END IF;
-    IF existing_state='found' AND existing_source=found AND NOT EXISTS(SELECT 1 FROM mcp_servers WHERE id=server
-         AND spec->'imported'->>'definition_fingerprint'=found->>'definition_fingerprint' AND spec->>'transport'=found->>'transport') THEN
-      UPDATE mcp_server_offerings SET seen_at=NEW.updated_at WHERE server_id=server AND machine_id=NEW.machine_id;
-      CONTINUE;
-    END IF;
-    IF found->>'definition_fingerprint' IS NULL OR NOT EXISTS(SELECT 1 FROM mcp_servers WHERE id=server
-        AND spec->'imported'->>'definition_fingerprint'=found->>'definition_fingerprint' AND spec->>'transport'=found->>'transport') THEN
-      INSERT INTO mcp_server_offerings(server_id,machine_id,environment_id,state,source,seen_at,reason)
-        VALUES(server,NEW.machine_id,NEW.id,'found',found,NEW.updated_at,
-          CASE WHEN found->>'definition_fingerprint' IS NULL OR (SELECT spec->'imported'->>'definition_fingerprint' FROM mcp_servers WHERE id=server) IS NULL THEN 'definition_unknown' ELSE 'different_definition' END)
-        ON CONFLICT(server_id,machine_id) DO UPDATE SET environment_id=EXCLUDED.environment_id,state='found',source=EXCLUDED.source,
-          seen_at=EXCLUDED.seen_at,reason=EXCLUDED.reason,lost_at=NULL,job_id=NULL;
-      UPDATE mcp_servers SET revision=revision+1,updated_at=NEW.updated_at WHERE id=server;
-      CONTINUE;
-    END IF;
-    imported_job:=gen_random_uuid();
-    INSERT INTO jobs(id,kind,environment_id,state,plan,progress,created_at,updated_at)
-      VALUES(imported_job,'mcp_offering',NEW.id,'queued',jsonb_build_object('server',server,'machine',NEW.machine_id,'environment',NEW.id,'source',found),
-        jsonb_build_object('phase','import','phases',jsonb_build_array(jsonb_build_object('name','import','weight',100,'state','pending')),
-          'percent',0,'files_done',0,'files_total',NULL,'bytes_done',0,'bytes_total',NULL,'rate_bps',NULL,'eta_seconds',NULL,'message',NULL),NEW.updated_at,NEW.updated_at);
-    INSERT INTO mcp_server_offerings(server_id,machine_id,environment_id,state,source,seen_at,job_id)
-      VALUES(server,NEW.machine_id,NEW.id,'pending',found,NEW.updated_at,imported_job)
-      ON CONFLICT(server_id,machine_id) DO UPDATE SET environment_id=EXCLUDED.environment_id,state='pending',source=EXCLUDED.source,
-        seen_at=EXCLUDED.seen_at,job_id=EXCLUDED.job_id,lost_at=NULL,reason=NULL;
+    why:=CASE WHEN discovered_definition->>'definition_fingerprint' IS NULL THEN 'definition_unknown'
+      WHEN NOT EXISTS(SELECT 1 FROM mcp_servers WHERE id=server
+          AND spec->'imported'->>'definition_fingerprint'=discovered_definition->>'definition_fingerprint'
+          AND spec->>'transport'=discovered_definition->>'transport') THEN 'different_definition'
+      WHEN canonical_machine IS DISTINCT FROM NEW.machine_id THEN 'another_machine' ELSE 'import_required' END;
+    INSERT INTO mcp_server_offerings AS offering(server_id,machine_id,environment_id,state,source,seen_at,reason)
+      VALUES(server,NEW.machine_id,NEW.id,'found',discovered_definition,NEW.updated_at,why)
+      ON CONFLICT(server_id,machine_id) DO UPDATE SET environment_id=EXCLUDED.environment_id,state='found',source=EXCLUDED.source,
+        seen_at=EXCLUDED.seen_at,reason=EXCLUDED.reason,lost_at=NULL,job_id=NULL,proposal=NULL
+      WHERE offering.state<>'found' OR offering.source IS DISTINCT FROM EXCLUDED.source
+        OR offering.environment_id IS DISTINCT FROM EXCLUDED.environment_id OR offering.reason IS DISTINCT FROM EXCLUDED.reason
+        OR offering.lost_at IS NOT NULL OR offering.job_id IS NOT NULL OR offering.proposal IS NOT NULL;
+    GET DIAGNOSTICS changed=ROW_COUNT;
+    IF changed>0 THEN UPDATE mcp_servers SET revision=revision+1,updated_at=NEW.updated_at WHERE id=server; END IF;
+    UPDATE mcp_server_offerings SET seen_at=NEW.updated_at WHERE server_id=server AND machine_id=NEW.machine_id;
   END LOOP;
   RETURN NEW;
 END $$;
@@ -1150,9 +1126,11 @@ BEGIN
  IF TG_OP='INSERT' THEN
   fresh_live_paths:=NOT EXISTS(SELECT 1 FROM participation_new_objects WHERE deleted_at IS NOT NULL);
   IF fresh_live_paths THEN
-   INSERT INTO participation_paths(node_id,path,live)
+   -- A plan kept from the first small insert can scan the grown node table for every path.
+   -- Plan this fixed set read against the current table instead of retaining that initial scan.
+   EXECUTE 'INSERT INTO participation_paths(node_id,path,live)
    SELECT n.id,n.path,NOT EXISTS(SELECT 1 FROM nodes gone WHERE gone.id=ANY(n.path) AND gone.deleted_at IS NOT NULL)
-   FROM participation_new_objects n;
+   FROM participation_new_objects n';
   END IF;
  END IF;
  IF NOT fresh_live_paths THEN
@@ -1575,14 +1553,20 @@ CREATE FUNCTION public.orch_project_program_reports() RETURNS trigger
     LANGUAGE plpgsql
     AS $$
 BEGIN
-    DELETE FROM agent_program_reports WHERE machine_id = NEW.id;
     IF NEW.deleted_at IS NULL AND NEW.status = 'active' THEN
+        DELETE FROM agent_program_reports r WHERE r.machine_id=NEW.id AND NOT EXISTS (
+            SELECT 1 FROM jsonb_array_elements(CASE WHEN jsonb_typeof(NEW.facts->'adapters')='array'
+                THEN NEW.facts->'adapters' ELSE '[]'::jsonb END) a WHERE a->>'kind'=r.kind);
         INSERT INTO agent_program_reports (machine_id, kind, manifest, builtin, reported_at)
         SELECT NEW.id, a->>'kind', a->'manifest', COALESCE(a->>'builtin','false')='true', NEW.created_at
         FROM jsonb_array_elements(CASE WHEN jsonb_typeof(NEW.facts->'adapters')='array'
                                      THEN NEW.facts->'adapters' ELSE '[]'::jsonb END) a
         WHERE COALESCE(a->>'kind','') <> ''
-        ON CONFLICT (machine_id, kind) DO UPDATE SET manifest=EXCLUDED.manifest, builtin=EXCLUDED.builtin;
+        ON CONFLICT (machine_id, kind) DO UPDATE SET manifest=EXCLUDED.manifest, builtin=EXCLUDED.builtin
+        WHERE agent_program_reports.manifest IS DISTINCT FROM EXCLUDED.manifest
+           OR agent_program_reports.builtin IS DISTINCT FROM EXCLUDED.builtin;
+    ELSE
+        DELETE FROM agent_program_reports WHERE machine_id=NEW.id;
     END IF;
     RETURN NEW;
 END;
@@ -2543,3 +2527,261 @@ CREATE AGGREGATE usage_merge_counts(jsonb) (
     STYPE = jsonb,
     INITCOND = '{}'
 );
+
+
+CREATE FUNCTION public.orch_row_revision() RETURNS trigger
+    LANGUAGE plpgsql
+    AS $function$
+BEGIN
+  NEW.revision := GREATEST(OLD.revision + 1, NEW.revision);
+  RETURN NEW;
+END;
+$function$;
+
+CREATE FUNCTION public.orch_group_holder_revision() RETURNS trigger
+    LANGUAGE plpgsql
+    AS $function$
+BEGIN
+  IF TG_OP <> 'INSERT' THEN
+    UPDATE groups SET revision=revision+1 WHERE id=OLD.group_id;
+  END IF;
+  IF TG_OP='INSERT' THEN
+    UPDATE groups SET revision=revision+1 WHERE id=NEW.group_id;
+  ELSIF TG_OP='UPDATE' AND NEW.group_id IS DISTINCT FROM OLD.group_id THEN
+    UPDATE groups SET revision=revision+1 WHERE id=NEW.group_id;
+  END IF;
+  RETURN NULL;
+END;
+$function$;
+
+
+CREATE FUNCTION public.orch_program_totals() RETURNS trigger LANGUAGE plpgsql AS $$
+DECLARE
+  old_kind text;
+  new_kind text;
+  old_live boolean := false;
+  new_live boolean := false;
+BEGIN
+  IF TG_TABLE_NAME='agents' THEN
+    IF TG_OP<>'INSERT' THEN old_kind:=OLD.harness_kind; old_live:=OLD.deleted_at IS NULL; END IF;
+    IF TG_OP<>'DELETE' THEN new_kind:=NEW.harness_kind; new_live:=NEW.deleted_at IS NULL; END IF;
+  ELSE
+    IF TG_OP<>'INSERT' THEN old_kind:=OLD.kind; old_live:=true; END IF;
+    IF TG_OP<>'DELETE' THEN new_kind:=NEW.kind; new_live:=true; END IF;
+  END IF;
+  IF old_kind IS NOT DISTINCT FROM new_kind AND old_live=new_live THEN RETURN NULL; END IF;
+  INSERT INTO agent_program_kinds(kind)
+    SELECT DISTINCT value FROM unnest(ARRAY[old_kind,new_kind]) AS value WHERE value IS NOT NULL ORDER BY value
+    ON CONFLICT DO NOTHING;
+  PERFORM kind FROM agent_program_kinds WHERE kind=ANY(ARRAY[old_kind,new_kind]) ORDER BY kind FOR UPDATE;
+  IF TG_TABLE_NAME='agents' THEN
+    IF old_live THEN UPDATE agent_program_kinds SET profile_count=profile_count-1 WHERE kind=old_kind; END IF;
+    IF new_live THEN UPDATE agent_program_kinds SET profile_count=profile_count+1 WHERE kind=new_kind; END IF;
+  ELSIF TG_TABLE_NAME='agent_program_reports' THEN
+    IF old_live THEN UPDATE agent_program_kinds SET machine_count=machine_count-1 WHERE kind=old_kind; END IF;
+    IF new_live THEN UPDATE agent_program_kinds SET machine_count=machine_count+1 WHERE kind=new_kind; END IF;
+  ELSE
+    IF old_live THEN UPDATE agent_program_kinds SET build_count=build_count-1 WHERE kind=old_kind; END IF;
+    IF new_live THEN UPDATE agent_program_kinds SET build_count=build_count+1 WHERE kind=new_kind; END IF;
+  END IF;
+  RETURN NULL;
+END;
+$$;
+
+CREATE FUNCTION public.orch_machine_program_projections() RETURNS trigger LANGUAGE plpgsql AS $$
+BEGIN
+  IF TG_OP='INSERT' OR NEW.status IS DISTINCT FROM OLD.status OR NEW.deleted_at IS DISTINCT FROM OLD.deleted_at
+      OR NEW.facts->'adapters' IS DISTINCT FROM OLD.facts->'adapters' THEN
+    DELETE FROM machine_program_adapters WHERE machine_id=NEW.id;
+    IF NEW.status='active' AND NEW.deleted_at IS NULL THEN
+      INSERT INTO machine_program_adapters(machine_id,kind)
+      SELECT DISTINCT NEW.id,a->>'kind'
+      FROM jsonb_array_elements(CASE WHEN jsonb_typeof(NEW.facts->'adapters')='array' THEN NEW.facts->'adapters' ELSE '[]'::jsonb END) a
+      WHERE a->>'kind' IS NOT NULL;
+    END IF;
+  END IF;
+  IF TG_OP='INSERT' OR NEW.status IS DISTINCT FROM OLD.status OR NEW.deleted_at IS DISTINCT FROM OLD.deleted_at
+      OR NEW.facts->'harnesses' IS DISTINCT FROM OLD.facts->'harnesses' THEN
+    DELETE FROM machine_harness_builds WHERE machine_id=NEW.id;
+    IF NEW.status='active' AND NEW.deleted_at IS NULL THEN
+      INSERT INTO machine_harness_builds(machine_id,kind,version)
+      SELECT DISTINCT NEW.id,h->>'kind',h->>'version'
+      FROM jsonb_array_elements(CASE WHEN jsonb_typeof(NEW.facts->'harnesses')='array' THEN NEW.facts->'harnesses' ELSE '[]'::jsonb END) h
+      WHERE h->>'kind' IS NOT NULL AND h->>'version' IS NOT NULL;
+    END IF;
+  END IF;
+  IF TG_OP='INSERT' OR NEW.deleted_at IS DISTINCT FROM OLD.deleted_at
+      OR NEW.facts->'plugins' IS DISTINCT FROM OLD.facts->'plugins' THEN
+    DELETE FROM machine_executor_reports WHERE machine_id=NEW.id;
+    IF NEW.deleted_at IS NULL THEN
+      INSERT INTO machine_executor_reports(machine_id,ordinal,payload)
+      SELECT NEW.id,p.ordinal,jsonb_build_object('kind','executor','executor',p.value->'executor',
+        'state',CASE WHEN jsonb_typeof(p.value->'state')='string' THEN p.value->>'state' END)
+      FROM jsonb_array_elements(CASE WHEN jsonb_typeof(NEW.facts->'plugins')='array' THEN NEW.facts->'plugins' ELSE '[]'::jsonb END)
+        WITH ORDINALITY AS p(value,ordinal)
+      WHERE p.value->>'kind'='executor' AND jsonb_typeof(p.value->'kind')='string';
+    END IF;
+  END IF;
+  RETURN NEW;
+END;
+$$;
+
+-- Metadata counters belong to the same item and retained-prefix producers as their bodies.
+CREATE FUNCTION public.thread_history_count_delta(p_owner uuid, p_turn uuid, p_stream text, p_kind text,
+    p_prior boolean, p_position bigint, p_changed bigint, p_size bigint, p_delta bigint) RETURNS void
+    LANGUAGE plpgsql AS $$
+BEGIN
+  IF p_delta=1 THEN
+    INSERT INTO thread_history_turn_counts(continuation_id,turn_id,stream,kind,before_orch,item_count,payload_bytes,first_seq,last_seq,changed_seq)
+      VALUES(p_owner,p_turn,p_stream,p_kind,p_prior,1,p_size,p_position,p_position,p_changed)
+    ON CONFLICT (continuation_id,turn_id,stream,kind,before_orch) DO UPDATE SET
+      item_count=thread_history_turn_counts.item_count+1,
+      payload_bytes=thread_history_turn_counts.payload_bytes+EXCLUDED.payload_bytes,
+      first_seq=LEAST(thread_history_turn_counts.first_seq,EXCLUDED.first_seq),
+      last_seq=GREATEST(thread_history_turn_counts.last_seq,EXCLUDED.last_seq),
+      changed_seq=GREATEST(thread_history_turn_counts.changed_seq,EXCLUDED.changed_seq);
+  ELSE
+    UPDATE thread_history_turn_counts c SET item_count=c.item_count-1,payload_bytes=c.payload_bytes-p_size,
+      changed_seq=GREATEST(c.changed_seq,p_changed)
+      WHERE c.continuation_id=p_owner AND c.turn_id IS NOT DISTINCT FROM p_turn
+        AND c.stream=p_stream AND c.kind=p_kind AND c.before_orch=p_prior;
+    DELETE FROM thread_history_turn_counts c WHERE c.continuation_id=p_owner AND c.turn_id IS NOT DISTINCT FROM p_turn
+      AND c.stream=p_stream AND c.kind=p_kind AND c.before_orch=p_prior AND c.item_count=0;
+    UPDATE thread_history_turn_counts c SET
+      first_seq=COALESCE((SELECT min(i.seq_created) FROM items i WHERE i.continuation_id=p_owner AND i.turn_id IS NOT DISTINCT FROM p_turn
+        AND i.stream=p_stream AND i.kind=p_kind AND i.before_orch=p_prior),c.first_seq),
+      last_seq=COALESCE((SELECT max(i.seq_created) FROM items i WHERE i.continuation_id=p_owner AND i.turn_id IS NOT DISTINCT FROM p_turn
+        AND i.stream=p_stream AND i.kind=p_kind AND i.before_orch=p_prior),c.last_seq)
+      WHERE c.continuation_id=p_owner AND c.turn_id IS NOT DISTINCT FROM p_turn
+        AND c.stream=p_stream AND c.kind=p_kind AND c.before_orch=p_prior
+        AND (c.first_seq=p_position OR c.last_seq=p_position);
+  END IF;
+END
+$$;
+
+CREATE FUNCTION public.thread_history_item_counts() RETURNS trigger LANGUAGE plpgsql AS $$
+BEGIN
+  IF TG_OP='UPDATE' AND (NEW.continuation_id,NEW.turn_id,NEW.stream,NEW.kind,NEW.before_orch,NEW.payload_bytes)
+      IS NOT DISTINCT FROM (OLD.continuation_id,OLD.turn_id,OLD.stream,OLD.kind,OLD.before_orch,OLD.payload_bytes) THEN
+    RETURN NEW;
+  END IF;
+  IF TG_OP<>'INSERT' THEN
+    PERFORM thread_history_count_delta(OLD.continuation_id,OLD.turn_id,OLD.stream,OLD.kind,OLD.before_orch,
+      OLD.seq_created,OLD.seq_updated,OLD.payload_bytes,-1);
+  END IF;
+  IF TG_OP<>'DELETE' THEN
+    PERFORM thread_history_count_delta(NEW.continuation_id,NEW.turn_id,NEW.stream,NEW.kind,NEW.before_orch,
+      NEW.seq_created,NEW.seq_updated,NEW.payload_bytes,1);
+    RETURN NEW;
+  END IF;
+  RETURN OLD;
+END
+$$;
+
+CREATE FUNCTION public.thread_history_freeze_counts(owner uuid, low_seq bigint, high_seq bigint, at_seq bigint)
+    RETURNS bigint LANGUAGE plpgsql AS $$
+DECLARE held bigint;
+BEGIN
+  SELECT id INTO held FROM thread_history_count_slices s WHERE s.continuation_id=owner
+    AND s.first_seq=low_seq AND s.last_seq=high_seq AND s.frozen_at=at_seq;
+  IF held IS NOT NULL THEN RETURN held; END IF;
+  INSERT INTO thread_history_count_slices(continuation_id,first_seq,last_seq,frozen_at)
+    VALUES(owner,low_seq,high_seq,at_seq) ON CONFLICT DO NOTHING RETURNING id INTO held;
+  IF held IS NULL THEN
+    SELECT id INTO held FROM thread_history_count_slices s WHERE s.continuation_id=owner
+      AND s.first_seq=low_seq AND s.last_seq=high_seq AND s.frozen_at=at_seq;
+    RETURN held;
+  END IF;
+  -- Whole turn groups use only maintained metadata. Only partial or older revision groups
+  -- resolve individual metadata at this first capture of the immutable prefix.
+  INSERT INTO thread_history_slice_counts(slice_id,turn_id,stream,kind,before_orch,item_count,payload_bytes,first_seq,last_seq)
+    SELECT held,c.turn_id,c.stream,c.kind,c.before_orch,c.item_count,c.payload_bytes,c.first_seq,c.last_seq
+    FROM thread_history_turn_counts c WHERE c.continuation_id=owner AND c.first_seq>=low_seq
+      AND c.last_seq<=high_seq AND c.changed_seq<=at_seq;
+  IF EXISTS(SELECT 1 FROM thread_history_turn_counts c JOIN items i ON i.continuation_id=c.continuation_id
+      AND i.turn_id IS NOT DISTINCT FROM c.turn_id AND i.stream=c.stream AND i.kind=c.kind AND i.before_orch=c.before_orch
+      WHERE c.continuation_id=owner AND c.first_seq<=high_seq AND c.last_seq>=low_seq
+        AND NOT(c.first_seq>=low_seq AND c.last_seq<=high_seq AND c.changed_seq<=at_seq)
+        AND i.seq_created BETWEEN low_seq AND high_seq AND i.seq_updated>at_seq
+        AND NOT EXISTS(SELECT 1 FROM thread_item_revisions r WHERE r.item_id=i.id AND r.seq_updated<=at_seq)) THEN
+    RAISE EXCEPTION 'a retained history count revision is missing' USING ERRCODE='23514';
+  END IF;
+  INSERT INTO thread_history_slice_counts(slice_id,turn_id,stream,kind,before_orch,item_count,payload_bytes,first_seq,last_seq)
+    SELECT held,c.turn_id,c.stream,c.kind,c.before_orch,count(*)::bigint,
+      sum(CASE WHEN i.seq_updated<=at_seq THEN i.payload_bytes
+        ELSE COALESCE((r.body->>'payload_bytes')::bigint,octet_length((r.body->'payload')::text)) END)::bigint,
+      min(i.seq_created),max(i.seq_created)
+    FROM thread_history_turn_counts c JOIN items i ON i.continuation_id=c.continuation_id
+      AND i.turn_id IS NOT DISTINCT FROM c.turn_id AND i.stream=c.stream AND i.kind=c.kind AND i.before_orch=c.before_orch
+      AND i.seq_created BETWEEN low_seq AND high_seq
+    LEFT JOIN LATERAL(SELECT v.body FROM thread_item_revisions v WHERE v.item_id=i.id
+      AND v.seq_updated<=at_seq ORDER BY v.seq_updated DESC LIMIT 1) r ON i.seq_updated>at_seq
+    WHERE c.continuation_id=owner AND c.first_seq<=high_seq AND c.last_seq>=low_seq
+      AND NOT(c.first_seq>=low_seq AND c.last_seq<=high_seq AND c.changed_seq<=at_seq)
+    GROUP BY c.turn_id,c.stream,c.kind,c.before_orch;
+  RETURN held;
+END
+$$;
+
+CREATE FUNCTION public.thread_history_span_counts() RETURNS trigger LANGUAGE plpgsql AS $$
+BEGIN
+  PERFORM thread_history_freeze_counts(NEW.owner_continuation_id,NEW.first_seq,NEW.last_seq,NEW.frozen_at);
+  RETURN NEW;
+END
+$$;
+
+CREATE FUNCTION public.thread_history_count_range(owner uuid, low_seq bigint, high_seq bigint, at_seq bigint, low_turn bigint, high_turn bigint, loose boolean)
+    RETURNS TABLE(turn_id uuid,stream text,kind text,before_orch boolean,item_count bigint,payload_bytes bigint,
+      first_seq bigint,last_seq bigint) LANGUAGE plpgsql STABLE AS $$
+DECLARE held bigint;
+BEGIN
+  IF low_seq>high_seq THEN RETURN; END IF;
+  IF at_seq IS NOT NULL THEN
+    SELECT s.id INTO held FROM thread_history_count_slices s WHERE s.continuation_id=owner AND s.frozen_at=at_seq
+      AND s.first_seq<=low_seq AND s.last_seq>=high_seq ORDER BY s.last_seq-s.first_seq LIMIT 1;
+    IF held IS NULL THEN RAISE EXCEPTION 'retained history counters are missing' USING ERRCODE='23514'; END IF;
+  END IF;
+  RETURN QUERY WITH groups AS MATERIALIZED (
+    SELECT c.turn_id,c.stream,c.kind,c.before_orch,c.item_count,c.payload_bytes,c.first_seq,c.last_seq
+      FROM turns t JOIN thread_history_turn_counts c ON c.turn_id=t.id AND c.continuation_id=owner AND c.stream='main'
+      WHERE held IS NULL AND t.continuation_id=owner AND t.ordinal BETWEEN low_turn AND high_turn
+    UNION ALL SELECT c.turn_id,c.stream,c.kind,c.before_orch,c.item_count,c.payload_bytes,c.first_seq,c.last_seq
+      FROM thread_history_turn_counts c WHERE held IS NULL AND c.continuation_id=owner
+        AND loose AND c.turn_id IS NULL AND c.before_orch AND c.stream='main'
+    UNION ALL SELECT c.turn_id,c.stream,c.kind,c.before_orch,c.item_count,c.payload_bytes,c.first_seq,c.last_seq
+      FROM turns t JOIN thread_history_slice_counts c ON c.turn_id=t.id AND c.slice_id=held AND c.stream='main'
+      WHERE held IS NOT NULL AND t.continuation_id=owner AND t.ordinal BETWEEN low_turn AND high_turn
+    UNION ALL SELECT c.turn_id,c.stream,c.kind,c.before_orch,c.item_count,c.payload_bytes,c.first_seq,c.last_seq
+      FROM thread_history_slice_counts c WHERE held IS NOT NULL AND c.slice_id=held
+        AND loose AND c.turn_id IS NULL AND c.before_orch AND c.stream='main'
+  ) SELECT c.* FROM groups c WHERE c.first_seq>=low_seq AND c.last_seq<=high_seq
+  UNION ALL
+    SELECT c.turn_id,c.stream,c.kind,c.before_orch,count(*)::bigint,
+      sum(CASE WHEN at_seq IS NULL OR i.seq_updated<=at_seq THEN i.payload_bytes
+        ELSE COALESCE((r.body->>'payload_bytes')::bigint,octet_length((r.body->'payload')::text)) END)::bigint,
+      min(i.seq_created),max(i.seq_created)
+    FROM groups c JOIN items i ON i.continuation_id=owner AND i.turn_id IS NOT DISTINCT FROM c.turn_id
+      AND i.stream=c.stream AND i.kind=c.kind AND i.before_orch=c.before_orch AND i.seq_created BETWEEN low_seq AND high_seq
+    LEFT JOIN LATERAL(SELECT v.body FROM thread_item_revisions v WHERE v.item_id=i.id
+      AND v.seq_updated<=at_seq ORDER BY v.seq_updated DESC LIMIT 1) r ON at_seq IS NOT NULL AND i.seq_updated>at_seq
+    WHERE c.first_seq<=high_seq AND c.last_seq>=low_seq AND NOT(c.first_seq>=low_seq AND c.last_seq<=high_seq)
+    GROUP BY c.turn_id,c.stream,c.kind,c.before_orch;
+END
+$$;
+
+CREATE FUNCTION public.thread_history_keep_cut_counts(cut uuid) RETURNS void LANGUAGE plpgsql AS $$
+BEGIN
+  INSERT INTO thread_history_cut_counts(cut_id,stream,kind,content,item_count,payload_bytes)
+    SELECT cut,m.stream,m.kind,m.turn_id IS NOT NULL OR COALESCE((m.body->>'before_orch')::boolean,
+        (r.body->>'before_orch')::boolean,i.before_orch,false),count(*)::bigint,
+      sum(CASE WHEN m.body IS NOT NULL THEN COALESCE((m.body->>'payload_bytes')::bigint,octet_length((m.body->'payload')::text))
+        WHEN m.revision_seq IS NOT NULL THEN COALESCE((r.body->>'payload_bytes')::bigint,octet_length((r.body->'payload')::text))
+        ELSE i.payload_bytes END)::bigint
+    FROM thread_history_cut_members(cut) m LEFT JOIN items i ON i.id=m.item_id AND m.body IS NULL
+    LEFT JOIN thread_item_revisions r ON r.item_id=m.item_id AND r.seq_updated=m.revision_seq
+    GROUP BY m.stream,m.kind,4 ON CONFLICT DO NOTHING;
+  INSERT INTO thread_history_cut_row_counts(cut_id,kind,row_count,max_ordinal)
+    SELECT cut,r.kind,count(*)::bigint,max(r.ordinal) FROM thread_history_cut_rows r WHERE r.cut_id=cut
+    GROUP BY r.kind ON CONFLICT DO NOTHING;
+END
+$$;

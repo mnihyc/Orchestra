@@ -9,21 +9,20 @@
 //! somebody from outside the root org, and the stamp a change leaves on the
 //! document, so that whoever has it open is told its page changed.
 
-use crate::middleware::authorization::{self, refusals};
+use crate::middleware::authorization::refusals;
 use crate::middleware::requests::{ApiError, ApiResult};
 use crate::registry::Ctx;
-use crate::routes::access::page::permission_page;
+use crate::routes::access::page_operations;
 use crate::routes::nodes::policy_at;
 use crate::sign_in::origin;
 use orch_access_contract::decisions::ObjectRef;
 use orch_access_contract::permissions::ObjectKind;
 use orch_api_contract::access as api;
-use orch_authz::pages::{self, ChangeError, Target};
+use orch_authz::pages::{self, ChangeError};
 use orch_authz::usable::ResourcePolicy;
-use orch_authz::{Policy, Principal, documents::Document};
+use orch_db::DbError;
 use orch_db::queries::documents::{self as rows};
-use orch_db::{Conn, DbError};
-use orch_types::{Id, Time};
+use orch_types::Id;
 
 fn object_of(ctx: &Ctx, id: Id) -> ObjectRef {
     ObjectRef {
@@ -36,54 +35,23 @@ fn object_of(ctx: &Ctx, id: Id) -> ObjectRef {
     }
 }
 
-async fn read(
-    ctx: &Ctx,
-    conn: &mut Conn,
-    principal: &Principal,
-    row: &Document,
-    policy: Policy,
-) -> ApiResult<api::PermissionPage> {
-    let page = pages::read(
-        conn,
-        principal,
-        Target::Resource(object_of(ctx, row.id)),
-        policy,
-    )
-    .await
-    .map_err(ApiError::internal)?;
-    permission_page(conn, principal, &page, Some(row.root), Time::new(ctx.now)).await
-}
-
 /// Reads the page of a document: whoever may read the document or manage its permission page.
 pub async fn get(ctx: &Ctx) -> ApiResult<api::PermissionPage> {
-    let id = ctx.id("id")?;
-    let mut conn = ctx.app.db.acquire().await?;
-    let principal = authorization::principal(ctx, &mut conn).await?;
-    crate::routes::access::subject::require_page(
-        &mut conn,
-        &principal,
-        orch_authz::things::Thing::Other(object_of(ctx, id)),
-        Policy::default(),
-    )
-    .await?;
-    let (_, row, _) = orch_authz::documents::site(&mut conn, id)
-        .await
-        .map_err(ApiError::internal)?;
-    if row.kind != object_of(ctx, id).kind {
-        return Err(ApiError::not_found());
-    }
-    let policy = policy_at(&mut conn, row.node).await?;
-    read(ctx, &mut conn, &principal, &row, policy).await
+    crate::routes::access::operations::read_page(ctx).await
 }
 
 /// Changes the page of a document, as a whole or not at all. Who may is the
 /// engine's, and it was asked before this ran. A change that changed
 /// something stamps the document.
-pub async fn update(ctx: &Ctx, body: &api::PageChange) -> ApiResult<api::PermissionPage> {
+pub async fn update(
+    ctx: &Ctx,
+    body: &api::PageChange,
+) -> ApiResult<api::PermissionPageWriteResponse> {
     let id = ctx.id("id")?;
     let (change, people) = crate::routes::notifications::person::page_change(body)?;
-    let mut tx = ctx.app.db.begin().await?;
-    let principal = authorization::principal(ctx, &mut tx).await?;
+    let (current, mut tx, guard) = page_operations::action(ctx).await?;
+    let ctx = &current;
+    let principal = guard.principal().clone();
     let (_, row, _) = orch_authz::documents::site(&mut tx, id)
         .await
         .map_err(ApiError::internal)?;
@@ -99,15 +67,25 @@ pub async fn update(ctx: &Ctx, body: &api::PageChange) -> ApiResult<api::Permiss
             policy,
         )
         .await?;
-        let page = read(ctx, &mut tx, &principal, &row, policy).await?;
+        let view = pages::read(
+            &mut tx,
+            &principal,
+            orch_authz::things::Thing::Other(object_of(ctx, id)).target(),
+            policy,
+        )
+        .await
+        .map_err(ApiError::internal)?;
+        let receipt = page_operations::acknowledged(ctx, view.revision)?;
         tx.commit().await.map_err(DbError::from)?;
-        return Ok(page);
+        return page_operations::reply(ctx, &principal, receipt).await;
     }
     let home = ResourcePolicy {
         owners_name_outsiders: policy.owners_name_outsiders,
         shared_subscriptions: None,
     };
-    match pages::change_resource_under(
+    let accepted_revision;
+    crate::routes::access::link_origin::check(&mut tx, &principal, body.link_origin).await?;
+    match pages::change_resource_under_fenced(
         &mut tx,
         &principal,
         object_of(ctx, id),
@@ -115,10 +93,12 @@ pub async fn update(ctx: &Ctx, body: &api::PageChange) -> ApiResult<api::Permiss
         policy,
         &home,
         &origin(ctx),
+        || guard.check_deadline(ctx),
     )
     .await
     {
         Ok(outcome) => {
+            accepted_revision = outcome.revision;
             if outcome.changed {
                 if row.kind == ObjectKind::Document {
                     rows::touch(&mut tx, id).await?;
@@ -130,15 +110,18 @@ pub async fn update(ctx: &Ctx, body: &api::PageChange) -> ApiResult<api::Permiss
                 }
             }
         }
-        Err(ChangeError::Stale { current }) => {
-            let page = read(ctx, &mut tx, &principal, &row, policy).await?;
-            return Err(
-                refusals::change_failed(&mut tx, ChangeError::Stale { current })
-                    .await
-                    .with("current", page),
-            );
+        Err(pages::ChangeFailure::Native(ChangeError::Stale { current })) => {
+            let page = page_operations::current(ctx, &mut tx, &principal).await?;
+            let mut error = refusals::change_failed(&mut tx, ChangeError::Stale { current }).await;
+            if let Some(page) = page {
+                error = error.with("current", page);
+            }
+            return Err(error);
         }
-        Err(error) => return Err(refusals::change_failed(&mut tx, error).await),
+        Err(pages::ChangeFailure::Native(error)) => {
+            return Err(refusals::change_failed(&mut tx, error).await);
+        }
+        Err(pages::ChangeFailure::BeforeEffect(error)) => return Err(error),
     }
     if !people.is_empty() {
         crate::routes::notifications::person::tell(
@@ -153,8 +136,8 @@ pub async fn update(ctx: &Ctx, body: &api::PageChange) -> ApiResult<api::Permiss
         )
         .await?;
     }
-    let page = read(ctx, &mut tx, &principal, &row, policy).await?;
+    let receipt = page_operations::acknowledged(ctx, accepted_revision)?;
     crate::routes::notifications::person::keep_page(ctx, &mut tx, &principal, body).await?;
     tx.commit().await.map_err(DbError::from)?;
-    Ok(page)
+    page_operations::reply(ctx, &principal, receipt).await
 }

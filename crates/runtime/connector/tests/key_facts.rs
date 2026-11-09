@@ -106,3 +106,58 @@ async fn a_refusal_or_an_answer_that_is_no_json_tells_nothing() {
     );
     assert_eq!(vendor.asked.lock().unwrap().len(), 2);
 }
+
+#[tokio::test]
+async fn declared_admin_headers_and_query_cursors_use_the_same_bounded_origin_without_a_bearer_fallback()
+ {
+    let captured: Arc<Mutex<Vec<(String, HeaderMap)>>> = Arc::default();
+    let seen = captured.clone();
+    let listener = tokio::net::TcpListener::bind(("127.0.0.1", 0))
+        .await
+        .unwrap();
+    let base = Url::parse(&format!("http://{}/", listener.local_addr().unwrap())).unwrap();
+    let router = Router::new().route(
+        "/facts",
+        get(move |uri: Uri, headers: HeaderMap| {
+            let seen = seen.clone();
+            async move {
+                seen.lock().unwrap().push((uri.to_string(), headers));
+                axum::Json(json!({"read":true}))
+            }
+        }),
+    );
+    let task = tokio::spawn(async move {
+        axum::serve(listener, router).await.unwrap();
+    });
+    let _guard = Vendor {
+        base: base.clone(),
+        asked: Arc::default(),
+        task,
+    };
+    let client = Upstream::new(Arc::new(SystemClock)).unwrap();
+    let headers = std::collections::BTreeMap::from([
+        (
+            "x-fixture-admin".into(),
+            Secret::new("source-admin-fixture"),
+        ),
+        ("x-protocol-version".into(), Secret::new("1")),
+    ]);
+    let result = client
+        .get_headers(&base, "/facts?page=opaque%2Fnext%26part", &headers, 1024)
+        .await;
+    assert_eq!(result, Some(json!({"read":true})));
+    assert!(
+        client
+            .get_headers(&base, "//another.invalid/facts", &headers, 1024)
+            .await
+            .is_none()
+    );
+    let captured = captured.lock().unwrap();
+    assert_eq!(captured.len(), 1);
+    assert_eq!(captured[0].0, "/facts?page=opaque%2Fnext%26part");
+    assert_eq!(
+        captured[0].1.get("x-fixture-admin").unwrap(),
+        "source-admin-fixture"
+    );
+    assert!(!captured[0].1.contains_key("authorization"));
+}

@@ -33,6 +33,8 @@ impl Wire {
             closed: CancellationToken::new(),
             stats: Mutex::new(None),
             started_at: orch_types::Time::new(chrono::Utc::now()),
+            #[cfg(feature = "test-observers")]
+            observed: orch_link::test_observers::QueueGauge::new("api.backplane.fixture"),
         });
         let session = new_id();
         link.attach(&gateway, machine, session, None).await;
@@ -318,3 +320,6 @@ async fn a_foreign_session_reset_writes_no_cursor_and_sends_no_resync_while_its_
     assert_eq!(kinds, ["session.resync"]);
     office.app.app.link.shutdown();
 }
+
+#[path = "session_source_tests/port_creation_replays.rs"]
+mod port_creation_replays;

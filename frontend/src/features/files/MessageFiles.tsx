@@ -1,4 +1,5 @@
 /** Search and Inbox attachment projections use the same file chip without a second preview implementation. */
+import { linkTo } from '@/lib/links';
 import { FileAttachment } from './FileChip';
 import { blobSource, documentSource, sourcesOfParts, type FileSource } from './source';
 import type { Notification, SearchHit } from '@/generated/api-types';
@@ -16,7 +17,7 @@ function imageName(name: string | null | undefined): string {
 }
 
 export function filesOfHit(hit: SearchHit): FileSource[] {
-  return hit.kind === 'chat_message' ? sourcesOfParts('chat', hit.chat.id, hit.message.parts)
+  return hit.kind === 'chat_message' ? sourcesOfParts('chat', hit.chat.id, hit.message.parts).map((source) => ({ ...source, href: linkTo({ kind: 'chat', id: hit.chat.id }, { message: hit.message.id }) }))
     : hit.kind === 'item' && hit.item.kind === 'user_message' ? sourcesOfParts('thread', hit.thread.id, hit.item.payload.parts)
     : hit.kind === 'item' && hit.item.kind === 'tool_call' && hit.item.payload.tool.kind === 'image' ? [blobSource('thread', hit.thread.id, hit.item.payload.tool.blob, imageName(hit.item.payload.tool.name), undefined, hit.item.payload.tool.media_type)]
     : hit.kind === 'document' && hit.file !== undefined && hit.file !== null ? [documentSource(hit.document.id, hit.file)] : [];

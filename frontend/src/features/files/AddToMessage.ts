@@ -5,6 +5,7 @@
  * text. The agent gets the path, the lines and the words.
  */
 import { composerWriter, useComposerStore } from '@/features/composer/Draft';
+import { fencedCode } from '@/lib/fencedCode';
 
 /** What is put into the message. */
 export type Reference =
@@ -16,13 +17,6 @@ export type Reference =
 /** The most characters of a quotation that go into the box: a screenful, not a file. */
 export const QUOTE_AT_MOST = 4_000;
 
-/** Puts text in a fence long enough that nothing inside it can end it. */
-function fenced(text: string, language = ''): string {
-  let ticks = '```';
-  while (text.includes(ticks)) ticks += '`';
-  return `${ticks}${language}\n${text}\n${ticks}`;
-}
-
 const cut = (text: string): string => (text.length > QUOTE_AT_MOST ? `${text.slice(0, QUOTE_AT_MOST)}\n…` : text);
 
 /** The reference as the text that stands in the box. */
@@ -32,12 +26,12 @@ export function referenceText(reference: Reference): string {
       return `\`${reference.path}\``;
     case 'lines': {
       const range = reference.fromLine === reference.toLine ? `${reference.fromLine}` : `${reference.fromLine}-${reference.toLine}`;
-      return `\`${reference.path}:${range}\`\n${fenced(cut(reference.text))}`;
+      return `\`${reference.path}:${range}\`\n${fencedCode(cut(reference.text))}`;
     }
     case 'difference':
-      return `\`${reference.path}\`\n${fenced(cut(reference.text), 'diff')}`;
+      return `\`${reference.path}\`\n${fencedCode(cut(reference.text), 'diff')}`;
     case 'output':
-      return `${reference.command === null ? '' : `\`$ ${reference.command}\`\n`}${fenced(cut(reference.text))}`;
+      return `${reference.command === null ? '' : `\`$ ${reference.command}\`\n`}${fencedCode(cut(reference.text))}`;
   }
 }
 

@@ -49,6 +49,8 @@ async fn folder(s: &Scene, by: &Who, project: Id, name: &str, access: Option<New
         .send()
         .await
         .ok()
+        .into_full()
+        .expect("this control expects the ordinary full project response")
         .base
         .id
 }
@@ -71,6 +73,9 @@ async fn topic(s: &Scene, by: &Who, project: Id, name: &str, access: Option<NewN
     match made {
         TopicCreateReply::Topic(topic) => topic.base.id,
         TopicCreateReply::WithThread(both) => both.topic.base.id,
+        TopicCreateReply::Receipt(_) | TopicCreateReply::ThreadReceipt(_) => {
+            panic!("this browser control expects the full topic response")
+        }
     }
 }
 
@@ -84,6 +89,8 @@ async fn told(s: &Scene, by: &Who, project: Id) -> PlaceAnnouncementCreateReply 
         .send()
         .await
         .ok()
+        .into_full()
+        .expect("the ordinary folder announcement control returns its full native result")
 }
 
 fn topics_of(reply: &PlaceAnnouncementCreateReply) -> Vec<Id> {

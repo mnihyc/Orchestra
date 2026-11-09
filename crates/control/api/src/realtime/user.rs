@@ -242,12 +242,63 @@ pub async fn notification_files(
     Ok(())
 }
 
-/// Current approval state and actor for these already-authorized notices, in one bounded batch.
-/// Enrichment is in memory only; the settlement producer already stamps the same durable row.
-pub(crate) async fn notification_people(
+/// Restore an old provider-job target from its actual job, without rewriting the stored notice.
+async fn notification_job_targets(
+    conn: &mut orch_db::Conn,
+    rows: &mut [&mut InboxRow],
+) -> crate::middleware::requests::ApiResult<()> {
+    fn wanted(row: &InboxRow) -> Option<Id> {
+        if row.kind != "job.finished" || row.thread_id.is_some() || row.approval_id.is_some() {
+            return None;
+        }
+        if row
+            .data
+            .get("path")
+            .and_then(Json::as_str)
+            .is_some_and(|path| !matches!(path, "/inbox" | "/inbox/"))
+        {
+            return None;
+        }
+        row.data.get("job_id")?.as_str()?.parse().ok()
+    }
+    let ids: Vec<Id> = rows
+        .iter()
+        .filter(|row| wanted(row).is_some())
+        .map(|row| row.id)
+        .collect();
+    let jobs: Vec<Id> = rows.iter().filter_map(|row| wanted(row)).collect();
+    if jobs.is_empty() {
+        return Ok(());
+    }
+    // These exact rows were admitted from the recipient's bounded Inbox window.
+    // Generic job completion notices belong to the person who created the job.
+    let targets: HashMap<Id, Id> = sqlx::query_as::<_, (Id, Id)>(
+        "SELECT n.id, j.provider_id FROM notifications n JOIN jobs j
+           ON j.id::text = lower(n.data->>'job_id') AND j.created_by = n.user_id
+          WHERE n.id = ANY($1) AND j.id = ANY($2) AND j.provider_id IS NOT NULL",
+    )
+    .bind(ids)
+    .bind(jobs)
+    .fetch_all(&mut *conn)
+    .await
+    .map_err(orch_db::DbError::from)?
+    .into_iter()
+    .collect();
+    for row in rows {
+        if let Some(provider) = targets.get(&row.id) {
+            row.data["path"] = json!(format!("/resources/providers/{provider}"));
+        }
+    }
+    Ok(())
+}
+
+/// Current target, approval state and actor for these already-authorized notices, in bounded batches.
+/// Enrichment is in memory only; new producers stamp the same durable context on their rows.
+pub(crate) async fn notification_context(
     conn: &mut orch_db::Conn,
     rows: &mut [&mut InboxRow],
 ) -> crate::middleware::requests::ApiResult<HashMap<Id, UserRef>> {
+    notification_job_targets(conn, rows).await?;
     fn id(value: &Json) -> Option<Id> {
         value
             .as_str()
@@ -401,7 +452,7 @@ pub(crate) async fn read(inner: &Inner, person: Id, after: Seq, upto: Seq) -> Re
         _ => HashMap::new(),
     };
     let actors = if principal.is_some() {
-        notification_people(&mut conn, &mut rows.iter_mut().collect::<Vec<_>>())
+        notification_context(&mut conn, &mut rows.iter_mut().collect::<Vec<_>>())
             .await
             .map_err(Fail::other)?
     } else {

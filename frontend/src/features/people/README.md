@@ -28,7 +28,7 @@ and chat screens. Notifications are server records; no screen fabricates a notic
 - `sharedMarker.ts`: Received current-readable sharing names and actual area levels in historical markers.
 - `ThreadIdentity.tsx`: Current agent, state and start time for equal-name thread choices.
 - `DocumentOutline.tsx`: Live headings, real jumps and the existing phone sheet, without inserted blocks.
-- `DocumentPolicy.tsx`: Current document policy, creation reach and controlling setting.
+- `AgentKnowledgeNotice.tsx`: Current-giver bounds and the distinction between creation presets and actual contributions.
 - `Knowledge.tsx`: Current shares, first-reading paths and the reachable metadata tree.
 - `InspectionAccess.tsx`: The standing creation-time inspection description from the actual permission row.
 - `CopyDocument.tsx`: Current readable source and destination checks, shared Tree, pending and failed copies.

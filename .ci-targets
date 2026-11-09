@@ -1,0 +1,8 @@
+# Central runs on the diag-25 tree (batch-25-pre + every lane head at 13:20Z) for scope-map-b's RUST-B23-DIAGNOSTICS.md and bg-wake-facts' batch cases. Leading NAME=value words are settings.
+# scope-map-b: after-start and the switch cases without diagnostics
+test -p orch-engine --test after_up -- --nocapture --test-threads=1
+test -p orch-api-core --test forks -- --exact a_switch_is_planned_without_a_change_and_carried_out_with_the_thread_held_until_it_ends a_switch_is_cancelled_by_whoever_started_it_before_its_commit_and_the_thread_is_as_it_was --nocapture --test-threads=1
+# scope-map-b and bg-wake-facts: the forks groups with the native operation visitor
+test ORCH_TEST_NATIVE_OPERATIONS=1 -p orch-api-core --test forks -- side_native_scopes:: preflight_native_scopes:: file_native_scopes:: immediate_native_scopes:: recovery_lifecycle:: confirmation_scopes:: moving_routes:: batch_cancel_scopes:: batch_native_scopes:: --nocapture --test-threads=1
+# scope-map-b: the duplicate chain's NotLockable and "requires its transaction" refusals
+test ORCH_TEST_NATIVE_OPERATIONS=1 -p orch-api-core --test environment_duplicates --test template_duplicates --test copy_out_ask --test chat_duplicates -- --nocapture --test-threads=1

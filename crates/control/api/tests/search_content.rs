@@ -11,6 +11,7 @@ mod places;
 mod search_world;
 mod support;
 
+use crate::support::FullPermissionPageReply;
 use chat_world::{Room, text};
 use desk::{Desk, paragraph, put};
 use orch_api_contract::{
@@ -437,6 +438,8 @@ async fn a_conversation_match_carries_the_item_and_its_nearest_folder_with_unico
         .send()
         .await
         .ok()
+        .into_full()
+        .expect("this control expects the ordinary full project response")
         .base
         .id;
     let topic = places::make_topic(&desk.world, &desk.ada, folder, "Payments")
@@ -545,6 +548,8 @@ async fn short_unscoped_queries_unknown_kinds_bad_cursors_limits_and_reversed_da
 
 #[tokio::test]
 async fn kinds_authors_and_inclusive_dates_filter_what_was_written() {
+    use orch_api_contract::search::{SearchStreamEvent, SearchStreamList};
+
     let desk = Desk::new().await;
     let bea = desk.member("bea", "viewer").await;
     let (thread, segment) = thread(&desk, &desk.ada, desk.topic, "Main").await;
@@ -607,6 +612,33 @@ async fn kinds_authors_and_inclusive_dates_filter_what_was_written() {
     };
     let empty = find(&desk, &desk.ada, &no_kinds).await;
     assert!(empty.items.is_empty() && empty.next_cursor.is_none());
+    let response = desk
+        .world
+        .app
+        .call(SearchStreamList, &[])
+        .token(&desk.ada.token)
+        .query(&SearchListQuery {
+            immediate: Some(true),
+            ..no_kinds
+        })
+        .send_bytes()
+        .await;
+    assert_eq!(response.status, 200);
+    let events: Vec<SearchStreamEvent> = response
+        .raw
+        .split(|byte| *byte == b'\n')
+        .filter(|line| !line.is_empty())
+        .map(|line| serde_json::from_slice(line).unwrap())
+        .collect();
+    assert!(
+        events
+            .iter()
+            .all(|event| !matches!(event, SearchStreamEvent::Hit { .. }))
+    );
+    assert!(events.iter().any(|event| matches!(event,
+        SearchStreamEvent::Source { source, state, received: 0, .. }
+            if source == "words" && state == "done"
+    )));
 }
 
 #[tokio::test]
@@ -800,13 +832,18 @@ async fn shared_filter_follows_a_group_grant_to_a_documents_folder_without_revea
         })
         .send()
         .await
-        .ok();
+        .ok()
+        .into_full()
+        .expect("this ordinary control requires the full native creation response");
     assert_eq!(
         desk.world
             .app
             .call(GroupHolderAdd, &[&group.id])
             .token(&desk.ada.token)
-            .body(&HolderInput::User { id: reader.id() })
+            .body(&orch_api_contract::directory::GroupHolderAddBody {
+                holder: HolderInput::User { id: reader.id() },
+                expected_revision: None
+            })
             .send()
             .await
             .status,
@@ -824,7 +861,9 @@ async fn shared_filter_follows_a_group_grant_to_a_documents_folder_without_revea
         })
         .send()
         .await
-        .ok();
+        .ok()
+        .into_full()
+        .unwrap();
     let Some(DocumentTreeItem::Container(folder)) = created.entries.first().map(|entry| entry.item)
     else {
         panic!("a folder was created")
@@ -837,7 +876,9 @@ async fn shared_filter_follows_a_group_grant_to_a_documents_folder_without_revea
         .body(&desk::body("starling handbook"))
         .send()
         .await
-        .ok();
+        .ok()
+        .into_full()
+        .unwrap();
     desk.world
         .app
         .call(PermissionPageUpdate, &[&"document-containers", &folder])
@@ -855,6 +896,7 @@ async fn shared_filter_follows_a_group_grant_to_a_documents_folder_without_revea
         })
         .send()
         .await
+        .full_permission_page()
         .ok();
     let ask = SearchListQuery {
         shared_with_me: Some(true),
@@ -1256,11 +1298,19 @@ async fn direct_and_group_chats_are_found_by_participants_and_never_by_an_inspec
             .await
             .ok();
         assert_eq!(hits.items.len(), 2);
-        assert!(
-            hits.items.iter().all(
-                |hit| matches!(&hit.found,SearchFound::ChatMessage {path,..} if path.is_empty())
-            )
-        );
+        for hit in &hits.items {
+            let SearchFound::ChatMessage { chat, path, .. } = &hit.found else {
+                panic!("only the two actual people-chat messages match");
+            };
+            if chat.id == direct {
+                assert!(path.is_empty());
+                assert!(chat.home.is_none());
+            } else {
+                assert_eq!(chat.id, group);
+                assert_eq!(path.last().unwrap().id, room.root);
+                assert_eq!(chat.home.as_ref().unwrap().id, room.root);
+            }
+        }
     }
     let before = room.world.audit().await;
     for who in [&room.dee, &room.eve] {

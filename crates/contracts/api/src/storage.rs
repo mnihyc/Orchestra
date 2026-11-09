@@ -1,5 +1,7 @@
 //! One retained-storage report and reviewed cleanup plans across resources and machines.
 
+use crate::operations::OperationSpec as Op;
+
 use orch_access_contract::decisions::ObjectRef;
 use orch_types::{Id, Time};
 use schemars::JsonSchema;
@@ -43,10 +45,14 @@ pub enum StorageKind {
     Database,
     /// Content in the server's blob store.
     Content,
-    /// An unfinished browser upload.
+    /// Completed upload custody or an unfinished browser or machine transfer.
     Upload,
     /// A completed export archive.
     Export,
+    /// A retained whole-workspace snapshot.
+    Snapshot,
+    /// A saved import and any source bytes it still retains.
+    Import,
     /// An updater payload release.
     Release,
     /// A database dump with its manifest and paired content copy.
@@ -81,9 +87,113 @@ pub enum StorageAvailability {
     Unknown,
 }
 
+/// What the connector's own data directory contains; no retained-object authority is supplied.
+#[derive(
+    Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize, JsonSchema,
+)]
+#[serde(rename_all = "snake_case")]
+pub enum MachineDataKind {
+    /// Files of directory environments inside this data directory.
+    EnvironmentData,
+    /// The connector's isolated program/provider homes.
+    ProviderHomes,
+    /// Private imported tool-server definition copies.
+    McpCopies,
+    /// Records of owned storage bindings; external target directories are not traversed.
+    StorageBindings,
+    /// Program logs.
+    Logs,
+    /// The outer sealed store or machine identity directory, without credential names.
+    SealedStore,
+    /// Spool, journal, cache or local state.
+    State,
+    /// Another top-level entry actually present on disk.
+    Other,
+}
+
+/// Why a metadata-only directory measurement cannot supply a size.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+#[serde(rename_all = "snake_case")]
+pub enum MachineDataProblem {
+    /// A directory or file could not be inspected.
+    Unreadable,
+    /// A symbolic link was not followed, or a changed path left the configured directory.
+    Link,
+    /// File lengths could not be represented exactly.
+    SizeOverflow,
+}
+
+/// One top-level component, with apparent file lengths rather than another physical allocation total.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+pub struct MachineDataPart {
+    /// An opaque local entry identity, never a remote filesystem operand.
+    pub id: String,
+    /// Its immediate relative name; never a full path or a nested credential filename.
+    pub name: String,
+    /// Its known data-directory role.
+    pub kind: MachineDataKind,
+    /// Sum of file lengths below this component; null for incomplete inspection.
+    pub bytes: Option<i64>,
+    /// An incomplete component is visible, rather than reported as empty.
+    pub problem: Option<MachineDataProblem>,
+}
+
+/// The existing machine report's metadata-only observation of its own data directory.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+pub struct MachineDataInventory {
+    /// When the actual scan was observed, retained unchanged by later cached reports.
+    pub observed_at: Time,
+    /// True only when every entry was published and measured.
+    pub complete: bool,
+    /// Immediate components inspected without opening file contents.
+    pub parts: Vec<MachineDataPart>,
+    /// Further immediate entries omitted from the bounded report; never a guessed zero.
+    pub unlisted_parts: u64,
+    /// A root that could not be listed is different from an empty directory.
+    pub problem: Option<MachineDataProblem>,
+}
+
+/// One independently shared physical component of a retained artifact.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+pub struct StoragePart {
+    /// The same opaque physical identity used by other rows of this report.
+    pub key: String,
+    /// Actual measured bytes, or unknown when its native association has no measurement.
+    pub bytes: Option<i64>,
+}
+
+/// A stored artifact is opened through its existing native reader, never a storage path.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+#[serde(rename_all = "snake_case")]
+pub enum StorageArtifactKind {
+    /// An existing immutable workspace snapshot.
+    Snapshot,
+    /// An existing export archive.
+    Export,
+    /// An existing saved import and report.
+    Import,
+}
+
+/// One real retained artifact and its native lifecycle.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+pub struct StorageArtifact {
+    /// The actual artifact UUID.
+    pub id: Id,
+    /// Snapshot, export or import, as the record's kind also says.
+    pub kind: StorageArtifactKind,
+    /// The stored lifecycle state, not a made-up ready result.
+    pub state: String,
+}
+
 /// One item, derived from its existing owner record or a node's observed inventory.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
 pub struct KeptRecord {
+    /// Actual shared components; empty retains the ordinary single accounting_key behavior.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub physical_parts: Vec<StoragePart>,
+    /// A retained snapshot/export/import's native metadata identity.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub artifact: Option<StorageArtifact>,
     /// A stable opaque key; cleanup re-reads it rather than trusting supplied paths.
     pub id: String,
     /// The kind of thing kept.
@@ -125,6 +235,9 @@ pub struct KeptRecord {
     /// The exact local updater command for operator-owned files; absent rows use the ordinary job.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub operator_command: Option<String>,
+    /// Existing upload custody, progress and attached-to facts, where this is an upload row.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub upload: Option<crate::threads::UploadInventoryItem>,
 }
 
 /// One uncounted reverse reference from the protected operator source.
@@ -339,6 +452,50 @@ pub struct CleanupPlan {
     pub notify: bool,
 }
 
+/// Accepted native choices without existing storage names, people or sizes.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+pub struct CleanupItemReceipt {
+    /// The selected opaque native key, which can be used to confirm the plan.
+    pub id: String,
+    /// Permitted fates, including Keep.
+    pub choices: Vec<CleanupChoice>,
+    /// The native default.
+    pub selected: CleanupChoice,
+    /// The native safe blocker, if this item cannot go ahead.
+    pub blocker: Option<String>,
+}
+/// A saved preview remains usable without disclosing its existing metadata.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+pub struct CleanupPlanReceipt {
+    /// Identifies the sparse accepted response.
+    pub projection: crate::common::ReceiptProjection,
+    /// The actual stored plan.
+    pub id: Id,
+    /// The native preview's deadline.
+    pub expires_at: Time,
+    /// The accepted native choices, with no previous names or observations.
+    pub items: Vec<CleanupItemReceipt>,
+}
+crate::common::full_or_receipt! {
+    /// Native cleanup metadata or its saved identity and permitted choices.
+    #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+    pub enum CleanupPlanResponse { Full(CleanupPlan), Receipt(CleanupPlanReceipt), }
+}
+
+/// The actual accepted cleanup job, without existing progress, people or private results.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+pub struct CleanupJobReceipt {
+    /// Identifies the sparse acknowledgement.
+    pub projection: crate::common::ReceiptProjection,
+    /// The actual newly created or replayed job.
+    pub id: Id,
+}
+crate::common::full_or_receipt! {
+    /// The native job or its accepted identifier when existing metadata is restricted.
+    #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+    pub enum CleanupJobResponse { Full(crate::workspace::Job), Receipt(CleanupJobReceipt), }
+}
+
 /// One edited fate in the accepted plan.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
 #[serde(deny_unknown_fields)]
@@ -376,9 +533,12 @@ pub struct CleanupOutcome {
 
 crate::endpoints! {
     /// Reads retained storage the caller may manage through one scoped report.
-    StorageGet: GET "/storage", Rule("only storage the caller may manage in this scope"), query StorageQuery, none, json StorageReport, 200;
+    StorageGet: GET "/storage", Rule("only storage the caller may manage in this scope"), query StorageQuery, none, json StorageReport, 200,
+        operation Op::facets(&crate::storage_sources::REPORT_FACETS);
     /// Previews the fates and blockers of selected retained storage.
-    StorageCleanupPreflight: POST "/storage/cleanup/preflight", User, none, json CleanupRequest, json CleanupPlan, 200;
+    StorageCleanupPreflight: POST "/storage/cleanup/preflight", User, none, json CleanupRequest, json CleanupPlanResponse, 200,
+        operation Op::receipt(&Op::facets(&crate::storage_sources::CLEANUP_FACETS));
     /// Starts one confirmed cleanup with current authority and the preview's exact objects.
-    StorageCleanupCreate: POST "/storage/cleanup", User, none, json CleanupStart, json crate::workspace::Job, 202;
+    StorageCleanupCreate: POST "/storage/cleanup", User, none, json CleanupStart, json CleanupJobResponse, 202,
+        operation Op::receipt(&Op::facets(&crate::storage_sources::CLEANUP_FACETS));
 }

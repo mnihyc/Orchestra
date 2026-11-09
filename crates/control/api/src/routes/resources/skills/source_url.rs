@@ -8,6 +8,9 @@ use orch_db::queries::settings::{self as secrets, SecretName};
 use orch_db::{Conn, DbError};
 use orch_types::{Id, Json, new_id};
 
+#[cfg(test)]
+mod stage_tests;
+
 /// What a public origin says when some of the address is kept privately.
 const HIDDEN_QUERY: &str = "?…";
 
@@ -45,8 +48,77 @@ pub(super) fn public_origin(mut origin: SkillOrigin) -> SkillOrigin {
     origin
 }
 
-/// Stores a fresh private source for a fetch, before the machine is asked to read it. Its name
-/// is unique to the invocation so that a concurrent import never changes an in-flight command.
+/// A fresh invocation's actual sealed URL preparation; no secret row or private raw value is kept.
+pub(super) struct Stage {
+    skill: Id,
+    by: Id,
+    shown: String,
+    sealed: Option<(String, Vec<u8>)>,
+}
+
+/// Seal newly supplied private URL data before its guarded native setup transaction.
+/// A public address is a genuine no-secret result, not a placeholder secret identity.
+pub(super) fn prepare_stage(skill: Id, raw: &str, by: Id) -> ApiResult<Stage> {
+    let (shown, private) = public_url(raw);
+    let sealed = if private {
+        if raw.len() > sealing::SECRET_MAX_BYTES {
+            return Err(invalid("from.url", "the source address is too long"));
+        }
+        let name = format!("source_url:{}", new_id());
+        sealing::master_key()?;
+        let sealed = seal(skill, &name, raw)?;
+        Some((name, sealed))
+    } else {
+        None
+    };
+    Ok(Stage {
+        skill,
+        by,
+        shown,
+        sealed,
+    })
+}
+
+/// Consume this actual invocation/actor packet at the existing secret INSERT. The caller supplies
+/// its current setup-source admission and keeps its raw/all-key deadline through commit.
+pub(super) async fn apply_stage<F>(
+    conn: &mut Conn,
+    plan: Stage,
+    by: Id,
+    at: DateTime<Utc>,
+    before: F,
+) -> ApiResult<(String, Option<SecretName>)>
+where
+    F: FnOnce() -> ApiResult<()> + Send,
+{
+    if by != plan.by {
+        return Err(ApiError::internal(
+            "the skill source belongs to another native actor",
+        ));
+    }
+    let Some((name, sealed)) = plan.sealed else {
+        return Ok((plan.shown, None));
+    };
+    if !orch_db::queries::transaction_guard::in_transaction(conn) {
+        return Err(ApiError::internal(
+            "skill source setup requires its action transaction",
+        ));
+    }
+    before()?;
+    let secret = secrets::put_secret(
+        conn,
+        sealing::SKILL,
+        plan.skill,
+        &name,
+        &sealed,
+        Some(by),
+        at,
+    )
+    .await?;
+    Ok((plan.shown, Some(secret)))
+}
+
+/// Preserve the existing once-per-invocation secret setup on its one native writer.
 pub(super) async fn stage(
     conn: &mut Conn,
     skill: Id,
@@ -54,16 +126,15 @@ pub(super) async fn stage(
     by: Id,
     at: DateTime<Utc>,
 ) -> ApiResult<(String, Option<SecretName>)> {
-    let (shown, private) = public_url(raw);
-    if !private {
-        return Ok((shown, None));
+    let plan = prepare_stage(skill, raw, by)?;
+    if plan.sealed.is_none() {
+        return Ok((plan.shown, None));
     }
-    if raw.len() > sealing::SECRET_MAX_BYTES {
-        return Err(invalid("from.url", "the source address is too long"));
-    }
-    let name = format!("source_url:{}", new_id());
-    let secret = sealing::put_skill_source_secret(conn, skill, &name, raw, Some(by), at).await?;
-    Ok((shown, Some(secret)))
+    use sqlx::Connection;
+    let mut tx = conn.begin().await.map_err(DbError::from)?;
+    let result = apply_stage(&mut tx, plan, by, at, || Ok(())).await?;
+    tx.commit().await.map_err(DbError::from)?;
+    Ok(result)
 }
 
 /// Abandons a source that did not become the skill's current origin.
@@ -72,24 +143,68 @@ pub(super) async fn abandon(conn: &mut Conn, skill: Id, secret: &SecretName) -> 
     Ok(())
 }
 
-/// Moves older plain URL origins into skill-owned sealed rows when their skill is next read or
-/// written. A current origin has a pointer for reimport; historical versions retain their own
-/// sealed source without making it a public version member.
-pub(super) async fn migrate_many(
-    conn: &mut Conn,
-    skills: &[Id],
-    at: DateTime<Utc>,
-) -> ApiResult<()> {
-    if skills.is_empty() {
-        return Ok(());
+struct CurrentMigration {
+    skill: Id,
+    old: Json,
+    public: Json,
+    pointer: Option<Id>,
+    sealed: Option<Vec<u8>>,
+}
+struct VersionMigration {
+    id: Id,
+    skill: Id,
+    old: Json,
+    public: Json,
+    name: String,
+    sealed: Vec<u8>,
+}
+/// Opaque native URL-custody maintenance on its actual transaction and locked source rows.
+pub(super) struct Migration {
+    transaction: String,
+    current: Vec<CurrentMigration>,
+    versions: Vec<VersionMigration>,
+    audits: Vec<Id>,
+}
+
+async fn transaction(conn: &mut Conn) -> ApiResult<String> {
+    Ok(sqlx::query_scalar("SELECT pg_current_xact_id()::text")
+        .fetch_one(conn)
+        .await
+        .map_err(DbError::from)?)
+}
+fn seal(skill: Id, name: &str, raw: &str) -> ApiResult<Vec<u8>> {
+    sealing::installed_master_key()?
+        .seal(
+            raw.as_bytes(),
+            &sealing::binding(sealing::SKILL, skill, name),
+        )
+        .map_err(|_| ApiError::internal("a skill source could not be sealed"))
+}
+
+/// Acquire the native source/secret/audit footprint and seal supplied legacy values before writing.
+pub(super) async fn prepare_migration(conn: &mut Conn, skills: &[Id]) -> ApiResult<Migration> {
+    if !orch_db::queries::transaction_guard::in_transaction(conn) {
+        return Err(ApiError::internal(
+            "native skill source maintenance requires its action transaction",
+        ));
     }
-    let current: Vec<(Id, Option<Json>, Option<Id>)> =
-        sqlx::query_as("SELECT id,origin,source_url_secret_id FROM skills WHERE id=ANY($1)")
-            .bind(skills)
-            .fetch_all(&mut *conn)
-            .await
-            .map_err(DbError::from)?;
-    for (id, old, pointer) in current {
+    let current: Vec<(Id, Option<Json>, Option<Id>)> = sqlx::query_as(
+        "SELECT id,origin,source_url_secret_id FROM skills WHERE id=ANY($1) ORDER BY id FOR UPDATE",
+    )
+    .bind(skills)
+    .fetch_all(&mut *conn)
+    .await
+    .map_err(DbError::from)?;
+    let versions: Vec<(Id, Id, Json)> = sqlx::query_as(
+        "SELECT id,skill_id,origin FROM skill_versions WHERE skill_id=ANY($1) ORDER BY skill_id,id FOR UPDATE")
+        .bind(skills).fetch_all(&mut *conn).await.map_err(DbError::from)?;
+    sqlx::query("SELECT id FROM secrets WHERE owner_kind='skill' AND owner_id=ANY($1) ORDER BY owner_id,name FOR UPDATE")
+        .bind(skills).fetch_all(&mut *conn).await.map_err(DbError::from)?;
+    let audits: Vec<Id> = sqlx::query_scalar(
+        "SELECT id FROM audit_log WHERE object_kind='skill' AND object_id=ANY($1) AND details ? 'origin' ORDER BY id FOR UPDATE")
+        .bind(skills).fetch_all(&mut *conn).await.map_err(DbError::from)?;
+    let mut selected = Vec::new();
+    for (skill, old, pointer) in current {
         let Some(old) = old else { continue };
         let origin: SkillOrigin =
             serde_json::from_value(old.clone()).map_err(ApiError::internal)?;
@@ -100,44 +215,24 @@ pub(super) async fn migrate_many(
         if !private || shown == url.as_str() {
             continue;
         }
-        let secret = if pointer.is_none() {
-            Some(
-                sealing::put_skill_source_secret(
-                    conn,
-                    id,
-                    "source_url:legacy_current",
-                    url,
-                    None,
-                    at,
-                )
-                .await?
-                .id,
-            )
+        let sealed = if pointer.is_none() {
+            Some(seal(skill, "source_url:legacy_current", url)?)
         } else {
-            pointer
+            None
         };
         let mut public = origin;
         if let SkillOrigin::Url { url, .. } = &mut public {
             *url = shown;
         }
-        sqlx::query(
-            "UPDATE skills SET origin=$2,source_url_secret_id=COALESCE(source_url_secret_id,$3)
-              WHERE id=$1 AND origin=$4",
-        )
-        .bind(id)
-        .bind(serde_json::to_value(public).map_err(ApiError::internal)?)
-        .bind(secret)
-        .bind(old)
-        .execute(&mut *conn)
-        .await
-        .map_err(DbError::from)?;
+        selected.push(CurrentMigration {
+            skill,
+            old,
+            public: serde_json::to_value(public).map_err(ApiError::internal)?,
+            pointer,
+            sealed,
+        });
     }
-    let versions: Vec<(Id, Id, Json)> =
-        sqlx::query_as("SELECT id,skill_id,origin FROM skill_versions WHERE skill_id=ANY($1)")
-            .bind(skills)
-            .fetch_all(&mut *conn)
-            .await
-            .map_err(DbError::from)?;
+    let mut historical = Vec::new();
     for (id, skill, old) in versions {
         let origin: SkillOrigin =
             serde_json::from_value(old.clone()).map_err(ApiError::internal)?;
@@ -149,29 +244,115 @@ pub(super) async fn migrate_many(
             continue;
         }
         let name = format!("source_url:legacy_version:{id}");
-        sealing::put_skill_source_secret(conn, skill, &name, url, None, at).await?;
+        let sealed = seal(skill, &name, url)?;
         let mut public = origin;
         if let SkillOrigin::Url { url, .. } = &mut public {
             *url = shown;
         }
+        historical.push(VersionMigration {
+            id,
+            skill,
+            old,
+            public: serde_json::to_value(public).map_err(ApiError::internal)?,
+            name,
+            sealed,
+        });
+    }
+    Ok(Migration {
+        transaction: transaction(conn).await?,
+        current: selected,
+        versions: historical,
+        audits,
+    })
+}
+
+/// Consume exactly the locked native maintenance packet, checking immediately before its first write.
+pub(super) async fn apply_migration<F>(
+    conn: &mut Conn,
+    plan: Migration,
+    at: DateTime<Utc>,
+    before: F,
+) -> ApiResult<bool>
+where
+    F: FnOnce() -> ApiResult<()> + Send,
+{
+    if transaction(conn).await? != plan.transaction {
+        return Err(ApiError::internal(
+            "the native skill source maintenance belongs to another transaction",
+        ));
+    }
+    let changed = !plan.current.is_empty() || !plan.versions.is_empty() || !plan.audits.is_empty();
+    if !changed {
+        return Ok(false);
+    }
+    before()?;
+    for row in plan.current {
+        let pointer = match row.sealed {
+            Some(sealed) => Some(
+                secrets::put_secret(
+                    conn,
+                    sealing::SKILL,
+                    row.skill,
+                    "source_url:legacy_current",
+                    &sealed,
+                    None,
+                    at,
+                )
+                .await?
+                .id,
+            ),
+            None => row.pointer,
+        };
+        sqlx::query("UPDATE skills SET origin=$2,source_url_secret_id=COALESCE(source_url_secret_id,$3) WHERE id=$1 AND origin=$4")
+            .bind(row.skill).bind(row.public).bind(pointer).bind(row.old).execute(&mut *conn).await.map_err(DbError::from)?;
+    }
+    for row in plan.versions {
+        secrets::put_secret(
+            conn,
+            sealing::SKILL,
+            row.skill,
+            &row.name,
+            &row.sealed,
+            None,
+            at,
+        )
+        .await?;
         sqlx::query("UPDATE skill_versions SET origin=$2 WHERE id=$1 AND origin=$3")
-            .bind(id)
-            .bind(serde_json::to_value(public).map_err(ApiError::internal)?)
-            .bind(old)
+            .bind(row.id)
+            .bind(row.public)
+            .bind(row.old)
             .execute(&mut *conn)
             .await
             .map_err(DbError::from)?;
     }
-    // An older audit may have copied the original origin verbatim. Keep the event and its other
-    // facts, while dropping that untrusted address before any history view can return it again.
-    sqlx::query(
-        "UPDATE audit_log SET details=details-'origin'
-          WHERE object_kind='skill' AND object_id=ANY($1) AND details ? 'origin'",
-    )
-    .bind(skills)
-    .execute(&mut *conn)
-    .await
-    .map_err(DbError::from)?;
+    if !plan.audits.is_empty() {
+        sqlx::query(
+            "UPDATE audit_log SET details=details-'origin' WHERE id=ANY($1) AND details ? 'origin'",
+        )
+        .bind(plan.audits)
+        .execute(&mut *conn)
+        .await
+        .map_err(DbError::from)?;
+    }
+    Ok(true)
+}
+
+/// Preserve the original legacy maintenance API with one rollbackable native transaction.
+pub(super) async fn migrate_many(
+    conn: &mut Conn,
+    skills: &[Id],
+    at: DateTime<Utc>,
+) -> ApiResult<()> {
+    if skills.is_empty() {
+        return Ok(());
+    }
+    // Complete any deployment-key file access before taking the native source locks.
+    sealing::master_key()?;
+    use sqlx::Connection;
+    let mut tx = conn.begin().await.map_err(DbError::from)?;
+    let plan = prepare_migration(&mut tx, skills).await?;
+    apply_migration(&mut tx, plan, at, || Ok(())).await?;
+    tx.commit().await.map_err(DbError::from)?;
     Ok(())
 }
 

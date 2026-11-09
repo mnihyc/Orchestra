@@ -2,7 +2,7 @@
 
 use crate::middleware::requests::{ApiError, ApiResult};
 use orch_api_contract::{
-    environment::{EnvironmentRef, EnvironmentSandboxReadiness},
+    environment::{EnvironmentRef, EnvironmentSandboxReadiness, SandboxReadiness},
     resources::MachineRef,
 };
 use orch_authz::{
@@ -26,7 +26,74 @@ pub(crate) async fn environment(
     agent: Option<Id>,
     executor: Option<&str>,
 ) -> ApiResult<EnvironmentSandboxReadiness> {
-    let row = environments::environment(conn, reference.id)
+    prepare(conn, principal, reference.id, place, agent, executor)
+        .await?
+        .render(reference)
+}
+
+/// Native readiness operands, before a caller's Environment reference is projected.
+pub(crate) struct Prepared {
+    environment: Id,
+    machine: Option<resources::MachineRow>,
+    policy_manage: bool,
+    sandbox: SandboxReadiness,
+}
+
+impl Prepared {
+    pub(crate) fn machine(&self) -> Option<Id> {
+        self.machine.as_ref().map(|row| row.id)
+    }
+
+    /// Keep the physical association and any disclosed policy-management capability.
+    pub(crate) fn preserved_by(&self, fresh: &Self) -> bool {
+        self.environment == fresh.environment
+            && self.machine() == fresh.machine()
+            && (!self.policy_manage || fresh.policy_manage)
+    }
+
+    pub(crate) fn render(
+        &self,
+        reference: EnvironmentRef,
+    ) -> ApiResult<EnvironmentSandboxReadiness> {
+        if reference.id != self.environment {
+            return Err(ApiError::internal(
+                "the readiness reference changed environment",
+            ));
+        }
+        let machine = self
+            .machine
+            .as_ref()
+            .map(|row| -> ApiResult<MachineRef> {
+                Ok(MachineRef {
+                    id: row.id,
+                    name: row.name.clone(),
+                    online: row.online,
+                    placement: serde_json::from_value(Json::String(row.placement.clone()))
+                        .map_err(ApiError::internal)?,
+                    platform_os: serde_json::from_value(Json::String(row.platform_os.clone()))
+                        .map_err(ApiError::internal)?,
+                })
+            })
+            .transpose()?;
+        Ok(EnvironmentSandboxReadiness {
+            environment: reference,
+            machine,
+            policy_manage: self.policy_manage,
+            sandbox: self.sandbox.clone(),
+        })
+    }
+}
+
+/// Effect-free native source preparation, sharing the ordinary readiness algorithm.
+pub(crate) async fn prepare(
+    conn: &mut Conn,
+    principal: &Principal,
+    environment: Id,
+    place: Option<Place>,
+    agent: Option<Id>,
+    executor: Option<&str>,
+) -> ApiResult<Prepared> {
+    let row = environments::environment(conn, environment)
         .await?
         .ok_or_else(ApiError::not_found)?;
     let physical = environment_facts::of(conn, row.id)
@@ -146,21 +213,12 @@ pub(crate) async fn environment(
                 .map_err(ApiError::internal)?,
                 Keying::Allowed
             );
-            let reference = MachineRef {
-                id,
-                name: row.name,
-                online: row.online,
-                placement: serde_json::from_value(Json::String(row.placement))
-                    .map_err(ApiError::internal)?,
-                platform_os: serde_json::from_value(Json::String(row.platform_os))
-                    .map_err(ApiError::internal)?,
-            };
-            (Some(reference), manages)
+            (Some(row), manages)
         }
         None => (None, false),
     };
-    Ok(EnvironmentSandboxReadiness {
-        environment: reference,
+    Ok(Prepared {
+        environment,
         machine,
         policy_manage,
         sandbox,

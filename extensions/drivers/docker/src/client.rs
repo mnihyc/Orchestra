@@ -422,6 +422,19 @@ mod tests {
     }
 
     async fn inventory_socket(replies: Vec<(u16, &'static str)>) -> (Daemon, InventorySocket) {
+        let mut replies = std::collections::VecDeque::from(replies);
+        inventory_responder(move |_| {
+            let (status, body) = replies
+                .pop_front()
+                .expect("one response per expected request");
+            (status, body.to_owned())
+        })
+        .await
+    }
+
+    async fn inventory_responder(
+        mut reply: impl FnMut(&str) -> (u16, String) + Send + 'static,
+    ) -> (Daemon, InventorySocket) {
         let mut listening = None;
         for port in 41000..42000 {
             if let Ok(listener) = TcpListener::bind((std::net::Ipv4Addr::LOCALHOST, port)).await {
@@ -434,20 +447,19 @@ mod tests {
         let requests = Arc::new(Mutex::new(Vec::new()));
         let observed = Arc::clone(&requests);
         let task = tokio::spawn(async move {
-            for (status, body) in replies {
+            loop {
                 let (mut socket, _) = listener.accept().await.unwrap();
                 let mut request = Vec::new();
                 while !request.ends_with(b"\r\n\r\n") {
                     let mut byte = [0];
                     assert_eq!(socket.read(&mut byte).await.unwrap(), 1);
                     request.push(byte[0]);
-                    // These controlled GETs have no body or authentication and fit one header page.
+                    // These controlled requests have no body or authentication and fit one header page.
                     assert!(request.len() <= 8192);
                 }
-                observed
-                    .lock()
-                    .unwrap()
-                    .push(String::from_utf8(request).unwrap());
+                let request = String::from_utf8(request).unwrap();
+                observed.lock().unwrap().push(request.clone());
+                let (status, body) = reply(&request);
                 let response = format!(
                     "HTTP/1.1 {status} controlled\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}",
                     body.len()
@@ -467,6 +479,288 @@ mod tests {
             },
             InventorySocket { requests, task },
         )
+    }
+
+    fn inventory_driver(daemon: Daemon) -> crate::driver::DockerDriver {
+        let config = crate::config::DockerConfig::default();
+        let permits = usize::try_from(config.build_parallel.max(1)).unwrap();
+        crate::driver::DockerDriver {
+            daemon,
+            config: Arc::new(config),
+            blobs: None,
+            clock: Arc::new(orch_types::SystemClock),
+            locks: Arc::new(crate::units::KeyedLocks::default()),
+            builds: Arc::new(tokio::sync::Semaphore::new(permits)),
+            memos: Arc::default(),
+            heartbeat: crate::restricted::Heartbeat::default(),
+            control_endpoints: Arc::default(),
+            live_helpers_kernel: false,
+            live_mounts: Arc::default(),
+            restricted_proved: Arc::new(crate::runtimes::RestrictedProved::new()),
+        }
+    }
+
+    struct RemovalScenario {
+        listed: &'static str,
+        running: bool,
+        owner: &'static str,
+        inspect_status: u16,
+        missing_state: bool,
+        volume_dependency: bool,
+        conflict: bool,
+    }
+
+    impl Default for RemovalScenario {
+        fn default() -> Self {
+            Self {
+                listed: "exited",
+                running: false,
+                owner: "selected",
+                inspect_status: 200,
+                missing_state: false,
+                volume_dependency: false,
+                conflict: false,
+            }
+        }
+    }
+
+    async fn removal_socket(
+        mut scenario: RemovalScenario,
+    ) -> (crate::driver::DockerDriver, InventorySocket) {
+        let (daemon, server) =
+            inventory_responder(move |request| {
+                let first = request.lines().next().unwrap();
+                let mut parts = first.split_whitespace();
+                let method = parts.next().unwrap();
+                let path = parts.next().unwrap();
+                let endpoint = path.split('?').next().unwrap();
+                if path.contains("/containers/json") {
+                    // The real managed-unit selector sees this orphan's missing runtime label.
+                    let mounts = if scenario.volume_dependency {
+                        serde_json::json!([{"Name":"owned-volume"}])
+                    } else {
+                        serde_json::json!([])
+                    };
+                    return (200, serde_json::json!([{
+                    "Id":"owned-unit","Names":["/orphan-helper"],"State":scenario.listed,
+                    "Labels":{"orch.system":"selected","orch.driver":"docker"},"Mounts":mounts
+                }]).to_string());
+                }
+                if path.contains("/images/json") || endpoint.ends_with("/networks") {
+                    return (200, "[]".into());
+                }
+                if endpoint.ends_with("/volumes") {
+                    let volumes = if scenario.volume_dependency {
+                        serde_json::json!([{
+                            "Name":"owned-volume","Driver":"local","Mountpoint":"/controlled",
+                            "Labels":{"orch.system":"selected","orch.driver":"docker"},
+                            "Scope":"local","Options":{}
+                        }])
+                    } else {
+                        serde_json::json!([])
+                    };
+                    return (
+                        200,
+                        serde_json::json!({"Volumes":volumes,"Warnings":[]}).to_string(),
+                    );
+                }
+                if endpoint.ends_with("/containers/owned-unit/json") {
+                    if scenario.inspect_status != 200 {
+                        return (
+                            scenario.inspect_status,
+                            r#"{"message":"controlled inspection failure"}"#.into(),
+                        );
+                    }
+                    let mut inspected = serde_json::json!({
+                        "Id":"owned-unit","Config":{"Labels":{
+                            "orch.system":scenario.owner,"orch.driver":"docker"
+                        }}
+                    });
+                    if !scenario.missing_state {
+                        inspected["State"] = serde_json::json!({
+                            "Status":if scenario.running {"running"} else {"exited"},
+                            "Running":scenario.running,"Paused":false,"Restarting":false,
+                            "Dead":false,"ExitCode":if scenario.running {0} else {137}
+                        });
+                    }
+                    return (200, inspected.to_string());
+                }
+                if method == "POST" && path.contains("/containers/owned-unit/stop") {
+                    // Acknowledge a real transition while deliberately retaining the old list summary.
+                    scenario.running = false;
+                    return (204, String::new());
+                }
+                if method == "DELETE" && path.contains("/containers/owned-unit") {
+                    return if scenario.conflict {
+                        (
+                            409,
+                            r#"{"message":"container became active before removal"}"#.into(),
+                        )
+                    } else {
+                        (204, String::new())
+                    };
+                }
+                (404, r#"{"message":"unexpected controlled request"}"#.into())
+            })
+            .await;
+        (inventory_driver(daemon), server)
+    }
+
+    fn unit_reference() -> orch_driver_contract::resources::ResourceRef {
+        orch_driver_contract::resources::ResourceRef {
+            kind: orch_driver_contract::resources::ResourceKind::Unit,
+            id: "owned-unit".into(),
+        }
+    }
+
+    fn deletes(server: &InventorySocket) -> Vec<String> {
+        server
+            .requests
+            .lock()
+            .unwrap()
+            .iter()
+            .filter(|request| request.starts_with("DELETE "))
+            .cloned()
+            .collect()
+    }
+
+    #[tokio::test]
+    async fn a_stopped_unit_is_removed_when_its_list_summary_is_stale() {
+        let (driver, server) = removal_socket(RemovalScenario {
+            listed: "running",
+            running: true,
+            ..Default::default()
+        })
+        .await;
+        let target = unit_reference();
+        driver
+            .stop_inventoried("selected", &target, Duration::ZERO)
+            .await
+            .unwrap();
+        let result = driver.remove_inventoried("selected", &target).await;
+        assert!(
+            result.is_ok(),
+            "acknowledged stop and fresh stopped inspection permit removal: {result:?}"
+        );
+        let requests = server.requests.lock().unwrap();
+        assert_eq!(
+            requests
+                .iter()
+                .filter(|s| s.starts_with("POST ") && s.contains("/stop"))
+                .count(),
+            1
+        );
+        assert_eq!(
+            requests
+                .iter()
+                .filter(|s| s.contains("/containers/owned-unit/json"))
+                .count(),
+            2
+        );
+        drop(requests);
+        let removed = deletes(&server);
+        assert_eq!(removed.len(), 1);
+        assert!(removed[0].contains("force=false") && removed[0].contains("v=false"));
+    }
+
+    #[tokio::test]
+    async fn a_fresh_running_unit_is_busy_even_when_its_list_summary_says_exited() {
+        let (driver, server) = removal_socket(RemovalScenario {
+            running: true,
+            ..Default::default()
+        })
+        .await;
+        assert!(matches!(
+            driver
+                .remove_inventoried("selected", &unit_reference())
+                .await,
+            Err(DriverError::Busy(_))
+        ));
+        assert!(deletes(&server).is_empty());
+    }
+
+    #[tokio::test]
+    async fn a_unit_whose_inspected_owner_changed_is_not_removed() {
+        let (driver, server) = removal_socket(RemovalScenario {
+            owner: "another-installation",
+            ..Default::default()
+        })
+        .await;
+        assert!(matches!(
+            driver
+                .remove_inventoried("selected", &unit_reference())
+                .await,
+            Err(DriverError::NotFound(_))
+        ));
+        assert!(deletes(&server).is_empty());
+    }
+
+    #[tokio::test]
+    async fn a_failed_exact_unit_inspection_does_not_allow_removal() {
+        let (driver, server) = removal_socket(RemovalScenario {
+            inspect_status: 503,
+            ..Default::default()
+        })
+        .await;
+        assert!(matches!(
+            driver
+                .remove_inventoried("selected", &unit_reference())
+                .await,
+            Err(DriverError::Unavailable(_))
+        ));
+        assert!(deletes(&server).is_empty());
+    }
+
+    #[tokio::test]
+    async fn a_missing_exact_unit_state_does_not_allow_removal() {
+        let (driver, server) = removal_socket(RemovalScenario {
+            missing_state: true,
+            ..Default::default()
+        })
+        .await;
+        assert!(matches!(
+            driver
+                .remove_inventoried("selected", &unit_reference())
+                .await,
+            Err(DriverError::Busy(_))
+        ));
+        assert!(deletes(&server).is_empty());
+    }
+
+    #[tokio::test]
+    async fn a_dependent_volume_stays_busy_without_a_delete() {
+        let (driver, server) = removal_socket(RemovalScenario {
+            volume_dependency: true,
+            ..Default::default()
+        })
+        .await;
+        let target = orch_driver_contract::resources::ResourceRef {
+            kind: orch_driver_contract::resources::ResourceKind::Volume,
+            id: "owned-volume".into(),
+        };
+        assert!(matches!(
+            driver.remove_inventoried("selected", &target).await,
+            Err(DriverError::Busy(_))
+        ));
+        assert!(deletes(&server).is_empty());
+    }
+
+    #[tokio::test]
+    async fn a_raced_native_removal_conflict_stays_busy_without_force_or_retry() {
+        let (driver, server) = removal_socket(RemovalScenario {
+            conflict: true,
+            ..Default::default()
+        })
+        .await;
+        assert!(matches!(
+            driver
+                .remove_inventoried("selected", &unit_reference())
+                .await,
+            Err(DriverError::Busy(_))
+        ));
+        let removed = deletes(&server);
+        assert_eq!(removed.len(), 1);
+        assert!(removed[0].contains("force=false") && removed[0].contains("v=false"));
     }
 
     #[tokio::test]

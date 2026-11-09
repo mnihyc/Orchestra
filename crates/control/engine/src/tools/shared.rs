@@ -1,4 +1,4 @@
-//! The shared tree: what is in an agent's reach as paths, from everything it may read or from its own topic: neighbouring threads by policy, the documents, chats and conversations people shared, and the files each carries; listed with what each entry is, how it is counted and whether it may be written.
+//! The shared tree: what is in an agent's reach as paths, from everything it may read or from its own topic: the documents, chats and conversations people shared, and the files each carries; listed with what each entry is, how it is counted and whether it may be written.
 //!
 //! `list_shared` lists the directory at `path`: the agent's own topic when it is left out, `/` for everything.
 //! It goes `depth` levels down in pages, active work and then recent changes first unless names are asked for;
@@ -15,15 +15,14 @@ use crate::error::EngineError;
 use crate::tools::definitions::{Code, Refusal};
 use crate::tools::tree::{self, Entry, FoundEntry, Listing, Named, Pattern, Scope, Tree, Where};
 use crate::tools::{Answer, CallContext};
+use futures::future::BoxFuture;
 use orch_access_contract::audit::AuditAction;
 use orch_api_contract::share::SharedEntryKind;
-use orch_authz::reach::{Agent, AgentReach, DocumentPolicy};
+use orch_authz::reach::Agent;
 use orch_db::Conn;
 use orch_db::audit::{Actor, Entry as AuditEntry, Origin, append};
 use orch_db::queries::identity;
 use orch_db::queries::threads::ThreadRow;
-use orch_settings::Place;
-use orch_settings_contract::registry::keys;
 use orch_types::{Id, Json, Time};
 use serde::Deserialize;
 use serde_json::json;
@@ -51,16 +50,12 @@ struct Arguments {
 pub struct Asking {
     /// The agent.
     pub agent: Agent,
-    /// What `sharing.agent_reach` says at its topic.
-    pub policy: AgentReach,
-    /// Independently resolved public topic-document reach.
-    pub documents_policy: DocumentPolicy,
     /// The moment of the call.
     pub now: Time,
 }
 
 impl Engine {
-    /// The agent of a thread and the policy of its topic, at this moment; nothing where the thread is not there.
+    /// The agent of a thread at this moment; nothing where the thread is not there.
     pub(crate) async fn asking(
         &self,
         conn: &mut Conn,
@@ -69,23 +64,8 @@ impl Engine {
         let Some(agent) = Agent::of(conn, thread).await? else {
             return Ok(None);
         };
-        let policy =
-            orch_settings::get::<String>(conn, Place::Node(agent.topic), keys::SHARING_AGENT_REACH)
-                .await?
-                .and_then(|word| AgentReach::parse(&word))
-                .unwrap_or_default();
         Ok(Some(Asking {
-            documents_policy: orch_settings::get::<String>(
-                conn,
-                Place::Node(agent.topic),
-                keys::SHARING_AGENT_DOCUMENTS,
-            )
-            .await?
-            .as_deref()
-            .and_then(DocumentPolicy::parse)
-            .unwrap_or(DocumentPolicy::Write),
             agent,
-            policy,
             now: Time::new(self.inner.clock.now()),
         }))
     }
@@ -100,15 +80,7 @@ impl Engine {
     ) -> Result<(Tree, tree::Walked, Named), EngineError> {
         let named = tree::absolute(conn, &asking.agent, named).await?;
         let walked = tree::walk(conn, &named).await?;
-        let tree = Tree::load(
-            conn,
-            asking.agent.clone(),
-            asking.policy,
-            asking.documents_policy,
-            asking.now,
-            walked.scope,
-        )
-        .await?;
+        let tree = Tree::load(conn, asking.agent.clone(), asking.now, walked.scope).await?;
         Ok((tree, walked, named))
     }
 
@@ -141,28 +113,13 @@ impl Engine {
             Scope::Under(_) => {}
         }
         for (at, node) in walked.chain.iter().enumerate().rev().skip(1) {
-            let above = Tree::load(
-                conn,
-                asking.agent.clone(),
-                asking.policy,
-                asking.documents_policy,
-                asking.now,
-                Scope::Under(*node),
-            )
-            .await?;
+            let above =
+                Tree::load(conn, asking.agent.clone(), asking.now, Scope::Under(*node)).await?;
             if above.directory_at(Where::Place(*node)) {
                 return Ok(not_found(&above, named, at + 1, asked));
             }
         }
-        let top = Tree::load(
-            conn,
-            asking.agent.clone(),
-            asking.policy,
-            asking.documents_policy,
-            asking.now,
-            Scope::Everything,
-        )
-        .await?;
+        let top = Tree::load(conn, asking.agent.clone(), asking.now, Scope::Everything).await?;
         Ok(not_found(&top, named, 0, asked))
     }
 
@@ -207,59 +164,60 @@ impl Engine {
     }
 
     /// `list_shared`: the call of an agent.
-    pub(crate) async fn list_shared_call(
-        &self,
-        call: &CallContext,
-        thread: &ThreadRow,
-    ) -> Result<Answer, EngineError> {
-        let arguments: Arguments = match serde_json::from_value(call.arguments.clone()) {
-            Ok(arguments) => arguments,
-            Err(error) => return Ok(Refusal::invalid(error.to_string()).into()),
-        };
-        let depth = u32::try_from(arguments.depth.unwrap_or(1).clamp(1, 4)).unwrap_or(1);
-        let limit = arguments.limit.unwrap_or(50);
-        if !(1..=super::definitions::PAGE_MAX).contains(&limit) {
-            return Ok(Refusal::invalid("limit must be between 1 and 200").into());
-        }
-        let limit = usize::try_from(limit).unwrap_or(50);
-        let sort = arguments.sort.unwrap_or_default();
-        let include_archived = arguments.include_archived.unwrap_or(false);
-        let pattern = match arguments.names.as_deref().map(Pattern::new) {
-            Some(None) => {
-                return Ok(Refusal::invalid(
-                    "\"names\" is not a pattern: it takes * ? and [...], as a shell has them.",
-                )
-                .into());
+    pub(crate) fn list_shared_call<'a>(
+        &'a self,
+        call: &'a CallContext,
+        thread: &'a ThreadRow,
+    ) -> BoxFuture<'a, Result<Answer, EngineError>> {
+        Box::pin(async move {
+            let arguments: Arguments = match serde_json::from_value(call.arguments.clone()) {
+                Ok(arguments) => arguments,
+                Err(error) => return Ok(Refusal::invalid(error.to_string()).into()),
+            };
+            let depth = u32::try_from(arguments.depth.unwrap_or(1).clamp(1, 4)).unwrap_or(1);
+            let limit = arguments.limit.unwrap_or(50);
+            if !(1..=super::definitions::PAGE_MAX).contains(&limit) {
+                return Ok(Refusal::invalid("limit must be between 1 and 200").into());
             }
-            Some(Some(pattern)) => Some(pattern),
-            None => None,
-        };
-        let asked = arguments.path.as_deref().unwrap_or(".");
-        let mut conn = self.inner.db.acquire().await?;
-        let LocatedPath {
-            asking,
-            tree,
-            found,
-            walked,
-            named,
-            also_named_so,
-        } = match self
-            .locate_shared(&mut conn, thread.node_id, asked, false, false)
-            .await?
-        {
-            Ok(located) => located,
-            Err(refusal) => return Ok(refusal.into()),
-        };
-        let at = match found.entry {
-            FoundEntry::Directory(at) if tree.directory_at(at) => at,
-            FoundEntry::Directory(_) => {
-                let refusal = self
-                    .nothing_there(&mut conn, &asking, &tree, &walked, &named, asked)
-                    .await?;
-                return Ok(refusal.into());
-            }
-            FoundEntry::File(_) => {
-                return Ok(Refusal::new(
+            let limit = usize::try_from(limit).unwrap_or(50);
+            let sort = arguments.sort.unwrap_or_default();
+            let include_archived = arguments.include_archived.unwrap_or(false);
+            let pattern = match arguments.names.as_deref().map(Pattern::new) {
+                Some(None) => {
+                    return Ok(Refusal::invalid(
+                        "\"names\" is not a pattern: it takes * ? and [...], as a shell has them.",
+                    )
+                    .into());
+                }
+                Some(Some(pattern)) => Some(pattern),
+                None => None,
+            };
+            let asked = arguments.path.as_deref().unwrap_or(".");
+            let mut conn = self.inner.db.acquire().await?;
+            let LocatedPath {
+                asking,
+                tree,
+                found,
+                walked,
+                named,
+                also_named_so,
+            } = match self
+                .locate_shared(&mut conn, thread.node_id, asked, false, false)
+                .await?
+            {
+                Ok(located) => located,
+                Err(refusal) => return Ok(refusal.into()),
+            };
+            let at = match found.entry {
+                FoundEntry::Directory(at) if tree.directory_at(at) => at,
+                FoundEntry::Directory(_) => {
+                    let refusal = self
+                        .nothing_there(&mut conn, &asking, &tree, &walked, &named, asked)
+                        .await?;
+                    return Ok(refusal.into());
+                }
+                FoundEntry::File(_) => {
+                    return Ok(Refusal::new(
                     Code::WrongKind,
                     format!(
                         "{} is a file, not a directory. Read it with read_shared, or copy it with download_shared.",
@@ -267,59 +225,60 @@ impl Engine {
                     ),
                 )
                 .into());
-            }
-        };
-        let query=json!({"path":found.path,"depth":depth,"kinds":arguments.kinds,"names":arguments.names,"sort":sort,"include_archived":include_archived}).to_string();
-        let binding = crate::ids::derived(
-            "list_shared.page",
-            &[thread.node_id.as_bytes(), query.as_bytes()],
-        )
-        .to_string();
-        let after=match arguments.cursor.as_deref() {
+                }
+            };
+            let query=json!({"path":found.path,"depth":depth,"kinds":arguments.kinds,"names":arguments.names,"sort":sort,"include_archived":include_archived}).to_string();
+            let binding = crate::ids::derived(
+                "list_shared.page",
+                &[thread.node_id.as_bytes(), query.as_bytes()],
+            )
+            .to_string();
+            let after=match arguments.cursor.as_deref() {
             None => None,
             Some(cursor) => match cursor.split_once('|').filter(|(tag,path)| *tag == binding && !path.is_empty()) {
                 Some((_,path)) => Some(path),
                 None => return Ok(Refusal::invalid("this cursor belongs to another thread or listing; use its original path, depth, filters, sort and archive choice").into()),
             },
         };
-        let Some(page) = tree
-            .list_page(
-                &mut conn,
-                at,
-                &found.path,
-                depth,
-                arguments.kinds.as_deref(),
-                pattern.as_ref(),
-                tree::PageOptions {
-                    sort,
-                    include_archived,
-                    limit,
-                    after,
-                },
-            )
-            .await?
-        else {
-            return Ok(Refusal::invalid("the directory changed or its last entry is no longer readable; list again without a cursor").into());
-        };
-        let mut listing = page.listing;
-        describe_documents(&mut conn, &mut listing.entries).await?;
-        let sharers = names_of(&mut conn, &listing.entries).await?;
-        let mut value = listing_json(&listing, &sharers, arguments.ids.unwrap_or(false));
-        if let Some(entries) = value["entries"].as_array_mut() {
-            for entry in entries {
-                if let Some(path) = entry["path"].as_str().map(str::to_owned) {
-                    entry["cursor"] = json!(format!("{binding}|{path}"));
+            let Some(page) = tree
+                .list_page(
+                    &mut conn,
+                    at,
+                    &found.path,
+                    depth,
+                    arguments.kinds.as_deref(),
+                    pattern.as_ref(),
+                    tree::PageOptions {
+                        sort,
+                        include_archived,
+                        limit,
+                        after,
+                    },
+                )
+                .await?
+            else {
+                return Ok(Refusal::invalid("the directory changed or its last entry is no longer readable; list again without a cursor").into());
+            };
+            let mut listing = page.listing;
+            describe_documents(&mut conn, &mut listing.entries).await?;
+            let sharers = names_of(&mut conn, &listing.entries).await?;
+            let mut value = listing_json(&listing, &sharers, arguments.ids.unwrap_or(false));
+            if let Some(entries) = value["entries"].as_array_mut() {
+                for entry in entries {
+                    if let Some(path) = entry["path"].as_str().map(str::to_owned) {
+                        entry["cursor"] = json!(format!("{binding}|{path}"));
+                    }
                 }
             }
-        }
-        value["partial"] = json!(page.next.is_some());
-        value["next_cursor"] = json!(page.next.map(|path| format!("{binding}|{path}")));
-        value["archived_count"] = json!(page.archived_count);
-        value["sort"] = json!(sort);
-        if let Some(notice) = also_named_so {
-            value["also_named_so"] = json!(notice);
-        }
-        Ok(Answer::Done(value))
+            value["partial"] = json!(page.next.is_some());
+            value["next_cursor"] = json!(page.next.map(|path| format!("{binding}|{path}")));
+            value["archived_count"] = json!(page.archived_count);
+            value["sort"] = json!(sort);
+            if let Some(notice) = also_named_so {
+                value["also_named_so"] = json!(notice);
+            }
+            Ok(Answer::Done(value))
+        })
     }
 }
 
@@ -522,8 +481,6 @@ impl Engine {
             let tree = Tree::load_search(
                 conn,
                 asking.agent.clone(),
-                asking.policy,
-                asking.documents_policy,
                 asking.now,
                 walked.scope,
                 selected,
@@ -758,7 +715,7 @@ pub(crate) async fn audit_by_agent(
 }
 
 impl Engine {
-    /// A thread addressed through the common resolver: its own topic permits sending, elsewhere a write share does.
+    /// A different thread addressed through the common resolver and its current lent Send right.
     pub(crate) async fn thread_shared_for_writing(
         &self,
         thread: &ThreadRow,
@@ -816,11 +773,15 @@ impl Engine {
                 "A side thread is not a message target.",
             )));
         }
-        if topic != thread.topic_id
-            && !resolved
-                .tree
-                .conversation_of(id)
-                .is_some_and(|(standing, _)| standing.writes())
+        if id == thread.node_id {
+            return Ok(Err(Refusal::invalid(
+                "That is your own thread. A message goes to the agent of another thread.",
+            )));
+        }
+        if !resolved
+            .tree
+            .conversation_of(id)
+            .is_some_and(|(standing, _)| standing.writes())
         {
             return Ok(Err(Refusal::new(
                 Code::NotFound,

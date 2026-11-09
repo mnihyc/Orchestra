@@ -8,6 +8,8 @@
 mod places;
 mod support;
 
+use crate::support::FullTransferReply;
+
 use chrono::Duration;
 use orch_api_contract::common::ErrorCode;
 use orch_api_contract::common::PageQuery;
@@ -126,7 +128,9 @@ async fn a_project_is_deleted_with_what_is_in_it_and_brought_back_archived_until
         .token(&s.boss.token)
         .send()
         .await
-        .ok();
+        .ok()
+        .into_full()
+        .expect("ordinary restoration keeps the full native Node");
     let Node::Project(back) = back else {
         panic!("a project comes back one");
     };
@@ -309,7 +313,9 @@ async fn a_root_org_is_deleted_listed_for_its_owners_and_restored_by_one_of_them
         .token(&s.boss.token)
         .send()
         .await
-        .ok();
+        .ok()
+        .into_full()
+        .expect("ordinary restoration keeps the full native Node");
     assert!(matches!(back, Node::Org(_)));
     // A system admin brings back one deleted by its owner.
     let root = places::admin(&world, "root").await;
@@ -320,7 +326,9 @@ async fn a_root_org_is_deleted_listed_for_its_owners_and_restored_by_one_of_them
         .token(&root.token)
         .send()
         .await
-        .ok();
+        .ok()
+        .into_full()
+        .expect("ordinary restoration keeps the full native Node");
     assert!(matches!(back, Node::Org(_)));
 }
 
@@ -339,14 +347,20 @@ async fn the_first_place_among_the_owners_is_handed_on_and_the_previous_stays_un
             })
             .send()
     };
-    let handed = transfer(&s.boss, s.web, s.dan.id(), None).await.ok();
+    let handed = transfer(&s.boss, s.web, s.dan.id(), None)
+        .await
+        .full_transfer()
+        .ok();
     let Node::Project(handed) = handed else {
         panic!("a project stays one");
     };
     assert_eq!(handed.base.owner.username, "dan");
     assert_eq!(handed.base.owners, 2, "the previous owner stays");
     // Dan, now an owner, hands it on and takes the previous out.
-    let again = transfer(&s.dan, s.web, s.boss.id(), Some(false)).await.ok();
+    let again = transfer(&s.dan, s.web, s.boss.id(), Some(false))
+        .await
+        .full_transfer()
+        .ok();
     let Node::Project(again) = again else {
         panic!("a project stays one");
     };

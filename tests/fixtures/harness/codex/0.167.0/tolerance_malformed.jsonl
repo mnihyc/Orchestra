@@ -1,0 +1,3 @@
+{"direction":"from_harness","frame":{"method":"turn/started","params":{"threadId":"fixture-thread","turn":{"id":"fixture-turn","status":"inProgress","items":[]}}}}
+{"direction":"raw","line":"{broken fixture","newline":true}
+{"direction":"from_harness","frame":{"method":"turn/completed","params":{"threadId":"fixture-thread","turn":{"id":"fixture-turn","status":"completed","error":null,"items":[]}}}}

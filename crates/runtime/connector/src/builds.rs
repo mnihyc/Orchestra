@@ -104,6 +104,7 @@ pub fn installed(tools_dir: &Path, registry: &AdapterRegistry) -> Vec<Installed>
 }
 
 #[cfg(test)]
+#[cfg(unix)]
 mod tests {
     use super::*;
     #[cfg(unix)]

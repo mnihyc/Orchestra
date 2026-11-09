@@ -56,7 +56,7 @@ pub fn driver_mounts_enforced(file: Option<&Path>) -> bool {
     }
 }
 
-#[cfg(any(target_os = "linux", test))]
+#[cfg(any(target_os = "linux", all(test, unix)))]
 fn read_only_are_enforced(mounts: &[AttachedMount], table: &str) -> bool {
     let read_only: Vec<_> = mounts
         .iter()

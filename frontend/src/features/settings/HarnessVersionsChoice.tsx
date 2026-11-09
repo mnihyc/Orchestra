@@ -75,7 +75,7 @@ export function HarnessVersionsChoice({ value, effective, onChange, onApply, dis
   const { t } = useTranslation();
   const builds = useQuery(programBuildsQuery);
   const programs = useHarnessNames();
-  if (builds.isPending) return <SkeletonRows rows={2} />;
+  if (builds.isPending) return <SkeletonRows read={builds} rows={2} />;
   if (builds.isError) return <ErrorAlert error={builds.error} />;
   const current = typeof value === 'object' && value !== null && !Array.isArray(value) ? value as Record<string, unknown> : {};
   const inherited = typeof effective === 'object' && effective !== null && !Array.isArray(effective) ? effective as Record<string, unknown> : {};

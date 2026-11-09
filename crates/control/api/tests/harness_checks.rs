@@ -10,6 +10,8 @@ mod admin_support;
 #[path = "harness_checks/channels.rs"]
 mod channel_cases;
 mod places;
+#[path = "harness_checks/scopes.rs"]
+mod scopes;
 mod support;
 
 use std::time::Duration;

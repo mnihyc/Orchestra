@@ -4,7 +4,7 @@ import { describe, expect, it } from 'vitest';
 
 import { ApiError } from '@/api/client';
 import { chooserOf, contextStart, droppedFor, kindOf, programStart, readDef, speedStart, type State, statesOf, withChoice, withoutDropped } from '@/features/composer/modelState';
-import { ranWithParts } from '@/features/composer/RanWith';
+import { ranWithParts, effectiveTurnModel, effectiveTurnModelName } from '@/features/composer/RanWith';
 import { readSize, readSlash } from '@/features/composer/SlashMenu';
 import { contextChoices, firstStep, formatContext, readTokens, stepBelow } from '@/features/models/context';
 import { groupPattern, isGroupName, listNames, patternNames } from '@/features/models/patterns';
@@ -343,6 +343,19 @@ describe('what is written in the box after a slash', () => {
 describe("what a turn ran with, as its footer says it", () => {
   const defs = [readDef(SPEED), readDef(ACCESS), readDef(CONTEXT), readDef({ key: 'verbosity', options: [{ value: 'terse', label: 'Terse' }] })].flatMap((def) => (def === null ? [] : [def]));
   const options = [{ model_name: 'sol', parameters: SOL }];
+
+  it('uses a reported model for option names while preserving the requested choice', () => {
+    const turn={model:'sol',model_display:'Chosen model',usage_detail:{effective_model:'effective',effective_model_display:'Effective model',subagents:null,by_subagent:[],models:[],context_window:null,context_used:null,compact_at:null,shortenings:[],breakdown:false}};
+    expect(effectiveTurnModel(turn)).toBe('effective');
+    expect(effectiveTurnModelName(turn)).toBe('Effective model');
+    expect(ranWithParts({service_tier:'fast'},defs,effectiveTurnModel(turn),[...options,{model_name:'effective',parameters:{...SOL,service_tiers:[{id:'fast',label:'Effective speed'}]}}],'en')).toEqual(['Effective speed']);
+    expect(turn.model).toBe('sol');
+  });
+
+  it('does not invent a native model when no effective name was reported', () => {
+    expect(effectiveTurnModel({model:'sol'})).toBe('sol');
+    expect(effectiveTurnModelName({model:'sol',model_display:'Chosen model'})).toBe('Chosen model');
+  });
 
   it('names the speed, the program and the context it was started with, in that order', () => {
     expect(ranWithParts({ context: 400_000, cyber_access_program: 'Daybreak Blue', service_tier: 'fast', context_window: 272_000 }, defs, 'sol', options, 'en-US')).toEqual(['Fast', 'Daybreak Blue', '400K']);

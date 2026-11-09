@@ -140,7 +140,7 @@ for (const locale of ['en', 'zh-CN'] as const) for (const theme of ['light', 'da
     const writes = await historySetting(page);
     const reads = traffic(page);
     try {
-      await page.goto('/org/acme.research/settings/policies');
+      await page.goto('/org/acme.research/settings/defaults');
       const row = page.locator(`[data-setting="${KEY}"]`);
       await expect(row.getByRole('spinbutton')).toHaveValue('7'); await settled(page);
       const cold = [...reads.requests];

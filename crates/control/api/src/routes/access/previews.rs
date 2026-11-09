@@ -17,7 +17,7 @@ use orch_access_contract::roles::PlaceRef;
 use orch_api_contract::access as api;
 use orch_api_contract::nodes::NodeKind;
 use orch_authz::pages::{self, ChangeError, Target};
-use orch_authz::previews::{self, Before, Moved, Preview, Scope};
+use orch_authz::previews::{Before, Moved, Preview, Scope};
 use orch_authz::{Policy, things};
 use orch_db::queries::access;
 use orch_db::{Conn, DbError};
@@ -52,6 +52,7 @@ pub(crate) async fn worded(conn: &mut Conn, preview: Preview) -> ApiResult<api::
     )
     .unwrap_or(i64::MAX);
     Ok(api::PagePreview {
+        owner_reads: None,
         pages: preview.pages,
         orgs: preview.orgs,
         gaining: named_gaining,
@@ -77,16 +78,59 @@ pub async fn page(ctx: Ctx, (): (), body: api::PageChange) -> ApiResult<api::Pag
             other => ApiError::internal(other),
         })?;
     let policy = subject::resource_policy(&mut tx, named.thing, &site).await?;
-    let previewed = previews::of_page(
+    let anchor = match named.thing {
+        things::Thing::Node(id) => Some(id),
+        _ => None,
+    };
+    let disclosure = crate::thread_read_tools::sharing::Before::take(
+        &ctx.app,
+        &mut tx,
+        anchor,
+        &("page", anchor, &body),
+        false,
+        true,
+    )
+    .await?;
+    let before = Before::take(
         &mut tx,
         &principal,
-        named.thing,
-        &change,
-        &policy,
-        &origin(&ctx),
+        Scope::Page(named.thing),
+        policy.node_policy(),
     )
+    .await
+    .map_err(ApiError::internal)?;
+    let previewed: Result<Preview, ChangeError> = async {
+        match named.thing {
+            things::Thing::Node(_) => {
+                pages::change(
+                    &mut tx,
+                    &principal,
+                    named.thing.target(),
+                    &change,
+                    policy.node_policy(),
+                    &origin(&ctx),
+                )
+                .await?;
+            }
+            things::Thing::Other(object) => {
+                pages::change_resource(
+                    &mut tx,
+                    &principal,
+                    object,
+                    &change,
+                    &policy,
+                    &origin(&ctx),
+                )
+                .await?;
+            }
+        }
+        Ok(before.finish(&mut tx, &principal).await?)
+    }
     .await;
-    let answer = answered(&mut tx, previewed).await;
+    let mut answer = answered(&mut tx, previewed).await;
+    if let Ok(answer) = &mut answer {
+        answer.owner_reads = disclosure.disclosure(&ctx.app, &mut tx).await?;
+    }
     // Nothing a preview did is kept: the change was made in a trial, and the transaction is ended
     // without being committed.
     tx.rollback().await.map_err(DbError::from)?;
@@ -107,16 +151,40 @@ pub async fn node_defaults(ctx: Ctx, (): (), body: api::PageChange) -> ApiResult
         ));
     }
     let policy = policy_at(&mut tx, id).await?;
-    let previewed = previews::of_defaults(
+    let disclosure = crate::thread_read_tools::sharing::Before::take(
+        &ctx.app,
+        &mut tx,
+        Some(id),
+        &("defaults", Some(id), &body),
+        false,
+        true,
+    )
+    .await?;
+    let before = Before::take(
         &mut tx,
         &principal,
-        PlaceRef::Node(id),
-        &change,
+        Scope::Inside(PlaceRef::Node(id)),
         policy,
-        &origin(&ctx),
     )
+    .await
+    .map_err(ApiError::internal)?;
+    let previewed: Result<Preview, ChangeError> = async {
+        pages::change(
+            &mut tx,
+            &principal,
+            Target::Defaults(PlaceRef::Node(id)),
+            &change,
+            policy,
+            &origin(&ctx),
+        )
+        .await?;
+        Ok(before.finish(&mut tx, &principal).await?)
+    }
     .await;
-    let answer = answered(&mut tx, previewed).await;
+    let mut answer = answered(&mut tx, previewed).await;
+    if let Ok(answer) = &mut answer {
+        answer.owner_reads = disclosure.disclosure(&ctx.app, &mut tx).await?;
+    }
     // Nothing a preview did is kept: the change was made in a trial, and the transaction is ended
     // without being committed.
     tx.rollback().await.map_err(DbError::from)?;
@@ -133,8 +201,14 @@ pub async fn admin_defaults(
     admin_of(&ctx)?;
     let change = read_change(&body)?;
     let resets = change.whole == Some(stored::Whole::Reset);
-    let mut tx = ctx.app.db.begin().await?;
-    let principal = authorization::principal(&ctx, &mut tx).await?;
+    let (mut tx, guard) = crate::routes::admin::action(&ctx).await?;
+    let principal = guard.principal().clone();
+    let disclosure = crate::thread_read_tools::sharing::Before::system(
+        &ctx.app,
+        &mut tx,
+        &("system-defaults", &body),
+    )
+    .await?;
     let before = Before::take(
         &mut tx,
         &principal,
@@ -144,6 +218,7 @@ pub async fn admin_defaults(
     .await
     .map_err(ApiError::internal)?;
     let mut trial = access::begin_trial(&mut tx).await?;
+    let mut owner_reads = None;
     let previewed: Result<Preview, ChangeError> = async {
         pages::change(
             &mut trial,
@@ -159,11 +234,19 @@ pub async fn admin_defaults(
                 ChangeError::Engine(orch_authz::Error::Stored(error.to_string()))
             })?;
         }
-        Ok(before.finish(&mut trial, &principal).await?)
+        let preview = before.finish(&mut trial, &principal).await?;
+        owner_reads = disclosure
+            .disclosure(&ctx.app, &mut trial)
+            .await
+            .map_err(|error| ChangeError::Engine(orch_authz::Error::Stored(error.to_string())))?;
+        Ok(preview)
     }
     .await;
     access::end_trial(trial).await?;
-    let answer = answered(&mut tx, previewed).await;
+    let mut answer = answered(&mut tx, previewed).await;
+    if let Ok(answer) = &mut answer {
+        answer.owner_reads = owner_reads;
+    }
     // Nothing a preview did is kept: the change was made in a trial, and the transaction is ended
     // without being committed.
     tx.rollback().await.map_err(DbError::from)?;

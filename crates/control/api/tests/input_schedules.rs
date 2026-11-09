@@ -8,6 +8,8 @@
 mod places;
 mod rig;
 mod support;
+mod thread_history_scope;
+use support::FullTokenReply as _;
 
 use chrono::Duration;
 use orch_api_contract::binding::EnvironmentChoice;
@@ -74,7 +76,9 @@ async fn authored_edits_controls_and_once_execution_have_real_safe_deduplicated_
         .body(&body)
         .send()
         .await
-        .ok();
+        .ok()
+        .into_full()
+        .expect("ordinary schedule response");
     assert_eq!(created.state, InputScheduleState::Active);
     assert!(created.definition.is_some());
     let turns: i64 = sqlx::query_scalar("SELECT count(*) FROM turns WHERE thread_id=$1")
@@ -114,7 +118,9 @@ async fn authored_edits_controls_and_once_execution_have_real_safe_deduplicated_
         })
         .send()
         .await
-        .ok();
+        .ok()
+        .into_full()
+        .expect("ordinary schedule response");
     let paused = scene
         .rig
         .world
@@ -128,7 +134,9 @@ async fn authored_edits_controls_and_once_execution_have_real_safe_deduplicated_
         })
         .send()
         .await
-        .ok();
+        .ok()
+        .into_full()
+        .expect("ordinary schedule response");
     assert!(paused.next_run_at.is_none());
     assert_eq!(
         orch_api_core::input_schedules::run_due(&scene.rig.world.app.app)
@@ -149,7 +157,9 @@ async fn authored_edits_controls_and_once_execution_have_real_safe_deduplicated_
         })
         .send()
         .await
-        .ok();
+        .ok()
+        .into_full()
+        .expect("ordinary schedule response");
     let stale = scene
         .rig
         .world
@@ -285,12 +295,36 @@ async fn a_due_occurrence_loses_current_authority_instead_of_reusing_creation_an
     let scene = rig::Scene::new().await;
     let thread = scene.thread().await;
     offline(&scene).await;
+    for (kind, id, permission) in [
+        ("agent", scene.on.agent, "agent.use"),
+        ("provider", scene.on.provider, "provider.use"),
+        ("environment", scene.on.environment, "environment.use"),
+    ] {
+        scene
+            .rig
+            .lets_use(kind, id, permission, &scene.cai, json!({}))
+            .await;
+    }
+    let interact = {
+        let mut conn = scene.rig.db.acquire().await.unwrap();
+        orch_db::queries::access::testing::add_entry(
+            &mut conn,
+            &orch_db::queries::access::PageKey::new("node", thread.base.id, "live"),
+            "any",
+            "thread.interact",
+            ("user", Some(scene.cai.id()), None),
+            None,
+            scene.rig.world.now(),
+        )
+        .await
+        .unwrap()
+    };
     let created = scene
         .rig
         .world
         .app
         .call(TopicInputScheduleCreate, &[&scene.tree.topic.base.id])
-        .token(&scene.ada.token)
+        .token(&scene.cai.token)
         .body(&once(
             &scene,
             InputScheduleTarget::Thread {
@@ -300,10 +334,20 @@ async fn a_due_occurrence_loses_current_authority_instead_of_reusing_creation_an
         ))
         .send()
         .await
-        .ok();
-    sqlx::query("UPDATE users SET status='suspended' WHERE id=$1")
-        .bind(scene.ada.id())
-        .execute(scene.rig.db.pool())
+        .ok()
+        .into_full()
+        .expect("ordinary schedule response");
+    // The active author loses only the permission needed to submit this occurrence.
+    let expired: Id = sqlx::query_scalar(
+        "UPDATE permission_entries SET expires_at=$2 WHERE id=$1 RETURNING holder_id",
+    )
+    .bind(interact)
+    .bind(scene.rig.world.now())
+    .fetch_one(scene.rig.db.pool())
+    .await
+    .unwrap();
+    assert_eq!(expired, scene.cai.id());
+    orch_db::queries::access::bump_epoch(&mut *scene.rig.world.conn().await)
         .await
         .unwrap();
     scene.rig.world.advance(Duration::minutes(2));
@@ -319,12 +363,15 @@ async fn a_due_occurrence_loses_current_authority_instead_of_reusing_creation_an
             .unwrap(),
         0
     );
-    sqlx::query("UPDATE users SET status='active' WHERE id=$1")
-        .bind(scene.ada.id())
-        .execute(scene.rig.db.pool())
+    let finished = scene
+        .rig
+        .world
+        .app
+        .call(InputScheduleGet, &[&created.id])
+        .token(&scene.cai.token)
+        .send()
         .await
-        .unwrap();
-    let finished = get(&scene, created.id).await;
+        .ok();
     let run = finished.last_run.unwrap();
     assert_eq!(run.state, InputScheduleRunState::Failed);
     assert!(run.input_id.is_none());
@@ -347,7 +394,7 @@ async fn a_due_occurrence_loses_current_authority_instead_of_reusing_creation_an
     let notices: i64 = sqlx::query_scalar(
         "SELECT count(*) FROM notifications WHERE user_id=$1 AND kind='schedule.cannot_start'",
     )
-    .bind(scene.ada.id())
+    .bind(scene.cai.id())
     .fetch_one(scene.rig.db.pool())
     .await
     .unwrap();
@@ -383,7 +430,9 @@ async fn new_thread_choices_are_resolved_when_due_and_creation_is_atomic_with_it
         ))
         .send()
         .await
-        .ok();
+        .ok()
+        .into_full()
+        .expect("ordinary schedule response");
     let before: i64 = sqlx::query_scalar("SELECT count(*) FROM threads WHERE topic_id=$1")
         .bind(scene.tree.topic.base.id)
         .fetch_one(scene.rig.db.pool())
@@ -441,7 +490,9 @@ async fn tokens_cannot_create_edit_or_resume_future_authority_but_can_pause_and_
         .body(&body)
         .send()
         .await
-        .ok();
+        .ok()
+        .into_full()
+        .expect("ordinary schedule response");
     let token = scene
         .rig
         .world
@@ -449,17 +500,19 @@ async fn tokens_cannot_create_edit_or_resume_future_authority_but_can_pause_and_
         .call(orch_api_contract::auth::MeTokenCreate, &[])
         .token(&scene.ada.token)
         .body(&orch_api_contract::auth::ApiTokenCreateBody {
+            rules: None,
             name: "Future-work control".to_owned(),
             scopes: Some(vec!["*".to_owned()]),
             node_id: None,
             expires_at: None,
-            proof: orch_api_contract::auth::SensitiveProof {
+            proof: Some(orch_api_contract::auth::SensitiveProof {
                 password: Some(support::PASSWORD.to_owned()),
                 ..Default::default()
-            },
+            }),
         })
         .send()
         .await
+        .full_token()
         .ok()
         .token
         .unwrap();
@@ -503,7 +556,9 @@ async fn tokens_cannot_create_edit_or_resume_future_authority_but_can_pause_and_
         })
         .send()
         .await
-        .ok();
+        .ok()
+        .into_full()
+        .expect("ordinary schedule response");
     let refused = scene
         .rig
         .world
@@ -528,4 +583,149 @@ async fn tokens_cannot_create_edit_or_resume_future_authority_but_can_pause_and_
         .send()
         .await
         .ok();
+}
+
+async fn creation_retry(
+    scene: &rig::Scene,
+    token: &str,
+    act: &str,
+    body: &InputScheduleCreateBody,
+) -> orch_api_core::testing::RawReply {
+    let id = scene.tree.topic.base.id;
+    let call = scene.rig.world.app.call(TopicInputScheduleCreate, &[&id]);
+    call.token(token)
+        .header("Idempotency-Key", act)
+        .body(body)
+        .send_bytes()
+        .await
+}
+#[tokio::test]
+async fn schedule_creation_keys_read_current_native_metadata_without_reauthoring_or_new_future_work()
+ {
+    let scene = rig::Scene::new().await;
+    let thread = scene.thread().await;
+    offline(&scene).await;
+    let body = once(
+        &scene,
+        InputScheduleTarget::Thread {
+            thread_id: thread.base.id,
+        },
+        120,
+    );
+    let act = orch_types::new_id().to_string();
+    let first = creation_retry(&scene, &scene.ada.token, &act, &body).await;
+    assert_eq!(
+        first.status,
+        http::StatusCode::CREATED,
+        "{}",
+        String::from_utf8_lossy(&first.raw)
+    );
+    let first = serde_json::from_slice::<InputScheduleWriteResponse>(&first.raw)
+        .unwrap()
+        .into_full()
+        .unwrap();
+    let update = scene.rig.world.app.call(InputScheduleUpdate, &[&first.id]);
+    assert!(
+        update
+            .token(&scene.ada.token)
+            .body(&InputScheduleUpdateBody {
+                revision: first.revision,
+                name: Some("Current native schedule".into()),
+                ..Default::default()
+            })
+            .send_bytes()
+            .await
+            .status
+            .is_success()
+    );
+    let original: serde_json::Value =
+        sqlx::query_scalar("SELECT definition_authority FROM input_schedules WHERE id=$1")
+            .bind(first.id)
+            .fetch_one(scene.rig.db.pool())
+            .await
+            .unwrap();
+    let reader = thread_history_scope::key(
+        &scene.rig.world,
+        scene.ada.id(),
+        vec![thread_history_scope::rule(
+            "TopicInputScheduleCreate",
+            "schedule",
+            first.id,
+            "self",
+            "read",
+        )],
+    )
+    .await
+    .unwrap();
+    let current = creation_retry(&scene, &reader.secret, &act, &body).await;
+    assert_eq!(
+        current.status,
+        http::StatusCode::CREATED,
+        "{}",
+        String::from_utf8_lossy(&current.raw)
+    );
+    let current = serde_json::from_slice::<InputScheduleWriteResponse>(&current.raw)
+        .unwrap()
+        .into_full()
+        .unwrap();
+    assert_eq!(current.id, first.id);
+    assert_eq!(current.name, "Current native schedule");
+    assert!(current.revision > first.revision);
+    assert_eq!(current.definition.as_ref().unwrap().content, body.content);
+    let wrong = thread_history_scope::key(
+        &scene.rig.world,
+        scene.ada.id(),
+        vec![thread_history_scope::rule(
+            "InputScheduleGet",
+            "schedule",
+            first.id,
+            "self",
+            "read",
+        )],
+    )
+    .await
+    .unwrap();
+    let reply = creation_retry(&scene, &wrong.secret, &act, &body).await;
+    assert_eq!(reply.status, http::StatusCode::CREATED);
+    assert_eq!(
+        serde_json::from_slice::<serde_json::Value>(&reply.raw).unwrap(),
+        json!({"projection":"receipt","schedule_id":first.id,"revision":first.revision,"topic_seq":first.topic_seq})
+    );
+    assert!(
+        creation_retry(
+            &scene,
+            &reader.secret,
+            &orch_types::new_id().to_string(),
+            &body
+        )
+        .await
+        .status
+        .is_client_error()
+    );
+    assert_eq!(
+        sqlx::query_scalar::<_, i64>("SELECT count(*) FROM input_schedules WHERE author_id=$1")
+            .bind(scene.ada.id())
+            .fetch_one(scene.rig.db.pool())
+            .await
+            .unwrap(),
+        1
+    );
+    assert_eq!(
+        sqlx::query_scalar::<_, serde_json::Value>(
+            "SELECT definition_authority FROM input_schedules WHERE id=$1"
+        )
+        .bind(first.id)
+        .fetch_one(scene.rig.db.pool())
+        .await
+        .unwrap(),
+        original
+    );
+    assert_eq!(
+        sqlx::query_scalar::<_, i64>("SELECT count(*) FROM thread_inputs WHERE thread_id=$1")
+            .bind(thread.base.id)
+            .fetch_one(scene.rig.db.pool())
+            .await
+            .unwrap(),
+        0
+    );
 }

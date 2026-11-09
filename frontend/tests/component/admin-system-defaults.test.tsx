@@ -51,7 +51,7 @@ for (const locale of ['en', 'zh-CN'] as const) {
     await user.click(await screen.findByRole('combobox', { name: i18n.t('adminDefaults.role') }));
     await user.click(screen.getByRole('option', { name: choiceOption(i18n.t, `accessRole.${role.key}`).name }));
     await waitFor(() => expect(calls.change).toHaveBeenCalledExactlyOnceWith({ expected_revision: 7,
-      rows: [{ permission: 'org.view', add: [{ holder: { kind: 'role', role: role.key } }] }] }));
+      rows: [{ permission: 'org.view', add: [{ holder: { kind: 'role', role: role.key } }] }] }, undefined));
     expect(calls.node).not.toHaveBeenCalled();
     expect(calls.preview).not.toHaveBeenCalled();
   });
@@ -69,7 +69,7 @@ for (const locale of ['en', 'zh-CN'] as const) {
     expect(calls.change).not.toHaveBeenCalled();
     await within(review).findByText(i18n.t('access.preview.orgs', { count: 3 }), { exact: false });
     await user.click(within(review).getByRole('button', { name: i18n.t('adminDefaults.reset') }));
-    await waitFor(() => expect(calls.change).toHaveBeenCalledExactlyOnceWith({ expected_revision: 7, whole: 'reset' }));
+    await waitFor(() => expect(calls.change).toHaveBeenCalledExactlyOnceWith({ expected_revision: 7, whole: 'reset' }, undefined));
     expect(calls.node).not.toHaveBeenCalled(); expect(calls.candidates).not.toHaveBeenCalled();
   });
 

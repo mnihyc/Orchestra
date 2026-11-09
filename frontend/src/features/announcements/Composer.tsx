@@ -79,7 +79,7 @@ function Contents({ place }: { place: Place }) {
     </form>}
     {send.data !== undefined && <AnnouncementResult reply={send.data} />}
     <h3 className="font-medium">{t('placeAnnouncements.history')}</h3>
-    {list.isPending ? <SkeletonRows rows={2} /> : list.isError ? <ErrorState compact error={list.error} onRetry={() => void list.refetch()} /> : rows.length === 0 ? <EmptyState compact title={t('placeAnnouncements.empty')} /> : <ul className="flex flex-col gap-3">{rows.map((row) => <li key={row.id} className="flex flex-col gap-1 border-t border-border pt-3"><h4 className="font-medium">{row.title}</h4><p className="whitespace-pre-wrap wrap-anywhere">{row.body}</p><DeliveryCounts counts={row.delivered} /><RelativeTime at={row.created_at} /></li>)}</ul>}
+    {list.isPending ? <SkeletonRows read={list} rows={2} /> : list.isError ? <ErrorState compact error={list.error} onRetry={() => void list.refetch()} /> : rows.length === 0 ? <EmptyState compact title={t('placeAnnouncements.empty')} /> : <ul className="flex flex-col gap-3">{rows.map((row) => <li key={row.id} className="flex flex-col gap-1 border-t border-border pt-3"><h4 className="font-medium">{row.title}</h4><p className="whitespace-pre-wrap wrap-anywhere">{row.body}</p><DeliveryCounts counts={row.delivered} /><RelativeTime at={row.created_at} /></li>)}</ul>}
     {list.hasNextPage && <Button pending={list.isFetchingNextPage} onClick={() => void list.fetchNextPage()}>{t('placeAnnouncements.more')}</Button>}
   </div>;
 }

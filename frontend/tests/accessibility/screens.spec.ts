@@ -2,6 +2,7 @@
 import { expect, test } from '@playwright/test';
 
 import { ACME, expectAccessibleInBothThemes, scenario, signIn } from '../e2e/support.ts';
+import { showWorkbenchView } from '../e2e/workbench-support.ts';
 
 test.beforeEach(async () => {
   await scenario();
@@ -51,8 +52,10 @@ test('the shared controls in Chinese and at the compact density', { tag: '@devel
   await expectAccessibleInBothThemes(page);
 });
 
-test('the workbench round an org, a thread and a page that is still to come', async ({ page }) => {
+test('the workbench round an org, a thread, usage and an unknown address', async ({ page }) => {
   await signIn(page);
+  await page.goto('/org/ada');
+  await page.waitForLoadState('networkidle');
   await page.getByRole('navigation', { name: 'Orgs and your own places' }).getByRole('link', { name: 'Acme' }).click();
   await expect(page.getByRole('treeitem', { name: /Fix login/ })).toBeVisible();
   await expectAccessibleInBothThemes(page);
@@ -62,9 +65,26 @@ test('the workbench round an org, a thread and a page that is still to come', as
   await expectAccessibleInBothThemes(page);
 
   // With a tab's menu open, and with the list of shortcuts.
-  await page.locator('[data-workbench-bar="right"]').getByRole('button', { name: 'Outline', exact: true }).click({ button: 'right' });
-  await expect(page.getByRole('menu', { name: 'Actions for Outline' })).toBeVisible();
+  await showWorkbenchView(page, 'Outline');
+  await showWorkbenchView(page, 'History');
+  await expect(page.getByRole('dialog', { name: /^(Views|视图)$/, includeHidden: true })).toHaveCount(0);
+  await page.mouse.move(0, 0);
+  // Dismiss the composer's passing inspection before asking a different popup.
+  await page.locator('[data-workbench-bar="right"]').getByRole('button', { name: 'Outline', exact: true }).focus();
+  await page.getByRole('button', { name: 'Workspace', exact: true }).focus();
+  const passingWorkspace = page.locator('[data-inspection-card][aria-label="Workspace"]:not([role="dialog"])');
+  await expect(passingWorkspace).toBeVisible();
+  await page.keyboard.press('Escape');
+  await expect(passingWorkspace).toHaveCount(0);
+  await page.locator('[data-workbench-bar="right"]').getByRole('button', { name: 'Outline', exact: true }).focus();
+  await page.keyboard.press('Shift+F10');
+  const outlineMenu = page.getByRole('menu', { name: 'Actions for Outline' });
+  await expect(outlineMenu).toBeVisible();
+  await expect.poll(() => outlineMenu.evaluate((menu) => menu.contains(document.activeElement))).toBe(true);
+  await expect(page.locator('[data-inspection-card]:visible:not([role="dialog"])')).toHaveCount(0);
+  await expect(outlineMenu).toBeVisible();
   await expectAccessibleInBothThemes(page);
+  await expect(outlineMenu).toBeVisible();
   await page.keyboard.press('Escape');
   await page.locator('body').press('?');
   await expect(page.getByRole('dialog', { name: 'Keyboard shortcuts' })).toBeVisible();
@@ -78,7 +98,8 @@ test('the workbench round an org, a thread and a page that is still to come', as
   await expectAccessibleInBothThemes(page);
 
   await page.goto('/usage');
-  await expect(page.getByText('Usage is not built yet')).toBeVisible();
+  await expect(page.getByRole('heading', { name: 'Usage', exact: true })).toBeVisible();
+  await expect(page.getByRole('tablist', { name: 'Usage views', exact: true })).toBeVisible();
   await expectAccessibleInBothThemes(page);
 
   await page.goto('/nowhere');
@@ -93,27 +114,33 @@ test('the workbench on a small screen, with its drawer open', async ({ page }) =
   await expect(page.getByRole('heading', { name: 'Fix login' })).toBeVisible();
   await expectAccessibleInBothThemes(page);
 
-  await page.getByRole('button', { name: 'Navigation' }).click();
+  await page.getByRole('button', { name: 'Navigation', exact: true }).click();
   await expect(page.getByRole('dialog', { name: 'Navigation' })).toBeVisible();
   await expectAccessibleInBothThemes(page);
 });
 
 test('the workbench is worked by keyboard alone: from area to area, into the tree, to a thread, and a view moved', async ({ page }) => {
   await signIn(page);
+  await page.goto('/org/ada');
+  await page.waitForLoadState('networkidle');
   await page.getByRole('navigation', { name: 'Orgs and your own places' }).getByRole('link', { name: 'Acme' }).click();
   await expect(page.getByRole('treeitem', { name: /Fix login/ })).toBeVisible();
+  await showWorkbenchView(page, 'Chat');
 
   // F6 goes from area to area; each stop puts the keyboard on something that takes it.
   const stops: string[] = [];
   await page.locator('body').click({ position: { x: 700, y: 500 } });
-  for (let press = 0; press < 5; press += 1) {
+  for (let press = 0; press < 6; press += 1) {
     await page.keyboard.press('F6');
-    stops.push(await page.evaluate(() => document.activeElement?.closest('[data-area-stop], [data-view-group]')?.getAttribute('aria-label') ?? ''));
+    stops.push(await page.evaluate(() => {
+      const stop = document.activeElement?.closest('[data-area-stop], [data-view-group]');
+      return stop?.hasAttribute('data-screen-titlebar') === true ? '[data-screen-titlebar]' : stop?.getAttribute('aria-label') ?? '';
+    }));
   }
-  expect(new Set(stops)).toEqual(new Set(['Orgs and your own places', 'Left bar', 'Main area', 'Right bar']));
+  expect(new Set(stops)).toEqual(new Set(['Orgs and your own places', 'Left bar', '[data-screen-titlebar]', 'Main area', 'Right bar', 'Status']));
 
   // Into the tree, down to a thread, and to its screen with Enter.
-  await page.getByRole('treeitem', { name: /Research/ }).focus();
+  await page.getByRole('treeitem', { name: /^Research(?:\s|$)/ }).focus();
   await page.keyboard.type('fix');
   await expect(page.getByRole('treeitem', { name: /Fix login/ })).toBeFocused();
   await page.keyboard.press('ArrowRight');
@@ -123,12 +150,40 @@ test('the workbench is worked by keyboard alone: from area to area, into the tre
   await expect(page).toHaveURL(new RegExp(`/thread/${ACME.mainThread}$`));
 
   // A section moves by its keyboard menu; main and bottom groups retain numbered tab shortcuts.
+  await showWorkbenchView(page, 'Terminal');
+  await showWorkbenchView(page, 'Outline');
+  await showWorkbenchView(page, 'History');
   await page.locator('[data-workbench-bar="right"]').getByRole('button', { name: 'Outline', exact: true }).focus();
   await page.keyboard.press('Shift+F10');
   await page.getByRole('menuitem', { name: 'Move to', exact: true }).press('ArrowRight');
   await page.getByRole('menuitem', { name: 'Bottom', exact: true }).press('Enter');
+  await page.getByRole('tablist', { name: 'Bottom', exact: true }).getByRole('tab', { name: 'Terminal', exact: true }).click();
   await page.keyboard.press('Alt+2');
-  await expect(page.getByRole('tab', { name: 'Outline', exact: true })).toHaveAttribute('aria-selected', 'true');
+  const movedOutline = page.getByRole('tablist', { name: 'Bottom', exact: true }).getByRole('tab', { name: 'Outline · Main thread · Fix login', exact: true });
+  await expect(movedOutline).toHaveAttribute('aria-selected', 'true');
   await page.keyboard.press('Alt+w');
-  await expect(page.getByRole('tab', { name: 'Outline', exact: true })).toHaveCount(0);
+  await expect(movedOutline).toHaveCount(0);
+});
+
+test('a kept environment card is keyboard scrollable and returns focus to its trigger', async ({ page }) => {
+  await page.setViewportSize({ width: 1440, height: 900 });
+  await signIn(page);
+  await page.goto(`/thread/${ACME.mainThread}`);
+  const trigger = page.getByRole('button', { name: 'Environment: Workspace', exact: true });
+  await trigger.focus();
+  await page.keyboard.press('Enter');
+  const card = page.getByRole('dialog', { name: 'Workspace', exact: true });
+  await expect(card).toBeVisible();
+  await expect(card).toBeFocused();
+  // The existing facts fill their measured height; the viewport's chrome then leaves a real scrollable remainder.
+  const contentHeight = await card.evaluate((element) => element.scrollHeight);
+  await page.setViewportSize({ width: 1440, height: contentHeight });
+  await expect.poll(() => card.evaluate((element) => element.scrollHeight - element.clientHeight)).toBeGreaterThan(0);
+  const before = await card.evaluate((element) => element.scrollTop);
+  await page.keyboard.press('PageDown');
+  await expect.poll(() => card.evaluate((element) => element.scrollTop)).toBeGreaterThan(before);
+  await expectAccessibleInBothThemes(page);
+  await page.keyboard.press('Escape');
+  await expect(card).toHaveCount(0);
+  await expect(trigger).toBeFocused();
 });

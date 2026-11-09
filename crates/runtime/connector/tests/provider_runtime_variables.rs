@@ -84,6 +84,7 @@ async fn the_harness_receives_runtime_values_over_the_profile_and_never_writes_a
         let sealed = seal(&recipient, &info_for_command(command), SECRET.as_bytes()).unwrap();
         let body:AgentStart=serde_json::from_value(json!({
             "provider_id":rig.provider,"agent_id":rig.agent,"harness_kind":"fake","home":null,
+            "provider_kind":"api",
             "profile":{"config":{},"env":{"REGION":"profile","PROFILE_ONLY":"kept","SERVICE_TOKEN":"profile-token"}},
             "provider_config":{},"runtime":{"variables":{"REGION":"runtime","SERVICE_TOKEN":{"$sealed":sealed}}}
         })).unwrap();
@@ -95,6 +96,7 @@ async fn the_harness_receives_runtime_values_over_the_profile_and_never_writes_a
         assert!(matches!(result, Progress::Succeeded(_)), "{result:?}");
         {
             let starts = starts.lock().unwrap();
+            assert_eq!(starts.last().unwrap().provider_kind, body.provider_kind);
             assert_eq!(starts.last().unwrap().profile.env["REGION"], "runtime");
             assert_eq!(starts.last().unwrap().profile.env["SERVICE_TOKEN"], SECRET);
             assert_eq!(starts.last().unwrap().profile.env["PROFILE_ONLY"], "kept");

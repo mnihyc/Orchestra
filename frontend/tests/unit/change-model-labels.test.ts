@@ -17,7 +17,7 @@ for (const locale of ['en', 'zh-CN'] as const) it(`names the chosen model consis
   const context: PlanContext = { kind: 'switch', thread: { name: 'Thread', owner, model: 'private_route_from', modelDisplay: 'Earlier Model', effort: null }, me: 'owner', locale, models };
   // Only the facts turned into lines by changesOf are needed; this fixture starts no job.
   const plan = {
-    result: 'replace', from: { provider: { id: 'provider', name: 'Provider' }, agent: { id: 'agent' }, environment: { id: 'environment', name: 'Workspace' } },
+    result: 'replace', from: { kind: 'agent', provider: { id: 'provider', name: 'Provider' }, agent: { id: 'agent' }, environment: { id: 'environment', name: 'Workspace' } },
     to: { provider: { id: 'provider', name: 'Provider' }, agent: { id: 'agent' }, model: 'private_route_to', effort: 'high', predicted: false, environment: { id: 'environment', name: 'Workspace' } },
     history: { mode: 'all', method: 'native_fork', turns: 2, report: { fidelity: 'lossless' } }, files: null, memory: null, mounts: [], mcp: [],
   } as unknown as ForkPlan;

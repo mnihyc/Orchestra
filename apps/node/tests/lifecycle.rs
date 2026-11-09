@@ -1,4 +1,5 @@
 //! A runtime's life on a real Docker daemon, through a real gateway and API: stopped and started with its identity, recreated as a successor on the same volumes with its files kept while the old unit stays until told, and removed without its volumes; and a unit whose connector cannot enroll, reported failed and cleaned up.
+// The engine's futures this fixture awaits are deep; the default query depth does not lay them out.
 #![allow(
     clippy::unwrap_used,
     clippy::expect_used,

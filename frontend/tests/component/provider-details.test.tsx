@@ -7,7 +7,7 @@ import { ModelsSourceState } from '@/features/resources/providers/Models';
 import type { DetailMember } from '@/features/resources/providers/details';
 import type { PlanProvider } from '@/features/resources/providers/plan';
 import { i18n, setLocale } from '@/i18n';
-import { planProvider } from '../unit/provider-plan-fixtures';
+import { OBSERVED, planProvider } from '../unit/provider-plan-fixtures';
 import { detailAgent, detailMachineRef } from './resource-detail-fixtures';
 import { show } from './support';
 
@@ -36,7 +36,7 @@ function reported(provider:PlanProvider) {
   provider.facts.ordinary_usage_allowed=false;
   provider.facts.balances=[{id:'account',label:'Account balance',unit:'USD',remaining:'0.00000000000000000001',total:'10',used:'9.99999999999999999999',unlimited:false,parts:[{label:'Granted',amount:'1.25'}],expires_at:null}];
   provider.facts.spend=[{id:'daily',label:'Daily spend',unit:'USD',period:'day',period_minutes:null,used:'0',limit:'10',remaining:'10',resets_at:null}];
-  provider.facts.extra_usage={enabled:true,used:1234,limit:2000,unit:'GBP',decimal_places:2,used_percent:61.7,disabled_reason:null,limit_reached:false};
+  provider.facts.extra_usage={enabled:true,used:'1234',limit:'2000',unit:'GBP',decimal_places:2,used_percent:61.7,disabled_reason:null,limit_reached:false};
 }
 
 for (const kind of ['api','subscription'] as const) describe(kind + ' credential details', () => {
@@ -50,11 +50,13 @@ for (const kind of ['api','subscription'] as const) describe(kind + ' credential
     const drawn=show(<ProviderUsageCard provider={provider} refreshing={state === 'not_read_yet'} />);
     const block=drawn.container.querySelector('[data-fact-member="' + member + '"]');
     if (state === 'unsupported') {
-      expect(block).not.toBeInTheDocument();
-      const foot=drawn.container.querySelectorAll('[data-unsupported-members]');
-      expect(foot).toHaveLength(1);
-      expect(foot[0]).toHaveTextContent(i18n.t('providerPlan.notReported'));
-      expect(foot[0]).not.toHaveTextContent(label);
+      expect(block).toHaveAttribute('data-fact-state',state);
+      const section=within(screen.getByRole('group',{name:label}));
+      expect(section.getByText(i18n.t('providerDetails.notSupplied'))).toBeVisible();
+      expect(section.getByText('Example source')).toBeVisible();
+      expect(section.queryByRole('meter')).not.toBeInTheDocument();
+      expect(drawn.container.querySelector('[data-unsupported-members]')).not.toBeInTheDocument();
+      expect(screen.queryByText(i18n.t('providerPlan.notReported'), {exact:true})).not.toBeInTheDocument();
       return;
     }
     expect(block).toHaveAttribute('data-fact-state',state);
@@ -84,6 +86,102 @@ for (const kind of ['api','subscription'] as const) describe(kind + ' credential
       case 'available_resets': expect(section.getByText('Full reset')).toBeVisible(); break;
     }
   });
+});
+
+/** Source declarations and returned member states agree; omitted fields are unsupported, not unread. */
+function declaredOnly(provider:PlanProvider, members:readonly DetailMember[]) {
+  const source=provider.sources.facts.descriptor?.facts;
+  if (source === null || source === undefined) throw new Error('the fixture needs a declared facts source');
+  source.reports=[...members];
+  source.spends_resets=members.includes('available_resets');
+  for (const member of MEMBERS) {
+    provider.facts_state[member]=members.includes(member) ? 'told' : 'unsupported';
+    if (!members.includes(member)) clear(provider,member);
+  }
+}
+
+for (const language of ['en','zh-CN'] as const) it.each(['api','subscription'] as const)(
+  language+' explains unsupported members without an unknown footer beside reported %s windows', async(kind)=>{
+    await setLocale(language);
+    const provider=planProvider({kind});
+    declaredOnly(provider,['credential','windows']);
+    const drawn=show(<ProviderUsageCard provider={provider}/>);
+    expect(screen.getByRole('meter',{name:'5-hour window'})).toHaveAttribute('aria-valuenow','0');
+    expect(screen.getByRole('meter',{name:'Weekly window (Fable)'})).toHaveAttribute('aria-valuenow','81');
+    for (const member of ['extra_usage','balances'] as const) expect(screen.getByRole('group',{name:i18n.t('providerDetails.members.'+member)})).toHaveTextContent(i18n.t('providerDetails.notSupplied'));
+    expect(drawn.container.querySelector('[data-unsupported-members]')).not.toBeInTheDocument();
+    expect(screen.queryByText(i18n.t('providerPlan.notReported'),{exact:true})).not.toBeInTheDocument();
+    expect(screen.queryByText(i18n.t('providerDetails.notReadOnce'),{exact:false})).not.toBeInTheDocument();
+  },
+);
+
+it('retains supported unread and unknown balances instead of treating missing values as unsupported',()=>{
+  const provider=planProvider();
+  declaredOnly(provider,['credential','balances']);
+  provider.facts_state.balances='not_read_yet';
+  provider.facts.balances=[];
+  const drawn=show(<ProviderUsageCard provider={provider} refreshing/>);
+  const unread=screen.getByRole('status');
+  expect(unread).toHaveTextContent(i18n.t('providerDetails.notReadOnce'));
+  expect(unread).toHaveTextContent(i18n.t('providerDetails.members.balances'));
+  expect(unread).toHaveAttribute('aria-busy','true');
+  expect(drawn.container.querySelector('[data-unsupported-members]')).not.toBeInTheDocument();
+  provider.facts_state.balances='told';
+  provider.facts.balances=[{id:'plan',label:'Reported plan',unit:'vendor credits',remaining:null,total:null,used:null,unlimited:false,parts:[],expires_at:null}];
+  provider.facts.field_times['balances.plan']=OBSERVED;
+  drawn.rerender(<ProviderUsageCard provider={provider}/>);
+  const balance=within(screen.getByRole('group',{name:i18n.t('providerDetails.members.balances')}));
+  expect(balance.getByText(i18n.t('providerDetails.balanceRemaining',{amount:i18n.t('providerPlan.notReported')}))).toBeVisible();
+  expect(balance.queryByText('0 vendor credits remaining')).not.toBeInTheDocument();
+  expect(screen.queryByRole('status')).not.toBeInTheDocument();
+});
+
+for (const language of ['en','zh-CN'] as const) it('keeps each unavailable member and its source visible without showing retained values in '+language, async()=>{
+  await setLocale(language);
+  const provider=planProvider();
+  provider.facts_state.plan='not_read_yet';
+  provider.facts.plan='Earlier private plan';
+  provider.facts_state.balances='unsupported';
+  provider.facts_state.spend={unsupported_because:{reason:'needs_admin_key'}};
+  const view=show(<ProviderUsageCard provider={provider} refreshing />);
+  const plan=screen.getByRole('group',{name:i18n.t('providerDetails.members.plan')});
+  expect(plan).toHaveTextContent(i18n.t('providerDetails.notReadOnce'));
+  expect(plan).toHaveTextContent('Example source');
+  expect(plan).toHaveAttribute('aria-busy','true');
+  expect(plan.querySelector('time')).not.toBeInTheDocument();
+  expect(screen.queryByText('Earlier private plan')).not.toBeInTheDocument();
+  const balance=screen.getByRole('group',{name:i18n.t('providerDetails.members.balances')});
+  expect(balance).toHaveTextContent(i18n.t('providerDetails.notSupplied'));
+  expect(balance).toHaveTextContent('Example source');
+  expect(balance).not.toHaveTextContent('12.4');
+  expect(balance.querySelector('time')).not.toBeInTheDocument();
+  const spend=screen.getByRole('group',{name:i18n.t('providerDetails.members.spend')});
+  expect(spend).toHaveTextContent(i18n.t('providerSources.needsAdminKey'));
+  expect(spend).not.toHaveTextContent(i18n.t('providerDetails.notSupplied'));
+  expect(screen.getByRole('meter',{name:'5-hour window'})).toHaveAttribute('aria-valuenow','0');
+  provider.access.permissions=['provider.manage'];
+  view.rerender(<ProviderUsageCard provider={structuredClone(provider)} />);
+  expect(screen.queryByRole('group')).not.toBeInTheDocument();
+  expect(screen.queryByText('Example source')).not.toBeInTheDocument();
+  expect(screen.queryByText('Earlier private plan')).not.toBeInTheDocument();
+});
+
+it('preserves reported zero and unlimited vendor balances after unsupported fields disappear',()=>{
+  const provider=planProvider();
+  declaredOnly(provider,['credential','balances']);
+  const base={unit:'vendor credits',total:null,used:null,parts:[],expires_at:null};
+  provider.facts.balances=[
+    {...base,id:'zero',label:'Zero balance',remaining:'0',unlimited:false},
+    {...base,id:'unlimited',label:'Unlimited balance',remaining:null,unlimited:true},
+  ];
+  provider.facts.field_times['balances.zero']=OBSERVED;
+  provider.facts.field_times['balances.unlimited']=OBSERVED;
+  const drawn=show(<ProviderUsageCard provider={provider}/>);
+  const balance=within(screen.getByRole('group',{name:i18n.t('providerDetails.members.balances')}));
+  expect(balance.getByText('0 vendor credits remaining')).toBeVisible();
+  expect(balance.getByText(i18n.t('providerPlan.unlimited'))).toBeVisible();
+  expect(balance.queryByRole('meter')).not.toBeInTheDocument();
+  expect(drawn.container.querySelector('[data-unsupported-members]')).not.toBeInTheDocument();
 });
 
 it('uses windows, then balance, then spend in a compact card while preserving precision and real zero', () => {

@@ -1,3 +1,4 @@
+import { treeNode } from '../doubles/tree-node';
 // @vitest-environment node
 /// <reference types="node" />
 /** Every act of the application is in the registry of acts, with what it changes; a change reaches exactly the queries it
@@ -14,10 +15,16 @@ import { ACTS, applyChanges, type Change, covers, findAct, followWith, resourceC
 import { browsersQuery } from '@/api/browsers';
 import { createApiClient } from '@/api/client';
 import { displaysQuery } from '@/api/displays';
+import { duplicateObjects } from '@/api/duplicates';
+import { inputScheduleQuery, inputScheduleRunsQuery, topicSchedulesQuery } from '@/api/inputSchedules';
 import { documentLinksQuery } from '@/api/links';
+import { moveOutPath, supportsMoveOut } from '@/api/moveOut';
 import { portsKey } from '@/api/ports';
-import type { DocumentLinks, TreeNode } from '@/generated/api-types';
+import { documentSummaryOptionsKey, resourceSummaryKey } from '@/api/summaries';
+import type { DocumentLinks, MachinePrograms, TreeNode } from '@/generated/api-types';
+import type { HomeMoveKind } from '@/features/duplicate/move';
 import { me, org, userRef } from '../doubles/fixtures';
+import { inputSchedule } from '../doubles/input-schedules';
 
 const sourceRoot = resolve(import.meta.dirname, '../../src');
 /** Parsing all source once takes seconds on the shared builder; this bounds the scan. */
@@ -25,6 +32,12 @@ const SCAN_BUDGET_MS = 20_000;
 /** What a parameter of a path stands for when a request written in the code is looked up: any one segment. */
 const ANY = 'x';
 const WRITES = new Set(['POST', 'PUT', 'PATCH', 'DELETE']);
+const moveFamilies: Record<HomeMoveKind, unknown> = { ...duplicateObjects, host: null, machine: null };
+// Run the real finite builder over every declared family and draft state. Unported
+// families remain rejected by its own predicate; every returned path must have an act.
+const movePaths = [...new Set((Object.keys(moveFamilies) as HomeMoveKind[])
+  .filter(supportsMoveOut)
+  .flatMap((kind) => [false, true].map((draft) => moveOutPath({ kind, id: ANY, draft }))))];
 
 it('applies the accepted document tabs to their captured document without reading either pane again', async () => {
   const cache = new QueryClient({ defaultOptions: { queries: { retry: false } } });
@@ -44,6 +57,42 @@ it('applies the accepted document tabs to their captured document without readin
     expect(cache.getQueryData(edited.queryKey)).toEqual(accepted);
     expect(cache.getQueryData(other.queryKey)).toEqual(before);
     expect(editedRead).not.toHaveBeenCalled(); expect(otherRead).not.toHaveBeenCalled();
+  } finally { stops.forEach((stop) => stop()); cache.clear(); }
+});
+
+it.each([
+  { method: 'PUT', path: '/documents/summary-document/summary-options', options: true, kind: 'document', range: undefined },
+  { method: 'POST', path: '/summaries/document/summary-document/refresh', options: false, kind: 'document', range: undefined },
+  { method: 'POST', path: '/summaries/chat/summary-document/refresh', options: false, kind: 'chat', range: { after: 10, through: 20 } },
+])('repairs only the selected summary views after $method $path, without projecting its receipt', async ({ method, path, options, kind, range }) => {
+  const cache = new QueryClient({ defaultOptions: { queries: { retry: false } } });
+  const id = 'summary-document';
+  const entries = [
+    { key: documentSummaryOptionsKey(id), changed: options },
+    { key: resourceSummaryKey({ kind: 'document', id }), changed: kind === 'document' },
+    { key: resourceSummaryKey({ kind: 'chat', id }, { after: 10, through: 20 }), changed: kind === 'chat' },
+    { key: resourceSummaryKey({ kind: 'chat', id }, { after: 20, through: 30 }), changed: false },
+    { key: resourceSummaryKey({ kind: 'chat', id }), changed: false },
+    { key: resourceSummaryKey({ kind: 'document', id: 'other-document' }), changed: false },
+    { key: documentSummaryOptionsKey('other-document'), changed: false },
+    // The inventory counter shares this head, but is not a subject summary.
+    { key: ['resource-summary', id] as const, changed: false },
+  ];
+  const reads = entries.map((_, index) => vi.fn(() => Promise.resolve({ view: `fresh-${index}` })));
+  const stops = entries.map(({ key }, index) => {
+    const read = reads[index]; if (read === undefined) throw new Error('A summary view has its read');
+    cache.setQueryData(key, { view: `old-${index}` });
+    return new QueryObserver(cache, { queryKey: key, queryFn: read, staleTime: Infinity }).subscribe(() => undefined);
+  });
+  const receipt = { projection: 'receipt', target: { kind, id }, revision: 9 };
+  try {
+    const act = findAct(method, path, { answer: receipt, input: range === undefined ? {} : { range } });
+    expect(act).not.toBeNull(); await applyChanges(act?.changes ?? [], cache);
+    entries.forEach(({ key, changed }, index) => {
+      expect(reads[index], JSON.stringify(key)).toHaveBeenCalledTimes(changed ? 1 : 0);
+      expect(cache.getQueryData(key)).toEqual({ view: `${changed ? 'fresh' : 'old'}-${index}` });
+      expect(cache.getQueryData(key)).not.toEqual(receipt);
+    });
   } finally { stops.forEach((stop) => stop()); cache.clear(); }
 });
 
@@ -107,15 +156,17 @@ const files = (directory: string): string[] =>
     return /\.tsx?$/.test(entry.name) && !entry.name.endsWith('.d.ts') && entry.name !== 'routeTree.gen.ts' ? [path] : [];
   });
 
-/** The paths an expression of the code can be: a string, a template whose parts are parameters, a helper of the same file that makes a path, or either side of a choice. */
-function pathsOf(node: ts.Expression, helpers: ReadonlyMap<string, ts.Expression>, depth = 0): string[] {
+/** A helper is a source expression or the concrete outputs of a finite native path builder. */
+type PathHelper = { expression: ts.Expression } | { paths: readonly string[] };
+/** Resolve literals, templates, local helpers and both branches without exempting an unresolved request. */
+function pathsOf(node: ts.Expression, helpers: ReadonlyMap<string, PathHelper>, depth = 0): string[] {
   if (depth > 4) return [ANY];
   if (ts.isStringLiteral(node) || ts.isNoSubstitutionTemplateLiteral(node)) return [node.text];
   if (ts.isParenthesizedExpression(node) || ts.isAsExpression(node) || ts.isTypeAssertionExpression(node) || ts.isSatisfiesExpression(node) || ts.isNonNullExpression(node)) return pathsOf(node.expression, helpers, depth + 1);
   if (ts.isConditionalExpression(node)) return [...pathsOf(node.whenTrue, helpers, depth + 1), ...pathsOf(node.whenFalse, helpers, depth + 1)];
   if (ts.isCallExpression(node) && ts.isIdentifier(node.expression)) {
     const helper = helpers.get(node.expression.text);
-    return helper === undefined ? [ANY] : pathsOf(helper, helpers, depth + 1);
+    return helper === undefined ? [ANY] : 'paths' in helper ? [...helper.paths] : pathsOf(helper.expression, helpers, depth + 1);
   }
   if (ts.isTemplateExpression(node)) {
     let paths = [node.head.text];
@@ -143,10 +194,13 @@ function writeRequests(): Request[] {
   for (const file of files(sourceRoot)) {
     if (file.endsWith('/api/acts.ts')) continue;
     const source = ts.createSourceFile(file, readFileSync(file, 'utf8'), ts.ScriptTarget.Latest, true, ts.ScriptKind.TSX);
-    const helpers = new Map<string, ts.Expression>();
+    const helpers = new Map<string, PathHelper>();
     const collect = (node: ts.Node) => {
       if (ts.isVariableDeclaration(node) && ts.isIdentifier(node.name) && node.initializer !== undefined && ts.isArrowFunction(node.initializer) && !ts.isBlock(node.initializer.body)) {
-        helpers.set(node.name.text, node.initializer.body);
+        helpers.set(node.name.text, { expression: node.initializer.body });
+      }
+      if (relative(sourceRoot, file) === 'api/moveOut.ts' && ts.isFunctionDeclaration(node) && node.name?.text === 'moveOutPath') {
+        helpers.set(node.name.text, { paths: movePaths });
       }
       ts.forEachChild(node, collect);
     };
@@ -180,7 +234,7 @@ function writeRequests(): Request[] {
 function namedHeads(): Set<string> {
   const heads = new Set<string>();
   const add = (changes: readonly Change[]) => {
-    for (const change of changes) if ('key' in change && change.key[0] !== undefined) heads.add(change.key[0]);
+    for (const change of changes) if ('key' in change) heads.add(change.key[0]);
   };
   for (const entry of Object.values(ACTS)) add(entry(() => ANY));
   for (const what of ['approvals', 'route', 'notification_prefs', 'notifications_read', 'favorites', 'state', 'org_creation', 'machines', 'resources', 'connected']) {
@@ -191,10 +245,76 @@ function namedHeads(): Set<string> {
 }
 
 describe('the registry of acts', () => {
+  it('repairs a cancelled schedule without removing its history or reading another schedule or topic', async () => {
+    const cache = new QueryClient({ defaultOptions: { queries: { retry: false } } });
+    const before = inputSchedule();
+    const topicId = before.topic?.id;
+    if (topicId === undefined) throw new Error('The schedule fixture needs a readable topic.');
+    const after = inputSchedule({ state: 'deleted', next_run_at: null, revision: before.revision + 1 });
+    const other = inputSchedule({ id: 'other-schedule' });
+    const history = { pages: [{ items: [], next_cursor: null }], pageParams: [null] };
+    const selected = inputScheduleQuery(before.id).queryKey;
+    const otherKey = inputScheduleQuery(other.id).queryKey;
+    const topic = topicSchedulesQuery(topicId).queryKey;
+    const runs = inputScheduleRunsQuery(before.id).queryKey;
+    const selectedRead = vi.fn(() => Promise.resolve(after));
+    const otherRead = vi.fn(() => Promise.resolve(other));
+    const topicRead = vi.fn(() => Promise.resolve([after]));
+    const runsRead = vi.fn(() => Promise.resolve(history));
+    const entries = [
+      { key: selected, data: before, read: selectedRead },
+      { key: otherKey, data: other, read: otherRead },
+      { key: topic, data: [before], read: topicRead },
+      { key: runs, data: history, read: runsRead },
+    ];
+    for (const entry of entries) cache.setQueryData(entry.key, entry.data);
+    const stops = entries.map((entry) => new QueryObserver<unknown>(cache, {
+      queryKey: entry.key, queryFn: () => entry.read(), staleTime: Infinity,
+    }).subscribe(() => undefined));
+    try {
+      const act = findAct('DELETE', `/input-schedules/${before.id}`);
+      expect(act).not.toBeNull();
+      await applyChanges(act?.changes ?? [], cache);
+      expect(selectedRead).toHaveBeenCalledOnce();
+      expect(cache.getQueryData(selected)).toEqual(after);
+      expect(otherRead).not.toHaveBeenCalled();
+      expect(topicRead).not.toHaveBeenCalled();
+      expect(runsRead).not.toHaveBeenCalled();
+      expect(cache.getQueryData(otherKey)).toEqual(other);
+      expect(cache.getQueryData(topic)).toEqual([before]);
+      expect(cache.getQueryData(runs)).toEqual(history);
+    } finally {
+      stops.forEach((stop) => stop());
+      cache.clear();
+    }
+  });
+
+  it.each(['messages', 'stop', 'keep'])('repairs the changed Ask conversation and its visible history independently after %s', async (operation) => {
+    const cache = new QueryClient({ defaultOptions: { queries: { retry: false } } });
+    const here = ['ask', 'viewer', 1, 'conversation', false], other = ['ask', 'viewer', 1, 'other', false];
+    const history = ['ask-history', 'viewer', 1, 'root', false];
+    const changed = vi.fn(() => Promise.resolve({ seq: 2 })), unrelated = vi.fn(() => Promise.resolve({ seq: 1 })), listed = vi.fn(() => Promise.resolve({ pages: ['fresh history'] }));
+    const stops = [{ key: here, read: changed }, { key: other, read: unrelated }, { key: history, read: listed }].map(({ key, read }) => {
+      cache.setQueryData(key, { seq: 1 });
+      return new QueryObserver(cache, { queryKey: key, queryFn: async (): Promise<unknown> => read(), staleTime: Infinity }).subscribe(() => undefined);
+    });
+    try {
+      const found = findAct('POST', `/ask/conversations/conversation/${operation}`, { answer: { conversation_id: 'conversation', seq: 2, turn_id: null } });
+      expect(found).not.toBeNull(); await applyChanges(found?.changes ?? [], cache);
+      expect(changed).toHaveBeenCalledOnce(); expect(listed).toHaveBeenCalledOnce(); expect(unrelated).not.toHaveBeenCalled();
+      expect(cache.getQueryData(here)).toEqual({ seq: 2 }); expect(cache.getQueryData(other)).toEqual({ seq: 1 });
+    } finally { stops.forEach((stop) => stop()); cache.clear(); }
+  });
+
+  it('registers Ask creation as a missing history projection without inventing a conversation snapshot from its receipt', () => {
+    expect(findAct('POST', '/ask/conversations', { answer: { conversation_id: 'new-conversation', seq: 1, turn_id: null } })?.changes)
+      .toEqual([{ missing: [{ key: ['ask-history'] }], cancelPending: true }]);
+  });
+
   it('has an entry for every request of the application that changes something', () => {
     const requests = writeRequests();
     // The two requests of the session are the client's own and change nothing a screen reads by themselves.
-    const acts = requests.filter((request) => !['/auth/refresh', '/auth/logout'].includes(request.path));
+    const acts = requests.filter((request) => !['/auth/session', '/auth/refresh', '/auth/logout'].includes(request.path));
     expect(acts.length).toBeGreaterThan(300);
     const missing = acts.filter((request) => findAct(request.method, asked(request.path)) === null).map((request) => `${request.where}: ${request.method} ${request.path}`);
     expect(missing).toEqual([]);
@@ -304,24 +424,7 @@ describe('a change', () => {
   });
 });
 
-const row = (id: string, parent: string | null, kind: TreeNode['kind'], seq: number, more: Partial<TreeNode> = {}): TreeNode => ({
-  address: kind === 'org' ? id : null,
-  id,
-  kind,
-  parent_id: parent,
-  name: id,
-  color: null,
-  participating: true,
-  archived: false,
-  restricted: false,
-  deleted: false,
-  tree_seq: seq,
-  topic: kind === 'topic' ? { status: 'open', tag_ids: [] } : null,
-  thread: null,
-  chat: { id: `chat-${id}`, seq: 0 },
-  docs: 0,
-  ...more,
-});
+const row = (id: string, parent: string | null, kind: TreeNode['kind'], seq: number, more: Partial<TreeNode> = {}): TreeNode => treeNode({ id, kind, parent_id: parent, address: kind === 'org' ? id : null, tree_seq: seq, topic: kind === 'topic' ? { status: 'open', tag_ids: [] } : null, ...more });
 
 describe('what the live tree says', () => {
   const held = new Map<string, TreeNode>(
@@ -406,12 +509,14 @@ it('applies program acknowledgements and live machine registry changes without a
   const cache=new QueryClient();
   const key=['machine-programs','machine'];
   cache.setQueryData(key,{entries:[],capabilities:[],config_file:null,can_manage:true});
-  const answer={entries:[{kind:'agent',name:'new-agent',ready:true}],capabilities:[],config_file:'/data/config.toml',can_manage:true};
+  const answer:MachinePrograms={entries:[{kind:'agent',name:'new-agent',command:['new-agent'],origin:'orch',ready:true,version:'1.0.0',
+    descriptor:{kind:'new-agent',harness:{name:'New agent'},sandbox_modes:['open'],approval_modes:['on_request']},models:null,detail:null}],
+    capabilities:[],config_file:'/data/config.toml',can_manage:true};
   const acknowledged=findAct('POST','/machines/machine/programs',{answer,input:{action:'reload'}});
   expect(acknowledged?.changes).toEqual([{value:{key,data:answer}}]);
   await applyChanges(acknowledged?.changes ?? [],cache);
   expect(cache.getQueryData(key)).toEqual(answer);
-  const report={...answer,entries:[{kind:'agent',name:'new-agent',ready:false,detail:'The program exited.'}]};
+  const report:MachinePrograms={...answer,entries:answer.entries.map((entry)=>({...entry,ready:false,detail:'The program exited.'}))};
   await applyChanges([{row:{kind:'machine',id:'machine',value:{id:'machine',access:{permissions:['machine.view']},facts:{programs:report}}}}],cache);
   expect(cache.getQueryData(key)).toEqual({...report,can_manage:false});
   await applyChanges([{row:{kind:'machine',id:'machine',value:null}}],cache);

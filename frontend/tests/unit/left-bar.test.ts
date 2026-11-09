@@ -1,3 +1,4 @@
+import { treeNode } from '../doubles/tree-node';
 /** The left bar as its rules can be told without a browser: a finished topic that keeps its place, what is unread and what a row that hides it carries, documents and chats in the tree, where the tree begins and what folds away, what the bar keeps for a person and what the device keeps, the colour of an icon, the way to a thing past a place its reader may not see, the marks of the orgs, the kinds of resource with their things, and the numbers on Messages. */
 import { describe, expect, it } from 'vitest';
 
@@ -55,24 +56,7 @@ import { display } from '../doubles/thread-display';
 
 const t = i18n.t.bind(i18n);
 
-const node = (id: string, kind: TreeNode['kind'], parent: string | null, more: Partial<TreeNode> = {}): TreeNode => ({
-  participating: true,
-  id,
-  address: null,
-  kind,
-  name: id,
-  parent_id: parent,
-  color: null,
-  docs: 0,
-  archived: false,
-  deleted: false,
-  restricted: false,
-  chat: { id: `chat-${id}`, seq: 0 },
-  thread: null,
-  topic: kind === 'topic' ? { status: 'open', tag_ids: [] } : null,
-  tree_seq: 1,
-  ...more,
-});
+const node = (id: string, kind: TreeNode['kind'], parent: string | null, more: Partial<TreeNode> = {}): TreeNode => treeNode({ id, kind, parent_id: parent, tree_seq: 1, topic: kind === 'topic' ? { status: 'open', tag_ids: [] } : null, ...more });
 
 type ThreadPart = NonNullable<TreeNode['thread']>;
 const thread = (id: string, parent: string, more: Partial<ThreadPart> = {}, row: Partial<TreeNode> = {}): TreeNode =>
@@ -256,7 +240,7 @@ const docsOf = (entries: Record<string, Partial<NodeDocs>>): Map<string, NodeDoc
   new Map(Object.entries(entries).map(([id, known]) => [id, { docs: [], more: false, state: 'ready', loadingMore: false, ...known }]));
 
 describe('documents in the tree', () => {
-  const withDocs = changed(node('web', 'project', 'acme', { docs: 1 }), node('alpha', 'topic', 'web', { docs: 2 }), thread('alpha-main', 'alpha', {}, { docs: 1 }));
+  const withDocs = changed(node('web', 'project', 'acme', { docs: 1, docs_seq: 1 }), node('alpha', 'topic', 'web', { docs: 2, docs_seq: 1 }), thread('alpha-main', 'alpha', {}, { docs: 1, docs_seq: 1 }));
   const known = docsOf({
     web: { docs: [doc('d-road', 'Roadmap')] },
     alpha: { docs: [doc('d-plan', 'Plan'), doc('d-notes', 'canary notes')] },
@@ -302,12 +286,17 @@ describe('documents in the tree', () => {
   });
 
   it('are read again when their place is stamped though their number stays: one of them was renamed', () => {
-    const renamed = changed(node('alpha', 'topic', 'web', { docs: 2, tree_seq: 7 }));
+    const renamed = changed(node('alpha', 'topic', 'web', { docs: 2, docs_seq: 7 }));
     expect(placesWithDocs(renamed, 'acme', new Set(['alpha']))).toBe('alpha:2:7');
   });
 
+  it('keeps the document read when only its place was renamed', () => {
+    const renamed = changed(node('alpha', 'topic', 'web', { name: 'New topic name', docs: 2, tree_seq: 7, docs_seq: 1 }));
+    expect(placesWithDocs(renamed, 'acme', new Set(['alpha']))).toBe('alpha:2:1');
+  });
+
   it('of the root org stand at the tree\'s own level, after everything else: the root is no row that could be opened', () => {
-    const rooted = changed(node('acme', 'org', null, { docs: 1 }));
+    const rooted = changed(node('acme', 'org', null, { docs: 1, docs_seq: 1 }));
     const handbook = docsOf({ acme: { docs: [doc('d-hand', 'Handbook')] } });
 
     expect(placesWithDocs(rooted, 'acme', new Set())).toBe('acme:1:1');
@@ -506,29 +495,33 @@ describe('how many of a person\'s chats are unread', () => {
 
 describe('the menu of a document in the tree', () => {
   const nothing = (): void => undefined;
-  const acts: DocMenuActions = { open: nothing, openInTab: nothing, rename: nothing, move: nothing, share: nothing, export: nothing, requestExport: nothing, copyLink: nothing, remove: nothing };
+  const acts: DocMenuActions = { open: nothing, openInTab: nothing, rename: nothing, move: nothing, share: nothing, export: nothing, requestExport: nothing, copyLink: nothing, copyReference: nothing, remove: nothing };
   const ada = { display_name: 'Ada Lovelace' };
   const ids = (entries: readonly MenuEntry[]) => entries.flatMap((entry) => ('id' in entry && entry.type !== 'separator' ? [entry.id] : []));
-  const menu = (permissions: string[] | undefined, archived = false) =>
-    ids(docMenuEntries({ archived, owner: ada }, permissions === undefined ? undefined : { access: { permissions } as never }, acts, t));
+  const entries = (permissions: string[] | undefined, archived = false) =>
+    docMenuEntries({ archived, owner: ada }, permissions === undefined ? undefined : { access: { permissions } as never }, acts, t);
+  const menu = (permissions: string[] | undefined, archived = false) => ids(entries(permissions, archived));
 
   it('begins with what a press on the row does, and ends, apart, with what destroys', () => {
     const all = menu(['doc.view', 'doc.edit', 'doc.manage', 'doc.export']);
 
     expect(all[0]).toBe('open');
     expect(all.at(-1)).toBe('delete');
-    expect(all).toEqual(['open', 'open-tab', 'rename', 'move', 'share', 'export', 'copy-link', 'delete']);
+    expect(all).toEqual(['open', 'open-tab', 'rename', 'move', 'share', 'export', 'copy-reference', 'copy-link', 'delete']);
   });
 
-  it('leaves out what the reader may not do', () => {
-    expect(menu(['doc.view'])).toEqual(['open', 'open-tab', 'share', 'copy-link']);
-    expect(menu(['doc.view', 'doc.edit'])).toEqual(['open', 'open-tab', 'rename', 'share', 'copy-link']);
+  it('keeps protected writes gated and names the current Export refusal with its access request', () => {
+    expect(menu(['doc.view'])).toEqual(['open', 'open-tab', 'share', 'export', 'export-request', 'copy-reference', 'copy-link']);
+    expect(menu(['doc.view', 'doc.edit'])).toEqual(['open', 'open-tab', 'rename', 'share', 'export', 'export-request', 'copy-reference', 'copy-link']);
+    expect(entries(['doc.view']).find((entry) => entry.id === 'export')).toMatchObject({ disabled: t('export.menu.notAllowed', { name: ada.display_name }) });
     // Beside an archived place a document is read and not written: its title stays as it is.
     expect(menu(['doc.view', 'doc.edit', 'doc.manage'], true)).not.toContain('rename');
   });
 
-  it('says that it is still asking while what the reader holds has not arrived, and offers only what needs nothing', () => {
-    expect(menu(undefined)).toEqual(['open', 'open-tab', 'copy-link', 'checking']);
+  it('keeps Export checking without a premature access request while current rights have not arrived', () => {
+    expect(menu(undefined)).toEqual(['open', 'open-tab', 'export', 'copy-reference', 'copy-link', 'checking']);
+    expect(entries(undefined).find((entry) => entry.id === 'export')).toMatchObject({ disabled: t('export.menu.checking') });
+    expect(menu(undefined)).not.toContain('export-request');
   });
 });
 

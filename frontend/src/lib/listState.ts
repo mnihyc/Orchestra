@@ -11,7 +11,7 @@ import { useViewInstance } from '@/features/workbench/instance';
 type Search = Record<string, unknown>;
 const listRoutes = new Set(['/', '/everything/', '/inbox/', '/approvals/', '/search/', '/usage/', '/storage/',
   '/admin/$section/', '/org/$slug/', '/org/$slug/messages/', '/project/$projectId/', '/topic/$topicId/',
-  '/trace/$nodeId/', '/shared/', '/doc/$documentId/', '/org/$slug/settings/$section/', '/documents/$nodeId/', '/document-folder/$folderId/']);
+  '/trace/$nodeId/', '/shared/', '/doc/$documentId/', '/documents/$nodeId/', '/document-folder/$folderId/']);
 export function isListRoute(route: string): boolean { return listRoutes.has(route) || /^\/resources\/[^/$]+\/$/.test(route); }
 
 /** Search words and content locators are not the list's view, order or filters. */
@@ -33,21 +33,22 @@ export function usePageListSearch(route: string, pathname: string, addressed: Se
   const search = useMemo(() => {
     const raw = enabled && !explicit ? { ...storedListState(kept), ...addressed } : addressed;
     const result = validate(raw);
-    return { ...result, ...(raw.list !== undefined ? { list: raw.list } : {}), ...(enabled ? { _list: true } : {}) };
+    return { ...result, ...(enabled && raw.list !== undefined ? { list: raw.list } : {}), ...(enabled ? { _list: true } : {}) };
   }, [addressed, enabled, explicit, kept, validate]);
   const serialized = JSON.stringify(listSearch(search,route));
   useEffect(() => { if (enabled && serialized !== kept) keep(serialized); }, [enabled, serialized, kept, keep]);
   return search;
 }
 
-/** Local list controls join the page's URL without changing the options that control offers. */
-export function useListChoice<T>(list: string, key: string, fallback: T): [T, Dispatch<SetStateAction<T>>] {
-  const page = usePageContext();
+/** Addressed list controls join their list's URL; transient controls keep only device state. */
+export function useListChoice<T>(list: string, key: string, fallback: T, persistence: 'address' | 'device' = 'address'): [T, Dispatch<SetStateAction<T>>] {
+  const context = usePageContext();
+  const page = persistence === 'address' && context !== null && isListRoute(context.target.route) ? context : null;
   const user=useStore(client.session,(state)=>state.userId);
   const reader=useStore(client.session,(state)=>state.readerVersion);
   const instance = useViewInstance();
   const target=instance?.target;
-  const pathname = page?.target.pathname ?? (target === null || target === undefined ? list : `/${target.kind}/${target.id}`);
+  const pathname = context?.target.pathname ?? (target === null || target === undefined ? list : `/${target.kind}/${target.id}`);
   const [kept, keep] = useViewChoice(`page.${pathname}.${list}`, key, JSON.stringify(fallback));
   const addressed = page?.target.search.list;
   const choices = useMemo<Search>(()=>typeof addressed === 'object' && addressed !== null && !Array.isArray(addressed) ? addressed as Search : {},[addressed]);

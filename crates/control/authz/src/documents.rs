@@ -371,6 +371,18 @@ pub async fn notice_readable(
         return Ok(false);
     }
     if kind == "person.notify" {
+        if data.get("completed_chat_move").is_some() || data.get("completed_thread_move").is_some()
+        {
+            return Ok(
+                orch_db::queries::notifications::operations::ending::move_readable(
+                    conn,
+                    principal.user(),
+                    kind,
+                    data,
+                )
+                .await?,
+            );
+        }
         if let (Some(resource), Some(kind)) = (
             data.get("resource_id")
                 .and_then(orch_types::Json::as_str)
